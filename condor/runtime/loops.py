@@ -21,6 +21,7 @@ from typing import Any
 
 from condor.runtime.registry_file import (
     BOOT_ID,
+    STATUS_FILENAME,
     LoopState,
     is_stale,
     read_status,
@@ -225,7 +226,26 @@ class LoopSupervisor:
 
         Never restarted: a delegation is one-shot, and re-running it could
         duplicate whatever side effects it already had.
+
+        Walks the delegation store, which is keyed by user (FEAT-051), plus the
+        pre-FEAT-051 agent directories: an unowned legacy record has no user
+        directory to have been migrated into, and it can be stale too.
         """
+        from condor import paths
+
+        count = 0
+        for user_id in paths.iter_user_ids():
+            delegations = paths.delegations_dir(user_id)
+            if not delegations.is_dir():
+                continue
+            for record_dir in sorted(p for p in delegations.iterdir() if p.is_dir()):
+                count += self._interrupt_if_stale(record_dir, STATUS_FILENAME)
+
+        count += self._reconcile_legacy_delegations(agents_root)
+        return count
+
+    def _reconcile_legacy_delegations(self, agents_root: Path | None) -> int:
+        """The same sweep over ``agents/{slug}/delegations/{task}.status.json``."""
         from condor.agents.agent import _DATA_ROOT
 
         root = Path(agents_root) if agents_root is not None else _DATA_ROOT
@@ -238,17 +258,17 @@ class LoopSupervisor:
             if not delegations.is_dir():
                 continue
             for path in sorted(delegations.glob("*.status.json")):
-                status = read_status(delegations, path.name)
-                if not status or not is_stale(status):
-                    continue
-                write_status(
-                    delegations,
-                    path.name,
-                    state=LoopState.INTERRUPTED,
-                    boot_id=BOOT_ID,
-                )
-                count += 1
+                count += self._interrupt_if_stale(delegations, path.name)
         return count
+
+    @staticmethod
+    def _interrupt_if_stale(directory: Path, filename: str) -> int:
+        """1 when this status was left ``running`` by a process that is gone."""
+        status = read_status(directory, filename)
+        if not status or not is_stale(status):
+            return 0
+        write_status(directory, filename, state=LoopState.INTERRUPTED, boot_id=BOOT_ID)
+        return 1
 
     def _stale_sessions(self, agents_root: Path | None):
         """Yield (session_dir, status) for every run a dead process left live."""

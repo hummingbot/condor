@@ -734,12 +734,26 @@ def _is_admin(user: WebUser) -> bool:
     return get_config_manager().is_admin(user.id)
 
 
+def _delegation_scope(user: WebUser) -> int | None:
+    """Whose delegations this caller reads: their own, or everyone's.
+
+    The store is partitioned by owner (FEAT-051), so this is resolved *before*
+    a path is built — the same idiom as ``_owner()`` in ``conversations.py``. A
+    non-admin does not get someone else's record refused; they cannot name it.
+    ``None`` is the admin scope, and the only one that reaches the unowned
+    legacy records.
+    """
+    return None if _is_admin(user) else user.id
+
+
 def _can_see_delegation(record: dict, user: WebUser) -> bool:
     """Admins see everything; everyone else only what they started.
 
-    A record whose ``user_id`` was never written (a transcript from before the
-    status file carried one) belongs to nobody and is therefore admin-only —
-    unowned must not mean unguarded.
+    Still a guard, no longer the fence. On disk the store is partitioned by
+    owner, so a scoped read cannot return a foreign record at all; what is left
+    for this check is the *live registry*, which is one dict for the whole
+    process, and the unowned legacy records an admin can reach — unowned must
+    not mean unguarded.
     """
     return _is_admin(user) or (
         bool(record.get("user_id")) and record["user_id"] == user.id
@@ -753,16 +767,19 @@ def _visible_record(task_id: str, user: WebUser) -> dict:
     the process that ran it (FEAT-035) — the registry stays the authority for
     anything running *now*, and history answers for everything else.
 
-    Same idiom as ``_require_ownership`` in ``sessions.py``: the caller is
-    compared against the record's own ``user_id``, which ``DelegateTask``
-    carries from the moment it is started. 403 rather than 404 on a foreign
-    task, matching ``conversations.py``.
+    403 when the process still holds a task that is not this caller's; 404 once
+    it is on disk, because there the caller's id is a path segment and a
+    stranger's record is not refused so much as unnameable.
     """
     from condor.agents.delegate import get_delegation
     from condor.agents.delegation_history import read_history
 
     dt = get_delegation(task_id)
-    record = dt.to_dict() if dt is not None else read_history(task_id)
+    record = (
+        dt.to_dict()
+        if dt is not None
+        else read_history(_delegation_scope(user), task_id)
+    )
     if record is None:
         raise HTTPException(status_code=404, detail=f"Delegation '{task_id}' not found")
     if not _can_see_delegation(record, user):
@@ -819,7 +836,9 @@ async def list_delegation_history(
     }
     records = [
         r
-        for r in list_history(agent_slug=agent, limit=limit)
+        for r in list_history(
+            user_id=_delegation_scope(user), agent_slug=agent, limit=limit
+        )
         if r["task_id"] not in live
     ]
     records.extend(live.values())
@@ -869,7 +888,9 @@ async def get_delegation_events(
     if dt is not None:
         events, markdown = events_for_wire(dt.events), ""
     else:
-        events, markdown = read_history_events(task_id)
+        # The record is already authorized, so read the transcript from its own
+        # owner's directory rather than searching for it again.
+        events, markdown = read_history_events(record.get("user_id") or None, task_id)
 
     return {
         "task_id": task_id,

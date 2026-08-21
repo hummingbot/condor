@@ -11,6 +11,7 @@ import asyncio
 import pytest
 from fastapi import HTTPException
 
+from condor import paths
 from condor.agents import agent as agent_module
 from condor.agents import consult as consult_module
 from condor.agents import delegate as delegate_module
@@ -108,7 +109,7 @@ def test_on_complete_and_session_key_round_trip_into_the_status_file(
 
     assert dt.on_complete == "resume"
     assert dt.session_key == "web:1:conv-1"
-    status = read_status(agent_dir / "delegations", f"{dt.task_id}.status.json")
+    status = read_status(paths.delegation_dir(1, dt.task_id))
     assert status["on_complete"] == "resume"
     assert status["session_key"] == "web:1:conv-1"
 

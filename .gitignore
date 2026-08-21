@@ -192,8 +192,10 @@ node_modules/
 # Pre-FEAT-051 location; kept ignored so an install mid-migration stays clean.
 condor/.runtime/
 
-# Agent runtime artifacts: learnings, session journals, dry-run experiments,
-# and delegation records (not committed)
+# Agent runtime artifacts: learnings, session journals and dry-run experiments
+# (not committed). Delegation records moved to .condor/users/{id}/delegations/
+# in FEAT-051; the pattern stays so an install that still holds the unowned
+# legacy ones does not commit them.
 agents/**/learnings.md
 agents/**/sessions/
 agents/**/dry_runs/

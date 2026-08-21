@@ -6,9 +6,12 @@ tree, which is exactly the failure mode to avoid here — this moves a person's
 chat history, so it cannot depend on anyone reading a release note.
 
 :func:`ensure_migrated` is therefore called from ``startup()``, before anything
-has read a conversation and before boot reconciliation. It moves
-``condor/.runtime/{conversations,state,telemetry}`` to ``.condor/…``, with the
-conversations re-keyed under ``users/{id}/conversations/``.
+has read a conversation and before boot reconciliation. It does two things:
+
+1. ``condor/.runtime/{conversations,state,telemetry}`` → ``.condor/…``, with
+   conversations re-keyed under ``users/{id}/conversations/``.
+2. every ``agents/{slug}/delegations/{task_id}.*`` that records a ``user_id`` →
+   ``.condor/users/{user_id}/delegations/{task_id}/``.
 
 **Every step is independently idempotent**, and the ``.migrated-v1`` marker is
 written last. So the marker is a fast path, not the correctness condition: a
@@ -35,10 +38,24 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from condor import paths
+from condor.agents.delegation_history import (
+    DELEGATION_EVENTS_FILENAME,
+    DELEGATION_STATUS_FILENAME,
+    DELEGATION_TRANSCRIPT_FILENAME,
+    EVENTS_SUFFIX,
+    STATUS_SUFFIX,
+)
 
 log = logging.getLogger(__name__)
 
 MARKER_FILENAME = ".migrated-v1"
+
+# Old flat name -> new name inside the per-task delegation directory.
+_DELEGATION_FILES = (
+    (STATUS_SUFFIX, DELEGATION_STATUS_FILENAME),
+    (".md", DELEGATION_TRANSCRIPT_FILENAME),
+    (EVENTS_SUFFIX, DELEGATION_EVENTS_FILENAME),
+)
 
 
 @dataclass
@@ -49,15 +66,22 @@ class MigrationReport:
     dropped_stubs: int = 0
     state: int = 0
     telemetry: int = 0
+    delegations: int = 0
     skipped: int = 0
 
     @property
     def total(self) -> int:
-        return self.conversations + self.state + self.telemetry
+        return self.conversations + self.state + self.telemetry + self.delegations
 
 
-def ensure_migrated() -> MigrationReport:
-    """Bring this install onto ``.condor/``. Safe to call on every boot."""
+def ensure_migrated(agents_root: Path | None = None) -> MigrationReport:
+    """Bring this install onto ``.condor/``. Safe to call on every boot.
+
+    ``agents_root`` is the *source* of step 2 and it lives outside the runtime
+    root, so it is a parameter and not a lookup: repointing ``$CONDOR_RUNTIME_ROOT``
+    alone would otherwise still let this walk the real ``agents/`` tree and move
+    records out of it. Production passes nothing and gets ``_DATA_ROOT``.
+    """
     root = paths.runtime_root()
     report = MigrationReport()
 
@@ -66,6 +90,7 @@ def ensure_migrated() -> MigrationReport:
 
     try:
         _migrate_runtime_stores(report)
+        _migrate_delegations(report, agents_root)
     except Exception:  # noqa: BLE001 - a failed migration must not block boot
         log.exception("Runtime migration failed; leaving the old layout in place")
         return report
@@ -78,11 +103,12 @@ def ensure_migrated() -> MigrationReport:
 
     if report.total or report.dropped_stubs:
         log.warning(
-            "Runtime migrated to %s: %d conversations, "
+            "Runtime migrated to %s: %d conversations, %d delegations, "
             "%d state namespaces, %d telemetry files "
             "(%d empty conversation stubs dropped, %d already present)",
             root,
             report.conversations,
+            report.delegations,
             report.state,
             report.telemetry,
             report.dropped_stubs,
@@ -196,3 +222,58 @@ def _migrate_flat(
             setattr(report, field, getattr(report, field) + 1)
         else:
             report.skipped += 1
+
+
+# ── step 2: delegations, re-keyed by the user who asked ──
+
+
+def _migrate_delegations(
+    report: MigrationReport, agents_root: Path | None = None
+) -> None:
+    """``agents/{slug}/delegations/{task}.*`` → ``users/{id}/delegations/{task}/``."""
+    from condor.agents.agent import _DATA_ROOT
+
+    root = Path(agents_root) if agents_root is not None else Path(_DATA_ROOT)
+    if not root.is_dir():
+        return
+
+    for agent_dir in sorted(p for p in root.iterdir() if p.is_dir()):
+        source = agent_dir / "delegations"
+        if not source.is_dir():
+            continue
+        for status_path in sorted(source.glob(f"*{STATUS_SUFFIX}")):
+            task_id = status_path.name[: -len(STATUS_SUFFIX)]
+            user_id = _owner_of(status_path)
+            if not user_id:
+                continue  # belongs to nobody; read in place, forever
+            try:
+                target = paths.delegation_dir(user_id, task_id)
+            except paths.UnsafeIdError:
+                log.warning("Skipping unrecognisable delegation %s", status_path)
+                continue
+            if _move_delegation(source, task_id, target):
+                report.delegations += 1
+            else:
+                report.skipped += 1
+        _prune_if_empty(source)
+
+
+def _owner_of(status_path: Path) -> str:
+    """The ``user_id`` a delegation recorded, or '' when it recorded none."""
+    try:
+        data = json.loads(status_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    user_id = data.get("user_id") if isinstance(data, dict) else None
+    return str(user_id) if user_id else ""
+
+
+def _move_delegation(source: Path, task_id: str, target: Path) -> bool:
+    """The three sidecars into one directory. True when the record moved."""
+    if (target / DELEGATION_STATUS_FILENAME).exists():
+        return False
+    moved = False
+    for suffix, new_name in _DELEGATION_FILES:
+        if _move(source / f"{task_id}{suffix}", target / new_name):
+            moved = True
+    return moved

@@ -109,14 +109,14 @@ line in your own checkout. The collector itself is open source
 (`condor-telemetry-server`).
 
 Events are buffered in memory and, when a batch cannot be delivered, appended to
-`condor/.runtime/telemetry/outbox.jsonl`, which is capped at 5,000 events and 7
+`.condor/telemetry/outbox.jsonl`, which is capped at 5,000 events and 7
 days — oldest dropped. At level `off` no event is ever created, so nothing is
 buffered, nothing is written, and nothing is sent.
 
 You can read exactly what would be sent:
 
 ```bash
-cat condor/.runtime/telemetry/outbox.jsonl | jq .
+cat .condor/telemetry/outbox.jsonl | jq .
 ```
 
 ## How to change it — or turn it off entirely

@@ -14,11 +14,13 @@ via :func:`condor.agents.consult._run_agent_to_completion`, passing
 chosen authorization model: full auto-approve, no sandbox (see FEAT-006 Risks).
 
 The registry is in-memory and ephemeral -- a delegation dies with the process. The
-*result transcript* is persisted to a flat file under
-``agents/{slug}/delegations/{task_id}.md`` so nothing is lost if you weren't
-watching. Since FEAT-012 a small ``{task_id}.status.json`` is written alongside it
-when the task starts, so a delegation killed by a restart is reported as
-``interrupted`` instead of vanishing without a trace. It is never auto-restarted:
+*result transcript* is persisted under
+``.condor/users/{user_id}/delegations/{task_id}/transcript.md`` so nothing is lost
+if you weren't watching -- keyed by the person who asked, beside their
+conversations, rather than by the agent that did the work (FEAT-051). Since
+FEAT-012 a small ``status.json`` is written alongside it when the task starts, so
+a delegation killed by a restart is reported as ``interrupted`` instead of
+vanishing without a trace. It is never auto-restarted:
 delegations are one-shot and re-running could duplicate side effects.
 
 Ephemeral does not mean free: the registry is bounded on both axes since
@@ -82,7 +84,7 @@ DROPPED_EVENT_TYPE = "dropped"
 # on. What makes a late collect safe is the disk fallback, not a timer --
 # ``GET /agents/delegations/{task_id}`` and its ``/events`` sibling both fall
 # through to :mod:`condor.agents.delegation_history`, which rebuilds the record
-# from the ``{task_id}.status.json`` and ``{task_id}.events.json`` files written
+# from the ``status.json`` and ``events.json`` files written
 # in ``_run``'s finally block, i.e. before an entry can ever be evicted. The two
 # registry-only readers (``GET /agents/delegations`` and the ``/delegations``
 # Telegram list) are per-process snapshots by contract and have the merged
@@ -203,11 +205,19 @@ async def start_delegation(
     return dt
 
 
-def _delegation_status_name(task_id: str) -> str:
-    return f"{task_id}.status.json"
-
-
 TERMINAL_STATES = ("done", "error", "stopped")
+
+
+def _record_dir(dt: "DelegateTask") -> Path:
+    """This delegation's directory, under the user who asked for the work.
+
+    ``user_id`` 0 means nobody -- a delegation with no person behind it. That is
+    a real directory and not a special case: ``_can_see_delegation`` already
+    reads an unowned record as admin-only.
+    """
+    from condor import paths
+
+    return paths.delegation_dir(dt.user_id or 0, dt.task_id)
 
 
 def _record_delegation_status(dt: "DelegateTask") -> None:
@@ -224,18 +234,11 @@ def _record_delegation_status(dt: "DelegateTask") -> None:
     simply arrive with the final write.
     """
     try:
-        from condor.agents.agent import AgentStore
         from condor.runtime.registry_file import write_status
 
-        agent = AgentStore().get(dt.agent_slug)
-        if agent is None:
-            return
-        delegations_dir = agent.agent_dir / "delegations"
-        delegations_dir.mkdir(parents=True, exist_ok=True)
         extra = {"ended_at": time.time()} if dt.status in TERMINAL_STATES else {}
         write_status(
-            delegations_dir,
-            _delegation_status_name(dt.task_id),
+            _record_dir(dt),
             state=dt.status,
             task_id=dt.task_id,
             agent_slug=dt.agent_slug,
@@ -541,33 +544,28 @@ def _render_session(events: list[dict]) -> str:
     return "\n\n".join(parts)
 
 
-def _events_sidecar_name(task_id: str) -> str:
-    return f"{task_id}.events.json"
-
-
 def _persist_transcript(dt: DelegateTask) -> None:
-    """Write a session transcript under agents/{slug}/delegations/{task_id}.md.
+    """Write a session transcript into this delegation's own directory.
 
-    Mirrors the ``dry_runs/experiment_N.md`` flat-file convention, not the
-    heavyweight ``sessions/`` tree -- a delegate has no ticks to journal. Captures
-    the full session: the agent's reasoning, every tool call (with input/output),
-    and the final result, so nothing about *how* the task was solved is lost.
+    Captures the full session: the agent's reasoning, every tool call (with
+    input/output), and the final result, so nothing about *how* the task was
+    solved is lost.
 
-    A ``{task_id}.events.json`` sidecar goes out alongside it (FEAT-035): the
-    markdown is for a human reading the repo, the JSON is what lets the dashboard
-    render a finished delegation with the same collapsible transcript it shows
-    while the task is running. Both are projections of the same ``dt.events``
-    through the same output bound, so they cannot drift apart.
+    An ``events.json`` sidecar goes out alongside it (FEAT-035): the markdown is
+    for a human reading the file, the JSON is what lets the dashboard render a
+    finished delegation with the same collapsible transcript it shows while the
+    task is running. Both are projections of the same ``dt.events`` through the
+    same output bound, so they cannot drift apart.
     """
     import json
 
-    from condor.agents.agent import AgentStore
+    from condor.agents.delegation_history import (
+        DELEGATION_EVENTS_FILENAME,
+        DELEGATION_TRANSCRIPT_FILENAME,
+    )
 
-    agent = AgentStore().get(dt.agent_slug)
-    if agent is None:
-        return
-    delegations_dir = agent.agent_dir / "delegations"
-    delegations_dir.mkdir(parents=True, exist_ok=True)
+    record_dir = _record_dir(dt)
+    record_dir.mkdir(parents=True, exist_ok=True)
 
     tool_count = sum(1 for e in dt.events if e.get("type") == "tool")
     body = dt.error if dt.status == "error" else dt.result
@@ -584,8 +582,8 @@ def _persist_transcript(dt: DelegateTask) -> None:
         f"## {'Error' if dt.status == 'error' else 'Result'}\n\n"
         f"{body or '(none)'}\n"
     )
-    (delegations_dir / f"{dt.task_id}.md").write_text(content)
-    (delegations_dir / _events_sidecar_name(dt.task_id)).write_text(
+    (record_dir / DELEGATION_TRANSCRIPT_FILENAME).write_text(content)
+    (record_dir / DELEGATION_EVENTS_FILENAME).write_text(
         json.dumps({"events": events_for_wire(dt.events)}, indent=2)
     )
 

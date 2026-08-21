@@ -9,6 +9,7 @@ import asyncio
 
 import pytest
 
+from condor import paths
 from condor.agents import agent as agent_module
 from condor.agents import consult as consult_module
 from condor.agents import delegate as delegate_module
@@ -95,8 +96,8 @@ def test_delegation_runs_to_done_and_persists(tmp_path, monkeypatch):
     # Auto-approve: the runner drives consult with NO permission callback.
     assert seen["permission_callback"] is None
     assert seen["task"] == "scan SOL pools"
-    # Transcript written under agents/{slug}/delegations/{task_id}.md.
-    transcript = tmp_path / "scout" / "delegations" / f"{dt.task_id}.md"
+    # Transcript written under the user who asked, not under the agent.
+    transcript = paths.delegation_dir(1, dt.task_id) / "transcript.md"
     assert transcript.exists()
     assert "scan complete: 3 pools" in transcript.read_text()
     # Notification delivered.
@@ -211,7 +212,7 @@ def test_delegation_carries_conversation_provenance(tmp_path, monkeypatch):
     assert dt.to_dict()["started_at"] > 0
     # Survives on disk, so a restart-interrupted task keeps its provenance.
     status = json.loads(
-        (tmp_path / "scout" / "delegations" / f"{dt.task_id}.status.json").read_text()
+        (paths.delegation_dir(1, dt.task_id) / "status.json").read_text()
     )
     assert status["conversation_id"] == "conv-abc"
 
@@ -449,7 +450,7 @@ def test_delegation_persists_full_session_transcript(tmp_path, monkeypatch):
     assert tool_ev["output"] == "3 pools found"
 
     # Transcript renders the full session, not just the result.
-    text = (tmp_path / "scout" / "delegations" / f"{dt.task_id}.md").read_text()
+    text = (paths.delegation_dir(1, dt.task_id) / "transcript.md").read_text()
     assert "## Session" in text
     assert "I should scan the pools first." in text
     assert "get_market_data" in text
