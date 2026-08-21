@@ -27,9 +27,9 @@ from condor.runtime.conversations import (
     ConversationIdError,
     Recorder,
     TurnEntry,
+    _conv_dir,
     _iter_lines_reverse,
     _render_turn,
-    _root,
     append_turn,
     delete_conversation,
     flush_all,
@@ -55,10 +55,13 @@ def conv_root(isolated_conversation_root):
     return isolated_conversation_root
 
 
-def test_root_is_derived_like_the_state_store(tmp_path, monkeypatch):
-    """The real path, unstubbed: same ``.runtime`` root ``state.py`` uses."""
-    monkeypatch.setattr("condor.agents.agent._DATA_ROOT", tmp_path / "agents")
-    assert _root() == tmp_path / "condor" / ".runtime" / "conversations"
+def test_a_conversation_lives_under_its_owner(conv_root):
+    """The user is the first path segment — see ``tests/runtime/test_paths.py``."""
+    meta = new_conversation(USER, WEB)
+
+    assert _conv_dir(USER, meta.id) == (
+        conv_root / str(USER) / "conversations" / meta.id
+    )
 
 
 # ── Lifecycle ──
@@ -70,7 +73,7 @@ def test_create_read_roundtrip(conv_root):
     assert meta.user_id == USER
     assert meta.surface == WEB
     assert meta.turn_count == 0
-    assert (conv_root / str(USER) / meta.id / "meta.json").is_file()
+    assert (conv_root / str(USER) / "conversations" / meta.id / "meta.json").is_file()
 
     loaded = get_conversation(USER, meta.id)
     assert loaded is not None
@@ -176,7 +179,7 @@ def test_long_title_is_truncated(conv_root):
 def test_a_corrupt_line_is_skipped_not_fatal(conv_root):
     meta = new_conversation(USER, WEB)
     append_turn(USER, meta.id, TurnEntry(role="user", text="one"))
-    path = conv_root / str(USER) / meta.id / "transcript.jsonl"
+    path = conv_root / str(USER) / "conversations" / meta.id / "transcript.jsonl"
     with path.open("a", encoding="utf-8") as fh:
         fh.write("{ this is not json\n")
         fh.write(json.dumps({"role": "assistant", "text": "two"}) + "\n")
@@ -191,7 +194,7 @@ def test_a_line_from_another_version_of_the_shape_still_parses(conv_root):
     unattributed, and a line carrying a key this build does not know is kept
     rather than dropped."""
     meta = new_conversation(USER, WEB)
-    path = conv_root / str(USER) / meta.id / "transcript.jsonl"
+    path = conv_root / str(USER) / "conversations" / meta.id / "transcript.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps({"role": "assistant", "text": "older build"}) + "\n")
@@ -500,7 +503,9 @@ def test_recorder_caps_tool_io(conv_root):
     assert "_clipped" in call["input"], "an oversized argument set stays a dict"
     assert len(call["input"]["_clipped"]) <= TOOL_INPUT_MAX_CHARS
 
-    written = (conv_root / str(USER) / meta.id / "transcript.jsonl").read_text()
+    written = (
+        conv_root / str(USER) / "conversations" / meta.id / "transcript.jsonl"
+    ).read_text()
     assert len(written) < 10_000, "the whole transcript stays small"
 
 
@@ -527,7 +532,9 @@ def test_recorder_does_not_persist_credentials_from_tool_arguments(conv_root):
     )
     rec.flush()
 
-    raw = (conv_root / str(USER) / meta.id / "transcript.jsonl").read_text()
+    raw = (
+        conv_root / str(USER) / "conversations" / meta.id / "transcript.jsonl"
+    ).read_text()
     assert "barabit" not in raw and "sk-live-123" not in raw
     call = read_transcript(USER, meta.id)[-1].tool_calls[0]
     assert call["input"]["password"] == REDACTED
@@ -1013,7 +1020,7 @@ def _replay_by_full_parse(user_id, conv_id, *, max_chars=None):
 
 def _write_raw_transcript(conv_root, conv_id, lines):
     """Write transcript lines straight to disk, bypassing ``append_turn``."""
-    path = conv_root / str(USER) / conv_id / "transcript.jsonl"
+    path = conv_root / str(USER) / "conversations" / conv_id / "transcript.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("".join(lines), encoding="utf-8")
     return path

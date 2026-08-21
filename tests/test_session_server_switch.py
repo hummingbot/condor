@@ -80,7 +80,6 @@ class _PinnedAgent(_Agent):
 
 @pytest.fixture
 def env(tmp_path, monkeypatch):
-    monkeypatch.setattr(conversations, "_root", lambda: tmp_path / "conversations")
     monkeypatch.setattr(conversations, "_live_recorders", set())
     monkeypatch.setattr(session_module, "_sessions", {})
     monkeypatch.setattr("condor.acp.client.ACPClient", _Client)

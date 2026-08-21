@@ -31,7 +31,6 @@ class FakeConfigManager:
 @pytest.fixture
 def store(tmp_path, monkeypatch):
     """A throwaway conversation root, plus a real router to drive it."""
-    monkeypatch.setattr(conversations, "_root", lambda: tmp_path / "conversations")
     monkeypatch.setattr(
         routes, "get_config_manager", lambda: FakeConfigManager({ADMIN.id})
     )

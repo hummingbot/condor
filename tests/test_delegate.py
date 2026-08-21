@@ -233,10 +233,9 @@ def test_delegation_without_conversation_is_empty_not_error():
 
 
 def _isolate_conversations(tmp_path, monkeypatch):
-    """Point the conversation store at a throwaway dir and return its reader."""
+    """The conversation store reader (the root is isolated suite-wide)."""
     from condor.runtime import conversations
 
-    monkeypatch.setattr(conversations, "_root", lambda: tmp_path / "conversations")
     return conversations
 
 
