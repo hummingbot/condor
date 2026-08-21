@@ -23,6 +23,7 @@ DANGEROUS_TOOLS = {
     "manage_gateway_swaps",  # execute action
     "manage_clmm",  # every action that moves liquidity
     "manage_amm",  # every action that moves liquidity
+    "manage_gateway_config",  # only the wallets resource; see below
 }
 
 # Tools that are always blocked (RBAC bypass prevention)
@@ -60,6 +61,15 @@ DANGEROUS_CLMM_ACTIONS = {
 
 # Actions within manage_amm that require confirmation
 DANGEROUS_AMM_ACTIONS = {"add_liquidity", "remove_liquidity", "create_pool"}
+
+# Resource types within manage_gateway_config that require confirmation. This tool
+# is gated on `resource_type`, not `action`, because what it edits matters and how
+# it edits does not: `wallets` + `add` takes a PRIVATE KEY, and `delete` removes a
+# signing wallet. Everything else it touches — tokens, pools, connectors, networks —
+# is Gateway's own symbol/address mapping. Deleting a token there moves no funds and
+# changes nothing on-chain, so gating it would put a human in front of a config edit
+# while the trades that edit enables stay where they are.
+DANGEROUS_CONFIG_RESOURCES = {"wallets"}
 
 
 def tool_call_name(tool_call: dict[str, Any]) -> str:
@@ -117,6 +127,24 @@ def _has_dangerous_action(
     return action in dangerous_actions
 
 
+def _has_dangerous_resource(
+    tool_call: dict[str, Any], dangerous_resources: set[str]
+) -> bool:
+    """Whether a resource-gated tool call selects one of its dangerous resources.
+
+    The resource-typed twin of :func:`_has_dangerous_action`, and it fails closed the
+    same way (SEC-093): unreadable arguments, or a missing/non-string ``resource_type``,
+    count as dangerous.
+    """
+    input_data = tool_call_input(tool_call)
+    if input_data is None:
+        return True
+    resource = input_data.get("resource_type")
+    if not isinstance(resource, str) or not resource:
+        return True
+    return resource in dangerous_resources
+
+
 def is_dangerous_tool_call(tool_call: dict[str, Any]) -> bool:
     """Check if a tool call requires user confirmation."""
     tool_name = tool_call_name(tool_call)
@@ -133,6 +161,9 @@ def is_dangerous_tool_call(tool_call: dict[str, Any]) -> bool:
 
         if tool_name == "manage_amm":
             return _has_dangerous_action(tool_call, DANGEROUS_AMM_ACTIONS)
+
+        if tool_name == "manage_gateway_config":
+            return _has_dangerous_resource(tool_call, DANGEROUS_CONFIG_RESOURCES)
 
         return True
 
@@ -201,6 +232,18 @@ def format_tool_summary(tool_call: dict[str, Any]) -> str:
         side = input_data.get("side", "?")
         amount = input_data.get("amount", "?")
         return f"Swap {side} {amount} {pair}"
+
+    if tool_name == "manage_gateway_config":
+        resource = input_data.get("resource_type", "?")
+        action = input_data.get("action", "?")
+        if resource == "wallets":
+            if action == "add":
+                chain = input_data.get("chain", "?")
+                return f"Import a {chain} wallet into Gateway (private key)"
+            if action == "delete":
+                addr = str(input_data.get("wallet_address") or "?")
+                return f"Remove wallet {addr[:12]}... from Gateway"
+        return f"Gateway config: {action} {resource}"
 
     if tool_name in ("manage_clmm", "manage_amm"):
         action = input_data.get("action", "?")

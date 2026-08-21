@@ -875,6 +875,119 @@ async def explore_dex_pools(
 
 
 @mcp.tool()
+@handle_errors("manage Gateway config", GATEWAY_LOG_HINT)
+async def manage_gateway_config(
+    resource_type: Literal[
+        "chains", "networks", "tokens", "connectors", "pools", "wallets"
+    ],
+    action: Literal["list", "get", "update", "add", "delete", "save"],
+    network_id: str | None = None,
+    connector_name: str | None = None,
+    config_updates: dict[str, Any] | None = None,
+    token_address: str | None = None,
+    token_symbol: str | None = None,
+    token_decimals: int | None = None,
+    token_name: str | None = None,
+    pool_type: str | None = None,
+    pool_base: str | None = None,
+    pool_quote: str | None = None,
+    pool_address: str | None = None,
+    search: str | None = None,
+    network: str | None = None,
+    chain: str | None = None,
+    private_key: str | None = None,
+    wallet_address: str | None = None,
+) -> str:
+    """Read and edit Gateway's own configuration — chains, networks, tokens, connectors, pools, wallets.
+
+    This is Gateway's config, not the chain. Adding or deleting a token here changes the
+    symbol -> address mapping Gateway resolves against; it moves no funds and touches
+    nothing on-chain.
+
+    Use `tokens` + `list` (with `search`) to answer "does Gateway know this symbol",
+    which is the check to run BEFORE quoting or swapping an unfamiliar token: a symbol
+    Gateway cannot resolve fails at the route, not at the trade.
+
+    Resource types:
+    - chains: every blockchain Gateway knows
+    - networks: network config, ids in 'chain-network' form ('solana-mainnet-beta')
+    - tokens: the per-network symbol/address/decimals mapping (list, add, delete)
+    - connectors: DEX connector config
+    - pools: the named pool registry (list, add)
+    - wallets: wallet add/delete. GATED — needs confirmation, and `add` takes a private
+      key. Prefer importing a wallet outside the agent.
+
+    Args:
+        resource_type: Which part of Gateway's config to act on.
+        action: list | get | update | add | delete | save.
+        network_id: Network id in 'chain-network' form. Required for token and pool actions.
+        connector_name: DEX connector name ('meteora', 'raydium', 'uniswap').
+        config_updates: Key-value updates for 'update'/'save'.
+        token_address: Token contract address. Required to add or delete a token.
+        token_symbol: Token symbol. Required to add a token.
+        token_decimals: Token decimals (6 for USDC, 18 for WETH). Required to add a token.
+        token_name: Token name. Optional on add; defaults to the symbol.
+        pool_type: 'CLMM' or 'AMM'. Required to add a pool.
+        pool_base: Base token symbol. Required to add a pool.
+        pool_quote: Quote token symbol. Required to add a pool.
+        pool_address: Pool contract address. Required to add a pool.
+        search: Filter tokens by symbol or name when listing.
+        network: Bare network name ('mainnet-beta'). Required to list pools.
+        chain: Chain for a wallet action ('solana', 'ethereum').
+        private_key: Private key for 'add' wallet. Gated; avoid where possible.
+        wallet_address: Wallet address for 'delete' wallet.
+    """
+    request = GatewayConfigRequest(
+        resource_type=resource_type,
+        action=action,
+        network_id=network_id,
+        connector_name=connector_name,
+        config_updates=config_updates,
+        token_address=token_address,
+        token_symbol=token_symbol,
+        token_decimals=token_decimals,
+        token_name=token_name,
+        pool_type=pool_type,
+        pool_base=pool_base,
+        pool_quote=pool_quote,
+        pool_address=pool_address,
+        search=search,
+        network=network,
+        chain=chain,
+        private_key=private_key,
+        wallet_address=wallet_address,
+    )
+
+    client = await hummingbot_client.get_client()
+    result = await manage_gateway_config_impl(client, request)
+    return format_gateway_config_result(result)
+
+
+@mcp.tool()
+@handle_errors("manage Gateway container")
+async def manage_gateway_container(
+    action: Literal["get_status", "start", "stop", "restart", "get_logs"],
+    config: dict[str, Any] | None = None,
+    tail: int = 100,
+) -> str:
+    """Gateway container lifecycle — status, start, stop, restart, and logs.
+
+    `get_logs` is what the hint on a failed Gateway call points at: when a swap or an LP
+    action fails with an error that does not say why, the container log usually does.
+
+    Args:
+        action: get_status | start | stop | restart | get_logs.
+        config: Gateway configuration. Used by 'start', optional for 'restart'.
+        tail: Log lines to retrieve for 'get_logs' (1-200, default 100).
+    """
+    request = GatewayContainerRequest(action=action, config=config, tail=tail)
+
+    client = await hummingbot_client.get_client()
+    result = await manage_gateway_container_impl(client, request)
+    return format_gateway_container_result(result)
+
+
+@mcp.tool()
 @handle_errors("manage AMM", GATEWAY_LOG_HINT)
 async def manage_amm(
     action: (
