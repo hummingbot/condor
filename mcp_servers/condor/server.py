@@ -1037,7 +1037,7 @@ async def trading_agent_journal_write(
 
 if __name__ == "__main__":
     # This server runs in its own process, spawned by the agent: a different
-    # interpreter, a different heap, and no job_queue. hosted=False makes emit()
+    # interpreter, a different heap, and no scheduler. hosted=False makes emit()
     # append to `spool.<pid>.jsonl`, which the host process drains and deletes.
     # Still a no-op unless the install opted in.
     try:

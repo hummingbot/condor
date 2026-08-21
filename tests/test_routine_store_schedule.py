@@ -14,9 +14,16 @@ import asyncio
 import datetime as dtm
 
 import pytest
+from fastapi import FastAPI
+from starlette.testclient import TestClient
 
 import condor.routine_store as rs
+import condor.web.routes.routines as routes
 from condor.scheduler import Scheduler
+from condor.web.auth import get_current_user
+from condor.web.models import WebUser
+
+USER = WebUser(id=7, username="u", first_name="U", role="user")
 
 
 @pytest.fixture
@@ -114,3 +121,51 @@ def test_an_unknown_routine_is_still_rejected(store, scheduler, monkeypatch):
     with pytest.raises(ValueError):
         asyncio.run(store.schedule("nope", {}, "srv", interval_sec=60))
     assert scheduler.jobs() == ()
+
+
+# ── the dashboard's own route ──
+
+
+@pytest.fixture
+def client(store, scheduler, monkeypatch):
+    """The real store behind the real route, with the access gate satisfied."""
+    monkeypatch.setattr(routes, "get_routine_store", lambda: store)
+    monkeypatch.setattr(routes, "check_server_access", lambda *a, **kw: None)
+
+    app = FastAPI()
+    app.include_router(routes.router)
+    app.dependency_overrides[get_current_user] = lambda: USER
+    return TestClient(app)
+
+
+def test_the_dashboard_can_put_a_routine_on_a_daily_schedule(client, store, scheduler):
+    """Criterion: given a daily time, it appears in the instance list, and the
+    existing stop button cancels it."""
+    resp = client.post(
+        "/routines/schedule",
+        json={
+            "routine_name": "probe",
+            "server_name": "srv",
+            "config": {},
+            "daily_time": "18:00",
+        },
+    )
+    assert resp.status_code == 200
+    instance_id = resp.json()["instance_id"]
+
+    listed = {i["instance_id"]: i for i in store.list_instances()}
+    assert listed[instance_id]["schedule"] == {"type": "daily", "daily_time": "18:00"}
+    assert len(scheduler.jobs_by_name(f"web:{instance_id}")) == 1
+
+    assert client.post(f"/routines/instances/{instance_id}/stop").status_code == 200
+    assert scheduler.jobs_by_name(f"web:{instance_id}") == []
+
+
+def test_a_schedule_with_no_daily_time_is_still_an_interval(client, store):
+    resp = client.post(
+        "/routines/schedule",
+        json={"routine_name": "probe", "server_name": "srv", "interval_sec": 600},
+    )
+    assert resp.status_code == 200
+    meta = store.get_instance(resp.json()["instance_id"])
+    assert meta["schedule"] == {"type": "interval", "interval_sec": 600}

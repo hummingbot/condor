@@ -6,7 +6,7 @@ the rest of the runtime keeps its append-only facts:
 ``spool.<pid>.jsonl``
     Written by processes that have no flush job of their own — in practice the
     MCP server, which the agent spawns in its own process group with its own
-    interpreter and no ``job_queue``. Each process owns its own file, so there
+    interpreter and no scheduler. Each process owns its own file, so there
     is no locking and no interleaving; the host drains and deletes them.
 
 ``outbox.jsonl``

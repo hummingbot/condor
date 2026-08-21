@@ -358,7 +358,7 @@ def version_change(from_version: str, to_version: str, was_behind: int = 0) -> N
 def tracked(tool_name: str):
     """Decorator for an MCP tool, which runs in its own process.
 
-    That process has no ``job_queue`` and no shared heap, so the event goes
+    That process has no scheduler of its own and no shared heap, so the event goes
     straight to its own ``spool.<pid>.jsonl`` and the host drains it later. Only
     the tool name, whether it worked, and how long it took — never arguments,
     never results.

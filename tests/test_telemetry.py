@@ -429,7 +429,7 @@ def test_the_install_context_carries_no_identity(install):
 
 
 def test_a_process_without_a_flush_job_spools_to_its_own_file(install):
-    """The MCP server has its own interpreter and no job_queue; an in-memory
+    """The MCP server has its own interpreter and no flush job; an in-memory
     ring there would be silently lost."""
     _grant("usage")
     emitter.set_hosted(False)
