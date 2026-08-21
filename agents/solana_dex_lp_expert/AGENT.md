@@ -16,11 +16,10 @@ tools:
 - trading_agent_journal_read
 - manage_memory
 - manage_skill
-when_to_consult: When the user asks which Solana memecoin pools to LP now, how to rank
-  by fee yield (fees/TVL), what range/side/size fits a given base_pct, or whether an
-  open LP slot should hold or exit — use consult. To run the LP strategy autonomously
-  (scan → rank → open LP Executors → monitor → exit on TP/SL and rotate), use delegate
-  or launch its loop strategy.
+when_to_consult: When the user wants to LP on Solana — pool selection, range sizing,
+  or deploying any LP controller (lp_rebalancer, lp_executor) — consult for parameters
+  before building config. Also for ranking pools by fee yield or deciding whether
+  to hold/exit an open position. Use delegate to run the LP strategy autonomously.
 server_required: true
 server_name: local
 created_by: 0

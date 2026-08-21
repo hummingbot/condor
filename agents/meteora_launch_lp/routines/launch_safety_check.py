@@ -5,9 +5,9 @@ gates the agent cannot do through its tools: **mint-authority renounced** and **
 concentration** (Solana RPC), plus **freeze-authority disabled**, **verified**, **LP lock**, and
 **TVL** (from the Meteora DAMM v2 data API). Returns a PASS/FAIL verdict with per-gate reasons.
 
-It does NOT check sellability (honeypot) — that needs a live two-way quote through the pool, which
-the agent does itself with manage_amm(quote_swap, side=SELL) + (side=BUY). See the launch_safety_check
-SKILL. This routine covers the deterministic on-chain/static gates only.
+It does NOT check sellability (honeypot) — that needs a live two-way quote, which the agent does
+itself with manage_gateway_swaps(action="quote", connector="meteora/amm", side=SELL) + (side=BUY).
+See the launch_safety_check SKILL. This routine covers the deterministic on-chain/static gates only.
 
 RPC: defaults to the public mainnet endpoint (rate-limited but fine for occasional checks); override
 with rpc_url for a private endpoint. No credentials are hardcoded.
@@ -194,6 +194,10 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     lines.append("")
     lines.append(
         "NOTE: sellability (honeypot) is NOT checked here — round-trip a SELL and BUY quote via "
-        "manage_amm(quote_swap) before entering. See the launch_safety_check skill."
+        'manage_gateway_swaps(action="quote", connector="meteora/amm", '
+        'network="solana-mainnet-beta", trading_pair="<BASE>-<QUOTE>") before entering. '
+        'A "No pool found" error means Gateway does not know this token (it matches its own '
+        "configured pool list by SYMBOL, and a fresh mint is not in it) — that is NOT a honeypot "
+        'verdict; retry via connector="jupiter/router". See the launch_safety_check skill.'
     )
     return "\n".join(lines)
