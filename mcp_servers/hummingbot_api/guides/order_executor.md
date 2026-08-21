@@ -35,8 +35,25 @@ Closest executor to a plain BUY/SELL order but with strategy options.
 - `position_action`: 'OPEN' or 'CLOSE' (default: 'OPEN', useful for perpetuals in HEDGE mode)
 - `level_id`: Optional identifier tag
 
-**Solana / Jupiter: `executed_amount_base` is the amount REQUESTED, not received.**
-Slippage and fees mean the wallet gets slightly less (observed −0.06% to −0.44%).
-Never feed it straight into a downstream call that must spend those tokens (e.g. an
-LP open's `base_amount`) — apply a haircut (`× 0.995`) or read the true post-swap
-wallet balance.
+**Solana: whether `executed_amount_base` is what you received depends on the route.**
+
+On an EXACT fill it is exact. A SOL-USDC round trip through `order_executor` on
+2026-08-21 moved gross ±0.010000000 SOL in both directions, matching the request to the
+lamport, and cost 0.0166% for the pair. A blanket `× 0.995` haircut there under-spends by
+half a percent.
+
+It is short when the BUY was APPROXIMATED. A BUY is an ExactOut order, and a thin token
+with no ExactOut route is quoted by pricing the sell leg and quoting that input forward —
+roughly 2.5%, and up to 4.83% observed. The order is silently resized rather than
+overcharged, which is what makes it dangerous to a caller who asked for a quantity.
+
+So the check is conditional, not a constant: the quote's `approximation` flag says which
+case you are in. When it is true, read the true post-swap wallet balance before feeding
+the amount into a call that must spend those tokens (e.g. an LP open's `base_amount`);
+when it is false, use the figure. Passing `extra_params={'approximateIfNoExactOut': False}`
+requires an exact route instead of accepting the resize.
+
+**Observability.** `custom_info` carries `transaction_hash` (the on-chain signature —
+`order_id` is internal and appears nowhere on chain), plus `slippage_pct` and
+`max_slippage_pct`. `slippage_pct` is the LIVE tolerance: a value above the configured
+start means earlier attempts failed on slippage and this one is paying to get through.

@@ -61,20 +61,45 @@ def tool(name):
 manage_executors = tool("manage_executors")
 
 NET = "solana-mainnet-beta"
-POOL = "Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE"  # orca SOL-USDC, 0.04%
 PAIR = "SOL-USDC"
+
+# Provider and pool are overridable so one script covers both CLMMs:
+#   LP_PROVIDER=meteora/clmm LP_POOL=2sf5NYcY... ./... lp-open
+# They differ in ways that matter to this test. Orca enforces a minimum-amount
+# check on close, so the slippage ramp can actually fire there; meteora passes
+# zero minimums (GW-25b), so on meteora the ramp is plumbed but inert. Meteora
+# is also binned — bin_step 100 is 1% per bin — so a range has to span several
+# bins to be meaningful, which WIDTH below accounts for.
+PROVIDER = os.environ.get("LP_PROVIDER", "orca/clmm")
+POOL = os.environ.get(
+    "LP_POOL",
+    "2sf5NYcY4zUPXUSmG6f66mskb24t5F8S11pC1Nz5nQT3"
+    if PROVIDER.startswith("meteora")
+    else "Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE",
+)
+CONNECTOR = PROVIDER.split("/")[0]
+
+# The order executor's connector_name must be a NETWORK, not a router: anything
+# absent from hummingbot-api's _conn_settings is built as Gateway(connector_name)
+# and parsed as chain-network. The router itself is not selectable per order — it
+# comes from the network's configured swapProvider (jupiter/router here), because
+# OrderExecutorConfig has no swap_provider field. See hummingbot issue #8429.
+ROUTER = os.environ.get("LP_ROUTER", NET)
 
 API = os.environ.get("HUMMINGBOT_API_URL", "http://localhost:8000")
 AUTH = os.environ.get("HUMMINGBOT_API_AUTH", "admin:admin")
 
-WIDTH = 0.01          # 1% wide, straddling spot — the GW-25 shape
+# Orca's ticks are fine, so 1% is the narrow in-range shape GW-25 was filed about.
+# Meteora's bin_step here is 100 (1% per bin): a 1% range is a single bin, which
+# snapping can collapse, so it gets a range spanning several bins instead.
+WIDTH = 0.06 if PROVIDER.startswith("meteora") else 0.01
 BASE_AMOUNT = "0.01"
 SIDE_RANGE = 3        # TradeType.RANGE, double-sided
 
 
 def _pool_price() -> float:
     request = urllib.request.Request(
-        f"{API}/gateway/clmm/pool-info?connector=orca&network={NET}&pool_address={POOL}")
+        f"{API}/gateway/clmm/pool-info?connector={CONNECTOR}&network={NET}&pool_address={POOL}")
     request.add_header("Authorization", "Basic " + base64.b64encode(AUTH.encode()).decode())
     with urllib.request.urlopen(request, timeout=60) as response:
         return float(json.load(response)["price"])
@@ -93,7 +118,7 @@ async def lp_open():
 
     config = {
         "connector_name": NET,
-        "lp_provider": "orca/clmm",
+        "lp_provider": PROVIDER,
         "trading_pair": PAIR,
         "pool_address": POOL,
         "lower_price": f"{lower:.6f}",
@@ -111,13 +136,18 @@ async def lp_open():
         # slippage behaviour harder to read.
         "keep_position": True,
     }
+    # Meteora's SDK takes a liquidity distribution; 0 is Spot (uniform), which is
+    # the shape this test wants. Orca has no equivalent parameter.
+    if PROVIDER.startswith("meteora"):
+        config["extra_params"] = {"strategyType": 0}
+    print(f"{PROVIDER} pool {POOL}")
     print(f"spot {spot:.4f}  ->  range {lower:.4f}-{upper:.4f}  ({WIDTH:.0%} wide, straddling)")
     print(f"funding {BASE_AMOUNT} SOL + {quote_amount} USDC   slippage ramp 0.05 -> 5")
     return await manage_executors(
         action="create", executor_type="lp_executor", executor_config=config)
 
 
-async def order_buy():
+async def order_swap(side: int = 1):
     """A market BUY through the order executor, to check GW-35 at this layer.
 
     Compare the reported `executed_amount_base` against the wallet delta afterwards. The
@@ -125,13 +155,21 @@ async def order_buy():
     fix reached here, they should agree.
     """
     config = {
-        "connector_name": "jupiter/router",
+        "connector_name": ROUTER,
         "trading_pair": PAIR,
-        "side": 1,                      # TradeType.BUY
+        "side": side,
         "amount": BASE_AMOUNT,
         "execution_strategy": "MARKET",
+        # GW-40: OrderExecutorConfig had no tolerance at all, so a Gateway swap
+        # ran at the connector's configured value and every retry repeated the
+        # same request. These three are the fix, and this is their first exercise.
+        "slippage_pct": "0.05",
+        "slippage_multiplier": "5",
+        "max_slippage_pct": "5",
     }
-    print(f"MARKET BUY {BASE_AMOUNT} SOL via jupiter/router")
+    print(f"MARKET {'BUY' if side == 1 else 'SELL'} {BASE_AMOUNT} SOL on {ROUTER}")
+    print("router = the network's configured swapProvider (not selectable per order)")
+    print("slippage ramp 0.05 -> 0.25 -> 1.25 -> 5")
     return await manage_executors(
         action="create", executor_type="order_executor", executor_config=config)
 
@@ -139,7 +177,8 @@ async def order_buy():
 def steps(arg):
     return {
         "lp-open": lp_open,
-        "order-buy": order_buy,
+        "order-buy": lambda: order_swap(1),    # TradeType.BUY
+        "order-sell": lambda: order_swap(2),   # TradeType.SELL
 
         # custom_info carries current_retries and the live slippage_pct — the only place
         # the ramp is observable after the fact.
