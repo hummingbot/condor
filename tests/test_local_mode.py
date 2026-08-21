@@ -11,7 +11,7 @@ Two of these tests are the feature's safety controls and exist to fail loudly:
 Everything else pins the seams: the local-login endpoint exists only in local
 mode, the JWT it mints is an ordinary one (``get_current_user`` never learns
 which mode it is in), the identity ``make setup`` writes actually resolves, and
-PTB still runs a job queue on an Application that was never initialized.
+the process-level jobs tick without any PTB ``Application`` at all.
 
 The identity tests carry a second lesson. Local mode logs in as
 ``ADMIN_USER_ID`` and nothing else: a dedicated ``CONDOR_LOCAL_USER_ID`` was a
@@ -390,32 +390,63 @@ def test_auth_mode_reports_the_mode_without_a_session(client, monkeypatch):
 # ── Boot without Telegram ──
 
 
-def test_job_queue_runs_on_an_uninitialized_application():
-    """Local mode's whole boot rests on this PTB behaviour, so pin it.
+def test_the_process_level_jobs_tick_without_a_telegram_application(monkeypatch):
+    """Local mode's boot no longer rests on PTB owning the clock (FEAT-050).
 
-    Scheduled routines, update checks and signals are all ``job_queue`` jobs.
-    Local mode never calls ``initialize()``/``start()`` (nothing polls), it just
-    starts the queue — a PTB release that breaks that must fail here rather than
-    in someone's install.
+    The update check and the telemetry flush/heartbeat are the two jobs local
+    mode actually runs, and they are registered exactly the way ``startup()``
+    registers them — against ``condor.scheduler``, with no ``Application``
+    anywhere in the picture. Registered *before* the scheduler starts, as
+    ``startup()`` does.
     """
-    from telegram.ext import Application
+    import condor.scheduler as scheduler_module
+    import condor.telemetry.taps as taps
+    import handlers.admin.update as update_module
+    import utils.updater as updater
+    from condor.scheduler import Scheduler
+    from condor.telemetry.taps import TELEMETRY_FLUSH_JOB, TELEMETRY_HEARTBEAT_JOB
+    from handlers.admin.update import UPDATE_CHECK_JOB
 
+    sched = Scheduler()
+    monkeypatch.setattr(scheduler_module, "get_scheduler", lambda: sched)
+    monkeypatch.setattr(update_module, "get_scheduler", lambda: sched)
+    monkeypatch.setattr(updater, "UPDATE_CHECK_INTERVAL", 3600)
+
+    update_module.schedule_update_checks()
+    taps.register_jobs()
+
+    names = {job.name for job in sched.jobs()}
+    assert names == {UPDATE_CHECK_JOB, TELEMETRY_FLUSH_JOB, TELEMETRY_HEARTBEAT_JOB}
+
+    # And they really fire: a job added the same way, due immediately.
     async def scenario():
-        application = Application.builder().token("0:local").build()
         fired = asyncio.Event()
 
         async def _job(_context):
             fired.set()
 
-        # Scheduled *before* the queue starts, exactly as ``startup()`` does.
-        application.job_queue.run_once(_job, 0)
-        await application.job_queue.start()
+        sched.run_once(_job, 0.01, name="probe")
+        sched.start()
         try:
             await asyncio.wait_for(fired.wait(), timeout=5)
         finally:
-            await application.job_queue.stop()
+            await sched.stop(wait=False)
 
     asyncio.run(scenario())
+
+
+def test_ptbs_job_queue_is_never_started():
+    """PTB stops being the thing that knows what time it is.
+
+    ``_run_dual`` starts ``condor.scheduler`` in both modes and never touches
+    ``application.job_queue``; a job registered on it would simply never fire,
+    which is why every caller had to move in one go.
+    """
+    from telegram.ext import Application
+
+    application = Application.builder().token("0:local").build()
+    assert application.job_queue.jobs() == ()
+    assert not application.job_queue.scheduler.running
 
 
 def test_outbound_messages_go_to_the_bell_in_local_mode(monkeypatch):

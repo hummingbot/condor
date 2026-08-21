@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
+from condor.scheduler import JobContext, get_scheduler
 from utils.auth import admin_required
 from utils.telegram_formatters import escape_markdown_v2, escape_markdown_v2_code
 
@@ -386,8 +387,13 @@ async def _do_restart(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _restart_now(query)
 
 
-async def _periodic_update_check(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Periodic job that checks for updates and notifies admin."""
+async def _periodic_update_check(context: JobContext) -> None:
+    """Periodic job that checks for updates and notifies admin.
+
+    ``context.bot`` resolves to whatever this install can actually reach, so an
+    install with no Telegram gets the notice on the dashboard bell instead of
+    handing it to a sender that drops it.
+    """
     from utils.config import ADMIN_USER_ID
     from utils.updater import check_for_updates, check_hb_api_updates
 
@@ -444,20 +450,19 @@ async def _periodic_update_check(context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.warning("Failed to send update notification: %s", e)
 
 
-def schedule_update_checks(application) -> None:
-    """Schedule periodic update checks. Call from post_init."""
+def schedule_update_checks() -> None:
+    """Schedule periodic update checks. Call from startup()."""
     from utils.updater import UPDATE_CHECK_INTERVAL
 
     if UPDATE_CHECK_INTERVAL <= 0:
         logger.info("Update checks disabled (UPDATE_CHECK_INTERVAL=0)")
         return
 
+    scheduler = get_scheduler()
     # Remove existing job if any
-    existing = application.job_queue.get_jobs_by_name(UPDATE_CHECK_JOB)
-    for job in existing:
-        job.schedule_removal()
+    scheduler.remove_by_name(UPDATE_CHECK_JOB)
 
-    application.job_queue.run_repeating(
+    scheduler.run_repeating(
         _periodic_update_check,
         interval=UPDATE_CHECK_INTERVAL,
         first=30,  # first check 30s after startup

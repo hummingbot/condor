@@ -593,6 +593,15 @@ async def startup(application: Application) -> None:
     and never run — which is exactly how boot reconciliation silently died.
     Called explicitly from :func:`_run_dual`, before the first update is served.
     """
+    # Condor's clock, started before anything registers a job on it. Not
+    # mode-aware: telegram and local mode run the same scheduler, so local mode
+    # cannot be the untested timing path (FEAT-050). PTB's own job_queue is
+    # never started.
+    from condor.scheduler import bind_user_data, get_scheduler
+
+    bind_user_data(application.user_data)
+    get_scheduler().start()
+
     # Sync server permissions (ensures all servers have ownership entries)
     await sync_server_permissions()
 
@@ -662,7 +671,7 @@ async def startup(application: Application) -> None:
     # Schedule periodic update checks (notifies admin)
     from handlers.admin.update import schedule_update_checks
 
-    schedule_update_checks(application)
+    schedule_update_checks()
 
     # Usage telemetry (FEAT-023). init() resolves the consent level once so the
     # taps never read the disk on a hot path, and only materializes the
@@ -673,7 +682,7 @@ async def startup(application: Application) -> None:
 
     try:
         level = telemetry.init(hosted=True)
-        telemetry_taps.register_jobs(application)
+        telemetry_taps.register_jobs()
         logger.info("Telemetry level: %s", level)
     except Exception:
         logger.exception("Telemetry init failed (continuing without it)")
@@ -873,8 +882,9 @@ def main() -> None:
     # hooks: they only fire from run_polling/run_webhook, and _run_dual owns the
     # lifecycle — startup() and teardown() are called there, explicitly.
     # In local mode there is no token and nothing polls; the placeholder exists
-    # only so the Application (and with it job_queue, CallbackContext and the
-    # handler registry) can be built at all. Nothing ever calls Telegram with it.
+    # only so the Application can be built at all, and since FEAT-050 the one
+    # thing it is still built *for* is the persisted user_data dict — the clock
+    # moved to condor.scheduler. Nothing ever calls Telegram with it.
     application = (
         Application.builder()
         .token(TELEGRAM_TOKEN or "0:local")
@@ -939,12 +949,11 @@ async def _run_dual(application: Application) -> None:
     #
     # Local mode skips that lifecycle rather than faking it (FEAT-049): the
     # Application is built but never initialized, so nothing polls and no handler
-    # can dispatch — the Telegram surface is inert, not mocked. The job queue is
-    # started directly, which is all scheduled routines, update checks and
-    # signals actually need.
+    # can dispatch — the Telegram surface is inert, not mocked. Nothing else is
+    # needed: scheduled routines, update checks and signals all tick on Condor's
+    # own scheduler, which startup() starts in both modes (FEAT-050).
     if LOCAL_MODE:
         await startup(application)
-        await application.job_queue.start()
     else:
         await application.initialize()
         await startup(application)
@@ -1037,20 +1046,24 @@ async def _run_dual(application: Application) -> None:
         # Run each step independently so one failure can't skip the rest.
         # teardown() runs last, mirroring where post_shutdown would have sat.
         # Local mode never initialized or started the Application, so the PTB
-        # stop steps would only raise "not running" — it has a job queue to stop
-        # and nothing else.
-        if LOCAL_MODE:
-            steps = (
-                ("job_queue.stop", application.job_queue.stop),
-                ("teardown", partial(teardown, application)),
-            )
-        else:
-            steps = (
+        # stop steps would only raise "not running" — there is nothing of PTB's
+        # to wind down there at all.
+        from condor.scheduler import get_scheduler
+
+        ptb_steps = (
+            ()
+            if LOCAL_MODE
+            else (
                 ("updater.stop", application.updater.stop),
                 ("application.stop", application.stop),
                 ("application.shutdown", application.shutdown),
-                ("teardown", partial(teardown, application)),
             )
+        )
+        steps = (
+            ("scheduler.stop", get_scheduler().stop),
+            *ptb_steps,
+            ("teardown", partial(teardown, application)),
+        )
         for name, step in steps:
             try:
                 await step()

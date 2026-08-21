@@ -420,7 +420,7 @@ async def heartbeat_job(context) -> None:
         log.debug("Heartbeat tap failed", exc_info=True)
 
 
-def register_jobs(application) -> None:
+def register_jobs() -> None:
     """Register the flush and heartbeat jobs, the house pattern from
     ``handlers.admin.update.schedule_update_checks``.
 
@@ -429,16 +429,15 @@ def register_jobs(application) -> None:
     restart.
     """
     try:
-        queue = getattr(application, "job_queue", None)
-        if queue is None:
-            return
+        from condor.scheduler import get_scheduler
+
+        scheduler = get_scheduler()
         for name in (TELEMETRY_FLUSH_JOB, TELEMETRY_HEARTBEAT_JOB):
-            for job in queue.get_jobs_by_name(name):
-                job.schedule_removal()
-        queue.run_repeating(
+            scheduler.remove_by_name(name)
+        scheduler.run_repeating(
             flush_job, interval=FLUSH_INTERVAL_S, first=60, name=TELEMETRY_FLUSH_JOB
         )
-        queue.run_repeating(
+        scheduler.run_repeating(
             heartbeat_job,
             interval=HEARTBEAT_INTERVAL_S,
             first=120,
