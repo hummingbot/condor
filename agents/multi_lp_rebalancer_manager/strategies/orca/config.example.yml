@@ -1,0 +1,92 @@
+# Copy to config.yml and set the exact server/account and portfolio budget.
+# Runtime policy is frozen into each new loop session.
+server_name: local
+execution_mode: loop
+frequency_sec: 100
+max_ticks: 0
+bot_mode: bot
+bot_name: multi_lp_rebalancer_manager-orca
+account_name: master_account
+network: solana-mainnet-beta
+controller_type: generic
+controller_name: trend_aware_lp_rebalancer
+lp_provider: orca/clmm
+swap_provider: jupiter/router
+quote_token_symbol: USDC
+quote_token_mint: EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
+quote_token_decimals: 6
+trading_context: ''
+
+total_amount_quote: 10
+target_active_controllers: 3
+max_active_controllers: 3
+min_controller_amount_quote: 1
+min_sol_reserve: 0.1
+lp_sizing_buffer_pct: 2
+
+risk_profile: balanced
+token_focus: mixed
+preferred_base_mints: []
+excluded_base_mints: []
+excluded_pool_addresses: []
+min_pool_tvl_usd: 10000
+candidate_scan_limit: 9
+
+controller_take_profit_ratio: 0.05
+controller_stop_loss_ratio: 0.05
+controller_time_limit_minutes: 720
+controller_pnl_grace_period_minutes: 5
+pool_reentry_cooldown_minutes: 5
+trend_signal_max_age_seconds: 600
+deployment_signal_min_remaining_seconds: 200
+defensive_rearm_cooldown_minutes: 5
+max_consecutive_controller_failures: 3
+failure_retry_backoff_seconds: 30
+cleanup_min_quote_value: 0.01
+
+trend_thresholds_pct:
+  change_24h: 1
+  recent_history: 1
+  seven_day_history: 3
+trend_history_min_points: 7
+
+allocation_safety_weights:
+  price_stability: 0.5
+  liquidity_depth: 0.35
+  execution_simplicity: 0.15
+allocation_profile_exponents:
+  conservative: 2
+  balanced: 1
+  high_yield: 0.5
+
+range_profiles:
+  conservative:
+    movement_multiplier: 2
+    min_width_pct: 4
+    max_width_pct: 20
+  balanced:
+    movement_multiplier: 1.5
+    min_width_pct: 2
+    max_width_pct: 12
+  high_yield:
+    movement_multiplier: 1
+    min_width_pct: 1
+    max_width_pct: 8
+downtrend_width_multiplier: 1.25
+downside_offset_width_ratio: 0.25
+rebalance_threshold_width_ratio: 0.25
+minimum_rebalance_threshold_pct: 0.25
+maximum_rebalance_threshold_pct: 5
+
+mcda_weights:
+  fee_productivity: 0.4
+  recent_activity: 0.25
+  price_stability: 0.15
+  liquidity_depth: 0.1
+  execution_simplicity: 0.1
+
+risk_limits:
+  max_position_size_quote: 30
+  max_open_executors: 12
+  max_drawdown_pct: -1
+  shutdown_drawdown_pct: -1
