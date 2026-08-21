@@ -57,16 +57,45 @@ quote units even for the base side, which it converts at the current price `P`.
 **To deploy a base holding of `B` tokens on RANGE, set `total_amount_quote = 2·B·P`** — half
 of it funds the base side. Sizing it to `B·P` deploys only half your base.
 
-### Two more fields that don't mean what the executor's do
+### Width is a full width, not a half
 - **`position_width_pct` is FULL width, not half.** RANGE bounds are
   `P·(1 ± width/200)`, so `5` gives ±2.5%. The `w` in this skill's Bounds section is a
   half-width. Still clamp to the venue bin cap — that math is unchanged.
-- **`position_offset_pct` is ignored entirely when `side=3` RANGE.** It touches neither
-  the amounts nor the bounds (RANGE is always centered on `P`). A small negative offset
-  "to stay in range" is a no-op; RANGE is already in range. Offset only does anything on
-  BUY/SELL, where its **sign selects the mode**: `≥ 0` single-sided out-of-range,
-  `< 0` in-range needing both tokens.
 - Default `position_width_pct` is `0.5` — that is 0.5%, i.e. ±0.25%. Very tight. Set it.
+
+### `position_offset_pct` is a REBALANCE setting — keep it positive
+`side` only applies to the **first** position. After that the controller picks the side
+itself, and it only ever picks BUY or SELL: on a top-of-range exit
+`price ≥ closed_upper` → BUY, on a bottom exit → SELL, and `_determine_side_from_price`
+returns nothing else. `_validate_and_clamp_bounds` can swap BUY↔SELL but never back to
+RANGE. So `side=3` RANGE happens exactly once.
+
+That matters because RANGE ignores `position_offset_pct` entirely — and BUY/SELL do not.
+The field therefore has **no effect on the position you are configuring** and governs
+**every position after it**, where its sign picks the funding shape:
+
+| offset | bounds | funding |
+|---|---|---|
+| `≥ 0` | sit entirely to one side of spot | **single-sided** — all of `total_amount_quote` in the token the close returned |
+| `< 0` | straddle spot | proportional split — needs **both** tokens |
+
+A rebalance is precisely when you have only one token: a top exit converts the position to
+100% quote. Choose `< 0` and the re-open asks for base you no longer hold, so it fails on
+`INSUFFICIENT_BALANCE`, or on `SLIPPAGE_EXCEEDED` trying to swap for it on a thin pool.
+
+**Use a small positive value — `0.1` is a good default.** Worked on a real 39-USDC
+position at P=0.3075, width 10:
+
+```
+offset = -0.1%  ->  bounds 0.27703-0.30781, straddles spot  ->  needs 1.267 base + 38.61 quote
+offset = +0.1%  ->  bounds 0.27647-0.30719, below spot      ->  needs 0 base + 39.00 quote  ✅
+```
+
+Do not read the field's own description as advice for the initial position. "Negative =
+in-range (needs both tokens, autoswap will convert |offset|%)" is true of rebalances, and
+its promise about autoswap only holds if you also set `autoswap=true` — which is easy to
+leave off when both tokens are in the wallet at deposit time, and every close after that
+returns only one.
 
 ### Size to ~95% of a base holding, or enable autoswap
 `base_amt` is recomputed from live `P` at open. Sizing `total_amount_quote` to exactly
@@ -79,8 +108,8 @@ total_amount_quote  = 39            # -> 75.0 ANSEM + 19.50 USDC, ~5% base headr
                                     #    (2*78.678*0.2623 = 41.3 would deploy all of it, no headroom)
 side                = 3             # RANGE
 position_width_pct  = 10            # -> +/-5%, = 50 bins at bin_step 20, under the 69 cap
-position_offset_pct = <ignored on RANGE>
-autoswap            = false         # both tokens already held
+position_offset_pct = 0.1           # rebalances only; positive keeps them single-sided
+autoswap            = false         # fine at deposit; with offset>0 rebalances need no swap
 ```
 
 ## Validate before create

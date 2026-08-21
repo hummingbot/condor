@@ -213,61 +213,72 @@ async def start_callback_handler(
             await _show_admin_menu(query, context)
 
 
+# Modules the handlers import from that do not live under ``handlers/``, and
+# that are safe to re-execute. Everything under ``handlers/`` itself is
+# discovered by :func:`_discover_handler_modules`.
+#
+# ``routines/`` is deliberately absent: routines have their own mtime-aware
+# discovery in ``routines.base.discover_routines(force_reload=True)``, which
+# owns reimporting individual routine modules. Only the base module is listed,
+# so that machinery itself stays fresh.
+_EXTRA_RELOAD_MODULES = (
+    "config_manager",
+    "utils.auth",
+    "utils.telegram_formatters",
+    "routines.base",
+)
+
+
+def _discover_handler_modules() -> list[str]:
+    """Every module under ``handlers/``, children before parents.
+
+    Derived rather than hand-listed. A hand-maintained list drifts, and it
+    drifts *silently*: ``reload_handlers`` skips any name not in
+    ``sys.modules``, so a stale entry is a no-op and a missing entry means the
+    watcher logs a successful reload while the running bot keeps the old code.
+    That is worse than no hot-reload, because it reports success. The list this
+    replaced named three ``handlers.dex.swap_*`` modules that no longer exist
+    and omitted six that do, including ``handlers.dex.router``.
+
+    Naming every module matters because ``importlib.reload`` is NOT recursive:
+    reloading ``handlers.dex`` re-executes its ``__init__``, but its
+    ``from .router import ...`` re-binds the *cached* ``handlers.dex.router``,
+    so an edit there is missed unless that module is reloaded in its own right.
+
+    For the same reason children sort before parents: by the time a package's
+    ``__init__`` re-executes, the submodules it imports from have already been
+    refreshed.
+    """
+    root = Path(__file__).parent / "handlers"
+    modules: set[str] = set()
+    for path in root.rglob("*.py"):
+        parts = path.relative_to(root.parent).with_suffix("").parts
+        # Per-agent runtime stores can sit under a watched tree (FEAT-003) and
+        # are data, not code — the file watcher skips them for the same reason.
+        if "__pycache__" in parts or "store" in parts:
+            continue
+        if parts[-1] == "__init__":
+            parts = parts[:-1]
+        if parts:
+            modules.add(".".join(parts))
+    return sorted(modules, key=lambda name: (-name.count("."), name))
+
+
 def reload_handlers():
     """Reload all handler modules."""
-    modules_to_reload = [
-        "handlers.portfolio",
-        "handlers.bots",
-        "handlers.bots.menu",
-        "handlers.bots.controllers",
-        "handlers.bots._shared",
-        "handlers.executors",
-        "handlers.executors.menu",
-        "handlers.executors.grid",
-        "handlers.executors.position",
-        "handlers.executors._shared",
-        "handlers.trading",
-        "handlers.trading.router",
-        "handlers.cex",
-        "handlers.cex.menu",
-        "handlers.cex.trade",
-        "handlers.cex.orders",
-        "handlers.cex.positions",
-        "handlers.cex._shared",
-        "handlers.dex",
-        "handlers.dex.menu",
-        "handlers.dex.swap_quote",
-        "handlers.dex.swap_execute",
-        "handlers.dex.swap_history",
-        "handlers.dex.pools",
-        "handlers.dex._shared",
-        "handlers.config",
-        "handlers.config.servers",
-        "handlers.config.api_keys",
-        "handlers.config.gateway",
-        "handlers.config.user_preferences",
-        "routines.base",
-        "handlers.routines",
-        "handlers.agents",
-        "handlers.agents.menu",
-        # NOTE: no "condor.runtime.*" module belongs in this list. The runtime
-        # holds live subprocess handles (agent sessions); re-executing those
-        # modules resets the registry and silently orphans every running agent.
-        "handlers.agents.stream",
-        "handlers.agents.confirmation",
-        "handlers.agents._shared",
-        "handlers.memory",
-        "handlers.admin",
-        "handlers.admin.update",
-        "utils.auth",
-        "utils.telegram_formatters",
-        "config_manager",
-    ]
+    # NOTE: no "condor.runtime.*" module belongs here. The runtime holds live
+    # subprocess handles (agent sessions); re-executing those modules resets
+    # the registry and silently orphans every running agent. The discovery
+    # above only walks handlers/, so it cannot pull them in.
+    modules_to_reload = [*_EXTRA_RELOAD_MODULES, *_discover_handler_modules()]
 
+    reloaded = 0
     for module_name in modules_to_reload:
         if module_name in sys.modules:
             importlib.reload(sys.modules[module_name])
-            logger.info(f"Reloaded module: {module_name}")
+            logger.debug(f"Reloaded module: {module_name}")
+            reloaded += 1
+    logger.info(f"Reloaded {reloaded} modules")
 
     # Re-register fetch functions after reload (preserves in-memory cache)
     try:
