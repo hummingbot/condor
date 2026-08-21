@@ -47,7 +47,13 @@ _web_port_raw = os.environ.get("WEB_PORT", "").strip()
 if _web_url_raw:
     WEB_URL = _web_url_raw.rstrip("/")
     _parsed = urlparse(WEB_URL)
-    WEB_PORT = _parsed.port or (443 if _parsed.scheme == "https" else 80)
+
+    if _web_port_raw:
+        WEB_PORT = int(_web_port_raw)
+    elif _parsed.port:
+        WEB_PORT = _parsed.port
+    else:
+        WEB_PORT = 443 if _parsed.scheme == "https" else 80
 else:
     WEB_PORT = int(_web_port_raw) if _web_port_raw else 8088
     WEB_URL = f"http://localhost:{WEB_PORT}"
