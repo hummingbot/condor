@@ -48,9 +48,15 @@ class FakeRoutineStore:
         return "inst-run"
 
     async def schedule(
-        self, routine_name, config, server_name, interval_sec, user_id=0
+        self,
+        routine_name,
+        config,
+        server_name,
+        interval_sec,
+        user_id=0,
+        daily_time=None,
     ):
-        self.schedule_calls.append((routine_name, server_name, user_id))
+        self.schedule_calls.append((routine_name, server_name, user_id, daily_time))
         return "inst-sched"
 
     async def start_continuous(
@@ -190,7 +196,7 @@ def test_schedule_allowed_on_owned_server(client_and_store):
     )
     assert resp.status_code == 200
     assert resp.json() == {"instance_id": "inst-sched"}
-    assert store.schedule_calls == [("some_routine", OWNED_SERVER, USER.id)]
+    assert store.schedule_calls == [("some_routine", OWNED_SERVER, USER.id, None)]
 
 
 def test_run_v2_allowed_on_owned_server(client_and_store):
@@ -214,7 +220,7 @@ def test_schedule_v2_allowed_on_owned_server(client_and_store):
         },
     )
     assert resp.status_code == 200
-    assert store.schedule_calls == [("agent/some_routine", OWNED_SERVER, USER.id)]
+    assert store.schedule_calls == [("agent/some_routine", OWNED_SERVER, USER.id, None)]
 
 
 def test_start_v2_denied_on_foreign_server(client_and_store):

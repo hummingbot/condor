@@ -12,8 +12,15 @@ const PRESETS = [
   { label: "1w", sec: 604800 },
 ];
 
+// The same times /routines offers in Telegram, so a routine put on a daily
+// schedule from either surface lands on the same minute. UTC, which is what the
+// scheduler resolves them in.
+const DAILY_PRESETS = ["06:00", "09:00", "12:00", "18:00", "21:00"];
+
+export type ScheduleSpec = { interval_sec: number } | { daily_time: string };
+
 interface Props {
-  onSchedule: (intervalSec: number) => void;
+  onSchedule: (spec: ScheduleSpec) => void;
   disabled?: boolean;
 }
 
@@ -32,18 +39,35 @@ export function ScheduleDropdown({ onSchedule, disabled }: Props) {
         <ChevronDown className="h-3 w-3" />
       </button>
       {open && (
-        <div className="absolute right-0 z-10 mt-1 w-28 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] py-1 shadow-lg">
+        <div className="absolute right-0 z-10 mt-1 w-32 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] py-1 shadow-lg">
           {PRESETS.map((p) => (
             <button
               key={p.sec}
               type="button"
               onClick={() => {
-                onSchedule(p.sec);
+                onSchedule({ interval_sec: p.sec });
                 setOpen(false);
               }}
               className="block w-full px-3 py-1.5 text-left text-xs text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]"
             >
               Every {p.label}
+            </button>
+          ))}
+          <div className="my-1 border-t border-[var(--color-border)]" />
+          <p className="px-3 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
+            Daily (UTC)
+          </p>
+          {DAILY_PRESETS.map((t) => (
+            <button
+              key={t}
+              type="button"
+              onClick={() => {
+                onSchedule({ daily_time: t });
+                setOpen(false);
+              }}
+              className="block w-full px-3 py-1.5 text-left text-xs text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]"
+            >
+              At {t}
             </button>
           ))}
         </div>

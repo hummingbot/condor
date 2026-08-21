@@ -37,6 +37,10 @@ class RunRequest(BaseModel):
 class ScheduleRequest(BaseModel):
     config: dict = {}
     interval_sec: int = 300
+    # "HH:MM" UTC. Set, it wins over interval_sec: one run a day at that minute
+    # (FEAT-050). Telegram schedules have always had this trigger; the dashboard
+    # could not offer it while its schedules were sleep loops rather than jobs.
+    daily_time: str | None = None
 
 
 class RunRequestV2(BaseModel):
@@ -58,6 +62,7 @@ class ScheduleRequestV2(BaseModel):
     server_name: str
     config: dict = {}
     interval_sec: int = 300
+    daily_time: str | None = None
 
 
 class HookTelegram(BaseModel):
@@ -170,7 +175,7 @@ async def schedule_routine(
     body: ScheduleRequest,
     user: WebUser = Depends(require_server_access_by_server_name),
 ):
-    """Schedule a routine at an interval. Returns instance_id."""
+    """Schedule a routine at an interval, or daily at a UTC time."""
     store = get_routine_store()
     try:
         instance_id = await store.schedule(
@@ -179,6 +184,7 @@ async def schedule_routine(
             server_name=server_name,
             interval_sec=body.interval_sec,
             user_id=user.id,
+            daily_time=body.daily_time,
         )
     except ValueError as e:
         raise HTTPException(404, str(e))
@@ -251,6 +257,7 @@ async def schedule_routine_v2(
             server_name=body.server_name,
             interval_sec=body.interval_sec,
             user_id=user.id,
+            daily_time=body.daily_time,
         )
     except ValueError as e:
         raise HTTPException(404, str(e))

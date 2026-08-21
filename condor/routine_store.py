@@ -12,11 +12,13 @@ import hashlib
 import logging
 import time
 import traceback
+from datetime import time as dt_time
 from pathlib import Path
 from typing import Any
 
 import condor.reports as reports
 from condor import routine_hooks
+from condor.scheduler import get_scheduler
 from condor.telemetry import taps as telemetry_taps
 from routines.base import (
     RoutineResult,
@@ -201,6 +203,16 @@ _MAX_TERMINAL_INSTANCES = _MAX_RESULTS
 # Telegram-owned instance, which keeps that status for its whole life) and
 # `scheduled` (between ticks of an interval schedule) are the live ones.
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "stopped"})
+
+
+def _web_job_name(instance_id: str) -> str:
+    """The scheduler job name for a dashboard/agent-created schedule.
+
+    Namespaced away from the Telegram handler's ``routine_{chat}_{instance}``:
+    both surfaces are on one clock now, and their instance ids are minted by
+    different generators.
+    """
+    return f"web:{instance_id}"
 
 
 class RoutineStore:
@@ -796,15 +808,33 @@ class RoutineStore:
         routine_name: str,
         config: dict,
         server_name: str,
-        interval_sec: int,
+        interval_sec: int = 300,
         user_id: int = 0,
+        daily_time: str | None = None,
     ) -> str:
-        """Schedule a routine to repeat at interval_sec. Returns instance_id."""
+        """Put a routine on Condor's clock. Returns instance_id.
+
+        ``daily_time`` is ``"HH:MM"`` **UTC** and wins over ``interval_sec``:
+        the schedule is one run a day at that minute. It is the trigger a
+        dashboard- or agent-created schedule never had, because this used to be
+        a bare ``while True: sleep(interval)`` task rather than a scheduled job
+        (FEAT-050).
+
+        One behaviour changes with the clock: a run that outlasts its own
+        interval no longer pushes the next tick back — APScheduler skips the
+        tick instead (``max_instances=1``). That is what a Telegram-created
+        schedule has always done, and now both surfaces agree.
+        """
         routine = self._resolve_routine(routine_name)
         if not routine:
             raise ValueError(f"Routine '{routine_name}' not found")
 
         instance_id = self._gen_id()
+        schedule = (
+            {"type": "daily", "daily_time": daily_time}
+            if daily_time
+            else {"type": "interval", "interval_sec": interval_sec}
+        )
         self._instances[instance_id] = self._new_instance_meta(
             routine_name,
             config,
@@ -812,50 +842,53 @@ class RoutineStore:
             user_id,
             source="web",
             status="scheduled",
-            schedule={"type": "interval", "interval_sec": interval_sec},
+            schedule=schedule,
         )
 
-        task = asyncio.create_task(
-            self._run_scheduled(
-                instance_id, routine, config, server_name, interval_sec, user_id
+        async def _tick(_context) -> None:
+            # stop() drops the instance record; the job outlives that call by
+            # at most one tick, so it retires itself here rather than running
+            # against an instance nobody can see.
+            if instance_id not in self._instances:
+                get_scheduler().remove_by_name(_web_job_name(instance_id))
+                return
+            await self._execute_and_record(
+                instance_id,
+                routine,
+                config,
+                server_name,
+                user_id,
+                status_after="scheduled",
+                trigger="schedule",
             )
-        )
-        self._tasks[instance_id] = task
-        return instance_id
 
-    async def _run_scheduled(
-        self,
-        instance_id: str,
-        routine,
-        config: dict,
-        server_name: str,
-        interval_sec: int,
-        user_id: int = 0,
-    ) -> None:
-        try:
-            while instance_id in self._instances:
-                await self._execute_and_record(
-                    instance_id,
-                    routine,
-                    config,
-                    server_name,
-                    user_id,
-                    status_after="scheduled",
-                    trigger="schedule",
-                )
-                # A cancel that lands mid-run is swallowed (and recorded) by
-                # _execute_and_record; stop() removed the instance, so bail out
-                # instead of sleeping through one more interval.
-                if instance_id not in self._instances:
-                    break
-                await asyncio.sleep(interval_sec)
-        except asyncio.CancelledError:
-            logger.info(f"Scheduled routine {instance_id} cancelled")
+        scheduler = get_scheduler()
+        if daily_time:
+            hour, minute = map(int, daily_time.split(":"))
+            scheduler.run_daily(
+                _tick,
+                dt_time(hour=hour, minute=minute),
+                name=_web_job_name(instance_id),
+                chat_id=user_id,
+            )
+        else:
+            # `first` mirrors the Telegram sibling: a schedule the user just
+            # created runs now, not one interval from now, which is also what
+            # the sleep loop this replaces did.
+            scheduler.run_repeating(
+                _tick,
+                interval_sec,
+                first=0.5,
+                name=_web_job_name(instance_id),
+                chat_id=user_id,
+            )
+        return instance_id
 
     def stop(self, instance_id: str) -> bool:
         task = self._tasks.pop(instance_id, None)
         if task and not task.done():
             task.cancel()
+        get_scheduler().remove_by_name(_web_job_name(instance_id))
 
         if instance_id in self._instances:
             self._instances[instance_id]["status"] = "stopped"

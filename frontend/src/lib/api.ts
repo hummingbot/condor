@@ -1952,15 +1952,18 @@ export const api = {
       { method: "POST", body: JSON.stringify({ routine_name: name, server_name: server, config }) },
     ),
 
+  // `spec` is one trigger or the other: every N seconds, or daily at an
+  // "HH:MM" UTC time. The backend takes daily_time as the winner when both
+  // are present; sending only one keeps that from ever coming up.
   scheduleRoutine: (
     server: string,
     name: string,
     config: Record<string, unknown> = {},
-    interval_sec: number = 300,
+    spec: { interval_sec: number } | { daily_time: string } = { interval_sec: 300 },
   ) =>
     apiFetch<{ instance_id: string }>(
       `/api/v1/routines/schedule`,
-      { method: "POST", body: JSON.stringify({ routine_name: name, server_name: server, config, interval_sec }) },
+      { method: "POST", body: JSON.stringify({ routine_name: name, server_name: server, config, ...spec }) },
     ),
 
   stopRoutineInstance: (id: string) =>

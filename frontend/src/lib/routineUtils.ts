@@ -69,6 +69,18 @@ export function formatInterval(sec: number): string {
   return `${sec}s`;
 }
 
+// A schedule's label, whichever trigger it uses. Daily times are UTC — the
+// scheduler resolves them there, so showing a local time would be a lie.
+export function formatSchedule(
+  schedule: Record<string, unknown> | null | undefined,
+): string | null {
+  if (!schedule) return null;
+  if (schedule.type === "daily") return `${schedule.daily_time as string} UTC`;
+  if (schedule.type === "interval")
+    return formatInterval(schedule.interval_sec as number);
+  return null;
+}
+
 // ── Query invalidation ──
 
 export function invalidateRoutineQueries(

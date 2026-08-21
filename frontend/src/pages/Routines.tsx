@@ -21,7 +21,7 @@ import { RoutineTable, type RoutineRow } from "@/components/routines/RoutineTabl
 import { useServer } from "@/hooks/useServer";
 import { api } from "@/lib/api";
 import { formatRelativeTime, toMs } from "@/lib/formatters";
-import { formatInterval } from "@/lib/routineUtils";
+import { formatSchedule } from "@/lib/routineUtils";
 
 type SourceTypeFilter = "all" | "routine" | "agent" | string;
 type ViewMode = "grid" | "table";
@@ -378,10 +378,10 @@ export function Routines() {
                         {!isLive(inst.status) && inst.last_run_at && (
                           <span>{formatRelativeTime(inst.last_run_at, "")}</span>
                         )}
-                        {inst.schedule?.type === "interval" && (
+                        {formatSchedule(inst.schedule) && (
                           <span className="flex items-center gap-0.5">
                             <Clock className="h-2 w-2" />
-                            {formatInterval(inst.schedule.interval_sec as number)}
+                            {formatSchedule(inst.schedule)}
                           </span>
                         )}
                         {inst.run_count > 0 && <span>{inst.run_count} runs</span>}

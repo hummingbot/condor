@@ -23,13 +23,13 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { type RoutineInstance, api } from "@/lib/api";
-import { buildConfigValues, formatAgo, formatInterval, invalidateRoutineQueries, saveConfig } from "@/lib/routineUtils";
+import { buildConfigValues, formatAgo, formatSchedule, invalidateRoutineQueries, saveConfig } from "@/lib/routineUtils";
 import { setViewContext } from "@/lib/viewContext";
 import { useServer } from "@/hooks/useServer";
 import { ReportFrame } from "./ReportFrame";
 import { RoutineConfigForm } from "./RoutineConfigForm";
 import { RoutineHooksPanel } from "./RoutineHooksPanel";
-import { ScheduleDropdown } from "./ScheduleDropdown";
+import { ScheduleDropdown, type ScheduleSpec } from "./ScheduleDropdown";
 
 interface ReportBrowserProps {
   initialSource?: string;
@@ -175,8 +175,8 @@ export function ReportBrowser({
   });
 
   const scheduleMutation = useMutation({
-    mutationFn: (intervalSec: number) =>
-      api.scheduleRoutine(server!, activeSource, configValues, intervalSec),
+    mutationFn: (spec: ScheduleSpec) =>
+      api.scheduleRoutine(server!, activeSource, configValues, spec),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["routine-instances"] });
       setShowConfigPanel(false);
@@ -505,9 +505,9 @@ export function ReportBrowser({
                   <div key={inst.instance_id} className="flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-2.5 py-1 text-[10px]">
                     <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
                     <span className="text-emerald-400 capitalize">{inst.status}</span>
-                    {inst.schedule?.type === "interval" && (
+                    {formatSchedule(inst.schedule) && (
                       <span className="text-[var(--color-text-muted)]">
-                        <Clock className="inline h-2.5 w-2.5" /> {formatInterval(inst.schedule.interval_sec as number)}
+                        <Clock className="inline h-2.5 w-2.5" /> {formatSchedule(inst.schedule)}
                       </span>
                     )}
                     <span className="text-[var(--color-text-muted)]">{inst.run_count} runs</span>
@@ -581,7 +581,7 @@ export function ReportBrowser({
                 </button>
                 {!activeRoutine.is_continuous && (
                   <ScheduleDropdown
-                    onSchedule={(sec) => scheduleMutation.mutate(sec)}
+                    onSchedule={(spec) => scheduleMutation.mutate(spec)}
                     disabled={scheduleMutation.isPending || !server}
                   />
                 )}
