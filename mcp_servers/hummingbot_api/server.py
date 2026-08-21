@@ -1103,8 +1103,24 @@ async def manage_gateway_swaps(
 ) -> str:
     """One-shot DEX swaps through Gateway's unified swap route — quote, execute, and track.
 
-    This is the ONLY swap surface. Router aggregators (jupiter, 0x) and pool-scoped AMM/CLMM
-    swaps all go through it; the pool-scoped `/trading/amm/*-swap` routes no longer exist.
+    PREFER order_executor FOR SWAPS. `manage_executors(action="create",
+    executor_type="order_executor", ...)` with `connector_name=<network>` (e.g.
+    "solana-mainnet-beta") and `execution_strategy="MARKET"` swaps through this same
+    Gateway route, and adds what a one-shot call cannot:
+      - the slippage ramp (`slippage_pct` / `slippage_multiplier` / `max_slippage_pct`),
+        which starts tight and widens only on a failure Gateway attributes to slippage.
+        A swap here carries ONE fixed tolerance and never retries at a wider one.
+      - an executor record, so the fill is tagged with `controller_id` and reaches PnL
+        attribution. A swap here is written to swap history only, so an entry executed
+        this way and the position it funds land in different ledgers.
+
+    Use this tool when order_executor cannot express what you need: a quote without an
+    execution, resolving or searching swap history, or a pool-scoped connector the
+    executor does not route to.
+
+    "Unified" is about Gateway's routes, not about tool choice. Router aggregators
+    (jupiter, 0x) and pool-scoped AMM/CLMM swaps all resolve to one route here; the
+    pool-scoped `/trading/amm/*-swap` routes no longer exist.
 
     Actions:
     - quote → price, expected output, and price impact BEFORE committing (free, always do this first)
