@@ -3,7 +3,7 @@
 ``uv run python -m condor.setup_llm`` lists every model this machine can
 actually run, says why each one is or isn't ready, and writes the pick to
 ``.env`` as ``CONDOR_DEFAULT_AGENT`` — the top of the precedence chain read by
-``handlers.agents._shared._default_agent()``, so it survives restarts and reaches
+``condor.llm.options._default_agent()``, so it survives restarts and reaches
 every entry point. ``--status`` (and any run without a TTY: CI, ``curl | bash``)
 prints the same report and changes nothing.
 
@@ -297,7 +297,7 @@ def _pick_openrouter(env, ask, say, ask_secret) -> tuple[str, dict[str, str]] | 
 def _install_bridge(base: str, say=print) -> bool:
     """Run the install command for a MISSING ACP bridge, right where it's needed.
 
-    Reuses :func:`handlers.agents.readiness.install_command` against
+    Reuses :func:`condor.llm.readiness.install_command` against
     ``ACP_COMMANDS[base]`` -- the exact command already shown in that row's
     "not installed" detail, so this can never run something different from
     what the menu displayed. Streams the real install output (npm's progress,

@@ -11,13 +11,13 @@ import asyncio
 import pytest
 
 from condor import setup_llm
-from handlers.agents._shared import (
+from condor.llm.openrouter_models import OpenRouterModel
+from condor.llm.options import (
     AGENT_OPTIONS,
     RECOMMENDED_AGENT,
     selectable_agent_options,
 )
-from handlers.agents.openrouter_models import OpenRouterModel
-from handlers.agents.readiness import MISSING, READY, UNVERIFIED, Readiness
+from condor.llm.readiness import MISSING, READY, UNVERIFIED, Readiness
 
 
 def scripted(answers):

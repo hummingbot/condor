@@ -145,7 +145,7 @@ def check_config() -> list[Check]:
     # Same readiness check `condor/setup_llm.py --status` reports for the
     # default agent — reused rather than reimplemented so the two can never
     # disagree about whether the current default actually works.
-    from handlers.agents import readiness
+    from condor.llm import readiness
 
     agent_key = current_default(env)
     try:
