@@ -31,7 +31,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dtm
 import logging
-from collections.abc import MutableMapping
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Callable
 from uuid import uuid4
@@ -56,11 +56,16 @@ ALL_DAYS: tuple[int, ...] = tuple(range(7))
 # ``application.user_data``; this is the last thing a job still needs the
 # Application for, deliberately concentrated in one place so the follow-on
 # feature that moves routine state onto disk has one call site to change.
-_user_data: MutableMapping[int, dict] = {}
+_user_data: Mapping[int, dict] = {}
 
 
-def bind_user_data(mapping: MutableMapping[int, dict]) -> None:
-    """Point job callbacks at the per-user buckets they read and write."""
+def bind_user_data(mapping: Mapping[int, dict]) -> None:
+    """Point job callbacks at the per-user buckets they read.
+
+    Reads only: PTB hands out ``application.user_data`` as a ``mappingproxy``,
+    so a bucket cannot be created through it — but the buckets themselves are
+    ordinary dicts, which is where every job's writes land.
+    """
     global _user_data
     _user_data = mapping
 
@@ -126,10 +131,16 @@ class JobContext:
 
         ``None`` when it does not — jobs created with only a ``chat_id`` got
         ``None`` from PTB too, and at least one caller (signals) reads it.
+
+        Read-only lookup, never creating: what is bound here is PTB's
+        ``application.user_data``, which is a ``mappingproxy``. Its *buckets*
+        are ordinary dicts, so everything a job actually does — updating an
+        instance record in place — writes through; only minting a new top-level
+        bucket is impossible, and no job does that.
         """
         if self.job.user_id is None:
             return None
-        return _user_data.setdefault(self.job.user_id, {})
+        return _user_data.get(self.job.user_id)
 
     def owner_data(self, owner_id: int | None, chat_id: int) -> dict:
         """The starter's ``user_data`` bucket, as seen from a job.

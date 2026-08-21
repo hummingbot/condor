@@ -271,7 +271,11 @@ def test_owner_data_reads_the_bucket_the_owner_is_keyed_by(scheduler):
 
 
 def test_user_data_follows_ptbs_rule(scheduler):
-    """``None`` unless the job names a user — signals read it and relied on it."""
+    """``None`` unless the job names a user — signals read it and relied on it.
+
+    A lookup, never a creation: what is bound in the real process is PTB's
+    read-only ``mappingproxy`` over its buckets.
+    """
 
     async def scenario():
         seen = {}
@@ -290,6 +294,42 @@ def test_user_data_follows_ptbs_rule(scheduler):
 
         assert seen["chat-only"] is None
         assert seen["with-user"] == {"marker": True}
+
+    try:
+        run(scheduler, scenario)
+    finally:
+        bind_user_data({})
+
+
+def test_binding_ptbs_read_only_view_of_user_data_works(scheduler):
+    """What ``main.startup`` binds is a ``mappingproxy``, not a dict.
+
+    ``Application.user_data`` is read-only, so anything that tried to *create* a
+    bucket through it would raise at the first tick of the first job. Nothing
+    does: a job reads its owner's bucket and updates the instance record inside
+    it in place, which writes through the proxy.
+    """
+    from types import MappingProxyType
+
+    async def scenario():
+        instances = {"i1": {"run_count": 0}}
+        backing = {111: {"routine_instances": instances}}
+        done = asyncio.Event()
+
+        async def cb(context):
+            bucket = context.owner_data(111, -100222)
+            bucket["routine_instances"]["i1"]["run_count"] += 1
+            # A user with no bucket yet must read as empty, not blow up.
+            assert context.owner_data(999, 999) == {}
+            assert context.user_data is None
+            done.set()
+
+        bind_user_data(MappingProxyType(backing))
+        scheduler.run_once(cb, 0.01, name="proxy")
+        scheduler.start()
+        await _wait(done)
+
+        assert instances["i1"]["run_count"] == 1
 
     try:
         run(scheduler, scenario)
