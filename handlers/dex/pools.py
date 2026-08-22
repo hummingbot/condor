@@ -31,7 +31,13 @@ from utils.telegram_formatters import (
     resolve_token_symbol,
 )
 
-from ._shared import DEFAULT_CACHE_TTL, get_cached, invalidate_cache, set_cached
+from ._shared import (
+    DEFAULT_CACHE_TTL,
+    get_cached,
+    invalidate_cache,
+    resolve_network_id,
+    set_cached,
+)
 from .visualizations import (
     generate_aggregated_liquidity_chart,
     generate_combined_chart,
@@ -40,6 +46,27 @@ from .visualizations import (
 )
 
 logger = logging.getLogger(__name__)
+
+# hapi's CLMM pool LISTING (/gateway/clmm/pools) is Solana-only — it accepts a
+# bare Solana network name and rejects every non-Solana connector — so pools
+# discovered through it live on this network. Anything reached by address
+# carries its own network instead.
+SOLANA_CLMM_NETWORK = "solana-mainnet-beta"
+
+
+def _require_network(record: dict, what: str) -> str:
+    """Read the network a pool/position lives on, failing loudly if it is absent.
+
+    Everything that reaches these screens is stamped with its own network — a
+    missing one means a stale cached record, and guessing 'solana-mainnet-beta'
+    is how EVM pools silently became unreachable.
+    """
+    network = record.get("network")
+    if not network:
+        raise ValueError(
+            f"{what} has no network recorded — reopen it from the menu to refresh it"
+        )
+    return network
 
 
 # ============================================
@@ -186,76 +213,6 @@ async def handle_pool_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     )
 
 
-def _format_pool_info(pool: dict) -> str:
-    """Format detailed pool information
-
-    Args:
-        pool: Pool data dictionary
-
-    Returns:
-        Formatted pool info string (not escaped)
-    """
-    lines = []
-
-    pair = pool.get("trading_pair", pool.get("name", "N/A"))
-    lines.append(f"🏊 Pool: {pair}")
-    lines.append("")
-
-    # Basic info - show full address for copy/paste
-    if pool.get("pool_address") or pool.get("address"):
-        addr = pool.get("pool_address") or pool.get("address")
-        lines.append(f"📍 Address:")
-        lines.append(f"`{addr}`")
-
-    if pool.get("bin_step"):
-        lines.append(f"📊 Bin Step: {pool.get('bin_step')}")
-
-    if pool.get("fee") is not None:
-        fee_pct = (
-            float(pool.get("fee", 0)) * 100
-            if float(pool.get("fee", 0)) < 1
-            else pool.get("fee")
-        )
-        lines.append(f"💸 Fee: {fee_pct:.2f}%")
-
-    lines.append("")
-
-    # TVL and volume
-    tvl = pool.get("liquidity") or pool.get("tvl")
-    if tvl is not None:
-        lines.append(f"💰 TVL: ${format_compact_number(tvl)}")
-
-    vol_24h = pool.get("volume_24h")
-    if vol_24h is not None:
-        lines.append(f"📈 Volume 24h: ${format_compact_number(vol_24h)}")
-
-    # APR/Fees
-    apr = pool.get("apr")
-    if apr is not None:
-        lines.append(f"📊 APR: {_format_percent(apr)}")
-
-    fee_tvl = pool.get("fee_tvl_ratio", {})
-    if isinstance(fee_tvl, dict) and fee_tvl.get("hour_24"):
-        lines.append(f"💵 Fee/TVL 24h: {_format_percent(fee_tvl.get('hour_24'))}")
-
-    lines.append("")
-
-    # Prices
-    current_price = pool.get("current_price") or pool.get("price")
-    if current_price is not None:
-        lines.append(f"💱 Current Price: {current_price}")
-
-    # Token info
-    base_token = pool.get("base_token") or pool.get("token_a")
-    quote_token = pool.get("quote_token") or pool.get("token_b")
-    if base_token:
-        lines.append(f"🪙 Base: {base_token}")
-    if quote_token:
-        lines.append(f"💵 Quote: {quote_token}")
-
-    return "\n".join(lines)
-
-
 async def process_pool_info(
     update: Update, context: ContextTypes.DEFAULT_TYPE, user_input: str
 ) -> None:
@@ -280,9 +237,15 @@ async def process_pool_info(
                 f"Unsupported connector '{connector}'. Use: {', '.join(supported_connectors)}"
             )
 
+        chat_id = update.effective_chat.id
+        client = await get_client(chat_id, context=context)
+
+        if not hasattr(client, "gateway_clmm"):
+            raise ValueError("Gateway CLMM not available")
+
         # Determine network based on connector type
         if connector in solana_connectors:
-            network = "solana-mainnet-beta"
+            network = SOLANA_CLMM_NETWORK
         else:
             # EVM connectors require network specification
             if len(parts) < 3:
@@ -290,25 +253,8 @@ async def process_pool_info(
                     f"EVM connector '{connector}' requires network.\n\n"
                     f"Example: {connector} {pool_address} ethereum"
                 )
-            network = parts[2].lower()
-            # Normalize network names
-            network_mapping = {
-                "ethereum": "ethereum-mainnet",
-                "eth": "ethereum-mainnet",
-                "arbitrum": "arbitrum-one",
-                "arb": "arbitrum-one",
-                "base": "base-mainnet",
-                "bsc": "binance-smart-chain",
-                "polygon": "polygon-mainnet",
-                "optimism": "optimism-mainnet",
-            }
-            network = network_mapping.get(network, network)
-
-        chat_id = update.effective_chat.id
-        client = await get_client(chat_id, context=context)
-
-        if not hasattr(client, "gateway_clmm"):
-            raise ValueError("Gateway CLMM not available")
+            # Gateway owns the network ids; ask it rather than guessing.
+            network = await resolve_network_id(client, parts[2])
 
         # Send loading message
         loading_msg = await update.message.reply_text("🔄 Loading pool details...")
@@ -335,29 +281,18 @@ async def process_pool_info(
             )
             return
 
-        # Construct pool dict with connector info for _show_pool_detail
+        # Construct pool dict for _show_pool_detail. Only the fields hapi's
+        # CLMMPoolInfoResponse actually carries: TVL/volume/APR are pool-LIST
+        # fields and simply do not exist on pool-info.
         pool = {
             "pool_address": pool_address,
             "address": pool_address,
             "connector": connector,
-            "trading_pair": result.get("trading_pair", result.get("name", "N/A")),
-            # Copy over any available data from result
-            "liquidity": result.get("liquidity") or result.get("tvl"),
-            "volume_24h": result.get("volume_24h"),
-            "fees_24h": result.get("fees_24h"),
-            "base_fee_percentage": result.get("base_fee_percentage")
-            or result.get("fee"),
-            "max_fee_percentage": result.get("max_fee_percentage"),
-            "apr": result.get("apr"),
-            "apy": result.get("apy"),
+            "network": network,
             "bin_step": result.get("bin_step"),
-            "current_price": result.get("current_price") or result.get("price"),
-            "mint_x": result.get("mint_x")
-            or result.get("base_token")
-            or result.get("token_a"),
-            "mint_y": result.get("mint_y")
-            or result.get("quote_token")
-            or result.get("token_b"),
+            "current_price": result.get("price"),
+            "mint_x": result.get("base_token_address"),
+            "mint_y": result.get("quote_token_address"),
         }
 
         # Use the rich pool detail display with chart and add liquidity button
@@ -748,9 +683,10 @@ async def process_pool_list(
 
         pools = result.get("pools", [])
 
-        # Add connector to each pool for later use
+        # Add connector/network to each pool for later use
         for pool in pools:
             pool["connector"] = connector
+            pool["network"] = SOLANA_CLMM_NETWORK
 
         if not pools:
             message = escape_markdown_v2("📋 No pools found")
@@ -896,7 +832,12 @@ async def handle_plot_liquidity(
             connector = pool.get("connector", "meteora")
             try:
                 pool_info = await asyncio.wait_for(
-                    _fetch_pool_info(client, pool_address, connector),
+                    _fetch_pool_info(
+                        client,
+                        pool_address,
+                        connector,
+                        _require_network(pool, "This pool"),
+                    ),
                     timeout=POOL_FETCH_TIMEOUT,
                 )
                 bins = pool_info.get("bins", [])
@@ -1039,14 +980,15 @@ async def handle_plot_liquidity(
 
 
 async def _fetch_pool_info(
-    client, pool_address: str, connector: str = "meteora"
+    client, pool_address: str, connector: str, network: str
 ) -> dict:
     """Fetch detailed pool info including bins
 
     Args:
         client: Gateway client
         pool_address: Pool address to fetch
-        connector: Connector name (meteora, raydium)
+        connector: Connector name (meteora, raydium, uniswap, ...)
+        network: Network ID in '{chain}-{network}' form the pool lives on
 
     Returns:
         Pool info dict with bins data
@@ -1055,7 +997,7 @@ async def _fetch_pool_info(
         if hasattr(client, "gateway_clmm"):
             result = await client.gateway_clmm.get_pool_info(
                 connector=connector,
-                network="solana-mainnet-beta",
+                network=network,
                 pool_address=pool_address,
             )
             return result or {}
@@ -1111,7 +1053,9 @@ async def _show_pool_detail(
 
     pool_address = pool.get("pool_address", pool.get("address", "N/A"))
     connector = pool.get("connector", "meteora")
-    network = "solana-mainnet-beta"
+    # Every pool dict reaching here is stamped with the network it was found on
+    # (pool list, pool-info lookup, position, or GeckoTerminal).
+    network = _require_network(pool, "This pool")
     chat_id = update.effective_chat.id
 
     # Parallel fetch: pool_info, token_cache, and OHLCV data
@@ -1125,7 +1069,7 @@ async def _show_pool_detail(
         if pool_info is not None:
             return pool_info
         client = await get_client(chat_id, context=context)
-        return await _fetch_pool_info(client, pool_address, connector)
+        return await _fetch_pool_info(client, pool_address, connector, network)
 
     async def fetch_token_cache_task():
         if token_cache is not None:
@@ -1159,22 +1103,14 @@ async def _show_pool_detail(
     if token_cache:
         context.user_data["token_cache"] = token_cache
 
-    # Try to get trading pair name from multiple sources
+    # Pair name comes from the pool LIST (CLMMPoolListItem.trading_pair/name);
+    # pool-info carries only token ADDRESSES, so resolve symbols from those.
     pair = pool.get("trading_pair") or pool.get("name")
-    mint_x = (
-        pool.get("mint_x") or pool_info.get("mint_x") or pool_info.get("token_x_mint")
-    )
-    mint_y = (
-        pool.get("mint_y") or pool_info.get("mint_y") or pool_info.get("token_y_mint")
-    )
+    mint_x = pool.get("mint_x") or pool_info.get("base_token_address")
+    mint_y = pool.get("mint_y") or pool_info.get("quote_token_address")
 
     if not pair or pair == "N/A":
-        # Try to construct from pool_info token symbols
-        token_x = pool_info.get("token_x_symbol") or pool_info.get("base_symbol")
-        token_y = pool_info.get("token_y_symbol") or pool_info.get("quote_symbol")
-        if token_x and token_y:
-            pair = f"{token_x}/{token_y}"
-        elif mint_x and mint_y:
+        if mint_x and mint_y:
             base_symbol = resolve_token_symbol(mint_x, token_cache)
             quote_symbol = resolve_token_symbol(mint_y, token_cache)
             pair = f"{base_symbol}/{quote_symbol}"
@@ -1204,9 +1140,7 @@ async def _show_pool_detail(
         quote_symbol = resolve_token_symbol(mint_y, token_cache) if mint_y else "QUOTE"
 
     # Get current price and bin step
-    current_price = (
-        pool_info.get("price") or pool.get("current_price") or pool.get("price")
-    )
+    current_price = pool_info.get("price") or pool.get("current_price")
     bin_step = pool.get("bin_step") or pool_info.get("bin_step")
     bins = pool_info.get("bins", [])
     active_bin = pool_info.get("active_bin_id")
@@ -1279,17 +1213,15 @@ async def _show_pool_detail(
     quote_in_gateway = mint_y and mint_y in token_cache
     tokens_in_gateway = base_in_gateway and quote_in_gateway
 
-    # Get pool metrics
-    tvl = (
-        pool.get("liquidity")
-        or pool.get("tvl")
-        or pool_info.get("liquidity")
-        or pool_info.get("tvl")
-    )
-    vol_24h = pool.get("volume_24h") or pool_info.get("volume_24h")
-    fees_24h = pool.get("fees_24h") or pool_info.get("fees_24h")
-    base_fee = pool.get("base_fee_percentage") or pool_info.get("base_fee_percentage")
-    apr = pool.get("apr") or pool_info.get("apr")
+    # Pool metrics. TVL/volume/fees/APR exist only on the pool LIST item (or a
+    # GeckoTerminal pool); pool-info has none of them, so a pool reached by
+    # address simply shows no metrics row. The fee percentage does come from
+    # pool-info, as fee_pct.
+    tvl = pool.get("liquidity")
+    vol_24h = pool.get("volume_24h")
+    fees_24h = pool.get("fees_24h")
+    base_fee = pool.get("base_fee_percentage") or pool_info.get("fee_pct")
+    apr = pool.get("apr")
 
     # Build message - matching show_add_position_menu format
     message = r"➕ *Add CLMM Position*" + "\n\n"
@@ -1783,24 +1715,16 @@ async def handle_add_to_gateway(
         await query.answer("No pool selected")
         return
 
-    # Get token addresses
-    mint_x = (
-        selected_pool.get("mint_x")
-        or pool_info.get("mint_x")
-        or pool_info.get("token_x_mint")
-    )
-    mint_y = (
-        selected_pool.get("mint_y")
-        or pool_info.get("mint_y")
-        or pool_info.get("token_y_mint")
-    )
+    # Get token addresses (pool list: mint_x/mint_y; pool-info: *_token_address)
+    mint_x = selected_pool.get("mint_x") or pool_info.get("base_token_address")
+    mint_y = selected_pool.get("mint_y") or pool_info.get("quote_token_address")
 
     if not mint_x or not mint_y:
         await query.answer("Token addresses not available", show_alert=True)
         return
 
-    network_id = "solana-mainnet-beta"
-    gecko_network = "solana"
+    network_id = _require_network(selected_pool, "This pool")
+    gecko_network = get_gecko_network(network_id)
 
     # Show loading
     await query.answer("Adding tokens to Gateway...")
@@ -2414,9 +2338,9 @@ def _format_position_detail(
     )
 
     # Get PNL data
-    pnl_summary = pos.get("pnl_summary", {})
-    base_pnl = pnl_summary.get("base_pnl")
-    quote_pnl = pnl_summary.get("quote_pnl")
+    # hapi emits pnl_summary: null when entry/current price or initial amounts
+    # are missing, so a {} default on a present key never applies.
+    pnl_summary = pos.get("pnl_summary") or {}
 
     # Get pending fees
     base_fee = pos.get(
@@ -2629,14 +2553,11 @@ def _format_position_detail(
         except (ValueError, TypeError):
             lines.append(f"   {range_emoji} Range: {range_str}")
 
-        # Compact PNL
-        if base_pnl is not None or quote_pnl is not None:
-            pnl_parts = []
-            if quote_pnl is not None:
-                sign = "+" if quote_pnl >= 0 else ""
-                pnl_parts.append(f"{sign}{format_amount(quote_pnl)} {quote_symbol}")
-            if pnl_parts:
-                lines.append(f"   📊 {' '.join(pnl_parts)}")
+        # Compact PNL (quote-denominated, as hapi calculates it)
+        compact_pnl = pnl_summary.get("total_pnl_quote")
+        if compact_pnl is not None:
+            sign = "+" if compact_pnl >= 0 else ""
+            lines.append(f"   📊 {sign}{format_amount(compact_pnl)} {quote_symbol}")
 
         # Compact Fees - show if any fees are pending
         try:
@@ -2885,12 +2806,12 @@ async def handle_pos_view(
         chat_id = update.effective_chat.id
         connector = pos.get("connector", "meteora")
         pool_address = pos.get("pool_address", "")
-        network = "solana-mainnet-beta"
+        network = _require_network(pos, "This position")
 
         # Get position price data
         lower_price = pos.get("lower_price", pos.get("price_lower"))
         upper_price = pos.get("upper_price", pos.get("price_upper"))
-        pnl_summary = pos.get("pnl_summary", {})
+        pnl_summary = pos.get("pnl_summary") or {}
         entry_price = pnl_summary.get("entry_price")
         current_price = pnl_summary.get("current_price")
 
@@ -2911,7 +2832,7 @@ async def handle_pos_view(
             if cached:
                 return cached
             client = await get_client(chat_id, context=context)
-            info = await _fetch_pool_info(client, pool_address, connector)
+            info = await _fetch_pool_info(client, pool_address, connector, network)
             if info:
                 set_cached(context.user_data, cache_key, info)
             return info or {}
@@ -3133,6 +3054,7 @@ async def handle_pos_view_pool(
             "pool_address": pool_address,
             "address": pool_address,
             "connector": connector,
+            "network": _require_network(pos, "This position"),
             "trading_pair": pos.get("trading_pair"),
             "mint_x": pos.get("base_token"),
             "mint_y": pos.get("quote_token"),
@@ -3232,11 +3154,7 @@ async def handle_pos_collect_fees(
         if result:
             success_msg = f"✅ *Fees collected from {escape_markdown_v2(pair)}\\!*"
             if isinstance(result, dict):
-                tx_hash = (
-                    result.get("tx_hash")
-                    or result.get("txHash")
-                    or result.get("signature")
-                )
+                tx_hash = result.get("transaction_hash")
                 if tx_hash:
                     success_msg += f"\n\nTx: `{tx_hash[:30]}...`"
 
@@ -3249,15 +3167,22 @@ async def handle_pos_collect_fees(
                     success_msg, parse_mode="MarkdownV2", reply_markup=back_keyboard
                 )
         else:
+            # A successful collect always returns a populated
+            # CLMMCollectFeesResponse, so an empty result is an API failure —
+            # not a zero-fee collect.
+            failure_msg = (
+                f"❌ No response from the API collecting fees on "
+                f"{escape_markdown_v2(pair)}"
+            )
             try:
                 await query.message.edit_text(
-                    f"ℹ️ No fees to collect from {escape_markdown_v2(pair)}",
+                    failure_msg,
                     parse_mode="MarkdownV2",
                     reply_markup=back_keyboard,
                 )
             except Exception:
                 await query.message.reply_text(
-                    f"ℹ️ No fees to collect from {escape_markdown_v2(pair)}",
+                    failure_msg,
                     parse_mode="MarkdownV2",
                     reply_markup=back_keyboard,
                 )
@@ -3417,10 +3342,8 @@ async def handle_pos_close_execute(
             pair = pos.get("trading_pair", "Unknown")
             success_msg = escape_markdown_v2(f"✅ Position closed: {pair}")
 
-            if isinstance(result, dict) and result.get("tx_hash"):
-                success_msg += (
-                    f"\n\nTx: `{escape_markdown_v2(result['tx_hash'][:20])}...`"
-                )
+            if isinstance(result, dict) and result.get("transaction_hash"):
+                success_msg += f"\n\nTx: `{escape_markdown_v2(result['transaction_hash'][:20])}...`"
 
             keyboard = [[InlineKeyboardButton("« Back", callback_data="dex:liquidity")]]
             reply_markup = InlineKeyboardMarkup(keyboard)
@@ -3490,9 +3413,14 @@ async def process_position_list(
         if not hasattr(client, "gateway_clmm"):
             raise ValueError("Gateway CLMM not available")
 
-        positions = await client.gateway_clmm.get_positions_owned(
-            connector=connector, network=network, pool_address=pool_address
+        # positions-owned has no pool filter: it lists every CLMM position the
+        # wallet owns on the connector, each row carrying its own pool_address.
+        all_positions = await client.gateway_clmm.get_positions_owned(
+            connector=connector, network=network
         )
+        positions = [
+            p for p in (all_positions or []) if p.get("pool_address") == pool_address
+        ]
 
         # Save params
         set_dex_last_pool(
@@ -3933,35 +3861,25 @@ async def show_add_position_menu(
 
     # Get current price and bin step for range calculation
     # Prefer pool_info (fetched data) over selected_pool (list data)
-    current_price = (
-        pool_info.get("price")
-        or selected_pool.get("current_price")
-        or selected_pool.get("price")
-    )
+    current_price = pool_info.get("price") or selected_pool.get("current_price")
     bin_step = pool_info.get("bin_step") or selected_pool.get("bin_step")
     bins = pool_info.get("bins", [])
-    network = params.get("network", "solana-mainnet-beta")
+    network = params.get("network") or _require_network(selected_pool, "This pool")
 
-    # Extract token addresses/symbols from pool info
-    base_token = selected_pool.get("base_token") or pool_info.get("base_token")
-    quote_token = selected_pool.get("quote_token") or pool_info.get("quote_token")
+    # Extract token addresses. pool-info names them base_token_address /
+    # quote_token_address; the pool list names them mint_x / mint_y.
+    base_token = selected_pool.get("base_token")
+    quote_token = selected_pool.get("quote_token")
 
-    # Try mint addresses if token not set
     if not base_token:
-        base_token = (
-            selected_pool.get("mint_x")
-            or pool_info.get("mint_x")
-            or pool_info.get("token_x_mint")
-        )
+        base_token = selected_pool.get("mint_x") or pool_info.get("base_token_address")
     if not quote_token:
-        quote_token = (
-            selected_pool.get("mint_y")
-            or pool_info.get("mint_y")
-            or pool_info.get("token_y_mint")
+        quote_token = selected_pool.get("mint_y") or pool_info.get(
+            "quote_token_address"
         )
 
-    # Get pair name, with fallback to resolving from token addresses
-    pair = selected_pool.get("trading_pair") or pool_info.get("trading_pair")
+    # Pair name is a pool-LIST field; pool-info has none.
+    pair = selected_pool.get("trading_pair")
     if not pair or pair in ("Pool", "N/A", "Unknown Pair"):
         # Try to resolve from token addresses using token_cache
         if base_token and quote_token:
@@ -4137,10 +4055,8 @@ async def show_add_position_menu(
             )
         if bin_step:
             help_text += f"📊 *Bin Step:* `{escape_markdown_v2(str(bin_step))}` _\\(default 20 bins each side\\)_\n"
-        # Add fee if available
-        base_fee = pool_info.get("base_fee_percentage") or selected_pool.get(
-            "base_fee_percentage"
-        )
+        # Add fee if available (pool-info: fee_pct; pool list: base_fee_percentage)
+        base_fee = pool_info.get("fee_pct") or selected_pool.get("base_fee_percentage")
         if base_fee:
             help_text += f"💸 *Fee:* `{escape_markdown_v2(str(base_fee))}%`\n"
 
@@ -4554,7 +4470,7 @@ async def handle_pos_refresh(
 
     pool_address = params.get("pool_address") or selected_pool.get("pool_address", "")
     connector = params.get("connector") or selected_pool.get("connector", "meteora")
-    network = params.get("network", "solana-mainnet-beta")
+    network = params.get("network") or _require_network(selected_pool, "This pool")
     base_token = selected_pool.get("base_token", "")
     quote_token = selected_pool.get("quote_token", "")
 
@@ -4574,7 +4490,7 @@ async def handle_pos_refresh(
         if pool_address:
             chat_id = update.effective_chat.id
             client = await get_client(chat_id, context=context)
-            pool_info = await _fetch_pool_info(client, pool_address, connector)
+            pool_info = await _fetch_pool_info(client, pool_address, connector, network)
             set_cached(context.user_data, pool_cache_key, pool_info)
             context.user_data["selected_pool_info"] = pool_info
 
@@ -4977,8 +4893,10 @@ async def handle_pos_add_confirm(
                 "Both amounts are 0. Need at least one token to add liquidity."
             )
 
-        # Build extra_params for strategy type
-        extra_params = {"strategyType": strategy_type}
+        # strategyType is Meteora-only; hapi rejects it for other connectors
+        extra_params = (
+            {"strategyType": strategy_type} if connector == "meteora" else None
+        )
 
         result = await client.gateway_clmm.open_position(
             connector=connector,
@@ -5022,11 +4940,20 @@ async def handle_pos_add_confirm(
             pos_info += escape_markdown_v2(f"Quote: {float(amount_quote):.6f}\n")
 
         if isinstance(result, dict):
-            if "tx_hash" in result:
-                pos_info += escape_markdown_v2(f"\nTx: {result['tx_hash'][:16]}...")
-            if "position_address" in result:
+            # transaction_hash is None while the open tx is still pending
+            if result.get("transaction_hash"):
+                pos_info += escape_markdown_v2(
+                    f"\nTx: {result['transaction_hash'][:16]}..."
+                )
+            # position_address is null when the tx was submitted but not yet
+            # confirmed — hapi's poller records the position once it lands
+            if result.get("position_address"):
                 pos_info += escape_markdown_v2(
                     f"\nPosition: {result['position_address'][:16]}..."
+                )
+            elif result.get("status") == "submitted":
+                pos_info += escape_markdown_v2(
+                    "\nPosition: pending confirmation (address known once the tx lands)"
                 )
 
         keyboard = [
@@ -5267,13 +5194,19 @@ async def process_add_position(
 
         # Now execute
         connector = params.get("connector", "meteora")
-        network = params.get("network", "solana-mainnet-beta")
+        network = params.get("network") or SOLANA_CLMM_NETWORK
+        strategy_type = int(params.get("strategy_type", "0"))
 
         chat_id = update.effective_chat.id
         client = await get_client(chat_id, context=context)
 
         if not hasattr(client, "gateway_clmm"):
             raise ValueError("Gateway CLMM not available")
+
+        # strategyType is Meteora-only; hapi rejects it for other connectors
+        extra_params = (
+            {"strategyType": strategy_type} if connector == "meteora" else None
+        )
 
         result = await client.gateway_clmm.open_position(
             connector=connector,
@@ -5287,6 +5220,7 @@ async def process_add_position(
             quote_token_amount=(
                 Decimal(params["amount_quote"]) if params["amount_quote"] else None
             ),
+            extra_params=extra_params,
         )
 
         if result is None:
@@ -5309,8 +5243,22 @@ async def process_add_position(
             f"Quote: {params['amount_quote']}\n"
         )
 
-        if isinstance(result, dict) and "tx_hash" in result:
-            pos_info += escape_markdown_v2(f"\nTx: {result['tx_hash'][:16]}...")
+        if isinstance(result, dict):
+            # transaction_hash is None while the open tx is still pending
+            if result.get("transaction_hash"):
+                pos_info += escape_markdown_v2(
+                    f"\nTx: {result['transaction_hash'][:16]}..."
+                )
+            # position_address is null when the tx was submitted but not yet
+            # confirmed — hapi's poller records the position once it lands
+            if result.get("position_address"):
+                pos_info += escape_markdown_v2(
+                    f"\nPosition: {result['position_address'][:16]}..."
+                )
+            elif result.get("status") == "submitted":
+                pos_info += escape_markdown_v2(
+                    "\nPosition: pending confirmation (address known once the tx lands)"
+                )
 
         keyboard = [
             [InlineKeyboardButton("« Back to Liquidity", callback_data="dex:liquidity")]

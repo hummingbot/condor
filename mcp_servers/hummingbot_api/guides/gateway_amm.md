@@ -19,15 +19,13 @@ through `manage_executors(order_executor)`; CLMM LP goes through `manage_executo
 | `pool_info` | read | `pool_address` |
 | `position_info` | read | `pool_address` (returns aggregate + `positions[]`) |
 | `positions_owned` | read | — (**meteora only**; fungible-LP → error) |
-| `quote_swap` | read | `pool_address`, `base_token`, `side`, `amount` |
-| `execute_swap` | write | `pool_address`, `base_token`, `side`, `amount` |
 | `quote_liquidity` | read | `pool_address`, `base_token_amount`, `quote_token_amount` |
 | `add_liquidity` | write | `pool_address`, `base_token_amount`, `quote_token_amount` (+ optional `position_address`) |
 | `remove_liquidity` | write | `pool_address`, `percentage_to_remove` (+ **`position_address` required for meteora**) |
 | `create_pool` | write | `base_token`, `quote_token`, `base_token_amount` (+ connector extra) |
 
-`quote_swap`/`execute_swap` are **pool-scoped** (they trade against the specific `pool_address`), not
-a router. Use `explore_dex_pools`/`pool_info` to find a pool.
+Swaps are not part of this tool: the unified swap route handles every connector type
+(pass connector as `name/type`, e.g. `raydium/amm`) — via the order executor for trading.
 
 ## Meteora DAMM v2 position model (important)
 DAMM v2 positions are **NFTs**: a wallet may hold **several positions in one pool**, each an
@@ -51,12 +49,14 @@ Seed price priority: `initial_price` (quote per base) → `quote_token_amount` r
 price** (fetched from the swap router so the pool opens on-market and bots can't arb your seed).
 Only `base_token_amount` is required.
 
-Per-connector `create_pool` extras (only the owning connector consumes them):
-- **meteora**: `config_address` (**required**) — the DAMM v2 config account that fixes the fee
-  schedule. Many configs are token-launch configs whose base fee starts near **99%** and decays;
-  pick a static-fee config you actually want. Token order: `base_token` → token A, `quote_token` → token B.
-- **raydium**: `fee_config_index` (optional; defaults to the first available config).
-- **uniswap**: `gas_price` / `max_gas` (optional; fee is fixed at 0.30%).
+Per-connector `create_pool` extras ride `extra_params` under Gateway's own names (only the
+owning connector consumes them; unknown keys are rejected):
+- **meteora**: `extra_params={"configAddress": ...}` (**required**) — the DAMM v2 config account
+  that fixes the fee schedule. Many configs are token-launch configs whose base fee starts near
+  **99%** and decays; pick a static-fee config you actually want. Token order: `base_token` →
+  token A, `quote_token` → token B.
+- **raydium**: `ammConfigIndex` (optional; defaults to the first available config).
+- **uniswap** (EVM): no extra params (fee is fixed at 0.30%).
 
 ## Examples
 - Load this guide: `manage_amm()`
@@ -65,4 +65,4 @@ Per-connector `create_pool` extras (only the owning connector consumes them):
 - Open a new Meteora position: `manage_amm(action="add_liquidity", connector="meteora", network="solana-mainnet-beta", pool_address="…", base_token_amount="1", quote_token_amount="2")` (omit `position_address`)
 - Exit a specific position: `manage_amm(action="remove_liquidity", connector="meteora", network="solana-mainnet-beta", pool_address="…", position_address="…", percentage_to_remove="100")`
 - Create a Raydium CPMM pool (market-seeded): `manage_amm(action="create_pool", connector="raydium", network="solana-mainnet-beta", base_token="SOL", quote_token="USDC", base_token_amount="1")`
-- Create a Meteora DAMM v2 pool: `manage_amm(action="create_pool", connector="meteora", network="solana-mainnet-beta", base_token="…", quote_token="USDC", base_token_amount="1", config_address="…")`
+- Create a Meteora DAMM v2 pool: `manage_amm(action="create_pool", connector="meteora", network="solana-mainnet-beta", base_token="…", quote_token="USDC", base_token_amount="1", extra_params={"configAddress": "…"})`

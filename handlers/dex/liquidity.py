@@ -172,21 +172,11 @@ async def _fetch_lp_positions(client, status: str = "OPEN") -> dict:
                 # Must not be closed
                 if pos.get("status") == "CLOSED":
                     return False
-                # Check liquidity
-                liq = pos.get("liquidity") or pos.get("current_liquidity")
-                if liq is not None:
-                    try:
-                        return float(liq) > 0
-                    except (ValueError, TypeError):
-                        pass
-                base = pos.get("base_token_amount") or pos.get("amount_base")
-                quote = pos.get("quote_token_amount") or pos.get("amount_quote")
-                if base is not None or quote is not None:
-                    try:
-                        return float(base or 0) > 0 or float(quote or 0) > 0
-                    except (ValueError, TypeError):
-                        pass
-                return True
+                # hapi's position rows carry the amounts as base_token_amount /
+                # quote_token_amount; there is no 'liquidity' field to read.
+                base = float(pos.get("base_token_amount") or 0)
+                quote = float(pos.get("quote_token_amount") or 0)
+                return base > 0 or quote > 0
 
             positions = [p for p in positions if is_active_with_liquidity(p)]
 
@@ -309,7 +299,7 @@ def _format_compact_position_line(
     )
 
     # Get position value from pnl_summary
-    pnl_summary = pos.get("pnl_summary", {})
+    pnl_summary = pos.get("pnl_summary") or {}
     position_value_quote = pnl_summary.get("current_total_value_quote")
 
     # Get values from pnl_summary (all values are in quote token units)
@@ -439,7 +429,7 @@ def _format_closed_position_line(
             pass
 
     # Get PnL data - use pre-calculated total_pnl_quote
-    pnl_summary = pos.get("pnl_summary", {})
+    pnl_summary = pos.get("pnl_summary") or {}
     total_pnl_quote = pnl_summary.get("total_pnl_quote", 0) or 0
     total_fees_value = pnl_summary.get("total_fees_value_quote", 0) or 0
 
@@ -895,15 +885,15 @@ def _format_detailed_position_line(pos: dict, token_cache: dict = None) -> str:
             pass
 
     # Get PnL summary
-    pnl = pos.get("pnl_summary", {})
+    pnl = pos.get("pnl_summary") or {}
     initial_base = pnl.get("initial_base", pos.get("initial_base_token_amount", 0)) or 0
     initial_quote = (
         pnl.get("initial_quote", pos.get("initial_quote_token_amount", 0)) or 0
     )
-    final_base = pnl.get("current_base_total", pos.get("base_token_amount", 0)) or 0
-    final_quote = pnl.get("current_quote_total", pos.get("quote_token_amount", 0)) or 0
-    base_pnl = pnl.get("base_pnl", 0) or 0
-    quote_pnl = pnl.get("quote_pnl", 0) or 0
+    # hapi's pnl_summary names the live amounts current_base / current_quote;
+    # it reports no per-token PnL, so derive it from initial vs final.
+    final_base = pnl.get("current_base", pos.get("base_token_amount", 0)) or 0
+    final_quote = pnl.get("current_quote", pos.get("quote_token_amount", 0)) or 0
 
     # Fees collected
     base_fee = pos.get("base_fee_collected", 0) or 0
@@ -960,8 +950,8 @@ def _format_detailed_position_line(pos: dict, token_cache: dict = None) -> str:
     try:
         final_base_f = float(final_base)
         final_quote_f = float(final_quote)
-        base_pnl_f = float(base_pnl)
-        quote_pnl_f = float(quote_pnl)
+        base_pnl_f = final_base_f - float(initial_base)
+        quote_pnl_f = final_quote_f - float(initial_quote)
 
         # Format PnL with +/- signs
         base_pnl_str = (
@@ -1048,10 +1038,14 @@ async def handle_lp_history(
 
         positions = result.get("data", []) if result else []
         pagination = result.get("pagination", {}) if result else {}
-        total_count = pagination.get("total_count", len(positions))
+        # total_count is null while more rows remain; has_more is what tells us
+        # whether there is a next page.
+        total_count = pagination.get("total_count")
+        has_more = bool(pagination.get("has_more"))
 
-        # Update filters with total count
+        # Update filters with pagination state
         filters.total_count = total_count
+        filters.has_more = has_more
         set_history_filters(context.user_data, filters)
 
         if not positions and filters.offset == 0:
@@ -1113,7 +1107,10 @@ async def handle_lp_history(
             filter_summary = ""
 
         message = rf"📜 *Position History*{filter_summary}" + "\n"
-        message += rf"_Showing {len(positions)} of {total_count}_" + "\n\n"
+        if total_count is None:
+            message += rf"_Showing {len(positions)}, more available_" + "\n\n"
+        else:
+            message += rf"_Showing {len(positions)} of {total_count}_" + "\n\n"
 
         for pos in positions:
             line = _format_detailed_position_line(pos, token_cache)
@@ -1123,7 +1120,7 @@ async def handle_lp_history(
         keyboard = build_filter_buttons(filters, "dex:lp_hist")
 
         # Pagination row
-        if total_count > filters.limit:
+        if filters.has_next or filters.has_prev:
             keyboard.append(build_pagination_buttons(filters, "dex:lp_hist"))
 
         # Action buttons - use lp_refresh to ensure fresh data when going back
