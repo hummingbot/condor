@@ -19,6 +19,7 @@ from handlers.agents._shared import (
     DANGEROUS_AMM_ACTIONS,
     DANGEROUS_BOT_ACTIONS,
     DANGEROUS_CLMM_ACTIONS,
+    DANGEROUS_CONFIG_RESOURCES,
     DANGEROUS_EXECUTOR_ACTIONS,
     DANGEROUS_SWAP_ACTIONS,
     DANGEROUS_TOOLS,
@@ -128,3 +129,47 @@ def test_gated_calls_render_a_specific_confirmation_summary():
         )
         assert expected in summary, f"{tool_name}({action}) rendered {summary!r}"
         assert summary != tool_name
+
+
+def test_gateway_config_gates_wallets_and_only_wallets():
+    """manage_gateway_config is gated on resource_type, not action.
+
+    `wallets` + `add` takes a private key, so it needs a human. Everything else the
+    tool edits is Gateway's own symbol/address mapping — deleting a token moves no
+    funds and changes nothing on-chain, so gating it would stop a config edit while
+    leaving the trades it enables ungated.
+    """
+    fn = _registered_tools()["manage_gateway_config"]
+    resources = {
+        str(v)
+        for v in typing.get_args(
+            inspect.signature(fn).parameters["resource_type"].annotation
+        )
+        if isinstance(v, str)
+    }
+    assert DANGEROUS_CONFIG_RESOURCES <= resources, (
+        f"gated resource(s) the tool has no such value for: "
+        f"{sorted(DANGEROUS_CONFIG_RESOURCES - resources)}"
+    )
+    assert DANGEROUS_CONFIG_RESOURCES == {"wallets"}
+
+    assert is_dangerous_tool_call(
+        {
+            "tool": "manage_gateway_config",
+            "input": {"resource_type": "wallets", "action": "add"},
+        }
+    )
+    for resource in resources - DANGEROUS_CONFIG_RESOURCES:
+        for action in ("list", "add", "delete"):
+            assert not is_dangerous_tool_call(
+                {
+                    "tool": "manage_gateway_config",
+                    "input": {"resource_type": resource, "action": action},
+                }
+            ), f"{resource}/{action} should not need confirmation"
+
+
+def test_gateway_config_fails_closed_on_an_unreadable_resource():
+    """SEC-093: a call whose resource_type cannot be read is treated as dangerous."""
+    for bad in ({}, {"resource_type": None}, {"resource_type": 7}, {"action": "add"}):
+        assert is_dangerous_tool_call({"tool": "manage_gateway_config", "input": bad})
