@@ -117,7 +117,13 @@ def get_executor_pnl(executor: Dict[str, Any]) -> float:
 
 
 def get_executor_volume(executor: Dict[str, Any]) -> float:
-    """Extract filled/traded volume from an executor response."""
+    """Extract traded volume from an executor response.
+
+    `filled_amount_quote` first, and it is the right field for every executor type
+    including LP: an LP executor reports the swaps that crossed its range, derived from
+    the fees it earned, rather than the capital it deposited. It briefly had a separate
+    `volume_traded_quote` for that; there is one field again, and this is it.
+    """
     for key in ("filled_amount_quote", "volume_traded", "total_volume"):
         val = executor.get(key)
         if val is not None and val != 0:
