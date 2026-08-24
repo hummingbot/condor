@@ -19,6 +19,7 @@ import { ChatSessionIdentity } from "@/components/chat/ChatSessionIdentity";
 import { ChatThread } from "@/components/chat/ChatThread";
 import { ContextDock } from "@/components/chat/ContextDock";
 import { ConversationList } from "@/components/chat/ConversationList";
+import { SessionTabs } from "@/components/chat/SessionTabs";
 import { useBrainSwitch } from "@/hooks/useBrainSwitch";
 import { useChat, useSessionOptions } from "@/hooks/useChat";
 import { useServer } from "@/hooks/useServer";
@@ -242,7 +243,8 @@ export function AgentChatTab() {
           escaping to the page, the mirror of what the rail does below `md`. */}
       <div className="relative flex min-w-0 flex-1">
         <div className="flex min-w-0 flex-1 flex-col">
-          {/* Who is answering */}
+          {/* Which sessions are live, and who is answering in this one — one
+              row, because the active tab and the identity name the same chat. */}
           <div className="flex shrink-0 items-center gap-2 border-b border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2">
             <button
               onClick={() => setRailOpen((v) => !v)}
@@ -255,27 +257,42 @@ export function AgentChatTab() {
                 <PanelLeftOpen className="h-4 w-4" />
               )}
             </button>
-            {/* Who is answering and where it runs — the same strip the overlay
-                panel shows. */}
-            <ChatSessionIdentity
-              slot={activeSlot}
+            {/* Every live session, including the ones answering in the
+                background — switching, and the only way to stop one. */}
+            <SessionTabs
+              slots={chat.slots}
               agents={modelOptions}
-              customProviders={customProviders}
-              agentBindings={agentBindings}
-              isStreaming={isActiveStreaming}
-              onSelectBrain={switchBrain}
-              placeholder={<span className="text-sm font-semibold">Chat</span>}
+              activeSlotId={chat.activeSlotId}
+              isSlotStreaming={chat.isSlotStreaming}
+              permissionRequests={chat.permissionRequests}
+              onSelect={(slotId) => chat.setActiveSlotId(slotId)}
+              // The session ends; the transcript stays on the server, so the
+              // conversation is still in the rail and clicking it respawns it.
+              onClose={(slotId) => chat.destroySession(slotId)}
+              className="min-w-0 flex-1"
             />
-            {/* Strategies, brain and routines stay on the agent's own page. */}
-            {boundAgent && (
-              <Link
-                to={`/agents/${boundAgent.slug}`}
-                className="ml-auto flex items-center gap-1 text-[11px] text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-primary)]"
-              >
-                Manage
-                <ArrowUpRight className="h-3 w-3" />
-              </Link>
-            )}
+            {/* Who is answering and where it runs, plus the way out to the
+                agent's own page — pinned right, whatever the strip does. */}
+            <div className="ml-auto flex shrink-0 items-center gap-2">
+              <ChatSessionIdentity
+                slot={activeSlot}
+                agents={modelOptions}
+                customProviders={customProviders}
+                agentBindings={agentBindings}
+                isStreaming={isActiveStreaming}
+                onSelectBrain={switchBrain}
+              />
+              {/* Strategies, brain and routines stay on the agent's own page. */}
+              {boundAgent && (
+                <Link
+                  to={`/agents/${boundAgent.slug}`}
+                  className="flex items-center gap-1 text-[11px] text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-primary)]"
+                >
+                  Manage
+                  <ArrowUpRight className="h-3 w-3" />
+                </Link>
+              )}
+            </div>
           </div>
 
           <ChatThread
