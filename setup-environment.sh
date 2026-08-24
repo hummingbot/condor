@@ -891,7 +891,17 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
         fi
 
         # ── Tailscale option for Docker deploy ─────────────
+        # Condor is deploying hummingbot-api right here, on this same machine
+        # -- so Condor itself always reaches it over localhost, tailnet or not.
+        # Answering yes below connects THIS HOST to the tailnet (so the
+        # dashboard can be reached remotely via `tailscale serve`). Giving
+        # hummingbot-api its OWN separate tailnet node is a second, distinct
+        # question asked further down, only if this one is yes -- most
+        # installs don't need a second node just to reach something already
+        # local, and spinning one up unconditionally used to mean two tailnet
+        # devices (and two `tailscale up` connections) for one machine.
         TS_DEPLOY=false
+        HB_OWN_TAILNET_NODE=false
         ts_auth_key=""
         ts_hb_hostname="hummingbot-api"
         use_tailscale="${use_tailscale_early:-N}"
@@ -917,14 +927,13 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
                 fi
                 break
             done
-            # Hostname defaults to "hummingbot-api" — override TAILSCALE_HOSTNAME in hummingbot-api/.env if needed
             msg_info "Installing Tailscale on this machine..."
             curl -fsSL https://tailscale.com/install.sh | sh
             msg_info "Connecting to Tailscale network..."
             tailscale_up --authkey="$ts_auth_key" --hostname="condor" --accept-dns=true
             ts_condor_ip=$(tailscale ip -4 2>/dev/null | head -1)
             TS_DEPLOY=true
-            msg_ok "Tailscale connected — hummingbot-api will be reachable at http://$ts_hb_hostname:8000"
+            msg_ok "Tailscale connected — this machine (and its dashboard) is reachable on your tailnet"
             # On a VPS (SERVER_IP set), point the web dashboard at the Tailscale IP so the /web link works remotely
             if [ -n "${SERVER_IP:-}" ] && [ -n "${ts_condor_ip:-}" ]; then
                 if grep -q "^WEB_URL=" "$ENV_FILE"; then
@@ -933,6 +942,15 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
                     echo "WEB_URL=http://$ts_condor_ip:8088" >> "$ENV_FILE"
                 fi
                 msg_ok "Web dashboard: http://$ts_condor_ip:8088 (Tailscale access)"
+            fi
+
+            echo ""
+            msg_info "hummingbot-api runs on this same machine, so Condor reaches it over"
+            msg_info "localhost — it doesn't need a tailnet node of its own for that."
+            prompt_visible "Also give hummingbot-api its own Tailscale node, so other devices (e.g. an MCP client on another machine) can reach it directly? [y/N]" "N" "hb_tailscale_choice"
+            if [[ "${hb_tailscale_choice:-}" =~ ^[Yy]$ ]]; then
+                HB_OWN_TAILNET_NODE=true
+                msg_ok "hummingbot-api will join the tailnet as '$ts_hb_hostname' — reachable at http://$ts_hb_hostname:8000"
             fi
         fi
 
@@ -973,14 +991,22 @@ DATABASE_URL=postgresql+asyncpg://hbot:hummingbot-api@localhost:5432/hummingbot_
 GATEWAY_URL=http://localhost:15888
 GATEWAY_PASSPHRASE=${hb_config_password}
 BOTS_PATH=${hb_api_abs_path}
-TAILSCALE_ENABLED=${TS_DEPLOY}
+TAILSCALE_ENABLED=${HB_OWN_TAILNET_NODE}
 TAILSCALE_AUTH_KEY=${ts_auth_key}
 TAILSCALE_HOSTNAME=${ts_hb_hostname}
+# Condor is co-located on this machine and always reaches the API over
+# localhost, tailnet node or not -- so port 8000 never needs to sit on every
+# interface here. See docker-compose.yml / docker-compose.tailscale.yml.
+API_BIND_HOST=127.0.0.1
 HBEOF
             msg_ok "Hummingbot API .env configured"
 
-            # Generate docker-compose.tailscale.yml if Tailscale is enabled
-            if [ "$TS_DEPLOY" = true ] && [ ! -f "$HB_API_DIR/docker-compose.tailscale.yml" ]; then
+            # Generate docker-compose.tailscale.yml if hummingbot-api is getting
+            # its own tailnet node. TS_SERVE_CONFIG is load-bearing, not
+            # cosmetic: API_BIND_HOST above always binds port 8000 to
+            # 127.0.0.1, so without this forward the sidecar would join the
+            # tailnet with nothing behind it -- reachable from nowhere at all.
+            if [ "$HB_OWN_TAILNET_NODE" = true ] && [ ! -f "$HB_API_DIR/docker-compose.tailscale.yml" ]; then
                 cat > "$HB_API_DIR/docker-compose.tailscale.yml" << 'TSEOF'
 services:
   tailscale:
@@ -992,9 +1018,11 @@ services:
       - TS_STATE_DIR=/var/lib/tailscale
       - TS_USERSPACE=false
       - TS_HOSTNAME=${TAILSCALE_HOSTNAME:-hummingbot-api}
+      - TS_SERVE_CONFIG=/config/tailscale-serve.json
     volumes:
       - tailscale_state:/var/lib/tailscale
       - /dev/net/tun:/dev/net/tun
+      - ./tailscale-serve.json:/config/tailscale-serve.json:ro
     cap_add:
       - NET_ADMIN
       - NET_RAW
@@ -1002,11 +1030,20 @@ services:
 volumes:
   tailscale_state:
 TSEOF
+                cat > "$HB_API_DIR/tailscale-serve.json" << 'TSSEOF'
+{
+  "TCP": {
+    "8000": {
+      "TCPForward": "127.0.0.1:8000"
+    }
+  }
+}
+TSSEOF
                 msg_ok "docker-compose.tailscale.yml created"
             fi
 
             # Patch hummingbot-api Makefile so future 'make deploy' stays Tailscale-aware
-            if [ "$TS_DEPLOY" = true ] && [ -f "$HB_API_DIR/Makefile" ]; then
+            if [ "$HB_OWN_TAILNET_NODE" = true ] && [ -f "$HB_API_DIR/Makefile" ]; then
                 python3 - "$HB_API_DIR/Makefile" << 'PYEOF'
 import sys
 with open(sys.argv[1]) as f:
@@ -1047,7 +1084,7 @@ PYEOF
             # Deploy if Docker is available
             if [ "$docker_available" = true ] && [ -f "$HB_API_DIR/docker-compose.yml" ]; then
                 msg_info "Starting Hummingbot API stack..."
-                if [ "$TS_DEPLOY" = true ] && [ -f "$HB_API_DIR/docker-compose.tailscale.yml" ]; then
+                if [ "$HB_OWN_TAILNET_NODE" = true ] && [ -f "$HB_API_DIR/docker-compose.tailscale.yml" ]; then
                     _compose_cmd="docker compose -f docker-compose.yml -f docker-compose.tailscale.yml up -d"
                     msg_info "Using Tailscale sidecar overlay..."
                 else
@@ -1173,13 +1210,10 @@ if [ "${hb_api_deployed:-}" = true ]; then
         msg_ok "Synced API credentials to $CONFIG_FILE"
     fi
 
-    # When Tailscale is enabled, update the server host to the Tailscale MagicDNS hostname
-    # so condor reaches hummingbot-api via the encrypted tailnet even on the same machine
-    if [ "${TS_DEPLOY:-false}" = true ]; then
-        sed -i.bak "/servers:/,/^[^ ]/ s/host: .*/host: $ts_hb_hostname/" "$CONFIG_FILE" && rm -f "$CONFIG_FILE.bak"
-        sed -i.bak "/servers:/,/^[^ ]/ s/port: .*/port: 8000/" "$CONFIG_FILE" && rm -f "$CONFIG_FILE.bak"
-        msg_ok "Updated server host to Tailscale hostname: $ts_hb_hostname"
-    fi
+    # host/port are left at the template default (localhost:8000): Condor is
+    # deploying this hummingbot-api right here, on this same machine, so it
+    # always reaches it over localhost -- whether or not hummingbot-api also
+    # has its own tailnet node for other clients (HB_OWN_TAILNET_NODE, above).
 fi
 
 # If user provided a remote API URL (skipped local deployment), update config.yml
@@ -1219,7 +1253,11 @@ fi
 if [ "${TS_DEPLOY:-false}" = true ]; then
 echo ""
 echo -e "  ${BOLD}Tailscale:${RESET}"
-echo -e "    hummingbot-api URL:  http://${ts_hb_hostname}:8000"
+if [ "${HB_OWN_TAILNET_NODE:-false}" = true ]; then
+echo -e "    hummingbot-api URL:  http://${ts_hb_hostname}:8000  ${CYAN}(own tailnet node)${RESET}"
+else
+echo -e "    hummingbot-api:      http://localhost:8000  ${CYAN}(local — no tailnet node needed)${RESET}"
+fi
 if [ -n "${ts_condor_ip:-}" ] && [ -n "${SERVER_IP:-}" ]; then
 echo -e "    Web dashboard URL:   http://${ts_condor_ip}:8088  ${CYAN}(Tailscale only)${RESET}"
 else
