@@ -109,17 +109,26 @@ def check_dependencies() -> list[Check]:
 
 
 def check_config() -> list[Check]:
+    from utils.config import MODE_LOCAL, resolve_mode
+
     checks = []
     env = read_env(ENV_PATH)
 
-    token = env.get("TELEGRAM_TOKEN", "").strip()
-    checks.append(
-        Check(
-            "TELEGRAM_TOKEN",
-            OK if token else FAIL,
-            "configured" if token else "missing — set in .env",
+    if resolve_mode(env) == MODE_LOCAL:
+        # Local mode has no bot at all -- an empty TELEGRAM_TOKEN here is the
+        # deliberate outcome of that choice, not a missing setup step.
+        checks.append(
+            Check("TELEGRAM_TOKEN", OK, "not used — local mode (no Telegram)")
         )
-    )
+    else:
+        token = env.get("TELEGRAM_TOKEN", "").strip()
+        checks.append(
+            Check(
+                "TELEGRAM_TOKEN",
+                OK if token else FAIL,
+                "configured" if token else "missing — set in .env",
+            )
+        )
 
     admin_id = env.get("ADMIN_USER_ID", "").strip()
     checks.append(
@@ -211,11 +220,15 @@ def check_dashboard_port() -> list[Check]:
 
     binds = _listening_binds(WEB_PORT)
     if not binds:
+        # Normal right after `make install` -- Condor has never been started
+        # yet, so there is nothing to bind-check. Not a warning: it would fire
+        # on every fresh install's automatic doctor run for no real reason.
         return [
             Check(
                 "Dashboard port",
-                WARN,
-                f"nothing listening on {WEB_PORT} — is Condor running?",
+                OK,
+                f"not running yet — start with `make run` to check the real "
+                f"{WEB_PORT} bind",
             )
         ]
 
@@ -245,15 +258,60 @@ def check_dashboard_port() -> list[Check]:
     return [Check("Dashboard port", OK, f"127.0.0.1:{WEB_PORT} only")]
 
 
+# ── Tailscale ────────────────────────────────────────────────────────────────
+
+_TAILSCALE_INSTALL = "curl -fsSL https://tailscale.com/install.sh | sh"
+
+
+def check_tailscale() -> list[Check]:
+    from utils.config import USE_TAILSCALE
+
+    if not USE_TAILSCALE:
+        return [Check("Tailscale", OK, "not enabled (USE_TAILSCALE is not set)")]
+
+    if not shutil.which("tailscale"):
+        return [
+            Check(
+                "Tailscale",
+                FAIL,
+                f"USE_TAILSCALE=true but tailscale isn't installed — {_TAILSCALE_INSTALL}",
+            )
+        ]
+
+    try:
+        proc = subprocess.run(
+            ["tailscale", "status"], capture_output=True, text=True, timeout=5
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        return [Check("Tailscale", WARN, f"installed; could not check status: {e}")]
+
+    if proc.returncode != 0:
+        return [
+            Check("Tailscale", FAIL, "installed but not connected — run `tailscale up`")
+        ]
+
+    # The first non-blank line of `tailscale status` is this node's own tailnet
+    # identity (hostname, IP, account) -- confirms *which* tailnet, not just
+    # that some daemon answered.
+    first_line = next(
+        (line.strip() for line in proc.stdout.splitlines() if line.strip()), ""
+    )
+    return [Check("Tailscale", OK, first_line or "connected")]
+
+
 # ── Hummingbot API connectivity ──────────────────────────────────────────────
 
 
 def _connection_hint(host: str, exc: Exception) -> str:
+    from utils.config import USE_TAILSCALE
+
     msg = str(exc).lower()
     if "401" in msg or "unauthor" in msg or "auth" in msg:
         return "check the username/password in /servers"
     if host in ("localhost", "127.0.0.1"):
         return "is it running? `cd ../hummingbot-api && docker compose ps`"
+    if USE_TAILSCALE:
+        return "see the Tailscale check above"
     return "check the host is reachable — firewall, Tailscale status, or the server is down"
 
 
@@ -321,6 +379,7 @@ def main(argv: list[str] | None = None) -> int:
         ("Dependencies", check_dependencies()),
         ("Configuration", check_config()),
         ("Dashboard", check_dashboard_port()),
+        ("Tailscale", check_tailscale()),
         ("Hummingbot API", check_hummingbot_api()),
     ]
 

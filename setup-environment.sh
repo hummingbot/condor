@@ -560,16 +560,15 @@ else
 fi
 
 if [ "${condor_mode_choice:-}" = "2" ]; then
-    # Local mode: nothing to ask. No bot, no token — the dashboard logs in as
-    # ADMIN_USER_ID, the same id config.yml, chat defaults, preferences, memory
-    # and session keys already key on.
+    # Local mode: nothing to ask about a bot. No Telegram, no token — the
+    # dashboard logs in as ADMIN_USER_ID, the same id config.yml, chat
+    # defaults, preferences, memory and session keys already key on.
     #
     # An existing numeric id is KEPT, never overwritten with 1: a Telegram
     # install switching to local keeps its own admin, so the dashboard logs in
     # as you with every server, preference and default intact. 1 is only the
     # answer for an install that never had a Telegram id.
     CONDOR_MODE="local"
-    USE_TAILSCALE=false
     if [[ "${ADMIN_USER_ID:-}" =~ ^[1-9][0-9]*$ ]]; then
         msg_info "Local mode will log in as user ${ADMIN_USER_ID} (ADMIN_USER_ID in .env)"
     else
@@ -578,9 +577,23 @@ if [ "${condor_mode_choice:-}" = "2" ]; then
     fi
     set_env_var CONDOR_MODE "local"
     set_env_var WEB_URL "http://localhost:8088"
-    set_env_var USE_TAILSCALE "false"
     msg_ok ".env configured for local mode"
     local_mode_warning
+
+    # Tailscale is not just an option here — it is the answer to the warning
+    # above: an unauthenticated dashboard is only as safe as what can actually
+    # reach it. Asked the same way Telegram mode asks it (below), so local
+    # mode gets the identical Tailscale install/connect treatment in Step 3
+    # for hummingbot-api — and for the dashboard itself, main.py's _run_dual()
+    # binds loopback and proxies it via `tailscale serve` whenever
+    # USE_TAILSCALE is set, local mode or not.
+    prompt_visible "Use Tailscale to secure the dashboard and the hummingbot-api connection? [y/N]" "N" "use_tailscale_early"
+    if [[ "${use_tailscale_early:-}" =~ ^[Yy]$ ]]; then
+        USE_TAILSCALE=true
+    else
+        USE_TAILSCALE=false
+    fi
+    set_env_var USE_TAILSCALE "$USE_TAILSCALE"
 elif [ "${condor_mode_choice:-}" = "1" ]; then
     msg_info "Create a bot: $(make_link 'https://t.me/BotFather')"
     msg_info "Get your ID: $(make_link 'https://t.me/userinfobot')"
