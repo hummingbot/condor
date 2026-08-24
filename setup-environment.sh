@@ -40,13 +40,15 @@ prompt_visible() {
     eval "$var_name=\"$value\""
 }
 
-# Prompt for passwords (no echo)
+# Prompt for passwords (no echo). Never echoes ``default`` in cleartext --
+# unlike prompt_visible, a bracketed hint here would defeat the whole point
+# of a masked prompt the moment a caller passed one.
 prompt_secret() {
     local prompt="$1"
     local default="$2"
     local var_name="$3"
     if [ -n "$default" ]; then
-        echo -ne "  ${prompt} ${DIM}[${default}]${RESET}: " >&2
+        echo -ne "  ${prompt} ${DIM}[hidden]${RESET}: " >&2
     else
         echo -ne "  ${prompt}: " >&2
     fi
@@ -57,6 +59,33 @@ prompt_secret() {
         value="$default"
     fi
     eval "$var_name=\"$value\""
+}
+
+# Prompt visibly, looping until non-empty. No default -- for values (like
+# credentials) that must never silently fall back to something guessable.
+prompt_required_visible() {
+    local prompt="$1" var_name="$2" warn_msg="${3:-This cannot be empty}"
+    while true; do
+        prompt_visible "$prompt" "" "$var_name"
+        if [ -z "${!var_name}" ]; then
+            msg_warn "$warn_msg"
+            continue
+        fi
+        break
+    done
+}
+
+# Same as prompt_required_visible, but masked (see prompt_secret).
+prompt_required_secret() {
+    local prompt="$1" var_name="$2" warn_msg="${3:-This cannot be empty}"
+    while true; do
+        prompt_secret "$prompt" "" "$var_name"
+        if [ -z "${!var_name}" ]; then
+            msg_warn "$warn_msg"
+            continue
+        fi
+        break
+    done
 }
 
 # Escape special characters for .env file
@@ -813,6 +842,14 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
             HB_API_PROTOCOL="http"
             HB_API_HOST="hummingbot-api"
             HB_API_PORT="8000"
+            # Skipping local deploy + using Tailscale means hummingbot-api is
+            # on another machine (a VPS, most likely) -- this is the default
+            # hostname its own Tailscale setup assigns it, not a guess made
+            # up here.
+            msg_info "Assuming the default tailnet address: http://hummingbot-api:8000"
+            msg_info "If that machine's hummingbot-api used a different TAILSCALE_HOSTNAME"
+            msg_info "(or you renamed the device in the Tailscale admin console), update the"
+            msg_info "host afterward in config.yml, or via /servers in Telegram."
         else
             prompt_visible "API URL + port (e.g. http://your-server:8000)" "http://localhost:8000" "hb_api_url_raw"
             hb_api_url_raw="${hb_api_url_raw:-http://localhost:8000}"
@@ -821,8 +858,8 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
             _def_port=$([ "$HB_API_PROTOCOL" = "https" ] && echo "443" || echo "8000")
             HB_API_PORT=$(python3 -c "from urllib.parse import urlparse; p=urlparse('${hb_api_url_raw}'); print(p.port or ${_def_port})" 2>/dev/null || echo "$_def_port")
         fi
-        prompt_visible "API admin username" "admin" "hb_username"
-        prompt_secret "API admin password" "admin" "hb_password"
+        prompt_required_visible "API admin username" "hb_username" "Username cannot be empty"
+        prompt_required_secret "API admin password" "hb_password" "Password cannot be empty"
 
         # ── Tailscale option for external API ──────────────
         use_tailscale_remote="${use_tailscale_early:-N}"
@@ -955,9 +992,9 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
         fi
 
         echo ""
-        prompt_visible "API admin username" "admin" "hb_username"
-        prompt_secret "API admin password" "admin" "hb_password"
-        prompt_secret "Config password" "admin" "hb_config_password"
+        prompt_required_visible "API admin username" "hb_username" "Username cannot be empty"
+        prompt_required_secret "API admin password" "hb_password" "Password cannot be empty"
+        prompt_required_secret "Config password" "hb_config_password" "Config password cannot be empty"
 
         # Save to condor's .env
         echo "DEPLOY_HUMMINGBOT_API=true" >> "$ENV_FILE"
