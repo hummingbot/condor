@@ -4,6 +4,8 @@ port/connectivity checks lean on. Rendering is colored only under a real tty
 rather than escape codes -- pytest's captured stdout is never a tty.
 """
 
+import os
+
 import utils.config as config_module
 from condor import doctor
 
@@ -189,3 +191,210 @@ def test_check_config_still_requires_telegram_outside_local_mode(tmp_path, monke
     token_check = next(c for c in checks if c.name == "TELEGRAM_TOKEN")
     assert token_check.state == doctor.FAIL
     assert "missing" in token_check.detail
+
+
+# ── Report layout: long details wrap instead of spilling past the frame ──────
+
+
+def test_render_wraps_a_long_detail_under_the_detail_column():
+    check = doctor.Check("Dashboard port", doctor.WARN, "word " * 40)
+    lines = check.render(width=20, report_width=80).splitlines()
+
+    assert len(lines) > 1
+    assert all(len(line) <= 80 for line in lines)
+    # Continuation lines start under the detail column, not under the badge.
+    assert lines[1].startswith(" " * (doctor._GUTTER + 20))
+
+
+def test_render_leaves_a_short_detail_on_one_line():
+    check = doctor.Check("uv", doctor.OK, "uv 0.12.3")
+    assert "\n" not in check.render(width=28, report_width=80)
+
+
+def test_report_width_stays_at_the_wizard_width_for_short_details(monkeypatch):
+    monkeypatch.setattr(
+        doctor.shutil,
+        "get_terminal_size",
+        lambda fallback=None: os.terminal_size((200, 50)),
+    )
+    sections = [("Dependencies", [doctor.Check("uv", doctor.OK, "uv 0.12.3")])]
+    assert doctor._report_width(sections) == doctor._FRAME_WIDTH
+
+
+def test_report_width_grows_for_a_long_detail_but_stays_under_the_cap(monkeypatch):
+    monkeypatch.setattr(
+        doctor.shutil,
+        "get_terminal_size",
+        lambda fallback=None: os.terminal_size((500, 50)),
+    )
+    sections = [("Dependencies", [doctor.Check("uv", doctor.FAIL, "x" * 500)])]
+    width = doctor._report_width(sections)
+    assert doctor._FRAME_WIDTH < width <= doctor._MAX_WIDTH
+
+
+def test_report_width_never_exceeds_the_terminal(monkeypatch):
+    monkeypatch.setattr(
+        doctor.shutil,
+        "get_terminal_size",
+        lambda fallback=None: os.terminal_size((60, 50)),
+    )
+    sections = [("Dependencies", [doctor.Check("uv", doctor.FAIL, "x" * 500)])]
+    assert doctor._report_width(sections) <= 60
+
+
+# ── Fresh checkout: one actionable failure, not four ─────────────────────────
+
+
+def test_check_config_reports_a_single_setup_failure_when_env_is_missing(
+    tmp_path, monkeypatch
+):
+    from condor.llm.readiness import READY, Readiness
+
+    monkeypatch.setattr(doctor, "ENV_PATH", tmp_path / ".env")
+    monkeypatch.setattr(doctor, "REPO_ROOT", tmp_path)
+    _patch_readiness_probe(monkeypatch, Readiness(READY, "installed and logged in"))
+
+    checks = doctor.check_config()
+    failures = [c for c in checks if c.state == doctor.FAIL]
+
+    assert len(failures) == 1
+    assert failures[0].name == "Setup"
+    assert "make install" in failures[0].detail
+    assert not [c for c in checks if c.name in ("TELEGRAM_TOKEN", "ADMIN_USER_ID")]
+
+
+# ── Placeholder API credentials ──────────────────────────────────────────────
+
+
+def test_placeholder_credentials_are_flagged():
+    data = {"servers": {"local": {"host": "localhost", "password": "admin"}}}
+    checks = doctor._check_placeholder_credentials(data)
+    assert len(checks) == 1
+    assert checks[0].state == doctor.WARN
+    assert "local" in checks[0].detail
+
+
+def test_real_credentials_are_not_flagged():
+    data = {"servers": {"local": {"host": "localhost", "password": "s3cr3t-real"}}}
+    assert doctor._check_placeholder_credentials(data) == []
+
+
+def test_placeholder_credentials_tolerates_a_malformed_config():
+    assert doctor._check_placeholder_credentials(None) == []
+    assert doctor._check_placeholder_credentials({"servers": "nope"}) == []
+
+
+# ── Doctor never creates config.yml ─────────────────────────────────────────
+
+
+def test_hummingbot_api_check_does_not_create_a_missing_config(tmp_path, monkeypatch):
+    """Instantiating a ConfigManager writes config.yml as a side effect, which
+    would both break doctor's read-only contract and make the "not found"
+    check above unreachable on every later run."""
+    monkeypatch.setattr(doctor, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(doctor, "ENV_PATH", tmp_path / ".env")
+
+    checks = doctor.check_hummingbot_api()
+
+    assert "make setup" in checks[0].detail
+    assert not (tmp_path / "config.yml").exists()
+
+
+# ── Local stack diagnosis ────────────────────────────────────────────────────
+
+
+def test_local_stack_diagnosis_fails_when_docker_is_missing(monkeypatch):
+    monkeypatch.setattr(doctor.shutil, "which", lambda cmd: None)
+    checks = doctor._local_stack_diagnosis()
+    assert checks[0].state == doctor.FAIL
+    assert "not installed" in checks[0].detail
+
+
+def test_local_stack_diagnosis_fails_when_the_daemon_is_down(monkeypatch):
+    monkeypatch.setattr(doctor.shutil, "which", lambda cmd: "/usr/bin/docker")
+
+    class FakeResult:
+        returncode = 1
+        stdout = ""
+
+    monkeypatch.setattr(doctor.subprocess, "run", lambda *a, **k: FakeResult())
+    checks = doctor._local_stack_diagnosis()
+    assert checks[0].state == doctor.FAIL
+    assert "daemon is not responding" in checks[0].detail
+
+
+def test_local_stack_diagnosis_fails_when_the_container_is_absent(monkeypatch):
+    monkeypatch.setattr(doctor.shutil, "which", lambda cmd: "/usr/bin/docker")
+
+    class FakeResult:
+        returncode = 0
+        stdout = "emqx\tUp 2 hours\npostgres\tUp 2 hours\n"
+
+    monkeypatch.setattr(doctor.subprocess, "run", lambda *a, **k: FakeResult())
+    checks = doctor._local_stack_diagnosis()
+    assert checks[0].state == doctor.FAIL
+    assert "make deploy" in checks[0].detail
+
+
+def test_local_stack_diagnosis_is_ok_when_the_container_is_up(monkeypatch):
+    monkeypatch.setattr(doctor.shutil, "which", lambda cmd: "/usr/bin/docker")
+
+    class FakeResult:
+        returncode = 0
+        stdout = "hummingbot-api\tUp 2 hours (healthy)\n"
+
+    monkeypatch.setattr(doctor.subprocess, "run", lambda *a, **k: FakeResult())
+    checks = doctor._local_stack_diagnosis()
+    assert checks[0].state == doctor.OK
+    assert "Up 2 hours" in checks[0].detail
+
+
+# ── Dashboard port names the process holding it ──────────────────────────────
+
+
+def test_dashboard_port_names_the_holding_process(monkeypatch):
+    monkeypatch.setattr(config_module, "USE_TAILSCALE", False)
+    monkeypatch.setattr(doctor, "_listening_binds", lambda port: ["0.0.0.0:8088"])
+    monkeypatch.setattr(doctor, "_listening_process", lambda port: "python3, pid 5011")
+
+    checks = doctor.check_dashboard_port()
+    assert checks[0].state == doctor.WARN
+    assert "python3, pid 5011" in checks[0].detail
+
+
+def test_listening_process_parses_the_ss_users_field(monkeypatch):
+    monkeypatch.setattr(doctor.shutil, "which", lambda cmd: "/usr/bin/ss")
+
+    class FakeResult:
+        returncode = 0
+        stdout = (
+            "0      4096   0.0.0.0:8088  0.0.0.0:*  "
+            'users:(("python3",pid=5011,fd=8))\n'
+        )
+
+    monkeypatch.setattr(doctor.subprocess, "run", lambda *a, **k: FakeResult())
+    assert doctor._listening_process(8088) == "python3, pid 5011"
+
+
+def test_hummingbot_api_check_only_warns_on_a_never_configured_checkout(
+    tmp_path, monkeypatch
+):
+    """The Setup check already reports this; a second failure would just
+    double-count the one thing there is to do about it."""
+    monkeypatch.setattr(doctor, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(doctor, "ENV_PATH", tmp_path / ".env")
+
+    checks = doctor.check_hummingbot_api()
+    assert checks[0].state == doctor.WARN
+
+
+def test_hummingbot_api_check_fails_when_env_exists_but_config_does_not(
+    tmp_path, monkeypatch
+):
+    env_file = tmp_path / ".env"
+    env_file.write_text("ADMIN_USER_ID=1\n")
+    monkeypatch.setattr(doctor, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(doctor, "ENV_PATH", env_file)
+
+    checks = doctor.check_hummingbot_api()
+    assert checks[0].state == doctor.FAIL
