@@ -421,6 +421,7 @@ async def add_dex_token(
     a verdict: the user pressed a button and deserves the actual reason.
     """
     from condor.fetchers.gateway_tokens import (
+        TokenListSnapshot,
         ensure_tokens_listed,
         find_symbol_holder,
         forget_listed,
@@ -446,8 +447,16 @@ async def add_dex_token(
         require_owner(cm, user.id, name)
     client = await cm.get_client(name)
 
+    # This handler asks the same token list up to four questions, so it holds one
+    # read and shares it — created here, after the owner gate, and living no
+    # longer than this request. Every write below drops it, so no answer is ever
+    # served from a copy taken before the list changed.
+    snapshot = TokenListSnapshot(client, gateway_network)
+
     async def register() -> str:
-        verdicts = await ensure_tokens_listed(client, gateway_network, [address])
+        verdicts = await ensure_tokens_listed(
+            client, gateway_network, [address], snapshot=snapshot
+        )
         return verdicts.get(address, "failed")
 
     try:
@@ -458,8 +467,14 @@ async def add_dex_token(
         # ticker — a `???` pool gets the verdict without the culprit.
         conflict = None
         if verdict == "symbol_taken" and body.symbol:
+            # Free: `symbol_taken` is itself proof that the save wrote nothing,
+            # and the re-read that established it is the snapshot now in hand.
             conflict = await find_symbol_holder(
-                client, gateway_network, body.symbol, exclude=address
+                client,
+                gateway_network,
+                body.symbol,
+                exclude=address,
+                snapshot=snapshot,
             )
             if body.replace and conflict:
                 logger.warning(
@@ -473,12 +488,20 @@ async def add_dex_token(
                 )
                 await client.gateway.delete_token(gateway_network, conflict["address"])
                 forget_listed(gateway_network, conflict["address"])
+                # A delete is a write, so the copy in hand still names the token
+                # that was just removed. Dropping it here is what keeps the
+                # lookup below from offering Replace on a deleted address.
+                snapshot.invalidate()
                 # The ticker is free now, so the save that Gateway refused can
                 # go through.
                 verdict = await register()
                 conflict = (
                     await find_symbol_holder(
-                        client, gateway_network, body.symbol, exclude=address
+                        client,
+                        gateway_network,
+                        body.symbol,
+                        exclude=address,
+                        snapshot=snapshot,
                     )
                     if verdict == "symbol_taken"
                     else None

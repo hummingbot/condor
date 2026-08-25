@@ -163,6 +163,71 @@ def test_a_failed_lookup_stays_retryable():
     assert asyncio.run(ensure_tokens_listed(client, NETWORK, [MINT])) == {MINT: "added"}
 
 
+# ---------------------------------------------------------------------------
+# How many times one call reads Gateway's whole token list (PERF-209).
+#
+# Every listedness test costs the whole list, because Gateway's `search` matches
+# symbol and name only. So the read is taken once per operation and shared — and
+# dropped the instant anything writes, which is the half that matters: the check
+# after a save exists to see live state, and a copy taken before it would report
+# a token Gateway had just listed as still missing.
+# ---------------------------------------------------------------------------
+
+
+def test_a_pools_two_listed_tokens_cost_one_read_of_the_list():
+    # The common cold open: both mints already listed, nothing written. One read
+    # answers both — asking twice was asking the same file the same question.
+    gw = FakeGateway(listed=[MINT, USDC])
+
+    verdicts = asyncio.run(ensure_tokens_listed(FakeClient(gw), NETWORK, [MINT, USDC]))
+
+    assert verdicts == {MINT: "listed", USDC: "listed"}
+    assert gw.searches == [None]
+
+
+def test_a_save_costs_one_read_before_it_and_one_after():
+    gw = FakeGateway(listed=[USDC])
+
+    verdicts = asyncio.run(ensure_tokens_listed(FakeClient(gw), NETWORK, [MINT, USDC]))
+
+    assert verdicts == {MINT: "added", USDC: "listed"}
+    # The pre-check, then the post-save verification — which USDC's own check
+    # then rides on, because the save refreshed the list for everyone after it.
+    assert gw.searches == [None, None]
+
+
+def test_a_token_saved_for_one_address_is_on_the_list_the_next_one_reads():
+    # Two unlisted mints, so the loop writes twice. The second address must be
+    # tested against a list that already holds the first — otherwise a snapshot
+    # would be answering from before a write it watched happen.
+    gw = FakeGateway(listed=[])
+    other = "So11111111111111111111111111111111111111112"
+
+    verdicts = asyncio.run(ensure_tokens_listed(FakeClient(gw), NETWORK, [MINT, other]))
+
+    assert verdicts == {MINT: "added", other: "added"}
+    assert gw.saves == [MINT, other]
+    # Read, save, re-read (which also serves the second pre-check), save,
+    # re-read. Four reads before; three is the floor while each save is verified.
+    assert len(gw.searches) == 3
+    assert {t["address"] for t in gw.tokens} == {MINT, other}
+
+
+def test_a_snapshot_never_outlives_the_call_that_took_it():
+    # No cross-request cache: a token one call registered is on the list the
+    # next call reads, even with the memo out of the way.
+    gw = FakeGateway(listed=[])
+    client = FakeClient(gw)
+
+    assert asyncio.run(ensure_tokens_listed(client, NETWORK, [MINT])) == {MINT: "added"}
+    gateway_tokens.reset_listed_memo()
+
+    assert asyncio.run(ensure_tokens_listed(client, NETWORK, [MINT])) == {
+        MINT: "listed"
+    }
+    assert gw.saves == [MINT]  # not saved a second time
+
+
 def test_only_address_shaped_values_are_sent_upstream():
     # A DEX pair is `<base_mint>-<quote_symbol>`: splitting it yields one thing
     # that can be registered and one that cannot.
@@ -467,6 +532,38 @@ def test_a_replace_for_a_mint_gateway_cannot_register_destroys_nothing(make_clie
     assert response.status_code == 502
     assert gw.deletes == []
     assert gw.tokens == [{"address": USDC, "symbol": "PUMP"}]
+
+
+def test_naming_a_holder_costs_no_extra_read(make_client):
+    # `symbol_taken` is itself proof the save wrote nothing, so the re-read that
+    # produced the verdict is still current and the holder is found in it.
+    gw = FakeGateway(refuse_save=True)
+    gw.tokens = [{"address": USDC, "symbol": "PUMP", "name": "Other Pump"}]
+    client = make_client(gw)
+
+    body = client.post(
+        ADD, json={"network": NETWORK, "address": MINT, "symbol": "PUMP"}
+    ).json()
+
+    assert body["conflict"]["address"] == USDC
+    assert len(gw.searches) == 2  # the pre-check and the post-save verification
+
+
+def test_a_replace_re_reads_the_list_after_the_delete(make_client):
+    # One read per state the list can be in: before the refused save, after it,
+    # after the delete, and after the save that then succeeds. The delete's is
+    # the one that must not be skipped — a copy taken before it still names the
+    # token that is gone, and the browser would be offered Replace on it again.
+    gw = FakeGateway(refuse_save=True)
+    gw.tokens = [{"address": USDC, "symbol": "PUMP"}]
+    client = make_client(gw)
+
+    body = client.post(ADD, json=_replace_body()).json()
+
+    assert body["verdict"] == "added"
+    assert body["conflict"] is None
+    assert gw.deletes == [USDC]
+    assert len(gw.searches) == 4
 
 
 def test_a_replacement_is_logged_with_who_did_it(make_client, caplog):
