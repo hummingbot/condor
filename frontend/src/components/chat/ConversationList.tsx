@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { memo, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Bot,
@@ -20,12 +20,17 @@ const QUERY_KEY = ["conversations"] as const;
 const GROUPS = ["Today", "Yesterday", "Earlier"] as const;
 type Group = (typeof GROUPS)[number];
 
-function groupOf(iso: string): Group {
-  const then = new Date(iso);
-  const midnight = new Date();
-  midnight.setHours(0, 0, 0, 0);
+/** Local midnight as a timestamp — the boundary both buckets are cut on. */
+function startOfToday(): number {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
+/** Boundaries are passed in, not derived: one pair per pass, not per row. */
+function groupOf(iso: string, midnight: number, yesterday: number): Group {
+  const then = new Date(iso).getTime();
   if (then >= midnight) return "Today";
-  const yesterday = new Date(midnight.getTime() - 86_400_000);
   return then >= yesterday ? "Yesterday" : "Earlier";
 }
 
@@ -50,7 +55,7 @@ function relativeTime(iso: string): string {
  * the live dot and the Telegram badge are shared — only the chrome differs.
  * Everything is keyed on conversation id, so the two cannot drift.
  */
-export function ConversationList({
+export const ConversationList = memo(function ConversationList({
   liveIds,
   activeId,
   onNew,
@@ -100,10 +105,28 @@ export function ConversationList({
     setRenaming(null);
   };
 
-  const grouped = GROUPS.map((group) => ({
-    group,
-    items: conversations.filter((c) => groupOf(c.updated_at) === group),
-  })).filter((g) => g.items.length > 0);
+  // One pass, not one per bucket, and the day boundaries are computed once
+  // instead of two or three Dates per conversation. Held across renders
+  // because react-query keeps `conversations` identity-stable between
+  // refetches — so the rail stops re-grouping 100 rows while an answer
+  // streams beside it. `dayStart` is a dep so the first render after local
+  // midnight re-files everything rather than leaving yesterday under "Today".
+  const dayStart = startOfToday();
+  const grouped = useMemo(() => {
+    const yesterday = dayStart - 86_400_000;
+    const buckets: Record<Group, ConversationMeta[]> = {
+      Today: [],
+      Yesterday: [],
+      Earlier: [],
+    };
+    for (const c of conversations) {
+      buckets[groupOf(c.updated_at, dayStart, yesterday)].push(c);
+    }
+    return GROUPS.filter((g) => buckets[g].length > 0).map((group) => ({
+      group,
+      items: buckets[group],
+    }));
+  }, [conversations, dayStart]);
 
   const isDrawer = variant === "drawer";
 
@@ -302,4 +325,4 @@ export function ConversationList({
       </div>
     </>
   );
-}
+});

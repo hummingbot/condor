@@ -9,7 +9,7 @@ import {
   Plus,
   Zap,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 
 import { deriveAgentStatus } from "@/components/agent/agentStatus";
@@ -23,7 +23,12 @@ import { SessionTabs } from "@/components/chat/SessionTabs";
 import { useBrainSwitch } from "@/hooks/useBrainSwitch";
 import { useChat, useSessionOptions } from "@/hooks/useChat";
 import { useServer } from "@/hooks/useServer";
-import { api, CHAT_SLUG, type AgentSummary } from "@/lib/api";
+import {
+  api,
+  CHAT_SLUG,
+  type AgentSummary,
+  type ConversationMeta,
+} from "@/lib/api";
 
 /** Openers offered when nothing is bound, and when something is. */
 const CONDOR_STARTERS = [
@@ -92,6 +97,20 @@ export function AgentChatTab() {
   const isActiveStreaming = chat.isSlotStreaming(chat.activeSlotId);
 
   /**
+   * The slots, read without depending on them.
+   *
+   * `chat.slots` is a new array on every 50 ms stream flush, so a `talkTo`
+   * that closed over it would be re-created 20 times a second — and the three
+   * props it feeds the rail would defeat the rail's `memo`. The lookup only
+   * ever runs from an event handler, which is after the commit that refreshed
+   * this, so the ref is never behind when it is read.
+   */
+  const slotsRef = useRef(chat.slots);
+  useEffect(() => {
+    slotsRef.current = chat.slots;
+  }, [chat.slots]);
+
+  /**
    * Talk to someone.
    *
    * `"focus"` is the contact-list gesture — go to my conversation with them,
@@ -100,33 +119,40 @@ export function AgentChatTab() {
    * Nothing spawns that the user did not ask for either way, so the per-user
    * session cap stays a non-issue.
    */
-  const talkTo = (
-    agentSlug: string,
-    opts?: { intent?: TalkIntent; text?: string },
-  ) => {
-    if ((opts?.intent ?? "focus") === "focus") {
-      const live = chat.slots.find(
-        (s) => (s.info.agent_slug || "") === agentSlug,
-      );
-      if (live) {
-        chat.setActiveSlotId(live.info.slot_id);
-        if (opts?.text) chat.sendMessage(live.info.slot_id, opts.text);
-        return;
+  const talkTo = useCallback(
+    (agentSlug: string, opts?: { intent?: TalkIntent; text?: string }) => {
+      if ((opts?.intent ?? "focus") === "focus") {
+        const live = slotsRef.current.find(
+          (s) => (s.info.agent_slug || "") === agentSlug,
+        );
+        if (live) {
+          chat.setActiveSlotId(live.info.slot_id);
+          if (opts?.text) chat.sendMessage(live.info.slot_id, opts.text);
+          return;
+        }
       }
-    }
-    const slotId = chat.startSession(
-      // `""` asks whoever is bound for their own model; only an unbound chat
-      // needs a model named. Volunteering `defaultAgent` here is what used to
-      // claim an override the user never made, so a bound Agent ran on
-      // Condor's model instead of its own.
-      pendingAgentKey ?? (agentSlug ? "" : defaultAgent),
-      server || undefined,
-      agentSlug || undefined,
-    );
-    // The tab is on screen before the spawn is; the outbox flushes this the
-    // moment the session lands, which is what makes a new chat feel warm.
-    if (opts?.text) chat.sendMessage(slotId, opts.text);
-  };
+      const slotId = chat.startSession(
+        // `""` asks whoever is bound for their own model; only an unbound chat
+        // needs a model named. Volunteering `defaultAgent` here is what used to
+        // claim an override the user never made, so a bound Agent ran on
+        // Condor's model instead of its own.
+        pendingAgentKey ?? (agentSlug ? "" : defaultAgent),
+        server || undefined,
+        agentSlug || undefined,
+      );
+      // The tab is on screen before the spawn is; the outbox flushes this the
+      // moment the session lands, which is what makes a new chat feel warm.
+      if (opts?.text) chat.sendMessage(slotId, opts.text);
+    },
+    [
+      chat.sendMessage,
+      chat.setActiveSlotId,
+      chat.startSession,
+      defaultAgent,
+      pendingAgentKey,
+      server,
+    ],
+  );
 
   /**
    * Who "New chat" means: the conversation you are in, or — before there is
@@ -146,8 +172,35 @@ export function AgentChatTab() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentParam]);
 
-  const liveIds = new Set(
-    chat.slots.map((s) => s.info.conversation_id || s.info.slot_id),
+  // Keyed on the joined ids rather than on `chat.slots`: the array itself is
+  // re-created by every stream flush, so a memo keyed on it would hand the
+  // rail a fresh `Set` 20 times a second. The join is O(#slots) — a handful,
+  // not the 100 rows the rail would otherwise re-render.
+  const liveKey = chat.slots
+    .map((s) => s.info.conversation_id || s.info.slot_id)
+    .join("|");
+  const liveIds = useMemo(
+    () => new Set(liveKey ? liveKey.split("|") : []),
+    [liveKey],
+  );
+
+  // Stable identities, so the rail's `memo` holds while an answer streams.
+  // `selectedSlug` is a string and the rest are `useCallback`s on genuinely
+  // stable deps, so these only change when the rail's answer actually changes.
+  const openFresh = useCallback(
+    () => talkTo(selectedSlug, { intent: "fresh" }),
+    [talkTo, selectedSlug],
+  );
+  const openConversation = useCallback(
+    (meta: ConversationMeta) => {
+      setRailOpen(false);
+      chat.resumeConversation(meta.id, {
+        agent_key: meta.agent_key,
+        server_name: meta.server_name || undefined,
+        agent_slug: meta.agent_slug,
+      });
+    },
+    [chat.resumeConversation],
   );
 
   const boundAgent = activeSlot?.info.agent_slug
@@ -227,15 +280,8 @@ export function AgentChatTab() {
           activeId={activeSlot?.info.conversation_id || chat.activeSlotId}
           // "New chat" means a fresh one with whoever is selected — Condor
           // only when Condor is who you are pointing at.
-          onNew={() => talkTo(selectedSlug, { intent: "fresh" })}
-          onOpen={(meta) => {
-            setRailOpen(false);
-            chat.resumeConversation(meta.id, {
-              agent_key: meta.agent_key,
-              server_name: meta.server_name || undefined,
-              agent_slug: meta.agent_slug,
-            });
-          }}
+          onNew={openFresh}
+          onOpen={openConversation}
         />
       </aside>
 
