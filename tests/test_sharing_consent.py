@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import threading
 import time
 
@@ -263,6 +264,121 @@ def test_the_queue_is_capped(chat, monkeypatch):
     assert len(outbox.pending()) == 3
     # Oldest first: what survives is the newest, which is what a retry wants.
     assert [r["body"]["revision"] for r in outbox.pending()] == [4, 5, 6]
+
+
+# ── The cap is scoped to shares (CORR-234) ───────────────────────────────
+
+
+def _unshare(n: int) -> dict:
+    """One queued revocation, as ``share.unshare`` would have written it."""
+    return outbox.enqueue(
+        outbox.OP_UNSHARE,
+        outbox.unshare_endpoint(str(n)),
+        wire.unshare_body(f"token-{n}"),
+        share_id=str(n),
+        user_id=4242,
+        kind=outbox.OP_UNSHARE,
+    )
+
+
+def test_the_cap_never_evicts_a_pending_unshare(chat):
+    """Acceptance criterion: withdrawing sixty conversations withdraws sixty.
+
+    The queued record holds the only surviving copy of the delete token —
+    ``unshare`` clears it from the meta as it queues — so an eviction here is
+    not a delay, it is a transcript nobody can ever take back.
+    """
+    for n in range(60):
+        _unshare(n)
+
+    queued = outbox.pending()
+    assert len(queued) == 60
+    assert [r["share_id"] for r in queued] == [str(n) for n in range(60)]
+
+
+def test_an_unshare_older_than_the_age_cutoff_survives_a_trim(chat):
+    """An install offline for a fortnight still owes those deletions."""
+    stale = time.time() - outbox.MAX_QUEUE_AGE_S - 1
+    outbox._write(
+        [
+            {"id": "old-share", "op": outbox.OP_SHARE, "url": "u", "queued_at": stale},
+            {"id": "old-undo", "op": outbox.OP_UNSHARE, "url": "u", "queued_at": stale},
+        ]
+    )
+
+    outbox.trim()
+
+    assert [r["id"] for r in outbox.pending()] == ["old-undo"]
+
+
+def test_an_unshare_does_not_use_up_a_shares_place_in_the_cap(chat, monkeypatch):
+    """The cap counts transcripts, so revocations do not crowd shares out."""
+    monkeypatch.setattr(outbox, "MAX_QUEUED_SHARES", 3)
+    _unshare(0)
+    for _ in range(3):
+        share.submit(4242, chat.id)
+
+    assert [r["op"] for r in outbox.pending()] == [
+        outbox.OP_UNSHARE,
+        outbox.OP_SHARE,
+        outbox.OP_SHARE,
+        outbox.OP_SHARE,
+    ]
+
+
+def test_a_mixed_queue_past_the_cap_keeps_every_pair_in_order(chat, monkeypatch):
+    """Acceptance criterion: a share and the unshare that revokes it never swap.
+
+    Interleaved well past the cap, so shares are really being dropped while the
+    unshares between them stay: what survives must still be a subsequence of
+    what was queued.
+    """
+    monkeypatch.setattr(outbox, "MAX_QUEUED_SHARES", 3)
+    queued: list[str] = []
+    for n in range(8):
+        queued.append(
+            outbox.enqueue(outbox.OP_SHARE, f"https://collector.invalid/{n}", {"n": n})[
+                "id"
+            ]
+        )
+        queued.append(_unshare(n)["id"])
+
+    surviving = [r["id"] for r in outbox.pending()]
+    assert [i for i in queued if i in set(surviving)] == surviving
+    assert sum(r["op"] == outbox.OP_UNSHARE for r in outbox.pending()) == 8
+    assert sum(r["op"] == outbox.OP_SHARE for r in outbox.pending()) == 3
+
+
+@pytest.mark.asyncio
+async def test_a_terminally_refused_unshare_is_logged_where_it_will_be_seen(
+    chat, caplog
+):
+    """Acceptance criterion: the install giving up on a revocation is not a
+    debug line. A refused *share* is a dropped upload; a refused unshare is a
+    transcript left on the collector with its delete token already gone."""
+
+    class _Refused:
+        status = 403
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class _Session(_Refused):
+        def post(self, *a, **kw):
+            return _Refused()
+
+    import aiohttp
+
+    caplog.set_level(logging.DEBUG)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(aiohttp, "ClientSession", lambda **kw: _Session())
+        assert await outbox.post(_unshare(7)) is True
+
+    refusal = [r for r in caplog.records if "refused an unshare" in r.getMessage()]
+    assert refusal and refusal[0].levelno >= logging.ERROR
 
 
 # ── The vetoes reach what is already queued (CORR-233) ───────────────────

@@ -51,9 +51,10 @@ COLLECTOR_URL = "https://telemetry.hummingbot.org/v1/conversations"
 POST_TIMEOUT_S = 10
 
 # An install that never reaches a collector accumulates a bounded file and then
-# quietly drops the oldest excess. That is the intended behaviour, not a bug —
-# same contract as telemetry's outbox, with a count low enough that the file
-# stays small even though each record is a whole transcript.
+# quietly drops the oldest excess *share*. That is the intended behaviour, not a
+# bug — same contract as telemetry's outbox, with a count low enough that the
+# file stays small even though each record is a whole transcript. Queued
+# unshares are exempt and uncapped: see :func:`_retain`.
 MAX_QUEUED_SHARES = 50
 MAX_QUEUE_AGE_S = 14 * 24 * 3600
 
@@ -164,10 +165,37 @@ def _retain(records: list[dict]) -> list[dict]:
 
     Split out of :func:`trim` so *what survives* is one function to read and to
     change, separate from the locking that makes changing it safe.
+
+    **The cap is scoped to shares.** It exists to bound the disk cost of queued
+    *transcripts*, and an unshare is not one: it is a URL and a 64-character
+    delete token, so thousands of them are a few hundred kB. Dropping one is not
+    a delayed revocation, it is a destroyed capability — ``share.unshare``
+    clears ``share_delete_token`` from the meta the moment it queues, so this
+    file holds the only copy, and evicting it leaves the transcript on the
+    collector with nothing on the box able to take it back. That is not
+    hypothetical: ``unshare_all`` enqueues one record per shared conversation
+    with no flush in between, so a user with sixty of them used to lose the
+    first ten and be told it worked (CORR-234).
+
+    So the count cap and the age cutoff apply to ``OP_SHARE`` records; anything
+    else is kept. **Order is never disturbed** — the survivors are filtered out
+    of ``records`` in place rather than partitioned and recombined, because a
+    share and the unshare that revokes it swapping would be its own bug, and
+    :func:`_rewrite` forbids a ``select`` that reorders.
     """
     cutoff = time.time() - MAX_QUEUE_AGE_S
-    kept = [r for r in records if float(r.get("queued_at") or 0) >= cutoff]
-    return kept[-MAX_QUEUED_SHARES:]
+    fresh = [
+        i
+        for i, record in enumerate(records)
+        if record.get("op") == OP_SHARE
+        and float(record.get("queued_at") or 0) >= cutoff
+    ]
+    kept = set(fresh[-MAX_QUEUED_SHARES:])
+    return [
+        record
+        for i, record in enumerate(records)
+        if record.get("op") != OP_SHARE or i in kept
+    ]
 
 
 def enqueue(
@@ -297,11 +325,23 @@ async def post(record: dict) -> bool:
                     return True
                 if response.status == 429 or response.status >= 500:
                     return False
-                log.warning(
-                    "The collector refused a %s share (%s); dropping it",
-                    record.get("op"),
-                    response.status,
-                )
+                if record.get("op") == OP_UNSHARE:
+                    # A refused revocation is not a dropped share. The delete
+                    # token lives nowhere else once ``unshare`` cleared it from
+                    # the meta, so giving up here leaves the transcript on the
+                    # collector with nothing able to ask again — an operator
+                    # should see that, not find it in a debug log (CORR-234).
+                    log.error(
+                        "The collector refused an unshare of %s (%s); the "
+                        "transcript stays there and the delete token is gone",
+                        record.get("share_id") or "?",
+                        response.status,
+                    )
+                else:
+                    log.warning(
+                        "The collector refused a share (%s); dropping it",
+                        response.status,
+                    )
                 return True
     except Exception:
         log.debug("Sharing POST failed; the record stays queued", exc_info=True)
