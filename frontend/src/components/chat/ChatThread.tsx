@@ -24,11 +24,11 @@ export function resolveAgentLabel(agentKey: string, agents: ChatAgentOption[]): 
 /**
  * The conversation itself, at any width.
  *
- * The 480 px overlay panel and the `/agents` workspace render this same
- * component, so a tool call, a thought block or a handover divider can never
- * look like two different things depending on where the user opened the chat.
- * Everything around it — who is answering, which conversations exist — is the
- * surface's business; this is only the transcript and the composer.
+ * The `/agents` workspace renders this at whatever width the rail leaves it,
+ * so a tool call, a thought block or a handover divider looks the same on a
+ * phone as on a wide screen. Everything around it — who is answering, which
+ * conversations exist — is the workspace's business; this is only the
+ * transcript and the composer.
  */
 export function ChatThread({
   slot,

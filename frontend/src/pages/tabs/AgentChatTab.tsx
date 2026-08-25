@@ -273,9 +273,8 @@ export function AgentChatTab() {
           ))}
         </div>
 
-        {/* What you already said — the panel's own list, in flow */}
+        {/* What you already said — the rail's own list, in flow */}
         <ConversationList
-          variant="inline"
           liveIds={liveIds}
           activeId={activeSlot?.info.conversation_id || chat.activeSlotId}
           // "New chat" means a fresh one with whoever is selected — Condor
