@@ -246,6 +246,15 @@ class ConversationMeta(BaseModel):
     Extra keys on disk are ignored (pydantic's default), so a meta written
     before a field was dropped — ``mode``, retired with the persona axis in
     FEAT-033 — still loads instead of failing the whole conversation list.
+
+    ``share_delete_token`` is the one field that is read from disk but never
+    serialized. It is a *capability*: whoever holds it can delete the shared
+    row from the collector, which is exactly why the owner keeps it and nobody
+    else receives it. Every route that returns a conversation dumps this model,
+    and one of them (``?user_id=``, admin only) returns someone else's — so a
+    plain field would hand an admin the token for a share that is not theirs to
+    revoke. ``exclude=True`` keeps it out of every dump; writes go through
+    ``update_meta``'s explicit kwargs, which are unaffected.
     """
 
     id: str
@@ -261,6 +270,24 @@ class ConversationMeta(BaseModel):
     updated_at: datetime = Field(default_factory=_utcnow)
     turn_count: int = 0
     last_snippet: str = ""
+
+    # ── Sharing (FEAT-054) ──
+    # Optional, defaulted, and tolerated in both directions like every other
+    # field here: a meta written before this existed loads unchanged, and one
+    # written by a newer build still loads in an older one.
+    share_id: str = Field(
+        default="",
+        description="Stable per conversation once shared; '' = never shared.",
+    )
+    share_revision: int = Field(
+        default=0, description="Bumped on each re-share; the server upserts on it."
+    )
+    shared_at: datetime | None = None
+    share_delete_token: str = Field(
+        default="",
+        exclude=True,
+        description="The capability that revokes the share. Local only.",
+    )
 
 
 class TurnEntry(BaseModel):
