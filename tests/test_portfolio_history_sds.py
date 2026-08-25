@@ -14,6 +14,7 @@ a second subscriber never spawns a duplicate poll.
 """
 
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
@@ -443,5 +444,7 @@ class _FakeWS:
     def __init__(self):
         self.sent: list[dict] = []
 
-    async def send_json(self, payload: dict) -> None:
-        self.sent.append(payload)
+    async def send_text(self, raw: str) -> None:
+        # The manager encodes each frame once per broadcast and fans out text
+        # (PERF-210); decode here so assertions stay in terms of the payload.
+        self.sent.append(json.loads(raw))

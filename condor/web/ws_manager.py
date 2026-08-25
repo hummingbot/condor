@@ -507,10 +507,22 @@ class WebSocketManager(CandleStreamsMixin, HummingbotStreamsMixin):
         ]
         if not subscribers:
             return
+        # The frame is identical for every subscriber (no per-connection state
+        # goes into it), so encode it once instead of once per connection: the
+        # hot channels re-broadcast the whole executor/bots list every couple of
+        # seconds to every dashboard tab on the same shared event loop.
+        try:
+            payload = self._encode(channel, data)
+        except Exception as e:
+            # Previously a serialization failure surfaced inside ``_send`` and
+            # was absorbed by ``return_exceptions=True``; with a single up-front
+            # encode it would escape and kill the calling stream task.
+            logger.warning("Broadcast encode failed: channel=%s: %s", channel, e)
+            return
         # Fan out concurrently so a slow/backpressured client does not block the
         # rest of the subscribers in the same broadcast tick.
         results = await asyncio.gather(
-            *(self._send(conn, channel, data) for conn in subscribers),
+            *(conn.ws.send_text(payload) for conn in subscribers),
             return_exceptions=True,
         )
         dead: list[_Connection] = []
@@ -526,8 +538,23 @@ class WebSocketManager(CandleStreamsMixin, HummingbotStreamsMixin):
         for conn in dead:
             self.disconnect(conn)
 
+    @staticmethod
+    def _encode(channel: str, data: Any) -> str:
+        """Serialize one frame exactly as Starlette's ``send_json`` would.
+
+        Same separators and ``ensure_ascii`` as ``WebSocket.send_json`` so the
+        bytes on the wire are unchanged, and deliberately no ``default=str``:
+        payloads that fail to serialize today must keep failing fast.
+        """
+        return json.dumps(
+            {"channel": channel, "data": data, "ts": time.time()},
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+
     async def _send(self, conn: _Connection, channel: str, data: Any) -> None:
-        await conn.ws.send_json({"channel": channel, "data": data, "ts": time.time()})
+        """Send one frame to a single connection (initial snapshots)."""
+        await conn.ws.send_text(self._encode(channel, data))
 
     # -- Generic stream lifecycle --
 
