@@ -2,12 +2,13 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { useCandleStore } from "@/hooks/useCandleStore";
+import { useRates } from "@/hooks/useRates";
 import { api, type ConsolidatedPosition } from "@/lib/api";
 import { candleChannelKey, candleStore } from "@/lib/candle-store";
 import type { ExtraLine, PickSlot } from "@/components/executor/types";
 import { getExecutorColor, type ExecutorOverlay } from "@/lib/executor-overlays";
 import { getThemeColors, pnlHexColor, sideColor } from "@/lib/theme-colors";
-import { escapeHtml, formatCompactUsd, formatPriceSig } from "@/lib/formatters";
+import { escapeHtml, formatPriceSig } from "@/lib/formatters";
 
 type PickField = PickSlot | null;
 
@@ -65,9 +66,6 @@ interface TradeChartProps {
   executorOverlays?: ExecutorOverlay[];
   positions?: ConsolidatedPosition[];
   selectedExecutorId?: string | null;
-  /** Convert a value from the pair's quote currency to display currency */
-  convertValue?: (val: number) => string;
-  convertPnl?: (val: number) => string;
   /** Callback when user clicks chart background to deselect executor */
   onExecutorDeselect?: () => void;
   /** Called once the series exists, with the chart's price mapping. */
@@ -96,8 +94,6 @@ export function TradeChart({
   executorOverlays,
   positions,
   selectedExecutorId,
-  convertValue,
-  convertPnl,
   onExecutorDeselect,
   onChartReady,
 }: TradeChartProps) {
@@ -118,10 +114,19 @@ export function TradeChart({
   const measureBoxRef = useRef<HTMLDivElement>(null);
   const overlaysRef = useRef<ExecutorOverlay[]>([]);
   const lastZoomedIdRef = useRef<string | null>(null);
-  const convertValueRef = useRef(convertValue);
-  const convertPnlRef = useRef(convertPnl);
-  convertValueRef.current = convertValue;
-  convertPnlRef.current = convertPnl;
+  // Currency conversion for the pair's quote asset, owned here rather than
+  // threaded in as props -- the pane below the chart (TradeBottomPane) derives
+  // it the same way, and a chart that took it optionally rendered raw quote
+  // dollars next to that pane's converted rows. The refs keep the imperative
+  // lightweight-charts callbacks reading the latest formatter without being
+  // re-subscribed on every rate tick.
+  const quoteCurrency = pair.split("-")[1] || "USDT";
+  const quoteCurrencies = useMemo(() => [quoteCurrency], [quoteCurrency]);
+  const { formatPnlValue, formatValue } = useRates(quoteCurrencies);
+  const convertValueRef = useRef<(val: number) => string>(() => "");
+  const convertPnlRef = useRef<(val: number) => string>(() => "");
+  convertValueRef.current = (val: number) => formatValue(val, quoteCurrency);
+  convertPnlRef.current = (val: number) => formatPnlValue(val, quoteCurrency);
   const [chartReady, setChartReady] = useState(false);
 
   // Price line refs
@@ -360,12 +365,12 @@ export function TradeChart({
 
         const o = bestOverlay;
         const pnlClr = pnlHexColor(o.pnl);
-        const _cvtPnl = convertPnlRef.current;
-        const _cvtVal = convertValueRef.current;
-        const pnlStr = _cvtPnl ? _cvtPnl(o.pnl) : (Math.abs(o.pnl) >= 1000 ? `${o.pnl >= 0 ? "+" : ""}$${(o.pnl / 1000).toFixed(1)}K` : `${o.pnl >= 0 ? "+" : ""}$${o.pnl.toFixed(2)}`);
+        const cvtPnl = convertPnlRef.current;
+        const cvtVal = convertValueRef.current;
+        const pnlStr = cvtPnl(o.pnl);
         const pctStr = o.pnlPct !== 0 ? `${o.pnlPct > 0 ? "+" : ""}${(o.pnlPct * 100).toFixed(2)}%` : "";
-        const volStr = _cvtVal ? _cvtVal(o.volume) : (Math.abs(o.volume) >= 1000 ? `$${(o.volume / 1000).toFixed(1)}K` : `$${o.volume.toFixed(0)}`);
-        const feesStr = o.fees ? (_cvtVal ? _cvtVal(o.fees) : `$${o.fees.toFixed(2)}`) : "";
+        const volStr = cvtVal(o.volume);
+        const feesStr = o.fees ? cvtVal(o.fees) : "";
 
         // An LP position has no direction -- it is `RANGE` -- and the buy/sell
         // normalization files everything that is not a buy under "sell", which
@@ -418,7 +423,7 @@ export function TradeChart({
         }
 
         if (cfg.leverage != null && Number(cfg.leverage) > 1) addRow("Leverage", `${cfg.leverage}x`);
-        if (cfg.total_amount_quote != null) addRow("Amount", _cvtVal ? _cvtVal(Number(cfg.total_amount_quote)) : formatCompactUsd(Number(cfg.total_amount_quote)));
+        if (cfg.total_amount_quote != null) addRow("Amount", cvtVal(Number(cfg.total_amount_quote)));
         else if (cfg.amount != null && Number(cfg.amount) > 0) addRow("Amount", String(cfg.amount));
 
         const tp = Number(tripleBarrier.take_profit || cfg.take_profit);
@@ -965,8 +970,7 @@ export function TradeChart({
       if (pos.entry_price <= 0) continue;
       const isLong = pos.position_side?.toUpperCase() === "LONG";
       const pnl = pos.unrealized_pnl ?? 0;
-      const _cvtPnl2 = convertPnlRef.current;
-      const pnlStr = _cvtPnl2 ? _cvtPnl2(pnl) : (Math.abs(pnl) >= 1000 ? `${pnl >= 0 ? "+" : ""}$${(pnl / 1000).toFixed(1)}K` : `${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`);
+      const pnlStr = convertPnlRef.current(pnl);
       const amt = Math.abs(pos.amount);
       const color = pnlHexColor(pnl);
       // A hold nothing ties to this pool still belongs on the chart -- the price

@@ -38,7 +38,6 @@ import { usePairBalances } from "@/hooks/usePairBalances";
 import { useServer } from "@/hooks/useServer";
 import { useCondorWebSocket } from "@/hooks/useWebSocket";
 import { useMainControllerData } from "@/hooks/useMainControllerData";
-import { useRates } from "@/hooks/useRates";
 import { useResizeDrag } from "@/hooks/useResizeDrag";
 import { api } from "@/lib/api";
 import { candleStore } from "@/lib/candle-store";
@@ -227,12 +226,6 @@ export function CreateExecutor() {
     useMainControllerData(server, connector, pair);
 
   const rulesData = useTradingRules(server ?? "", connector, caps.hasTradingRules);
-
-  // Currency conversion for chart tooltip values
-  const quoteCurrency = pair.split("-")[1] || "USDT";
-  const { formatPnlValue, formatValue } = useRates([quoteCurrency]);
-  const convertPnl = useCallback((val: number) => formatPnlValue(val, quoteCurrency), [formatPnlValue, quoteCurrency]);
-  const convertValue = useCallback((val: number) => formatValue(val, quoteCurrency), [formatValue, quoteCurrency]);
 
   // Load candles for an executor that's outside the current range
   const handleRequestCandleRange = useCallback((startTime: number) => {
@@ -589,8 +582,6 @@ export function CreateExecutor() {
               executorOverlays={mainOverlays}
               positions={mainPositions}
               selectedExecutorId={selectedExecutorId}
-              convertValue={convertValue}
-              convertPnl={convertPnl}
               onExecutorDeselect={() => setSelectedExecutorId(null)}
             />
           </div>
