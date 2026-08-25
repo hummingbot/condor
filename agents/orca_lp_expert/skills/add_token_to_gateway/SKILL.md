@@ -115,3 +115,4 @@ For Orca CLMM LP, always use `solana-mainnet-beta`.
 - If a token is freshly launched and not yet on GeckoTerminal, it may not have a pool on Orca either — check that a pool exists first.
 - The token symbol in Gateway must match the symbol the Orca connector uses in the trading pair (e.g., `SPCX-USDC` → symbol must be `SPCX`). A mismatch will cause the executor to fail even after adding.
 - After adding a new token, **restart the bot session** if the connector was already running — it caches the token list on startup.
+  Gateway itself needs no restart: it reads the token list off disk on every request, so the token is live there the moment it is added. It is only the connector's startup copy that is stale.
