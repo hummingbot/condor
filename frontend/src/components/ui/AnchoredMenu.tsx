@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { useDismissOnOutsideClick } from "@/hooks/useDismissOnOutsideClick";
@@ -63,7 +63,9 @@ const MIN_ROOM = 160;
  *
  * Rendering into `document.body` at fixed coordinates escapes every clipping
  * and scrolling ancestor. The trade is that the panel no longer moves with the
- * page, so it is re-anchored on scroll and resize instead.
+ * page, so it is re-anchored on scroll and resize instead — and that tab order
+ * no longer follows visual order, which is why the panel also takes focus on
+ * open and hands it back on close (see the focus effect below).
  */
 export function AnchoredMenu({
   anchor,
@@ -123,6 +125,35 @@ export function AnchoredMenu({
     };
   }, [open, anchor, align, matchAnchorWidth, maxHeight, gap]);
 
+  // Tab order follows the DOM, and the DOM now says the panel is a sibling of
+  // the whole app rather than a child of its trigger. Without this, Tab from an
+  // open menu walks into whatever control comes next *on the page*, leaving the
+  // options unreachable from the keyboard. Runs after the layout effect above
+  // on purpose: the panel is not in the DOM until `pos` is set.
+  const placed = pos !== null;
+  useEffect(() => {
+    if (!open || !placed) return;
+    const panel = menuRef.current;
+    if (!panel) return;
+    // A panel that autofocuses something of its own — PairSelector's search
+    // box, the venue filter — has already claimed focus by now, and stealing it
+    // back to the wrapper would eat the first keystroke.
+    if (!panel.contains(document.activeElement)) {
+      // The layout effect just positioned it; scrolling it into view would
+      // only fight that.
+      panel.focus({ preventScroll: true });
+    }
+    return () => {
+      // Restore only when the panel was still the thing holding focus: removing
+      // the focused node drops focus to <body>, whereas a mousedown that landed
+      // on some other control has already moved focus there, and pulling it
+      // back to the trigger would undo the user's own click.
+      const active = document.activeElement;
+      if (active && active !== document.body) return;
+      if (anchor?.isConnected) anchor.focus({ preventScroll: true });
+    };
+  }, [open, placed, anchor]);
+
   useDismissOnOutsideClick(open, onClose, [menuRef, anchor]);
   useEscapeKey(open, onClose);
 
@@ -132,6 +163,9 @@ export function AnchoredMenu({
     <div
       ref={menuRef}
       role={role}
+      // Focusable on open without joining the tab order itself, so Tab from the
+      // panel steps into the options rather than skipping the menu entirely.
+      tabIndex={-1}
       style={{
         position: "fixed",
         top: pos.top,
@@ -144,7 +178,7 @@ export function AnchoredMenu({
         width: pos.width,
         minWidth: pos.minWidth,
       }}
-      className={`z-50 overflow-y-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] shadow-xl ${className}`}
+      className={`z-50 overflow-y-auto rounded-lg border border-[var(--color-border)] focus:outline-none bg-[var(--color-surface)] shadow-xl ${className}`}
     >
       {children}
     </div>,

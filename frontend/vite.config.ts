@@ -15,11 +15,12 @@ export default defineConfig({
     },
   },
   test: {
-    // The helpers under test are pure — no DOM, no React — so the node
-    // environment keeps the run fast and needs no jsdom dependency. Add an
-    // environment override per file when a component test eventually lands.
+    // Pure helpers are the common case — no DOM, no React — so `node` stays the
+    // default and keeps the run fast. A component test that needs a DOM opts in
+    // per file with a `@vitest-environment jsdom` docblock (see
+    // components/ui/AnchoredMenu.test.tsx).
     environment: "node",
-    include: ["src/**/*.test.ts"],
+    include: ["src/**/*.test.{ts,tsx}"],
   },
   server: {
     proxy: {
