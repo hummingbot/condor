@@ -99,7 +99,8 @@ function MultiSelect({
         anchor={anchor}
         open={open}
         onClose={close}
-        matchAnchorWidth
+        matchAnchorWidth="min"
+        maxHeight={256}
         className="w-max"
       >
         {selected.length > 0 && (

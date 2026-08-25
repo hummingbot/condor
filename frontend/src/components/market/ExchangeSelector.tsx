@@ -51,6 +51,7 @@ export function ExchangeSelector({
         open={open}
         onClose={close}
         gap={1}
+        maxHeight={288}
         role="listbox"
         className="min-w-[180px] rounded-t-none border-t-0 py-1 shadow-black/30"
       >

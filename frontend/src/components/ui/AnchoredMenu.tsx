@@ -12,11 +12,17 @@ interface Props {
   /** Which edge of the panel lines up with the same edge of the anchor. */
   align?: "left" | "right";
   /**
-   * Make the panel at least as wide as its trigger. A select's menu has to line
-   * up with its field, and `w-full` cannot say that once the panel is portalled
-   * — 100% would be of `document.body`.
+   * Tie the panel's width to its trigger, which `w-full` cannot do once the
+   * panel is portalled — 100% would be of `document.body`. `"exact"` for a
+   * select, whose menu must line up with its field; `"min"` for a menu that
+   * may outgrow its trigger but never be narrower.
    */
-  matchAnchorWidth?: boolean;
+  matchAnchorWidth?: "exact" | "min";
+  /**
+   * A px ceiling applied on top of the measured room, for a menu that is meant
+   * to stay compact even when the viewport could fit more.
+   */
+  maxHeight?: number;
   /**
    * Distance between the trigger and the panel, in px. Defaults to a floating
    * 6; a menu drawn as a continuation of its trigger passes ~1.
@@ -64,7 +70,8 @@ export function AnchoredMenu({
   open,
   onClose,
   align = "left",
-  matchAnchorWidth = false,
+  matchAnchorWidth,
+  maxHeight,
   gap = DEFAULT_GAP,
   className = "",
   role,
@@ -77,6 +84,7 @@ export function AnchoredMenu({
     left?: number;
     right?: number;
     maxHeight: number;
+    width?: number;
     minWidth?: number;
   } | null>(null);
 
@@ -90,16 +98,19 @@ export function AnchoredMenu({
       const above = r.top - gap - EDGE;
       // Open upward only when downward is cramped *and* upward is roomier —
       // otherwise the familiar direction wins.
+      const cap = (room: number) =>
+        Math.max(maxHeight ? Math.min(room, maxHeight) : room, 0);
       const vertical =
         below < Math.min(MIN_ROOM, above)
-          ? { bottom: window.innerHeight - r.top + gap, maxHeight: Math.max(above, 0) }
-          : { top: r.bottom + gap, maxHeight: Math.max(below, 0) };
+          ? { bottom: window.innerHeight - r.top + gap, maxHeight: cap(above) }
+          : { top: r.bottom + gap, maxHeight: cap(below) };
       setPos({
         ...vertical,
         ...(align === "right"
           ? { right: Math.max(EDGE, window.innerWidth - r.right) }
           : { left: Math.max(EDGE, r.left) }),
-        minWidth: matchAnchorWidth ? r.width : undefined,
+        width: matchAnchorWidth === "exact" ? r.width : undefined,
+        minWidth: matchAnchorWidth === "min" ? r.width : undefined,
       });
     };
     place();
@@ -110,7 +121,7 @@ export function AnchoredMenu({
       window.removeEventListener("scroll", place, true);
       window.removeEventListener("resize", place);
     };
-  }, [open, anchor, align, matchAnchorWidth, gap]);
+  }, [open, anchor, align, matchAnchorWidth, maxHeight, gap]);
 
   useDismissOnOutsideClick(open, onClose, [menuRef, anchor]);
   useEscapeKey(open, onClose);
@@ -130,6 +141,7 @@ export function AnchoredMenu({
         // Never taller than the room on the side it opened to, so a long list
         // scrolls inside the panel rather than running off the window.
         maxHeight: pos.maxHeight,
+        width: pos.width,
         minWidth: pos.minWidth,
       }}
       className={`z-50 overflow-y-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] shadow-xl ${className}`}

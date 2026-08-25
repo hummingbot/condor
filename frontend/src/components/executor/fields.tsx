@@ -273,7 +273,8 @@ export function SelectField({
         anchor={anchor}
         open={open && !disabled}
         onClose={close}
-        matchAnchorWidth
+        matchAnchorWidth="exact"
+        maxHeight={192}
         role="listbox"
       >
         {options.map((opt) => {

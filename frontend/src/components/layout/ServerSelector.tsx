@@ -67,14 +67,17 @@ export function ServerSelector() {
 
       <AnchoredMenu
         anchor={anchor}
-        open={open && !!servers}
+        open={open}
         onClose={close}
         align="right"
         className="min-w-[220px] py-1"
       >
         <div className="px-3 py-1.5 text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
-          API Servers ({onlineServers.length}/{totalCount} online)
+          {servers ? `API Servers (${onlineServers.length}/${totalCount} online)` : "API Servers"}
         </div>
+        {!servers && (
+          <div className="px-3 py-2 text-xs text-[var(--color-text-muted)]">Loading…</div>
+        )}
         {onlineServers.map((s: ServerInfo) => (
           <button
             key={s.name}
