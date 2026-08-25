@@ -975,6 +975,123 @@ def test_budget_still_refuses_when_every_session_is_busy(registry):
     assert "busy" in asyncio.run(scenario())
 
 
+# ── The LRU does not cross surfaces by surprise (CORR-227) ──
+
+
+class _RecordingBot:
+    """Stands in for the health monitor's Bot; records what it was told."""
+
+    def __init__(self):
+        self.sent: list[tuple[int, str]] = []
+
+    async def send_message(self, chat_id, text, **kwargs):
+        self.sent.append((chat_id, text))
+
+
+async def _fill_with_one_telegram_session(web_slots: int) -> None:
+    """One (coldest) Telegram session plus ``web_slots`` warmer web ones."""
+    await runtime.create_session(
+        SessionSpec(
+            key=str(SessionKey.telegram(USER)),
+            agent_key="claude-code",
+            chat_id=USER,
+            user_id=USER,
+        )
+    )
+    for i in range(web_slots):
+        await runtime.create_session(
+            SessionSpec(
+                key=str(SessionKey.web(USER, f"slot{i}")),
+                agent_key="claude-code",
+                user_id=USER,
+            )
+        )
+        await _chat(SessionKey.web(USER, f"slot{i}"), "ping")
+
+
+def test_budget_prefers_a_victim_on_the_incoming_surface(registry):
+    """A new web tab detaches a web session, not the older Telegram chat.
+
+    The Telegram session here is the coldest of all — a global LRU would take
+    it, and the user would never see why: the tab bar shows only web.
+    """
+    cap = session_module.MAX_SESSIONS_PER_USER
+
+    async def scenario():
+        await _fill_with_one_telegram_session(cap - 1)
+        await runtime.create_session(
+            SessionSpec(
+                key=str(SessionKey.web(USER, "slot-new")),
+                agent_key="claude-code",
+                user_id=USER,
+            )
+        )
+
+    asyncio.run(scenario())
+
+    live = {i.key for i in asyncio.run(runtime.list_sessions(USER))}
+    assert len(live) == cap, "still at the cap, not over it"
+    assert str(SessionKey.web(USER, "slot-new")) in live
+    assert str(SessionKey.telegram(USER)) in live, "the unseen chat survived"
+    assert str(SessionKey.web(USER, "slot0")) not in live, "the coldest web tab went"
+
+
+def test_budget_crosses_surfaces_only_when_this_one_has_nothing_idle(
+    registry, monkeypatch
+):
+    """The cap is still a cap: with every web session busy, Telegram pays."""
+    cap = session_module.MAX_SESSIONS_PER_USER
+    bot = _RecordingBot()
+    monkeypatch.setattr(session_module, "_health_bot", bot)
+
+    async def scenario():
+        await _fill_with_one_telegram_session(cap - 1)
+        for session in session_module._sessions.values():
+            session.is_busy = session.key.surface == WEB
+
+        await runtime.create_session(
+            SessionSpec(
+                key=str(SessionKey.web(USER, "slot-new")),
+                agent_key="claude-code",
+                user_id=USER,
+            )
+        )
+
+    asyncio.run(scenario())
+
+    live = {i.key for i in asyncio.run(runtime.list_sessions(USER))}
+    assert len(live) == cap, "the cap is never breached to spare a surface"
+    assert str(SessionKey.web(USER, "slot-new")) in live
+    assert str(SessionKey.telegram(USER)) not in live, "the only idle one was taken"
+
+    assert len(bot.sent) == 1, "the chat that lost its session was told"
+    chat_id, text = bot.sent[0]
+    assert chat_id == USER
+    assert "detached" in text.lower()
+    assert "unexpectedly" not in text.lower(), "a detach is not the death notice"
+
+
+def test_a_same_surface_detach_stays_silent(registry, monkeypatch):
+    """No cross-surface surprise, no notice — the tab bar already showed it."""
+    bot = _RecordingBot()
+    monkeypatch.setattr(session_module, "_health_bot", bot)
+    cap = session_module.MAX_SESSIONS_PER_USER
+
+    async def scenario():
+        await _fill_with_one_telegram_session(cap - 1)
+        await runtime.create_session(
+            SessionSpec(
+                key=str(SessionKey.web(USER, "slot-new")),
+                agent_key="claude-code",
+                user_id=USER,
+            )
+        )
+
+    asyncio.run(scenario())
+
+    assert bot.sent == []
+
+
 # ── Bounded tail reads (PERF-138) ──
 
 

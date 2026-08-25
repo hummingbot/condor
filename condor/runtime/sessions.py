@@ -256,7 +256,31 @@ def _deny_pending_confirmations(raw_key: str) -> int:
     return denied
 
 
-async def _enforce_session_budget(user_id: int) -> None:
+async def _notify_detached_by_budget(key: SessionKey) -> None:
+    """Tell a Telegram chat its session was detached to make room (CORR-227).
+
+    Only the health monitor used to speak into a chat it had torn down, and it
+    says "ended unexpectedly" because a dead subprocess is a fault. An LRU
+    detach is not a fault: the conversation is durable and the next message
+    reattaches it. Same delivery path, deliberately different words, so the
+    two are distinguishable from inside the chat.
+    """
+    chat_id = key.telegram_chat_id
+    if _health_bot is None or chat_id is None:
+        return
+    try:
+        await _health_bot.send_message(
+            chat_id=chat_id,
+            text=(
+                "Agent session detached to free a slot for another chat. "
+                "Send a message to pick up where you left off."
+            ),
+        )
+    except Exception:  # noqa: BLE001 - a notice must never break the budget
+        log.warning("Failed to notify chat %s about a detached session", chat_id)
+
+
+async def _enforce_session_budget(user_id: int, surface: str | None = None) -> None:
     """Reap dead sessions, detach the least recently used idle one, then refuse.
 
     Detaching used to be unthinkable — destroying a session destroyed the chat,
@@ -264,6 +288,13 @@ async def _enforce_session_budget(user_id: int) -> None:
     the conversation is durable (FEAT-015), the detached chat is fully
     recoverable and reattaching costs one lazy spawn, so the cap behaves as an
     LRU instead. Only when every session is *busy* is there nothing to give up.
+
+    The cap counts every surface (it bounds subprocesses, not tabs), but each
+    frontend only shows its own sessions — so a plain global LRU let a new web
+    tab silently detach a Telegram chat the user could not see (CORR-227).
+    ``surface`` is the incoming key's surface: the victim is chosen from that
+    surface first, and only when it has no idle session does eviction cross
+    over — audibly, for a Telegram victim.
     """
     for raw_key, session in list(_sessions.items()):
         if session.user_id == user_id and not session.client.alive:
@@ -289,15 +320,24 @@ async def _enforce_session_budget(user_id: int) -> None:
                 "Wait for one to finish, or cancel it."
             )
 
-        victim = min(idle, key=lambda s: s.last_prompt_at or s.created_at)
+        # Same surface first; the full list is the fallback that keeps the cap
+        # a cap even when this surface has nothing idle to give up.
+        same_surface = [s for s in idle if s.key.surface == surface]
+        crossed = not same_surface
+        victim = min(
+            same_surface or idle, key=lambda s: s.last_prompt_at or s.created_at
+        )
         log.info(
             "Session budget reached for user %s: detaching idle session %s "
-            "(conversation %s is kept)",
+            "(conversation %s is kept%s)",
             user_id,
             victim.key,
             victim.conversation_id or "none",
+            ", crossing surfaces" if crossed else "",
         )
         await _destroy_session_internal(victim.key)
+        if crossed:
+            await _notify_detached_by_budget(victim.key)
 
 
 def bound_agent_context(
@@ -444,7 +484,7 @@ async def _get_or_create_session_locked(
             # Only a genuinely new key counts against the budget — replacing
             # the session behind an existing key is a swap, not an extra
             # subprocess.
-            await _enforce_session_budget(spec.user_id)
+            await _enforce_session_budget(spec.user_id, key.surface)
         # Reserve this key's budget slot for the whole spawn. The reservation
         # must follow the check with no await in between — the event loop
         # makes the pair atomic, so two creates can never both pass the count
