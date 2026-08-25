@@ -1,0 +1,282 @@
+"""The scrubber (FEAT-054) — what leaves an install, and what must not.
+
+Like ``test_telemetry.py``, the load-bearing assertions here are the negative
+ones. Half of this file proves that known values are *absent* from the output;
+the other half proves that a trading pair, a price, an order id and a bot name
+are *present*, because a corpus that mangled them would be a corpus nobody can
+read the agent's reasoning out of.
+
+The install's own values are injected rather than discovered, so the suite
+asserts against a stated table instead of against whatever ``config.yml`` the
+developer happens to have.
+"""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+import pytest
+
+from condor.runtime.conversations import TurnEntry
+from condor.sharing import scrub
+
+SECRET = "0123456789abcdef0123456789abcdef"
+
+# What this pretend install knows about itself.
+KNOWN = [
+    ("prod-hb", "known_server"),
+    ("http://10.4.2.9:8000", "known_url"),
+    ("hbot-admin", "known_user"),
+    ("sk-live-9f8e7d6c5b4a3210", "known_key"),
+    ("987654321", "known_user"),
+    ("/Users/alice", "known_path"),
+]
+
+# Real-shaped values. None of them is live: the Solana address is the SPL token
+# program, the EVM one is the address from the go-ethereum docs, and the key
+# prefixes are shape only.
+SOL_ADDR = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+EVM_ADDR = "0x71C7656EC7ab88b098defB751B7401B5f6d8976F"
+TX_HASH = "0x" + "9f" * 32
+ANTHROPIC_KEY = "sk-ant-api03-QQzzAAbbCCdd1122334455"
+SEED = "legal winner thank year wave sausage worth useful legal winner thank yellow"
+
+
+def _scrub(text: str) -> tuple[str, dict[str, int]]:
+    turns, counts = scrub.scrub(
+        [TurnEntry(role="user", text=text)], secret=SECRET, known=KNOWN
+    )
+    return turns[0].text, counts
+
+
+# ── Tier 2: shapes that cannot be anything else ──────────────────────────
+
+
+@pytest.mark.parametrize(
+    "raw, category",
+    [
+        (f"send it to {SOL_ADDR} now", "sol_addr"),
+        (f"the contract is {EVM_ADDR}", "evm_addr"),
+        (f"filled in tx {TX_HASH}", "hex64"),
+        (f"export ANTHROPIC_API_KEY={ANTHROPIC_KEY}", "api_key"),
+        (f"my phrase: {SEED}", "seed_phrase"),
+        ("mail me at alice@example.org", "email"),
+        ("GET https://api.example.com/v1/orders?api_key=abc123def", "url"),
+        ("the box is at 203.0.113.44", "ip"),
+        ("blob aGVsbG93b3JsZDEyMzQ1Njc4OTBhYmNkZWZnaGlq here", "secret"),
+    ],
+)
+def test_a_structural_secret_is_replaced_and_counted(raw, category):
+    out, counts = _scrub(raw)
+    assert counts[category] == 1
+    for value in (SOL_ADDR, EVM_ADDR, TX_HASH, ANTHROPIC_KEY, "alice@example.org"):
+        if value in raw:
+            assert value not in out
+    assert scrub._TAGS[category] in out
+
+
+def test_a_recovery_phrase_survives_repeated_words():
+    """BIP-39's own test vector repeats three words.
+
+    This is why membership is checked against the vendored wordlist rather than
+    guessed at structurally: the obvious heuristic — twelve short lowercase
+    words, none repeated — waves this exact string through.
+    """
+    out, counts = _scrub(f"write this down: {SEED}")
+    assert counts["seed_phrase"] == 1
+    assert "sausage" not in out
+
+
+def test_the_vendored_wordlist_is_the_canonical_one():
+    """2048 words, ``abandon`` to ``zoo``. A truncated file silently stops
+    catching phrases, so its shape is asserted rather than assumed."""
+    words = scrub.bip39_words()
+    assert len(words) == 2048
+    assert "abandon" in words and "zoo" in words
+    assert all(3 <= len(w) <= 8 and w.isalpha() and w.islower() for w in words)
+
+
+def test_a_url_keeps_its_scheme_and_host_but_loses_its_query():
+    out, _ = _scrub("GET https://api.example.com/v1/orders?api_key=abc123def")
+    assert out.startswith("GET https://api.example.com/")
+    assert "abc123def" not in out
+
+
+def test_a_documentation_url_survives_whole():
+    """No query, no userinfo, no secret. A corpus that lost these lost part of
+    what the agent was reasoning about."""
+    out, counts = _scrub("see https://docs.hummingbot.org/v2/quickstart")
+    assert out == "see https://docs.hummingbot.org/v2/quickstart"
+    assert counts["url"] == 0
+
+
+# ── Tier 1: the values the install already holds ─────────────────────────
+
+
+def test_every_known_value_is_absent_from_the_output():
+    """Acceptance criterion: no server name, URL, key, username, user id or
+    home path this install holds reaches the payload."""
+    raw = (
+        "on prod-hb at http://10.4.2.9:8000 as hbot-admin with "
+        "sk-live-9f8e7d6c5b4a3210 for 987654321, logs in /Users/alice/condor"
+    )
+    out, counts = _scrub(raw)
+    for value, _ in KNOWN:
+        assert value not in out, value
+    assert counts["known_server"] == 1
+    assert counts["known_key"] == 1
+    assert counts["known_path"] == 1
+    assert counts["known_user"] == 2  # the username and the user id
+
+
+def test_a_known_value_beats_the_pattern_that_would_also_match_it():
+    """Tier 1 runs first on purpose: an exact hit is better labelled than a
+    guess, so the server's URL reads as ``URL_…`` from the known table rather
+    than being taken apart by the IP pattern."""
+    out, counts = _scrub("the api is at http://10.4.2.9:8000/status")
+    assert counts["known_url"] == 1
+    assert counts["ip"] == 0
+    assert "10.4.2.9" not in out
+
+
+# ── Negative controls: what must survive ─────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "survivor",
+    [
+        "SOL-USDC",  # a trading pair
+        "142.35",  # a price
+        "x-XEKWYICXf1a2b3c4d5e6f7a8b9c0d1e2f3",  # an exchange order id
+        "hummingbot-v2-pmm-solusdc",  # a bot name
+        "1250.00",  # a quantity
+        "binance_perpetual",  # a connector
+    ],
+)
+def test_a_thing_that_only_looks_like_a_secret_survives(survivor):
+    out, _ = _scrub(f"placed {survivor} on the book")
+    assert survivor in out
+
+
+def test_a_plain_english_sentence_is_untouched():
+    raw = "the agent should check the current price before placing another order"
+    out, counts = _scrub(raw)
+    assert out == raw
+    assert sum(counts.values()) == 0
+
+
+# ── Pseudonyms ───────────────────────────────────────────────────────────
+
+
+def test_a_pseudonym_is_stable_across_turns_so_the_chat_still_reads():
+    """The agent's reasoning about "that wallet" has to survive redaction."""
+    turns, _ = scrub.scrub(
+        [
+            TurnEntry(role="user", text=f"check {SOL_ADDR}"),
+            TurnEntry(role="assistant", text=f"{SOL_ADDR} holds 12 SOL"),
+            TurnEntry(role="user", text=f"and now? {SOL_ADDR}"),
+        ],
+        secret=SECRET,
+        known=KNOWN,
+    )
+    found = {re.search(r"SOL_ADDR_\w+", t.text).group(0) for t in turns}
+    assert len(found) == 1
+
+
+def test_two_installs_give_the_same_address_different_pseudonyms():
+    """The salt is the install's own ``share_secret``, which never leaves it —
+    so a corpus cannot be joined on "who else talked about this wallet"."""
+    one, _ = scrub.scrub(
+        [TurnEntry(role="user", text=SOL_ADDR)], secret="aaa", known=[]
+    )
+    two, _ = scrub.scrub(
+        [TurnEntry(role="user", text=SOL_ADDR)], secret="bbb", known=[]
+    )
+    assert one[0].text != two[0].text
+
+
+def test_counts_always_carry_every_category():
+    """An all-zero share is the signal that a build's scrubber stopped matching.
+    That only reads as a signal if the zeros are actually reported."""
+    _, counts = _scrub("nothing to see here")
+    assert set(counts) == set(scrub.CATEGORIES)
+    assert set(counts.values()) == {0}
+
+
+# ── Structures ───────────────────────────────────────────────────────────
+
+
+def test_a_tool_call_payload_is_scrubbed_at_every_depth():
+    turns, counts = scrub.scrub(
+        [
+            TurnEntry(
+                role="assistant",
+                text="checking",
+                thought=f"the wallet {SOL_ADDR} again",
+                tool_calls=[
+                    {
+                        "id": "1",
+                        "title": "get_balance",
+                        "input": {"wallet": SOL_ADDR, "password": "[redacted]"},
+                        "output": {"rows": [{"addr": EVM_ADDR, "qty": 12.5}]},
+                    }
+                ],
+            )
+        ],
+        secret=SECRET,
+        known=KNOWN,
+    )
+    call = turns[0].tool_calls[0]
+    assert SOL_ADDR not in str(call) and SOL_ADDR not in turns[0].thought
+    assert EVM_ADDR not in str(call)
+    assert call["input"]["password"] == "[redacted]"  # _redact's marker survives
+    assert call["output"]["rows"][0]["qty"] == 12.5  # quantities are kept
+    assert call["title"] == "get_balance"  # so is the trajectory
+    assert counts["sol_addr"] and counts["evm_addr"]
+
+
+def test_quantities_are_deliberately_kept():
+    """Called out in the consent copy rather than hidden: a corpus without the
+    numbers cannot tell whether the agent computed the right answer."""
+    raw = "balance 12,450.31 USDC, pnl -3.2%, filled 0.25 at 142.35"
+    out, _ = _scrub(raw)
+    assert out == raw
+
+
+# ── The separation rule ──────────────────────────────────────────────────
+
+
+def test_sharing_never_imports_the_telemetry_taxonomy():
+    """The load-bearing constraint of the whole feature, asserted the way the
+    collector asserts its vendored taxonomy is the only definition there.
+
+    ``condor/telemetry/`` is where "free text cannot escape" is enforced by
+    construction — an allowlist, a 64-character cap, a character class. If the
+    conversation path ever imported that taxonomy, the next person to widen a
+    property "just like the transcript one" would turn it from a fence into a
+    suggestion, and nobody would notice.
+
+    Asserted over the import graph rather than over the file text, so a
+    docstring may go on *explaining* the rule without appearing to break it.
+    ``condor.telemetry.context`` is not in scope: the deployment block is not
+    the taxonomy, and the envelope legitimately carries it.
+    """
+    import ast
+
+    package = Path(scrub.__file__).resolve().parent
+    offenders: list[str] = []
+    for path in sorted(package.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                names = [node.module or ""] + [
+                    f"{node.module}.{alias.name}" for alias in node.names
+                ]
+            else:
+                continue
+            if any(name.startswith("condor.telemetry.schema") for name in names):
+                offenders.append(f"{path.name}:{node.lineno}")
+    assert offenders == []
