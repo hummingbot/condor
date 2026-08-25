@@ -69,7 +69,7 @@ function ChainSelect({
         />
       </button>
 
-      <AnchoredMenu anchor={anchor} open={open} onClose={close} className="w-44">
+      <AnchoredMenu anchor={anchor} open={open} onClose={close} className="w-44 py-1">
         {chains.map((c) => (
           <button
             key={c.network_id}
@@ -174,7 +174,7 @@ function DexFilter({
         open={open}
         onClose={close}
         align="right"
-        className="w-56"
+        className="w-56 py-1"
       >
         <div className="px-2 pb-1">
           <input

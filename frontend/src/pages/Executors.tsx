@@ -14,10 +14,11 @@ import {
   Volume2,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { NoServerCard } from "@/components/NoServerCard";
+import { AnchoredMenu } from "@/components/ui/AnchoredMenu";
 import { useEscapeKey } from "@/hooks/useEscapeKey";
 import {
   DetailPanel,
@@ -54,15 +55,8 @@ function MultiSelect({
   label?: (value: string) => string;
 }) {
   const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    const handler = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, []);
+  const [anchor, setAnchor] = useState<HTMLElement | null>(null);
+  const close = useCallback(() => setOpen(false), []);
 
   const toggle = (value: string) => {
     if (selected.includes(value)) {
@@ -75,9 +69,12 @@ function MultiSelect({
   const display = label ?? ((v: string) => v);
 
   return (
-    <div ref={ref} className="relative">
+    <>
       <button
+        ref={setAnchor}
         type="button"
+        aria-expanded={open}
+        aria-haspopup="listbox"
         onClick={() => setOpen(!open)}
         className="flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-left text-sm transition-colors hover:border-[var(--color-primary)]/50 focus:border-[var(--color-primary)] focus:outline-none"
       >
@@ -98,48 +95,52 @@ function MultiSelect({
         <ChevronDown className={`h-3.5 w-3.5 flex-shrink-0 text-[var(--color-text-muted)] transition-transform ${open ? "rotate-180" : ""}`} />
       </button>
 
-      {open && (
-        <div className="absolute left-0 z-50 mt-1 max-h-64 w-max min-w-full overflow-y-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] shadow-lg">
-          {selected.length > 0 && (
+      <AnchoredMenu
+        anchor={anchor}
+        open={open}
+        onClose={close}
+        matchAnchorWidth
+        className="w-max"
+      >
+        {selected.length > 0 && (
+          <button
+            type="button"
+            onClick={() => onChange([])}
+            className="flex w-full items-center gap-2 border-b border-[var(--color-border)] px-3 py-2 text-xs text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] transition-colors"
+          >
+            <X className="h-3 w-3" />
+            Clear all
+          </button>
+        )}
+        {options.map((opt) => {
+          const isActive = selected.includes(opt);
+          return (
             <button
+              key={opt}
               type="button"
-              onClick={() => onChange([])}
-              className="flex w-full items-center gap-2 border-b border-[var(--color-border)] px-3 py-2 text-xs text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] transition-colors"
+              onClick={() => toggle(opt)}
+              className={`flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm transition-colors ${
+                isActive
+                  ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
+                  : "text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]"
+              }`}
             >
-              <X className="h-3 w-3" />
-              Clear all
+              <div className={`flex h-4 w-4 flex-shrink-0 items-center justify-center rounded border transition-colors ${
+                isActive
+                  ? "border-[var(--color-primary)] bg-[var(--color-primary)] text-white"
+                  : "border-[var(--color-border)]"
+              }`}>
+                {isActive && <Check className="h-3 w-3" />}
+              </div>
+              <span className="truncate">{display(opt)}</span>
             </button>
-          )}
-          {options.map((opt) => {
-            const isActive = selected.includes(opt);
-            return (
-              <button
-                key={opt}
-                type="button"
-                onClick={() => toggle(opt)}
-                className={`flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm transition-colors ${
-                  isActive
-                    ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
-                    : "text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]"
-                }`}
-              >
-                <div className={`flex h-4 w-4 flex-shrink-0 items-center justify-center rounded border transition-colors ${
-                  isActive
-                    ? "border-[var(--color-primary)] bg-[var(--color-primary)] text-white"
-                    : "border-[var(--color-border)]"
-                }`}>
-                  {isActive && <Check className="h-3 w-3" />}
-                </div>
-                <span className="truncate">{display(opt)}</span>
-              </button>
-            );
-          })}
-          {options.length === 0 && (
-            <div className="px-3 py-2 text-xs text-[var(--color-text-muted)]">No options</div>
-          )}
-        </div>
-      )}
-    </div>
+          );
+        })}
+        {options.length === 0 && (
+          <div className="px-3 py-2 text-xs text-[var(--color-text-muted)]">No options</div>
+        )}
+      </AnchoredMenu>
+    </>
   );
 }
 

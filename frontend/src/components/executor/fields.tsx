@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import {
   AlertTriangle,
   Check,
@@ -7,9 +7,11 @@ import {
   Crosshair,
 } from "lucide-react";
 
-// ── Generic dispatch type ──
+import { AnchoredMenu } from "@/components/ui/AnchoredMenu";
 
 import { PERCENT_PRESETS, SIDE_OPTIONS } from "./field-options";
+
+// ── Generic dispatch type ──
 
 export type FieldDispatch = (action: { type: "SET_FIELD"; field: string; value: unknown }) => void;
 
@@ -238,32 +240,18 @@ export function SelectField({
   disabled?: boolean;
 }) {
   const [open, setOpen] = useState(false);
-  const containerRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const handler = (e: MouseEvent) => {
-      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
-        setOpen(false);
-      }
-    };
-    const keyHandler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("mousedown", handler);
-    document.addEventListener("keydown", keyHandler);
-    return () => {
-      document.removeEventListener("mousedown", handler);
-      document.removeEventListener("keydown", keyHandler);
-    };
-  }, [open]);
+  // A callback-ref *state* element, not a `useRef`: the menu needs a render to
+  // pass through once the trigger exists, or it has no coordinates to place at.
+  const [anchor, setAnchor] = useState<HTMLElement | null>(null);
+  const close = useCallback(() => setOpen(false), []);
 
   const selected = options.find((o) => o.value === value) ?? options[0];
 
   return (
-    <div ref={containerRef} className="relative">
+    <div>
       <label className="mb-1 block text-xs text-[var(--color-text-muted)]">{label}</label>
       <button
+        ref={setAnchor}
         type="button"
         aria-label={label}
         aria-expanded={open}
@@ -281,32 +269,38 @@ export function SelectField({
           <ChevronDown className={`h-3.5 w-3.5 text-[var(--color-text-muted)] transition-transform ${open ? "rotate-180" : ""}`} />
         )}
       </button>
-      {open && !disabled && (
-        <div className="absolute z-50 mt-1 max-h-48 w-full overflow-y-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] shadow-lg">
-          {options.map((opt) => {
-            const isActive = opt.value === value;
-            return (
-              <button
-                key={opt.value}
-                type="button"
-                onClick={() => {
-                  const asNum = Number(opt.value);
-                  dispatch({ type: "SET_FIELD", field, value: isNaN(asNum) ? opt.value : asNum });
-                  setOpen(false);
-                }}
-                className={`flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs transition-colors ${
-                  isActive
-                    ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
-                    : "text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]"
-                }`}
-              >
-                {isActive && <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-primary)]" />}
-                <span className={isActive ? "" : "ml-3.5"}>{opt.label}</span>
-              </button>
-            );
-          })}
-        </div>
-      )}
+      <AnchoredMenu
+        anchor={anchor}
+        open={open && !disabled}
+        onClose={close}
+        matchAnchorWidth
+        role="listbox"
+      >
+        {options.map((opt) => {
+          const isActive = opt.value === value;
+          return (
+            <button
+              key={opt.value}
+              type="button"
+              role="option"
+              aria-selected={isActive}
+              onClick={() => {
+                const asNum = Number(opt.value);
+                dispatch({ type: "SET_FIELD", field, value: isNaN(asNum) ? opt.value : asNum });
+                setOpen(false);
+              }}
+              className={`flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs transition-colors ${
+                isActive
+                  ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
+                  : "text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]"
+              }`}
+            >
+              {isActive && <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-primary)]" />}
+              <span className={isActive ? "" : "ml-3.5"}>{opt.label}</span>
+            </button>
+          );
+        })}
+      </AnchoredMenu>
     </div>
   );
 }

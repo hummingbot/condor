@@ -28,6 +28,8 @@ import {
   NewConfigDialog,
   UploadDialog,
 } from "@/components/editor/EditorDialogs";
+import { useDismissOnOutsideClick } from "@/hooks/useDismissOnOutsideClick";
+import { useEscapeKey } from "@/hooks/useEscapeKey";
 import { useServer } from "@/hooks/useServer";
 import { api, type ControllerConfigSummary } from "@/lib/api";
 import { configToYaml } from "@/lib/configYaml";
@@ -81,13 +83,11 @@ function ContextMenu({
 }) {
   const ref = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    const handler = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [onClose]);
+  // Positioned at the click point rather than hung off a trigger, so this is
+  // not an AnchoredMenu — but dismissal is the same problem, so it shares the
+  // same hook rather than binding its own listener.
+  useDismissOnOutsideClick(true, onClose, [ref]);
+  useEscapeKey(true, onClose);
 
   return (
     <div

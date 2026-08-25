@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ChevronDown, Search, X } from "lucide-react";
 
+import { AnchoredMenu } from "@/components/ui/AnchoredMenu";
 import { api } from "@/lib/api";
 import { formatCompactVolume } from "@/lib/formatters";
 import { useTickers } from "./useTickers";
@@ -74,9 +75,9 @@ export function PairSelector({
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
-  const containerRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const [anchor, setAnchor] = useState<HTMLElement | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const close = useCallback(() => setOpen(false), []);
 
   const { data: rulesData, isLoading } = useQuery({
     queryKey: ["trading-rules", server, connector],
@@ -131,27 +132,6 @@ export function PairSelector({
     return pairs.filter((p) => p.toUpperCase().includes(q)).slice(0, MAX_VISIBLE);
   }, [pairs, search]);
 
-  // Close on outside click
-  useEffect(() => {
-    if (!open) return;
-    const handler = (e: MouseEvent) => {
-      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
-        setOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [open]);
-
-  // Focus input when opening
-  useEffect(() => {
-    if (open) {
-      inputRef.current?.focus();
-      setSearch("");
-      setActiveIndex(0);
-    }
-  }, [open]);
-
   // Scroll active item into view
   useEffect(() => {
     if (!open || !listRef.current) return;
@@ -194,9 +174,18 @@ export function PairSelector({
   }
 
   return (
-    <div ref={containerRef} className="relative">
+    <>
       <button
-        onClick={() => setOpen(!open)}
+        ref={setAnchor}
+        aria-expanded={open}
+        aria-haspopup="listbox"
+        onClick={() => {
+          // The panel only exists while open, so its search state is reset on
+          // the way in rather than by an effect that watches `open`.
+          setSearch("");
+          setActiveIndex(0);
+          setOpen(!open);
+        }}
         className="group flex items-center gap-1 px-4 py-2.5 transition-colors hover:bg-[var(--color-surface-hover)] focus:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[var(--color-primary)]"
       >
         {isLoading ? (
@@ -209,13 +198,13 @@ export function PairSelector({
         <ChevronDown className="ml-1 h-3.5 w-3.5 text-[var(--color-text-muted)] transition-transform group-hover:text-[var(--color-text)]" />
       </button>
 
-      {open && (
-        <div className="absolute left-0 top-full z-50 mt-1 w-72 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] shadow-xl shadow-black/40">
+      <AnchoredMenu anchor={anchor} open={open} onClose={close} className="w-72 shadow-black/40">
+        <>
           {/* Search input */}
           <div className="flex items-center gap-2 border-b border-[var(--color-border)] px-3 py-2">
             <Search className="h-3.5 w-3.5 text-[var(--color-text-muted)]" />
             <input
-              ref={inputRef}
+              autoFocus
               type="text"
               value={search}
               onChange={(e) => {
@@ -292,9 +281,9 @@ export function PairSelector({
               </p>
             )}
           </div>
-        </div>
-      )}
-    </div>
+        </>
+      </AnchoredMenu>
+    </>
   );
 }
 
@@ -317,33 +306,22 @@ function DexPairEntry({
   onChange: (pair: string) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const [draft, setDraft] = useState("");
-  const containerRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const [draft, setDraft] = useState(value);
+  const [anchor, setAnchor] = useState<HTMLElement | null>(null);
   const [recents, setRecents] = useState<string[]>(() => loadDexRecents(connector));
+  const close = useCallback(() => setOpen(false), []);
 
   useEffect(() => {
     setRecents(loadDexRecents(connector));
   }, [connector]);
 
-  useEffect(() => {
-    if (!open) return;
-    const handler = (e: MouseEvent) => {
-      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
-        setOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [open]);
-
-  useEffect(() => {
-    if (open) {
-      setDraft(value);
-      inputRef.current?.focus();
-      inputRef.current?.select();
-    }
-  }, [open, value]);
+  // The input only exists while the menu is open, so it is focused on mount
+  // rather than by an effect. A stable callback keeps React from re-running it
+  // — and re-selecting the text — on every keystroke.
+  const focusAndSelect = useCallback((el: HTMLInputElement | null) => {
+    el?.focus();
+    el?.select();
+  }, []);
 
   const commit = (raw: string) => {
     const pair = normalizeDexPair(raw);
@@ -355,9 +333,15 @@ function DexPairEntry({
   };
 
   return (
-    <div ref={containerRef} className="relative">
+    <>
       <button
-        onClick={() => setOpen(!open)}
+        ref={setAnchor}
+        aria-expanded={open}
+        aria-haspopup="listbox"
+        onClick={() => {
+          setDraft(value);
+          setOpen(!open);
+        }}
         className="group flex items-center gap-1 px-4 py-2.5 transition-colors hover:bg-[var(--color-surface-hover)] focus:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[var(--color-primary)]"
       >
         {value ? (
@@ -370,11 +354,11 @@ function DexPairEntry({
         <ChevronDown className="ml-1 h-3.5 w-3.5 text-[var(--color-text-muted)] transition-transform group-hover:text-[var(--color-text)]" />
       </button>
 
-      {open && (
-        <div className="absolute left-0 top-full z-50 mt-1 w-80 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] shadow-xl shadow-black/40">
+      <AnchoredMenu anchor={anchor} open={open} onClose={close} className="w-80 shadow-black/40">
+        <>
           <div className="flex items-center gap-2 border-b border-[var(--color-border)] px-3 py-2">
             <input
-              ref={inputRef}
+              ref={focusAndSelect}
               type="text"
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
@@ -424,9 +408,9 @@ function DexPairEntry({
           <p className="border-t border-[var(--color-border)] px-3 py-1.5 text-[10px] text-[var(--color-text-muted)]">
             Gateway resolves the pool from the pair — a token mint works as the base.
           </p>
-        </div>
-      )}
-    </div>
+        </>
+      </AnchoredMenu>
+    </>
   );
 }
 

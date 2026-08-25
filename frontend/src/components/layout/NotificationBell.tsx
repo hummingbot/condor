@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Bell, Bot, CheckCheck, Terminal, Workflow, Zap } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
+import { AnchoredMenu } from "@/components/ui/AnchoredMenu";
 import { NOTIFICATIONS_KEY } from "@/hooks/useChatSocket";
 import { api, type AppNotification, type NotificationsResponse } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
@@ -44,7 +45,8 @@ function preview(text: string): string {
 export function NotificationBell() {
   const { token } = useAuth();
   const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
+  const [anchor, setAnchor] = useState<HTMLElement | null>(null);
+  const close = useCallback(() => setOpen(false), []);
   const navigate = useNavigate();
   const queryClient = useQueryClient();
 
@@ -76,21 +78,6 @@ export function NotificationBell() {
     },
   });
 
-  useEffect(() => {
-    const handler = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    const keyHandler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("mousedown", handler);
-    document.addEventListener("keydown", keyHandler);
-    return () => {
-      document.removeEventListener("mousedown", handler);
-      document.removeEventListener("keydown", keyHandler);
-    };
-  }, []);
-
   const toggle = () => {
     const next = !open;
     setOpen(next);
@@ -106,8 +93,9 @@ export function NotificationBell() {
   };
 
   return (
-    <div ref={ref} className="relative">
+    <>
       <button
+        ref={setAnchor}
         onClick={toggle}
         aria-expanded={open}
         aria-haspopup="menu"
@@ -122,63 +110,65 @@ export function NotificationBell() {
         )}
       </button>
 
-      {open && (
-        <div
-          role="menu"
-          className="absolute right-0 top-full z-50 mt-1.5 max-h-[70vh] w-[360px] overflow-y-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] py-1 shadow-xl"
-        >
-          <div className="flex items-center justify-between px-3 py-1.5">
-            <span className="text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
-              Notifications
-            </span>
-            {items.length > 0 && (
-              <button
-                onClick={() => markRead.mutate(undefined)}
-                className="flex items-center gap-1 text-[10px] text-[var(--color-text-muted)] hover:text-[var(--color-accent)]"
-                title="Mark all as read"
-              >
-                <CheckCheck className="h-3 w-3" />
-                Mark all read
-              </button>
-            )}
-          </div>
-
-          {items.length === 0 && (
-            <div className="px-3 py-6 text-center text-xs text-[var(--color-text-muted)]">
-              Nothing yet. Finished tasks show up here.
-            </div>
+      <AnchoredMenu
+        anchor={anchor}
+        open={open}
+        onClose={close}
+        align="right"
+        role="menu"
+        className="w-[360px] py-1"
+      >
+        <div className="flex items-center justify-between px-3 py-1.5">
+          <span className="text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
+            Notifications
+          </span>
+          {items.length > 0 && (
+            <button
+              onClick={() => markRead.mutate(undefined)}
+              className="flex items-center gap-1 text-[10px] text-[var(--color-text-muted)] hover:text-[var(--color-accent)]"
+              title="Mark all as read"
+            >
+              <CheckCheck className="h-3 w-3" />
+              Mark all read
+            </button>
           )}
-
-          {items.map((n) => {
-            const Icon = KIND_ICON[n.kind] ?? Bell;
-            return (
-              <button
-                key={n.id}
-                onClick={() => openItem(n)}
-                className={`flex w-full items-start gap-2.5 px-3 py-2 text-left transition-colors hover:bg-[var(--color-surface-hover)] ${
-                  n.link ? "cursor-pointer" : "cursor-default"
-                } ${n.read ? "" : "bg-[var(--color-primary)]/5"}`}
-              >
-                <Icon className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[var(--color-text-muted)]" />
-                <span className="min-w-0 flex-1">
-                  {n.title && (
-                    <span className="block truncate text-xs font-medium">{n.title}</span>
-                  )}
-                  <span className="block whitespace-pre-wrap break-words text-xs text-[var(--color-text)]">
-                    {preview(n.text)}
-                  </span>
-                  <span className="mt-0.5 block text-[10px] text-[var(--color-text-muted)]">
-                    {formatRelativeTime(n.ts)}
-                  </span>
-                </span>
-                {!n.read && (
-                  <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--color-primary)]" />
-                )}
-              </button>
-            );
-          })}
         </div>
-      )}
-    </div>
+
+        {items.length === 0 && (
+          <div className="px-3 py-6 text-center text-xs text-[var(--color-text-muted)]">
+            Nothing yet. Finished tasks show up here.
+          </div>
+        )}
+
+        {items.map((n) => {
+          const Icon = KIND_ICON[n.kind] ?? Bell;
+          return (
+            <button
+              key={n.id}
+              onClick={() => openItem(n)}
+              className={`flex w-full items-start gap-2.5 px-3 py-2 text-left transition-colors hover:bg-[var(--color-surface-hover)] ${
+                n.link ? "cursor-pointer" : "cursor-default"
+              } ${n.read ? "" : "bg-[var(--color-primary)]/5"}`}
+            >
+              <Icon className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[var(--color-text-muted)]" />
+              <span className="min-w-0 flex-1">
+                {n.title && (
+                  <span className="block truncate text-xs font-medium">{n.title}</span>
+                )}
+                <span className="block whitespace-pre-wrap break-words text-xs text-[var(--color-text)]">
+                  {preview(n.text)}
+                </span>
+                <span className="mt-0.5 block text-[10px] text-[var(--color-text-muted)]">
+                  {formatRelativeTime(n.ts)}
+                </span>
+              </span>
+              {!n.read && (
+                <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--color-primary)]" />
+              )}
+            </button>
+          );
+        })}
+      </AnchoredMenu>
+    </>
   );
 }
