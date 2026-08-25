@@ -14,8 +14,15 @@ is fixed in the source and cannot be pointed elsewhere. An admin can turn it
 off entirely — in Settings → Privacy, or with `CONDOR_TELEMETRY=off` in the
 environment — and a refusal, once recorded, is honoured across upgrades.
 
-The whole mechanism is about 900 lines in [`condor/telemetry/`](condor/telemetry/).
-It is meant to be read, not trusted.
+There is one other way anything can leave, and it is completely separate: you
+can **hand us a single conversation** by pressing a button and confirming the
+redacted transcript we would send. That is content, so it has its own rules,
+its own code and its own section below — [Sharing a
+conversation](#sharing-a-conversation). It never happens on its own.
+
+The whole mechanism is about 900 lines in [`condor/telemetry/`](condor/telemetry/),
+and sharing is about 1,000 more in [`condor/sharing/`](condor/sharing/). They are
+meant to be read, not trusted.
 
 ---
 
@@ -79,6 +86,13 @@ Never sent, under any level:
 - **Your infrastructure** — server names, URLs, hostnames, IP addresses, file paths outside this repo, your home directory or username.
 - **People** — Telegram user ids, usernames, chat ids, display names.
 - **Content** — prompts, agent replies, journal entries, notes, routine configs, report bodies, and exception *message* strings.
+
+That list is about **telemetry**, and it stays true of telemetry no matter what
+else you do. The one way a prompt or an agent reply can ever leave this install
+is the button described under [Sharing a
+conversation](#sharing-a-conversation) — a different pipeline, a different
+consent, and a different endpoint. It is never automatic, and turning telemetry
+off does not turn it on.
 
 Two of those deserve a note, because they are where this kind of thing usually
 leaks:
@@ -169,8 +183,106 @@ creates no install id — for as long as it stands. To opt back in, an admin
 picks a level in Settings → Privacy (or sets `CONDOR_TELEMETRY=ping|usage`,
 which overrides the stored answer like any other).
 
+## Sharing a conversation
+
+Separate from everything above. Telemetry is anonymous counts an admin consents
+to once for the whole install; this is a **transcript**, and only the person who
+held the conversation can hand it over — one at a time, every time, after
+reading exactly what would be sent.
+
+The code is [`condor/sharing/`](condor/sharing/), and it deliberately shares no
+module, no consent record, no queue file and no endpoint with
+`condor/telemetry/`. The rule is asserted by a test: the sharing package never
+imports `condor/telemetry/schema.py`. Widening that taxonomy to carry a
+transcript would have deleted the very property that makes the "never
+collected" list above checkable rather than merely claimed.
+
+**How it works.** In the chat rail, each conversation has a share button. It
+opens a dialog showing the redacted transcript, a plain sentence saying what was
+replaced ("2 wallet addresses and 1 API key were replaced"), and a Download
+button if you would rather keep the bytes than send them. Nothing is queued
+until you confirm.
+
+**What is redacted**, in two tiers:
+
+- **Values this install holds are substituted exactly.** Server names, hosts and
+  URLs, server credentials, LLM provider keys, your Telegram bot token, saved
+  endpoint keys, Gateway wallet addresses, Telegram user ids and usernames, and
+  your home directory path. These are not guessed at — they are read out of your
+  own config and replaced wherever they appear.
+- **Shapes that cannot be anything else are pattern-matched.** EVM and Solana
+  addresses, 64-hex blobs (transaction hash *or* private key — never kept),
+  prefixed API tokens (`sk-`, `sk-ant-`, `xoxb-`, `ghp_`, `AKIA…`), long
+  mixed-case secret runs, email addresses, URLs carrying credentials in the
+  userinfo or query string, IP addresses, and BIP-39 recovery phrases (checked
+  against the actual wordlist, not guessed at structurally).
+
+Each replacement becomes a stable pseudonym — the same wallet reads as the same
+`SOL_ADDR_a3f91c` throughout, so the conversation still makes sense — computed
+as an HMAC salted with a random secret that **never leaves your machine**. We
+cannot reverse it, and the same address on two installs produces two unrelated
+pseudonyms.
+
+**What is deliberately kept, and why.** Amounts, balances, order sizes, prices
+and PnL survive redaction. A transcript in which nobody can tell whether the
+agent computed the right answer is a transcript with no value for improving the
+agent, which is the entire reason for asking. Once the wallet, the server and
+the user are pseudonymous, a number is not on its own an identifier. The dialog
+says this before you confirm rather than leaving you to find out.
+
+**What the scrubber will miss.** Free text is best-effort and cannot be
+otherwise: no rule knows that "the vault key is hunter2" is a secret. That is
+exactly why the payload is shown to you first, why it is one conversation at a
+time, and why unsharing works. If you pasted something sensitive into a chat,
+read the dialog before pressing Share.
+
+**Group chats contain other people's words.** A transcript from a Telegram group
+may quote people who never agreed to anything. Sharing it is your judgement
+call, and the dialog says so.
+
+**Where it goes.** `https://telemetry.hummingbot.org/v1/conversations` — the
+same host as telemetry, a different endpoint, a different table, its own rate
+limit, and no code path in common. Fixed in the source like the other one. The
+envelope carries a random `share_install_id` that is **not** your telemetry
+install id, so a shared conversation cannot be joined to your install's
+heartbeat history, and an install with `CONDOR_TELEMETRY=off` can still share.
+Alongside it go the build version, branch, OS and Python version, which model
+answered, and the counts of what was redacted.
+
+**How to unshare.** Press Unshare in the dialog, or in Settings → Privacy, which
+lists everything you currently have out there. Deleting a conversation unshares
+it first, so a copy never outlives the chat it came from. The revocation works
+without anyone knowing who you are: your install kept a random token and sent us
+only its SHA-256, so posting the token is proof enough to delete the row. If the
+network is down when you press it, the revocation is queued with its token and
+completes later.
+
+**How to turn it off.**
+
+1. **Environment** — `CONDOR_SHARING=off` in your `.env`. The full kill switch;
+   it overrides everything and nothing on the box can share.
+2. **The dashboard** — Settings → Privacy. The admin holds an install-wide veto
+   that hides the button for everyone
+   (`GET`/`PUT /api/v1/sharing/settings`). Unsharing keeps working while the
+   veto is on, so nobody is stranded with something they cannot take back.
+3. **`config.yml`** — the `sharing` section:
+
+   ```yaml
+   sharing:
+     enabled: false
+   ```
+
+There is nothing to turn off on a fresh install: the default is that nothing is
+shared, and it stays that way until somebody presses the button.
+
 ## Changes to this document
 
 Adding anything to the collected list requires a change to `schema.py`, a change
 to this file, and re-asking for consent. In particular, adding trading pairs
 would make positions inferable from timing and must not be done quietly.
+
+The same applies to sharing, in its own terms. Sending anything a user has not
+been shown, or sending anything without a user pressing a button, would be a
+change to `condor/sharing/`, a change to this file, and a new consent — not a
+default someone flips. The one planned addition, a per-user "share everything
+from now on" opt-in, is exactly that: an opt-in, off until chosen.
