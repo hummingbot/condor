@@ -302,7 +302,7 @@ async def get_sharing_settings(user: WebUser = Depends(get_current_user)):
         env_overridden=consent.env_overridden(),
         can_change=get_config_manager().is_admin(user.id),
         endpoint_configured=bool(outbox.endpoint()),
-        pending=len(outbox.pending()),
+        pending=outbox.count(),
     )
 
 

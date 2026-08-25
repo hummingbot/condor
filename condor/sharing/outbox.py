@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import time
 from collections.abc import Callable
@@ -124,15 +125,88 @@ def _read() -> list[dict]:
 
 
 def _write(records: list[dict]) -> None:
+    _write_lines([json.dumps(r, separators=(",", ":")) for r in records])
+
+
+def _write_lines(lines: list[str]) -> None:
+    """Put the queue back, one record per line, exactly as given.
+
+    The kept lines are written verbatim rather than re-serialised, so a trim
+    that drops nothing but the oldest leaves every survivor byte-identical to
+    what was appended (PERF-237).
+    """
     path = queue_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_text(
-            path,
-            "".join(json.dumps(r, separators=(",", ":")) + "\n" for r in records),
-        )
+        atomic_write_text(path, "".join(line + "\n" for line in lines))
     except OSError:
         log.warning("Sharing could not write its queue", exc_info=True)
+
+
+# The two ends of a record, as :func:`enqueue` writes it: ``id`` and ``op``
+# open the object and ``queued_at`` closes it, with the transcript in between.
+# Both patterns are anchored — ``_HEAD_RE`` at the start of the line, and
+# ``_TAIL_RE`` inside a short window off its end — so neither can be fooled by
+# a transcript that happens to quote one of these keys at itself. Anything they
+# do not both match is parsed the slow, certain way instead.
+_HEAD_RE = re.compile(r'^\{"id":"[^"]*","op":"([^"]*)"')
+_TAIL_RE = re.compile(r',"queued_at":(-?[0-9]+(?:\.[0-9]+)?(?:[eE][-+]?[0-9]+)?)\}$')
+_TAIL_WINDOW = 80
+
+
+def _probe(line: str) -> dict | None:
+    """The two fields the retention policy reads, without parsing the body.
+
+    A queued record is a whole scrubbed transcript — up to ``MAX_SHARE_BYTES``
+    — and :func:`_retained` looks at ``op`` and ``queued_at`` and at nothing
+    else. So the count-shaped paths lift those two off the line's ends in
+    constant time instead of building the megabyte of dicts in the middle
+    (PERF-237). ``None`` for a line that is not a record at all: a torn last
+    line from a killed process, skipped here exactly as :func:`_read` skips it.
+    """
+    head = _HEAD_RE.match(line)
+    tail = _TAIL_RE.search(line[-_TAIL_WINDOW:])
+    if head and tail:
+        return {"op": head.group(1), "queued_at": float(tail.group(1))}
+    try:
+        record = json.loads(line)
+    except ValueError:
+        return None
+    if not isinstance(record, dict):
+        return None
+    return {"op": record.get("op"), "queued_at": record.get("queued_at")}
+
+
+def _read_probes() -> list[tuple[str, dict]]:
+    """Every queued record as ``(raw line, probe)``, oldest first.
+
+    The line-oriented twin of :func:`_read`: same file, same order, and the
+    same lines skipped — blank ones, and the torn last line a killed process
+    leaves — so ``len(_read_probes())`` is ``len(_read())`` and :func:`count`
+    can answer for :func:`pending`. A line that parses but is not an object is
+    skipped here too; :func:`_read` would hand it to the policy to trip over.
+    """
+    path = queue_path()
+    if not path.is_file():
+        return []
+    probed: list[tuple[str, dict]] = []
+    try:
+        with path.open(encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                probe = _probe(line)
+                if probe is not None:
+                    probed.append((line, probe))
+    except OSError:
+        log.debug("Sharing could not read %s", path, exc_info=True)
+    return probed
+
+
+def _read_lines() -> list[str]:
+    """The queued records as they sit on disk, oldest first."""
+    return [line for line, _ in _read_probes()]
 
 
 def _rewrite(select: Callable[[list[dict]], list[dict]]) -> int:
@@ -160,11 +234,38 @@ def _rewrite(select: Callable[[list[dict]], list[dict]]) -> int:
         return dropped
 
 
-def _retain(records: list[dict]) -> list[dict]:
-    """The retention policy: which queued records survive the cap, oldest first.
+def _rewrite_lines(select: Callable[[list[dict]], set[int]]) -> int:
+    """Remove records without parsing them. The line-oriented :func:`_rewrite`.
+
+    The same guarded read-modify-write under the same lock, for the paths that
+    decide by counting rather than by reading a record's contents. ``select``
+    sees one probe per queued record — ``op`` and ``queued_at``, and no body
+    (see :func:`_probe`) — and answers with the *indices* it keeps, so the
+    survivors are picked out of the file's own order and reordering a share
+    past the unshare that revokes it is not expressible here. As in
+    :func:`_rewrite`, the file is re-read under the lock so a concurrent append
+    survives, it runs with the lock held so it must not block or await, and it
+    rewrites only when something was actually dropped.
+
+    Returns how many records were dropped.
+    """
+    with _QUEUE_LOCK:
+        probed = _read_probes()
+        keep = select([probe for _, probe in probed])
+        kept = [line for i, (line, _) in enumerate(probed) if i in keep]
+        dropped = len(probed) - len(kept)
+        if dropped:
+            _write_lines(kept)
+        return dropped
+
+
+def _retained(records: list[dict]) -> set[int]:
+    """The retention policy: which queued records survive the cap, by index.
 
     Split out of :func:`trim` so *what survives* is one function to read and to
-    change, separate from the locking that makes changing it safe.
+    change, separate from the locking that makes changing it safe. It reads
+    ``op`` and ``queued_at`` and nothing else, which is what lets :func:`trim`
+    run it over probes instead of over parsed transcripts (PERF-237).
 
     **The cap is scoped to shares.** It exists to bound the disk cost of queued
     *transcripts*, and an unshare is not one: it is a URL and a 64-character
@@ -178,10 +279,10 @@ def _retain(records: list[dict]) -> list[dict]:
     first ten and be told it worked (CORR-234).
 
     So the count cap and the age cutoff apply to ``OP_SHARE`` records; anything
-    else is kept. **Order is never disturbed** — the survivors are filtered out
-    of ``records`` in place rather than partitioned and recombined, because a
-    share and the unshare that revokes it swapping would be its own bug, and
-    :func:`_rewrite` forbids a ``select`` that reorders.
+    else is kept. **Order is never disturbed** — answering with indices into
+    ``records`` rather than with a rebuilt list means the survivors can only
+    come back in the order they were queued in, because a share and the unshare
+    that revokes it swapping would be its own bug.
     """
     cutoff = time.time() - MAX_QUEUE_AGE_S
     fresh = [
@@ -191,11 +292,11 @@ def _retain(records: list[dict]) -> list[dict]:
         and float(record.get("queued_at") or 0) >= cutoff
     ]
     kept = set(fresh[-MAX_QUEUED_SHARES:])
-    return [
-        record
+    return {
+        i
         for i, record in enumerate(records)
         if record.get("op") != OP_SHARE or i in kept
-    ]
+    }
 
 
 def enqueue(
@@ -246,9 +347,27 @@ def pending() -> list[dict]:
     return _read()
 
 
+def count() -> int:
+    """How many requests are queued. The answer without the transcripts.
+
+    ``len(pending())`` costs one ``json.loads`` per queued record, bodies and
+    all, to produce a number — tens of milliseconds on a full queue, and on the
+    event loop when a settings page asks (PERF-237).
+    """
+    return len(_read_lines())
+
+
 def trim() -> None:
-    """Enforce the cap, oldest first. See :func:`_retain` for the policy."""
-    _rewrite(_retain)
+    """Enforce the cap, oldest first. See :func:`_retained` for the policy.
+
+    Called on every enqueue — three times a sweep tick, and once per
+    conversation inside ``unshare_all`` — so it decides by line rather than by
+    record. The policy needs ``op`` and ``queued_at``; parsing the megabytes of
+    transcript between them to enforce a count cap was the whole cost of the
+    call, and dropping the oldest re-serialised every survivor to write back
+    what was already on disk (PERF-237).
+    """
+    _rewrite_lines(_retained)
 
 
 def purge_shares() -> int:

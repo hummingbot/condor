@@ -501,16 +501,20 @@ def test_purge_shares_never_takes_a_pending_revocation(chat):
 # ── The queue has two writers (CORR-232) ─────────────────────────────────
 
 
-def _enqueue_during(fn, monkeypatch) -> dict:
+def _enqueue_during(fn, monkeypatch, *, reader: str = "_read") -> dict:
     """Run ``fn`` while another thread appends to the queue. Returns its record.
 
     The append is aimed at the window between a read-modify-write's read and its
     write — the window a flush of a full queue holds open for minutes. If the
     write path is locked the append lands just after that window instead of
     inside it; either way the record must be in the file afterwards.
+
+    ``reader`` names the read that opens that window, because the queue has two:
+    the record-shaped :func:`outbox._read` and the line-shaped
+    ``outbox._read_probes`` the count-capped paths use (PERF-237).
     """
     reached = threading.Event()
-    real_read = outbox._read
+    real_read = getattr(outbox, reader)
     slowed: list[bool] = []
 
     def slow_read():
@@ -532,13 +536,13 @@ def _enqueue_during(fn, monkeypatch) -> dict:
         )
 
     thread = threading.Thread(target=worker)
-    monkeypatch.setattr(outbox, "_read", slow_read)
+    monkeypatch.setattr(outbox, reader, slow_read)
     thread.start()
     try:
         fn()
     finally:
         thread.join(5)
-        monkeypatch.setattr(outbox, "_read", real_read)
+        monkeypatch.setattr(outbox, reader, real_read)
     assert queued, "the worker thread never got to enqueue"
     return queued[0]
 
@@ -553,7 +557,7 @@ def test_trim_keeps_what_a_worker_thread_appends_while_it_runs(chat):
     )
 
     with pytest.MonkeyPatch.context() as mp:
-        late = _enqueue_during(outbox.trim, mp)
+        late = _enqueue_during(outbox.trim, mp, reader="_read_probes")
 
     # The cap was still enforced, and the sweep's append was not collateral.
     assert [r["id"] for r in outbox.pending()] == ["kept", late["id"]]
@@ -712,6 +716,125 @@ async def test_a_record_queued_before_ids_existed_is_still_retired(chat, monkeyp
     monkeypatch.setattr(outbox, "post", post)
     assert await outbox.flush() == (1, 1)
     assert [r["url"] for r in outbox.pending()] == ["v"]
+
+
+# ── The count-shaped paths do not read transcripts (PERF-237) ────────────
+
+
+def _count_loads(monkeypatch) -> list[str]:
+    """Record every line ``json.loads`` is handed while the fixture is up."""
+    seen: list[str] = []
+    real = json.loads
+
+    def counting(text, *args, **kwargs):
+        seen.append(text)
+        return real(text, *args, **kwargs)
+
+    monkeypatch.setattr(outbox.json, "loads", counting)
+    return seen
+
+
+def test_trim_does_not_parse_the_records_it_keeps(chat, monkeypatch):
+    """Acceptance criterion: the cap is a count, so enforcing it must not cost
+    a transcript. Every enqueue trims, three times a sweep tick, and a queued
+    record is a whole conversation."""
+    monkeypatch.setattr(outbox, "MAX_QUEUED_SHARES", 10)
+    for n in range(4):
+        outbox.enqueue(outbox.OP_SHARE, f"https://collector.invalid/{n}", {"n": n})
+        _unshare(n)
+
+    parsed = _count_loads(monkeypatch)
+    outbox.trim()
+
+    assert parsed == []
+    assert len(outbox.pending()) == 8
+
+
+def test_trim_does_not_parse_the_records_it_drops_either(chat, monkeypatch):
+    """Dropping the oldest is a truncation of a list of lines, not a rewrite of
+    a list of transcripts: nothing is parsed and nothing is re-serialised."""
+    monkeypatch.setattr(outbox, "MAX_QUEUED_SHARES", 4)
+    for n in range(4):
+        outbox.enqueue(outbox.OP_SHARE, f"https://collector.invalid/{n}", {"n": n})
+    assert len(outbox.pending()) == 4
+
+    monkeypatch.setattr(outbox, "MAX_QUEUED_SHARES", 2)
+    parsed = _count_loads(monkeypatch)
+    outbox.trim()
+
+    assert parsed == []
+    assert [r["body"]["n"] for r in outbox.pending()] == [2, 3]
+
+
+def test_count_agrees_with_pending_without_materialising_it(chat, monkeypatch):
+    """Acceptance criterion: ``GET /sharing/settings`` reports the same number
+    ``len(outbox.pending())`` would, having parsed nothing to get it."""
+    for n in range(3):
+        outbox.enqueue(outbox.OP_SHARE, f"https://collector.invalid/{n}", {"n": n})
+    _unshare(9)
+
+    expected = len(outbox.pending())
+    parsed = _count_loads(monkeypatch)
+
+    assert outbox.count() == expected == 4
+    assert parsed == []
+
+
+def test_count_skips_a_torn_line_exactly_as_pending_does(chat):
+    """A killed process leaves half a record behind; the two must still agree."""
+    outbox.enqueue(outbox.OP_SHARE, "https://collector.invalid/1", {"n": 1})
+    with outbox.queue_path().open("a", encoding="utf-8") as fh:
+        fh.write('{"id":"torn","op":"share","url":"u","bo')
+
+    assert outbox.count() == len(outbox.pending()) == 1
+
+
+def test_a_record_the_probe_cannot_read_is_still_trimmed_correctly(chat, monkeypatch):
+    """An upgrade finds records whose keys are not where the probe looks — a
+    queue written before ``id`` existed, say. They are parsed the slow, certain
+    way rather than misread, so the policy sees the same fields either way."""
+    monkeypatch.setattr(outbox, "MAX_QUEUED_SHARES", 1)
+    now = time.time()
+    outbox._write(
+        [
+            {"op": outbox.OP_SHARE, "url": "old", "queued_at": now, "id": "a"},
+            {"op": outbox.OP_UNSHARE, "url": "undo", "queued_at": now, "id": "b"},
+            {"op": outbox.OP_SHARE, "url": "new", "queued_at": now, "id": "c"},
+        ]
+    )
+
+    outbox.trim()
+
+    assert [r["id"] for r in outbox.pending()] == ["b", "c"]
+
+
+def test_a_trim_that_drops_nothing_leaves_the_file_untouched(chat):
+    """Acceptance criterion, half one: a no-op trim costs no rename."""
+    for n in range(3):
+        outbox.enqueue(outbox.OP_SHARE, f"https://collector.invalid/{n}", {"n": n})
+    before = outbox.queue_path().read_bytes()
+    stat = outbox.queue_path().stat()
+
+    outbox.trim()
+
+    assert outbox.queue_path().read_bytes() == before
+    assert outbox.queue_path().stat().st_mtime_ns == stat.st_mtime_ns
+
+
+def test_the_survivors_of_a_trim_are_byte_identical_to_what_was_appended(
+    chat, monkeypatch
+):
+    """Acceptance criterion, half two: the kept lines are written back verbatim
+    rather than round-tripped through ``json``."""
+    monkeypatch.setattr(outbox, "MAX_QUEUED_SHARES", 4)
+    for n in range(4):
+        outbox.enqueue(outbox.OP_SHARE, f"https://collector.invalid/{n}", {"n": n})
+    appended = outbox.queue_path().read_text().splitlines()
+
+    monkeypatch.setattr(outbox, "MAX_QUEUED_SHARES", 2)
+    outbox.trim()
+
+    assert outbox.queue_path().read_text().splitlines() == appended[2:]
 
 
 # ── Bounding ─────────────────────────────────────────────────────────────

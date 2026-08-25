@@ -159,6 +159,25 @@ def test_settings_are_readable_by_every_seat(chat):
     assert theirs.can_change is False and admins.can_change is True
 
 
+def test_settings_count_the_queue_without_reading_it(chat, monkeypatch):
+    """Acceptance criterion (PERF-237): ``pending`` is the number
+    ``len(outbox.pending())`` would give, arrived at without parsing a single
+    queued transcript — this runs on the event loop, and a queued record is a
+    whole conversation."""
+    run(routes.submit_share(chat.id, user=OWNER))
+    expected = len(outbox.pending())
+
+    parsed: list[str] = []
+    real = outbox.json.loads
+    monkeypatch.setattr(
+        outbox.json, "loads", lambda text, *a, **k: (parsed.append(text), real(text))[1]
+    )
+    settings = run(routes.get_sharing_settings(user=OWNER))
+
+    assert settings.pending == expected == 1
+    assert parsed == []
+
+
 # ── Unsharing ────────────────────────────────────────────────────────────
 
 
