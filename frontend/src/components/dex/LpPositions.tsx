@@ -3,6 +3,7 @@ import { ArrowRight } from "lucide-react";
 import { useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 
+import { poolLabel } from "./format";
 import {
   LP_EXECUTOR_TYPE,
   LP_REFRESH_MS,
@@ -26,10 +27,7 @@ const MAX_LABELLED_POOLS = 30;
  * `SOL-USDC`. The pool row has the symbols, so it wins when it resolved.
  */
 function labelFor(pos: LpPosition, pool: PoolSummary | undefined): string {
-  const base = pool?.base_symbol;
-  const quote = pool?.quote_symbol;
-  if (base && base !== "???" && quote && quote !== "???") return `${base}-${quote}`;
-  if (pool?.name) return pool.name;
+  if (pool) return poolLabel(pool);
   const [poolBase, poolQuote] = pos.pair.split("-");
   if (poolBase && poolBase.length > 12) {
     return `${poolBase.slice(0, 4)}…-${poolQuote ?? ""}`;

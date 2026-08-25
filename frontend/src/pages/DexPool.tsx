@@ -13,6 +13,7 @@ import { LiquidityDepthColumn } from "@/components/dex/LiquidityDepthColumn";
 import { LpPositionBar } from "@/components/dex/LpPositionBar";
 import { PoolAddress, PoolStats } from "@/components/dex/PoolStats";
 import { UpstreamNotice } from "@/components/dex/UpstreamNotice";
+import { poolLabel, poolSymbols } from "@/components/dex/format";
 import {
   ErrorToast,
   ExecutorSuccessModal,
@@ -153,24 +154,20 @@ export function DexPool() {
   // another token already holds, and the only visible symptom is a balance that
   // stays 0 for a wallet that is not empty. Each entry keeps its ticker so the
   // add button can say what it adds — and so the server can name a collision.
-  const unlistedTokens = useMemo(
-    () =>
-      Object.entries(tokenVerdicts ?? {})
-        .filter(([, verdict]) => verdict === "symbol_taken" || verdict === "failed")
-        .map(([tokenAddress]) => {
-          const ticker =
-            tokenAddress === pool?.base_token_address
-              ? pool?.base_symbol
-              : tokenAddress === pool?.quote_token_address
-                ? pool?.quote_symbol
-                : undefined;
-          return {
-            address: tokenAddress,
-            symbol: ticker && ticker !== "???" ? ticker : undefined,
-          };
-        }),
-    [tokenVerdicts, pool],
-  );
+  const unlistedTokens = useMemo(() => {
+    const { base, quote } = poolSymbols(pool);
+    return Object.entries(tokenVerdicts ?? {})
+      .filter(([, verdict]) => verdict === "symbol_taken" || verdict === "failed")
+      .map(([tokenAddress]) => ({
+        address: tokenAddress,
+        symbol:
+          tokenAddress === pool?.base_token_address
+            ? base
+            : tokenAddress === pool?.quote_token_address
+              ? quote
+              : undefined,
+      }));
+  }, [tokenVerdicts, pool]);
 
   // The collision the last add ran into: who holds the ticker, so the banner
   // can ask "replace it?" instead of failing with the same verdict again.
@@ -234,10 +231,7 @@ export function DexPool() {
   // `pair` is the executor's `<base_mint>-<quote_symbol>` form. The tickers only
   // exist on the pool, so every symbol-shaped consumer — balance lookups, amount
   // labels — is handed them rather than left to split the pair.
-  const baseSymbol =
-    pool?.base_symbol && pool.base_symbol !== "???" ? pool.base_symbol : undefined;
-  const quoteSymbol =
-    pool?.quote_symbol && pool.quote_symbol !== "???" ? pool.quote_symbol : undefined;
+  const { base: baseSymbol, quote: quoteSymbol } = poolSymbols(pool);
   const balances = usePairBalances(server ?? null, network, baseSymbol, quoteSymbol);
 
   const orderConfig = useOrderConfig();
@@ -376,10 +370,7 @@ export function DexPool() {
     );
   }
 
-  const pairLabel =
-    pool.base_symbol !== "???" && pool.quote_symbol !== "???"
-      ? `${pool.base_symbol}-${pool.quote_symbol}`
-      : pool.name;
+  const pairLabel = poolLabel(pool);
 
   return (
     <div className="-m-6 flex h-[calc(100%+3rem)] flex-col">

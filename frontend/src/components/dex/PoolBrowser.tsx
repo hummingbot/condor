@@ -11,7 +11,7 @@ import { useNavigate } from "react-router-dom";
 import type { PoolSummary } from "@/lib/api";
 import { useDexFavorites } from "@/lib/dexFavorites";
 
-import { num, pct, usdCompact } from "./format";
+import { num, pct, poolLabel, usdCompact } from "./format";
 
 type SortKey =
   | "name"
@@ -32,13 +32,6 @@ function sortValue(p: PoolSummary, key: SortKey): number | null {
 const ESTIMATED_YIELD_HINT =
   "Estimated: 24h volume x the pool's base fee tier, over TVL. " +
   "This connector reports no yield of its own.";
-
-function pairLabel(p: PoolSummary): string {
-  const base = p.base_symbol && p.base_symbol !== "???" ? p.base_symbol : null;
-  const quote =
-    p.quote_symbol && p.quote_symbol !== "???" ? p.quote_symbol : null;
-  return base && quote ? `${base}-${quote}` : p.name || p.address.slice(0, 8);
-}
 
 function SortTh({
   label,
@@ -130,7 +123,7 @@ export function PoolBrowser({
     const rows = [...pools];
     rows.sort((a, b) => {
       let cmp: number;
-      if (sortKey === "name") cmp = pairLabel(a).localeCompare(pairLabel(b));
+      if (sortKey === "name") cmp = poolLabel(a).localeCompare(poolLabel(b));
       else if (sortKey === "dex_id") cmp = a.dex_id.localeCompare(b.dex_id);
       else {
         const av = sortValue(a, sortKey);
@@ -318,7 +311,7 @@ export function PoolBrowser({
                     </button>
                   </td>
                   <td className="px-4 py-2.5 font-medium">
-                    {pairLabel(p)}
+                    {poolLabel(p)}
                     {!p.tradable && (
                       <span className="ml-2 text-[10px] font-normal text-[var(--color-text-muted)]">
                         not on Gateway
