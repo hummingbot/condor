@@ -96,7 +96,6 @@ class SharingPreference(BaseModel):
     opted_in_at: float = 0.0
     allowed: bool = False
     sweeping: bool = False
-    shared_count: int = 0
 
 
 class SharingPreferenceUpdate(BaseModel):
@@ -256,16 +255,16 @@ async def set_exclusion(
 async def get_preference(user: WebUser = Depends(get_current_user)):
     """This user's own answer. Never another's — there is no id to name one.
 
-    The three consent reads are in-memory; ``shared_count`` is a walk of the
-    user's whole conversation store, so it is the one that leaves the loop.
+    Every read here is an in-memory consent lookup, so nothing on this route
+    touches the conversation store. It used to also report a count of the
+    user's shares, which walked their whole store to take a length no caller
+    read (PERF-239); a count belongs to whoever already holds the list.
     """
-    shares = await asyncio.to_thread(share.list_shares, user.id)
     return SharingPreference(
         state=consent.user_state(user.id),
         opted_in_at=consent.opted_in_at(user.id),
         allowed=consent.can_share(user.id),
         sweeping=consent.can_sweep(user.id),
-        shared_count=len(shares),
     )
 
 

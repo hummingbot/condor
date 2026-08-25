@@ -1250,7 +1250,6 @@ export interface SharingPreferenceResponse {
   allowed: boolean;
   /** Always is on *and* the install permits it — the two can disagree. */
   sweeping: boolean;
-  shared_count: number;
 }
 
 export interface ConversationSharingStatus {

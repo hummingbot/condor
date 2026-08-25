@@ -307,6 +307,31 @@ def test_the_preference_starts_off_and_is_the_callers_own(chat):
     assert run(routes.get_preference(user=STRANGER)).state == consent.OFF
 
 
+def test_the_preference_never_reads_the_conversation_store(chat, monkeypatch):
+    """The answer is three consent lookups and a timestamp. It used to also
+    walk the whole store to count shares, for a number no caller read
+    (PERF-239); a store read that explodes must not be able to reach this
+    route — nor the PUT, which answers by calling it."""
+
+    def boom(*args, **kwargs):
+        raise AssertionError("the preference route read the conversation store")
+
+    monkeypatch.setattr(conversations, "list_conversations", boom)
+
+    answer = run(routes.get_preference(user=OWNER))
+    assert answer.state == consent.OFF
+    assert answer.allowed is True
+    assert answer.sweeping is False
+
+    stored = run(
+        routes.set_preference(
+            routes.SharingPreferenceUpdate(state="always"), user=OWNER
+        )
+    )
+    assert stored.state == consent.ALWAYS
+    assert stored.sweeping
+
+
 def test_choosing_always_records_the_moment_and_starts_sweeping(chat):
     before = time.time()
     answer = run(
