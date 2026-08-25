@@ -16,7 +16,6 @@ from mcp_servers.hummingbot_api.formatters import (
     format_bot_logs_as_table,
     format_gateway_clmm_pool_result,
     format_gateway_config_result,
-    format_gateway_container_result,
     format_gateway_swap_result,
     format_portfolio_as_table,
 )
@@ -43,15 +42,9 @@ from mcp_servers.hummingbot_api.tools.executors import (
 from mcp_servers.hummingbot_api.tools.gateway import (
     manage_gateway_config as manage_gateway_config_impl,
 )
-from mcp_servers.hummingbot_api.tools.gateway import (
-    manage_gateway_container as manage_gateway_container_impl,
-)
 from mcp_servers.hummingbot_api.tools.gateway_amm import manage_amm_impl
 from mcp_servers.hummingbot_api.tools.gateway_clmm import (
     explore_gateway_clmm_pools as explore_gateway_clmm_pools_impl,
-)
-from mcp_servers.hummingbot_api.tools.gateway_swap import (
-    manage_gateway_swaps as manage_gateway_swaps_impl,
 )
 from mcp_servers.hummingbot_api.tools.geckoterminal import (
     explore_geckoterminal as explore_geckoterminal_impl,
