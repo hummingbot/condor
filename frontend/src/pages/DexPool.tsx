@@ -235,7 +235,16 @@ export function DexPool() {
   const balances = usePairBalances(server ?? null, network, baseSymbol, quoteSymbol);
 
   const orderConfig = useOrderConfig();
-  const lpConfig = useLpConfig(server ?? null, network, pair, lpAvailable);
+  // The pool is pinned by the URL, so the hook is told not to resolve one: its
+  // answer would be the pair's deepest pool, which the effect below overrides
+  // anyway, bought with a GeckoTerminal request off the budget this page needs.
+  const lpConfig = useLpConfig(
+    server ?? null,
+    network,
+    pair,
+    lpAvailable,
+    pool?.address,
+  );
 
   // The user picked a pool. Auto-resolution must not second-guess it, so the
   // opened pool is written straight into the LP config — which sets poolTouched
@@ -678,8 +687,10 @@ export function DexPool() {
                 validation={lpConfig.validation}
                 currentPrice={currentPrice}
                 pair={pairLabel}
-                pool={lpConfig.pool}
-                poolFetching={lpConfig.poolFetching}
+                // No `pool`: the locked branch below never reads it, and the
+                // resolve that would fill it is off. Price and symbols come from
+                // this page's own by-address pool, which describes the pool on
+                // screen rather than the pair's deepest one.
                 // Gateway's number, from the bins call — the GeckoTerminal pool
                 // row does not carry one.
                 binStep={depth?.bin_step}
