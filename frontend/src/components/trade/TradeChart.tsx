@@ -31,7 +31,8 @@ const PICK_LABELS: Record<PickSlot, string> = {
 export interface ChartPriceAxis {
   /** Pixel row for a price, from the pane's top. `null` when it is off-scale. */
   priceToCoordinate(price: number): number | null;
-  /** Pane height in CSS pixels, so a sibling canvas can match it. */
+  /** Pane height in CSS pixels, so a sibling canvas can match it. Cached, so
+   * polling it costs no layout. */
   height(): number;
   /** Subscribe to scale changes; returns its own unsubscribe. */
   onScaleChange(cb: () => void): () => void;
@@ -485,6 +486,25 @@ export function TradeChart({
     };
   }, []);
 
+  // ── Pane height, cached ──
+  // `height()` is handed out and polled by siblings, and a `clientHeight` read
+  // on a page whose layout is being dirtied by streaming data is a forced
+  // reflow every time it is asked. The pane's height only changes when the pane
+  // is resized, so it is taken from the observer that already hears about that
+  // — inside the callback, where layout is clean — and `height()` just hands
+  // the number back.
+  const paneHeightRef = useRef(0);
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    paneHeightRef.current = el.clientHeight;
+    const observer = new ResizeObserver(() => {
+      paneHeightRef.current = el.clientHeight;
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
   // ── Lend the price mapping out, once the series exists ──
   // Read before the series is created, priceToCoordinate answers for an empty
   // scale — plausible pixels for the wrong prices — so this waits on chartReady
@@ -501,7 +521,7 @@ export function TradeChart({
         const coord = seriesRef.current?.priceToCoordinate(price);
         return coord == null ? null : (coord as number);
       },
-      height: () => containerRef.current?.clientHeight ?? 0,
+      height: () => paneHeightRef.current || containerRef.current?.clientHeight || 0,
       onScaleChange: (cb) => {
         const chart = chartRef.current;
         if (!chart) return () => {};
