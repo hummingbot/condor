@@ -18,6 +18,7 @@ import asyncio
 import pytest
 from fastapi import HTTPException
 
+from condor import paths
 from condor.code_runs import CodeRun, CodeRunStore
 from condor.web.models import WebUser
 from condor.web.routes import code as code_routes
@@ -218,10 +219,11 @@ def test_get_without_an_id_or_for_an_unknown_run_is_an_error(store, seat):
     assert "error" in asyncio.run(code_tool.run_code(action="get", run_id="code_x"))
 
 
-def test_history_rereads_the_index_the_main_process_writes(tmp_path, seat, monkeypatch):
+def test_history_rereads_the_index_the_main_process_writes(seat):
     """A cached store would answer with whatever existed at subprocess start."""
-    directory = tmp_path / "code_runs"
-    monkeypatch.setattr("condor.code_runs._DATA_DIR", directory)
+    # The tool's *default* store, which conftest's $CONDOR_DATA_DIR already
+    # points at this test's tmp_path -- no monkeypatch of a private name.
+    directory = paths.code_runs_dir()
     CodeRunStore(directory)  # the reader's view at startup: empty
 
     asyncio.run(code_tool.run_code(action="history"))  # warms nothing

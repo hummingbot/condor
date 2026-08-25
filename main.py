@@ -19,6 +19,7 @@ from telegram.ext import (
     filters,
 )
 
+from condor import paths
 from condor.persistence import SafePicklePersistence
 from condor.telemetry import taps as telemetry_taps
 from handlers import cancel_command, clear_all_input_states
@@ -793,13 +794,14 @@ def get_persistence() -> SafePicklePersistence:
     """
     Build a persistence object that works both locally and in Docker.
     - Uses an env var override if provided.
-    - Defaults to <project_root>/data/condor_bot_data.pickle.
+    - Defaults to <project_root>/data/condor_bot_data.pickle, resolved through
+      condor.paths.data_dir() so $CONDOR_DATA_DIR repoints the whole
+      operational store at once rather than this one file.
     - Ensures the parent directory exists, but does NOT create the file.
     - Uses SafePicklePersistence for atomic writes, backup recovery,
       and ephemeral key filtering.
     """
-    base_dir = Path(__file__).parent
-    default_path = base_dir / "data" / "condor_bot_data.pickle"
+    default_path = paths.data_dir() / "condor_bot_data.pickle"
 
     persistence_path = Path(os.getenv("CONDOR_PERSISTENCE_FILE", default_path))
 

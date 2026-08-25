@@ -47,28 +47,21 @@ def _reset_gecko_throttle():
 
 @pytest.fixture(autouse=True)
 def _isolated_runtime_root(tmp_path, monkeypatch):
-    """Keep the whole runtime store out of the developer's live install.
+    """Keep both durable roots out of the developer's live install.
 
-    The same wound as ``_isolated_notification_store`` below, one layer up: for
-    as long as every store derived its own root there was nothing to repoint,
-    so four test modules each had to remember to monkeypatch a private ``_root``
-    and four others forgot -- which is how 812 stub conversations ended up in a
-    real install (FEAT-051). One root, one env var, one fixture.
+    For as long as every store derived its own root there was nothing to
+    repoint, so four test modules each had to remember to monkeypatch a private
+    ``_root`` and four others forgot -- which is how 812 stub conversations
+    ended up in a real install (FEAT-051). One env var per root, one fixture.
+
+    The second line covers ``data/``: the bell, the routine hooks, the backtest
+    store and the code runs used to need a per-module monkeypatch of a private
+    name each (and a test that forgot appended to the running install's
+    notification bell, or dropped a record among the live ones in
+    ``data/code_runs/``). They all resolve through ``condor.paths`` now, so
+    ``$CONDOR_DATA_DIR`` moves the lot.
     """
     from condor import paths
 
     monkeypatch.setenv(paths.RUNTIME_ROOT_ENV, str(tmp_path / "condor-runtime"))
-
-
-@pytest.fixture(autouse=True)
-def _isolated_notification_store(tmp_path, monkeypatch):
-    """Keep the bell's store out of the developer's ``data/`` directory.
-
-    ``condor.notifications.record`` is now reached from several producers
-    (FEAT-048), so without this any test that finishes a delegation, a routine
-    or a ``notify`` call appends to the real ``data/notifications.json`` — and a
-    test run would show up in the running install's notification bell.
-    """
-    from condor import notifications
-
-    monkeypatch.setattr(notifications, "_FILE", tmp_path / "notifications.json")
+    monkeypatch.setenv(paths.DATA_DIR_ENV, str(tmp_path / "condor-data"))

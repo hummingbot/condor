@@ -19,6 +19,7 @@ from starlette.testclient import TestClient
 
 import condor.routine_hooks as hooks
 import condor.web.routes.routines as routines_module
+from condor import paths
 from condor.web.auth import get_current_user
 from condor.web.models import WebUser
 
@@ -36,12 +37,15 @@ class FakeConfigManager:
 
 
 @pytest.fixture(autouse=True)
-def hooks_file(tmp_path, monkeypatch):
+def hooks_file(monkeypatch):
     """Point the hook store at a throwaway file and stub the role lookup."""
     import config_manager
 
-    path = tmp_path / "routine_hooks.json"
-    monkeypatch.setattr(hooks, "_HOOKS_FILE", path)
+    # No monkeypatch of the store's path: conftest's $CONDOR_DATA_DIR already
+    # points the whole operational store at this test's tmp_path, so what runs
+    # here is the resolver production uses.
+    path = paths.routine_hooks_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(config_manager, "get_config_manager", FakeConfigManager)
     # The "dropped a dead field" log fires once per routine per process.
     monkeypatch.setattr(hooks, "_dead_field_warned", set())

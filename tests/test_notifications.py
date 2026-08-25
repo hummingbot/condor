@@ -14,7 +14,7 @@ import json
 
 import pytest
 
-from condor import notifications
+from condor import notifications, paths
 from condor.notifications import (
     NotifyBot,
     list_for,
@@ -30,12 +30,15 @@ USER_B = 222
 
 
 @pytest.fixture
-def store(tmp_path, monkeypatch):
-    """A private store file and an empty sink registry for each test."""
-    path = tmp_path / "notifications.json"
-    monkeypatch.setattr(notifications, "_FILE", path)
+def store(monkeypatch):
+    """A private store file and an empty sink registry for each test.
+
+    The file itself needs no monkeypatch: conftest's ``$CONDOR_DATA_DIR``
+    already puts the whole operational store under this test's ``tmp_path``,
+    so this is the path production resolves.
+    """
     monkeypatch.setattr(notifications, "_push_sinks", [])
-    return path
+    return paths.notifications_path()
 
 
 @pytest.fixture

@@ -10,8 +10,9 @@ live *and* is still there, unread, an hour later.
 Two rules shape it:
 
 * **The notice must survive nobody watching.** So a store, not just a push:
-  ``data/notifications.json``, newest first, capped per user, written with
-  :func:`condor.fsutil.atomic_write_json` exactly like ``routine_hooks.json``.
+  :func:`condor.paths.notifications_path`, newest first, capped per user,
+  written with :func:`condor.fsutil.atomic_write_json` exactly like
+  ``routine_hooks.json``.
 * **Core must not import the web layer.** The surface registers itself at
   import time, the same shape ``condor/runtime/wake.py`` uses for wake and note
   sinks — see ``condor/web/routes/chat_ws.py``.
@@ -31,14 +32,12 @@ import logging
 import time
 import uuid
 from dataclasses import asdict, dataclass
-from pathlib import Path
 from typing import Any, Awaitable, Callable, NamedTuple
 
+from condor import paths
 from condor.fsutil import atomic_write_json
 
 log = logging.getLogger(__name__)
-
-_FILE = Path("data") / "notifications.json"
 
 # Per user. A bell shows the last few dozen; anything older is history nobody
 # scrolls to, and an unbounded file would be read and rewritten on every record.
@@ -100,20 +99,21 @@ async def _push(notification: Notification) -> None:
 
 
 def _read_all() -> dict[str, list[dict]]:
-    if not _FILE.exists():
+    path = paths.notifications_path()
+    if not path.exists():
         return {}
     try:
-        data = json.loads(_FILE.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
             return {}
         return {str(k): v for k, v in data.items() if isinstance(v, list)}
     except Exception:  # noqa: BLE001
-        log.warning("Failed to read %s; treating as empty", _FILE)
+        log.warning("Failed to read %s; treating as empty", path)
         return {}
 
 
 def _write_all(data: dict[str, list[dict]]) -> None:
-    atomic_write_json(_FILE, data, indent=2)
+    atomic_write_json(paths.notifications_path(), data, indent=2)
 
 
 def _hydrate(raw: dict) -> Notification | None:

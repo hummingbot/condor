@@ -294,11 +294,13 @@ def _direct_http(posted: list, reply: dict):
 
 
 @pytest.fixture
-def store(tmp_path, monkeypatch):
-    """A private bell store and an empty sink registry (see test_notifications)."""
+def store(monkeypatch):
+    """A private bell store and an empty sink registry (see test_notifications).
+
+    conftest's ``$CONDOR_DATA_DIR`` already isolates the store's file.
+    """
     from condor import notifications
 
-    monkeypatch.setattr(notifications, "_FILE", tmp_path / "notifications.json")
     monkeypatch.setattr(notifications, "_push_sinks", [])
 
 

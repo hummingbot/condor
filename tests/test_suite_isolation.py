@@ -7,14 +7,20 @@ conversations and a stream of test delegations inside a running install.
 
 Asserting on "nothing appeared on disk after the run" would be flaky (the real
 bot may be running while the suite is), so what is pinned here is the mechanism
-instead: with the autouse fixtures in ``conftest.py`` active, every path a
+instead: with the autouse fixture in ``conftest.py`` active, every path a
 writer can build resolves outside the repository. If someone reintroduces a
-root that ignores ``CONDOR_RUNTIME_ROOT``, one of these fails.
+root that ignores ``CONDOR_RUNTIME_ROOT`` or ``CONDOR_DATA_DIR``, one of these
+fails.
+
+Both roots are covered, because both are durable and both were reachable from
+a test: ``.condor/`` (conversations, delegations, state, telemetry) and
+``data/`` (the bell, routine hooks, backtests, code runs) -- the second is the
+one whose three cwd-relative constants READ-215 replaced with resolvers.
 """
 
 from pathlib import Path
 
-from condor import notifications, paths
+from condor import backtest_store, code_runs, paths
 from condor.agents.delegate import DelegateTask, _record_dir
 
 REPO = Path(__file__).resolve().parent.parent
@@ -52,5 +58,23 @@ def test_a_delegation_would_be_written_outside_the_install():
     assert "agents" not in _record_dir(dt).parts
 
 
-def test_the_notification_bell_is_isolated_too():
-    assert _outside_the_repo(Path(notifications._FILE))
+def test_the_operational_store_is_isolated_too():
+    """``data/`` is the second durable root, and a test must not land in it."""
+    assert paths.data_dir() != REPO / "data"
+    assert _outside_the_repo(paths.data_dir())
+    assert _outside_the_repo(paths.notifications_path())
+    assert _outside_the_repo(paths.routine_hooks_path())
+    assert _outside_the_repo(paths.backtests_dir())
+    assert _outside_the_repo(paths.legacy_backtests_file())
+    assert _outside_the_repo(paths.code_runs_dir())
+
+
+def test_the_default_stores_land_outside_the_install():
+    """The writers' own defaults, not a reconstruction of them.
+
+    ``BacktestStore()`` and ``CodeRunStore()`` both create their directory in
+    ``__init__``, so a default that had stayed bound at import would make this
+    test itself write into the live ``data/``.
+    """
+    assert _outside_the_repo(backtest_store.BacktestStore()._dir)
+    assert _outside_the_repo(code_runs.CodeRunStore()._dir)
