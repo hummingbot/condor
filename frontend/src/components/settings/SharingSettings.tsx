@@ -28,7 +28,8 @@ const CHOICES: { value: SharingState; label: string; detail: string }[] = [
   {
     value: "off",
     label: "Off",
-    detail: "Nothing is shared. The share button stays available if you want it.",
+    detail:
+      "Nothing is shared. The share button stays available if you want it.",
   },
   {
     value: "explicit",
@@ -161,7 +162,8 @@ export function SharingSettings() {
             const selected = state === choice.value;
             // Always is the only answer that needs the install's permission:
             // it is the only one that sends anything on its own.
-            const blocked = choice.value === "always" && preference?.allowed === false;
+            const blocked =
+              choice.value === "always" && preference?.allowed === false;
             return (
               <button
                 key={choice.value}
@@ -204,8 +206,8 @@ export function SharingSettings() {
         )}
         {state === "always" && preference?.allowed === false && (
           <p className="mt-2 text-xs text-[var(--color-yellow)]">
-            Your answer is Always, but sharing is turned off for this install, so
-            nothing is going out.
+            Your answer is Always, but sharing is turned off for this install,
+            so nothing is going out.
           </p>
         )}
         {choose.isError && (
@@ -263,8 +265,12 @@ export function SharingSettings() {
 
         {shares.length > 0 && (
           <p className="mt-2 text-xs text-[var(--color-text-muted)]">
-            Unsharing deletes the copy on our side. Deleting a conversation here
-            unshares it first, so it never outlives the chat it came from.
+            Unsharing deletes the copy on our side, and takes that chat out of
+            automatic sharing for good — it will not be sent again on its own,
+            however much it grows. To put one back, open it and use{" "}
+            <span className="text-[var(--color-text)]">Include it</span> on the
+            header chip. Deleting a conversation here unshares it first, so it
+            never outlives the chat it came from.
           </p>
         )}
         {unshare.isError && (
@@ -284,13 +290,24 @@ export function SharingSettings() {
                 Unshare all {shares.length} conversations? Every copy we hold is
                 deleted. The chats themselves stay here, untouched.
               </p>
+              {/* The caveat this button earns: each one is also excluded from
+                  automatic sharing, and there is no bulk way back. Somebody who
+                  later wants Always to cover their archive again has to include
+                  the chats one at a time, so they are told before, not after. */}
+              <p className="mt-1 text-xs text-[var(--color-text-muted)]">
+                {state === "always"
+                  ? "All of them also stop being shared automatically, permanently. Turning Always back on will not cover them again — each one has to be included from its own header chip."
+                  : "All of them are also taken out of automatic sharing, so turning Always on later will not cover them — each one has to be included from its own header chip."}
+              </p>
               <div className="mt-2 flex gap-2">
                 <button
                   onClick={() => purge.mutate()}
                   disabled={purge.isPending}
                   className="flex items-center gap-1.5 rounded-md bg-[var(--color-red)] px-3 py-1 text-xs font-medium text-white disabled:opacity-60"
                 >
-                  {purge.isPending && <Loader2 className="h-3 w-3 animate-spin" />}
+                  {purge.isPending && (
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                  )}
                   Yes, delete everything I've shared
                 </button>
                 <button

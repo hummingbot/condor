@@ -250,56 +250,68 @@ export function ShareConversation({
               ))}
             </div>
 
-            <div className="flex items-center justify-between gap-2 border-t border-[var(--color-border)] p-4">
-              <div className="flex gap-2">
-                <button
-                  onClick={download}
-                  className="flex items-center gap-1.5 rounded-md border border-[var(--color-border)] px-3 py-1.5 text-xs text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
-                >
-                  <Download className="h-3.5 w-3.5" />
-                  Download instead
-                </button>
-                {data.shared && (
+            <div className="border-t border-[var(--color-border)] p-4">
+              {/* Said before the button is pressed, not discovered a sweep
+                  later: unsharing is a standing refusal, and the way back in is
+                  the header chip's Include it. */}
+              {data.shared && (
+                <p className="mb-3 text-xs leading-relaxed text-[var(--color-text-muted)]">
+                  Unsharing deletes our copy and stops this chat being shared
+                  automatically — it will not be sent again unless you include
+                  it from the header chip or press Share here yourself.
+                </p>
+              )}
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex gap-2">
                   <button
-                    onClick={() => unshareMutation.mutate()}
-                    disabled={unshareMutation.isPending}
-                    className="flex items-center gap-1.5 rounded-md border border-[var(--color-border)] px-3 py-1.5 text-xs text-[var(--color-red)] hover:bg-[var(--color-surface-hover)]"
+                    onClick={download}
+                    className="flex items-center gap-1.5 rounded-md border border-[var(--color-border)] px-3 py-1.5 text-xs text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
                   >
-                    <Trash2 className="h-3.5 w-3.5" />
-                    Unshare
+                    <Download className="h-3.5 w-3.5" />
+                    Download instead
                   </button>
-                )}
-              </div>
+                  {data.shared && (
+                    <button
+                      onClick={() => unshareMutation.mutate()}
+                      disabled={unshareMutation.isPending}
+                      className="flex items-center gap-1.5 rounded-md border border-[var(--color-border)] px-3 py-1.5 text-xs text-[var(--color-red)] hover:bg-[var(--color-surface-hover)]"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                      Unshare
+                    </button>
+                  )}
+                </div>
 
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={onClose}
-                  className="rounded-md px-3 py-1.5 text-xs text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
-                >
-                  Cancel
-                </button>
-                {confirming ? (
+                <div className="flex items-center gap-2">
                   <button
-                    onClick={() => shareMutation.mutate()}
-                    disabled={shareMutation.isPending}
-                    className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-white disabled:opacity-60"
+                    onClick={onClose}
+                    className="rounded-md px-3 py-1.5 text-xs text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
                   >
-                    {shareMutation.isPending ? (
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                    ) : (
-                      <Send className="h-3.5 w-3.5" />
-                    )}
-                    Yes, send this
+                    Cancel
                   </button>
-                ) : (
-                  <button
-                    onClick={() => setConfirming(true)}
-                    className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-white"
-                  >
-                    <Share2 className="h-3.5 w-3.5" />
-                    {data.shared ? "Share again" : "Share"}
-                  </button>
-                )}
+                  {confirming ? (
+                    <button
+                      onClick={() => shareMutation.mutate()}
+                      disabled={shareMutation.isPending}
+                      className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-white disabled:opacity-60"
+                    >
+                      {shareMutation.isPending ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <Send className="h-3.5 w-3.5" />
+                      )}
+                      Yes, send this
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => setConfirming(true)}
+                      className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-white"
+                    >
+                      <Share2 className="h-3.5 w-3.5" />
+                      {data.shared ? "Share again" : "Share"}
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
 

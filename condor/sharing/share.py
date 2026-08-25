@@ -206,6 +206,16 @@ def unshare(user_id: int, conv_id: str) -> bool:
     mean the UI shows "shared" for a conversation the user has already taken
     back, and the queue — not the meta — is what actually owes the server a
     request.
+
+    Revoking also **excludes** the conversation (CORR-231). Clearing the receipt
+    alone is not a revocation for a user at ``always``: it resets
+    ``share_turn_count`` to zero, which is precisely the state the sweep's
+    growth gate reads as "never sent", so the next tick would re-upload the same
+    transcript under a fresh ``share_id`` half an hour later. ``share_excluded``
+    is the one flag the sweep honours forever, and it is inert for users at
+    ``off`` or ``explicit`` — nothing was going to be taken from them anyway. The
+    way back in is the header chip's *Include it*, which is a deliberate act
+    rather than an automatic one.
     """
     meta = _meta(user_id, conv_id)
     if not meta.share_id or not meta.share_delete_token:
@@ -227,6 +237,7 @@ def unshare(user_id: int, conv_id: str) -> bool:
         share_delete_token="",
         shared_at=None,
         share_turn_count=0,
+        share_excluded=True,
     )
     log.info("Queued an unshare for conversation %s", conv_id)
     return True
@@ -245,6 +256,13 @@ def unshare_all(user_id: int) -> int:
     queued with its own delete token and survives a restart exactly like a
     single one does. A conversation that fails is logged and the rest continue:
     a partial withdrawal is strictly better than an aborted one.
+
+    Each one is also excluded from the sweep, per :func:`unshare`. For a user
+    still at ``always`` that means the whole back catalogue stops being swept,
+    permanently and with no bulk way back — they just asked for all of it
+    deleted, so re-uploading any of it on the next tick would be the wrong
+    reading. Settings says so on the button, and an individual chat can be
+    re-included from its header chip.
     """
     removed = 0
     for meta in conversations.list_conversations(user_id, limit=0):
