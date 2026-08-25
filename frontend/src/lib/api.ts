@@ -1157,6 +1157,12 @@ export interface ConversationMeta {
   updated_at: string;
   turn_count: number;
   last_snippet: string;
+  /** Set once this conversation has been shared (FEAT-054); "" if never. The
+   *  delete token that revokes the share is deliberately not here — it never
+   *  crosses the API boundary. */
+  share_id?: string;
+  share_revision?: number;
+  shared_at?: string | null;
 }
 
 export interface ConversationTurn {
@@ -1173,6 +1179,60 @@ export interface ConversationTurn {
 export interface ConversationDetail {
   meta: ConversationMeta;
   turns: ConversationTurn[];
+}
+
+// ── Sharing a conversation (FEAT-054) ──
+//
+// A separate surface from telemetry on purpose. Telemetry is anonymous counts
+// the admin consents to once, install-wide; this is content, and only the
+// person who said it can hand it over — every time, after seeing exactly what
+// would be sent.
+
+/** How many values each tier of the scrubber replaced. Every category is
+ *  present, zeros included: an all-zero share is how a broken scrubber shows up,
+ *  and that only reads as a signal if the zeros are reported. */
+export type RedactionCounts = Record<string, number>;
+
+export interface SharePreview {
+  conversation_id: string;
+  title: string;
+  surface: string;
+  agent_slug: string;
+  agent_key: string;
+  /** The scrubbed transcript, exactly as it would be sent. */
+  turns: ConversationTurn[];
+  counts: RedactionCounts;
+  truncated: boolean;
+  turns_omitted: number;
+  revision: number;
+  shared: boolean;
+  share_id: string;
+  shared_at: string | null;
+}
+
+export interface ShareReceipt {
+  conversation_id: string;
+  share_id: string;
+  revision: number;
+  shared_at: string;
+  queued: boolean;
+}
+
+export interface SharedConversation {
+  conversation_id: string;
+  title: string;
+  share_id: string;
+  revision: number;
+  shared_at: string | null;
+  turn_count: number;
+}
+
+export interface SharingSettingsResponse {
+  enabled: boolean;
+  env_overridden: boolean;
+  can_change: boolean;
+  endpoint_configured: boolean;
+  pending: number;
 }
 
 export interface SwitchSessionRequest {
@@ -2273,12 +2333,47 @@ export const api = {
       body: JSON.stringify({ title }),
     }),
 
-  /** The only way to lose a transcript. Killing a session no longer does. */
+  /** The only way to lose a transcript. Killing a session no longer does.
+   *  A shared conversation is unshared on the way out — otherwise "delete"
+   *  would mean "delete here, keep there". */
   deleteConversation: (id: string) =>
-    apiFetch<{ deleted: boolean; sessions_destroyed: number }>(
+    apiFetch<{ deleted: boolean; sessions_destroyed: number; unshared: boolean }>(
       `/api/v1/conversations/${encodeURIComponent(id)}`,
       { method: "DELETE" },
     ),
+
+  // ── Sharing a conversation (FEAT-054) ──
+
+  /** What would be sent, scrubbed. Sends nothing — the dialog renders this and
+   *  the POST below runs the identical code path, so what the user approves is
+   *  what leaves. */
+  previewShare: (id: string) =>
+    apiFetch<SharePreview>(
+      `/api/v1/sharing/conversations/${encodeURIComponent(id)}/preview`,
+    ),
+
+  shareConversation: (id: string) =>
+    apiFetch<ShareReceipt>(`/api/v1/sharing/conversations/${encodeURIComponent(id)}`, {
+      method: "POST",
+    }),
+
+  unshareConversation: (id: string) =>
+    apiFetch<{ unshared: boolean; conversation_id: string }>(
+      `/api/v1/sharing/conversations/${encodeURIComponent(id)}`,
+      { method: "DELETE" },
+    ),
+
+  listSharedConversations: () =>
+    apiFetch<SharedConversation[]>("/api/v1/sharing/conversations"),
+
+  getSharingSettings: () =>
+    apiFetch<SharingSettingsResponse>("/api/v1/sharing/settings"),
+
+  setSharingEnabled: (enabled: boolean) =>
+    apiFetch<SharingSettingsResponse>("/api/v1/sharing/settings", {
+      method: "PUT",
+      body: JSON.stringify({ enabled }),
+    }),
 
   // ── Custom OpenAI-compatible LLM endpoints ──
 

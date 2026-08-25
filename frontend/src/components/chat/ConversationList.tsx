@@ -8,9 +8,11 @@ import {
   Pencil,
   Plus,
   Send,
+  Share2,
   Trash2,
 } from "lucide-react";
 
+import { ShareConversation } from "@/components/chat/ShareConversation";
 import { api, type ConversationMeta } from "@/lib/api";
 
 const QUERY_KEY = ["conversations"] as const;
@@ -69,6 +71,7 @@ export const ConversationList = memo(function ConversationList({
   const [renaming, setRenaming] = useState<string | null>(null);
   const [draftTitle, setDraftTitle] = useState("");
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const [sharing, setSharing] = useState<string | null>(null);
 
   // The rail mounts with the chat workspace, so "always" is one fetch per
   // arrival at the workspace — and a chat started seconds ago is at the top
@@ -269,6 +272,21 @@ export const ConversationList = memo(function ConversationList({
                           <Pencil className="h-3 w-3" />
                         </button>
                         <button
+                          onClick={() => setSharing(meta.id)}
+                          className={`rounded bg-[var(--color-surface)] p-1 hover:text-[var(--color-primary)] ${
+                            meta.share_id
+                              ? "text-[var(--color-primary)]"
+                              : "text-[var(--color-text-muted)]"
+                          }`}
+                          title={
+                            meta.share_id
+                              ? "Shared with Condor — review or unshare"
+                              : "Share with Condor"
+                          }
+                        >
+                          <Share2 className="h-3 w-3" />
+                        </button>
+                        <button
                           onClick={() => setConfirmDelete(meta.id)}
                           className="rounded bg-[var(--color-surface)] p-1 text-[var(--color-text-muted)] hover:text-[var(--color-red)]"
                           title="Delete"
@@ -284,6 +302,17 @@ export const ConversationList = memo(function ConversationList({
           </div>
         ))}
       </div>
+
+      {/* One dialog for the whole rail rather than one per row: it is mounted
+          only while a conversation is selected, and its preview query is keyed
+          on that id. */}
+      {sharing && (
+        <ShareConversation
+          conversationId={sharing}
+          open
+          onClose={() => setSharing(null)}
+        />
+      )}
     </div>
   );
 });

@@ -7,6 +7,7 @@ import { ApiKeysSettings } from "@/components/settings/ApiKeysSettings";
 import { CustomProvidersSettings } from "@/components/settings/CustomProvidersSettings";
 import { GatewaySettings } from "@/components/settings/GatewaySettings";
 import { ServersSettings } from "@/components/settings/ServersSettings";
+import { SharingSettings } from "@/components/settings/SharingSettings";
 import { TelemetrySettings } from "@/components/settings/TelemetrySettings";
 import { VoiceSettings } from "@/components/settings/VoiceSettings";
 import { ADMIN_USERS_KEY, adminApi } from "@/lib/admin-api";
@@ -82,7 +83,18 @@ export function Settings() {
       {tab === "keys" && <ApiKeysSettings />}
       {tab === "llm" && <CustomProvidersSettings />}
       {tab === "voice" && <VoiceSettings />}
-      {tab === "privacy" && <TelemetrySettings />}
+      {/* Two cards, not one switch. Telemetry is anonymous counts the admin
+          consents to install-wide; sharing is content only its author can hand
+          over. They are different promises, and merging the controls would
+          misrepresent one of them — the divider is where the copy says so. */}
+      {tab === "privacy" && (
+        <div className="space-y-8">
+          <TelemetrySettings />
+          <div className="border-t border-[var(--color-border)] pt-8">
+            <SharingSettings />
+          </div>
+        </div>
+      )}
       {tab === "admin" && <AdminSettings />}
     </div>
   );
