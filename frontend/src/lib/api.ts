@@ -489,6 +489,16 @@ export interface Ticker {
   quote_volume: number;
   /** 24h volume in USD; null when the quote asset couldn't be priced. */
   usd_volume: number | null;
+  /**
+   * Price change in percent against the snapshot closest to 24h ago; null until
+   * the backend has a reference, and for a pair listed after it was taken.
+   */
+  change_pct: number | null;
+  /**
+   * The window `change_pct` was actually measured over, in seconds — never
+   * assume 24h, label the column from this.
+   */
+  change_window_s: number | null;
 }
 
 export interface TickersResponse {

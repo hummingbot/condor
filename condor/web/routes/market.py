@@ -316,6 +316,29 @@ async def get_trading_rules(
     return TradingRulesResponse(connector=connector, rules=rules)
 
 
+def _join_change(server: str, connector: str, tickers: list[TickerItem]) -> None:
+    """Fill in `change_pct` / `change_window_s` from the recorded price history.
+
+    A read of an in-memory ring (`condor.ticker_history`), not of the upstream:
+    the API has no change field on the CLOB path at all, so the reference comes
+    from the ticker-pool snapshots Condor takes off its own poll. Every row that
+    gets a number gets the window it was measured over with it.
+    """
+    from condor import ticker_history
+
+    ref = ticker_history.reference(server)
+    if not ref:
+        return
+
+    prices, window = ref
+    connector_prices = prices.get(connector) or {}
+    for t in tickers:
+        was = connector_prices.get(t.trading_pair)
+        if was and was > 0 and t.price > 0:
+            t.change_pct = (t.price / was - 1) * 100
+            t.change_window_s = window
+
+
 @router.get("/servers/{name}/market/tickers", response_model=TickersResponse)
 async def get_tickers(
     name: str,
@@ -340,6 +363,7 @@ async def get_tickers(
         for pair, data in (result.get("tickers") or {}).items()
         if isinstance(data, dict)
     ]
+    _join_change(name, connector, tickers)
     # Unpriced quotes sort last rather than mixing in at zero volume.
     tickers.sort(
         key=lambda t: (t.usd_volume is not None, t.usd_volume or 0), reverse=True
