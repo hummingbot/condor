@@ -46,7 +46,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Collection, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -351,8 +351,9 @@ def _from_dir(record_dir: Path) -> dict[str, Any] | None:
 
 
 # ── listing: sort first, hydrate the survivors ──────────────────────────────
-# A listing walks every delegation an owner ever ran -- nothing prunes those
-# directories -- but returns at most ``limit`` of them. So the walk yields
+# A listing walks every delegation an owner still has on disk -- bounded since
+# PERF-222, but always more than a page -- and returns at most ``limit`` of
+# them. So the walk yields
 # *handles*: the sort key, the id (for de-duplication), and a thunk that builds
 # the record. Only the rows that survive the sort are ever built.
 
@@ -395,6 +396,49 @@ def _entries_of(user_id: int | str) -> Iterator[Entry]:
         entry = _entry_from_dir(child)
         if entry is not None:
             yield entry
+
+
+# ── retention: which directories are safe to consider ──────────────────────
+
+
+def terminal_record_dirs(
+    user_id: int | str, states: Collection[str]
+) -> list[tuple[float, str, Path]]:
+    """This owner's records whose status file reports one of ``states``, oldest first.
+
+    The read half of PERF-222's retention sweep, and nothing more: it answers
+    *which directories are candidates*, as ``(sort key, task_id, directory)``.
+    Deciding and deleting stay on the write side
+    (:func:`condor.agents.delegate.prune_delegation_records`), which is the only
+    thing that knows which task ids are still live in this process -- so this
+    module keeps its one job, reading.
+
+    A directory with no status file, or one whose state is not in ``states``, is
+    left out entirely: it is neither evictable nor counted towards a cap. Sorted
+    by the key :func:`list_history` orders on, so the first record here is the
+    row that listing would have shown last.
+    """
+    from condor.runtime.registry_file import read_status
+
+    try:
+        children = paths.delegations_dir(user_id).iterdir()
+    except (OSError, paths.UnsafeIdError):
+        return []
+
+    records: list[tuple[float, str, Path]] = []
+    for child in children:
+        try:
+            if not child.is_dir() or not (child / DELEGATION_STATUS_FILENAME).is_file():
+                continue
+        except OSError:  # pragma: no cover - a directory vanishing mid-walk
+            continue
+        data = read_status(child, DELEGATION_STATUS_FILENAME) or {}
+        if data.get("state") not in states:
+            continue
+        key = _status_sort_key(data, child / DELEGATION_TRANSCRIPT_FILENAME)
+        records.append((key, child.name, child))
+    records.sort(key=lambda record: (record[0], record[1]))
+    return records
 
 
 def _legacy_entries_in(agent_slug: str, directory: Path) -> Iterator[Entry]:
@@ -449,8 +493,10 @@ def list_history(
     is the authority for anything still running in this process.
 
     Ordering happens before hydration: every delegation on disk is *ordered*,
-    only ``limit`` of them are *built*. Nothing prunes these directories, so the
-    walk grows for the life of the install while the page stays the same size.
+    only ``limit`` of them are *built* (PERF-204). What bounds the *ordering* is
+    retention: :func:`condor.agents.delegate.prune_delegation_records` caps how
+    many terminal records an owner keeps, so the walk no longer grows for the
+    life of the install (PERF-222).
     """
     entries: list[Entry] = []
     for owner in _owners(user_id):

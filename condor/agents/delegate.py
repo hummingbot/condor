@@ -31,12 +31,21 @@ from :mod:`condor.agents.delegation_history` instead. Within one delegation the
 event stream is bounded too (:data:`MAX_EVENTS_PER_DELEGATION`, with tool
 payloads clipped to what a reader would have been shown anyway), so no single
 runaway session can pin an unbounded transcript.
+
+The files behind that fallback are bounded too, since PERF-222. Every finishing
+delegation sweeps its own owner's directory
+(:func:`prune_delegation_records`), keeping the most recent
+:data:`MAX_DELEGATION_RECORDS` terminal records and dropping the rest whole --
+so neither the disk nor the walk a history listing does grows with the age of
+the install. Nothing still running is ever a candidate.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import shutil
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -91,6 +100,19 @@ DROPPED_EVENT_TYPE = "dropped"
 # ``/delegations/history`` route as their complete view. In-flight delegations
 # are never evicted, at any count.
 MAX_FINISHED_DELEGATIONS = 25
+
+# How many *terminal* records one owner keeps on disk (PERF-222). The disk twin
+# of the bound above: that one caps what stays in RAM, this one caps what stays
+# in ``.condor/users/{id}/delegations/``, which until now nothing ever removed --
+# so a listing walked, and stat'd, every delegation the install had ever run.
+#
+# Deliberately generous: this is a history a person may legitimately scroll, the
+# cost of an over-large cap is only a slower listing, and the cost of an
+# over-small one is history that is gone for good. ``$CONDOR_MAX_DELEGATION_RECORDS``
+# overrides it, and a value of zero or less turns retention off entirely -- an
+# install that wants to keep everything says so rather than discovering the
+# default the hard way.
+MAX_DELEGATION_RECORDS = int(os.environ.get("CONDOR_MAX_DELEGATION_RECORDS", "") or 500)
 
 # What happens to the conversation that asked for the work when the task ends.
 #
@@ -259,6 +281,94 @@ def _record_delegation_status(dt: "DelegateTask") -> None:
         log.debug(
             "Could not record delegation status for %s", dt.task_id, exc_info=True
         )
+
+    # The growth and the sweep in one place: a record directory only ever
+    # appears here, so the cheapest correct moment to bound the collection is
+    # the write that completes one. Outside the try above on purpose -- the
+    # status write is the delegation's own business and must have landed (or
+    # failed) on its own terms before retention gets a say. Scoped to the one
+    # owner whose directory just grew; walking every user would put the whole
+    # install on a hot path.
+    if dt.status in TERMINAL_STATES:
+        try:
+            prune_delegation_records(dt.user_id or 0)
+        except Exception:
+            log.warning(
+                "Could not prune delegation records for user %s",
+                dt.user_id or 0,
+                exc_info=True,
+            )
+
+
+def _is_live_delegation(task_id: str) -> bool:
+    """True while this task could still be writing into its record directory.
+
+    The on-disk state alone cannot answer this: ``_record_delegation_status``
+    stamps the terminal state from ``_run``'s ``finally``, while that very task
+    is still on the loop and still has a notification and a wake to do. So the
+    registry is consulted the way :meth:`RoutineStore._has_live_task` is --
+    unknown here means finished elsewhere (a previous process), which is the
+    only reading a restart leaves available anyway.
+    """
+    dt = _delegations.get(task_id)
+    if dt is None:
+        return False
+    if dt.status not in TERMINAL_STATES:
+        return True
+    return dt._task is not None and not dt._task.done()
+
+
+def prune_delegation_records(user_id: int | str) -> int:
+    """Evict this owner's oldest terminal records past :data:`MAX_DELEGATION_RECORDS`.
+
+    The disk counterpart of :func:`retire_delegation`, and modelled on
+    ``RoutineStore._prune_instances`` -- the repo's existing answer to this
+    exact shape of problem -- so the rules are the same three:
+
+    * **Only terminal records are candidates.** A delegation still running, one
+      whose task is still on the loop, and one whose status file says anything
+      other than :data:`TERMINAL_STATES` (a state from a process that died, a
+      record with no status file at all) is exempt from eviction *and* from the
+      count. No amount of churn can reap or squeeze out something still live.
+    * **Oldest first**, by the same key the listing sorts on, so what is dropped
+      is what the listing would have shown last anyway.
+    * **The whole record directory goes** -- status, events and transcript
+      together -- so both the disk and the walk shrink, and a reader gets a
+      clean ``None`` rather than half a record.
+
+    Returns how many directories were evicted. Public so retention can be
+    exercised (and, on a large install, run) directly rather than only as a
+    side effect of finishing a delegation.
+    """
+    from condor.agents.delegation_history import terminal_record_dirs
+
+    if MAX_DELEGATION_RECORDS <= 0:  # retention off: keep everything
+        return 0
+
+    candidates = [
+        record
+        for record in terminal_record_dirs(user_id, TERMINAL_STATES)
+        if not _is_live_delegation(record[1])
+    ]
+    excess = len(candidates) - MAX_DELEGATION_RECORDS
+    if excess <= 0:
+        return 0
+
+    evicted = 0
+    for _key, task_id, record_dir in candidates[:excess]:
+        try:
+            shutil.rmtree(record_dir)
+        except OSError:
+            log.warning(
+                "Could not evict delegation record %s", record_dir, exc_info=True
+            )
+            continue
+        evicted += 1
+    if evicted:
+        log.debug(
+            "Evicted %s delegation record(s) from disk for user %s", evicted, user_id
+        )
+    return evicted
 
 
 def _make_event_sink(dt: DelegateTask):
