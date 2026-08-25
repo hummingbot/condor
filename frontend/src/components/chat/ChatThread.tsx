@@ -5,6 +5,7 @@ import type { ChatSlot } from "@/hooks/useChatSocket";
 import type { ChatAgentOption } from "@/lib/api";
 import { ChatInput } from "./ChatInput";
 import { ChatMessageView } from "./ChatMessage";
+import { SharingIndicator } from "./SharingIndicator";
 
 /** How close to the end still counts as "following the answer", in pixels. */
 const NEAR_BOTTOM_PX = 80;
@@ -142,6 +143,15 @@ export function ChatThread({
 
   return (
     <>
+      {/* Automatic sharing, while it is on. Above the permission banner because
+          it is a standing condition of the conversation rather than something
+          that just happened, and non-dismissable by design: with Always on
+          nobody reads the payload before it leaves, so the user must not be
+          able to forget it (FEAT-055). */}
+      {slot?.info.conversation_id && (
+        <SharingIndicator conversationId={slot.info.conversation_id} />
+      )}
+
       {/* Permission request banner */}
       {permissionRequest && (
         <div className="border-b border-amber-500/30 bg-amber-500/10 px-4 py-3">

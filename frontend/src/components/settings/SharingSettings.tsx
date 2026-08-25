@@ -1,5 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useState } from "react";
 import {
+  Check,
   Loader2,
   Lock,
   MessageSquare,
@@ -8,10 +10,43 @@ import {
   Trash2,
 } from "lucide-react";
 
-import { api } from "@/lib/api";
+import { api, type SharingState } from "@/lib/api";
 
 const SHARES_KEY = ["shared-conversations"] as const;
 const SETTINGS_KEY = ["sharing-settings"] as const;
+const PREFERENCE_KEY = ["sharing-preference"] as const;
+
+/**
+ * The three answers, with the copy that makes each one mean what it does.
+ *
+ * Always is described in full rather than summarised, because it is the only
+ * one where nobody reads the payload before it leaves. Every limit on it —
+ * idle, forward-only, single-author — is stated here, at the moment of the
+ * choice, and not left to be discovered in `PRIVACY.md` afterwards.
+ */
+const CHOICES: { value: SharingState; label: string; detail: string }[] = [
+  {
+    value: "off",
+    label: "Off",
+    detail: "Nothing is shared. The share button stays available if you want it.",
+  },
+  {
+    value: "explicit",
+    label: "Ask me",
+    detail:
+      "Share one conversation at a time, with the button, after reading the " +
+      "redacted transcript. This is what everyone gets by default.",
+  },
+  {
+    value: "always",
+    label: "Always",
+    detail:
+      "Share my conversations automatically once they have been idle for half " +
+      "an hour — redacted the same way, but without showing me first. Only " +
+      "chats started after I choose this, only ones where I am the only person " +
+      "talking, and never one I have excluded.",
+  },
+];
 
 function when(iso: string | null): string {
   if (!iso) return "";
@@ -36,10 +71,17 @@ function when(iso: string | null): string {
  */
 export function SharingSettings() {
   const queryClient = useQueryClient();
+  const [confirmingPurge, setConfirmingPurge] = useState(false);
 
   const { data: settings } = useQuery({
     queryKey: SETTINGS_KEY,
     queryFn: api.getSharingSettings,
+    retry: false,
+  });
+
+  const { data: preference } = useQuery({
+    queryKey: PREFERENCE_KEY,
+    queryFn: api.getSharingPreference,
     retry: false,
   });
 
@@ -62,6 +104,29 @@ export function SharingSettings() {
     onSuccess: (next) => queryClient.setQueryData(SETTINGS_KEY, next),
   });
 
+  const choose = useMutation({
+    mutationFn: (state: SharingState) => api.setSharingPreference(state),
+    onSuccess: (next) => {
+      queryClient.setQueryData(PREFERENCE_KEY, next);
+      // Every chat header reads this; a stale one would keep promising that a
+      // conversation is about to be shared after the user said stop.
+      queryClient.invalidateQueries({ queryKey: ["conversation-sharing"] });
+    },
+  });
+
+  const purge = useMutation({
+    mutationFn: () => api.unshareEverything(),
+    onSuccess: () => {
+      setConfirmingPurge(false);
+      queryClient.invalidateQueries({ queryKey: SHARES_KEY });
+      queryClient.invalidateQueries({ queryKey: PREFERENCE_KEY });
+      queryClient.invalidateQueries({ queryKey: ["conversations"] });
+      queryClient.invalidateQueries({ queryKey: ["conversation-sharing"] });
+    },
+  });
+
+  const state = preference?.state ?? "off";
+
   return (
     <div className="space-y-6">
       <section>
@@ -74,8 +139,9 @@ export function SharingSettings() {
             Separate from usage telemetry above, and it works differently.
             Telemetry is anonymous counts the admin turns on once for this whole
             install. A shared conversation is <strong>content</strong>: only you
-            can share one of yours, one at a time, and only after reading the
-            redacted transcript we would send.
+            can share one of yours, and by default only after reading the
+            redacted transcript we would send. You choose below whether that
+            stays one button press at a time.
           </p>
           <p>
             Keys, wallet addresses, server names, accounts and file paths are
@@ -83,6 +149,70 @@ export function SharingSettings() {
             transcript without them cannot show whether the agent was right.
           </p>
         </div>
+      </section>
+
+      <section>
+        <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-[var(--color-text-muted)]">
+          Share my conversations with Condor
+        </h4>
+
+        <div className="space-y-1">
+          {CHOICES.map((choice) => {
+            const selected = state === choice.value;
+            // Always is the only answer that needs the install's permission:
+            // it is the only one that sends anything on its own.
+            const blocked = choice.value === "always" && preference?.allowed === false;
+            return (
+              <button
+                key={choice.value}
+                disabled={blocked || choose.isPending}
+                onClick={() => choose.mutate(choice.value)}
+                className={`flex w-full items-start gap-3 rounded-lg border px-3 py-2 text-left transition-colors ${
+                  selected
+                    ? "border-[var(--color-primary)] bg-[var(--color-primary)]/10"
+                    : "border-[var(--color-border)] hover:bg-[var(--color-surface-hover)]"
+                } ${blocked ? "cursor-not-allowed opacity-50" : "cursor-pointer"}`}
+              >
+                <span
+                  className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border ${
+                    selected
+                      ? "border-[var(--color-primary)] bg-[var(--color-primary)]"
+                      : "border-[var(--color-border)]"
+                  }`}
+                >
+                  {selected && <Check className="h-2.5 w-2.5 text-white" />}
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block text-sm text-[var(--color-text)]">
+                    {choice.label}
+                  </span>
+                  <span className="mt-0.5 block text-xs leading-relaxed text-[var(--color-text-muted)]">
+                    {choice.detail}
+                  </span>
+                </span>
+              </button>
+            );
+          })}
+        </div>
+
+        {state === "always" && preference?.sweeping && (
+          <p className="mt-2 text-xs text-[var(--color-text-muted)]">
+            Every conversation this covers says so in its own header, with one
+            click to leave it out. Turning this off deletes anything queued but
+            not yet sent.
+          </p>
+        )}
+        {state === "always" && preference?.allowed === false && (
+          <p className="mt-2 text-xs text-[var(--color-yellow)]">
+            Your answer is Always, but sharing is turned off for this install, so
+            nothing is going out.
+          </p>
+        )}
+        {choose.isError && (
+          <p className="mt-2 text-xs text-[var(--color-red)]">
+            Could not save that. {(choose.error as Error).message}
+          </p>
+        )}
       </section>
 
       <section>
@@ -140,6 +270,49 @@ export function SharingSettings() {
         {unshare.isError && (
           <p className="mt-2 text-xs text-[var(--color-red)]">
             Could not unshare that. {(unshare.error as Error).message}
+          </p>
+        )}
+
+        {/* The back catalogue, as one button. Deliberately separate from the
+            Off choice above: turning off future sharing and withdrawing what
+            you already gave are two different decisions, and neither is the
+            default for the other. */}
+        {shares.length > 0 &&
+          (confirmingPurge ? (
+            <div className="mt-3 rounded-lg border border-[var(--color-red)]/40 bg-[var(--color-red)]/5 px-3 py-2">
+              <p className="text-xs text-[var(--color-text)]">
+                Unshare all {shares.length} conversations? Every copy we hold is
+                deleted. The chats themselves stay here, untouched.
+              </p>
+              <div className="mt-2 flex gap-2">
+                <button
+                  onClick={() => purge.mutate()}
+                  disabled={purge.isPending}
+                  className="flex items-center gap-1.5 rounded-md bg-[var(--color-red)] px-3 py-1 text-xs font-medium text-white disabled:opacity-60"
+                >
+                  {purge.isPending && <Loader2 className="h-3 w-3 animate-spin" />}
+                  Yes, delete everything I've shared
+                </button>
+                <button
+                  onClick={() => setConfirmingPurge(false)}
+                  className="rounded-md px-3 py-1 text-xs text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button
+              onClick={() => setConfirmingPurge(true)}
+              className="mt-3 flex items-center gap-1.5 rounded-md border border-[var(--color-border)] px-3 py-1.5 text-xs text-[var(--color-red)] hover:bg-[var(--color-surface-hover)]"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+              Delete everything I've shared
+            </button>
+          ))}
+        {purge.isError && (
+          <p className="mt-2 text-xs text-[var(--color-red)]">
+            Could not unshare everything. {(purge.error as Error).message}
           </p>
         )}
       </section>

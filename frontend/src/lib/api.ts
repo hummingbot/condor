@@ -1235,6 +1235,33 @@ export interface SharingSettingsResponse {
   pending: number;
 }
 
+// ── Sharing every conversation, opt-in (FEAT-055) ──
+
+/** Off = nothing leaves. Ask = the share button only, which is what everyone
+ *  has by default. Always = finished conversations go on their own. */
+export type SharingState = "off" | "explicit" | "always";
+
+export interface SharingPreferenceResponse {
+  state: SharingState;
+  /** When Always was chosen, as a Unix timestamp. Conversations older than it
+   *  are never swept — consent to a policy, not a licence over the archive. */
+  opted_in_at: number;
+  /** The install still permits sharing at all (no admin veto, no kill switch). */
+  allowed: boolean;
+  /** Always is on *and* the install permits it — the two can disagree. */
+  sweeping: boolean;
+  shared_count: number;
+}
+
+export interface ConversationSharingStatus {
+  conversation_id: string;
+  excluded: boolean;
+  /** The sweep would take this one, once it goes idle. What the chip renders. */
+  covered: boolean;
+  shared: boolean;
+  shared_at: string | null;
+}
+
 export interface SwitchSessionRequest {
   agent_slug?: string;
   agent_key?: string;
@@ -2374,6 +2401,37 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ enabled }),
     }),
+
+  // ── Sharing every conversation, opt-in (FEAT-055) ──
+
+  getSharingPreference: () =>
+    apiFetch<SharingPreferenceResponse>("/api/v1/sharing/preference"),
+
+  /** Leaving Always also destroys whatever the sweep queued but never sent.
+   *  The back catalogue is a separate decision — `unshareEverything` below. */
+  setSharingPreference: (state: SharingState) =>
+    apiFetch<SharingPreferenceResponse>("/api/v1/sharing/preference", {
+      method: "PUT",
+      body: JSON.stringify({ state }),
+    }),
+
+  unshareEverything: () =>
+    apiFetch<{ unshared: number }>("/api/v1/sharing/conversations", {
+      method: "DELETE",
+    }),
+
+  getConversationSharing: (id: string) =>
+    apiFetch<ConversationSharingStatus>(
+      `/api/v1/sharing/conversations/${encodeURIComponent(id)}/status`,
+    ),
+
+  /** Take one conversation out of the sweep, or put it back. Does not unshare
+   *  a copy already sent — that is Unshare, and it means something else. */
+  setConversationExcluded: (id: string, excluded: boolean) =>
+    apiFetch<ConversationSharingStatus>(
+      `/api/v1/sharing/conversations/${encodeURIComponent(id)}/exclusion`,
+      { method: "PUT", body: JSON.stringify({ excluded }) },
+    ),
 
   // ── Custom OpenAI-compatible LLM endpoints ──
 
