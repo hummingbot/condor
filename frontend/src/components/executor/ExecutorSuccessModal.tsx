@@ -18,8 +18,8 @@ interface ExecutorSuccessModalProps {
 
 /**
  * Success dialog shown after creating an executor (order, LP position, grid…).
- * Shared by DexPool, CreateExecutor and CreateGridExecutor so the overlay,
- * card styling and copy-ID behavior stay consistent.
+ * Shared by DexPool and CreateExecutor so the overlay, card styling and
+ * copy-ID behavior stay consistent.
  */
 export function ExecutorSuccessModal({
   executorId,

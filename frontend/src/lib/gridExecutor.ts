@@ -1,4 +1,4 @@
-// ── Grid executor state machine (shared by CreateExecutor & CreateGridExecutor) ──
+// ── Grid executor state machine (shared by CreateExecutor, GridConfigPanel and DexPool) ──
 
 export interface GridState {
   connector: string;

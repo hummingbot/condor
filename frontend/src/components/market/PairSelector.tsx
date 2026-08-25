@@ -430,7 +430,7 @@ function DexPairEntry({
   );
 }
 
-// Export the rules map hook for TradingRulesInfo
+// Export the rules map hook for CreateExecutor: pair list and price precision
 export function useTradingRules(server: string, connector: string, enabled = true) {
   const { data } = useQuery({
     queryKey: ["trading-rules", server, connector],
