@@ -136,7 +136,8 @@ def discard_buffer() -> None:
 async def flush(reason: str = "job") -> int:
     """Try to deliver everything pending. Returns the number of events sent.
 
-    Returns 0 without reading a file when the operator has forced ``off``. If
+    Returns 0 without reading a file at level ``off`` — whether the operator
+    forced it or the install's admin refused. If
     :func:`condor.telemetry.outbox.endpoint` ever yields nothing, the batch is
     stashed rather than sent — the guard that keeps a delivery-less build from
     losing events, and the seam the tests use; a shipped install always has the

@@ -1,4 +1,4 @@
-import { BarChart3, Check, Loader2, Lock, ShieldCheck } from "lucide-react";
+import { BarChart3, Check, Loader2, Lock, ShieldCheck, ShieldOff } from "lucide-react";
 
 import { useSetTelemetryLevel, useTelemetry } from "@/hooks/useTelemetry";
 import type { TelemetryLevel } from "@/lib/api";
@@ -25,8 +25,10 @@ export function TelemetrySettings() {
   const { disclosure, level, consent, env_overridden, can_change } = data;
   const locked = env_overridden || !can_change;
   // At `unknown` no option is the answer yet, so none is shown as chosen —
-  // the install is at the ping floor, but nobody has said so.
-  const chosen = consent === "granted" ? level : null;
+  // the install is at the ping floor, but nobody has said so. `denied` is an
+  // answer, and the one it selects is the off row below.
+  const chosen = consent === "granted" ? level : consent === "denied" ? "off" : null;
+  const offChosen = chosen === "off";
 
   return (
     <div className="space-y-6">
@@ -91,8 +93,39 @@ export function TelemetrySettings() {
               </button>
             );
           })}
+
+          {/* Not one of `disclosure.options`: the consent form has no "off"
+              button, because ignoring a prompt must not read as a refusal.
+              Saying no out loud is a different act, and it needs somewhere to
+              be said other than the operator's `.env`. */}
+          <button
+            disabled={locked || mutation.isPending}
+            onClick={() => mutation.mutate("off")}
+            className={`flex w-full items-center gap-3 rounded-lg border px-3 py-2 text-left transition-colors ${
+              offChosen
+                ? "border-[var(--color-primary)] bg-[var(--color-primary)]/10"
+                : "border-[var(--color-border)] hover:bg-[var(--color-surface-hover)]"
+            } ${locked ? "cursor-not-allowed opacity-60" : "cursor-pointer"}`}
+          >
+            <ShieldOff
+              className={`h-4 w-4 shrink-0 ${
+                offChosen ? "text-[var(--color-primary)]" : "text-[var(--color-text-muted)]"
+              }`}
+            />
+            <span className="flex-1 text-sm text-[var(--color-text)]">
+              Nothing at all — stop reporting this install
+            </span>
+            {offChosen && <Check className="h-4 w-4 shrink-0 text-[var(--color-primary)]" />}
+          </button>
         </div>
 
+        {offChosen && !env_overridden && (
+          <p className="mt-2 text-xs text-[var(--color-text-muted)]">
+            This install reports nothing, and stays that way across upgrades.
+            Anything already collected was deleted. Pick a level above to turn
+            reporting back on.
+          </p>
+        )}
         {env_overridden && (
           <p className="mt-2 flex items-start gap-1.5 text-xs text-[var(--color-text-muted)]">
             <Lock className="mt-0.5 h-3 w-3 shrink-0" />

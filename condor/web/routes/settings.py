@@ -908,15 +908,20 @@ async def get_telemetry_settings(user: WebUser = Depends(get_current_user)):
 
 @router.put("/telemetry")
 async def set_telemetry_settings(
-    level: str = Query(..., description="ping | usage"),
+    level: str = Query(..., description="ping | usage | off"),
     user: WebUser = Depends(get_current_user),
 ):
     """Change the install's telemetry level. Admin only, and reversible.
 
-    ``ping`` is the floor — install counting cannot be turned off here; only
-    ``CONDOR_TELEMETRY=off`` in the environment silences telemetry entirely.
-    Downgrading from ``usage`` is a withdrawal, not a pause: the buffer and the
-    outbox are deleted, so nothing already recorded can be sent later.
+    ``ping`` is the floor for an install that has never answered — silence is
+    not refusal — but ``off`` is a real answer here, because an admin who wants
+    this install to report nothing must have a way to say so in the product
+    rather than only by editing ``.env``. It is recorded as a refusal in
+    ``config.yml``, so it survives upgrades; ``ping``/``usage`` re-enable.
+
+    Turning off, like downgrading from ``usage``, is a withdrawal rather than a
+    pause: the buffer and the outbox are deleted, so nothing already recorded
+    can be sent later.
     """
     from condor.telemetry import consent
 
@@ -926,12 +931,10 @@ async def set_telemetry_settings(
             status_code=403,
             detail="Telemetry is an install-wide setting; only the admin can change it",
         )
-    if level not in (consent.PING, consent.USAGE):
+    if level not in consent.LEVELS:
         raise HTTPException(
             status_code=400,
-            detail="level must be ping or usage; install counting cannot be "
-            "turned off here — set CONDOR_TELEMETRY=off in the environment to "
-            "disable telemetry entirely",
+            detail=f"level must be one of {', '.join(consent.LEVELS)}",
         )
     if consent.env_overridden():
         raise HTTPException(
@@ -939,5 +942,5 @@ async def set_telemetry_settings(
             detail="CONDOR_TELEMETRY is set in the environment and overrides this setting",
         )
 
-    applied = consent.set_level(level)
+    applied = consent.deny() if level == consent.OFF else consent.set_level(level)
     return {"level": applied, "consent": consent.state()}

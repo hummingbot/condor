@@ -10,8 +10,9 @@ consent recorded it runs at level `ping`: a random install id, the version, and
 a periodic heartbeat — nothing about you, your users, or your trading. None of
 the usage events are sent until an admin taps "yes" on a prompt. Batches go to
 the project's collector at `https://telemetry.hummingbot.org/v1/events`, which
-is fixed in the source and cannot be pointed elsewhere. The one full kill
-switch is `CONDOR_TELEMETRY=off` in the environment.
+is fixed in the source and cannot be pointed elsewhere. An admin can turn it
+off entirely — in Settings → Privacy, or with `CONDOR_TELEMETRY=off` in the
+environment — and a refusal, once recorded, is honoured across upgrades.
 
 The whole mechanism is about 900 lines in [`condor/telemetry/`](condor/telemetry/).
 It is meant to be read, not trusted.
@@ -20,14 +21,17 @@ It is meant to be read, not trusted.
 
 ## What is collected
 
-There are three levels. The consent prompt chooses between `ping` and `usage`;
-`off` exists only as an environment override. You can change the answer later.
+There are three levels. The consent prompt chooses between `ping` and `usage`
+— it has no "off" button, so ignoring it is never read as a refusal. `off` is a
+deliberate act: the admin turns reporting off in Settings → Privacy, or the
+operator sets `CONDOR_TELEMETRY=off`. You can change the answer later, in
+either direction.
 
 | Level | What it sends |
 |---|---|
 | `ping` | Only that this install exists: `install`, `heartbeat`, `version_change`, `shutdown`. **This is the default, and the floor** — the prompt has no "off" option. |
 | `usage` | The above plus the feature, reliability and agent events below. Opt-in only. |
-| `off` | Nothing, ever. The emitter is a no-op. Reachable only via `CONDOR_TELEMETRY=off` in the environment. |
+| `off` | Nothing, ever. The emitter is a no-op — no install id is created, nothing is buffered, nothing is written, nothing is sent. Reached by an admin turning reporting off in Settings → Privacy, or by `CONDOR_TELEMETRY=off` in the environment. |
 
 Every batch carries one context block describing the *deployment*, not you:
 
@@ -121,14 +125,16 @@ cat .condor/telemetry/outbox.jsonl | jq .
 
 ## How to change it — or turn it off entirely
 
-Install counting (`ping`) is the floor: it is not an option on the consent
-prompt and cannot be disabled from the dashboard, because the project needs an
-honest count of installs to know what to support. To check what your install is
-doing:
+Install counting (`ping`) is the floor for an install that has *not* answered:
+it is not an option on the consent prompt, because an ignored prompt must not be
+read as a refusal and the project needs an honest count of installs to know what
+to support. A refusal, though, is a different thing from silence — an admin who
+says no is obeyed, and that answer is written to `config.yml`, so it keeps
+holding after an upgrade. To check what your install is doing:
 
 ```bash
-# The authoritative answer. Prints "ping" on a default install,
-# "off" only when CONDOR_TELEMETRY=off is set.
+# The authoritative answer. Prints "ping" on a default install, and
+# "off" when CONDOR_TELEMETRY=off is set or the admin turned reporting off.
 uv run python -c "from condor.telemetry import consent; print(consent.level())"
 ```
 
@@ -138,21 +144,30 @@ Three ways to control it, in order of precedence:
    switch: it overrides everything, suppresses the prompt, and is the right
    answer for an install that must send nothing at all.
 2. **The dashboard** — Settings → Privacy, which every seat can read and only
-   the admin can change (`GET`/`PUT /api/v1/settings/telemetry?level=ping|usage`;
-   `off` is rejected there). This is also where an install that runs without
-   Telegram is asked in the first place, since it has no bot to be asked
-   through.
+   the admin can change
+   (`GET`/`PUT /api/v1/settings/telemetry?level=ping|usage|off`). This is also
+   where an install that runs without Telegram is asked in the first place,
+   since it has no bot to be asked through. Choosing `off` here records a
+   refusal, which is the durable form of the kill switch: it is stored rather
+   than read from the environment of one process.
 3. **`config.yml`** — edit the `telemetry` section directly:
 
    ```yaml
    telemetry:
-     consent: granted
+     consent: granted   # or `denied`, which forces level `off`
      level: ping
    ```
 
-Downgrading from `usage` to `ping` is a **withdrawal, not a pause**: the
-in-memory buffer and the outbox file are deleted, so nothing already recorded
-can be sent afterwards.
+Downgrading from `usage` to `ping`, and turning reporting off, are both a
+**withdrawal, not a pause**: the in-memory buffer and the outbox file are
+deleted, so nothing already recorded can be sent afterwards.
+
+**An install that already refused stays off.** Earlier builds shipped a "No
+thanks" button, and its answer was recorded as `consent: denied`. That refusal
+is honoured — such an install resolves to level `off`, is never re-asked, and
+creates no install id — for as long as it stands. To opt back in, an admin
+picks a level in Settings → Privacy (or sets `CONDOR_TELEMETRY=ping|usage`,
+which overrides the stored answer like any other).
 
 ## Changes to this document
 

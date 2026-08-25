@@ -56,7 +56,10 @@ else:
 # An operator override, in both directions. An unset value means "no override",
 # and the stored consent decides — whose default, with no answer given, is
 # `ping`: the four adoption events and nothing else, from the first boot. The
-# admin prompt chooses between `ping` and `usage`; `off` is reachable only here.
+# admin prompt chooses between `ping` and `usage`. An install whose admin
+# *refused* (stored consent `denied`, from Settings -> Privacy or from an older
+# build's "No thanks") stays at `off` across upgrades; setting this to
+# `ping`/`usage` overrides that refusal too.
 #   off   - nothing, ever. emit() returns immediately.
 #   ping  - install / heartbeat / version_change / shutdown only.
 #   usage - the full allowlisted taxonomy in condor/telemetry/schema.py.

@@ -1002,8 +1002,16 @@ export interface VoiceSettingsResponse {
 
 // ── Telemetry (FEAT-023) ──
 
-/** The only two answers. `off` is reachable only from the environment. */
+/** The two answers on the consent form. There is no "off" button on it. */
 export type TelemetryLevel = "ping" | "usage";
+
+/**
+ * What the level can actually be. `off` is not an answer to the prompt — it is
+ * a refusal, made explicitly (Settings → Privacy) or pinned by the operator's
+ * `CONDOR_TELEMETRY` — which is why it is a separate type from the two options
+ * the disclosure offers.
+ */
+export type TelemetryEffectiveLevel = TelemetryLevel | "off";
 
 export interface TelemetryOption {
   level: TelemetryLevel;
@@ -1023,10 +1031,13 @@ export interface TelemetryDisclosure {
   options: TelemetryOption[];
 }
 
+export type TelemetryConsentState = "unknown" | "granted" | "denied";
+
 export interface TelemetrySettingsResponse {
-  /** `unknown` until someone answers — that is what the consent card asks. */
-  consent: "unknown" | "granted" | "denied";
-  level: "off" | TelemetryLevel;
+  /** `unknown` until someone answers — that is what the consent card asks.
+   * `denied` is a recorded refusal: the level is `off` and stays off. */
+  consent: TelemetryConsentState;
+  level: TelemetryEffectiveLevel;
   /** `CONDOR_TELEMETRY` is pinned in the environment; nothing here can change it. */
   env_overridden: boolean;
   endpoint_configured: boolean;
@@ -2184,9 +2195,10 @@ export const api = {
   getTelemetrySettings: () =>
     apiFetch<TelemetrySettingsResponse>("/api/v1/settings/telemetry"),
 
-  /** Admin only (403 otherwise), and 409 when `CONDOR_TELEMETRY` is pinned. */
-  setTelemetryLevel: (level: TelemetryLevel) =>
-    apiFetch<{ level: TelemetryLevel; consent: string }>(
+  /** Admin only (403 otherwise), and 409 when `CONDOR_TELEMETRY` is pinned.
+   * `off` records a refusal and purges whatever was collected. */
+  setTelemetryLevel: (level: TelemetryEffectiveLevel) =>
+    apiFetch<{ level: TelemetryEffectiveLevel; consent: TelemetryConsentState }>(
       `/api/v1/settings/telemetry?level=${level}`,
       { method: "PUT" },
     ),

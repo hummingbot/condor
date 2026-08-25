@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { api } from "@/lib/api";
-import type { TelemetryLevel, TelemetrySettingsResponse } from "@/lib/api";
+import type { TelemetryEffectiveLevel, TelemetrySettingsResponse } from "@/lib/api";
 
 export const TELEMETRY_KEY = ["telemetry-settings"] as const;
 
@@ -24,13 +24,15 @@ export function useTelemetry() {
 export function useSetTelemetryLevel() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (level: TelemetryLevel) => api.setTelemetryLevel(level),
+    mutationFn: (level: TelemetryEffectiveLevel) => api.setTelemetryLevel(level),
     onSuccess: (res) => {
       // Write the answer through rather than refetching: the banner unmounts on
       // `consent !== "unknown"`, and a refetch round-trip would leave it on
-      // screen long enough to look like the click did nothing.
+      // screen long enough to look like the click did nothing. The state comes
+      // from the response, not from a guess — turning reporting off answers
+      // `denied`, not `granted`.
       qc.setQueryData(TELEMETRY_KEY, (old: TelemetrySettingsResponse | undefined) =>
-        old ? { ...old, level: res.level, consent: "granted" as const } : old,
+        old ? { ...old, level: res.level, consent: res.consent } : old,
       );
     },
   });
