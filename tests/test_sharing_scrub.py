@@ -88,6 +88,55 @@ def test_a_recovery_phrase_survives_repeated_words():
     assert "sausage" not in out
 
 
+@pytest.mark.parametrize(
+    "shape, raw",
+    [
+        ("single space", SEED),
+        ("newlines", "\n".join(SEED.split())),
+        ("commas", ", ".join(SEED.split())),
+        ("double spaces", "  ".join(SEED.split())),
+        (
+            "numbered sheet",
+            " ".join(f"{n}. {word}" for n, word in enumerate(SEED.split(), 1)),
+        ),
+        (
+            "numbered lines",
+            "\n".join(f"{n}) {word}" for n, word in enumerate(SEED.split(), 1)),
+        ),
+    ],
+)
+def test_a_recovery_phrase_is_caught_in_every_shape_it_is_pasted_in(shape, raw):
+    """A phrase does not arrive single-spaced (SEC-230).
+
+    Out of a wallet UI it is one word per line, out of a backup sheet it is
+    numbered, out of a paste it carries whatever spacing it had. Every one of
+    these reached the collector verbatim while the candidate regex asked for a
+    single literal space, and reported "nothing was replaced" while doing it.
+    """
+    out, counts = _scrub(raw)
+    assert counts["seed_phrase"] == 1, shape
+    for word in SEED.split():
+        assert word not in out, shape
+
+
+def test_an_ordinary_sentence_of_wordlist_words_is_left_alone():
+    """The widened shape leans on membership harder, so the negative case is
+    what proves it: twelve-plus words, several of them real wordlist entries,
+    and no run of twelve reaches the floor."""
+    prose = "i will always cover the bridge and act toward the market with useful ideas"
+    out, counts = _scrub(prose)
+    assert counts.get("seed_phrase", 0) == 0
+    assert out == prose
+
+
+def test_a_phrase_pasted_mid_sentence_loses_only_the_phrase():
+    out, counts = _scrub(f"my phrase is {SEED} and it is not working")
+    assert counts["seed_phrase"] == 1
+    assert out.startswith("my phrase is ")
+    assert out.endswith(" it is not working")
+    assert "sausage" not in out
+
+
 def test_the_vendored_wordlist_is_the_canonical_one():
     """2048 words, ``abandon`` to ``zoo``. A truncated file silently stops
     catching phrases, so its shape is asserted rather than assumed."""

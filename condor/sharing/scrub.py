@@ -152,15 +152,30 @@ _IPV4_RE = re.compile(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])")
 _IPV6_RE = re.compile(
     r"(?<![0-9A-Fa-f:])(?:[0-9A-Fa-f]{1,4}:){3,7}[0-9A-Fa-f]{1,4}(?![0-9A-Fa-f:])"
 )
-# Twelve or more consecutive lowercase words of 3–8 letters, single-spaced —
-# the shape of a BIP-39 recovery phrase, and the *candidate* for one. Shape
+# Twelve or more consecutive lowercase words of 3–8 letters, separated by any
+# run of whitespace or commas and each optionally numbered — the shape of a
+# BIP-39 recovery phrase, and the *candidate* for one. The separator is
+# deliberately permissive because it is only a prefilter: a phrase pasted out
+# of a wallet UI arrives one word per line, out of a backup sheet as "1. legal
+# 2. winner", and out of a chat with whatever spacing the paste carried. Shape
 # alone is not enough in either direction: an English sentence can reach twelve
 # long words, and a real phrase can repeat one, so neither a prose test nor a
 # distinctness test decides this. :func:`_seed_phrase` decides it against the
-# vendored wordlist, where membership is exact.
+# vendored wordlist, where membership is exact — narrowing the shape here would
+# only move the decision away from the wordlist.
+_SEED_ORDINAL = r"(?:\d{1,2}[.)]\s*)?"
 _WORD_RUN_RE = re.compile(
-    _NOT_ID_BEFORE + r"[a-z]{3,8}(?: [a-z]{3,8}){11,}" + _NOT_ID_AFTER
+    _NOT_ID_BEFORE
+    + _SEED_ORDINAL
+    + r"[a-z]{3,8}(?:[\s,]+"
+    + _SEED_ORDINAL
+    + r"[a-z]{3,8}){11,}"
+    + _NOT_ID_AFTER
 )
+# The separator is captured so a run that turns out not to be a phrase can be
+# re-emitted exactly as it came in, line breaks and all.
+_SEED_SPLIT_RE = re.compile(r"([\s,]+)")
+_SEED_ORDINAL_RE = re.compile(r"^\d{1,2}[.)]\s*")
 
 # The shortest run of wordlist entries treated as a phrase. Twelve is the
 # smallest mnemonic BIP-39 defines, so a shorter run is a coincidence.
@@ -343,25 +358,54 @@ def _seed_phrase(scrubber: "Scrubber", category: str, match: re.Match) -> str:
     if not words:
         return match.group(0)
 
-    tokens = match.group(0).split(" ")
     out: list[str] = []
-    run: list[str] = []
+    run: list[str] = []  # the pieces of the current run, verbatim
+    pending: list[str] = []  # separators and ordinals not yet claimed by a run
+    ordinal_at: int | None = None  # where an ordinal first appears in pending
+    counted = 0  # wordlist entries in the run, which ordinals are not
 
     def flush() -> None:
-        if len(run) >= SEED_MIN_WORDS:
-            out.append(scrubber._hit(category, " ".join(run)))
+        nonlocal counted
+        if counted >= SEED_MIN_WORDS:
+            out.append(scrubber._hit(category, "".join(run)))
         else:
             out.extend(run)
         run.clear()
+        counted = 0
 
-    for token in tokens:
+    # The candidate always starts on a word or its ordinal, so even positions
+    # are tokens and odd ones are the separators between them.
+    for index, piece in enumerate(_SEED_SPLIT_RE.split(match.group(0))):
+        if index % 2:
+            pending.append(piece)
+            continue
+        token = _SEED_ORDINAL_RE.sub("", piece)
         if token in words:
-            run.append(token)
+            if run:
+                run.extend(pending)  # inside the run: the phrase's own spacing
+            else:
+                # Opening a run takes the numbering with it and leaves the
+                # prose in front of it alone.
+                cut = len(pending) if ordinal_at is None else ordinal_at
+                out.extend(pending[:cut])
+                run.extend(pending[cut:])
+            pending.clear()
+            ordinal_at = None
+            run.append(piece)
+            counted += 1
+        elif not token:  # a bare "1." — numbering, not a word that breaks a run
+            if ordinal_at is None:
+                ordinal_at = len(pending)
+            pending.append(piece)
         else:
             flush()
-            out.append(token)
+            out.extend(pending)
+            pending.clear()
+            ordinal_at = None
+            out.append(piece)
     flush()
-    return " ".join(out)
+    out.extend(pending)
+    return "".join(out)
 
 
 # Order matters — see the note above the patterns.
