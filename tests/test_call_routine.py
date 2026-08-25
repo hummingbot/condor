@@ -528,3 +528,116 @@ def test_start_routine_validates_config_before_backgrounding_anything(library, s
         asyncio.run(primitives.start_routine("inner", {"nope": 1}))
 
     assert store.list_instances() == []
+
+
+# ── the Telegram runner's context (CORR-205) ──
+
+
+class _PTBContext:
+    """The shape ``handlers.routines._execute_routine`` hands a routine.
+
+    The delivery chat and the owner differ in a group, and the server lives in
+    the owner's preferences rather than in a ``server_name`` attribute.
+    """
+
+    def __init__(self, chat_id, owner_id, server):
+        from condor.preferences import SERVER_PIN_KEY, USER_PREFERENCES_KEY
+
+        self._chat_id = chat_id
+        self._owner_id = owner_id
+        self._user_data = {
+            USER_PREFERENCES_KEY: {"general": {"active_server": server}},
+            SERVER_PIN_KEY: True,
+        }
+        self.bot = None
+
+    @property
+    def user_data(self):
+        return self._user_data
+
+
+def test_a_nested_call_inherits_the_telegram_runners_own_context(library, store):
+    seen = {}
+
+    async def inner(config, context):
+        seen["ctx"] = context
+        return "done"
+
+    library("inner", inner)
+    ptb = _PTBContext(chat_id=-100, owner_id=42, server="prod")
+
+    async def caller():
+        with primitives.bind_context(ptb):
+            await primitives.call_routine("inner")
+
+    asyncio.run(caller())
+
+    assert seen["ctx"] is ptb
+
+
+def test_a_nested_call_in_a_group_is_owned_by_the_starter_not_the_group(
+    library, store, reports_dir
+):
+    async def inner(config, context):
+        return await _save_report("nested")
+
+    library("inner", inner)
+    ptb = _PTBContext(chat_id=-100, owner_id=42, server="prod")
+
+    async def caller():
+        with primitives.bind_context(ptb):
+            return await primitives.call_routine("inner")
+
+    result = asyncio.run(caller())
+
+    assert reports.get_report(result.report_id)["user_id"] == 42
+
+
+def test_start_routine_forwards_the_telegram_owner_and_resolved_server(
+    library, store, monkeypatch
+):
+    forwarded = {}
+
+    async def _execute(self, name, config, server, user_id, agent=""):
+        forwarded.update(name=name, server=server, user_id=user_id)
+        return "inst-1"
+
+    monkeypatch.setattr(RoutineStore, "execute", _execute)
+
+    async def inner(config, context):  # pragma: no cover - never runs
+        return ""
+
+    library("inner", inner)
+    ptb = _PTBContext(chat_id=-100, owner_id=42, server="prod")
+
+    async def caller():
+        with primitives.bind_context(ptb):
+            return await primitives.start_routine("inner")
+
+    assert asyncio.run(caller()) == "inst-1"
+    assert forwarded == {"name": "inner", "server": "prod", "user_id": 42}
+
+
+def test_start_routine_still_reads_a_web_contexts_server_name(
+    library, store, monkeypatch
+):
+    forwarded = {}
+
+    async def _execute(self, name, config, server, user_id, agent=""):
+        forwarded.update(server=server, user_id=user_id)
+        return "inst-2"
+
+    monkeypatch.setattr(RoutineStore, "execute", _execute)
+
+    async def inner(config, context):  # pragma: no cover - never runs
+        return ""
+
+    library("inner", inner)
+
+    async def caller():
+        with primitives.bind_context(WebRoutineContext("web", bot=None, chat_id=7)):
+            return await primitives.start_routine("inner")
+
+    asyncio.run(caller())
+
+    assert forwarded == {"server": "web", "user_id": 7}

@@ -19,7 +19,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import CallbackContext, ContextTypes
 
 import condor.reports
-from condor import routine_hooks
+from condor import primitives, routine_hooks
 from condor.routine_store import get_routine_store
 from handlers import clear_all_input_states
 from routines.base import (
@@ -304,6 +304,11 @@ async def _execute_routine(
     # Prepare context for routine
     context._chat_id = chat_id
     context._instance_id = instance_id
+    # The owner, recorded explicitly: in a group chat it differs from
+    # ``_chat_id``, and a nested call_routine() must be attributed to the person
+    # who started the run, not to the group (CORR-205).
+    owner_key = owner_id if owner_id is not None else chat_id
+    context._owner_id = owner_key
     user_data = _owner_data(context.application, owner_id, chat_id)
     # Inject the active server captured at creation time so routines
     # in group chats connect to the correct server.
@@ -323,10 +328,11 @@ async def _execute_routine(
         # Reports belong to the user whose user_data the run executes against
         # (the starter), falling back to the chat — the same identity the hooks
         # record (SEC-152) — so the web can authorize reads by it (SEC-196).
-        with condor.reports.attribute_owner(
-            owner_id if owner_id is not None else chat_id
-        ):
-            raw_result = await routine.run_fn(config, context)
+        # The context is published so a nested call_routine() inside this
+        # routine inherits its server, bot and user (FEAT-052, CORR-205).
+        with primitives.bind_context(context):
+            with condor.reports.attribute_owner(owner_key):
+                raw_result = await routine.run_fn(config, context)
         rich_result = normalize_result(raw_result)
         result_text = rich_result.text[:500] if rich_result.text else "Completed"
     except Exception as e:
@@ -400,6 +406,8 @@ async def _run_continuous_routine(
         def __init__(self):
             self._chat_id = chat_id
             self._instance_id = instance_id
+            # Owner kept distinct from the delivery chat, as one-shot runs do.
+            self._owner_id = owner_key
             # Ensure user_data dict exists in application. Keyed by the owner:
             # fabricating one for a (negative) group chat id would both persist
             # junk and hand the routine an empty bucket.
@@ -428,8 +436,9 @@ async def _run_continuous_routine(
         logger.info(f"Starting continuous routine {routine_name}[{instance_id}]")
         # Same owner stamping as one-shot runs (SEC-196): reports this loop
         # saves belong to the user the instance runs for.
-        with condor.reports.attribute_owner(owner_key):
-            result = await routine.run_fn(config, context)
+        with primitives.bind_context(context):
+            with condor.reports.attribute_owner(owner_key):
+                result = await routine.run_fn(config, context)
         logger.info(f"Continuous routine {routine_name}[{instance_id}] ended: {result}")
     except asyncio.CancelledError:
         logger.info(f"Continuous routine {routine_name}[{instance_id}] cancelled")

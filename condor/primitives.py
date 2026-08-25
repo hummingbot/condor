@@ -329,10 +329,11 @@ DEFAULT_CALL_TIMEOUT = 60.0
 def bind_context(ctx):
     """Make ``ctx`` the context a nested :func:`call_routine` inherits.
 
-    Called by the two things that build one — ``code_runner`` for a snippet and
-    ``RoutineStore._execute_and_record`` for a routine — so a nested run lands on
-    the caller's server, as the caller's user, with the caller's bot. Without it
-    a nested routine would silently resolve the chat's ambient default, which is
+    Called by the three things that build one — ``code_runner`` for a snippet,
+    ``RoutineStore._execute_and_record`` for a routine and the Telegram runner in
+    ``handlers.routines`` for a ``/routines`` run — so a nested run lands on the
+    caller's server, as the caller's user, with the caller's bot. Without it a
+    nested routine would silently resolve the chat's ambient default, which is
     the bug class FEAT-051 closed for pinned servers.
     """
     token = _CONTEXT.set(ctx)
@@ -352,6 +353,36 @@ def _resolve_context(explicit):
     from condor.routine_store import WebRoutineContext, get_routine_store
 
     return WebRoutineContext("", bot=get_routine_store().get_bot(), chat_id=0)
+
+
+def _owner_of(ctx) -> int:
+    """The user a nested run belongs to.
+
+    The Telegram runner separates the delivery chat (``_chat_id``, negative in a
+    group) from the owner whose ``user_data`` the run executes against, and
+    stamps the latter as ``_owner_id``. Attributing a nested run to the chat
+    would leave a report the starter cannot read. Web/MCP contexts carry only
+    ``_chat_id``, which is already the user id there.
+    """
+    return getattr(ctx, "_owner_id", None) or getattr(ctx, "_chat_id", 0) or 0
+
+
+def _server_of(ctx) -> str:
+    """The server a nested run should target.
+
+    ``WebRoutineContext`` names it outright and stays authoritative; a PTB
+    context carries it only as a preference inside its ``user_data``, so fall
+    back to the resolution ``get_client`` already performs for one.
+    """
+    named = getattr(ctx, "server_name", "") or ""
+    if named:
+        return named
+    from config_manager import get_effective_server
+
+    user_data = getattr(ctx, "user_data", None)
+    if user_data is None:
+        user_data = getattr(ctx, "_user_data", None)
+    return get_effective_server(getattr(ctx, "_chat_id", 0) or 0, user_data) or ""
 
 
 def _resolve_routine(name: str):
@@ -415,7 +446,7 @@ async def _run_nested(routine, cfg, ctx, stack: tuple[str, ...], out: dict):
     _STACK.set(stack)
     reports.reset_last_report_id()
     base_name = (routine.name or "").split("/")[-1]
-    owner = getattr(ctx, "_chat_id", 0) or 0
+    owner = _owner_of(ctx)
     from condor.routine_store import _agent_of
 
     try:
@@ -529,8 +560,8 @@ async def start_routine(
     cfg = _validate_config(routine, name, config)
     ctx = _resolve_context(context)
     store = get_routine_store()
-    server = getattr(ctx, "server_name", "") or ""
-    user_id = getattr(ctx, "_chat_id", 0) or 0
+    server = _server_of(ctx)
+    user_id = _owner_of(ctx)
     # The validated model, dumped: `execute` re-builds Config from this dict, and
     # sending the *validated* values keeps a coerced default from silently
     # differing between the inline and backgrounded paths.
