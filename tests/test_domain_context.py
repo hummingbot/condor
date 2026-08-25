@@ -107,10 +107,14 @@ def test_the_section_headers_are_written_in_exactly_one_module():
         "[DOMAIN MEMORY — what you remember in this domain]",
         "[DOMAIN SKILLS — playbooks you can follow]",
     )
+    # Only this checkout's own sources: a nested checkout (``.claude/worktrees``
+    # while a sweep runs, a vendored venv) carries its own copy of every module
+    # and would fail this on paths that are not ours to fix.
     sources = [
         p
         for p in _PROJECT_ROOT.rglob("*.py")
-        if ".venv" not in p.parts and "tests" not in p.parts
+        if not any(part.startswith(".") for part in p.relative_to(_PROJECT_ROOT).parts)
+        and "tests" not in p.parts
     ]
 
     for header in headers:
