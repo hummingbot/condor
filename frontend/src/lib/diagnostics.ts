@@ -183,6 +183,22 @@ export function recentErrors(): string[] {
   );
 }
 
+/**
+ * Drop the outgoing session's errors. The recorder stays installed.
+ *
+ * The ring is module state, so on its own it outlives a session change: logging
+ * out is a pure client-side transition with no page reload, and the buffer
+ * would carry one user's errors — server names, bots, pairs — into the next
+ * user's bug report, which is filed from their own GitHub account into a public
+ * repo. `installed` and the `console.error` wrapper are deliberately left
+ * alone: the incoming session still needs recording, and re-installing would
+ * stack a second wrapper and duplicate the `window` listeners.
+ */
+export function clearDiagnostics() {
+  // `buffer` is a const binding the recorder writes through; empty it in place.
+  buffer.length = 0;
+}
+
 /** Fenced so GitHub renders the block as written — single newlines and all. */
 function fence(body: string): string {
   return "```\n" + body + "\n```";
