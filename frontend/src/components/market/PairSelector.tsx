@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { ChevronDown, Search, X } from "lucide-react";
+import { ChevronDown, List, Search, X } from "lucide-react";
 
 import { AnchoredMenu } from "@/components/ui/AnchoredMenu";
 import { api } from "@/lib/api";
@@ -18,6 +18,12 @@ interface PairSelectorProps {
    * entry backed by a recents list.
    */
   hasTradingRules?: boolean;
+  /**
+   * Hand off to the full market browser. Omitted for venues that have no list
+   * to browse, which is what keeps this a quick-switch control rather than a
+   * second, worse copy of the browser.
+   */
+  onBrowseAll?: () => void;
 }
 
 const MAX_VISIBLE = 50;
@@ -71,6 +77,7 @@ export function PairSelector({
   value,
   onChange,
   hasTradingRules = true,
+  onBrowseAll,
 }: PairSelectorProps) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
@@ -281,6 +288,24 @@ export function PairSelector({
               </p>
             )}
           </div>
+
+          {onBrowseAll && (
+            <button
+              onClick={() => {
+                setOpen(false);
+                onBrowseAll();
+              }}
+              className="flex w-full items-center justify-between border-t border-[var(--color-border)] px-3 py-2 text-xs text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+            >
+              <span className="flex items-center gap-1.5">
+                <List className="h-3.5 w-3.5" />
+                Browse all markets
+              </span>
+              <kbd className="rounded border border-[var(--color-border)] px-1 font-mono text-[10px]">
+                /
+              </kbd>
+            </button>
+          )}
         </>
       </AnchoredMenu>
     </>
