@@ -410,6 +410,15 @@ def _resolve_conversation(
             agent_key=agent_key,
             agent_slug=agent_slug,
             server_name=server_name,
+            # Whether anyone but the owner can speak into this transcript. On
+            # Telegram the key's owner is the *chat*, so a chat id that is not
+            # the user's own id is a group: the session is one, its turns are
+            # recorded under whoever opened it, and nothing downstream could
+            # tell them apart afterwards. Recorded here so the sweep can refuse
+            # it rather than trusting a guard in another module (FEAT-055).
+            multi_author=bool(
+                spec.chat_id is not None and spec.chat_id != spec.user_id
+            ),
         )
         return meta.id, ""
     except Exception:  # noqa: BLE001 - a chat must start even if recording fails

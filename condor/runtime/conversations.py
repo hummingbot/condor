@@ -289,6 +289,23 @@ class ConversationMeta(BaseModel):
         description="The capability that revokes the share. Local only.",
     )
 
+    # ── Automatic sharing (FEAT-055) ──
+    share_excluded: bool = Field(
+        default=False,
+        description="The user took this one chat out of the sweep. Honoured forever.",
+    )
+    share_turn_count: int = Field(
+        default=0,
+        description="``turn_count`` at the last share; growth past it re-shares.",
+    )
+    multi_author: bool = Field(
+        default=False,
+        description=(
+            "Another human can speak in the room this was born in — a Telegram "
+            "group. The sweep never takes one: a user consents for themselves."
+        ),
+    )
+
 
 class TurnEntry(BaseModel):
     """One line of the transcript.
@@ -363,8 +380,17 @@ def new_conversation(
     agent_key: str = "",
     agent_slug: str = "",
     server_name: str | None = None,
+    multi_author: bool = False,
 ) -> ConversationMeta:
-    """Mint an empty conversation and persist its meta."""
+    """Mint an empty conversation and persist its meta.
+
+    ``multi_author`` is recorded at birth because that is the only moment the
+    fact is known: a turn carries which *brain* produced it but not which human
+    typed it, and the recorder is built from the session's owner, so by the time
+    a second person's words are on disk they are indistinguishable from the
+    owner's. The caller who provisioned the session knows whether the room admits
+    anyone else, and says so here (FEAT-055).
+    """
     now = _utcnow()
     meta = ConversationMeta(
         id=uuid.uuid4().hex[:12],
@@ -375,6 +401,7 @@ def new_conversation(
         server_name=server_name,
         created_at=now,
         updated_at=now,
+        multi_author=bool(multi_author),
     )
     write_status(_conv_dir(user_id, meta.id), META_FILENAME, **_meta_fields(meta))
     return meta

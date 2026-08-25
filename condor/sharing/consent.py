@@ -18,11 +18,15 @@ than reusing that one: telemetry consent is *per install*, held by the admin,
 and an admin tapping "yes" on an install-wide prompt cannot consent to
 uploading another person's conversation.
 
-In this feature ``user_state`` is only ever ``off`` or ``explicit``: pressing
-the button *is* the consent, and it is recorded on the conversation rather than
-on the user. ``always`` exists here because the state machine is this module's
-to own, but nothing sets it — the per-user "share everything from now on"
-opt-in and the sweep that acts on it are FEAT-055.
+``user_state`` has three answers. ``off`` is the default and the only one a
+fresh install has. ``explicit`` and ``off`` behave identically for the button —
+pressing it *is* the consent, and it is recorded on the conversation rather than
+on the user. ``always`` is the standing answer FEAT-055 added: it is the only
+thing that lets the sweep in :mod:`condor.sharing.sweep` send anything without a
+human looking at the payload first, which is why it is the only state that
+records *when* it was chosen. ``opted_in_at`` is what makes forward-only
+enforceable rather than aspirational — a conversation older than the answer was
+never covered by it.
 
 The identity is this package's own and deliberately not the telemetry install
 id. Two consequences, both wanted: an install with ``CONDOR_TELEMETRY=off`` can
@@ -35,6 +39,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 import uuid
 from pathlib import Path
 
@@ -42,7 +47,7 @@ log = logging.getLogger(__name__)
 
 OFF = "off"
 EXPLICIT = "explicit"
-ALWAYS = "always"  # FEAT-055 sets this; nothing in this feature does.
+ALWAYS = "always"  # The standing answer the sweep acts on (FEAT-055).
 USER_STATES = (OFF, EXPLICIT, ALWAYS)
 
 SECTION = "sharing"
@@ -125,23 +130,74 @@ def set_install_allows(enabled: bool) -> bool:
     return install_allows()
 
 
+def _record(user_id: int | str) -> dict:
+    """This user's stored answer, in either shape it can be on disk.
+
+    FEAT-054 wrote a bare string per user. FEAT-055 needs a timestamp beside the
+    answer, so the value is now a mapping — and a string is still read as one,
+    because a config written by the older build must keep meaning what it meant.
+    A string is only ever ``off`` or ``explicit`` there, neither of which the
+    sweep acts on, so there is nothing to migrate and nothing is rewritten until
+    the user next chooses.
+    """
+    states = _section().get("users") or {}
+    value = states.get(str(user_id))
+    if value is None:
+        value = states.get(user_id)
+    if isinstance(value, str):
+        return {"state": value}
+    return dict(value) if isinstance(value, dict) else {}
+
+
 def user_state(user_id: int | str) -> str:
     """``off`` (the default) | ``explicit`` | ``always``.
 
-    Nothing in FEAT-054 moves a user off ``off``: the button is consent for one
-    conversation, recorded on that conversation. This exists so FEAT-055 has a
-    place to put a standing answer, and so ``can_share`` has one thing to read.
+    ``off`` and ``explicit`` differ only as a record of what the user last chose
+    — the button works at either, because pressing it *is* the consent. Only
+    ``always`` changes what the install does on its own.
     """
-    states = _section().get("users") or {}
-    value = states.get(str(user_id)) or states.get(user_id)
+    value = _record(user_id).get("state")
     return value if value in USER_STATES else OFF
 
 
+def opted_in_at(user_id: int | str) -> float:
+    """When this user chose ``always``, as a Unix timestamp. ``0.0`` if never.
+
+    Forward-only lives or dies on this number: the sweep will not take a
+    conversation created before it. A user at any other state has no such
+    timestamp, so the sweep has nothing to compare against and takes nothing —
+    which is the correct reading of "I have not opted in".
+    """
+    if user_state(user_id) != ALWAYS:
+        return 0.0
+    try:
+        return float(_record(user_id).get("opted_in_at") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def set_user_state(user_id: int | str, state: str) -> str:
+    """Record a standing answer, and stamp ``always`` with the moment it began.
+
+    Re-choosing ``always`` while already at ``always`` keeps the original
+    timestamp: the consent has been continuous, and moving it forward would
+    silently make the conversations in between ineligible. Leaving ``always``
+    drops it, so opting back in later covers only what comes after *that* — a
+    gap in consent is a gap in the corpus, not something to paper over.
+    """
     if state not in USER_STATES:
         return user_state(user_id)
+
+    record = _record(user_id) if state == ALWAYS else {}
+    record["state"] = state
+    if state == ALWAYS and not record.get("opted_in_at"):
+        record["opted_in_at"] = time.time()
+
     states = dict(_section().get("users") or {})
-    states[str(user_id)] = state
+    # YAML can hand back an integer key for a numeric user id, and a stale one
+    # left beside the string form would shadow this write on the next read.
+    states.pop(user_id, None)
+    states[str(user_id)] = record
     _update(users=states)
     return state
 
@@ -150,9 +206,9 @@ def can_share(user_id: int | str) -> bool:
     """May *this* user share *now*? Every gate, in precedence order.
 
     The user's own state is deliberately not one of the gates: at ``off`` — the
-    default, and where FEAT-054 leaves everyone — pressing the button is still
-    allowed, because pressing it *is* the consent. What the state will gate is
-    the automatic producer FEAT-055 adds.
+    default — pressing the button is still allowed, because pressing it *is* the
+    consent. What the state gates is the automatic producer, in
+    :func:`can_sweep`.
     """
     if not env_allows() or not install_allows():
         return False
@@ -160,6 +216,30 @@ def can_share(user_id: int | str) -> bool:
         return int(user_id) > 0
     except (TypeError, ValueError):
         return False
+
+
+def can_sweep(user_id: int | str) -> bool:
+    """May the install share this user's conversations *without being asked*?
+
+    Strictly narrower than :func:`can_share`, and that is the whole point: this
+    is the only predicate in the package that authorizes sending a payload no
+    human has looked at. It requires everything the button requires **and** a
+    standing ``always`` with a timestamp to enforce forward-only against, so the
+    operator kill switch and the admin veto both outrank a user's Always exactly
+    as they outrank their button.
+    """
+    return can_share(user_id) and user_state(user_id) == ALWAYS
+
+
+def users_sweeping() -> list[str]:
+    """Every user id with a standing ``always``, from the stored answers alone.
+
+    The sweep intersects this with :func:`condor.paths.iter_user_ids`, so a user
+    who consented and then had their runtime directory removed costs a lookup
+    and nothing else.
+    """
+    states = _section().get("users") or {}
+    return [uid for uid in map(str, states) if user_state(uid) == ALWAYS]
 
 
 # ── Identity ─────────────────────────────────────────────────────────────
