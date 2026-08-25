@@ -6,9 +6,9 @@ out three times, in three modules, as a literal expression. That put this
 deployment's data inside the code, and it meant a test run wrote into the
 developer's live install because there was no single knob to turn.
 
-There are **two** roots, not one, and this module is where both are named. They
-are separate on purpose (``.gitignore`` has always listed them apart) and the
-line between them is *who writes and when*:
+There are **three** roots, not one, and this module is where all three are
+named. They are separate on purpose (``.gitignore`` has always listed the first
+two apart) and the line between them is *who writes and when*:
 
     <repo>/.condor/                    # or $CONDOR_RUNTIME_ROOT
     ├── users/{user_id}/               # the runtime store: one conversation's
@@ -22,16 +22,33 @@ line between them is *who writes and when*:
     ├── notifications.json             # accumulated while it ran, readable and
     ├── routine_hooks.json             # editable by an operator
     ├── backtests/
-    ├── code_runs/
-    └── notes/, memory/
+    └── code_runs/
 
-``data/`` is the older of the two and is named literally in agent-facing text
+    <repo>/agents/                     # or $CONDOR_AGENTS_ROOT
+    ├── <slug>/AGENT.md                # the agent registry: each agent's
+    ├── <slug>/skills/                 # definition, its library, and the
+    ├── <slug>/store/user_{user_id}/   # memory it accumulated per user
+    └── _shared/{skills,routines}/
+
+``data/`` is the older of the three and is named literally in agent-facing text
 (``data/code_runs/`` in the ``run_code`` tool description), so folding it into
 ``.condor/`` would open a new split rather than close one. What it did lack was
 a resolver: three of its stores built their path at import from the bare name
 ``data``, making it relative to the *working directory*, while ``main.py``'s
 pickle and ``code_runs`` were already anchored at the repo. Both now come from
 :func:`data_dir`.
+
+``agents/`` is the odd one, and the reason it took a third pass to reach: it is
+*half version-controlled*. An agent's definition and its skill library are
+committed; the ``store/user_{id}/`` under them is not. Only the whole root can
+be repointed, because :func:`condor.memory.paths.assistant_home` is the single
+parent of both, so a test that moves it gets an empty registry as well as an
+empty store -- which is what a test that touches memory wants, and what a test
+that reads a real agent's definition must not do. It resolved from a module
+constant until then, so isolating it meant monkeypatching a private name in
+every module that wrote a memory, and the modules that forgot wrote into the
+developer's live library (an ``audit.log`` for a ``user_424242`` that exists
+nowhere in the repo is what that leaves behind).
 
 **The user is the first path segment** of the runtime store. A person's whole
 footprint is one directory: it can be listed, tarred, handed to support or
@@ -40,10 +57,10 @@ that a route could forget to make -- it is a path the caller cannot name.
 
 Two rules this module keeps:
 
-* :func:`runtime_root` and :func:`data_dir` are a *function call at every use*,
-  never a module constant. The env override has to be observable after import,
-  or the test fixture that isolates the suite cannot work and the MCP/ACP
-  subprocesses cannot inherit it.
+* :func:`runtime_root`, :func:`data_dir` and :func:`agents_root` are a
+  *function call at every use*, never a module constant. The env override has
+  to be observable after import, or the test fixture that isolates the suite
+  cannot work and the MCP/ACP subprocesses cannot inherit it.
 * :func:`safe_id` is the single guard. Three near-identical regexes used to
   live in ``conversations.py``, ``state.py`` and ``delegation_history.py``;
   they collapse here. Same behaviour as before: refuse, never sanitize.
@@ -75,9 +92,11 @@ from pathlib import Path
 
 RUNTIME_ROOT_ENV = "CONDOR_RUNTIME_ROOT"
 DATA_DIR_ENV = "CONDOR_DATA_DIR"
+AGENTS_ROOT_ENV = "CONDOR_AGENTS_ROOT"
 
 RUNTIME_DIRNAME = ".condor"
 DATA_DIRNAME = "data"
+AGENTS_DIRNAME = "agents"
 
 # <repo>: condor/paths.py -> condor/ -> <repo>
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -137,6 +156,23 @@ def data_dir() -> Path:
     if override:
         return Path(override).expanduser()
     return _PROJECT_ROOT / DATA_DIRNAME
+
+
+def agents_root() -> Path:
+    """The agent registry: one directory per agent, its library and its stores.
+
+    Every path under ``agents/`` hangs off this -- an agent's home, its skills,
+    the ``_shared/`` libraries and each ``store/user_{id}/`` -- and
+    :mod:`condor.memory.paths` builds them all from here.
+    ``$CONDOR_AGENTS_ROOT`` overrides it, read on every call for the same
+    reason :func:`runtime_root` reads its own: the suite's autouse fixture sets
+    it after import, and the MCP/ACP subprocesses inherit the environment
+    rather than the constant.
+    """
+    override = os.environ.get(AGENTS_ROOT_ENV)
+    if override:
+        return Path(override).expanduser()
+    return _PROJECT_ROOT / AGENTS_DIRNAME
 
 
 def notifications_path() -> Path:

@@ -205,9 +205,15 @@ def _completed(task_id="task-1") -> FakeClient:
 # ── One surface, reachable from every seat ────────────────────────────────────
 
 
-def test_both_routines_are_published_to_every_assistant():
+def test_both_routines_are_published_to_every_assistant(monkeypatch):
     """Deleting the MCP tools is only safe because agents resolve these."""
+    from condor import paths
     from routines.base import assistant_routines, discover_routines
+
+    # A fact about the *shipped* library, so it reads the real ``agents/``
+    # rather than the suite's tmp one. Read-only: nothing here writes, which is
+    # the only condition under which dropping the isolation knob is allowed.
+    monkeypatch.delenv(paths.AGENTS_ROOT_ENV, raising=False)
 
     chat = discover_routines(force_reload=True)
     agent = assistant_routines("directional_trader", force_reload=True)

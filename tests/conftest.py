@@ -47,7 +47,7 @@ def _reset_gecko_throttle():
 
 @pytest.fixture(autouse=True)
 def _isolated_runtime_root(tmp_path, monkeypatch):
-    """Keep both durable roots out of the developer's live install.
+    """Keep all three durable roots out of the developer's live install.
 
     For as long as every store derived its own root there was nothing to
     repoint, so four test modules each had to remember to monkeypatch a private
@@ -60,8 +60,20 @@ def _isolated_runtime_root(tmp_path, monkeypatch):
     notification bell, or dropped a record among the live ones in
     ``data/code_runs/``). They all resolve through ``condor.paths`` now, so
     ``$CONDOR_DATA_DIR`` moves the lot.
+
+    The third line covers ``agents/``: every ``MemoryStore`` and ``SkillStore``
+    hangs off it and ``mkdir(parents=True)``s on write, so a module that did not
+    monkeypatch ``condor.memory.paths._PROJECT_ROOT`` by hand wrote into the
+    developer's own memory and skill library -- it left an ``audit.log`` for a
+    ``user_424242`` that appears nowhere in the repo. Ten modules remembered;
+    the knob means none of them has to (CORR-220).
     """
     from condor import paths
 
     monkeypatch.setenv(paths.RUNTIME_ROOT_ENV, str(tmp_path / "condor-runtime"))
     monkeypatch.setenv(paths.DATA_DIR_ENV, str(tmp_path / "condor-data"))
+    # ``tmp_path / "agents"`` and not ``condor-agents``: ``tmp_path`` stands in
+    # for the repo root in the agent tests, and several roots still out of scope
+    # here (``agent.py``/``strategy.py``'s ``_DATA_ROOT``) are monkeypatched to
+    # that same directory, so the registry and the stores stay one tree.
+    monkeypatch.setenv(paths.AGENTS_ROOT_ENV, str(tmp_path / "agents"))

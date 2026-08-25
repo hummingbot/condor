@@ -8,7 +8,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from condor.memory import paths as paths_module
 from condor.memory.store import MemoryStore
 from handlers.memory import _DEL_MAP_KEY, _build_view
 
@@ -17,9 +16,8 @@ _CALLBACK_DATA_MAX = 64
 
 
 @pytest.fixture
-def memory_root(tmp_path, monkeypatch):
-    """Point the project root at a tmp dir so stores resolve under it."""
-    monkeypatch.setattr(paths_module, "_PROJECT_ROOT", tmp_path)
+def memory_root(tmp_path):
+    """The tmp root the suite-wide fixture already points ``agents/`` under."""
     return tmp_path
 
 

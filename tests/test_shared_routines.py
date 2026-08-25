@@ -53,7 +53,6 @@ def isolated(tmp_path, monkeypatch):
     changes when the shared dir is empty" reference every test measures against.
     """
     monkeypatch.setattr(base, "_PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(paths_mod, "_PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(base, "_routines_cache", None)
     monkeypatch.setattr(base, "_routines_mtimes", {})
     monkeypatch.setattr(base, "_path_caches", {})

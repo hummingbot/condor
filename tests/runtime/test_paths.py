@@ -4,6 +4,10 @@ These pin the two properties everything else in FEAT-051 leans on -- the env
 override is read at call time (so the suite can isolate itself and a subprocess
 can inherit it), and an id that could escape its directory is refused rather
 than sanitized.
+
+The agent registry root is pinned the same way at the bottom: it was the third
+root and the last to get a knob (CORR-220), and it is the one a test *writes*
+to, so "read at call time" is not a nicety there.
 """
 
 import pytest
@@ -20,6 +24,54 @@ def test_root_defaults_to_a_dot_condor_beside_the_code(monkeypatch):
     assert root.parent == paths._PROJECT_ROOT
     # The whole point: not inside the Python package any more.
     assert "condor/.runtime" not in str(root)
+
+
+def test_the_agent_registry_defaults_to_agents_beside_the_code(monkeypatch):
+    monkeypatch.delenv(paths.AGENTS_ROOT_ENV, raising=False)
+
+    assert paths.agents_root() == paths._PROJECT_ROOT / "agents"
+
+
+def test_the_agent_registry_override_is_observable_after_import(tmp_path, monkeypatch):
+    """A module constant is what CORR-220 removed; this is why it had to go.
+
+    Ten test modules monkeypatched the private constant by hand and any
+    eleventh could forget, writing a stub memory into the developer's live
+    library. Read on every call, one ``setenv`` in ``conftest`` covers them all.
+    """
+    from condor.memory import paths as memory_paths
+
+    monkeypatch.setenv(paths.AGENTS_ROOT_ENV, str(tmp_path / "elsewhere"))
+
+    assert paths.agents_root() == tmp_path / "elsewhere"
+    assert memory_paths.assistant_home("scout") == tmp_path / "elsewhere" / "scout"
+    assert memory_paths.store_root(7, "scout") == (
+        tmp_path / "elsewhere" / "scout" / "store" / "user_7"
+    )
+    assert memory_paths.shared_skills_root() == (
+        tmp_path / "elsewhere" / "_shared" / "skills"
+    )
+    assert memory_paths.shared_routines_root() == (
+        tmp_path / "elsewhere" / "_shared" / "routines"
+    )
+
+    monkeypatch.setenv(paths.AGENTS_ROOT_ENV, str(tmp_path / "moved"))
+
+    assert paths.agents_root() == tmp_path / "moved"
+    assert memory_paths.store_root(7, "scout") == (
+        tmp_path / "moved" / "scout" / "store" / "user_7"
+    )
+
+
+def test_the_three_roots_stay_apart(tmp_path, monkeypatch):
+    """Repointing one root must not drag the other two with it."""
+    monkeypatch.setenv(paths.RUNTIME_ROOT_ENV, str(tmp_path / "runtime"))
+    monkeypatch.setenv(paths.DATA_DIR_ENV, str(tmp_path / "operational"))
+    monkeypatch.setenv(paths.AGENTS_ROOT_ENV, str(tmp_path / "registry"))
+
+    assert paths.runtime_root() == tmp_path / "runtime"
+    assert paths.data_dir() == tmp_path / "operational"
+    assert paths.agents_root() == tmp_path / "registry"
 
 
 def test_env_override_is_observable_after_import(tmp_path, monkeypatch):

@@ -14,7 +14,6 @@ from types import SimpleNamespace
 import pytest
 
 from condor.memory import domain_context
-from condor.memory import paths as paths_module
 from condor.memory.skills import SkillStore
 from condor.memory.store import MemoryStore
 
@@ -25,9 +24,8 @@ _PROJECT_ROOT = Path(__file__).parent.parent
 
 
 @pytest.fixture
-def stocked_agent(tmp_path, monkeypatch):
+def stocked_agent(tmp_path):
     """An agent with one memory and one skill, in stores under a tmp root."""
-    monkeypatch.setattr(paths_module, "_PROJECT_ROOT", tmp_path)
 
     MemoryStore(_USER_ID, _SLUG).write(
         name="Funding window",
@@ -96,8 +94,7 @@ def test_both_builders_carry_the_memory_and_skills_indexes(stocked_agent):
     assert "[CONSULT REQUEST]" not in chatted
 
 
-def test_an_empty_store_contributes_no_sections(tmp_path, monkeypatch):
-    monkeypatch.setattr(paths_module, "_PROJECT_ROOT", tmp_path)
+def test_an_empty_store_contributes_no_sections(tmp_path):
     assert domain_context("nobody", _USER_ID) == []
 
 

@@ -16,7 +16,6 @@ import pytest
 
 from condor.agents import agent as agent_module
 from condor.agents import strategy as strategy_module
-from condor.memory import paths as paths_module
 from mcp_servers.condor.settings import settings
 from mcp_servers.condor.tools import skills as skills_tool
 
@@ -45,8 +44,12 @@ class _FakeStrategyStore:
 
 @pytest.fixture
 def chat(tmp_path, monkeypatch):
-    """Run as the chat condor (no bound specialist), rooted at a tmp project."""
-    monkeypatch.setattr(paths_module, "_PROJECT_ROOT", tmp_path)
+    """Run as the chat condor (no bound specialist), rooted at a tmp project.
+
+    The ``agents/`` root is already under ``tmp_path`` for every test
+    (``conftest``'s ``_isolated_runtime_root``); only the stores this module
+    fakes out are wired here.
+    """
     monkeypatch.setattr(agent_module, "AgentStore", _FakeAgentStore)
     monkeypatch.setattr(strategy_module, "StrategyStore", _FakeStrategyStore)
     monkeypatch.setattr(settings, "agent_slug", "")
@@ -103,7 +106,6 @@ def test_unknown_target_errors_instead_of_writing_to_the_chat(chat):
 
 def test_a_launched_agent_writes_only_to_its_own_library(tmp_path, monkeypatch):
     """A specialist ignores nothing and targets nobody else: its slug is the scope."""
-    monkeypatch.setattr(paths_module, "_PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(settings, "agent_slug", AGENT_SLUG)
 
     _create()
@@ -115,7 +117,6 @@ def test_a_launched_agent_writes_only_to_its_own_library(tmp_path, monkeypatch):
 
 def test_an_agent_cannot_publish_to_every_agent(tmp_path, monkeypatch):
     """`shared` is honored only in Condor's library — an agent may not publish."""
-    monkeypatch.setattr(paths_module, "_PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(settings, "agent_slug", AGENT_SLUG)
 
     result = _create(shared=True)

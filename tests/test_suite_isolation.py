@@ -9,19 +9,22 @@ Asserting on "nothing appeared on disk after the run" would be flaky (the real
 bot may be running while the suite is), so what is pinned here is the mechanism
 instead: with the autouse fixture in ``conftest.py`` active, every path a
 writer can build resolves outside the repository. If someone reintroduces a
-root that ignores ``CONDOR_RUNTIME_ROOT`` or ``CONDOR_DATA_DIR``, one of these
-fails.
+root that ignores ``CONDOR_RUNTIME_ROOT``, ``CONDOR_DATA_DIR`` or
+``CONDOR_AGENTS_ROOT``, one of these fails.
 
-Both roots are covered, because both are durable and both were reachable from
-a test: ``.condor/`` (conversations, delegations, state, telemetry) and
-``data/`` (the bell, routine hooks, backtests, code runs) -- the second is the
-one whose three cwd-relative constants READ-215 replaced with resolvers.
+All three roots are covered, because all three are durable and all three were
+reachable from a test: ``.condor/`` (conversations, delegations, state,
+telemetry), ``data/`` (the bell, routine hooks, backtests, code runs) -- whose
+three cwd-relative constants READ-215 replaced with resolvers -- and
+``agents/`` (every agent's per-user memory and skill library), the one READ-215
+did not reach and CORR-220 did.
 """
 
 from pathlib import Path
 
 from condor import backtest_store, code_runs, paths
 from condor.agents.delegate import DelegateTask, _record_dir
+from condor.memory import paths as memory_paths
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -40,6 +43,33 @@ def test_no_store_resolves_inside_the_repository():
     assert _outside_the_repo(paths.delegation_dir(42, "t"))
     assert _outside_the_repo(paths.state_dir("ns"))
     assert _outside_the_repo(paths.telemetry_dir())
+
+
+def test_the_agent_stores_are_isolated_too():
+    """``agents/`` is the third root, and the one a test *writes* to.
+
+    ``MemoryStore`` and ``SkillStore`` both ``mkdir(parents=True)`` their root
+    on the first write, so a module that forgot the old per-module monkeypatch
+    left stub memories and skills in the developer's live library. Every path
+    the two stores can build is asserted here, the default slug and a named
+    agent alike.
+    """
+    assert paths.agents_root() != REPO / "agents"
+    assert _outside_the_repo(paths.agents_root())
+    assert _outside_the_repo(memory_paths.assistant_home())
+    assert _outside_the_repo(memory_paths.assistant_home("grid_scalper"))
+    assert _outside_the_repo(memory_paths.store_root(42))
+    assert _outside_the_repo(memory_paths.store_root(42, "grid_scalper"))
+    assert _outside_the_repo(memory_paths.builtin_skills_root("grid_scalper"))
+    assert _outside_the_repo(memory_paths.shared_skills_root())
+    assert _outside_the_repo(memory_paths.shared_routines_root())
+
+
+def test_a_memory_would_be_written_outside_the_install():
+    """The writer's own root, not a reconstruction of it."""
+    from condor.memory.store import MemoryStore
+
+    assert _outside_the_repo(MemoryStore(424242, "grid_scalper").root)
 
 
 def test_a_delegation_would_be_written_outside_the_install():

@@ -134,8 +134,14 @@ def test_the_assistants_tree_is_gone():
     assert not (_REPO_ROOT / "assistants").exists()
 
 
-def test_the_chats_store_and_skills_moved_with_it():
+def test_the_chats_store_and_skills_moved_with_it(monkeypatch):
+    from condor import paths
     from condor.memory.paths import builtin_skills_root, store_root
+
+    # Production's view: this pins where the chat's store and library *are* in
+    # the shipped repo, so the suite-wide ``agents/`` override comes off.
+    # Read-only, so nothing lands in the developer's install (CORR-220).
+    monkeypatch.delenv(paths.AGENTS_ROOT_ENV, raising=False)
 
     home = _REPO_ROOT / "agents" / CHAT_SLUG
     assert store_root(42) == home / "store" / "user_42"
@@ -146,17 +152,15 @@ def test_the_chats_store_and_skills_moved_with_it():
     assert (home / "skills" / "agent_builder" / "SKILL.md").exists()
 
 
-def test_the_chat_does_not_list_a_skill_twice(tmp_path, monkeypatch):
+def test_the_chat_does_not_list_a_skill_twice(tmp_path):
     """``SkillStore("condor")`` and ``SkillStore(None)`` are the same library.
 
     Both spellings resolve the chat (FEAT-033), and the chat reads the shared
     library like everyone else — so a slug must still surface exactly once,
     whichever library it lives in.
     """
-    from condor.memory import paths as paths_module
     from condor.memory.skills import SkillStore
 
-    monkeypatch.setattr(paths_module, "_PROJECT_ROOT", tmp_path)
     for parent in ((CHAT_SLUG, "skills"), ("_shared", "skills")):
         d = tmp_path / "agents" / parent[0] / parent[1] / f"in_{parent[0]}"
         d.mkdir(parents=True)
@@ -170,11 +174,9 @@ def test_the_chat_does_not_list_a_skill_twice(tmp_path, monkeypatch):
     assert index.count("[in__shared]") == 1
 
 
-def test_memory_index_lists_the_chat_first_as_the_chat(tmp_path, monkeypatch):
-    from condor.memory import paths as paths_module
+def test_memory_index_lists_the_chat_first_as_the_chat(tmp_path):
     from condor.memory.paths import iter_user_stores
 
-    monkeypatch.setattr(paths_module, "_PROJECT_ROOT", tmp_path)
     for slug in (CHAT_SLUG, "brigado"):
         (tmp_path / "agents" / slug / "store" / "user_7").mkdir(parents=True)
 
