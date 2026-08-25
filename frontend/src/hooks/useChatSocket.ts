@@ -17,6 +17,34 @@ export interface ToolCall {
   status: string;
 }
 
+/** What each key shape means, said once per conversation (FEAT-056).
+ *
+ * The two `redacted` kinds describe text the user can see is gone. The other
+ * two describe text that is still there on purpose: a 64-byte value is a
+ * transaction hash or signature far more often than a key here, and redacting
+ * those by default would break "check this tx" on every use. */
+const SECRET_NOTICES: Record<string, string> = {
+  mnemonic:
+    "**A recovery phrase was removed from that message.** It never reached the " +
+    "model and was not written to the transcript. Import wallets from Settings " +
+    "instead — that flow is the only one that should ever see a key. If the " +
+    "phrase holds funds, move them.",
+  "solana-keypair":
+    "**A keypair array was removed from that message.** It never reached the " +
+    "model and was not written to the transcript. Import wallets from Settings " +
+    "instead. If that key holds funds, move them.",
+  "evm-hex64":
+    "That message carried a `0x` value 64 hex digits long. An EVM private key " +
+    "looks exactly like that — and so does a transaction hash, which is why it " +
+    "was passed through untouched. If it was a key, treat it as exposed: it " +
+    "reached the model and the transcript.",
+  "solana-b58-64":
+    "That message carried an 87–88 character base58 value. A Solana secret key " +
+    "looks exactly like that — and so does a transaction signature, which is " +
+    "why it was passed through untouched. If it was a key, treat it as " +
+    "exposed: it reached the model and the transcript.",
+};
+
 export interface ChatMessage {
   id: string;
   /** A `system` message is not a bubble — it is a divider in the scrollback. */
@@ -24,7 +52,8 @@ export interface ChatMessage {
   text: string;
   toolCalls: ToolCall[];
   thought?: string;
-  /** System: "switch" | "error" | "delegation" | "resume" | "notification" | "routine". */
+  /** System: "switch" | "error" | "delegation" | "resume" | "notification" |
+   * "routine" | "secret_notice". */
   kind?: string;
   /**
    * The user redirected the agent while this answer was being written. The
@@ -942,6 +971,41 @@ export function useChatSocket() {
                         role: "system" as const,
                         text: noteText,
                         kind: noteKind,
+                        toolCalls: [],
+                      },
+                    ],
+                  }
+                : s,
+            ),
+          );
+          break;
+        }
+
+        case "secret_notice": {
+          // The funnel found something key-shaped in what was just sent
+          // (FEAT-056). A `certain` kind was already replaced before the model
+          // saw it and before anything was written; an ambiguous one was left
+          // alone, because in this app that shape is a transaction far more
+          // often than a key. The server sends the kind, never the value, and
+          // sends it at most once per conversation per kind — so the wording
+          // is composed here rather than shipped over the wire.
+          if (!slotId) break;
+          flushChunks(slotId);
+          const secretKind = data.kind as string;
+          const text = SECRET_NOTICES[secretKind];
+          if (!text) break;
+          setSlots((prev) =>
+            prev.map((s) =>
+              s.info.slot_id === slotId
+                ? {
+                    ...s,
+                    messages: [
+                      ...s.messages,
+                      {
+                        id: nextMsgId(),
+                        role: "system" as const,
+                        text,
+                        kind: "secret_notice",
                         toolCalls: [],
                       },
                     ],

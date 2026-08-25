@@ -18,7 +18,7 @@ from condor.llm.options import DEFAULT_AGENT
 from condor.notifications import Notification, register_push_sink
 from condor.runtime import WEB, EventType, PromptRequest, SessionKey, SessionSpec
 from condor.runtime import client as runtime
-from condor.runtime import conversations
+from condor.runtime import conversations, secrets
 from condor.runtime.binding import remember_model_choice
 from condor.runtime.confirmations import (
     PendingConfirmation,
@@ -654,6 +654,53 @@ async def _spawn(
         return False
 
 
+# ── Pasted key material (FEAT-056) ───────────────────────────────────────
+#
+# Safety is the funnel's: ``runtime.prompt`` has already replaced the certain
+# shapes by the time anything below runs. This surface cannot delete what the
+# user typed the way Telegram can, so all it does is say what happened, and say
+# it at most once per conversation per kind — a web slot id *is* its
+# conversation id, so that bound is exactly the one the Telegram side keeps in
+# ``chat_data``.
+_secret_notices_sent: dict[str, set[str]] = {}
+
+
+async def _notify_secret_shapes(
+    ws: WebSocket, user_id: int, slot_id: str, text: str
+) -> None:
+    """Emit ``secret_notice`` for each key shape this message carried."""
+    findings = secrets.scan(text)
+    if not findings:
+        return
+
+    told = _secret_notices_sent.setdefault(f"{user_id}:{slot_id}", set())
+    allowed: bool | None = None  # the preference, read only if it is needed
+    for kind in dict.fromkeys(finding.kind for finding in findings):
+        if kind in told:
+            continue
+        certain = secrets.KINDS.get(kind, False)
+        if not certain:
+            if allowed is None:
+                from condor.preferences import (
+                    load_user_data_for,
+                    secret_notices_enabled,
+                )
+
+                allowed = secret_notices_enabled(load_user_data_for(user_id))
+            if not allowed:
+                continue
+        told.add(kind)
+        await _send(
+            ws,
+            {
+                "event": "secret_notice",
+                "slot_id": slot_id,
+                "kind": kind,
+                "certain": certain,
+            },
+        )
+
+
 async def _handle_send_message(
     ws: WebSocket,
     user_id: int,
@@ -667,6 +714,10 @@ async def _handle_send_message(
     if not slot_id:
         await _send(ws, {"event": "error", "message": "No slot_id"})
         return
+
+    # Said before the spawn wait, so the notice lands with the message it is
+    # about rather than after the answer to it.
+    await _notify_secret_shapes(ws, user_id, slot_id, text)
 
     # The user is allowed to type through a spawn, so a message can legitimately
     # arrive before the subprocess exists. Waiting for it is the difference

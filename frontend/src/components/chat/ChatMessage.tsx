@@ -1,7 +1,15 @@
 import { isValidElement, memo, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { ChevronDown, ChevronRight, Loader2, Square, User, Bot } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronRight,
+  Loader2,
+  Square,
+  User,
+  Bot,
+  ShieldAlert,
+} from "lucide-react";
 import type { ChatMessage as ChatMessageType } from "@/hooks/useChatSocket";
 import { useLiveDisclosure } from "@/hooks/useLiveDisclosure";
 import { ChartBlock } from "./ChartBlock";
@@ -98,6 +106,25 @@ export const ChatMessageView = memo(function ChatMessageView({
   // the user out of band, and the transcript records that it did. And so is a
   // `routine` outcome — a run's result, often a multi-line error, which the
   // divider rendered as one shouting, unreadable, un-wrapped line.
+  // Key material in what was just sent (FEAT-056). It gets the warning
+  // treatment rather than the quiet inset note: half of these say text the
+  // user can see is gone, and the other half say a value is still there and
+  // should be rotated. Neither is something to scroll past.
+  if (message.role === "system" && message.kind === "secret_notice") {
+    return (
+      <div className="my-3 flex justify-start">
+        <div className="flex max-w-[85%] items-start gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3.5 py-2 text-sm text-[var(--color-text-muted)]">
+          <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-[var(--color-yellow)]" />
+          <div className="chat-markdown">
+            <ReactMarkdown remarkPlugins={[remarkGfm]} components={STATIC_COMPONENTS}>
+              {message.text}
+            </ReactMarkdown>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   const isNote =
     message.kind === "delegation" ||
     message.kind === "resume" ||
