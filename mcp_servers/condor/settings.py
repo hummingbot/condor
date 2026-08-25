@@ -79,3 +79,18 @@ def _parse_settings() -> Settings:
 
 
 settings = _parse_settings()
+
+
+def caller_slug(owner: str | None = None) -> str:
+    """Who a run started from this subprocess is *for*, as the store stamps it.
+
+    One rule in one place: an explicit ``owner`` — the agent that owns a
+    routine the caller targeted — wins, else the specialist bound to this
+    subprocess, else the chat. Every ``attribute_to`` the tools put on the wire
+    comes from here. ARCH-217 single-sourced the store side that consumes the
+    value (``reports.run_scope``); this is the MCP side that supplies it, so a
+    change to the rule cannot land in one tool and miss another (ARCH-218).
+    """
+    from condor.memory.paths import CHAT_SLUG
+
+    return owner or settings.specialist_slug or CHAT_SLUG

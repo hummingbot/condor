@@ -458,7 +458,8 @@ async def manage_routines(
             and "get_instance", pass the instance_id as name.
         config: Config overrides for run/start (optional, merged with defaults).
         agent: Slug of the agent whose routine library to target (agent-local
-            CRUD, and "list"/"run" against another agent's routines). Omit to use
+            CRUD, and "list"/"run"/"start" against another agent's routines).
+            A run started with it is attributed to that agent. Omit to use
             the current assistant's own library.
         code: Python source code for create_routine / edit_routine.
         strategy_id: DEPRECATED alias of `agent`, kept for older callers. A

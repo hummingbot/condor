@@ -213,6 +213,39 @@ def test_continuous_start_is_registered_in_the_main_process(project, monkeypatch
     assert out == {"started": True, "instance_id": "inst-1", "routine": "watcher"}
 
 
+def test_start_attributes_a_targeted_routine_to_its_owning_agent(project, monkeypatch):
+    """ARCH-218: ``start`` resolves an owner exactly as ``run`` does.
+
+    Starting a continuous routine and running a one-shot ask the same question —
+    "who is this run for?" — so from the chat's seat both must stamp the targeted
+    library's owner, not the caller.
+    """
+    import condor.agents.agent as agent_mod
+
+    monkeypatch.setattr(agent_mod, "_DATA_ROOT", project / "agents")
+    (project / "agents" / "scout" / "AGENT.md").write_text("---\nname: Scout\n---\n")
+    api = _api(monkeypatch)
+
+    out = asyncio.run(mcp_routines.manage_routines("start", "watcher", agent="scout"))
+
+    assert api.posted["routine_name"] == "scout/watcher"
+    assert api.posted["attribute_to"] == "scout"
+    assert out["started"] is True
+
+
+def test_start_without_a_target_still_attributes_to_the_chat(project, monkeypatch):
+    """The default is byte-identical to before the owner resolution existed."""
+    api = _api(monkeypatch)
+    watcher = routines_base.discover_routines_from_path(
+        project / "agents" / "scout" / "routines", agent_slug="scout"
+    )["watcher"]
+    monkeypatch.setattr(mcp_routines, "_resolve_routine", lambda name: watcher)
+
+    asyncio.run(mcp_routines.start_routine("watcher", {}))
+
+    assert api.posted["attribute_to"] == "condor"
+
+
 def test_start_rejects_a_one_shot_routine(project, monkeypatch):
     monkeypatch.setattr(mcp_routines.settings, "agent_slug", "scout")
     api = _api(monkeypatch)
