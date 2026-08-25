@@ -636,6 +636,13 @@ async def startup(application: Application) -> None:
     sds.start()
     await sds.auto_subscribe_servers()
 
+    # Ride the ticker-pool poll the SDS just started: an hourly price snapshot
+    # per server is the only source of 24h change on the CLOB side, and it costs
+    # no upstream request (FEAT-053).
+    from condor import ticker_history
+
+    ticker_history.install_listener()
+
     # Start agent session health monitor. The health monitor is process
     # lifecycle, not a session operation, so it is driven off the module
     # directly rather than through the client facade.
