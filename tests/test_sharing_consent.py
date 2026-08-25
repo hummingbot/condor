@@ -8,7 +8,10 @@ queue holds.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
+import time
 
 import pytest
 
@@ -260,6 +263,222 @@ def test_the_queue_is_capped(chat, monkeypatch):
     assert len(outbox.pending()) == 3
     # Oldest first: what survives is the newest, which is what a retry wants.
     assert [r["body"]["revision"] for r in outbox.pending()] == [4, 5, 6]
+
+
+# ── The queue has two writers (CORR-232) ─────────────────────────────────
+
+
+def _enqueue_during(fn, monkeypatch) -> dict:
+    """Run ``fn`` while another thread appends to the queue. Returns its record.
+
+    The append is aimed at the window between a read-modify-write's read and its
+    write — the window a flush of a full queue holds open for minutes. If the
+    write path is locked the append lands just after that window instead of
+    inside it; either way the record must be in the file afterwards.
+    """
+    reached = threading.Event()
+    real_read = outbox._read
+    slowed: list[bool] = []
+
+    def slow_read():
+        records = real_read()
+        if not slowed:  # only the read that opens the window
+            slowed.append(True)
+            reached.set()
+            time.sleep(0.2)
+        return records
+
+    queued: list[dict] = []
+
+    def worker():
+        reached.wait(5)
+        queued.append(
+            outbox.enqueue(
+                outbox.OP_SHARE, "https://collector.invalid/late", {}, user_id=99
+            )
+        )
+
+    thread = threading.Thread(target=worker)
+    monkeypatch.setattr(outbox, "_read", slow_read)
+    thread.start()
+    try:
+        fn()
+    finally:
+        thread.join(5)
+        monkeypatch.setattr(outbox, "_read", real_read)
+    assert queued, "the worker thread never got to enqueue"
+    return queued[0]
+
+
+def test_trim_keeps_what_a_worker_thread_appends_while_it_runs(chat):
+    stale = time.time() - outbox.MAX_QUEUE_AGE_S - 1
+    outbox._write(
+        [
+            {"id": "old", "op": outbox.OP_SHARE, "url": "u", "queued_at": stale},
+            {"id": "kept", "op": outbox.OP_SHARE, "url": "u", "queued_at": time.time()},
+        ]
+    )
+
+    with pytest.MonkeyPatch.context() as mp:
+        late = _enqueue_during(outbox.trim, mp)
+
+    # The cap was still enforced, and the sweep's append was not collateral.
+    assert [r["id"] for r in outbox.pending()] == ["kept", late["id"]]
+
+
+def test_purge_user_shares_keeps_what_a_worker_thread_appends_while_it_runs(chat):
+    outbox.enqueue(outbox.OP_SHARE, "u", {}, user_id=4242, kind="passive")
+
+    with pytest.MonkeyPatch.context() as mp:
+        late = _enqueue_during(
+            lambda: outbox.purge_user_shares(4242, kind="passive"), mp
+        )
+
+    assert [r["id"] for r in outbox.pending()] == [late["id"]]
+
+
+@pytest.mark.asyncio
+async def test_a_flush_keeps_what_was_queued_while_it_was_posting(chat, monkeypatch):
+    """Acceptance criterion: a POST that enqueues does not lose its own record."""
+    first = outbox.enqueue(outbox.OP_SHARE, "https://collector.invalid/1", {"n": 1})
+    second = outbox.enqueue(outbox.OP_SHARE, "https://collector.invalid/2", {"n": 2})
+
+    arrivals: list[dict] = []
+
+    async def post_and_enqueue(record):
+        arrivals.append(
+            outbox.enqueue(
+                outbox.OP_SHARE,
+                "https://collector.invalid/late",
+                {"after": record["id"]},
+            )
+        )
+        return True
+
+    monkeypatch.setattr(outbox, "post", post_and_enqueue)
+    delivered, remaining = await outbox.flush()
+
+    assert (delivered, remaining) == (2, 2)
+    queued = [r["id"] for r in outbox.pending()]
+    assert first["id"] not in queued and second["id"] not in queued
+    assert queued == [a["id"] for a in arrivals]  # and in the order they arrived
+
+
+@pytest.mark.asyncio
+async def test_an_unshare_queued_during_a_flush_survives_it(chat, monkeypatch):
+    """The worst case: the queue holds the only copy of the delete token.
+
+    ``share.unshare`` clears ``share_delete_token`` from the meta as soon as it
+    queues, so a flush that dropped the record would leave nothing on the box
+    able to revoke — permanently, silently.
+    """
+    share.submit(4242, chat.id)
+
+    async def post_then_unshare(record):
+        if record["op"] == outbox.OP_SHARE:
+            share.unshare(4242, chat.id)  # a user pressing Unshare mid-flight
+        return True
+
+    monkeypatch.setattr(outbox, "post", post_then_unshare)
+    delivered, remaining = await outbox.flush()
+    assert (delivered, remaining) == (1, 1)
+    assert [r["op"] for r in outbox.pending()] == [outbox.OP_UNSHARE]
+
+    posted: list[dict] = []
+
+    async def record_post(record):
+        posted.append(record)
+        return True
+
+    monkeypatch.setattr(outbox, "post", record_post)
+    assert await outbox.flush() == (1, 0)
+    assert [r["op"] for r in posted] == [outbox.OP_UNSHARE]
+
+
+@pytest.mark.asyncio
+async def test_a_stalled_flush_still_keeps_a_concurrent_arrival(chat, monkeypatch):
+    """Order survives too: nothing overtakes the record that stalled."""
+    stalled = outbox.enqueue(outbox.OP_SHARE, "https://collector.invalid/1", {"n": 1})
+    behind = outbox.enqueue(outbox.OP_SHARE, "https://collector.invalid/2", {"n": 2})
+
+    async def post_and_enqueue(record):
+        outbox.enqueue(outbox.OP_SHARE, "https://collector.invalid/late", {})
+        return False
+
+    monkeypatch.setattr(outbox, "post", post_and_enqueue)
+    delivered, remaining = await outbox.flush()
+
+    assert (delivered, remaining) == (0, 3)
+    queued = outbox.pending()
+    assert [r["id"] for r in queued[:2]] == [stalled["id"], behind["id"]]
+
+
+@pytest.mark.asyncio
+async def test_two_overlapping_flushes_never_post_the_same_record_twice(
+    chat, monkeypatch
+):
+    """The job fires every 300s; a full queue of 10s timeouts can outlast that."""
+    outbox.enqueue(outbox.OP_SHARE, "https://collector.invalid/1", {"n": 1})
+    posted: list[str] = []
+    in_flight = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_post(record):
+        posted.append(record["id"])
+        in_flight.set()
+        await release.wait()
+        return True
+
+    monkeypatch.setattr(outbox, "post", slow_post)
+    first = asyncio.create_task(outbox.flush())
+    await in_flight.wait()
+
+    assert await outbox.flush() == (0, 1)  # the second stands down
+    release.set()
+    assert await first == (1, 0)
+    assert len(posted) == 1
+
+
+@pytest.mark.asyncio
+async def test_no_lock_is_held_while_a_record_is_in_flight(chat, monkeypatch):
+    """A POST can take ``POST_TIMEOUT_S``; producers must not block on it."""
+    outbox.enqueue(outbox.OP_SHARE, "https://collector.invalid/1", {"n": 1})
+    free: list[bool] = []
+
+    def _lock_is_free() -> bool:
+        # From another thread: an RLock would let this one straight back in.
+        acquired = outbox._QUEUE_LOCK.acquire(timeout=1)
+        if acquired:
+            outbox._QUEUE_LOCK.release()
+        return acquired
+
+    async def post(record):
+        free.append(await asyncio.to_thread(_lock_is_free))
+        return True
+
+    monkeypatch.setattr(outbox, "post", post)
+    await outbox.flush()
+    assert free == [True]
+
+
+@pytest.mark.asyncio
+async def test_a_record_queued_before_ids_existed_is_still_retired(chat, monkeypatch):
+    """An upgrade finds a queue written by the version that had no ``id``."""
+    outbox._write(
+        [
+            {"op": outbox.OP_SHARE, "url": "u", "body": {}, "queued_at": time.time()},
+            {"op": outbox.OP_SHARE, "url": "v", "body": {}, "queued_at": time.time()},
+        ]
+    )
+    delivered_urls: list[str] = []
+
+    async def post(record):
+        delivered_urls.append(record["url"])
+        return record["url"] == "u"  # the second stalls
+
+    monkeypatch.setattr(outbox, "post", post)
+    assert await outbox.flush() == (1, 1)
+    assert [r["url"] for r in outbox.pending()] == ["v"]
 
 
 # ── Bounding ─────────────────────────────────────────────────────────────
