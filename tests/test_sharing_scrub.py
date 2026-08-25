@@ -13,13 +13,14 @@ developer happens to have.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
 import pytest
 
 from condor.runtime.conversations import TurnEntry
-from condor.sharing import scrub
+from condor.sharing import scrub, wire
 
 SECRET = "0123456789abcdef0123456789abcdef"
 
@@ -291,6 +292,110 @@ def test_quantities_are_deliberately_kept():
     raw = "balance 12,450.31 USDC, pnl -3.2%, filled 0.25 at 142.35"
     out, _ = _scrub(raw)
     assert out == raw
+
+
+# ── Coverage over the model, not over three names ────────────────────────
+
+
+def test_every_turn_field_is_classified():
+    """The guard: a field the scrubber cannot bucket breaks the build here.
+
+    ``wire.envelope`` posts ``model_dump()`` of the whole entry, so the fields
+    the scrubber does not cover are the fields that ship raw. The scrubber
+    derives its coverage from ``TurnEntry`` instead of restating it, and this is
+    what makes that derivation honest: add a field of a shape ``classify`` does
+    not know — a nested model, a ``datetime`` — and this fails now, rather than
+    the share leaking later.
+
+    The fix when it fails is to teach :func:`condor.sharing.scrub.classify`
+    about the type, not to delete the field from the assertion.
+    """
+    unclassified = [
+        name
+        for name, bucket in scrub.TURN_FIELDS.items()
+        if bucket not in scrub.BUCKETS
+    ]
+    assert unclassified == []
+    assert set(scrub.TURN_FIELDS) == set(TurnEntry.model_fields)
+
+
+def test_the_current_fields_land_in_the_bucket_they_should():
+    """Stated once, so a change of type is a change of test."""
+    assert scrub.TURN_FIELDS["text"] == scrub.TEXT
+    assert scrub.TURN_FIELDS["thought"] == scrub.TEXT
+    assert scrub.TURN_FIELDS["stop_reason"] == scrub.TEXT
+    assert scrub.TURN_FIELDS["tool_calls"] == scrub.PAYLOAD
+    assert scrub.TURN_FIELDS["ts"] == scrub.SCALAR
+
+
+def test_a_secret_in_any_other_string_field_does_not_reach_the_wire():
+    """The failure the enumeration used to allow, asserted end to end.
+
+    ``stop_reason`` stands in for the ``error_text`` or ``system_note`` somebody
+    adds next: it is a plain string field the scrubber never named, and before
+    coverage was derived from the model it went out verbatim. The assertion is
+    over ``wire.envelope`` rather than over the scrubbed turn, because the
+    envelope is what actually leaves.
+    """
+    turns, counts = scrub.scrub(
+        [
+            TurnEntry(
+                role="assistant",
+                text="done",
+                stop_reason=f"error: sk-live-9f8e7d6c5b4a3210 rejected by {EVM_ADDR}",
+                agent_key="claude-opus-4",
+            )
+        ],
+        secret=SECRET,
+        known=KNOWN,
+    )
+    body = wire.envelope(
+        share_install_id="i",
+        share_id="s",
+        delete_token="t",
+        revision=1,
+        turns=turns,
+        counts=counts,
+        truncated=False,
+    )
+    payload = json.dumps(body["turns"])
+    assert "sk-live-9f8e7d6c5b4a3210" not in payload
+    assert EVM_ADDR not in payload
+    assert counts["known_key"] == 1 and counts["evm_addr"] == 1
+    # The field is scrubbed, not blanked: the reason a stream ended is still
+    # readable, which is the whole point of keeping it.
+    assert body["turns"][0]["stop_reason"].startswith("error: API_KEY_")
+    assert body["turns"][0]["agent_key"] == "claude-opus-4"
+
+
+def test_a_scalar_field_is_left_exactly_as_it_was():
+    """``ts`` is a float and stays one — a scrubbed timestamp is a broken
+    transcript, and no free text can hide in a number anyway."""
+    entry = TurnEntry(role="user", text="hi", ts=1755000000.5)
+    turns, _ = scrub.scrub([entry], secret=SECRET, known=KNOWN)
+    assert turns[0].ts == 1755000000.5
+
+
+def test_an_unclassifiable_field_never_travels(monkeypatch):
+    """Fail closed, the way ``ATTRIBUTABLE_SURFACES`` refuses a surface it does
+    not recognise: a shape this module cannot walk is dropped to its default
+    rather than posted on the hope that it holds nothing."""
+    monkeypatch.setitem(scrub.TURN_FIELDS, "kind", scrub.UNCLASSIFIED)
+    turns, _ = scrub.scrub(
+        [TurnEntry(role="system", kind="switch", text="hi")], secret=SECRET, known=KNOWN
+    )
+    assert turns[0].kind == ""
+    assert turns[0].text == "hi"
+
+
+def test_classify_reads_the_annotation_not_the_name():
+    assert scrub.classify(str) == scrub.TEXT
+    assert scrub.classify(str | None) == scrub.TEXT
+    assert scrub.classify(list[dict]) == scrub.PAYLOAD
+    assert scrub.classify(dict[str, object]) == scrub.PAYLOAD
+    assert scrub.classify(float) == scrub.SCALAR
+    assert scrub.classify(bool) == scrub.SCALAR
+    assert scrub.classify(TurnEntry) == scrub.UNCLASSIFIED
 
 
 # ── The separation rule ──────────────────────────────────────────────────

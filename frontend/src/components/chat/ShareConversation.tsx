@@ -65,6 +65,32 @@ function redactionSentence(counts: RedactionCounts): string {
   return `${listed} ${merged.size === 1 && parts[0].startsWith("1 ") ? "was" : "were"} replaced.`;
 }
 
+/** What the preview renders on its own: the speaker, the content, and the
+ *  timestamp — metadata rather than anything anybody pasted.
+ *
+ *  Everything else falls through to the line at the foot of each turn, and that
+ *  inversion is the point. The backend stopped naming three fields and derives
+ *  its redaction coverage from the turn model instead (ARCH-236); a dialog that
+ *  went on hand-rendering three fields would still be showing *less* than what
+ *  is sent the day a field is added, and the whole promise of this dialog is
+ *  that the bytes below are the bytes that leave. So the rule here is the
+ *  complement rather than a second enumeration: anything not accounted for
+ *  above is shown, whether or not this file has heard of it. */
+const PREVIEWED_FIELDS = new Set(["role", "text", "thought", "tool_calls", "ts"]);
+
+/** ``[field, printable value]`` for every field the preview does not render
+ *  itself, empty ones dropped — an unset field is not something to read. */
+function otherFields(turn: object): [string, string][] {
+  const out: [string, string][] = [];
+  for (const [key, value] of Object.entries(turn as Record<string, unknown>)) {
+    if (PREVIEWED_FIELDS.has(key) || value === null || value === undefined)
+      continue;
+    const printed = typeof value === "string" ? value : JSON.stringify(value);
+    if (printed && printed !== "[]" && printed !== "{}") out.push([key, printed]);
+  }
+  return out;
+}
+
 function TurnPreview({ turn }: { turn: SharePreview["turns"][number] }) {
   const label =
     turn.role === "user"
@@ -72,6 +98,7 @@ function TurnPreview({ turn }: { turn: SharePreview["turns"][number] }) {
       : turn.role === "assistant"
         ? "Condor"
         : "System";
+  const others = otherFields(turn);
   return (
     <div className="border-b border-[var(--color-border)]/40 px-3 py-2 last:border-0">
       <div className="mb-0.5 text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
@@ -95,6 +122,15 @@ function TurnPreview({ turn }: { turn: SharePreview["turns"][number] }) {
               className="rounded bg-[var(--color-surface-hover)] px-1.5 py-0.5 text-[10px] text-[var(--color-text-muted)]"
             >
               {call.title ?? "tool"}
+            </span>
+          ))}
+        </div>
+      )}
+      {others.length > 0 && (
+        <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[10px] text-[var(--color-text-muted)]">
+          {others.map(([key, value]) => (
+            <span key={key} className="break-all">
+              <span className="opacity-60">{key}:</span> {value}
             </span>
           ))}
         </div>

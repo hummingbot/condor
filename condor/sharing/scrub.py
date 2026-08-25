@@ -42,7 +42,11 @@ import hmac
 import logging
 import os
 import re
+import types
 from pathlib import Path
+from typing import Any, Union, get_args, get_origin
+
+from pydantic_core import PydanticUndefined
 
 from condor.runtime.conversations import TurnEntry
 
@@ -215,6 +219,93 @@ def _octets_ok(match: str) -> bool:
     return all(part.isdigit() and int(part) <= 255 for part in match.split("."))
 
 
+# ── What the scrubber covers ─────────────────────────────────────────────
+#
+# ``wire.envelope`` posts ``model_dump()`` of the *whole* entry, so every field
+# this module does not touch travels verbatim. Naming the fields here — text,
+# thought, tool_calls — would leave the redaction rule owned by one module and
+# silently depended on by another, and it would fail **open**: a field added
+# later by someone who has never opened ``condor/sharing/`` would ship
+# unredacted, and no test would fail, because none of them enumerate the model.
+#
+# So coverage is derived from ``TurnEntry`` itself. Each field is placed in a
+# bucket by its declared type:
+#
+#   ``TEXT``     a string — scrubbed through :meth:`Scrubber.text`
+#   ``PAYLOAD``  a container — walked by :meth:`Scrubber.payload`
+#   ``SCALAR``   a number or a flag — no free text can hide in one
+#
+# ``extra="ignore"`` on ``TurnEntry`` makes the declared fields the whole
+# surface, so the enumeration is complete by construction, and a new text field
+# is redacted the day it is added rather than the day someone notices.
+#
+# A field whose type fits no bucket — a nested model, say — is left
+# ``UNCLASSIFIED`` and never travels: :meth:`Scrubber.turn` drops it to its
+# default, or refuses the share outright if it has none. That is the same move
+# ``ATTRIBUTABLE_SURFACES`` makes for an unrecognised surface. The guard test in
+# ``tests/test_sharing_scrub.py`` fails on the same condition, so a build breaks
+# before it can take that path.
+
+TEXT = "text"
+PAYLOAD = "payload"
+SCALAR = "scalar"
+UNCLASSIFIED = ""
+
+BUCKETS = (TEXT, PAYLOAD, SCALAR)
+
+_SCALAR_TYPES = (bool, int, float)
+_PAYLOAD_TYPES = (list, tuple, set, frozenset, dict)
+
+
+def classify(annotation) -> str:
+    """The bucket one field annotation falls into, or :data:`UNCLASSIFIED`."""
+    if annotation is str:
+        return TEXT
+    if annotation in _SCALAR_TYPES:
+        return SCALAR
+    if annotation is Any:
+        return PAYLOAD  # unknown at rest, and ``payload`` walks anything
+    origin = get_origin(annotation)
+    if origin in (Union, types.UnionType):
+        # ``str | None`` is text. A union of buckets is walked as a payload,
+        # which handles a string, a container and a scalar alike.
+        inner = {classify(arg) for arg in get_args(annotation) if arg is not type(None)}
+        if UNCLASSIFIED in inner or not inner:
+            return UNCLASSIFIED
+        return inner.pop() if len(inner) == 1 else PAYLOAD
+    container = origin or annotation
+    if isinstance(container, type) and issubclass(container, _PAYLOAD_TYPES):
+        return PAYLOAD
+    return UNCLASSIFIED
+
+
+#: ``{field name: bucket}`` for every field ``TurnEntry`` declares, computed
+#: once at import. The guard test reads this.
+TURN_FIELDS: dict[str, str] = {
+    name: classify(field.annotation) for name, field in TurnEntry.model_fields.items()
+}
+
+
+def _dropped(name: str, value):
+    """An unclassified field, removed from the share rather than sent raw.
+
+    Fail closed: a shape this module does not know how to walk is a shape it
+    cannot promise is clean. ``TurnEntry``'s growth contract says every field
+    past ``role`` carries a default that reads as "not recorded", so dropping to
+    that default is both valid and honest. A field with no default cannot be
+    dropped, so the share does not go at all — the sweep catches that per
+    conversation and the button reports it.
+    """
+    default = TurnEntry.model_fields[name].get_default(call_default_factory=True)
+    if default is PydanticUndefined:
+        raise ValueError(
+            f"Sharing cannot classify the required turn field {name!r}; "
+            "teach condor.sharing.scrub.classify about it before sharing."
+        )
+    log.warning("Sharing dropped the unclassified turn field %r from a share", name)
+    return default
+
+
 class Scrubber:
     """One share's substitution table and the counts it accumulated.
 
@@ -301,17 +392,32 @@ class Scrubber:
     def turn(self, entry: TurnEntry) -> TurnEntry:
         """One transcript line, scrubbed into a new entry.
 
+        Every field the model declares, by its declared type — see the note
+        above :data:`TURN_FIELDS` for why the fields are read off the model
+        rather than named here.
+
         ``TurnEntry`` *is* the wire format for a share — the model already on
         disk, not a parallel extraction path — so the scrubbed turn is the same
         type and every existing reader of a transcript can read a share.
         """
-        return entry.model_copy(
-            update={
-                "text": self.text(entry.text),
-                "thought": self.text(entry.thought),
-                "tool_calls": [self.payload(call) for call in entry.tool_calls],
-            }
-        )
+        update: dict = {}
+        for name, bucket in TURN_FIELDS.items():
+            if bucket == SCALAR:
+                continue
+            value = getattr(entry, name)
+            if bucket == TEXT:
+                update[name] = self.text(value) if isinstance(value, str) else value
+            elif bucket == PAYLOAD:
+                # Each element from depth 0, so a tool call is walked exactly as
+                # deep as it was when this loop named ``tool_calls`` itself.
+                update[name] = (
+                    [self.payload(item) for item in value]
+                    if isinstance(value, (list, tuple))
+                    else self.payload(value)
+                )
+            else:
+                update[name] = _dropped(name, value)
+        return entry.model_copy(update=update)
 
 
 # ── Tier-2 handlers ──────────────────────────────────────────────────────

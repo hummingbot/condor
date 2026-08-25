@@ -315,7 +315,11 @@ class TurnEntry(BaseModel):
     written before a field existed still parses, and unknown keys are ignored,
     so a line written by a newer build still loads here. Anything added later
     must keep both halves of that bargain — optional, with a default that reads
-    as "not recorded" rather than as a real value.
+    as "not recorded" rather than as a real value. That default is also what
+    makes the shape safe to grow: ``condor.sharing.scrub`` reads its redaction
+    coverage off these fields rather than naming them, so a text field added
+    here is scrubbed the day it is added, and one whose type the scrubber cannot
+    walk is dropped to its default instead of being shared raw.
 
     The attribution fields say which brain produced the turn. They live on the
     turn rather than only on ``ConversationMeta`` because the meta is
