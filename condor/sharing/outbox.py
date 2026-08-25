@@ -223,13 +223,24 @@ def trim() -> None:
     _rewrite(_retain)
 
 
-def purge() -> None:
-    """Delete everything queued. The off switch's counterpart."""
-    with _QUEUE_LOCK:
-        try:
-            queue_path().unlink()
-        except OSError:
-            pass
+def purge_shares() -> int:
+    """Destroy every undelivered share. The off switch's counterpart.
+
+    Shares only, never the pending unshares. A veto is the install being
+    forbidden to *send* a conversation; a queued unshare is the install still
+    owing the collector a *deletion* it already promised a user, and the delete
+    token lives nowhere else once ``unshare`` has cleared it from the meta
+    (CORR-232). Turning sharing off must not strand somebody with a transcript
+    they can no longer take back — which is the same reason the unshare route is
+    deliberately ungated.
+
+    So this deletes records rather than the file: a bare ``unlink`` would take
+    every revocation with it. Returns how many shares were dropped.
+    """
+    dropped = _rewrite(lambda records: [r for r in records if r.get("op") != OP_SHARE])
+    if dropped:
+        log.info("Dropped %d undelivered share(s) on veto", dropped)
+    return dropped
 
 
 def purge_user_shares(user_id: int | str, *, kind: str) -> int:
@@ -239,13 +250,12 @@ def purge_user_shares(user_id: int | str, *, kind: str) -> int:
     withdrawing consent destroys what was collected but unsent rather than
     merely deciding not to send it, so a later bug has nothing left to deliver.
 
-    It is scoped rather than a bare :func:`purge` because this queue is not one
-    user's. A single file holds every share on the install **and every pending
-    unshare** — the record that carries a delete token for something already
-    revoked. Emptying it to honour one user turning Always off would silently
-    un-revoke somebody else's withdrawal and throw away a conversation a third
-    person deliberately pressed Share on. So a withdrawal takes what it is owed:
-    the passive shares this user never looked at, still sitting in the queue.
+    It is scoped to one user rather than the install-wide :func:`purge_shares`
+    because this queue is not one user's. A single file holds every share on the
+    install, and emptying it to honour one user turning Always off would throw
+    away a conversation a second person deliberately pressed Share on. So a
+    withdrawal takes what it is owed and no more: the passive shares this user
+    never looked at, still sitting in the queue.
     """
     wanted = str(user_id)
 
@@ -317,11 +327,36 @@ def _ensure_ids() -> list[dict]:
         return records
 
 
+def _share_vetoed() -> bool:
+    """May this install still send a *share* right now?
+
+    Consulted per record on the send path, not only when the share was created:
+    a queue survives restarts and lives for ``MAX_QUEUE_AGE_S``, so consent
+    checked once at creation would let an operator export ``CONDOR_SHARING=off``
+    and still watch every transcript queued before the switch was flipped go out
+    (CORR-233). Re-read each time and never cached, for the reason
+    :func:`condor.sharing.consent.env_allows` gives: the operator should not have
+    to restart to be obeyed. Both reads are in-memory and neither blocks.
+
+    Imported lazily to keep this module free of a cycle through ``consent``.
+    """
+    from condor.sharing import consent
+
+    return not consent.env_allows() or not consent.install_allows()
+
+
 async def flush() -> tuple[int, int]:
     """Try every queued request in order. Returns ``(delivered, still queued)``.
 
     Order is preserved and a failure does not skip ahead: a share and the
     unshare that revokes it must not be able to arrive out of order.
+
+    Consent is a *send*-time gate as well as a creation-time one. A share the
+    install is no longer allowed to make is dropped here rather than held: the
+    kill switch says nothing on this box can share, and leaving it queued only
+    postpones the leak to whenever the switch is flipped back. An unshare is
+    delivered under both vetoes — an admin turning sharing off must not strand a
+    user with a transcript they can no longer take back.
 
     Delivery is by identity, not by snapshot. Posting the whole queue can take
     ``MAX_QUEUED_SHARES`` × ``POST_TIMEOUT_S``, and the sweep and the web routes
@@ -344,8 +379,15 @@ async def flush() -> tuple[int, int]:
             return 0, 0
 
         delivered: set[str] = set()
+        vetoed: set[str] = set()
         stalled = False
         for record in records:
+            if record.get("op") == OP_SHARE and _share_vetoed():
+                # Checked ahead of the stall: a share this install is forbidden
+                # to send should not survive because something ahead of it in
+                # the queue could not reach the collector.
+                vetoed.add(record["id"])
+                continue
             if stalled:
                 continue  # keep order once something has stalled
             if await post(record):
@@ -353,7 +395,10 @@ async def flush() -> tuple[int, int]:
             else:
                 stalled = True
 
-        _rewrite(lambda queued: [r for r in queued if r.get("id") not in delivered])
+        if vetoed:
+            log.info("Sharing is off; dropped %d queued share(s) unsent", len(vetoed))
+        retired = delivered | vetoed
+        _rewrite(lambda queued: [r for r in queued if r.get("id") not in retired])
         return len(delivered), len(_read())
     finally:
         _flushing = False

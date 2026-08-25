@@ -265,6 +265,123 @@ def test_the_queue_is_capped(chat, monkeypatch):
     assert [r["body"]["revision"] for r in outbox.pending()] == [4, 5, 6]
 
 
+# ── The vetoes reach what is already queued (CORR-233) ───────────────────
+
+
+def _posted(sink: list):
+    async def _post(record):
+        sink.append(record)
+        return True
+
+    return _post
+
+
+@pytest.mark.asyncio
+async def test_the_kill_switch_drops_a_share_that_was_already_queued(chat, monkeypatch):
+    """Consent is checked when the share is sent, not only when it was made."""
+    share.submit(4242, chat.id)
+    sent: list = []
+    monkeypatch.setattr(outbox, "post", _posted(sent))
+    monkeypatch.setenv(consent.ENV_VAR, "off")
+
+    delivered, remaining = await outbox.flush()
+
+    assert sent == []
+    assert (delivered, remaining) == (0, 0)
+    assert outbox.pending() == []
+
+
+@pytest.mark.asyncio
+async def test_the_admin_veto_drops_a_share_that_was_already_queued(chat, monkeypatch):
+    share.submit(4242, chat.id)
+    sent: list = []
+    monkeypatch.setattr(outbox, "post", _posted(sent))
+    consent.set_install_allows(False)
+
+    assert await outbox.flush() == (0, 0)
+    assert sent == []
+    assert outbox.pending() == []
+
+
+@pytest.mark.asyncio
+async def test_a_queued_unshare_survives_the_kill_switch(chat, monkeypatch):
+    """A revocation is owed to the user; the veto is about what may go out."""
+    share.submit(4242, chat.id)
+    share.unshare(4242, chat.id)
+    sent: list = []
+    monkeypatch.setattr(outbox, "post", _posted(sent))
+    monkeypatch.setenv(consent.ENV_VAR, "off")
+
+    delivered, remaining = await outbox.flush()
+
+    assert [r["op"] for r in sent] == [outbox.OP_UNSHARE]
+    assert (delivered, remaining) == (1, 0)
+
+
+@pytest.mark.asyncio
+async def test_a_queued_unshare_survives_the_admin_veto(chat, monkeypatch):
+    share.submit(4242, chat.id)
+    share.unshare(4242, chat.id)
+    sent: list = []
+    monkeypatch.setattr(outbox, "post", _posted(sent))
+    consent.set_install_allows(False)
+
+    assert await outbox.flush() == (1, 0)
+    assert [r["op"] for r in sent] == [outbox.OP_UNSHARE]
+
+
+@pytest.mark.asyncio
+async def test_a_vetoed_share_is_dropped_even_behind_a_stalled_record(
+    chat, monkeypatch
+):
+    """The kill switch does not wait for the collector to come back."""
+    share.submit(4242, chat.id)
+    share.unshare(4242, chat.id)
+    share.submit(4242, chat.id)
+    monkeypatch.setattr(outbox, "post", _always(False))
+    monkeypatch.setenv(consent.ENV_VAR, "off")
+
+    await outbox.flush()
+
+    assert [r["op"] for r in outbox.pending()] == [outbox.OP_UNSHARE]
+
+
+def test_the_admin_veto_destroys_what_is_undelivered(chat):
+    """Set it and the transcripts are gone, not merely unsent."""
+    share.submit(4242, chat.id)
+    conversations.append_turn(4242, chat.id, TurnEntry(role="user", text="again"))
+    other = conversations.new_conversation(99, surface="web", agent_slug="condor")
+    conversations.append_turn(99, other.id, TurnEntry(role="user", text="mine"))
+    share.submit(99, other.id)
+    share.unshare(4242, chat.id)
+    assert len(outbox.pending()) == 3
+
+    consent.set_install_allows(False)
+
+    assert [r["op"] for r in outbox.pending()] == [outbox.OP_UNSHARE]
+
+
+def test_lifting_the_veto_does_not_resurrect_anything(chat):
+    share.submit(4242, chat.id)
+    consent.set_install_allows(False)
+    consent.set_install_allows(True)
+
+    assert outbox.pending() == []
+
+
+def test_purge_shares_never_takes_a_pending_revocation(chat):
+    """The delete token lives nowhere else once unshare has queued it."""
+    share.submit(4242, chat.id)
+    token = conversations.get_conversation(4242, chat.id).share_delete_token
+    share.unshare(4242, chat.id)
+
+    assert outbox.purge_shares() == 1
+
+    revocation = outbox.pending()
+    assert len(revocation) == 1
+    assert revocation[0]["body"]["delete_token"] == token
+
+
 # ── The queue has two writers (CORR-232) ─────────────────────────────────
 
 
