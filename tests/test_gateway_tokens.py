@@ -23,6 +23,7 @@ from condor.fetchers import gateway_tokens
 from condor.fetchers.gateway_tokens import ensure_tokens_listed, token_addresses
 from condor.web.auth import get_current_user
 from condor.web.models import WebUser
+from config_manager import ServerPermission
 
 MINT = "9QFfgxdSqH5zT7j6rZb1y6SZhw2aFtcQu2r6BuYpump"
 USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
@@ -32,10 +33,16 @@ NETWORK = "solana-mainnet-beta"
 class FakeGateway:
     """Gateway's token list, with the two behaviours that matter kept honest."""
 
-    def __init__(self, listed=(), refuse_save=False, fail_search=False):
+    def __init__(
+        self, listed=(), refuse_save=False, fail_search=False, fail_save=False
+    ):
         self.tokens = [{"address": a, "symbol": a[:4]} for a in listed]
         self.refuse_save = refuse_save
         self.fail_search = fail_search
+        # A mint Gateway cannot resolve at all — an address-shaped string that
+        # is not a token. Distinct from `refuse_save`, which is a live token
+        # whose ticker is already held.
+        self.fail_save = fail_save
         self.searches: list[str] = []
         self.saves: list[str] = []
         self.deletes: list[str] = []
@@ -60,6 +67,8 @@ class FakeGateway:
 
     async def save_network_token(self, network_id, token_address):
         self.saves.append(token_address)
+        if self.fail_save:
+            raise RuntimeError("token not found")
         # A ticker already held by another token: Gateway answers 200 and keeps
         # the list unchanged.
         if self.refuse_save:
@@ -167,11 +176,25 @@ def test_only_address_shaped_values_are_sent_upstream():
 # ---------------------------------------------------------------------------
 
 USER = WebUser(id=222, username="u", first_name="U", role="user")
+# The server is USER's. TRADER holds a share of it; ADMIN holds no grant at all
+# and reaches it only through the bypass admins hold everywhere in the web layer.
+TRADER = WebUser(id=333, username="t", first_name="T", role="user")
+ADMIN = WebUser(id=444, username="a", first_name="A", role="admin")
 
 
 class FakeConfigManager:
     def __init__(self, gateway):
         self.client = FakeClient(gateway)
+
+    def get_server_permission(self, user_id, name):
+        if user_id == USER.id:
+            return ServerPermission.OWNER
+        if user_id == TRADER.id:
+            return ServerPermission.TRADER
+        return None
+
+    def is_admin(self, user_id):
+        return user_id == ADMIN.id
 
     def has_server_access(self, user_id, name, *a, **kw):
         return True
@@ -248,13 +271,13 @@ def test_a_ticker_is_not_sent_upstream_as_an_address(route_client):
 
 @pytest.fixture
 def make_client(monkeypatch):
-    def _make(gw):
+    def _make(gw, user=USER):
         cm = FakeConfigManager(gw)
         monkeypatch.setattr(dex_routes, "get_config_manager", lambda: cm)
         monkeypatch.setattr("condor.web.auth.get_config_manager", lambda: cm)
         app = FastAPI()
         app.include_router(dex_routes.router)
-        app.dependency_overrides[get_current_user] = lambda: USER
+        app.dependency_overrides[get_current_user] = lambda: user
         return TestClient(app)
 
     return _make
@@ -340,3 +363,120 @@ def test_the_button_refuses_a_value_that_is_not_an_address(make_client):
     )
 
     assert response.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Who may delete an entry from the owner's token list (SEC-207).
+#
+# `replace` deletes a token from the network's list — the owner's configuration,
+# shared by every user of that server, and an entry deleted from it makes every
+# balance for that mint read 0 (see this module's docstring). That is the class
+# SEC-166 put at OWNER for the gateway container, keystore and RPC endpoints;
+# this route landed after it, below that line, reachable by any shared trader —
+# or any agent or MCP caller running as one.
+#
+# The additive half stays where it was: registering a token is a precondition of
+# trading a pool, not a mutation of anything that already exists.
+# ---------------------------------------------------------------------------
+
+ADD = "/servers/srv/dex/tokens/add"
+
+
+def _replace_body():
+    return {
+        "network": NETWORK,
+        "address": MINT,
+        "symbol": "PUMP",
+        "replace": True,
+    }
+
+
+def test_a_trader_cannot_delete_a_token_from_the_owners_list(make_client):
+    gw = FakeGateway(refuse_save=True)
+    gw.tokens = [{"address": USDC, "symbol": "PUMP"}]
+    client = make_client(gw, TRADER)
+
+    response = client.post(ADD, json=_replace_body())
+
+    assert response.status_code == 403
+    # Refused on `replace` alone, before anything reached Gateway: the answer a
+    # trader gets must not depend on whether a collision happens to exist.
+    assert gw.deletes == []
+    assert gw.saves == []
+
+
+def test_a_trader_can_still_register_a_token(make_client):
+    # Without `replace` this route only re-attempts what the automatic path
+    # already does for every pool a trader opens.
+    client = make_client(FakeGateway(listed=[]), TRADER)
+
+    body = client.post(ADD, json={"network": NETWORK, "address": MINT}).json()
+
+    assert body["verdict"] == "added"
+
+
+def test_a_trader_can_still_open_a_pool(make_client):
+    # The automatic path is unchanged: a trader who cannot register a pool's
+    # tokens cannot size an order on it at all.
+    client = make_client(FakeGateway(listed=[USDC]), TRADER)
+
+    body = client.post(
+        "/servers/srv/dex/tokens",
+        json={"network": NETWORK, "addresses": [MINT, USDC]},
+    ).json()
+
+    assert body["tokens"] == {MINT: "added", USDC: "listed"}
+
+
+def test_an_admin_may_replace_a_holder_on_a_server_they_do_not_own(make_client):
+    gw = FakeGateway(refuse_save=True)
+    gw.tokens = [{"address": USDC, "symbol": "PUMP"}]
+    client = make_client(gw, ADMIN)
+
+    body = client.post(ADD, json=_replace_body()).json()
+
+    assert gw.deletes == [USDC]
+    assert body["verdict"] == "added"
+
+
+def test_a_replace_whose_ticker_is_not_actually_taken_deletes_nothing(make_client):
+    # The ticker in the body is the caller's claim, not evidence. Gateway
+    # resolves symbol and name from the address itself, so its `symbol_taken`
+    # refusal is the only proof the new token really claims that ticker — here
+    # the save goes through, so there was no collision and nothing to replace.
+    gw = FakeGateway(listed=[])
+    gw.tokens = [{"address": USDC, "symbol": "PUMP"}]
+    client = make_client(gw)
+
+    body = client.post(ADD, json=_replace_body()).json()
+
+    assert gw.deletes == []
+    assert body["verdict"] == "added"
+
+
+def test_a_replace_for_a_mint_gateway_cannot_register_destroys_nothing(make_client):
+    # SEC-207's sharpest form: the delete used to run *first*, so an address
+    # that was merely address-shaped — never registrable at all — still wiped
+    # the owner's entry on its way to the 502.
+    gw = FakeGateway(fail_save=True)
+    gw.tokens = [{"address": USDC, "symbol": "PUMP"}]
+    client = make_client(gw)
+
+    response = client.post(ADD, json=_replace_body())
+
+    assert response.status_code == 502
+    assert gw.deletes == []
+    assert gw.tokens == [{"address": USDC, "symbol": "PUMP"}]
+
+
+def test_a_replacement_is_logged_with_who_did_it(make_client, caplog):
+    gw = FakeGateway(refuse_save=True)
+    gw.tokens = [{"address": USDC, "symbol": "PUMP"}]
+    client = make_client(gw)
+
+    with caplog.at_level("WARNING", logger="condor.web.routes.dex"):
+        client.post(ADD, json=_replace_body())
+
+    line = next(m for m in caplog.messages if "replaced the holder" in m)
+    assert str(USER.id) in line and USDC in line and MINT in line
+    assert NETWORK in line and "PUMP" in line

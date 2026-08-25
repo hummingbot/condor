@@ -7,7 +7,11 @@ from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from condor.web.auth import get_current_user, require_server_access_query
+from condor.web.auth import (
+    get_current_user,
+    require_owner,
+    require_server_access_query,
+)
 from condor.web.models import (
     AddCredentialRequest,
     AddServerRequest,
@@ -32,26 +36,11 @@ router = APIRouter(prefix="/settings", tags=["settings"])
 # ── Helpers ──
 
 
-def _require_owner(cm, user_id: int, server_name: str):
-    """Enforce the OWNER line on top of the TRADER floor every route already has.
-
-    The rule this file draws (SEC-153, extended to the gateway by SEC-166):
-
-    * **Reading** a server's state — status, logs, wallet and network listings,
-      configured connectors — needs TRADER. A shared trader has to be able to
-      see what they are trading against, and to tell the owner when it is down.
-    * **Trading** on a server needs TRADER. That is what the share is for.
-    * **Mutating a server's configuration or its infrastructure** needs OWNER.
-      Exchange credentials, the gateway container lifecycle, the private keys
-      in its keystore and the RPC endpoints it dials are all the owner's
-      machine, not a trading action — and each of them can break the owner's
-      running bots for everyone else on the server.
-
-    Admins keep the bypass they hold everywhere else in this module.
-    """
-    perm = cm.get_server_permission(user_id, server_name)
-    if perm != ServerPermission.OWNER and not cm.is_admin(user_id):
-        raise HTTPException(status_code=403, detail="Owner access required")
+# The OWNER ceiling this module drew now lives in ``condor.web.auth`` beside the
+# TRADER floor it sits on: ``routes/dex.py`` needs the same line for the gateway
+# token list (SEC-207), and one shared helper is the only way that line stays in
+# one place. Kept under its original private name so this module reads unchanged.
+_require_owner = require_owner
 
 
 async def _get_client(cm, server_name: str):
