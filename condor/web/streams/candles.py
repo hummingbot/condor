@@ -1,9 +1,8 @@
 """Candle streaming subsystem: buffer, backend WS stream, REST poll fallback,
 historical backfill and idle-buffer cleanup.
 
-``CandleStreamsMixin`` is mixed into ``WebSocketManager`` (the
-:class:`~condor.web.streams.StreamHost` implementation): it calls the host's
-``broadcast`` / ``_send`` / ``_has_subscribers`` / ``_ensure_stream`` and
+``CandleStreamsMixin`` is mixed into ``WebSocketManager``, which provides the
+host surface: it calls the host's ``broadcast`` / ``_send`` / ``_has_subscribers`` / ``_ensure_stream`` and
 tracks its fire-and-forget work on the host's ``_oneshot_tasks``. The candle
 state it drives (``_candle_buffers``, ``_candle_tasks``,
 ``_candle_poll_tasks``, teardown timers and staleness bookkeeping) is
@@ -184,7 +183,7 @@ class CandleStreamsMixin:
         _last_candle_ws_update: dict[str, float]
         _candle_first_msg_logged: set[str]
         _connections: list[Any]
-        # Host surface (see condor.web.streams.StreamHost).
+        # Host surface, provided by WebSocketManager.
         _last_data: dict[str, Any]
         _oneshot_tasks: TaskSet
 

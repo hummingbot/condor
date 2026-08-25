@@ -3,9 +3,8 @@
 The upstream stream implementations live in ``condor.web.streams`` (candles in
 ``streams.candles``, the Hummingbot-bridged protocols in
 ``streams.hummingbot_ws``) as mixins over the small host surface this module
-implements — see ``condor.web.streams.StreamHost``. ``WebSocketManager`` keeps
-only connection/subscription bookkeeping, the SDS bridge, broadcasting and the
-stream lifecycle registry.
+implements. ``WebSocketManager`` keeps only connection/subscription
+bookkeeping, the SDS bridge, broadcasting and the stream lifecycle registry.
 """
 
 from __future__ import annotations

@@ -1,8 +1,8 @@
 """Streams bridged from the Hummingbot backend WS endpoints, plus the
 controller-performance REST poll.
 
-``HummingbotStreamsMixin`` is mixed into ``WebSocketManager`` (the
-:class:`~condor.web.streams.StreamHost` implementation). It owns the shared
+``HummingbotStreamsMixin`` is mixed into ``WebSocketManager``, which provides
+the host surface. It owns the shared
 connect/reconnect skeleton (``_run_ws_stream``) and every per-protocol
 handler built on it: trades and order book (``/ws/market-data``), executors,
 bots, positions and performance (``/ws/executors``), and the 30s
@@ -25,7 +25,7 @@ class HummingbotStreamsMixin:
     if TYPE_CHECKING:
         # Stream task state, initialized by WebSocketManager.__init__.
         _controller_perf_tasks: dict[str, asyncio.Task]
-        # Host surface (see condor.web.streams.StreamHost).
+        # Host surface, provided by WebSocketManager.
         _last_data: dict[str, Any]
 
         async def broadcast(self, channel: str, data: Any) -> None: ...
