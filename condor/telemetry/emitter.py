@@ -136,11 +136,13 @@ def discard_buffer() -> None:
 async def flush(reason: str = "job") -> int:
     """Try to deliver everything pending. Returns the number of events sent.
 
-    Returns 0 without reading a file when the operator has forced ``off``, and
-    0 without touching the network when no endpoint is configured — the shipped
-    state, in which events simply accumulate in the capped outbox. An
-    unanswered install flushes too: the ping floor is only worth anything if
-    the adoption events actually leave.
+    Returns 0 without reading a file when the operator has forced ``off``. If
+    :func:`condor.telemetry.outbox.endpoint` ever yields nothing, the batch is
+    stashed rather than sent — the guard that keeps a delivery-less build from
+    losing events, and the seam the tests use; a shipped install always has the
+    compiled-in collector, so it does not take that path. An unanswered install
+    flushes too: the ping floor is only worth anything if the adoption events
+    actually leave.
     """
     try:
         from condor.telemetry import consent, context, outbox

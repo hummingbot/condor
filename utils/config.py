@@ -53,10 +53,10 @@ else:
     WEB_URL = f"http://localhost:{WEB_PORT}"
 
 # ── Telemetry (FEAT-023) ──
-# Opt-in and OFF by default. Nothing is collected, buffered or sent unless the
-# install's admin has explicitly consented, or an operator sets CONDOR_TELEMETRY
-# here. An unset value is *not* "on": it means "no override", and the stored
-# consent decides — whose default is `unknown`, which emits nothing.
+# An operator override, in both directions. An unset value means "no override",
+# and the stored consent decides — whose default, with no answer given, is
+# `ping`: the four adoption events and nothing else, from the first boot. The
+# admin prompt chooses between `ping` and `usage`; `off` is reachable only here.
 #   off   - nothing, ever. emit() returns immediately.
 #   ping  - install / heartbeat / version_change / shutdown only.
 #   usage - the full allowlisted taxonomy in condor/telemetry/schema.py.
