@@ -17,6 +17,9 @@ from condor.runtime import (
     SessionSpec,
 )
 from condor.runtime import client as runtime
+from condor.runtime import (
+    secrets,
+)
 from handlers import clear_all_input_states
 from utils.auth import restricted
 
@@ -333,6 +336,24 @@ async def agent_callback_handler(
     if action == "start" or action.startswith("mode:"):
         await _handle_start(update, context)
 
+    # The button on the ambiguous-shape notice (FEAT-056). Nothing about the
+    # certain shapes is silenceable — those are removed whatever this says.
+    elif action == "secret_notices_off":
+        from condor.preferences import set_secret_notices
+
+        set_secret_notices(context.user_data, False)
+        await query.message.edit_text(
+            "I will not flag key-shaped values again. It is back on from "
+            "/agent → Settings whenever you want it."
+        )
+    elif action == "secret_notices_toggle":
+        from condor.preferences import secret_notices_enabled, set_secret_notices
+
+        set_secret_notices(
+            context.user_data, not secret_notices_enabled(context.user_data)
+        )
+        await _handle_settings(update, context)
+
     # Settings
     elif action == "settings":
         await _handle_settings(update, context)
@@ -525,13 +546,17 @@ async def _handle_start(
 
 async def _handle_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show settings sub-menu with LLM picker."""
+    from condor.preferences import secret_notices_enabled
+
     from .menu import _settings_keyboard
 
     query = update.callback_query
     current_llm = context.user_data.get("agent_llm", DEFAULT_AGENT)
     await query.message.edit_text(
         "Select the LLM for new sessions:",
-        reply_markup=_settings_keyboard(current_llm),
+        reply_markup=_settings_keyboard(
+            current_llm, secret_notices_enabled(context.user_data)
+        ),
     )
 
 
@@ -1898,6 +1923,98 @@ async def agent_voice_handler(
     await agent_message_handler(update, context)
 
 
+# ── Pasted key material (FEAT-056) ───────────────────────────────────────
+#
+# The safety property is not here: ``runtime.prompt`` redacts the certain
+# shapes on the one funnel every surface crosses, so this handler could do
+# nothing and a pasted phrase would still never reach the model or the disk.
+# What lives here is the half only Telegram can do — deleting the message that
+# carried it, and saying why the text the user is looking at just changed.
+
+_SECRET_SEEN_KEY = "_secret_notice_seen"
+
+_CERTAIN_NOTICE = (
+    "I removed a recovery phrase from that message and deleted the message. "
+    "It was not sent to the agent and it is not in the transcript.\n\n"
+    "Import wallets with /gateway — that flow is the only one that should ever "
+    "see a key.\n\n"
+    "Telegram had the message until the delete landed, so if that phrase holds "
+    "funds, move them."
+)
+
+_AMBIGUOUS_NOTICE = {
+    secrets.EVM_HEX64: (
+        "Heads up: that message carried a 0x value 64 hex digits long. An EVM "
+        "private key looks exactly like that — and so does a transaction hash, "
+        "which is why it was passed through untouched."
+    ),
+    secrets.SOLANA_B58: (
+        "Heads up: that message carried an 87–88 character base58 value. A "
+        "Solana secret key looks exactly like that — and so does a transaction "
+        "signature, which is why it was passed through untouched."
+    ),
+}
+
+_AMBIGUOUS_TAIL = (
+    "\n\nIf it was a key, treat it as exposed: it reached the agent and the "
+    "transcript. I only say this once per conversation."
+)
+
+
+async def _handle_pasted_secrets(update, context, text: str) -> None:
+    """Delete what was eaten, warn once about what was not.
+
+    Both branches run off ``secrets.scan`` on this surface's own copy of the
+    text. Running the detector twice is free, and two calls to one pure
+    function cannot disagree with each other the way two implementations would.
+    """
+    findings = secrets.scan(text)
+    if not findings:
+        return
+
+    if any(finding.certain for finding in findings):
+        # Mirrors handlers/config/gateway/wallets.py: the message goes first,
+        # and its failure is not the user's problem to hear about.
+        try:
+            await update.message.delete()
+        except Exception:  # noqa: BLE001 - best effort, and already logged there
+            log.debug("Could not delete a message carrying key material")
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id, text=_CERTAIN_NOTICE
+        )
+
+    from condor.preferences import secret_notices_enabled
+
+    if not secret_notices_enabled(context.user_data):
+        return
+
+    # Per conversation, so a fresh chat is told again, and per kind, so being
+    # warned about a hash does not use up the warning about a keypair. The flag
+    # is the kind string — never the value, and never a hash of one.
+    conv_id = stored_chat_conversation(context.user_data)
+    seen = context.chat_data.setdefault(_SECRET_SEEN_KEY, {})
+    told = seen.setdefault(conv_id, [])
+    for kind in dict.fromkeys(
+        finding.kind for finding in findings if not finding.certain
+    ):
+        if kind in told or kind not in _AMBIGUOUS_NOTICE:
+            continue
+        told.append(kind)
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=_AMBIGUOUS_NOTICE[kind] + _AMBIGUOUS_TAIL,
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "Stop warning me", callback_data="agent:secret_notices_off"
+                        )
+                    ]
+                ]
+            ),
+        )
+
+
 async def agent_message_handler(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
@@ -1930,6 +2047,12 @@ async def agent_message_handler(
 
     if not text:
         return
+
+    # Before every state branch below, because a phrase pasted into any of them
+    # is still a phrase on Telegram's servers. The turn itself continues: the
+    # funnel already replaced the value, so the agent sees a marker it can talk
+    # about rather than a hole.
+    await _handle_pasted_secrets(update, context, text)
 
     # "-" resets the ACP session: destroy current and let the next block auto-create a new one
     if text.strip() == "-":

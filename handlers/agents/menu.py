@@ -268,12 +268,17 @@ def _picked_model_label(sentinel_key: str, current_llm: str) -> str | None:
     return f"• {_PICKER_SENTINELS[sentinel_key]} — {current_llm.partition(':')[2]}"
 
 
-def _settings_keyboard(current_llm: str) -> InlineKeyboardMarkup:
+def _settings_keyboard(
+    current_llm: str, secret_notices: bool = True
+) -> InlineKeyboardMarkup:
     """Build LLM picker keyboard.
 
     The current selection is marked with a bullet. If the user has previously
     picked a model through a sentinel row (agent_llm like "openrouter:<slug>"
     or "custom@venice:<model-id>"), that sentinel row matches and shows the pick.
+
+    The last row is the key-shape warning switch (FEAT-056), which is here
+    because a preference with no way back on is not a preference.
     """
     keyboard = []
     for key, info in AGENT_OPTIONS.items():
@@ -288,6 +293,14 @@ def _settings_keyboard(current_llm: str) -> InlineKeyboardMarkup:
         keyboard.append(
             [InlineKeyboardButton(label, callback_data=f"agent:set_llm:{key}")]
         )
+    keyboard.append(
+        [
+            InlineKeyboardButton(
+                f"Key-shape warnings: {'on' if secret_notices else 'off'}",
+                callback_data="agent:secret_notices_toggle",
+            )
+        ]
+    )
     keyboard.append([InlineKeyboardButton("Back", callback_data="agent:menu")])
     return InlineKeyboardMarkup(keyboard)
 
