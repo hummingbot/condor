@@ -186,3 +186,51 @@ def test_a_live_slot_does_not_respawn(ws_env):
     assert not after.events("session_started"), "a live slot must not be respawned"
     assert [e["text"] for e in after.events("text_chunk")] == ["the answer"]
     assert _ScriptedClient.spawns == 1
+
+
+def test_an_idle_reap_reattaches_when_the_tab_speaks_again(ws_env, monkeypatch):
+    """The TTL (PERF-226) composes with this reattach instead of dead-ending.
+
+    An idle detach is the eviction case made routine: the tab is still open,
+    the session behind it is gone, and the very next message has to bring it
+    back. This drives the real health sweep rather than calling ``destroy``,
+    so the two halves are pinned together and not just side by side.
+    """
+    from dataclasses import replace
+    from datetime import timedelta
+
+    monkeypatch.setattr(
+        session_module,
+        "TIMEOUTS",
+        replace(session_module.TIMEOUTS, session_idle=3600),
+    )
+
+    async def scenario():
+        ws = _FakeWS()
+        await _handle_start_session(ws, USER, {"agent_key": "claude-code"})
+        slot_id = ws.events("session_started")[0]["slot_id"]
+        await _chat(slot_id, "my favourite pair is SOL-USDC")
+
+        session = session_module._sessions[str(SessionKey.web(USER, slot_id))]
+        session.last_prompt_at = session_module._utcnow() - timedelta(seconds=3601)
+        await session_module._sweep_sessions()
+        assert await runtime.get_info(SessionKey.web(USER, slot_id)) is None
+
+        after = _FakeWS()
+        await _handle_send_message(
+            after, USER, {"slot_id": slot_id, "text": "what was it?"}
+        )
+        return slot_id, after
+
+    slot_id, after = asyncio.run(scenario())
+
+    assert "error" not in after.names(), after.sent
+    assert after.events("session_started")[0]["restored"] is True
+    assert [e["text"] for e in after.events("text_chunk")] == ["the answer"]
+    # One conversation across the reap, so the user lost no context.
+    assert [t.text for t in read_transcript(USER, slot_id)] == [
+        "my favourite pair is SOL-USDC",
+        "the answer",
+        "what was it?",
+        "the answer",
+    ]

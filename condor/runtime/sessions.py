@@ -740,36 +740,80 @@ async def stop_health_monitor() -> None:
 
 
 async def _health_check_loop() -> None:
-    """Every 15s, check for dead sessions (including stuck ones with is_busy=True)."""
+    """Every 15s, sweep the registry once."""
     try:
         while True:
             await asyncio.sleep(15)
-            dead_keys: list[SessionKey] = []
-            for raw_key, session in list(_sessions.items()):
-                if not session.client.alive:
-                    if session.is_busy:
-                        # Force-clear stuck busy flag on dead sessions
-                        session.is_busy = False
-                        log.warning(
-                            "Health monitor: force-cleared is_busy for dead session %s",
-                            raw_key,
-                        )
-                    dead_keys.append(session.key)
-
-            for key in dead_keys:
-                log.warning("Health monitor: dead session %s, cleaning up", key)
-                await _destroy_session_internal(key)
-                # Only Telegram sessions have a chat to notify.
-                chat_id = key.telegram_chat_id
-                if _health_bot and chat_id is not None:
-                    try:
-                        await _health_bot.send_message(
-                            chat_id=chat_id,
-                            text="Agent session ended unexpectedly. Send a message to start a new session.",
-                        )
-                    except Exception:
-                        log.warning(
-                            "Failed to notify chat %s about dead session", chat_id
-                        )
+            await _sweep_sessions()
     except asyncio.CancelledError:
         pass
+
+
+async def _sweep_sessions() -> None:
+    """One health pass: reap the dead sessions, detach the idle ones.
+
+    Two questions of the same registry, so one scan asks both rather than a
+    second task asking the second — but they mean different things and are
+    deliberately said differently. A dead subprocess is a fault, and the
+    Telegram chat behind it is told so. An idle session is not a fault
+    (PERF-226): it is a conversation nobody came back to, still holding an
+    agent subprocess, the MCP tree it was spawned with, and one of the five
+    slots in ``MAX_SESSIONS_PER_USER``. Since FEAT-015 the conversation
+    outlives the subprocess, so retiring one is a detach the next message
+    reattaches — silently, like the LRU's same-surface detach.
+
+    Both go out through ``_destroy_session_internal``, the one funnel that also
+    denies whatever the session was still asking a human to approve.
+    """
+    ttl = TIMEOUTS.session_idle
+    now = _utcnow()
+    dead_keys: list[SessionKey] = []
+    # (key, conversation id, seconds idle) — captured during the scan, because
+    # the session is gone from the registry by the time it is logged.
+    idle: list[tuple[SessionKey, str, float]] = []
+
+    for raw_key, session in list(_sessions.items()):
+        if not session.client.alive:
+            if session.is_busy:
+                # Force-clear stuck busy flag on dead sessions
+                session.is_busy = False
+                log.warning(
+                    "Health monitor: force-cleared is_busy for dead session %s",
+                    raw_key,
+                )
+            dead_keys.append(session.key)
+            continue
+        # A session mid-turn is never idle, however old its timestamp is:
+        # ``last_prompt_at`` is stamped when the turn *starts*, so a long
+        # answer would otherwise reap the subprocess writing it.
+        if not ttl or session.is_busy:
+            continue
+        since = session.last_prompt_at or session.created_at
+        seconds = (now - since).total_seconds()
+        if seconds > ttl:
+            idle.append((session.key, session.conversation_id, seconds))
+
+    for key in dead_keys:
+        log.warning("Health monitor: dead session %s, cleaning up", key)
+        await _destroy_session_internal(key)
+        # Only Telegram sessions have a chat to notify.
+        chat_id = key.telegram_chat_id
+        if _health_bot and chat_id is not None:
+            try:
+                await _health_bot.send_message(
+                    chat_id=chat_id,
+                    text="Agent session ended unexpectedly. Send a message to start a new session.",
+                )
+            except Exception:
+                log.warning("Failed to notify chat %s about dead session", chat_id)
+
+    for key, conversation_id, seconds in idle:
+        log.info(
+            "Health monitor: session %s idle for %.0fs (over the %ss TTL), "
+            "detaching (conversation %s is kept)",
+            key,
+            seconds,
+            ttl,
+            conversation_id or "none",
+        )
+        await _destroy_session_internal(key)
