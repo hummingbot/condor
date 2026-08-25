@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from condor.runtime.danger import (
+    DANGEROUS_AMM_ACTIONS,
     DANGEROUS_BOT_ACTIONS,
     is_dangerous_tool_call,
     tool_call_input,
@@ -275,11 +276,15 @@ def auto_approve_with_risk_check(
                     if action in DANGEROUS_BOT_ACTIONS:
                         log.info("Dry-run mode: blocked manage_bots(%s)", action)
                         return {"outcome": {"outcome": "cancelled"}}
-                elif tool_name in (
-                    "place_order",
-                    "manage_gateway_swaps",
-                    "manage_gateway_clmm",
-                ):
+                elif tool_name == "manage_amm":
+                    # Name-matching the whole tool would also block the quotes
+                    # and pool reads a dry-run agent needs to reason with, so
+                    # gate on the action, as the manage_bots branch does.
+                    action = input_data.get("action", "")
+                    if action in DANGEROUS_AMM_ACTIONS:
+                        log.info("Dry-run mode: blocked manage_amm(%s)", action)
+                        return {"outcome": {"outcome": "cancelled"}}
+                elif tool_name == "place_order":
                     log.info("Dry-run mode: blocked %s", tool_name)
                     return {"outcome": {"outcome": "cancelled"}}
 

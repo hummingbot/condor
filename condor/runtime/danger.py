@@ -20,8 +20,7 @@ from typing import Any
 # Tools that require user confirmation before execution
 DANGEROUS_TOOLS = {
     "place_order",
-    "manage_gateway_swaps",  # execute action
-    "manage_gateway_clmm",  # open/close position
+    "manage_amm",  # swap / LP / pool-creation actions
 }
 
 # Tools that are always blocked (RBAC bypass prevention)
@@ -42,11 +41,18 @@ DANGEROUS_BOT_ACTIONS = {
     "update_config",
 }
 
-# Actions within manage_gateway_swaps that require confirmation
-DANGEROUS_SWAP_ACTIONS = {"execute"}
-
-# Actions within manage_gateway_clmm that require confirmation
-DANGEROUS_CLMM_ACTIONS = {"open_position", "close_position"}
+# Actions within manage_amm that sign an on-chain transaction from the user's
+# Gateway wallet. The reads (pool_info, position_info, positions_owned,
+# quote_swap, quote_liquidity) and the no-action guide load are excluded.
+# manage_amm is the only fund-moving DEX tool the MCP server registers: the
+# older manage_gateway_swaps/manage_gateway_clmm entries that used to live here
+# named tools that server.py no longer exposes (SEC-206).
+DANGEROUS_AMM_ACTIONS = {
+    "execute_swap",
+    "add_liquidity",
+    "remove_liquidity",
+    "create_pool",
+}
 
 
 def tool_call_name(tool_call: dict[str, Any]) -> str:
@@ -104,19 +110,30 @@ def _has_dangerous_action(
     return action in dangerous_actions
 
 
+def _short_address(value: Any) -> str:
+    """An on-chain address abbreviated for a confirmation line.
+
+    The human approving a swap needs to recognize the pool, not read 44 base58
+    characters, and a missing address has to render as "?" rather than crash
+    the summary of a call that is about to move funds.
+    """
+    if not isinstance(value, str) or not value:
+        return "?"
+    return f"{value[:8]}..." if len(value) > 8 else value
+
+
 def is_dangerous_tool_call(tool_call: dict[str, Any]) -> bool:
     """Check if a tool call requires user confirmation."""
     tool_name = tool_call_name(tool_call)
 
     # Direct dangerous tools
     if tool_name in DANGEROUS_TOOLS:
-        # For manage_gateway_swaps, only "execute" action is dangerous
-        if tool_name == "manage_gateway_swaps":
-            return _has_dangerous_action(tool_call, DANGEROUS_SWAP_ACTIONS)
-
-        # For manage_gateway_clmm, only open/close are dangerous
-        if tool_name == "manage_gateway_clmm":
-            return _has_dangerous_action(tool_call, DANGEROUS_CLMM_ACTIONS)
+        # For manage_amm, only the actions that sign a transaction are
+        # dangerous; quotes and pool/position reads are not. A missing action
+        # is the guide load, but _has_dangerous_action still fails closed on it
+        # rather than trusting an argument shape we could not read (SEC-093).
+        if tool_name == "manage_amm":
+            return _has_dangerous_action(tool_call, DANGEROUS_AMM_ACTIONS)
 
         return True
 
@@ -179,20 +196,32 @@ def format_tool_summary(tool_call: dict[str, Any]) -> str:
             return f"Update config '{config_name}' on bot '{bot_name}'"
         return f"Bot '{bot_name}': {action}"
 
-    if tool_name == "manage_gateway_swaps":
+    if tool_name == "manage_amm":
         action = input_data.get("action", "?")
-        pair = input_data.get("trading_pair", "?")
-        side = input_data.get("side", "?")
-        amount = input_data.get("amount", "?")
-        return f"Swap {side} {amount} {pair}"
-
-    if tool_name == "manage_gateway_clmm":
-        action = input_data.get("action", "?")
-        if action == "open_position":
-            return "Open LP position"
-        if action == "close_position":
-            return "Close LP position"
-        return f"CLMM: {action}"
+        connector = input_data.get("connector", "?")
+        pool = _short_address(input_data.get("pool_address"))
+        if action == "execute_swap":
+            side = input_data.get("side", "?")
+            amount = input_data.get("amount", "?")
+            base = input_data.get("base_token", "?")
+            return f"Swap {side} {amount} {base} on {connector} pool {pool}"
+        if action == "add_liquidity":
+            base_amount = input_data.get("base_token_amount", "?")
+            quote_amount = input_data.get("quote_token_amount", "?")
+            return (
+                f"Add {base_amount}/{quote_amount} liquidity "
+                f"on {connector} pool {pool}"
+            )
+        if action == "remove_liquidity":
+            pct = input_data.get("percentage_to_remove", "?")
+            position = _short_address(input_data.get("position_address"))
+            return f"Remove {pct}% from position {position}"
+        if action == "create_pool":
+            base = input_data.get("base_token", "?")
+            quote = input_data.get("quote_token", "?")
+            seed = input_data.get("base_token_amount", "?")
+            return f"Create {connector} pool {base}/{quote} seeded with {seed}"
+        return f"AMM: {action}"
 
     # Generic fallback
     return tool_name

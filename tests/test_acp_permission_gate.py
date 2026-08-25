@@ -25,6 +25,7 @@ from condor.agents.risk import (
 )
 from condor.runtime import confirmations as confirmations_module
 from condor.runtime.confirmations import ConfirmationRegistry, build_permission_callback
+from condor.runtime.danger import format_tool_summary
 from handlers.agents._shared import is_dangerous_tool_call, tool_call_input
 
 USER_ID = 42
@@ -243,3 +244,207 @@ def test_dry_run_blocks_an_acp_shaped_deploy():
     )
     result = asyncio.run(_risk_callback(execution_mode="dry_run")(call, OPTIONS))
     assert result["outcome"]["outcome"] == "cancelled"
+
+
+# ---------------------------------------------------------------------------
+# manage_amm moves real funds: it must be gated like any other trade (SEC-206)
+# ---------------------------------------------------------------------------
+
+AMM = "mcp__mcp-hummingbot__manage_amm"
+
+
+def test_amm_signing_actions_are_dangerous():
+    for action in ("execute_swap", "add_liquidity", "remove_liquidity", "create_pool"):
+        call = normalize_tool_call(_acp_request(AMM, {"action": action}))
+        assert is_dangerous_tool_call(call), f"manage_amm({action}) was auto-approved"
+
+
+def test_amm_read_actions_stay_on_the_fast_path():
+    for action in (
+        "pool_info",
+        "position_info",
+        "positions_owned",
+        "quote_swap",
+        "quote_liquidity",
+    ):
+        call = normalize_tool_call(_acp_request(AMM, {"action": action}))
+        assert not is_dangerous_tool_call(
+            call
+        ), f"manage_amm({action}) needlessly gated"
+
+
+def test_amm_with_unreadable_arguments_fails_closed():
+    for raw in (None, "not json", ["execute_swap"], {}):
+        call = normalize_tool_call(_acp_request(AMM, raw))
+        assert is_dangerous_tool_call(call), f"{raw!r} slipped past the gate"
+
+
+def test_amm_swap_reaches_a_human_with_a_readable_summary():
+    channel = _CapturingChannel(answer=False)
+    result = _drive_acp(
+        _acp_request(
+            AMM,
+            {
+                "action": "execute_swap",
+                "connector": "meteora",
+                "side": "SELL",
+                "amount": "12.5",
+                "base_token": "SOL",
+                "pool_address": "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1",
+            },
+        ),
+        channel,
+    )
+
+    assert len(channel.delivered) == 1, "an AMM swap was never put in front of a human"
+    assert (
+        channel.delivered[0].summary == "Swap SELL 12.5 SOL on meteora pool 5Q544fKr..."
+    )
+    assert result["outcome"]["outcome"] == "cancelled"
+
+
+def test_amm_summaries_name_what_is_being_moved():
+    def summary(**args):
+        return format_tool_summary({"tool": AMM, "input": args})
+
+    assert (
+        summary(
+            action="add_liquidity",
+            connector="raydium",
+            base_token_amount="1",
+            quote_token_amount="200",
+            pool_address="8sLbNZoA1cfnvMJLPfp98ZLAnFSYCFApfJKMbiXNLwxj",
+        )
+        == "Add 1/200 liquidity on raydium pool 8sLbNZoA..."
+    )
+    assert (
+        summary(
+            action="remove_liquidity",
+            percentage_to_remove="100",
+            position_address="9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin",
+        )
+        == "Remove 100% from position 9xQeWvG8..."
+    )
+    assert (
+        summary(
+            action="create_pool",
+            connector="uniswap",
+            base_token="WETH",
+            quote_token="USDC",
+            base_token_amount="0.5",
+        )
+        == "Create uniswap pool WETH/USDC seeded with 0.5"
+    )
+    # An address we were not given must not blow up a confirmation prompt.
+    assert summary(action="execute_swap") == "Swap ? ? ? on ? pool ?"
+    assert summary(action="quote_swap") == "AMM: quote_swap"
+
+
+def test_dry_run_cancels_an_amm_swap_but_not_a_quote():
+    swap = normalize_tool_call(
+        _acp_request(AMM, {"action": "execute_swap", "connector": "meteora"})
+    )
+    assert (
+        asyncio.run(_risk_callback(execution_mode="dry_run")(swap, OPTIONS))["outcome"][
+            "outcome"
+        ]
+        == "cancelled"
+    )
+
+    quote = normalize_tool_call(_acp_request(AMM, {"action": "quote_swap"}))
+    assert asyncio.run(_risk_callback(execution_mode="dry_run")(quote, OPTIONS))[
+        "outcome"
+    ] == {"outcome": "selected", "optionId": "allow"}
+
+
+# ---------------------------------------------------------------------------
+# Every mutating MCP action is classified, so the next tool can't reopen the hole
+# ---------------------------------------------------------------------------
+
+# manage_amm shipped ungated because nothing tied the MCP server's tool surface
+# to danger.py (SEC-206). These two tests are that tie: a newly registered tool,
+# or a new mutating action on an existing one, fails CI until someone classifies
+# it here. danger.py itself stays stdlib-only, so the import lives in the test.
+
+#: Tools whose actions can move funds or a live bot. Every mutating action of
+#: these must be classified dangerous.
+FUND_MOVING_TOOLS = {"manage_amm", "manage_bots", "manage_executors"}
+
+#: Tools that read, or that only write config the trading loop must be told to
+#: pick up. Listed explicitly so a new tool belongs to neither set and trips
+#: ``test_every_action_gated_tool_is_classified`` below.
+NON_FUND_MOVING_TOOLS = {
+    "manage_controllers",  # writes controller templates, never a running bot
+    "explore_dex_pools",
+    "explore_geckoterminal",
+}
+
+#: Verbs that mean "this call changes something out in the world".
+MUTATING_PREFIXES = (
+    "execute_",
+    "add_",
+    "remove_",
+    "create",
+    "deploy",
+    "stop",
+    "start_",
+    "update_",
+)
+
+
+def _action_literals() -> dict[str, list[str]]:
+    """Each registered MCP tool's ``action`` values, read off its signature."""
+    import inspect
+    import typing
+
+    from mcp_servers.hummingbot_api import server
+
+    actions: dict[str, list[str]] = {}
+    for tool in asyncio.run(server.mcp.list_tools()):
+        fn = getattr(server, tool.name, None)
+        param = inspect.signature(fn).parameters.get("action") if fn else None
+        if param is None:
+            continue
+        annotation = param.annotation
+        members: list[str] = []
+        for candidate in (annotation, *typing.get_args(annotation)):
+            if typing.get_origin(candidate) is typing.Literal:
+                members.extend(typing.get_args(candidate))
+        actions[tool.name] = members
+    return actions
+
+
+def test_every_action_gated_tool_is_classified():
+    """A newly registered tool has to be sorted into one of the two sets."""
+    registered = set(_action_literals())
+    unclassified = registered - FUND_MOVING_TOOLS - NON_FUND_MOVING_TOOLS
+    assert not unclassified, (
+        f"MCP tools {sorted(unclassified)} are action-gated but classified nowhere; "
+        "decide whether they move funds and, if so, gate them in condor/runtime/danger.py"
+    )
+    assert FUND_MOVING_TOOLS <= registered, (
+        f"{sorted(FUND_MOVING_TOOLS - registered)} is gated but no longer registered "
+        "by the MCP server — the gate for it is dead code"
+    )
+
+
+def test_every_mutating_action_of_a_fund_moving_tool_is_dangerous():
+    checked = 0
+    for tool_name, actions in _action_literals().items():
+        if tool_name not in FUND_MOVING_TOOLS:
+            continue
+        for action in actions:
+            if not action.startswith(MUTATING_PREFIXES):
+                continue
+            checked += 1
+            call = {
+                "tool": f"mcp__mcp-hummingbot__{tool_name}",
+                "input": {"action": action},
+            }
+            assert is_dangerous_tool_call(call), (
+                f"{tool_name}({action}) mutates but is auto-approved; "
+                "add it to the matching DANGEROUS_* set in condor/runtime/danger.py"
+            )
+    # 4 AMM + 5 bot + 2 executor today: a floor, so a signature refactor that
+    # silently stops yielding actions fails instead of passing vacuously.
+    assert checked >= 11, f"only {checked} mutating actions found — enumeration broke"
