@@ -330,9 +330,14 @@ async def _execute_routine(
         # record (SEC-152) — so the web can authorize reads by it (SEC-196).
         # The context is published so a nested call_routine() inside this
         # routine inherits its server, bot and user (FEAT-052, CORR-205).
+        # default_source stamps reports that never called ReportBuilder.source()
+        # so they stay visible on the Routines page, exactly as the store, code
+        # runner and primitives runners do (CORR-211). ``routine_name`` is the
+        # bare library name here — agent-prefixed keys never reach this path.
         with primitives.bind_context(context):
             with condor.reports.attribute_owner(owner_key):
-                raw_result = await routine.run_fn(config, context)
+                with condor.reports.default_source("routine", routine_name):
+                    raw_result = await routine.run_fn(config, context)
         rich_result = normalize_result(raw_result)
         result_text = rich_result.text[:500] if rich_result.text else "Completed"
     except Exception as e:
@@ -434,11 +439,13 @@ async def _run_continuous_routine(
     try:
         config = routine.config_class(**config_dict)
         logger.info(f"Starting continuous routine {routine_name}[{instance_id}]")
-        # Same owner stamping as one-shot runs (SEC-196): reports this loop
-        # saves belong to the user the instance runs for.
+        # Same owner and source stamping as one-shot runs (SEC-196, CORR-211):
+        # reports this loop saves belong to the user the instance runs for, and
+        # carry the routine as their source even without an explicit .source().
         with primitives.bind_context(context):
             with condor.reports.attribute_owner(owner_key):
-                result = await routine.run_fn(config, context)
+                with condor.reports.default_source("routine", routine_name):
+                    result = await routine.run_fn(config, context)
         logger.info(f"Continuous routine {routine_name}[{instance_id}] ended: {result}")
     except asyncio.CancelledError:
         logger.info(f"Continuous routine {routine_name}[{instance_id}] cancelled")
