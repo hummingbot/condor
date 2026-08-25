@@ -154,30 +154,74 @@ def _grid_config(direction, price, grid_D, config):
 # ── Executor helpers ──────────────────────────────────────────────────────────
 
 
-async def _active_executors(client):
-    """Active executors as a list.
+def _controller_id(config) -> str:
+    """A durable handle for everything this run creates.
+
+    The id returned by ``create_executor`` is the only reference this routine has
+    to a grid, and it does not exist until that call returns. Cancellation landing
+    mid-POST — after the server has created the grid, before the id comes back —
+    would otherwise leave a 5x leveraged grid running its full 24-hour lifetime
+    with nothing left that knows its id. Tagging every create with a controller id
+    chosen *before* the first one gives the server a handle that survives that
+    window, and ``search_executors``/``get_positions_summary`` both filter on it.
+    """
+    pair = config.trading_pair.replace("-", "").lower()
+    return f"kalman_grid_{pair}_{int(time.time())}"
+
+
+async def _our_executors(client, controller_id):
+    """Active executors this run owns, as a list.
 
     ``search_executors`` returns hapi's ``{"data": [...], "pagination": {...}}``
     envelope, not a bare list — iterating the response directly walks its string
     keys, so ``e.get(...)`` raises AttributeError. Every other consumer in the
     repo goes through this same helper.
+
+    Scoped to our controller id: an unrelated grid on the same account is not ours
+    to reason about, and must not read as "our grid is still alive" either.
     """
     result = await client.executors.search_executors(
-        controller_ids=[], status="active", limit=50
+        controller_ids=[controller_id], status="active", limit=50
     )
     return extract_executors_list(result)
 
 
-async def _teardown(client, executor_id, log, ts) -> bool:
-    """Stop a grid and confirm it is really gone. True only if it is.
+async def _flat_check(client, controller_id):
+    """``(flat, note)`` — has this run left any position open?
 
-    The caller clears its executor id and deploys a replacement on the strength
-    of this return, so a stop that failed — or that the venue did not honour —
-    must not read as success. Both would otherwise leave the original leveraged
-    grid trading, untracked, while a second full-budget grid runs beside it.
+    An executor leaving the active listing does not mean its exposure went with
+    it. A close that exhausts its retries ends as a position hold: executor gone,
+    position still on the venue. Deploying on that reading stacks a second
+    full-budget grid on top of exposure nobody is managing.
+
+    A read that fails counts as *not* flat. The caller uses this to decide whether
+    to put more money on the venue, and "I could not tell" is not a yes.
     """
     try:
-        await client.executors.stop_executor(executor_id)
+        summary = await client.executors.get_positions_summary(
+            controller_id=controller_id
+        )
+    except Exception as e:
+        return False, f"flatness unverified: {e}"
+    held = int(summary.get("total_positions", 0) or 0)
+    if held:
+        return False, f"{held} position(s) still held"
+    return True, ""
+
+
+async def _teardown(client, controller_id, executor_id, log, ts) -> bool:
+    """Stop a grid and confirm both that it is gone and that it left nothing open.
+
+    The caller clears its executor id and deploys a replacement on the strength of
+    this return, so a stop that failed — or that the venue did not honour — must
+    not read as success. Nor may a stop that removed the executor while leaving
+    its position: that is the same overlapping exposure by another route.
+
+    ``keep_position=False`` is spelled out rather than left to the default: it is
+    the close primitive, and this call is the reason the position closes at all.
+    """
+    try:
+        await client.executors.stop_executor(executor_id, keep_position=False)
     except Exception as e:
         log.append(f"{ts} WARN stop failed: {e} — keeping grid, no redeploy")
         return False
@@ -185,7 +229,7 @@ async def _teardown(client, executor_id, log, ts) -> bool:
     try:
         still_active = any(
             str(e.get("id") or e.get("executor_id", "")) == executor_id
-            for e in await _active_executors(client)
+            for e in await _our_executors(client, controller_id)
         )
     except Exception as e:
         # Cannot prove it stopped; treat as still running rather than stack grids.
@@ -196,14 +240,21 @@ async def _teardown(client, executor_id, log, ts) -> bool:
         log.append(f"{ts} WARN {executor_id[:8]} still active after stop")
         return False
 
+    flat, note = await _flat_check(client, controller_id)
+    if not flat:
+        log.append(f"{ts} WARN {executor_id[:8]} stopped but {note} — no redeploy")
+        return False
+
     log.append(f"{ts} TEARDOWN {executor_id[:8]} OK")
     return True
 
 
-async def _deploy(client, direction, price, grid_D, config, log, ts):
+async def _deploy(client, controller_id, direction, price, grid_D, config, log, ts):
     gcfg = _grid_config(direction, price, grid_D, config)
     try:
-        result = await client.executors.create_executor(gcfg)
+        result = await client.executors.create_executor(
+            gcfg, controller_id=controller_id
+        )
         eid = str(result.get("id") or result.get("executor_id", ""))
         log.append(
             f"{ts} DEPLOY {direction} {eid[:8]} "
@@ -243,6 +294,15 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     # Bound before the loop: the CancelledError handler below stops the live
     # grid, and cancellation can arrive before the first tick ever assigns it.
     client = None
+
+    # Fixed before the first create, so the handler can ask the server what this
+    # run owns even when a mid-POST cancellation cost us the returned id.
+    controller_id = _controller_id(config)
+
+    # Bound for the same reason as `client`: the handler's teardown logs through
+    # it, and cancellation can arrive before the first tick sets one. A NameError
+    # here would abort the very cleanup this handler exists to perform.
+    ts = time.strftime("%H:%M:%S")
 
     try:
         while True:
@@ -295,7 +355,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                 new_direction = direction
 
                 if executor_id is not None:
-                    execs = await _active_executors(client)
+                    execs = await _our_executors(client, controller_id)
                     our_exec = next(
                         (
                             e
@@ -389,7 +449,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
 
                 # ── 3. Execute ────────────────────────────────────────────
                 if action in ("retune", "flip"):
-                    if await _teardown(client, executor_id, log, ts):
+                    if await _teardown(client, controller_id, executor_id, log, ts):
                         executor_id = grid_D_deployed = deployed_at = None
                         pnl = fills = 0.0
                         pnl_history.clear()
@@ -413,13 +473,31 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                         log.append(f"{ts} HOLD: budget too small")
                         action = "hold"
                     else:
-                        eid, D_dep = await _deploy(
-                            client, direction, current_price, grid_D, config, log, ts
-                        )
-                        if eid:
-                            executor_id = eid
-                            grid_D_deployed = D_dep
-                            deployed_at = time.time()
+                        # Gated here rather than in _teardown alone, because
+                        # teardown is not the only way in: the "grid died on its
+                        # own" branch above clears state and routes straight to a
+                        # deploy, and a grid that ended by exhausting its close
+                        # retries ends holding a position. Every path to a deploy
+                        # passes through this check.
+                        flat, note = await _flat_check(client, controller_id)
+                        if not flat:
+                            log.append(f"{ts} HOLD: {note} — not stacking a grid")
+                            action = "hold"
+                        else:
+                            eid, D_dep = await _deploy(
+                                client,
+                                controller_id,
+                                direction,
+                                current_price,
+                                grid_D,
+                                config,
+                                log,
+                                ts,
+                            )
+                            if eid:
+                                executor_id = eid
+                                grid_D_deployed = D_dep
+                                deployed_at = time.time()
                 elif action == "deploy":
                     action = "hold"
                     direction = None
@@ -478,17 +556,48 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         # grid keeps trading for the rest of its configured lifetime with nobody
         # left to monitor, retune or exit it.
         stop_note = "FLAT"
-        if executor_id and client:
+        if client:
+            # Ask the server what this run owns rather than trusting executor_id.
+            # Cancellation can land inside create_executor, after the grid exists
+            # and before its id comes back, so a live grid can sit behind an
+            # executor_id that is still None. controller_id was fixed before the
+            # first create, so it finds that grid anyway.
+            doomed = {executor_id} if executor_id else set()
             try:
-                await client.executors.stop_executor(executor_id)
-                stop_note = f"{executor_id[:8]} stopped"
+                doomed |= {
+                    str(e.get("id") or e.get("executor_id", ""))
+                    for e in await _our_executors(client, controller_id)
+                }
             except Exception as e:
-                # Say so loudly: the grid is still live and now unmanaged.
                 logger.error(
-                    f"Kalman Grid Operator cancelled but grid {executor_id} "
-                    f"could not be stopped — it is still trading: {e}"
+                    f"Kalman Grid Operator cancelled but could not list its own "
+                    f"grids ({controller_id}) — any live grid is now unmanaged: {e}"
                 )
-                stop_note = f"{executor_id[:8]} STILL LIVE — stop it manually"
+                stop_note = f"UNKNOWN — check controller {controller_id}"
+            doomed.discard("")
+
+            stopped, live = [], []
+            for eid in sorted(doomed):
+                # _teardown, not a bare stop_executor: a stop that returns without
+                # raising has proved nothing. It is the verified path, and this is
+                # the moment it matters most, since nothing runs after it.
+                try:
+                    ok = await _teardown(client, controller_id, eid, log, ts)
+                except Exception as e:
+                    logger.error(f"Teardown of {eid} raised during shutdown: {e}")
+                    ok = False
+                (stopped if ok else live).append(eid)
+
+            if live:
+                # Say so loudly: still trading, and now with nobody watching.
+                logger.error(
+                    f"Kalman Grid Operator cancelled but {len(live)} grid(s) could "
+                    f"not be verified stopped and flat — they are still trading: "
+                    f"{', '.join(live)} (controller {controller_id})"
+                )
+                stop_note = f"{live[0][:8]} STILL LIVE — stop it manually"
+            elif stopped:
+                stop_note = f"{stopped[0][:8]} stopped"
 
         if report.report_id is not None:
             report.clear()
