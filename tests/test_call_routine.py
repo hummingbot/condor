@@ -190,6 +190,79 @@ def test_a_nested_report_does_not_clobber_the_callers_report_id(
     assert reports.get_report(result.report_id)["title"] == "inner report"
 
 
+def test_a_nested_run_inherits_the_callers_agent(library, reports_dir, store):
+    """ARCH-217: the inner report lands in the dock the enclosing run does.
+
+    ``_agent_of`` answers ``"condor"`` for every shared routine, so hardcoding it
+    filed an agent's ``call_routine("portfolio_snapshot")`` under Condor while
+    the enclosing snippet was stamped with the agent — and ``list_reports``
+    matches ``agent`` exactly, so the dock never showed it.
+    """
+
+    async def inner(config, context):
+        await _save_report("inner report")
+        return "done"
+
+    library("inner", inner)
+
+    async def caller():
+        with reports.attribute_to("market_making_expert"):
+            return await primitives.call_routine("inner")
+
+    result = asyncio.run(caller())
+
+    assert reports.get_report(result.report_id)["agent"] == "market_making_expert"
+
+
+def test_an_explicit_agent_beats_the_ambient_one(library, reports_dir, store):
+    async def inner(config, context):
+        await _save_report("inner report")
+        return "done"
+
+    library("inner", inner)
+
+    async def caller():
+        with reports.attribute_to("market_making_expert"):
+            return await primitives.call_routine("inner", agent="scout")
+
+    result = asyncio.run(caller())
+
+    assert reports.get_report(result.report_id)["agent"] == "scout"
+
+
+def test_an_unattributed_caller_falls_back_to_the_routines_own_owner(
+    library, reports_dir, store
+):
+    async def inner(config, context):
+        await _save_report("inner report")
+        return "done"
+
+    library("inner", inner, source="agent:scout")
+
+    result = asyncio.run(primitives.call_routine("inner"))
+
+    assert reports.get_report(result.report_id)["agent"] == "scout"
+
+
+def test_the_nested_run_leaves_the_callers_attribution_alone(
+    library, reports_dir, store
+):
+    async def inner(config, context):
+        await _save_report("inner report")
+        return "done"
+
+    library("inner", inner, source="agent:scout")
+
+    async def caller():
+        with reports.attribute_to("market_making_expert"):
+            await primitives.call_routine("inner", agent="scout")
+            return await _save_report("outer report")
+
+    outer_id = asyncio.run(caller())
+
+    assert reports.get_report(outer_id)["agent"] == "market_making_expert"
+
+
 def test_a_nested_report_is_filed_under_the_inner_routine(library, reports_dir, store):
     async def inner(config, context):
         await _save_report("inner report")

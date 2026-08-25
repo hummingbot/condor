@@ -146,19 +146,18 @@ async def _run_in_task(
     from condor.primitives import bind_context
 
     _CAPTURE.set(buffer)
-    reports.reset_last_report_id()
-    try:
-        with (
-            bind_context(namespace.get("context")),
-            reports.attribute_owner(owner_id),
-            reports.attribute_to(agent),
-            reports.default_source("code", source),
-        ):
+    with (
+        reports.run_scope(
+            owner=owner_id, agent=agent, source_type="code", source_name=source
+        ),
+        bind_context(namespace.get("context")),
+    ):
+        try:
             outcome = eval(compiled, namespace)  # noqa: S307 - this IS the feature
             if inspect.isawaitable(outcome):
                 await outcome
-    finally:
-        out["report_id"] = reports.get_last_report_id() or ""
+        finally:
+            out["report_id"] = reports.get_last_report_id() or ""
 
 
 async def execute_code(

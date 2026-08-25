@@ -121,6 +121,40 @@ def test_one_shot_run_stamps_the_routine_as_the_report_source(
     assert entry["source_name"] == "probe"
 
 
+def test_a_telegram_run_publishes_its_producer_for_nested_calls(
+    monkeypatch, quiet, reports_dir
+):
+    """ARCH-217: the Telegram runner now enters ``attribute_to`` like the others.
+
+    It used to skip it, so nothing was in scope during the run. That was
+    invisible in the saved entry — ``ReportBuilder.save`` defaults a missing
+    producer to ``"condor"`` — but it is what a nested ``call_routine`` reads to
+    inherit the producer of the run it is nested in, so the gap mattered as soon
+    as the nested runner started honouring the ambient attribution.
+    """
+    seen = {}
+
+    async def _probe(config, context):
+        seen["agent"] = rep.current_agent()
+        return "done"
+
+    _library(monkeypatch, _probe)
+
+    asyncio.run(
+        hr._execute_routine(
+            _ptb_context(_owner_bucket()),
+            "i1",
+            "probe",
+            {},
+            GROUP_ID,
+            owner_id=OWNER_ID,
+        )
+    )
+
+    assert seen["agent"] == "condor"
+    assert rep.current_agent() is None, "the scope outlived the run"
+
+
 def test_a_telegram_started_report_is_grouped_for_its_starter(
     monkeypatch, quiet, reports_dir
 ):

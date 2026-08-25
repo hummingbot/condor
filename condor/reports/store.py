@@ -65,6 +65,17 @@ def attribute_to(agent: str | None):
         _report_agent.reset(token)
 
 
+def current_agent() -> str | None:
+    """The assistant reports are currently attributed to, if any.
+
+    Read by the nested ``call_routine`` runner: a nested run executes in its own
+    copy of the caller's context, so the caller's ``attribute_to`` is still in
+    scope here, and the inner routine can inherit the assistant that asked
+    instead of falling back to its own library owner (ARCH-217).
+    """
+    return _report_agent.get()
+
+
 @contextmanager
 def attribute_owner(user_id: int | None):
     """Attribute reports saved within this block to an authenticated user id.
@@ -98,6 +109,36 @@ def default_source(source_type: str, source_name: str):
         yield
     finally:
         _report_source.reset(token)
+
+
+@contextmanager
+def run_scope(
+    *,
+    owner: int | None = None,
+    agent: str | None = None,
+    source_type: str = "",
+    source_name: str = "",
+):
+    """The report-attribution scope every runner of user code enters.
+
+    One block, four effects: the last-report id is reset so the run reports only
+    what *it* saved, and reports saved inside are stamped with the owner allowed
+    to read them (SEC-196), the assistant that asked, and a fallback source that
+    keeps them visible on the Routines page. The routine store, the code runner,
+    the nested ``call_routine`` runner and both Telegram runners enter it here
+    instead of hand-copying the four calls, which had already drifted apart once
+    (ARCH-217).
+
+    ``bind_context`` stays at the call site: each runner publishes a different
+    context object, and ``condor.reports`` must not import ``condor.primitives``.
+    """
+    reset_last_report_id()
+    with (
+        attribute_owner(owner),
+        attribute_to(agent),
+        default_source(source_type, source_name),
+    ):
+        yield
 
 
 def get_report_raw_html(report_id: str) -> tuple[str, str] | None:

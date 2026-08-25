@@ -428,7 +428,7 @@ def _guard_stack(name: str) -> tuple[str, ...]:
     return stack + (name,)
 
 
-async def _run_nested(routine, cfg, ctx, stack: tuple[str, ...], out: dict):
+async def _run_nested(routine, cfg, ctx, stack: tuple[str, ...], out: dict, agent: str):
     """The inner routine, in its own task context.
 
     Everything here that writes a ContextVar — the stack push, the report
@@ -438,25 +438,38 @@ async def _run_nested(routine, cfg, ctx, stack: tuple[str, ...], out: dict):
     report id is safe for the same reason, and necessary: without it a child that
     saves nothing would report the caller's own report as its own.
 
+    The same task copy is what makes ``reports.current_agent()`` the right
+    fallback for the producer: the enclosing runner's ``attribute_to`` is still
+    in scope in here, so the nested run is filed under the assistant that asked
+    rather than under the inner routine's own library owner — which is
+    ``"condor"`` for every shared routine, and made an agent's nested report
+    invisible in that agent's dock (ARCH-217). The routine's own source is the
+    last resort, for a caller with no attribution at all.
+
     Deliberately not ``_execute_and_record``: a nested call is an implementation
     detail of the caller, so it registers no dock instance, fires no post-run
     hook, sends the user no message and stamps no separate telemetry run. That
     split is what ``start_routine`` exists for.
     """
-    _STACK.set(stack)
-    reports.reset_last_report_id()
-    base_name = (routine.name or "").split("/")[-1]
-    owner = _owner_of(ctx)
     from condor.routine_store import _agent_of
 
-    try:
-        with bind_context(ctx):
-            with reports.attribute_owner(owner):
-                with reports.attribute_to(_agent_of(routine)):
-                    with reports.default_source("routine", base_name):
-                        raw = await routine.run_fn(cfg, ctx)
-    finally:
-        out["report_id"] = reports.get_last_report_id() or ""
+    _STACK.set(stack)
+    base_name = (routine.name or "").split("/")[-1]
+    producer = agent or reports.current_agent() or _agent_of(routine)
+
+    with (
+        reports.run_scope(
+            owner=_owner_of(ctx),
+            agent=producer,
+            source_type="routine",
+            source_name=base_name,
+        ),
+        bind_context(ctx),
+    ):
+        try:
+            raw = await routine.run_fn(cfg, ctx)
+        finally:
+            out["report_id"] = reports.get_last_report_id() or ""
     return normalize_result(raw)
 
 
@@ -465,6 +478,7 @@ async def call_routine(
     config: dict | None = None,
     *,
     context: Any = None,
+    agent: str = "",
     timeout: float = DEFAULT_CALL_TIMEOUT,
 ) -> RoutineResult:
     """Run another routine inline and get its result back.
@@ -483,6 +497,9 @@ async def call_routine(
         config: Config overrides, merged over the routine's defaults.
         context: Routine context to run against. Defaults to the caller's own,
             so the nested run inherits its server, bot and user.
+        agent: Attribute the nested run's reports to this assistant slug.
+            Defaults to whoever the enclosing run is attributed to, so the
+            inner report lands in the same dock as the outer one.
         timeout: Seconds to allow the inner routine.
 
     Returns:
@@ -512,7 +529,7 @@ async def call_routine(
     ctx = _resolve_context(context)
 
     out: dict = {"report_id": ""}
-    task = asyncio.create_task(_run_nested(routine, cfg, ctx, stack, out))
+    task = asyncio.create_task(_run_nested(routine, cfg, ctx, stack, out, agent))
     try:
         result = await asyncio.wait_for(task, timeout=timeout)
     except (asyncio.TimeoutError, TimeoutError) as e:

@@ -20,7 +20,7 @@ from telegram.ext import CallbackContext, ContextTypes
 
 import condor.reports
 from condor import primitives, routine_hooks
-from condor.routine_store import get_routine_store
+from condor.routine_store import _agent_of, get_routine_store
 from handlers import clear_all_input_states
 from routines.base import (
     discover_routines,
@@ -320,24 +320,29 @@ async def _execute_routine(
         ] = active_server
     context._user_data = user_data
 
-    # Reset report capture before execution
-    condor.reports.reset_last_report_id()
-
     try:
-        config = routine.config_class(**config_dict)
-        # Reports belong to the user whose user_data the run executes against
-        # (the starter), falling back to the chat — the same identity the hooks
-        # record (SEC-152) — so the web can authorize reads by it (SEC-196).
-        # The context is published so a nested call_routine() inside this
-        # routine inherits its server, bot and user (FEAT-052, CORR-205).
-        # default_source stamps reports that never called ReportBuilder.source()
-        # so they stay visible on the Routines page, exactly as the store, code
-        # runner and primitives runners do (CORR-211). ``routine_name`` is the
-        # bare library name here — agent-prefixed keys never reach this path.
-        with primitives.bind_context(context):
-            with condor.reports.attribute_owner(owner_key):
-                with condor.reports.default_source("routine", routine_name):
-                    raw_result = await routine.run_fn(config, context)
+        # The one attribution scope every runner enters (ARCH-217). Reports
+        # belong to the user whose user_data the run executes against (the
+        # starter), falling back to the chat — the same identity the hooks
+        # record (SEC-152) — so the web can authorize reads by it (SEC-196);
+        # they name the routine's own library owner as their producer, as the
+        # store runner does, so a nested call_routine() inherits it; and they
+        # carry a fallback source so they stay visible on the Routines page
+        # (CORR-211). The context is published so a nested call_routine() inside
+        # this routine inherits its server, bot and user (FEAT-052, CORR-205).
+        # ``routine_name`` is the bare library name here — agent-prefixed keys
+        # never reach this path.
+        with (
+            condor.reports.run_scope(
+                owner=owner_key,
+                agent=_agent_of(routine),
+                source_type="routine",
+                source_name=routine_name,
+            ),
+            primitives.bind_context(context),
+        ):
+            config = routine.config_class(**config_dict)
+            raw_result = await routine.run_fn(config, context)
         rich_result = normalize_result(raw_result)
         result_text = rich_result.text[:500] if rich_result.text else "Completed"
     except Exception as e:
@@ -437,15 +442,22 @@ async def _run_continuous_routine(
     context = MockContext()
 
     try:
-        config = routine.config_class(**config_dict)
         logger.info(f"Starting continuous routine {routine_name}[{instance_id}]")
-        # Same owner and source stamping as one-shot runs (SEC-196, CORR-211):
-        # reports this loop saves belong to the user the instance runs for, and
-        # carry the routine as their source even without an explicit .source().
-        with primitives.bind_context(context):
-            with condor.reports.attribute_owner(owner_key):
-                with condor.reports.default_source("routine", routine_name):
-                    result = await routine.run_fn(config, context)
+        # The same scope one-shot runs enter (ARCH-217): reports this loop saves
+        # belong to the user the instance runs for (SEC-196), name the routine's
+        # library owner as their producer, and carry the routine as their source
+        # even without an explicit .source() (CORR-211).
+        with (
+            condor.reports.run_scope(
+                owner=owner_key,
+                agent=_agent_of(routine),
+                source_type="routine",
+                source_name=routine_name,
+            ),
+            primitives.bind_context(context),
+        ):
+            config = routine.config_class(**config_dict)
+            result = await routine.run_fn(config, context)
         logger.info(f"Continuous routine {routine_name}[{instance_id}] ended: {result}")
     except asyncio.CancelledError:
         logger.info(f"Continuous routine {routine_name}[{instance_id}] cancelled")
