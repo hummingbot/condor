@@ -621,6 +621,28 @@ class ConfigManager:
         self._save_config()
         return dict(section)
 
+    def get_sharing(self) -> dict:
+        """The conversation-sharing section (FEAT-054). Empty on a fresh install.
+
+        Deliberately separate from :meth:`get_telemetry`: the two record
+        different promises to different people. Telemetry consent is the
+        admin's, install-wide, and anonymous counts; sharing holds an admin veto
+        plus this install's own random ids, and the content it gates belongs to
+        individual users.
+        """
+        section = self._data.get("sharing")
+        return dict(section) if isinstance(section, dict) else {}
+
+    def update_sharing(self, **changes) -> dict:
+        """Merge keys into the sharing section and persist."""
+        section = self._data.setdefault("sharing", {})
+        if not isinstance(section, dict):
+            section = {}
+            self._data["sharing"] = section
+        section.update(changes)
+        self._save_config()
+        return dict(section)
+
     def get_user(self, user_id: int) -> Optional[dict]:
         """Get user record."""
         return self._data.get("users", {}).get(user_id)
