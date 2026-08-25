@@ -750,3 +750,98 @@ def test_rollup_and_agent_view_agree_on_an_adopted_bot():
         assert s1.trade_count == detail.trade_count == 3
         assert s1.unrealized_pnl == detail.unrealized_pnl == 7.0
         assert s1.fees_known and detail.fees_known
+
+
+def _both_surfaces(tmp_path: Path, history: dict, snapshots: list[dict]):
+    """Run the same synthetic bot through both surfaces of the shared engine.
+
+    Returns ``(rollup_session, agent_detail)`` for a single session that adopted
+    ``ns-bot`` at T2 — the web strategy rollup (``apply_bot_mode_pnl``) and the
+    agent's own ``fetch_agent_performance``, over the identical ownership window.
+    """
+    from types import SimpleNamespace
+
+    from condor.agents.performance import fetch_agent_performance
+
+    sd1 = _write_session(tmp_path, 1)
+    _write_ledger(sd1, {"ns-bot": _epoch(T2)})
+
+    rollup_client = _FakeClient(snapshots=snapshots, history=history)
+    s1 = _session(1)
+    asyncio.run(apply_bot_mode_pnl([s1], tmp_path, None, rollup_client))
+
+    async def _no_executors(**_kw):
+        return []
+
+    agent_client = _FakeClient(snapshots=snapshots, history=history)
+    agent_client.executors = SimpleNamespace(search_executors=_no_executors)
+    owned = session_ownership(tmp_path, None, 1)
+    since = min(b.since for b in owned)
+    detail = asyncio.run(
+        fetch_agent_performance(
+            agent_client, "a_1", bot_names=[b.base for b in owned], since=since
+        )
+    )
+    return s1, detail
+
+
+def test_live_fee_fallback_marks_the_figure_a_floor_on_both_surfaces(tmp_path):
+    """A fee-less history plus a live cumulative: same number AND same caveat.
+
+    The backend omitted the cumulative fee column, so every owner window slices to
+    zero fees and the only figure there is comes from the live snapshot's open
+    positions — a floor, not a total. Both surfaces must therefore report the same
+    ``fees`` *and* ``fees_known=False`` ([[CORR-216]]): the rollup used to fold raw
+    and top up after (flag False) while the agent's view substituted before folding
+    (flag True), so the two disagreed on identical data.
+    """
+    inst = "ns-bot-20260701-000000"
+    closes = {"CloseType.TAKE_PROFIT": 3}
+    history = {
+        inst: [
+            _hist_row(T0, 0.0, cum_volume=0.0),
+            _hist_row(T2, 40.0, cum_volume=4000.0),
+            _hist_row(T3, 100.0, cum_volume=9000.0, closes=closes),
+        ]
+    }
+    snapshots = [
+        _snap(
+            inst,
+            T3,
+            realized=100.0,
+            unrealized=7.0,
+            positions=[{"cum_fees_quote": 12.5}],
+        )
+    ]
+
+    s1, detail = _both_surfaces(tmp_path, history, snapshots)
+
+    assert s1.fees == detail.fees == 12.5
+    assert s1.fees_known is detail.fees_known is False
+    # The rest of the attribution is unchanged by the fee rule.
+    assert s1.realized_pnl == detail.realized_pnl == 60.0
+    assert s1.volume == detail.volume == 5000.0
+    assert s1.trade_count == detail.trade_count == 3
+
+
+def test_no_fees_anywhere_still_reads_as_unknown_on_both_surfaces(tmp_path):
+    """Volume, no fee column, and no live figure either: unknown, not free.
+
+    With nothing to fall back to the top-up is a no-op, so the flag is left where
+    ``fold_sliced_window``'s heuristic put it — False, on both surfaces.
+    """
+    inst = "ns-bot-20260701-000000"
+    history = {
+        inst: [
+            _hist_row(T0, 0.0, cum_volume=0.0),
+            _hist_row(T2, 40.0, cum_volume=4000.0),
+            _hist_row(T3, 100.0, cum_volume=9000.0),
+        ]
+    }
+    snapshots = [_snap(inst, T3, realized=100.0, unrealized=7.0)]
+
+    s1, detail = _both_surfaces(tmp_path, history, snapshots)
+
+    assert s1.fees == detail.fees == 0.0
+    assert s1.fees_known is detail.fees_known is False
+    assert s1.volume == detail.volume == 5000.0

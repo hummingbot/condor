@@ -167,7 +167,7 @@ def _merge_bot_perf(
     the bot snapshot reports how many positions closed but not how each one ended,
     so a bot-mode agent has no per-trade outcome to derive one from.
     """
-    from condor.agents.attribution import fold_sliced_window, sliced_or_live_fees
+    from condor.agents.attribution import apply_fee_fallback, fold_sliced_window
     from condor.fetchers.bot_performance import bot_executor_rows
 
     rows = bot_executor_rows(bot)
@@ -186,10 +186,11 @@ def _merge_bot_perf(
             ),
         )
     else:
-        realized, volume, trades, fees = window
-        fold_sliced_window(
-            perf, (realized, volume, trades, sliced_or_live_fees(fees, bot))
-        )
+        # Fold the RAW sliced window, then top up: the fees_known heuristic must
+        # see the unsubstituted fee column, and the fallback stamps its own flag.
+        # Same order as the web rollup, so the two surfaces cannot disagree.
+        fold_sliced_window(perf, window)
+        apply_fee_fallback(perf, window[3], bot)
 
     for ct, n in (bot.get("close_type_counts") or {}).items():
         perf.close_type_counts[str(ct)] = perf.close_type_counts.get(str(ct), 0) + int(
