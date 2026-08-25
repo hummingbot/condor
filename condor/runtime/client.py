@@ -18,7 +18,7 @@ import time
 from typing import AsyncIterator, Literal
 
 from condor.acp.pydantic_ai_client import model_prefix
-from condor.runtime import conversations
+from condor.runtime import conversations, secrets
 from condor.runtime.events import EventType, RuntimeEvent
 from condor.runtime.keys import SessionKey
 from condor.runtime.models import PromptRequest, SessionInfo, SessionSpec
@@ -212,13 +212,24 @@ async def prompt(
             # rather than a composer that looks broken.
             yield RuntimeEvent.queued(session_key=raw_key)
 
+    # Key material never gets past this line (FEAT-056). It is the same
+    # argument the funnel already makes for recording and for ``on_busy``,
+    # applied to a third cross-cutting concern: one variable feeds both the
+    # Recorder below and ``prompt_stream`` seven lines further down, so
+    # sanitising it here covers Telegram, the dashboard, background wakes,
+    # delegations and MCP at once — and covers surface number four, which
+    # would otherwise inherit the omission. Only *certain* shapes are replaced;
+    # ``findings`` carries the ambiguous ones too, for telemetry to count and
+    # for the surfaces to warn about. See :mod:`condor.runtime.secrets`.
+    clean, findings = secrets.redact(req.text)
+
     # Stamped from the live session, not from the conversation meta: the meta's
     # agent_key/agent_slug are last-write-wins, so a chat that switches models
     # mid-way would attribute its whole history to whatever answered last.
     recorder = conversations.Recorder(
         session.user_id,
         session.conversation_id,
-        req.text,
+        clean,
         agent_key=session.agent_key,
         agent_slug=session.agent_slug,
         # Empty for a turn the user typed; set when something else drove it
@@ -232,7 +243,7 @@ async def prompt(
     tool_kinds: dict[str, int] = {}
     outcome = "aborted"
     try:
-        async for event in session.prompt_stream(req.text, lock_timeout=lock_timeout):
+        async for event in session.prompt_stream(clean, lock_timeout=lock_timeout):
             runtime_event = RuntimeEvent.from_acp(event, session_key=raw_key)
             if runtime_event.type is EventType.TOOL_CALL:
                 # The ACP `kind` ("read", "execute", …), never the `title`: a
@@ -268,6 +279,10 @@ async def prompt(
             outcome=outcome,
             surface=_SURFACES.get(getattr(key, "surface", ""), "other"),
             tools=tool_kinds,
+            # Counts per kind, never an offset and never a value — the same
+            # "counts and categories only" contract the rest of this call
+            # already holds to.
+            secrets=secrets.counts(findings),
         )
 
 
