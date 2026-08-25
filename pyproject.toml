@@ -52,3 +52,7 @@ profile = "black"
 
 [tool.setuptools.package-data]
 "condor.reports" = ["report_runtime.js"]
+# The BIP-39 English wordlist. Vendored rather than depended on, and shipped
+# here rather than assumed present: without it the ingress scrubber degrades to
+# no recovery-phrase detection at all, silently.
+"condor.runtime" = ["bip39_english.txt"]

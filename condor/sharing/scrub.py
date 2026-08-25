@@ -57,6 +57,9 @@ from typing import Any, Union, get_args, get_origin
 from pydantic_core import PydanticUndefined
 
 from condor.runtime.conversations import TurnEntry
+from condor.runtime.secrets import HEX64_RE as _HEX64_RE
+from condor.runtime.secrets import SEED_CANDIDATE_RE as _WORD_RUN_RE
+from condor.runtime.secrets import bip39_words, phrase_spans
 
 log = logging.getLogger(__name__)
 
@@ -138,7 +141,6 @@ _MAX_DEPTH = 6
 _NOT_ID_BEFORE = r"(?<![A-Za-z0-9_\-])"
 _NOT_ID_AFTER = r"(?![A-Za-z0-9_\-])"
 
-_HEX64_RE = re.compile(r"0x[0-9a-fA-F]{64}" + _NOT_ID_AFTER)
 _EVM_RE = re.compile(r"0x[0-9a-fA-F]{40}" + _NOT_ID_AFTER)
 _TOKEN_RE = re.compile(
     _NOT_ID_BEFORE
@@ -164,63 +166,16 @@ _IPV4_RE = re.compile(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])")
 _IPV6_RE = re.compile(
     r"(?<![0-9A-Fa-f:])(?:[0-9A-Fa-f]{1,4}:){3,7}[0-9A-Fa-f]{1,4}(?![0-9A-Fa-f:])"
 )
-# Twelve or more consecutive lowercase words of 3–8 letters, separated by any
-# run of whitespace or commas and each optionally numbered — the shape of a
-# BIP-39 recovery phrase, and the *candidate* for one. The separator is
-# deliberately permissive because it is only a prefilter: a phrase pasted out
-# of a wallet UI arrives one word per line, out of a backup sheet as "1. legal
-# 2. winner", and out of a chat with whatever spacing the paste carried. Shape
-# alone is not enough in either direction: an English sentence can reach twelve
-# long words, and a real phrase can repeat one, so neither a prose test nor a
-# distinctness test decides this. :func:`_seed_phrase` decides it against the
-# vendored wordlist, where membership is exact — narrowing the shape here would
-# only move the decision away from the wordlist.
-_SEED_ORDINAL = r"(?:\d{1,2}[.)]\s*)?"
-_WORD_RUN_RE = re.compile(
-    _NOT_ID_BEFORE
-    + _SEED_ORDINAL
-    + r"[a-z]{3,8}(?:[\s,]+"
-    + _SEED_ORDINAL
-    + r"[a-z]{3,8}){11,}"
-    + _NOT_ID_AFTER
-)
-# The separator is captured so a run that turns out not to be a phrase can be
-# re-emitted exactly as it came in, line breaks and all.
-_SEED_SPLIT_RE = re.compile(r"([\s,]+)")
-_SEED_ORDINAL_RE = re.compile(r"^\d{1,2}[.)]\s*")
-
-# The shortest run of wordlist entries treated as a phrase. Twelve is the
-# smallest mnemonic BIP-39 defines, so a shorter run is a coincidence.
-SEED_MIN_WORDS = 12
-
-_BIP39_PATH = Path(__file__).resolve().parent / "bip39_english.txt"
-_bip39: frozenset[str] | None = None
-
-
-def bip39_words() -> frozenset[str]:
-    """The vendored BIP-39 English wordlist, read once.
-
-    Vendored rather than guessed at. The alternative was a structural heuristic
-    — "twelve short lowercase words that never repeat" — and it failed in the
-    direction that matters: BIP-39's own test vector (``legal winner thank year
-    wave sausage worth useful legal winner thank yellow``) repeats three words,
-    so a distinctness rule waves a real recovery phrase straight through. 14 kB
-    of exact membership buys both directions at once.
-
-    The file is the canonical list, sha256
-    ``2f5eed53a4727b4bf8880d8f3f199efc90e58503646d9ff8eff3a2ed3b24dbda``, 2048
-    words, ``abandon`` to ``zoo``. A missing or unreadable file degrades to no
-    phrase detection rather than failing the share — tier 2's other patterns and
-    the user's own eyes are still in front of it.
-    """
-    global _bip39
-    if _bip39 is None:
-        try:
-            _bip39 = frozenset(_BIP39_PATH.read_text(encoding="utf-8").split())
-        except OSError:  # pragma: no cover - a mangled install
-            log.warning("Sharing could not read the BIP-39 wordlist", exc_info=True)
-            _bip39 = frozenset()
-    return _bip39
+# The shapes a recovery phrase can be pasted in, the wordlist that decides
+# whether a run of words is one, and the scan that finds the runs, all live in
+# ``condor.runtime.secrets``. That module answers the same question at
+# *ingress* — before a pasted phrase reaches the model or the first disk write
+# — and two copies of a detector is two calibrations, only one of which anyone
+# is ever looking at. What stays here is what is the scrubber's own business:
+# the pseudonym, the count, and the category name on the wire.
+#
+# ``bip39_words`` is re-exported for the guard test that asserts the vendored
+# list is the canonical one.
 
 
 def _octets_ok(match: str) -> bool:
@@ -460,65 +415,25 @@ def _url(scrubber: "Scrubber", category: str, match: re.Match) -> str:
 
 
 def _seed_phrase(scrubber: "Scrubber", category: str, match: re.Match) -> str:
-    """Replace each maximal run of ``SEED_MIN_WORDS``+ wordlist entries.
+    """Replace each maximal run of wordlist entries inside the candidate.
 
-    The regex only found a candidate of the right *shape*; membership is what
-    decides. Scanning inside the candidate rather than judging it whole is what
-    lets a phrase pasted mid-sentence be caught without taking the sentence
-    around it: "my phrase is ``abandon … zoo`` please check" loses the phrase
-    and keeps the question.
+    The regex only found a candidate of the right *shape*;
+    :func:`condor.runtime.secrets.phrase_spans` decides which parts of it are
+    really a phrase, and returns those parts as offsets. Everything between
+    them — the prose a phrase was pasted into, the "and it is not working"
+    after it — is re-emitted byte for byte, line breaks and numbering intact.
     """
-    words = bip39_words()
-    if not words:
-        return match.group(0)
-
+    src = match.group(0)
+    spans = phrase_spans(src)
+    if not spans:
+        return src
     out: list[str] = []
-    run: list[str] = []  # the pieces of the current run, verbatim
-    pending: list[str] = []  # separators and ordinals not yet claimed by a run
-    ordinal_at: int | None = None  # where an ordinal first appears in pending
-    counted = 0  # wordlist entries in the run, which ordinals are not
-
-    def flush() -> None:
-        nonlocal counted
-        if counted >= SEED_MIN_WORDS:
-            out.append(scrubber._hit(category, "".join(run)))
-        else:
-            out.extend(run)
-        run.clear()
-        counted = 0
-
-    # The candidate always starts on a word or its ordinal, so even positions
-    # are tokens and odd ones are the separators between them.
-    for index, piece in enumerate(_SEED_SPLIT_RE.split(match.group(0))):
-        if index % 2:
-            pending.append(piece)
-            continue
-        token = _SEED_ORDINAL_RE.sub("", piece)
-        if token in words:
-            if run:
-                run.extend(pending)  # inside the run: the phrase's own spacing
-            else:
-                # Opening a run takes the numbering with it and leaves the
-                # prose in front of it alone.
-                cut = len(pending) if ordinal_at is None else ordinal_at
-                out.extend(pending[:cut])
-                run.extend(pending[cut:])
-            pending.clear()
-            ordinal_at = None
-            run.append(piece)
-            counted += 1
-        elif not token:  # a bare "1." — numbering, not a word that breaks a run
-            if ordinal_at is None:
-                ordinal_at = len(pending)
-            pending.append(piece)
-        else:
-            flush()
-            out.extend(pending)
-            pending.clear()
-            ordinal_at = None
-            out.append(piece)
-    flush()
-    out.extend(pending)
+    cursor = 0
+    for start, end in spans:
+        out.append(src[cursor:start])
+        out.append(scrubber._hit(category, src[start:end]))
+        cursor = end
+    out.append(src[cursor:])
     return "".join(out)
 
 
