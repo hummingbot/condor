@@ -126,13 +126,21 @@ def preview(user_id: int, conv_id: str) -> ScrubbedShare:
     return _build(user_id, conv_id)[0]
 
 
-def submit(user_id: int, conv_id: str) -> ShareReceipt:
+def submit(
+    user_id: int, conv_id: str, *, kind: str = wire.KIND_EXPLICIT
+) -> ShareReceipt:
     """Queue this conversation for delivery, and record the receipt locally.
 
     ``share_id`` and ``delete_token`` are minted once per conversation and
     reused: re-sharing a chat that has grown is an upsert with a higher
     revision, not a second row, and the token that revokes it does not change
     underneath the user.
+
+    ``kind`` says who decided. The sweep passes ``passive``; everything else is
+    ``explicit``. It is the one thing the two producers do differently, and it
+    is a parameter rather than a second function on purpose — the acceptance
+    criterion that the automatic path sends exactly what the button would send
+    only holds while there is one build and one send (FEAT-055).
     """
     share, meta = _build(user_id, conv_id)
 
@@ -151,9 +159,16 @@ def submit(user_id: int, conv_id: str) -> ShareReceipt:
         agent_slug=meta.agent_slug,
         agent_key=meta.agent_key,
         surface=meta.surface,
-        kind=wire.KIND_EXPLICIT,
+        kind=kind,
     )
-    outbox.enqueue(outbox.OP_SHARE, outbox.endpoint(), envelope, share_id=share_id)
+    outbox.enqueue(
+        outbox.OP_SHARE,
+        outbox.endpoint(),
+        envelope,
+        share_id=share_id,
+        user_id=user_id,
+        kind=kind,
+    )
 
     shared_at = datetime.now(timezone.utc)
     conversations.update_meta(
@@ -163,8 +178,15 @@ def submit(user_id: int, conv_id: str) -> ShareReceipt:
         share_revision=revision,
         share_delete_token=delete_token,
         shared_at=shared_at.isoformat(),
+        # What "it has grown since" is measured against. Stamped from the meta
+        # read at the top of this function rather than re-read, so a turn landing
+        # mid-share is counted as growth by the next sweep instead of being
+        # silently folded into this revision and never sent.
+        share_turn_count=meta.turn_count,
     )
-    log.info("Queued conversation %s as share %s r%d", conv_id, share_id, revision)
+    log.info(
+        "Queued conversation %s as %s share %s r%d", conv_id, kind, share_id, revision
+    )
     return ShareReceipt(
         conversation_id=conv_id,
         share_id=share_id,
@@ -194,6 +216,8 @@ def unshare(user_id: int, conv_id: str) -> bool:
         outbox.unshare_endpoint(meta.share_id),
         wire.unshare_body(meta.share_delete_token),
         share_id=meta.share_id,
+        user_id=user_id,
+        kind=outbox.OP_UNSHARE,
     )
     conversations.update_meta(
         user_id,
@@ -202,9 +226,37 @@ def unshare(user_id: int, conv_id: str) -> bool:
         share_revision=0,
         share_delete_token="",
         shared_at=None,
+        share_turn_count=0,
     )
     log.info("Queued an unshare for conversation %s", conv_id)
     return True
+
+
+def unshare_all(user_id: int) -> int:
+    """Take back everything this user has out there. Returns how many.
+
+    The back catalogue, as one button. It is offered rather than performed when
+    a user turns Always off, because withdrawing consent to *future* sharing and
+    withdrawing the conversations already given are two different decisions —
+    somebody who deliberately pressed Share two hundred times has not asked for
+    those to disappear (FEAT-055).
+
+    Each conversation goes through :func:`unshare`, so every revocation is
+    queued with its own delete token and survives a restart exactly like a
+    single one does. A conversation that fails is logged and the rest continue:
+    a partial withdrawal is strictly better than an aborted one.
+    """
+    removed = 0
+    for meta in conversations.list_conversations(user_id, limit=0):
+        if not meta.share_id:
+            continue
+        try:
+            if unshare(user_id, meta.id):
+                removed += 1
+        except Exception:  # noqa: BLE001 - one failure must not strand the rest
+            log.warning("Could not unshare conversation %s", meta.id, exc_info=True)
+    log.info("Queued %d unshare(s) for user %s", removed, user_id)
+    return removed
 
 
 def list_shares(user_id: int) -> list[dict]:

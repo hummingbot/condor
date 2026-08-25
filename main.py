@@ -688,14 +688,17 @@ async def startup(application: Application) -> None:
     except Exception:
         logger.exception("Telemetry init failed (continuing without it)")
 
-    # Conversation sharing (FEAT-054). Only the delivery job is registered here,
-    # and it is deliberately not part of the block above: nothing is ever
-    # queued without a user pressing Share, so on an install where nobody has,
-    # this job finds an empty queue and returns without touching the network.
+    # Conversation sharing (FEAT-054, FEAT-055). Two jobs, deliberately not part
+    # of the telemetry block above: they share no consent record, no queue and
+    # no endpoint with it. Both are free on an install where nobody has opted
+    # in — the delivery job finds an empty queue and the sweep finds no user at
+    # ``always``, and neither touches the network.
     try:
         from condor.sharing import share as sharing
+        from condor.sharing import sweep as sharing_sweep
 
         sharing.register_jobs(application)
+        sharing_sweep.register_jobs(application)
     except Exception:
         logger.exception("Sharing job registration failed (continuing without it)")
 

@@ -12,7 +12,9 @@ envelope of 500 counters is cheaper than 500 envelopes; a transcript is not a
 counter.
 
 **The queue holds whole requests, not events.** Each line is
-``{"op": "share"|"unshare", "url": …, "body": …, "queued_at": …}``, so a retry
+``{"op": "share"|"unshare", "url": …, "body": …, "queued_at": …}`` plus the
+local-only ``user_id``/``kind`` bookkeeping a scoped withdrawal needs, none of
+which is in ``body`` and none of which is posted. A retry
 re-posts exactly what failed — including an unshare, which is the one operation
 that must survive a restart to be worth promising. A user who pressed Unshare
 and then lost the network has still revoked; the revocation is in this file
@@ -103,12 +105,29 @@ def _write(records: list[dict]) -> None:
         log.warning("Sharing could not write its queue", exc_info=True)
 
 
-def enqueue(op: str, url: str, body: dict, *, share_id: str = "") -> dict:
-    """Park one request until a flush delivers it. Returns the queued record."""
+def enqueue(
+    op: str,
+    url: str,
+    body: dict,
+    *,
+    share_id: str = "",
+    user_id: int | str = "",
+    kind: str = "",
+) -> dict:
+    """Park one request until a flush delivers it. Returns the queued record.
+
+    ``user_id`` and ``kind`` are **bookkeeping, not payload**: only ``body`` is
+    posted, and neither of them is in it. They exist so
+    :func:`purge_user_shares` can find exactly the records a withdrawal is
+    entitled to destroy — this user's, produced without them looking — and leave
+    everything else alone (FEAT-055).
+    """
     record = {
         "op": op,
         "url": url,
         "share_id": share_id,
+        "user_id": str(user_id or ""),
+        "kind": kind,
         "body": body,
         "queued_at": time.time(),
     }
@@ -144,6 +163,41 @@ def purge() -> None:
         queue_path().unlink()
     except OSError:
         pass
+
+
+def purge_user_shares(user_id: int | str, *, kind: str) -> int:
+    """Destroy this user's undelivered shares of one ``kind``. Returns how many.
+
+    The counterpart of ``condor/telemetry/consent.py``'s ``_purge_collected``:
+    withdrawing consent destroys what was collected but unsent rather than
+    merely deciding not to send it, so a later bug has nothing left to deliver.
+
+    It is scoped rather than a bare :func:`purge` because this queue is not one
+    user's. A single file holds every share on the install **and every pending
+    unshare** — the record that carries a delete token for something already
+    revoked. Emptying it to honour one user turning Always off would silently
+    un-revoke somebody else's withdrawal and throw away a conversation a third
+    person deliberately pressed Share on. So a withdrawal takes what it is owed:
+    the passive shares this user never looked at, still sitting in the queue.
+    """
+    records = _read()
+    if not records:
+        return 0
+    wanted = str(user_id)
+    kept = [
+        r
+        for r in records
+        if not (
+            r.get("op") == OP_SHARE
+            and str(r.get("user_id") or "") == wanted
+            and str(r.get("kind") or "") == kind
+        )
+    ]
+    dropped = len(records) - len(kept)
+    if dropped:
+        _write(kept)
+        log.info("Dropped %d undelivered %s share(s) on withdrawal", dropped, kind)
+    return dropped
 
 
 async def post(record: dict) -> bool:
