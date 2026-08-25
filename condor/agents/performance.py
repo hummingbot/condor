@@ -176,15 +176,23 @@ def _merge_bot_perf(
     if window is None:
         # Lifetime aggregate, folded through the same shared rule as a window so
         # the fees_known heuristic exists exactly once (condor.agents.attribution).
+        # The lifetime aggregate has no fee *column*: ``cum_fees_quote`` is what
+        # ``_aggregate_by_bot`` sums off ``positions_summary``, i.e. the fees of the
+        # positions open at this instant, with every closed position's fees missing.
+        # So it is the fallback figure, not a window's fees — fold a zero fee slot
+        # and let ``apply_fee_fallback`` add it and stamp ``fees_known=False``
+        # ([[CORR-219]]). ``perf.fees`` lands on the same number either way; only
+        # the certainty changes.
         fold_sliced_window(
             perf,
             (
                 float(bot.get("realized_pnl_quote", 0) or 0),
                 float(bot.get("volume_traded", 0) or 0),
                 float(bot.get("closed_trades", 0) or 0),
-                float(bot.get("cum_fees_quote", 0) or 0),
+                0.0,
             ),
         )
+        apply_fee_fallback(perf, 0.0, bot)
     else:
         # Fold the RAW sliced window, then top up: the fees_known heuristic must
         # see the unsubstituted fee column, and the fallback stamps its own flag.
