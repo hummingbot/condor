@@ -15,10 +15,14 @@ off entirely — in Settings → Privacy, or with `CONDOR_TELEMETRY=off` in the
 environment — and a refusal, once recorded, is honoured across upgrades.
 
 There is one other way anything can leave, and it is completely separate: you
-can **hand us a single conversation** by pressing a button and confirming the
-redacted transcript we would send. That is content, so it has its own rules,
-its own code and its own section below — [Sharing a
-conversation](#sharing-a-conversation). It never happens on its own.
+can **hand us a conversation**. By default that means pressing a button and
+confirming the redacted transcript we would send, one chat at a time. If you
+would rather stop pressing it, you can turn on **Always** and let finished
+conversations go automatically — off unless you choose it, and narrower than the
+button in every direction. That is content, so it has its own rules, its own
+code and its own section below — [Sharing a
+conversation](#sharing-a-conversation). Nothing there happens on a fresh
+install, and nothing automatic happens until you ask for it.
 
 The whole mechanism is about 900 lines in [`condor/telemetry/`](condor/telemetry/),
 and sharing is about 1,000 more in [`condor/sharing/`](condor/sharing/). They are
@@ -89,10 +93,11 @@ Never sent, under any level:
 
 That list is about **telemetry**, and it stays true of telemetry no matter what
 else you do. The one way a prompt or an agent reply can ever leave this install
-is the button described under [Sharing a
-conversation](#sharing-a-conversation) — a different pipeline, a different
-consent, and a different endpoint. It is never automatic, and turning telemetry
-off does not turn it on.
+is [Sharing a conversation](#sharing-a-conversation) — a different pipeline, a
+different consent, and a different endpoint. It happens only because you pressed
+the button, or because you turned on Always yourself; turning telemetry off does
+not turn either of them on, and turning telemetry on does not share a word of
+any conversation.
 
 Two of those deserve a note, because they are where this kind of thing usually
 leaks:
@@ -187,8 +192,10 @@ which overrides the stored answer like any other).
 
 Separate from everything above. Telemetry is anonymous counts an admin consents
 to once for the whole install; this is a **transcript**, and only the person who
-held the conversation can hand it over — one at a time, every time, after
-reading exactly what would be sent.
+held the conversation can hand it over. By default that is one at a time, every
+time, after reading exactly what would be sent. There is a standing answer you
+can choose instead — [Sharing automatically](#sharing-automatically) — and it is
+off until you choose it.
 
 The code is [`condor/sharing/`](condor/sharing/), and it deliberately shares no
 module, no consent record, no queue file and no endpoint with
@@ -237,8 +244,9 @@ time, and why unsharing works. If you pasted something sensitive into a chat,
 read the dialog before pressing Share.
 
 **Group chats contain other people's words.** A transcript from a Telegram group
-may quote people who never agreed to anything. Sharing it is your judgement
-call, and the dialog says so.
+may quote people who never agreed to anything. Sharing it with the button is
+your judgement call, and the dialog says so. Automatic sharing never takes one
+at all — see [Sharing automatically](#sharing-automatically).
 
 **Where it goes.** `https://telemetry.hummingbot.org/v1/conversations` — the
 same host as telemetry, a different endpoint, a different table, its own rate
@@ -248,6 +256,64 @@ install id, so a shared conversation cannot be joined to your install's
 heartbeat history, and an install with `CONDOR_TELEMETRY=off` can still share.
 Alongside it go the build version, branch, OS and Python version, which model
 answered, and the counts of what was redacted.
+
+## Sharing automatically
+
+In Settings → Privacy there are three answers, and **Off** is what every install
+starts at:
+
+- **Off** — nothing is shared. The share button is still there if you want it.
+- **Ask me** — the button, as described above. Every share is a decision you
+  make with the transcript in front of you.
+- **Always** — your conversations are shared on their own, redacted exactly the
+  same way, **without showing you first**.
+
+Always is the only path where nobody reads the payload before it leaves, so
+everything below exists to compensate for that. It is deliberately narrower than
+the button in five ways, each of which is enough on its own to stop a
+conversation from going:
+
+- **Idle.** A conversation is only taken once nothing has happened in it for 30
+  minutes. Conversations never formally end, so "finished" has to be a
+  heuristic; if you come back and continue one that was already sent, the next
+  sweep replaces it with the longer transcript rather than adding a second copy.
+- **Forward-only.** Only conversations *started after* you chose Always. Turning
+  the setting on is consent to a policy from that moment, not a licence over
+  your archive — your old chats are never swept, and if you want to hand one
+  over you do it deliberately, with the button. Turning Always off and on again
+  starts a fresh window rather than reaching back over the gap.
+- **Single-author only.** A conversation that anyone but you can speak into — a
+  Telegram group — is never taken automatically. You can consent for yourself;
+  you cannot consent for the other people in the room. Those chats stay
+  shareable with the button, where you are deciding with the transcript in front
+  of you. A conversation from a surface this check does not recognise is
+  excluded too, rather than assumed to be yours alone.
+- **Excluded chats, forever.** While Always is on, every conversation it covers
+  carries a marker in its own header saying so, with one click to leave that
+  chat out. It cannot be dismissed — the point is that you should not be able to
+  forget the setting is on — and an exclusion is honoured permanently, including
+  after the conversation grows.
+- **Rate limited.** At most 3 conversations per 15-minute sweep, which stays
+  inside the collector's 12-per-hour allowance. A backlog drains oldest-first
+  over several sweeps instead of bursting.
+
+Everything else is identical to the button: the same scrubber, the same
+pseudonyms, the same size cap, the same `share_id` and delete token, the same
+endpoint. The only thing that differs on the wire is a flag saying the share was
+automatic rather than chosen, so a reader of the corpus can tell a sample from a
+signal.
+
+**How to stop.** Choosing Off does two things immediately: no further
+conversations are taken, and anything the sweep had queued but not yet sent is
+**deleted** rather than merely held back. It does not touch what you have
+already shared — that is the separate "Delete everything I've shared" button
+below it, because turning off future sharing and withdrawing the past are two
+different decisions and neither one is the default for the other. Both buttons
+are there; you can press either, both, or neither.
+
+The admin's install-wide veto and `CONDOR_SHARING=off` both outrank Always, the
+same way they outrank the button. If sharing is turned off above your head,
+Settings says so rather than leaving a switch that quietly does nothing.
 
 **How to unshare.** Press Unshare in the dialog, or in Settings → Privacy, which
 lists everything you currently have out there. Deleting a conversation unshares
@@ -273,7 +339,8 @@ completes later.
    ```
 
 There is nothing to turn off on a fresh install: the default is that nothing is
-shared, and it stays that way until somebody presses the button.
+shared, and it stays that way until somebody presses the button — or turns on
+Always, which nobody but that user can do for them.
 
 ## Changes to this document
 
@@ -282,7 +349,9 @@ to this file, and re-asking for consent. In particular, adding trading pairs
 would make positions inferable from timing and must not be done quietly.
 
 The same applies to sharing, in its own terms. Sending anything a user has not
-been shown, or sending anything without a user pressing a button, would be a
-change to `condor/sharing/`, a change to this file, and a new consent — not a
-default someone flips. The one planned addition, a per-user "share everything
-from now on" opt-in, is exactly that: an opt-in, off until chosen.
+been shown, or sending anything a user has not asked for, would be a change to
+`condor/sharing/`, a change to this file, and a new consent — not a default
+someone flips. Always is exactly that kind of change, and it arrived as one: an
+opt-in, off until chosen, described in full at the moment of the choice, and
+narrowed by the five rules above precisely because it is the one path where the
+scrubber is the last gate rather than the second-to-last.
