@@ -1,6 +1,6 @@
-"""Sharing a conversation, over HTTP (FEAT-054).
+"""Sharing a conversation, over HTTP (FEAT-054, FEAT-055).
 
-Four routes and one rule that is not inherited from anywhere: **sharing is the
+One rule that is not inherited from anywhere: **sharing is the
 owner's act alone.** ``conversations.py``'s ``_owner`` lets an admin *read*
 someone else's conversation by naming them in ``?user_id=``, which is right for
 support and for the admin panel. It is not right here — the content belongs to
@@ -25,8 +25,9 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from condor.runtime import conversations
 from condor.runtime.conversations import ConversationIdError
-from condor.sharing import consent, share
+from condor.sharing import consent, share, sweep
 from condor.web.auth import get_current_user
 from condor.web.models import WebUser
 from config_manager import get_config_manager
@@ -68,6 +69,40 @@ class SharingSettings(BaseModel):
 
 class SharingUpdate(BaseModel):
     enabled: bool
+
+
+class SharingPreference(BaseModel):
+    """This user's standing answer, and what it means right now.
+
+    ``allowed`` is not the same question as ``state``: a user can be at
+    ``always`` on an install whose admin has since vetoed sharing, and the UI
+    has to be able to say "your answer is Always, and nothing is going out"
+    rather than picking one of the two and hiding the other.
+    """
+
+    state: str
+    opted_in_at: float = 0.0
+    allowed: bool = False
+    sweeping: bool = False
+    shared_count: int = 0
+
+
+class SharingPreferenceUpdate(BaseModel):
+    state: str
+
+
+class ConversationSharingStatus(BaseModel):
+    """What the chat header chip renders for one conversation."""
+
+    conversation_id: str
+    excluded: bool = False
+    covered: bool = False
+    shared: bool = False
+    shared_at: str | None = None
+
+
+class ExclusionUpdate(BaseModel):
+    excluded: bool
 
 
 # ── One conversation ─────────────────────────────────────────────────────
@@ -128,6 +163,129 @@ async def unshare_conversation(
 async def list_shared(user: WebUser = Depends(get_current_user)):
     """Everything this user currently has out there, for Settings → Privacy."""
     return share.list_shares(user.id)
+
+
+@router.delete("/conversations")
+async def unshare_everything(user: WebUser = Depends(get_current_user)):
+    """Take back the whole back catalogue.
+
+    Ungated like the single unshare above and for the same reason: a user must
+    always be able to withdraw, whatever the admin has since decided about
+    sending. Separate from turning Always off, because they are separate
+    decisions (FEAT-055).
+    """
+    return {"unshared": share.unshare_all(user.id)}
+
+
+@router.get(
+    "/conversations/{conversation_id}/status", response_model=ConversationSharingStatus
+)
+async def conversation_status(
+    conversation_id: str,
+    user: WebUser = Depends(get_current_user),
+):
+    """Whether the sweep would ever take this conversation. What the chip reads.
+
+    Answers for the caller's own conversation only, like every other route here.
+    A conversation that does not exist is a 404 rather than an all-false status:
+    the chip must not be able to say "this will not be shared" about something it
+    simply failed to find.
+    """
+    try:
+        meta = conversations.get_conversation(user.id, conversation_id)
+    except ConversationIdError as exc:
+        raise _handle(exc) from exc
+    if meta is None:
+        raise HTTPException(status_code=404, detail="No such conversation")
+
+    return ConversationSharingStatus(
+        conversation_id=conversation_id,
+        excluded=meta.share_excluded,
+        covered=sweep.covered(meta, user.id),
+        shared=bool(meta.share_id),
+        shared_at=meta.shared_at.isoformat() if meta.shared_at else None,
+    )
+
+
+@router.put(
+    "/conversations/{conversation_id}/exclusion",
+    response_model=ConversationSharingStatus,
+)
+async def set_exclusion(
+    conversation_id: str,
+    body: ExclusionUpdate,
+    user: WebUser = Depends(get_current_user),
+):
+    """Take this one conversation out of the sweep, or put it back.
+
+    Ungated, again: excluding is a refusal, and a refusal must never be behind
+    the switch it is refusing. Excluding does **not** unshare a conversation
+    already sent — the two verbs are next to each other in the UI and they mean
+    different things.
+    """
+    try:
+        meta = conversations.get_conversation(user.id, conversation_id)
+    except ConversationIdError as exc:
+        raise _handle(exc) from exc
+    if meta is None:
+        raise HTTPException(status_code=404, detail="No such conversation")
+
+    conversations.update_meta(
+        user.id, conversation_id, share_excluded=bool(body.excluded)
+    )
+    return await conversation_status(conversation_id, user)
+
+
+# ── The user's standing answer ───────────────────────────────────────────
+
+
+@router.get("/preference", response_model=SharingPreference)
+async def get_preference(user: WebUser = Depends(get_current_user)):
+    """This user's own answer. Never another's — there is no id to name one."""
+    return SharingPreference(
+        state=consent.user_state(user.id),
+        opted_in_at=consent.opted_in_at(user.id),
+        allowed=consent.can_share(user.id),
+        sweeping=consent.can_sweep(user.id),
+        shared_count=len(share.list_shares(user.id)),
+    )
+
+
+@router.put("/preference", response_model=SharingPreference)
+async def set_preference(
+    body: SharingPreferenceUpdate,
+    user: WebUser = Depends(get_current_user),
+):
+    """Record Off / Ask / Always for the caller.
+
+    Choosing ``always`` is the only answer that authorizes anything, so it is
+    the only one that has to clear the install's gates first — an admin veto or
+    ``CONDOR_SHARING=off`` refuses it rather than storing a consent the install
+    would not honour. Choosing ``off`` is never refused: withdrawing must work
+    on an install where sharing has already been turned off above the user's
+    head, or a user could be locked into a standing yes.
+
+    Leaving ``always`` goes through :func:`condor.sharing.sweep.withdraw`, which
+    destroys what the sweep queued but never sent. The back catalogue is a
+    separate button and is deliberately not touched here.
+    """
+    state = (body.state or "").strip().lower()
+    if state not in consent.USER_STATES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown sharing preference {body.state!r}",
+        )
+
+    if state == consent.ALWAYS:
+        if not consent.can_share(user.id):
+            raise HTTPException(status_code=403, detail=SHARING_DISABLED)
+        consent.set_user_state(user.id, state)
+    elif consent.user_state(user.id) == consent.ALWAYS:
+        sweep.withdraw(user.id, state)
+    else:
+        consent.set_user_state(user.id, state)
+
+    return await get_preference(user)
 
 
 # ── The install-wide switch ──────────────────────────────────────────────
