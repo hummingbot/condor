@@ -81,11 +81,12 @@ export function AgentChatTab() {
     refetchInterval: 5000,
   });
 
-  // Nobody else opens the socket here: the overlay panel is hidden on this
-  // route, and `connect()` no-ops on an open socket.
+  // The shell already holds the socket open on every route; this is the one
+  // surface allowed to prewarm on top of it, which is what keeps a subprocess
+  // from being spawned for a user who only opened /portfolio.
   useEffect(() => {
-    chat.connect();
-  }, [chat.connect]);
+    chat.enablePrewarm();
+  }, [chat.enablePrewarm]);
 
   const activeSlot = chat.activeSlot;
   const isActiveStreaming = chat.isSlotStreaming(chat.activeSlotId);

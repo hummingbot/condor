@@ -32,11 +32,14 @@ function preview(text: string): string {
  * notice — used to go to Telegram and nowhere else. This is where it lands for
  * a user who only has the browser open.
  *
- * Two sources, one cache. The history comes from `GET /notifications` on mount;
- * live arrivals are written into the same react-query key by the chat socket's
- * `notification` handler, which is why a notice that arrived while the tab was
- * open and one that arrived an hour ago are indistinguishable here. That is the
- * whole point: the store, not the socket, is what guarantees it is seen.
+ * Two sources, one cache. The history comes from `GET /notifications` on mount
+ * and on a slow poll; live arrivals are written into the same react-query key
+ * by the chat socket's `notification` handler — the socket `ChatProvider` opens
+ * on every route, not just the chat workspace — which is why a notice that
+ * arrived while the tab was open and one that arrived an hour ago are
+ * indistinguishable here. That is the whole point: the store, not the socket,
+ * is what guarantees it is seen, and the poll is what guarantees the store
+ * catches up even when the socket is gone.
  */
 export function NotificationBell() {
   const { token } = useAuth();
@@ -48,9 +51,14 @@ export function NotificationBell() {
   const { data } = useQuery<NotificationsResponse>({
     queryKey: NOTIFICATIONS_KEY,
     queryFn: () => api.getNotifications(50),
-    // A push keeps this fresh while a tab is open; the refetch is only for the
-    // socket being down, so it is slow on purpose.
+    // A push keeps this fresh while a tab is open; the poll is the floor for
+    // when it cannot — a dropped socket, a proxy that killed the upgrade — so
+    // the badge is right within a minute regardless. Slow on purpose, and not
+    // at all in a background tab: react-query's own refetch-on-focus covers
+    // the user who comes back.
     staleTime: 60_000,
+    refetchInterval: 60_000,
+    refetchIntervalInBackground: false,
     enabled: !!token,
   });
 

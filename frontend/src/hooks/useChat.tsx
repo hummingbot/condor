@@ -1,4 +1,4 @@
-import { createContext, useContext } from "react";
+import { createContext, useContext, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 
 import { useChatSocket } from "@/hooks/useChatSocket";
@@ -24,6 +24,18 @@ const ChatContext = createContext<ReturnType<typeof useChatSocket> | null>(null)
 
 export function ChatProvider({ children }: { children: React.ReactNode }) {
   const chat = useChatSocket();
+
+  // The socket is opened here, not by the chat workspace, because it carries
+  // more than chat: `notification` frames are the only live push path the
+  // dashboard has (FEAT-048), and a session that starts on /executors — a
+  // reload, a bookmark, a click on a notification's own link — used to never
+  // open it at all, leaving the bell frozen for the whole visit. Connecting
+  // from the shell does not spawn anything: prewarming stays gated behind
+  // `enablePrewarm`, which only the workspace calls.
+  useEffect(() => {
+    chat.connect();
+  }, [chat.connect]);
+
   return <ChatContext value={chat}>{children}</ChatContext>;
 }
 

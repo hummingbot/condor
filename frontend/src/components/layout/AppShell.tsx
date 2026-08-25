@@ -132,8 +132,9 @@ function AppShellBody() {
           <div className="flex items-center gap-1">
             {/* Inside the ChatProvider on purpose: the bell reads the same
                 react-query cache the chat socket pushes live notifications
-                into, and that socket is what makes it update without a
-                reload (FEAT-048). */}
+                into, and the provider opens that socket on every route — not
+                only on the chat workspace — which is what makes the bell
+                update without a reload wherever the user is (FEAT-048). */}
             <NotificationBell />
 
             <button
