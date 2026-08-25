@@ -43,6 +43,15 @@ prompt_visible() {
 # Prompt for passwords (no echo). Never echoes ``default`` in cleartext --
 # unlike prompt_visible, a bracketed hint here would defeat the whole point
 # of a masked prompt the moment a caller passed one.
+#
+# Only the *edges* are trimmed. prompt_visible strips all whitespace, which is
+# right for a token or a hostname but wrong for a password: the user would
+# type "correct horse battery", get "correcthorsebattery" written to two
+# different .env files, and then be unable to log in anywhere with the
+# passphrase they believe they set. Inner whitespace is rejected instead --
+# see prompt_required_secret -- because .env is read by three different
+# parsers (python-dotenv, docker compose, and `source`) that do not agree on
+# how to quote it.
 prompt_secret() {
     local prompt="$1"
     local default="$2"
@@ -54,7 +63,7 @@ prompt_secret() {
     fi
     read -rs value < /dev/tty || value=""
     echo "" >&2
-    value=$(echo "$value" | tr -d '[:space:]')
+    value="$(printf '%s' "$value" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
     if [ -z "$value" ] && [ -n "$default" ]; then
         value="$default"
     fi
@@ -84,6 +93,10 @@ prompt_required_secret() {
             msg_warn "$warn_msg"
             continue
         fi
+        if [[ "${!var_name}" =~ [[:space:]] ]]; then
+            msg_warn "Spaces are not supported in this value -- please retype it without any"
+            continue
+        fi
         break
     done
 }
@@ -102,7 +115,13 @@ set_env_var() {
     local key="$1"
     local value
     value="$(escape_env_value "$2")"
-    [ -f "$ENV_FILE" ] || touch "$ENV_FILE"
+    if [ ! -f "$ENV_FILE" ]; then
+        touch "$ENV_FILE"
+        # .env holds the bot token and the API password. 644 (the usual umask
+        # default) means every other account on a shared box or VPS can read
+        # them. Best-effort: a no-op on filesystems without POSIX modes.
+        chmod 600 "$ENV_FILE" 2>/dev/null || true
+    fi
     if grep -q "^${key}=" "$ENV_FILE"; then
         sed -i.bak "s|^${key}=.*|${key}=${value}|" "$ENV_FILE"
         rm -f "$ENV_FILE.bak"
@@ -718,6 +737,7 @@ elif [ "${condor_mode_choice:-}" = "1" ]; then
                 echo "WEB_URL=http://$(escape_env_value "$SERVER_IP"):8088"
             fi
         } > "$ENV_FILE"
+        chmod 600 "$ENV_FILE" 2>/dev/null || true
     fi
 
     # The mode is written explicitly even for the default, so nothing downstream
@@ -810,9 +830,24 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
         if [[ "${override_api:-}" =~ ^[Yy]$ ]]; then
             msg_info "Will reconfigure and restart the API."
         else
-            echo "DEPLOY_HUMMINGBOT_API=false" >> "$ENV_FILE"
+            set_env_var DEPLOY_HUMMINGBOT_API "false"
             msg_ok "Keeping existing API instance"
             hb_api_deployed=false
+
+            # Keeping someone else's API still means Condor has to log in to
+            # it. Skipping this used to leave config.yml on the template's
+            # placeholder credentials, so the very next thing the user saw was
+            # every command failing with a 401 and no hint as to why.
+            echo ""
+            msg_info "Condor still needs this API's credentials to talk to it."
+            msg_info "They are USERNAME / PASSWORD in that instance's .env."
+            prompt_required_visible "API admin username" "hb_username" "Username cannot be empty"
+            prompt_required_secret "API admin password" "hb_password" "Password cannot be empty"
+            HB_API_PROTOCOL="http"
+            HB_API_HOST="localhost"
+            HB_API_PORT="8000"
+            hb_api_configured=true
+
             # Skip the rest of the API setup block
             existing_api=skip
         fi
@@ -832,7 +867,7 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
 
     if [[ "${deploy_hb:-}" =~ ^[Nn]$ ]]; then
         if [ "$finish_remote_api" != true ]; then
-            echo "DEPLOY_HUMMINGBOT_API=false" >> "$ENV_FILE"
+            set_env_var DEPLOY_HUMMINGBOT_API "false"
         fi
         msg_ok "Skipped Hummingbot API deployment"
         echo ""
@@ -997,7 +1032,7 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
         prompt_required_secret "Config password" "hb_config_password" "Config password cannot be empty"
 
         # Save to condor's .env
-        echo "DEPLOY_HUMMINGBOT_API=true" >> "$ENV_FILE"
+        set_env_var DEPLOY_HUMMINGBOT_API "true"
 
         # Clone hummingbot-api if not present
         if [ -d "$HB_API_DIR" ]; then
@@ -1036,6 +1071,9 @@ TAILSCALE_HOSTNAME=${ts_hb_hostname}
 # interface here. See docker-compose.yml / docker-compose.tailscale.yml.
 API_BIND_HOST=127.0.0.1
 HBEOF
+            # Holds the API password, the config password and (when set) a
+            # Tailscale auth key -- not a world-readable file.
+            chmod 600 "$HB_API_DIR/.env" 2>/dev/null || true
             msg_ok "Hummingbot API .env configured"
 
             # Generate docker-compose.tailscale.yml if hummingbot-api is getting
@@ -1178,13 +1216,18 @@ fi
 # Always create/update config.yml with template
 if [ ! -f "$CONFIG_FILE" ] || [ ! -s "$CONFIG_FILE" ]; then
     msg_info "Creating $CONFIG_FILE with template..."
+    # username/password are deliberately EMPTY, not admin/admin. A template
+    # that ships working-looking credentials is a template someone deploys
+    # with, and `make doctor` cannot tell "the operator chose admin/admin"
+    # apart from "nobody ever filled this in". Empty is unambiguous: doctor
+    # names it, and the API answers 401 rather than letting a default in.
     cat > "$CONFIG_FILE" << 'CONFIGEOF'
 servers:
   local:
     host: localhost
     port: 8000
-    username: admin
-    password: admin
+    username: ""
+    password: ""
 
 default_server: local
 
@@ -1203,6 +1246,8 @@ chat_defaults:
 
 version: 1
 CONFIGEOF
+    # config.yml carries the hummingbot-api password once setup fills it in.
+    chmod 600 "$CONFIG_FILE" 2>/dev/null || true
     msg_ok "Created $CONFIG_FILE with template"
 fi
 
@@ -1255,7 +1300,7 @@ fi
 
 # If user provided a remote API URL (skipped local deployment), update config.yml
 if [ "${hb_api_configured:-false}" = true ] && [ -f "$CONFIG_FILE" ]; then
-    if update_config_api_server "$HB_API_HOST" "$HB_API_PORT" "${hb_username:-admin}" "${hb_password:-admin}"; then
+    if update_config_api_server "$HB_API_HOST" "$HB_API_PORT" "${hb_username:-}" "${hb_password:-}"; then
         msg_ok "Configured $CONFIG_FILE: ${HB_API_PROTOCOL:-http}://${HB_API_HOST}:${HB_API_PORT}"
     else
         msg_warn "Configured $CONFIG_FILE with a basic edit -- review the servers: section to confirm it looks right"
@@ -1278,10 +1323,18 @@ fi
 
 echo -e "${BOLD}══════════════════════════════════════════════${RESET}"
 echo -e "  ${GREEN}Setup complete!${RESET}"
+echo ""
+echo -e "  ${BOLD}Next:${RESET}"
+echo -e "    make run     ${DIM}- start Condor (tmux session 'condor')${RESET}"
+echo -e "    make doctor  ${DIM}- re-check dependencies, config and API access${RESET}"
+echo -e "    make logs    ${DIM}- attach to the running session (detach: Ctrl+B then D)${RESET}"
 if [ "${CONDOR_MODE:-telegram}" = "local" ]; then
 echo ""
 echo -e "  Then open ${BOLD}http://localhost:8088${RESET} — you are logged in already."
 echo -e "  ${DIM}No login, loopback only. See 'Local mode' in the README before exposing it.${RESET}"
+else
+echo ""
+echo -e "  Then send ${BOLD}/start${RESET} to your Telegram bot."
 fi
 if [ "${hb_api_deployed:-}" = true ]; then
 echo ""
@@ -1315,9 +1368,13 @@ fi
 if [ "${TS_DEPLOY:-false}" = true ] || [[ "${use_tailscale_remote:-}" =~ ^[Yy]$ ]]; then
 echo ""
 echo -e "  ${BOLD}Accessing the web dashboard from another device:${RESET}"
-echo -e "  ${CYAN}  Install Tailscale on that device first, then connect with the same key:${RESET}"
-echo -e "    Linux / WSL:   curl -fsSL https://tailscale.com/install.sh | sh && sudo tailscale up --authkey=${ts_auth_key}"
-echo -e "    macOS / Win:   https://tailscale.com/download — then run: sudo tailscale up --authkey=${ts_auth_key}"
+echo -e "  ${CYAN}  Install Tailscale on that device, then sign in to the same account:${RESET}"
+echo -e "    Linux / WSL:   curl -fsSL https://tailscale.com/install.sh | sh && sudo tailscale up"
+echo -e "    macOS / Win:   https://tailscale.com/download — then sign in to the same account"
+echo -e "  ${DIM}A reusable auth key works too (sudo tailscale up --authkey=tskey-auth-...).${RESET}"
+echo -e "  ${DIM}Yours is not reprinted here — it is a credential, and this output ends up in${RESET}"
+echo -e "  ${DIM}scrollback and install logs. Find or reissue it at${RESET}"
+echo -e "  ${DIM}https://login.tailscale.com/admin/settings/keys${RESET}"
 fi
 echo -e "${BOLD}══════════════════════════════════════════════${RESET}"
 echo ""
