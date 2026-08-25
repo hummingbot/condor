@@ -246,9 +246,12 @@ def can_sweep(user_id: int | str) -> bool:
 def users_sweeping() -> list[str]:
     """Every user id with a standing ``always``, from the stored answers alone.
 
-    The sweep intersects this with :func:`condor.paths.iter_user_ids`, so a user
-    who consented and then had their runtime directory removed costs a lookup
-    and nothing else.
+    Nothing intersects this with the ids that have a runtime directory:
+    ``sweep._candidates`` walks this list and calls ``sweep.eligible`` on each
+    one directly. A user who consented and then had their directory removed is
+    absorbed a layer down, where
+    :func:`condor.runtime.conversations.list_conversations` returns ``[]`` for a
+    missing directory — so a stale id costs a lookup and nothing else.
     """
     states = _section().get("users") or {}
     return [uid for uid in map(str, states) if user_state(uid) == ALWAYS]

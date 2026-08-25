@@ -7,9 +7,14 @@ and the sender to call one function. :func:`_build` is that function; neither
 verb has a scrubbing path of its own.
 
 Nothing here decides *whether* to share. That is
-:mod:`condor.sharing.consent`'s job, checked at the HTTP boundary where the
-caller's identity is known, and the answer in this feature is always "because a
-human pressed the button".
+:mod:`condor.sharing.consent`'s job, and :func:`submit` has two producers who
+ask it in two different places. The HTTP route checks
+:func:`consent.can_share` at the boundary, where the caller's identity is known
+and the answer is "because a human pressed the button". The sweep has no
+boundary and no human: :func:`condor.sharing.sweep.eligible` checks the
+narrower :func:`consent.can_sweep` before a conversation is ever offered here.
+Neither check lives in this module, so a third producer inherits nothing — its
+gate is its own to supply.
 """
 
 from __future__ import annotations

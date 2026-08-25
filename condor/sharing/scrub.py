@@ -16,8 +16,16 @@ string is a secret; we are replacing strings we know are ours.
 anything else: an EVM address, a 64-hex blob, a base58 address, a prefixed API
 token, a long mixed-case secret run, an email, a URL carrying a query string or
 userinfo, an IP, a seed-phrase-shaped run of words. Everything here is
-best-effort by construction, which is why the feature ships an explicit button
-whose dialog shows the user the exact bytes before anything is sent.
+best-effort by construction, and it now has two consumers with very different
+safety nets behind it. An explicit share ends in a dialog that shows the user
+the exact bytes before anything is sent, so a pattern that misses is at least
+visible. The sweep in :mod:`condor.sharing.sweep` sends what nobody has read:
+there **the scrubber is the last gate**, and the compensating controls are the
+ones that module's docstring holds — a narrow definition of what may be taken
+at all, a chip in the header that cannot be dismissed while it happens, and
+revocation after. Calibrate a new pattern against the sweep rather than the
+dialog. It is the stricter of the two callers, and the "nothing was replaced"
+the dialog prints is only ever as honest as the pattern that produced it.
 
 **Pseudonyms are stable and one-way.** ``TAG_{hmac_sha256(share_secret, value)[:6]}``.
 Within a transcript the same wallet is the same ``SOL_ADDR_a3f91c`` in every

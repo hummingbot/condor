@@ -142,8 +142,10 @@ function TurnPreview({ turn }: { turn: SharePreview["turns"][number] }) {
 /**
  * Hand one conversation to the Condor project — after reading exactly what goes.
  *
- * The dialog is the last gate, and it is the reason this feature ships an
- * explicit button rather than a background sweep. The scrubber replaces every
+ * The dialog is the last gate on *this* path — the one the button opens. It is
+ * not evidence that no sweep exists: the background producer is the
+ * neighbouring SharingIndicator, mounted in the same header, and it ships no
+ * dialog because nobody is watching it. The scrubber replaces every
  * value the install knows about itself and then pattern-matches the shapes it
  * does not, but no regex knows that "the vault key is hunter2" is a secret. So
  * the payload is rendered here, verbatim, before anyone consents to it: the
