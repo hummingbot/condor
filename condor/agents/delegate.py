@@ -725,16 +725,12 @@ async def _notify_done(dt: DelegateTask, bot) -> None:
     if not dt.chat_id:
         return
 
-    from condor.notifications import NotifyBot, record
+    from condor.notifications import announce
 
-    text = _completion_text(dt)
-    target = resolve_bot(bot)
-    await target.send_message(chat_id=dt.chat_id, text=text)
-
-    # And on the dashboard bell (FEAT-048), with the same text the Telegram push
-    # and the transcript note carry, so the three surfaces cannot tell three
-    # stories about one task. Skipped when the resolved sender *is* the bell:
-    # that rung only wins when there is no Telegram, and it has already recorded
-    # this very message.
-    if not isinstance(target, NotifyBot):
-        await record(dt.user_id, text, kind="delegation")
+    # Telegram *and* the dashboard bell (FEAT-048), with the same text the
+    # transcript note carries, so the three surfaces cannot tell three stories
+    # about one task. ``announce`` owns the "don't file it twice when the
+    # resolved sender is the bell itself" rule (ARCH-212).
+    await announce(
+        dt.user_id, dt.chat_id, _completion_text(dt), kind="delegation", bot=bot
+    )

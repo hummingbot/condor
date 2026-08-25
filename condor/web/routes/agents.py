@@ -1214,48 +1214,6 @@ async def delegate_agent(
     return {"task_id": dt.task_id, "status": dt.status}
 
 
-def _delivered(result: Any) -> bool:
-    """Did a ``send_message`` on the resolved bot actually deliver?
-
-    The ladder returns two different things: a live python-telegram-bot raises
-    on failure and returns a ``Message``, while ``_HttpBot`` never raises and
-    hands back Telegram's raw envelope (or ``None`` when it has no token). Only
-    the envelope can say "no" quietly, so that is the case worth reading.
-    """
-    if result is None:
-        return False
-    if isinstance(result, dict):
-        return bool(result.get("ok"))
-    return True
-
-
-async def _push_to_telegram(chat_id: int, text: str, parse_mode: str) -> bool:
-    """Push a notification through the shared outbound-bot ladder.
-
-    Retries once without ``parse_mode`` because the overwhelmingly common
-    failure is an unescaped ``_`` or ``*`` in text a model wrote: the user must
-    get the message, ugly, rather than not get it at all.
-    """
-    from condor.agents.delegate import resolve_bot
-
-    bot = resolve_bot()
-    if parse_mode:
-        try:
-            if _delivered(
-                await bot.send_message(
-                    chat_id=chat_id, text=text, parse_mode=parse_mode
-                )
-            ):
-                return True
-        except Exception:
-            log.debug("Notification rejected with parse_mode=%s", parse_mode)
-    try:
-        return _delivered(await bot.send_message(chat_id=chat_id, text=text))
-    except Exception:
-        log.warning("Could not deliver notification to chat %s", chat_id)
-        return False
-
-
 @router.post("/notify")
 async def notify_user(req: NotifyRequest, user: WebUser = Depends(get_current_user)):
     """Announce something to the user, in the conversation *and* on Telegram.
@@ -1296,22 +1254,27 @@ async def notify_user(req: NotifyRequest, user: WebUser = Depends(get_current_us
                 exc_info=True,
             )
 
-    # The dashboard bell (FEAT-048), addressed to the caller themselves — never
-    # to ``req.chat_id``, which may legitimately be a group they belong to but
-    # which has no dashboard owner. This is what makes ``send_notification``
+    # The Telegram push and the dashboard bell (FEAT-048) are one decision, not
+    # two: ``announce`` resolves the outbound ladder once and files the bell
+    # entry exactly once — the bottom rung of that ladder records the message
+    # itself, so recording again here duplicated it on every install with no
+    # Telegram (ARCH-212). The bell entry is addressed to the caller themselves,
+    # never to ``req.chat_id``, which may legitimately be a group they belong to
+    # but which has no dashboard owner. This is what makes ``send_notification``
     # succeed on an install with no Telegram: the tool already counts
-    # ``recorded`` as delivered.
-    try:
-        from condor.notifications import record
-
-        if await record(user.id, req.text, kind="agent"):
-            recorded = True
-    except Exception:
-        log.debug("Could not record a notification for user %s", user.id, exc_info=True)
-
+    # ``recorded`` as delivered, and ``sent`` now says the honest "no".
     sent = False
-    if req.chat_id:
-        sent = await _push_to_telegram(req.chat_id, req.text, req.parse_mode)
+    try:
+        from condor.notifications import announce
+
+        delivery = await announce(
+            user.id, req.chat_id, req.text, kind="agent", parse_mode=req.parse_mode
+        )
+        sent = delivery.sent
+        recorded = recorded or delivery.recorded
+    except Exception:
+        log.debug("Could not announce a notification for %s", user.id, exc_info=True)
+
     return {"sent": sent, "recorded": recorded}
 
 

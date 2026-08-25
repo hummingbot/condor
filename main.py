@@ -525,7 +525,7 @@ async def _notify_interrupted_runs(bot, report) -> None:
     One summary per chat rather than a message per run: a crash with several
     live loops would otherwise spam the user at the worst possible moment.
     """
-    from condor.notifications import NotifyBot
+    from condor.notifications import announce, user_for_chat
 
     by_chat: dict[int, list] = {}
     for run in report.interrupted:
@@ -546,24 +546,17 @@ async def _notify_interrupted_runs(bot, report) -> None:
             suffix = " — restarted" if run.restarted else ""
             lines.append(f"• {run.label} (last tick {run.last_tick}){suffix}")
         text = "\n".join(lines)
+        # Telegram and the bell (FEAT-048) in one call: ``announce`` resolves
+        # the sender once and files the notice exactly once, including when the
+        # sender *is* the bell (local mode, FEAT-049). A private chat id is the
+        # owner's user id; a group has no dashboard owner, so a group summary is
+        # simply not filed anywhere.
         try:
-            await bot.send_message(chat_id=chat_id, text=text)
+            await announce(
+                user_for_chat(chat_id), chat_id, text, kind="system", bot=bot
+            )
         except Exception:
             logger.warning("Could not notify chat %s about interrupted runs", chat_id)
-        # And on the bell (FEAT-048). A private chat id is the owner's user id;
-        # ``record`` ignores anything that is not one, so a group summary is
-        # simply not filed anywhere. Skipped when the sender above *is* the bell
-        # (local mode, FEAT-049): it already filed exactly this text.
-        if isinstance(bot, NotifyBot):
-            continue
-        try:
-            from condor.notifications import record, user_for_chat
-
-            owner = user_for_chat(chat_id)
-            if owner:
-                await record(owner, text, kind="system")
-        except Exception:
-            logger.debug("Could not record interrupted-run notice", exc_info=True)
 
 
 def _outbound_bot(application: Application):
