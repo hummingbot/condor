@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 
 import { api } from "@/lib/api";
-import { candleStore } from "@/lib/candle-store";
+import { candleChannelKey, candleStore } from "@/lib/candle-store";
 
 interface PriceTickerProps {
   server: string;
@@ -26,16 +26,18 @@ export function PriceTicker({ server, connector, pair, interval = "1m", hasRestP
   useEffect(() => {
     if (!server || !connector || !pair) {
       setCandlePrice(0);
+      prevPriceRef.current = 0;
       return;
     }
 
-    const key = `candles:${server}:${connector}:${pair}:${interval}`;
+    const key = candleChannelKey(server, connector, pair, interval);
 
-    // Check existing cached candles
+    // Seed from cache unconditionally: an empty cache for the newly subscribed
+    // channel must clear the previous market's close, or `displayPrice` below
+    // keeps preferring it over the REST mid_price this pair already resolved.
     const cached = candleStore.subscribe(key);
-    if (cached.length > 0) {
-      setCandlePrice(cached[cached.length - 1].close);
-    }
+    setCandlePrice(cached[cached.length - 1]?.close ?? 0);
+    prevPriceRef.current = 0; // never colour a new pair against the old one's price
 
     const removeListener = candleStore.onUpdate(key, (candles) => {
       if (candles.length > 0) {
