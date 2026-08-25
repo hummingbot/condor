@@ -119,14 +119,26 @@ export function TradeChart({
   // it the same way, and a chart that took it optionally rendered raw quote
   // dollars next to that pane's converted rows. The refs keep the imperative
   // lightweight-charts callbacks reading the latest formatter without being
-  // re-subscribed on every rate tick.
+  // re-subscribed on every rate tick -- they are read at call time, so the
+  // crosshair and tooltip always format with the current currency.
+  //
+  // `convertPnl` is memoized rather than only ref-held because the position
+  // price lines bake their label at creation time: that effect depends on this
+  // identity to repaint on a currency switch, and would tear down and redraw
+  // every line on each render if the closure were minted fresh. `useRates`
+  // memoizes `formatPnlValue` on the rates themselves, so this changes only
+  // when the conversion actually does.
   const quoteCurrency = pair.split("-")[1] || "USDT";
   const quoteCurrencies = useMemo(() => [quoteCurrency], [quoteCurrency]);
   const { formatPnlValue, formatValue } = useRates(quoteCurrencies);
+  const convertPnl = useMemo(
+    () => (val: number) => formatPnlValue(val, quoteCurrency),
+    [formatPnlValue, quoteCurrency],
+  );
   const convertValueRef = useRef<(val: number) => string>(() => "");
   const convertPnlRef = useRef<(val: number) => string>(() => "");
   convertValueRef.current = (val: number) => formatValue(val, quoteCurrency);
-  convertPnlRef.current = (val: number) => formatPnlValue(val, quoteCurrency);
+  convertPnlRef.current = convertPnl;
   const [chartReady, setChartReady] = useState(false);
 
   // Price line refs
@@ -970,7 +982,7 @@ export function TradeChart({
       if (pos.entry_price <= 0) continue;
       const isLong = pos.position_side?.toUpperCase() === "LONG";
       const pnl = pos.unrealized_pnl ?? 0;
-      const pnlStr = convertPnlRef.current(pnl);
+      const pnlStr = convertPnl(pnl);
       const amt = Math.abs(pos.amount);
       const color = pnlHexColor(pnl);
       // A hold nothing ties to this pool still belongs on the chart -- the price
@@ -988,7 +1000,10 @@ export function TradeChart({
       });
       positionLinesRef.current.push(pl);
     }
-  }, [positions, chartReady]);
+    // `convertPnl` is a dependency, not a ref read: the label is a string the
+    // chart owns once created, so a currency switch has to redraw the lines.
+    // The effect already clears every line it drew, so re-running is idempotent.
+  }, [positions, chartReady, convertPnl]);
 
   // ── Measure tool helpers ──
   const clearMeasure = () => {
