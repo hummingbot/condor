@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 
 import { useAuth } from "@/lib/auth";
@@ -48,6 +48,21 @@ export function Login() {
       });
   }, [searchParams, loginWithToken, navigate, redirectTo]);
 
+  // The one local-login attempt, shared by the probe below and the Retry
+  // button. Retrying calls this directly rather than re-firing the effect: the
+  // `probed` ref has already latched, and the mode cannot have changed without
+  // a server restart, so a second /auth/mode round trip would buy nothing.
+  const attemptLocalLogin = useCallback(() => {
+    setError("");
+    setLoggingIn(true);
+    return loginLocal()
+      .then(() => navigate(redirectTo, { replace: true }))
+      .catch((err) => {
+        setError(err instanceof Error ? err.message : "Login failed");
+        setLoggingIn(false);
+      });
+  }, [loginLocal, navigate, redirectTo]);
+
   // Local mode (FEAT-049): there is no login step. Ask the server how it
   // authenticates and, if the answer is "locally", claim the session and go.
   // Skipped entirely when a one-time ?token= is being redeemed above.
@@ -62,13 +77,7 @@ export function Login() {
         if (cancelled) return;
         setMode(data?.mode ?? "telegram");
         if (data?.mode !== "local") return;
-        setLoggingIn(true);
-        return loginLocal()
-          .then(() => navigate(redirectTo, { replace: true }))
-          .catch((err) => {
-            setError(err instanceof Error ? err.message : "Login failed");
-            setLoggingIn(false);
-          });
+        return attemptLocalLogin();
       })
       .catch(() => {
         // The server is unreachable, not Telegram-less: show the normal card.
@@ -78,7 +87,7 @@ export function Login() {
     return () => {
       cancelled = true;
     };
-  }, [searchParams, loginLocal, navigate, redirectTo]);
+  }, [searchParams, attemptLocalLogin]);
 
   return (
     <div className="flex h-screen items-center justify-center">
@@ -89,6 +98,27 @@ export function Login() {
           <p className="text-sm text-[var(--color-text-muted)]">
             Signing in...
           </p>
+        ) : mode === "local" ? (
+          // Local mode has no Telegram bot to run /web in, and the sign-in it
+          // does have just failed. Two things can cause that — the server went
+          // away between the probe and the POST, or the user it logs in as is
+          // no longer approved — so name both rather than assert either; when
+          // the server did answer, its own detail lands below in red.
+          <>
+            <p className="mb-4 text-sm text-[var(--color-text-muted)]">
+              This install runs in local mode, so there is no login link — the dashboard signs you in by itself. That did not work this time.
+            </p>
+            <p className="mb-6 text-sm text-[var(--color-text-muted)]">
+              Check that Condor is still running, and that <code className="rounded bg-[var(--color-bg)] px-1.5 py-0.5 font-mono text-xs">ADMIN_USER_ID</code> in <code className="rounded bg-[var(--color-bg)] px-1.5 py-0.5 font-mono text-xs">.env</code> is an approved user in <code className="rounded bg-[var(--color-bg)] px-1.5 py-0.5 font-mono text-xs">config.yml</code> — or run <code className="rounded bg-[var(--color-bg)] px-1.5 py-0.5 font-mono text-xs">make setup</code> and choose Local mode.
+            </p>
+            <button
+              type="button"
+              onClick={() => void attemptLocalLogin()}
+              className="rounded-lg bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90"
+            >
+              Retry
+            </button>
+          </>
         ) : (
           <>
             <p className="mb-6 text-sm text-[var(--color-text-muted)]">
