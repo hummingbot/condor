@@ -176,10 +176,11 @@ async def sweep(now: float | None = None) -> int:
 
     Both halves run in a worker thread, and that is a requirement rather than a
     tidiness preference: listing a store reads a ``meta.json`` per conversation
-    and a submit scrubs a whole transcript, both of them blocking. On the
-    explicit path that cost lands inside a request the user is already waiting
-    on. Here there is nobody waiting, so the same work on the event loop would
-    be paid by whoever happens to be mid-answer when the tick fires.
+    and a submit scrubs a whole transcript, both of them blocking. This was once
+    justified here by saying the explicit path can afford the same work inline
+    because the user asked for it — which was wrong, and the routes now use
+    ``asyncio.to_thread`` too. Only the *latency* is the asker's; the *blocking*
+    is the whole install's, because uvicorn shares this loop (PERF-235).
     """
     if not consent.env_allows() or not consent.install_allows():
         return 0

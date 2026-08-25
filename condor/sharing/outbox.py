@@ -524,13 +524,19 @@ async def flush() -> tuple[int, int]:
     :func:`_rewrite`, which re-reads under the lock. Whatever arrived meanwhile
     is still queued afterwards, in order. Losing one of those would usually cost
     a share; once, it cost the only copy of a delete token (CORR-232).
+
+    The "still queued" number it returns comes from :func:`count` rather than
+    from ``len(_read())``. This coroutine runs on the loop that also polls
+    Telegram, and rebuilding every queued transcript into dicts merely to take
+    a length of it blocked that loop for tens of milliseconds on a full queue —
+    the same mistake the HTTP surface was making next door (PERF-235).
     """
     global _flushing
     with _QUEUE_LOCK:
         if _flushing:
             # A flush already in flight owns these records; posting them from
             # here too would duplicate the share, or the revocation.
-            return 0, len(_read())
+            return 0, count()
         _flushing = True
     try:
         records = _ensure_ids()
@@ -558,6 +564,6 @@ async def flush() -> tuple[int, int]:
             log.info("Sharing is off; dropped %d queued share(s) unsent", len(vetoed))
         retired = delivered | vetoed
         _rewrite(lambda queued: [r for r in queued if r.get("id") not in retired])
-        return len(delivered), len(_read())
+        return len(delivered), count()
     finally:
         _flushing = False
