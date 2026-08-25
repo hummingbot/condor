@@ -228,6 +228,66 @@ class RiskEngine:
 
         return True, ""
 
+    def check_amm_action(
+        self,
+        tool_call: dict,
+        current_state: RiskState,
+        notional_quote: float | None = None,
+    ) -> tuple[bool, str]:
+        """Check a manage_amm call against the position limit.
+
+        ``manage_amm`` signs straight from the user's Gateway wallet -- no
+        executor, no controller, no saved config in the path -- so this gate is
+        the only thing bounding a loop agent's DEX capital. Anything outside
+        ``DANGEROUS_AMM_ACTIONS`` (quotes, pool and position reads, the guide
+        load) is not a signature and passes through untouched.
+        ``remove_liquidity`` withdraws capital, so it is allowed even under a
+        breached limit -- the same reasoning that lets a bot stop through
+        ``check_bot_action``.
+
+        ``notional_quote`` is the call valued in the pool's quote token by
+        :func:`_amm_notional_quote`; the callback prices it, exactly as it does
+        for an executor create. ``None`` or a non-finite/non-positive value
+        means the call could not be valued, and an unpriced signature is
+        refused rather than approved blind (SEC-093).
+
+        On approval the notional accumulates into ``current_state`` the way
+        :meth:`check_executor_action` does, so a second swap in the same tick
+        is gated against the running total and not the frozen snapshot.
+
+        Returns (allowed, reason).
+        """
+        input_data = tool_call_input(tool_call)
+        if input_data is None:
+            return False, "Tool arguments could not be read"
+        action = input_data.get("action", "")
+
+        if action not in DANGEROUS_AMM_ACTIONS:
+            return True, ""
+
+        if action == "remove_liquidity":
+            return True, ""
+
+        if (
+            notional_quote is None
+            or not math.isfinite(notional_quote)
+            or notional_quote <= 0
+        ):
+            return False, f"AMM {action} quote notional is unavailable"
+
+        projected = current_state.total_exposure + notional_quote
+        if projected > self.limits.max_position_size_quote:
+            return False, (
+                f"AMM {action} would exceed position limit: ${projected:.2f} > "
+                f"${self.limits.max_position_size_quote:.2f}"
+            )
+
+        # Approved: accumulate so the next signature in this tick is gated
+        # against the running total, not the pre-tick numbers.
+        current_state.total_exposure += notional_quote
+
+        return True, ""
+
 
 def auto_approve_with_risk_check(
     risk_engine: RiskEngine,
@@ -361,6 +421,32 @@ def auto_approve_with_risk_check(
                     if input_data.get("action", "") == "deploy":
                         ledger.note_deploy(input_data.get("bot_name", "") or "")
 
+            # AMM signatures move funds straight out of the Gateway wallet, so
+            # they are priced and gated here (SEC-224). Interactive surfaces
+            # still route the same call to a human via confirmations.py; this
+            # branch is what stands in for that human in loop mode.
+            if tool_name == "manage_amm":
+                action = input_data.get("action", "")
+                notional_quote = None
+                if (
+                    action in DANGEROUS_AMM_ACTIONS
+                    and action != "remove_liquidity"  # risk-reducing, unpriced
+                ):
+                    try:
+                        notional_quote = await _amm_notional_quote(
+                            input_data, price_client
+                        )
+                    except Exception as exc:
+                        log.warning("Blocked manage_amm(%s): %s", action, exc)
+                        return {"outcome": {"outcome": "cancelled"}}
+
+                allowed, reason = risk_engine.check_amm_action(
+                    tool_call, risk_state, notional_quote
+                )
+                if not allowed:
+                    log.warning("Risk engine blocked tool call: %s", reason)
+                    return {"outcome": {"outcome": "cancelled"}}
+
             # Block direct order placement entirely
             if tool_name == "place_order":
                 log.warning("Blocked direct place_order (agents must use executors)")
@@ -428,4 +514,130 @@ async def _planned_amount_quote(input_data: dict[str, Any], client: Any) -> floa
 
     if not math.isfinite(amount) or amount <= 0:
         raise ValueError("planned quote amount must be a positive finite number")
+    return amount
+
+
+def _amm_field(value: Any, name: str, default: float | None = None) -> float:
+    """One numeric ``manage_amm`` field as a non-negative float.
+
+    The tool's schema types every amount as a string, so this parses rather
+    than casts, and refuses anything it cannot read: the caller is about to
+    sign a transaction with it.
+    """
+    if value is None or value == "":
+        if default is None:
+            raise ValueError(f"{name} is required to price this call")
+        return default
+    try:
+        amount = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a number, got {value!r}") from exc
+    if not math.isfinite(amount) or amount < 0:
+        raise ValueError(f"{name} must be a non-negative finite number")
+    return amount
+
+
+def _positive_price(value: Any) -> float:
+    """A reference price, or ``ValueError`` if it cannot bound anything."""
+    if value is None or value == "":
+        raise ValueError("reference price is unavailable")
+    try:
+        price = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"reference price must be a number, got {value!r}") from exc
+    if not math.isfinite(price) or price <= 0:
+        raise ValueError("reference price must be a positive finite number")
+    return price
+
+
+async def _amm_base_price(input_data: dict[str, Any], client: Any) -> float:
+    """The quote-per-base price to value a ``manage_amm`` call's base leg.
+
+    ``manage_amm`` is pool-scoped, not pair-scoped: ``execute_swap`` and
+    ``add_liquidity`` name a ``pool_address`` and a ``base_token`` but never a
+    trading pair, so ``fetch_current_price`` -- which keys off a pair -- cannot
+    price them. The pool's own mid price is both available from the same client
+    and the price the call will actually execute at, so it is used instead.
+
+    ``create_pool`` has no pool yet, so it takes the declared ``initial_price``
+    (already quote per base) and otherwise falls back to the market price of
+    ``base_token-quote_token``, the pair the connector itself seeds from.
+    """
+    if client is None:
+        raise ValueError("Hummingbot price client is unavailable")
+
+    if input_data.get("action", "") == "create_pool":
+        declared = input_data.get("initial_price")
+        if declared is not None and declared != "":
+            return _positive_price(declared)
+
+        base_token = input_data.get("base_token") or ""
+        quote_token = input_data.get("quote_token") or ""
+        if not base_token or not quote_token:
+            raise ValueError("create_pool must name base_token and quote_token")
+
+        from condor.fetchers.market_data import fetch_current_price
+
+        return _positive_price(
+            await fetch_current_price(
+                client,
+                input_data.get("network") or "",
+                f"{base_token}-{quote_token}",
+            )
+        )
+
+    pool_address = input_data.get("pool_address") or ""
+    if not pool_address:
+        raise ValueError("pool_address is required to price this call")
+
+    gateway_amm = getattr(client, "gateway_amm", None)
+    if gateway_amm is None:
+        raise ValueError("Gateway AMM client is unavailable")
+
+    info = (
+        await gateway_amm.get_pool_info(
+            connector=input_data.get("connector") or "",
+            network=input_data.get("network") or "",
+            pool_address=pool_address,
+        )
+    ) or {}
+    price = info.get("price")
+    if price is None or price == "":
+        price = info.get("current_price")
+    return _positive_price(price)
+
+
+async def _amm_notional_quote(input_data: dict[str, Any], client: Any) -> float:
+    """Value a signing ``manage_amm`` call in the pool's quote token.
+
+    Raises ``ValueError`` when the call cannot be valued; the gate cancels
+    rather than signing an unpriced transaction. Like the executor path, the
+    number is denominated in the pool's quote token, which the position limit
+    is assumed to share.
+    """
+    action = input_data.get("action", "")
+
+    if action == "execute_swap":
+        # Pool-scoped swaps are base-denominated on both sides: ``amount`` is
+        # read against ``base_token``, and ``side`` only picks the direction.
+        base = _amm_field(input_data.get("amount"), "amount")
+        quote = 0.0
+    elif action == "add_liquidity":
+        base = _amm_field(input_data.get("base_token_amount"), "base_token_amount")
+        quote = _amm_field(input_data.get("quote_token_amount"), "quote_token_amount")
+    elif action == "create_pool":
+        base = _amm_field(input_data.get("base_token_amount"), "base_token_amount")
+        # Optional on create_pool: omitting it seeds from the market price.
+        quote = _amm_field(
+            input_data.get("quote_token_amount"), "quote_token_amount", default=0.0
+        )
+    else:
+        raise ValueError(f"unsupported AMM action: {action or 'unknown'}")
+
+    amount = quote
+    if base:
+        amount += base * await _amm_base_price(input_data, client)
+
+    if not math.isfinite(amount) or amount <= 0:
+        raise ValueError("AMM quote notional must be a positive finite number")
     return amount

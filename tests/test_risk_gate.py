@@ -455,3 +455,271 @@ def test_missing_controller_id_still_cancelled_without_an_agent_id():
         asyncio.run(callback(_tagged_call("anything"), _OPTIONS))["outcome"]["outcome"]
         == "selected"
     )
+
+
+# ---------------------------------------------------------------------------
+# loop mode: manage_amm signs straight from the Gateway wallet, so the position
+# limit has to reach it too (SEC-224). Both failure modes are covered: a
+# signature over the limit must be refused, and a legitimate one under the
+# limit must still go through.
+# ---------------------------------------------------------------------------
+
+
+class _AmmClient:
+    """A price client whose AMM pool quotes ``price`` per base token."""
+
+    def __init__(self, pool_price=None, market_price=None):
+        self.gateway_amm = _GatewayAmm(pool_price)
+        self.market_data = _MarketData(market_price)
+
+
+class _GatewayAmm:
+    def __init__(self, price):
+        self.price = price
+        self.calls = 0
+
+    async def get_pool_info(self, connector, network, pool_address):
+        self.calls += 1
+        return {"price": self.price} if self.price is not None else {}
+
+
+def _amm_call(action: str, **extra) -> dict:
+    return {
+        "tool": "mcp__mcp-hummingbot__manage_amm",
+        "input": {
+            "action": action,
+            "connector": "meteora",
+            "network": "solana-mainnet-beta",
+            **extra,
+        },
+    }
+
+
+def _swap_call(amount: str, pool: str = "PooL1111") -> dict:
+    return _amm_call(
+        "execute_swap",
+        pool_address=pool,
+        base_token="SOL",
+        side="BUY",
+        amount=amount,
+    )
+
+
+def _amm_callback(limit: float = 500.0, client=None, state=None, mode="loop"):
+    state = state if state is not None else RiskState()
+    callback = auto_approve_with_risk_check(
+        RiskEngine(RiskLimits(max_position_size_quote=limit)),
+        state,
+        execution_mode=mode,
+        price_client=client,
+    )
+    return callback, state
+
+
+def test_loop_mode_blocks_swap_over_the_position_limit():
+    callback, state = _amm_callback(limit=100.0, client=_AmmClient(pool_price=200.0))
+
+    result = asyncio.run(callback(_swap_call("1"), _OPTIONS))
+
+    assert result["outcome"]["outcome"] == "cancelled"
+    assert state.total_exposure == 0
+
+
+def test_loop_mode_refusal_reason_names_the_position_limit():
+    engine = RiskEngine(RiskLimits(max_position_size_quote=100.0))
+    allowed, reason = engine.check_amm_action(_swap_call("1"), RiskState(), 200.0)
+
+    assert not allowed
+    assert "100.00" in reason and "200.00" in reason
+
+
+def test_loop_mode_allows_swap_under_the_position_limit():
+    """The too-tight failure mode: a legitimate swap must still go through."""
+    callback, state = _amm_callback(limit=500.0, client=_AmmClient(pool_price=200.0))
+
+    result = asyncio.run(callback(_swap_call("1"), _OPTIONS))
+
+    assert result["outcome"]["outcome"] == "selected"
+    assert state.total_exposure == pytest.approx(200.0)
+
+
+@pytest.mark.parametrize(
+    "action", ["quote_swap", "pool_info", "position_info", "positions_owned"]
+)
+def test_loop_mode_leaves_amm_reads_unchecked(action):
+    """Reads are not signatures: they must not be priced or risk-checked.
+
+    ``price_client=None`` makes any pricing attempt fail closed, so a
+    ``selected`` outcome proves the gate never ran.
+    """
+    callback, state = _amm_callback(limit=1.0, client=None)
+
+    result = asyncio.run(callback(_amm_call(action, pool_address="PooL1111"), _OPTIONS))
+
+    assert result["outcome"]["outcome"] == "selected"
+    assert state.total_exposure == 0
+
+
+def test_loop_mode_blocks_swap_that_cannot_be_priced():
+    callback, state = _amm_callback(limit=500.0, client=_AmmClient(pool_price=None))
+
+    result = asyncio.run(callback(_swap_call("1"), _OPTIONS))
+
+    assert result["outcome"]["outcome"] == "cancelled"
+    assert state.total_exposure == 0
+
+
+def test_loop_mode_blocks_swap_with_an_unreadable_amount():
+    callback, state = _amm_callback(limit=500.0, client=_AmmClient(pool_price=200.0))
+
+    result = asyncio.run(callback(_swap_call("a lot"), _OPTIONS))
+
+    assert result["outcome"]["outcome"] == "cancelled"
+    assert state.total_exposure == 0
+
+
+def test_loop_mode_two_swaps_gated_against_the_accumulated_exposure():
+    client = _AmmClient(pool_price=200.0)
+    callback, state = _amm_callback(limit=300.0, client=client)
+
+    async def _drive():
+        return (
+            await callback(_swap_call("1"), _OPTIONS),
+            await callback(_swap_call("1"), _OPTIONS),
+        )
+
+    first, second = asyncio.run(_drive())
+
+    assert first["outcome"]["outcome"] == "selected"
+    assert second["outcome"]["outcome"] == "cancelled"
+    assert state.total_exposure == pytest.approx(200.0)
+
+
+def test_loop_mode_allows_remove_liquidity_under_a_breached_limit():
+    """Withdrawing is risk-reducing, like a bot stop: never block an exit."""
+    callback, state = _amm_callback(
+        limit=100.0, client=None, state=RiskState(total_exposure=5_000.0)
+    )
+
+    result = asyncio.run(
+        callback(
+            _amm_call(
+                "remove_liquidity",
+                pool_address="PooL1111",
+                position_address="Pos11111",
+                percentage_to_remove="100",
+            ),
+            _OPTIONS,
+        )
+    )
+
+    assert result["outcome"]["outcome"] == "selected"
+    assert state.total_exposure == pytest.approx(5_000.0)
+
+
+def test_loop_mode_prices_add_liquidity_on_both_legs():
+    client = _AmmClient(pool_price=200.0)
+    callback, state = _amm_callback(limit=500.0, client=client)
+
+    result = asyncio.run(
+        callback(
+            _amm_call(
+                "add_liquidity",
+                pool_address="PooL1111",
+                base_token_amount="1",
+                quote_token_amount="150",
+            ),
+            _OPTIONS,
+        )
+    )
+
+    assert result["outcome"]["outcome"] == "selected"
+    assert state.total_exposure == pytest.approx(350.0)
+
+
+def test_loop_mode_blocks_add_liquidity_over_the_position_limit():
+    callback, state = _amm_callback(limit=300.0, client=_AmmClient(pool_price=200.0))
+
+    result = asyncio.run(
+        callback(
+            _amm_call(
+                "add_liquidity",
+                pool_address="PooL1111",
+                base_token_amount="1",
+                quote_token_amount="150",
+            ),
+            _OPTIONS,
+        )
+    )
+
+    assert result["outcome"]["outcome"] == "cancelled"
+    assert state.total_exposure == 0
+
+
+def test_loop_mode_prices_create_pool_from_its_declared_initial_price():
+    """No pool exists yet, so the seed price comes from the payload."""
+    client = _AmmClient(pool_price=None)
+    callback, state = _amm_callback(limit=500.0, client=client)
+
+    result = asyncio.run(
+        callback(
+            _amm_call(
+                "create_pool",
+                base_token="SOL",
+                quote_token="USDC",
+                base_token_amount="1",
+                initial_price="200",
+            ),
+            _OPTIONS,
+        )
+    )
+
+    assert result["outcome"]["outcome"] == "selected"
+    assert state.total_exposure == pytest.approx(200.0)
+    assert client.gateway_amm.calls == 0
+
+
+def test_loop_mode_prices_market_seeded_create_pool_from_the_pair():
+    """Only base_token_amount given: fall back to the market price of the pair."""
+    client = _AmmClient(pool_price=None, market_price=200.0)
+    callback, state = _amm_callback(limit=500.0, client=client)
+
+    result = asyncio.run(
+        callback(
+            _amm_call(
+                "create_pool",
+                base_token="SOL",
+                quote_token="USDC",
+                base_token_amount="1",
+            ),
+            _OPTIONS,
+        )
+    )
+
+    assert result["outcome"]["outcome"] == "selected"
+    assert state.total_exposure == pytest.approx(200.0)
+
+
+def test_dry_run_still_blocks_amm_signatures_and_allows_reads():
+    """The dry-run branch predates this gate and must keep working unchanged."""
+    callback, _ = _amm_callback(
+        limit=500.0, client=_AmmClient(pool_price=200.0), mode="dry_run"
+    )
+
+    blocked = asyncio.run(callback(_swap_call("1"), _OPTIONS))
+    read = asyncio.run(callback(_amm_call("pool_info", pool_address="P"), _OPTIONS))
+
+    assert blocked["outcome"]["outcome"] == "cancelled"
+    assert read["outcome"]["outcome"] == "selected"
+
+
+def test_amm_guide_load_is_not_risk_checked():
+    """action=None is the guide load; it signs nothing and must stay free."""
+    callback, state = _amm_callback(limit=1.0, client=None)
+
+    result = asyncio.run(
+        callback({"tool": "mcp__mcp-hummingbot__manage_amm", "input": {}}, _OPTIONS)
+    )
+
+    assert result["outcome"]["outcome"] == "selected"
+    assert state.total_exposure == 0
