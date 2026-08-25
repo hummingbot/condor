@@ -688,6 +688,17 @@ async def startup(application: Application) -> None:
     except Exception:
         logger.exception("Telemetry init failed (continuing without it)")
 
+    # Conversation sharing (FEAT-054). Only the delivery job is registered here,
+    # and it is deliberately not part of the block above: nothing is ever
+    # queued without a user pressing Share, so on an install where nobody has,
+    # this job finds an empty queue and returns without touching the network.
+    try:
+        from condor.sharing import share as sharing
+
+        sharing.register_jobs(application)
+    except Exception:
+        logger.exception("Sharing job registration failed (continuing without it)")
+
     # Start file watcher
     asyncio.create_task(watch_and_reload(application))
 
