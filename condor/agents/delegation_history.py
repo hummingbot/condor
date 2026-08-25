@@ -33,12 +33,20 @@ Four shapes of record exist on disk, and all four are readable here:
 The last two belong to nobody -- no ``user_id`` was ever written -- so there is
 no user directory to file them under and the migration leaves them where they
 are. They stay readable through the unscoped path, which is admin-only.
+
+Only those last two ever cost a transcript read (PERF-204). A current
+``status.json`` *is* the whole record, and ``transcript.md`` beside it embeds
+every tool call's input and output -- so the listing route, which the dashboard
+re-polls every five seconds and which drops the bodies anyway, opens nothing but
+small JSON. What the older shapes still need is parsed at most once per version
+of the file, and a listing only ever builds the page it returns.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -67,6 +75,14 @@ def _safe(value: int | str) -> str | None:
         return paths.safe_id(value)
     except paths.UnsafeIdError:
         return None
+
+
+def _mtime(path: Path) -> float:
+    """A file's mtime, or 0.0 when it cannot be stat'd. Never raises."""
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
 
 
 def _owners(user_id: int | str | None) -> list[str]:
@@ -125,8 +141,12 @@ def _section(text: str, heading: str) -> str:
     return (body if nxt < 0 else body[:nxt]).strip()
 
 
-def _from_markdown(md_path: Path, agent_slug: str, task_id: str) -> dict[str, Any]:
-    """A record rebuilt from the transcript alone."""
+def _read_markdown(md_path: Path) -> dict[str, Any]:
+    """The fields one transcript carries, independent of who is asking.
+
+    Everything here comes from the file itself, so two callers asking about the
+    same path get the same answer -- which is what makes the parse cacheable.
+    """
     try:
         text = md_path.read_text(encoding="utf-8")
     except OSError:
@@ -143,21 +163,21 @@ def _from_markdown(md_path: Path, agent_slug: str, task_id: str) -> dict[str, An
     # The transcript is written when the task ends, so its mtime is the only
     # timestamp these records have. Reported as the start, since that is what
     # orders the list -- and it is closer to the truth than zero.
-    try:
-        mtime = md_path.stat().st_mtime
-    except OSError:
-        mtime = 0.0
+    mtime = _mtime(md_path)
 
     body = _section(text, "Error" if is_error else "Result")
     if body == "(none)":
         body = ""
 
+    # "-" is the placeholder ``_persist_transcript`` renders for "no server",
+    # not a server name: reading it back as one would put a dash on the wire.
+    server = _header_value(text, "Server")
+
     return {
-        "task_id": task_id,
-        "agent": _header_value(text, "Agent") or agent_slug,
+        "agent": _header_value(text, "Agent"),
         "user_id": 0,
         "chat_id": 0,
-        "server_name": _header_value(text, "Server") or None,
+        "server_name": None if server in ("", "-") else server,
         "task": _section(text, "Task"),
         "status": status,
         "result": "" if is_error else body,
@@ -170,22 +190,103 @@ def _from_markdown(md_path: Path, agent_slug: str, task_id: str) -> dict[str, An
     }
 
 
+# Memoized on ``(mtime, size)``, the idiom ``sessions_index`` already uses for
+# snapshots. A transcript embeds every tool call's input and output, so one file
+# runs to hundreds of KB, and the dashboard re-lists while a task is running --
+# parsing an unchanged file once per process is the whole point. A file that is
+# rewritten gets a new mtime or size and re-parses, so a delegation that changes
+# is never served from a stale parse.
+_MD_CACHE: dict[Path, tuple[float, int, dict[str, Any]]] = {}
+
+# Only the two unowned legacy shapes still reach the parser, and nothing writes
+# those any more, so this cannot grow with usage. The cap is for the
+# pathological directory, not for a hot path; dropping it whole is fine because
+# every entry is rebuildable from the file it names.
+_MD_CACHE_MAX = 512
+
+
+def _parse_markdown(md_path: Path) -> dict[str, Any]:
+    """:func:`_read_markdown`, parsed at most once per version of the file."""
+    try:
+        stat = md_path.stat()
+        key: tuple[float, int] | None = (stat.st_mtime, stat.st_size)
+    except OSError:
+        key = None
+
+    cached = _MD_CACHE.get(md_path)
+    if key is not None and cached is not None and cached[:2] == key:
+        return cached[2]
+
+    parsed = _read_markdown(md_path)
+    if key is not None:
+        if len(_MD_CACHE) >= _MD_CACHE_MAX:
+            _MD_CACHE.clear()
+        _MD_CACHE[md_path] = (key[0], key[1], parsed)
+    return parsed
+
+
+def _from_markdown(md_path: Path, agent_slug: str, task_id: str) -> dict[str, Any]:
+    """A record rebuilt from the transcript alone."""
+    parsed = _parse_markdown(md_path)
+    return {
+        "task_id": task_id,
+        "agent": parsed["agent"] or agent_slug,
+        **{k: v for k, v in parsed.items() if k != "agent"},
+    }
+
+
 # ── status.json ────────────────────────────────────────────────────────────
 
 
+# What ``delegate._record_delegation_status`` writes. Their *presence* is what
+# says "this status file is the whole record" and no backfill is owed. Presence,
+# not truthiness: a running record's ``result`` is legitimately "" and an errored
+# one's is too, so an emptiness test would re-read the transcript on exactly the
+# rows the dashboard polls every five seconds.
+_CONTENT_KEYS = frozenset({"state", "task", "result", "error", "tool_count"})
+
+
+def _needs_markdown(data: dict[str, Any]) -> bool:
+    """Whether this status file is missing content only the transcript has."""
+    return not _CONTENT_KEYS <= data.keys()
+
+
+def _status_sort_key(data: dict[str, Any], md_path: Path) -> float:
+    """The ``started_at`` :func:`_from_status` will report, without parsing.
+
+    Mirrors that function's fallback chain exactly -- transcript mtime included,
+    since that is the only timestamp a status file missing ``started_at`` has. A
+    ``stat()`` answers it; the file is not opened.
+    """
+    return data.get("started_at") or _mtime(md_path) or data.get("updated_at") or 0.0
+
+
 def _from_status(
-    status_path: Path, agent_slug: str, task_id: str, md_path: Path
+    status_path: Path,
+    agent_slug: str,
+    task_id: str,
+    md_path: Path,
+    data: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """A record rebuilt from its status file, backfilled from the markdown.
 
     Backfill is what makes a *pre*-FEAT-035 status file useful: it recorded the
     state and the provenance but not the task or the result, and the markdown
-    beside it has both.
+    beside it has both. A current status file carries all of it, so the
+    transcript -- the big file -- is not opened at all; see :data:`_CONTENT_KEYS`.
+
+    ``data`` lets a caller that has already read the status file hand it over
+    rather than paying for a second read.
     """
     from condor.runtime.registry_file import is_stale, read_status
 
-    data = read_status(status_path.parent, status_path.name) or {}
-    md = _from_markdown(md_path, agent_slug, task_id) if md_path.is_file() else {}
+    if data is None:
+        data = read_status(status_path.parent, status_path.name) or {}
+    md = (
+        _from_markdown(md_path, agent_slug, task_id)
+        if _needs_markdown(data) and md_path.is_file()
+        else {}
+    )
 
     # A `running` record stamped by a boot that is not ours belongs to a process
     # that died without recording an end -- FEAT-012's distinction, and the only
@@ -200,6 +301,15 @@ def _from_status(
             value = md.get(key, fallback)
         return fallback if value in (None, "") else value
 
+    stamp: float | None = None
+
+    def transcript_mtime() -> float:
+        """The transcript's mtime, stat'd at most once and only if needed."""
+        nonlocal stamp
+        if stamp is None:
+            stamp = _mtime(md_path)
+        return stamp
+
     return {
         "task_id": task_id,
         "agent": data.get("agent_slug") or md.get("agent") or agent_slug,
@@ -212,11 +322,15 @@ def _from_status(
         "error": pick("error"),
         "conversation_id": data.get("conversation_id") or "",
         "on_complete": data.get("on_complete") or "",
+        # The transcript's mtime stands in for a timestamp the status file does
+        # not carry -- a status write that never landed, on either end. It is a
+        # ``stat()``, not a parse, so it costs the same whether the transcript
+        # was read or skipped, and the answer is the one the old backfill gave.
         "started_at": data.get("started_at")
-        or md.get("started_at")
+        or transcript_mtime()
         or data.get("updated_at")
         or 0.0,
-        "ended_at": data.get("ended_at") or md.get("ended_at") or 0.0,
+        "ended_at": data.get("ended_at") or transcript_mtime() or 0.0,
         "tool_count": data.get("tool_count") or md.get("tool_count") or 0,
     }
 
@@ -236,8 +350,41 @@ def _from_dir(record_dir: Path) -> dict[str, Any] | None:
     return None
 
 
-def _records_of(user_id: int | str):
-    """Every delegation this user has on disk."""
+# ── listing: sort first, hydrate the survivors ──────────────────────────────
+# A listing walks every delegation an owner ever ran -- nothing prunes those
+# directories -- but returns at most ``limit`` of them. So the walk yields
+# *handles*: the sort key, the id (for de-duplication), and a thunk that builds
+# the record. Only the rows that survive the sort are ever built.
+
+Entry = tuple[float, str, Callable[[], dict[str, Any] | None]]
+
+
+def _entry_from_dir(record_dir: Path) -> Entry | None:
+    """A sortable handle on one ``{task_id}/`` directory, hydrated on demand.
+
+    The status file is read here rather than in the thunk: it is small, and the
+    sort key is in it. It is handed to the thunk so the row that does get built
+    does not read it twice.
+    """
+    from condor.runtime.registry_file import read_status
+
+    task_id = record_dir.name
+    status_path = record_dir / DELEGATION_STATUS_FILENAME
+    md_path = record_dir / DELEGATION_TRANSCRIPT_FILENAME
+    if status_path.is_file():
+        data = read_status(record_dir, DELEGATION_STATUS_FILENAME) or {}
+        return (
+            _status_sort_key(data, md_path),
+            task_id,
+            lambda: _from_status(status_path, "", task_id, md_path, data),
+        )
+    if md_path.is_file():
+        return _mtime(md_path), task_id, lambda: _from_markdown(md_path, "", task_id)
+    return None
+
+
+def _entries_of(user_id: int | str) -> Iterator[Entry]:
+    """Every delegation this user has on disk, unhydrated."""
     try:
         children = sorted(paths.delegations_dir(user_id).iterdir())
     except (OSError, paths.UnsafeIdError):
@@ -245,24 +392,41 @@ def _records_of(user_id: int | str):
     for child in children:
         if not child.is_dir():
             continue
-        record = _from_dir(child)
-        if record is not None:
-            yield record
+        entry = _entry_from_dir(child)
+        if entry is not None:
+            yield entry
 
 
-def _legacy_records_in(agent_slug: str, directory: Path):
-    """Every delegation in one pre-FEAT-051 directory, status files first."""
+def _legacy_entries_in(agent_slug: str, directory: Path) -> Iterator[Entry]:
+    """Every delegation in one pre-FEAT-051 directory, status files first.
+
+    The lone-``.md`` records are the ones this buys the most: their sort key is
+    the file's mtime, so ordering them costs a ``stat()`` and the transcript is
+    opened only for the handful that make the page.
+    """
+    from condor.runtime.registry_file import read_status
+
     seen: set[str] = set()
     for status_path in sorted(directory.glob(f"*{STATUS_SUFFIX}")):
         task_id = status_path.name[: -len(STATUS_SUFFIX)]
         seen.add(task_id)
-        yield _from_status(
-            status_path, agent_slug, task_id, directory / f"{task_id}.md"
+        md_path = directory / f"{task_id}.md"
+        data = read_status(directory, status_path.name) or {}
+        yield (
+            _status_sort_key(data, md_path),
+            task_id,
+            lambda sp=status_path, tid=task_id, mp=md_path, d=data: _from_status(
+                sp, agent_slug, tid, mp, d
+            ),
         )
     for md_path in sorted(directory.glob("*.md")):
         task_id = md_path.name[: -len(".md")]
         if task_id not in seen:
-            yield _from_markdown(md_path, agent_slug, task_id)
+            yield (
+                _mtime(md_path),
+                task_id,
+                lambda mp=md_path, tid=task_id: _from_markdown(mp, agent_slug, tid),
+            )
 
 
 # ── the read API ───────────────────────────────────────────────────────────
@@ -283,31 +447,42 @@ def list_history(
 
     Reads only what is on disk -- the caller merges in the live registry, which
     is the authority for anything still running in this process.
+
+    Ordering happens before hydration: every delegation on disk is *ordered*,
+    only ``limit`` of them are *built*. Nothing prunes these directories, so the
+    walk grows for the life of the install while the page stays the same size.
     """
-    records: list[dict[str, Any]] = []
+    entries: list[Entry] = []
     for owner in _owners(user_id):
         try:
-            records.extend(_records_of(owner))
+            entries.extend(_entries_of(owner))
         except OSError:
             log.debug("Could not list delegations for user %s", owner, exc_info=True)
 
     if user_id is None:
-        seen = {r["task_id"] for r in records}
+        seen = {task_id for _key, task_id, _load in entries}
         for slug, directory in _legacy_dirs(agent_slug):
             try:
-                records.extend(
-                    r
-                    for r in _legacy_records_in(slug, directory)
-                    if r["task_id"] not in seen
+                entries.extend(
+                    e for e in _legacy_entries_in(slug, directory) if e[1] not in seen
                 )
             except OSError:
                 log.debug("Could not list delegations in %s", directory, exc_info=True)
 
-    if agent_slug:
-        records = [r for r in records if r.get("agent") == agent_slug]
+    entries.sort(key=lambda e: e[0], reverse=True)
 
-    records.sort(key=lambda r: r.get("started_at") or 0.0, reverse=True)
-    return records[: max(0, limit)]
+    records: list[dict[str, Any]] = []
+    cap = max(0, limit)
+    for _key, _task_id, load in entries:
+        if len(records) >= cap:
+            break
+        record = load()
+        if record is None:
+            continue
+        if agent_slug and record.get("agent") != agent_slug:
+            continue
+        records.append(record)
+    return records
 
 
 def read_history(user_id: int | str | None, task_id: str) -> dict[str, Any] | None:
