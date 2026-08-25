@@ -20,8 +20,8 @@ import { SessionServerChip } from "./SessionServerChip";
  * It lives here for the same reason `ChatThread` and `SessionServerChip` do:
  * it is the identity of the chat, not of the surface showing it, so the bound
  * identity and the "not while a turn is in flight" rule stay one rule. The
- * overlay panel that used to be its other consumer is gone; the `/agents`
- * workspace is now the only one, and it owns the chrome around it — the rail
+ * overlay panel that used to be its other consumer is gone; the chat workspace
+ * at `/` is now the only one, and it owns the chrome around it — the rail
  * toggle, the session tabs and the Manage link.
  */
 export function ChatSessionIdentity({

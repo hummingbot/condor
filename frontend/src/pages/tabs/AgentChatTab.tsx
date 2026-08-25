@@ -42,13 +42,13 @@ const AGENT_STARTERS = ["What are you working on?", "Review your last session"];
 type TalkIntent = "focus" | "fresh";
 
 /**
- * The chat workspace — what `/agents` opens on.
+ * The chat workspace — what `/` opens on.
  *
  * A rail of who you can talk to and what you already said, a conversation
  * beside it, and a dock of the work it set in motion. Since the fleet grid was
- * removed this is the whole of `/agents`: the rail is how you switch who you
- * are talking to and start another conversation, which is the gesture the old
- * header selector could not do.
+ * removed this is the whole of the workspace: the rail is how you switch who
+ * you are talking to and start another conversation, which is the gesture the
+ * old header selector could not do.
  */
 export function AgentChatTab() {
   const chat = useChat();

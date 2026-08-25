@@ -47,7 +47,7 @@ function relativeTime(iso: string): string {
 
 /**
  * Every conversation the user has ever held, on the one surface that shows
- * them: the rail of the `/agents` workspace.
+ * them: the rail of the chat workspace at `/`.
  *
  * It renders in flow inside that rail — grouped by day, with rename, delete,
  * the live dot and the Telegram badge. Everything is keyed on conversation id,
@@ -70,7 +70,7 @@ export const ConversationList = memo(function ConversationList({
   const [draftTitle, setDraftTitle] = useState("");
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
 
-  // The rail mounts with the `/agents` workspace, so "always" is one fetch per
+  // The rail mounts with the chat workspace, so "always" is one fetch per
   // arrival at the workspace — and a chat started seconds ago is at the top
   // where the user expects it.
   const { data: conversations = [], isLoading } = useQuery({

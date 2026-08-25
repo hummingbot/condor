@@ -24,7 +24,7 @@ export function resolveAgentLabel(agentKey: string, agents: ChatAgentOption[]): 
 /**
  * The conversation itself, at any width.
  *
- * The `/agents` workspace renders this at whatever width the rail leaves it,
+ * The chat workspace at `/` renders this at whatever width the rail leaves it,
  * so a tool call, a thought block or a handover divider looks the same on a
  * phone as on a wide screen. Everything around it — who is answering, which
  * conversations exist — is the workspace's business; this is only the
