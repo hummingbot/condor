@@ -45,8 +45,13 @@ let installed = false;
  * block before submitting, but review is not a control you rely on for
  * credentials — the obvious shapes get masked first, and the review catches
  * what is left.
+ *
+ * Exported because masking belongs to *leaving the app*, not to this module:
+ * `buildIssueUrl` runs it over every field it puts in a github.com URL. The
+ * substitutions are idempotent — none of them matches its own output — so a
+ * block masked here and masked again on the way out is unchanged.
  */
-function redact(text: string): string {
+export function redact(text: string): string {
   return text
     .replace(/(bearer\s+)[\w.\-+/=]{8,}/gi, "$1***")
     .replace(/((?:api[_-]?key|secret|token|password|passphrase)["'\s:=]+)[^\s"',}]{6,}/gi, "$1***")
