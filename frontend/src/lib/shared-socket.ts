@@ -76,6 +76,34 @@ function mergeSnapshots(
 }
 
 /**
+ * Merge snapshots into every cached performance-history query under `prefix`.
+ *
+ * The readers of these caches append a time bound to the key
+ * (`["controller-perf-history-all", server, earliestDeploy]`,
+ * `["controller-perf-history", server, controllerId, deployedAt]`) that is
+ * derived from data this module never sees. `setQueryData` matches by exact key
+ * hash, so the socket has to discover the live keys rather than reconstruct
+ * them. Entries that don't exist yet are left alone — the query's own fetch
+ * seeds them, and merging into a missing entry would produce a history with no
+ * beginning.
+ */
+function mergeIntoMatchingQueries(
+  prefix: unknown[],
+  snapshots: ControllerPerformanceSnapshot[],
+): void {
+  for (const entry of queryClient.getQueryCache().findAll({ queryKey: prefix })) {
+    queryClient.setQueryData(
+      entry.queryKey,
+      (old: ControllerPerformanceHistoryResponse | undefined) => {
+        if (!old) return old;
+        // Append new snapshots and deduplicate by controller_id+timestamp
+        return { ...old, snapshots: mergeSnapshots(old.snapshots ?? [], snapshots) };
+      },
+    );
+  }
+}
+
+/**
  * The single message handler for the shared socket.
  *
  * Registered once per connection at module scope, so it cannot close over any
@@ -84,8 +112,10 @@ function mergeSnapshots(
  * segment (`portfolio:<server>`, `orderbook:<server>:<connector>:<pair>`, …),
  * which is what the backend authorizes against, so that is the authoritative
  * source for the cache key too.
+ *
+ * Exported for tests; the socket wires it up itself in `openSocket`.
  */
-function handleMessage(channel: string, data: unknown): void {
+export function handleMessage(channel: string, data: unknown): void {
   const parts = channel.split(":");
   const prefix = parts[0];
   const server = parts[1];
@@ -187,20 +217,17 @@ function handleMessage(channel: string, data: unknown): void {
       );
     }
   } else if (prefix === "controller_perf") {
-    // Update the "all controllers" sparkline cache
     const incoming = data as { snapshots?: ControllerPerformanceSnapshot[] };
     if (incoming?.snapshots) {
-      queryClient.setQueryData(
-        ["controller-perf-history-all", server],
-        (old: ControllerPerformanceHistoryResponse | undefined) => {
-          if (!old) return old;
-          // Append new snapshots and deduplicate by controller_id+timestamp
-          const merged = mergeSnapshots(old.snapshots ?? [], incoming.snapshots!);
-          return { ...old, snapshots: merged };
-        },
-      );
+      // Both readers key on a time bound the socket cannot know — the fleet
+      // query adds `earliestDeploy` (ActiveBotsTab) and the per-controller one
+      // adds `deployedAt` (ControllerPnlChart). `setQueryData` matches the key
+      // hash exactly, so writing the short prefix here landed on an entry that
+      // never exists and every frame was silently dropped. Resolve the live
+      // keys from the cache instead, the way the `executors` branch above does.
+      mergeIntoMatchingQueries(["controller-perf-history-all", server], incoming.snapshots);
 
-      // Also update per-controller history caches
+      // Same, per controller.
       const byController = new Map<string, ControllerPerformanceSnapshot[]>();
       for (const snap of incoming.snapshots) {
         const cid = snap.controller_id || snap.controller_name;
@@ -210,14 +237,7 @@ function handleMessage(channel: string, data: unknown): void {
         byController.set(cid, arr);
       }
       for (const [cid, snaps] of byController) {
-        queryClient.setQueryData(
-          ["controller-perf-history", server, cid],
-          (old: ControllerPerformanceHistoryResponse | undefined) => {
-            if (!old) return old;
-            const merged = mergeSnapshots(old.snapshots ?? [], snaps);
-            return { ...old, snapshots: merged };
-          },
-        );
+        mergeIntoMatchingQueries(["controller-perf-history", server, cid], snaps);
       }
     }
   } else if (prefix === "orderbook") {

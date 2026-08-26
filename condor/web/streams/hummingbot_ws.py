@@ -58,6 +58,24 @@ class HummingbotStreamsMixin:
         return build_bots_page(raw_data)
 
     @staticmethod
+    def _transform_controller_perf(raw_data: Any) -> list[dict]:
+        """Transform raw controller performance into ControllerPerformanceSnapshot dicts.
+
+        The frontend merges these frames into the same react-query cache the
+        REST history endpoint fills, so they have to be the same shape: the
+        upstream payload nests the numbers under ``performance``, and a frame
+        broadcast unflattened would append points whose PnL and volume all read
+        as ``undefined``.
+        """
+        from condor.fetchers.bot_performance import extract_snapshots
+        from condor.web.models import ControllerPerformanceSnapshot
+
+        return [
+            ControllerPerformanceSnapshot.from_raw(s).model_dump()
+            for s in extract_snapshots(raw_data)
+        ]
+
+    @staticmethod
     def _overlay_stopping_state(server_name: str, data: dict) -> None:
         """Apply transitional 'stopping' state to WS broadcast data."""
         from condor.web.routes.bots import overlay_stopping_state
@@ -564,21 +582,7 @@ class HummingbotStreamsMixin:
                     await client.bot_orchestration.get_latest_controller_performance()
                 )
 
-                # Normalize to list of snapshots
-                snapshots = []
-                if isinstance(result, list):
-                    snapshots = result
-                elif isinstance(result, dict):
-                    data = result.get(
-                        "data", result.get("snapshots", result.get("records", []))
-                    )
-                    if isinstance(data, list):
-                        snapshots = data
-                    elif isinstance(data, dict):
-                        for key, val in data.items():
-                            if isinstance(val, dict):
-                                val.setdefault("controller_id", key)
-                                snapshots.append(val)
+                snapshots = self._transform_controller_perf(result)
 
                 if snapshots:
                     await self._broadcast_update(channel, {"snapshots": snapshots})

@@ -170,6 +170,38 @@ class ControllerPerformanceSnapshot(BaseModel):
     positions_summary: list[dict[str, Any]] = []
     custom_info: dict[str, Any] = {}
 
+    @classmethod
+    def from_raw(cls, raw: dict) -> "ControllerPerformanceSnapshot":
+        """Build the wire model from one raw controller-performance dict.
+
+        The upstream payload nests the numbers under ``performance`` while the
+        identity fields stay at the top level. Both the REST routes and the
+        ``controller_perf`` WS stream parse through here, so a snapshot means
+        the same thing however it reached the dashboard -- the frontend merges
+        the two into one cache entry and would otherwise read a socket frame's
+        PnL as zero.
+        """
+        perf = raw.get("performance", raw)
+        if not isinstance(perf, dict):
+            perf = {}
+
+        return cls(
+            timestamp=str(raw.get("timestamp", "")),
+            bot_name=raw.get("bot_name", ""),
+            controller_id=raw.get("controller_id", ""),
+            controller_name=raw.get("controller_name", ""),
+            connector=raw.get("connector", raw.get("connector_name", "")),
+            trading_pair=raw.get("trading_pair", ""),
+            realized_pnl_quote=float(perf.get("realized_pnl_quote", 0) or 0),
+            unrealized_pnl_quote=float(perf.get("unrealized_pnl_quote", 0) or 0),
+            global_pnl_quote=float(perf.get("global_pnl_quote", 0) or 0),
+            global_pnl_pct=float(perf.get("global_pnl_pct", 0) or 0),
+            volume_traded=float(perf.get("volume_traded", 0) or 0),
+            close_type_counts=perf.get("close_type_counts", {}),
+            positions_summary=perf.get("positions_summary", []),
+            custom_info=perf.get("custom_info", raw.get("custom_info", {})),
+        )
+
 
 class ControllerPerformanceLatestResponse(BaseModel):
     snapshots: list[ControllerPerformanceSnapshot] = []

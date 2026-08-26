@@ -27,30 +27,6 @@ router = APIRouter(tags=["controller-performance"])
 # ── Helpers ──
 
 
-def _parse_snapshot(raw: dict) -> ControllerPerformanceSnapshot:
-    """Normalize a raw performance snapshot dict into our model."""
-    perf = raw.get("performance", raw)
-    if not isinstance(perf, dict):
-        perf = {}
-
-    return ControllerPerformanceSnapshot(
-        timestamp=str(raw.get("timestamp", "")),
-        bot_name=raw.get("bot_name", ""),
-        controller_id=raw.get("controller_id", ""),
-        controller_name=raw.get("controller_name", ""),
-        connector=raw.get("connector", raw.get("connector_name", "")),
-        trading_pair=raw.get("trading_pair", ""),
-        realized_pnl_quote=float(perf.get("realized_pnl_quote", 0) or 0),
-        unrealized_pnl_quote=float(perf.get("unrealized_pnl_quote", 0) or 0),
-        global_pnl_quote=float(perf.get("global_pnl_quote", 0) or 0),
-        global_pnl_pct=float(perf.get("global_pnl_pct", 0) or 0),
-        volume_traded=float(perf.get("volume_traded", 0) or 0),
-        close_type_counts=perf.get("close_type_counts", {}),
-        positions_summary=perf.get("positions_summary", []),
-        custom_info=perf.get("custom_info", raw.get("custom_info", {})),
-    )
-
-
 def _parse_bot_run(raw: dict, perf_by_bot: dict[str, dict] | None = None) -> BotRunInfo:
     """Normalize a raw bot run dict into our model."""
     bot_name = raw.get("bot_name", "")
@@ -217,7 +193,7 @@ async def get_latest_controller_performance(
     snapshots = _extract_snapshots(result)
 
     return ControllerPerformanceLatestResponse(
-        snapshots=[_parse_snapshot(s) for s in snapshots],
+        snapshots=[ControllerPerformanceSnapshot.from_raw(s) for s in snapshots],
     )
 
 
@@ -269,7 +245,7 @@ async def get_controller_performance_history(
         next_cursor = result.get("next_cursor") or result.get("cursor")
 
     return ControllerPerformanceHistoryResponse(
-        snapshots=[_parse_snapshot(s) for s in snapshots],
+        snapshots=[ControllerPerformanceSnapshot.from_raw(s) for s in snapshots],
         next_cursor=next_cursor,
         interval=interval,
     )
