@@ -17,6 +17,7 @@ from telegram.ext import ContextTypes
 
 from condor.preferences import (
     DEFAULT_DEX_NETWORK,
+    get_active_server,
     get_all_enabled_networks,
     get_dex_connector,
     get_dex_swap_defaults,
@@ -1225,6 +1226,15 @@ async def handle_swap_execute_confirm(
 
         # Invalidate caches - including swap_quote so background fetch runs when going back
         invalidate_cache(context.user_data, "balances", "swaps")
+        # The swap moved real balances, so the shared cache is now wrong: drop
+        # the server-scoped portfolio entry the way an executed CEX order does
+        # (handlers/cex/trade.py). /portfolio and the dashboard both render from
+        # this key, so a stale entry would show pre-swap balances.
+        from condor.server_data_service import ServerDataType, get_server_data_service
+
+        swap_server = get_active_server(context.user_data)
+        if swap_server:
+            get_server_data_service().invalidate(swap_server, ServerDataType.PORTFOLIO)
         _invalidate_swap_quote(context.user_data)
         # Flag to force refresh on next balance fetch (swap changed balances)
         context.user_data["_force_balance_refresh"] = True

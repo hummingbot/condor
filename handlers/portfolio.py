@@ -235,6 +235,7 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     try:
+        from condor.server_data_service import ServerDataType, get_server_data_service
         from config_manager import get_config_manager
 
         # Only servers this user has access to are candidates
@@ -264,8 +265,19 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         # ========================================
         # FETCH BALANCES
         # ========================================
+        # Read the cache the dashboard already reads instead of forcing an
+        # exchange-wide re-fetch on every render. SDS polls PORTFOLIO every 10s
+        # with a 60s TTL for each configured server, so the initial view is at
+        # most one TTL old — in practice a few seconds — and usually free. That
+        # staleness window is deliberate and bounded: mutations invalidate the
+        # key (see handlers/cex/trade.py and handlers/dex/swap.py), and the
+        # Refresh button below still forces a real get_state(refresh=True).
+        # get_or_fetch falls back to a real fetch when the key is cold and
+        # returns None rather than raising when the server is unreachable.
         try:
-            balances = await client.portfolio.get_state(refresh=True)
+            balances = await get_server_data_service().get_or_fetch(
+                server_name, ServerDataType.PORTFOLIO
+            )
         except Exception as e:
             logger.error(f"Failed to fetch balances: {e}")
             balances = None
@@ -487,6 +499,7 @@ async def refresh_portfolio_dashboard(
         return
 
     try:
+        from condor.server_data_service import ServerDataType, get_server_data_service
         from config_manager import get_config_manager
 
         # Same access-checked resolution as the command
@@ -499,12 +512,27 @@ async def refresh_portfolio_dashboard(
         client = await get_config_manager().get_client(server_name)
         server_status = "online"
 
-        # Fetch balances only
+        # Fetch balances only. This is the explicit-refresh path (the button
+        # answers "Refreshing from exchanges..."), so it keeps re-querying every
+        # exchange rather than reading the cache.
         try:
             balances = await client.portfolio.get_state(refresh=refresh)
         except Exception as e:
             logger.error(f"Failed to fetch balances: {e}")
             balances = None
+
+        if balances is not None:
+            # Push the fresh payload into the shared cache, as the web route's
+            # refresh branch does. /portfolio now renders from SDS, so leaving
+            # the older polled value in place would make the next view regress
+            # to what the user just refreshed away from. Store the raw state:
+            # every surface applies its own filtering on top.
+            try:
+                get_server_data_service().put(
+                    server_name, ServerDataType.PORTFOLIO, balances
+                )
+            except Exception as e:
+                logger.warning(f"Failed to update portfolio cache: {e}")
 
         # Filter balances by enabled networks
         if balances:
