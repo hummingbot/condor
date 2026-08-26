@@ -5,7 +5,7 @@ import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { AppShell } from "@/components/layout/AppShell";
 import { ServerContext } from "@/hooks/useServer";
 import { AuthContext, SERVER_KEY, useAuth, useAuthState } from "@/lib/auth";
-import { queryClient } from "@/lib/queryClient";
+import { invalidateServerScopedQueries, queryClient } from "@/lib/queryClient";
 import { AgentDetail } from "@/pages/AgentDetail";
 import { Agents } from "@/pages/Agents";
 import { BotDetail } from "@/pages/BotDetail";
@@ -38,11 +38,20 @@ function ServerProvider({ children }: { children: React.ReactNode }) {
   const [server, setServer] = useState<string | null>(
     () => localStorage.getItem(SERVER_KEY),
   );
-  const handleSetServer = useCallback((s: string) => {
-    localStorage.setItem(SERVER_KEY, s);
-    setServer(s);
-    queryClient.invalidateQueries();
-  }, []);
+  const handleSetServer = useCallback(
+    (next: string) => {
+      localStorage.setItem(SERVER_KEY, next);
+      setServer(next);
+      // Only the two servers involved are touched, and nothing is refetched
+      // here: `AppShell` renders `<Outlet key={server}>`, so the switch already
+      // remounts every page against the new key. See the helper for why the
+      // blanket invalidation it replaces hit the server being left.
+      if (next !== server) {
+        invalidateServerScopedQueries(queryClient, [server, next]);
+      }
+    },
+    [server],
+  );
 
   return (
     <ServerContext value={{ server, setServer: handleSetServer }}>

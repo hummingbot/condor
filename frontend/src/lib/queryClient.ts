@@ -66,3 +66,40 @@ export function candlesQuery(
     ],
   };
 }
+
+/**
+ * Marks every cache entry belonging to `servers` stale, without fetching any.
+ *
+ * Server-scoped keys in this app are uniformly `[name, server, …]`, so a switch
+ * only has to touch the entries naming the server being left and the one being
+ * entered. It used to call bare `invalidateQueries()`: that marked the whole
+ * cache stale and immediately refetched every *active* query — and at that
+ * instant the active queries are still the OUTGOING server's, their `queryFn`s
+ * closed over the previous name. Leaving a slow or offline server therefore
+ * fired a burst of portfolio/bots/executors/positions requests *at it*, whose
+ * answers were discarded one commit later when `<Outlet key={server}>`
+ * remounted the page. It also reset the server-independent entries in passing
+ * (`["agents"]`, `["session-options"]` — deliberately `staleTime: Infinity` —
+ * `["servers"]`, `["notifications"]`, `["conversations"]`, `["delegations"]`,
+ * `["routines"]`, …), forcing a refetch of data no server switch can affect.
+ *
+ * `refetchType: "none"` is the load-bearing part: stale-marking must never
+ * start a request of its own. The incoming server's pages fetch from the
+ * remount, and the outgoing server's entries refetch only if the user actually
+ * returns to it — which is why they are marked at all rather than left alone,
+ * so a return trip shows fresh data instead of a frozen snapshot.
+ */
+export function invalidateServerScopedQueries(
+  client: QueryClient,
+  servers: (string | null | undefined)[],
+) {
+  const names = servers.filter((s): s is string => Boolean(s));
+  if (names.length === 0) return;
+  client.invalidateQueries({
+    predicate: (query) =>
+      query.queryKey.some(
+        (part) => typeof part === "string" && names.includes(part),
+      ),
+    refetchType: "none",
+  });
+}
