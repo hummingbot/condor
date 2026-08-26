@@ -1467,7 +1467,7 @@ async def update_agent_config(
     """Set the Agent's server pin or model without hand-editing front matter.
 
     ``AgentStore.update`` re-renders the whole front matter, so this is the same
-    write the MCP ``manage_trading_agent`` tool already performs — the web layer
+    write the MCP ``manage_agents`` tool already performs — the web layer
     simply had no door to it, which is why the UI could only offer a text editor.
     """
     from condor.llm.options import AGENT_OPTIONS

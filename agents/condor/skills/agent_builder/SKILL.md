@@ -8,8 +8,8 @@ source: builtin
 
 You are helping the user build or operate an **autonomous trading agent**. Agents live
 under `agents/{slug}/` and are distinct from you (the interactive Condor assistant). You
-drive them via `manage_trading_agent`, `manage_routines`, `trading_agent_journal_read`,
-and `consult`.
+drive them via `manage_agents`, `manage_strategies`, `control_agent`, `manage_routines`,
+`trading_agent_journal_read` and `consult`.
 
 ## Mental model — start minimal, improve in layers
 
@@ -20,8 +20,8 @@ consulted.
 
 **Every agent can do all three things from the moment it exists** — be consulted
 (`consult`), be delegated a background task (`delegate`), and run on a loop
-(`start_agent`). There is no capability flag, nothing to enable, and no such thing as a
-"consult-only" or "loop-only" agent. The layers below add *quality*, never capability.
+(`control_agent(action="start")`). There is no capability flag, nothing to enable, and
+no such thing as a "consult-only" or "loop-only" agent. The layers below add *quality*, never capability.
 
 The whole point of this skill is to build the agent in the **smallest useful step first,
 then layer capability on only when the user wants it.** Do NOT front-load routines,
@@ -73,8 +73,8 @@ call `get_available_models` once and choose a sensible default for THIS agent's 
 Then create:
 
 ```
-manage_trading_agent(
-    action="create_agent",
+manage_agents(
+    action="create",
     name="Executor Manager",
     description="Expert in deploying and tuning Hummingbot executors",
     agent_key="openrouter:anthropic/claude-sonnet-4-5",   # chosen from get_available_models; change anytime
@@ -110,7 +110,7 @@ prompt, kept tight: **who it is** (its domain + what it explicitly does NOT hand
 recommendation, key: value not prose). You can keep it short now and enrich it later with
 `update_agent`. Note it owns scoped memory (`manage_memory`) and skills (`manage_skill`).
 
-`create_agent` returns `agent_slug` — use it for everything after.
+`manage_agents(action="create")` returns `agent_slug` — use it for everything after.
 
 Then tell the user plainly: **the agent is created. Now let's consult it to check it's
 alive.**
@@ -161,7 +161,8 @@ a loop.**
 ## Step 4 — (Optional) Give its loop a dedicated playbook
 
 Only if the user wants the agent to act autonomously. The agent can already loop without
-this step — `start_agent(strategy_id="<agent_slug>")` ticks a default playbook driven by
+this step — `control_agent(action="start", strategy_id="<agent_slug>")` ticks a
+default playbook driven by
 its AGENT.md — but that default is deliberately generic. A **strategy** is the specific
 tick playbook the engine runs in a **session**, and it is what you want for anything that
 trades.
@@ -183,11 +184,10 @@ If the agent is capable enough to author its own loop, prefer handing it the job
 shared playbook and knows its own domain better than you do.
 
 ## Monitoring existing agents
-1. `manage_trading_agent(action="list_agent_definitions")` — all agents, with their
+1. `manage_agents(action="list")` — all agents, with their
    routing hint and owned strategies. Only list that shows agents owning no strategy.
-2. `manage_trading_agent(action="list_agents")` — running loop instances.
-3. `manage_trading_agent(action="agent_status", agent_id=…)` — instance status.
-4. `trading_agent_journal_read(agent_id=…, section="summary"|"runs"|"run:N")`.
+2. `control_agent(action="list")` — running loop instances, with their status.
+3. `trading_agent_journal_read(agent_id=…, section="summary"|"runs"|"run:N")`.
 
 ## Reference
 

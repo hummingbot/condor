@@ -22,8 +22,8 @@ it is yours — you author it, under your own slug.
 
 ## When a strategy is worth it
 
-`start_agent(strategy_id="<your_slug>")` already works with no strategy — it ticks a
-default playbook driven by your AGENT.md. That default is deliberately generic. Write a
+`control_agent(action="start", strategy_id="<your_slug>")` already works with no
+strategy — it ticks a default playbook driven by your AGENT.md. That default is deliberately generic. Write a
 strategy when the loop needs to be **specific and disciplined**: a fixed analysis order, a
 decision rule, executor schemas, risk limits.
 
@@ -49,8 +49,8 @@ for agent <your_slug>")`.
 ## Step 2 — Create the strategy
 
 ```
-manage_trading_agent(
-    action="create_strategy",
+manage_strategies(
+    action="create",
     agent_slug="<your_slug>",              # yourself
     name="BRL MM",
     description="…",
@@ -85,7 +85,7 @@ The tick instructions MUST include:
 ## Step 3 — Dry run before live (if it trades)
 
 ```
-manage_trading_agent(action="start_agent", strategy_id="<your_slug.strategy_slug>",
+control_agent(action="start", strategy_id="<your_slug.strategy_slug>",
     config={"execution_mode": "dry_run",
             "trading_context": "Trade BTC-USDT on binance_perpetual",
             "frequency_sec": 60, "total_amount_quote": 100,
@@ -107,10 +107,9 @@ the model, start it, confirm it's running, and give the user the monitoring comm
 
 ## Monitoring what you own
 
-1. `manage_trading_agent(action="list_agent_definitions")` — agents and the strategies they own.
-2. `manage_trading_agent(action="list_agents")` — running loop instances.
-3. `manage_trading_agent(action="agent_status", agent_id=…)` — instance status.
-4. `trading_agent_journal_read(agent_id=…, section="summary"|"runs"|"run:N")`.
+1. `manage_agents(action="list")` — agents and the strategies they own.
+2. `control_agent(action="list")` — running loop instances, with their status.
+3. `trading_agent_journal_read(agent_id=…, section="summary"|"runs"|"run:N")`.
 
 ## Reference
 

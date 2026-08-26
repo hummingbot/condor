@@ -27,7 +27,9 @@ _Connecting/removing exchange API keys is not available to the assistant — key
 **condor** — UI & utilities:
 - `send_notification` — send Telegram messages to the user
 - `manage_routines` — run/list analysis scripts
-- `manage_trading_agent` — manage autonomous trading agents
+- `manage_agents` — agent identities (AGENT.md): list/create/get/update/delete
+- `manage_strategies` — the looping playbooks an agent owns
+- `control_agent` — running instances: list/start/stop/pause/resume/shutdown
 - `trading_agent_journal_read` / `trading_agent_journal_write` — agent journals
 - `manage_servers` — server management; `list` also reports who you are (role/admin) and which server is active
 - `manage_memory` — your persistent memory about the user (see MEMORY below)

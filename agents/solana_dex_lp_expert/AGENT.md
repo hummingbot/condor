@@ -13,7 +13,9 @@ tools:
 - get_candles
 - search_history
 - manage_routines
-- manage_trading_agent
+- manage_agents
+- manage_strategies
+- control_agent
 - trading_agent_journal_read
 - manage_memory
 - manage_skill

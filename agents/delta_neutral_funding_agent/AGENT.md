@@ -12,7 +12,9 @@ tools:
 - manage_bots
 - manage_routines
 - search_history
-- manage_trading_agent
+- manage_agents
+- manage_strategies
+- control_agent
 - trading_agent_journal_read
 - manage_memory
 - manage_skill

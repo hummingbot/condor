@@ -1,4 +1,4 @@
-"""Trading agent strategy CRUD, lifecycle, monitoring, and journal."""
+"""Agent CRUD, strategy CRUD, instance lifecycle, and the journal."""
 
 from pathlib import Path
 
@@ -470,7 +470,9 @@ def journal_read(agent_id: str, section: str = "recent", max_entries: int = 30) 
     if err:
         return err
 
-    if section == "full":
+    if section == "tracker":
+        return {"tracker_md": jm.read_full(), "summary": jm.get_summary_dict()}
+    elif section == "full":
         return {"content": jm.read_full()}
     elif section == "learnings":
         return {"content": jm.read_learnings()}
@@ -555,41 +557,13 @@ def journal_write(
     return {"written": True}
 
 
-# ---------------------------------------------------------------------------
-# Agent monitoring (file-based)
-# ---------------------------------------------------------------------------
-
-
-def _agent_monitoring(action: str, agent_id: str | None) -> dict:
-    if not agent_id:
-        return {"error": "agent_id is required"}
-
-    jm, err = _resolve_journal_manager(agent_id)
-    if err:
-        # For monitoring, convert experiment/missing journal to error
-        if "experiment" in str(err.get("content", "")):
-            return {
-                "error": "experiments don't have a journal — use dry_runs/ for results"
-            }
-        return {"error": "no journal available for this agent"}
-
-    if action == "agent_tracker":
-        content = jm.read_full()
-        summary = jm.get_summary_dict()
-        return {"tracker_md": content, "summary": summary}
-
-    elif action == "agent_journal":
-        return {
-            "recent_actions": jm.read_recent(max_entries=30),
-            "learnings": jm.read_learnings(),
-            "entry_count": jm.entry_count(),
-        }
-
-    return {"error": f"Unknown monitoring action: {action}"}
-
-
 async def _agent_state(
-    action: str, agent_id: str | None, key: str | None, config: dict | None
+    action: str,
+    agent_id: str | None,
+    key: str | None,
+    value,
+    expires_in: int | None,
+    clear: bool,
 ) -> dict:
     """Read or write this agent's scratch state through the main process.
 
@@ -607,19 +581,150 @@ async def _agent_state(
         return {"state": state.get(key) if key else state}
 
     if not key:
-        return {"error": "name (the state key) is required for set_state"}
-    body = {"key": key, **(config or {})}
+        return {"error": "key (the state key) is required for set_state"}
+    body = {"key": key, "value": value, "expires_in": expires_in, "clear": clear}
     return await call_main_api("POST", path, body)
 
 
 # ---------------------------------------------------------------------------
-# Main entry point
+# Tool entry points — one per family (FEAT-068)
+#
+# Three tools replace the old manage_trading_agent funnel, each fronting the
+# family function that already existed underneath it. Actions are short and
+# unprefixed ("create", "start"); the legacy prefixed names ("create_agent",
+# "start_agent") still resolve inside their own family, and a name belonging to
+# a SIBLING family answers with the call that would have worked instead of a
+# bare "unknown action".
 # ---------------------------------------------------------------------------
 
+# action name -> (owning tool, the call that handles it)
+_ACTION_OWNER: dict[str, tuple[str, str]] = {
+    "list_agent_definitions": ("manage_agents", 'manage_agents(action="list")'),
+    "create_agent": ("manage_agents", 'manage_agents(action="create", ...)'),
+    "get_agent": ("manage_agents", 'manage_agents(action="get", agent_slug=...)'),
+    "update_agent": ("manage_agents", 'manage_agents(action="update", agent_slug=...)'),
+    "delete_agent": ("manage_agents", 'manage_agents(action="delete", agent_slug=...)'),
+    "list_strategies": ("manage_strategies", 'manage_strategies(action="list")'),
+    "get_strategy": (
+        "manage_strategies",
+        'manage_strategies(action="get", strategy_id=...)',
+    ),
+    "create_strategy": (
+        "manage_strategies",
+        'manage_strategies(action="create", agent_slug=..., name=..., instructions=...)',
+    ),
+    "update_strategy": (
+        "manage_strategies",
+        'manage_strategies(action="update", strategy_id=...)',
+    ),
+    "delete_strategy": (
+        "manage_strategies",
+        'manage_strategies(action="delete", strategy_id=...)',
+    ),
+    "list_agents": ("control_agent", 'control_agent(action="list")'),
+    "start_agent": ("control_agent", 'control_agent(action="start", strategy_id=...)'),
+    "stop_agent": ("control_agent", 'control_agent(action="stop", agent_id=...)'),
+    "pause_agent": ("control_agent", 'control_agent(action="pause", agent_id=...)'),
+    "resume_agent": ("control_agent", 'control_agent(action="resume", agent_id=...)'),
+    "shutdown_agent": (
+        "control_agent",
+        'control_agent(action="shutdown", agent_id=...)',
+    ),
+    "get_state": ("control_agent", 'control_agent(action="get_state", agent_id=...)'),
+    "set_state": (
+        "control_agent",
+        'control_agent(action="set_state", agent_id=..., key=...)',
+    ),
+    "agent_tracker": (
+        "trading_agent_journal_read",
+        'trading_agent_journal_read(agent_id=..., section="tracker")',
+    ),
+    "agent_journal": (
+        "trading_agent_journal_read",
+        'trading_agent_journal_read(agent_id=..., section="recent")',
+    ),
+}
 
-async def manage_trading_agent(
+_AGENT_ACTIONS = {
+    "list": "list_agent_definitions",
+    "create": "create_agent",
+    "get": "get_agent",
+    "update": "update_agent",
+    "delete": "delete_agent",
+}
+
+_STRATEGY_ACTIONS = {
+    "list": "list_strategies",
+    "get": "get_strategy",
+    "create": "create_strategy",
+    "update": "update_strategy",
+    "delete": "delete_strategy",
+}
+
+_CONTROL_ACTIONS = {
+    "list": "list_agents",
+    "start": "start_agent",
+    "stop": "stop_agent",
+    "pause": "pause_agent",
+    "resume": "resume_agent",
+    "shutdown": "shutdown_agent",
+    "get_state": "get_state",
+    "set_state": "set_state",
+}
+
+
+def _resolve_action(
+    tool: str, action: str, actions: dict[str, str]
+) -> tuple[str | None, dict | None]:
+    """Map a tool's short action to its internal name, or explain the misroute."""
+    if action in actions:
+        return actions[action], None
+    owner, call = _ACTION_OWNER.get(action, ("", ""))
+    if owner == tool:
+        # Legacy prefixed name for an action this tool already owns.
+        return action, None
+    if owner:
+        return None, {"error": f"'{action}' belongs to {owner} — call {call} instead."}
+    return None, {
+        "error": f"Unknown action '{action}'. {tool} actions: "
+        + ", ".join(actions)
+        + "."
+    }
+
+
+def manage_agents(
     action: str,
-    agent_id: str | None = None,
+    agent_slug: str | None = None,
+    name: str | None = None,
+    description: str | None = None,
+    instructions: str | None = None,
+    agent_key: str | None = None,
+    tools: list[str] | None = None,
+    when_to_consult: str | None = None,
+    server_required: bool | None = None,
+    server_name: str | None = None,
+) -> dict:
+    resolved, err = _resolve_action("manage_agents", action, _AGENT_ACTIONS)
+    if err:
+        return err
+    if resolved == "list_agent_definitions":
+        return _list_agent_definitions()
+    return _manage_agent(
+        resolved,
+        agent_slug,
+        name,
+        description,
+        instructions,
+        agent_key,
+        tools,
+        when_to_consult,
+        server_required,
+        server_name,
+    )
+
+
+def manage_strategies(
+    action: str,
     strategy_id: str | None = None,
     agent_slug: str | None = None,
     name: str | None = None,
@@ -628,85 +733,38 @@ async def manage_trading_agent(
     agent_key: str | None = None,
     skills: list[str] | None = None,
     config: dict | None = None,
-    # Agent-definition params (for create_agent/update_agent actions)
-    tools: list[str] | None = None,
-    when_to_consult: str | None = None,
-    server_required: bool | None = None,
-    server_name: str | None = None,
 ) -> dict:
-    # Agent definitions (identities) — distinct from strategies and instances
-    if action == "list_agent_definitions":
-        return _list_agent_definitions()
+    resolved, err = _resolve_action("manage_strategies", action, _STRATEGY_ACTIONS)
+    if err:
+        return err
+    return _manage_strategy(
+        resolved,
+        strategy_id,
+        agent_slug,
+        name,
+        description,
+        instructions,
+        agent_key,
+        skills,
+        config,
+    )
 
-    # Agent CRUD — the AGENT.md identity itself (created before routines/strategies)
-    agent_def_actions = {
-        "create_agent",
-        "get_agent",
-        "update_agent",
-        "delete_agent",
-    }
-    if action in agent_def_actions:
-        return _manage_agent(
-            action,
-            agent_slug,
-            name,
-            description,
-            instructions,
-            agent_key,
-            tools,
-            when_to_consult,
-            server_required,
-            server_name,
-        )
 
-    # Strategy operations
-    local_strategy_actions = {
-        "list_strategies",
-        "get_strategy",
-        "create_strategy",
-        "update_strategy",
-        "delete_strategy",
-    }
-    if action in local_strategy_actions:
-        return _manage_strategy(
-            action,
-            strategy_id,
-            agent_slug,
-            name,
-            description,
-            instructions,
-            agent_key,
-            skills,
-            config,
-        )
-
-    # Routines are NOT actions here: an agent's routine library is reached with
-    # manage_routines(action="list"/"run", agent="<agent_slug>") (FEAT-067).
-
-    # Agent lifecycle actions
-    lifecycle_actions = {
-        "start_agent",
-        "stop_agent",
-        "pause_agent",
-        "resume_agent",
-        "shutdown_agent",
-        "list_agents",
-    }
-    if action in lifecycle_actions:
-        return await _agent_lifecycle(action, strategy_id, agent_id, config)
-
-    # Journal reads/writes are the standalone trading_agent_journal_read /
-    # trading_agent_journal_write tools — the canonical interface used by live
-    # tick prompts. They are intentionally NOT duplicated as actions here.
-
-    # Scratch state scoped to the calling agent's own strategy. The namespace
-    # is derived from agent_id, never taken from the caller, so an agent cannot
-    # read another's cursors by guessing a key.
-    if action in ("get_state", "set_state"):
-        return await _agent_state(action, agent_id, name, config)
-
-    # Journal/monitoring that's file-based
-    if action in ("agent_tracker", "agent_journal"):
-        return _agent_monitoring(action, agent_id)
-
-    return {"error": f"Unknown action: {action}"}
+async def control_agent(
+    action: str,
+    agent_id: str | None = None,
+    strategy_id: str | None = None,
+    config: dict | None = None,
+    key: str | None = None,
+    value=None,
+    expires_in: int | None = None,
+    clear: bool = False,
+) -> dict:
+    resolved, err = _resolve_action("control_agent", action, _CONTROL_ACTIONS)
+    if err:
+        return err
+    if resolved in ("get_state", "set_state"):
+        # The namespace is derived from agent_id, never taken from the caller,
+        # so an agent cannot read another's cursors by guessing a key.
+        return await _agent_state(resolved, agent_id, key, value, expires_in, clear)
+    return await _agent_lifecycle(resolved, strategy_id, agent_id, config)
