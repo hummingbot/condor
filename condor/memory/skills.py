@@ -63,7 +63,7 @@ from pathlib import Path
 
 from condor.frontmatter import parse_frontmatter, render_frontmatter
 
-from .paths import builtin_skills_root, shared_skills_root
+from .paths import CHAT_SLUG, builtin_skills_root, shared_skills_root
 from .store import _atomic_write, _slugify, _utcnow
 
 
@@ -107,7 +107,14 @@ class SkillStore:
         self.shared_dir = shared_skills_root()
         # Publishing is Condor's alone. An agent that could publish would put a
         # playbook in every other agent's prompt with no one in the loop.
-        self.can_publish = not agent_slug
+        #
+        # Addressed by name or by `None`, Condor is the same assistant —
+        # `builtin_skills_root` already collapses the two — so the right to
+        # publish has to collapse with them. It did not, and the difference was
+        # invisible until a caller appeared that says `"condor"`: the MCP tool
+        # passes `None` and could edit the shared library, while the web panel
+        # passes the slug and was refused on the very playbooks Condor owns.
+        self.can_publish = not agent_slug or agent_slug == CHAT_SLUG
 
     # -- resolution --------------------------------------------------------
 
