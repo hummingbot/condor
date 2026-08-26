@@ -78,6 +78,21 @@ mcp = FastMCP("hummingbot-mcp")
 # Settings → Gateway).
 
 
+def _credentials_were_injected() -> bool:
+    """True when this process was spawned holding somebody else's credentials.
+
+    The same env signal ``_apply_cli_args`` reads, deliberately: whatever it
+    lifted onto ``settings`` is a secret this process was *handed* by its
+    spawner (``build_mcp_servers_for_session``), not one supplied by whoever is
+    talking to it over stdio. A standalone launch — the uvx console script, an
+    external MCP host, the checked-in ``.mcp.json`` — sets neither, so it reads
+    False and keeps the full configure-and-persist behaviour.
+    """
+    return bool(
+        os.getenv("HUMMINGBOT_API_USERNAME") or os.getenv("HUMMINGBOT_API_PASSWORD")
+    )
+
+
 @handle_errors("configure server")
 async def configure_server(
     name: str | None = None,
@@ -116,6 +131,26 @@ async def configure_server(
             f"  Name: {settings.server_name}\n"
             f"  URL: {settings.api_url}\n"
             f"  Username: {settings.api_username}\n"
+        )
+
+    # Past here the tool would rebuild the connection around whatever host it was
+    # handed, carrying over every field it wasn't given — including the password.
+    # In a Condor-spawned process that password is the *server owner's*, so a
+    # single configure_server(host=…) would authenticate against a host the model
+    # named, and save_server_config would leave it in cleartext in the
+    # machine-global ~/.hummingbot_mcp/server.yml (SEC-253). Tool output is
+    # untrusted input, so "the prompt says don't call this" is not a control.
+    # Injected credentials are not ours to re-send anywhere: refuse the mutation
+    # and leave repointing to the dashboard's owner-gated Settings → Servers.
+    if _credentials_were_injected():
+        return (
+            "Changing the server connection is disabled for this session.\n\n"
+            "This MCP server was started by Condor and holds the API credentials "
+            "of the server's owner, so it cannot be repointed from a chat.\n\n"
+            f"  Name: {settings.server_name}\n"
+            f"  URL: {settings.api_url}\n\n"
+            "Add, edit or switch servers in the Condor dashboard: "
+            "Settings → Servers.\n"
         )
 
     # Build new config with partial updates (use in-memory settings, not disk)
