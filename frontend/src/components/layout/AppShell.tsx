@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import {
   Activity,
@@ -98,7 +99,11 @@ function AppShellBody() {
   // The route baseline for the chat's page context (FEAT-059): every page
   // gets a label and a URL-derived subject through the same seam richer
   // contributors use, so the chat never has to know about the router.
-  useViewFacts(() => routeFacts(pathname, search));
+  // The client is handed over so the table can also read what each page is
+  // rendering (FEAT-060) — at send time, out of the cache the page fetched
+  // through, rather than from eight components each pushing their state here.
+  const queryClient = useQueryClient();
+  useViewFacts(() => routeFacts(pathname, search, queryClient));
 
   return (
     <div className="flex h-screen flex-col">

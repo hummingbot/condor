@@ -48,3 +48,14 @@ export function useDisplayCurrency() {
     currencySymbol: CURRENCY_SYMBOLS[currency],
   };
 }
+
+/**
+ * The display currency, read outside React.
+ *
+ * The chat's page-context block (FEAT-060) formats money at *send* time, from
+ * a plain function with no component around it — but it must read the same
+ * number the user is looking at, so it reads the same store the hook does.
+ */
+export function getDisplayCurrency(): DisplayCurrency {
+  return currentCurrency;
+}
