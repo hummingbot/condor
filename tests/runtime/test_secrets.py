@@ -54,12 +54,25 @@ def kinds(text: str) -> list[str]:
             " ".join(f"{n}. {w}" for n, w in enumerate(SEED.split(), 1)),
         ),
         ("twenty-four words", SEED_24),
+        ("title case", SEED.title()),
+        ("shouted", SEED.upper()),
+        ("phone autocapitalised", SEED[0].upper() + SEED[1:]),
     ],
 )
 def test_a_recovery_phrase_is_redacted_in_every_shape_it_is_pasted_in(shape, raw):
     clean, findings = secrets.redact(raw)
     assert [f.kind for f in findings] == [secrets.MNEMONIC], shape
     assert clean == "[redacted: mnemonic]", shape
+
+
+def test_prose_in_title_case_is_not_a_phrase():
+    """The case-insensitive candidate leans on membership harder, so the
+    negative is what proves it: a capitalised sentence is still not twelve
+    consecutive wordlist entries."""
+    prose = "The Quick Brown Foxes Jumped Over Several Lazy Sleeping Dogs Near Rivers"
+    clean, findings = secrets.redact(prose)
+    assert findings == []
+    assert clean == prose
 
 
 def test_a_phrase_pasted_mid_sentence_loses_only_the_phrase():

@@ -120,6 +120,41 @@ def test_a_recovery_phrase_is_caught_in_every_shape_it_is_pasted_in(shape, raw):
         assert word not in out, shape
 
 
+@pytest.mark.parametrize(
+    "case, raw",
+    [
+        ("title case", SEED.title()),
+        ("shouted", SEED.upper()),
+        ("phone autocapitalised", SEED[0].upper() + SEED[1:]),
+        (
+            "numbered sheet, capitalised",
+            "\n".join(f"{n}. {w.capitalize()}" for n, w in enumerate(SEED.split(), 1)),
+        ),
+    ],
+)
+def test_a_recovery_phrase_is_caught_whatever_case_it_arrives_in(case, raw):
+    """BIP-39 writes its wordlist in lowercase; a paste is under no such rule.
+
+    The candidate regex asked for ``[a-z]``, so a phrase that had been through
+    a phone keyboard's autocapitalisation — or any wallet that renders its
+    words capitalised — was rejected on shape before the wordlist was ever
+    consulted, and reached the collector verbatim. Flagged on PR #224.
+    """
+    out, counts = _scrub(raw)
+    assert counts["seed_phrase"] == 1, case
+    for word in raw.split():
+        assert word not in out, case
+
+
+def test_a_capitalised_sentence_is_not_a_phrase():
+    """The negative half of the case fix: matching any case must not turn a
+    Title Case sentence into a mnemonic."""
+    prose = "The Quick Brown Foxes Jumped Over Several Lazy Sleeping Dogs Near Rivers"
+    out, counts = _scrub(prose)
+    assert counts.get("seed_phrase", 0) == 0
+    assert out == prose
+
+
 def test_an_ordinary_sentence_of_wordlist_words_is_left_alone():
     """The widened shape leans on membership harder, so the negative case is
     what proves it: twelve-plus words, several of them real wordlist entries,

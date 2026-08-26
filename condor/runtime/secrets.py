@@ -81,25 +81,30 @@ KEYPAIR_ARRAY_RE = re.compile(r"\[\s*\d{1,3}(?:\s*,\s*\d{1,3}){63}\s*,?\s*\]")
 
 # ── BIP-39 recovery phrases ──────────────────────────────────────────────
 #
-# Twelve or more consecutive lowercase words of 3–8 letters, separated by any
-# run of whitespace or commas and each optionally numbered — the shape of a
+# Twelve or more consecutive words of 3–8 letters, in any case, separated by
+# any run of whitespace or commas and each optionally numbered — the shape of a
 # recovery phrase, and only the *candidate* for one. The separator is
 # deliberately permissive because this is a prefilter: a phrase pasted out of a
 # wallet UI arrives one word per line, out of a backup sheet as "1. legal
 # 2. winner", and out of a chat with whatever spacing the paste carried (this
 # is SEC-230's finding, and the shapes above are the ones that were reaching a
-# collector verbatim). Shape alone decides nothing in either direction — an
-# English sentence can reach twelve long words, and a real phrase can repeat
-# one — so :func:`phrase_spans` decides it against the vendored wordlist, where
-# membership is exact.
+# collector verbatim). Case is permissive for the same reason and not for a
+# hypothetical one: BIP-39 writes its wordlist in lowercase, but a phrase
+# arrives however the thing that produced it wrote it, and a phone keyboard
+# capitalises the first word of a message on its own. Matching only [a-z] let
+# "Legal winner thank…" past both this filter and the sharing scrubber that
+# imports it. Shape alone decides nothing in either direction — an English
+# sentence can reach twelve long words, and a real phrase can repeat one — so
+# :func:`phrase_spans` decides it against the vendored wordlist, case-folded
+# to it, where membership is otherwise exact.
 
 _SEED_ORDINAL = r"(?:\d{1,2}[.)]\s*)?"
 SEED_CANDIDATE_RE = re.compile(
     _NOT_ID_BEFORE
     + _SEED_ORDINAL
-    + r"[a-z]{3,8}(?:[\s,]+"
+    + r"[A-Za-z]{3,8}(?:[\s,]+"
     + _SEED_ORDINAL
-    + r"[a-z]{3,8}){11,}"
+    + r"[A-Za-z]{3,8}){11,}"
     + _NOT_ID_AFTER
 )
 # The separator is captured so a run that turns out not to be a phrase can be
@@ -192,7 +197,8 @@ def _spans_within(candidate: str, words: frozenset[str]) -> list[tuple[int, int]
             pending.append((start, offset))
             continue
         token = SEED_ORDINAL_RE.sub("", piece)
-        if token in words:
+        # The wordlist is lowercase; the paste need not be.
+        if token.lower() in words:
             if run_start is None:
                 # Opening a run takes the numbering with it and leaves the
                 # prose in front of it alone.
