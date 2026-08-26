@@ -251,12 +251,21 @@ def test_dry_run_blocks_an_acp_shaped_deploy():
 # ---------------------------------------------------------------------------
 
 AMM = "mcp__mcp-hummingbot__manage_amm"
+SWAPS = "mcp__mcp-hummingbot__manage_gateway_swaps"
 
 
 def test_amm_signing_actions_are_dangerous():
-    for action in ("execute_swap", "add_liquidity", "remove_liquidity", "create_pool"):
+    for action in ("add_liquidity", "remove_liquidity", "create_pool"):
         call = normalize_tool_call(_acp_request(AMM, {"action": action}))
         assert is_dangerous_tool_call(call), f"manage_amm({action}) was auto-approved"
+
+
+def test_swap_signing_action_is_dangerous():
+    """The swap left manage_amm for manage_gateway_swaps, and stayed gated."""
+    call = normalize_tool_call(_acp_request(SWAPS, {"action": "execute"}))
+    assert is_dangerous_tool_call(
+        call
+    ), "manage_gateway_swaps(execute) was auto-approved"
 
 
 def test_amm_read_actions_stay_on_the_fast_path():
@@ -279,27 +288,24 @@ def test_amm_with_unreadable_arguments_fails_closed():
         assert is_dangerous_tool_call(call), f"{raw!r} slipped past the gate"
 
 
-def test_amm_swap_reaches_a_human_with_a_readable_summary():
+def test_a_swap_reaches_a_human_with_a_readable_summary():
     channel = _CapturingChannel(answer=False)
     result = _drive_acp(
         _acp_request(
-            AMM,
+            SWAPS,
             {
-                "action": "execute_swap",
+                "action": "execute",
                 "connector": "meteora",
                 "side": "SELL",
                 "amount": "12.5",
-                "base_token": "SOL",
-                "pool_address": "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1",
+                "trading_pair": "SOL-USDC",
             },
         ),
         channel,
     )
 
-    assert len(channel.delivered) == 1, "an AMM swap was never put in front of a human"
-    assert (
-        channel.delivered[0].summary == "Swap SELL 12.5 SOL on meteora pool 5Q544fKr..."
-    )
+    assert len(channel.delivered) == 1, "a swap was never put in front of a human"
+    assert channel.delivered[0].summary == "Swap SELL 12.5 SOL-USDC"
     assert result["outcome"]["outcome"] == "cancelled"
 
 
@@ -315,7 +321,7 @@ def test_amm_summaries_name_what_is_being_moved():
             quote_token_amount="200",
             pool_address="8sLbNZoA1cfnvMJLPfp98ZLAnFSYCFApfJKMbiXNLwxj",
         )
-        == "Add 1/200 liquidity on raydium pool 8sLbNZoA..."
+        == "Add 1 base / 200 quote to AMM 8sLbNZoA... on raydium"
     )
     assert (
         summary(
@@ -323,7 +329,7 @@ def test_amm_summaries_name_what_is_being_moved():
             percentage_to_remove="100",
             position_address="9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin",
         )
-        == "Remove 100% from position 9xQeWvG8..."
+        == "Remove 100% from AMM position 9xQeWvG8... on ?"
     )
     assert (
         summary(
@@ -333,16 +339,16 @@ def test_amm_summaries_name_what_is_being_moved():
             quote_token="USDC",
             base_token_amount="0.5",
         )
-        == "Create uniswap pool WETH/USDC seeded with 0.5"
+        == "Create AMM pool WETH-USDC on uniswap"
     )
     # An address we were not given must not blow up a confirmation prompt.
-    assert summary(action="execute_swap") == "Swap ? ? ? on ? pool ?"
-    assert summary(action="quote_swap") == "AMM: quote_swap"
+    assert summary(action="add_liquidity") == "Add ? base / ? quote to AMM ? on ?"
+    assert summary(action="quote_liquidity") == "AMM: quote_liquidity"
 
 
-def test_dry_run_cancels_an_amm_swap_but_not_a_quote():
+def test_dry_run_cancels_a_swap_but_not_a_quote():
     swap = normalize_tool_call(
-        _acp_request(AMM, {"action": "execute_swap", "connector": "meteora"})
+        _acp_request(SWAPS, {"action": "execute", "connector": "meteora"})
     )
     assert (
         asyncio.run(_risk_callback(execution_mode="dry_run")(swap, OPTIONS))["outcome"][
@@ -351,7 +357,7 @@ def test_dry_run_cancels_an_amm_swap_but_not_a_quote():
         == "cancelled"
     )
 
-    quote = normalize_tool_call(_acp_request(AMM, {"action": "quote_swap"}))
+    quote = normalize_tool_call(_acp_request(SWAPS, {"action": "quote"}))
     assert asyncio.run(_risk_callback(execution_mode="dry_run")(quote, OPTIONS))[
         "outcome"
     ] == {"outcome": "selected", "optionId": "allow"}
@@ -368,20 +374,31 @@ def test_dry_run_cancels_an_amm_swap_but_not_a_quote():
 
 #: Tools whose actions can move funds or a live bot. Every mutating action of
 #: these must be classified dangerous.
-FUND_MOVING_TOOLS = {"manage_amm", "manage_bots", "manage_executors"}
+FUND_MOVING_TOOLS = {
+    "manage_amm",
+    "manage_bots",
+    "manage_clmm",
+    "manage_executors",
+    "manage_gateway_config",  # the wallets resource takes a private key
+    "manage_gateway_swaps",
+}
 
 #: Tools that read, or that only write config the trading loop must be told to
 #: pick up. Listed explicitly so a new tool belongs to neither set and trips
 #: ``test_every_action_gated_tool_is_classified`` below.
 NON_FUND_MOVING_TOOLS = {
     "manage_controllers",  # writes controller templates, never a running bot
+    "manage_gateway_container",  # starts and stops Gateway; signs nothing
     "explore_dex_pools",
     "explore_geckoterminal",
 }
 
 #: Verbs that mean "this call changes something out in the world".
 MUTATING_PREFIXES = (
-    "execute_",
+    # Bare "execute", not "execute_": manage_gateway_swaps names its signing
+    # action `execute`, so the underscore spelling matched nothing on the one
+    # tool whose whole purpose is to sign a swap.
+    "execute",
     "add_",
     "remove_",
     "create",
@@ -445,6 +462,7 @@ def test_every_mutating_action_of_a_fund_moving_tool_is_dangerous():
                 f"{tool_name}({action}) mutates but is auto-approved; "
                 "add it to the matching DANGEROUS_* set in condor/runtime/danger.py"
             )
-    # 4 AMM + 5 bot + 2 executor today: a floor, so a signature refactor that
-    # silently stops yielding actions fails instead of passing vacuously.
-    assert checked >= 11, f"only {checked} mutating actions found — enumeration broke"
+    # 3 AMM + 3 CLMM + 5 bot + 2 executor + 1 swap today: a floor, so a
+    # signature refactor that silently stops yielding actions fails instead of
+    # passing vacuously.
+    assert checked >= 14, f"only {checked} mutating actions found — enumeration broke"

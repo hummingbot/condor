@@ -127,6 +127,18 @@ def _has_dangerous_action(
     return action in dangerous_actions
 
 
+def _short_address(value: Any) -> str:
+    """An on-chain address abbreviated for a confirmation line.
+
+    The human approving a signature needs to recognize the pool, not read 44
+    base58 characters, and a missing address has to render as "?" rather than
+    crash the summary of a call that is about to move funds.
+    """
+    if not isinstance(value, str) or not value:
+        return "?"
+    return f"{value[:8]}..." if len(value) > 8 else value
+
+
 def _has_dangerous_resource(
     tool_call: dict[str, Any], dangerous_resources: set[str]
 ) -> bool:
@@ -226,8 +238,7 @@ def format_tool_summary(tool_call: dict[str, Any]) -> str:
             return f"Update config '{config_name}' on bot '{bot_name}'"
         return f"Bot '{bot_name}': {action}"
 
-    if tool_name == "manage_amm":
-        action = input_data.get("action", "?")
+    if tool_name == "manage_gateway_swaps":
         pair = input_data.get("trading_pair", "?")
         side = input_data.get("side", "?")
         amount = input_data.get("amount", "?")
@@ -249,8 +260,8 @@ def format_tool_summary(tool_call: dict[str, Any]) -> str:
         action = input_data.get("action", "?")
         kind = "CLMM" if tool_name == "manage_clmm" else "AMM"
         connector = input_data.get("connector", "?")
-        pool = (
-            input_data.get("pool_address") or input_data.get("position_address") or "?"
+        pool = _short_address(
+            input_data.get("pool_address") or input_data.get("position_address")
         )
         if action == "open":
             lower = input_data.get("lower_price", "?")

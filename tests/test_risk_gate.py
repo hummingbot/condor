@@ -495,14 +495,25 @@ def _amm_call(action: str, **extra) -> dict:
     }
 
 
-def _swap_call(amount: str, pool: str = "PooL1111") -> dict:
-    return _amm_call(
-        "execute_swap",
-        pool_address=pool,
-        base_token="SOL",
-        side="BUY",
-        amount=amount,
-    )
+def _swap_call(amount: str, pair: str = "SOL-USDC") -> dict:
+    """A signing ``manage_gateway_swaps`` call.
+
+    The swap used to be ``manage_amm(execute_swap)`` and was priced off the
+    pool quote. It is its own pair-scoped tool now, so the gate prices it from
+    the market feed instead -- the same number, reached the way this tool
+    identifies its market.
+    """
+    return {
+        "tool": "mcp__mcp-hummingbot__manage_gateway_swaps",
+        "input": {
+            "action": "execute",
+            "connector": "meteora",
+            "network": "solana-mainnet-beta",
+            "trading_pair": pair,
+            "side": "BUY",
+            "amount": amount,
+        },
+    }
 
 
 def _amm_callback(limit: float = 500.0, client=None, state=None, mode="loop"):
@@ -527,7 +538,7 @@ def test_loop_mode_blocks_swap_over_the_position_limit():
 
 def test_loop_mode_refusal_reason_names_the_position_limit():
     engine = RiskEngine(RiskLimits(max_position_size_quote=100.0))
-    allowed, reason = engine.check_amm_action(_swap_call("1"), RiskState(), 200.0)
+    allowed, reason = engine.check_dex_action(_swap_call("1"), RiskState(), 200.0)
 
     assert not allowed
     assert "100.00" in reason and "200.00" in reason
@@ -535,7 +546,7 @@ def test_loop_mode_refusal_reason_names_the_position_limit():
 
 def test_loop_mode_allows_swap_under_the_position_limit():
     """The too-tight failure mode: a legitimate swap must still go through."""
-    callback, state = _amm_callback(limit=500.0, client=_AmmClient(pool_price=200.0))
+    callback, state = _amm_callback(limit=500.0, client=_AmmClient(market_price=200.0))
 
     result = asyncio.run(callback(_swap_call("1"), _OPTIONS))
 
@@ -579,7 +590,7 @@ def test_loop_mode_blocks_swap_with_an_unreadable_amount():
 
 
 def test_loop_mode_two_swaps_gated_against_the_accumulated_exposure():
-    client = _AmmClient(pool_price=200.0)
+    client = _AmmClient(market_price=200.0)
     callback, state = _amm_callback(limit=300.0, client=client)
 
     async def _drive():

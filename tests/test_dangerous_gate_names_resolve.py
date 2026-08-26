@@ -85,6 +85,26 @@ def test_every_liquidity_moving_action_is_gated():
         ), f"{tool_name} write action(s) ungated: {sorted(writes - gated)}"
 
 
+def test_every_signing_swap_action_is_gated():
+    """The swap twin of :func:`test_every_liquidity_moving_action_is_gated`.
+
+    ``manage_gateway_swaps`` registers four actions and only ``execute`` signs,
+    so ``DANGEROUS_SWAP_ACTIONS`` covers the surface today. The reason to pin it
+    is what sits one layer down: the implementation also handles
+    ``execute_quote`` — it signs a quote taken earlier by ``action="quote"`` —
+    and that action is simply not in the registered ``Literal``, so nothing can
+    reach it. Adding it to that Literal would be a one-word change with no
+    obvious connection to this gate, and the swap would sign unconfirmed and
+    unpriced. This test is that connection.
+    """
+    read_only = {"quote", "search", "get_status"}
+    writes = _action_literals("manage_gateway_swaps") - read_only
+    assert writes <= DANGEROUS_SWAP_ACTIONS, (
+        "manage_gateway_swaps signing action(s) ungated: "
+        f"{sorted(writes - DANGEROUS_SWAP_ACTIONS)}"
+    )
+
+
 def test_lp_writes_require_confirmation():
     for tool_name, action in (
         ("manage_clmm", "open"),
