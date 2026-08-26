@@ -85,6 +85,29 @@ what to do with the result, a multi-tool procedure. That is a skill
 (`agents/*/skills/`). The rule of thumb: *types teach the call, skills teach the
 decision.* If a paragraph would still be true with a different tool, it is a skill.
 
+### Pointing at a skill
+
+When a tool's judgment half lives in a skill, the docstring ends with **one soft
+pointer** naming it:
+
+> For <judgment topic>, read the '<name>' skill if the Condor skills library is
+> available.
+
+The conditional is not politeness, it is a requirement: `mcp_servers/hummingbot_api`
+runs standalone in hosts that mount no skills library at all, and a docstring that
+instructs a model to read a file it cannot reach turns a working tool into a dead end.
+The pointer must therefore be the *last* thing the docstring needs, never a
+prerequisite — everything required to make the call correctly stays in the docstring,
+and the skill only adds the decision.
+
+One pointer per tool. A tool whose mechanics are the whole story (`create_order_executor`,
+`get_prices`) gets none: pointing at a skill that does not exist, or at one that would
+only restate the `Args:`, costs a session more than it returns. The executor family's
+pointers are `create_position_executor` → `directional_position`, `create_grid_executor`
+→ `run_a_grid`, `create_dca_executor` → `dca_into_position`, `create_lp_executor` →
+`open_lp_position`, and `stop_executor` / `list_orphaned_positions` / `manage_clmm` →
+`recover_orphaned_position`.
+
 ## Impl split
 
 `server.py` holds the registration, the typed signature and the docstring; `tools/*.py`

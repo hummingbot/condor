@@ -795,6 +795,9 @@ async def create_position_executor(
     - Long 0.01 BTC at 5x with a 2% stop and 3% target:
       create_position_executor("binance_perpetual", "BTC-USDT", 1, 0.01, leverage=5,
       stop_loss=0.02, take_profit=0.03)
+
+    For sizing from a stop distance and setting the risk/reward, read the
+    'directional_position' skill if the Condor skills library is available.
     """
     client = await hummingbot_client.get_client()
     result = await executor_create.create_position_executor(
@@ -915,6 +918,9 @@ async def create_grid_executor(
     - A $500 long grid on SOL-USDT between 140 and 150, stopping under 138:
       create_grid_executor("binance", "SOL-USDT", 1, 140, 150, 138, 500,
       take_profit=0.002, open_order_type=3, take_profit_order_type=3, leverage=1)
+
+    For confirming the market is ranging and choosing the prices and level count, read
+    the 'run_a_grid' skill if the Condor skills library is available.
     """
     client = await hummingbot_client.get_client()
     result = await executor_create.create_grid_executor(
@@ -1008,6 +1014,9 @@ async def create_dca_executor(
     - Ladder $350 into BTC across three levels with a 3% target and 5% stop:
       create_dca_executor("binance_perpetual", "BTC-USDT", 1, [100, 100, 150],
       [50000, 48000, 46000], take_profit=0.03, stop_loss=0.05)
+
+    For spacing the levels and distributing size across them, read the
+    'dca_into_position' skill if the Condor skills library is available.
     """
     client = await hummingbot_client.get_client()
     result = await executor_create.create_dca_executor(
@@ -1219,6 +1228,9 @@ async def create_lp_executor(
       create_lp_executor("solana-mainnet-beta", "meteora/clmm", "BONK-SOL", "<pool>",
       lower_price=p*0.8, upper_price=p, side=1, quote_amount=1.0,
       lower_limit_price=p*0.72, upper_limit_price=p*1.1)
+
+    For choosing the pool, sizing the range and picking the side, read the
+    'open_lp_position' skill if the Condor skills library is available.
     """
     client = await hummingbot_client.get_client()
     result = await executor_create.create_lp_executor(
@@ -1336,8 +1348,9 @@ async def stop_executor(
     STOPPING AN ALREADY-TERMINATED EXECUTOR IS A NO-OP, NOT AN ERROR. It returns the
     final close_type instead of a 404, and — for an LP executor — whether a position
     was left open on-chain. A 404 means the id is unknown to the API database. A
-    terminated executor's on-chain position CANNOT be closed by stopping it; see
-    `list_orphaned_positions`.
+    terminated executor's on-chain position CANNOT be closed by stopping it; start from
+    `list_orphaned_positions`, and for the recovery procedure read the
+    'recover_orphaned_position' skill if the Condor skills library is available.
 
     Args:
         executor_id: The executor to stop.
@@ -1372,6 +1385,9 @@ async def list_orphaned_positions() -> str:
     Recover with `manage_clmm(action="close", ...)`, where pool_address is REQUIRED
     because LP-executor positions are opened straight against Gateway and have no row in
     the API database. Then call `resolve_orphaned_position`.
+
+    For the full cross-server procedure, read the 'recover_orphaned_position' skill if
+    the Condor skills library is available.
     """
     client = await hummingbot_client.get_client()
     result = await executors_tools.list_orphaned_positions(client)
@@ -1815,10 +1831,9 @@ async def manage_clmm(
 
     THE UNMANAGED PATH. For normal LP work use `create_lp_executor`, which owns range
     monitoring, rebalancing and bounded close retries. Use this tool when no executor can do
-    that for you — above all to RECOVER AN ORPHANED POSITION: a terminated executor cannot be told
-    to close anything (`stop_executor` on one is correctly a no-op), so the
-    position must be closed by address here, then marked with
-    `resolve_orphaned_position`.
+    that for you — above all to RECOVER AN ORPHANED POSITION, which is closed by address here
+    and then marked with `resolve_orphaned_position`. For that procedure read the
+    'recover_orphaned_position' skill if the Condor skills library is available.
 
     Actions:
     - position_info → your positions in a pool with amounts, range, and uncollected fees
@@ -1831,10 +1846,6 @@ async def manage_clmm(
     remove_liquidity at 100% leaves an EMPTY POSITION OPEN; only `close` closes the account. To
     recover an orphan, use `close`.
 
-    Positions opened by an lp_executor are not in the API database (the bot opens them straight
-    against Gateway), and they close fine anyway: the API never reads `pool_address` on
-    close/collect_fees.
-
     Pool discovery lives in `explore_dex_pools`.
 
     Args:
@@ -1845,8 +1856,10 @@ async def manage_clmm(
         network: Network ID in 'chain-network' format (e.g. 'solana-mainnet-beta', 'ethereum-mainnet').
             For an orphan record this is the `connector_name` field.
         wallet_address: Wallet address (optional, uses default if not provided).
-        pool_address: Pool contract address. Required for open; informational elsewhere —
-            position_info takes no pool filter and close/collect_fees never read it.
+        pool_address: Pool contract address. Required for open. On close/collect_fees pass
+            it whenever you have it — a position opened by an lp_executor has no row in the
+            API database, so the pool cannot be looked up and the call can fail without it.
+            position_info takes no pool filter.
         position_address: Position NFT address (add_liquidity, remove_liquidity, close, collect_fees).
         lower_price: Lower price bound of the range (open).
         upper_price: Upper price bound of the range (open).
