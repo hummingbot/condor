@@ -9,7 +9,8 @@ tools:
 - manage_amm
 - explore_dex_pools
 - get_portfolio_overview
-- get_market_data
+- get_prices
+- get_candles
 - send_notification
 - manage_routines
 - manage_trading_agent

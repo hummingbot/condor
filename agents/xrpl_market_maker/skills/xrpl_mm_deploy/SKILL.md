@@ -87,7 +87,7 @@ One LIMIT/LIMIT_MAKER level per side first; confirm on-ledger before laddering.
 ## Phase 4 — Verify
 
 ```
-get_market_data(data_type="order_book", connector_name="xrpl", trading_pair="<pair>")
+get_order_book(connector_name="xrpl", trading_pair="<pair>")
 ```
 
 Offer must be visible at the expected price.

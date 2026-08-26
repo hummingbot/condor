@@ -333,125 +333,151 @@ async def search_history(
 
 
 @mcp.tool()
-@handle_errors("get market data")
-async def get_market_data(
-    data_type: Literal["prices", "candles", "funding_rate", "order_book"],
-    connector_name: str,
-    trading_pairs: list[str] | None = None,
-    trading_pair: str | None = None,
-    interval: str = "1h",
-    days: int = 30,
-    query_type: (
-        Literal[
-            "snapshot",
-            "volume_for_price",
-            "price_for_volume",
-            "quote_volume_for_price",
-            "price_for_quote_volume",
-        ]
-        | None
-    ) = None,
-    query_value: float | None = None,
-    is_buy: bool = True,
-) -> str:
-    """Get market data: prices, candles, funding rates, or order book data.
-
-    Data Types:
-    - prices: Get latest prices for multiple trading pairs
-    - candles: Get OHLCV candle data for a trading pair
-    - funding_rate: Get perpetual funding rate (connector must have _perpetual)
-    - order_book: Get order book snapshot or queries
+@handle_errors("get prices")
+async def get_prices(connector_name: str, trading_pairs: list[str]) -> str:
+    """Get the latest price for one or more trading pairs on a connector.
 
     Args:
-        data_type: Type of market data to retrieve ('prices', 'candles', 'funding_rate', 'order_book')
         connector_name: Exchange connector name (e.g., 'binance', 'binance_perpetual')
-        trading_pairs: List of trading pairs (required for 'prices', e.g., ['BTC-USDT', 'ETH-USD'])
-        trading_pair: Single trading pair (required for 'candles', 'funding_rate', 'order_book')
-        interval: Candle interval for 'candles' (default: '1h'). Options: '1m', '5m', '15m', '30m', '1h', '4h', '1d'.
-        days: Number of days of historical data for 'candles' (default: 30).
-        query_type: Order book query type for 'order_book' (default: 'snapshot'). Options: 'snapshot',
-            'volume_for_price', 'price_for_volume', 'quote_volume_for_price', 'price_for_quote_volume'.
-        query_value: Value for order book queries (required if query_type is not 'snapshot').
-        is_buy: Side for order book queries (default: True for buy side).
+        trading_pairs: Trading pairs to price (e.g., ['BTC-USDT', 'ETH-USDT'])
+
+    Example:
+    - get_prices("binance", ["BTC-USDT", "ETH-USDT"])
     """
     client = await hummingbot_client.get_client()
 
-    if data_type == "prices":
-        if not trading_pairs:
-            return "Error: 'trading_pairs' is required for data_type='prices'"
-        result = await market_data_tools.get_prices(
-            client=client,
-            connector_name=connector_name,
-            trading_pairs=trading_pairs,
-        )
+    result = await market_data_tools.get_prices(
+        client=client,
+        connector_name=connector_name,
+        trading_pairs=trading_pairs,
+    )
+    return (
+        f"Latest Prices for {result['connector_name']}:\n"
+        f"Timestamp: {result['timestamp']}\n\n"
+        f"{result['prices_table']}"
+    )
+
+
+@mcp.tool()
+@handle_errors("get candles")
+async def get_candles(
+    connector_name: str,
+    trading_pair: str,
+    interval: str = "1h",
+    days: int = 30,
+) -> str:
+    """Get OHLCV candles for a trading pair.
+
+    Args:
+        connector_name: Exchange connector name (e.g., 'binance', 'binance_perpetual')
+        trading_pair: Trading pair (e.g., 'BTC-USDT')
+        interval: Candle interval (default: '1h'). Options: '1m', '5m', '15m', '30m', '1h', '4h', '1d'.
+        days: Number of days of historical data (default: 30).
+
+    Example:
+    - get_candles("binance", "BTC-USDT", interval="1h", days=7)
+    """
+    client = await hummingbot_client.get_client()
+
+    result = await market_data_tools.get_candles(
+        client=client,
+        connector_name=connector_name,
+        trading_pair=trading_pair,
+        interval=interval,
+        days=days,
+    )
+    return (
+        f"Candles for {result['trading_pair']} on {result['connector_name']}:\n"
+        f"Interval: {result['interval']}\n"
+        f"Total Candles: {result['total_candles']}\n\n"
+        f"{result['candles_table']}"
+    )
+
+
+@mcp.tool()
+@handle_errors("get funding rate")
+async def get_funding_rate(connector_name: str, trading_pair: str) -> str:
+    """Get the current perpetual funding rate for a trading pair.
+
+    Args:
+        connector_name: Perpetual connector name, must contain '_perpetual'
+            (e.g., 'binance_perpetual')
+        trading_pair: Trading pair (e.g., 'BTC-USDT')
+
+    Example:
+    - get_funding_rate("binance_perpetual", "BTC-USDT")
+    """
+    client = await hummingbot_client.get_client()
+
+    result = await market_data_tools.get_funding_rate(
+        client=client,
+        connector_name=connector_name,
+        trading_pair=trading_pair,
+    )
+    return (
+        f"Funding Rate for {result['trading_pair']} on {result['connector_name']}:\n\n"
+        f"Funding Rate: {result['funding_rate_pct']:.4f}%\n"
+        f"Mark Price: ${result['mark_price']:.2f}\n"
+        f"Index Price: ${result['index_price']:.2f}\n"
+        f"Next Funding Time: {result['next_funding_time']}"
+    )
+
+
+@mcp.tool()
+@handle_errors("get order book")
+async def get_order_book(
+    connector_name: str,
+    trading_pair: str,
+    query_type: Literal[
+        "snapshot",
+        "volume_for_price",
+        "price_for_volume",
+        "quote_volume_for_price",
+        "price_for_quote_volume",
+    ] = "snapshot",
+    query_value: float | None = None,
+    is_buy: bool = True,
+) -> str:
+    """Get an order book snapshot, or interrogate the book with a depth query.
+
+    Args:
+        connector_name: Exchange connector name (e.g., 'binance', 'binance_perpetual')
+        trading_pair: Trading pair (e.g., 'BTC-USDT')
+        query_type: What to ask the book (default: 'snapshot'). Options: 'snapshot',
+            'volume_for_price', 'price_for_volume', 'quote_volume_for_price',
+            'price_for_quote_volume'.
+        query_value: Value for the query (required for every query_type except 'snapshot').
+        is_buy: Side to query (default: True for buy side).
+
+    Examples:
+    - Top of book: get_order_book("binance", "BTC-USDT")
+    - Price to buy 5 BTC: get_order_book("binance", "BTC-USDT",
+      query_type="price_for_volume", query_value=5, is_buy=True)
+    """
+    client = await hummingbot_client.get_client()
+
+    result = await market_data_tools.get_order_book(
+        client=client,
+        connector_name=connector_name,
+        trading_pair=trading_pair,
+        query_type=query_type,
+        query_value=query_value,
+        is_buy=is_buy,
+    )
+    if result["query_type"] == "snapshot":
         return (
-            f"Latest Prices for {result['connector_name']}:\n"
-            f"Timestamp: {result['timestamp']}\n\n"
-            f"{result['prices_table']}"
+            f"Order Book Snapshot for {result['trading_pair']} on {result['connector_name']}:\n"
+            f"Timestamp: {result['timestamp']}\n"
+            f"Top 10 Levels:\n\n"
+            f"{result['order_book_table']}"
         )
-
-    elif data_type == "candles":
-        if not trading_pair:
-            return "Error: 'trading_pair' is required for data_type='candles'"
-        result = await market_data_tools.get_candles(
-            client=client,
-            connector_name=connector_name,
-            trading_pair=trading_pair,
-            interval=interval,
-            days=days,
-        )
-        return (
-            f"Candles for {result['trading_pair']} on {result['connector_name']}:\n"
-            f"Interval: {result['interval']}\n"
-            f"Total Candles: {result['total_candles']}\n\n"
-            f"{result['candles_table']}"
-        )
-
-    elif data_type == "funding_rate":
-        if not trading_pair:
-            return "Error: 'trading_pair' is required for data_type='funding_rate'"
-        result = await market_data_tools.get_funding_rate(
-            client=client,
-            connector_name=connector_name,
-            trading_pair=trading_pair,
-        )
-        return (
-            f"Funding Rate for {result['trading_pair']} on {result['connector_name']}:\n\n"
-            f"Funding Rate: {result['funding_rate_pct']:.4f}%\n"
-            f"Mark Price: ${result['mark_price']:.2f}\n"
-            f"Index Price: ${result['index_price']:.2f}\n"
-            f"Next Funding Time: {result['next_funding_time']}"
-        )
-
-    elif data_type == "order_book":
-        if not trading_pair:
-            return "Error: 'trading_pair' is required for data_type='order_book'"
-        result = await market_data_tools.get_order_book(
-            client=client,
-            connector_name=connector_name,
-            trading_pair=trading_pair,
-            query_type=query_type or "snapshot",
-            query_value=query_value,
-            is_buy=is_buy,
-        )
-        if result["query_type"] == "snapshot":
-            return (
-                f"Order Book Snapshot for {result['trading_pair']} on {result['connector_name']}:\n"
-                f"Timestamp: {result['timestamp']}\n"
-                f"Top 10 Levels:\n\n"
-                f"{result['order_book_table']}"
-            )
-        else:
-            return (
-                f"Order Book Query for {result['trading_pair']} on {result['connector_name']}:\n\n"
-                f"Query Type: {result['query_type']}\n"
-                f"Query Value: {result['query_value']}\n"
-                f"Side: {result['side']}\n"
-                f"Result: {result['result']}"
-            )
-
-    else:
-        return f"Error: Invalid data_type '{data_type}'. Use 'prices', 'candles', 'funding_rate', or 'order_book'"
+    return (
+        f"Order Book Query for {result['trading_pair']} on {result['connector_name']}:\n\n"
+        f"Query Type: {result['query_type']}\n"
+        f"Query Value: {result['query_value']}\n"
+        f"Side: {result['side']}\n"
+        f"Result: {result['result']}"
+    )
 
 
 @mcp.tool()

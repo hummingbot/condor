@@ -135,7 +135,8 @@ def build_initial_context(
         tool_preload_hint = ""
         if agent_key and not is_pydantic_ai_model(agent_key):
             mcp_tools = [
-                "mcp__mcp-hummingbot__get_market_data",
+                "mcp__mcp-hummingbot__get_prices",
+                "mcp__mcp-hummingbot__get_candles",
                 "mcp__mcp-hummingbot__get_portfolio_overview",
                 "mcp__mcp-hummingbot__manage_executors",
                 "mcp__mcp-hummingbot__manage_bots",

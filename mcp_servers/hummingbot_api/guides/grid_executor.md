@@ -72,7 +72,7 @@ When the user asks for a grid without specifying exact prices, use one of the st
 
 ##### Strategy 1: Percentage-Based (Default)
 
-Fetch current price P first using `get_market_data(data_type="prices", ...)`.
+Fetch current price P first using `get_prices(...)`.
 
 **LONG grid (side=1, bullish) -- expects price to rise:**
 - `end_price`   = P x 1.03   (3% above current -- profit room)
@@ -90,7 +90,7 @@ Fetch current price P first using `get_market_data(data_type="prices", ...)`.
 
 Use when the user mentions "recent range", "volatility", or wants a data-driven grid.
 
-1. Fetch candles: `get_market_data(data_type="candles", interval="1h", days=3, ...)`
+1. Fetch candles: `get_candles(interval="1h", days=3, ...)`
 2. Calculate high and low from the candle data
 3. **LONG grid:** start_price = low, end_price = high, limit_price = low x 0.995
 4. **SHORT grid:** start_price = low, end_price = high, limit_price = high x 1.005

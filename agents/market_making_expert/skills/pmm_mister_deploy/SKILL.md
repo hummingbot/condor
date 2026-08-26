@@ -38,13 +38,13 @@ When managing a running pmm_mister bot, there are **two independent config store
 Fetch candles for the target pair (1h, last 7 days) and current price:
 
 ```
-get_market_data(data_type="candles", connector_name=<connector>, trading_pair=<pair>, interval="1h", days=7)
-get_market_data(data_type="prices", connector_name=<connector>, trading_pairs=[<pair>])
+get_candles(connector_name=<connector>, trading_pair=<pair>, interval="1h", days=7)
+get_prices(connector_name=<connector>, trading_pairs=[<pair>])
 ```
 
 If the pair is on a perpetual connector, also fetch funding rate:
 ```
-get_market_data(data_type="funding_rate", connector_name=<connector_perpetual>, trading_pair=<pair>)
+get_funding_rate(connector_name=<connector_perpetual>, trading_pair=<pair>)
 ```
 
 ---

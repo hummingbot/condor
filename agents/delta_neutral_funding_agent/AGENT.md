@@ -4,7 +4,8 @@ description: Delta-neutral funding specialist — beta-weighted pair market-maki
   HIP-3 perps that harvests net funding carry with market risk hedged out
 agent_key: claude-acp:sonnet
 tools:
-- get_market_data
+- get_prices
+- get_funding_rate
 - get_portfolio_overview
 - manage_executors
 - manage_controllers

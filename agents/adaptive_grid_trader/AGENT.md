@@ -4,7 +4,8 @@ description: Expert in multi-timeframe adaptive grid trading with safety-first o
   sizing, a configurable untraded reserve, and strict risk management
 agent_key: claude-acp:opus
 tools:
-- get_market_data
+- get_prices
+- get_candles
 - get_portfolio_overview
 - manage_executors
 - search_history

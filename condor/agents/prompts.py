@@ -153,7 +153,10 @@ def _build_tool_preload(
     Controller mode preloads the bot/controller tools it actually trades with —
     otherwise the agent burns a tick discovering them.
     """
-    tools = ["mcp__mcp-hummingbot__get_market_data"]
+    tools = [
+        "mcp__mcp-hummingbot__get_prices",
+        "mcp__mcp-hummingbot__get_candles",
+    ]
     if is_controller_mode:
         # Read-only bot/controller queries stay available in dry-run; the
         # permission layer, not the tool list, is what blocks mutation there.

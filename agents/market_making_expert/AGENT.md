@@ -4,7 +4,10 @@ description: Market making specialist — regime detection, spread calibration, 
   inventory management for PMM strategies
 agent_key: claude-acp:sonnet
 tools:
-- get_market_data
+- get_prices
+- get_candles
+- get_funding_rate
+- get_order_book
 - get_portfolio_overview
 - manage_executors
 - manage_controllers
@@ -50,7 +53,7 @@ manage_skill(action="read", name="pmm_mister_deploy")
 ## Advisory flow (when consulted)
 
 1. **Gather data** — use available tools to get the current picture for the pair in question:
-   - `get_market_data` — candles, prices, funding rate
+   - `get_candles`, `get_prices`, `get_funding_rate` — market data reads
    - `get_portfolio_overview` — current balances and inventory distribution
    - `manage_bots(action="status")` — running bots and their state
 

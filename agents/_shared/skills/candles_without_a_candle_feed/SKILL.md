@@ -1,7 +1,7 @@
 ---
 name: candles_without_a_candle_feed
 description: Many connectors (xrpl and every AMM/DEX connector, plus some CEXs) have
-  no candle feed. `get_market_data(data_type="candles")` raises there and no retry
+  no candle feed. `get_candles` raises there and no retry
   will fix it — source the history from a candle-capable proxy or GeckoTerminal instead.
 when_to_use: Any time OHLCV / candles / price history is needed and the connector is
   not on the candle list — typically xrpl, meteora, raydium, orca, uniswap, jupiter and
@@ -15,7 +15,7 @@ source: builtin
 
 ## Candles do not exist on every connector
 
-`get_market_data(data_type="candles", connector_name=...)` first asks the API which
+`get_candles(connector_name=...)` first asks the API which
 connectors have a candle feed, and **raises** if yours is not one of them:
 
 ```
@@ -37,8 +37,8 @@ list the error prints. The list is the authority — never assume from the name.
 Losing candles does **not** mean losing the venue. On a connector with no candle
 feed these are still live and still correct:
 
-- `get_market_data(data_type="prices", trading_pairs=[...])` — the current price
-- `get_market_data(data_type="order_book", ...)` — depth, and the `price_for_volume` /
+- `get_prices(trading_pairs=[...])` — the current price
+- `get_order_book(...)` — depth, and the `price_for_volume` /
   `volume_for_price` queries used for slippage
 - `explore_dex_pools` — pool discovery, TVL, fees, APR (CLMM connectors)
 - Trading itself: quoting, swaps, LP and executor deployment

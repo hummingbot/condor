@@ -11,7 +11,8 @@ tools:
 - manage_routines
 - manage_executors
 - get_portfolio_overview
-- get_market_data
+- get_prices
+- get_candles
 - search_history
 - manage_memory
 - manage_skill

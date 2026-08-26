@@ -17,7 +17,7 @@ until this passes.
 
 ## Step 1 — Gather market data
 
-`get_market_data(data_type="candles", ...)` with:
+`get_candles(...)` with:
 - `connector_name` (e.g. `binance_perpetual`)
 - `trading_pair` (e.g. `BTC-USDT`)
 - `interval` — `1h` swing, `15m` intraday, `1d` position

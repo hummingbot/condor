@@ -9,7 +9,8 @@ tools:
 - explore_dex_pools
 - manage_executors
 - get_portfolio_overview
-- get_market_data
+- get_prices
+- get_candles
 - search_history
 - manage_routines
 - manage_trading_agent

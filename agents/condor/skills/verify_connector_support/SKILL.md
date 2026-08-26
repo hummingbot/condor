@@ -17,6 +17,6 @@ Never guess connector capabilities from memory. Always pull the authoritative so
 1. **LP / CLMM questions** → `manage_executors(executor_type="lp_executor")` — read the "Supported DEXs" section
 2. **AMM swap/pool-creation questions** → `manage_amm()` (no action) — read the connector list
 3. **Pool discovery questions** → `explore_dex_pools` tool description lists supported connectors
-4. **Market data / candle questions** → `get_market_data` guide or the `candles_without_a_candle_feed` skill
+4. **Market data / candle questions** → `get_candles` guide or the `candles_without_a_candle_feed` skill
 
 Then answer from what the guide actually says — not from what you remember.
