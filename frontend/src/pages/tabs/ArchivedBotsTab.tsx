@@ -7,6 +7,7 @@ import { ArchivedPerformanceCharts } from "@/components/charts/ArchivedPerforman
 import { useServer } from "@/hooks/useServer";
 import { api } from "@/lib/api";
 import type { ArchivedBotSummary, ExecutorInfo } from "@/lib/api";
+import { pnlTextClass } from "@/lib/formatters";
 
 function formatUsd(v: number) {
   if (Math.abs(v) >= 1e6) return `$${(v / 1e6).toFixed(2)}M`;
@@ -17,10 +18,6 @@ function formatUsd(v: number) {
 function formatPnl(v: number) {
   const sign = v >= 0 ? "+" : "";
   return `${sign}${formatUsd(v)}`;
-}
-
-function pnlColor(v: number) {
-  return v >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]";
 }
 
 function formatDate(epoch: number | null) {
@@ -176,7 +173,7 @@ function PnlByPairBar({ pair, pnl, maxAbs }: { pair: string; pnl: number; maxAbs
           style={{ width: `${Math.max(pct, 2)}%` }}
         />
       </div>
-      <span className={`w-20 text-right font-mono ${pnlColor(pnl)}`}>
+      <span className={`w-20 text-right font-mono ${pnlTextClass(pnl)}`}>
         {formatPnl(pnl)}
       </span>
     </div>
@@ -291,7 +288,7 @@ function ExecutorTable({ server, dbPath, executorCount }: { server: string; dbPa
                     <td className="px-3 py-1.5 text-right font-mono">
                       {ex.current_price > 0 ? ex.current_price.toPrecision(6) : "—"}
                     </td>
-                    <td className={`px-3 py-1.5 text-right font-mono ${pnlColor(ex.pnl)}`}>
+                    <td className={`px-3 py-1.5 text-right font-mono ${pnlTextClass(ex.pnl)}`}>
                       {formatPnl(ex.pnl)}
                     </td>
                     <td className="px-3 py-1.5 text-right font-mono text-amber-400/80">
@@ -443,7 +440,7 @@ function ArchivedBotDetail({ dbPath, startTime: botStartTime, endTime: botEndTim
           </button>
           <h2 className="text-lg font-semibold">{perf.bot_name}</h2>
         </div>
-        <div className={`flex items-center gap-1 text-lg font-bold ${pnlColor(perf.total_pnl)}`}>
+        <div className={`flex items-center gap-1 text-lg font-bold ${pnlTextClass(perf.total_pnl)}`}>
           {perf.total_pnl >= 0 ? <TrendingUp className="h-5 w-5" /> : <TrendingDown className="h-5 w-5" />}
           {formatPnl(perf.total_pnl)}
         </div>
@@ -451,7 +448,7 @@ function ArchivedBotDetail({ dbPath, startTime: botStartTime, endTime: botEndTim
 
       {/* Stats row */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
-        <StatCard label="Total PnL" value={formatPnl(perf.total_pnl)} className={pnlColor(perf.total_pnl)} />
+        <StatCard label="Total PnL" value={formatPnl(perf.total_pnl)} className={pnlTextClass(perf.total_pnl)} />
         <StatCard label="Volume" value={formatUsd(perf.total_volume)} />
         <StatCard label="Fees" value={formatUsd(perf.total_fees)} />
         <StatCard label="Trades" value={String(perf.trade_count)} />

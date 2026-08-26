@@ -6,6 +6,7 @@ import { NoServerCard } from "@/components/NoServerCard";
 import { FallbackSpinner } from "@/components/ui/FallbackSpinner";
 import { useServer } from "@/hooks/useServer";
 import { api, type BotRunInfo } from "@/lib/api";
+import { pnlTextClass } from "@/lib/formatters";
 
 function formatTimestamp(ts: string | null): string {
   if (!ts) return "—";
@@ -344,7 +345,7 @@ function BotRunRow({
   const deplClass = DEPLOYMENT_COLORS[run.deployment_status] ?? "bg-[var(--color-surface)] text-[var(--color-text-muted)]";
   const isArchived = run.deployment_status === "ARCHIVED";
   const pnl = run.global_pnl_quote;
-  const pnlColor = pnl > 0 ? "text-[var(--color-green)]" : pnl < 0 ? "text-[var(--color-red)]" : "text-[var(--color-text-muted)]";
+  const pnlClass = pnlTextClass(pnl);
 
   return (
     <tr className={`border-b border-[var(--color-border)]/30 transition-colors ${isDeleting ? "opacity-40" : "hover:bg-[var(--color-surface-hover)]/50"}`}>
@@ -387,7 +388,7 @@ function BotRunRow({
           )}
         </div>
       </td>
-      <td className={`px-4 py-2.5 text-right tabular-nums font-medium ${pnlColor}`}>
+      <td className={`px-4 py-2.5 text-right tabular-nums font-medium ${pnlClass}`}>
         {formatPnl(pnl)}
       </td>
       <td className="px-4 py-2.5 text-right text-[var(--color-text-muted)] tabular-nums">

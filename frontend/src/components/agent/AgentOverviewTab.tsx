@@ -11,7 +11,7 @@ import { useCallback, useMemo, useState } from "react";
 import { AgentPnlChart, sessionsToDataPoints } from "@/components/agent/AgentPnlChart";
 import { ModeBadge } from "@/components/agent/ModeBadge";
 import { api } from "@/lib/api";
-import { formatCurrency, formatCurrencyPnl, formatCurrencyVolume } from "@/lib/formatters";
+import { formatCurrency, formatCurrencyPnl, formatCurrencyVolume, pnlTextClass } from "@/lib/formatters";
 
 // ── Markdown Editor ──
 
@@ -97,7 +97,7 @@ export function InstanceCard({ instance }: { instance: import("@/lib/api").Runni
         </div>
         <div className="flex items-center gap-3 text-xs text-[var(--color-text-muted)]">
           <span>Ticks: {instance.tick_count}</span>
-          <span className={instance.daily_pnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]"}>
+          <span className={pnlTextClass(instance.daily_pnl)}>
             PnL: {formatCurrencyPnl(instance.daily_pnl)}
           </span>
         </div>
@@ -179,7 +179,7 @@ export function PerformancePanel({
   const volume = Number(totals.volume ?? 0);
   const fees = Number(totals.fees ?? 0);
   const openPos = Number(totals.open_positions ?? 0);
-  const pnlColor = totalPnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]";
+  const pnlClass = pnlTextClass(totalPnl);
 
   // Only sessions whose closes carry an outcome can be averaged. A bot-mode
   // session reports its closes with win_rate === null (the controller snapshot
@@ -209,7 +209,7 @@ export function PerformancePanel({
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-4 lg:grid-cols-8">
           <div>
             <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Total PnL</span>
-            <span className={`text-lg font-mono font-semibold ${pnlColor}`}>
+            <span className={`text-lg font-mono font-semibold ${pnlClass}`}>
               {formatCurrencyPnl(totalPnl)}
             </span>
           </div>
@@ -296,7 +296,7 @@ export function PerformancePanel({
                   .slice()
                   .sort((a, b) => (b.kind === a.kind ? b.session_num - a.session_num : a.kind === "experiment" ? 1 : -1))
                   .map((s) => {
-                    const pnlCol = s.total_pnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]";
+                    const pnlCol = pnlTextClass(s.total_pnl);
                     const isExperiment = s.kind === "experiment";
                     return (
                       <tr

@@ -28,7 +28,7 @@ import { MODE_STYLES } from "@/components/agent/modeStyles";
 import { ToolCallStatusIcon } from "@/components/chat/ToolCallStatus";
 import { ReportViewer } from "@/components/routines/ReportViewer";
 import { type ExperimentInfo, type SessionInfo, api } from "@/lib/api";
-import { formatCurrencyPnl, formatDateTime, formatToolName } from "@/lib/formatters";
+import { formatCurrencyPnl, formatDateTime, formatToolName, pnlTextClass } from "@/lib/formatters";
 import { type ParsedJournal, type ParsedSnapshot, parseJournal, parseSnapshot } from "@/lib/parse-agent";
 
 // Two views, not three. "Activity" used to be a tab of its own holding the
@@ -254,7 +254,7 @@ export function SessionReviewer({
 
   // PnL for current session
   const pnl = sessionPerf?.total_pnl ?? 0;
-  const pnlColor = pnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]";
+  const pnlClass = pnlTextClass(pnl);
 
   // Visible sub-tabs depend on kind
   const visibleSubTabs = isExperiment
@@ -391,7 +391,7 @@ export function SessionReviewer({
               </span>
             )}
             {!isExperiment && (
-              <span className={`text-sm font-mono font-semibold ${pnlColor}`}>
+              <span className={`text-sm font-mono font-semibold ${pnlClass}`}>
                 {formatCurrencyPnl(pnl)}
               </span>
             )}

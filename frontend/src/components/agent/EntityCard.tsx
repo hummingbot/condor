@@ -3,7 +3,7 @@ import { ChevronRight, Trash2, type LucideIcon } from "lucide-react";
 import { deriveAgentStatus } from "@/components/agent/agentStatus";
 import { StatusBadge } from "@/components/agent/StatusBadge";
 import type { RunningInstance } from "@/lib/api";
-import { formatCurrencyPnl } from "@/lib/formatters";
+import { formatCurrencyPnl, pnlTextClass } from "@/lib/formatters";
 
 // ── Entity Card ──
 //
@@ -40,9 +40,9 @@ export function EntityCard({
   onDelete: () => void;
 }) {
   const totalPnl = entity.total_pnl ?? 0;
-  const totalPnlColor = totalPnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]";
+  const totalPnlColor = pnlTextClass(totalPnl);
   const dayPnl = entity.daily_pnl ?? 0;
-  const dayPnlColor = dayPnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]";
+  const dayPnlColor = pnlTextClass(dayPnl);
   const status = deriveAgentStatus(entity);
   const isLive = status === "running";
 

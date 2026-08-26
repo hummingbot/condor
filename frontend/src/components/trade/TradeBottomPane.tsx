@@ -13,6 +13,7 @@ import {
   formatPriceSig,
   formatUsd,
   pnlColor,
+  pnlTextClass,
   isExecutorActive,
 } from "@/lib/formatters";
 
@@ -651,7 +652,7 @@ export function TradeBottomPane({
                             {pos.leverage > 1 && (
                               <span className="text-[10px] text-[var(--color-text-muted)]">{pos.leverage}x</span>
                             )}
-                            <span className={`font-mono font-medium ${pos.unrealized_pnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]"}`}>
+                            <span className={`font-mono font-medium ${pnlTextClass(pos.unrealized_pnl)}`}>
                               {fmtPnl(pos.unrealized_pnl)}
                             </span>
                             <button
@@ -670,7 +671,7 @@ export function TradeBottomPane({
                         </div>
                         <div className="mt-1 flex items-center gap-3 text-[10px] text-[var(--color-text-muted)]">
                           <span>
-                            Realized: <span className={`font-mono ${pos.realized_pnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]"}`}>
+                            Realized: <span className={`font-mono ${pnlTextClass(pos.realized_pnl)}`}>
                               {fmtPnl(pos.realized_pnl)}
                             </span>
                           </span>

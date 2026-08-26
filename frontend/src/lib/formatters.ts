@@ -67,8 +67,20 @@ export function formatCurrencyPnl(val: number, symbol = "$") {
   return prefix + formatCurrency(val, symbol);
 }
 
+// Single source of truth for the PnL sign encoding (>= 0 green, < 0 red), in the
+// two forms the codebase consumes. They are NOT interchangeable — both are
+// `string`, so handing one to the other's consumer renders an unstyled or
+// invisible number with no TS or build error. Same split as `MODE_STYLES` in
+// components/agent/modeStyles.ts: one source of truth, one variant per sink.
+
+/** CSS color value — for `style={{ color: pnlColor(x) }}` and chart/theme options. */
 export function pnlColor(val: number) {
   return val >= 0 ? "var(--color-green)" : "var(--color-red)";
+}
+
+/** Tailwind text-color class — for `className={pnlTextClass(x)}`. */
+export function pnlTextClass(val: number) {
+  return val >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]";
 }
 
 // Backward-compatible aliases (default to $)

@@ -19,7 +19,7 @@ import { snapshotQueryOptions, useSnapshotBubbles } from "@/hooks/useSnapshotBub
 import { type AgentExecutorRow, type AgentPerformance, type ExecutorInfo, api } from "@/lib/api";
 import { groupExecutorsByMarket } from "@/lib/executor-overlays";
 import { type ParsedJournal, type ParsedSnapshot, parseSnapshot } from "@/lib/parse-agent";
-import { formatCompactUsd, formatCurrencyPnl, toolCallState } from "@/lib/formatters";
+import { formatCompactUsd, formatCurrencyPnl, pnlTextClass, toolCallState } from "@/lib/formatters";
 import { useRates } from "@/hooks/useRates";
 import { DetailPanel, ExecutorTable, type SortDir, type SortKey } from "@/components/executor/ExecutorTable";
 
@@ -137,7 +137,7 @@ export function SessionKpis({
         <Kpi
           label="Total PnL"
           value={formatCurrencyPnl(total)}
-          className={total >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]"}
+          className={pnlTextClass(total)}
         />
         <Kpi label="Realized" value={formatCurrencyPnl(perf?.realized_pnl ?? 0)} />
         <Kpi label="Unrealized" value={formatCurrencyPnl(perf?.unrealized_pnl ?? 0)} />
@@ -221,7 +221,7 @@ export function SessionBots({ perf }: { perf?: AgentPerformance | null }) {
                 >
                   {live ? "running" : "stopped"}
                 </span>
-                <span className={`ml-auto font-mono text-xs ${realized >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]"}`}>
+                <span className={`ml-auto font-mono text-xs ${pnlTextClass(realized)}`}>
                   {formatCurrencyPnl(realized)}
                 </span>
                 <span className="font-mono text-[10px] text-[var(--color-text-muted)]">{formatCompactUsd(volume)} vol</span>
@@ -622,7 +622,7 @@ export function SessionExecutors({
                       <td className="py-2 pr-3 text-right font-mono text-[var(--color-text)]">{Math.abs(amount).toFixed(4)}</td>
                       <td className="py-2 pr-3 text-right font-mono text-[var(--color-text-muted)]">${entry.toFixed(2)}</td>
                       <td className="py-2 pr-3 text-right font-mono text-[var(--color-text)]">${current.toFixed(2)}</td>
-                      <td className={`py-2 pr-3 text-right font-mono ${upnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]"}`}>
+                      <td className={`py-2 pr-3 text-right font-mono ${pnlTextClass(upnl)}`}>
                         {formatCurrencyPnl(upnl)}
                       </td>
                       <td className="py-2 text-right font-mono text-[var(--color-text-muted)]">{p.leverage ? `${p.leverage}x` : "—"}</td>
@@ -649,7 +649,7 @@ export function SessionExecutors({
                   className="text-xs font-medium text-[var(--color-text)]"
                 />
                 <span className="text-[10px] text-[var(--color-text-muted)]">{group[0].connector}</span>
-                <span className={`ml-auto font-mono text-xs ${pairPnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]"}`}>
+                <span className={`ml-auto font-mono text-xs ${pnlTextClass(pairPnl)}`}>
                   {formatCurrencyPnl(pairPnl)}
                 </span>
                 <span className="text-[10px] text-[var(--color-text-muted)]">{group.length} exec</span>
