@@ -1842,6 +1842,64 @@ export const api = {
       `/api/v1/agents/${encodeURIComponent(slug)}/memories/${encodeURIComponent(name)}`,
     ),
 
+  /** Add a playbook to this Agent's own library. Publishing to the shared one
+   *  is Condor's decision alone, so there is no `shared` flag to pass. */
+  createAgentSkill: (
+    slug: string,
+    data: {
+      name: string;
+      description: string;
+      when_to_use: string;
+      body: string;
+      references_routine?: string;
+    },
+  ) =>
+    apiFetch<{ saved: boolean; name: string }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/skills`,
+      { method: "POST", body: JSON.stringify(data) },
+    ),
+
+  /** Patch a playbook. Omitted fields are left alone; `references_routine: ""`
+   *  unlinks the routine, which is why it is only sent when it changed. */
+  updateAgentSkill: (
+    slug: string,
+    name: string,
+    data: {
+      description?: string;
+      when_to_use?: string;
+      body?: string;
+      references_routine?: string;
+    },
+  ) =>
+    apiFetch<SkillBody>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/skills/${encodeURIComponent(name)}`,
+      { method: "PUT", body: JSON.stringify(data) },
+    ),
+
+  deleteAgentSkill: (slug: string, name: string) =>
+    apiFetch<{ deleted: boolean }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/skills/${encodeURIComponent(name)}`,
+      { method: "DELETE" },
+    ),
+
+  /** Create or overwrite one of your memories with this Agent — the store keys
+   *  on the slug, so one call serves both. */
+  saveAgentMemory: (
+    slug: string,
+    name: string,
+    data: { content: string; description: string; type?: string },
+  ) =>
+    apiFetch<{ saved: boolean; name: string }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/memories/${encodeURIComponent(name)}`,
+      { method: "PUT", body: JSON.stringify(data) },
+    ),
+
+  deleteAgentMemory: (slug: string, name: string) =>
+    apiFetch<{ deleted: boolean }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/memories/${encodeURIComponent(name)}`,
+      { method: "DELETE" },
+    ),
+
   createAgent: (data: {
     name: string;
     description?: string;

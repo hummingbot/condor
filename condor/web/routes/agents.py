@@ -374,6 +374,35 @@ class UpdateAgentMdRequest(BaseModel):
     content: str
 
 
+class SkillWriteRequest(BaseModel):
+    """A playbook, created or patched from the knowledge panel.
+
+    Every field is optional so an edit can move one line without restating the
+    playbook; ``create`` enforces its own required set (name, description,
+    when_to_use, body) and answers with an error the route turns into a 400.
+    ``references_routine=""`` clears the reference, which is why it defaults to
+    ``None`` — "leave it alone" and "unlink it" are different requests.
+    """
+
+    name: str = ""
+    description: str = ""
+    when_to_use: str = ""
+    body: str = ""
+    references_routine: str | None = None
+
+
+class MemoryWriteRequest(BaseModel):
+    """One thing the Agent should remember about the caller.
+
+    ``MemoryStore.write`` creates or overwrites by slug, so this is the payload
+    for both — the URL carries the name.
+    """
+
+    content: str
+    description: str
+    type: str = "fact"
+
+
 class AgentConfigRequest(BaseModel):
     """The few front-matter fields worth a control instead of a text editor.
 
@@ -1191,6 +1220,117 @@ async def get_agent_memory(
     return MemoryBody(name=name, body=body)
 
 
+# ── The brain, written back ──
+#
+# The stores behind these already own every rule that matters — a shared
+# playbook is read-only for the agent that only inherits it, a memory belongs to
+# one ``(agent, user)`` pair — and they signal a refusal by *returning* an
+# ``{"error": ...}`` dict rather than raising. So each route below is the same
+# three lines: call the store, turn an error dict into a 400, hand back what the
+# panel needs to re-render. Nothing here re-implements a guard.
+
+
+def _store_result(result: dict) -> dict:
+    """Pass a store's answer through, or raise its refusal as a 400."""
+    if isinstance(result, dict) and result.get("error"):
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+
+@router.post("/{slug}/skills")
+async def create_agent_skill(
+    slug: str, req: SkillWriteRequest, user: WebUser = Depends(get_current_user)
+):
+    """Add a playbook to this Agent's own library.
+
+    ``shared`` is deliberately not accepted: publishing to every assistant is
+    Condor's own decision (see ``SkillStore.can_publish``) and is not something
+    a panel button should do silently.
+    """
+    agent = _get_agent(slug)
+    return _store_result(
+        _skill_store_for(agent.slug).create(
+            name=req.name,
+            description=req.description,
+            when_to_use=req.when_to_use,
+            body=req.body,
+            references_routine=req.references_routine,
+            source="web",
+        )
+    )
+
+
+@router.put("/{slug}/skills/{name}")
+async def update_agent_skill(
+    slug: str,
+    name: str,
+    req: SkillWriteRequest,
+    user: WebUser = Depends(get_current_user),
+):
+    """Patch one of the Agent's playbooks, leaving unsent fields alone."""
+    agent = _get_agent(slug)
+    fields: dict[str, Any] = {}
+    for key in ("description", "when_to_use", "body"):
+        if getattr(req, key):
+            fields[key] = getattr(req, key)
+    # `None` means "leave it alone"; `""` means "unlink the routine".
+    if req.references_routine is not None:
+        fields["references_routine"] = req.references_routine
+    return _store_result(_skill_store_for(agent.slug).edit(name, **fields))
+
+
+@router.delete("/{slug}/skills/{name}")
+async def delete_agent_skill(
+    slug: str, name: str, user: WebUser = Depends(get_current_user)
+):
+    """Delete one of the Agent's playbooks. Refuses an inherited shared one."""
+    agent = _get_agent(slug)
+    # `delete` answers `True`, `False` for an unknown slug, or a refusal dict.
+    result = _skill_store_for(agent.slug).delete(name)
+    if isinstance(result, dict):
+        raise HTTPException(
+            status_code=400, detail=result.get("error", f"Cannot delete '{name}'")
+        )
+    if not result:
+        raise HTTPException(status_code=404, detail=f"Skill '{name}' not found")
+    return {"deleted": True}
+
+
+@router.put("/{slug}/memories/{name}")
+async def save_agent_memory(
+    slug: str,
+    name: str,
+    req: MemoryWriteRequest,
+    user: WebUser = Depends(get_current_user),
+):
+    """Write one of the caller's memories with this Agent — create or overwrite.
+
+    Scoped to ``(agent, caller)`` like the read above, so this can only ever
+    touch the memories this user's own conversations with the Agent produced.
+    """
+    agent = _get_agent(slug)
+    return _store_result(
+        _memory_store_for(agent.slug, user.id).write(
+            name=name,
+            content=req.content,
+            description=req.description,
+            type=req.type,
+            source="web",
+        )
+    )
+
+
+@router.delete("/{slug}/memories/{name}")
+async def delete_agent_memory(
+    slug: str, name: str, user: WebUser = Depends(get_current_user)
+):
+    """Forget one of the caller's memories with this Agent."""
+    agent = _get_agent(slug)
+    if not _memory_store_for(agent.slug, user.id).delete(name, source="web"):
+        raise HTTPException(status_code=404, detail=f"Memory '{name}' not found")
+    return {"deleted": True}
+
+
 @router.post("", response_model=AgentSummary)
 async def create_agent(
     req: CreateAgentRequest, user: WebUser = Depends(get_current_user)
@@ -1286,7 +1426,14 @@ async def delete_agent(slug: str, user: WebUser = Depends(get_current_user)):
                 status_code=400,
                 detail="Cannot delete an Agent with running strategies. Stop them first.",
             )
-    _agent_store().delete(slug)
+    try:
+        _agent_store().delete(slug)
+    except ValueError as exc:
+        # `condor` is reserved — deleting the default agent's AGENT.md would
+        # leave every unbound session without instructions or a model. The store
+        # has always refused it; unhandled here that refusal reached the browser
+        # as a 500, which reads as a broken server rather than a rule.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"deleted": True}
 
 
