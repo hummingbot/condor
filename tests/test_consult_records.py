@@ -343,3 +343,26 @@ def test_a_live_delegation_is_excluded_when_the_caller_asks_for_consults(_routes
 
     assert _routes(7) == {"scout-delegate-live", "scout-consult-b"}
     assert _routes(7, kind=KIND_CONSULT) == {"scout-consult-b"}
+
+
+def test_a_consult_row_opens_into_the_same_sheet(monkeypatch):
+    """The sheet fetches the record it was handed a summary of, kind regardless."""
+    import config_manager
+    from condor.web.models import WebUser
+    from condor.web.routes.agents import get_delegation_status
+
+    monkeypatch.setattr(config_manager, "get_config_manager", _FakeConfigManager)
+    _consult(monkeypatch, caller="condor")
+    task_id = _only_record()["task_id"]
+
+    record = asyncio.run(
+        get_delegation_status(task_id, user=WebUser(id=7, role="user"))
+    )
+    assert record["kind"] == KIND_CONSULT
+    assert record["result"] == "the funding is 3bps"
+
+    # And it is not a stranger's to open: the owner is a path segment, so a
+    # scoped read cannot name it at all.
+    with pytest.raises(Exception) as exc:
+        asyncio.run(get_delegation_status(task_id, user=WebUser(id=8, role="user")))
+    assert getattr(exc.value, "status_code", None) == 404
