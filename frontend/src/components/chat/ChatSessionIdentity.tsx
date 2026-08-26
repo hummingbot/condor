@@ -31,6 +31,7 @@ export function ChatSessionIdentity({
   agentBindings,
   isStreaming,
   onSelectBrain,
+  onSelectServer,
 }: {
   /** The conversation on screen, or null when there is none yet. */
   slot: ChatSlot | null;
@@ -39,6 +40,13 @@ export function ChatSessionIdentity({
   agentBindings: AgentBindingOption[];
   isStreaming: boolean;
   onSelectBrain: (selection: BrainSelection) => void;
+  /**
+   * Move the conversation to another server. Handed in for the same reason the
+   * brain is: the switch can be refused, and the failure has to land in the
+   * banner the thread owns — not float away as an unhandled rejection while the
+   * chip keeps naming the old account (CORR-225).
+   */
+  onSelectServer: (serverName: string) => void;
 }) {
   const chat = useChat();
 
@@ -70,7 +78,7 @@ export function ChatSessionIdentity({
           agentSlug={slot.info.agent_slug}
           label={slot.info.label}
           disabled={busy}
-          onSelect={(name) => chat.switchServer(slot.info.slot_id, name)}
+          onSelect={onSelectServer}
         />
       )}
     </>

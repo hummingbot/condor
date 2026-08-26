@@ -62,7 +62,8 @@ export function AgentChatTab() {
     defaultAgent,
   } = useSessionOptions();
 
-  const { switchBrain, switchError, dismissSwitchError } = useBrainSwitch();
+  const { switchBrain, switchServer, switchError, dismissSwitchError } =
+    useBrainSwitch();
   const [railOpen, setRailOpen] = useState(false);
   /** The rail row selected while no session exists yet, to colour the hero. */
   const [pendingAgent, setPendingAgent] = useState<AgentSummary | null>(null);
@@ -341,6 +342,9 @@ export function AgentChatTab() {
                 agentBindings={agentBindings}
                 isStreaming={isActiveStreaming}
                 onSelectBrain={switchBrain}
+                onSelectServer={(name) => {
+                  if (activeSlot) switchServer(activeSlot.info.slot_id, name);
+                }}
               />
               {/* What the thing on the other side of this conversation
                   actually knows — its brain, playbooks, memories, tools,
