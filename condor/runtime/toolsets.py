@@ -97,6 +97,13 @@ def seat_profile(agent_slug: str | None, tick: bool) -> str:
     watching and the same specialist ticking unattended are different seats, and
     neither ``agent_slug`` nor ``--delegate-worker`` tells them apart, which is
     why ``tick`` is passed in rather than derived.
+
+    Attendance is necessary for ``full`` but not sufficient: what separates it
+    from ``agent`` is the admin ring, and that ring is the *server owner's*.
+    :func:`build_mcp_servers_for_session` downgrades a ``full`` seat to ``agent``
+    once it knows which server the run resolved onto and that the caller does not
+    own it (SEC-252) — a question this function cannot answer, since no server is
+    resolved yet when it is called.
     """
     from condor.memory.paths import CHAT_SLUG
 
@@ -204,7 +211,11 @@ def build_mcp_servers_for_session(
     ``tick`` marks the unattended loop seat, which mounts the narrowest tool
     profile on both subprocesses (FEAT-066). See :func:`seat_profile`.
     """
-    from config_manager import get_config_manager, get_effective_server
+    from config_manager import (
+        ServerPermission,
+        get_config_manager,
+        get_effective_server,
+    )
 
     cm = get_config_manager()
     profile = seat_profile(agent_slug, tick)
@@ -231,6 +242,24 @@ def build_mcp_servers_for_session(
         yield accessible[0] if accessible else None
 
     server_name = next((name for name in candidates() if usable(name)), None)
+
+    # The admin ring belongs to the server's owner (SEC-252). ``full`` is the
+    # only profile that mounts ADMIN_TOOLS on mcp-hummingbot — configure_server,
+    # manage_gateway_config, manage_gateway_container — and those act on the
+    # resolved server with the OWNER's credentials, injected into the env below,
+    # while enforcing no permission of their own: the subprocess has no notion of
+    # the calling user, so nothing downstream can. Every other surface already
+    # draws that line — ``require_owner`` for the dashboard's gateway lifecycle,
+    # ``require_gateway_owner`` for Telegram's token list — so a chat seat must
+    # draw it too. It can only be drawn here: ``seat_profile`` knows attendance,
+    # and this is the first point that also knows *whose* server the seat landed
+    # on. ``agent`` keeps every trading and liquidity tool, so a user shared in as
+    # TRADER loses nothing they were ever permitted to do, and
+    # ``get_server_permission`` answers OWNER for admins — the same free bypass
+    # ``require_owner`` grants them.
+    if profile == "full" and server_name:
+        if cm.get_server_permission(user_id, server_name) != ServerPermission.OWNER:
+            profile = "agent"
 
     # Condor MCP -- runs as stdio subprocess, tools work locally without TCP bridge
     # Pass resolved server_name so start_agent uses the correct server

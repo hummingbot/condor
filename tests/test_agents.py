@@ -736,6 +736,11 @@ def test_numeric_credentials_reach_the_subprocess_as_strings(monkeypatch):
             # existence. This double owns the server it hands out.
             return True
 
+        def get_server_permission(self, user_id, server_name):
+            from config_manager import ServerPermission
+
+            return ServerPermission.OWNER
+
     monkeypatch.setattr(
         config_manager, "get_config_manager", lambda: _NumericPasswordServer()
     )

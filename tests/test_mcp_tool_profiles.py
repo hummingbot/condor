@@ -253,3 +253,92 @@ def test_a_tick_session_mounts_the_narrow_surface_on_both_servers(monkeypatch):
     by_name = {s["name"]: s["args"] for s in servers}
     for args in by_name.values():
         assert args[args.index("--profile") + 1] == "tick"
+
+
+# ── the admin ring is the server owner's (SEC-252) ───────────────────────────
+
+
+def _session_profiles(monkeypatch, permission, **kwargs) -> dict[str, str]:
+    """``{mcp server name: profile}`` for a chat seat on a server the caller
+    holds at ``permission``."""
+    import condor.runtime.toolsets as toolsets
+
+    class _CM:
+        def get_server(self, name):
+            return {"host": "h", "port": 1, "username": "u", "password": "p"}
+
+        def has_server_access(self, user_id, name, *a, **kw):
+            return permission is not None
+
+        def get_server_permission(self, user_id, name):
+            return permission
+
+        def get_accessible_servers(self, user_id):
+            return ["local"] if permission is not None else []
+
+    monkeypatch.setattr(
+        "config_manager.get_config_manager", lambda: _CM(), raising=False
+    )
+    monkeypatch.setattr(
+        "config_manager.get_effective_server", lambda *a, **k: "local", raising=False
+    )
+    servers = toolsets.build_mcp_servers_for_session(42, 42, **kwargs)
+    return {s["name"]: s["args"][s["args"].index("--profile") + 1] for s in servers}
+
+
+def test_a_shared_trader_chat_does_not_mount_the_admin_ring(monkeypatch):
+    """The defect: the seat is `full` on attendance alone, so a user shared into
+    someone else's server could stop their Gateway container from chat while the
+    dashboard and Telegram both answer "Owner access required"."""
+    from config_manager import ServerPermission
+
+    profiles = _session_profiles(monkeypatch, ServerPermission.TRADER)
+    assert profiles["mcp-hummingbot"] == "agent"
+    assert profiles["condor"] == "agent"
+    assert HB_ADMIN.isdisjoint(_registered(hb_server, profiles["mcp-hummingbot"]))
+
+
+def test_a_shared_trader_keeps_every_tool_they_were_permitted(monkeypatch):
+    """The downgrade lands on `agent`, not `tick`: a trader loses the operator
+    surface and nothing else."""
+    from config_manager import ServerPermission
+
+    profiles = _session_profiles(monkeypatch, ServerPermission.TRADER)
+    assert (
+        _registered(hb_server, profiles["mcp-hummingbot"]) == HB_TRADING | HB_LIQUIDITY
+    )
+    assert _registered(condor_server, profiles["condor"]) == (
+        CONDOR_COMMON | CONDOR_ORCHESTRATION
+    )
+
+
+def test_the_owner_chat_still_mounts_the_admin_ring(monkeypatch):
+    """``get_server_permission`` answers OWNER for the owner *and* for an admin,
+    the same free bypass ``require_owner`` grants — so both keep the ring."""
+    from config_manager import ServerPermission
+
+    profiles = _session_profiles(monkeypatch, ServerPermission.OWNER)
+    assert profiles == {"mcp-hummingbot": "full", "condor": "full"}
+    assert HB_ADMIN <= _registered(hb_server, "full")
+
+
+def test_a_bound_specialist_and_a_tick_are_unaffected(monkeypatch):
+    """They were never `full`; the gate only ever narrows that one seat."""
+    from config_manager import ServerPermission
+
+    for permission in (ServerPermission.OWNER, ServerPermission.TRADER):
+        bound = _session_profiles(
+            monkeypatch, permission, agent_slug="adaptive_grid_trader"
+        )
+        assert set(bound.values()) == {"agent"}
+        tick = _session_profiles(
+            monkeypatch, permission, agent_slug="adaptive_grid_trader", tick=True
+        )
+        assert set(tick.values()) == {"tick"}
+
+
+def test_a_seat_with_no_server_never_reaches_the_admin_ring(monkeypatch):
+    """No resolved server means no mcp-hummingbot at all, so no ring to gate;
+    the condor seat is unchanged (`agent` and `full` register the same set)."""
+    profiles = _session_profiles(monkeypatch, None)
+    assert "mcp-hummingbot" not in profiles
