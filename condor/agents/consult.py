@@ -8,6 +8,14 @@ claude-code (unrestricted, mutations still confirmation-gated); a pydantic-ai ke
 whose local backend is down falls back to claude-code — and return its answer text.
 No strategy is involved — CONSULT runs the Agent's identity + shared memory/skills.
 
+Since FEAT-058 a consult also *leaves a record*. It is the channel every other
+agent, the Telegram bot and the dashboard actually use -- dozens of runs where a
+delegation happens once -- and until now every one of them ran and then vanished
+without a trace. Each consult now writes a small ledger entry into the same
+per-user store delegations use (:mod:`condor.agents.run_records`): the ask, the
+caller, the outcome, the timing. Not a transcript -- see that module for why the
+ledger and the tape are different questions.
+
 The Agent may call mutating tools; those are gated by the SAME interactive
 confirmation flow condor uses, routed to the user's Telegram chat. Approvals live
 in :mod:`condor.runtime.confirmations` as addressable entries, so the user's
@@ -17,20 +25,30 @@ awaiting the consult result — and it can be answered from the dashboard instea
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+import time
+import uuid
 
 from condor.acp.pydantic_ai_client import (
     healthcheck_local_backend,
     is_pydantic_ai_model,
 )
 from condor.agents.agent import AgentStore
+from condor.agents.run_records import KIND_CONSULT, record_run
 from condor.preferences import resolve_custom_endpoint
 from condor.runtime import context as runtime_context
 from condor.runtime import toolsets
 from condor.runtime.channels import TelegramChannel
 
 log = logging.getLogger(__name__)
+
+# How much of an answer the ledger keeps -- the same 2000 characters every other
+# body in this store is cut at (``delegate.MAX_TOOL_OUTPUT``), stated separately
+# because it bounds a different thing: a record is a row in a list, not a second
+# copy of the answer. The answer itself is returned to the caller uncut.
+MAX_RECORDED_RESULT = 2000
 
 
 def _build_consult_permission_cb(slug: str, user_id: int, chat_id: int):
@@ -60,6 +78,16 @@ def _build_consult_permission_cb(slug: str, user_id: int, chat_id: int):
     return None
 
 
+def _clip(text: str) -> str:
+    """An answer, bounded for the ledger."""
+    text = text or ""
+    return (
+        text
+        if len(text) <= MAX_RECORDED_RESULT
+        else text[:MAX_RECORDED_RESULT] + "\n… (truncated)"
+    )
+
+
 async def run_consult(
     slug: str,
     user_id: int,
@@ -67,6 +95,7 @@ async def run_consult(
     server_name: str | None,
     task: str,
     context: str = "",
+    caller: str = "",
 ) -> str:
     """Consult the Agent ``slug`` with ``task`` and return its answer.
 
@@ -74,17 +103,62 @@ async def run_consult(
     user's Telegram chat. Its async, unattended sibling is DELEGATE
     (:mod:`condor.agents.delegate`), which reuses :func:`_run_agent_to_completion`
     with ``permission_callback=None`` (auto-approve).
+
+    Every consult leaves a **record** (FEAT-058), which is the whole reason this
+    function is more than a one-line forward to the engine. Consults are the
+    channel every other agent, the bot and the dashboard actually use; before
+    this each one ran, spent tokens, possibly called mutating tools, and then
+    vanished. Now the same store delegations use gets a small ledger entry: what
+    was asked, who asked (``caller`` -- an agent's slug, "" when a person asked
+    directly), when, and how it ended.
+
+    The write at the *start* is the load-bearing one -- it is what makes a
+    consult the process died during read back as ``interrupted`` rather than as
+    nothing at all. Every write is best-effort and swallowed inside
+    :func:`~condor.agents.run_records.record_run`: bookkeeping must never be why
+    a consult failed, and a failing consult must still raise to its caller.
     """
     permission_cb = _build_consult_permission_cb(slug, user_id, chat_id)
-    return await _run_agent_to_completion(
-        slug=slug,
-        user_id=user_id,
-        chat_id=chat_id,
-        server_name=server_name,
-        task=task,
-        context=context,
-        permission_callback=permission_cb,
-    )
+
+    run_id = f"{slug}-consult-{uuid.uuid4().hex[:8]}"
+    started_at = time.time()
+    # Same shape as a delegation id, and the ``-consult-`` infix is what keeps
+    # the two from ever colliding in a directory they now share.
+    stamp = {
+        "user_id": user_id,
+        "run_id": run_id,
+        "agent_slug": slug,
+        "kind": KIND_CONSULT,
+        "task": task,
+        "started_at": started_at,
+        "chat_id": chat_id,
+        "server_name": server_name,
+        "caller": caller,
+    }
+    record_run(state="running", **stamp)
+
+    try:
+        answer = await _run_agent_to_completion(
+            slug=slug,
+            user_id=user_id,
+            chat_id=chat_id,
+            server_name=server_name,
+            task=task,
+            context=context,
+            permission_callback=permission_cb,
+        )
+    except asyncio.CancelledError:
+        # The caller disconnected or the MCP timeout fired. A record left saying
+        # "running" would read as interrupted on the next boot and as live until
+        # then; stopped is what actually happened.
+        record_run(state="stopped", **stamp)
+        raise
+    except Exception as exc:
+        record_run(state="error", error=str(exc), **stamp)
+        raise
+
+    record_run(state="done", result=_clip(answer), **stamp)
+    return answer
 
 
 async def _run_agent_to_completion(
