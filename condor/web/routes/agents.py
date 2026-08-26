@@ -242,6 +242,101 @@ class AgentDetail(BaseModel):
     strategies: list[StrategySummary] = []
 
 
+class SkillCard(BaseModel):
+    """One playbook in the Agent's library. Metadata only — body on demand."""
+
+    slug: str
+    name: str
+    description: str = ""
+    when_to_use: str = ""
+    # From the shared library (``agents/_shared/skills``) rather than this
+    # Agent's own, and — when it also cannot write there — inherited read-only.
+    shared: bool = False
+    inherited: bool = False
+    references_routine: str = ""
+    routine_ok: bool = True
+
+
+class MemoryCard(BaseModel):
+    """One thing this Agent remembers about the caller. Body on demand."""
+
+    name: str
+    description: str = ""
+    type: str = "fact"
+    created: str = ""
+    source: str = ""
+
+
+class RoutineCard(BaseModel):
+    """One script this Agent can run. ``source`` is ``global`` or ``agent:<slug>``."""
+
+    name: str
+    description: str = ""
+    continuous: bool = False
+    source: str = "global"
+    category: str = ""
+
+
+class StrategyCard(BaseModel):
+    """A strategy row without its performance — see ``/strategies`` for that."""
+
+    slug: str
+    name: str
+    description: str = ""
+    status: str = "idle"
+
+
+class AgentBrain(BaseModel):
+    """Everything a conversation is actually talking to, in one read.
+
+    Deliberately not folded into :class:`AgentDetail`: that payload is polled
+    every 5s by the agent page and carries the per-strategy performance rollup,
+    while this one is read once when a reader opens the panel and carries the
+    four libraries the model sees in its prompt. Joining them would make every
+    poll pay for a disk walk of the skill and memory stores.
+    """
+
+    slug: str
+    name: str
+    description: str = ""
+    agent_md: str = ""
+    agent_key: str = ""
+    when_to_consult: str = ""
+    server_required: bool = True
+    server_name: str = ""
+    # The tool allowlist as written in AGENT.md. Empty means unrestricted —
+    # every discovered tool — which is a different statement from "no tools",
+    # so the reader is told which of the two it is rather than shown "0".
+    tools: list[str] = []
+    tools_unrestricted: bool = True
+    skills: list[SkillCard] = []
+    memories: list[MemoryCard] = []
+    routines: list[RoutineCard] = []
+    strategies: list[StrategyCard] = []
+
+
+class SkillBody(BaseModel):
+    """A playbook read in full."""
+
+    slug: str
+    name: str
+    description: str = ""
+    when_to_use: str = ""
+    body: str = ""
+    shared: bool = False
+    inherited: bool = False
+    references_routine: str = ""
+    routine_ok: bool = True
+    files: list[str] = []
+
+
+class MemoryBody(BaseModel):
+    """A memory read in full."""
+
+    name: str
+    body: str = ""
+
+
 class StrategyDetail(BaseModel):
     slug: str
     agent_slug: str
@@ -944,6 +1039,156 @@ async def get_agent(slug: str, user: WebUser = Depends(get_current_user)):
         server_name=agent.server_name,
         strategies=strat_summaries,
     )
+
+
+# ── The brain, as one read ──
+#
+# What the model is handed at the top of every turn — its AGENT.md, the two
+# indexes ``condor.memory.context`` injects, its tool allowlist, its routine
+# catalog and its strategies — read back for the human on the other side of the
+# conversation. Each library is fetched behind its own guard: a store that
+# cannot be read leaves its section empty rather than blanking the panel, the
+# same rule the prompt builder already follows for the same stores.
+
+
+def _skill_store_for(slug: str):
+    from condor.memory import SkillStore
+
+    return SkillStore(slug)
+
+
+def _memory_store_for(slug: str, user_id: int):
+    from condor.memory import MemoryStore
+
+    return MemoryStore(user_id, slug)
+
+
+def _strategy_cards(slug: str) -> list[StrategyCard]:
+    """Strategy rows without the performance rollup.
+
+    ``_build_strategy_summary`` fans out to the Hummingbot API for every
+    session's executors; this panel only ever says "running" or "idle", so it
+    reads the same two sources that answer *that* — the live supervisor, then
+    disk — and nothing else.
+    """
+    cards: list[StrategyCard] = []
+    for strategy in _strategy_store().list(slug):
+        status = "idle"
+        engines = _get_engines_for(slug, strategy.slug)
+        if engines:
+            status = engines[0].get_info().get("status", "running")
+        else:
+            disk_info = infer_latest_session_status(
+                strategy.dir, _runkey(slug, strategy.slug)
+            )
+            if disk_info:
+                status = disk_info["status"]
+        cards.append(
+            StrategyCard(
+                slug=strategy.slug,
+                name=strategy.name,
+                description=strategy.description,
+                status=status,
+            )
+        )
+    return cards
+
+
+def _routine_cards(slug: str) -> list[RoutineCard]:
+    """Every routine this Agent may run — its own library over the shared one."""
+    from routines.base import assistant_routines
+
+    return [
+        RoutineCard(
+            name=name,
+            description=info.description,
+            continuous=info.is_continuous,
+            source=info.source,
+            category=info.category,
+        )
+        for name, info in sorted(assistant_routines(slug).items())
+    ]
+
+
+@router.get("/{slug}/brain", response_model=AgentBrain)
+async def get_agent_brain(slug: str, user: WebUser = Depends(get_current_user)):
+    """The Agent's identity and its four libraries, for the panel behind the chat.
+
+    Memory is per ``(agent, user)``, so this returns *the caller's* memories
+    with this Agent and never another user's — the same scope the Agent's own
+    ``manage_memory`` runs under.
+    """
+    agent = _get_agent(slug)
+
+    agent_md_path = agent.agent_dir / "AGENT.md"
+
+    skills: list[SkillCard] = []
+    try:
+        skills = [SkillCard(**row) for row in _skill_store_for(agent.slug).catalog()]
+    except Exception:
+        log.debug("brain: skill catalog failed for %s", slug, exc_info=True)
+
+    memories: list[MemoryCard] = []
+    try:
+        memories = [
+            MemoryCard(**row)
+            for row in _memory_store_for(agent.slug, user.id).catalog()
+        ]
+    except Exception:
+        log.debug("brain: memory catalog failed for %s", slug, exc_info=True)
+
+    routines: list[RoutineCard] = []
+    try:
+        routines = _routine_cards(agent.slug)
+    except Exception:
+        log.debug("brain: routine catalog failed for %s", slug, exc_info=True)
+
+    strategies: list[StrategyCard] = []
+    try:
+        strategies = _strategy_cards(agent.slug)
+    except Exception:
+        log.debug("brain: strategy cards failed for %s", slug, exc_info=True)
+
+    return AgentBrain(
+        slug=agent.slug,
+        name=agent.name,
+        description=agent.description,
+        agent_md=agent_md_path.read_text() if agent_md_path.exists() else "",
+        agent_key=agent.agent_key,
+        when_to_consult=agent.consult_hint,
+        server_required=agent.server_required,
+        server_name=agent.server_name,
+        tools=agent.tools,
+        tools_unrestricted=not agent.tools,
+        skills=skills,
+        memories=memories,
+        routines=routines,
+        strategies=strategies,
+    )
+
+
+@router.get("/{slug}/skills/{name}", response_model=SkillBody)
+async def get_agent_skill(
+    slug: str, name: str, user: WebUser = Depends(get_current_user)
+):
+    """Read one of the Agent's playbooks in full — what ``manage_skill`` reads."""
+    agent = _get_agent(slug)
+    skill = _skill_store_for(agent.slug).read(name)
+    if not skill:
+        raise HTTPException(status_code=404, detail=f"Skill '{name}' not found")
+    return SkillBody(slug=name, **skill)
+
+
+@router.get("/{slug}/memories/{name}", response_model=MemoryBody)
+async def get_agent_memory(
+    slug: str, name: str, user: WebUser = Depends(get_current_user)
+):
+    """Read one of the caller's memories with this Agent in full."""
+    agent = _get_agent(slug)
+    body = _memory_store_for(agent.slug, user.id).read(name)
+    if body is None:
+        raise HTTPException(status_code=404, detail=f"Memory '{name}' not found")
+    return MemoryBody(name=name, body=body)
 
 
 @router.post("", response_model=AgentSummary)

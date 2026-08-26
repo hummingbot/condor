@@ -212,6 +212,24 @@ class MemoryStore:
                 break
         return results
 
+    def catalog(self) -> list[dict]:
+        """Every memory's metadata, oldest first — no bodies.
+
+        The structured twin of :meth:`list_index`, which returns the same set as
+        one markdown blob for the prompt. Bodies stay behind :meth:`read` so a
+        reader pays for the one memory they opened, not for all of them.
+        """
+        return [
+            {
+                "name": meta.get("name", ""),
+                "description": meta.get("description", ""),
+                "type": meta.get("type", "fact"),
+                "created": meta.get("created", ""),
+                "source": meta.get("source", ""),
+            }
+            for meta, _ in self._iter_memories()
+        ]
+
     def list_index(self) -> str:
         """Return the contents of ``MEMORY.md`` (for prompt injection).
 

@@ -448,7 +448,7 @@ class SkillStore:
         """
         q = (query or "").lower().strip()
         results: list[dict] = []
-        for meta, body in self._iter_skills():
+        for _slug, meta, body, _shared in self._iter_skills():
             haystack = (
                 f"{meta.get('name', '')} {meta.get('when_to_use', '')} "
                 f"{meta.get('description', '')} {body}"
@@ -469,6 +469,34 @@ class SkillStore:
                 break
         return results
 
+    def catalog(self) -> list[dict]:
+        """Every playbook this assistant can read, as metadata rows — no bodies.
+
+        The structured twin of :meth:`list_index`: same two roots, same
+        shadowing, same order, but shaped for a reader rather than for a prompt.
+        A UI can render what the model only ever sees as one index line, and the
+        body still costs a deliberate :meth:`read` — a library of forty
+        playbooks would otherwise be a megabyte on every page load.
+        """
+        rows: list[dict] = []
+        for slug, meta, _body, shared in self._iter_skills():
+            ref = meta.get("references_routine") or ""
+            rows.append(
+                {
+                    "slug": slug,
+                    "name": meta.get("name", slug),
+                    "description": meta.get("description", ""),
+                    "when_to_use": meta.get("when_to_use", ""),
+                    "shared": shared,
+                    "inherited": bool(shared and not self.can_publish),
+                    "references_routine": ref,
+                    "routine_ok": (
+                        _routine_exists(ref, self.agent_slug) if ref else True
+                    ),
+                }
+            )
+        return rows
+
     def list_index(self) -> str:
         """Injectable skills index: one line per playbook the assistant ships.
 
@@ -480,17 +508,21 @@ class SkillStore:
     # -- internals ---------------------------------------------------------
 
     def _iter_skills(self):
-        """Yield (meta, body) for every skill this assistant can read.
+        """Yield (slug, meta, body, shared) for every skill this assistant can read.
 
         Own playbooks first (sorted by slug), then the shared library's whose
         slug was not already yielded — so shadowing falls out of iteration order
-        and :meth:`list_index` / :meth:`search` inherit it with no code of their
-        own. Every file on these two paths is readable by definition, so nothing
-        is parsed only to be discarded. Authored playbooks have no per-user
-        ``created`` ordering, so slug order gives a stable injection order.
+        and :meth:`list_index` / :meth:`search` / :meth:`catalog` inherit it with
+        no code of their own. Every file on these two paths is readable by
+        definition, so nothing is parsed only to be discarded. Authored playbooks
+        have no per-user ``created`` ordering, so slug order gives a stable
+        injection order.
+
+        ``shared`` says which root won, which only :meth:`catalog` cares about —
+        the index and the search read the same playbook either way.
         """
         seen: set[str] = set()
-        for root in (self.skills_dir, self.shared_dir):
+        for root, shared in ((self.skills_dir, False), (self.shared_dir, True)):
             if not root or not root.exists():
                 continue
             for f in sorted(root.glob("*/SKILL.md")):
@@ -503,12 +535,12 @@ class SkillStore:
                     continue
                 seen.add(slug)
                 meta.setdefault("name", slug)
-                yield meta, body
+                yield slug, meta, body, shared
 
     def _index_lines(self) -> list[str]:
         """One index line per skill (name + trigger + optional routine link)."""
         lines: list[str] = []
-        for meta, _ in self._iter_skills():
+        for _slug, meta, _body, _shared in self._iter_skills():
             name = meta.get("name", "")
             when = meta.get("when_to_use", "")
             ref = meta.get("references_routine")
