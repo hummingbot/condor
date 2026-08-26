@@ -158,6 +158,7 @@ class ConfigManager:
         self._data.setdefault("chat_defaults", {})
         self._data.setdefault("user_preferences", {})
         self._data.setdefault("telemetry", {})
+        self._data.setdefault("sharing", {})
         # Migrate audit_log from config.yml to separate file (one-time)
         if "audit_log" in self._data:
             self._audit_log = self._data.pop("audit_log")
@@ -230,6 +231,11 @@ class ConfigManager:
                 "user_preferences": self._data.get("user_preferences", {}),
                 "web_jwt_secret": self._data.get("web_jwt_secret"),
                 "telemetry": self._data.get("telemetry", {}),
+                # Same omission as ARCH-177 above, one section newer: without
+                # this the admin's sharing veto, each user's standing answer and
+                # the share_secret behind the stable pseudonyms were re-minted
+                # on every restart (CORR-244).
+                "sharing": self._data.get("sharing", {}),
                 "version": self._data.get("version", self.VERSION),
             }
             # Keep a copy of the last known-good file before truncating it,

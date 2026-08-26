@@ -117,6 +117,75 @@ def test_an_install_that_never_shares_never_grows_the_section(install):
     assert get_config_manager().get_sharing() == {}
 
 
+# ── The section survives a restart (CORR-244) ────────────────────────────
+# _save_config serialises a whitelist of sections and ``sharing`` was missing
+# from it, so every write below was discarded by the very save that recorded it.
+
+
+def _restart(install):
+    """A restart, as far as config.yml is concerned: drop the in-memory manager
+    and let the next reader load the file back off disk."""
+    import config_manager as cm_module
+
+    cm_module.ConfigManager.reset_instance()
+
+
+def test_the_admin_veto_survives_a_restart(chat, install):
+    consent.set_install_allows(False)
+    _restart(install)
+
+    assert not consent.install_allows()
+    assert not consent.can_share(4242)
+
+
+def test_the_identity_is_minted_once_and_not_again_at_every_boot(chat, install):
+    """``share_secret`` salts the pseudonym HMAC: re-minting it would give the
+    same wallet a new pseudonym in every share."""
+    consent.ensure_identity()
+    install_id, secret = consent.share_install_id(), consent.share_secret()
+    assert install_id and secret
+
+    _restart(install)
+    consent.ensure_identity()
+
+    assert consent.share_install_id() == install_id
+    assert consent.share_secret() == secret
+
+
+def test_a_standing_answer_and_its_timestamp_survive_a_restart(chat, install):
+    consent.set_user_state(4242, consent.ALWAYS)
+    opted_in_at = consent.opted_in_at(4242)
+    assert opted_in_at
+
+    _restart(install)
+
+    assert consent.user_state(4242) == consent.ALWAYS
+    assert consent.users_sweeping() == ["4242"]
+    assert consent.opted_in_at(4242) == opted_in_at
+
+
+def test_the_saved_file_carries_a_sharing_section(chat, install):
+    import yaml
+
+    consent.set_install_allows(False)
+    on_disk = yaml.safe_load((install / "config.yml").read_text())
+
+    assert on_disk["sharing"] == {"enabled": False}
+
+
+def test_an_unrelated_save_does_not_drop_the_section(chat, install):
+    """The whitelist rewrites the whole file: any other write was enough."""
+    from config_manager import get_config_manager
+
+    consent.set_install_allows(False)
+    cm = get_config_manager()
+    cm._data["chat_defaults"][4242] = "prod"  # any other config write
+    cm._save_config()
+    _restart(install)
+
+    assert not consent.install_allows()
+
+
 def test_the_share_secret_never_reaches_the_wire(chat):
     consent.ensure_identity()
     secret = consent.share_secret()
