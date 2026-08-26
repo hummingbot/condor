@@ -11,10 +11,11 @@ import { useCallback, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-import { ExecutorChart, type SnapshotBubble } from "@/components/charts/ExecutorChart";
+import { ExecutorChart } from "@/components/charts/ExecutorChart";
 import { PairLabel } from "@/components/executor/PairLabel";
 import { AgentPnlChart, metricsToDataPoints } from "@/components/agent/AgentPnlChart";
 import { useAgentExecutors } from "@/hooks/useAgentExecutors";
+import { snapshotQueryOptions, useSnapshotBubbles } from "@/hooks/useSnapshotBubbles";
 import { type AgentExecutorRow, type AgentPerformance, type ExecutorInfo, api } from "@/lib/api";
 import { groupExecutorsByMarket } from "@/lib/executor-overlays";
 import { type ParsedJournal, type ParsedSnapshot, parseSnapshot } from "@/lib/parse-agent";
@@ -507,42 +508,9 @@ export function SessionExecutors({
     queryFn: () => api.getSessionSnapshots(slug, sslug, sessionNum),
   });
 
-  // Fetch each snapshot content for agent response previews
-  const snapshotSummaries = snapshotsData?.snapshots ?? [];
-  const snapshotQueries = useQuery({
-    queryKey: ["strategy", slug, sslug, "session", sessionNum, "snapshot-contents", snapshotSummaries.map((s) => s.tick).join(",")],
-    queryFn: async () => {
-      // Fetch all snapshots concurrently: Promise.all preserves input order, so
-      // the result stays sorted by tick while latency collapses to the slowest
-      // request instead of the sum of all of them.
-      return Promise.all(
-        snapshotSummaries.map(async (snap): Promise<SnapshotBubble> => {
-          try {
-            const data = await api.getSnapshot(slug, sslug, sessionNum, snap.tick);
-            if (data?.content) {
-              const parsed = parseSnapshot(data.content);
-              return {
-                tick: snap.tick,
-                timestamp: snap.timestamp,
-                agentResponse: parsed.agentResponse,
-                toolCallCount: parsed.toolCalls.length,
-              };
-            }
-            return { tick: snap.tick, timestamp: snap.timestamp };
-          } catch {
-            return { tick: snap.tick, timestamp: snap.timestamp };
-          }
-        }),
-      );
-    },
-    enabled: snapshotSummaries.length > 0,
-    staleTime: 60000,
-  });
-
-  const snapshotBubbles = snapshotQueries.data ?? snapshotSummaries.map((s) => ({
-    tick: s.tick,
-    timestamp: s.timestamp,
-  }));
+  // One query per snapshot body, shared with SnapshotDetail — see useSnapshotBubbles.
+  const snapshotSummaries = useMemo(() => snapshotsData?.snapshots ?? [], [snapshotsData]);
+  const snapshotBubbles = useSnapshotBubbles(slug, sslug, sessionNum, snapshotSummaries);
 
   // Group executors by connector:pair for charts
   const chartGroups = useMemo(
@@ -788,9 +756,10 @@ export function SessionSnapshots({ slug, sslug, sessionNum, initialTick }: { slu
 // ── Snapshot Detail ──
 
 function SnapshotDetail({ slug, sslug, sessionNum, tick }: { slug: string; sslug: string; sessionNum: number; tick: number }) {
+  // Same options the marker previews use, so a tick already previewed renders
+  // straight from cache — no second request, no spinner.
   const { data, isLoading } = useQuery({
-    queryKey: ["strategy", slug, sslug, "session", sessionNum, "snapshot", tick],
-    queryFn: () => api.getSnapshot(slug, sslug, sessionNum, tick),
+    ...snapshotQueryOptions(slug, sslug, sessionNum, tick),
     enabled: tick > 0,
   });
 
