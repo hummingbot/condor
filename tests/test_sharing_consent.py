@@ -359,12 +359,18 @@ async def test_a_terminally_refused_unshare_is_logged_where_it_will_be_seen(
 
     class _Refused:
         status = 403
+        body: object = {"error": "forbidden"}
 
         async def __aenter__(self):
             return self
 
         async def __aexit__(self, *exc):
             return False
+
+        async def json(self, **kw):
+            if isinstance(self.body, Exception):
+                raise self.body
+            return self.body
 
     class _Session(_Refused):
         def post(self, *a, **kw):
@@ -379,6 +385,53 @@ async def test_a_terminally_refused_unshare_is_logged_where_it_will_be_seen(
 
     refusal = [r for r in caplog.records if "refused an unshare" in r.getMessage()]
     assert refusal and refusal[0].levelno >= logging.ERROR
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op", [outbox.OP_SHARE, outbox.OP_UNSHARE])
+async def test_a_4xx_from_an_edge_rather_than_the_collector_keeps_the_record(
+    chat, caplog, op
+):
+    """Acceptance criterion: only the collector's own verdict is terminal.
+
+    A WAF in front of the collector answers a path it has not been told about
+    with its own HTML, and that is what production actually returned for
+    ``/v1/conversations`` while the door was unrouted. Treating that as "the
+    collector refused this share's shape" drops a transcript the user consented
+    to send, on an outage that ends.
+    """
+
+    class _Blocked:
+        status = 403
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def json(self, **kw):
+            raise ValueError("<!DOCTYPE html> Attention Required!")
+
+    class _Session(_Blocked):
+        def post(self, *a, **kw):
+            return _Blocked()
+
+    import aiohttp
+
+    record = (
+        _unshare(7)
+        if op == outbox.OP_UNSHARE
+        else outbox.enqueue(outbox.OP_SHARE, "https://collector.invalid/x", {"n": 1})
+    )
+
+    caplog.set_level(logging.DEBUG)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(aiohttp, "ClientSession", lambda **kw: _Session())
+        assert await outbox.post(record) is False
+
+    assert not [r for r in caplog.records if "dropping it" in r.getMessage()]
+    assert [r for r in caplog.records if "not the collector" in r.getMessage()]
 
 
 # ── The vetoes reach what is already queued (CORR-233) ───────────────────

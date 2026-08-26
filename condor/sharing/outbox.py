@@ -423,13 +423,35 @@ def purge_user_shares(user_id: int | str, *, kind: str) -> int:
     return dropped
 
 
+async def _collector_refused(response) -> bool:
+    """Did the collector refuse this, or did something in front of it?
+
+    Every refusal the collector issues is one JSON object with an ``error``
+    string. An edge — a WAF, a corporate proxy, a captive portal — answers 4xx
+    with HTML it wrote itself, which is not a verdict on this record at all: it
+    is the request never reaching the door. The distinction decides whether a
+    queued transcript is dropped, so anything that cannot be positively
+    identified as the collector speaking is treated as *not* the collector.
+
+    Being wrong in that direction costs a retry. Being wrong in the other
+    direction costs the share, and the queue's own age and size caps already
+    retire a record nothing will ever accept.
+    """
+    try:
+        body = await response.json(content_type=None)
+    except Exception:
+        return False
+    return isinstance(body, dict) and isinstance(body.get("error"), str)
+
+
 async def post(record: dict) -> bool:
     """Deliver one queued request.
 
-    A 4xx other than 429 is *terminal*: the collector refused this share's shape
-    and re-posting it forever would only keep a permanently-rejected record at
-    the head of the queue. It is reported as delivered so the queue drains, and
-    the refusal is logged. 5xx and transport failures stay queued.
+    A 4xx other than 429 is *terminal*, but only when the collector is the one
+    that said it: re-posting a permanently-rejected record forever would keep it
+    at the head of the queue. It is reported as delivered so the queue drains,
+    and the refusal is logged. 5xx, transport failures, and a 4xx from anything
+    that is not the collector stay queued.
     """
     url = record.get("url") or ""
     if not url:
@@ -443,6 +465,18 @@ async def post(record: dict) -> bool:
                 if 200 <= response.status < 300:
                     return True
                 if response.status == 429 or response.status >= 500:
+                    return False
+                if not await _collector_refused(response):
+                    # Not this record's shape being rejected — the request never
+                    # arrived. Dropping a transcript over an edge that is down,
+                    # or a path a WAF has not been told about yet, would destroy
+                    # what the user consented to send for an outage that ends.
+                    log.warning(
+                        "A %s for %s came from something that is not the "
+                        "collector; the record stays queued",
+                        response.status,
+                        record.get("op") or "?",
+                    )
                     return False
                 if record.get("op") == OP_UNSHARE:
                     # A refused revocation is not a dropped share. The delete
