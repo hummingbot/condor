@@ -458,7 +458,8 @@ async def manage_routines(
             and "get_instance", pass the instance_id as name.
         config: Config overrides for run/start (optional, merged with defaults).
         agent: Slug of the agent whose routine library to target (agent-local
-            CRUD, and "list"/"run" against another agent's routines). Omit to use
+            CRUD, and "list"/"run"/"start" against another agent's routines).
+            A run started with it is attributed to that agent. Omit to use
             the current assistant's own library.
         code: Python source code for create_routine / edit_routine.
         strategy_id: DEPRECATED alias of `agent`, kept for older callers. A
@@ -505,6 +506,12 @@ async def run_code(
     - every `condor.*` module is importable, including
       `from condor.reports import ReportBuilder` — a snippet that saves one
       produces a real dashboard report and its id comes back as `report_id`
+
+    Don't guess an import. `from condor.primitives import catalog, describe,
+    call_routine`: `catalog()` lists every primitive and routine this install
+    has, `describe(ref)` gives one full signature, docstring or config schema,
+    and `await call_routine(name, config)` runs an existing routine inline
+    instead of rewriting it (`start_routine` backgrounds it).
 
     On failure you get `status="error"` and a traceback whose line numbers are
     YOUR snippet's: read it, fix the code, run it again. Keep snippets short and

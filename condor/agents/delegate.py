@@ -14,11 +14,13 @@ via :func:`condor.agents.consult._run_agent_to_completion`, passing
 chosen authorization model: full auto-approve, no sandbox (see FEAT-006 Risks).
 
 The registry is in-memory and ephemeral -- a delegation dies with the process. The
-*result transcript* is persisted to a flat file under
-``agents/{slug}/delegations/{task_id}.md`` so nothing is lost if you weren't
-watching. Since FEAT-012 a small ``{task_id}.status.json`` is written alongside it
-when the task starts, so a delegation killed by a restart is reported as
-``interrupted`` instead of vanishing without a trace. It is never auto-restarted:
+*result transcript* is persisted under
+``.condor/users/{user_id}/delegations/{task_id}/transcript.md`` so nothing is lost
+if you weren't watching -- keyed by the person who asked, beside their
+conversations, rather than by the agent that did the work (FEAT-051). Since
+FEAT-012 a small ``status.json`` is written alongside it when the task starts, so
+a delegation killed by a restart is reported as ``interrupted`` instead of
+vanishing without a trace. It is never auto-restarted:
 delegations are one-shot and re-running could duplicate side effects.
 
 Ephemeral does not mean free: the registry is bounded on both axes since
@@ -29,12 +31,21 @@ from :mod:`condor.agents.delegation_history` instead. Within one delegation the
 event stream is bounded too (:data:`MAX_EVENTS_PER_DELEGATION`, with tool
 payloads clipped to what a reader would have been shown anyway), so no single
 runaway session can pin an unbounded transcript.
+
+The files behind that fallback are bounded too, since PERF-222. Every finishing
+delegation sweeps its own owner's directory
+(:func:`prune_delegation_records`), keeping the most recent
+:data:`MAX_DELEGATION_RECORDS` terminal records and dropping the rest whole --
+so neither the disk nor the walk a history listing does grows with the age of
+the install. Nothing still running is ever a candidate.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import shutil
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -82,13 +93,26 @@ DROPPED_EVENT_TYPE = "dropped"
 # on. What makes a late collect safe is the disk fallback, not a timer --
 # ``GET /agents/delegations/{task_id}`` and its ``/events`` sibling both fall
 # through to :mod:`condor.agents.delegation_history`, which rebuilds the record
-# from the ``{task_id}.status.json`` and ``{task_id}.events.json`` files written
+# from the ``status.json`` and ``events.json`` files written
 # in ``_run``'s finally block, i.e. before an entry can ever be evicted. The two
 # registry-only readers (``GET /agents/delegations`` and the ``/delegations``
 # Telegram list) are per-process snapshots by contract and have the merged
 # ``/delegations/history`` route as their complete view. In-flight delegations
 # are never evicted, at any count.
 MAX_FINISHED_DELEGATIONS = 25
+
+# How many *terminal* records one owner keeps on disk (PERF-222). The disk twin
+# of the bound above: that one caps what stays in RAM, this one caps what stays
+# in ``.condor/users/{id}/delegations/``, which until now nothing ever removed --
+# so a listing walked, and stat'd, every delegation the install had ever run.
+#
+# Deliberately generous: this is a history a person may legitimately scroll, the
+# cost of an over-large cap is only a slower listing, and the cost of an
+# over-small one is history that is gone for good. ``$CONDOR_MAX_DELEGATION_RECORDS``
+# overrides it, and a value of zero or less turns retention off entirely -- an
+# install that wants to keep everything says so rather than discovering the
+# default the hard way.
+MAX_DELEGATION_RECORDS = int(os.environ.get("CONDOR_MAX_DELEGATION_RECORDS", "") or 500)
 
 # What happens to the conversation that asked for the work when the task ends.
 #
@@ -203,11 +227,19 @@ async def start_delegation(
     return dt
 
 
-def _delegation_status_name(task_id: str) -> str:
-    return f"{task_id}.status.json"
-
-
 TERMINAL_STATES = ("done", "error", "stopped")
+
+
+def _record_dir(dt: "DelegateTask") -> Path:
+    """This delegation's directory, under the user who asked for the work.
+
+    ``user_id`` 0 means nobody -- a delegation with no person behind it. That is
+    a real directory and not a special case: ``_can_see_delegation`` already
+    reads an unowned record as admin-only.
+    """
+    from condor import paths
+
+    return paths.delegation_dir(dt.user_id or 0, dt.task_id)
 
 
 def _record_delegation_status(dt: "DelegateTask") -> None:
@@ -224,18 +256,11 @@ def _record_delegation_status(dt: "DelegateTask") -> None:
     simply arrive with the final write.
     """
     try:
-        from condor.agents.agent import AgentStore
         from condor.runtime.registry_file import write_status
 
-        agent = AgentStore().get(dt.agent_slug)
-        if agent is None:
-            return
-        delegations_dir = agent.agent_dir / "delegations"
-        delegations_dir.mkdir(parents=True, exist_ok=True)
         extra = {"ended_at": time.time()} if dt.status in TERMINAL_STATES else {}
         write_status(
-            delegations_dir,
-            _delegation_status_name(dt.task_id),
+            _record_dir(dt),
             state=dt.status,
             task_id=dt.task_id,
             agent_slug=dt.agent_slug,
@@ -256,6 +281,94 @@ def _record_delegation_status(dt: "DelegateTask") -> None:
         log.debug(
             "Could not record delegation status for %s", dt.task_id, exc_info=True
         )
+
+    # The growth and the sweep in one place: a record directory only ever
+    # appears here, so the cheapest correct moment to bound the collection is
+    # the write that completes one. Outside the try above on purpose -- the
+    # status write is the delegation's own business and must have landed (or
+    # failed) on its own terms before retention gets a say. Scoped to the one
+    # owner whose directory just grew; walking every user would put the whole
+    # install on a hot path.
+    if dt.status in TERMINAL_STATES:
+        try:
+            prune_delegation_records(dt.user_id or 0)
+        except Exception:
+            log.warning(
+                "Could not prune delegation records for user %s",
+                dt.user_id or 0,
+                exc_info=True,
+            )
+
+
+def _is_live_delegation(task_id: str) -> bool:
+    """True while this task could still be writing into its record directory.
+
+    The on-disk state alone cannot answer this: ``_record_delegation_status``
+    stamps the terminal state from ``_run``'s ``finally``, while that very task
+    is still on the loop and still has a notification and a wake to do. So the
+    registry is consulted the way :meth:`RoutineStore._has_live_task` is --
+    unknown here means finished elsewhere (a previous process), which is the
+    only reading a restart leaves available anyway.
+    """
+    dt = _delegations.get(task_id)
+    if dt is None:
+        return False
+    if dt.status not in TERMINAL_STATES:
+        return True
+    return dt._task is not None and not dt._task.done()
+
+
+def prune_delegation_records(user_id: int | str) -> int:
+    """Evict this owner's oldest terminal records past :data:`MAX_DELEGATION_RECORDS`.
+
+    The disk counterpart of :func:`retire_delegation`, and modelled on
+    ``RoutineStore._prune_instances`` -- the repo's existing answer to this
+    exact shape of problem -- so the rules are the same three:
+
+    * **Only terminal records are candidates.** A delegation still running, one
+      whose task is still on the loop, and one whose status file says anything
+      other than :data:`TERMINAL_STATES` (a state from a process that died, a
+      record with no status file at all) is exempt from eviction *and* from the
+      count. No amount of churn can reap or squeeze out something still live.
+    * **Oldest first**, by the same key the listing sorts on, so what is dropped
+      is what the listing would have shown last anyway.
+    * **The whole record directory goes** -- status, events and transcript
+      together -- so both the disk and the walk shrink, and a reader gets a
+      clean ``None`` rather than half a record.
+
+    Returns how many directories were evicted. Public so retention can be
+    exercised (and, on a large install, run) directly rather than only as a
+    side effect of finishing a delegation.
+    """
+    from condor.agents.delegation_history import terminal_record_dirs
+
+    if MAX_DELEGATION_RECORDS <= 0:  # retention off: keep everything
+        return 0
+
+    candidates = [
+        record
+        for record in terminal_record_dirs(user_id, TERMINAL_STATES)
+        if not _is_live_delegation(record[1])
+    ]
+    excess = len(candidates) - MAX_DELEGATION_RECORDS
+    if excess <= 0:
+        return 0
+
+    evicted = 0
+    for _key, task_id, record_dir in candidates[:excess]:
+        try:
+            shutil.rmtree(record_dir)
+        except OSError:
+            log.warning(
+                "Could not evict delegation record %s", record_dir, exc_info=True
+            )
+            continue
+        evicted += 1
+    if evicted:
+        log.debug(
+            "Evicted %s delegation record(s) from disk for user %s", evicted, user_id
+        )
+    return evicted
 
 
 def _make_event_sink(dt: DelegateTask):
@@ -541,33 +654,28 @@ def _render_session(events: list[dict]) -> str:
     return "\n\n".join(parts)
 
 
-def _events_sidecar_name(task_id: str) -> str:
-    return f"{task_id}.events.json"
-
-
 def _persist_transcript(dt: DelegateTask) -> None:
-    """Write a session transcript under agents/{slug}/delegations/{task_id}.md.
+    """Write a session transcript into this delegation's own directory.
 
-    Mirrors the ``dry_runs/experiment_N.md`` flat-file convention, not the
-    heavyweight ``sessions/`` tree -- a delegate has no ticks to journal. Captures
-    the full session: the agent's reasoning, every tool call (with input/output),
-    and the final result, so nothing about *how* the task was solved is lost.
+    Captures the full session: the agent's reasoning, every tool call (with
+    input/output), and the final result, so nothing about *how* the task was
+    solved is lost.
 
-    A ``{task_id}.events.json`` sidecar goes out alongside it (FEAT-035): the
-    markdown is for a human reading the repo, the JSON is what lets the dashboard
-    render a finished delegation with the same collapsible transcript it shows
-    while the task is running. Both are projections of the same ``dt.events``
-    through the same output bound, so they cannot drift apart.
+    An ``events.json`` sidecar goes out alongside it (FEAT-035): the markdown is
+    for a human reading the file, the JSON is what lets the dashboard render a
+    finished delegation with the same collapsible transcript it shows while the
+    task is running. Both are projections of the same ``dt.events`` through the
+    same output bound, so they cannot drift apart.
     """
     import json
 
-    from condor.agents.agent import AgentStore
+    from condor.agents.delegation_history import (
+        DELEGATION_EVENTS_FILENAME,
+        DELEGATION_TRANSCRIPT_FILENAME,
+    )
 
-    agent = AgentStore().get(dt.agent_slug)
-    if agent is None:
-        return
-    delegations_dir = agent.agent_dir / "delegations"
-    delegations_dir.mkdir(parents=True, exist_ok=True)
+    record_dir = _record_dir(dt)
+    record_dir.mkdir(parents=True, exist_ok=True)
 
     tool_count = sum(1 for e in dt.events if e.get("type") == "tool")
     body = dt.error if dt.status == "error" else dt.result
@@ -584,8 +692,8 @@ def _persist_transcript(dt: DelegateTask) -> None:
         f"## {'Error' if dt.status == 'error' else 'Result'}\n\n"
         f"{body or '(none)'}\n"
     )
-    (delegations_dir / f"{dt.task_id}.md").write_text(content)
-    (delegations_dir / _events_sidecar_name(dt.task_id)).write_text(
+    (record_dir / DELEGATION_TRANSCRIPT_FILENAME).write_text(content)
+    (record_dir / DELEGATION_EVENTS_FILENAME).write_text(
         json.dumps({"events": events_for_wire(dt.events)}, indent=2)
     )
 
@@ -727,16 +835,12 @@ async def _notify_done(dt: DelegateTask, bot) -> None:
     if not dt.chat_id:
         return
 
-    from condor.notifications import NotifyBot, record
+    from condor.notifications import announce
 
-    text = _completion_text(dt)
-    target = resolve_bot(bot)
-    await target.send_message(chat_id=dt.chat_id, text=text)
-
-    # And on the dashboard bell (FEAT-048), with the same text the Telegram push
-    # and the transcript note carry, so the three surfaces cannot tell three
-    # stories about one task. Skipped when the resolved sender *is* the bell:
-    # that rung only wins when there is no Telegram, and it has already recorded
-    # this very message.
-    if not isinstance(target, NotifyBot):
-        await record(dt.user_id, text, kind="delegation")
+    # Telegram *and* the dashboard bell (FEAT-048), with the same text the
+    # transcript note carries, so the three surfaces cannot tell three stories
+    # about one task. ``announce`` owns the "don't file it twice when the
+    # resolved sender is the bell itself" rule (ARCH-212).
+    await announce(
+        dt.user_id, dt.chat_id, _completion_text(dt), kind="delegation", bot=bot
+    )

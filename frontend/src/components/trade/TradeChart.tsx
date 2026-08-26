@@ -2,12 +2,13 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { useCandleStore } from "@/hooks/useCandleStore";
+import { useRates } from "@/hooks/useRates";
 import { api, type ConsolidatedPosition } from "@/lib/api";
 import { candleChannelKey, candleStore } from "@/lib/candle-store";
 import type { ExtraLine, PickSlot } from "@/components/executor/types";
 import { getExecutorColor, type ExecutorOverlay } from "@/lib/executor-overlays";
 import { getThemeColors, pnlHexColor, sideColor } from "@/lib/theme-colors";
-import { escapeHtml, formatCompactUsd, formatPriceSig } from "@/lib/formatters";
+import { escapeHtml, formatPriceSig } from "@/lib/formatters";
 
 type PickField = PickSlot | null;
 
@@ -31,7 +32,8 @@ const PICK_LABELS: Record<PickSlot, string> = {
 export interface ChartPriceAxis {
   /** Pixel row for a price, from the pane's top. `null` when it is off-scale. */
   priceToCoordinate(price: number): number | null;
-  /** Pane height in CSS pixels, so a sibling canvas can match it. */
+  /** Pane height in CSS pixels, so a sibling canvas can match it. Cached, so
+   * polling it costs no layout. */
   height(): number;
   /** Subscribe to scale changes; returns its own unsubscribe. */
   onScaleChange(cb: () => void): () => void;
@@ -64,9 +66,6 @@ interface TradeChartProps {
   executorOverlays?: ExecutorOverlay[];
   positions?: ConsolidatedPosition[];
   selectedExecutorId?: string | null;
-  /** Convert a value from the pair's quote currency to display currency */
-  convertValue?: (val: number) => string;
-  convertPnl?: (val: number) => string;
   /** Callback when user clicks chart background to deselect executor */
   onExecutorDeselect?: () => void;
   /** Called once the series exists, with the chart's price mapping. */
@@ -95,8 +94,6 @@ export function TradeChart({
   executorOverlays,
   positions,
   selectedExecutorId,
-  convertValue,
-  convertPnl,
   onExecutorDeselect,
   onChartReady,
 }: TradeChartProps) {
@@ -117,9 +114,30 @@ export function TradeChart({
   const measureBoxRef = useRef<HTMLDivElement>(null);
   const overlaysRef = useRef<ExecutorOverlay[]>([]);
   const lastZoomedIdRef = useRef<string | null>(null);
-  const convertValueRef = useRef(convertValue);
-  const convertPnlRef = useRef(convertPnl);
-  convertValueRef.current = convertValue;
+  // Currency conversion for the pair's quote asset, owned here rather than
+  // threaded in as props -- the pane below the chart (TradeBottomPane) derives
+  // it the same way, and a chart that took it optionally rendered raw quote
+  // dollars next to that pane's converted rows. The refs keep the imperative
+  // lightweight-charts callbacks reading the latest formatter without being
+  // re-subscribed on every rate tick -- they are read at call time, so the
+  // crosshair and tooltip always format with the current currency.
+  //
+  // `convertPnl` is memoized rather than only ref-held because the position
+  // price lines bake their label at creation time: that effect depends on this
+  // identity to repaint on a currency switch, and would tear down and redraw
+  // every line on each render if the closure were minted fresh. `useRates`
+  // memoizes `formatPnlValue` on the rates themselves, so this changes only
+  // when the conversion actually does.
+  const quoteCurrency = pair.split("-")[1] || "USDT";
+  const quoteCurrencies = useMemo(() => [quoteCurrency], [quoteCurrency]);
+  const { formatPnlValue, formatValue } = useRates(quoteCurrencies);
+  const convertPnl = useMemo(
+    () => (val: number) => formatPnlValue(val, quoteCurrency),
+    [formatPnlValue, quoteCurrency],
+  );
+  const convertValueRef = useRef<(val: number) => string>(() => "");
+  const convertPnlRef = useRef<(val: number) => string>(() => "");
+  convertValueRef.current = (val: number) => formatValue(val, quoteCurrency);
   convertPnlRef.current = convertPnl;
   const [chartReady, setChartReady] = useState(false);
 
@@ -359,12 +377,12 @@ export function TradeChart({
 
         const o = bestOverlay;
         const pnlClr = pnlHexColor(o.pnl);
-        const _cvtPnl = convertPnlRef.current;
-        const _cvtVal = convertValueRef.current;
-        const pnlStr = _cvtPnl ? _cvtPnl(o.pnl) : (Math.abs(o.pnl) >= 1000 ? `${o.pnl >= 0 ? "+" : ""}$${(o.pnl / 1000).toFixed(1)}K` : `${o.pnl >= 0 ? "+" : ""}$${o.pnl.toFixed(2)}`);
+        const cvtPnl = convertPnlRef.current;
+        const cvtVal = convertValueRef.current;
+        const pnlStr = cvtPnl(o.pnl);
         const pctStr = o.pnlPct !== 0 ? `${o.pnlPct > 0 ? "+" : ""}${(o.pnlPct * 100).toFixed(2)}%` : "";
-        const volStr = _cvtVal ? _cvtVal(o.volume) : (Math.abs(o.volume) >= 1000 ? `$${(o.volume / 1000).toFixed(1)}K` : `$${o.volume.toFixed(0)}`);
-        const feesStr = o.fees ? (_cvtVal ? _cvtVal(o.fees) : `$${o.fees.toFixed(2)}`) : "";
+        const volStr = cvtVal(o.volume);
+        const feesStr = o.fees ? cvtVal(o.fees) : "";
 
         // An LP position has no direction -- it is `RANGE` -- and the buy/sell
         // normalization files everything that is not a buy under "sell", which
@@ -417,7 +435,7 @@ export function TradeChart({
         }
 
         if (cfg.leverage != null && Number(cfg.leverage) > 1) addRow("Leverage", `${cfg.leverage}x`);
-        if (cfg.total_amount_quote != null) addRow("Amount", _cvtVal ? _cvtVal(Number(cfg.total_amount_quote)) : formatCompactUsd(Number(cfg.total_amount_quote)));
+        if (cfg.total_amount_quote != null) addRow("Amount", cvtVal(Number(cfg.total_amount_quote)));
         else if (cfg.amount != null && Number(cfg.amount) > 0) addRow("Amount", String(cfg.amount));
 
         const tp = Number(tripleBarrier.take_profit || cfg.take_profit);
@@ -485,6 +503,25 @@ export function TradeChart({
     };
   }, []);
 
+  // ── Pane height, cached ──
+  // `height()` is handed out and polled by siblings, and a `clientHeight` read
+  // on a page whose layout is being dirtied by streaming data is a forced
+  // reflow every time it is asked. The pane's height only changes when the pane
+  // is resized, so it is taken from the observer that already hears about that
+  // — inside the callback, where layout is clean — and `height()` just hands
+  // the number back.
+  const paneHeightRef = useRef(0);
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    paneHeightRef.current = el.clientHeight;
+    const observer = new ResizeObserver(() => {
+      paneHeightRef.current = el.clientHeight;
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
   // ── Lend the price mapping out, once the series exists ──
   // Read before the series is created, priceToCoordinate answers for an empty
   // scale — plausible pixels for the wrong prices — so this waits on chartReady
@@ -501,7 +538,7 @@ export function TradeChart({
         const coord = seriesRef.current?.priceToCoordinate(price);
         return coord == null ? null : (coord as number);
       },
-      height: () => containerRef.current?.clientHeight ?? 0,
+      height: () => paneHeightRef.current || containerRef.current?.clientHeight || 0,
       onScaleChange: (cb) => {
         const chart = chartRef.current;
         if (!chart) return () => {};
@@ -945,8 +982,7 @@ export function TradeChart({
       if (pos.entry_price <= 0) continue;
       const isLong = pos.position_side?.toUpperCase() === "LONG";
       const pnl = pos.unrealized_pnl ?? 0;
-      const _cvtPnl2 = convertPnlRef.current;
-      const pnlStr = _cvtPnl2 ? _cvtPnl2(pnl) : (Math.abs(pnl) >= 1000 ? `${pnl >= 0 ? "+" : ""}$${(pnl / 1000).toFixed(1)}K` : `${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`);
+      const pnlStr = convertPnl(pnl);
       const amt = Math.abs(pos.amount);
       const color = pnlHexColor(pnl);
       // A hold nothing ties to this pool still belongs on the chart -- the price
@@ -964,7 +1000,10 @@ export function TradeChart({
       });
       positionLinesRef.current.push(pl);
     }
-  }, [positions, chartReady]);
+    // `convertPnl` is a dependency, not a ref read: the label is a string the
+    // chart owns once created, so a currency switch has to redraw the lines.
+    // The effect already clears every line it drew, so re-running is idempotent.
+  }, [positions, chartReady, convertPnl]);
 
   // ── Measure tool helpers ──
   const clearMeasure = () => {

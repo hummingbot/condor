@@ -220,8 +220,8 @@ export function ChatInput({
       {voiceError && (
         <p className="mb-2 text-xs text-red-400">{voiceError}</p>
       )}
-      {/* One composer chrome, owned here — the hero, the thread and the overlay
-          drawer all get this box, so they cannot drift into two shapes again. */}
+      {/* One composer chrome, owned here — the hero and the thread both get this
+          box, so they cannot drift into two shapes again. */}
       <div
         className={`flex items-end gap-2 rounded-xl border bg-[var(--color-surface)] px-2 py-1.5 transition-colors ${
           focused

@@ -2,21 +2,26 @@
 
 The install — not the individual user — is the unit of consent, because the
 admin owns the install. The states are ``unknown`` (the default on a fresh
-clone), ``granted`` and ``denied`` (legacy — older installs could refuse from
-the prompt), stored in ``config.yml`` under ``telemetry`` alongside the
-install's identity.
+clone), ``granted`` and ``denied``, stored in ``config.yml`` under ``telemetry``
+alongside the install's identity.
 
-Two rules matter more than the rest:
+Three rules matter more than the rest:
 
-**The floor is ``ping``.** Every install is counted. An install whose admin has
-never answered the prompt emits the four adoption events (``install``,
-``heartbeat``, ``version_change``, ``shutdown``) and nothing else; the prompt
-decides one thing only — whether the ``usage`` events are added on top. There
-is no "off" answer on the form.
+**The floor is ``ping`` — for an install that has not answered.** Every install
+that has said nothing is counted: it emits the four adoption events
+(``install``, ``heartbeat``, ``version_change``, ``shutdown``) and nothing else.
+The prompt decides one thing only — whether the ``usage`` events are added on
+top. There is no "off" answer on the form, so silence is never read as refusal.
+
+**A refusal is honoured, and survives an upgrade.** ``denied`` is not silence:
+it is a recorded "no", written by :func:`deny` (the dashboard's off switch, and
+older builds' "No thanks" button). It resolves to level ``off``, so an install
+that refused under any build stays silent across upgrades and is never re-asked.
+Re-enabling is an explicit act — :func:`set_level` with ``ping`` or ``usage``.
 
 **The environment wins.** ``CONDOR_TELEMETRY`` in ``utils/config.py`` overrides
-the stored answer in both directions, and it is the only way to reach level
-``off`` — the operator's kill switch for a headless or containerized install.
+the stored answer in both directions: it can silence an install that granted
+consent, and it can re-enable one that refused.
 
 Reads never create ``config.yml``; the identity ids are materialized by
 :func:`condor.telemetry.init` on the first boot that can actually emit.
@@ -41,8 +46,9 @@ GRANTED = "granted"
 DENIED = "denied"
 
 # Answer -> level, the two buttons of the admin prompt. "off" is deliberately
-# not an answer: install counting is the floor, and only the environment can
-# silence it entirely.
+# not one of them: install counting is the floor for an install that has *not*
+# answered, so an ignored prompt must not be readable as a refusal. Refusing is
+# a separate, explicit act — `deny()`.
 ANSWER_LEVELS = {"usage": USAGE, "ping": PING}
 
 _cached_level: str | None = None
@@ -114,11 +120,16 @@ def _compute_level() -> str:
     env = _env_level()
     if env is not None:
         return env
-    if state() == GRANTED:
+    stored_state = state()
+    if stored_state == GRANTED:
         stored = _section().get("level")
         return stored if stored in (PING, USAGE) else USAGE
-    # Unanswered — and legacy denied — installs are still counted: ping is the
-    # floor, and only the environment can force `off`.
+    if stored_state == DENIED:
+        # A recorded "no" outranks the floor. Installs that refused under an
+        # older build carry this state forward, and an upgrade must not read
+        # their refusal as an unanswered prompt.
+        return OFF
+    # Unanswered installs are still counted: ping is the floor.
     return PING
 
 
@@ -205,8 +216,13 @@ def _purge_collected() -> None:
 
 
 def set_level(new_level: str) -> str:
-    """Change the level of an install. ``off`` is not accepted here: the floor
-    is ``ping``, and only ``CONDOR_TELEMETRY=off`` reaches ``off``."""
+    """Change the level of an install to one of the two *grantable* answers.
+
+    ``off`` is not one of them: it is a refusal, not a level, so it goes
+    through :func:`deny` instead — which records *why* the install is silent so
+    the next upgrade honours it. Calling this with ``ping`` or ``usage`` is also
+    how a refusing install opts back in.
+    """
     if new_level not in (PING, USAGE):
         return level()
     downgrading = new_level == PING and level() == USAGE
@@ -215,6 +231,30 @@ def set_level(new_level: str) -> str:
     if downgrading:
         _purge_collected()
     return new_level
+
+
+def deny() -> str:
+    """Record an explicit refusal, and destroy whatever was already collected.
+
+    This is the in-product off switch. It is durable in a way the environment
+    kill switch is not: ``CONDOR_TELEMETRY=off`` silences the process that
+    happens to read it, while ``denied`` is written to ``config.yml``, resolves
+    to ``off`` in :func:`_compute_level`, and stops :func:`should_prompt` from
+    ever asking again — so the refusal survives upgrades instead of being
+    re-read as silence.
+
+    Refusing deletes the spool and the outbox rather than merely ignoring them:
+    a "no" should leave nothing behind for a later bug to send. It deliberately
+    does not call :func:`ensure_identity` — an install that refuses should not
+    grow an install id on its way out.
+    """
+    _update(
+        consent=DENIED,
+        level=OFF,
+        decided_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    )
+    _purge_collected()
+    return OFF
 
 
 # ── Install counting ─────────────────────────────────────────────────────

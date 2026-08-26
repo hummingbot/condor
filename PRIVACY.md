@@ -10,24 +10,39 @@ consent recorded it runs at level `ping`: a random install id, the version, and
 a periodic heartbeat — nothing about you, your users, or your trading. None of
 the usage events are sent until an admin taps "yes" on a prompt. Batches go to
 the project's collector at `https://telemetry.hummingbot.org/v1/events`, which
-is fixed in the source and cannot be pointed elsewhere. The one full kill
-switch is `CONDOR_TELEMETRY=off` in the environment.
+is fixed in the source and cannot be pointed elsewhere. An admin can turn it
+off entirely — in Settings → Privacy, or with `CONDOR_TELEMETRY=off` in the
+environment — and a refusal, once recorded, is honoured across upgrades.
 
-The whole mechanism is about 900 lines in [`condor/telemetry/`](condor/telemetry/).
-It is meant to be read, not trusted.
+There is one other way anything can leave, and it is completely separate: you
+can **hand us a conversation**. By default that means pressing a button and
+confirming the redacted transcript we would send, one chat at a time. If you
+would rather stop pressing it, you can turn on **Always** and let finished
+conversations go automatically — off unless you choose it, and narrower than the
+button in every direction. That is content, so it has its own rules, its own
+code and its own section below — [Sharing a
+conversation](#sharing-a-conversation). Nothing there happens on a fresh
+install, and nothing automatic happens until you ask for it.
+
+The whole mechanism is about 900 lines in [`condor/telemetry/`](condor/telemetry/),
+and sharing is about 1,000 more in [`condor/sharing/`](condor/sharing/). They are
+meant to be read, not trusted.
 
 ---
 
 ## What is collected
 
-There are three levels. The consent prompt chooses between `ping` and `usage`;
-`off` exists only as an environment override. You can change the answer later.
+There are three levels. The consent prompt chooses between `ping` and `usage`
+— it has no "off" button, so ignoring it is never read as a refusal. `off` is a
+deliberate act: the admin turns reporting off in Settings → Privacy, or the
+operator sets `CONDOR_TELEMETRY=off`. You can change the answer later, in
+either direction.
 
 | Level | What it sends |
 |---|---|
 | `ping` | Only that this install exists: `install`, `heartbeat`, `version_change`, `shutdown`. **This is the default, and the floor** — the prompt has no "off" option. |
 | `usage` | The above plus the feature, reliability and agent events below. Opt-in only. |
-| `off` | Nothing, ever. The emitter is a no-op. Reachable only via `CONDOR_TELEMETRY=off` in the environment. |
+| `off` | Nothing, ever. The emitter is a no-op — no install id is created, nothing is buffered, nothing is written, nothing is sent. Reached by an admin turning reporting off in Settings → Privacy, or by `CONDOR_TELEMETRY=off` in the environment. |
 
 Every batch carries one context block describing the *deployment*, not you:
 
@@ -76,6 +91,14 @@ Never sent, under any level:
 - **People** — Telegram user ids, usernames, chat ids, display names.
 - **Content** — prompts, agent replies, journal entries, notes, routine configs, report bodies, and exception *message* strings.
 
+That list is about **telemetry**, and it stays true of telemetry no matter what
+else you do. The one way a prompt or an agent reply can ever leave this install
+is [Sharing a conversation](#sharing-a-conversation) — a different pipeline, a
+different consent, and a different endpoint. It happens only because you pressed
+the button, or because you turned on Always yourself; turning telemetry off does
+not turn either of them on, and turning telemetry on does not share a word of
+any conversation.
+
 Two of those deserve a note, because they are where this kind of thing usually
 leaks:
 
@@ -109,26 +132,28 @@ line in your own checkout. The collector itself is open source
 (`condor-telemetry-server`).
 
 Events are buffered in memory and, when a batch cannot be delivered, appended to
-`condor/.runtime/telemetry/outbox.jsonl`, which is capped at 5,000 events and 7
+`.condor/telemetry/outbox.jsonl`, which is capped at 5,000 events and 7
 days — oldest dropped. At level `off` no event is ever created, so nothing is
 buffered, nothing is written, and nothing is sent.
 
 You can read exactly what would be sent:
 
 ```bash
-cat condor/.runtime/telemetry/outbox.jsonl | jq .
+cat .condor/telemetry/outbox.jsonl | jq .
 ```
 
 ## How to change it — or turn it off entirely
 
-Install counting (`ping`) is the floor: it is not an option on the consent
-prompt and cannot be disabled from the dashboard, because the project needs an
-honest count of installs to know what to support. To check what your install is
-doing:
+Install counting (`ping`) is the floor for an install that has *not* answered:
+it is not an option on the consent prompt, because an ignored prompt must not be
+read as a refusal and the project needs an honest count of installs to know what
+to support. A refusal, though, is a different thing from silence — an admin who
+says no is obeyed, and that answer is written to `config.yml`, so it keeps
+holding after an upgrade. To check what your install is doing:
 
 ```bash
-# The authoritative answer. Prints "ping" on a default install,
-# "off" only when CONDOR_TELEMETRY=off is set.
+# The authoritative answer. Prints "ping" on a default install, and
+# "off" when CONDOR_TELEMETRY=off is set or the admin turned reporting off.
 uv run python -c "from condor.telemetry import consent; print(consent.level())"
 ```
 
@@ -138,24 +163,195 @@ Three ways to control it, in order of precedence:
    switch: it overrides everything, suppresses the prompt, and is the right
    answer for an install that must send nothing at all.
 2. **The dashboard** — Settings → Privacy, which every seat can read and only
-   the admin can change (`GET`/`PUT /api/v1/settings/telemetry?level=ping|usage`;
-   `off` is rejected there). This is also where an install that runs without
-   Telegram is asked in the first place, since it has no bot to be asked
-   through.
+   the admin can change
+   (`GET`/`PUT /api/v1/settings/telemetry?level=ping|usage|off`). This is also
+   where an install that runs without Telegram is asked in the first place,
+   since it has no bot to be asked through. Choosing `off` here records a
+   refusal, which is the durable form of the kill switch: it is stored rather
+   than read from the environment of one process.
 3. **`config.yml`** — edit the `telemetry` section directly:
 
    ```yaml
    telemetry:
-     consent: granted
+     consent: granted   # or `denied`, which forces level `off`
      level: ping
    ```
 
-Downgrading from `usage` to `ping` is a **withdrawal, not a pause**: the
-in-memory buffer and the outbox file are deleted, so nothing already recorded
-can be sent afterwards.
+Downgrading from `usage` to `ping`, and turning reporting off, are both a
+**withdrawal, not a pause**: the in-memory buffer and the outbox file are
+deleted, so nothing already recorded can be sent afterwards.
+
+**An install that already refused stays off.** Earlier builds shipped a "No
+thanks" button, and its answer was recorded as `consent: denied`. That refusal
+is honoured — such an install resolves to level `off`, is never re-asked, and
+creates no install id — for as long as it stands. To opt back in, an admin
+picks a level in Settings → Privacy (or sets `CONDOR_TELEMETRY=ping|usage`,
+which overrides the stored answer like any other).
+
+## Sharing a conversation
+
+Separate from everything above. Telemetry is anonymous counts an admin consents
+to once for the whole install; this is a **transcript**, and only the person who
+held the conversation can hand it over. By default that is one at a time, every
+time, after reading exactly what would be sent. There is a standing answer you
+can choose instead — [Sharing automatically](#sharing-automatically) — and it is
+off until you choose it.
+
+The code is [`condor/sharing/`](condor/sharing/), and it deliberately shares no
+module, no consent record, no queue file and no endpoint with
+`condor/telemetry/`. The rule is asserted by a test: the sharing package never
+imports `condor/telemetry/schema.py`. Widening that taxonomy to carry a
+transcript would have deleted the very property that makes the "never
+collected" list above checkable rather than merely claimed.
+
+**How it works.** In the chat rail, each conversation has a share button. It
+opens a dialog showing the redacted transcript, a plain sentence saying what was
+replaced ("2 wallet addresses and 1 API key were replaced"), and a Download
+button if you would rather keep the bytes than send them. Nothing is queued
+until you confirm.
+
+**What is redacted**, in two tiers:
+
+- **Values this install holds are substituted exactly.** Server names, hosts and
+  URLs, server credentials, LLM provider keys, your Telegram bot token, saved
+  endpoint keys, Gateway wallet addresses, Telegram user ids and usernames, and
+  your home directory path. These are not guessed at — they are read out of your
+  own config and replaced wherever they appear.
+- **Shapes that cannot be anything else are pattern-matched.** EVM and Solana
+  addresses, 64-hex blobs (transaction hash *or* private key — never kept),
+  prefixed API tokens (`sk-`, `sk-ant-`, `xoxb-`, `ghp_`, `AKIA…`), long
+  mixed-case secret runs, email addresses, URLs carrying credentials in the
+  userinfo or query string, IP addresses, and BIP-39 recovery phrases (checked
+  against the actual wordlist, not guessed at structurally).
+
+Each replacement becomes a stable pseudonym — the same wallet reads as the same
+`SOL_ADDR_a3f91c` throughout, so the conversation still makes sense — computed
+as an HMAC salted with a random secret that **never leaves your machine**. We
+cannot reverse it, and the same address on two installs produces two unrelated
+pseudonyms.
+
+**What is deliberately kept, and why.** Amounts, balances, order sizes, prices
+and PnL survive redaction. A transcript in which nobody can tell whether the
+agent computed the right answer is a transcript with no value for improving the
+agent, which is the entire reason for asking. Once the wallet, the server and
+the user are pseudonymous, a number is not on its own an identifier. The dialog
+says this before you confirm rather than leaving you to find out.
+
+**What the scrubber will miss.** Free text is best-effort and cannot be
+otherwise: no rule knows that "the vault key is hunter2" is a secret. That is
+exactly why the payload is shown to you first, why it is one conversation at a
+time, and why unsharing works. If you pasted something sensitive into a chat,
+read the dialog before pressing Share.
+
+**Group chats contain other people's words.** A transcript from a Telegram group
+may quote people who never agreed to anything. Sharing it with the button is
+your judgement call, and the dialog says so. Automatic sharing never takes one
+at all — see [Sharing automatically](#sharing-automatically).
+
+**Where it goes.** `https://telemetry.hummingbot.org/v1/conversations` — the
+same host as telemetry, a different endpoint, a different table, its own rate
+limit, and no code path in common. Fixed in the source like the other one. The
+envelope carries a random `share_install_id` that is **not** your telemetry
+install id, so a shared conversation cannot be joined to your install's
+heartbeat history, and an install with `CONDOR_TELEMETRY=off` can still share.
+Alongside it go the build version, branch, OS and Python version, which model
+answered, and the counts of what was redacted.
+
+## Sharing automatically
+
+In Settings → Privacy there are three answers, and **Off** is what every install
+starts at:
+
+- **Off** — nothing is shared. The share button is still there if you want it.
+- **Ask me** — the button, as described above. Every share is a decision you
+  make with the transcript in front of you.
+- **Always** — your conversations are shared on their own, redacted exactly the
+  same way, **without showing you first**.
+
+Always is the only path where nobody reads the payload before it leaves, so
+everything below exists to compensate for that. It is deliberately narrower than
+the button in five ways, each of which is enough on its own to stop a
+conversation from going:
+
+- **Idle.** A conversation is only taken once nothing has happened in it for 30
+  minutes. Conversations never formally end, so "finished" has to be a
+  heuristic; if you come back and continue one that was already sent, the next
+  sweep replaces it with the longer transcript rather than adding a second copy.
+- **Forward-only.** Only conversations *started after* you chose Always. Turning
+  the setting on is consent to a policy from that moment, not a licence over
+  your archive — your old chats are never swept, and if you want to hand one
+  over you do it deliberately, with the button. Turning Always off and on again
+  starts a fresh window rather than reaching back over the gap.
+- **Single-author only.** A conversation that anyone but you can speak into — a
+  Telegram group — is never taken automatically. You can consent for yourself;
+  you cannot consent for the other people in the room. Those chats stay
+  shareable with the button, where you are deciding with the transcript in front
+  of you. A conversation from a surface this check does not recognise is
+  excluded too, rather than assumed to be yours alone.
+- **Excluded chats, forever.** While Always is on, every conversation it covers
+  carries a marker in its own header saying so, with one click to leave that
+  chat out. It cannot be dismissed — the point is that you should not be able to
+  forget the setting is on — and an exclusion is honoured permanently, including
+  after the conversation grows.
+- **Rate limited.** At most 3 conversations per 15-minute sweep, which stays
+  inside the collector's 12-per-hour allowance. A backlog drains oldest-first
+  over several sweeps instead of bursting.
+
+Everything else is identical to the button: the same scrubber, the same
+pseudonyms, the same size cap, the same `share_id` and delete token, the same
+endpoint. The only thing that differs on the wire is a flag saying the share was
+automatic rather than chosen, so a reader of the corpus can tell a sample from a
+signal.
+
+**How to stop.** Choosing Off does two things immediately: no further
+conversations are taken, and anything the sweep had queued but not yet sent is
+**deleted** rather than merely held back. It does not touch what you have
+already shared — that is the separate "Delete everything I've shared" button
+below it, because turning off future sharing and withdrawing the past are two
+different decisions and neither one is the default for the other. Both buttons
+are there; you can press either, both, or neither.
+
+The admin's install-wide veto and `CONDOR_SHARING=off` both outrank Always, the
+same way they outrank the button. If sharing is turned off above your head,
+Settings says so rather than leaving a switch that quietly does nothing.
+
+**How to unshare.** Press Unshare in the dialog, or in Settings → Privacy, which
+lists everything you currently have out there. Deleting a conversation unshares
+it first, so a copy never outlives the chat it came from. The revocation works
+without anyone knowing who you are: your install kept a random token and sent us
+only its SHA-256, so posting the token is proof enough to delete the row. If the
+network is down when you press it, the revocation is queued with its token and
+completes later.
+
+**How to turn it off.**
+
+1. **Environment** — `CONDOR_SHARING=off` in your `.env`. The full kill switch;
+   it overrides everything and nothing on the box can share.
+2. **The dashboard** — Settings → Privacy. The admin holds an install-wide veto
+   that hides the button for everyone
+   (`GET`/`PUT /api/v1/sharing/settings`). Unsharing keeps working while the
+   veto is on, so nobody is stranded with something they cannot take back.
+3. **`config.yml`** — the `sharing` section:
+
+   ```yaml
+   sharing:
+     enabled: false
+   ```
+
+There is nothing to turn off on a fresh install: the default is that nothing is
+shared, and it stays that way until somebody presses the button — or turns on
+Always, which nobody but that user can do for them.
 
 ## Changes to this document
 
 Adding anything to the collected list requires a change to `schema.py`, a change
 to this file, and re-asking for consent. In particular, adding trading pairs
 would make positions inferable from timing and must not be done quietly.
+
+The same applies to sharing, in its own terms. Sending anything a user has not
+been shown, or sending anything a user has not asked for, would be a change to
+`condor/sharing/`, a change to this file, and a new consent — not a default
+someone flips. Always is exactly that kind of change, and it arrived as one: an
+opt-in, off until chosen, described in full at the moment of the choice, and
+narrowed by the five rules above precisely because it is the one path where the
+scrubber is the last gate rather than the second-to-last.

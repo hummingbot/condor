@@ -19,6 +19,7 @@ from telegram.ext import (
     filters,
 )
 
+from condor import paths
 from condor.persistence import SafePicklePersistence
 from condor.telemetry import taps as telemetry_taps
 from handlers import cancel_command, clear_all_input_states
@@ -536,7 +537,7 @@ async def _notify_interrupted_runs(bot, report) -> None:
     One summary per chat rather than a message per run: a crash with several
     live loops would otherwise spam the user at the worst possible moment.
     """
-    from condor.notifications import NotifyBot
+    from condor.notifications import announce, user_for_chat
 
     by_chat: dict[int, list] = {}
     for run in report.interrupted:
@@ -557,24 +558,17 @@ async def _notify_interrupted_runs(bot, report) -> None:
             suffix = " — restarted" if run.restarted else ""
             lines.append(f"• {run.label} (last tick {run.last_tick}){suffix}")
         text = "\n".join(lines)
+        # Telegram and the bell (FEAT-048) in one call: ``announce`` resolves
+        # the sender once and files the notice exactly once, including when the
+        # sender *is* the bell (local mode, FEAT-049). A private chat id is the
+        # owner's user id; a group has no dashboard owner, so a group summary is
+        # simply not filed anywhere.
         try:
-            await bot.send_message(chat_id=chat_id, text=text)
+            await announce(
+                user_for_chat(chat_id), chat_id, text, kind="system", bot=bot
+            )
         except Exception:
             logger.warning("Could not notify chat %s about interrupted runs", chat_id)
-        # And on the bell (FEAT-048). A private chat id is the owner's user id;
-        # ``record`` ignores anything that is not one, so a group summary is
-        # simply not filed anywhere. Skipped when the sender above *is* the bell
-        # (local mode, FEAT-049): it already filed exactly this text.
-        if isinstance(bot, NotifyBot):
-            continue
-        try:
-            from condor.notifications import record, user_for_chat
-
-            owner = user_for_chat(chat_id)
-            if owner:
-                await record(owner, text, kind="system")
-        except Exception:
-            logger.debug("Could not record interrupted-run notice", exc_info=True)
 
 
 def _outbound_bot(application: Application):
@@ -604,6 +598,15 @@ async def startup(application: Application) -> None:
     and never run — which is exactly how boot reconciliation silently died.
     Called explicitly from :func:`_run_dual`, before the first update is served.
     """
+    # First, before anything reads a conversation or reconciles a delegation:
+    # settle where the runtime store lives (FEAT-051). Idempotent, so this is a
+    # no-op on every boot after the first; it is a named public function rather
+    # than inline code because a second entry point (a CLI, a worker) would have
+    # to call it too.
+    from condor.migrations import ensure_migrated
+
+    ensure_migrated()
+
     # Sync server permissions (ensures all servers have ownership entries)
     await sync_server_permissions()
 
@@ -643,6 +646,13 @@ async def startup(application: Application) -> None:
     sds = get_server_data_service()
     sds.start()
     await sds.auto_subscribe_servers()
+
+    # Ride the ticker-pool poll the SDS just started: an hourly price snapshot
+    # per server is the only source of 24h change on the CLOB side, and it costs
+    # no upstream request (FEAT-053).
+    from condor import ticker_history
+
+    ticker_history.install_listener()
 
     # Start agent session health monitor. The health monitor is process
     # lifecycle, not a session operation, so it is driven off the module
@@ -688,6 +698,20 @@ async def startup(application: Application) -> None:
         logger.info("Telemetry level: %s", level)
     except Exception:
         logger.exception("Telemetry init failed (continuing without it)")
+
+    # Conversation sharing (FEAT-054, FEAT-055). Two jobs, deliberately not part
+    # of the telemetry block above: they share no consent record, no queue and
+    # no endpoint with it. Both are free on an install where nobody has opted
+    # in — the delivery job finds an empty queue and the sweep finds no user at
+    # ``always``, and neither touches the network.
+    try:
+        from condor.sharing import share as sharing
+        from condor.sharing import sweep as sharing_sweep
+
+        sharing.register_jobs(application)
+        sharing_sweep.register_jobs(application)
+    except Exception:
+        logger.exception("Sharing job registration failed (continuing without it)")
 
     # Start file watcher
     asyncio.create_task(watch_and_reload(application))
@@ -802,13 +826,14 @@ def get_persistence() -> SafePicklePersistence:
     """
     Build a persistence object that works both locally and in Docker.
     - Uses an env var override if provided.
-    - Defaults to <project_root>/data/condor_bot_data.pickle.
+    - Defaults to <project_root>/data/condor_bot_data.pickle, resolved through
+      condor.paths.data_dir() so $CONDOR_DATA_DIR repoints the whole
+      operational store at once rather than this one file.
     - Ensures the parent directory exists, but does NOT create the file.
     - Uses SafePicklePersistence for atomic writes, backup recovery,
       and ephemeral key filtering.
     """
-    base_dir = Path(__file__).parent
-    default_path = base_dir / "data" / "condor_bot_data.pickle"
+    default_path = paths.data_dir() / "condor_bot_data.pickle"
 
     persistence_path = Path(os.getenv("CONDOR_PERSISTENCE_FILE", default_path))
 

@@ -11,7 +11,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 
 from condor.web.models import WebUser
-from config_manager import UserRole, get_config_manager
+from config_manager import ServerPermission, UserRole, get_config_manager
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +148,33 @@ def check_server_access(user_id: int, server_name: str) -> None:
     """
     if not get_config_manager().has_server_access(user_id, server_name):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access")
+
+
+def require_owner(cm, user_id: int, server_name: str) -> None:
+    """Enforce the OWNER line on top of the TRADER floor every route already has.
+
+    The rule (SEC-153, extended to the gateway by SEC-166, and to the gateway
+    token list by SEC-207):
+
+    * **Reading** a server's state — status, logs, wallet and network listings,
+      configured connectors — needs TRADER. A shared trader has to be able to
+      see what they are trading against, and to tell the owner when it is down.
+    * **Trading** on a server needs TRADER. That is what the share is for.
+    * **Mutating a server's configuration or its infrastructure** needs OWNER.
+      Exchange credentials, the gateway container lifecycle, the private keys
+      in its keystore, the RPC endpoints it dials and the entries on its token
+      list are all the owner's machine, not a trading action — and each of them
+      can break the owner's running bots for everyone else on the server.
+
+    Admins keep the bypass they hold everywhere else in the web layer.
+
+    Lives here rather than in ``routes/settings.py`` (its first home) because
+    it is the ceiling to this module's floor, and a second hand-copied
+    implementation in the next router that needs it is how the line drifts.
+    """
+    perm = cm.get_server_permission(user_id, server_name)
+    if perm != ServerPermission.OWNER and not cm.is_admin(user_id):
+        raise HTTPException(status_code=403, detail="Owner access required")
 
 
 async def require_server_access(

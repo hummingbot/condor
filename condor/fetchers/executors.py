@@ -27,7 +27,7 @@ EXECUTORS_POLL_MAX = EXECUTORS_PAGE_SIZE
 # ============================================
 
 
-def extract_executors_list(result) -> list[dict]:
+def extract_executors_list(result: Any) -> list[dict]:
     """Extract executor list from various API response shapes."""
     if isinstance(result, list):
         return result

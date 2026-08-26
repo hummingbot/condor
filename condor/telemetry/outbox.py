@@ -1,6 +1,6 @@
-"""Durable spool and the (deliberately inert) send path.
+"""Durable spool and the send path.
 
-Two files live under ``condor/.runtime/telemetry/``, the same gitignored place
+Two files live under ``.condor/telemetry/``, the same gitignored place
 the rest of the runtime keeps its append-only facts:
 
 ``spool.<pid>.jsonl``
@@ -16,9 +16,16 @@ the rest of the runtime keeps its append-only facts:
     then quietly drops the excess. That is the intended behaviour, not a bug.
 
 The collector address is :data:`COLLECTOR_URL`, compiled in and not
-configurable. Whether anything is sent to it is decided entirely by consent: at
-level ``off`` — the default — no event is ever created, so :func:`post` is never
-reached, and :func:`purge` deletes whatever a withdrawn opt-in left behind.
+configurable — :func:`endpoint` returns the constant unconditionally, and no
+environment variable redirects it. Whether anything is sent to it is decided
+entirely by consent, and the floor is level ``ping``: every install emits the
+four adoption events (``install``, ``heartbeat``, ``version_change``,
+``shutdown``) from the first boot, with no answer required, so :func:`post` is
+reached on an install whose admin never touched the prompt. ``CONDOR_TELEMETRY=off``
+in the environment is the one way to reach level ``off``, at which no event is
+ever created and :func:`post` is never called; :func:`purge` then deletes
+whatever a withdrawn opt-in left behind. ``PRIVACY.md`` states the same contract
+for humans — keep the two in step.
 """
 
 from __future__ import annotations
@@ -46,10 +53,10 @@ COLLECTOR_URL = "https://telemetry.hummingbot.org/v1/events"
 
 
 def root() -> Path:
-    """Where the spool lives. Derived like every other runtime store."""
-    from condor.agents.agent import _DATA_ROOT
+    """Where the spool lives. One runtime root, resolved in ``condor.paths``."""
+    from condor import paths
 
-    return Path(_DATA_ROOT).parent / "condor" / ".runtime" / "telemetry"
+    return paths.telemetry_dir()
 
 
 def spool_path(pid: int | None = None) -> Path:
@@ -212,7 +219,12 @@ def endpoint() -> str:
 
 
 async def post(envelope: dict) -> bool:
-    """Deliver one envelope."""
+    """Deliver one envelope.
+
+    The falsy-``url`` guard is not a deployment mode: :func:`endpoint` returns
+    the compiled-in constant, so a shipped install never takes it. It keeps a
+    build without a collector from claiming a delivery it never made.
+    """
     url = endpoint()
     if not url:
         return False

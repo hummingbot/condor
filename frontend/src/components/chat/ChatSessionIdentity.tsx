@@ -18,11 +18,11 @@ import { SessionServerChip } from "./SessionServerChip";
  * trades on.
  *
  * It lives here for the same reason `ChatThread` and `SessionServerChip` do:
- * the 480 px overlay panel and the `/agents` workspace both render it, so the
- * bound identity and the "not while a turn is in flight" rule cannot come to
- * mean two different things depending on where the chat was opened. Each
- * surface still owns its own chrome around it — the panel's History/New/
- * Minimize, the workspace's rail toggle and Manage link.
+ * it is the identity of the chat, not of the surface showing it, so the bound
+ * identity and the "not while a turn is in flight" rule stay one rule. The
+ * overlay panel that used to be its other consumer is gone; the chat workspace
+ * at `/` is now the only one, and it owns the chrome around it — the rail
+ * toggle, the session tabs and the Manage link.
  */
 export function ChatSessionIdentity({
   slot,
@@ -31,7 +31,6 @@ export function ChatSessionIdentity({
   agentBindings,
   isStreaming,
   onSelectBrain,
-  placeholder,
 }: {
   /** The conversation on screen, or null when there is none yet. */
   slot: ChatSlot | null;
@@ -40,8 +39,6 @@ export function ChatSessionIdentity({
   agentBindings: AgentBindingOption[];
   isStreaming: boolean;
   onSelectBrain: (selection: BrainSelection) => void;
-  /** What stands in for the picker before there is a session to switch. */
-  placeholder?: React.ReactNode;
 }) {
   const chat = useChat();
 
@@ -54,7 +51,7 @@ export function ChatSessionIdentity({
       {chat.isConnected && (
         <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-green-500" />
       )}
-      {slot ? (
+      {slot && (
         <BrainPicker
           agents={agents}
           customProviders={customProviders}
@@ -65,8 +62,6 @@ export function ChatSessionIdentity({
           variant="inline"
           disabled={busy}
         />
-      ) : (
-        placeholder
       )}
       {slot && (
         <SessionServerChip

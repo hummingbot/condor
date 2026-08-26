@@ -333,6 +333,15 @@ export function useLpConfig(
   connector: string,
   pair: string,
   enabled: boolean,
+  /**
+   * The pool the caller already knows, when it knows one (the DEX pool
+   * workspace opens on a specific address). Resolving the pair's deepest pool
+   * would then spend a rate-limited GeckoTerminal `search/pools` request — the
+   * same per-IP budget the page's chart, stats and bins compete for — on an
+   * answer the reducer discards: the caller pins its own pool, which sets
+   * `poolTouched` and turns every `RESOLVED` into a no-op.
+   */
+  lockedPoolAddress?: string,
 ) {
   const [state, dispatch] = useReducer(lpReducer, undefined, loadSavedDefaults);
   const validation = useLpValidation(state);
@@ -340,7 +349,7 @@ export function useLpConfig(
   const { data: pool, isFetching: poolFetching } = useQuery({
     queryKey: ["dex-pool", server, connector, pair],
     queryFn: () => api.getDexPool(server!, connector, pair),
-    enabled: enabled && !!server && !!connector && !!pair,
+    enabled: enabled && !lockedPoolAddress && !!server && !!connector && !!pair,
     staleTime: 60 * 1000,
   });
 

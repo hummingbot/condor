@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from condor import dex_candles
-from condor.web.auth import require_server_access
+from condor.web.auth import require_owner, require_server_access
 from condor.web.models import WebUser
 from config_manager import get_config_manager
 
@@ -400,13 +400,28 @@ async def add_dex_token(
     because deleting the holder changes what that ticker means everywhere.
     This route is that human's answer. Without ``replace`` it retries the
     registration and, on a collision, names the holder so the browser can ask;
-    with ``replace`` it deletes the holder first and registers the new token in
-    its place.
+    with ``replace`` it registers the new token, and deletes the holder only if
+    Gateway comes back saying the ticker is genuinely taken.
+
+    Two things that order buys, both of them the point of SEC-207. Deleting a
+    token *first* — as this route used to — made destruction unconditional: an
+    address that was merely address-shaped, and could never be registered at
+    all, still wiped the owner's entry on its way to a 502. And it is Gateway's
+    own ``symbol_taken`` verdict, not the ticker the caller typed, that proves
+    the new token really claims that ticker; nothing else in this process ever
+    learns it, since ``save_network_token`` resolves symbol and name upstream
+    from the address alone.
+
+    ``replace`` is OWNER-only for the same reason the gateway's container,
+    keystore and RPC endpoints are (SEC-166): the token list is the owner's
+    configuration, every user of the server trades against it, and an entry
+    deleted from it silently reads every balance for that mint as 0.
 
     Unlike the ensure route, an upstream error here is raised, not folded into
     a verdict: the user pressed a button and deserves the actual reason.
     """
     from condor.fetchers.gateway_tokens import (
+        TokenListSnapshot,
         ensure_tokens_listed,
         find_symbol_holder,
         forget_listed,
@@ -426,27 +441,71 @@ async def add_dex_token(
     address = addresses[0]
 
     cm = get_config_manager()
+    # Checked on `replace` alone, before any Gateway call: a trader's refusal
+    # must not depend on whether a collision happens to exist.
+    if body.replace:
+        require_owner(cm, user.id, name)
     client = await cm.get_client(name)
-    try:
-        if body.replace and body.symbol:
-            holder = await find_symbol_holder(
-                client, gateway_network, body.symbol, exclude=address
-            )
-            if holder:
-                await client.gateway.delete_token(gateway_network, holder["address"])
-                forget_listed(gateway_network, holder["address"])
 
-        verdicts = await ensure_tokens_listed(client, gateway_network, [address])
-        verdict = verdicts.get(address, "failed")
+    # This handler asks the same token list up to four questions, so it holds one
+    # read and shares it — created here, after the owner gate, and living no
+    # longer than this request. Every write below drops it, so no answer is ever
+    # served from a copy taken before the list changed.
+    snapshot = TokenListSnapshot(client, gateway_network)
+
+    async def register() -> str:
+        verdicts = await ensure_tokens_listed(
+            client, gateway_network, [address], snapshot=snapshot
+        )
+        return verdicts.get(address, "failed")
+
+    try:
+        verdict = await register()
 
         # The collision's other half: who holds the ticker. Looked up only when
         # the answer is needed, and only nameable when the pool knows its own
         # ticker — a `???` pool gets the verdict without the culprit.
         conflict = None
         if verdict == "symbol_taken" and body.symbol:
+            # Free: `symbol_taken` is itself proof that the save wrote nothing,
+            # and the re-read that established it is the snapshot now in hand.
             conflict = await find_symbol_holder(
-                client, gateway_network, body.symbol, exclude=address
+                client,
+                gateway_network,
+                body.symbol,
+                exclude=address,
+                snapshot=snapshot,
             )
+            if body.replace and conflict:
+                logger.warning(
+                    "user %s replaced the holder of ticker %s on %s: "
+                    "deleted %s from the token list in favour of %s",
+                    user.id,
+                    body.symbol,
+                    gateway_network,
+                    conflict["address"],
+                    address,
+                )
+                await client.gateway.delete_token(gateway_network, conflict["address"])
+                forget_listed(gateway_network, conflict["address"])
+                # A delete is a write, so the copy in hand still names the token
+                # that was just removed. Dropping it here is what keeps the
+                # lookup below from offering Replace on a deleted address.
+                snapshot.invalidate()
+                # The ticker is free now, so the save that Gateway refused can
+                # go through.
+                verdict = await register()
+                conflict = (
+                    await find_symbol_holder(
+                        client,
+                        gateway_network,
+                        body.symbol,
+                        exclude=address,
+                        snapshot=snapshot,
+                    )
+                    if verdict == "symbol_taken"
+                    else None
+                )
     except Exception as e:
         logger.warning("add token %s on %s failed: %s", address, gateway_network, e)
         raise HTTPException(status_code=502, detail=f"Gateway refused: {e}") from e

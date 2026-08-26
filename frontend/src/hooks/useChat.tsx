@@ -1,4 +1,4 @@
-import { createContext, useContext } from "react";
+import { createContext, useContext, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 
 import { useChatSocket } from "@/hooks/useChatSocket";
@@ -15,15 +15,26 @@ import {
  * `useChatSocket` keeps the socket, the slots, the streaming slot, the prewarm
  * guard and the outbox in a single instance. Calling it twice would open a
  * second socket, spawn a second subprocess against the session budget, and give
- * the two surfaces different ideas about what was said — so it is called once,
- * here, and both the overlay panel and the `/agents` workspace read the same
- * state. Streaming an answer in one and switching to the other shows the same
- * tokens still arriving, because there is only one of them.
+ * the two callers different ideas about what was said — so it is called once,
+ * here, and the chat workspace at `/` — `AgentChatTab` and everything it
+ * renders — reads that one state.
  */
 const ChatContext = createContext<ReturnType<typeof useChatSocket> | null>(null);
 
 export function ChatProvider({ children }: { children: React.ReactNode }) {
   const chat = useChatSocket();
+
+  // The socket is opened here, not by the chat workspace, because it carries
+  // more than chat: `notification` frames are the only live push path the
+  // dashboard has (FEAT-048), and a session that starts on /executors — a
+  // reload, a bookmark, a click on a notification's own link — used to never
+  // open it at all, leaving the bell frozen for the whole visit. Connecting
+  // from the shell does not spawn anything: prewarming stays gated behind
+  // `enablePrewarm`, which only the workspace calls.
+  useEffect(() => {
+    chat.connect();
+  }, [chat.connect]);
+
   return <ChatContext value={chat}>{children}</ChatContext>;
 }
 

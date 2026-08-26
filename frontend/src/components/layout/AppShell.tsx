@@ -42,9 +42,9 @@ const NAV_ITEMS = [
  * The shell owns the chat state.
  *
  * There used to be two surfaces rendering a conversation — an overlay panel
- * docked to the right of every page, and the workspace at `/agents` — which
- * meant two doors to one thing. The panel is gone; the provider stays here so
- * the socket outlives navigation between pages and `/agents`.
+ * docked to the right of every page, and the workspace at `/` — which meant
+ * two doors to one thing. The panel is gone; the provider stays here so the
+ * socket outlives navigation between pages and the workspace.
  */
 export function AppShell() {
   return (
@@ -132,8 +132,9 @@ function AppShellBody() {
           <div className="flex items-center gap-1">
             {/* Inside the ChatProvider on purpose: the bell reads the same
                 react-query cache the chat socket pushes live notifications
-                into, and that socket is what makes it update without a
-                reload (FEAT-048). */}
+                into, and the provider opens that socket on every route — not
+                only on the chat workspace — which is what makes the bell
+                update without a reload wherever the user is (FEAT-048). */}
             <NotificationBell />
 
             <button

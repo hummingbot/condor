@@ -13,7 +13,10 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from condor.runtime.danger import (
+    DANGEROUS_AMM_ACTIONS,
     DANGEROUS_BOT_ACTIONS,
+    DANGEROUS_CLMM_ACTIONS,
+    DANGEROUS_SWAP_ACTIONS,
     is_dangerous_tool_call,
     tool_call_input,
     tool_call_name,
@@ -76,6 +79,22 @@ class RiskState:
                 self._limits.shutdown_drawdown_pct if hasattr(self, "_limits") else -1
             ),
         }
+
+
+#: The signing actions of each Gateway tool, by tool name. These are the
+#: DANGEROUS_* sets the confirmation gate already uses: loop mode stands in for
+#: the human those sets would otherwise put in front of the call, so it has to
+#: agree with them exactly or the two gates disagree about the same signature.
+_SIGNING_DEX_ACTIONS = {
+    "manage_gateway_swaps": DANGEROUS_SWAP_ACTIONS,
+    "manage_clmm": DANGEROUS_CLMM_ACTIONS,
+    "manage_amm": DANGEROUS_AMM_ACTIONS,
+}
+
+#: Signing actions that return capital instead of committing it. Allowed even
+#: under a breached limit: refusing them would trap a loop agent in a position
+#: it is no longer permitted to unwind.
+RISK_REDUCING_DEX_ACTIONS = frozenset({"remove_liquidity", "close", "collect_fees"})
 
 
 class RiskEngine:
@@ -227,6 +246,72 @@ class RiskEngine:
 
         return True, ""
 
+    def check_dex_action(
+        self,
+        tool_call: dict,
+        current_state: RiskState,
+        notional_quote: float | None = None,
+    ) -> tuple[bool, str]:
+        """Check a signing DEX call against the position limit.
+
+        The Gateway tools sign straight from the user's wallet -- no executor,
+        no controller, no saved config in the path -- so this gate is the only
+        thing bounding a loop agent's DEX capital. Three tools reach it:
+        ``manage_gateway_swaps`` signs a swap, ``manage_clmm`` and
+        ``manage_amm`` move liquidity. Anything outside their
+        ``DANGEROUS_*_ACTIONS`` (quotes, pool and position reads, the guide
+        load) is not a signature and passes through untouched.
+
+        ``remove_liquidity``, ``close`` and ``collect_fees`` withdraw capital
+        rather than commit it, so they are allowed even under a breached limit
+        -- the same reasoning that lets a bot stop through
+        ``check_bot_action``.
+
+        ``notional_quote`` is the call valued in the pool's quote token by
+        :func:`_amm_notional_quote`; the callback prices it, exactly as it does
+        for an executor create. ``None`` or a non-finite/non-positive value
+        means the call could not be valued, and an unpriced signature is
+        refused rather than approved blind (SEC-093).
+
+        On approval the notional accumulates into ``current_state`` the way
+        :meth:`check_executor_action` does, so a second swap in the same tick
+        is gated against the running total and not the frozen snapshot.
+
+        Returns (allowed, reason).
+        """
+        input_data = tool_call_input(tool_call)
+        if input_data is None:
+            return False, "Tool arguments could not be read"
+        action = input_data.get("action", "")
+
+        if action not in _SIGNING_DEX_ACTIONS.get(
+            tool_call_name(tool_call), frozenset()
+        ):
+            return True, ""
+
+        if action in RISK_REDUCING_DEX_ACTIONS:
+            return True, ""
+
+        if (
+            notional_quote is None
+            or not math.isfinite(notional_quote)
+            or notional_quote <= 0
+        ):
+            return False, f"DEX {action} quote notional is unavailable"
+
+        projected = current_state.total_exposure + notional_quote
+        if projected > self.limits.max_position_size_quote:
+            return False, (
+                f"DEX {action} would exceed position limit: ${projected:.2f} > "
+                f"${self.limits.max_position_size_quote:.2f}"
+            )
+
+        # Approved: accumulate so the next signature in this tick is gated
+        # against the running total, not the pre-tick numbers.
+        current_state.total_exposure += notional_quote
+
+        return True, ""
+
 
 def auto_approve_with_risk_check(
     risk_engine: RiskEngine,
@@ -356,6 +441,32 @@ def auto_approve_with_risk_check(
                     if input_data.get("action", "") == "deploy":
                         ledger.note_deploy(input_data.get("bot_name", "") or "")
 
+            # Gateway signatures move funds straight out of the user's wallet,
+            # so they are priced and gated here (SEC-224). Interactive surfaces
+            # still route the same call to a human via confirmations.py; this
+            # branch is what stands in for that human in loop mode.
+            if tool_name in _SIGNING_DEX_ACTIONS:
+                action = input_data.get("action", "")
+                notional_quote = None
+                if (
+                    action in _SIGNING_DEX_ACTIONS[tool_name]
+                    and action not in RISK_REDUCING_DEX_ACTIONS  # unpriced
+                ):
+                    try:
+                        notional_quote = await _dex_notional_quote(
+                            tool_name, input_data, price_client
+                        )
+                    except Exception as exc:
+                        log.warning("Blocked %s(%s): %s", tool_name, action, exc)
+                        return {"outcome": {"outcome": "cancelled"}}
+
+                allowed, reason = risk_engine.check_dex_action(
+                    tool_call, risk_state, notional_quote
+                )
+                if not allowed:
+                    log.warning("Risk engine blocked tool call: %s", reason)
+                    return {"outcome": {"outcome": "cancelled"}}
+
             # Block direct order placement entirely
             if tool_name == "place_order":
                 log.warning("Blocked direct place_order (agents must use executors)")
@@ -424,3 +535,172 @@ async def _planned_amount_quote(input_data: dict[str, Any], client: Any) -> floa
     if not math.isfinite(amount) or amount <= 0:
         raise ValueError("planned quote amount must be a positive finite number")
     return amount
+
+
+def _amm_field(value: Any, name: str, default: float | None = None) -> float:
+    """One numeric ``manage_amm`` field as a non-negative float.
+
+    The tool's schema types every amount as a string, so this parses rather
+    than casts, and refuses anything it cannot read: the caller is about to
+    sign a transaction with it.
+    """
+    if value is None or value == "":
+        if default is None:
+            raise ValueError(f"{name} is required to price this call")
+        return default
+    try:
+        amount = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a number, got {value!r}") from exc
+    if not math.isfinite(amount) or amount < 0:
+        raise ValueError(f"{name} must be a non-negative finite number")
+    return amount
+
+
+def _positive_price(value: Any) -> float:
+    """A reference price, or ``ValueError`` if it cannot bound anything."""
+    if value is None or value == "":
+        raise ValueError("reference price is unavailable")
+    try:
+        price = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"reference price must be a number, got {value!r}") from exc
+    if not math.isfinite(price) or price <= 0:
+        raise ValueError("reference price must be a positive finite number")
+    return price
+
+
+async def _amm_base_price(input_data: dict[str, Any], client: Any) -> float:
+    """The quote-per-base price to value a ``manage_amm`` call's base leg.
+
+    ``manage_amm`` is pool-scoped, not pair-scoped: ``execute_swap`` and
+    ``add_liquidity`` name a ``pool_address`` and a ``base_token`` but never a
+    trading pair, so ``fetch_current_price`` -- which keys off a pair -- cannot
+    price them. The pool's own mid price is both available from the same client
+    and the price the call will actually execute at, so it is used instead.
+
+    ``create_pool`` has no pool yet, so it takes the declared ``initial_price``
+    (already quote per base) and otherwise falls back to the market price of
+    ``base_token-quote_token``, the pair the connector itself seeds from.
+    """
+    if client is None:
+        raise ValueError("Hummingbot price client is unavailable")
+
+    if input_data.get("action", "") == "create_pool":
+        declared = input_data.get("initial_price")
+        if declared is not None and declared != "":
+            return _positive_price(declared)
+
+        base_token = input_data.get("base_token") or ""
+        quote_token = input_data.get("quote_token") or ""
+        if not base_token or not quote_token:
+            raise ValueError("create_pool must name base_token and quote_token")
+
+        from condor.fetchers.market_data import fetch_current_price
+
+        return _positive_price(
+            await fetch_current_price(
+                client,
+                input_data.get("network") or "",
+                f"{base_token}-{quote_token}",
+            )
+        )
+
+    pool_address = input_data.get("pool_address") or ""
+    if not pool_address:
+        raise ValueError("pool_address is required to price this call")
+
+    gateway_amm = getattr(client, "gateway_amm", None)
+    if gateway_amm is None:
+        raise ValueError("Gateway AMM client is unavailable")
+
+    info = (
+        await gateway_amm.get_pool_info(
+            connector=input_data.get("connector") or "",
+            network=input_data.get("network") or "",
+            pool_address=pool_address,
+        )
+    ) or {}
+    price = info.get("price")
+    if price is None or price == "":
+        price = info.get("current_price")
+    return _positive_price(price)
+
+
+async def _dex_notional_quote(
+    tool_name: str, input_data: dict[str, Any], client: Any
+) -> float:
+    """Value a signing Gateway call in its quote token.
+
+    Raises ``ValueError`` when the call cannot be valued; the gate cancels
+    rather than signing an unpriced transaction. Like the executor path, the
+    number is denominated in the quote token, which the position limit is
+    assumed to share.
+
+    The two tool families are priced differently because they identify a market
+    differently. ``manage_gateway_swaps`` is *pair*-scoped -- it names a
+    ``trading_pair``, so ``fetch_current_price`` can price it directly. The LP
+    tools are *pool*-scoped: they name a ``pool_address`` and a ``base_token``
+    but never a pair, so they are valued off the pool's own mid price (see
+    :func:`_amm_base_price`).
+    """
+    action = input_data.get("action", "")
+
+    if tool_name == "manage_gateway_swaps":
+        # `amount` is denominated in the pair's base token; `side` only picks
+        # the direction, so it does not change what the swap is worth.
+        base = _amm_field(input_data.get("amount"), "amount")
+        amount = base * await _swap_base_price(input_data, client)
+        if not math.isfinite(amount) or amount <= 0:
+            raise ValueError("swap quote notional must be a positive finite number")
+        return amount
+
+    if action == "open":
+        # A CLMM open seeds one or both legs; either may be omitted.
+        base = _amm_field(
+            input_data.get("base_token_amount"), "base_token_amount", default=0.0
+        )
+        quote = _amm_field(
+            input_data.get("quote_token_amount"), "quote_token_amount", default=0.0
+        )
+    elif action == "add_liquidity":
+        base = _amm_field(input_data.get("base_token_amount"), "base_token_amount")
+        quote = _amm_field(input_data.get("quote_token_amount"), "quote_token_amount")
+    elif action == "create_pool":
+        base = _amm_field(input_data.get("base_token_amount"), "base_token_amount")
+        # Optional on create_pool: omitting it seeds from the market price.
+        quote = _amm_field(
+            input_data.get("quote_token_amount"), "quote_token_amount", default=0.0
+        )
+    else:
+        raise ValueError(f"unsupported DEX action: {action or 'unknown'}")
+
+    amount = quote
+    if base:
+        amount += base * await _amm_base_price(input_data, client)
+
+    if not math.isfinite(amount) or amount <= 0:
+        raise ValueError("DEX quote notional must be a positive finite number")
+    return amount
+
+
+async def _swap_base_price(input_data: dict[str, Any], client: Any) -> float:
+    """The quote-per-base price to value a ``manage_gateway_swaps`` call.
+
+    Pair-scoped, so unlike the pool-scoped LP tools this is exactly the case
+    :func:`condor.fetchers.market_data.fetch_current_price` is for.
+    """
+    if client is None:
+        raise ValueError("Hummingbot price client is unavailable")
+
+    trading_pair = input_data.get("trading_pair") or ""
+    if not trading_pair:
+        raise ValueError("swap must name a trading_pair")
+
+    from condor.fetchers.market_data import fetch_current_price
+
+    return _positive_price(
+        await fetch_current_price(
+            client, input_data.get("connector", "") or "", trading_pair
+        )
+    )

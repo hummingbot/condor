@@ -61,8 +61,8 @@ def test_a_fresh_install_pings_and_says_nothing_more(install):
 
 
 def test_usage_events_write_nothing_to_disk_at_the_ping_floor(install):
-    """Acceptance criterion: no condor/.runtime/telemetry directory is created
-    by activity that the install has no consent to report."""
+    """Acceptance criterion: no telemetry directory is created at all by
+    activity that the install has no consent to report."""
     emitter.set_hosted(False)  # the spooling path, which is the one that does I/O
     emitter.emit("command", name="portfolio", surface="telegram")
     assert not outbox.root().exists()
@@ -222,6 +222,146 @@ def test_off_is_not_a_grantable_answer(install):
     assert consent.state() == consent.GRANTED
     assert consent.set_level("off") == consent.PING  # rejected, level unchanged
     assert consent.level() == consent.PING
+
+
+# ── A refusal is honoured ────────────────────────────────────────────────
+
+
+def _refuse_like_an_older_build(tmp_path):
+    """Leave behind the `config.yml` the shipped "No thanks" button wrote, then
+    read it the way a fresh boot of the current build would."""
+    import yaml
+
+    import config_manager as cm_module
+
+    (tmp_path / "config.yml").write_text(
+        yaml.safe_dump(
+            {
+                "telemetry": {
+                    "consent": "denied",
+                    "level": "off",
+                    "decided_at": "2026-01-01T00:00:00Z",
+                }
+            }
+        )
+    )
+    cm_module.ConfigManager.reset_instance()
+    consent.refresh()
+
+
+def test_a_refusal_recorded_by_an_older_build_survives_the_upgrade(install):
+    """The regression this file exists to prevent: an admin said no under the
+    build that had a "No thanks" button, and the upgrade that introduced the
+    ping floor must not read that recorded no as silence."""
+    from condor import telemetry
+
+    _refuse_like_an_older_build(install)
+
+    assert consent.state() == consent.DENIED
+    assert consent.level() == consent.OFF
+    assert telemetry.init(hosted=True) == consent.OFF
+
+    # Nothing materialized on the way through: no identity, no count, no event.
+    assert consent.install_id() == ""
+    emitter.emit("install")
+    emitter.emit("command", name="portfolio", surface="telegram")
+    taps.on_error(RuntimeError("boom"), where="test")
+
+    assert emitter.buffered() == 0
+    assert asyncio.run(emitter.flush("test")) == 0
+    assert not outbox.root().exists()
+    # And it is not asked again — the answer is on file.
+    assert consent.should_prompt("1.2.3") is False
+
+
+def test_the_environment_can_still_opt_a_refusing_install_back_in(install, monkeypatch):
+    """The override is authoritative in both directions, so an operator can
+    re-enable an install that refused without hand-editing `config.yml`."""
+    _refuse_like_an_older_build(install)
+    monkeypatch.setattr("utils.config.CONDOR_TELEMETRY", "ping", raising=False)
+    consent.refresh()
+
+    assert consent.level() == consent.PING
+    assert consent.state() == consent.DENIED  # the stored answer is left intact
+
+
+def test_turning_reporting_off_is_a_withdrawal_not_a_pause(install):
+    """`deny()` is the in-product off switch: it destroys what was collected
+    and, unlike the env kill switch, is durable."""
+    _grant("usage")
+    emitter.emit("command", name="portfolio", surface="telegram")
+    outbox.stash(
+        [
+            {
+                "id": "x",
+                "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "name": "command",
+            }
+        ]
+    )
+    assert outbox.outbox_path().exists()
+
+    assert consent.deny() == consent.OFF
+
+    assert consent.state() == consent.DENIED
+    assert consent.level() == consent.OFF
+    assert emitter.buffered() == 0
+    assert not outbox.outbox_path().exists()
+
+    emitter.emit("command", name="portfolio", surface="telegram")
+    assert emitter.buffered() == 0
+
+
+class _FakeQuery:
+    def __init__(self, data):
+        self.data = data
+        self.text = None
+
+    async def answer(self):
+        return None
+
+    async def edit_message_text(self, text, **kwargs):
+        self.text = text
+
+
+class _FakeTap:
+    """An update carrying one inline-keyboard tap from the admin."""
+
+    def __init__(self, data):
+        self.callback_query = _FakeQuery(data)
+        self.effective_user = type("U", (), {"id": 7})()
+
+
+def test_a_stale_no_thanks_tap_is_recorded_as_the_refusal_it_is(install, monkeypatch):
+    """The prompt no longer offers "off", so such a tap can only come from a
+    message an older build sent — where the button read "No thanks". Rounding
+    it up to the floor would be the same defect as ignoring a stored one."""
+    from condor.telemetry import prompt
+    from config_manager import get_config_manager
+
+    _grant("usage")
+    # The real ConfigManager, so the refusal genuinely lands on disk; only the
+    # "is this the admin" question is answered for us.
+    monkeypatch.setattr(type(get_config_manager()), "is_admin", lambda self, uid: True)
+
+    tap = _FakeTap("telemetry:off")
+    asyncio.run(prompt.callback_handler(tap, None))
+
+    assert consent.state() == consent.DENIED
+    assert consent.level() == consent.OFF
+    assert "report nothing" in tap.callback_query.text
+    emitter.emit("command", name="portfolio", surface="telegram")
+    assert emitter.buffered() == 0
+
+
+def test_a_refusing_install_can_opt_back_in_from_the_dashboard(install):
+    """The way back on is a level, not a `.env` edit — otherwise "no" is a trap."""
+    _refuse_like_an_older_build(install)
+
+    assert consent.set_level(consent.PING) == consent.PING
+    assert consent.state() == consent.GRANTED
+    assert consent.level() == consent.PING
+    assert consent.install_id()  # identity is materialized only now
 
 
 # ── The leak test ────────────────────────────────────────────────────────

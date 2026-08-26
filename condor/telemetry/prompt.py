@@ -145,8 +145,19 @@ async def callback_handler(update, context) -> None:
         answer = (
             (query.data or "").split(":", 1)[1] if ":" in (query.data or "") else ""
         )
-        # An "off" tap can only come from a prompt sent by an older version;
-        # grant() lands anything unrecognized on ping, the floor.
+        # An "off" tap can only come from a prompt sent by an older version,
+        # where the button read "No thanks". That is a refusal, so it is
+        # recorded as one — the same answer the dashboard's off switch gives —
+        # rather than being rounded up to the floor. Anything else
+        # unrecognized still lands on ping via grant().
+        if answer == consent.OFF:
+            consent.deny()
+            await query.edit_message_text(
+                "Understood. Condor will report nothing at all, and will not "
+                "ask again. Settings \u2192 Privacy can turn it back on."
+            )
+            return
+
         chosen = consent.grant(answer)
         from condor.telemetry import emitter
 

@@ -4,15 +4,13 @@ from pathlib import Path
 
 import pytest
 
-from condor.memory import paths as paths_module
 from condor.memory.paths import store_root
 from condor.memory.store import MemoryStore, _atomic_write
 
 
 @pytest.fixture
-def memory_root(tmp_path, monkeypatch):
-    """Point the project root at a tmp dir so stores resolve under it."""
-    monkeypatch.setattr(paths_module, "_PROJECT_ROOT", tmp_path)
+def memory_root(tmp_path):
+    """Where the chat's stores land under the suite-wide tmp agents root."""
     # The chat store (agent_slug=None) is what these per-user tests exercise.
     return tmp_path / "agents" / "condor" / "store"
 
@@ -251,8 +249,7 @@ def test_concurrent_writers_never_leave_a_torn_file(memory_root):
 # -- per-assistant resolver + isolation (FEAT-003) ----------------------------
 
 
-def test_resolver_distinct_roots_per_assistant(tmp_path, monkeypatch):
-    monkeypatch.setattr(paths_module, "_PROJECT_ROOT", tmp_path)
+def test_resolver_distinct_roots_per_assistant(tmp_path):
     chat = store_root(42, None)
     grid = store_root(42, "grid_scalper")
     ema = store_root(42, "ema_trend_follower")
@@ -263,14 +260,12 @@ def test_resolver_distinct_roots_per_assistant(tmp_path, monkeypatch):
     assert store_root(42, "grid_scalper") == grid
 
 
-def test_resolver_user_isolation_within_assistant(tmp_path, monkeypatch):
-    monkeypatch.setattr(paths_module, "_PROJECT_ROOT", tmp_path)
+def test_resolver_user_isolation_within_assistant(tmp_path):
     assert store_root(1, "grid_scalper") != store_root(2, "grid_scalper")
 
 
-def test_memory_isolated_between_assistants(tmp_path, monkeypatch):
+def test_memory_isolated_between_assistants(tmp_path):
     """A memory written by one assistant is invisible to another."""
-    monkeypatch.setattr(paths_module, "_PROJECT_ROOT", tmp_path)
     grid = MemoryStore(user_id=42, agent_slug="grid_scalper")
     chat = MemoryStore(user_id=42, agent_slug=None)
 
@@ -283,8 +278,7 @@ def test_memory_isolated_between_assistants(tmp_path, monkeypatch):
     assert "only grid knows this" in (grid.read("Grid fact") or "")
 
 
-def test_audit_logs_are_per_assistant(tmp_path, monkeypatch):
-    monkeypatch.setattr(paths_module, "_PROJECT_ROOT", tmp_path)
+def test_audit_logs_are_per_assistant(tmp_path):
     grid = MemoryStore(user_id=42, agent_slug="grid_scalper")
     ema = MemoryStore(user_id=42, agent_slug="ema_trend_follower")
 

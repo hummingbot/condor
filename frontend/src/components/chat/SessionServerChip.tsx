@@ -19,8 +19,9 @@ import { api, type ServerInfo } from "@/lib/api";
  *   any ambient choice, so there is nothing to pick. The chip says who pinned
  *   it and links to the one page that owns the decision.
  *
- * Lives here rather than inline so the workspace tab and the overlay panel
- * cannot drift apart on what the chip means.
+ * Lives here rather than inline so every place that shows a session's server
+ * — the workspace tab today, whatever else asks for it later — cannot drift
+ * apart on what the chip means.
  */
 export function SessionServerChip({
   serverName,

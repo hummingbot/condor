@@ -1,14 +1,16 @@
 import { useQuery } from "@tanstack/react-query";
 import { ChevronDown, Circle, Server, Star } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
+import { AnchoredMenu } from "@/components/ui/AnchoredMenu";
 import { useServer } from "@/hooks/useServer";
 import { api, type ServerInfo } from "@/lib/api";
 
 export function ServerSelector() {
   const { server, setServer } = useServer();
   const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
+  const [anchor, setAnchor] = useState<HTMLElement | null>(null);
+  const close = useCallback(() => setOpen(false), []);
 
   const { data: servers } = useQuery({
     queryKey: ["servers"],
@@ -44,29 +46,12 @@ export function ServerSelector() {
     }
   }, [server, onlineServerNames, defaultOnlineName, setServer]);
 
-  // Close on outside click or Escape
-  useEffect(() => {
-    const handler = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) {
-        setOpen(false);
-      }
-    };
-    const keyHandler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("mousedown", handler);
-    document.addEventListener("keydown", keyHandler);
-    return () => {
-      document.removeEventListener("mousedown", handler);
-      document.removeEventListener("keydown", keyHandler);
-    };
-  }, []);
-
   const current = servers?.find((s) => s.name === server);
 
   return (
-    <div ref={ref} className="relative">
+    <>
       <button
+        ref={setAnchor}
         onClick={() => setOpen(!open)}
         aria-expanded={open}
         aria-haspopup="listbox"
@@ -80,56 +65,63 @@ export function ServerSelector() {
         <ChevronDown className={`h-3 w-3 shrink-0 text-[var(--color-text-muted)] transition-transform ${open ? "rotate-180" : ""}`} />
       </button>
 
-      {open && servers && (
-        <div className="absolute right-0 top-full z-50 mt-1.5 min-w-[220px] rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] py-1 shadow-xl">
-          <div className="px-3 py-1.5 text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
-            API Servers ({onlineServers.length}/{totalCount} online)
-          </div>
-          {onlineServers.map((s: ServerInfo) => (
-            <button
-              key={s.name}
-              onClick={() => {
-                setServer(s.name);
-                setOpen(false);
-              }}
-              className={`flex w-full items-center gap-2.5 px-3 py-2 text-sm transition-colors hover:bg-[var(--color-surface-hover)] ${
-                s.name === server
-                  ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
-                  : ""
-              }`}
-            >
-              <Circle className="h-2 w-2 shrink-0 fill-current text-[var(--color-green)]" />
-              <span className="truncate">{s.name}</span>
-              {s.is_default && (
-                <Star
-                  className="h-2.5 w-2.5 shrink-0 fill-current text-amber-400"
-                  aria-label="Default server"
-                />
-              )}
-              {s.name === server && (
-                <span className="ml-auto text-[10px] font-medium uppercase text-[var(--color-primary)]">Active</span>
-              )}
-            </button>
-          ))}
-          {offlineServers.length > 0 && onlineServers.length > 0 && (
-            <div className="mx-3 my-1 border-t border-[var(--color-border)]" />
-          )}
-          {offlineServers.length > 0 && (
-            <div className="px-3 py-1.5 text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
-              Offline
-            </div>
-          )}
-          {offlineServers.map((s: ServerInfo) => (
-            <div
-              key={s.name}
-              className="flex w-full items-center gap-2.5 px-3 py-2 text-sm text-[var(--color-text-muted)] opacity-50 cursor-not-allowed"
-            >
-              <Circle className="h-2 w-2 shrink-0 fill-current text-[var(--color-text-muted)]" />
-              <span className="truncate">{s.name}</span>
-            </div>
-          ))}
+      <AnchoredMenu
+        anchor={anchor}
+        open={open}
+        onClose={close}
+        align="right"
+        className="min-w-[220px] py-1"
+      >
+        <div className="px-3 py-1.5 text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
+          {servers ? `API Servers (${onlineServers.length}/${totalCount} online)` : "API Servers"}
         </div>
-      )}
-    </div>
+        {!servers && (
+          <div className="px-3 py-2 text-xs text-[var(--color-text-muted)]">Loading…</div>
+        )}
+        {onlineServers.map((s: ServerInfo) => (
+          <button
+            key={s.name}
+            onClick={() => {
+              setServer(s.name);
+              setOpen(false);
+            }}
+            className={`flex w-full items-center gap-2.5 px-3 py-2 text-sm transition-colors hover:bg-[var(--color-surface-hover)] ${
+              s.name === server
+                ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
+                : ""
+            }`}
+          >
+            <Circle className="h-2 w-2 shrink-0 fill-current text-[var(--color-green)]" />
+            <span className="truncate">{s.name}</span>
+            {s.is_default && (
+              <Star
+                className="h-2.5 w-2.5 shrink-0 fill-current text-amber-400"
+                aria-label="Default server"
+              />
+            )}
+            {s.name === server && (
+              <span className="ml-auto text-[10px] font-medium uppercase text-[var(--color-primary)]">Active</span>
+            )}
+          </button>
+        ))}
+        {offlineServers.length > 0 && onlineServers.length > 0 && (
+          <div className="mx-3 my-1 border-t border-[var(--color-border)]" />
+        )}
+        {offlineServers.length > 0 && (
+          <div className="px-3 py-1.5 text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
+            Offline
+          </div>
+        )}
+        {offlineServers.map((s: ServerInfo) => (
+          <div
+            key={s.name}
+            className="flex w-full items-center gap-2.5 px-3 py-2 text-sm text-[var(--color-text-muted)] opacity-50 cursor-not-allowed"
+          >
+            <Circle className="h-2 w-2 shrink-0 fill-current text-[var(--color-text-muted)]" />
+            <span className="truncate">{s.name}</span>
+          </div>
+        ))}
+      </AnchoredMenu>
+    </>
   );
 }

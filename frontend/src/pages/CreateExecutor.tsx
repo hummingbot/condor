@@ -20,7 +20,7 @@ import { ExchangeSelector } from "@/components/market/ExchangeSelector";
 import { PairSelector, useTradingRules } from "@/components/market/PairSelector";
 import { PriceTicker } from "@/components/market/PriceTicker";
 import { MarketDepthPanel } from "@/components/market/MarketDepthPanel";
-import { MarketsPanel } from "@/components/market/MarketsPanel";
+import { MarketBrowser, type MarketPick } from "@/components/market/MarketBrowser";
 import { TradeChart } from "@/components/trade/TradeChart";
 import { GridConfigPanel, useGridValidation } from "@/components/grid/GridConfigPanel";
 import {
@@ -38,7 +38,6 @@ import { usePairBalances } from "@/hooks/usePairBalances";
 import { useServer } from "@/hooks/useServer";
 import { useCondorWebSocket } from "@/hooks/useWebSocket";
 import { useMainControllerData } from "@/hooks/useMainControllerData";
-import { useRates } from "@/hooks/useRates";
 import { useResizeDrag } from "@/hooks/useResizeDrag";
 import { api } from "@/lib/api";
 import { candleStore } from "@/lib/candle-store";
@@ -138,7 +137,8 @@ export function CreateExecutor() {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const [successInfo, setSuccessInfo] = useState<{ id: string; type: ExecutorType; connector: string; pair: string } | null>(null);
-  const [rightPanel, setRightPanel] = useState<"config" | "depth" | "markets">("config");
+  const [rightPanel, setRightPanel] = useState<"config" | "depth">("config");
+  const [browserOpen, setBrowserOpen] = useState(false);
   const [rightPanelWidth, setRightPanelWidth] = useState(288);
   const [bottomPaneHeight, setBottomPaneHeight] = useState(200);
   // The selection belongs to the market it was made in, so it carries that
@@ -227,12 +227,6 @@ export function CreateExecutor() {
     useMainControllerData(server, connector, pair);
 
   const rulesData = useTradingRules(server ?? "", connector, caps.hasTradingRules);
-
-  // Currency conversion for chart tooltip values
-  const quoteCurrency = pair.split("-")[1] || "USDT";
-  const { formatPnlValue, formatValue } = useRates([quoteCurrency]);
-  const convertPnl = useCallback((val: number) => formatPnlValue(val, quoteCurrency), [formatPnlValue, quoteCurrency]);
-  const convertValue = useCallback((val: number) => formatValue(val, quoteCurrency), [formatValue, quoteCurrency]);
 
   // Load candles for an executor that's outside the current range
   const handleRequestCandleRange = useCallback((startTime: number) => {
@@ -341,6 +335,42 @@ export function CreateExecutor() {
   // Depth and Markets have no DEX answer. Derived rather than reset in an effect, so
   // a CEX selection is remembered and comes back when the user returns to a CEX.
   const activePanel = caps.hasOrderBook ? rightPanel : "config";
+
+  // One state, three doors: the Browse button, the "/" key, and the pair
+  // selector's footer all land here (FEAT-053).
+  const applyMarket = useCallback(
+    (market: MarketPick) => {
+      if (market.connector !== connector) {
+        gridDispatch({ type: "SET_CONNECTOR", value: market.connector });
+      }
+      gridDispatch({ type: "SET_PAIR", value: market.pair });
+      setBrowserOpen(false);
+    },
+    [connector],
+  );
+
+  // "/" opens the browser, unless the keystroke belongs to something being
+  // typed into. Cmd+K is the chat's (AppShell), so the market list takes the
+  // key every other terminal gives a search box.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key !== "/" || e.metaKey || e.ctrlKey || e.altKey) return;
+      const el = e.target as HTMLElement | null;
+      if (
+        el &&
+        (el.tagName === "INPUT" ||
+          el.tagName === "TEXTAREA" ||
+          el.tagName === "SELECT" ||
+          el.isContentEditable)
+      ) {
+        return;
+      }
+      e.preventDefault();
+      setBrowserOpen(true);
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
 
   // ── Active config derived values ──
   const activeValidation = useMemo(() => {
@@ -509,6 +539,7 @@ export function CreateExecutor() {
             value={pair}
             onChange={(v) => gridDispatch({ type: "SET_PAIR", value: v })}
             hasTradingRules={caps.hasTradingRules}
+            onBrowseAll={caps.hasOrderBook ? () => setBrowserOpen(true) : undefined}
           />
           <div className="relative border-l border-[var(--color-border)]">
             <ExchangeSelector
@@ -517,6 +548,16 @@ export function CreateExecutor() {
               onChange={(v) => gridDispatch({ type: "SET_CONNECTOR", value: v })}
             />
           </div>
+          {caps.hasOrderBook && (
+            <button
+              onClick={() => setBrowserOpen(true)}
+              title="Browse all markets (/)"
+              className="flex items-center gap-1.5 border-l border-[var(--color-border)] px-3 py-2.5 text-xs text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+            >
+              <List className="h-3.5 w-3.5" />
+              Browse
+            </button>
+          )}
         </div>
 
         {/* Price ticker */}
@@ -566,7 +607,17 @@ export function CreateExecutor() {
       {/* Main Area: Chart + Right Panel */}
       <div className="flex min-h-0 flex-1">
         {/* Chart + Bottom Pane */}
-        <div className="min-w-0 flex-1 flex flex-col">
+        <div className="relative min-w-0 flex-1 flex flex-col">
+          {browserOpen && (
+            <MarketBrowser
+              server={server}
+              connectors={allConnectors}
+              connector={connector}
+              pair={pair}
+              onPick={applyMarket}
+              onClose={() => setBrowserOpen(false)}
+            />
+          )}
           <div className="flex-1 min-h-0 overflow-hidden bg-[var(--color-surface)]">
             <TradeChart
               key={`${connector}:${pair}:${gridState.interval}`}
@@ -589,8 +640,6 @@ export function CreateExecutor() {
               executorOverlays={mainOverlays}
               positions={mainPositions}
               selectedExecutorId={selectedExecutorId}
-              convertValue={convertValue}
-              convertPnl={convertPnl}
               onExecutorDeselect={() => setSelectedExecutorId(null)}
             />
           </div>
@@ -664,19 +713,6 @@ export function CreateExecutor() {
               Data
             </button>
             )}
-            {caps.hasOrderBook && (
-            <button
-              onClick={() => setRightPanel("markets")}
-              className={`flex flex-1 items-center justify-center gap-1.5 px-2 py-2 text-[11px] font-medium transition-colors ${
-                activePanel === "markets"
-                  ? "border-b-2 border-[var(--color-primary)] text-[var(--color-primary)]"
-                  : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-              }`}
-            >
-              <List className="h-3.5 w-3.5" />
-              Markets
-            </button>
-            )}
           </div>
 
           {activePanel === "config" ? (
@@ -741,15 +777,8 @@ export function CreateExecutor() {
                 </button>
               </div>
             </>
-          ) : activePanel === "depth" ? (
-            <MarketDepthPanel server={server} connector={connector} pair={pair} />
           ) : (
-            <MarketsPanel
-              server={server}
-              connector={connector}
-              pair={pair}
-              onSelectPair={(v) => gridDispatch({ type: "SET_PAIR", value: v })}
-            />
+            <MarketDepthPanel server={server} connector={connector} pair={pair} />
           )}
         </div>
       </div>

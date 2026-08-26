@@ -98,7 +98,50 @@ async def _network_tokens(client: Any, network_id: str) -> list[dict]:
     return [token for token in (tokens or []) if isinstance(token, dict)]
 
 
-async def _is_listed(client: Any, network_id: str, address: str) -> bool:
+class TokenListSnapshot:
+    """One read of a network's token list, shared for the length of one operation.
+
+    Every listedness question in a single call — both mints of a pool, the
+    address being registered, the ticker's holder — interrogates the same
+    curated file, and reading it whole is the only way to ask about an address
+    at all (see ``_network_tokens``). So the read is taken once, lazily on first
+    need, and reused.
+
+    Reused *only* until something writes. ``invalidate`` is called after every
+    save and must be called after every delete, because the one thing this must
+    never do is answer a post-write check from a pre-write copy: that check
+    exists precisely to see live state, and a snapshot serving it would report a
+    token as unlisted after Gateway had just listed it — or, worse on the
+    replace path, name a ticker holder that has already been deleted and invite
+    the user to delete it again.
+
+    Scoped to one operation on purpose, never to a process or a TTL. Nothing
+    here outlives the call that created it, so it cannot go stale for a later
+    request and it never spans two users or two permission checks.
+    """
+
+    def __init__(self, client: Any, network_id: str) -> None:
+        self._client = client
+        self._network_id = network_id
+        self._tokens: list[dict] | None = None
+
+    async def tokens(self) -> list[dict]:
+        """The list, read once. A failed read is not cached, so it retries."""
+        if self._tokens is None:
+            self._tokens = await _network_tokens(self._client, self._network_id)
+        return self._tokens
+
+    def invalidate(self) -> None:
+        """Forget the read. Call after anything writes to this network's list."""
+        self._tokens = None
+
+
+async def _is_listed(
+    client: Any,
+    network_id: str,
+    address: str,
+    snapshot: "TokenListSnapshot | None" = None,
+) -> bool:
     """Whether Gateway's token list for ``network_id`` already holds ``address``.
 
     The whole list is read, not ``search=<address>``: Gateway matches ``search``
@@ -113,16 +156,24 @@ async def _is_listed(client: Any, network_id: str, address: str) -> bool:
     A network's list is Gateway's curated file — tens of entries, not the whole
     chain — so reading it whole is one small response, and confirmed hits are
     memoized by the caller anyway.
+
+    ``snapshot`` lets a caller that is asking several of these in a row share
+    one read; without it the list is read fresh, which is what a standalone call
+    wants.
     """
     wanted = address.lower()
+    tokens = await (snapshot or TokenListSnapshot(client, network_id)).tokens()
     return any(
-        str((token or {}).get("address") or "").lower() == wanted
-        for token in await _network_tokens(client, network_id)
+        str((token or {}).get("address") or "").lower() == wanted for token in tokens
     )
 
 
 async def find_symbol_holder(
-    client: Any, network_id: str, symbol: str, exclude: str | None = None
+    client: Any,
+    network_id: str,
+    symbol: str,
+    exclude: str | None = None,
+    snapshot: TokenListSnapshot | None = None,
 ) -> dict[str, Any] | None:
     """The token on ``network_id``'s list that holds ``symbol``, if any.
 
@@ -131,10 +182,14 @@ async def find_symbol_holder(
     decide whether the holder should be replaced. ``exclude`` skips the token
     being registered itself, so a half-written state cannot name it as its own
     conflict.
+
+    ``snapshot`` shares a read the caller has already paid for — but only one
+    taken after the last write, or this would name a holder that is no longer
+    there.
     """
     wanted = symbol.lower()
     excluded = (exclude or "").lower()
-    for entry in await _network_tokens(client, network_id):
+    for entry in await (snapshot or TokenListSnapshot(client, network_id)).tokens():
         if str(entry.get("symbol") or "").lower() != wanted:
             continue
         address = str(entry.get("address") or "")
@@ -149,7 +204,10 @@ async def find_symbol_holder(
 
 
 async def ensure_tokens_listed(
-    client: Any, network_id: str, addresses: Iterable[str]
+    client: Any,
+    network_id: str,
+    addresses: Iterable[str],
+    snapshot: TokenListSnapshot | None = None,
 ) -> dict[str, str]:
     """Register every address that Gateway does not already know, idempotently.
 
@@ -168,7 +226,16 @@ async def ensure_tokens_listed(
     Registration is sequential on purpose. Gateway's ``addToken`` is a
     read-modify-write of one JSON file, so two concurrent saves for the same
     network can drop one of the two tokens.
+
+    A pool's two mints ask the same list the same question, so one read answers
+    both: the addresses share a `TokenListSnapshot`, taken lazily *after* the
+    memo has had its say — a fully memoized re-visit still costs zero requests,
+    which an eager read at the top would spend for nothing. Every save drops the
+    snapshot, so the verification below it reads live state and the next address
+    sees the token this loop just registered. A caller running several of these
+    around its own writes passes its own ``snapshot`` and owns invalidating it.
     """
+    snapshot = snapshot or TokenListSnapshot(client, network_id)
     verdicts: dict[str, str] = {}
     for address in list(addresses)[:MAX_TOKENS_PER_CALL]:
         if _memo_key(network_id, address) in _listed:
@@ -176,7 +243,7 @@ async def ensure_tokens_listed(
             continue
 
         try:
-            if await _is_listed(client, network_id, address):
+            if await _is_listed(client, network_id, address, snapshot):
                 _remember(network_id, address)
                 verdicts[address] = "listed"
                 continue
@@ -196,12 +263,17 @@ async def ensure_tokens_listed(
             logger.warning("token save failed %s on %s: %s", address, network_id, e)
             verdicts[address] = "failed"
             continue
+        finally:
+            # Whatever the save did — wrote, refused, or errored halfway — the
+            # copy of the list in hand is worthless from here: for the check
+            # below, and for every address after this one.
+            snapshot.invalidate()
 
         # A save whose symbol collides with a token already on the list answers
         # 200 with "already exists" and writes nothing, so the response cannot be
         # trusted to mean the token is there. Re-reading the list can.
         try:
-            saved = await _is_listed(client, network_id, address)
+            saved = await _is_listed(client, network_id, address, snapshot)
         except Exception as e:
             logger.warning("token re-check failed %s on %s: %s", address, network_id, e)
             verdicts[address] = "failed"

@@ -8,6 +8,7 @@ import { LpPositions } from "@/components/dex/LpPositions";
 import { PoolBrowser } from "@/components/dex/PoolBrowser";
 import { PoolSourceTabs } from "@/components/dex/PoolSourceTabs";
 import { UpstreamNotice } from "@/components/dex/UpstreamNotice";
+import { poolLabel } from "@/components/dex/format";
 import { GATEWAY_TAB_CHAIN, type PoolSource } from "@/components/dex/pool-source";
 import { useDexUpstream } from "@/hooks/useDexUpstream";
 import { useServer } from "@/hooks/useServer";
@@ -373,9 +374,7 @@ export function Dex() {
           >
             <span className="flex items-center gap-2 text-sm">
               <span className="font-medium">
-                {pastedPool.base_symbol && pastedPool.base_symbol !== "???"
-                  ? `${pastedPool.base_symbol}-${pastedPool.quote_symbol}`
-                  : pastedPool.name}
+                {poolLabel(pastedPool)}
               </span>
               <span className="text-xs text-[var(--color-text-muted)]">
                 {pastedPool.dex_id}

@@ -9,10 +9,12 @@ from condor.pool_data import gecko_call
 
 from ..user_preferences import get_active_server
 from ._shared import (
+    OWNER_REQUIRED_MESSAGE,
     escape_markdown_v2,
     extract_network_id,
     get_default_networks,
     logger,
+    require_gateway_owner,
 )
 
 # Gateway network ID -> GeckoTerminal network ID mapping
@@ -742,14 +744,30 @@ async def remove_token(
     try:
         from config_manager import get_config_manager
 
+        chat_id = query.message.chat_id
+        user_id = query.from_user.id
+
+        # The token list is the owner's configuration, shared by everyone on the
+        # server: a deleted entry makes that mint's balance read 0 for all of
+        # them. Refuse before anything reaches Gateway (SEC-225).
+        server_name, is_owner = require_gateway_owner(
+            user_id, chat_id, get_active_server(context.user_data)
+        )
+        if not is_owner:
+            await query.answer(OWNER_REQUIRED_MESSAGE, show_alert=True)
+            return
+
         await query.answer("Removing token...")
 
-        chat_id = query.message.chat_id
         client = await get_config_manager().get_client_for_chat(
-            chat_id, preferred_server=get_active_server(context.user_data)
+            chat_id, preferred_server=server_name
         )
         await client.gateway.delete_token(
             network_id=network_id, token_address=token_address
+        )
+        logger.info(
+            f"Gateway token deleted: user_id={user_id} server={server_name} "
+            f"network={network_id} address={token_address}"
         )
 
         network_escaped = escape_markdown_v2(network_id)
@@ -1030,6 +1048,32 @@ async def handle_token_input(
             context.user_data.pop("token_edit_address", None)
             context.user_data.pop("dex_state", None)
 
+            # An edit is a delete underneath, so it sits behind the same OWNER
+            # line as the explicit delete (SEC-225). Checked after the input
+            # state is cleared so a refused user is not left mid-flow.
+            user_id = update.effective_user.id
+            server_name, is_owner = require_gateway_owner(
+                user_id,
+                chat_id or update.effective_chat.id,
+                get_active_server(context.user_data),
+            )
+            if not is_owner:
+                refusal_text = f"⛔ {escape_markdown_v2(OWNER_REQUIRED_MESSAGE)}"
+                if message_id and chat_id:
+                    await update.get_bot().edit_message_text(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        text=refusal_text,
+                        parse_mode="MarkdownV2",
+                    )
+                else:
+                    await update.get_bot().send_message(
+                        chat_id=update.effective_chat.id,
+                        text=refusal_text,
+                        parse_mode="MarkdownV2",
+                    )
+                return
+
             # Show updating message
             network_escaped = escape_markdown_v2(network_id)
             symbol_escaped = escape_markdown_v2(new_symbol)
@@ -1044,12 +1088,17 @@ async def handle_token_input(
 
             try:
                 client = await get_config_manager().get_client_for_chat(
-                    chat_id, preferred_server=get_active_server(context.user_data)
+                    chat_id, preferred_server=server_name
                 )
 
                 # Delete old token first, then add with new values
                 await client.gateway.delete_token(
                     network_id=network_id, token_address=token_address
+                )
+                logger.info(
+                    f"Gateway token deleted (edit): user_id={user_id} "
+                    f"server={server_name} network={network_id} "
+                    f"address={token_address}"
                 )
                 await client.gateway.add_token(
                     network_id=network_id,

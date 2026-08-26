@@ -7,6 +7,7 @@ import {
 } from "react";
 
 import { TOKEN_KEY, authHeaders } from "./auth-token";
+import { clearDiagnostics } from "./diagnostics";
 import { queryClient } from "./queryClient";
 
 export interface User {
@@ -28,8 +29,44 @@ export interface AuthState {
 
 const USER_KEY = "condor_user";
 
-/** Selected Hummingbot API server. Session state: cleared on logout. */
+/** Selected Hummingbot API server. Session state: cleared on every session boundary. */
 export const SERVER_KEY = "condor_selected_server";
+
+/**
+ * Drop the outgoing user's session state when a login replaces a live session.
+ *
+ * `logout` is the usual way a session ends, but it is not the only one:
+ * `/login` stays reachable while authenticated, and a fresh `/web` link from
+ * Telegram redeems its token straight into whatever tab is already open. That
+ * is a session boundary with no `logout` in between, and everything `logout`
+ * drops would otherwise cross it: the React Query cache (every cached response
+ * belongs to the session that fetched it — portfolio, bots, API keys,
+ * conversations), the console-error ring, and the selected server, which the
+ * next user may not even have access to. One function and one predicate for the
+ * three of them, so they cannot drift apart.
+ *
+ * Re-logging in as the same user is not a boundary — Telegram mints a new token
+ * every time — and keeps its state: the errors are often exactly the session
+ * someone is about to file a bug report about, and re-fetching an unchanged
+ * cache would cost them a full reload for no security gain. Unreadable stored
+ * user: clear, since the point of the check is to prove the two sessions belong
+ * to one person.
+ *
+ * Runs before `setUser`, so `ServerProvider` — keyed by the user id in
+ * `App.tsx` — remounts into the cleared `localStorage` rather than ahead of it.
+ */
+function resetForNewUser(incoming: User) {
+  const raw = localStorage.getItem(USER_KEY);
+  if (!raw) return;
+  try {
+    if ((JSON.parse(raw) as User).id === incoming.id) return;
+  } catch {
+    // Cannot prove the two sessions are one person: treat it as a boundary.
+  }
+  localStorage.removeItem(SERVER_KEY);
+  queryClient.clear();
+  clearDiagnostics();
+}
 
 export const AuthContext = createContext<AuthState>({
   user: null,
@@ -64,6 +101,7 @@ export function useAuthState(): AuthState {
       throw new Error(err.detail || "Login failed");
     }
     const data = await res.json();
+    resetForNewUser(data.user);
     localStorage.setItem(TOKEN_KEY, data.token);
     localStorage.setItem(USER_KEY, JSON.stringify(data.user));
     setToken(data.token);
@@ -81,6 +119,7 @@ export function useAuthState(): AuthState {
       throw new Error(err.detail || "Local login failed");
     }
     const data = await res.json();
+    resetForNewUser(data.user);
     localStorage.setItem(TOKEN_KEY, data.token);
     localStorage.setItem(USER_KEY, JSON.stringify(data.user));
     setToken(data.token);
@@ -96,6 +135,12 @@ export function useAuthState(): AuthState {
     // next user to log in renders the previous user's portfolio, bots, API keys
     // and conversations straight from the cache.
     queryClient.clear();
+    // The console-error ring is session state for the same reason the cache is,
+    // and it leaves the machine: it is quoted verbatim into the "Report an
+    // issue" block and into the crash report ErrorBoundary files. Reached both
+    // from the Settings button and from the token check below, so an expired
+    // session drops its errors too.
+    clearDiagnostics();
     setToken(null);
     setUser(null);
   }, []);

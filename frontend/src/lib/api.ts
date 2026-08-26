@@ -489,6 +489,16 @@ export interface Ticker {
   quote_volume: number;
   /** 24h volume in USD; null when the quote asset couldn't be priced. */
   usd_volume: number | null;
+  /**
+   * Price change in percent against the snapshot closest to 24h ago; null until
+   * the backend has a reference, and for a pair listed after it was taken.
+   */
+  change_pct: number | null;
+  /**
+   * The window `change_pct` was actually measured over, in seconds — never
+   * assume 24h, label the column from this.
+   */
+  change_window_s: number | null;
 }
 
 export interface TickersResponse {
@@ -1002,8 +1012,16 @@ export interface VoiceSettingsResponse {
 
 // ── Telemetry (FEAT-023) ──
 
-/** The only two answers. `off` is reachable only from the environment. */
+/** The two answers on the consent form. There is no "off" button on it. */
 export type TelemetryLevel = "ping" | "usage";
+
+/**
+ * What the level can actually be. `off` is not an answer to the prompt — it is
+ * a refusal, made explicitly (Settings → Privacy) or pinned by the operator's
+ * `CONDOR_TELEMETRY` — which is why it is a separate type from the two options
+ * the disclosure offers.
+ */
+export type TelemetryEffectiveLevel = TelemetryLevel | "off";
 
 export interface TelemetryOption {
   level: TelemetryLevel;
@@ -1023,10 +1041,13 @@ export interface TelemetryDisclosure {
   options: TelemetryOption[];
 }
 
+export type TelemetryConsentState = "unknown" | "granted" | "denied";
+
 export interface TelemetrySettingsResponse {
-  /** `unknown` until someone answers — that is what the consent card asks. */
-  consent: "unknown" | "granted" | "denied";
-  level: "off" | TelemetryLevel;
+  /** `unknown` until someone answers — that is what the consent card asks.
+   * `denied` is a recorded refusal: the level is `off` and stays off. */
+  consent: TelemetryConsentState;
+  level: TelemetryEffectiveLevel;
   /** `CONDOR_TELEMETRY` is pinned in the environment; nothing here can change it. */
   env_overridden: boolean;
   endpoint_configured: boolean;
@@ -1136,6 +1157,12 @@ export interface ConversationMeta {
   updated_at: string;
   turn_count: number;
   last_snippet: string;
+  /** Set once this conversation has been shared (FEAT-054); "" if never. The
+   *  delete token that revokes the share is deliberately not here — it never
+   *  crosses the API boundary. */
+  share_id?: string;
+  share_revision?: number;
+  shared_at?: string | null;
 }
 
 export interface ConversationTurn {
@@ -1152,6 +1179,87 @@ export interface ConversationTurn {
 export interface ConversationDetail {
   meta: ConversationMeta;
   turns: ConversationTurn[];
+}
+
+// ── Sharing a conversation (FEAT-054) ──
+//
+// A separate surface from telemetry on purpose. Telemetry is anonymous counts
+// the admin consents to once, install-wide; this is content, and only the
+// person who said it can hand it over — every time, after seeing exactly what
+// would be sent.
+
+/** How many values each tier of the scrubber replaced. Every category is
+ *  present, zeros included: an all-zero share is how a broken scrubber shows up,
+ *  and that only reads as a signal if the zeros are reported. */
+export type RedactionCounts = Record<string, number>;
+
+export interface SharePreview {
+  conversation_id: string;
+  title: string;
+  surface: string;
+  agent_slug: string;
+  agent_key: string;
+  /** The scrubbed transcript, exactly as it would be sent. */
+  turns: ConversationTurn[];
+  counts: RedactionCounts;
+  truncated: boolean;
+  turns_omitted: number;
+  revision: number;
+  shared: boolean;
+  share_id: string;
+  shared_at: string | null;
+}
+
+export interface ShareReceipt {
+  conversation_id: string;
+  share_id: string;
+  revision: number;
+  shared_at: string;
+  queued: boolean;
+}
+
+export interface SharedConversation {
+  conversation_id: string;
+  title: string;
+  share_id: string;
+  revision: number;
+  shared_at: string | null;
+  turn_count: number;
+}
+
+export interface SharingSettingsResponse {
+  enabled: boolean;
+  env_overridden: boolean;
+  can_change: boolean;
+  endpoint_configured: boolean;
+  pending: number;
+}
+
+// ── Sharing every conversation, opt-in (FEAT-055) ──
+
+/** Off = nothing leaves. Ask = the share button only, which is what everyone
+ *  has by default. Always = finished conversations go on their own. */
+export type SharingState = "off" | "explicit" | "always";
+
+export interface SharingPreferenceResponse {
+  state: SharingState;
+  /** When Always was chosen, as a Unix timestamp. Conversations older than it
+   *  are never swept — consent to a policy, not a licence over the archive. */
+  opted_in_at: number;
+  /** The install still permits sharing at all (no admin veto, no kill switch). */
+  allowed: boolean;
+  /** Always is on *and* the install permits it — the two can disagree. */
+  sweeping: boolean;
+  shared_count: number;
+}
+
+export interface ConversationSharingStatus {
+  conversation_id: string;
+  excluded: boolean;
+  /** The sweep would take this one, once it goes idle. What the chip renders. */
+  covered: boolean;
+  shared: boolean;
+  shared_at: string | null;
 }
 
 export interface SwitchSessionRequest {
@@ -2184,9 +2292,10 @@ export const api = {
   getTelemetrySettings: () =>
     apiFetch<TelemetrySettingsResponse>("/api/v1/settings/telemetry"),
 
-  /** Admin only (403 otherwise), and 409 when `CONDOR_TELEMETRY` is pinned. */
-  setTelemetryLevel: (level: TelemetryLevel) =>
-    apiFetch<{ level: TelemetryLevel; consent: string }>(
+  /** Admin only (403 otherwise), and 409 when `CONDOR_TELEMETRY` is pinned.
+   * `off` records a refusal and purges whatever was collected. */
+  setTelemetryLevel: (level: TelemetryEffectiveLevel) =>
+    apiFetch<{ level: TelemetryEffectiveLevel; consent: TelemetryConsentState }>(
       `/api/v1/settings/telemetry?level=${level}`,
       { method: "PUT" },
     ),
@@ -2251,11 +2360,77 @@ export const api = {
       body: JSON.stringify({ title }),
     }),
 
-  /** The only way to lose a transcript. Killing a session no longer does. */
+  /** The only way to lose a transcript. Killing a session no longer does.
+   *  A shared conversation is unshared on the way out — otherwise "delete"
+   *  would mean "delete here, keep there". */
   deleteConversation: (id: string) =>
-    apiFetch<{ deleted: boolean; sessions_destroyed: number }>(
+    apiFetch<{ deleted: boolean; sessions_destroyed: number; unshared: boolean }>(
       `/api/v1/conversations/${encodeURIComponent(id)}`,
       { method: "DELETE" },
+    ),
+
+  // ── Sharing a conversation (FEAT-054) ──
+
+  /** What would be sent, scrubbed. Sends nothing — the dialog renders this and
+   *  the POST below runs the identical code path, so what the user approves is
+   *  what leaves. */
+  previewShare: (id: string) =>
+    apiFetch<SharePreview>(
+      `/api/v1/sharing/conversations/${encodeURIComponent(id)}/preview`,
+    ),
+
+  shareConversation: (id: string) =>
+    apiFetch<ShareReceipt>(`/api/v1/sharing/conversations/${encodeURIComponent(id)}`, {
+      method: "POST",
+    }),
+
+  unshareConversation: (id: string) =>
+    apiFetch<{ unshared: boolean; conversation_id: string }>(
+      `/api/v1/sharing/conversations/${encodeURIComponent(id)}`,
+      { method: "DELETE" },
+    ),
+
+  listSharedConversations: () =>
+    apiFetch<SharedConversation[]>("/api/v1/sharing/conversations"),
+
+  getSharingSettings: () =>
+    apiFetch<SharingSettingsResponse>("/api/v1/sharing/settings"),
+
+  setSharingEnabled: (enabled: boolean) =>
+    apiFetch<SharingSettingsResponse>("/api/v1/sharing/settings", {
+      method: "PUT",
+      body: JSON.stringify({ enabled }),
+    }),
+
+  // ── Sharing every conversation, opt-in (FEAT-055) ──
+
+  getSharingPreference: () =>
+    apiFetch<SharingPreferenceResponse>("/api/v1/sharing/preference"),
+
+  /** Leaving Always also destroys whatever the sweep queued but never sent.
+   *  The back catalogue is a separate decision — `unshareEverything` below. */
+  setSharingPreference: (state: SharingState) =>
+    apiFetch<SharingPreferenceResponse>("/api/v1/sharing/preference", {
+      method: "PUT",
+      body: JSON.stringify({ state }),
+    }),
+
+  unshareEverything: () =>
+    apiFetch<{ unshared: number }>("/api/v1/sharing/conversations", {
+      method: "DELETE",
+    }),
+
+  getConversationSharing: (id: string) =>
+    apiFetch<ConversationSharingStatus>(
+      `/api/v1/sharing/conversations/${encodeURIComponent(id)}/status`,
+    ),
+
+  /** Take one conversation out of the sweep, or put it back. Does not unshare
+   *  a copy already sent — that is Unshare, and it means something else. */
+  setConversationExcluded: (id: string, excluded: boolean) =>
+    apiFetch<ConversationSharingStatus>(
+      `/api/v1/sharing/conversations/${encodeURIComponent(id)}/exclusion`,
+      { method: "PUT", body: JSON.stringify({ excluded }) },
     ),
 
   // ── Custom OpenAI-compatible LLM endpoints ──

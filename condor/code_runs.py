@@ -1,10 +1,10 @@
 """Persistence for ad-hoc code runs (FEAT-047).
 
 Same shape as :mod:`condor.backtest_store` and the report index: one JSON file
-per run under ``data/code_runs/`` plus a light ``_index.json`` so listing a
-history needs no per-file reads. No sqlite anywhere in this repo, and a store
-that holds a few hundred short records whose main consumer reads one record at
-a time does not earn the first one.
+per run under :func:`condor.paths.code_runs_dir` plus a light ``_index.json``
+so listing a history needs no per-file reads. No sqlite anywhere in this repo,
+and a store that holds a few hundred short records whose main consumer reads
+one record at a time does not earn the first one.
 
 The store keeps the **full** text of every run — code, stdout, result,
 traceback. Clipping for a model's context is the caller's job, so a snippet
@@ -21,13 +21,10 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from condor import paths
 from condor.fsutil import atomic_write_json
 
 logger = logging.getLogger(__name__)
-
-# Anchored at the repo root, not the cwd: the main process writes this dir and
-# every MCP subprocess reads it, and they need not agree on a working directory.
-_DATA_DIR = Path(__file__).resolve().parents[1] / "data" / "code_runs"
 
 # Retention bound. Also the only thing standing between a snippet that printed a
 # credential and an unbounded pile of them on disk (see FEAT-047 risks).
@@ -78,7 +75,10 @@ class CodeRunStore:
     """Per-file JSON persistence for code runs, newest-first index, capped."""
 
     def __init__(self, data_dir: Path | None = None) -> None:
-        self._dir = Path(data_dir) if data_dir is not None else _DATA_DIR
+        # paths.code_runs_dir() is repo-anchored, not cwd-relative: the main
+        # process writes this dir and every MCP subprocess reads it, and they
+        # need not agree on a working directory.
+        self._dir = Path(data_dir) if data_dir is not None else paths.code_runs_dir()
         self._index_path = self._dir / "_index.json"
         self._index: list[dict] = []
         self._dir.mkdir(parents=True, exist_ok=True)

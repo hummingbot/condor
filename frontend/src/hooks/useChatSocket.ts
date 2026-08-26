@@ -270,6 +270,12 @@ export function useChatSocket() {
   // The dashboard prewarms the most recent conversation once per mount, never
   // per reconnect: the 3s retry loop would otherwise spawn on every failure.
   const prewarmed = useRef(false);
+  // Prewarming is the chat workspace's privilege, not a side effect of holding
+  // the socket open. `prewarmDeferred` is the one prewarm an empty roster asked
+  // for while nobody was allowed to grant it, kept so opening the workspace
+  // later is still warm.
+  const prewarmAllowed = useRef(false);
+  const prewarmDeferred = useRef(false);
 
   const [isConnected, setIsConnected] = useState(false);
   const [slots, setSlots] = useState<ChatSlot[]>([]);
@@ -624,9 +630,19 @@ export function useChatSocket() {
    * is no user-agnostic warm process to hand out. Prewarming on *selection* —
    * and this, the implicit selection of "the chat you were last in" — is the
    * same latency win without idle processes burning the session budget.
+   *
+   * Which is exactly why it is gated. The shell holds the socket open on every
+   * route so push frames arrive wherever the user is standing, and on most of
+   * those routes the roster comes back empty — prewarming there would spawn a
+   * subprocess for someone who only opened /portfolio. The empty roster is
+   * remembered instead, and `enablePrewarm` redeems it.
    */
   const prewarmLatest = useCallback(() => {
     if (prewarmed.current) return;
+    if (!prewarmAllowed.current) {
+      prewarmDeferred.current = true;
+      return;
+    }
     prewarmed.current = true;
     api
       .listConversations(1)
@@ -645,6 +661,22 @@ export function useChatSocket() {
         // No history, or the API is down. Either way the panel still works.
       });
   }, [resumeConversation]);
+
+  /**
+   * Say that this surface is a chat.
+   *
+   * Only the workspace calls it. Everywhere else the connection exists to
+   * receive push frames — a finished delegation, a routine's notice — and a
+   * user who never asked for an agent should not be given one. Calling it also
+   * redeems the prewarm an empty roster deferred, so arriving at the workspace
+   * after the shell already connected is as warm as opening it cold.
+   */
+  const enablePrewarm = useCallback(() => {
+    prewarmAllowed.current = true;
+    if (!prewarmDeferred.current) return;
+    prewarmDeferred.current = false;
+    prewarmLatest();
+  }, [prewarmLatest]);
 
   const handleEvent = useCallback(
     (data: Record<string, unknown>) => {
@@ -1321,6 +1353,7 @@ export function useChatSocket() {
     permissionRequest,
     permissionRequests,
     connect,
+    enablePrewarm,
     disconnect,
     sendMessage,
     startSession,

@@ -12,6 +12,7 @@ which is the whole point of persisting these at all.
 """
 
 from mcp_servers.condor.condor_client import call_main_api
+from mcp_servers.condor.settings import caller_slug as _caller_slug
 from mcp_servers.condor.settings import settings
 
 # Snippet budget. The main process clamps to the same ceiling; this copy exists
@@ -27,13 +28,6 @@ _HTTP_MARGIN = 15
 # Per-field ceiling in the tool's *reply*. Enough for a table or a traceback,
 # small enough that a runaway print loop cannot flood a context window.
 _CLIP = 4000
-
-
-def _caller_slug() -> str:
-    """The assistant behind this subprocess, as reports and runs are stamped."""
-    from condor.memory.paths import CHAT_SLUG
-
-    return settings.specialist_slug or CHAT_SLUG
 
 
 def _store():

@@ -167,7 +167,7 @@ def _merge_bot_perf(
     the bot snapshot reports how many positions closed but not how each one ended,
     so a bot-mode agent has no per-trade outcome to derive one from.
     """
-    from condor.agents.attribution import fold_sliced_window, sliced_or_live_fees
+    from condor.agents.attribution import apply_fee_fallback, fold_sliced_window
     from condor.fetchers.bot_performance import bot_executor_rows
 
     rows = bot_executor_rows(bot)
@@ -176,20 +176,29 @@ def _merge_bot_perf(
     if window is None:
         # Lifetime aggregate, folded through the same shared rule as a window so
         # the fees_known heuristic exists exactly once (condor.agents.attribution).
+        # The lifetime aggregate has no fee *column*: ``cum_fees_quote`` is what
+        # ``_aggregate_by_bot`` sums off ``positions_summary``, i.e. the fees of the
+        # positions open at this instant, with every closed position's fees missing.
+        # So it is the fallback figure, not a window's fees — fold a zero fee slot
+        # and let ``apply_fee_fallback`` add it and stamp ``fees_known=False``
+        # ([[CORR-219]]). ``perf.fees`` lands on the same number either way; only
+        # the certainty changes.
         fold_sliced_window(
             perf,
             (
                 float(bot.get("realized_pnl_quote", 0) or 0),
                 float(bot.get("volume_traded", 0) or 0),
                 float(bot.get("closed_trades", 0) or 0),
-                float(bot.get("cum_fees_quote", 0) or 0),
+                0.0,
             ),
         )
+        apply_fee_fallback(perf, 0.0, bot)
     else:
-        realized, volume, trades, fees = window
-        fold_sliced_window(
-            perf, (realized, volume, trades, sliced_or_live_fees(fees, bot))
-        )
+        # Fold the RAW sliced window, then top up: the fees_known heuristic must
+        # see the unsubstituted fee column, and the fallback stamps its own flag.
+        # Same order as the web rollup, so the two surfaces cannot disagree.
+        fold_sliced_window(perf, window)
+        apply_fee_fallback(perf, window[3], bot)
 
     for ct, n in (bot.get("close_type_counts") or {}).items():
         perf.close_type_counts[str(ct)] = perf.close_type_counts.get(str(ct), 0) + int(

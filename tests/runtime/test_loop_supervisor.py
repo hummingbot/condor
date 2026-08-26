@@ -427,6 +427,32 @@ def test_sessions_index_falls_back_for_legacy_sessions(tmp_path):
 
 def test_reconcile_marks_delegations_interrupted(tmp_path):
     """An in-flight delegation is marked interrupted — and never restarted."""
+    from condor import paths
+
+    record = paths.delegation_dir(7, "brigado-delegate-abc123")
+    record.mkdir(parents=True)
+    (record / "status.json").write_text(
+        json.dumps(
+            {
+                "state": LoopState.RUNNING,
+                "boot_id": FOREIGN_BOOT,
+                "task_id": "brigado-delegate-abc123",
+                "agent_slug": "brigado",
+                "user_id": 7,
+                "chat_id": 555,
+            }
+        )
+    )
+
+    supervisor = LoopSupervisor()
+    report = asyncio.run(supervisor.reconcile_boot(agents_root=tmp_path))
+
+    assert report.delegations == 1
+    assert read_status(record)["state"] == LoopState.INTERRUPTED
+
+
+def test_reconcile_still_settles_a_pre_feat_051_delegation(tmp_path):
+    """An unowned legacy record has no user directory to have been moved into."""
     delegations = tmp_path / "brigado" / "delegations"
     delegations.mkdir(parents=True)
     name = "brigado-delegate-abc123.status.json"

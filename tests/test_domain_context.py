@@ -14,7 +14,6 @@ from types import SimpleNamespace
 import pytest
 
 from condor.memory import domain_context
-from condor.memory import paths as paths_module
 from condor.memory.skills import SkillStore
 from condor.memory.store import MemoryStore
 
@@ -25,9 +24,8 @@ _PROJECT_ROOT = Path(__file__).parent.parent
 
 
 @pytest.fixture
-def stocked_agent(tmp_path, monkeypatch):
+def stocked_agent(tmp_path):
     """An agent with one memory and one skill, in stores under a tmp root."""
-    monkeypatch.setattr(paths_module, "_PROJECT_ROOT", tmp_path)
 
     MemoryStore(_USER_ID, _SLUG).write(
         name="Funding window",
@@ -96,8 +94,7 @@ def test_both_builders_carry_the_memory_and_skills_indexes(stocked_agent):
     assert "[CONSULT REQUEST]" not in chatted
 
 
-def test_an_empty_store_contributes_no_sections(tmp_path, monkeypatch):
-    monkeypatch.setattr(paths_module, "_PROJECT_ROOT", tmp_path)
+def test_an_empty_store_contributes_no_sections(tmp_path):
     assert domain_context("nobody", _USER_ID) == []
 
 
@@ -107,10 +104,14 @@ def test_the_section_headers_are_written_in_exactly_one_module():
         "[DOMAIN MEMORY — what you remember in this domain]",
         "[DOMAIN SKILLS — playbooks you can follow]",
     )
+    # Only this checkout's own sources: a nested checkout (``.claude/worktrees``
+    # while a sweep runs, a vendored venv) carries its own copy of every module
+    # and would fail this on paths that are not ours to fix.
     sources = [
         p
         for p in _PROJECT_ROOT.rglob("*.py")
-        if ".venv" not in p.parts and "tests" not in p.parts
+        if not any(part.startswith(".") for part in p.relative_to(_PROJECT_ROOT).parts)
+        and "tests" not in p.parts
     ]
 
     for header in headers:

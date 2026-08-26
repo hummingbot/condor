@@ -474,23 +474,13 @@ async def _handle_resume_conversation(
     makes today.
     """
     conversation_id = str(msg.get("conversation_id") or "")
-    try:
-        conv = conversations.get_conversation(user_id, conversation_id)
-    except conversations.ConversationIdError:
-        conv = None
+    conv = _conversation_for(user_id, conversation_id)
     if conv is None:
         await _send(ws, {"event": "error", "message": "No such conversation"})
         return
 
-    # A bound conversation resumes on its Agent's *current* model, not on
-    # whatever answered last: ``conv.agent_key`` is a record of what answered,
-    # never a pin, and honouring it here is what let a reload re-override the
-    # Agent with DEFAULT_AGENT.
     picked = str(msg.get("agent_key") or "")
-    if conv.agent_slug:
-        agent_key = picked
-    else:
-        agent_key = picked or conv.agent_key or DEFAULT_AGENT
+    agent_key = _resume_agent_key(conv, picked)
 
     await _start(
         ws,
@@ -505,6 +495,33 @@ async def _handle_resume_conversation(
     remember_model_choice(user_id, conv.agent_slug, picked)
 
 
+def _conversation_for(
+    user_id: int, conversation_id: str
+) -> conversations.ConversationMeta | None:
+    """This user's conversation record, or None — an unusable id included.
+
+    An id that is not even a safe path is "no such conversation" to every
+    caller here, so the validation error is folded into the same answer.
+    """
+    try:
+        return conversations.get_conversation(user_id, conversation_id)
+    except conversations.ConversationIdError:
+        return None
+
+
+def _resume_agent_key(conv: conversations.ConversationMeta, picked: str) -> str:
+    """Which model answers when a conversation is picked back up.
+
+    A bound conversation resumes on its Agent's *current* model, not on whatever
+    answered last: ``conv.agent_key`` is a record of what answered, never a pin,
+    and honouring it here is what let a reload re-override the Agent with
+    DEFAULT_AGENT. ``picked`` is a deliberate choice by the user and always wins.
+    """
+    if conv.agent_slug:
+        return picked
+    return picked or conv.agent_key or DEFAULT_AGENT
+
+
 async def _start(
     ws: WebSocket,
     user_id: int,
@@ -515,7 +532,7 @@ async def _start(
     restored: bool,
     agent_slug: str = "",
     client_ref: str = "",
-) -> None:
+) -> bool:
     """Spawn the session behind a conversation and announce it.
 
     Shared by ``start_session`` and ``resume_conversation``: the two differ only
@@ -526,18 +543,54 @@ async def _start(
     instant the user asks for one, before any id exists, and uses the echo to
     reconcile that optimistic tab with the conversation it turned out to be.
     """
+    # Registered before the first await, so a send_message dispatched in the
+    # same batch of WS frames finds the spawn and waits for it. The task here is
+    # the handler's own — awaiting it means awaiting the whole announce.
+    #
+    # Which is why the reattach in ``_handle_send_message`` calls ``_spawn``
+    # directly instead: registering *that* task would make a second message
+    # wait for the whole answer, not for the spawn, and steering would turn
+    # back into queueing. It holds the slot gate throughout, which is the
+    # serialisation that path actually needs.
+    task_key = f"{user_id}:{conversation_id}"
+    current = asyncio.current_task()
+    if current is not None:
+        _pending_spawns[task_key] = current
+    try:
+        return await _spawn(
+            ws,
+            user_id,
+            conversation_id,
+            agent_key,
+            server_name,
+            restored=restored,
+            agent_slug=agent_slug,
+            client_ref=client_ref,
+        )
+    finally:
+        _pending_spawns.pop(task_key, None)
+
+
+async def _spawn(
+    ws: WebSocket,
+    user_id: int,
+    conversation_id: str,
+    agent_key: str,
+    server_name: str | None,
+    *,
+    restored: bool,
+    agent_slug: str = "",
+    client_ref: str = "",
+) -> bool:
+    """Create the subprocess for one conversation and announce it.
+
+    Returns whether the session is up; a failure has already told the client,
+    so a caller that wanted to continue only needs to stop.
+    """
     # The per-user session cap now lives in the runtime, so Telegram and the
     # dashboard draw on one budget; exceeding it raises out of create_session.
     slot_id = conversation_id
     session_key = _session_key(user_id, slot_id)
-
-    # Registered before the first await, so a send_message dispatched in the
-    # same batch of WS frames finds the spawn and waits for it. The task here is
-    # the handler's own — awaiting it means awaiting the whole announce.
-    task_key = f"{user_id}:{slot_id}"
-    current = asyncio.current_task()
-    if current is not None:
-        _pending_spawns[task_key] = current
 
     perm_cb = build_permission_callback(
         session_key=str(session_key),
@@ -584,6 +637,7 @@ async def _start(
                 "client_ref": client_ref,
             },
         )
+        return True
     except Exception as e:
         log.exception("Failed to start chat session for user %d", user_id)
         await _send(
@@ -597,8 +651,7 @@ async def _start(
                 "slot_id": slot_id,
             },
         )
-    finally:
-        _pending_spawns.pop(task_key, None)
+        return False
 
 
 async def _handle_send_message(
@@ -632,21 +685,68 @@ async def _handle_send_message(
         info = await runtime.get_info(session_key)
 
         if info is None or not info.alive:
-            # Session died — clean up and notify frontend
-            await runtime.destroy(session_key)
-            await _send(
-                ws,
-                {
-                    "event": "error",
-                    "slot_id": slot_id,
-                    "message": "Session ended. Start a new one.",
-                },
+            # No session behind this slot. That is not the same as "gone": the
+            # budget detaches idle sessions on purpose and keeps the
+            # conversation, and a bot restart leaves every one of them on disk.
+            # For a web slot the slot id *is* the conversation id, so if the
+            # record is still there this is a reattach — the same spawn
+            # ``resume_conversation`` does — and the message the user just typed
+            # goes on to be answered instead of being dropped on the floor.
+            if info is not None:
+                # Only a subprocess that really died needs reaping first; a
+                # detached slot has nothing left to tear down.
+                await runtime.destroy(session_key)
+            conv = _conversation_for(user_id, slot_id)
+            if conv is None:
+                await _send(
+                    ws,
+                    {
+                        "event": "error",
+                        "slot_id": slot_id,
+                        "message": "Session ended. Start a new one.",
+                    },
+                )
+                await _send(
+                    ws,
+                    {
+                        "event": "session_destroyed",
+                        "slot_id": slot_id,
+                        "had_session": True,
+                    },
+                )
+                return
+
+            # Said apart from the crash case on purpose: an evicted slot that
+            # reattaches is the budget working, not a fault to go looking for.
+            log.info(
+                "Reattaching %s slot %s for user %d before its message",
+                "dead" if info is not None else "detached",
+                slot_id,
+                user_id,
             )
-            await _send(
+            # ``_spawn`` and not ``_start``: see the note there on why this path
+            # must not register itself as a pending spawn.
+            if not await _spawn(
                 ws,
-                {"event": "session_destroyed", "slot_id": slot_id, "had_session": True},
-            )
-            return
+                user_id,
+                conv.id,
+                _resume_agent_key(conv, ""),
+                conv.server_name,
+                restored=True,
+                agent_slug=conv.agent_slug,
+            ):
+                return
+            info = await runtime.get_info(session_key)
+            if info is None:
+                await _send(
+                    ws,
+                    {
+                        "event": "error",
+                        "slot_id": slot_id,
+                        "message": "Session ended. Start a new one.",
+                    },
+                )
+                return
 
         # This turn owns the slot from here on, so a Stop that arrives next
         # cancels *this* task and not the one it is replacing.

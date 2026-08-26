@@ -9,7 +9,7 @@ import {
   Plus,
   Zap,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 
 import { deriveAgentStatus } from "@/components/agent/agentStatus";
@@ -19,10 +19,16 @@ import { ChatSessionIdentity } from "@/components/chat/ChatSessionIdentity";
 import { ChatThread } from "@/components/chat/ChatThread";
 import { ContextDock } from "@/components/chat/ContextDock";
 import { ConversationList } from "@/components/chat/ConversationList";
+import { SessionTabs } from "@/components/chat/SessionTabs";
 import { useBrainSwitch } from "@/hooks/useBrainSwitch";
 import { useChat, useSessionOptions } from "@/hooks/useChat";
 import { useServer } from "@/hooks/useServer";
-import { api, CHAT_SLUG, type AgentSummary } from "@/lib/api";
+import {
+  api,
+  CHAT_SLUG,
+  type AgentSummary,
+  type ConversationMeta,
+} from "@/lib/api";
 
 /** Openers offered when nothing is bound, and when something is. */
 const CONDOR_STARTERS = [
@@ -36,13 +42,13 @@ const AGENT_STARTERS = ["What are you working on?", "Review your last session"];
 type TalkIntent = "focus" | "fresh";
 
 /**
- * The chat workspace — what `/agents` opens on.
+ * The chat workspace — what `/` opens on.
  *
  * A rail of who you can talk to and what you already said, a conversation
  * beside it, and a dock of the work it set in motion. Since the fleet grid was
- * removed this is the whole of `/agents`: the rail is how you switch who you
- * are talking to and start another conversation, which is the gesture the old
- * header selector could not do.
+ * removed this is the whole of the workspace: the rail is how you switch who
+ * you are talking to and start another conversation, which is the gesture the
+ * old header selector could not do.
  */
 export function AgentChatTab() {
   const chat = useChat();
@@ -80,14 +86,29 @@ export function AgentChatTab() {
     refetchInterval: 5000,
   });
 
-  // Nobody else opens the socket here: the overlay panel is hidden on this
-  // route, and `connect()` no-ops on an open socket.
+  // The shell already holds the socket open on every route; this is the one
+  // surface allowed to prewarm on top of it, which is what keeps a subprocess
+  // from being spawned for a user who only opened /portfolio.
   useEffect(() => {
-    chat.connect();
-  }, [chat.connect]);
+    chat.enablePrewarm();
+  }, [chat.enablePrewarm]);
 
   const activeSlot = chat.activeSlot;
   const isActiveStreaming = chat.isSlotStreaming(chat.activeSlotId);
+
+  /**
+   * The slots, read without depending on them.
+   *
+   * `chat.slots` is a new array on every 50 ms stream flush, so a `talkTo`
+   * that closed over it would be re-created 20 times a second — and the three
+   * props it feeds the rail would defeat the rail's `memo`. The lookup only
+   * ever runs from an event handler, which is after the commit that refreshed
+   * this, so the ref is never behind when it is read.
+   */
+  const slotsRef = useRef(chat.slots);
+  useEffect(() => {
+    slotsRef.current = chat.slots;
+  }, [chat.slots]);
 
   /**
    * Talk to someone.
@@ -98,33 +119,40 @@ export function AgentChatTab() {
    * Nothing spawns that the user did not ask for either way, so the per-user
    * session cap stays a non-issue.
    */
-  const talkTo = (
-    agentSlug: string,
-    opts?: { intent?: TalkIntent; text?: string },
-  ) => {
-    if ((opts?.intent ?? "focus") === "focus") {
-      const live = chat.slots.find(
-        (s) => (s.info.agent_slug || "") === agentSlug,
-      );
-      if (live) {
-        chat.setActiveSlotId(live.info.slot_id);
-        if (opts?.text) chat.sendMessage(live.info.slot_id, opts.text);
-        return;
+  const talkTo = useCallback(
+    (agentSlug: string, opts?: { intent?: TalkIntent; text?: string }) => {
+      if ((opts?.intent ?? "focus") === "focus") {
+        const live = slotsRef.current.find(
+          (s) => (s.info.agent_slug || "") === agentSlug,
+        );
+        if (live) {
+          chat.setActiveSlotId(live.info.slot_id);
+          if (opts?.text) chat.sendMessage(live.info.slot_id, opts.text);
+          return;
+        }
       }
-    }
-    const slotId = chat.startSession(
-      // `""` asks whoever is bound for their own model; only an unbound chat
-      // needs a model named. Volunteering `defaultAgent` here is what used to
-      // claim an override the user never made, so a bound Agent ran on
-      // Condor's model instead of its own.
-      pendingAgentKey ?? (agentSlug ? "" : defaultAgent),
-      server || undefined,
-      agentSlug || undefined,
-    );
-    // The tab is on screen before the spawn is; the outbox flushes this the
-    // moment the session lands, which is what makes a new chat feel warm.
-    if (opts?.text) chat.sendMessage(slotId, opts.text);
-  };
+      const slotId = chat.startSession(
+        // `""` asks whoever is bound for their own model; only an unbound chat
+        // needs a model named. Volunteering `defaultAgent` here is what used to
+        // claim an override the user never made, so a bound Agent ran on
+        // Condor's model instead of its own.
+        pendingAgentKey ?? (agentSlug ? "" : defaultAgent),
+        server || undefined,
+        agentSlug || undefined,
+      );
+      // The tab is on screen before the spawn is; the outbox flushes this the
+      // moment the session lands, which is what makes a new chat feel warm.
+      if (opts?.text) chat.sendMessage(slotId, opts.text);
+    },
+    [
+      chat.sendMessage,
+      chat.setActiveSlotId,
+      chat.startSession,
+      defaultAgent,
+      pendingAgentKey,
+      server,
+    ],
+  );
 
   /**
    * Who "New chat" means: the conversation you are in, or — before there is
@@ -144,8 +172,35 @@ export function AgentChatTab() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentParam]);
 
-  const liveIds = new Set(
-    chat.slots.map((s) => s.info.conversation_id || s.info.slot_id),
+  // Keyed on the joined ids rather than on `chat.slots`: the array itself is
+  // re-created by every stream flush, so a memo keyed on it would hand the
+  // rail a fresh `Set` 20 times a second. The join is O(#slots) — a handful,
+  // not the 100 rows the rail would otherwise re-render.
+  const liveKey = chat.slots
+    .map((s) => s.info.conversation_id || s.info.slot_id)
+    .join("|");
+  const liveIds = useMemo(
+    () => new Set(liveKey ? liveKey.split("|") : []),
+    [liveKey],
+  );
+
+  // Stable identities, so the rail's `memo` holds while an answer streams.
+  // `selectedSlug` is a string and the rest are `useCallback`s on genuinely
+  // stable deps, so these only change when the rail's answer actually changes.
+  const openFresh = useCallback(
+    () => talkTo(selectedSlug, { intent: "fresh" }),
+    [talkTo, selectedSlug],
+  );
+  const openConversation = useCallback(
+    (meta: ConversationMeta) => {
+      setRailOpen(false);
+      chat.resumeConversation(meta.id, {
+        agent_key: meta.agent_key,
+        server_name: meta.server_name || undefined,
+        agent_slug: meta.agent_slug,
+      });
+    },
+    [chat.resumeConversation],
   );
 
   const boundAgent = activeSlot?.info.agent_slug
@@ -218,22 +273,14 @@ export function AgentChatTab() {
           ))}
         </div>
 
-        {/* What you already said — the panel's own list, in flow */}
+        {/* What you already said — the rail's own list, in flow */}
         <ConversationList
-          variant="inline"
           liveIds={liveIds}
           activeId={activeSlot?.info.conversation_id || chat.activeSlotId}
           // "New chat" means a fresh one with whoever is selected — Condor
           // only when Condor is who you are pointing at.
-          onNew={() => talkTo(selectedSlug, { intent: "fresh" })}
-          onOpen={(meta) => {
-            setRailOpen(false);
-            chat.resumeConversation(meta.id, {
-              agent_key: meta.agent_key,
-              server_name: meta.server_name || undefined,
-              agent_slug: meta.agent_slug,
-            });
-          }}
+          onNew={openFresh}
+          onOpen={openConversation}
         />
       </aside>
 
@@ -242,7 +289,8 @@ export function AgentChatTab() {
           escaping to the page, the mirror of what the rail does below `md`. */}
       <div className="relative flex min-w-0 flex-1">
         <div className="flex min-w-0 flex-1 flex-col">
-          {/* Who is answering */}
+          {/* Which sessions are live, and who is answering in this one — one
+              row, because the active tab and the identity name the same chat. */}
           <div className="flex shrink-0 items-center gap-2 border-b border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2">
             <button
               onClick={() => setRailOpen((v) => !v)}
@@ -255,27 +303,42 @@ export function AgentChatTab() {
                 <PanelLeftOpen className="h-4 w-4" />
               )}
             </button>
-            {/* Who is answering and where it runs — the same strip the overlay
-                panel shows. */}
-            <ChatSessionIdentity
-              slot={activeSlot}
+            {/* Every live session, including the ones answering in the
+                background — switching, and the only way to stop one. */}
+            <SessionTabs
+              slots={chat.slots}
               agents={modelOptions}
-              customProviders={customProviders}
-              agentBindings={agentBindings}
-              isStreaming={isActiveStreaming}
-              onSelectBrain={switchBrain}
-              placeholder={<span className="text-sm font-semibold">Chat</span>}
+              activeSlotId={chat.activeSlotId}
+              isSlotStreaming={chat.isSlotStreaming}
+              permissionRequests={chat.permissionRequests}
+              onSelect={(slotId) => chat.setActiveSlotId(slotId)}
+              // The session ends; the transcript stays on the server, so the
+              // conversation is still in the rail and clicking it respawns it.
+              onClose={(slotId) => chat.destroySession(slotId)}
+              className="min-w-0 flex-1"
             />
-            {/* Strategies, brain and routines stay on the agent's own page. */}
-            {boundAgent && (
-              <Link
-                to={`/agents/${boundAgent.slug}`}
-                className="ml-auto flex items-center gap-1 text-[11px] text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-primary)]"
-              >
-                Manage
-                <ArrowUpRight className="h-3 w-3" />
-              </Link>
-            )}
+            {/* Who is answering and where it runs, plus the way out to the
+                agent's own page — pinned right, whatever the strip does. */}
+            <div className="ml-auto flex shrink-0 items-center gap-2">
+              <ChatSessionIdentity
+                slot={activeSlot}
+                agents={modelOptions}
+                customProviders={customProviders}
+                agentBindings={agentBindings}
+                isStreaming={isActiveStreaming}
+                onSelectBrain={switchBrain}
+              />
+              {/* Strategies, brain and routines stay on the agent's own page. */}
+              {boundAgent && (
+                <Link
+                  to={`/agents/${boundAgent.slug}`}
+                  className="flex items-center gap-1 text-[11px] text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-primary)]"
+                >
+                  Manage
+                  <ArrowUpRight className="h-3 w-3" />
+                </Link>
+              )}
+            </div>
           </div>
 
           <ChatThread

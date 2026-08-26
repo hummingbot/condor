@@ -9,7 +9,9 @@
     "lint": "eslint .",
     "lint:ci": "node scripts/lint-baseline.mjs",
     "lint:baseline": "node scripts/lint-baseline.mjs",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@codemirror/lang-python": "^6.2.1",
@@ -40,9 +42,11 @@
     "eslint-plugin-react-hooks": "^7.0.1",
     "eslint-plugin-react-refresh": "^0.5.2",
     "globals": "^17.4.0",
+    "jsdom": "^30.0.1",
     "tailwindcss": "^4.2.2",
     "typescript": "~5.9.3",
     "typescript-eslint": "^8.57.0",
-    "vite": "^8.0.1"
+    "vite": "^8.0.1",
+    "vitest": "^4.1.11"
   }
 }

@@ -19,8 +19,9 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import CallbackContext, ContextTypes
 
 import condor.reports
-from condor import routine_hooks
-from condor.routine_store import get_routine_store
+from condor import primitives, routine_hooks
+from condor.preferences import SERVER_PIN_KEY, get_active_server, set_active_server
+from condor.routine_store import _agent_of, get_routine_store
 from handlers import clear_all_input_states
 from routines.base import (
     discover_routines,
@@ -86,6 +87,36 @@ def _owner_data(application, owner_id: int | None, chat_id: int) -> dict:
     the same graceful degradation ``_sync_instance_to_store`` applies.
     """
     return application.user_data.get(owner_id if owner_id is not None else chat_id, {})
+
+
+def _bind_launch_server(user_data: dict, active_server: str | None) -> None:
+    """Record the server a run was launched against, for ``get_client()``.
+
+    Both Telegram runners capture ``get_effective_server()`` at creation time —
+    ``user_data`` is keyed by user id, so a job or a task ticking later in a
+    group chat cannot look the room's server up for itself. The capture only
+    reaches the client if it is written where the preference API reads: both
+    call sites hand-rolled a walk down a bare ``preferences`` key that nothing
+    in the repo reads, writes or migrates, so the injection was inert and every
+    such run silently resolved whatever ambient default it found — the same
+    key mismatch ``WebRoutineContext`` carried until ``test_routine_server_scope``
+    pinned it down, left behind in the two Telegram runners (CORR-221).
+
+    Pinned, not merely preferred: the captured name *is* the server the user
+    was looking at when they pressed Run, and a scheduled or continuous run
+    ticks long after that. Without the mark ``get_effective_server`` treats
+    ``active_server`` as a cache of the chat default and lets a ``chat_defaults``
+    entry recorded later overwrite it mid-run — moving a running routine onto
+    another server, which is exactly what capturing the name was meant to stop.
+
+    An owner who already has a server of their own keeps it: the guard reads
+    through the same API it writes through, so it is now a real check rather
+    than one that always fell through to the write.
+    """
+    if not active_server or get_active_server(user_data):
+        return
+    set_active_server(user_data, active_server)
+    user_data[SERVER_PIN_KEY] = True
 
 
 def _get_draft(context: ContextTypes.DEFAULT_TYPE, routine_name: str) -> dict:
@@ -304,28 +335,39 @@ async def _execute_routine(
     # Prepare context for routine
     context._chat_id = chat_id
     context._instance_id = instance_id
+    # The owner, recorded explicitly: in a group chat it differs from
+    # ``_chat_id``, and a nested call_routine() must be attributed to the person
+    # who started the run, not to the group (CORR-205).
+    owner_key = owner_id if owner_id is not None else chat_id
+    context._owner_id = owner_key
     user_data = _owner_data(context.application, owner_id, chat_id)
     # Inject the active server captured at creation time so routines
-    # in group chats connect to the correct server.
-    if active_server and not user_data.get("preferences", {}).get("general", {}).get(
-        "active_server"
-    ):
-        user_data.setdefault("preferences", {}).setdefault("general", {})[
-            "active_server"
-        ] = active_server
+    # in group chats connect to the correct server (CORR-221).
+    _bind_launch_server(user_data, active_server)
     context._user_data = user_data
 
-    # Reset report capture before execution
-    condor.reports.reset_last_report_id()
-
     try:
-        config = routine.config_class(**config_dict)
-        # Reports belong to the user whose user_data the run executes against
-        # (the starter), falling back to the chat — the same identity the hooks
-        # record (SEC-152) — so the web can authorize reads by it (SEC-196).
-        with condor.reports.attribute_owner(
-            owner_id if owner_id is not None else chat_id
+        # The one attribution scope every runner enters (ARCH-217). Reports
+        # belong to the user whose user_data the run executes against (the
+        # starter), falling back to the chat — the same identity the hooks
+        # record (SEC-152) — so the web can authorize reads by it (SEC-196);
+        # they name the routine's own library owner as their producer, as the
+        # store runner does, so a nested call_routine() inherits it; and they
+        # carry a fallback source so they stay visible on the Routines page
+        # (CORR-211). The context is published so a nested call_routine() inside
+        # this routine inherits its server, bot and user (FEAT-052, CORR-205).
+        # ``routine_name`` is the bare library name here — agent-prefixed keys
+        # never reach this path.
+        with (
+            condor.reports.run_scope(
+                owner=owner_key,
+                agent=_agent_of(routine),
+                source_type="routine",
+                source_name=routine_name,
+            ),
+            primitives.bind_context(context),
         ):
+            config = routine.config_class(**config_dict)
             raw_result = await routine.run_fn(config, context)
         rich_result = normalize_result(raw_result)
         result_text = rich_result.text[:500] if rich_result.text else "Completed"
@@ -400,19 +442,17 @@ async def _run_continuous_routine(
         def __init__(self):
             self._chat_id = chat_id
             self._instance_id = instance_id
+            # Owner kept distinct from the delivery chat, as one-shot runs do.
+            self._owner_id = owner_key
             # Ensure user_data dict exists in application. Keyed by the owner:
             # fabricating one for a (negative) group chat id would both persist
             # junk and hand the routine an empty bucket.
             if owner_key not in application.user_data:
                 application.user_data[owner_key] = {}
             self._user_data = application.user_data[owner_key]
-            # Inject active server so group chats connect to the correct server
-            if active_server and not self._user_data.get("preferences", {}).get(
-                "general", {}
-            ).get("active_server"):
-                self._user_data.setdefault("preferences", {}).setdefault("general", {})[
-                    "active_server"
-                ] = active_server
+            # Inject active server so group chats connect to the correct
+            # server — the same binding one-shot runs apply (CORR-221).
+            _bind_launch_server(self._user_data, active_server)
             self.bot = application.bot
             self.application = application
 
@@ -424,11 +464,21 @@ async def _run_continuous_routine(
     context = MockContext()
 
     try:
-        config = routine.config_class(**config_dict)
         logger.info(f"Starting continuous routine {routine_name}[{instance_id}]")
-        # Same owner stamping as one-shot runs (SEC-196): reports this loop
-        # saves belong to the user the instance runs for.
-        with condor.reports.attribute_owner(owner_key):
+        # The same scope one-shot runs enter (ARCH-217): reports this loop saves
+        # belong to the user the instance runs for (SEC-196), name the routine's
+        # library owner as their producer, and carry the routine as their source
+        # even without an explicit .source() (CORR-211).
+        with (
+            condor.reports.run_scope(
+                owner=owner_key,
+                agent=_agent_of(routine),
+                source_type="routine",
+                source_name=routine_name,
+            ),
+            primitives.bind_context(context),
+        ):
+            config = routine.config_class(**config_dict)
             result = await routine.run_fn(config, context)
         logger.info(f"Continuous routine {routine_name}[{instance_id}] ended: {result}")
     except asyncio.CancelledError:

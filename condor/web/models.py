@@ -328,6 +328,16 @@ class TickerItem(BaseModel):
     quote_volume: float = 0.0
     # 24h volume converted to USD; None when the quote asset can't be priced.
     usd_volume: float | None = None
+    # Price change against the snapshot closest to 24h ago, in percent. None
+    # until `condor.ticker_history` has a reference — and for a pair that was
+    # not listed when it was taken, which has no change rather than a change
+    # against zero.
+    change_pct: float | None = None
+    # The window that change was actually measured over. It rides per row, not
+    # per response: a pair listed 3h ago genuinely has a shorter window than its
+    # neighbours, and the client labels the column from what it was given rather
+    # than assuming 24h.
+    change_window_s: float | None = None
 
 
 class TickersResponse(BaseModel):

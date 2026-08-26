@@ -53,11 +53,13 @@ export function useCandleStore(
 
     keyRef.current = key;
 
-    // Subscribe — returns cached candles instantly
+    // Subscribe — returns cached candles instantly, or [] for a cold channel.
+    // Written unconditionally: retaining the previous key's candles here would
+    // leak one market's prices into another for callers that are not remounted
+    // on a pair change (CreateExecutor's `currentPrice`, for one).
     const cached = candleStore.subscribe(key);
-    if (cached.length > 0) {
-      setCandles(cached);
-    }
+    setCandles(cached);
+    setIsStale(false); // freshly subscribed; the periodic check re-evaluates below
 
     // Listen for updates
     const removeListener = candleStore.onUpdate(key, (updated) => {

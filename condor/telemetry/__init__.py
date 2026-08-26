@@ -7,18 +7,22 @@ keys, it is built to be auditable in one sitting rather than to be clever.
 
 The four facts that define it:
 
-- **Every install is counted.** The floor is level ``ping``: the four adoption
-  events (``install``, ``heartbeat``, ``version_change``, ``shutdown``) and the
-  anonymous envelope, from the first boot, with no answer required.
+- **Every install that has not refused is counted.** The floor is level
+  ``ping``: the four adoption events (``install``, ``heartbeat``,
+  ``version_change``, ``shutdown``) and the anonymous envelope, from the first
+  boot, with no answer required.
 - **Usage is opt-in, once, by the admin.** One inline-keyboard prompt on boot
   offers full usage or install-count-only. The answer is durable and
   reversible.
 - **Allowlisted.** :mod:`condor.telemetry.schema` declares every event and every
   property. Anything undeclared is dropped by construction, which is what makes
   the "never collected" list in ``PRIVACY.md`` a property of the code.
-- **The environment is the only kill switch.** The collector address is fixed
-  in :mod:`condor.telemetry.outbox`; ``CONDOR_TELEMETRY=off`` is the one way to
-  reach level ``off``, at which nothing is ever recorded.
+- **A refusal is honoured.** The collector address is fixed in
+  :mod:`condor.telemetry.outbox`, so consent is the only switch there is. Level
+  ``off`` — nothing is ever recorded — is reached two ways: the operator's
+  ``CONDOR_TELEMETRY=off``, and an admin's recorded refusal
+  (:func:`condor.telemetry.consent.deny`, behind Settings → Privacy), which is
+  written to ``config.yml`` and therefore survives upgrades.
 
 Public surface — call sites should need nothing else::
 
@@ -66,8 +70,8 @@ def init(hosted: bool = True) -> str:
     :func:`emit` never has to read the disk on a hot path, and — only if the
     level is not ``off`` — it materializes the install's random ids and counts
     the install. With the ping floor all three happen on the very first boot;
-    only an install silenced by ``CONDOR_TELEMETRY=off`` is left exactly as it
-    was found.
+    an install silenced by ``CONDOR_TELEMETRY=off`` or by a recorded refusal is
+    left exactly as it was found — no ids, no count, no events.
 
     Counting here, rather than when the admin answers the prompt, is what makes
     "every install is counted" true rather than aspirational: an install whose

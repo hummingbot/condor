@@ -46,14 +46,34 @@ def _reset_gecko_throttle():
 
 
 @pytest.fixture(autouse=True)
-def _isolated_notification_store(tmp_path, monkeypatch):
-    """Keep the bell's store out of the developer's ``data/`` directory.
+def _isolated_runtime_root(tmp_path, monkeypatch):
+    """Keep all three durable roots out of the developer's live install.
 
-    ``condor.notifications.record`` is now reached from several producers
-    (FEAT-048), so without this any test that finishes a delegation, a routine
-    or a ``notify`` call appends to the real ``data/notifications.json`` — and a
-    test run would show up in the running install's notification bell.
+    For as long as every store derived its own root there was nothing to
+    repoint, so four test modules each had to remember to monkeypatch a private
+    ``_root`` and four others forgot -- which is how 812 stub conversations
+    ended up in a real install (FEAT-051). One env var per root, one fixture.
+
+    The second line covers ``data/``: the bell, the routine hooks, the backtest
+    store and the code runs used to need a per-module monkeypatch of a private
+    name each (and a test that forgot appended to the running install's
+    notification bell, or dropped a record among the live ones in
+    ``data/code_runs/``). They all resolve through ``condor.paths`` now, so
+    ``$CONDOR_DATA_DIR`` moves the lot.
+
+    The third line covers ``agents/``: every ``MemoryStore`` and ``SkillStore``
+    hangs off it and ``mkdir(parents=True)``s on write, so a module that did not
+    monkeypatch ``condor.memory.paths._PROJECT_ROOT`` by hand wrote into the
+    developer's own memory and skill library -- it left an ``audit.log`` for a
+    ``user_424242`` that appears nowhere in the repo. Ten modules remembered;
+    the knob means none of them has to (CORR-220).
     """
-    from condor import notifications
+    from condor import paths
 
-    monkeypatch.setattr(notifications, "_FILE", tmp_path / "notifications.json")
+    monkeypatch.setenv(paths.RUNTIME_ROOT_ENV, str(tmp_path / "condor-runtime"))
+    monkeypatch.setenv(paths.DATA_DIR_ENV, str(tmp_path / "condor-data"))
+    # ``tmp_path / "agents"`` and not ``condor-agents``: ``tmp_path`` stands in
+    # for the repo root in the agent tests, and several roots still out of scope
+    # here (``agent.py``/``strategy.py``'s ``_DATA_ROOT``) are monkeypatched to
+    # that same directory, so the registry and the stores stay one tree.
+    monkeypatch.setenv(paths.AGENTS_ROOT_ENV, str(tmp_path / "agents"))

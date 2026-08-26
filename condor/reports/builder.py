@@ -36,6 +36,14 @@ _INTERACTIVE_SECTION_TYPES = {
 
 
 class ReportBuilder:
+    """Compose a report section by section, then ``save()`` it.
+
+    The one output surface a routine or a snippet renders through: KPIs,
+    tables, Plotly charts and prose accumulate on the builder and are written
+    as a single HTML report the dashboard can open. ``source(type, name)`` is
+    what files it under the producing routine.
+    """
+
     def __init__(self, title: str = "Report"):
         self._title = title
         self._source_type: str = ""

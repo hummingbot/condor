@@ -7,7 +7,7 @@ budget eviction or a crashed ACP bridge silently deleted the chat.
 They are separate here. The session still dies with the process — that is what
 a subprocess is. The conversation is a directory:
 
-    condor/.runtime/conversations/{user_id}/{conv_id}/
+    .condor/users/{user_id}/conversations/{conv_id}/
         meta.json                  # atomic merge, via registry_file.write_status()
         transcript.jsonl           # append-only, bounded; one JSON object per line
         transcript_archive.jsonl   # turns retired out of the file above
@@ -40,6 +40,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from condor import paths
 from condor.fsutil import atomic_write_bytes
 from condor.runtime.events import EventType
 from condor.runtime.registry_file import read_status, write_status
@@ -49,10 +50,6 @@ log = logging.getLogger(__name__)
 META_FILENAME = "meta.json"
 TRANSCRIPT_FILENAME = "transcript.jsonl"
 TRANSCRIPT_ARCHIVE_FILENAME = "transcript_archive.jsonl"
-
-# conv_id and user_id both become directory names, so neither may escape one.
-# Same guard, same reason, as state.py's namespace check.
-_SAFE_ID = re.compile(r"^[A-Za-z0-9._-]+$")
 
 # Upper bound on the replayed transcript, in characters. Load-bearing, not
 # cosmetic: a 300-turn conversation replayed whole would eat the context
@@ -173,12 +170,19 @@ def _utcnow() -> datetime:
 
 
 def _validate(value: str) -> str:
-    if not value or not _SAFE_ID.match(value):
+    """``paths.safe_id`` under this module's own error type.
+
+    The guard is shared (one regex, in ``condor.paths``); the exception is not,
+    because ``chat_ws`` and the conversations route both catch
+    :class:`ConversationIdError` to answer 400 rather than 500.
+    """
+    try:
+        return paths.safe_id(value)
+    except paths.UnsafeIdError as exc:
         raise ConversationIdError(
             f"Invalid conversation id {value!r}: "
             "use letters, digits, dot, dash or underscore."
-        )
-    return value
+        ) from exc
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -242,6 +246,15 @@ class ConversationMeta(BaseModel):
     Extra keys on disk are ignored (pydantic's default), so a meta written
     before a field was dropped — ``mode``, retired with the persona axis in
     FEAT-033 — still loads instead of failing the whole conversation list.
+
+    ``share_delete_token`` is the one field that is read from disk but never
+    serialized. It is a *capability*: whoever holds it can delete the shared
+    row from the collector, which is exactly why the owner keeps it and nobody
+    else receives it. Every route that returns a conversation dumps this model,
+    and one of them (``?user_id=``, admin only) returns someone else's — so a
+    plain field would hand an admin the token for a share that is not theirs to
+    revoke. ``exclude=True`` keeps it out of every dump; writes go through
+    ``update_meta``'s explicit kwargs, which are unaffected.
     """
 
     id: str
@@ -257,6 +270,41 @@ class ConversationMeta(BaseModel):
     updated_at: datetime = Field(default_factory=_utcnow)
     turn_count: int = 0
     last_snippet: str = ""
+
+    # ── Sharing (FEAT-054) ──
+    # Optional, defaulted, and tolerated in both directions like every other
+    # field here: a meta written before this existed loads unchanged, and one
+    # written by a newer build still loads in an older one.
+    share_id: str = Field(
+        default="",
+        description="Stable per conversation once shared; '' = never shared.",
+    )
+    share_revision: int = Field(
+        default=0, description="Bumped on each re-share; the server upserts on it."
+    )
+    shared_at: datetime | None = None
+    share_delete_token: str = Field(
+        default="",
+        exclude=True,
+        description="The capability that revokes the share. Local only.",
+    )
+
+    # ── Automatic sharing (FEAT-055) ──
+    share_excluded: bool = Field(
+        default=False,
+        description="The user took this one chat out of the sweep. Honoured forever.",
+    )
+    share_turn_count: int = Field(
+        default=0,
+        description="``turn_count`` at the last share; growth past it re-shares.",
+    )
+    multi_author: bool = Field(
+        default=False,
+        description=(
+            "Another human can speak in the room this was born in — a Telegram "
+            "group. The sweep never takes one: a user consents for themselves."
+        ),
+    )
 
 
 class TurnEntry(BaseModel):
@@ -313,23 +361,13 @@ class TurnEntry(BaseModel):
 # ── Paths ──
 
 
-def _root() -> Path:
-    """Where every conversation lives.
-
-    Derived from ``_DATA_ROOT`` exactly as ``state.py`` derives its own root, so
-    a test that repoints one repoints both.
-    """
-    from condor.agents.agent import _DATA_ROOT
-
-    return Path(_DATA_ROOT).parent / "condor" / ".runtime" / "conversations"
-
-
 def _user_dir(user_id: int | str) -> Path:
-    return _root() / _validate(str(user_id))
+    """This user's conversations. The store is partitioned by owner (FEAT-051)."""
+    return paths.conversations_dir(_validate(str(user_id)))
 
 
 def _conv_dir(user_id: int | str, conv_id: str) -> Path:
-    return _user_dir(user_id) / _validate(str(conv_id))
+    return paths.conversation_dir(_validate(str(user_id)), _validate(str(conv_id)))
 
 
 # ── Store ──
@@ -342,8 +380,17 @@ def new_conversation(
     agent_key: str = "",
     agent_slug: str = "",
     server_name: str | None = None,
+    multi_author: bool = False,
 ) -> ConversationMeta:
-    """Mint an empty conversation and persist its meta."""
+    """Mint an empty conversation and persist its meta.
+
+    ``multi_author`` is recorded at birth because that is the only moment the
+    fact is known: a turn carries which *brain* produced it but not which human
+    typed it, and the recorder is built from the session's owner, so by the time
+    a second person's words are on disk they are indistinguishable from the
+    owner's. The caller who provisioned the session knows whether the room admits
+    anyone else, and says so here (FEAT-055).
+    """
     now = _utcnow()
     meta = ConversationMeta(
         id=uuid.uuid4().hex[:12],
@@ -354,6 +401,7 @@ def new_conversation(
         server_name=server_name,
         created_at=now,
         updated_at=now,
+        multi_author=bool(multi_author),
     )
     write_status(_conv_dir(user_id, meta.id), META_FILENAME, **_meta_fields(meta))
     return meta

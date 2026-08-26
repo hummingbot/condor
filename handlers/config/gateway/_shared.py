@@ -3,7 +3,7 @@ Shared utilities and imports for gateway modules
 """
 
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 from utils.telegram_formatters import escape_markdown_v2
 
@@ -103,3 +103,51 @@ async def get_default_networks(client) -> List[str]:
         logger.debug(f"Could not fetch ethereum defaults: {e}")
 
     return default_networks
+
+
+# Refusal rendered when a non-owner reaches a Gateway mutation from Telegram.
+OWNER_REQUIRED_MESSAGE = "Only the server owner can change the Gateway token list"
+
+
+def require_gateway_owner(
+    user_id: int, chat_id: int, preferred_server: Optional[str] = None
+) -> Tuple[Optional[str], bool]:
+    """Resolve the target server and whether ``user_id`` may mutate its Gateway.
+
+    The OWNER line this enforces is the one ``condor/web/auth.py::require_owner``
+    spells out (SEC-153, extended to the gateway by SEC-166 and to its token list
+    by SEC-207): *reading* a server's Gateway state is TRADER, but its token list,
+    keystore and RPC endpoints are the owner's machine, not a trading action. An
+    entry deleted from the token list makes every balance for that mint read 0 for
+    everyone on the server, not just the person who pressed the button.
+
+    This is the Telegram counterpart of that function rather than a call into it:
+    ``require_owner`` raises ``HTTPException``, which is a web concern. Callers
+    here render a refusal and return.
+
+    Admins keep the bypass they hold everywhere else — ``get_server_permission``
+    already answers OWNER for them.
+
+    Returns:
+        ``(server_name, is_owner)``. ``server_name`` is the server the mutation
+        would land on, resolved the same way ``get_client_for_chat`` resolves it
+        for a caller that passes no ``user_id``: the explicit choice wins over the
+        chat default. Pass it back as ``preferred_server`` so the permission and
+        the mutation cannot disagree about which server they mean.
+    """
+    from config_manager import ServerPermission, get_config_manager
+
+    cm = get_config_manager()
+
+    server_name = (
+        preferred_server
+        if preferred_server and cm.get_server(preferred_server)
+        else cm.get_chat_default_server(chat_id)
+    )
+
+    if not server_name:
+        return None, False
+
+    return server_name, cm.get_server_permission(user_id, server_name) == (
+        ServerPermission.OWNER
+    )

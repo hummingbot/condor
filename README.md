@@ -15,9 +15,11 @@ A Telegram bot for monitoring and trading with Hummingbot via the **Hummingbot A
 > **Privacy:** Condor counts installs anonymously — a random id, the version,
 > and a heartbeat; nothing about you or your trading. Everything beyond that is
 > **opt-in** from the one prompt it sends on first boot, and
-> `CONDOR_TELEMETRY=off` silences telemetry entirely. What each level does and
-> does not collect, where it goes, and how to verify it, is spelled out in
-> [PRIVACY.md](PRIVACY.md).
+> `CONDOR_TELEMETRY=off` silences telemetry entirely. Your conversations are
+> never part of that: the only way one leaves is if you press Share on it and
+> confirm the redacted transcript, which `CONDOR_SHARING=off` disables outright.
+> What each level does and does not collect, where it goes, and how to verify
+> it, is spelled out in [PRIVACY.md](PRIVACY.md).
 
 ## Features
 

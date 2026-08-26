@@ -1,7 +1,8 @@
 """Per-file JSON persistence for backtest results.
 
-Each backtest is stored as an individual JSON file under data/backtests/.
-A lightweight index (_index.json) tracks task_id -> server mapping for fast listing.
+Each backtest is stored as an individual JSON file under
+:func:`condor.paths.backtests_dir`. A lightweight index (_index.json) tracks
+task_id -> server mapping for fast listing.
 """
 
 from __future__ import annotations
@@ -11,19 +12,20 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from condor import paths
 from condor.fsutil import atomic_write_json
 
 logger = logging.getLogger(__name__)
-
-_DATA_DIR = Path("data") / "backtests"
-_INDEX_FILE = _DATA_DIR / "_index.json"
-_LEGACY_FILE = Path("data") / "backtests.json"
 
 
 class BacktestStore:
     """Persist backtest results to individual JSON files."""
 
-    def __init__(self, data_dir: Path = _DATA_DIR) -> None:
+    def __init__(self, data_dir: Path | None = None) -> None:
+        # Resolved here rather than as a default argument: a default binds the
+        # directory at import, which is exactly the cwd-relative constant this
+        # replaced, and $CONDOR_DATA_DIR has to stay observable after import.
+        data_dir = paths.backtests_dir() if data_dir is None else Path(data_dir)
         self._dir = data_dir
         self._index_path = data_dir / "_index.json"
         self._index: dict[str, dict[str, str]] = (
@@ -123,12 +125,13 @@ class BacktestStore:
 
     def _migrate_legacy(self) -> None:
         """Migrate from single backtests.json to per-file storage."""
-        if not _LEGACY_FILE.exists():
+        legacy_file = paths.legacy_backtests_file()
+        if not legacy_file.exists():
             return
         try:
-            legacy_data = json.loads(_LEGACY_FILE.read_text(encoding="utf-8"))
+            legacy_data = json.loads(legacy_file.read_text(encoding="utf-8"))
             if not isinstance(legacy_data, dict) or not legacy_data:
-                _LEGACY_FILE.unlink()
+                legacy_file.unlink()
                 return
             logger.info(
                 "Migrating %d backtest results from legacy store", len(legacy_data)
@@ -146,7 +149,7 @@ class BacktestStore:
                 }
             self._persist_index()
             # Remove legacy file after successful migration
-            _LEGACY_FILE.unlink()
+            legacy_file.unlink()
             logger.info("Legacy backtest store migrated and removed")
         except Exception:
             logger.warning("Failed to migrate legacy backtest store", exc_info=True)

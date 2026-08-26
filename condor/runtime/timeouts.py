@@ -46,6 +46,13 @@ class TimeoutPolicy:
     # Wall-clock budget for one agent session: a strategy tick's LLM turn, and
     # the shutdown cleanup pass that runs under the same ceiling. 10 minutes.
     tick_default: int = 600
+    # How long a live session may sit unprompted before the health monitor
+    # detaches it. Every other deadline here bounds a *turn*; this one bounds a
+    # *session* — an abandoned chat holds an agent subprocess, the MCP tree it
+    # was spawned with, and one of the five per-user session slots, forever.
+    # The conversation is durable (FEAT-015), so this is a detach, not a loss.
+    # 0 disables the sweep. 1 hour.
+    session_idle: int = 3600
 
     @classmethod
     def load(cls) -> "TimeoutPolicy":

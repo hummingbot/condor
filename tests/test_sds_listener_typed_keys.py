@@ -16,6 +16,7 @@ channel, and no per-data-type string synthesis creeps back into SDS.
 
 import asyncio
 import inspect
+import json
 
 from condor.server_data_service import (
     CacheKey,
@@ -30,8 +31,10 @@ class _FakeWS:
     def __init__(self):
         self.sent: list[dict] = []
 
-    async def send_json(self, payload: dict) -> None:
-        self.sent.append(payload)
+    async def send_text(self, raw: str) -> None:
+        # The manager encodes each frame once per broadcast and fans out text
+        # (PERF-210); decode here so assertions stay in terms of the payload.
+        self.sent.append(json.loads(raw))
 
 
 def _manager_with_subscriber(channel: str) -> tuple[WebSocketManager, _FakeWS]:

@@ -181,24 +181,60 @@ export function LiquidityDepthColumn({
     // The scale-change subscription covers pan and zoom, but not a drag of the
     // price axis or an autoscale after new candles — and a bar at a
     // plausible-but-wrong price is worse than no bar. So the mapping itself is
-    // probed each frame (two calls, no drawing) and a redraw only follows a
-    // mapping that actually moved.
+    // probed (two calls, no drawing) and a redraw only follows a mapping that
+    // actually moved.
+    //
+    // An idle chart's mapping cannot move on its own, so probing it every frame
+    // forever buys nothing: the page a user parks on while an LP position runs
+    // would wake the main thread 60 times a second to learn that nothing
+    // changed. Instead the probe idles on a ~10 Hz timer — an autoscale after a
+    // new candle is caught within a tick — and the moment it sees the mapping
+    // move it escalates to per-frame, so a price-axis drag is still followed
+    // frame by frame. It drops back once the axis has been still for SETTLE_MS.
+    const IDLE_PROBE_MS = 100;
+    const SETTLE_MS = 400;
+
     let frame = 0;
+    let timer = 0;
     let lastProbe = "";
+    let lastMoveAt = 0;
     const probePrice = bins[Math.floor(bins.length / 2)]?.price;
-    const tick = () => {
-      frame = requestAnimationFrame(tick);
-      if (probePrice == null) return;
-      const probe = `${axis.priceToCoordinate(probePrice)}:${axis.height()}`;
-      if (probe === lastProbe) return;
-      lastProbe = probe;
+
+    /** Redraws if the chart's mapping moved since the last probe. */
+    const probe = () => {
+      if (probePrice == null) return false;
+      const current = `${axis.priceToCoordinate(probePrice)}:${axis.height()}`;
+      if (current === lastProbe) return false;
+      lastProbe = current;
       draw();
+      return true;
     };
-    frame = requestAnimationFrame(tick);
+
+    const idleTick = () => {
+      if (probe()) {
+        lastMoveAt = performance.now();
+        frame = requestAnimationFrame(burstTick);
+      } else {
+        timer = window.setTimeout(idleTick, IDLE_PROBE_MS);
+      }
+    };
+
+    const burstTick = () => {
+      if (probe()) lastMoveAt = performance.now();
+      if (performance.now() - lastMoveAt >= SETTLE_MS) {
+        frame = 0;
+        timer = window.setTimeout(idleTick, IDLE_PROBE_MS);
+        return;
+      }
+      frame = requestAnimationFrame(burstTick);
+    };
+
+    timer = window.setTimeout(idleTick, IDLE_PROBE_MS);
 
     return () => {
       unsubscribe();
       observer.disconnect();
+      window.clearTimeout(timer);
       cancelAnimationFrame(frame);
     };
   }, [axis, bins, activePrice, rangeStart, rangeEnd, percentile]);

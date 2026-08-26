@@ -16,6 +16,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useServer } from "@/hooks/useServer";
 import { OWNER_ONLY_HINT, useServerPermission } from "@/hooks/useServerPermission";
 import { type ConnectorInfo, type CredentialInfo, type GatewayWalletGroup, api } from "@/lib/api";
+import { CREDENTIAL_FIELD_PATTERNS } from "@/lib/credential-fields";
 import { ConnectHyperliquid } from "./ConnectHyperliquid";
 import { ImportGatewayWallet, type WalletChain } from "./ImportGatewayWallet";
 
@@ -50,21 +51,6 @@ const INITIAL_FLOW: AddFlowState = {
 const WALLET_CHAINS: { chain: WalletChain; label: string }[] = [
   { chain: "solana", label: "Solana" },
   { chain: "ethereum", label: "Ethereum/EVM" },
-];
-
-// Substrings that mark a connector config field as a sensitive credential.
-// Connector keys vary (api_key, secret_key, passphrase, private_key, api_token,
-// mnemonic, seed, ...), so we match by substring on both the field name and type
-// rather than the few exact names ("secret"/"password") covered before.
-const CREDENTIAL_FIELD_PATTERNS = [
-  "secret",
-  "password",
-  "passphrase",
-  "key",
-  "token",
-  "private",
-  "mnemonic",
-  "seed",
 ];
 
 function isCredentialField(key: string, type?: string): boolean {

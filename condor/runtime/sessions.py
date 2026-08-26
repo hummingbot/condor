@@ -256,7 +256,31 @@ def _deny_pending_confirmations(raw_key: str) -> int:
     return denied
 
 
-async def _enforce_session_budget(user_id: int) -> None:
+async def _notify_detached_by_budget(key: SessionKey) -> None:
+    """Tell a Telegram chat its session was detached to make room (CORR-227).
+
+    Only the health monitor used to speak into a chat it had torn down, and it
+    says "ended unexpectedly" because a dead subprocess is a fault. An LRU
+    detach is not a fault: the conversation is durable and the next message
+    reattaches it. Same delivery path, deliberately different words, so the
+    two are distinguishable from inside the chat.
+    """
+    chat_id = key.telegram_chat_id
+    if _health_bot is None or chat_id is None:
+        return
+    try:
+        await _health_bot.send_message(
+            chat_id=chat_id,
+            text=(
+                "Agent session detached to free a slot for another chat. "
+                "Send a message to pick up where you left off."
+            ),
+        )
+    except Exception:  # noqa: BLE001 - a notice must never break the budget
+        log.warning("Failed to notify chat %s about a detached session", chat_id)
+
+
+async def _enforce_session_budget(user_id: int, surface: str | None = None) -> None:
     """Reap dead sessions, detach the least recently used idle one, then refuse.
 
     Detaching used to be unthinkable — destroying a session destroyed the chat,
@@ -264,6 +288,13 @@ async def _enforce_session_budget(user_id: int) -> None:
     the conversation is durable (FEAT-015), the detached chat is fully
     recoverable and reattaching costs one lazy spawn, so the cap behaves as an
     LRU instead. Only when every session is *busy* is there nothing to give up.
+
+    The cap counts every surface (it bounds subprocesses, not tabs), but each
+    frontend only shows its own sessions — so a plain global LRU let a new web
+    tab silently detach a Telegram chat the user could not see (CORR-227).
+    ``surface`` is the incoming key's surface: the victim is chosen from that
+    surface first, and only when it has no idle session does eviction cross
+    over — audibly, for a Telegram victim.
     """
     for raw_key, session in list(_sessions.items()):
         if session.user_id == user_id and not session.client.alive:
@@ -289,15 +320,24 @@ async def _enforce_session_budget(user_id: int) -> None:
                 "Wait for one to finish, or cancel it."
             )
 
-        victim = min(idle, key=lambda s: s.last_prompt_at or s.created_at)
+        # Same surface first; the full list is the fallback that keeps the cap
+        # a cap even when this surface has nothing idle to give up.
+        same_surface = [s for s in idle if s.key.surface == surface]
+        crossed = not same_surface
+        victim = min(
+            same_surface or idle, key=lambda s: s.last_prompt_at or s.created_at
+        )
         log.info(
             "Session budget reached for user %s: detaching idle session %s "
-            "(conversation %s is kept)",
+            "(conversation %s is kept%s)",
             user_id,
             victim.key,
             victim.conversation_id or "none",
+            ", crossing surfaces" if crossed else "",
         )
         await _destroy_session_internal(victim.key)
+        if crossed:
+            await _notify_detached_by_budget(victim.key)
 
 
 def bound_agent_context(
@@ -370,6 +410,15 @@ def _resolve_conversation(
             agent_key=agent_key,
             agent_slug=agent_slug,
             server_name=server_name,
+            # Whether anyone but the owner can speak into this transcript. On
+            # Telegram the key's owner is the *chat*, so a chat id that is not
+            # the user's own id is a group: the session is one, its turns are
+            # recorded under whoever opened it, and nothing downstream could
+            # tell them apart afterwards. Recorded here so the sweep can refuse
+            # it rather than trusting a guard in another module (FEAT-055).
+            multi_author=bool(
+                spec.chat_id is not None and spec.chat_id != spec.user_id
+            ),
         )
         return meta.id, ""
     except Exception:  # noqa: BLE001 - a chat must start even if recording fails
@@ -444,7 +493,7 @@ async def _get_or_create_session_locked(
             # Only a genuinely new key counts against the budget — replacing
             # the session behind an existing key is a swap, not an extra
             # subprocess.
-            await _enforce_session_budget(spec.user_id)
+            await _enforce_session_budget(spec.user_id, key.surface)
         # Reserve this key's budget slot for the whole spawn. The reservation
         # must follow the check with no await in between — the event loop
         # makes the pair atomic, so two creates can never both pass the count
@@ -700,36 +749,80 @@ async def stop_health_monitor() -> None:
 
 
 async def _health_check_loop() -> None:
-    """Every 15s, check for dead sessions (including stuck ones with is_busy=True)."""
+    """Every 15s, sweep the registry once."""
     try:
         while True:
             await asyncio.sleep(15)
-            dead_keys: list[SessionKey] = []
-            for raw_key, session in list(_sessions.items()):
-                if not session.client.alive:
-                    if session.is_busy:
-                        # Force-clear stuck busy flag on dead sessions
-                        session.is_busy = False
-                        log.warning(
-                            "Health monitor: force-cleared is_busy for dead session %s",
-                            raw_key,
-                        )
-                    dead_keys.append(session.key)
-
-            for key in dead_keys:
-                log.warning("Health monitor: dead session %s, cleaning up", key)
-                await _destroy_session_internal(key)
-                # Only Telegram sessions have a chat to notify.
-                chat_id = key.telegram_chat_id
-                if _health_bot and chat_id is not None:
-                    try:
-                        await _health_bot.send_message(
-                            chat_id=chat_id,
-                            text="Agent session ended unexpectedly. Send a message to start a new session.",
-                        )
-                    except Exception:
-                        log.warning(
-                            "Failed to notify chat %s about dead session", chat_id
-                        )
+            await _sweep_sessions()
     except asyncio.CancelledError:
         pass
+
+
+async def _sweep_sessions() -> None:
+    """One health pass: reap the dead sessions, detach the idle ones.
+
+    Two questions of the same registry, so one scan asks both rather than a
+    second task asking the second — but they mean different things and are
+    deliberately said differently. A dead subprocess is a fault, and the
+    Telegram chat behind it is told so. An idle session is not a fault
+    (PERF-226): it is a conversation nobody came back to, still holding an
+    agent subprocess, the MCP tree it was spawned with, and one of the five
+    slots in ``MAX_SESSIONS_PER_USER``. Since FEAT-015 the conversation
+    outlives the subprocess, so retiring one is a detach the next message
+    reattaches — silently, like the LRU's same-surface detach.
+
+    Both go out through ``_destroy_session_internal``, the one funnel that also
+    denies whatever the session was still asking a human to approve.
+    """
+    ttl = TIMEOUTS.session_idle
+    now = _utcnow()
+    dead_keys: list[SessionKey] = []
+    # (key, conversation id, seconds idle) — captured during the scan, because
+    # the session is gone from the registry by the time it is logged.
+    idle: list[tuple[SessionKey, str, float]] = []
+
+    for raw_key, session in list(_sessions.items()):
+        if not session.client.alive:
+            if session.is_busy:
+                # Force-clear stuck busy flag on dead sessions
+                session.is_busy = False
+                log.warning(
+                    "Health monitor: force-cleared is_busy for dead session %s",
+                    raw_key,
+                )
+            dead_keys.append(session.key)
+            continue
+        # A session mid-turn is never idle, however old its timestamp is:
+        # ``last_prompt_at`` is stamped when the turn *starts*, so a long
+        # answer would otherwise reap the subprocess writing it.
+        if not ttl or session.is_busy:
+            continue
+        since = session.last_prompt_at or session.created_at
+        seconds = (now - since).total_seconds()
+        if seconds > ttl:
+            idle.append((session.key, session.conversation_id, seconds))
+
+    for key in dead_keys:
+        log.warning("Health monitor: dead session %s, cleaning up", key)
+        await _destroy_session_internal(key)
+        # Only Telegram sessions have a chat to notify.
+        chat_id = key.telegram_chat_id
+        if _health_bot and chat_id is not None:
+            try:
+                await _health_bot.send_message(
+                    chat_id=chat_id,
+                    text="Agent session ended unexpectedly. Send a message to start a new session.",
+                )
+            except Exception:
+                log.warning("Failed to notify chat %s about dead session", chat_id)
+
+    for key, conversation_id, seconds in idle:
+        log.info(
+            "Health monitor: session %s idle for %.0fs (over the %ss TTL), "
+            "detaching (conversation %s is kept)",
+            key,
+            seconds,
+            ttl,
+            conversation_id or "none",
+        )
+        await _destroy_session_internal(key)

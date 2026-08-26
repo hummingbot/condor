@@ -11,7 +11,8 @@ place:
   reproduce a bot's whole cumulative with no gap and no double count;
 - **slice-and-merge** — folding a sliced history window into a performance
   object, including the shared fee rules (``fees_known`` heuristic and the
-  live ``cum_fees_quote`` fallback), which exist exactly once, here;
+  live ``cum_fees_quote`` fallback, which also owns the flag), which exist
+  exactly once, here;
 - **the current-owner rule** — live unrealized PnL and the open book belong to
   whoever operates the bot now.
 
@@ -19,7 +20,7 @@ Both consumers go through this module: the web strategy rollup
 (``condor.web.routes.agents``) via :func:`apply_bot_mode_pnl` /
 :func:`current_owner_bases` / :func:`session_ownership`, and the agent's own
 view (``condor.agents.performance``) via :func:`fold_sliced_window` /
-:func:`sliced_or_live_fees`. That is what makes the invariant structural
+:func:`apply_fee_fallback`. That is what makes the invariant structural
 instead of hand-maintained: the dashboard and the tick loop cannot disagree,
 because they no longer have separate copies of the rules to drift apart.
 """
@@ -75,6 +76,22 @@ def sliced_or_live_fees(sliced_fees: float, bot: dict[str, Any]) -> float:
     if sliced_fees:
         return sliced_fees
     return float(bot.get("cum_fees_quote", 0) or 0)
+
+
+def apply_fee_fallback(perf: Any, sliced_fees: float, bot: dict[str, Any]) -> None:
+    """Top ``perf.fees`` up to the live figure, and record that it is a floor.
+
+    The fallback figure is open-position fees only (``_aggregate_by_bot`` derives
+    it from ``positions_summary``), so a window it covers has no fee column at
+    all — the number is a floor, exactly what ``fees_known=False`` means. Applied
+    *after* :func:`fold_sliced_window` on both surfaces, so the heuristic always
+    sees the raw sliced column and the flag cannot diverge on identical data.
+    """
+    live = sliced_or_live_fees(sliced_fees, bot)
+    if live == sliced_fees:
+        return
+    perf.fees += live - sliced_fees
+    perf.fees_known = False
 
 
 # ── Session ownership resolution ──
@@ -285,8 +302,9 @@ async def apply_bot_mode_pnl(
         b_rows = bot_executor_rows(bot)
         operator.unrealized_pnl += float(bot.get("unrealized_pnl_quote", 0) or 0)
         # Top the operator up to the fallback figure: when the whole sliced fee
-        # column is zero, the live open-position fees are the only ones there are.
-        operator.fees += sliced_or_live_fees(sliced_fees, bot) - sliced_fees
+        # column is zero, the live open-position fees are the only ones there are
+        # — a floor, so the shared rule stamps ``fees_known=False`` with it.
+        apply_fee_fallback(operator, sliced_fees, bot)
         operator.open_count += sum(1 for r in b_rows if r["status"] == "RUNNING")
         operator.executors = list(operator.executors) + b_rows
         operator.total_pnl = operator.realized_pnl + operator.unrealized_pnl

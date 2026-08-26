@@ -9,16 +9,14 @@ from pathlib import Path
 
 import pytest
 
-from condor.memory import paths as paths_module
 from condor.memory import skills as skills_module
 from condor.memory.skills import SkillStore
 from condor.memory.store import _atomic_write
 
 
 @pytest.fixture
-def project_root(tmp_path, monkeypatch):
-    """Point the project root at a tmp dir so builtin skills resolve under it."""
-    monkeypatch.setattr(paths_module, "_PROJECT_ROOT", tmp_path)
+def project_root(tmp_path):
+    """The tmp root the suite-wide fixture already points ``agents/`` under."""
     return tmp_path
 
 

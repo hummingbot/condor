@@ -288,3 +288,63 @@ def _direct_http(posted: list, reply: dict):
             return _Resp()
 
     return _Client
+
+
+# ── The rung every other test here stubs away ──
+
+
+@pytest.fixture
+def store(monkeypatch):
+    """A private bell store and an empty sink registry (see test_notifications).
+
+    conftest's ``$CONDOR_DATA_DIR`` already isolates the store's file.
+    """
+    from condor import notifications
+
+    monkeypatch.setattr(notifications, "_push_sinks", [])
+
+
+@pytest.fixture
+def no_telegram(monkeypatch):
+    """The real ladder with nothing above its bottom rung: no bot, no token."""
+
+    class _NoBotStore:
+        def get_bot(self):
+            return None
+
+    class _CM:
+        def get_user(self, user_id):
+            return {"id": user_id} if user_id == CALLER.id else None
+
+    monkeypatch.setattr("condor.routine_store.get_routine_store", lambda: _NoBotStore())
+    monkeypatch.setattr("config_manager.get_config_manager", lambda: _CM())
+    monkeypatch.delenv("TELEGRAM_TOKEN", raising=False)
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+
+
+def test_a_telegram_less_install_files_the_notification_once(
+    monkeypatch, notes, store, no_telegram
+):
+    """The bell rung records the push; recording again filed it twice (ARCH-212).
+
+    Deliberately does *not* stub ``resolve_bot``, unlike every other test in
+    this file — the duplicate only existed below the two Telegram rungs, so a
+    fake bot could never see it.
+    """
+    _resolves_to(monkeypatch, "")
+    from condor.agents.delegate import resolve_bot
+    from condor.notifications import NotifyBot, list_for
+
+    assert isinstance(resolve_bot(), NotifyBot)
+
+    result = asyncio.run(
+        notify_user(
+            NotifyRequest(text="the thing happened", chat_id=CALLER.id), user=CALLER
+        )
+    )
+
+    # Nothing reached Telegram, and the caller is told so honestly; the tool
+    # counts ``recorded`` as delivery, so it still succeeds.
+    assert result == {"sent": False, "recorded": True}
+    items = list_for(CALLER.id)
+    assert [(n.text, n.kind) for n in items] == [("the thing happened", "agent")]

@@ -139,21 +139,25 @@ async def _run_in_task(
     snippet that saved a report and then raised still reports it.
     ``owner_id`` is the authenticated caller (``chat_id`` in ``execute_code``);
     it stamps any report the snippet saves so the web routes can authorize
-    reads/deletes against it (SEC-196).
+    reads/deletes against it (SEC-196). ``bind_context`` publishes the same
+    context object the snippet sees, so a ``call_routine`` inside it inherits
+    this run's server and user instead of an ambient default (FEAT-052).
     """
+    from condor.primitives import bind_context
+
     _CAPTURE.set(buffer)
-    reports.reset_last_report_id()
-    try:
-        with (
-            reports.attribute_owner(owner_id),
-            reports.attribute_to(agent),
-            reports.default_source("code", source),
-        ):
+    with (
+        reports.run_scope(
+            owner=owner_id, agent=agent, source_type="code", source_name=source
+        ),
+        bind_context(namespace.get("context")),
+    ):
+        try:
             outcome = eval(compiled, namespace)  # noqa: S307 - this IS the feature
             if inspect.isawaitable(outcome):
                 await outcome
-    finally:
-        out["report_id"] = reports.get_last_report_id() or ""
+        finally:
+            out["report_id"] = reports.get_last_report_id() or ""
 
 
 async def execute_code(

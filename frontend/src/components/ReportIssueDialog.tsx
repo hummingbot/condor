@@ -98,7 +98,9 @@ export function ReportIssueDialog({
         <p className="mt-1 mb-4 text-xs text-[var(--color-text-muted)]">
           Opens a prefilled issue on{" "}
           <span className="font-mono">{ISSUE_REPO}</span> in a new tab. You review and
-          submit it under your own GitHub account — nothing is sent from here.
+          submit it under your own GitHub account — nothing is sent from here. Text
+          that looks like a key, token or password is masked on the way out, so the
+          form can differ slightly from what you typed.
         </p>
 
         <div className="mb-4 flex gap-1 rounded-lg bg-[var(--color-bg)] p-1">
