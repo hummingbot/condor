@@ -72,12 +72,46 @@ def _env_entries(**values: Any) -> list[dict[str, str]]:
     return [{"name": name, "value": value} for name, value in entries if value]
 
 
+def seat_profile(agent_slug: str | None, tick: bool) -> str:
+    """Which tool profile a seat mounts (FEAT-066).
+
+    Tool allowlists are only enforced for pydantic-ai model keys; an ACP bridge
+    runs unrestricted, so for those seats the surface a session MOUNTS *is* the
+    permission model. One rule, in one place, for both subprocesses — they share
+    a profile vocabulary precisely so a seat is described here and nowhere else.
+
+    - ``tick`` — the unattended loop. No Gateway config or container control, no
+      repointing the API server, no direct liquidity moves outside an executor,
+      and none of the orchestration family that starts and stops the very loop it
+      is running inside.
+    - ``agent`` — an attended specialist (a consult, a chat bound to an agent, a
+      background copy of one). Keeps its domain tools: the LP experts name
+      ``manage_amm``, the shared ``recover_orphaned_position`` playbook closes a
+      stranded position with ``manage_clmm``, and ``strategy_builder`` — shared,
+      so every agent inherits it — has the agent author and launch its own
+      strategy. It loses only the operator surface no agent's tool list names.
+    - ``full`` — the chat coordinator, where a human confirms every dangerous
+      call, and any launch with no seat at all.
+
+    Note the axis is attendance, not identity: a specialist consulted with a user
+    watching and the same specialist ticking unattended are different seats, and
+    neither ``agent_slug`` nor ``--delegate-worker`` tells them apart, which is
+    why ``tick`` is passed in rather than derived.
+    """
+    from condor.memory.paths import CHAT_SLUG
+
+    if tick:
+        return "tick"
+    return "agent" if agent_slug and agent_slug != CHAT_SLUG else "full"
+
+
 def _condor_mcp_args(
     chat_id: int | str,
     user_id: int,
     agent_slug: str | None = None,
     server_name: str | None = None,
     delegate_worker: bool = False,
+    profile: str = "full",
 ) -> list[str]:
     """Build CLI args for the condor MCP subprocess.
 
@@ -106,10 +140,13 @@ def _condor_mcp_args(
         args.extend(["--server-name", str(server_name)])
     if delegate_worker:
         args.append("--delegate-worker")
+    args.extend(["--profile", profile])
     return args
 
 
-def _hummingbot_mcp_args(server: dict[str, Any], server_name: str) -> list[str]:
+def _hummingbot_mcp_args(
+    server: dict[str, Any], server_name: str, profile: str = "full"
+) -> list[str]:
     """Build CLI args for the hummingbot MCP subprocess.
 
     Only non-secret coordinates travel here — the API username/password go in
@@ -128,6 +165,8 @@ def _hummingbot_mcp_args(server: dict[str, Any], server_name: str) -> list[str]:
         api_url,
         "--server-name",
         str(server_name),
+        "--profile",
+        profile,
     ] + _bot_id_args()
 
 
@@ -138,6 +177,7 @@ def build_mcp_servers_for_session(
     server_name: str | None = None,
     agent_slug: str | None = None,
     delegate_worker: bool = False,
+    tick: bool = False,
 ) -> list[dict[str, Any]]:
     """Build dynamic MCP server configs for an agent session.
 
@@ -160,10 +200,14 @@ def build_mcp_servers_for_session(
 
     ``delegate_worker`` marks a background Condor delegation (FEAT-032) so the
     subprocess picks up the worker framing and refuses to delegate again.
+
+    ``tick`` marks the unattended loop seat, which mounts the narrowest tool
+    profile on both subprocesses (FEAT-066). See :func:`seat_profile`.
     """
     from config_manager import get_config_manager, get_effective_server
 
     cm = get_config_manager()
+    profile = seat_profile(agent_slug, tick)
 
     # Resolve which hummingbot server to use (explicit override > user
     # preferences). Every candidate is held to existence *and* reach, because
@@ -200,6 +244,7 @@ def build_mcp_servers_for_session(
             agent_slug,
             server_name=server_name,
             delegate_worker=delegate_worker,
+            profile=profile,
         ),
         "env": _env_entries(TELEGRAM_BOT_TOKEN=_bot_token()),
     }
@@ -230,7 +275,7 @@ def build_mcp_servers_for_session(
     mcp_hummingbot = {
         "name": "mcp-hummingbot",
         "command": "uv",
-        "args": _hummingbot_mcp_args(server, server_name),
+        "args": _hummingbot_mcp_args(server, server_name, profile),
         "env": _env_entries(
             HUMMINGBOT_API_USERNAME=server["username"],
             HUMMINGBOT_API_PASSWORD=server["password"],

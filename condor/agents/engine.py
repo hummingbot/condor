@@ -869,11 +869,15 @@ class TickEngine:
         mode = self.config.get("execution_mode", "loop")
 
         # A configured server pins the toolset; None falls back to the chat's.
+        # tick=True narrows both subprocesses to the loop profile (FEAT-066).
+        # This seat runs unattended behind an auto-approving permission callback,
+        # so what it can reach at all is decided here, by what gets mounted.
         mcp_servers = toolsets.build_mcp_servers_for_session(
             self.user_id,
             self.chat_id,
             server_name=self.config.get("server_name"),
             agent_slug=self.agent.slug,
+            tick=True,
         )
         permission_cb = auto_approve_with_risk_check(
             self.risk,
