@@ -120,9 +120,20 @@ _CASE_FOLDED = frozenset({"evm_addr", "hex64", "ip", "email", "known_url"})
 _MIN_KNOWN_CHARS = 4
 _MIN_KNOWN_DIGITS = 6
 
-# Nesting past this is not walked, matching ``_redact``'s bound in
-# ``condor.runtime.conversations``: the payload came from a tool we do not own.
-_MAX_DEPTH = 6
+# Nesting past this is not walked, and what sits there is elided rather than
+# emitted: the payload came from a tool we do not own, so an unwalked value is
+# one this module cannot promise is clean.
+#
+# One deeper than ``_REDACT_MAX_DEPTH`` in ``condor.runtime.conversations`` so
+# the two budgets line up where it matters. ``_redact`` runs on a tool call's
+# ``input`` dict from depth 0, while :meth:`Scrubber.turn` enters at the *call*
+# and reaches ``input`` at depth 1 — the extra level pays for that offset, so a
+# value ``_redact`` kept on disk is a value this still walks.
+_MAX_DEPTH = 7
+
+# What replaces a container sitting at the cap — ``_redact``'s own marker, so a
+# transcript reads the same whichever gate elided it.
+_ELIDED = "…"
 
 # ── Tier 2 patterns ──────────────────────────────────────────────────────
 #
@@ -343,6 +354,14 @@ class Scrubber:
         what a model or an exchange wrote, so it is what this has to look at.
         """
         if depth >= _MAX_DEPTH:
+            # Fail closed, like ``_dropped`` and like ``_redact``'s own cap: a
+            # leaf string is cheap to scrub and has nothing below it to walk, so
+            # it still gets a pseudonym; anything with more structure under it is
+            # elided rather than handed to the collector unread.
+            if isinstance(value, str):
+                return self.text(value)
+            if isinstance(value, (dict, list, tuple)):
+                return _ELIDED
             return value
         if isinstance(value, dict):
             return {str(k): self.payload(v, depth + 1) for k, v in value.items()}

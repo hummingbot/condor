@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from condor.runtime.conversations import TurnEntry
+from condor.runtime.conversations import TurnEntry, _tool_input
 from condor.sharing import scrub, wire
 
 SECRET = "0123456789abcdef0123456789abcdef"
@@ -319,6 +319,61 @@ def test_a_tool_call_payload_is_scrubbed_at_every_depth():
     assert call["output"]["rows"][0]["qty"] == 12.5  # quantities are kept
     assert call["title"] == "get_balance"  # so is the trajectory
     assert counts["sol_addr"] and counts["evm_addr"]
+
+
+def _nest(depth: int, leaf):
+    """``leaf`` buried so that ``payload`` reaches it at ``depth``."""
+    for level in reversed(range(depth)):
+        leaf = {f"l{level}": leaf}
+    return leaf
+
+
+def test_the_depth_cap_scrubs_the_leaf_it_stops_at():
+    """CORR-245: the cap used to ``return value`` — the raw object, unscrubbed —
+    while every other decision in this module fails closed. The scrubber is the
+    last gate on the sweep path, so the one fail-open branch was the one that
+    could put a verbatim wallet on the wire."""
+    scrubber = scrub.Scrubber(SECRET, KNOWN)
+    out = scrubber.payload(_nest(scrub._MAX_DEPTH, EVM_ADDR))
+    assert EVM_ADDR not in json.dumps(out)
+    assert scrubber.counts["evm_addr"] == 1
+
+
+@pytest.mark.parametrize("extra", [0, 1, 4])
+def test_nothing_below_the_cap_survives_verbatim(extra):
+    scrubber = scrub.Scrubber(SECRET, KNOWN)
+    buried = {"evm": EVM_ADDR, "sol": SOL_ADDR, "hash": TX_HASH}
+    out = json.dumps(scrubber.payload(_nest(scrub._MAX_DEPTH + extra, buried)))
+    for value in buried.values():
+        assert value not in out
+
+
+def test_a_container_past_the_cap_is_elided_not_emitted():
+    """A dict at the cap has more below it than a leaf scrub can reach, so it
+    goes out as ``_redact``'s marker rather than whole."""
+    scrubber = scrub.Scrubber(SECRET, KNOWN)
+    out = scrubber.payload(_nest(scrub._MAX_DEPTH, {"addr": EVM_ADDR}))
+    leaf = out
+    for level in range(scrub._MAX_DEPTH):
+        leaf = leaf[f"l{level}"]
+    assert leaf == "…"
+
+
+def test_scrub_reaches_everything_redact_left_on_disk():
+    """The two caps are one apart because ``turn`` enters at the *call* and
+    reaches ``input`` a level later. A value ``_redact`` kept has to be a value
+    the scrubber still walks, or the deepest surviving argument goes out raw."""
+    raw = _nest(5, EVM_ADDR)
+    disk = _tool_input(raw)
+    assert EVM_ADDR in json.dumps(disk), "the fixture must survive redaction"
+
+    turns, counts = scrub.scrub(
+        [TurnEntry(role="assistant", tool_calls=[{"id": "1", "input": disk}])],
+        secret=SECRET,
+        known=KNOWN,
+    )
+    assert EVM_ADDR not in json.dumps(turns[0].tool_calls)
+    assert counts["evm_addr"] == 1
 
 
 def test_quantities_are_deliberately_kept():
