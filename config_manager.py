@@ -79,6 +79,16 @@ class ConfigManager:
         self._client_locks: Dict[str, asyncio.Lock] = (
             {}
         )  # per-server lock for get_client
+        # Short-lived memo of check_server_status results so the N parallel
+        # probes fired by one menu render (and repeated taps) collapse to one
+        # probe per server. Kept well under _client_verify_interval.
+        self._status_cache: Dict[str, Tuple[dict, float]] = (
+            {}
+        )  # server_name -> (status_result, checked_at)
+        self._status_ttl = 15  # seconds
+        self._status_locks: Dict[str, asyncio.Lock] = (
+            {}
+        )  # per-server lock for check_server_status
         # True when an existing config file could not be read: the in-memory
         # state is empty and MUST NOT be written back over the file on disk.
         self._load_failed = False
@@ -366,9 +376,8 @@ class ConfigManager:
             logger.error(f"Server '{name}' not found")
             return False
 
-        # Clear cached client
-        if name in self._clients:
-            del self._clients[name]
+        # Clear cached client and any memoized status
+        self._invalidate_server_caches(name)
 
         if host is not None:
             servers[name]["host"] = host
@@ -390,9 +399,8 @@ class ConfigManager:
             logger.error(f"Server '{name}' not found")
             return False
 
-        # Clear cached client
-        if name in self._clients:
-            del self._clients[name]
+        # Clear cached client and any memoized status
+        self._invalidate_server_caches(name)
 
         del servers[name]
 
@@ -438,6 +446,15 @@ class ConfigManager:
             self.config_path,
         )
         return secret
+
+    def _invalidate_server_caches(self, name: str):
+        """Drop the pooled client and memoized status for a server.
+
+        Called whenever the server's credentials or existence change, so a
+        cached client or status can never outlive the config it was built from.
+        """
+        self._clients.pop(name, None)
+        self._status_cache.pop(name, None)
 
     async def get_client(self, name: str = None):
         """Get or create API client for a server."""
@@ -562,12 +579,82 @@ class ConfigManager:
             raise ValueError("No servers configured")
         return await self.get_client(server_name)
 
-    async def check_server_status(self, name: str) -> dict:
-        """Check if a server is online."""
-        from hummingbot_api_client import HummingbotAPIClient
+    STATUS_PROBE_TIMEOUT = 3  # seconds — a dead server must not stall a menu
 
+    @staticmethod
+    def _classify_status_error(exc: Exception) -> dict:
+        """Map a failed liveness probe to the status shown in the menus."""
+        error_msg = str(exc)
+        if isinstance(exc, asyncio.TimeoutError):
+            return {"status": "offline", "message": "Connection timeout"}
+        if "401" in error_msg:
+            return {"status": "auth_error", "message": "Invalid credentials"}
+        if "timeout" in error_msg.lower():
+            return {"status": "offline", "message": "Connection timeout"}
+        if "connect" in error_msg.lower():
+            return {"status": "offline", "message": "Cannot reach server"}
+        return {"status": "error", "message": f"Error: {error_msg[:80]}"}
+
+    def _pooled_client(self, name: str):
+        """Return the pooled client for a server if it is still within TTL."""
+        entry = self._clients.get(name)
+        if not entry:
+            return None
+        client, connected_at = entry
+        if time.time() - connected_at >= self._client_ttl:
+            return None
+        return client
+
+    async def check_server_status(self, name: str) -> dict:
+        """Check if a server is online.
+
+        Probes through the pooled client when ConfigManager already holds one,
+        and only builds a short-timeout throwaway client when there is none (or
+        when the pooled session itself is broken). Results are memoized per
+        server for _status_ttl seconds so one menu render costs at most one
+        probe per server.
+        """
         if name not in self._data["servers"]:
             return {"status": "error", "message": "Server not found"}
+
+        cached = self._status_cache.get(name)
+        if cached and time.time() - cached[1] < self._status_ttl:
+            return dict(cached[0])
+
+        lock = self._status_locks.setdefault(name, asyncio.Lock())
+        async with lock:
+            # Re-check: a concurrent probe for this server may have just landed
+            cached = self._status_cache.get(name)
+            if cached and time.time() - cached[1] < self._status_ttl:
+                return dict(cached[0])
+
+            result = await self._probe_server_status(name)
+            self._status_cache[name] = (result, time.time())
+            return dict(result)
+
+    async def _probe_server_status(self, name: str) -> dict:
+        """Run one liveness probe, preferring the pooled client."""
+        # Same call shape as condor/fetchers/server_status.py:fetch_server_status
+        # so the two liveness probes stay in step.
+        client = self._pooled_client(name)
+        if client is not None:
+            try:
+                await asyncio.wait_for(
+                    client.accounts.list_accounts(),
+                    timeout=self.STATUS_PROBE_TIMEOUT,
+                )
+                return {"status": "online", "message": "Connected and authenticated"}
+            except Exception as e:
+                # The pooled session may simply be stale — confirm with a fresh
+                # short-timeout client rather than reporting a false outage.
+                # The pooled client is never closed here: get_client owns it.
+                logger.debug(f"Pooled status probe for '{name}' failed: {e}")
+
+        return await self._probe_server_status_fresh(name)
+
+    async def _probe_server_status_fresh(self, name: str) -> dict:
+        """Liveness probe over a throwaway short-timeout client."""
+        from hummingbot_api_client import HummingbotAPIClient
 
         server = self._data["servers"][name]
         base_url = f"http://{server['host']}:{server['port']}"
@@ -584,15 +671,7 @@ class ConfigManager:
             await client.accounts.list_accounts()
             return {"status": "online", "message": "Connected and authenticated"}
         except Exception as e:
-            error_msg = str(e)
-            if "401" in error_msg:
-                return {"status": "auth_error", "message": "Invalid credentials"}
-            elif "timeout" in error_msg.lower():
-                return {"status": "offline", "message": "Connection timeout"}
-            elif "connect" in error_msg.lower():
-                return {"status": "offline", "message": "Cannot reach server"}
-            else:
-                return {"status": "error", "message": f"Error: {error_msg[:80]}"}
+            return self._classify_status_error(e)
         finally:
             try:
                 await client.close()
@@ -608,6 +687,7 @@ class ConfigManager:
             except Exception as e:
                 logger.error(f"Error closing client '{name}': {e}")
         self._clients.clear()
+        self._status_cache.clear()
 
     # =========================================================================
     # USER MANAGEMENT
