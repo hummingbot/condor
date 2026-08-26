@@ -7,7 +7,10 @@ tools:
 - get_prices
 - get_candles
 - get_portfolio_overview
-- manage_executors
+- create_grid_executor
+- list_executors
+- get_executor
+- stop_executor
 - search_history
 - manage_routines
 - trading_agent_journal_read

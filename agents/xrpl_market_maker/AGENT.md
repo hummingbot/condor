@@ -8,7 +8,10 @@ tools:
 - get_order_book
 - get_portfolio_overview
 - explore_geckoterminal
-- manage_executors
+- create_order_executor
+- list_executors
+- get_executor
+- stop_executor
 - manage_controllers
 - manage_bots
 - manage_routines

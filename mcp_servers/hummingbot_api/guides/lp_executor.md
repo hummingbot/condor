@@ -41,7 +41,7 @@ and auto-closes when price crosses configurable limit prices.
    - Set `side` based on which tokens user is providing (1=BUY/quote-only, 2=SELL/base-only, 3=RANGE/both)
 
 5. **Create executor**:
-   - Use `manage_executors` with `action="create"`, `executor_type="lp_executor"`
+   - Call `create_lp_executor`
    - Required params: `connector_name` (network), `lp_provider` (DEX), `trading_pair`, `pool_address`, `lower_price`, `upper_price`, `side`, plus at least one of `base_amount` / `quote_amount`
 
 #### State Machine
@@ -153,32 +153,27 @@ lower_limit_price = lower_price * (1 - buffer)   # close trigger below range bot
 #### Example: Single-sided SOL into a memecoin/SOL pool
 
 ```python
-manage_executors(
-    action="create",
-    executor_type="lp_executor",
-    executor_config={
-        "connector_name": "solana-mainnet-beta",   # network, NOT the DEX
-        "lp_provider": "meteora/clmm",             # DEX + trading type
-        "trading_pair": "BONK-SOL",
-        "pool_address": "<pool_address>",
-        "lower_price": price * 0.80,
-        "upper_price": price,                      # range entirely below current price
-        "upper_limit_price": price * 1.10,         # close if price rallies 10% above range top
-        "lower_limit_price": price * 0.80 * 0.90,  # close if price drops 10% below range bottom
-        "side": 1,                                 # BUY = single-sided quote-only (SOL is quote)
-        "base_amount": 0,
-        "quote_amount": 1.0,
-        "keep_position": False,                    # swap memecoin → SOL on close
-    },
+create_lp_executor(
+    connector_name="solana-mainnet-beta",   # network, NOT the DEX
+    lp_provider="meteora/clmm",             # DEX + trading type
+    trading_pair="BONK-SOL",
+    pool_address="<pool_address>",
+    lower_price=price * 0.80,
+    upper_price=price,                      # range entirely below current price
+    upper_limit_price=price * 1.10,         # close if price rallies 10% above range top
+    lower_limit_price=price * 0.80 * 0.90,  # close if price drops 10% below range bottom
+    side=1,                                 # BUY = single-sided quote-only (SOL is quote)
+    quote_amount=1.0,
+    keep_position=False,                    # swap memecoin → SOL on close
 )
 ```
 
 #### Important: Managing Positions
 
-**Always use the executor tool (`manage_executors`) to open and close LP positions.**
+**Always use the executor tools (`create_lp_executor` / `stop_executor`) to open and close LP positions.**
 
-- Use `manage_executors` with `action="stop"` to properly close positions and update executor status
-- `manage_executors(action="stop")` accepts its own `keep_position` flag (separate from the config field) — MCP default is `False`, which closes the on-chain position and swaps back to the original quote asset. Pass `keep_position=True` to close the LP position but retain the net token change as a held spot position.
+- Use `stop_executor` to properly close positions and update executor status
+- `stop_executor` accepts its own `keep_position` flag (separate from the config field) — MCP default is `False`, which closes the on-chain position and swaps back to the original quote asset. Pass `keep_position=True` to close the LP position but retain the net token change as a held spot position.
 - If a position is closed externally (via DEX UI), manually mark the executor as `TERMINATED` in the database
 
 **Verifying position status:**
@@ -188,14 +183,14 @@ manage_executors(
 - If position is open on-chain but executor still shows `OPENING`, the executor should eventually sync — if stuck, check API logs for errors
 
 **Orphaned positions (executor terminated with a live on-chain position):**
-- `manage_executors(action="orphaned")` lists terminated executors that may still own an on-chain position: involuntary holds (`POSITION_HOLD` with `hold_reason` set — a close that exhausted its retries), legacy `FAILED` executors whose final state carries a `position_address`, and `SYSTEM_CLEANUP` LP executors from an API restart (position address unknown — reconcile against `get_portfolio_overview(include_lp_positions=True)` or the gateway positions-owned endpoints)
+- `list_orphaned_positions()` lists terminated executors that may still own an on-chain position: involuntary holds (`POSITION_HOLD` with `hold_reason` set — a close that exhausted its retries), legacy `FAILED` executors whose final state carries a `position_address`, and `SYSTEM_CLEANUP` LP executors from an API restart (position address unknown — reconcile against `get_portfolio_overview(include_lp_positions=True)` or the gateway positions-owned endpoints)
 - Each entry reports the `lp_provider` (the DEX, e.g. `orca/clmm`) and `pool_address` needed to close it. Note `connector_name` holds the **network** (e.g. `solana-mainnet-beta`), not the DEX
 - Recover with `manage_clmm(action="close", connector=<lp_provider>, network=<connector_name>, position_address=..., pool_address=...)`. `pool_address` is REQUIRED here: LP-executor positions are opened by the bot straight against Gateway, so the API database has no row to read the pool from and the close returns 400 without it
-- Stopping the executor will NOT close the position — it has already terminated, so `manage_executors(action="stop")` is correctly a no-op. A fresh `lp_executor` CANNOT adopt an existing position either; it always mints a new one, which would stack a second funded position on top of the orphan
-- After the position is closed on-chain, mark it recovered with `manage_executors(action="resolve_orphan", executor_id="...")` so it stops appearing in orphan listings and warnings
-- If an `lp_rebalancer` controller was managing the executor, restart the controller (or its bot) after resolving: the controller's orphan halt is held in memory and only clears on restart. `resolve_orphan` updates the API database, not the running controller
+- Stopping the executor will NOT close the position — it has already terminated, so `stop_executor` is correctly a no-op. A fresh `create_lp_executor` CANNOT adopt an existing position either; it always mints a new one, which would stack a second funded position on top of the orphan
+- After the position is closed on-chain, mark it recovered with `resolve_orphaned_position(executor_id="...")` so it stops appearing in orphan listings and warnings
+- If an `lp_rebalancer` controller was managing the executor, restart the controller (or its bot) after resolving: the controller's orphan halt is held in memory and only clears on restart. `resolve_orphaned_position` updates the API database, not the running controller
 - Do NOT open new positions on the same funds until the orphan is recovered
 
 **Stopping an already-terminated executor is a no-op, not an error:**
-- `manage_executors(action="stop")` on a terminated executor returns `status="already_terminated"` with its final `close_type`, `position_address`, and `orphaned_position` flag instead of a 404
+- `stop_executor` on a terminated executor returns `status="already_terminated"` with its final `close_type`, `position_address`, and `orphaned_position` flag instead of a 404
 - A 404 means the executor ID is unknown to the API's database (never existed, or the database was unavailable at that moment)

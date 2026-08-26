@@ -113,7 +113,7 @@ def test_cancelled_outcome_prevents_the_tool_from_running():
     async def deny(tool_call: dict, options: list[dict]) -> dict:
         return {"outcome": {"outcome": "cancelled"}}
 
-    client, spy = _client_with("manage_executors", {"action": "create"}, deny)
+    client, spy = _client_with("create_grid_executor", {}, deny)
     events = _drive(client)
 
     assert not spy.ran, "denied tool executed anyway"
@@ -127,7 +127,7 @@ def test_blocked_call_is_not_also_reported_completed():
     async def deny(tool_call: dict, options: list[dict]) -> dict:
         return {"outcome": {"outcome": "cancelled"}}
 
-    client, _ = _client_with("manage_executors", {"action": "create"}, deny)
+    client, _ = _client_with("create_grid_executor", {}, deny)
     events = _drive(client)
 
     blocked = _statuses(events, "blocked")
@@ -220,20 +220,17 @@ def test_reset_clears_decisions_between_turns():
 
 
 def test_dry_run_cannot_execute_a_real_trading_tool():
-    """A dry-run agent must not reach manage_executors(create)."""
+    """A dry-run agent must not reach a create_*_executor tool."""
     callback = auto_approve_with_risk_check(
         RiskEngine(RiskLimits()), RiskState(), execution_mode="dry_run"
     )
     args = {
-        "action": "create",
-        "executor_type": "grid_executor",
-        "executor_config": {
-            "controller_id": "test_controller",
-            "type": "grid_executor",
-            "total_amount_quote": 100.0,
-        },
+        "controller_id": "test_controller",
+        "connector_name": "binance",
+        "trading_pair": "SOL-USDT",
+        "total_amount_quote": 100.0,
     }
-    client, spy = _client_with("manage_executors", args, callback)
+    client, spy = _client_with("create_grid_executor", args, callback)
     events = _drive(client)
 
     assert not spy.ran, "dry-run agent executed a real create"
@@ -259,15 +256,12 @@ def test_risk_limit_denial_prevents_the_create():
         RiskState(total_exposure=0.0),
     )
     args = {
-        "action": "create",
-        "executor_type": "grid_executor",
-        "executor_config": {
-            "controller_id": "test_controller",
-            "type": "grid_executor",
-            "total_amount_quote": 5000.0,
-        },
+        "controller_id": "test_controller",
+        "connector_name": "binance",
+        "trading_pair": "SOL-USDT",
+        "total_amount_quote": 5000.0,
     }
-    client, spy = _client_with("manage_executors", args, callback)
+    client, spy = _client_with("create_grid_executor", args, callback)
     events = _drive(client)
 
     assert not spy.ran, "an over-limit create reached the backend"

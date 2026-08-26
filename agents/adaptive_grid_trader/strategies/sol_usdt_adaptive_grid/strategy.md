@@ -144,7 +144,7 @@ Ignore PROFILE=HOLD as first-entry veto.
 
 ### 3. Live state
 ```
-manage_executors(action="search", connector_names=["binance_perpetual"],
+list_executors(connector_names=["binance_perpetual"],
   trading_pairs=["SOL-USDT"], executor_types=["grid_executor"], status="RUNNING")
 get_portfolio_overview(connector_names=["binance_perpetual"],
   include_perp_positions=True, include_balances=True,
@@ -154,13 +154,12 @@ get_portfolio_overview(connector_names=["binance_perpetual"],
 
 ### 3a. Orphan cleanup (before any deploy)
 If step 3 shows **active orders on SOL-USDT** but **no running executor owns them**, they are stale leftovers.
-1. Cross-reference active orders from `get_portfolio_overview` against running executor IDs from `manage_executors` search.
-2. Any order whose `client_order_id` does not belong to a running executor → cancel it:
+1. Cross-reference active orders from `get_portfolio_overview` against running executor IDs from `list_executors`.
+2. Any order whose `client_order_id` belongs to an executor that is still running → stop that executor (stopping it cancels the orders it owns):
    ```
-   manage_executors(action="cancel_order", connector_name="binance_perpetual",
-     trading_pair="SOL-USDT", order_id="<orphan_order_id>")
+   stop_executor(executor_id="<owning_executor_id>")
    ```
-3. If cancel fails, retry once. If still stuck, journal the orphan and **continue** (do not HOLD solely because of an uncancellable orphan — attempt deployment anyway unless the orphan blocks balance).
+3. If the stop fails, retry once. If still stuck, journal the orphan and **continue** (do not HOLD solely because of an uncancellable orphan — attempt deployment anyway unless the orphan blocks balance).
 4. Verify orders are gone before proceeding to deploy.
 
 ### 3b. Account menu (mandatory on flat / first entry / before TWO_SIDED)

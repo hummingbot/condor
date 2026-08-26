@@ -9,7 +9,9 @@ tools:
 - get_funding_rate
 - get_order_book
 - get_portfolio_overview
-- manage_executors
+- list_executors
+- get_executor
+- get_performance_report
 - manage_controllers
 - manage_bots
 - search_history

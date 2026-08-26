@@ -17,6 +17,19 @@ from __future__ import annotations
 import json
 from typing import Any
 
+#: Every executor-creating tool, by name. The typed split (FEAT-062) gave each
+#: executor type its own tool, so creating one is no longer an ``action`` inside a
+#: mega-tool — reaching any of these names at all is the create.
+CREATE_EXECUTOR_TOOLS = frozenset(
+    {
+        "create_position_executor",
+        "create_grid_executor",
+        "create_dca_executor",
+        "create_order_executor",
+        "create_lp_executor",
+    }
+)
+
 # Tools that require user confirmation before execution
 DANGEROUS_TOOLS = {
     "place_order",
@@ -24,13 +37,18 @@ DANGEROUS_TOOLS = {
     "manage_clmm",  # every action that moves liquidity
     "manage_amm",  # every action that moves liquidity
     "manage_gateway_config",  # no resource of it is gated today; see below
+    # The executor family is gated by NAME (FEAT-062), the same way the swap family
+    # is: a create and a stop each have their own tool, so there is no `action` to
+    # read out of the arguments and no fail-closed ambiguity. Every other executor
+    # tool (list_executors, get_executor, list_positions_held, get_performance_report,
+    # list_orphaned_positions, resolve_orphaned_position, clear_position_held,
+    # executor_defaults) is safe by name and never reaches a human.
+    *CREATE_EXECUTOR_TOOLS,
+    "stop_executor",
 }
 
 # Tools that are always blocked (RBAC bypass prevention)
 BLOCKED_TOOLS: set[str] = set()
-
-# Actions within manage_executors that require confirmation
-DANGEROUS_EXECUTOR_ACTIONS = {"create", "stop"}
 
 # Actions within manage_bots that deploy/mutate a live bot (status/logs/get_config
 # are read-only and excluded). manage_controllers itself is excluded entirely — it
@@ -144,6 +162,29 @@ def _short_address(value: Any) -> str:
     return f"{value[:8]}..." if len(value) > 8 else value
 
 
+def _executor_amount(tool_name: str, input_data: dict[str, Any]) -> str:
+    """The size of a pending executor create, for the confirmation line.
+
+    Each executor type denominates its size in a different field and a different
+    currency -- base for a position, quote for a grid, a ladder of quote amounts for a
+    DCA, one or both legs for an LP position. A human approving a create is approving
+    that number, so it is spelled out per type rather than omitted.
+    """
+    if tool_name == "create_grid_executor":
+        return f" for {input_data.get('total_amount_quote', '?')} quote"
+    if tool_name == "create_dca_executor":
+        amounts = input_data.get("amounts_quote")
+        if isinstance(amounts, list) and amounts:
+            return f" for {sum(amounts)} quote over {len(amounts)} levels"
+        return ""
+    if tool_name == "create_lp_executor":
+        base = input_data.get("base_amount") or 0
+        quote = input_data.get("quote_amount") or 0
+        return f" with {base} base / {quote} quote"
+    amount = input_data.get("amount")
+    return f" of {amount}" if amount is not None else ""
+
+
 def _has_dangerous_resource(
     tool_call: dict[str, Any], dangerous_resources: set[str]
 ) -> bool:
@@ -180,12 +221,8 @@ def is_dangerous_tool_call(tool_call: dict[str, Any]) -> bool:
 
         return True
 
-    # manage_executors with create/stop actions
-    if tool_name == "manage_executors":
-        return _has_dangerous_action(tool_call, DANGEROUS_EXECUTOR_ACTIONS)
-
     # manage_bots with deploy/stop/update actions (a bot deploy places real
-    # capital via a controller, a different path than manage_executors)
+    # capital via a controller, a different path than the executor tools)
     if tool_name == "manage_bots":
         return _has_dangerous_action(tool_call, DANGEROUS_BOT_ACTIONS)
 
@@ -216,17 +253,22 @@ def format_tool_summary(tool_call: dict[str, Any]) -> str:
         summary += f" on {connector}"
         return summary
 
-    if tool_name == "manage_executors":
-        action = input_data.get("action", "?")
-        exec_type = input_data.get("executor_type", "")
-        exec_id = input_data.get("executor_id", "")
-        if action == "create" and exec_type:
-            config = input_data.get("executor_config", {})
-            pair = config.get("trading_pair", "?")
-            return f"Create {exec_type} on {pair}"
-        if action == "stop" and exec_id:
-            return f"Stop executor {exec_id[:12]}..."
-        return f"Executor: {action}"
+    if tool_name in CREATE_EXECUTOR_TOOLS:
+        # The typed tools put the numbers the human is approving at the top level,
+        # so the summary reads them straight instead of digging through a config
+        # blob. Each type sizes itself differently, hence the per-type amount.
+        pair = input_data.get("trading_pair", "?")
+        kind = tool_name.removeprefix("create_").removesuffix("_executor")
+        amount = _executor_amount(tool_name, input_data)
+        return f"Create {kind} executor on {pair}{amount}"
+
+    if tool_name == "stop_executor":
+        exec_id = str(input_data.get("executor_id", "") or "")
+        keep = input_data.get("keep_position", False)
+        if not exec_id:
+            return "Stop executor (id could not be read)"
+        suffix = ", keeping the position" if keep else ""
+        return f"Stop executor {exec_id[:12]}...{suffix}"
 
     if tool_name == "manage_bots":
         action = input_data.get("action", "?")

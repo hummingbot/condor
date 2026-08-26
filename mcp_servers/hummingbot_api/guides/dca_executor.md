@@ -20,7 +20,7 @@ Dollar-cost averages into positions over time with scheduled purchases.
 **CRITICAL:**
 - Uses `amounts_quote` (list, quote currency) — NOT `amount` or `total_amount_quote`
 - `prices` list must be the same length as `amounts_quote`
-- Always fetch the schema first via progressive disclosure (`manage_executors(executor_type='dca_executor')`) before creating
+- Every field is a typed parameter of `create_dca_executor` — read its signature rather than guessing a config dict
 
 #### Parameter Reference
 

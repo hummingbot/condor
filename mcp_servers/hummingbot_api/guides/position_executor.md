@@ -18,7 +18,7 @@ Takes directional positions with defined entry, stop-loss, and take-profit level
 
 **CRITICAL:**
 - `amount` is in **base currency** — NOT `total_amount_quote`. To convert from USD: `amount = usd_value / entry_price`
-- Always fetch the schema first via progressive disclosure (`manage_executors(executor_type='position_executor')`) before creating
+- Every field is a typed parameter of `create_position_executor` — read its signature rather than guessing a config dict
 
 #### Parameter Reference
 

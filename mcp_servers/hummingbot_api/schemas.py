@@ -8,199 +8,7 @@ and documentation across the codebase.
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
-
-# ==============================================================================
-# Executor Management Schemas
-# ==============================================================================
-
-
-class ManageExecutorsRequest(BaseModel):
-    """Request model for managing executors with progressive disclosure.
-
-    Progressive Flow Stages:
-    1. No params -> List available executor types with descriptions
-    2. executor_type only -> Show config schema with user defaults applied
-    3. action="create" + executor_config -> Create executor (merged with defaults)
-    4. action="search" -> Search/list executors (or get detail if executor_id provided)
-    5. action="stop" + executor_id -> Stop executor
-    6. action="get_logs" + executor_id -> Get executor logs
-    7. action="get_preferences" -> View saved preferences
-    8. action="save_preferences" + preferences_content -> Save preferences file
-    9. action="reset_preferences" -> Reset preferences to defaults
-    10. action="positions_summary" -> Get positions (or specific if connector_name+trading_pair given)
-    11. action="clear_position" + connector_name + trading_pair -> Clear position
-    12. action="orphaned" -> List terminated executors that may still own an on-chain position
-    13. action="resolve_orphan" + executor_id -> Mark an orphaned position as recovered
-    """
-
-    action: (
-        Literal[
-            "create",
-            "search",
-            "stop",
-            "get_logs",
-            "get_preferences",
-            "save_preferences",
-            "reset_preferences",
-            "positions_summary",
-            "clear_position",
-            "performance_report",
-            "orphaned",
-            "resolve_orphan",
-        ]
-        | None
-    ) = Field(
-        default=None,
-        description="Action to perform. Leave empty to see executor types or show schema.",
-    )
-
-    executor_type: str | None = Field(
-        default=None,
-        description="Type of executor (e.g., 'position_executor', 'dca_executor'). Leave empty to list types.",
-    )
-
-    executor_config: dict[str, Any] | None = Field(
-        default=None,
-        description="Configuration for creating an executor. Required for 'create' action.",
-    )
-
-    executor_id: str | None = Field(
-        default=None,
-        description="Executor ID for 'get' or 'stop' actions.",
-    )
-
-    # Log options
-    log_level: str | None = Field(
-        default=None,
-        description="Filter logs by level (ERROR, WARNING, INFO, DEBUG). Only for 'get_logs' action.",
-    )
-
-    # Search filters
-    account_names: list[str] | None = Field(
-        default=None,
-        description="Filter by account names.",
-    )
-
-    connector_names: list[str] | None = Field(
-        default=None,
-        description="Filter by connector names.",
-    )
-
-    trading_pairs: list[str] | None = Field(
-        default=None,
-        description="Filter by trading pairs.",
-    )
-
-    executor_types: list[str] | None = Field(
-        default=None,
-        description="Filter by executor types for search.",
-    )
-
-    status: str | None = Field(
-        default=None,
-        description="Filter by status (e.g., 'RUNNING', 'TERMINATED').",
-    )
-
-    # Pagination
-    cursor: str | None = Field(
-        default=None,
-        description="Pagination cursor for search results.",
-    )
-
-    limit: int = Field(
-        default=50,
-        description="Maximum number of results to return.",
-        ge=1,
-        le=1000,
-    )
-
-    # Stop options
-    keep_position: bool = Field(
-        default=False,
-        description="When stopping, keep the position open instead of closing it.",
-    )
-
-    # Preferences
-    save_as_default: bool = Field(
-        default=False,
-        description="Save the executor_config as default for this executor_type.",
-    )
-
-    preferences_content: str | None = Field(
-        default=None,
-        description="Complete markdown content for the preferences file. Used with 'save_preferences' action.",
-    )
-
-    account_name: str | None = Field(
-        default=None,
-        description="Account name for creating executors. Defaults to 'master_account'.",
-    )
-
-    # Position management fields (for positions_summary, get_position, clear_position)
-    connector_name: str | None = Field(
-        default=None,
-        description="Connector name for position filtering or clearing.",
-    )
-
-    trading_pair: str | None = Field(
-        default=None,
-        description="Trading pair for position filtering or clearing.",
-    )
-
-    controller_id: str | None = Field(
-        default=None,
-        description="Controller ID that owns this executor. Used for create, positions_summary, get_position, clear_position, and performance_report.",
-    )
-
-    controller_ids: list[str] | None = Field(
-        default=None,
-        description="Filter by controller IDs (for search).",
-    )
-
-    @field_validator("executor_type")
-    @classmethod
-    def validate_executor_type(cls, v: str | None) -> str | None:
-        """Validate executor type format if provided."""
-        if v is not None:
-            v = v.lower().replace(" ", "_").replace("-", "_")
-        return v
-
-    def get_flow_stage(self) -> str:
-        """Determine which stage of the flow we're in."""
-        if self.action == "get_preferences":
-            return "get_preferences"
-        elif self.action == "save_preferences" and self.preferences_content:
-            return "save_preferences"
-        elif self.action == "reset_preferences":
-            return "reset_preferences"
-        elif self.action == "search":
-            return "search"
-        elif self.action == "stop" and self.executor_id:
-            return "stop"
-        elif self.action == "get_logs" and self.executor_id:
-            return "get_logs"
-        elif self.action == "create" and self.executor_config:
-            return "create"
-        elif self.action == "positions_summary":
-            return "positions_summary"
-        elif (
-            self.action == "clear_position"
-            and self.connector_name
-            and self.trading_pair
-        ):
-            return "clear_position"
-        elif self.action == "performance_report":
-            return "performance_report"
-        elif self.action == "orphaned":
-            return "orphaned"
-        elif self.action == "resolve_orphan":
-            return "resolve_orphan"
-        elif self.executor_type is not None:
-            return "show_schema"
-        else:
-            return "list_types"
-
+from pydantic import BaseModel, Field
 
 # ==============================================================================
 # Gateway Management Schemas
@@ -511,7 +319,7 @@ class GatewayCLMMRequest(BaseModel):
     - list_pools: Get list of available CLMM pools with filtering/sorting
     - get_pool_info: Get detailed information about a specific pool
 
-    To manage LP positions, use `manage_executors` with `lp_executor` type.
+    To manage LP positions, use `create_lp_executor`.
     To check on-chain positions, use `get_portfolio_overview` with `include_lp_positions=True`.
     """
 
@@ -688,7 +496,7 @@ class CLMMRequest(BaseModel):
     Progressive disclosure: action=None returns the CLMM guide.
 
     This is the direct, unmanaged path. The managed path for normal LP work is
-    manage_executors(lp_executor), which owns range monitoring, rebalancing and close retries.
+    create_lp_executor, which owns range monitoring, rebalancing and close retries.
     Use manage_clmm to inspect positions and to recover orphaned ones that no executor owns
     any more — a terminated executor cannot be told to close its position.
     """

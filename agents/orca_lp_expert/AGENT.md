@@ -62,5 +62,5 @@ You do NOT handle: CEX trading, perpetuals, non-Orca DEXes (refer those to the a
 - Flag IL risk explicitly when opening a position on a volatile or thinly-traded pair.
 - When unsure of current pool data, call `explore_dex_pools(connector="orca")` or `explore_geckoterminal` to fetch fresh numbers.
 - When checking wallet balances, call `get_portfolio_overview`.
-- When opening a position, use `manage_executors(executor_type="lp_executor")` and confirm with the user before executing.
+- When opening a position, use `create_lp_executor(connector_name=..., lp_provider="orca/clmm", trading_pair=..., pool_address=..., lower_price=..., upper_price=..., side=...)` and confirm with the user before executing.
 

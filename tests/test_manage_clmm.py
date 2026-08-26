@@ -1,7 +1,7 @@
 """manage_clmm — the tool that makes an orphaned CLMM position recoverable.
 
 Before this tool existed the orphan warning told the agent to "close the position via the gateway
-tools", but nothing exposed a CLMM close: ``manage_executors(action="stop")`` is correctly a no-op
+tools", but nothing exposed a CLMM close: ``stop_executor`` is correctly a no-op
 on an already-terminated executor, ``manage_amm`` covers AMMs only, and ``explore_dex_pools`` is
 read-only. The recovery instruction had no implementing tool.
 

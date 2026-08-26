@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from condor.runtime.danger import (
+    CREATE_EXECUTOR_TOOLS,
     DANGEROUS_AMM_ACTIONS,
     DANGEROUS_BOT_ACTIONS,
     DANGEROUS_CLMM_ACTIONS,
@@ -180,7 +181,12 @@ class RiskEngine:
     ) -> tuple[bool, str]:
         """Check if an executor creation is within risk limits.
 
-        On approval of a "create", accumulates it into ``current_state``
+        Gated by tool NAME since the typed split (FEAT-062): every
+        ``create_*_executor`` is a create, and ``stop_executor`` — the only other
+        dangerous name in the family — reduces exposure and is never gated here.
+        There is no ``action`` to read, so there is nothing to fail closed on.
+
+        On approval of a create, accumulates it into ``current_state``
         (executor count and exposure) so subsequent checks within the same
         tick see the running totals instead of the frozen per-tick snapshot.
         The state is recomputed from the journal at the start of each tick.
@@ -190,10 +196,8 @@ class RiskEngine:
         input_data = tool_call_input(tool_call)
         if input_data is None:
             return False, "Tool arguments could not be read"
-        action = input_data.get("action", "")
 
-        # Only gate "create" actions
-        if action != "create":
+        if tool_call_name(tool_call) not in CREATE_EXECUTOR_TOOLS:
             return True, ""
 
         # Check executor count
@@ -392,37 +396,35 @@ def auto_approve_with_risk_check(
                 )
                 return {"outcome": {"outcome": "cancelled"}}
 
-            # For executor actions, run risk check
-            if tool_name == "manage_executors":
-                action = input_data.get("action", "")
-
+            # For executor creates, run risk check. The name is the classification
+            # since FEAT-062 — `stop_executor` is dangerous too, but it reduces
+            # exposure and so is confirmed without being risk-checked.
+            if tool_name in CREATE_EXECUTOR_TOOLS:
                 # Validate controller_id on create — presence AND value, since
-                # this tag is what per-session PnL attribution keys on.
-                if action == "create":
-                    executor_config = input_data.get("executor_config", {})
-                    tag = str(executor_config.get("controller_id") or "")
-                    if not tag:
-                        log.warning("Blocked executor create: missing controller_id")
-                        return {"outcome": {"outcome": "cancelled"}}
-                    if agent_id and tag != agent_id:
-                        log.warning(
-                            "Blocked executor create: controller_id %r is not this "
-                            "session's agent_id %r — the position would be "
-                            "unattributable",
-                            tag,
-                            agent_id,
-                        )
-                        return {"outcome": {"outcome": "cancelled"}}
+                # this tag is what per-session PnL attribution keys on. It is a
+                # top-level typed parameter now, not a field buried in a config
+                # blob, so there is one place it can be.
+                tag = str(input_data.get("controller_id") or "")
+                if not tag:
+                    log.warning("Blocked executor create: missing controller_id")
+                    return {"outcome": {"outcome": "cancelled"}}
+                if agent_id and tag != agent_id:
+                    log.warning(
+                        "Blocked executor create: controller_id %r is not this "
+                        "session's agent_id %r — the position would be "
+                        "unattributable",
+                        tag,
+                        agent_id,
+                    )
+                    return {"outcome": {"outcome": "cancelled"}}
 
-                planned_amount_quote = None
-                if action == "create":
-                    try:
-                        planned_amount_quote = await _planned_amount_quote(
-                            input_data, price_client
-                        )
-                    except Exception as exc:
-                        log.warning("Blocked executor create: %s", exc)
-                        return {"outcome": {"outcome": "cancelled"}}
+                try:
+                    planned_amount_quote = await _planned_amount_quote(
+                        tool_name, input_data, price_client
+                    )
+                except Exception as exc:
+                    log.warning("Blocked %s: %s", tool_name, exc)
+                    return {"outcome": {"outcome": "cancelled"}}
 
                 allowed, reason = risk_engine.check_executor_action(
                     tool_call, risk_state, planned_amount_quote
@@ -512,30 +514,82 @@ def auto_approve_with_risk_check(
     return callback
 
 
-async def _planned_amount_quote(input_data: dict[str, Any], client: Any) -> float:
-    """Value a supported executor create in its quote token."""
+def _quote_amount(value: Any, name: str) -> float:
+    """One executor amount as a non-negative float.
 
-    config = input_data.get("executor_config") or {}
-    executor_type = (
-        input_data.get("executor_type")
-        or config.get("type")
-        or config.get("executor_type")
-    )
+    The typed tools take numbers, but `create_order_executor`'s ``amount`` is a
+    string so it can also carry the "$100" USD form, so this parses rather than
+    casts. The "$" is stripped by :func:`_is_quote_denominated`, which is what
+    decides whether the figure still has to be priced.
+    """
+    if value is None or value == "":
+        return 0.0
+    if isinstance(value, str):
+        value = value.strip().removeprefix("$")
+    try:
+        amount = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a number, got {value!r}") from exc
+    if not math.isfinite(amount) or amount < 0:
+        raise ValueError(f"{name} must be a non-negative finite number")
+    return amount
 
-    if executor_type == "dca_executor":
-        amounts = [float(value) for value in config.get("amounts_quote", [])]
-        if any(not math.isfinite(value) or value <= 0 for value in amounts):
+
+def _is_quote_denominated(value: Any) -> bool:
+    """Whether an ``amount`` is already in quote currency.
+
+    ``create_order_executor`` accepts "$100" to mean "one hundred of the quote
+    token", alongside a plain figure meaning base units. Pricing a "$" amount as
+    if it were base would value a $100 order at 100x the pair's price, so the
+    marker has to be read before the multiplication, not stripped and forgotten.
+    """
+    return isinstance(value, str) and value.strip().startswith("$")
+
+
+async def _planned_amount_quote(
+    tool_name: str, input_data: dict[str, Any], client: Any
+) -> float:
+    """Value an executor create in its quote token, by tool name.
+
+    Each ``create_*_executor`` sizes itself in a different field and a different
+    currency, and since FEAT-062 those fields are top-level typed parameters
+    rather than keys of an opaque ``executor_config``. The table below is that
+    difference made explicit:
+
+    - grid: ``total_amount_quote``, already in quote currency.
+    - dca: the sum of the ``amounts_quote`` ladder.
+    - position / order: ``amount`` in BASE currency, so it is priced — unless it
+      carries order-executor's "$" marker, in which case it already is the notional.
+    - lp: ``quote_amount`` plus ``base_amount`` priced.
+
+    Raises ``ValueError`` when the call cannot be valued; the gate cancels rather
+    than approving an unpriced create.
+    """
+    if tool_name == "create_grid_executor":
+        amount = _quote_amount(
+            input_data.get("total_amount_quote"), "total_amount_quote"
+        )
+    elif tool_name == "create_dca_executor":
+        amounts = [
+            _quote_amount(value, "amounts_quote")
+            for value in (input_data.get("amounts_quote") or [])
+        ]
+        if not amounts or any(value <= 0 for value in amounts):
             raise ValueError("amounts_quote must contain positive finite numbers")
         amount = sum(amounts)
-    elif executor_type in {"order_executor", "position_executor", "lp_executor"}:
-        base = float(
-            config.get("base_amount", 0)
-            if executor_type == "lp_executor"
-            else config.get("amount", 0)
-        )
-        quote = float(config.get("quote_amount", 0))
-        if base < 0 or quote < 0:
-            raise ValueError("executor amounts cannot be negative")
+    elif tool_name in {
+        "create_position_executor",
+        "create_order_executor",
+        "create_lp_executor",
+    }:
+        is_lp = tool_name == "create_lp_executor"
+        raw = input_data.get("base_amount") if is_lp else input_data.get("amount")
+        figure = _quote_amount(raw, "base_amount" if is_lp else "amount")
+        quote = _quote_amount(input_data.get("quote_amount"), "quote_amount")
+        # A "$100" order is already the notional; anything else is base units.
+        base = 0.0 if _is_quote_denominated(raw) else figure
+        if _is_quote_denominated(raw):
+            quote += figure
         if base:
             if client is None:
                 raise ValueError("Hummingbot price client is unavailable")
@@ -543,8 +597,8 @@ async def _planned_amount_quote(input_data: dict[str, Any], client: Any) -> floa
 
             price = await fetch_current_price(
                 client,
-                config.get("connector_name", ""),
-                config.get("trading_pair", ""),
+                input_data.get("connector_name", ""),
+                input_data.get("trading_pair", ""),
             )
             if price is None:
                 raise ValueError("reference price is unavailable")
@@ -554,10 +608,8 @@ async def _planned_amount_quote(input_data: dict[str, Any], client: Any) -> floa
             amount = quote + base * price
         else:
             amount = quote
-    elif executor_type in {"grid_executor", "twap_executor"}:
-        amount = float(config["total_amount_quote"])
     else:
-        raise ValueError(f"unsupported executor type: {executor_type or 'unknown'}")
+        raise ValueError(f"unsupported executor tool: {tool_name or 'unknown'}")
 
     if not math.isfinite(amount) or amount <= 0:
         raise ValueError("planned quote amount must be a positive finite number")

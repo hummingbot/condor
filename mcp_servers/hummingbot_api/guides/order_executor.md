@@ -1,5 +1,5 @@
 ### Order Executor
-**This is the standard way to place buy/sell orders.** To cancel, use `manage_executors(action="stop")` with the executor ID.
+**This is the standard way to place buy/sell orders.** Create one with `create_order_executor`; to cancel, use `stop_executor` with the executor ID.
 
 Simple order execution with retry logic and multiple execution strategies.
 Closest executor to a plain BUY/SELL order but with strategy options.

@@ -78,8 +78,9 @@ so PnL attributes to direct executors.
 ### Executor fallback
 
 ```
-manage_executors(action="create", controller_id="{agent_id}",
-                 executor_config={"type": "order_executor", "connector_name": "xrpl", ...})
+create_order_executor(connector_name="xrpl", trading_pair="<pair>", side=<1|2>,
+                      amount=<base_amount>, execution_strategy="LIMIT_MAKER",
+                      price=<price>, controller_id="{agent_id}")
 ```
 
 One LIMIT/LIMIT_MAKER level per side first; confirm on-ledger before laddering.

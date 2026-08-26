@@ -326,17 +326,17 @@ def test_agent_skill_library_read_and_edit(tmp_path):
 
 def test_allowlist_filters_bare_and_namespaced_names():
     client = PydanticAIClient(
-        model="ollama:x", allowed_tools=["manage_executors", "get_market_data"]
+        model="ollama:x", allowed_tools=["create_grid_executor", "get_market_data"]
     )
     defs = [
-        SimpleNamespace(name="manage_executors"),
+        SimpleNamespace(name="create_grid_executor"),
         SimpleNamespace(name="mcp__condor__get_market_data"),
         SimpleNamespace(name="manage_bots"),
         SimpleNamespace(name="place_order"),
     ]
     kept = asyncio.run(client._prepare_tools(None, defs))
     assert sorted(d.name for d in kept) == [
-        "manage_executors",
+        "create_grid_executor",
         "mcp__condor__get_market_data",
     ]
 

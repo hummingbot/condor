@@ -7,7 +7,9 @@ tools:
 - get_prices
 - get_funding_rate
 - get_portfolio_overview
-- manage_executors
+- list_executors
+- get_executor
+- list_positions_held
 - manage_controllers
 - manage_bots
 - manage_routines

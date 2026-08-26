@@ -54,7 +54,7 @@ def agents_root(tmp_path, monkeypatch):
         description="Manages executors",
         instructions="You manage executors.",
         agent_key="ollama:qwen3:32b",
-        tools=["get_market_data", "manage_executors"],
+        tools=["get_market_data", "create_grid_executor"],
         when_to_consult="When deploying executors",
         server_required=False,
     )
@@ -235,7 +235,7 @@ def test_tool_allowlist_enforced(agents_root, registry, monkeypatch):
 
     assert _FakeClient.last.kwargs["allowed_tools"] == [
         "get_market_data",
-        "manage_executors",
+        "create_grid_executor",
     ]
     # The Agent's own model was used, so the pydantic-ai client was selected.
     assert _FakeClient.last.kwargs["model"] == "ollama:qwen3:32b"

@@ -9,7 +9,10 @@ description: Directional perp trader on Derive (`derive_perpetual`) — reads ca
 agent_key: custom@opencode:deepseek-v4-flash
 tools:
 - manage_routines
-- manage_executors
+- create_position_executor
+- list_executors
+- get_executor
+- stop_executor
 - get_portfolio_overview
 - get_prices
 - get_candles

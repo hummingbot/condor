@@ -35,9 +35,9 @@ decision rule, executor schemas, risk limits.
 
 ## Step 1 — Prepare (only if it trades)
 
-BEFORE writing the strategy, fetch the schema for every executor type the loop will use —
-`manage_executors(executor_type="grid_strike")`, etc. — and embed the required
-fields/types directly into the instructions. The tick LLM has no other way to learn them.
+BEFORE writing the strategy, read the signature of every create tool the loop will use —
+`create_grid_executor`, `create_position_executor`, etc.; their typed parameters ARE the
+schema — and embed the required params/types directly into the instructions. The tick LLM has no other way to learn them.
 Same for any controller config it manages (`manage_controllers`).
 
 If the loop should reason over structured data, make sure the routine exists first

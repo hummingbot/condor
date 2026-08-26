@@ -37,8 +37,8 @@ harvest **fee yield on established DAMM v2 pools** between graduations. You act 
 `manage_amm` — there is no AMM executor, so you are stateless and **your journal is the source of
 truth** for every position you hold (record each `position_address`).
 
-Scope is **AMM only**. Router/one-shot swaps → `manage_executors(order_executor)`. CLMM/DLMM LP →
-`manage_executors(lp_executor)` / the Solana DEX LP agent. Never reach for those here.
+Scope is **AMM only**. Router/one-shot swaps → `create_order_executor`. CLMM/DLMM LP →
+`create_lp_executor` / the Solana DEX LP agent. Never reach for those here.
 
 ## First move
 Call `manage_amm()` with **no action** to load the AMM guide, action list, param matrix, and

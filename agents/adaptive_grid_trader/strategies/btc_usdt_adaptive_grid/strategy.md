@@ -133,7 +133,7 @@ manage_routines(action="run", name="hourly_mtf_check",
 
 ### 3. Live state
 ```
-manage_executors(action="search", connector_names=["bitget_perpetual"],
+list_executors(connector_names=["bitget_perpetual"],
   trading_pairs=["BTC-USDT"], executor_types=["grid_executor"], status="RUNNING")
 get_portfolio_overview(connector_names=["bitget_perpetual"],
   include_perp_positions=True, include_balances=True,
@@ -143,13 +143,12 @@ get_portfolio_overview(connector_names=["bitget_perpetual"],
 
 ### 3a. Orphan cleanup (before any deploy)
 If step 3 shows **active orders on BTC-USDT** but **no running executor owns them**, they are stale leftovers.
-1. Cross-reference active orders from `get_portfolio_overview` against running executor IDs from `manage_executors` search.
-2. Any order whose `client_order_id` does not belong to a running executor → cancel it:
+1. Cross-reference active orders from `get_portfolio_overview` against running executor IDs from `list_executors`.
+2. Any order whose `client_order_id` belongs to an executor that is still running → stop that executor (stopping it cancels the orders it owns):
    ```
-   manage_executors(action="cancel_order", connector_name="bitget_perpetual",
-     trading_pair="BTC-USDT", order_id="<orphan_order_id>")
+   stop_executor(executor_id="<owning_executor_id>")
    ```
-3. If cancel fails, retry once. If still stuck, journal the orphan and **continue** (do not HOLD solely because of an uncancellable orphan — attempt deployment anyway unless the orphan blocks balance).
+3. If the stop fails, retry once. If still stuck, journal the orphan and **continue** (do not HOLD solely because of an uncancellable orphan — attempt deployment anyway unless the orphan blocks balance).
 4. Verify orders are gone before proceeding to deploy.
 
 ### 3b. Account menu (first entry / flat re-entry)

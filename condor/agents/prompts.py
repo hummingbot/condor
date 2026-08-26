@@ -14,22 +14,24 @@ from .strategy import Strategy
 
 # Two live base prompts, one per execution surface. A session either spawns
 # standalone executors or steers a bot's controllers (see _build_controller_mode_section);
-# stating "trade ONLY via manage_executors" to a controller-mode agent contradicts the
+# stating "trade ONLY via the create_*_executor tools" to a controller-mode agent contradicts the
 # [CONTROLLER MODE] block later in the same prompt, so the surface is chosen once here.
 BASE_PROMPT_LIVE_EXECUTORS = """\
 You are an autonomous trading agent running inside Condor.
 
 RULES:
-- Trade ONLY via manage_executors(action="create"). NEVER use place_order.
+- Trade ONLY via the create_*_executor tools — create_position_executor,
+  create_grid_executor, create_dca_executor, create_order_executor,
+  create_lp_executor. NEVER use place_order.
 - If your strategy deploys a controller-based bot, manage_bots(action="deploy")
   MUST include max_global_drawdown_quote within your risk limits — deploys
   without a declared loss cap are blocked by the risk engine.
 - Be conservative. When in doubt, hold and journal why.
 
 ERROR RECOVERY:
-- If manage_executors(action="create") fails, call manage_executors(executor_type="<type>") \
-to fetch the full config schema, compare it against what you sent, fix the missing/wrong \
-fields, and retry ONCE. Journal the error and fix as a learning.
+- If a create_*_executor call fails, re-read the tool's signature: every field it \
+accepts is a typed parameter with its units in the description. Fix the wrong field and \
+retry ONCE. Journal the error and fix as a learning.
 """
 
 BASE_PROMPT_LIVE_CONTROLLER = """\
@@ -40,7 +42,7 @@ RULES:
   below for which bot and the exact call sequence. NEVER use place_order.
 - manage_bots(action="deploy") MUST include max_global_drawdown_quote within your risk
   limits — deploys without a declared loss cap are blocked by the risk engine.
-- Standalone executors (manage_executors(action="create")) are a fallback, used ONLY
+- Standalone executors (the create_*_executor tools) are a fallback, used ONLY
   when the strategy instructions explicitly ask for them.
 - Be conservative. When in doubt, hold and journal why.
 
@@ -49,8 +51,8 @@ ERROR RECOVERY:
 manage_controllers(action="describe", controller_name="<name>") to fetch the parameter \
 template, compare it against what you sent, fix the missing/wrong fields, and retry ONCE. \
 Journal the error and fix as a learning.
-- If you do fall back to manage_executors(action="create") and it fails, fetch its schema \
-with manage_executors(executor_type="<type>") and retry ONCE the same way.
+- If you do fall back to a create_*_executor tool and it fails, re-read that tool's \
+signature and retry ONCE the same way.
 """
 
 BASE_PROMPT_DRY_RUN = """\
@@ -60,8 +62,10 @@ RULES:
 - This is OBSERVATION ONLY. Do NOT create or stop executors, and do NOT deploy,
   stop, or update a controller-based bot (manage_bots with action="deploy",
   "stop_bot", "stop_controllers", "start_controllers", or "update_config").
-- manage_executors and manage_bots are available for read-only queries
-  (performance_report; status/logs/get_config).
+- The read-only executor tools are available (list_executors, get_executor,
+  get_performance_report, list_positions_held), as is manage_bots for
+  status/logs/get_config. The create_*_executor tools and stop_executor are not
+  loaded this tick.
 - Analyze the market and describe what you WOULD do, but take NO trading action.
 
 DRY RUN MESSAGING:
@@ -148,10 +152,12 @@ def _build_tool_preload(
 ) -> str:
     """ToolSearch preload line for ACP sessions.
 
-    Dry-run omits manage_executors (read-only). Experiment modes (dry_run /
-    run_once) omit trading_agent_journal_write since they have no journal.
-    Controller mode preloads the bot/controller tools it actually trades with —
-    otherwise the agent burns a tick discovering them.
+    Dry-run preloads only the read-only executor tools, so the create/stop names are
+    not even in the session (FEAT-062) — the permission layer still blocks them, but
+    an agent that cannot see them does not spend a tick reaching for one. Experiment
+    modes (dry_run / run_once) omit trading_agent_journal_write since they have no
+    journal. Controller mode preloads the bot/controller tools it actually trades with
+    — otherwise the agent burns a tick discovering them.
     """
     tools = [
         "mcp__mcp-hummingbot__get_prices",
@@ -164,8 +170,20 @@ def _build_tool_preload(
             "mcp__mcp-hummingbot__manage_bots",
             "mcp__mcp-hummingbot__manage_controllers",
         ]
+    tools += [
+        "mcp__mcp-hummingbot__list_executors",
+        "mcp__mcp-hummingbot__get_executor",
+        "mcp__mcp-hummingbot__get_performance_report",
+    ]
     if not is_dry_run:
-        tools.append("mcp__mcp-hummingbot__manage_executors")
+        tools += [
+            "mcp__mcp-hummingbot__create_position_executor",
+            "mcp__mcp-hummingbot__create_grid_executor",
+            "mcp__mcp-hummingbot__create_dca_executor",
+            "mcp__mcp-hummingbot__create_order_executor",
+            "mcp__mcp-hummingbot__create_lp_executor",
+            "mcp__mcp-hummingbot__stop_executor",
+        ]
     tools += [
         "mcp__mcp-hummingbot__search_history",
         "mcp__mcp-hummingbot__explore_geckoterminal",
@@ -350,7 +368,7 @@ def build_tick_prompt(
     if agent_id:
         tick_info += f"\nAgent ID: {agent_id}"
         if not is_dry_run and not is_controller_mode:
-            tick_info += f'\nPass controller_id="{agent_id}" as a TOP-LEVEL arg to manage_executors (not inside executor_config).'
+            tick_info += f'\nPass controller_id="{agent_id}" to every create_*_executor call — it is what attributes the position to this session.'
     sections.append(tick_info)
 
     # Run-once mode note

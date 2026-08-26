@@ -117,8 +117,13 @@ def test_acp_deploy_approved_by_a_human_runs():
     channel = _CapturingChannel(answer=True)
     result = _drive_acp(
         _acp_request(
-            "mcp__mcp-hummingbot__manage_executors",
-            {"action": "create", "executor_config": {"controller_id": "c"}},
+            "mcp__mcp-hummingbot__create_grid_executor",
+            {
+                "controller_id": "c",
+                "connector_name": "binance",
+                "trading_pair": "SOL-USDT",
+                "total_amount_quote": 100,
+            },
         ),
         channel,
     )
@@ -233,7 +238,7 @@ def test_acp_deploy_outside_the_namespace_is_cancelled(tmp_path):
 
 
 def test_risk_callback_cancels_unreadable_arguments():
-    call = normalize_tool_call(_acp_request("manage_executors", None))
+    call = normalize_tool_call(_acp_request("create_grid_executor", None))
     result = asyncio.run(_risk_callback()(call, OPTIONS))
     assert result["outcome"]["outcome"] == "cancelled"
 
@@ -382,7 +387,6 @@ FUND_MOVING_TOOLS = {
     "manage_amm",
     "manage_bots",
     "manage_clmm",
-    "manage_executors",
     "manage_gateway_config",  # the wallets resource takes a private key
 }
 
@@ -392,6 +396,7 @@ FUND_MOVING_TOOLS = {
 NON_FUND_MOVING_TOOLS = {
     "manage_controllers",  # writes controller templates, never a running bot
     "manage_gateway_container",  # starts and stops Gateway; signs nothing
+    "executor_defaults",  # edits a local preferences file; creates nothing
     "explore_dex_pools",
     "explore_geckoterminal",
 }
@@ -466,8 +471,9 @@ def test_every_mutating_action_of_a_fund_moving_tool_is_dangerous():
                 f"{tool_name}({action}) mutates but is auto-approved; "
                 "add it to the matching DANGEROUS_* set in condor/runtime/danger.py"
             )
-    # 3 AMM + 3 CLMM + 5 bot + 2 executor today: a floor, so a signature refactor
-    # that silently stops yielding actions fails instead of passing vacuously.
-    # The swap is not counted: it has no `action` since FEAT-064 and is gated by
-    # name instead (see test_swap_signing_action_is_dangerous).
-    assert checked >= 13, f"only {checked} mutating actions found — enumeration broke"
+    # 3 AMM + 3 CLMM + 5 bot today: a floor, so a signature refactor that silently
+    # stops yielding actions fails instead of passing vacuously. Neither the swap
+    # nor the executor family is counted: they have no `action` since FEAT-064 and
+    # FEAT-062 and are gated by name instead (see test_swap_signing_action_is_dangerous
+    # and tests/test_dangerous_gate_names_resolve.py).
+    assert checked >= 11, f"only {checked} mutating actions found — enumeration broke"

@@ -334,7 +334,10 @@ each with its own executor set and capital allocation.
 
 ```
 manage_bots(action="status")
-manage_executors(action="list", bot_name=<bot_name>)
+list_executors(controller_ids=[
+  "NNN_pmm_<connector>_<PAIR>_variantA",
+  "NNN_pmm_<connector>_<PAIR>_variantB"
+])
 ```
 
 Confirm executors appear for both config names.

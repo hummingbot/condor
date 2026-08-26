@@ -16,11 +16,11 @@ import inspect
 import typing
 
 from handlers.agents._shared import (
+    CREATE_EXECUTOR_TOOLS,
     DANGEROUS_AMM_ACTIONS,
     DANGEROUS_BOT_ACTIONS,
     DANGEROUS_CLMM_ACTIONS,
     DANGEROUS_CONFIG_RESOURCES,
-    DANGEROUS_EXECUTOR_ACTIONS,
     DANGEROUS_TOOLS,
     is_dangerous_tool_call,
 )
@@ -61,7 +61,6 @@ def test_gated_actions_exist_on_their_tools():
     for tool_name, actions in (
         ("manage_clmm", DANGEROUS_CLMM_ACTIONS),
         ("manage_amm", DANGEROUS_AMM_ACTIONS),
-        ("manage_executors", DANGEROUS_EXECUTOR_ACTIONS),
         ("manage_bots", DANGEROUS_BOT_ACTIONS),
     ):
         available = _action_literals(tool_name)
@@ -108,6 +107,101 @@ def test_the_swap_family_is_gated_by_name():
         assert not is_dangerous_tool_call(
             {"tool": f"mcp__mcp-hummingbot__{name}", "input": {}}
         ), f"{name} needlessly gated"
+
+
+def test_the_executor_family_is_gated_by_name():
+    """The executor twin of :func:`test_the_swap_family_is_gated_by_name`.
+
+    The typed split (FEAT-062) gave every executor type its own create tool, so
+    there is no ``action`` to sniff: the five creates and ``stop_executor`` are
+    gated by name, and the nine read/control tools must stay off the gate. What
+    this pins is that a create can never be reintroduced under a name the gate
+    does not know — the old mega-tool is asserted gone, and every registered
+    ``create_*``/``stop_*`` name has to be in ``DANGEROUS_TOOLS``.
+    """
+    registered = _registered_tools()
+    assert "manage_executors" not in registered, (
+        "the multiplexed executor tool is back: a create and a list share a name "
+        "again, and the gate is back to sniffing an action string"
+    )
+
+    for name in sorted(CREATE_EXECUTOR_TOOLS | {"stop_executor"}):
+        assert name in registered, f"{name} is gated but no longer registered"
+        assert name in DANGEROUS_TOOLS, f"{name} moves funds and must be gated"
+        assert is_dangerous_tool_call(
+            {"tool": f"mcp__mcp-hummingbot__{name}", "input": {}}
+        ), f"{name} was not gated"
+
+    for name in (
+        "list_executors",
+        "get_executor",
+        "list_positions_held",
+        "clear_position_held",
+        "get_performance_report",
+        "list_orphaned_positions",
+        "resolve_orphaned_position",
+        "executor_defaults",
+    ):
+        assert name in registered, f"{name} is no longer registered"
+        assert name not in DANGEROUS_TOOLS, f"{name} reads only; gating it is noise"
+        assert not is_dangerous_tool_call(
+            {"tool": f"mcp__mcp-hummingbot__{name}", "input": {}}
+        ), f"{name} needlessly gated"
+
+    # Every executor-creating name the server registers must be gated: a sixth
+    # executor type added later without a gate entry fails here.
+    creates = {
+        name
+        for name in registered
+        if name.startswith("create_") and name.endswith("_executor")
+    }
+    assert creates == set(CREATE_EXECUTOR_TOOLS), (
+        "registered create tools and the gate list disagree: "
+        f"{sorted(creates ^ set(CREATE_EXECUTOR_TOOLS))}"
+    )
+
+
+def test_a_gated_executor_call_names_what_it_will_do():
+    """The confirmation prompt must show the size, not the bare tool name."""
+    from handlers.agents.confirmation import format_tool_summary
+
+    for call, expected in (
+        (
+            {
+                "tool": "create_grid_executor",
+                "input": {"trading_pair": "SOL-USDT", "total_amount_quote": 500},
+            },
+            "Create grid executor on SOL-USDT for 500 quote",
+        ),
+        (
+            {
+                "tool": "create_position_executor",
+                "input": {"trading_pair": "BTC-USDT", "amount": 0.01},
+            },
+            "Create position executor on BTC-USDT of 0.01",
+        ),
+        (
+            {
+                "tool": "create_dca_executor",
+                "input": {"trading_pair": "ETH-USDT", "amounts_quote": [50, 50]},
+            },
+            "Create dca executor on ETH-USDT for 100 quote over 2 levels",
+        ),
+        (
+            {
+                "tool": "create_lp_executor",
+                "input": {"trading_pair": "SOL-USDC", "quote_amount": 25},
+            },
+            "Create lp executor on SOL-USDC with 0 base / 25 quote",
+        ),
+        (
+            {"tool": "stop_executor", "input": {"executor_id": "abcdef012345678"}},
+            "Stop executor abcdef012345",
+        ),
+    ):
+        summary = format_tool_summary(call)
+        assert expected in summary, f"{call['tool']} rendered {summary!r}"
+        assert summary != call["tool"]
 
 
 def test_lp_writes_require_confirmation():
