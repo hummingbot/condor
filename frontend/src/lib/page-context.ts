@@ -52,12 +52,16 @@ export function describePage(pathname: string, search = ""): PageContext {
   switch (first) {
     case "":
       return of("Chat workspace", "Agents & chat");
+    // Only the two-and-three-segment agent routes are real: `/agents` itself is
+    // a `<Navigate to="/">` in App.tsx, so it redirects before any consumer of
+    // this module reads the location, and a bare-`/agents` branch here would be
+    // dead code. The same is true of `/reports`, `/backtest`, `/archived`,
+    // `/market` and `/executors/new*` — none of them gets a case.
     case "agents":
       if (second && third === "strategies" && fourth) {
         return of(`Strategy detail (agent "${second}", strategy "${fourth}")`, "Agents & chat");
       }
-      if (second) return of(`Agent detail ("${second}")`, "Agents & chat");
-      return of("Agents", "Agents & chat");
+      return of(`Agent detail ("${second}")`, "Agents & chat");
     case "portfolio":
       return of(withTab("Portfolio"), "Portfolio");
     case "bots":
@@ -66,12 +70,16 @@ export function describePage(pathname: string, search = ""): PageContext {
         : of(withTab("Bots"), "Bots & controllers");
     case "trade":
       return of(withTab("Trade"), "Trading & executors");
+    // Mirrors the `/dex` and `/dex/:network/:address` entries `lib/pageFacts.ts`
+    // already carries, labels included, so a report and its facts agree.
+    case "dex":
+      return second && third
+        ? of(`DEX pool ("${third}" on "${second}")`, "Gateway / DEX")
+        : of(withTab("DEX pools"), "Gateway / DEX");
     case "executors":
       return of(withTab("Executors"), "Trading & executors");
     case "routines":
       return of(withTab("Routines"), "Routines & reports");
-    case "reports":
-      return of("Reports", "Routines & reports");
     case "settings":
       return of(withTab("Settings"), "Settings & connections");
     default:
