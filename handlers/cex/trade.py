@@ -14,15 +14,15 @@ import logging
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
-from condor.server_data_service import ServerDataType, get_server_data_service
-from config_manager import get_client
-from handlers.config.user_preferences import (
+from condor.preferences import (
     get_all_enabled_networks,
     get_clob_account,
     get_clob_order_defaults,
     set_clob_last_order,
     set_last_trade_connector,
 )
+from condor.server_data_service import ServerDataType, get_server_data_service
+from config_manager import get_client
 from handlers.dex._shared import format_relative_time
 from utils.telegram_formatters import (
     escape_markdown_v2,
@@ -178,7 +178,7 @@ async def handle_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     params = context.user_data.get("trade_params", {})
     user_id = context.user_data.get("_user_id")
     if user_id:
-        from handlers.config.user_preferences import get_active_server
+        from condor.preferences import get_active_server
 
         server = get_active_server(context.user_data)
         if server:
@@ -238,7 +238,7 @@ async def handle_trade_refresh(
 
     # Invalidate both old cache and SDS
     invalidate_cache(context.user_data, "balances", "orders", "positions")
-    from handlers.config.user_preferences import get_active_server
+    from condor.preferences import get_active_server
 
     server = get_active_server(context.user_data)
     if server:
@@ -546,8 +546,8 @@ async def show_trade_menu(
     quote_data: dict = None,
 ) -> None:
     """Display the unified trade menu with balances and data"""
+    from condor.preferences import get_active_server
     from config_manager import get_config_manager
-    from handlers.config.user_preferences import get_active_server
 
     params = context.user_data.get("trade_params", {})
     connector = params.get("connector", "binance_perpetual")
@@ -702,7 +702,7 @@ async def _update_trade_message(context: ContextTypes.DEFAULT_TYPE, message) -> 
     is_perpetual = _is_perpetual_connector(connector)
 
     # Get all cached data from SDS (server-scoped), fall back to old cache
-    from handlers.config.user_preferences import get_active_server
+    from condor.preferences import get_active_server
 
     server = get_active_server(context.user_data)
     sds = get_server_data_service()
@@ -790,7 +790,7 @@ async def _fetch_trade_data_background(
         return
 
     # Get SDS for dual-write (server-scoped)
-    from handlers.config.user_preferences import get_active_server
+    from condor.preferences import get_active_server
 
     server = get_active_server(context.user_data)
     sds = get_server_data_service()
@@ -1157,8 +1157,8 @@ async def handle_trade_set_connector(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
     """Show available CEX connectors and DEX networks for selection"""
+    from condor.preferences import get_active_server
     from config_manager import get_config_manager
-    from handlers.config.user_preferences import get_active_server
 
     chat_id = update.effective_chat.id
     keyboard = []
@@ -1315,7 +1315,7 @@ async def handle_trade_connector_select(
 
     # Invalidate SDS cache and update subscription for new connector
     user_id = context.user_data.get("_user_id")
-    from handlers.config.user_preferences import get_active_server
+    from condor.preferences import get_active_server
 
     server = get_active_server(context.user_data)
     if server:
@@ -1562,7 +1562,7 @@ async def handle_trade_execute(
         invalidate_cache(context.user_data, "balances", "orders", "positions")
         context.user_data["_force_cex_balance_refresh"] = True
         # Also invalidate SDS cache (server-scoped)
-        from handlers.config.user_preferences import get_active_server
+        from condor.preferences import get_active_server
 
         exec_server = get_active_server(context.user_data)
         if exec_server:
@@ -1645,7 +1645,7 @@ async def _update_trade_menu_after_input(
         is_perpetual = _is_perpetual_connector(connector)
 
         # Get cached data from SDS (server-scoped), fall back to old cache
-        from handlers.config.user_preferences import get_active_server
+        from condor.preferences import get_active_server
 
         input_server = get_active_server(context.user_data)
         sds = get_server_data_service()
@@ -1800,7 +1800,7 @@ async def process_trade(
         invalidate_cache(context.user_data, "balances", "orders", "positions")
         context.user_data["_force_cex_balance_refresh"] = True
         # Also invalidate SDS (server-scoped)
-        from handlers.config.user_preferences import get_active_server
+        from condor.preferences import get_active_server
 
         qt_server = get_active_server(context.user_data)
         if qt_server:

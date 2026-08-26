@@ -62,7 +62,7 @@ from handlers import clear_all_input_states
 clear_all_input_states(context)  # Prevents state pollution between features
 ```
 
-**User Preferences** (`handlers/config/user_preferences.py`):
+**User Preferences** (`condor/preferences.py`):
 - Centralized preference management with type-safe TypedDict definitions
 - Auto-persists via Telegram's PicklePersistence
 - Functions: `get_portfolio_prefs()`, `set_clob_last_order()`, `get_dex_swap_defaults()`, etc.

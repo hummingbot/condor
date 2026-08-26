@@ -389,7 +389,7 @@ async def handle_connector_select(
         "_Enter pair \\(e\\.g\\. SOL\\-USDT\\):_",
     ]
 
-    from handlers.config.user_preferences import get_executor_deployed_pairs
+    from condor.preferences import get_executor_deployed_pairs
 
     executor_pairs = get_executor_deployed_pairs(context.user_data)
     keyboard = []
@@ -982,7 +982,7 @@ async def handle_deploy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             executor_id = result.get("executor_id") or result.get("id") or "unknown"
 
         # Save deployed pair and last-used config to user preferences
-        from handlers.config.user_preferences import (
+        from condor.preferences import (
             add_executor_deployed_pair,
             set_executor_last_config,
         )

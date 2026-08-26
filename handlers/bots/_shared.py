@@ -111,7 +111,7 @@ async def get_bots_client(
     # Use user's preferred server if valid
     preferred = None
     if user_data:
-        from handlers.config.user_preferences import get_active_server
+        from condor.preferences import get_active_server
 
         preferred = get_active_server(user_data)
 

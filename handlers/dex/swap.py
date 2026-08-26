@@ -15,8 +15,7 @@ import aiohttp
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
-from config_manager import get_client
-from handlers.config.user_preferences import (
+from condor.preferences import (
     DEFAULT_DEX_NETWORK,
     get_all_enabled_networks,
     get_dex_connector,
@@ -24,6 +23,7 @@ from handlers.config.user_preferences import (
     set_dex_last_swap,
     set_last_trade_connector,
 )
+from config_manager import get_client
 from utils.telegram_formatters import (
     escape_markdown_v2,
     format_compact_number,

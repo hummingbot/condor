@@ -9,9 +9,9 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import CallbackQueryHandler, ContextTypes
 
 from condor.fetchers.portfolio import dedupe_unified_accounts
+from condor.preferences import get_all_enabled_networks
 from handlers import is_gateway_network
 from handlers.config import clear_config_state
-from handlers.config.user_preferences import get_all_enabled_networks
 from utils.auth import hummingbot_api_required, restricted
 from utils.telegram_formatters import (
     escape_markdown_v2,
@@ -182,8 +182,8 @@ def _resolve_server_for_user(context: ContextTypes.DEFAULT_TYPE) -> str:
     Raises:
         ValueError: when the user has no enabled server they can access.
     """
+    from condor.preferences import get_active_server
     from config_manager import get_config_manager
-    from handlers.config.user_preferences import get_active_server
 
     cm = get_config_manager()
     user_id = context.user_data.get("_user_id")

@@ -168,8 +168,8 @@ def server_access_required(min_permission: ServerPermission = ServerPermission.T
         async def wrapped(
             update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs
         ):
+            from condor.preferences import get_active_server
             from config_manager import get_config_manager
-            from handlers.config.user_preferences import get_active_server
 
             user_id = update.effective_user.id
             cm = get_config_manager()

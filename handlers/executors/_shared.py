@@ -160,7 +160,7 @@ def init_new_executor_config(context, executor_type: str = "grid") -> Dict[str, 
         config = GRID_EXECUTOR_DEFAULTS.copy()
 
     # Overlay last-used config params from user preferences
-    from handlers.config.user_preferences import get_executor_last_config
+    from condor.preferences import get_executor_last_config
 
     last_config = get_executor_last_config(context.user_data, executor_type)
     if last_config:

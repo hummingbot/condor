@@ -61,7 +61,7 @@ def _context(active_server=None, user_id=USER_ID):
     if user_id is not None:
         user_data["_user_id"] = user_id
     if active_server is not None:
-        from handlers.config.user_preferences import set_active_server
+        from condor.preferences import set_active_server
 
         set_active_server(user_data, active_server)
     return FakeContext(user_data)

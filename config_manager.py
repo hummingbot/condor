@@ -1231,8 +1231,7 @@ def get_effective_server(chat_id: int, user_data: dict = None) -> str | None:
     Returns:
         Server name or None
     """
-    from condor.preferences import SERVER_PIN_KEY
-    from handlers.config.user_preferences import get_active_server
+    from condor.preferences import SERVER_PIN_KEY, get_active_server
 
     # A context built for one server — a routine or an agent run launched
     # against it — carries its own answer and is never re-resolved from a chat's
@@ -1250,7 +1249,7 @@ def get_effective_server(chat_id: int, user_data: dict = None) -> str | None:
         # persists the whole preference section to config.yml, and this runs on
         # every server lookup.
         if user_data is not None and get_active_server(user_data) != chat_default:
-            from handlers.config.user_preferences import set_active_server
+            from condor.preferences import set_active_server
 
             set_active_server(user_data, chat_default)
         return chat_default
