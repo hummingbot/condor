@@ -46,6 +46,13 @@ PERMISSION_HIERARCHY = {
 # Declared here so the gate and the thing that grants it share one spelling.
 CODE_RUN_PREFERENCE = "code_run"
 
+# Preference keys that are capability grants rather than settings. They live in
+# the same ``user_preferences`` map as a UI toggle, so any endpoint that merges
+# a caller-supplied dict into that map is a privilege-escalation path unless it
+# refuses these first (SEC-250). Writing one goes through its own audited setter
+# — ``set_code_run_grant`` for ``code_run`` — never through a bulk merge.
+RESERVED_PREFERENCE_KEYS = frozenset({CODE_RUN_PREFERENCE})
+
 
 class ConfigManager:
     """
@@ -772,7 +779,21 @@ class ConfigManager:
         self._save_config()
 
     def set_user_preferences(self, user_id: int, updates: dict) -> None:
-        """Merge multiple preference values and persist."""
+        """Merge multiple preference values and persist.
+
+        This is the bulk path, and the only caller feeds it a dict straight off
+        the wire, so it refuses ``RESERVED_PREFERENCE_KEYS`` outright: a
+        capability grant shares this map with ordinary settings, and merging one
+        in from a request body would hand a user the very grant its audited
+        setter exists to control (SEC-250). Grants are written one at a time
+        through ``set_user_preference``, which ``set_code_run_grant`` drives.
+        """
+        reserved = RESERVED_PREFERENCE_KEYS.intersection(updates)
+        if reserved:
+            raise ValueError(
+                f"Reserved preference keys cannot be set in bulk: "
+                f"{', '.join(sorted(reserved))}"
+            )
         prefs = self._data.setdefault("user_preferences", {})
         if user_id not in prefs:
             prefs[user_id] = {}
