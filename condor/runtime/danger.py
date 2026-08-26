@@ -20,7 +20,10 @@ from typing import Any
 # Tools that require user confirmation before execution
 DANGEROUS_TOOLS = {
     "place_order",
-    "manage_amm",  # swap / LP / pool-creation actions
+    "manage_gateway_swaps",  # execute action
+    "manage_clmm",  # every action that moves liquidity
+    "manage_amm",  # every action that moves liquidity
+    "manage_gateway_config",  # only the wallets resource; see below
 }
 
 # Tools that are always blocked (RBAC bypass prevention)
@@ -41,18 +44,32 @@ DANGEROUS_BOT_ACTIONS = {
     "update_config",
 }
 
-# Actions within manage_amm that sign an on-chain transaction from the user's
-# Gateway wallet. The reads (pool_info, position_info, positions_owned,
-# quote_swap, quote_liquidity) and the no-action guide load are excluded.
-# manage_amm is the only fund-moving DEX tool the MCP server registers: the
-# older manage_gateway_swaps/manage_gateway_clmm entries that used to live here
-# named tools that server.py no longer exposes (SEC-206).
-DANGEROUS_AMM_ACTIONS = {
-    "execute_swap",
+# Actions within manage_gateway_swaps that require confirmation
+DANGEROUS_SWAP_ACTIONS = {"execute"}
+
+# Actions within manage_clmm that require confirmation. These are the tool's
+# own action literals — a name that does not match one lets the call through
+# ungated, so they are asserted against the registered tool in the tests.
+DANGEROUS_CLMM_ACTIONS = {
+    "open",
+    "close",
     "add_liquidity",
     "remove_liquidity",
+    "collect_fees",
     "create_pool",
 }
+
+# Actions within manage_amm that require confirmation
+DANGEROUS_AMM_ACTIONS = {"add_liquidity", "remove_liquidity", "create_pool"}
+
+# Resource types within manage_gateway_config that require confirmation. This tool
+# is gated on `resource_type`, not `action`, because what it edits matters and how
+# it edits does not: `wallets` + `add` takes a PRIVATE KEY, and `delete` removes a
+# signing wallet. Everything else it touches — tokens, pools, connectors, networks —
+# is Gateway's own symbol/address mapping. Deleting a token there moves no funds and
+# changes nothing on-chain, so gating it would put a human in front of a config edit
+# while the trades that edit enables stay where they are.
+DANGEROUS_CONFIG_RESOURCES = {"wallets"}
 
 
 def tool_call_name(tool_call: dict[str, Any]) -> str:
@@ -110,16 +127,22 @@ def _has_dangerous_action(
     return action in dangerous_actions
 
 
-def _short_address(value: Any) -> str:
-    """An on-chain address abbreviated for a confirmation line.
+def _has_dangerous_resource(
+    tool_call: dict[str, Any], dangerous_resources: set[str]
+) -> bool:
+    """Whether a resource-gated tool call selects one of its dangerous resources.
 
-    The human approving a swap needs to recognize the pool, not read 44 base58
-    characters, and a missing address has to render as "?" rather than crash
-    the summary of a call that is about to move funds.
+    The resource-typed twin of :func:`_has_dangerous_action`, and it fails closed the
+    same way (SEC-093): unreadable arguments, or a missing/non-string ``resource_type``,
+    count as dangerous.
     """
-    if not isinstance(value, str) or not value:
-        return "?"
-    return f"{value[:8]}..." if len(value) > 8 else value
+    input_data = tool_call_input(tool_call)
+    if input_data is None:
+        return True
+    resource = input_data.get("resource_type")
+    if not isinstance(resource, str) or not resource:
+        return True
+    return resource in dangerous_resources
 
 
 def is_dangerous_tool_call(tool_call: dict[str, Any]) -> bool:
@@ -128,12 +151,19 @@ def is_dangerous_tool_call(tool_call: dict[str, Any]) -> bool:
 
     # Direct dangerous tools
     if tool_name in DANGEROUS_TOOLS:
-        # For manage_amm, only the actions that sign a transaction are
-        # dangerous; quotes and pool/position reads are not. A missing action
-        # is the guide load, but _has_dangerous_action still fails closed on it
-        # rather than trusting an argument shape we could not read (SEC-093).
+        # For manage_gateway_swaps, only "execute" action is dangerous
+        if tool_name == "manage_gateway_swaps":
+            return _has_dangerous_action(tool_call, DANGEROUS_SWAP_ACTIONS)
+
+        # For the LP tools, only the actions that move liquidity are dangerous
+        if tool_name == "manage_clmm":
+            return _has_dangerous_action(tool_call, DANGEROUS_CLMM_ACTIONS)
+
         if tool_name == "manage_amm":
             return _has_dangerous_action(tool_call, DANGEROUS_AMM_ACTIONS)
+
+        if tool_name == "manage_gateway_config":
+            return _has_dangerous_resource(tool_call, DANGEROUS_CONFIG_RESOURCES)
 
         return True
 
@@ -198,30 +228,52 @@ def format_tool_summary(tool_call: dict[str, Any]) -> str:
 
     if tool_name == "manage_amm":
         action = input_data.get("action", "?")
+        pair = input_data.get("trading_pair", "?")
+        side = input_data.get("side", "?")
+        amount = input_data.get("amount", "?")
+        return f"Swap {side} {amount} {pair}"
+
+    if tool_name == "manage_gateway_config":
+        resource = input_data.get("resource_type", "?")
+        action = input_data.get("action", "?")
+        if resource == "wallets":
+            if action == "add":
+                chain = input_data.get("chain", "?")
+                return f"Import a {chain} wallet into Gateway (private key)"
+            if action == "delete":
+                addr = str(input_data.get("wallet_address") or "?")
+                return f"Remove wallet {addr[:12]}... from Gateway"
+        return f"Gateway config: {action} {resource}"
+
+    if tool_name in ("manage_clmm", "manage_amm"):
+        action = input_data.get("action", "?")
+        kind = "CLMM" if tool_name == "manage_clmm" else "AMM"
         connector = input_data.get("connector", "?")
-        pool = _short_address(input_data.get("pool_address"))
-        if action == "execute_swap":
-            side = input_data.get("side", "?")
-            amount = input_data.get("amount", "?")
-            base = input_data.get("base_token", "?")
-            return f"Swap {side} {amount} {base} on {connector} pool {pool}"
-        if action == "add_liquidity":
-            base_amount = input_data.get("base_token_amount", "?")
-            quote_amount = input_data.get("quote_token_amount", "?")
+        pool = (
+            input_data.get("pool_address") or input_data.get("position_address") or "?"
+        )
+        if action == "open":
+            lower = input_data.get("lower_price", "?")
+            upper = input_data.get("upper_price", "?")
             return (
-                f"Add {base_amount}/{quote_amount} liquidity "
-                f"on {connector} pool {pool}"
+                f"Open {kind} position on {connector} pool {pool} over {lower}-{upper}"
             )
+        if action == "close":
+            return f"Close {kind} position {pool} on {connector}"
+        if action == "add_liquidity":
+            base = input_data.get("base_token_amount", "?")
+            quote = input_data.get("quote_token_amount", "?")
+            return f"Add {base} base / {quote} quote to {kind} {pool} on {connector}"
         if action == "remove_liquidity":
             pct = input_data.get("percentage_to_remove", "?")
-            position = _short_address(input_data.get("position_address"))
-            return f"Remove {pct}% from position {position}"
+            return f"Remove {pct}% from {kind} position {pool} on {connector}"
+        if action == "collect_fees":
+            return f"Collect fees from {kind} position {pool} on {connector}"
         if action == "create_pool":
             base = input_data.get("base_token", "?")
             quote = input_data.get("quote_token", "?")
-            seed = input_data.get("base_token_amount", "?")
-            return f"Create {connector} pool {base}/{quote} seeded with {seed}"
-        return f"AMM: {action}"
+            return f"Create {kind} pool {base}-{quote} on {connector}"
+        return f"{kind}: {action}"
 
     # Generic fallback
     return tool_name

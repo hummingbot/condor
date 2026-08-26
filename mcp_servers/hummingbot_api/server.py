@@ -14,6 +14,7 @@ from mcp_servers.hummingbot_api.formatters import (
     format_active_bots_as_table,
     format_amm_result,
     format_bot_logs_as_table,
+    format_clmm_result,
     format_gateway_clmm_pool_result,
     format_gateway_config_result,
     format_gateway_swap_result,
@@ -23,6 +24,7 @@ from mcp_servers.hummingbot_api.hummingbot_client import hummingbot_client
 from mcp_servers.hummingbot_api.middleware import GATEWAY_LOG_HINT, handle_errors
 from mcp_servers.hummingbot_api.schemas import (
     AMMRequest,
+    CLMMRequest,
     GatewayCLMMRequest,
     GatewayConfigRequest,
     GatewayContainerRequest,
@@ -45,6 +47,12 @@ from mcp_servers.hummingbot_api.tools.gateway import (
 from mcp_servers.hummingbot_api.tools.gateway_amm import manage_amm_impl
 from mcp_servers.hummingbot_api.tools.gateway_clmm import (
     explore_gateway_clmm_pools as explore_gateway_clmm_pools_impl,
+)
+from mcp_servers.hummingbot_api.tools.gateway_clmm import (
+    manage_clmm_impl,
+)
+from mcp_servers.hummingbot_api.tools.gateway_swap import (
+    manage_gateway_swaps as manage_gateway_swaps_impl,
 )
 from mcp_servers.hummingbot_api.tools.geckoterminal import (
     explore_geckoterminal as explore_geckoterminal_impl,
@@ -695,6 +703,8 @@ async def manage_executors(
             "positions_summary",
             "clear_position",
             "performance_report",
+            "orphaned",
+            "resolve_orphan",
         ]
         | None
     ) = None,
@@ -740,6 +750,10 @@ async def manage_executors(
     - positions_summary → View all positions (add connector_name + trading_pair to filter)
     - clear_position + connector_name + trading_pair → Clear externally-closed position
     - performance_report → Get executor performance report (optionally filter by controller_id)
+    - orphaned → List terminated executors that may still own an on-chain LP position (recover before opening new ones).
+      Reports the dex, pool and network needed to close each one with `manage_clmm(action="close")`
+    - resolve_orphan + executor_id → Mark an orphaned position as recovered, after closing it with `manage_clmm`.
+      Stopping a terminated executor does NOT close its position
 
     Args:
         action: Action to perform. Leave empty to see executor types or config schema.
@@ -803,7 +817,7 @@ async def explore_dex_pools(
     page: int = 0,
     limit: int = 50,
     search_term: str | None = None,
-    sort_key: str | None = "volume",
+    sort_key: str | None = "tvl",
     order_by: str | None = "desc",
     include_unknown: bool = True,
     detailed: bool = False,
@@ -826,7 +840,13 @@ async def explore_dex_pools(
         page: Page number for list_pools (default: 0).
         limit: Results per page for list_pools (default: 50, max: 100).
         search_term: Search term to filter pools by token symbols (e.g., 'SOL', 'USDC').
-        sort_key: Sort by field for list_pools (volume, tvl, feetvlratio, etc.).
+        sort_key: Sort by field for list_pools. Defaults to 'tvl', which is the LP
+            question — how much depth is there. 'volume' ranks by how much OTHERS traded,
+            and on a quiet pair every pool ties at zero, making the order arbitrary: on
+            UMBRA-USDC that put a pool holding $1.07 above one holding $15.34K, and buried
+            the deep one at row 68 of 73. meteora: tvl, volume, feetvlratio.
+            orca: tvl, volume, fees, rewards, yieldovertvl. Anything else is rejected with
+            the legal list rather than failing upstream.
         order_by: Sort order for list_pools ('asc' or 'desc').
         include_unknown: Include pools with unverified tokens (default: True).
         detailed: Return detailed table with more columns for list_pools (default: False).
@@ -851,6 +871,119 @@ async def explore_dex_pools(
 
 
 @mcp.tool()
+@handle_errors("manage Gateway config", GATEWAY_LOG_HINT)
+async def manage_gateway_config(
+    resource_type: Literal[
+        "chains", "networks", "tokens", "connectors", "pools", "wallets"
+    ],
+    action: Literal["list", "get", "update", "add", "delete", "save"],
+    network_id: str | None = None,
+    connector_name: str | None = None,
+    config_updates: dict[str, Any] | None = None,
+    token_address: str | None = None,
+    token_symbol: str | None = None,
+    token_decimals: int | None = None,
+    token_name: str | None = None,
+    pool_type: str | None = None,
+    pool_base: str | None = None,
+    pool_quote: str | None = None,
+    pool_address: str | None = None,
+    search: str | None = None,
+    network: str | None = None,
+    chain: str | None = None,
+    private_key: str | None = None,
+    wallet_address: str | None = None,
+) -> str:
+    """Read and edit Gateway's own configuration — chains, networks, tokens, connectors, pools, wallets.
+
+    This is Gateway's config, not the chain. Adding or deleting a token here changes the
+    symbol -> address mapping Gateway resolves against; it moves no funds and touches
+    nothing on-chain.
+
+    Use `tokens` + `list` (with `search`) to answer "does Gateway know this symbol",
+    which is the check to run BEFORE quoting or swapping an unfamiliar token: a symbol
+    Gateway cannot resolve fails at the route, not at the trade.
+
+    Resource types:
+    - chains: every blockchain Gateway knows
+    - networks: network config, ids in 'chain-network' form ('solana-mainnet-beta')
+    - tokens: the per-network symbol/address/decimals mapping (list, add, delete)
+    - connectors: DEX connector config
+    - pools: the named pool registry (list, add)
+    - wallets: wallet add/delete. GATED — needs confirmation, and `add` takes a private
+      key. Prefer importing a wallet outside the agent.
+
+    Args:
+        resource_type: Which part of Gateway's config to act on.
+        action: list | get | update | add | delete | save.
+        network_id: Network id in 'chain-network' form. Required for token and pool actions.
+        connector_name: DEX connector name ('meteora', 'raydium', 'uniswap').
+        config_updates: Key-value updates for 'update'/'save'.
+        token_address: Token contract address. Required to add or delete a token.
+        token_symbol: Token symbol. Required to add a token.
+        token_decimals: Token decimals (6 for USDC, 18 for WETH). Required to add a token.
+        token_name: Token name. Optional on add; defaults to the symbol.
+        pool_type: 'CLMM' or 'AMM'. Required to add a pool.
+        pool_base: Base token symbol. Required to add a pool.
+        pool_quote: Quote token symbol. Required to add a pool.
+        pool_address: Pool contract address. Required to add a pool.
+        search: Filter tokens by symbol or name when listing.
+        network: Bare network name ('mainnet-beta'). Required to list pools.
+        chain: Chain for a wallet action ('solana', 'ethereum').
+        private_key: Private key for 'add' wallet. Gated; avoid where possible.
+        wallet_address: Wallet address for 'delete' wallet.
+    """
+    request = GatewayConfigRequest(
+        resource_type=resource_type,
+        action=action,
+        network_id=network_id,
+        connector_name=connector_name,
+        config_updates=config_updates,
+        token_address=token_address,
+        token_symbol=token_symbol,
+        token_decimals=token_decimals,
+        token_name=token_name,
+        pool_type=pool_type,
+        pool_base=pool_base,
+        pool_quote=pool_quote,
+        pool_address=pool_address,
+        search=search,
+        network=network,
+        chain=chain,
+        private_key=private_key,
+        wallet_address=wallet_address,
+    )
+
+    client = await hummingbot_client.get_client()
+    result = await manage_gateway_config_impl(client, request)
+    return format_gateway_config_result(result)
+
+
+@mcp.tool()
+@handle_errors("manage Gateway container")
+async def manage_gateway_container(
+    action: Literal["get_status", "start", "stop", "restart", "get_logs"],
+    config: dict[str, Any] | None = None,
+    tail: int = 100,
+) -> str:
+    """Gateway container lifecycle — status, start, stop, restart, and logs.
+
+    `get_logs` is what the hint on a failed Gateway call points at: when a swap or an LP
+    action fails with an error that does not say why, the container log usually does.
+
+    Args:
+        action: get_status | start | stop | restart | get_logs.
+        config: Gateway configuration. Used by 'start', optional for 'restart'.
+        tail: Log lines to retrieve for 'get_logs' (1-200, default 100).
+    """
+    request = GatewayContainerRequest(action=action, config=config, tail=tail)
+
+    client = await hummingbot_client.get_client()
+    result = await manage_gateway_container_impl(client, request)
+    return format_gateway_container_result(result)
+
+
+@mcp.tool()
 @handle_errors("manage AMM", GATEWAY_LOG_HINT)
 async def manage_amm(
     action: (
@@ -858,8 +991,6 @@ async def manage_amm(
             "pool_info",
             "position_info",
             "positions_owned",
-            "quote_swap",
-            "execute_swap",
             "quote_liquidity",
             "add_liquidity",
             "remove_liquidity",
@@ -874,17 +1005,12 @@ async def manage_amm(
     position_address: str | None = None,
     base_token: str | None = None,
     quote_token: str | None = None,
-    amount: str | None = None,
-    side: Literal["BUY", "SELL"] | None = None,
     slippage_pct: str | None = None,
     base_token_amount: str | None = None,
     quote_token_amount: str | None = None,
     percentage_to_remove: str | None = None,
     initial_price: str | None = None,
-    config_address: str | None = None,
-    fee_config_index: int | None = None,
-    gas_price: str | None = None,
-    max_gas: int | None = None,
+    extra_params: dict[str, Any] | None = None,
 ) -> str:
     """Direct AMM pool operations + pool creation, chain- & DEX-agnostic (Meteora / Raydium / Uniswap).
 
@@ -894,7 +1020,6 @@ async def manage_amm(
     Actions:
     - pool_info / position_info → read pool reserves/price/fee; read your position (aggregate + positions[])
     - positions_owned → list ALL your positions across pools (meteora only)
-    - quote_swap / execute_swap → quote/execute a swap AGAINST a specific AMM pool (pool-scoped, not router)
     - quote_liquidity / add_liquidity / remove_liquidity → two-sided LP in/out
     - create_pool → create + seed a new pool (market-price seeded by default; anti-snipe)
 
@@ -905,8 +1030,9 @@ async def manage_amm(
     returns a positions[] breakdown, positions_owned lists all your positions. Fungible-LP AMMs
     (raydium, uniswap) ignore position_address and have no enumerable positions.
 
-    create_pool extras by connector: meteora→config_address (required); raydium→fee_config_index
-    (optional); uniswap→gas_price/max_gas (optional, 0.30% fixed fee).
+    create_pool extras ride extra_params under Gateway's own names: meteora→configAddress
+    (required); raydium→ammConfigIndex (optional); uniswap/pancakeswap (EVM)→none
+    (0.30% fixed fee). Unknown keys are rejected with a 400.
 
     Scope: AMM only. Router/one-shot swaps → manage_executors(order_executor); CLMM LP →
     manage_executors(lp_executor).
@@ -918,19 +1044,16 @@ async def manage_amm(
         wallet_address: Wallet address (optional, uses default if not provided).
         pool_address: Pool contract address.
         position_address: Meteora NFT position — required for remove_liquidity, optional for add_liquidity (omit = new position).
-        base_token: Base token symbol or address (swap direction / pool base).
+        base_token: Base token symbol or address (create_pool).
         quote_token: Quote token symbol or address (pool quote, for create_pool).
-        amount: Swap amount (string).
-        side: Swap direction (BUY or SELL).
         slippage_pct: Maximum slippage percentage (string).
         base_token_amount: Base token amount (add_liquidity / quote_liquidity / create_pool).
         quote_token_amount: Quote token amount (add_liquidity / quote_liquidity / create_pool).
         percentage_to_remove: Percentage of liquidity to remove, 0-100 (remove_liquidity).
         initial_price: Initial price as quote per base (create_pool; overrides quote_token_amount).
-        config_address: Meteora DAMM v2 config account address (required for meteora create_pool).
-        fee_config_index: Raydium CPMM fee config index (optional, create_pool).
-        gas_price: Uniswap (EVM) gas price in gwei (optional, create_pool).
-        max_gas: Uniswap (EVM) max gas limit (optional, create_pool).
+        extra_params: Connector-specific create_pool params under Gateway's own names:
+            configAddress (meteora, required), ammConfigIndex (raydium). Unknown keys
+            are rejected with a 400.
     """
     request = AMMRequest(
         action=action,
@@ -941,22 +1064,252 @@ async def manage_amm(
         position_address=position_address,
         base_token=base_token,
         quote_token=quote_token,
-        amount=amount,
-        side=side,
         slippage_pct=slippage_pct,
         base_token_amount=base_token_amount,
         quote_token_amount=quote_token_amount,
         percentage_to_remove=percentage_to_remove,
         initial_price=initial_price,
-        config_address=config_address,
-        fee_config_index=fee_config_index,
-        gas_price=gas_price,
-        max_gas=max_gas,
+        extra_params=extra_params,
     )
 
     client = await hummingbot_client.get_client()
     result = await manage_amm_impl(client, request)
     return format_amm_result(action, result)
+
+
+@mcp.tool()
+@handle_errors("manage CLMM", GATEWAY_LOG_HINT)
+async def manage_clmm(
+    action: (
+        Literal[
+            "position_info",
+            "open",
+            "add_liquidity",
+            "remove_liquidity",
+            "close",
+            "collect_fees",
+            "create_pool",
+        ]
+        | None
+    ) = None,
+    connector: str | None = None,
+    network: str | None = None,
+    wallet_address: str | None = None,
+    pool_address: str | None = None,
+    position_address: str | None = None,
+    lower_price: str | None = None,
+    upper_price: str | None = None,
+    base_token_amount: str | None = None,
+    quote_token_amount: str | None = None,
+    percentage_to_remove: str | None = None,
+    slippage_pct: str | None = None,
+    base_token: str | None = None,
+    quote_token: str | None = None,
+    initial_price: str | None = None,
+    extra_params: dict | None = None,
+) -> str:
+    """Direct CLMM position operations, chain- & DEX-agnostic (Meteora / Raydium / Orca / Uniswap / PancakeSwap).
+
+    Stateless — you hold position state in your journal. Progressive disclosure: call with NO
+    `action` to load the CLMM guide.
+
+    THE UNMANAGED PATH. For normal LP work use `manage_executors` with `lp_executor`, which owns
+    range monitoring, rebalancing and bounded close retries. Use this tool when no executor can do
+    that for you — above all to RECOVER AN ORPHANED POSITION: a terminated executor cannot be told
+    to close anything (`manage_executors(action="stop")` on one is correctly a no-op), so the
+    position must be closed by address here, then marked with
+    `manage_executors(action="resolve_orphan")`.
+
+    Actions:
+    - position_info → your positions in a pool with amounts, range, and uncollected fees
+    - open → create a position NO executor tracks (not range-monitored or auto-closed)
+    - add_liquidity / remove_liquidity → resize an existing position, keeping its range
+    - close → withdraw everything, collect fees, close the account
+    - collect_fees → fees only, position untouched
+    - create_pool → create a new (empty) CLMM pool; liquidity is added by opening positions
+
+    remove_liquidity at 100% leaves an EMPTY POSITION OPEN; only `close` closes the account. To
+    recover an orphan, use `close`.
+
+    Positions opened by an lp_executor are not in the API database (the bot opens them straight
+    against Gateway), and they close fine anyway: the API never reads `pool_address` on
+    close/collect_fees.
+
+    Pool discovery lives in `explore_dex_pools`.
+
+    Args:
+        action: CLMM action. Leave empty to load the CLMM guide.
+        connector: CLMM connector: meteora | raydium | orca | pancakeswap-sol (Solana),
+            uniswap | pancakeswap (EVM). A '<name>/clmm' form is accepted, so an orphan's
+            lp_provider passes through unchanged.
+        network: Network ID in 'chain-network' format (e.g. 'solana-mainnet-beta', 'ethereum-mainnet').
+            For an orphan record this is the `connector_name` field.
+        wallet_address: Wallet address (optional, uses default if not provided).
+        pool_address: Pool contract address. Required for open; informational elsewhere —
+            position_info takes no pool filter and close/collect_fees never read it.
+        position_address: Position NFT address (add_liquidity, remove_liquidity, close, collect_fees).
+        lower_price: Lower price bound of the range (open).
+        upper_price: Upper price bound of the range (open).
+        base_token_amount: Base token amount (open / add_liquidity).
+        quote_token_amount: Quote token amount (open / add_liquidity).
+        percentage_to_remove: Percentage of liquidity to remove, 0-100 (remove_liquidity).
+        slippage_pct: Maximum slippage percentage.
+        base_token: Base token symbol or address (create_pool).
+        quote_token: Quote token symbol or address (create_pool).
+        initial_price: Initial pool price as quote per base (create_pool, optional —
+            the API fetches the market price when omitted).
+        extra_params: Connector-specific params under Gateway's own names.
+            open/add_liquidity: strategyType (meteora DLMM, e.g. {"strategyType": 0}).
+            create_pool: binStep (meteora/orca), feeBps (meteora/uniswap/pancakeswap),
+            ammConfigIndex (raydium/pancakeswap-sol). Unknown keys are rejected with a 400.
+    """
+    request = CLMMRequest(
+        action=action,
+        connector=connector,
+        network=network,
+        wallet_address=wallet_address,
+        pool_address=pool_address,
+        position_address=position_address,
+        lower_price=lower_price,
+        upper_price=upper_price,
+        base_token_amount=base_token_amount,
+        quote_token_amount=quote_token_amount,
+        percentage_to_remove=percentage_to_remove,
+        slippage_pct=slippage_pct,
+        base_token=base_token,
+        quote_token=quote_token,
+        initial_price=initial_price,
+        extra_params=extra_params,
+    )
+
+    client = await hummingbot_client.get_client()
+    result = await manage_clmm_impl(client, request)
+    return format_clmm_result(action, result)
+
+
+@mcp.tool()
+@handle_errors("manage Gateway swaps", GATEWAY_LOG_HINT)
+async def manage_gateway_swaps(
+    action: Literal["quote", "execute", "search", "get_status"],
+    connector: str | None = None,
+    network: str | None = None,
+    trading_pair: str | None = None,
+    side: Literal["BUY", "SELL"] | None = None,
+    amount: str | None = None,
+    slippage_pct: str | None = None,
+    wallet_address: str | None = None,
+    transaction_hash: str | None = None,
+    extra_params: dict[str, Any] | None = None,
+    search_connector: str | None = None,
+    search_network: str | None = None,
+    search_wallet_address: str | None = None,
+    search_trading_pair: str | None = None,
+    status: Literal["SUBMITTED", "CONFIRMED", "FAILED"] | None = None,
+    start_time: int | None = None,
+    end_time: int | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> str:
+    """One-shot DEX swaps through Gateway's unified swap route — quote, execute, and track.
+
+    PREFER order_executor FOR SWAPS. `manage_executors(action="create",
+    executor_type="order_executor", ...)` with `connector_name=<network>` (e.g.
+    "solana-mainnet-beta") and `execution_strategy="MARKET"` swaps through this same
+    Gateway route, and adds what a one-shot call cannot:
+      - the slippage ramp (`slippage_pct` / `slippage_multiplier` / `max_slippage_pct`),
+        which starts tight and widens only on a failure Gateway attributes to slippage.
+        A swap here carries ONE fixed tolerance and never retries at a wider one.
+      - an executor record, so the fill is tagged with `controller_id` and reaches PnL
+        attribution. A swap here is written to swap history only, so an entry executed
+        this way and the position it funds land in different ledgers.
+
+    Use this tool when order_executor cannot express what you need: a quote without an
+    execution, resolving or searching swap history, or a pool-scoped connector the
+    executor does not route to.
+
+    "Unified" is about Gateway's routes, not about tool choice. Router aggregators
+    (jupiter, 0x) and pool-scoped AMM/CLMM swaps all resolve to one route here; the
+    pool-scoped `/trading/amm/*-swap` routes no longer exist.
+
+    Actions:
+    - quote → price, expected output, and price impact BEFORE committing (free, always do this first)
+    - execute → submit the swap on-chain; returns a transaction hash
+    - get_status → resolve a submitted swap by transaction_hash
+    - search → query swap history with filters
+
+    CONNECTOR FORMAT. `connector` is "name/type":
+    - "jupiter/router", "0x/router" — aggregator routing across every pool it knows
+    - "meteora/amm", "raydium/amm", "uniswap/amm" — swap against an AMM pool
+    - "meteora/clmm", "raydium/clmm", "uniswap/clmm" — swap against a CLMM pool
+
+    POOL RESOLUTION (read this before trusting a failure). For the pool-scoped forms
+    (`/amm`, `/clmm`) Gateway resolves the pool itself from ITS OWN CONFIGURED POOL LIST,
+    matched BY TOKEN SYMBOL from `trading_pair` — you cannot pass a pool address here. A token
+    Gateway does not know (a fresh launch mint, a pool created moments ago via
+    `manage_amm(create_pool)`) will NOT resolve, and creating a pool does not register it. Such a
+    call fails with "No pool found", which means UNKNOWN, not "bad token" — do not read it as a
+    honeypot or a failed safety check. Route those through an aggregator ("jupiter/router"),
+    which quotes off live on-chain routes rather than a config file.
+
+    LP work is elsewhere: `manage_amm` (AMM pools), `manage_clmm` (CLMM positions),
+    `manage_executors(lp_executor)` (managed LP).
+
+    Args:
+        action: Swap action to perform.
+        connector: Connector in "name/type" form (required for quote/execute), e.g.
+            'jupiter/router', 'meteora/amm', 'raydium/clmm'.
+        network: Network ID in 'chain-network' format (required for quote/execute), e.g.
+            'solana-mainnet-beta', 'ethereum-mainnet'.
+        trading_pair: Trading pair as 'BASE-QUOTE' (required for quote/execute). Either
+            side may be a SYMBOL or a raw TOKEN ADDRESS, and the address does NOT have to
+            be registered with Gateway first — Gateway resolves an unknown mint on the
+            spot and reads its decimals on-chain. Do not add a token to Gateway's list as
+            a prerequisite for trading it: that write is a symbol/address mapping, it is
+            not required here, and guessing decimals to satisfy it corrupts the mapping.
+            Pool-scoped connectors match Gateway's pool list by SYMBOL.
+        side: 'BUY' (buy base with quote) or 'SELL' (sell base for quote). Required for quote/execute.
+        amount: Base token amount to buy or sell (required for quote/execute).
+        slippage_pct: Maximum slippage percentage. OMIT to use the connector's configured
+            slippage; '0' is a real value, not "use the default".
+        wallet_address: Wallet for execute (optional, uses the default wallet).
+        transaction_hash: Transaction hash (required for get_status).
+        extra_params: Connector-specific params under Gateway's own names. Supported:
+            'approximateIfNoExactOut' (bool, jupiter/dflow/okx/titan routers).
+        search_connector: Filter history by connector (search).
+        search_network: Filter history by network (search).
+        search_wallet_address: Filter history by wallet address (search).
+        search_trading_pair: Filter history by trading pair (search).
+        status: Filter history by status: SUBMITTED | CONFIRMED | FAILED (search).
+        start_time: Start timestamp in unix seconds (search).
+        end_time: End timestamp in unix seconds (search).
+        limit: Max results for search (default 50, max 1000).
+        offset: Pagination offset for search (default 0).
+    """
+    request = GatewaySwapRequest(
+        action=action,
+        connector=connector,
+        network=network,
+        trading_pair=trading_pair,
+        side=side,
+        amount=amount,
+        slippage_pct=slippage_pct,
+        wallet_address=wallet_address,
+        transaction_hash=transaction_hash,
+        extra_params=extra_params,
+        search_connector=search_connector,
+        search_network=search_network,
+        search_wallet_address=search_wallet_address,
+        search_trading_pair=search_trading_pair,
+        status=status,
+        start_time=start_time,
+        end_time=end_time,
+        limit=limit,
+        offset=offset,
+    )
+
+    client = await hummingbot_client.get_client()
+    result = await manage_gateway_swaps_impl(client, request)
+    return format_gateway_swap_result(action, result)
 
 
 # GeckoTerminal Tools

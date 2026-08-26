@@ -1,6 +1,6 @@
 """Unit tests for the human-readable confirmation-prompt formatter."""
 
-from handlers.agents.confirmation import _format_tool_summary
+from handlers.agents.confirmation import format_tool_summary
 
 
 def _bot_call(action: str, **extra) -> dict:
@@ -8,7 +8,7 @@ def _bot_call(action: str, **extra) -> dict:
 
 
 def test_format_manage_bots_deploy():
-    summary = _format_tool_summary(
+    summary = format_tool_summary(
         _bot_call("deploy", bot_name="mm-bot", controllers_config=["cfg_a"])
     )
     assert "mm-bot" in summary
@@ -16,7 +16,7 @@ def test_format_manage_bots_deploy():
 
 
 def test_format_manage_bots_update_config():
-    summary = _format_tool_summary(
+    summary = format_tool_summary(
         _bot_call("update_config", bot_name="mm-bot", config_name="cfg_a")
     )
     assert "mm-bot" in summary
@@ -24,6 +24,6 @@ def test_format_manage_bots_update_config():
 
 
 def test_format_manage_bots_stop_bot():
-    summary = _format_tool_summary(_bot_call("stop_bot", bot_name="mm-bot"))
+    summary = format_tool_summary(_bot_call("stop_bot", bot_name="mm-bot"))
     assert "mm-bot" in summary
     assert "stop_bot" in summary

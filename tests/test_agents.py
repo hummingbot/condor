@@ -734,6 +734,9 @@ def test_numeric_credentials_reach_the_subprocess_as_strings(monkeypatch):
         def get_accessible_servers(self, user_id):
             return ["local"]
 
+        def has_server_access(self, user_id, name, permission=None):
+            return True
+
         def get_server(self, name):
             return {
                 "host": "localhost",

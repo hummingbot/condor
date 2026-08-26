@@ -303,22 +303,13 @@ async def _fetch_lp_positions(client) -> dict:
         open_positions = [p for p in positions if p.get("status") == "OPEN"]
         logger.info(f"After OPEN filter: {len(open_positions)} positions")
 
-        # Filter out positions with 0 liquidity
+        # Filter out positions with 0 liquidity. hapi's position rows carry the
+        # amounts as base_token_amount / quote_token_amount (always present,
+        # always floats) — there is no 'liquidity' field to read.
         def has_liquidity(pos):
-            liq = pos.get("liquidity") or pos.get("current_liquidity")
-            if liq is not None:
-                try:
-                    return float(liq) > 0
-                except (ValueError, TypeError):
-                    pass
-            base = pos.get("base_amount") or pos.get("amount_base")
-            quote = pos.get("quote_amount") or pos.get("amount_quote")
-            if base is not None and quote is not None:
-                try:
-                    return float(base) > 0 or float(quote) > 0
-                except (ValueError, TypeError):
-                    pass
-            return True
+            base = float(pos.get("base_token_amount") or 0)
+            quote = float(pos.get("quote_token_amount") or 0)
+            return base > 0 or quote > 0
 
         active_positions = [p for p in open_positions if has_liquidity(p)]
         if len(active_positions) < len(open_positions):

@@ -324,29 +324,25 @@ def auto_approve_with_risk_check(
                 log.warning("Blocked %s: tool arguments could not be read", tool_name)
                 return {"outcome": {"outcome": "cancelled"}}
 
-            # Dry-run mode: block ALL mutating actions
+            # Dry-run mode: block ALL mutating actions.
+            #
+            # Everything here is already inside `is_dangerous_tool_call`, which
+            # did the per-action matching against DANGEROUS_*_ACTIONS. Repeating
+            # it per tool was not just redundant, it reopened SEC-093: that gate
+            # fails CLOSED on an unreadable action, so `manage_clmm` with a
+            # missing, null or non-string `action` arrives here as dangerous —
+            # and the re-check then read it as "" , matched no set, fell through
+            # every branch and hit the auto-approve tail. A malformed write
+            # executed for real in the one mode whose whole promise is that
+            # nothing does. Reaching this line is the decision; blocking is
+            # unconditional.
             if execution_mode == "dry_run":
-                if tool_name == "manage_executors":
-                    action = input_data.get("action", "")
-                    if action in ("create", "stop"):
-                        log.info("Dry-run mode: blocked manage_executors(%s)", action)
-                        return {"outcome": {"outcome": "cancelled"}}
-                elif tool_name == "manage_bots":
-                    action = input_data.get("action", "")
-                    if action in DANGEROUS_BOT_ACTIONS:
-                        log.info("Dry-run mode: blocked manage_bots(%s)", action)
-                        return {"outcome": {"outcome": "cancelled"}}
-                elif tool_name == "manage_amm":
-                    # Name-matching the whole tool would also block the quotes
-                    # and pool reads a dry-run agent needs to reason with, so
-                    # gate on the action, as the manage_bots branch does.
-                    action = input_data.get("action", "")
-                    if action in DANGEROUS_AMM_ACTIONS:
-                        log.info("Dry-run mode: blocked manage_amm(%s)", action)
-                        return {"outcome": {"outcome": "cancelled"}}
-                elif tool_name == "place_order":
-                    log.info("Dry-run mode: blocked %s", tool_name)
-                    return {"outcome": {"outcome": "cancelled"}}
+                log.info(
+                    "Dry-run mode: blocked %s(%s)",
+                    tool_name,
+                    input_data.get("action", "") or "?",
+                )
+                return {"outcome": {"outcome": "cancelled"}}
 
             # For executor actions, run risk check
             if tool_name == "manage_executors":
