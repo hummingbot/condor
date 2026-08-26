@@ -25,7 +25,6 @@ export function PriceField({
   dispatch,
   valid,
   hint,
-  pickable = true,
 }: {
   label: string;
   value: number;
@@ -34,12 +33,6 @@ export function PriceField({
   dispatch: FieldDispatch;
   valid: boolean;
   hint?: string;
-  /**
-   * Whether this price can be picked off the chart. A panel that has run out of
-   * pick slots turns the crosshair off for the remaining prices rather than
-   * offering a button that does nothing.
-   */
-  pickable?: boolean;
 }) {
   const isActive = activePickField === field;
   const id = useId();
@@ -82,7 +75,6 @@ export function PriceField({
               : "border-[var(--color-border)] focus:border-[var(--color-primary)]"
           }`}
         />
-        {pickable && (
         <button
           onClick={() =>
             dispatch({
@@ -100,7 +92,6 @@ export function PriceField({
         >
           <Crosshair className="h-3.5 w-3.5" />
         </button>
-        )}
       </div>
       {hint && <p className="mt-0.5 text-[10px] text-[var(--color-text-muted)]">{hint}</p>}
     </div>
