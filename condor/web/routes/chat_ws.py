@@ -54,6 +54,12 @@ _pending_spawns: dict[str, asyncio.Task] = {}
 # itself, which would turn steering into queueing.
 _slot_gates: dict[str, asyncio.Lock] = {}
 
+# Hard cap on the page-context block a frame may carry (FEAT-059). Load-bearing,
+# not defensive: this is a client-supplied string that is prepended to the
+# prompt, so an unbounded one is an unbounded turn. The frontend renders at
+# most 1200 chars; the slack covers a client a version ahead.
+VIEW_CONTEXT_MAX_CHARS = 1500
+
 # Chat sockets currently attached, per user. One socket carries every
 # conversation a user has open, so this is all the addressing a server-initiated
 # turn needs: the slot travels in the frame like it does for a typed turn.
@@ -708,6 +714,10 @@ async def _handle_send_message(
 ) -> None:
     slot_id = msg.get("slot_id", "")
     text = msg.get("text", "").strip()
+    # What the user was looking at while asking (FEAT-059). Rides beside the
+    # text to the funnel, which prepends it to this one prompt and never
+    # records it — the transcript keeps only the user's words.
+    view_context = str(msg.get("view_context") or "")[:VIEW_CONTEXT_MAX_CHARS]
     if not text:
         await _send(ws, {"event": "error", "message": "Empty message"})
         return
@@ -806,7 +816,11 @@ async def _handle_send_message(
 
         # Busy is no longer a refusal: the composer stays live and sending is
         # how the user redirects an answer that is heading the wrong way.
-        stream = runtime.prompt(session_key, PromptRequest(text=text), on_busy="steer")
+        stream = runtime.prompt(
+            session_key,
+            PromptRequest(text=text, view_context=view_context),
+            on_busy="steer",
+        )
 
         if info.is_busy:
             # Said before the stream starts, so the partial answer on screen is

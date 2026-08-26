@@ -214,14 +214,23 @@ async def prompt(
 
     # Key material never gets past this line (FEAT-056). It is the same
     # argument the funnel already makes for recording and for ``on_busy``,
-    # applied to a third cross-cutting concern: one variable feeds both the
-    # Recorder below and ``prompt_stream`` seven lines further down, so
-    # sanitising it here covers Telegram, the dashboard, background wakes,
-    # delegations and MCP at once — and covers surface number four, which
-    # would otherwise inherit the omission. Only *certain* shapes are replaced;
-    # ``findings`` carries the ambiguous ones too, for telemetry to count and
-    # for the surfaces to warn about. See :mod:`condor.runtime.secrets`.
+    # applied to a third cross-cutting concern: ``clean`` feeds both the
+    # Recorder below and ``prompt_stream`` further down, so sanitising it here
+    # covers Telegram, the dashboard, background wakes, delegations and MCP at
+    # once — and covers surface number four, which would otherwise inherit the
+    # omission. Only *certain* shapes are replaced; ``findings`` carries the
+    # ambiguous ones too, for telemetry to count and for the surfaces to warn
+    # about. See :mod:`condor.runtime.secrets`.
     clean, findings = secrets.redact(req.text)
+    # Redacted like the text, for the same reason and by the same rule — a
+    # page that renders a credential must not be the one hole in FEAT-056. Its
+    # findings are dropped on purpose: ``findings`` drives the secret *notice*,
+    # which tells the user about something they typed.
+    view, _ = secrets.redact(req.view_context)
+    # The model hears the page; the transcript keeps only the user's words.
+    # Anything recorded is replayed on resume and shown by ShareConversation,
+    # and a page the user was on is true of a moment, not of the conversation.
+    wire = f"{view}\n\n{clean}" if view.strip() else clean
 
     # Stamped from the live session, not from the conversation meta: the meta's
     # agent_key/agent_slug are last-write-wins, so a chat that switches models
@@ -243,7 +252,7 @@ async def prompt(
     tool_kinds: dict[str, int] = {}
     outcome = "aborted"
     try:
-        async for event in session.prompt_stream(clean, lock_timeout=lock_timeout):
+        async for event in session.prompt_stream(wire, lock_timeout=lock_timeout):
             runtime_event = RuntimeEvent.from_acp(event, session_key=raw_key)
             if runtime_event.type is EventType.TOOL_CALL:
                 # The ACP `kind` ("read", "execute", …), never the `title`: a

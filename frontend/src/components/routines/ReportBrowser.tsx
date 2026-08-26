@@ -24,7 +24,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { type RoutineInstance, api } from "@/lib/api";
 import { buildConfigValues, formatAgo, formatInterval, invalidateRoutineQueries, saveConfig } from "@/lib/routineUtils";
-import { setViewContext } from "@/lib/viewContext";
+import { useViewFacts } from "@/lib/viewFacts";
 import { useServer } from "@/hooks/useServer";
 import { ReportFrame } from "./ReportFrame";
 import { RoutineConfigForm } from "./RoutineConfigForm";
@@ -291,17 +291,15 @@ export function ReportBrowser({
     el?.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }, [activeSource]);
 
-  // Update view context for chat integration
-  useEffect(() => {
-    if (selectedReport) {
-      setViewContext({
-        filename: selectedReport.filename,
-        title: selectedReport.title,
-        source_name: activeSource,
-      });
-    }
-    return () => setViewContext(null);
-  }, [selectedReport, activeSource]);
+  // Tell the chat what report is open, for as long as the reader is (FEAT-059).
+  useViewFacts(() =>
+    selectedReport
+      ? {
+          label: "Routine report",
+          subject: `report "${selectedReport.title}" (${selectedReport.filename}) from ${activeSource}`,
+        }
+      : null,
+  );
 
   return (
     <div className="fixed inset-0 z-50 flex bg-[var(--color-bg)]">

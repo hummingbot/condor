@@ -113,3 +113,10 @@ class PromptRequest(BaseModel):
         "line is recorded as a system turn of this kind instead of as the "
         "user's words. Empty (the default) is a real user turn.",
     )
+    view_context: str = Field(
+        default="",
+        description="What the user was looking at while asking. Prepended to "
+        "this one prompt and never recorded: it is true of a moment, not of "
+        "the conversation, so replaying it on resume would state a page the "
+        "user left long ago.",
+    )

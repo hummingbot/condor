@@ -367,7 +367,7 @@ export function AgentChatTab() {
             agents={modelOptions}
             isStreaming={isActiveStreaming}
             isQueued={chat.isSlotQueued(chat.activeSlotId)}
-            permissionRequest={chat.permissionRequest}
+            permissionRequest={chat.permissionFor(chat.activeSlotId)}
             onResolvePermission={chat.resolvePermission}
             switchError={switchError}
             onDismissSwitchError={dismissSwitchError}

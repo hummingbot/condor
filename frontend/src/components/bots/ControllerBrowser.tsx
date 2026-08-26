@@ -20,7 +20,7 @@ import { ControllerPnlChart } from "@/components/bots/ControllerPnlChart";
 import { api, type ControllerInfo } from "@/lib/api";
 import { configToYaml, CONTROLLER_HIDDEN_KEYS } from "@/lib/configYaml";
 import { formatCurrencyVolume, formatCurrencyPnl, pnlColor } from "@/lib/formatters";
-import { setViewContext } from "@/lib/viewContext";
+import { useViewFacts } from "@/lib/viewFacts";
 
 type ConvertFn = (value: number, quoteCurrency: string) => { value: number; converted: boolean };
 
@@ -258,17 +258,15 @@ export function ControllerBrowser({
     el?.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }, [activeKey]);
 
-  // View context for Agent chat integration
-  useEffect(() => {
-    if (activeCtrl) {
-      setViewContext({
-        filename: `controller:${activeCtrl.controller_id || activeCtrl.controller_name}`,
-        title: `${activeCtrl.controller_name} (${activeCtrl.trading_pair})`,
-        source_name: activeCtrl.bot_name,
-      });
-    }
-    return () => setViewContext(null);
-  }, [activeCtrl]);
+  // Tell the chat which controller is open, while the browser is (FEAT-059).
+  useViewFacts(() =>
+    activeCtrl
+      ? {
+          label: "Controller config",
+          subject: `controller "${activeCtrl.controller_name}" (${activeCtrl.trading_pair}) of bot ${activeCtrl.bot_name}`,
+        }
+      : null,
+  );
 
   if (!activeCtrl) return null;
 

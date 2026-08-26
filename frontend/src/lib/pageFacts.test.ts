@@ -1,0 +1,212 @@
+/**
+ * The page-context baseline (FEAT-059): what each route says about itself,
+ * how the block is rendered for the wire, and the registry semantics that
+ * replaced `lib/viewContext.ts` — two overlapping contributors must both
+ * speak, and an unmount must remove only its own entry (the old module was
+ * one mutable slot, and the outer unmount wiped the inner contribution).
+ *
+ * The registry is exercised through the hook, so this file needs a DOM.
+ *
+ * @vitest-environment jsdom
+ */
+
+import { act, createElement } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+
+import { routeFacts } from "./pageFacts";
+import {
+  collectViewFacts,
+  renderViewBlock,
+  useViewFacts,
+  VIEW_BLOCK_MAX_CHARS,
+  type ViewFacts,
+} from "./viewFacts";
+
+declare global {
+  // eslint-disable-next-line no-var
+  var IS_REACT_ACT_ENVIRONMENT: boolean;
+}
+
+describe("routeFacts", () => {
+  it("says nothing on the chat workspace", () => {
+    expect(routeFacts("/", "")).toBeNull();
+  });
+
+  it("labels every plain page", () => {
+    expect(routeFacts("/portfolio", "")?.label).toBe("Portfolio");
+    expect(routeFacts("/bots", "")?.label).toBe("Bots");
+    expect(routeFacts("/trade", "")?.label).toBe("Trade — create executor");
+    expect(routeFacts("/dex", "")?.label).toBe("DEX pools");
+    expect(routeFacts("/executors", "")?.label).toBe("Executors");
+    expect(routeFacts("/routines", "")?.label).toBe("Routines");
+    expect(routeFacts("/settings", "")?.label).toBe("Settings");
+  });
+
+  it("derives the subject from the URL", () => {
+    expect(routeFacts("/bots/42", "")).toEqual({
+      label: "Bot detail",
+      subject: "bot id 42",
+    });
+    expect(routeFacts("/dex/solana/7qbRF6", "")).toEqual({
+      label: "DEX pool",
+      subject: "pool 7qbRF6 on solana",
+    });
+    expect(routeFacts("/agents/orca-lp-expert", "")).toEqual({
+      label: "Agent page",
+      subject: 'agent "orca-lp-expert"',
+    });
+    expect(routeFacts("/agents/orca-lp-expert/strategies/sol-lp", "")).toEqual({
+      label: "Strategy detail",
+      subject: 'strategy "sol-lp" of agent "orca-lp-expert"',
+    });
+  });
+
+  it("decodes URL-encoded parts", () => {
+    expect(routeFacts("/agents/my%20agent", "")?.subject).toBe('agent "my agent"');
+  });
+
+  it("reads the tab from the query string", () => {
+    expect(routeFacts("/bots", "?tab=backtest")?.label).toBe("Backtests");
+    expect(routeFacts("/bots", "?tab=archived")?.label).toBe("Archived bots");
+    expect(routeFacts("/routines", "?tab=reports")?.label).toBe("Routine reports");
+  });
+
+  it("says nothing on a route it does not know", () => {
+    expect(routeFacts("/login", "")).toBeNull();
+    expect(routeFacts("/no/such/page", "")).toBeNull();
+  });
+});
+
+describe("renderViewBlock", () => {
+  it("is empty with nothing to say", () => {
+    expect(renderViewBlock([], "/bots/42")).toBe("");
+  });
+
+  it("renders the block the design promises", () => {
+    const facts: ViewFacts[] = [
+      {
+        label: "Bot detail",
+        subject: 'bot "backpack-mm-3" (id 42)',
+        onScreen: { PNL: "$-412.30", controllers: 3, "active executors": 12 },
+      },
+    ];
+    const block = renderViewBlock(facts, "/bots/42");
+    expect(block).toContain("do not treat it as something the user said");
+    expect(block).toContain("Screen: Bot detail");
+    expect(block).toContain('About: bot "backpack-mm-3" (id 42)');
+    expect(block).toContain(
+      "On screen: PNL $-412.30 · controllers 3 · active executors 12",
+    );
+    expect(block).toContain("URL: /bots/42");
+  });
+
+  it("drops empty onScreen values rather than rendering blanks", () => {
+    const block = renderViewBlock(
+      [{ label: "Bots", onScreen: { total: 3, filter: null, q: undefined, s: "" } }],
+      "/bots",
+    );
+    expect(block).toContain("On screen: total 3");
+    expect(block).not.toContain("filter");
+  });
+
+  it("caps the block and marks the cut", () => {
+    const block = renderViewBlock(
+      [{ label: "Bots", subject: "x".repeat(5000) }],
+      "/bots",
+    );
+    expect(block.length).toBe(VIEW_BLOCK_MAX_CHARS);
+    expect(block.endsWith("…")).toBe(true);
+  });
+});
+
+describe("useViewFacts registry", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  function Contributor({ facts }: { facts: ViewFacts | null }) {
+    useViewFacts(() => facts);
+    return null;
+  }
+
+  it("two overlapping registrations both contribute, outermost first", () => {
+    act(() => {
+      root.render(
+        createElement(
+          "div",
+          null,
+          createElement(Contributor, { facts: { label: "Routine report" } }),
+          createElement(Contributor, { facts: { label: "Controller" } }),
+        ),
+      );
+    });
+    expect(collectViewFacts().map((f) => f.label)).toEqual([
+      "Routine report",
+      "Controller",
+    ]);
+  });
+
+  it("unmounting the outer contributor leaves the inner one intact", () => {
+    // Keyed, so the re-render genuinely unmounts "outer" rather than React
+    // reusing its instance for the remaining child.
+    act(() => {
+      root.render(
+        createElement(
+          "div",
+          null,
+          createElement(Contributor, { key: "outer", facts: { label: "Outer" } }),
+          createElement(Contributor, { key: "inner", facts: { label: "Inner" } }),
+        ),
+      );
+    });
+    act(() => {
+      root.render(
+        createElement(
+          "div",
+          null,
+          createElement(Contributor, { key: "inner", facts: { label: "Inner" } }),
+        ),
+      );
+    });
+    expect(collectViewFacts().map((f) => f.label)).toEqual(["Inner"]);
+  });
+
+  it("a getter that throws degrades to no context", () => {
+    function Broken() {
+      useViewFacts(() => {
+        throw new Error("boom");
+      });
+      return null;
+    }
+    act(() => {
+      root.render(
+        createElement(
+          "div",
+          null,
+          createElement(Broken),
+          createElement(Contributor, { facts: { label: "Still here" } }),
+        ),
+      );
+    });
+    expect(collectViewFacts().map((f) => f.label)).toEqual(["Still here"]);
+  });
+
+  it("a null contribution is simply absent", () => {
+    act(() => {
+      root.render(createElement(Contributor, { facts: null }));
+    });
+    expect(collectViewFacts()).toEqual([]);
+  });
+});

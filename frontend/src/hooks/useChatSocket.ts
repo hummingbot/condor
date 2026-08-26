@@ -8,7 +8,7 @@ import {
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { toolCallState } from "@/lib/formatters";
-import { getViewContext } from "@/lib/viewContext";
+import { collectViewFacts, renderViewBlock } from "@/lib/viewFacts";
 import { WS_AUTH_SUBPROTOCOL } from "@/lib/websocket";
 
 export interface ToolCall {
@@ -294,8 +294,22 @@ export function useChatSocket() {
   const hydratedSlots = useRef<Set<string>>(new Set());
   // Text typed into a tab whose spawn is still in flight. Keyed by the tab's
   // id (a client_ref for a new chat, the conversation id for a resume) and
-  // flushed on session_started — that queue IS the warm session.
-  const outbox = useRef<Record<string, string[]>>({});
+  // flushed on session_started — that queue IS the warm session. Each entry
+  // carries the page context captured at *queue* time, not at flush time: the
+  // block is true of the moment the user asked, and a spawn can land after
+  // they have navigated away.
+  const outbox = useRef<Record<string, { text: string; view: string }[]>>({});
+  // A tab opened optimistically is renamed on session_started: the client_ref
+  // it was started under becomes the backend's slot id. The workspace follows
+  // the rename through `activeSlotId`, which this hook rewrites itself — but a
+  // surface that keeps its own slot id (the bubble holds one per bound agent,
+  // FEAT-059) would be left pointing at a ref no slot answers to, and its next
+  // send would respawn. This map is how such a caller follows the rename.
+  const refAliases = useRef<Record<string, string>>({});
+  // Refs started with `focus: false`, so their session_started must not adopt
+  // the slot as active even when nothing else is — the workspace would open on
+  // a conversation the user never chose there.
+  const unfocusedRefs = useRef<Set<string>>(new Set());
   // The dashboard prewarms the most recent conversation once per mount, never
   // per reconnect: the 3s retry loop would otherwise spawn on every failure.
   const prewarmed = useRef(false);
@@ -775,6 +789,12 @@ export function useChatSocket() {
           // the ref it was opened under, a resume by the conversation itself.
           const ref = (data.client_ref as string) || "";
           const tabId = ref || newSlot.slot_id;
+          if (ref && ref !== newSlot.slot_id) {
+            refAliases.current[ref] = newSlot.slot_id;
+          }
+          // `delete` doubles as the membership test: an unfocused spawn is
+          // one-shot, and the set must not grow for the life of the tab.
+          const adopt = ref ? !unfocusedRefs.current.delete(ref) : true;
           setSlots((prev) =>
             prev.some((s) => s.info.slot_id === tabId)
               ? prev.map((s) =>
@@ -784,14 +804,21 @@ export function useChatSocket() {
                 )
               : [...prev, { info: newSlot, messages: [] }],
           );
-          setActiveSlotId((cur) => (cur === tabId || cur === null ? newSlot.slot_id : cur));
+          setActiveSlotId((cur) =>
+            cur === tabId || (cur === null && adopt) ? newSlot.slot_id : cur,
+          );
 
           // Anything typed while the spawn was in flight goes out now, in
           // order. The bubbles are already on screen; only the wire lagged.
           const queued = outbox.current[tabId] || [];
           delete outbox.current[tabId];
-          for (const text of queued) {
-            send({ action: "send_message", slot_id: newSlot.slot_id, text });
+          for (const { text, view } of queued) {
+            send({
+              action: "send_message",
+              slot_id: newSlot.slot_id,
+              text,
+              view_context: view,
+            });
           }
 
           // A resumed conversation arrives with a transcript; a brand new one
@@ -1137,21 +1164,21 @@ export function useChatSocket() {
         { id, role: "user" as const, text, toolCalls: [] },
       ]);
 
-      // Inject report context if the user is viewing a report
-      const ctx = getViewContext();
-      const wireText = ctx
-        ? `${text}\n\n[System: The user is currently viewing the report file: ${ctx.filename}. If the question might relate to this report, you can read it for context.]`
-        : text;
+      // What the user is looking at while asking, rendered here so it is true
+      // of this moment. It travels beside the text, never inside it: the
+      // backend prepends it to this one prompt and records only the user's
+      // words (FEAT-059).
+      const view = renderViewBlock(collectViewFacts());
 
       // A tab whose spawn is still in flight has no id the backend knows yet,
       // so the message waits here rather than being sent into the void.
       const slot = slotsRef.current.find((s) => s.info.slot_id === slotId);
       if (slot?.pending) {
-        (outbox.current[slotId] ||= []).push(wireText);
+        (outbox.current[slotId] ||= []).push({ text, view });
         return;
       }
 
-      send({ action: "send_message", slot_id: slotId, text: wireText });
+      send({ action: "send_message", slot_id: slotId, text, view_context: view });
     },
     [flushChunks, send, updateSlotMessages],
   );
@@ -1165,7 +1192,19 @@ export function useChatSocket() {
    * there eagerly rather than left for `sendMessage` to miss.
    */
   const startSession = useCallback(
-    (agentKey: string, serverName?: string, agentSlug?: string): string => {
+    (
+      agentKey: string,
+      serverName?: string,
+      agentSlug?: string,
+      opts?: {
+        /**
+         * `false` keeps `activeSlotId` where it is: the bubble starts sessions
+         * from other pages, and stealing the focus would change which
+         * conversation the workspace at `/` shows (FEAT-059).
+         */
+        focus?: boolean;
+      },
+    ): string => {
       const ref = nextClientRef();
       const slot: ChatSlot = {
         info: {
@@ -1179,7 +1218,8 @@ export function useChatSocket() {
       };
       slotsRef.current = [...slotsRef.current, slot];
       setSlots((prev) => [...prev, slot]);
-      setActiveSlotId(ref);
+      if (opts?.focus === false) unfocusedRefs.current.add(ref);
+      else setActiveSlotId(ref);
       hydratedSlots.current.add(ref);
       prewarmed.current = true; // An explicit start is the warm session.
       send({
@@ -1396,13 +1436,24 @@ export function useChatSocket() {
     (slotId: string | null | undefined) => !!slotId && slotId in queuedSlots,
     [queuedSlots],
   );
-  // What the conversation on screen is being asked to approve — and nothing
-  // else. A request raised elsewhere stays in the map, where the tab strip
-  // badges it, so it is visible without being answerable from the wrong chat.
-  const permissionRequest =
-    (activeSlotId ? permissionRequests[activeSlotId] : undefined) ||
-    permissionRequests[UNATTRIBUTED] ||
-    null;
+  // What *one* conversation is being asked to approve — and nothing else. A
+  // request raised elsewhere stays in the map, where the tab strip badges it,
+  // so it is visible without being answerable from the wrong chat. A selector
+  // rather than a value derived from `activeSlotId`, so a surface that is not
+  // the active one — the bubble — can answer its own approvals (FEAT-059).
+  const permissionFor = useCallback(
+    (slotId: string | null | undefined) =>
+      (slotId ? permissionRequests[slotId] : undefined) ||
+      permissionRequests[UNATTRIBUTED] ||
+      null,
+    [permissionRequests],
+  );
+
+  /** Follow the spawn's rename: the live slot id behind a possibly-stale one. */
+  const resolveSlotId = useCallback(
+    (id: string): string => refAliases.current[id] ?? id,
+    [],
+  );
 
   return {
     isConnected,
@@ -1414,8 +1465,9 @@ export function useChatSocket() {
     streamingSlots,
     isSlotStreaming,
     isSlotQueued,
-    permissionRequest,
+    permissionFor,
     permissionRequests,
+    resolveSlotId,
     connect,
     enablePrewarm,
     disconnect,
