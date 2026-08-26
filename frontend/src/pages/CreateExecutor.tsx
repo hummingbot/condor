@@ -33,7 +33,7 @@ import { DCAConfigPanel, useDCAConfig } from "@/components/executor/DCAConfigPan
 import { LPConfigPanel } from "@/components/executor/LPConfigPanel";
 import { LP_SIDE_RANGE, useLpConfig } from "@/components/executor/lp-config";
 import { TradeBottomPane } from "@/components/trade/TradeBottomPane";
-import { useCandleStore } from "@/hooks/useCandleStore";
+import { useLastClose } from "@/hooks/useCandleStore";
 import { usePairBalances } from "@/hooks/usePairBalances";
 import { useServer } from "@/hooks/useServer";
 import { useCondorWebSocket } from "@/hooks/useWebSocket";
@@ -377,16 +377,20 @@ export function CreateExecutor() {
     refetchInterval: 5000,
   });
 
-  const { candles: sharedCandles } = useCandleStore(
-    server ?? null,
+  // Only the last close is read, so only the last close is subscribed: a fresh
+  // candle array once a second would re-render this page — chart wrapper, every
+  // config panel, the bottom pane — under the user's hands for a scalar that a
+  // REST-priced venue never even reads. Gating the server on the capability
+  // keeps a CLOB page off the stream entirely; TradeChart holds the channel's
+  // own refcounted subscription either way, so the wire is unchanged.
+  const lastClose = useLastClose(
+    caps.hasRestPrice ? null : (server ?? null),
     connector,
     pair,
     gridState.interval,
   );
 
-  const currentPrice = !caps.hasRestPrice
-    ? (sharedCandles[sharedCandles.length - 1]?.close ?? null)
-    : (priceData?.mid_price ?? null);
+  const currentPrice = !caps.hasRestPrice ? lastClose : (priceData?.mid_price ?? null);
 
 
   // Price precision
