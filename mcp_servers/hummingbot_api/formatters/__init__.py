@@ -38,7 +38,6 @@ from .bots import (
 # Executor formatters
 from .executors import (
     format_executor_detail,
-    format_executor_schema_table,
     format_executor_summary,
     format_executor_types_table,
     format_executors_table,
@@ -116,6 +115,5 @@ __all__ = [
     "format_executor_detail",
     "format_positions_held_table",
     "format_positions_summary",
-    "format_executor_schema_table",
     "format_executor_summary",
 ]
