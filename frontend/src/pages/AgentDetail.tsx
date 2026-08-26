@@ -18,7 +18,7 @@ import { useNavigate, useParams } from "react-router-dom";
 
 import { AgentKnowledge } from "@/components/agent/AgentKnowledge";
 import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
-import { DelegationHistory } from "@/components/agent/DelegationHistory";
+import { ActivityFeed } from "@/components/agent/ActivityFeed";
 import { EntityCard } from "@/components/agent/EntityCard";
 import { BrainPicker } from "@/components/chat/BrainPicker";
 import { ReportBrowser } from "@/components/routines/ReportBrowser";
@@ -486,7 +486,7 @@ export function AgentDetail() {
       </div>
 
       {/* The same panel the chat opens behind a conversation, with this page's
-          own Strategies grid dropped into that tab and Delegations added — so
+          own Strategies grid dropped into that tab and Activity added — so
           reading an agent and changing it are one place, whichever door you
           came through. */}
       <AgentKnowledge
@@ -505,12 +505,13 @@ export function AgentDetail() {
         }}
         extraTabs={[
           {
-            id: "delegations",
-            label: "Delegations",
+            id: "activity",
+            label: "Activity",
             icon: <History className="h-3.5 w-3.5" />,
-            // Everything this agent was ever asked to do in the background —
-            // this run's tasks and every earlier one, read back from disk.
-            render: () => <DelegationHistory agent={agent.slug} />,
+            // Everything this agent actually did — the tasks handed to it in
+            // the background and the consults it answered — this run's and
+            // every earlier one, read back from disk (FEAT-058).
+            render: () => <ActivityFeed agent={agent.slug} />,
           },
         ]}
       />

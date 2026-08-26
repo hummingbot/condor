@@ -823,10 +823,24 @@ export type DelegationStatus =
   | "interrupted"
   | "unknown";
 
-// Delegation = a fire-and-forget background task handed to a detached Agent
-// instance (DELEGATE mode). The registry is in-process, but the record outlives
-// it on disk — so this shape also comes back from history (FEAT-035), where
-// `ended_at`/`tool_count` are known and the live registry has nothing to say.
+/**
+ * Which channel a run came through (FEAT-058).
+ *
+ * `delegate` — a fire-and-forget background task handed to a detached Agent
+ * instance. `consult` — the synchronous channel every other agent, the bot and
+ * this dashboard use, which records a ledger entry and no transcript.
+ *
+ * The name on the wire (and the route, and the directory) stays "delegation"
+ * for both: it is where these records already lived, and splitting the store
+ * would cost every reader a merge for a rename nobody would see.
+ */
+export type DelegationKind = "delegate" | "consult";
+
+// Delegation = one agent run. The registry is in-process, but the record
+// outlives it on disk — so this shape also comes back from history (FEAT-035),
+// where `ended_at`/`tool_count` are known and the live registry has nothing to
+// say. Fields a given kind does not have are absent rather than zeroed: a
+// consult has no tool count, a delegation records no caller.
 export interface Delegation {
   task_id: string;
   agent: string;
@@ -837,6 +851,10 @@ export interface Delegation {
   status: DelegationStatus;
   result: string;
   error: string;
+  /** Absent on records written before kinds existed — those were delegations. */
+  kind?: DelegationKind;
+  /** Consults only: the slug of the agent that asked. "" is a person asking. */
+  caller?: string;
   /** The conversation that started this task; "" when there was none. */
   conversation_id: string;
   /** Wall-clock start (epoch seconds) — drives the elapsed time. */
@@ -1950,10 +1968,12 @@ export const api = {
 
   /** Every delegation ever recorded, newest first — live ones included, and the
    *  ones whose process is long gone. Optionally scoped to one agent. */
-  getDelegationHistory: (agent?: string, limit = 100) =>
+  /** Recorded runs, newest first. `kind` omitted means every channel. */
+  getDelegationHistory: (agent?: string, limit = 100, kind?: DelegationKind) =>
     apiFetch<{ delegations: DelegationSummary[] }>(
       `/api/v1/agents/delegations/history?limit=${limit}` +
-        (agent ? `&agent=${encodeURIComponent(agent)}` : ""),
+        (agent ? `&agent=${encodeURIComponent(agent)}` : "") +
+        (kind ? `&kind=${kind}` : ""),
     ),
 
   /** One delegation's full record, from the registry or from disk. */
