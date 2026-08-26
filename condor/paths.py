@@ -221,6 +221,13 @@ def conversation_dir(user_id: int | str, conv_id: str) -> Path:
 
 
 def delegations_dir(user_id: int | str) -> Path:
+    """Every agent *run* this user owns -- delegations and consults alike.
+
+    The name is historical (FEAT-058): the directory predates there being a
+    second kind of run to put in it, and splitting the store would have cost
+    every reader a merge and retention a second home for a rename nobody sees.
+    Same reasoning as the ``data/`` root above.
+    """
     return user_dir(user_id) / DELEGATIONS_DIRNAME
 
 

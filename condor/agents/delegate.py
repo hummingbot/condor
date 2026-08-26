@@ -38,6 +38,13 @@ delegation sweeps its own owner's directory
 :data:`MAX_DELEGATION_RECORDS` terminal records and dropping the rest whole --
 so neither the disk nor the walk a history listing does grows with the age of
 the install. Nothing still running is ever a candidate.
+
+Since FEAT-058 that directory is no longer only delegations: a *consult* records
+itself there too, discriminated by a ``kind`` field, so an agent's page can list
+every run it performed rather than only the rare ones handed to the background.
+The writing lives in :mod:`condor.agents.run_records`; what stays here is what a
+delegation specifically has to say (a transcript, an event stream, a tool count)
+and a retention cap of its own, so the plentiful kind cannot evict the rare one.
 """
 
 from __future__ import annotations
@@ -50,6 +57,14 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from condor.agents.run_records import (
+    KIND_CONSULT,
+    KIND_DELEGATE,
+    RECORD_KINDS,
+    TERMINAL_STATES,
+    record_run,
+)
 
 log = logging.getLogger(__name__)
 
@@ -114,6 +129,26 @@ MAX_FINISHED_DELEGATIONS = 25
 # default the hard way.
 MAX_DELEGATION_RECORDS = int(os.environ.get("CONDOR_MAX_DELEGATION_RECORDS", "") or 500)
 
+# The same bound for the *other* kind of run in the same directory (FEAT-058).
+# Separate, and swept separately, because the two kinds are nothing alike: a
+# consult happens whenever one agent asks another a question, a delegation is a
+# deliberate act that cost minutes of unattended work and carries a transcript
+# nothing can rebuild. Sharing one budget would let a busy afternoon of consults
+# evict every delegation an owner has. 300 is what ``CodeRunStore.MAX_RUNS``
+# already settled on for a high-frequency run ledger.
+MAX_CONSULT_RECORDS = int(os.environ.get("CONDOR_MAX_CONSULT_RECORDS", "") or 300)
+
+
+def max_records_for(kind: str) -> int:
+    """How many terminal records of ``kind`` one owner keeps on disk.
+
+    A function rather than a mapping so the caps stay *readable at call time*:
+    both are module-level names an install (or a test) may repoint, and a dict
+    built at import would freeze whatever they were then.
+    """
+    return MAX_CONSULT_RECORDS if kind == KIND_CONSULT else MAX_DELEGATION_RECORDS
+
+
 # What happens to the conversation that asked for the work when the task ends.
 #
 # ``notify`` -- Telegram push + transcript note, and nothing else. The outcome is
@@ -170,6 +205,11 @@ class DelegateTask:
             # dict is polled straight into a chat agent's context.
             "on_complete": self.on_complete,
             "started_at": self.started_at,
+            # Which channel this run came through (FEAT-058). Everything in the
+            # live registry is a delegation by construction; it is stated
+            # anyway so a row from memory and a row from disk are the same
+            # shape to the reader that merges them.
+            "kind": KIND_DELEGATE,
             # NOTE: `events` is deliberately omitted. This dict is what the MCP
             # `delegate` tool polls, so including the session stream would dump
             # the whole untruncated reasoning + tool output into a *chat agent's*
@@ -227,9 +267,6 @@ async def start_delegation(
     return dt
 
 
-TERMINAL_STATES = ("done", "error", "stopped")
-
-
 def _record_dir(dt: "DelegateTask") -> Path:
     """This delegation's directory, under the user who asked for the work.
 
@@ -254,50 +291,29 @@ def _record_delegation_status(dt: "DelegateTask") -> None:
     in-memory registry is gone (FEAT-035). ``write_status`` merges, so the
     fields the start-time write cannot know (result, tool count, end time)
     simply arrive with the final write.
+
+    This function is now only *which fields a delegation has*: the writing, the
+    end stamp and the retention sweep moved to
+    :func:`condor.agents.run_records.record_run`, which a consult reaches too
+    (FEAT-058), so a run becomes files in exactly one place.
     """
-    try:
-        from condor.runtime.registry_file import write_status
-
-        extra = {"ended_at": time.time()} if dt.status in TERMINAL_STATES else {}
-        write_status(
-            _record_dir(dt),
-            state=dt.status,
-            task_id=dt.task_id,
-            agent_slug=dt.agent_slug,
-            chat_id=dt.chat_id,
-            user_id=dt.user_id,
-            conversation_id=dt.conversation_id,
-            session_key=dt.session_key,
-            on_complete=dt.on_complete,
-            started_at=dt.started_at,
-            task=dt.task,
-            server_name=dt.server_name,
-            result=dt.result,
-            error=dt.error,
-            tool_count=sum(1 for e in dt.events if e.get("type") == "tool"),
-            **extra,
-        )
-    except Exception:
-        log.debug(
-            "Could not record delegation status for %s", dt.task_id, exc_info=True
-        )
-
-    # The growth and the sweep in one place: a record directory only ever
-    # appears here, so the cheapest correct moment to bound the collection is
-    # the write that completes one. Outside the try above on purpose -- the
-    # status write is the delegation's own business and must have landed (or
-    # failed) on its own terms before retention gets a say. Scoped to the one
-    # owner whose directory just grew; walking every user would put the whole
-    # install on a hot path.
-    if dt.status in TERMINAL_STATES:
-        try:
-            prune_delegation_records(dt.user_id or 0)
-        except Exception:
-            log.warning(
-                "Could not prune delegation records for user %s",
-                dt.user_id or 0,
-                exc_info=True,
-            )
+    record_run(
+        user_id=dt.user_id,
+        run_id=dt.task_id,
+        agent_slug=dt.agent_slug,
+        kind=KIND_DELEGATE,
+        state=dt.status,
+        task=dt.task,
+        started_at=dt.started_at,
+        chat_id=dt.chat_id,
+        conversation_id=dt.conversation_id,
+        session_key=dt.session_key,
+        on_complete=dt.on_complete,
+        server_name=dt.server_name,
+        result=dt.result,
+        error=dt.error,
+        tool_count=sum(1 for e in dt.events if e.get("type") == "tool"),
+    )
 
 
 def _is_live_delegation(task_id: str) -> bool:
@@ -318,8 +334,8 @@ def _is_live_delegation(task_id: str) -> bool:
     return dt._task is not None and not dt._task.done()
 
 
-def prune_delegation_records(user_id: int | str) -> int:
-    """Evict this owner's oldest terminal records past :data:`MAX_DELEGATION_RECORDS`.
+def prune_delegation_records(user_id: int | str, kind: str | None = None) -> int:
+    """Evict this owner's oldest terminal records of ``kind`` past its cap.
 
     The disk counterpart of :func:`retire_delegation`, and modelled on
     ``RoutineStore._prune_instances`` -- the repo's existing answer to this
@@ -336,21 +352,31 @@ def prune_delegation_records(user_id: int | str) -> int:
       together -- so both the disk and the walk shrink, and a reader gets a
       clean ``None`` rather than half a record.
 
+    Since FEAT-058 the directory holds two kinds of run and each has its own
+    cap (:func:`max_records_for`), for the reason stated at
+    :data:`MAX_CONSULT_RECORDS`: one budget shared between them would let the
+    cheap, plentiful kind push out the expensive, rare one. ``kind=None`` sweeps
+    every kind, which is what an owner-wide clean-up means.
+
     Returns how many directories were evicted. Public so retention can be
     exercised (and, on a large install, run) directly rather than only as a
     side effect of finishing a delegation.
     """
     from condor.agents.delegation_history import terminal_record_dirs
 
-    if MAX_DELEGATION_RECORDS <= 0:  # retention off: keep everything
+    if kind is None:
+        return sum(prune_delegation_records(user_id, k) for k in RECORD_KINDS)
+
+    cap = max_records_for(kind)
+    if cap <= 0:  # retention off: keep everything
         return 0
 
     candidates = [
         record
-        for record in terminal_record_dirs(user_id, TERMINAL_STATES)
+        for record in terminal_record_dirs(user_id, TERMINAL_STATES, kind=kind)
         if not _is_live_delegation(record[1])
     ]
-    excess = len(candidates) - MAX_DELEGATION_RECORDS
+    excess = len(candidates) - cap
     if excess <= 0:
         return 0
 
