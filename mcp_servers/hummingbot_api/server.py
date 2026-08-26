@@ -30,7 +30,7 @@ from mcp_servers.hummingbot_api.schemas import (
     GatewayContainerRequest,
     GatewaySwapRequest,
 )
-from mcp_servers.hummingbot_api.settings import settings
+from mcp_servers.hummingbot_api.settings import DEFAULT_TOOL_PROFILE, settings
 from mcp_servers.hummingbot_api.tools import bot_management as bot_management_tools
 from mcp_servers.hummingbot_api.tools import controllers as controllers_tools
 from mcp_servers.hummingbot_api.tools import executor_create
@@ -78,7 +78,6 @@ mcp = FastMCP("hummingbot-mcp")
 # Settings → Gateway).
 
 
-@mcp.tool()
 @handle_errors("configure server")
 async def configure_server(
     name: str | None = None,
@@ -160,7 +159,6 @@ async def configure_server(
         )
 
 
-@mcp.tool()
 @handle_errors("get portfolio overview")
 async def get_portfolio_overview(
     account_names: list[str] | None = None,
@@ -226,7 +224,6 @@ async def get_portfolio_overview(
 # Trading Tools
 
 
-@mcp.tool()
 @handle_errors("set position mode and leverage")
 async def set_account_position_mode_and_leverage(
     account_name: str,
@@ -264,7 +261,6 @@ async def set_account_position_mode_and_leverage(
     return response.strip()
 
 
-@mcp.tool()
 @handle_errors("search history")
 async def search_history(
     data_type: Literal["orders", "perp_positions", "clmm_positions"],
@@ -334,7 +330,6 @@ async def search_history(
 # Market Data Tools
 
 
-@mcp.tool()
 @handle_errors("get prices")
 async def get_prices(connector_name: str, trading_pairs: list[str]) -> str:
     """Get the latest price for one or more trading pairs on a connector.
@@ -360,7 +355,6 @@ async def get_prices(connector_name: str, trading_pairs: list[str]) -> str:
     )
 
 
-@mcp.tool()
 @handle_errors("get candles")
 async def get_candles(
     connector_name: str,
@@ -396,7 +390,6 @@ async def get_candles(
     )
 
 
-@mcp.tool()
 @handle_errors("get funding rate")
 async def get_funding_rate(connector_name: str, trading_pair: str) -> str:
     """Get the current perpetual funding rate for a trading pair.
@@ -425,7 +418,6 @@ async def get_funding_rate(connector_name: str, trading_pair: str) -> str:
     )
 
 
-@mcp.tool()
 @handle_errors("get order book")
 async def get_order_book(
     connector_name: str,
@@ -482,7 +474,6 @@ async def get_order_book(
     )
 
 
-@mcp.tool()
 @handle_errors("manage controllers")
 async def manage_controllers(
     action: Literal["list", "describe", "upsert", "delete"],
@@ -566,7 +557,6 @@ async def manage_controllers(
     return result.get("formatted_output") or result.get("message", str(result))
 
 
-@mcp.tool()
 @handle_errors("manage bots")
 async def manage_bots(
     action: Literal[
@@ -726,7 +716,6 @@ async def manage_bots(
 # See `mcp_servers/TOOL_STYLE.md`.
 
 
-@mcp.tool()
 @handle_errors("create position executor")
 async def create_position_executor(
     connector_name: str,
@@ -825,7 +814,6 @@ async def create_position_executor(
     return result.get("formatted_output", str(result))
 
 
-@mcp.tool()
 @handle_errors("create grid executor")
 async def create_grid_executor(
     connector_name: str,
@@ -954,7 +942,6 @@ async def create_grid_executor(
     return result.get("formatted_output", str(result))
 
 
-@mcp.tool()
 @handle_errors("create DCA executor")
 async def create_dca_executor(
     connector_name: str,
@@ -1041,7 +1028,6 @@ async def create_dca_executor(
     return result.get("formatted_output", str(result))
 
 
-@mcp.tool()
 @handle_errors("create order executor")
 async def create_order_executor(
     connector_name: str,
@@ -1143,7 +1129,6 @@ async def create_order_executor(
     return result.get("formatted_output", str(result))
 
 
-@mcp.tool()
 @handle_errors("create LP executor", GATEWAY_LOG_HINT)
 async def create_lp_executor(
     connector_name: str,
@@ -1256,7 +1241,6 @@ async def create_lp_executor(
     return result.get("formatted_output", str(result))
 
 
-@mcp.tool()
 @handle_errors("list executors")
 async def list_executors(
     account_names: list[str] | None = None,
@@ -1301,7 +1285,6 @@ async def list_executors(
     return result.get("formatted_output", str(result))
 
 
-@mcp.tool()
 @handle_errors("get executor")
 async def get_executor(
     executor_id: str,
@@ -1335,7 +1318,6 @@ async def get_executor(
     return result.get("formatted_output", str(result))
 
 
-@mcp.tool()
 @handle_errors("stop executor")
 async def stop_executor(
     executor_id: str,
@@ -1367,7 +1349,6 @@ async def stop_executor(
     return result.get("formatted_output", str(result))
 
 
-@mcp.tool()
 @handle_errors("list orphaned positions")
 async def list_orphaned_positions() -> str:
     """List terminated executors that may still own an on-chain position. Read-only.
@@ -1394,7 +1375,6 @@ async def list_orphaned_positions() -> str:
     return result.get("formatted_output", str(result))
 
 
-@mcp.tool()
 @handle_errors("resolve orphaned position")
 async def resolve_orphaned_position(executor_id: str) -> str:
     """Mark an orphaned position as recovered, after closing it. Read-only bookkeeping.
@@ -1417,7 +1397,6 @@ async def resolve_orphaned_position(executor_id: str) -> str:
     return result.get("formatted_output", str(result))
 
 
-@mcp.tool()
 @handle_errors("list positions held")
 async def list_positions_held(
     connector_name: str | None = None,
@@ -1448,7 +1427,6 @@ async def list_positions_held(
     return result.get("formatted_output", str(result))
 
 
-@mcp.tool()
 @handle_errors("clear position held")
 async def clear_position_held(
     connector_name: str,
@@ -1481,7 +1459,6 @@ async def clear_position_held(
     return result.get("formatted_output", str(result))
 
 
-@mcp.tool()
 @handle_errors("get performance report")
 async def get_performance_report(controller_id: str | None = None) -> str:
     """Get aggregate executor performance. Read-only.
@@ -1499,7 +1476,6 @@ async def get_performance_report(controller_id: str | None = None) -> str:
     return result.get("formatted_output", str(result))
 
 
-@mcp.tool()
 @handle_errors("manage executor defaults")
 async def executor_defaults(
     action: Literal["get", "save", "reset"],
@@ -1529,7 +1505,6 @@ async def executor_defaults(
     return result.get("formatted_output", str(result))
 
 
-@mcp.tool()
 @handle_errors("explore DEX pools", GATEWAY_LOG_HINT)
 async def explore_dex_pools(
     action: Literal["list_pools", "get_pool_info"],
@@ -1592,7 +1567,6 @@ async def explore_dex_pools(
     return format_gateway_clmm_pool_result(action, result)
 
 
-@mcp.tool()
 @handle_errors("manage Gateway config", GATEWAY_LOG_HINT)
 async def manage_gateway_config(
     resource_type: Literal[
@@ -1675,7 +1649,6 @@ async def manage_gateway_config(
     return format_gateway_config_result(result)
 
 
-@mcp.tool()
 @handle_errors("manage Gateway container")
 async def manage_gateway_container(
     action: Literal["get_status", "start", "stop", "restart", "get_logs"],
@@ -1699,7 +1672,6 @@ async def manage_gateway_container(
     return format_gateway_container_result(result)
 
 
-@mcp.tool()
 @handle_errors("manage AMM", GATEWAY_LOG_HINT)
 async def manage_amm(
     action: (
@@ -1793,7 +1765,6 @@ async def manage_amm(
     return format_amm_result(action, result)
 
 
-@mcp.tool()
 @handle_errors("manage CLMM", GATEWAY_LOG_HINT)
 async def manage_clmm(
     action: (
@@ -1900,7 +1871,6 @@ async def manage_clmm(
     return format_clmm_result(action, result)
 
 
-@mcp.tool()
 @handle_errors("quote a Gateway swap", GATEWAY_LOG_HINT)
 async def quote_swap(
     connector: str,
@@ -1973,7 +1943,6 @@ async def quote_swap(
     return format_gateway_swap_result("quote", result)
 
 
-@mcp.tool()
 @handle_errors("execute a Gateway swap", GATEWAY_LOG_HINT)
 async def execute_swap(
     connector: str,
@@ -2041,7 +2010,6 @@ async def execute_swap(
     return format_gateway_swap_result("execute", result)
 
 
-@mcp.tool()
 @handle_errors("get Gateway swap status", GATEWAY_LOG_HINT)
 async def get_swap_status(transaction_hash: str) -> str:
     """Resolve a submitted swap by its transaction hash.
@@ -2059,7 +2027,6 @@ async def get_swap_status(transaction_hash: str) -> str:
     return format_gateway_swap_result("get_status", result)
 
 
-@mcp.tool()
 @handle_errors("search Gateway swaps", GATEWAY_LOG_HINT)
 async def search_swaps(
     connector: str | None = None,
@@ -2109,7 +2076,6 @@ async def search_swaps(
 # GeckoTerminal Tools
 
 
-@mcp.tool()
 @handle_errors("explore GeckoTerminal")
 async def explore_geckoterminal(
     action: Literal[
@@ -2181,6 +2147,107 @@ async def explore_geckoterminal(
         trade_volume_filter=trade_volume_filter,
     )
     return result.get("formatted_output", str(result))
+
+
+# ── Tool profiles (FEAT-066) ─────────────────────────────────────────────────
+#
+# Tool allowlists are only enforced for pydantic-ai model keys; an ACP bridge
+# (claude-code, gemini, copilot) runs unrestricted. For those seats the surface a
+# session MOUNTS is the whole permission model, so which tools this process
+# registers is a security boundary — hence explicit registration below instead of
+# an ``@mcp.tool()`` decorator that fires for everyone at import.
+#
+# Read the tables as nested rings, narrowest first. Nothing here changes a tool's
+# behaviour; a seat simply cannot name what was never registered.
+
+#: The trading surface: everything an autonomous tick needs to read a market,
+#: size a position, run it and report on it. This is the whole surface minus the
+#: two rings below.
+TRADING_TOOLS = (
+    get_portfolio_overview,
+    set_account_position_mode_and_leverage,
+    search_history,
+    get_prices,
+    get_candles,
+    get_funding_rate,
+    get_order_book,
+    manage_controllers,
+    manage_bots,
+    create_position_executor,
+    create_grid_executor,
+    create_dca_executor,
+    create_order_executor,
+    create_lp_executor,
+    list_executors,
+    get_executor,
+    stop_executor,
+    list_orphaned_positions,
+    resolve_orphaned_position,
+    list_positions_held,
+    clear_position_held,
+    get_performance_report,
+    executor_defaults,
+    explore_dex_pools,
+    quote_swap,
+    execute_swap,
+    get_swap_status,
+    search_swaps,
+    explore_geckoterminal,
+)
+
+#: Direct, un-executored liquidity operations. An attended specialist owns these
+#: — the LP experts list ``manage_amm`` in their own tools, and the shared
+#: ``recover_orphaned_position`` playbook closes a stranded position with
+#: ``manage_clmm(action="close")``. A tick does not: its orphan hint tells it to
+#: report, not to self-recover, and an unattended loop that can move liquidity
+#: outside an executor has no ledger entry to show for it.
+LIQUIDITY_TOOLS = (
+    manage_amm,
+    manage_clmm,
+)
+
+#: Infrastructure. Repointing the API server, rewriting Gateway's config and
+#: restarting its container are operator actions with a human in front of them:
+#: the chat, or a standalone host. No agent's tool list names one, and the chat's
+#: own context prompt already says not to call ``configure_server``.
+ADMIN_TOOLS = (
+    configure_server,
+    manage_gateway_config,
+    manage_gateway_container,
+)
+
+#: profile name → the tools it registers. ``full`` is the default because this
+#: server is also run standalone (uvx, external hosts, `.mcp.json`).
+TOOL_PROFILES: dict[str, tuple] = {
+    "tick": TRADING_TOOLS,
+    "agent": TRADING_TOOLS + LIQUIDITY_TOOLS,
+    "full": TRADING_TOOLS + LIQUIDITY_TOOLS + ADMIN_TOOLS,
+}
+
+
+def register_tools(server: FastMCP, profile: str = DEFAULT_TOOL_PROFILE) -> None:
+    """Register this profile's tools on ``server``.
+
+    Raises on an unknown profile rather than degrading to ``full``: the only
+    spawner that passes the flag is ``condor.runtime.toolsets``, so a name that
+    does not resolve is a bug there, and silently widening a seat is the one
+    failure mode this feature exists to prevent.
+    """
+    try:
+        tools = TOOL_PROFILES[profile]
+    except KeyError:
+        raise ValueError(
+            f"Unknown tool profile {profile!r}; expected one of "
+            f"{sorted(TOOL_PROFILES)}"
+        ) from None
+    for fn in tools:
+        server.tool()(fn)
+
+
+# Registration happens at import, not in ``_run()``: ``mcp`` is a module-level
+# singleton and the profile is resolved from argv at import (settings), so the
+# server object is complete for anything that inspects it before startup.
+register_tools(mcp, settings.tool_profile)
 
 
 def _apply_cli_args():

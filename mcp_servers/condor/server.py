@@ -10,6 +10,7 @@ from mcp.server.fastmcp import FastMCP
 
 from condor.telemetry import taps as telemetry_taps
 from mcp_servers.condor.middleware import handle_errors
+from mcp_servers.condor.settings import DEFAULT_TOOL_PROFILE, settings
 from mcp_servers.condor.tools import available_models as available_models_tool
 from mcp_servers.condor.tools import code as code_tool
 from mcp_servers.condor.tools import consult as consult_tool
@@ -301,7 +302,6 @@ def _build_instructions() -> str:
 mcp = FastMCP("condor", instructions=_build_instructions())
 
 
-@mcp.tool()
 @handle_errors("consult agent")
 @telemetry_taps.tracked("consult")
 async def consult(agent: str, task: str, context: str = "") -> dict:
@@ -323,7 +323,6 @@ async def consult(agent: str, task: str, context: str = "") -> dict:
     return await consult_tool.consult(agent, task, context)
 
 
-@mcp.tool()
 @handle_errors("delegate task")
 @telemetry_taps.tracked("delegate")
 async def delegate(
@@ -380,7 +379,6 @@ async def delegate(
     return await delegate_tool.delegate(action, agent, task, task_id, on_complete)
 
 
-@mcp.tool()
 @handle_errors("send notification")
 @telemetry_taps.tracked("send_notification")
 async def send_notification(
@@ -399,7 +397,6 @@ async def send_notification(
     return await notification.send_notification(text, parse_mode)
 
 
-@mcp.tool()
 @handle_errors("manage routines")
 @telemetry_taps.tracked("manage_routines")
 async def manage_routines(
@@ -469,7 +466,6 @@ async def manage_routines(
     return await routines.manage_routines(action, name, config, agent, code, shared)
 
 
-@mcp.tool()
 @handle_errors("run code")
 @telemetry_taps.tracked("run_code")
 async def run_code(
@@ -540,7 +536,6 @@ async def run_code(
     return await code_tool.run_code(code, action, label, timeout, run_id, agent, limit)
 
 
-@mcp.tool()
 @handle_errors("manage servers")
 @telemetry_taps.tracked("manage_servers")
 async def manage_servers(
@@ -566,7 +561,6 @@ async def manage_servers(
     return await servers.manage_servers(action, name)
 
 
-@mcp.tool()
 @handle_errors("get available models")
 @telemetry_taps.tracked("get_available_models")
 async def get_available_models(
@@ -623,7 +617,6 @@ async def get_available_models(
     )
 
 
-@mcp.tool()
 @handle_errors("manage agents")
 @telemetry_taps.tracked("manage_agents")
 async def manage_agents(
@@ -698,7 +691,6 @@ async def manage_agents(
     )
 
 
-@mcp.tool()
 @handle_errors("manage strategies")
 @telemetry_taps.tracked("manage_strategies")
 async def manage_strategies(
@@ -757,7 +749,6 @@ async def manage_strategies(
     )
 
 
-@mcp.tool()
 @handle_errors("control agent")
 @telemetry_taps.tracked("control_agent")
 async def control_agent(
@@ -829,7 +820,6 @@ async def control_agent(
     )
 
 
-@mcp.tool()
 @handle_errors("manage memory")
 @telemetry_taps.tracked("manage_memory")
 async def manage_memory(
@@ -883,7 +873,6 @@ async def manage_memory(
     )
 
 
-@mcp.tool()
 @handle_errors("manage skill")
 @telemetry_taps.tracked("manage_skill")
 async def manage_skill(
@@ -995,7 +984,6 @@ async def manage_skill(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
 @handle_errors("journal read")
 @telemetry_taps.tracked("trading_agent_journal_read")
 async def trading_agent_journal_read(
@@ -1026,7 +1014,6 @@ async def trading_agent_journal_read(
     return trading_agent.journal_read(agent_id, section, max_entries)
 
 
-@mcp.tool()
 @handle_errors("journal write")
 @telemetry_taps.tracked("trading_agent_journal_write")
 async def trading_agent_journal_write(
@@ -1077,6 +1064,84 @@ async def trading_agent_journal_write(
         category,
         section,
     )
+
+
+# ── Tool profiles (FEAT-066) ─────────────────────────────────────────────────
+#
+# Tool allowlists are only enforced for pydantic-ai model keys; an ACP bridge
+# (claude-code, gemini, copilot) runs unrestricted. For those seats the surface a
+# session MOUNTS is the whole permission model, so which tools this process
+# registers is a security boundary — hence explicit registration below instead of
+# an ``@mcp.tool()`` decorator that fires for every seat at import.
+
+#: Everything a session needs whoever is sitting in it: its own memory and
+#: playbooks, its routines, a scratch interpreter, the journal it writes each
+#: tick, and the peers it may consult. ``consult``/``delegate`` stay even in the
+#: narrowest profile — a peer consult and a background copy of oneself are
+#: designed behaviour, and a worker already has ``delegate(action="start")``
+#: refused in code rather than by omission.
+COMMON_TOOLS = (
+    consult,
+    delegate,
+    send_notification,
+    manage_routines,
+    run_code,
+    manage_servers,
+    manage_memory,
+    manage_skill,
+    trading_agent_journal_read,
+    trading_agent_journal_write,
+)
+
+#: Orchestration: who exists, what loops they own, and which instances are
+#: running. An *attended* specialist owns these — ``strategy_builder`` is a
+#: shared playbook every agent inherits, and it tells the agent to author its own
+#: strategy with ``manage_strategies``, pick a model from ``get_available_models``
+#: and launch itself with ``control_agent``. A tick is the one seat that must
+#: not: it is already running inside the very loop these tools start and stop,
+#: and nothing in a tick playbook reaches for them.
+ORCHESTRATION_TOOLS = (
+    manage_agents,
+    manage_strategies,
+    control_agent,
+    get_available_models,
+)
+
+#: profile name → the tools it registers. ``agent`` and ``full`` register the
+#: same set today, and the name is kept distinct on purpose: it is the seat axis
+#: the hummingbot server narrows (no Gateway config, no container control, no
+#: repointing the API server), and keeping one profile vocabulary across both
+#: servers means a seat is described once, in ``condor.runtime.toolsets``.
+TOOL_PROFILES: dict[str, tuple] = {
+    "tick": COMMON_TOOLS,
+    "agent": COMMON_TOOLS + ORCHESTRATION_TOOLS,
+    "full": COMMON_TOOLS + ORCHESTRATION_TOOLS,
+}
+
+
+def register_tools(server: FastMCP, profile: str = DEFAULT_TOOL_PROFILE) -> None:
+    """Register this profile's tools on ``server``.
+
+    Raises on an unknown profile rather than degrading to ``full``: the only
+    spawner that passes the flag is ``condor.runtime.toolsets``, so a name that
+    does not resolve is a bug there, and silently widening a seat is the one
+    failure mode this feature exists to prevent.
+    """
+    try:
+        tools = TOOL_PROFILES[profile]
+    except KeyError:
+        raise ValueError(
+            f"Unknown tool profile {profile!r}; expected one of "
+            f"{sorted(TOOL_PROFILES)}"
+        ) from None
+    for fn in tools:
+        server.tool()(fn)
+
+
+# Registration happens at import: ``mcp`` is a module-level singleton and the
+# profile is resolved from argv at import (settings), so the server object is
+# complete for anything that inspects it before startup.
+register_tools(mcp, settings.tool_profile)
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@
 Configuration settings for Hummingbot MCP Server
 """
 
+import argparse
 import os
 from pathlib import Path
 
@@ -13,6 +14,27 @@ from mcp_servers.hummingbot_api.exceptions import ConfigurationError
 
 CONFIG_DIR = Path.home() / ".hummingbot_mcp"
 SERVER_CONFIG_PATH = CONFIG_DIR / "server.yml"
+
+#: Default tool profile (FEAT-066). ``full`` on purpose: this server is also run
+#: standalone (the uvx console script, an external MCP host, the checked-in
+#: `.mcp.json`), and a launch with no flag has to keep serving the whole surface.
+DEFAULT_TOOL_PROFILE = "full"
+
+
+def _parse_tool_profile() -> str:
+    """``--profile`` off argv, read at import.
+
+    It has to be resolved *here* rather than in ``server._apply_cli_args``: which
+    tools exist is decided when the module registers them, which is import time,
+    and ``_apply_cli_args`` only runs once ``_run()`` is already starting the
+    stdio loop. ``parse_known_args`` so every other flag the spawner passes
+    (``--url``, ``--server-name``, ``--bot-id``) stays inert here, and so a run
+    under pytest — whose argv is the test runner's — resolves the default.
+    """
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--profile", default=DEFAULT_TOOL_PROFILE)
+    args, _ = parser.parse_known_args()
+    return args.profile
 
 
 class ServerConfig(BaseModel):
@@ -65,6 +87,11 @@ class Settings(BaseModel):
     server_name: str = Field(default="default")
     default_account: str = Field(default="master_account")
 
+    # Which slice of the tool surface this process registers (FEAT-066). For an
+    # ACP-driven seat the mounted surface IS the permission model, so this is a
+    # security boundary, not a convenience: see ``server.TOOL_PROFILES``.
+    tool_profile: str = Field(default=DEFAULT_TOOL_PROFILE)
+
     # Connection settings
     connection_timeout: float = Field(default=30.0)
     max_retries: int = Field(default=3)
@@ -113,6 +140,7 @@ def get_settings() -> Settings:
             max_retries=int(os.getenv("HUMMINGBOT_MAX_RETRIES", "3")),
             retry_delay=float(os.getenv("HUMMINGBOT_RETRY_DELAY", "2.0")),
             log_level=os.getenv("HUMMINGBOT_LOG_LEVEL", "INFO"),
+            tool_profile=_parse_tool_profile(),
         )
     except Exception as e:
         raise ConfigurationError(f"Failed to load configuration: {e}")
