@@ -31,6 +31,10 @@ import { useMainControllerData } from "@/hooks/useMainControllerData";
 import { usePairBalances } from "@/hooks/usePairBalances";
 import { useResizeDrag } from "@/hooks/useResizeDrag";
 import { useServer } from "@/hooks/useServer";
+import {
+  OWNER_ONLY_HINT,
+  useServerPermission,
+} from "@/hooks/useServerPermission";
 import { useCondorWebSocket } from "@/hooks/useWebSocket";
 import { api, type DexTokenConflict } from "@/lib/api";
 import { connectorCapabilities } from "@/lib/connector-capabilities";
@@ -56,6 +60,10 @@ const DEPTH_KEY = "condor.dex.depth-collapsed";
  */
 export function DexPool() {
   const { server } = useServer();
+  // Replacing a token deletes the entry another token holds, so the backend
+  // gates that one flag on ownership (condor/web/routes/dex.py). Read the same
+  // answer here so a trader is told, rather than handed a 403.
+  const { isOwner } = useServerPermission();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { network = "", address = "" } = useParams();
@@ -436,8 +444,9 @@ export function DexPool() {
                     replace: true,
                   })
                 }
-                disabled={addTokenMutation.isPending}
-                className="rounded border border-amber-500/40 px-2 py-0.5 font-medium text-[var(--color-yellow)] hover:bg-amber-500/20 disabled:opacity-50"
+                disabled={addTokenMutation.isPending || !isOwner}
+                title={isOwner ? undefined : OWNER_ONLY_HINT}
+                className="rounded border border-amber-500/40 px-2 py-0.5 font-medium text-[var(--color-yellow)] hover:bg-amber-500/20 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 Replace
               </button>
