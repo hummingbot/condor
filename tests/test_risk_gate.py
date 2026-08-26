@@ -496,17 +496,17 @@ def _amm_call(action: str, **extra) -> dict:
 
 
 def _swap_call(amount: str, pair: str = "SOL-USDC") -> dict:
-    """A signing ``manage_gateway_swaps`` call.
+    """A signing ``execute_swap`` call.
 
     The swap used to be ``manage_amm(execute_swap)`` and was priced off the
     pool quote. It is its own pair-scoped tool now, so the gate prices it from
     the market feed instead -- the same number, reached the way this tool
-    identifies its market.
+    identifies its market. It carries no ``action``: the tool name is what says
+    this call signs (FEAT-064).
     """
     return {
-        "tool": "mcp__mcp-hummingbot__manage_gateway_swaps",
+        "tool": "mcp__mcp-hummingbot__execute_swap",
         "input": {
-            "action": "execute",
             "connector": "meteora",
             "network": "solana-mainnet-beta",
             "trading_pair": pair,

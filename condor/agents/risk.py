@@ -16,7 +16,6 @@ from condor.runtime.danger import (
     DANGEROUS_AMM_ACTIONS,
     DANGEROUS_BOT_ACTIONS,
     DANGEROUS_CLMM_ACTIONS,
-    DANGEROUS_SWAP_ACTIONS,
     is_dangerous_tool_call,
     tool_call_input,
     tool_call_name,
@@ -81,15 +80,37 @@ class RiskState:
         }
 
 
-#: The signing actions of each Gateway tool, by tool name. These are the
-#: DANGEROUS_* sets the confirmation gate already uses: loop mode stands in for
+#: Gateway tools where reaching the tool at all is the signature -- there is no
+#: ``action`` to look up, because the split gave the signing call its own name
+#: (FEAT-064). The confirmation gate lists these in ``DANGEROUS_TOOLS``.
+ALWAYS_SIGNING_DEX_TOOLS = frozenset({"execute_swap"})
+
+#: The signing actions of each action-gated Gateway tool, by tool name. These are
+#: the DANGEROUS_* sets the confirmation gate already uses: loop mode stands in for
 #: the human those sets would otherwise put in front of the call, so it has to
 #: agree with them exactly or the two gates disagree about the same signature.
 _SIGNING_DEX_ACTIONS = {
-    "manage_gateway_swaps": DANGEROUS_SWAP_ACTIONS,
     "manage_clmm": DANGEROUS_CLMM_ACTIONS,
     "manage_amm": DANGEROUS_AMM_ACTIONS,
 }
+
+
+def _is_signing_dex_call(tool_name: str, input_data: dict[str, Any]) -> bool:
+    """Whether a Gateway call signs, by tool name or by action.
+
+    The two spellings of the same question: a name-gated tool signs on every
+    call, an action-gated one only on its own ``DANGEROUS_*`` actions.
+    """
+    if tool_name in ALWAYS_SIGNING_DEX_TOOLS:
+        return True
+    action = input_data.get("action", "")
+    return action in _SIGNING_DEX_ACTIONS.get(tool_name, frozenset())
+
+
+def _dex_call_label(tool_name: str, input_data: dict[str, Any]) -> str:
+    """How a refused Gateway call names itself in the reason string."""
+    return input_data.get("action", "") or tool_name
+
 
 #: Signing actions that return capital instead of committing it. Allowed even
 #: under a breached limit: refusing them would trap a loop agent in a position
@@ -257,9 +278,9 @@ class RiskEngine:
         The Gateway tools sign straight from the user's wallet -- no executor,
         no controller, no saved config in the path -- so this gate is the only
         thing bounding a loop agent's DEX capital. Three tools reach it:
-        ``manage_gateway_swaps`` signs a swap, ``manage_clmm`` and
-        ``manage_amm`` move liquidity. Anything outside their
-        ``DANGEROUS_*_ACTIONS`` (quotes, pool and position reads, the guide
+        ``execute_swap`` signs a swap on every call, ``manage_clmm`` and
+        ``manage_amm`` move liquidity on their signing actions. Anything else
+        (``quote_swap``, ``search_swaps``, pool and position reads, the guide
         load) is not a signature and passes through untouched.
 
         ``remove_liquidity``, ``close`` and ``collect_fees`` withdraw capital
@@ -282,11 +303,10 @@ class RiskEngine:
         input_data = tool_call_input(tool_call)
         if input_data is None:
             return False, "Tool arguments could not be read"
+        tool_name = tool_call_name(tool_call)
         action = input_data.get("action", "")
 
-        if action not in _SIGNING_DEX_ACTIONS.get(
-            tool_call_name(tool_call), frozenset()
-        ):
+        if not _is_signing_dex_call(tool_name, input_data):
             return True, ""
 
         if action in RISK_REDUCING_DEX_ACTIONS:
@@ -297,12 +317,16 @@ class RiskEngine:
             or not math.isfinite(notional_quote)
             or notional_quote <= 0
         ):
-            return False, f"DEX {action} quote notional is unavailable"
+            return False, (
+                f"DEX {_dex_call_label(tool_name, input_data)} quote notional "
+                "is unavailable"
+            )
 
         projected = current_state.total_exposure + notional_quote
         if projected > self.limits.max_position_size_quote:
             return False, (
-                f"DEX {action} would exceed position limit: ${projected:.2f} > "
+                f"DEX {_dex_call_label(tool_name, input_data)} would exceed "
+                f"position limit: ${projected:.2f} > "
                 f"${self.limits.max_position_size_quote:.2f}"
             )
 
@@ -445,11 +469,14 @@ def auto_approve_with_risk_check(
             # so they are priced and gated here (SEC-224). Interactive surfaces
             # still route the same call to a human via confirmations.py; this
             # branch is what stands in for that human in loop mode.
-            if tool_name in _SIGNING_DEX_ACTIONS:
+            if (
+                tool_name in ALWAYS_SIGNING_DEX_TOOLS
+                or tool_name in _SIGNING_DEX_ACTIONS
+            ):
                 action = input_data.get("action", "")
                 notional_quote = None
                 if (
-                    action in _SIGNING_DEX_ACTIONS[tool_name]
+                    _is_signing_dex_call(tool_name, input_data)
                     and action not in RISK_REDUCING_DEX_ACTIONS  # unpriced
                 ):
                     try:
@@ -638,7 +665,7 @@ async def _dex_notional_quote(
     assumed to share.
 
     The two tool families are priced differently because they identify a market
-    differently. ``manage_gateway_swaps`` is *pair*-scoped -- it names a
+    differently. ``execute_swap`` is *pair*-scoped -- it names a
     ``trading_pair``, so ``fetch_current_price`` can price it directly. The LP
     tools are *pool*-scoped: they name a ``pool_address`` and a ``base_token``
     but never a pair, so they are valued off the pool's own mid price (see
@@ -646,7 +673,7 @@ async def _dex_notional_quote(
     """
     action = input_data.get("action", "")
 
-    if tool_name == "manage_gateway_swaps":
+    if tool_name == "execute_swap":
         # `amount` is denominated in the pair's base token; `side` only picks
         # the direction, so it does not change what the swap is worth.
         base = _amm_field(input_data.get("amount"), "amount")
@@ -685,7 +712,7 @@ async def _dex_notional_quote(
 
 
 async def _swap_base_price(input_data: dict[str, Any], client: Any) -> float:
-    """The quote-per-base price to value a ``manage_gateway_swaps`` call.
+    """The quote-per-base price to value an ``execute_swap`` call.
 
     Pair-scoped, so unlike the pool-scoped LP tools this is exactly the case
     :func:`condor.fetchers.market_data.fetch_current_price` is for.

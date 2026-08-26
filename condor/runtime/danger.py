@@ -20,7 +20,7 @@ from typing import Any
 # Tools that require user confirmation before execution
 DANGEROUS_TOOLS = {
     "place_order",
-    "manage_gateway_swaps",  # execute action
+    "execute_swap",  # every call signs; quote/status/search are separate tools
     "manage_clmm",  # every action that moves liquidity
     "manage_amm",  # every action that moves liquidity
     "manage_gateway_config",  # no resource of it is gated today; see below
@@ -44,8 +44,10 @@ DANGEROUS_BOT_ACTIONS = {
     "update_config",
 }
 
-# Actions within manage_gateway_swaps that require confirmation
-DANGEROUS_SWAP_ACTIONS = {"execute"}
+# There is no DANGEROUS_SWAP_ACTIONS: the swap family is gated by NAME. `execute_swap`
+# is its own tool (FEAT-064), so the gate no longer has to read an `action` out of the
+# arguments to tell a free quote from a signature — reaching `execute_swap` at all is
+# the signature, and `quote_swap` / `get_swap_status` / `search_swaps` are never gated.
 
 # Actions within manage_clmm that require confirmation. These are the tool's
 # own action literals — a name that does not match one lets the call through
@@ -166,10 +168,6 @@ def is_dangerous_tool_call(tool_call: dict[str, Any]) -> bool:
 
     # Direct dangerous tools
     if tool_name in DANGEROUS_TOOLS:
-        # For manage_gateway_swaps, only "execute" action is dangerous
-        if tool_name == "manage_gateway_swaps":
-            return _has_dangerous_action(tool_call, DANGEROUS_SWAP_ACTIONS)
-
         # For the LP tools, only the actions that move liquidity are dangerous
         if tool_name == "manage_clmm":
             return _has_dangerous_action(tool_call, DANGEROUS_CLMM_ACTIONS)
@@ -241,7 +239,7 @@ def format_tool_summary(tool_call: dict[str, Any]) -> str:
             return f"Update config '{config_name}' on bot '{bot_name}'"
         return f"Bot '{bot_name}': {action}"
 
-    if tool_name == "manage_gateway_swaps":
+    if tool_name == "execute_swap":
         pair = input_data.get("trading_pair", "?")
         side = input_data.get("side", "?")
         amount = input_data.get("amount", "?")

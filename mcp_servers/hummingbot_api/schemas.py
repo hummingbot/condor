@@ -469,27 +469,10 @@ class GatewaySwapRequest(BaseModel):
         default=None, description="Transaction hash (required for get_status action)"
     )
 
-    # Search parameters (all optional)
-    search_connector: str | None = Field(
-        default=None,
-        description="Filter by connector for search action (e.g., 'jupiter')",
-    )
-
-    search_network: str | None = Field(
-        default=None,
-        description="Filter by network for search action (e.g., 'solana-mainnet-beta')",
-    )
-
-    search_wallet_address: str | None = Field(
-        default=None, description="Filter by wallet address for search action"
-    )
-
-    search_trading_pair: str | None = Field(
-        default=None,
-        description="Filter by trading pair for search action. Supports symbols and addresses "
-        "(e.g., 'SOL-USDC', 'TOKEN_ADDRESS_1-TOKEN_ADDRESS_2')",
-    )
-
+    # Search parameters (all optional). The search action reuses `connector`,
+    # `network`, `wallet_address` and `trading_pair` as filters: each action is
+    # now its own registered tool (FEAT-064), so nothing has to disambiguate a
+    # filter from a quote parameter inside one signature any more.
     status: Literal["SUBMITTED", "CONFIRMED", "FAILED"] | None = Field(
         default=None, description="Filter by transaction status for search action"
     )

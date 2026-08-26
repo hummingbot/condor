@@ -21,7 +21,6 @@ from handlers.agents._shared import (
     DANGEROUS_CLMM_ACTIONS,
     DANGEROUS_CONFIG_RESOURCES,
     DANGEROUS_EXECUTOR_ACTIONS,
-    DANGEROUS_SWAP_ACTIONS,
     DANGEROUS_TOOLS,
     is_dangerous_tool_call,
 )
@@ -62,7 +61,6 @@ def test_gated_actions_exist_on_their_tools():
     for tool_name, actions in (
         ("manage_clmm", DANGEROUS_CLMM_ACTIONS),
         ("manage_amm", DANGEROUS_AMM_ACTIONS),
-        ("manage_gateway_swaps", DANGEROUS_SWAP_ACTIONS),
         ("manage_executors", DANGEROUS_EXECUTOR_ACTIONS),
         ("manage_bots", DANGEROUS_BOT_ACTIONS),
     ):
@@ -85,24 +83,31 @@ def test_every_liquidity_moving_action_is_gated():
         ), f"{tool_name} write action(s) ungated: {sorted(writes - gated)}"
 
 
-def test_every_signing_swap_action_is_gated():
+def test_the_swap_family_is_gated_by_name():
     """The swap twin of :func:`test_every_liquidity_moving_action_is_gated`.
 
-    ``manage_gateway_swaps`` registers four actions and only ``execute`` signs,
-    so ``DANGEROUS_SWAP_ACTIONS`` covers the surface today. The reason to pin it
-    is what sits one layer down: the implementation also handles
-    ``execute_quote`` — it signs a quote taken earlier by ``action="quote"`` —
-    and that action is simply not in the registered ``Literal``, so nothing can
-    reach it. Adding it to that Literal would be a one-word change with no
-    obvious connection to this gate, and the swap would sign unconfirmed and
-    unpriced. This test is that connection.
+    The swap tools carry no ``action`` at all since FEAT-064: ``execute_swap``
+    is the only one that signs and it is gated by name, so the three reads must
+    stay off the gate and the writer must stay on it. What this pins is the
+    layer below: the implementation also handles ``execute_quote`` — it signs a
+    quote taken earlier — and no registered tool reaches it. Registering one
+    would be a small change with no obvious connection to this gate, and the
+    swap would sign unconfirmed and unpriced. This test is that connection.
     """
-    read_only = {"quote", "search", "get_status"}
-    writes = _action_literals("manage_gateway_swaps") - read_only
-    assert writes <= DANGEROUS_SWAP_ACTIONS, (
-        "manage_gateway_swaps signing action(s) ungated: "
-        f"{sorted(writes - DANGEROUS_SWAP_ACTIONS)}"
+    registered = _registered_tools()
+    assert "manage_gateway_swaps" not in registered, (
+        "the multiplexed swap tool is back: a free quote and a signature share a "
+        "name again, and the gate is back to sniffing an action string"
     )
+    assert "execute_swap" in DANGEROUS_TOOLS
+    assert is_dangerous_tool_call({"tool": "execute_swap", "input": {}})
+
+    for name in ("quote_swap", "get_swap_status", "search_swaps"):
+        assert name in registered, f"{name} is no longer registered"
+        assert name not in DANGEROUS_TOOLS, f"{name} reads only; gating it is noise"
+        assert not is_dangerous_tool_call(
+            {"tool": f"mcp__mcp-hummingbot__{name}", "input": {}}
+        ), f"{name} needlessly gated"
 
 
 def test_lp_writes_require_confirmation():

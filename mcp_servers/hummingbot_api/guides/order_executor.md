@@ -6,10 +6,10 @@ Closest executor to a plain BUY/SELL order but with strategy options.
 
 **This is also how you swap on a DEX.** Set `connector_name` to a NETWORK
 (`"solana-mainnet-beta"`, `"ethereum-mainnet"`) with `execution_strategy="MARKET"` and the
-order routes through Gateway's unified swap route — the same one `manage_gateway_swaps`
+order routes through Gateway's unified swap route — the same one `execute_swap`
 uses, but with the slippage ramp and an executor record attached. The router is not
 selectable per order: it comes from the network's configured `swapProvider`. Prefer this
-over `manage_gateway_swaps(action="execute")` for any swap that is part of a strategy.
+over a one-shot `execute_swap` for any swap that is part of a strategy.
 
 **Use when:**
 - You want a one-off buy or sell with reliable execution

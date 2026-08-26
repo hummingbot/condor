@@ -37,7 +37,6 @@ from condor.runtime.danger import (  # noqa: F401
     DANGEROUS_CLMM_ACTIONS,
     DANGEROUS_CONFIG_RESOURCES,
     DANGEROUS_EXECUTOR_ACTIONS,
-    DANGEROUS_SWAP_ACTIONS,
     DANGEROUS_TOOLS,
     is_dangerous_tool_call,
     tool_call_input,

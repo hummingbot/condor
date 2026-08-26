@@ -1212,54 +1212,25 @@ async def manage_clmm(
 
 
 @mcp.tool()
-@handle_errors("manage Gateway swaps", GATEWAY_LOG_HINT)
-async def manage_gateway_swaps(
-    action: Literal["quote", "execute", "search", "get_status"],
-    connector: str | None = None,
-    network: str | None = None,
-    trading_pair: str | None = None,
-    side: Literal["BUY", "SELL"] | None = None,
-    amount: str | None = None,
+@handle_errors("quote a Gateway swap", GATEWAY_LOG_HINT)
+async def quote_swap(
+    connector: str,
+    network: str,
+    trading_pair: str,
+    side: Literal["BUY", "SELL"],
+    amount: str,
     slippage_pct: str | None = None,
-    wallet_address: str | None = None,
-    transaction_hash: str | None = None,
     extra_params: dict[str, Any] | None = None,
-    search_connector: str | None = None,
-    search_network: str | None = None,
-    search_wallet_address: str | None = None,
-    search_trading_pair: str | None = None,
-    status: Literal["SUBMITTED", "CONFIRMED", "FAILED"] | None = None,
-    start_time: int | None = None,
-    end_time: int | None = None,
-    limit: int = 50,
-    offset: int = 0,
 ) -> str:
-    """One-shot DEX swaps through Gateway's unified swap route — quote, execute, and track.
+    """Price a DEX swap through Gateway's unified swap route — free, signs nothing.
 
-    PREFER order_executor FOR SWAPS. `manage_executors(action="create",
-    executor_type="order_executor", ...)` with `connector_name=<network>` (e.g.
-    "solana-mainnet-beta") and `execution_strategy="MARKET"` swaps through this same
-    Gateway route, and adds what a one-shot call cannot:
-      - the slippage ramp (`slippage_pct` / `slippage_multiplier` / `max_slippage_pct`),
-        which starts tight and widens only on a failure Gateway attributes to slippage.
-        A swap here carries ONE fixed tolerance and never retries at a wider one.
-      - an executor record, so the fill is tagged with `controller_id` and reaches PnL
-        attribution. A swap here is written to swap history only, so an entry executed
-        this way and the position it funds land in different ledgers.
-
-    Use this tool when order_executor cannot express what you need: a quote without an
-    execution, resolving or searching swap history, or a pool-scoped connector the
-    executor does not route to.
+    Use this tool when: you want the price, the expected output and the price impact
+    before committing anything. A quote costs nothing and moves nothing, so take one
+    first — `execute_swap` is the call that spends.
 
     "Unified" is about Gateway's routes, not about tool choice. Router aggregators
     (jupiter, 0x) and pool-scoped AMM/CLMM swaps all resolve to one route here; the
     pool-scoped `/trading/amm/*-swap` routes no longer exist.
-
-    Actions:
-    - quote → price, expected output, and price impact BEFORE committing (free, always do this first)
-    - execute → submit the swap on-chain; returns a transaction hash
-    - get_status → resolve a submitted swap by transaction_hash
-    - search → query swap history with filters
 
     CONNECTOR FORMAT. `connector` is "name/type":
     - "jupiter/router", "0x/router" — aggregator routing across every pool it knows
@@ -1279,38 +1250,93 @@ async def manage_gateway_swaps(
     `manage_executors(lp_executor)` (managed LP).
 
     Args:
-        action: Swap action to perform.
-        connector: Connector in "name/type" form (required for quote/execute), e.g.
-            'jupiter/router', 'meteora/amm', 'raydium/clmm'.
-        network: Network ID in 'chain-network' format (required for quote/execute), e.g.
-            'solana-mainnet-beta', 'ethereum-mainnet'.
-        trading_pair: Trading pair as 'BASE-QUOTE' (required for quote/execute). Either
-            side may be a SYMBOL or a raw TOKEN ADDRESS, and the address does NOT have to
-            be registered with Gateway first — Gateway resolves an unknown mint on the
-            spot and reads its decimals on-chain. Do not add a token to Gateway's list as
-            a prerequisite for trading it: that write is a symbol/address mapping, it is
-            not required here, and guessing decimals to satisfy it corrupts the mapping.
-            Pool-scoped connectors match Gateway's pool list by SYMBOL.
-        side: 'BUY' (buy base with quote) or 'SELL' (sell base for quote). Required for quote/execute.
-        amount: Base token amount to buy or sell (required for quote/execute).
+        connector: Connector in "name/type" form, e.g. 'jupiter/router', 'meteora/amm',
+            'raydium/clmm'.
+        network: Network ID in 'chain-network' format, e.g. 'solana-mainnet-beta',
+            'ethereum-mainnet'.
+        trading_pair: Trading pair as 'BASE-QUOTE'. Either side may be a SYMBOL or a raw
+            TOKEN ADDRESS, and the address does NOT have to be registered with Gateway
+            first — Gateway resolves an unknown mint on the spot and reads its decimals
+            on-chain. Do not add a token to Gateway's list as a prerequisite for trading
+            it: that write is a symbol/address mapping, it is not required here, and
+            guessing decimals to satisfy it corrupts the mapping. Pool-scoped connectors
+            match Gateway's pool list by SYMBOL.
+        side: 'BUY' (buy base with quote) or 'SELL' (sell base for quote).
+        amount: Base token amount to buy or sell.
         slippage_pct: Maximum slippage percentage. OMIT to use the connector's configured
             slippage; '0' is a real value, not "use the default".
-        wallet_address: Wallet for execute (optional, uses the default wallet).
-        transaction_hash: Transaction hash (required for get_status).
         extra_params: Connector-specific params under Gateway's own names. Supported:
             'approximateIfNoExactOut' (bool, jupiter/dflow/okx/titan routers).
-        search_connector: Filter history by connector (search).
-        search_network: Filter history by network (search).
-        search_wallet_address: Filter history by wallet address (search).
-        search_trading_pair: Filter history by trading pair (search).
-        status: Filter history by status: SUBMITTED | CONFIRMED | FAILED (search).
-        start_time: Start timestamp in unix seconds (search).
-        end_time: End timestamp in unix seconds (search).
-        limit: Max results for search (default 50, max 1000).
-        offset: Pagination offset for search (default 0).
     """
     request = GatewaySwapRequest(
-        action=action,
+        action="quote",
+        connector=connector,
+        network=network,
+        trading_pair=trading_pair,
+        side=side,
+        amount=amount,
+        slippage_pct=slippage_pct,
+        extra_params=extra_params,
+    )
+
+    client = await hummingbot_client.get_client()
+    result = await manage_gateway_swaps_impl(client, request)
+    return format_gateway_swap_result("quote", result)
+
+
+@mcp.tool()
+@handle_errors("execute a Gateway swap", GATEWAY_LOG_HINT)
+async def execute_swap(
+    connector: str,
+    network: str,
+    trading_pair: str,
+    side: Literal["BUY", "SELL"],
+    amount: str,
+    slippage_pct: str | None = None,
+    wallet_address: str | None = None,
+    extra_params: dict[str, Any] | None = None,
+) -> str:
+    """Sign and submit a one-shot DEX swap on-chain. Spends real funds — quote first.
+
+    Same connector/network semantics as `quote_swap` (the "name/type" connector form,
+    and Gateway's symbol-matched pool resolution) — read that tool's docstring for them,
+    then take a quote before calling this.
+
+    Do NOT use when:
+    - the swap is part of a strategy → `manage_executors(action="create",
+      executor_type="order_executor", ...)` with `connector_name=<network>` (e.g.
+      "solana-mainnet-beta") and `execution_strategy="MARKET"` swaps through this same
+      Gateway route, and adds what a one-shot call cannot: the slippage ramp
+      (`slippage_pct` / `slippage_multiplier` / `max_slippage_pct`), which starts tight
+      and widens only on a failure Gateway attributes to slippage — a swap here carries
+      ONE fixed tolerance and never retries at a wider one — and an executor record, so
+      the fill is tagged with `controller_id` and reaches PnL attribution. A swap here is
+      written to swap history only, so an entry executed this way and the position it
+      funds land in different ledgers.
+    - you only want a price → `quote_swap` (free).
+
+    Use this tool when order_executor cannot express what you need: a pool-scoped
+    connector the executor does not route to, or a one-off swap outside any strategy.
+
+    Returns a transaction hash; resolve it with `get_swap_status`.
+
+    Args:
+        connector: Connector in "name/type" form, e.g. 'jupiter/router', 'meteora/amm',
+            'raydium/clmm'.
+        network: Network ID in 'chain-network' format, e.g. 'solana-mainnet-beta',
+            'ethereum-mainnet'.
+        trading_pair: Trading pair as 'BASE-QUOTE'; either side may be a SYMBOL or a raw
+            TOKEN ADDRESS (see `quote_swap`).
+        side: 'BUY' (buy base with quote) or 'SELL' (sell base for quote).
+        amount: Base token amount to buy or sell.
+        slippage_pct: Maximum slippage percentage. OMIT to use the connector's configured
+            slippage; '0' is a real value, not "use the default".
+        wallet_address: Wallet to sign with (optional, uses the default wallet).
+        extra_params: Connector-specific params under Gateway's own names. Supported:
+            'approximateIfNoExactOut' (bool, jupiter/dflow/okx/titan routers).
+    """
+    request = GatewaySwapRequest(
+        action="execute",
         connector=connector,
         network=network,
         trading_pair=trading_pair,
@@ -1318,12 +1344,67 @@ async def manage_gateway_swaps(
         amount=amount,
         slippage_pct=slippage_pct,
         wallet_address=wallet_address,
-        transaction_hash=transaction_hash,
         extra_params=extra_params,
-        search_connector=search_connector,
-        search_network=search_network,
-        search_wallet_address=search_wallet_address,
-        search_trading_pair=search_trading_pair,
+    )
+
+    client = await hummingbot_client.get_client()
+    result = await manage_gateway_swaps_impl(client, request)
+    return format_gateway_swap_result("execute", result)
+
+
+@mcp.tool()
+@handle_errors("get Gateway swap status", GATEWAY_LOG_HINT)
+async def get_swap_status(transaction_hash: str) -> str:
+    """Resolve a submitted swap by its transaction hash.
+
+    Use this tool when: `execute_swap` returned a hash and you need to know whether the
+    swap confirmed, is still pending, or failed.
+
+    Args:
+        transaction_hash: Transaction hash returned by `execute_swap`.
+    """
+    request = GatewaySwapRequest(action="get_status", transaction_hash=transaction_hash)
+
+    client = await hummingbot_client.get_client()
+    result = await manage_gateway_swaps_impl(client, request)
+    return format_gateway_swap_result("get_status", result)
+
+
+@mcp.tool()
+@handle_errors("search Gateway swaps", GATEWAY_LOG_HINT)
+async def search_swaps(
+    connector: str | None = None,
+    network: str | None = None,
+    wallet_address: str | None = None,
+    trading_pair: str | None = None,
+    status: Literal["SUBMITTED", "CONFIRMED", "FAILED"] | None = None,
+    start_time: int | None = None,
+    end_time: int | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> str:
+    """Query swap history with filters. Reads only — every argument is a filter.
+
+    Use this tool when: you want to see what was swapped, by whom and when. Omitting a
+    filter leaves that dimension unrestricted.
+
+    Args:
+        connector: Filter by connector.
+        network: Filter by network.
+        wallet_address: Filter by wallet address.
+        trading_pair: Filter by trading pair.
+        status: Filter by status: SUBMITTED | CONFIRMED | FAILED.
+        start_time: Start timestamp in unix seconds.
+        end_time: End timestamp in unix seconds.
+        limit: Max results (default 50, max 1000).
+        offset: Pagination offset (default 0).
+    """
+    request = GatewaySwapRequest(
+        action="search",
+        connector=connector,
+        network=network,
+        wallet_address=wallet_address,
+        trading_pair=trading_pair,
         status=status,
         start_time=start_time,
         end_time=end_time,
@@ -1333,7 +1414,7 @@ async def manage_gateway_swaps(
 
     client = await hummingbot_client.get_client()
     result = await manage_gateway_swaps_impl(client, request)
-    return format_gateway_swap_result(action, result)
+    return format_gateway_swap_result("search", result)
 
 
 # GeckoTerminal Tools

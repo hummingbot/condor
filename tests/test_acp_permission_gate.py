@@ -251,7 +251,7 @@ def test_dry_run_blocks_an_acp_shaped_deploy():
 # ---------------------------------------------------------------------------
 
 AMM = "mcp__mcp-hummingbot__manage_amm"
-SWAPS = "mcp__mcp-hummingbot__manage_gateway_swaps"
+EXECUTE_SWAP = "mcp__mcp-hummingbot__execute_swap"
 
 
 def test_amm_signing_actions_are_dangerous():
@@ -261,11 +261,16 @@ def test_amm_signing_actions_are_dangerous():
 
 
 def test_swap_signing_action_is_dangerous():
-    """The swap left manage_amm for manage_gateway_swaps, and stayed gated."""
-    call = normalize_tool_call(_acp_request(SWAPS, {"action": "execute"}))
-    assert is_dangerous_tool_call(
-        call
-    ), "manage_gateway_swaps(execute) was auto-approved"
+    """The swap left manage_amm for its own tool, and stayed gated the whole way."""
+    call = normalize_tool_call(_acp_request(EXECUTE_SWAP, {"trading_pair": "SOL-USDC"}))
+    assert is_dangerous_tool_call(call), "execute_swap was auto-approved"
+
+
+def test_swap_reads_are_not_gated():
+    """Only the writer is dangerous by name; a free quote must not need a human."""
+    for name in ("quote_swap", "get_swap_status", "search_swaps"):
+        call = normalize_tool_call(_acp_request(f"mcp__mcp-hummingbot__{name}", {}))
+        assert not is_dangerous_tool_call(call), f"{name} needlessly gated"
 
 
 def test_amm_read_actions_stay_on_the_fast_path():
@@ -292,9 +297,8 @@ def test_a_swap_reaches_a_human_with_a_readable_summary():
     channel = _CapturingChannel(answer=False)
     result = _drive_acp(
         _acp_request(
-            SWAPS,
+            EXECUTE_SWAP,
             {
-                "action": "execute",
                 "connector": "meteora",
                 "side": "SELL",
                 "amount": "12.5",
@@ -347,9 +351,7 @@ def test_amm_summaries_name_what_is_being_moved():
 
 
 def test_dry_run_cancels_a_swap_but_not_a_quote():
-    swap = normalize_tool_call(
-        _acp_request(SWAPS, {"action": "execute", "connector": "meteora"})
-    )
+    swap = normalize_tool_call(_acp_request(EXECUTE_SWAP, {"connector": "meteora"}))
     assert (
         asyncio.run(_risk_callback(execution_mode="dry_run")(swap, OPTIONS))["outcome"][
             "outcome"
@@ -357,7 +359,9 @@ def test_dry_run_cancels_a_swap_but_not_a_quote():
         == "cancelled"
     )
 
-    quote = normalize_tool_call(_acp_request(SWAPS, {"action": "quote"}))
+    quote = normalize_tool_call(
+        _acp_request("mcp__mcp-hummingbot__quote_swap", {"connector": "meteora"})
+    )
     assert asyncio.run(_risk_callback(execution_mode="dry_run")(quote, OPTIONS))[
         "outcome"
     ] == {"outcome": "selected", "optionId": "allow"}
@@ -380,7 +384,6 @@ FUND_MOVING_TOOLS = {
     "manage_clmm",
     "manage_executors",
     "manage_gateway_config",  # the wallets resource takes a private key
-    "manage_gateway_swaps",
 }
 
 #: Tools that read, or that only write config the trading loop must be told to
@@ -395,9 +398,10 @@ NON_FUND_MOVING_TOOLS = {
 
 #: Verbs that mean "this call changes something out in the world".
 MUTATING_PREFIXES = (
-    # Bare "execute", not "execute_": manage_gateway_swaps names its signing
-    # action `execute`, so the underscore spelling matched nothing on the one
-    # tool whose whole purpose is to sign a swap.
+    # Bare "execute", not "execute_": a tool that names its signing action
+    # `execute` would match nothing under the underscore spelling. The swap that
+    # motivated this is name-gated now (`execute_swap`, FEAT-064) and no longer
+    # enumerated here at all, but the loose prefix stays so the next one is caught.
     "execute",
     "add_",
     "remove_",
@@ -462,7 +466,8 @@ def test_every_mutating_action_of_a_fund_moving_tool_is_dangerous():
                 f"{tool_name}({action}) mutates but is auto-approved; "
                 "add it to the matching DANGEROUS_* set in condor/runtime/danger.py"
             )
-    # 3 AMM + 3 CLMM + 5 bot + 2 executor + 1 swap today: a floor, so a
-    # signature refactor that silently stops yielding actions fails instead of
-    # passing vacuously.
-    assert checked >= 14, f"only {checked} mutating actions found — enumeration broke"
+    # 3 AMM + 3 CLMM + 5 bot + 2 executor today: a floor, so a signature refactor
+    # that silently stops yielding actions fails instead of passing vacuously.
+    # The swap is not counted: it has no `action` since FEAT-064 and is gated by
+    # name instead (see test_swap_signing_action_is_dangerous).
+    assert checked >= 13, f"only {checked} mutating actions found — enumeration broke"
