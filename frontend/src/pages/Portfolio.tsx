@@ -12,9 +12,11 @@ import {
   ArrowDownRight,
 } from "lucide-react";
 import { useState, useEffect, useMemo, useCallback } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 
 import { NoServerCard } from "@/components/NoServerCard";
+import { PositionsTab } from "@/components/portfolio/PositionsTab";
+import { useLpPositions } from "@/hooks/useLpPositions";
 import { useRates } from "@/hooks/useRates";
 import { useServer } from "@/hooks/useServer";
 import { useCondorWebSocket } from "@/hooks/useWebSocket";
@@ -744,11 +746,23 @@ function PortfolioEvolution({ server, range, convertFromUsd, currencySymbol }: {
 
 // ── Main Portfolio Page ──
 
+/** Assets is what you hold; Positions is what you are in. */
+type PortfolioTab = "assets" | "positions";
+
 export function Portfolio() {
   const { server } = useServer();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [period, setPeriod] = useState<string>("1W");
+
+  // A tab is a real address here (Bots.tsx idiom): the default clears the param
+  // rather than writing it, so `/portfolio` stays the canonical URL for Assets.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tab: PortfolioTab = searchParams.get("tab") === "positions" ? "positions" : "assets";
+  const setTab = (next: PortfolioTab) => {
+    if (next === "assets") setSearchParams({}, { replace: true });
+    else setSearchParams({ tab: next }, { replace: true });
+  };
 
   const { data, isLoading, error, isPlaceholderData } = useQuery({
     queryKey: ["portfolio", server],
@@ -825,6 +839,30 @@ export function Portfolio() {
     refetchInterval: 60000,
   });
 
+  // Holds — the same server-scoped cache entry the trade workspace and the pool
+  // pages already invalidate after a mutation, so this observer inherits every
+  // existing invalidation and adds no new cache surface. Polled slowly while
+  // Assets is showing, since only the tab badge depends on it there.
+  const { data: positionsData, isLoading: isLoadingHolds } = useQuery({
+    queryKey: ["consolidated-positions", server],
+    queryFn: () => api.getConsolidatedPositions(server!),
+    enabled: !!server,
+    refetchInterval: tab === "positions" ? 15_000 : 60_000,
+    placeholderData: keepPreviousData,
+  });
+  const holds = useMemo(
+    () => [
+      ...(positionsData?.executor_positions ?? []),
+      ...(positionsData?.bot_positions ?? []),
+    ],
+    [positionsData],
+  );
+
+  // Liquidity — shared with the /dex strip, and deliberately not derived from
+  // the unfiltered ["executors", server, ""] cache below (see the hook).
+  const { positions: lpPositions, label: lpLabel, isLoading: isLoadingLp } =
+    useLpPositions(server ?? null);
+
   // Currency conversion for bots + executors (must be before early returns)
   const controllers = bots?.controllers ?? [];
   const executorsList = allExecutors ?? [];
@@ -836,9 +874,19 @@ export function Portfolio() {
     for (const e of executorsList) {
       quotes.add(e.trading_pair?.split("-")[1] || "USDT");
     }
+    // Without these a hold on a non-USDT pair renders unconverted under the
+    // display currency's symbol — the number and its label disagreeing.
+    for (const pos of holds) {
+      quotes.add(pos.trading_pair?.split("-")[1] || "USDT");
+    }
     return Array.from(quotes);
-  }, [controllers, executorsList]);
-  const { convert, resolvedSymbol: currencySymbol } = useRates(quoteCurrencies);
+  }, [controllers, executorsList, holds]);
+  const {
+    convert,
+    formatValueDetailed,
+    formatPnlValue,
+    resolvedSymbol: currencySymbol,
+  } = useRates(quoteCurrencies);
 
   // Convert a USDT-denominated value to the display currency
   const convertFromUsd = useCallback(
@@ -957,42 +1005,91 @@ export function Portfolio() {
         )}
       </div>
 
-      {/* Balance table */}
-      {connectors.length === 0 ? (
-        <div className="flex flex-col items-center gap-2 py-16 text-[var(--color-text-muted)]">
-          <Wallet className="h-10 w-10" />
-          <p>No balances found</p>
-        </div>
-      ) : (
-        <div className="overflow-hidden rounded-lg border border-[var(--color-border)]">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-[var(--color-border)] bg-[var(--color-surface)]">
-                <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
-                  Token
-                </th>
-                <th className="px-4 py-3 text-right text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
-                  Amount
-                </th>
-                <th className="px-4 py-3 text-right text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
-                  Price
-                </th>
-                <th className="px-4 py-3 text-right text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
-                  Value
-                </th>
-                <th className="px-4 py-3 text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
-                  Allocation
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {connectors.map((c) => (
-                <ConnectorRow key={c.connector} connector={c} totalPortfolio={totalUsd} convertFromUsd={convertFromUsd} currencySymbol={currencySymbol} />
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+      {/* Assets | Positions — the header above describes the whole portfolio,
+          so it stays above the split. */}
+      <div className="flex items-center gap-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-1 w-fit">
+        {([
+          { key: "assets" as const, label: "Assets", icon: Wallet, count: null },
+          {
+            key: "positions" as const,
+            label: "Positions",
+            icon: Layers,
+            // A flash of `(0)` on a portfolio that has seven positions is worse
+            // than a beat of no badge, so it waits for both queries.
+            count: isLoadingHolds || isLoadingLp ? null : holds.length + lpPositions.length,
+          },
+        ]).map(({ key, label, icon: Icon, count }) => (
+          <button
+            key={key}
+            onClick={() => setTab(key)}
+            className={`flex items-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
+              tab === key
+                ? "bg-[var(--color-bg)] text-[var(--color-text)] shadow-sm"
+                : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+            }`}
+          >
+            <Icon className="h-3.5 w-3.5" />
+            {label}
+            {count !== null && (
+              <span className="text-xs text-[var(--color-text-muted)]">({count})</span>
+            )}
+          </button>
+        ))}
+      </div>
+
+      {/* Both tabs stay mounted and the inactive one is hidden: this is a
+          toggle, not a route change, and the balance table is expensive to
+          rebuild. Deferring the mount buys nothing — the queries behind
+          Positions run at page level anyway, for the tab badge. */}
+      <div style={{ display: tab === "assets" ? undefined : "none" }}>
+        {connectors.length === 0 ? (
+          <div className="flex flex-col items-center gap-2 py-16 text-[var(--color-text-muted)]">
+            <Wallet className="h-10 w-10" />
+            <p>No balances found</p>
+          </div>
+        ) : (
+          <div className="overflow-hidden rounded-lg border border-[var(--color-border)]">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-[var(--color-border)] bg-[var(--color-surface)]">
+                  <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
+                    Token
+                  </th>
+                  <th className="px-4 py-3 text-right text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
+                    Amount
+                  </th>
+                  <th className="px-4 py-3 text-right text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
+                    Price
+                  </th>
+                  <th className="px-4 py-3 text-right text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
+                    Value
+                  </th>
+                  <th className="px-4 py-3 text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
+                    Allocation
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {connectors.map((c) => (
+                  <ConnectorRow key={c.connector} connector={c} totalPortfolio={totalUsd} convertFromUsd={convertFromUsd} currencySymbol={currencySymbol} />
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      <div style={{ display: tab === "positions" ? undefined : "none" }}>
+        <PositionsTab
+          holds={holds}
+          lpPositions={lpPositions}
+          lpLabel={lpLabel}
+          isLoading={isLoadingHolds || isLoadingLp}
+          convert={convert}
+          formatValue={formatValueDetailed}
+          formatPnlValue={formatPnlValue}
+        />
+      </div>
     </div>
   );
 }
