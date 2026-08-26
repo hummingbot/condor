@@ -257,14 +257,15 @@ class GatewayConfigRequest(BaseModel):
     - tokens: Token configurations (list, add, delete, save) per network
     - connectors: DEX connector configurations (list, get, update)
     - pools: Liquidity pools (list, add, delete, save) per connector/network
-    - wallets: Wallet management (add, delete) for blockchain chains
+    - wallets: Configured wallets per chain (list only — a wallet is added or
+      removed in the Condor dashboard, never through an agent)
 
     Actions:
     - list: List available resources
     - get: Get specific resource configuration
     - update: Update resource configuration
-    - add: Add new resource (tokens, pools, wallets) - requires full details
-    - delete: Delete resource (tokens, pools, wallets)
+    - add: Add new resource (tokens, pools) - requires full details
+    - delete: Delete resource (tokens, pools)
     - save: Save resource by address only (tokens, pools) - auto-fetches details
     """
 
@@ -367,17 +368,8 @@ class GatewayConfigRequest(BaseModel):
     # Wallet-specific fields
     chain: str | None = Field(
         default=None,
-        description="Blockchain chain for wallet (e.g., 'solana', 'ethereum'). Required for wallet operations",
+        description="Blockchain chain to filter wallets by (e.g., 'solana', 'ethereum')",
         examples=["solana", "ethereum", "avalanche", "polygon"],
-    )
-
-    private_key: str | None = Field(
-        default=None,
-        description="Private key for wallet. Required for 'add' wallet action",
-    )
-
-    wallet_address: str | None = Field(
-        default=None, description="Wallet address. Required for 'delete' wallet action"
     )
 
 

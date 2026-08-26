@@ -80,7 +80,7 @@ async def manage_gateway_config(
     - tokens: List/add/delete tokens per network
     - connectors: List/get/update DEX connector configurations
     - pools: List/add liquidity pools per connector/network
-    - wallets: Add/delete wallets for blockchain chains
+    - wallets: List the configured wallets per chain (read-only)
     """
     # ============================================
     # CHAINS
@@ -387,47 +387,36 @@ async def manage_gateway_config(
             )
 
     # ============================================
-    # WALLETS
+    # WALLETS (read-only)
     # ============================================
+    # A wallet is added or removed in the Condor dashboard, never here: `add` took a
+    # PRIVATE KEY, and a key typed at an agent is persisted by the chat transport, by
+    # the bot's own state and by every transcript that session writes. No confirmation
+    # gate un-leaks it, so the parameter does not exist. Exchange API keys are kept off
+    # this surface for the same reason (see server.py).
     elif request.resource_type == "wallets":
-        if request.action == "add":
-            if not request.chain:
-                raise ToolError("chain is required for 'add' wallet action")
-            if not request.private_key:
-                raise ToolError("private_key is required for 'add' wallet action")
-
-            result = await client.accounts.add_gateway_wallet(
-                chain=request.chain, private_key=request.private_key
-            )
-            return {
-                "resource_type": "wallets",
-                "action": "add",
-                "chain": request.chain,
-                "result": result,
-            }
-
-        elif request.action == "delete":
-            if not request.chain:
-                raise ToolError("chain is required for 'delete' wallet action")
-            if not request.wallet_address:
-                raise ToolError("wallet_address is required for 'delete' wallet action")
-
-            result = await client.accounts.remove_gateway_wallet(
-                chain=request.chain, address=request.wallet_address
-            )
-            return {
-                "resource_type": "wallets",
-                "action": "delete",
-                "chain": request.chain,
-                "wallet_address": request.wallet_address,
-                "result": result,
-            }
-
-        else:
+        if request.action != "list":
             raise ToolError(
                 f"Action '{request.action}' not supported for wallets. "
-                f"Supported: add, delete"
+                f"Supported: list. Wallets are added and removed in the Condor "
+                f"dashboard (Settings -> Gateway) — a private key must never be "
+                f"sent through chat."
             )
+
+        # The API answers with one group per chain; flatten it to one row per wallet.
+        groups = await client.accounts.list_gateway_wallets()
+        wallets = [
+            {"chain": group.get("chain", "unknown"), "address": address}
+            for group in (groups or [])
+            if isinstance(group, dict)
+            for address in group.get("walletAddresses", [])
+            if not request.chain or group.get("chain") == request.chain
+        ]
+        return {
+            "resource_type": "wallets",
+            "action": "list",
+            "result": {"wallets": wallets},
+        }
 
     else:
         raise ToolError(f"Unknown resource type: {request.resource_type}")

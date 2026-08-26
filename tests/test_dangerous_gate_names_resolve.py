@@ -151,13 +151,14 @@ def test_gated_calls_render_a_specific_confirmation_summary():
         assert summary != tool_name
 
 
-def test_gateway_config_gates_wallets_and_only_wallets():
-    """manage_gateway_config is gated on resource_type, not action.
+def test_gateway_config_gates_nothing_now_that_wallets_are_read_only():
+    """manage_gateway_config is gated on resource_type, not action — and gates nothing.
 
-    `wallets` + `add` takes a private key, so it needs a human. Everything else the
-    tool edits is Gateway's own symbol/address mapping — deleting a token moves no
-    funds and changes nothing on-chain, so gating it would stop a config edit while
-    leaving the trades it enables ungated.
+    `wallets` was the one gated resource because `add` took a private key; that path
+    is gone (wallets are read-only over MCP, FEAT-065). Everything the tool still
+    edits is Gateway's own symbol/address mapping — deleting a token moves no funds
+    and changes nothing on-chain, so gating it would stop a config edit while leaving
+    the trades it enables ungated.
     """
     fn = _registered_tools()["manage_gateway_config"]
     resources = {
@@ -171,14 +172,8 @@ def test_gateway_config_gates_wallets_and_only_wallets():
         f"gated resource(s) the tool has no such value for: "
         f"{sorted(DANGEROUS_CONFIG_RESOURCES - resources)}"
     )
-    assert DANGEROUS_CONFIG_RESOURCES == {"wallets"}
+    assert DANGEROUS_CONFIG_RESOURCES == set()
 
-    assert is_dangerous_tool_call(
-        {
-            "tool": "manage_gateway_config",
-            "input": {"resource_type": "wallets", "action": "add"},
-        }
-    )
     for resource in resources - DANGEROUS_CONFIG_RESOURCES:
         for action in ("list", "add", "delete"):
             assert not is_dangerous_tool_call(

@@ -23,7 +23,7 @@ DANGEROUS_TOOLS = {
     "manage_gateway_swaps",  # execute action
     "manage_clmm",  # every action that moves liquidity
     "manage_amm",  # every action that moves liquidity
-    "manage_gateway_config",  # only the wallets resource; see below
+    "manage_gateway_config",  # no resource of it is gated today; see below
 }
 
 # Tools that are always blocked (RBAC bypass prevention)
@@ -64,12 +64,15 @@ DANGEROUS_AMM_ACTIONS = {"add_liquidity", "remove_liquidity", "create_pool"}
 
 # Resource types within manage_gateway_config that require confirmation. This tool
 # is gated on `resource_type`, not `action`, because what it edits matters and how
-# it edits does not: `wallets` + `add` takes a PRIVATE KEY, and `delete` removes a
-# signing wallet. Everything else it touches — tokens, pools, connectors, networks —
-# is Gateway's own symbol/address mapping. Deleting a token there moves no funds and
-# changes nothing on-chain, so gating it would put a human in front of a config edit
-# while the trades that edit enables stay where they are.
-DANGEROUS_CONFIG_RESOURCES = {"wallets"}
+# it edits does not. The set is empty and the gate stays: `wallets` used to be in it
+# because `add` took a PRIVATE KEY, but that path no longer exists over MCP (wallets
+# are read-only there, added and removed in the dashboard), so nothing this tool can
+# reach is worth a human. Everything it still touches — tokens, pools, connectors,
+# networks — is Gateway's own symbol/address mapping. Deleting a token there moves no
+# funds and changes nothing on-chain, so gating it would put a human in front of a
+# config edit while the trades that edit enables stay where they are. An unreadable
+# `resource_type` still fails closed.
+DANGEROUS_CONFIG_RESOURCES: set[str] = set()
 
 
 def tool_call_name(tool_call: dict[str, Any]) -> str:
@@ -245,15 +248,10 @@ def format_tool_summary(tool_call: dict[str, Any]) -> str:
         return f"Swap {side} {amount} {pair}"
 
     if tool_name == "manage_gateway_config":
+        # The wallet import/remove summaries lived here until the tool stopped
+        # accepting a private key at all (FEAT-065); wallets are read-only now.
         resource = input_data.get("resource_type", "?")
         action = input_data.get("action", "?")
-        if resource == "wallets":
-            if action == "add":
-                chain = input_data.get("chain", "?")
-                return f"Import a {chain} wallet into Gateway (private key)"
-            if action == "delete":
-                addr = str(input_data.get("wallet_address") or "?")
-                return f"Remove wallet {addr[:12]}... from Gateway"
         return f"Gateway config: {action} {resource}"
 
     if tool_name in ("manage_clmm", "manage_amm"):

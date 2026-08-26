@@ -72,8 +72,12 @@ mcp = FastMCP("hummingbot-mcp")
 
 # Server Management Tools
 #
-# Connecting/removing exchange API keys is intentionally NOT exposed here.
-# Keys are managed exclusively through the Condor web dashboard (Settings → Keys).
+# No secret is a parameter of any tool on this server. Connecting/removing exchange
+# API keys and adding/removing Gateway wallets are intentionally NOT exposed here:
+# a key typed at an agent is persisted by the chat transport, by the bot's state and
+# by every transcript that session writes, and no confirmation gate un-leaks it.
+# Both are managed exclusively through the Condor web dashboard (Settings → Keys,
+# Settings → Gateway).
 
 
 @mcp.tool()
@@ -917,8 +921,6 @@ async def manage_gateway_config(
     search: str | None = None,
     network: str | None = None,
     chain: str | None = None,
-    private_key: str | None = None,
-    wallet_address: str | None = None,
 ) -> str:
     """Read and edit Gateway's own configuration — chains, networks, tokens, connectors, pools, wallets.
 
@@ -936,8 +938,8 @@ async def manage_gateway_config(
     - tokens: the per-network symbol/address/decimals mapping (list, add, delete)
     - connectors: DEX connector config
     - pools: the named pool registry (list, add)
-    - wallets: wallet add/delete. GATED — needs confirmation, and `add` takes a private
-      key. Prefer importing a wallet outside the agent.
+    - wallets: list only. Add or remove wallets in the Condor dashboard
+      (Settings → Gateway) — a private key must never be sent through chat.
 
     Args:
         resource_type: Which part of Gateway's config to act on.
@@ -955,9 +957,7 @@ async def manage_gateway_config(
         pool_address: Pool contract address. Required to add a pool.
         search: Filter tokens by symbol or name when listing.
         network: Bare network name ('mainnet-beta'). Required to list pools.
-        chain: Chain for a wallet action ('solana', 'ethereum').
-        private_key: Private key for 'add' wallet. Gated; avoid where possible.
-        wallet_address: Wallet address for 'delete' wallet.
+        chain: Filter wallets by chain when listing ('solana', 'ethereum').
     """
     request = GatewayConfigRequest(
         resource_type=resource_type,
@@ -976,8 +976,6 @@ async def manage_gateway_config(
         search=search,
         network=network,
         chain=chain,
-        private_key=private_key,
-        wallet_address=wallet_address,
     )
 
     client = await hummingbot_client.get_client()
