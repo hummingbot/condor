@@ -23,6 +23,27 @@ interface ServerForm {
 
 const EMPTY_FORM: ServerForm = { name: "", host: "", port: 8000, username: "", password: "" };
 
+/**
+ * The edit form opens with the credential fields blank and both placeholders
+ * promising "(unchanged)", so a blank one means "keep what is stored" — never
+ * "erase it". The backend can only hear that as absence: `modify_server`
+ * applies each field under `if x is not None` (config_manager.py:342), and `""`
+ * is not None, so spreading the whole form wrote empty basic-auth credentials
+ * into config.yml on every host-only edit — silently, for the owner and for
+ * every trader the server is shared with (SEC-229).
+ *
+ * Omitting the key is what makes that safe, rather than round-tripping a
+ * sentinel: nothing about the stored secret has to reach the browser for it to
+ * survive an edit, so "keep what is stored" can never double as a way to read
+ * it back.
+ */
+function buildServerUpdate({ host, port, username, password }: ServerForm) {
+  const patch: Parameters<typeof api.updateServer>[1] = { host, port };
+  if (username) patch.username = username;
+  if (password) patch.password = password;
+  return patch;
+}
+
 export function ServersSettings() {
   const qc = useQueryClient();
   const { server: activeServer, setServer } = useServer();
@@ -47,7 +68,7 @@ export function ServersSettings() {
   });
 
   const updateMut = useMutation({
-    mutationFn: ({ name, ...data }: ServerForm) => api.updateServer(name, data),
+    mutationFn: (data: ServerForm) => api.updateServer(data.name, buildServerUpdate(data)),
     onSuccess: () => { invalidate(); setEditing(null); setForm(EMPTY_FORM); },
   });
 
@@ -152,7 +173,7 @@ export function ServersSettings() {
                 value={form.username}
                 onChange={(e) => setForm({ ...form, username: e.target.value })}
                 className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-sm text-[var(--color-text)] focus:border-[var(--color-primary)] focus:outline-none"
-                placeholder="admin"
+                placeholder={editing ? "(unchanged)" : "admin"}
               />
             </div>
             <div>
