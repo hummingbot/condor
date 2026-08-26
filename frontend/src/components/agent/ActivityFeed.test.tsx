@@ -1,16 +1,21 @@
 /**
- * What the Activity feed promises (FEAT-058).
+ * What the Activity feed promises (FEAT-058, FEAT-061).
  *
- * Four things are load-bearing and none of them are visual: both kinds of run
- * appear in one timeline and are told apart; each row says the one thing its
- * kind actually knows (who asked, for a consult; how much work it did, for a
- * background task) and invents nothing for the other; the summary strip names
- * the sample it measured rather than implying it speaks for the whole history;
- * and a record written before kinds existed still reads as a delegation.
+ * Four things are load-bearing and none of them are visual: every kind of run
+ * appears in one timeline and they are told apart; each row says the one thing
+ * its kind actually knows (who asked, for a consult; how much work it did, for
+ * a background task; how long it took, for a code run) and invents nothing for
+ * the others; the summary strip names the sample it measured rather than
+ * implying it speaks for the whole history; and a record written before kinds
+ * existed still reads as a delegation.
  *
- * The fifth is the dock's: it asks for background tasks only, which is the
- * regression this feature could most easily have introduced — filling the chat
- * dock with every consult the conversation made.
+ * The fifth is the filter's, and it is the reason the filter is server-side: a
+ * narrowed feed must *re-ask*, because filtering the page already fetched would
+ * show three consults and imply that is all there ever were.
+ *
+ * The sixth is the dock's: it asks for background tasks only, which is the
+ * regression these features could most easily have introduced — filling the
+ * chat dock with every consult the conversation made, or every snippet it ran.
  *
  * Needs a DOM, so this file overrides vitest's default `node` environment.
  *
@@ -22,7 +27,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { DelegationSummary } from "@/lib/api";
+import type { DelegationKind, DelegationSummary } from "@/lib/api";
 import { ActivityFeed } from "./ActivityFeed";
 
 vi.mock("@/lib/api", () => ({
@@ -30,9 +35,15 @@ vi.mock("@/lib/api", () => ({
     getDelegationHistory: vi.fn(
       async (agent?: string, limit?: number, kind?: string) => {
         ASKED.push({ agent, limit, kind });
-        return { delegations: ROWS };
+        // The filter is server-side, so the fake answers the question it was
+        // asked rather than handing back the whole set every time.
+        const shown = kind
+          ? ROWS.filter((r) => (r.kind ?? "delegate") === kind)
+          : ROWS;
+        return { delegations: shown };
       },
     ),
+    getCodeRun: vi.fn(async () => ({})),
   },
 }));
 
@@ -71,7 +82,7 @@ function run(over: Partial<DelegationSummary> & { task_id: string }): Delegation
 let container: HTMLDivElement;
 let root: Root;
 
-async function render(props: { agent?: string; kind?: "delegate" | "consult" } = {}) {
+async function render(props: { agent?: string; kind?: DelegationKind } = {}) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 } },
   });
@@ -82,12 +93,25 @@ async function render(props: { agent?: string; kind?: "delegate" | "consult" } =
       </QueryClientProvider>,
     );
   });
-  // react-query resolves on a later macrotask than the render that asked.
+  await settle();
+}
+
+/** react-query resolves on a later macrotask than the render that asked. */
+async function settle() {
   for (let i = 0; i < 5; i++) {
     await act(async () => {
       await new Promise((r) => setTimeout(r, 0));
     });
   }
+}
+
+async function clickFilter(kind: DelegationKind | "all") {
+  await act(async () => {
+    document
+      .querySelector<HTMLElement>(`[data-activity-filter="${kind}"]`)!
+      .click();
+  });
+  await settle();
 }
 
 const rows = () => [...document.querySelectorAll<HTMLElement>("[data-activity-row]")];
@@ -109,7 +133,7 @@ afterEach(() => {
   container.remove();
 });
 
-describe("one timeline, two kinds", () => {
+describe("one timeline, three kinds", () => {
   it("lists background tasks and consults together, told apart by kind", async () => {
     ROWS = [
       run({ task_id: "a", kind: "delegate", task: "back-test the SOL grid" }),
@@ -205,5 +229,127 @@ describe("scoping", () => {
 
     expect(rows()).toHaveLength(0);
     expect(container.textContent).toContain("has not run yet");
+  });
+});
+
+describe("code runs are work too", () => {
+  const codeRun = (over: Partial<DelegationSummary> = {}) =>
+    run({
+      task_id: "c",
+      kind: "code",
+      task: "returns of SOL 1h",
+      caller: "",
+      // 340ms, the duration the store measured.
+      started_at: NOW - 12,
+      ended_at: NOW - 12 + 0.34,
+      ...over,
+    });
+
+  it("lists a snippet beside the other two kinds", async () => {
+    ROWS = [
+      run({ task_id: "a", kind: "delegate" }),
+      run({ task_id: "b", kind: "consult" }),
+      codeRun(),
+    ];
+    await render({ agent: "scout" });
+
+    expect(kinds()).toEqual(["delegate", "consult", "code"]);
+  });
+
+  it("says how long the snippet took, and nothing it cannot know", async () => {
+    ROWS = [codeRun()];
+    await render({ agent: "scout" });
+
+    const row = rows()[0];
+    expect(row.textContent).toContain("code");
+    expect(row.querySelector("[data-code-duration]")!.textContent).toBe("340ms");
+    // No caller and no tool count: those belong to the other two kinds.
+    expect(row.textContent).not.toContain("asked by");
+    expect(row.querySelector("[data-tool-count]")).toBeNull();
+  });
+
+  it("keeps a timeout apart from an error", async () => {
+    ROWS = [
+      codeRun({ task_id: "c", status: "timeout" }),
+      codeRun({ task_id: "d", status: "error" }),
+    ];
+    await render({ agent: "scout" });
+
+    const [timedOut, failed] = rows();
+    expect(timedOut.textContent).toContain("timeout");
+    expect(failed.textContent).toContain("error");
+    expect(timedOut.textContent).not.toContain("error");
+  });
+
+  it("folds a snippet's real duration into the median", async () => {
+    ROWS = [codeRun({ started_at: NOW - 30, ended_at: NOW - 20 })];
+    await render({ agent: "scout" });
+
+    expect(summary()).toContain("median 10s");
+  });
+});
+
+describe("the kind filter", () => {
+  const mixed = () => [
+    run({ task_id: "a", kind: "delegate" }),
+    run({ task_id: "b", kind: "consult" }),
+    run({ task_id: "c", kind: "code" }),
+  ];
+
+  it("re-asks the server rather than narrowing the page it already has", async () => {
+    ROWS = mixed();
+    await render({ agent: "scout" });
+    await clickFilter("consult");
+
+    expect(ASKED.map((a) => a.kind)).toEqual([undefined, "consult"]);
+    expect(kinds()).toEqual(["consult"]);
+  });
+
+  it("offers every kind, and All to come back to", async () => {
+    ROWS = mixed();
+    await render({ agent: "scout" });
+    await clickFilter("code");
+    expect(kinds()).toEqual(["code"]);
+
+    await clickFilter("all");
+    expect(kinds()).toEqual(["delegate", "consult", "code"]);
+    expect(ASKED.map((a) => a.kind)).toEqual([undefined, "code", undefined]);
+  });
+
+  it("stays on screen when the kind it narrowed to is empty", async () => {
+    // Otherwise a reader who picks a kind with no rows has no way back.
+    ROWS = [run({ task_id: "a", kind: "delegate" })];
+    await render({ agent: "scout" });
+    await clickFilter("code");
+
+    expect(rows()).toHaveLength(0);
+    expect(document.querySelector("[data-activity-filters]")).not.toBeNull();
+  });
+
+  it("still names the sample it measured after a filter", async () => {
+    ROWS = mixed();
+    await render({ agent: "scout" });
+    await clickFilter("consult");
+
+    expect(summary()).toContain("1 run");
+    expect(summary()).toContain("last 1 shown");
+  });
+
+  it("is absent when the dock has pinned the feed to one kind", async () => {
+    ROWS = [run({ task_id: "a", kind: "delegate" })];
+    await render({ kind: "delegate" });
+
+    expect(document.querySelector("[data-activity-filters]")).toBeNull();
+  });
+
+  it("never lets a code run reach the pinned dock", async () => {
+    ROWS = [
+      run({ task_id: "a", kind: "delegate" }),
+      run({ task_id: "c", kind: "code" }),
+    ];
+    await render({ kind: "delegate" });
+
+    expect(kinds()).toEqual(["delegate"]);
+    expect(ASKED).toEqual([{ agent: undefined, limit: 100, kind: "delegate" }]);
   });
 });
