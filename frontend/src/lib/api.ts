@@ -1248,16 +1248,6 @@ export interface SessionInfo {
   conversation_id: string;
 }
 
-export interface CreateSessionRequest {
-  key: string;
-  agent_key: string;
-  server_name?: string | null;
-  agent_slug?: string;
-  lazy_context?: boolean;
-  /** Empty mints a new conversation; an id resumes that transcript. */
-  conversation_id?: string;
-}
-
 // ── Conversations ──
 //
 // A session is the live subprocess; a conversation is what was said. The
@@ -1436,11 +1426,6 @@ export const api = {
 
   /** Build identity — shown to the user when they file an issue. */
   getEnv: () => apiFetch<AppEnvResponse>("/api/v1/meta/env"),
-
-  getServerStatus: (name: string) =>
-    apiFetch<{ online: boolean; error?: string }>(
-      `/api/v1/servers/${encodeURIComponent(name)}/status`,
-    ),
 
   getPortfolio: (server: string, refresh = false) =>
     apiFetch<PortfolioResponse>(
@@ -1951,21 +1936,6 @@ export const api = {
       { method: "DELETE" },
     ),
 
-  createAgent: (data: {
-    name: string;
-    description?: string;
-    instructions?: string;
-    agent_key?: string;
-    tools?: string[];
-    when_to_consult?: string;
-    server_required?: boolean;
-    server_name?: string;
-  }) =>
-    apiFetch<AgentSummary>("/api/v1/agents", {
-      method: "POST",
-      body: JSON.stringify(data),
-    }),
-
   updateAgentMd: (slug: string, content: string) =>
     apiFetch<{ updated: boolean }>(`/api/v1/agents/${encodeURIComponent(slug)}`, {
       method: "PUT",
@@ -2042,9 +2012,6 @@ export const api = {
 
   // ── Strategies (playbooks that loop under an Agent) ──
 
-  getStrategies: (slug: string) =>
-    apiFetch<StrategySummary[]>(`/api/v1/agents/${encodeURIComponent(slug)}/strategies`),
-
   getStrategy: (slug: string, sslug: string) =>
     apiFetch<StrategyDetail>(
       `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}`,
@@ -2077,12 +2044,6 @@ export const api = {
     apiFetch<{ updated: boolean }>(
       `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}`,
       { method: "PUT", body: JSON.stringify({ content }) },
-    ),
-
-  updateStrategyConfig: (slug: string, sslug: string, config: Record<string, unknown>) =>
-    apiFetch<{ updated: boolean }>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/config`,
-      { method: "PUT", body: JSON.stringify({ config }) },
     ),
 
   deleteStrategy: (slug: string, sslug: string) =>
@@ -2137,20 +2098,10 @@ export const api = {
       { method: "POST" },
     ),
 
-  getStrategyLearnings: (slug: string, sslug: string) =>
-    apiFetch<{ content: string }>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/learnings`,
-    ),
-
   updateStrategyLearnings: (slug: string, sslug: string, content: string) =>
     apiFetch<{ updated: boolean }>(
       `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/learnings`,
       { method: "PUT", body: JSON.stringify({ content }) },
-    ),
-
-  getStrategySessions: (slug: string, sslug: string) =>
-    apiFetch<{ sessions: SessionInfo[] }>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/sessions`,
     ),
 
   getSessionJournal: (slug: string, sslug: string, sessionNum: number) =>
@@ -2210,21 +2161,7 @@ export const api = {
       { method: "DELETE" },
     ),
 
-  getSavedBacktests: (server: string) =>
-    apiFetch<BacktestTask[]>(`/api/v1/servers/${encodeURIComponent(server)}/backtesting/saved`),
-
-  deleteSavedBacktest: (server: string, taskId: string) =>
-    apiFetch<Record<string, unknown>>(
-      `/api/v1/servers/${encodeURIComponent(server)}/backtesting/saved/${encodeURIComponent(taskId)}`,
-      { method: "DELETE" },
-    ),
-
   // ── Experiments ──
-
-  getAgentExperiments: (slug: string, sslug: string) =>
-    apiFetch<{ experiments: ExperimentInfo[] }>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/experiments`,
-    ),
 
   getExperiment: (slug: string, sslug: string, expNum: number) =>
     apiFetch<{ content: string; number: number }>(
@@ -2336,14 +2273,6 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(hooks),
     }),
-
-  // ── Agent Routines & Reports ──
-
-  getAgentRoutines: (slug: string) =>
-    apiFetch<RoutineInfo[]>(`/api/v1/agents/${encodeURIComponent(slug)}/routines`),
-
-  getAgentReports: (slug: string) =>
-    apiFetch<ReportsListResponse>(`/api/v1/agents/${encodeURIComponent(slug)}/reports`),
 
   // ── Settings ──
 
@@ -2513,14 +2442,6 @@ export const api = {
   getSessionOptions: () =>
     apiFetch<SessionOptionsResponse>("/api/v1/sessions/options"),
 
-  listSessions: () => apiFetch<SessionInfo[]>("/api/v1/sessions"),
-
-  createSession: (spec: CreateSessionRequest) =>
-    apiFetch<SessionInfo>("/api/v1/sessions", {
-      method: "POST",
-      body: JSON.stringify(spec),
-    }),
-
   destroySession: (key: string) =>
     apiFetch<{ destroyed: boolean }>(
       `/api/v1/sessions/${encodeURIComponent(key)}`,
@@ -2533,12 +2454,6 @@ export const api = {
     apiFetch<{ ok: boolean; session: SessionInfo }>(
       `/api/v1/sessions/${encodeURIComponent(key)}/action`,
       { method: "POST", body: JSON.stringify({ action: "switch", ...body }) },
-    ),
-
-  cancelSessionPrompt: (key: string) =>
-    apiFetch<{ ok: boolean }>(
-      `/api/v1/sessions/${encodeURIComponent(key)}/action`,
-      { method: "POST", body: JSON.stringify({ action: "cancel" }) },
     ),
 
   // ── Conversations (durable transcripts) ──
