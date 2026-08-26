@@ -2151,6 +2151,61 @@ async def _start(agent, strategy, req: StartStrategyRequest, user_id: int) -> di
     }
 
 
+# ── Loop lifecycle ──
+
+
+def _owns_engine(engine, user: WebUser) -> bool:
+    """Whether ``user`` is the one who started this loop.
+
+    The owner is the JWT id ``_start`` forces into the ``TickEngine``, which is
+    also the id ``_resolve_server`` keys credentials on — so it is the only
+    thing that may decide who gets to stop, wind down, pause or resume the run.
+    An engine with no owner (``user_id == 0``: a session restored from a status
+    file written before the field existed, whose strategy/agent frontmatter
+    named no creator either — see ``LoopSupervisor._owner_of``) belongs to
+    nobody and stays out of every non-admin's reach, the same call
+    ``routes/routines.py`` makes for an unowned routine instance.
+    """
+    owner = getattr(engine, "user_id", 0) or 0
+    return bool(owner) and owner == user.id
+
+
+def _require_engine_owner(engine, user: WebUser) -> None:
+    """Admins reach every loop; everyone else only their own (SEC-251)."""
+    if _is_admin(user):
+        return
+    if not _owns_engine(engine, user):
+        raise HTTPException(status_code=403, detail="Not your agent")
+
+
+def _authorized_engine(agent_id: str, user: WebUser):
+    """The named engine, 404 if absent and 403 if it belongs to someone else."""
+    from condor.agents.engine import get_engine
+
+    engine = get_engine(agent_id)
+    if not engine:
+        raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
+    _require_engine_owner(engine, user)
+    return engine
+
+
+def _authorized_engines_for(slug: str, sslug: str, user: WebUser) -> list:
+    """Every engine of this strategy the caller may act on (SEC-251).
+
+    ``get_engine``/``for_strategy`` are process-global registries, so the
+    no-``agent_id`` branch would otherwise broadcast over loops started by
+    other users. Filtered rather than checked one by one: someone else's engine
+    is simply not part of the set, and the caller gets the same "no running
+    strategy" a genuinely idle strategy gives them instead of a 403 admitting
+    the run exists.
+    """
+    return [
+        e
+        for e in _get_engines_for(slug, sslug)
+        if _is_admin(user) or _owns_engine(e, user)
+    ]
+
+
 @router.post("/{slug}/strategies/{sslug}/stop")
 async def stop_strategy(
     slug: str,
@@ -2160,14 +2215,9 @@ async def stop_strategy(
 ):
     """Stop a running strategy. If agent_id given, stop that instance; else all."""
     if agent_id:
-        from condor.agents.engine import get_engine
-
-        engine = get_engine(agent_id)
-        if not engine:
-            raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
-        await engine.stop()
+        await _authorized_engine(agent_id, user).stop()
     else:
-        engines = _get_engines_for(slug, sslug)
+        engines = _authorized_engines_for(slug, sslug, user)
         if not engines:
             raise HTTPException(status_code=404, detail="No running strategy found")
         for engine in engines:
@@ -2190,14 +2240,9 @@ async def shutdown_strategy(
     """
     reason = "manual emergency stop"
     if agent_id:
-        from condor.agents.engine import get_engine
-
-        engine = get_engine(agent_id)
-        if not engine:
-            raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
-        await engine._run_shutdown(reason=reason)
+        await _authorized_engine(agent_id, user)._run_shutdown(reason=reason)
     else:
-        engines = _get_engines_for(slug, sslug)
+        engines = _authorized_engines_for(slug, sslug, user)
         if not engines:
             raise HTTPException(status_code=404, detail="No running strategy found")
         for engine in engines:
@@ -2214,16 +2259,16 @@ async def pause_strategy(
 ):
     """Pause a running strategy."""
     if agent_id:
-        from condor.agents.engine import get_engine
-
-        engine = get_engine(agent_id)
-        if not engine or not engine.is_running:
+        engine = _authorized_engine(agent_id, user)
+        if not engine.is_running:
             raise HTTPException(
                 status_code=404, detail=f"Agent '{agent_id}' not found or not running"
             )
         engine.pause()
     else:
-        engines = [e for e in _get_engines_for(slug, sslug) if e.is_running]
+        engines = [
+            e for e in _authorized_engines_for(slug, sslug, user) if e.is_running
+        ]
         if not engines:
             raise HTTPException(status_code=404, detail="No running strategy found")
         engines[0].pause()
@@ -2239,14 +2284,9 @@ async def resume_strategy(
 ):
     """Resume a paused strategy."""
     if agent_id:
-        from condor.agents.engine import get_engine
-
-        engine = get_engine(agent_id)
-        if not engine:
-            raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
-        engine.resume()
+        _authorized_engine(agent_id, user).resume()
     else:
-        engines = _get_engines_for(slug, sslug)
+        engines = _authorized_engines_for(slug, sslug, user)
         if not engines:
             raise HTTPException(status_code=404, detail="No strategy found")
         engines[0].resume()
