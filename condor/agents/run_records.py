@@ -48,6 +48,14 @@ KIND_CONSULT = "consult"
 DEFAULT_KIND = KIND_DELEGATE
 RECORD_KINDS = (KIND_DELEGATE, KIND_CONSULT)
 
+# A third kind the Activity feed lists and this module does **not** write: a
+# code run is persisted by :class:`condor.code_runs.CodeRunStore`, under its own
+# cap, in its own directory (FEAT-061). The name lives here because the wire
+# shape and the history route's ``kind`` filter are shared, and one spelling of
+# "code" beats two. It is deliberately absent from ``RECORD_KINDS``, which drives
+# this store's retention and must keep answering only for what it holds.
+KIND_CODE = "code"
+
 # States a run can be found in when it is over. Lives here rather than in
 # ``delegate`` because retention, the history reader and both writers all need
 # the same answer to "is this finished".

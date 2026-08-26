@@ -32,6 +32,7 @@ from condor.agents.attribution import (
     current_owner_bases,
     session_ownership,
 )
+from condor.agents.run_records import KIND_CODE
 from condor.agents.sessions_index import (
     count_experiments,
     count_sessions,
@@ -874,6 +875,44 @@ def _delegation_scope(user: WebUser) -> int | None:
     return None if _is_admin(user) else user.id
 
 
+# What the store's three status words mean in the wire's vocabulary. `ok` is a
+# run that finished, `error` one that raised — both exact. `timeout` is neither:
+# the snippet was cut off by its budget, which the store bothered to record and
+# the feed therefore keeps rather than flattening into "error".
+_CODE_STATUS = {"ok": "done", "error": "error", "timeout": "timeout"}
+
+
+def _code_run_row(entry: dict) -> dict:
+    """A code-run index entry, in the shape the history feed already renders.
+
+    A wire concern, so it lives beside the route and not in
+    :class:`condor.code_runs.CodeRunStore` — that store knows nothing about
+    delegations and gains nothing by learning.
+
+    The fields a code run has no answer for (a caller, a conversation, a tool
+    count) carry the empty value the wire already uses for "not recorded", the
+    same way a consult carries no tool count. ``ended_at`` is derived from a
+    duration the store actually measured, so the feed's median is a real number
+    rather than a stand-in.
+    """
+    created = entry.get("created") or 0.0
+    return {
+        "task_id": entry.get("id") or "",
+        "agent": entry.get("agent") or "",
+        "kind": KIND_CODE,
+        "task": entry.get("label") or "",
+        "status": _CODE_STATUS.get(entry.get("status") or "", "unknown"),
+        "user_id": entry.get("user_id") or 0,
+        "started_at": created,
+        "ended_at": created + (entry.get("duration_ms") or 0) / 1000,
+        "caller": "",
+        "conversation_id": "",
+        "chat_id": 0,
+        "server_name": None,
+        "tool_count": 0,
+    }
+
+
 def _can_see_delegation(record: dict, user: WebUser) -> bool:
     """Admins see everything; everyone else only what they started.
 
@@ -956,6 +995,13 @@ async def list_delegation_history(
     ``"delegate"`` is today's behaviour exactly (the chat dock, which is about
     background tasks and would drown in consults).
 
+    Since FEAT-061 a third channel merges in from a different store: ``"code"``
+    is a snippet the agent ran, read from :class:`condor.code_runs.CodeRunStore`
+    and projected by :func:`_code_run_row`. That source is gated on
+    ``_may_run_code`` in addition to the ownership scope, because a run's
+    recorded stdout is as sensitive as running the snippet was; a caller without
+    that grant gets no code rows and an empty ``?kind=code``, not a 403.
+
     Returns *summary* rows: the bodies (``result``/``error``) are dropped, since
     a hundred rows must not ship a hundred answers — a row that gets opened
     fetches itself from ``/delegations/{task_id}``. Live tasks are included from
@@ -965,6 +1011,8 @@ async def list_delegation_history(
     from condor.agents.delegate import get_all_delegations
     from condor.agents.delegation_history import list_history
     from condor.agents.run_records import KIND_DELEGATE
+    from condor.code_runs import get_code_run_store
+    from condor.web.routes.code import _may_run_code
 
     # Everything in the registry is a delegation by construction, so a consult
     # filter simply excludes it rather than needing a field to test.
@@ -988,6 +1036,26 @@ async def list_delegation_history(
         if r["task_id"] not in live
     ]
     records.extend(live.values())
+
+    # The third source (FEAT-061). It lives in its own store, keyed by an
+    # in-record owner rather than by a path segment, so the merge is where the
+    # two ownership models meet — scoped by the same `_delegation_scope`
+    # expression the other two use, which is exactly `_owner_filter`'s contract
+    # in reports.py.
+    #
+    # `_may_run_code` gates the whole source: a run's stdout is whatever the
+    # snippet printed, and a caller who may not run code has no business reading
+    # one. `?kind=code` then returns an empty list rather than a 403 — a filter
+    # over a kind you have none of is honestly empty. The cost is deliberate: a
+    # revoked grant also closes the window on that user's own past runs.
+    if kind in ("", KIND_CODE) and _may_run_code(user.id):
+        records.extend(
+            _code_run_row(e)
+            for e in get_code_run_store().list(
+                agent=agent, limit=limit, user_id=_delegation_scope(user)
+            )
+        )
+
     records.sort(key=lambda r: r.get("started_at") or 0.0, reverse=True)
 
     return {
