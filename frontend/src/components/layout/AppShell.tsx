@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 
+import { ChatBubble } from "@/components/chat/ChatBubble";
 import { ConnectKeysOverlay } from "@/components/ConnectKeysOverlay";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { ReportIssueDialog } from "@/components/ReportIssueDialog";
@@ -24,6 +25,8 @@ import { useCredentials } from "@/hooks/useCredentials";
 import { usePrefetchData } from "@/hooks/usePrefetchData";
 import { useServer } from "@/hooks/useServer";
 import { useTheme } from "@/hooks/useTheme";
+import { routeFacts } from "@/lib/pageFacts";
+import { useViewFacts } from "@/lib/viewFacts";
 import { CurrencySelector } from "./CurrencySelector";
 import { NotificationBell } from "./NotificationBell";
 import { ServerSelector } from "./ServerSelector";
@@ -56,7 +59,7 @@ export function AppShell() {
 
 function AppShellBody() {
   const { server } = useServer();
-  const { pathname } = useLocation();
+  const { pathname, search } = useLocation();
   const { theme, toggleTheme } = useTheme();
   const navigate = useNavigate();
   const { hasKeys, isLoading: keysLoading } = useCredentials();
@@ -91,6 +94,11 @@ function AppShellBody() {
 
   // Prefetch core data (executors, bots) and subscribe to WS channels early
   usePrefetchData();
+
+  // The route baseline for the chat's page context (FEAT-059): every page
+  // gets a label and a URL-derived subject through the same seam richer
+  // contributors use, so the chat never has to know about the router.
+  useViewFacts(() => routeFacts(pathname, search));
 
   return (
     <div className="flex h-screen flex-col">
@@ -195,6 +203,11 @@ function AppShellBody() {
       </main>
 
       <ReportIssueDialog open={reportOpen} onClose={() => setReportOpen(false)} />
+
+      {/* The quick chat on every page but `/` (FEAT-059). Inside the
+          provider, outside `main`, so it neither scrolls with the page nor
+          unmounts on navigation. */}
+      <ChatBubble />
     </div>
   );
 }
