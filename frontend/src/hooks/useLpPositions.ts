@@ -39,8 +39,8 @@ function labelFor(pos: LpPosition, pool: PoolSummary | undefined): string {
  * portfolio's liquidity table — and two copies of "which LP executor counts as
  * open" is how they would come to disagree about whether a range is live.
  *
- * Deliberately *not* derived from the page-wide `["executors", server, ""]`
- * cache that Portfolio already holds: unfiltered, that route reads the newest
+ * Deliberately *not* derived from the page-wide unfiltered executors cache
+ * (`executorsQuery(server)`) that Portfolio already holds: unfiltered, that route reads the newest
  * 500 executors of every kind, so a range opened last week on a busy server
  * falls off the end of the page and silently vanishes. The typed query below
  * bypasses that cache and 200 *LP* executors reaches far deeper in time.

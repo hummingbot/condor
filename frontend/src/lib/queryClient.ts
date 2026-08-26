@@ -103,3 +103,71 @@ export function invalidateServerScopedQueries(
     refetchType: "none",
   });
 }
+
+/**
+ * Cache key for an executors list, plus the prefix that matches the whole
+ * family on one server.
+ *
+ * This key is read back positionally by code that did not build it:
+ * `lib/shared-socket.ts` pushes each `executors:<server>` frame into every
+ * *filtered* entry it finds in the cache, recovering `controllerId` and `pair`
+ * from the live keys — the filters exist nowhere else. While those keys were
+ * hand-written literals spread over seven files in two different arities, a
+ * page that wrote a differently shaped one matched no branch of that bridge and
+ * simply stopped receiving updates: a screen that goes quietly stale, with no
+ * error anywhere (the shape this repo has already shipped as CORR-006,
+ * CORR-180, CORR-185).
+ *
+ * So the shape is decided here, once, and it is uniform: always four elements,
+ * with `""` in a filter slot meaning "not filtered on this". Build keys with
+ * this function, read them back with `parseExecutorsKey`, and no other module
+ * needs to know the order.
+ */
+export type ExecutorsQueryKey = [
+  root: "executors",
+  server: string | null | undefined,
+  controllerId: string,
+  pair: string,
+];
+
+export function executorsQuery(
+  server: string | null | undefined,
+  opts: { controllerId?: string; pair?: string } = {},
+) {
+  return {
+    queryKey: [
+      "executors",
+      server,
+      opts.controllerId ?? "",
+      opts.pair ?? "",
+    ] as ExecutorsQueryKey,
+    /**
+     * Every executors entry for this server, filtered or not — what a mutation
+     * invalidates when it cannot know which narrowings are currently mounted.
+     */
+    prefix: ["executors", server] as [string, string | null | undefined],
+  };
+}
+
+/**
+ * Recover the filters from an executors key, or `null` if the key is not one.
+ *
+ * Deliberately strict: a cache scan reaches this with arbitrary keys, and the
+ * only keys that can be shaped like an executors key are the ones
+ * `executorsQuery` built.
+ */
+export function parseExecutorsKey(
+  key: readonly unknown[],
+): { server: string; controllerId: string; pair: string } | null {
+  if (key.length !== 4) return null;
+  const [root, server, controllerId, pair] = key;
+  if (root !== "executors") return null;
+  if (
+    typeof server !== "string" ||
+    typeof controllerId !== "string" ||
+    typeof pair !== "string"
+  ) {
+    return null;
+  }
+  return { server, controllerId, pair };
+}

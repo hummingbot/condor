@@ -30,6 +30,7 @@ import {
   type PortfolioHistoryResponse,
 } from "@/lib/api";
 import { formatCurrency, formatCurrencyPnl, formatCurrencyVolume, isExecutorActive } from "@/lib/formatters";
+import { executorsQuery } from "@/lib/queryClient";
 import { getThemeColors } from "@/lib/theme-colors";
 
 // ── Formatters ──
@@ -795,7 +796,7 @@ export function Portfolio() {
   });
 
   // Subscribe to the executors WS channel so the KPI strip updates live;
-  // the query below shares the canonical ["executors", server, ""] cache key
+  // the query below shares the canonical unfiltered executors cache key
   // (prefetched by usePrefetchData, pushed by useWebSocket) with a relaxed
   // poll as fallback.
   const executorChannels = useMemo(
@@ -805,7 +806,7 @@ export function Portfolio() {
   useCondorWebSocket(executorChannels, server ?? null);
 
   const { data: allExecutors } = useQuery({
-    queryKey: ["executors", server, ""],
+    queryKey: executorsQuery(server).queryKey,
     queryFn: () => api.getExecutors(server!),
     enabled: !!server,
     refetchInterval: 60000,
@@ -859,7 +860,7 @@ export function Portfolio() {
   );
 
   // Liquidity — shared with the /dex strip, and deliberately not derived from
-  // the unfiltered ["executors", server, ""] cache below (see the hook).
+  // the unfiltered executors cache below (see the hook).
   const { positions: lpPositions, label: lpLabel, isLoading: isLoadingLp } =
     useLpPositions(server ?? null);
 

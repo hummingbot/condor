@@ -16,6 +16,7 @@ import {
   pnlTextClass,
   isExecutorActive,
 } from "@/lib/formatters";
+import { executorsQuery } from "@/lib/queryClient";
 
 interface TradeBottomPaneProps {
   executors: ExecutorInfo[];
@@ -283,8 +284,9 @@ export function TradeBottomPane({
         return next;
       });
       setConfirmStopId(null);
-      // Prefix match covers ["executors", server, "main", pair] and the altPair variant
-      queryClient.invalidateQueries({ queryKey: ["executors", server] });
+      // The prefix covers every filtered executors view — the pair-filtered
+      // trade panel, its altPair twin, and the unfiltered portfolio list.
+      queryClient.invalidateQueries({ queryKey: executorsQuery(server).prefix });
       queryClient.invalidateQueries({ queryKey: ["dex-lp-executors", server] });
       queryClient.invalidateQueries({ queryKey: ["executors-infinite", server] });
     },

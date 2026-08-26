@@ -39,6 +39,7 @@ import { useCondorWebSocket } from "@/hooks/useWebSocket";
 import { api, type DexTokenConflict } from "@/lib/api";
 import { connectorCapabilities } from "@/lib/connector-capabilities";
 import { LOOKBACK_OPTIONS } from "@/lib/gridExecutor";
+import { executorsQuery } from "@/lib/queryClient";
 
 type Tab = "order" | "lp";
 
@@ -332,7 +333,9 @@ export function DexPool() {
     onSuccess: (data) => {
       active.save();
       setSuccessId(data.executor_id);
-      queryClient.invalidateQueries({ queryKey: ["executors", server, "main", pair] });
+      queryClient.invalidateQueries({
+        queryKey: executorsQuery(server, { controllerId: "main", pair }).queryKey,
+      });
       queryClient.invalidateQueries({ queryKey: ["consolidated-positions", server] });
       setSelectedExecutorId(data.executor_id);
     },

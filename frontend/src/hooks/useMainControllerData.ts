@@ -8,6 +8,7 @@ import {
 } from "@/components/dex/lp-position";
 import { api, type ExecutorInfo } from "@/lib/api";
 import { computeMultiOverlays } from "@/lib/executor-overlays";
+import { executorsQuery } from "@/lib/queryClient";
 
 /** The pool an executor traded in, from wherever it records one. */
 function executorPool(ex: ExecutorInfo): string {
@@ -52,7 +53,7 @@ export function useMainControllerData(
 ) {
   // Fetch executors filtered server-side by controller_id + trading_pair
   const { data: cachedExecutors } = useQuery<ExecutorInfo[]>({
-    queryKey: ["executors", server, "main", pair],
+    queryKey: executorsQuery(server, { controllerId: "main", pair }).queryKey,
     queryFn: () => api.getExecutors(server!, { controller_id: "main", trading_pair: pair }),
     enabled: !!server && !!pair,
     staleTime: 30_000, // REST fetch valid for 30s, WS pushes override instantly
@@ -60,11 +61,11 @@ export function useMainControllerData(
   });
 
   // Same query under the market's other name. The WS bridge refreshes every
-  // 4-element ["executors", server, controller, pair] key it finds, so this one
-  // stays as live as the primary without any wiring of its own.
+  // filtered executors key it finds in the cache, so this one stays as live as
+  // the primary without any wiring of its own.
   const wantsAlt = !!altPair && altPair !== pair;
   const { data: altExecutors } = useQuery<ExecutorInfo[]>({
-    queryKey: ["executors", server, "main", altPair],
+    queryKey: executorsQuery(server, { controllerId: "main", pair: altPair }).queryKey,
     queryFn: () => api.getExecutors(server!, { controller_id: "main", trading_pair: altPair }),
     enabled: !!server && wantsAlt,
     staleTime: 30_000,

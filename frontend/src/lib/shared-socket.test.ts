@@ -14,7 +14,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
 import type { ControllerPerformanceSnapshot } from "./api";
-import { queryClient } from "./queryClient";
+import { executorsQuery, queryClient } from "./queryClient";
 import { handleMessage } from "./shared-socket";
 
 const SERVER = "prod";
@@ -132,5 +132,100 @@ describe("controller_perf cache writes", () => {
     });
 
     expect(snapshotsAt(key)).toHaveLength(0);
+  });
+});
+
+/**
+ * An `executors` frame must reach the filtered views too (ARCH-227).
+ *
+ * Which narrowings someone is watching is recorded nowhere but in the live
+ * query keys, so this bridge reads the filters back out of the cache. It used
+ * to do that by index, and a key of an unexpected arity fell through every
+ * branch in silence — the screen simply stopped updating. These cases hold the
+ * factory and the parser to the same shape.
+ */
+describe("executors cache writes", () => {
+  const BTC = { id: "e1", controller_id: "main", trading_pair: "BTC-USDT" };
+  const SOL = { id: "e2", controller_id: "main", trading_pair: "SOL-USDC" };
+  const OTHER = { id: "e3", controller_id: "grid_1", trading_pair: "BTC-USDT" };
+
+  const ids = (key: unknown[]) =>
+    queryClient.getQueryData<{ id: string }[]>(key)?.map((e) => e.id);
+
+  beforeEach(() => {
+    queryClient.clear();
+  });
+
+  it("writes the whole frame to the unfiltered entry", () => {
+    handleMessage(`executors:${SERVER}`, [BTC, SOL, OTHER]);
+
+    expect(ids(executorsQuery(SERVER).queryKey)).toEqual(["e1", "e2", "e3"]);
+  });
+
+  it("narrows the frame into a controller+pair entry", () => {
+    // useMainControllerData: the pair-filtered trade panel list.
+    const key = executorsQuery(SERVER, { controllerId: "main", pair: "BTC-USDT" })
+      .queryKey;
+    queryClient.setQueryData(key, []);
+
+    handleMessage(`executors:${SERVER}`, [BTC, SOL, OTHER]);
+
+    expect(ids(key)).toEqual(["e1"]);
+  });
+
+  it("narrows into single-filter entries as well", () => {
+    const byPair = executorsQuery(SERVER, { pair: "SOL-USDC" }).queryKey;
+    const byController = executorsQuery(SERVER, { controllerId: "grid_1" }).queryKey;
+    queryClient.setQueryData(byPair, []);
+    queryClient.setQueryData(byController, []);
+
+    handleMessage(`executors:${SERVER}`, [BTC, SOL, OTHER]);
+
+    expect(ids(byPair)).toEqual(["e2"]);
+    expect(ids(byController)).toEqual(["e3"]);
+  });
+
+  it("keeps the unfiltered entry unfiltered", () => {
+    const filtered = executorsQuery(SERVER, { pair: "BTC-USDT" }).queryKey;
+    queryClient.setQueryData(filtered, []);
+
+    handleMessage(`executors:${SERVER}`, [BTC, SOL]);
+
+    expect(ids(executorsQuery(SERVER).queryKey)).toEqual(["e1", "e2"]);
+    expect(ids(filtered)).toEqual(["e1"]);
+  });
+
+  it("does not mint filtered entries nobody is watching", () => {
+    handleMessage(`executors:${SERVER}`, [BTC, SOL]);
+
+    // Only the unfiltered entry the handler writes outright.
+    expect(
+      queryClient.getQueryCache().findAll({ queryKey: executorsQuery(SERVER).prefix }),
+    ).toHaveLength(1);
+  });
+
+  it("leaves another server's entries alone", () => {
+    const other = executorsQuery("staging", { pair: "BTC-USDT" }).queryKey;
+    queryClient.setQueryData(other, [OTHER]);
+
+    handleMessage(`executors:${SERVER}`, [BTC, SOL]);
+
+    expect(ids(other)).toEqual(["e3"]);
+  });
+
+  it("refreshes the first page of the infinite list", () => {
+    queryClient.setQueryData(["executors-infinite", SERVER], {
+      pages: [{ executors: [OTHER], next_cursor: null }],
+      pageParams: [undefined],
+    });
+
+    handleMessage(`executors:${SERVER}`, [BTC, SOL]);
+
+    expect(
+      queryClient.getQueryData<{ pages: { executors: { id: string }[] }[] }>([
+        "executors-infinite",
+        SERVER,
+      ])?.pages[0].executors.map((e) => e.id),
+    ).toEqual(["e1"]);
   });
 });

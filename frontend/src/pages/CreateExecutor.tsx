@@ -42,6 +42,7 @@ import { useResizeDrag } from "@/hooks/useResizeDrag";
 import { api } from "@/lib/api";
 import { candleStore } from "@/lib/candle-store";
 import { connectorCapabilities } from "@/lib/connector-capabilities";
+import { executorsQuery } from "@/lib/queryClient";
 import type { ExecutorType, PickSlot } from "@/components/executor/types";
 import {
   gridReducer,
@@ -579,7 +580,9 @@ export function CreateExecutor() {
       // Show success modal
       setSuccessInfo({ id: data.executor_id, type: executorType, connector, pair });
       // Invalidate executor queries so the new one appears immediately
-      queryClient.invalidateQueries({ queryKey: ["executors", server, "main", pair] });
+      queryClient.invalidateQueries({
+        queryKey: executorsQuery(server, { controllerId: "main", pair }).queryKey,
+      });
       queryClient.invalidateQueries({ queryKey: ["consolidated-positions", server] });
       // Auto-select the new executor in the bottom pane
       setSelectedExecutorId(data.executor_id);

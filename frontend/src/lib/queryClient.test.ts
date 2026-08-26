@@ -16,7 +16,11 @@
 import { QueryClient, QueryObserver } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { invalidateServerScopedQueries } from "@/lib/queryClient";
+import {
+  executorsQuery,
+  invalidateServerScopedQueries,
+  parseExecutorsKey,
+} from "@/lib/queryClient";
 
 const PREVIOUS = "server-a";
 const NEXT = "server-b";
@@ -39,7 +43,8 @@ const SERVER_INDEPENDENT = [
 const scopedKeys = (server: string) => [
   ["portfolio", server],
   ["bots", server],
-  ["executors", server, ""],
+  executorsQuery(server).queryKey,
+  executorsQuery(server, { controllerId: "main", pair: "BTC-USDT" }).queryKey,
   ["consolidated-positions", server],
   ["settings-credentials", server],
   ["settings-connectors", server, "spot"],
@@ -151,5 +156,85 @@ describe("invalidateServerScopedQueries", () => {
     for (const key of SERVER_INDEPENDENT) {
       expect(isInvalidated(key), JSON.stringify(key)).toBe(false);
     }
+  });
+});
+
+/**
+ * Pins the executors key contract (ARCH-227).
+ *
+ * `lib/shared-socket.ts` recovers the filters from whatever executors keys it
+ * finds in the cache, so a key the factory builds and the parser then fails to
+ * recognise is not a type error — it is a screen that stops receiving live
+ * updates and says nothing. Every shape the app builds is asserted to survive
+ * the round trip, to be reachable from the invalidation prefix, and to be seen
+ * by the server switch.
+ */
+describe("executorsQuery / parseExecutorsKey", () => {
+  const SHAPES = [
+    ["unfiltered", {}, { controllerId: "", pair: "" }],
+    ["controller only", { controllerId: "main" }, { controllerId: "main", pair: "" }],
+    ["pair only", { pair: "BTC-USDT" }, { controllerId: "", pair: "BTC-USDT" }],
+    [
+      "controller + pair",
+      { controllerId: "main", pair: "SOL-USDC" },
+      { controllerId: "main", pair: "SOL-USDC" },
+    ],
+  ] as const;
+
+  it.each(SHAPES)("round-trips the %s key", (_label, opts, expected) => {
+    expect(parseExecutorsKey(executorsQuery(PREVIOUS, opts).queryKey)).toEqual({
+      server: PREVIOUS,
+      ...expected,
+    });
+  });
+
+  it("gives every shape the same arity, so no reader has to branch on length", () => {
+    for (const [, opts] of SHAPES) {
+      expect(executorsQuery(PREVIOUS, opts).queryKey).toHaveLength(4);
+    }
+  });
+
+  it("finds every shape from the invalidation prefix", () => {
+    for (const [, opts] of SHAPES) {
+      client.setQueryData(executorsQuery(PREVIOUS, opts).queryKey, []);
+    }
+    // A neighbouring family that must NOT be swept up by the prefix.
+    client.setQueryData(["executors-infinite", PREVIOUS], []);
+
+    const found = client
+      .getQueryCache()
+      .findAll({ queryKey: executorsQuery(PREVIOUS).prefix });
+
+    expect(found).toHaveLength(SHAPES.length);
+    for (const entry of found) {
+      expect(parseExecutorsKey(entry.queryKey)?.server).toBe(PREVIOUS);
+    }
+  });
+
+  it("does not match another server's entries", () => {
+    client.setQueryData(executorsQuery(NEXT, { pair: "BTC-USDT" }).queryKey, []);
+    expect(
+      client.getQueryCache().findAll({ queryKey: executorsQuery(PREVIOUS).prefix }),
+    ).toHaveLength(0);
+  });
+
+  it("rejects keys that are not executors keys", () => {
+    expect(parseExecutorsKey(["executors-infinite", PREVIOUS])).toBeNull();
+    expect(parseExecutorsKey(["portfolio", PREVIOUS])).toBeNull();
+    // The pre-ARCH-227 three-element shapes, which no longer exist.
+    expect(parseExecutorsKey(["executors", PREVIOUS, ""])).toBeNull();
+    expect(parseExecutorsKey(["executors", PREVIOUS, "main"])).toBeNull();
+    // A key minted before a server was picked.
+    expect(parseExecutorsKey(executorsQuery(null).queryKey)).toBeNull();
+  });
+
+  it("is reached by the server switch", () => {
+    const key = executorsQuery(PREVIOUS, { controllerId: "main", pair: "SOL-USDC" })
+      .queryKey;
+    client.setQueryData(key, "cached");
+
+    invalidateServerScopedQueries(client, [PREVIOUS, NEXT]);
+
+    expect(isInvalidated(key)).toBe(true);
   });
 });

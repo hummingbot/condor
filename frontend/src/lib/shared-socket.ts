@@ -22,7 +22,7 @@
  */
 
 import { candleStore } from "./candle-store";
-import { queryClient } from "./queryClient";
+import { executorsQuery, parseExecutorsKey, queryClient } from "./queryClient";
 import type {
   BotsPageResponse,
   ControllerInfo,
@@ -181,23 +181,27 @@ export function handleMessage(channel: string, data: unknown): void {
       };
     });
   } else if (prefix === "executors") {
-    queryClient.setQueryData(["executors", server, ""], data);
-    // Also update any filtered executor queries (e.g. ["executors", server, "main", pair])
+    const unfiltered = executorsQuery(server);
+    queryClient.setQueryData(unfiltered.queryKey, data);
     const allExecs = data as { controller_id?: string; trading_pair?: string }[];
     if (Array.isArray(allExecs)) {
-      const cache = queryClient.getQueryCache().findAll({ queryKey: ["executors", server] });
-      for (const entry of cache) {
-        const key = entry.queryKey as string[];
-        // Skip the unfiltered key (already set above)
-        if (key.length <= 3 && key[2] === "") continue;
-        // key format: ["executors", server, controllerId, pair]
-        if (key.length === 4) {
-          const [, , cid, tp] = key;
-          const filtered = allExecs.filter(
-            (ex) => (!cid || ex.controller_id === cid) && (!tp || ex.trading_pair === tp),
-          );
-          queryClient.setQueryData(key, filtered);
-        }
+      // Filtered views of the same list are derived from this one frame. Which
+      // narrowings someone is currently watching is recorded nowhere but in the
+      // live keys, so they are read back through the shared parser rather than
+      // destructured here — `executorsQuery` owns the order.
+      for (const entry of queryClient.getQueryCache().findAll({ queryKey: unfiltered.prefix })) {
+        const filter = parseExecutorsKey(entry.queryKey);
+        if (!filter) continue;
+        // The unfiltered entry, already written above.
+        if (!filter.controllerId && !filter.pair) continue;
+        queryClient.setQueryData(
+          entry.queryKey,
+          allExecs.filter(
+            (ex) =>
+              (!filter.controllerId || ex.controller_id === filter.controllerId) &&
+              (!filter.pair || ex.trading_pair === filter.pair),
+          ),
+        );
       }
     }
     const execs = data as unknown[];
