@@ -298,6 +298,87 @@ describe("money in the display currency", () => {
     localStorage.removeItem("condor_display_currency");
     vi.resetModules();
   });
+
+  /**
+   * The parity the block's docstring promises, checked against the hook the
+   * pages actually render with rather than against a second opinion.
+   *
+   * The interesting case is a quote with no rate path: the number stays in
+   * quote units, so it must keep the *quote's* symbol on both surfaces. The
+   * block used to relabel it with the display currency's — telling the agent a
+   * BRL loss was in euros while the screen said `R$` (ARCH-228).
+   */
+  it("hands the agent the exact string the page renders for an unconvertible quote", async () => {
+    localStorage.setItem("condor_display_currency", "EUR");
+    vi.resetModules();
+    const [
+      { routeFacts: facts },
+      { renderViewBlock: render },
+      { useRates },
+      { ServerContext },
+      { QueryClient: Client, QueryClientProvider },
+      React,
+      { createRoot },
+    ] = await Promise.all([
+      import("./pageFacts"),
+      import("./viewFacts"),
+      import("@/hooks/useRates"),
+      import("@/hooks/useServer"),
+      import("@tanstack/react-query"),
+      import("react"),
+      import("react-dom/client"),
+    ]);
+
+    const PNL = -412.2971;
+    const client = new Client();
+    client.setQueryData(["bot", SRV, "42"], {
+      bot: { id: "42", name: "brl-mm", status: "running", pnl: PNL, trading_pair: "BTC-BRL" },
+      config: {},
+      performance: {},
+    });
+    // EUR priced against BRL, and the server has no path: a real answer.
+    client.setQueryData(["rates", SRV, "EUR", "BRL"], { BRL: null });
+
+    const holder: { onScreen?: string } = {};
+    function Harness() {
+      const { formatPnlValue } = useRates(["BRL"]);
+      React.useEffect(() => {
+        holder.onScreen = formatPnlValue(PNL, "BRL");
+      });
+      return null;
+    }
+
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await React.act(async () => {
+      root.render(
+        React.createElement(
+          QueryClientProvider,
+          { client },
+          React.createElement(
+            ServerContext.Provider,
+            { value: { server: SRV, setServer: () => {} } },
+            React.createElement(Harness),
+          ),
+        ),
+      );
+    });
+    await React.act(async () => root.unmount());
+    container.remove();
+
+    // The screen keeps the quote's symbol and marks the value unconverted...
+    expect(holder.onScreen).toContain("R$");
+    expect(holder.onScreen).toContain("\u26A0");
+    expect(holder.onScreen).not.toContain("\u20AC");
+    // ...and the block quotes that string character for character.
+    const block = render([facts("/bots/42", "", client)!], "/bots/42");
+    expect(block).toContain(`pnl ${holder.onScreen}`);
+
+    localStorage.removeItem("condor_display_currency");
+    vi.resetModules();
+  });
 });
 
 describe("an empty cache", () => {

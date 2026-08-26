@@ -1,7 +1,7 @@
 import type { QueryClient } from "@tanstack/react-query";
 
 import { poolLabel } from "@/components/dex/format";
-import { CURRENCY_SYMBOLS, getDisplayCurrency } from "@/hooks/useDisplayCurrency";
+import { getDisplayCurrency } from "@/hooks/useDisplayCurrency";
 import type {
   AgentDetail,
   BotDetail,
@@ -25,6 +25,7 @@ import {
   isExecutorActive,
   toMs,
 } from "./formatters";
+import { formatWithRate, type RateTable } from "./rates";
 import type { ViewFacts } from "./viewFacts";
 
 /**
@@ -144,47 +145,27 @@ function freshKey(
   return best;
 }
 
-// USD-pegged stablecoins, as `useRates` treats them — 1:1, no rate needed.
-const STABLECOINS = new Set(["USDT", "USDC", "FDUSD", "BUSD", "DAI", "TUSD", "USD"]);
-
 /**
  * Money formatted the way the page formats it.
  *
  * Reads the same `["rates", server, currency, …]` cache `useRates` fills and
- * applies the same conversion, symbol fallback and `⚠` marker — so the block
- * says `$-412.30` where the screen says `$-412.30`, in the display currency
- * the user picked rather than in raw quote units.
+ * runs it through the same `lib/rates` rule — same conversion, same symbol,
+ * same `⚠` marker — so the block says `$-412.30` where the screen says
+ * `$-412.30`, in the display currency the user picked rather than in raw quote
+ * units. Sharing the rule is the point: the copy that used to live here had
+ * drifted on the symbol for an unconvertible quote (ARCH-228).
  */
 function money(qc: QueryClient) {
   const currency = getDisplayCurrency();
-  const table = fresh<Record<string, number | null>>(
-    qc,
-    ["rates"],
-    (key) => key[2] === currency,
-  );
+  const table = fresh<RateTable>(qc, ["rates"], (key) => key[2] === currency);
 
-  const rateFor = (quote: string): number | null => {
-    const q = (quote || "USDT").toUpperCase();
-    if (q === currency) return 1;
-    if (STABLECOINS.has(currency) && STABLECOINS.has(q)) return 1;
-    const rate = table?.[q];
-    return rate != null && rate > 0 ? rate : null;
+  // A missing number is left out of the block entirely — better no fact than a
+  // confident `$0.00` the screen is not showing.
+  const format = (fmt: (val: number, symbol?: string) => string) => {
+    const formatted = formatWithRate(fmt, table, currency);
+    return (val: number | null | undefined, quote?: string): string | undefined =>
+      val == null || !Number.isFinite(val) ? undefined : formatted(val, quote);
   };
-
-  // Same fallback as `useRates().resolvedSymbol`: until the rate lands the
-  // number and its symbol must not disagree about what currency it is in.
-  const usdRate = rateFor("USDT");
-  const symbol = usdRate != null ? CURRENCY_SYMBOLS[currency] : "$";
-
-  const format =
-    (fmt: (val: number, symbol?: string) => string) =>
-    (val: number | null | undefined, quote = "USDT"): string | undefined => {
-      if (val == null || !Number.isFinite(val)) return undefined;
-      const rate = rateFor(quote);
-      return rate != null
-        ? fmt(val / rate, symbol)
-        : `${fmt(val, symbol)} ⚠`;
-    };
 
   return {
     value: format(formatCurrency),

@@ -3,11 +3,9 @@ import { useMemo } from "react";
 
 import { api } from "@/lib/api";
 import { formatCurrency, formatCurrencyPnl, formatCurrencyVolume } from "@/lib/formatters";
-import { useDisplayCurrency, CURRENCY_SYMBOLS, type DisplayCurrency } from "./useDisplayCurrency";
+import { formatWithRate, rateFor, resolveSymbol, STABLECOINS } from "@/lib/rates";
+import { useDisplayCurrency } from "./useDisplayCurrency";
 import { useServer } from "./useServer";
-
-// USD-pegged stablecoins — treat conversions between these as 1:1
-const STABLECOINS = new Set(["USDT", "USDC", "FDUSD", "BUSD", "DAI", "TUSD", "USD"]);
 
 export function useRates(quoteCurrencies: string[]) {
   const { currency, currencySymbol } = useDisplayCurrency();
@@ -74,45 +72,35 @@ export function useRates(quoteCurrencies: string[]) {
     },
   });
 
+  // The rule itself lives in `lib/rates.ts`, shared with the chat's
+  // page-context block so the two never drift apart again (ARCH-228).
   const convert = useMemo(() => {
     return (value: number, quoteCurrency: string): { value: number; converted: boolean } => {
-      const norm = quoteCurrency.toUpperCase();
-      if (norm === currency) return { value, converted: true };
-      const rate = rates?.[norm];
-      if (rate != null && rate > 0) return { value: value / rate, converted: true };
-      return { value, converted: false };
+      const rate = rateFor(rates, currency, quoteCurrency);
+      return rate != null ? { value: value / rate, converted: true } : { value, converted: false };
     };
   }, [rates, currency]);
 
   // Symbol for values already run through `convert()` (aggregates, USD totals).
   // Falls back to "$" until the USD -> display-currency rate is live, so the
   // number and its label never disagree.
-  const usdConverted = useMemo(() => convert(1, "USDT").converted, [convert]);
-  const resolvedSymbol = usdConverted ? currencySymbol : "$";
+  const usdConverted = useMemo(() => rateFor(rates, currency, "USDT") != null, [rates, currency]);
+  const resolvedSymbol = useMemo(() => resolveSymbol(rates, currency), [rates, currency]);
 
-  const formatValue = useMemo(() => {
-    return (val: number, quoteCurrency: string): string => {
-      const { value, converted } = convert(val, quoteCurrency);
-      const sym = converted ? currencySymbol : CURRENCY_SYMBOLS[quoteCurrency.toUpperCase() as DisplayCurrency] || "$";
-      return formatCurrencyVolume(value, sym) + (converted ? "" : " \u26A0");
-    };
-  }, [convert, currencySymbol]);
+  const formatValue = useMemo(
+    () => formatWithRate(formatCurrencyVolume, rates, currency),
+    [rates, currency],
+  );
 
-  const formatPnlValue = useMemo(() => {
-    return (val: number, quoteCurrency: string): string => {
-      const { value, converted } = convert(val, quoteCurrency);
-      const sym = converted ? currencySymbol : CURRENCY_SYMBOLS[quoteCurrency.toUpperCase() as DisplayCurrency] || "$";
-      return formatCurrencyPnl(value, sym) + (converted ? "" : " \u26A0");
-    };
-  }, [convert, currencySymbol]);
+  const formatPnlValue = useMemo(
+    () => formatWithRate(formatCurrencyPnl, rates, currency),
+    [rates, currency],
+  );
 
-  const formatValueDetailed = useMemo(() => {
-    return (val: number, quoteCurrency: string): string => {
-      const { value, converted } = convert(val, quoteCurrency);
-      const sym = converted ? currencySymbol : CURRENCY_SYMBOLS[quoteCurrency.toUpperCase() as DisplayCurrency] || "$";
-      return formatCurrency(value, sym) + (converted ? "" : " \u26A0");
-    };
-  }, [convert, currencySymbol]);
+  const formatValueDetailed = useMemo(
+    () => formatWithRate(formatCurrency, rates, currency),
+    [rates, currency],
+  );
 
   return {
     rates: rates ?? {},
