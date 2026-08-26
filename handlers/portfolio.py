@@ -8,6 +8,7 @@ import time
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import CallbackQueryHandler, ContextTypes
 
+from condor.fetchers.portfolio import dedupe_unified_accounts
 from handlers import is_gateway_network
 from handlers.config import clear_config_state
 from handlers.config.user_preferences import get_all_enabled_networks
@@ -275,6 +276,7 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             enabled_networks = get_all_enabled_networks(context.user_data)
             if enabled_networks:
                 balances = _filter_balances_by_networks(balances, enabled_networks)
+            balances, _ = dedupe_unified_accounts(balances)
 
         # Build keyboard with connector buttons
         connector_keys = _get_connector_keys(balances)
@@ -509,6 +511,7 @@ async def refresh_portfolio_dashboard(
             enabled_networks = get_all_enabled_networks(context.user_data)
             if enabled_networks:
                 balances = _filter_balances_by_networks(balances, enabled_networks)
+            balances, _ = dedupe_unified_accounts(balances)
 
         connector_keys = _get_connector_keys(balances)
         reply_markup = build_portfolio_keyboard(connector_keys)

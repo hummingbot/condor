@@ -6,7 +6,11 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from condor.fetchers.portfolio import PORTFOLIO_HISTORY_RANGES
+from condor.fetchers.portfolio import (
+    PORTFOLIO_HISTORY_RANGES,
+    UNIFIED_ACCOUNT_NOTE,
+    dedupe_unified_accounts,
+)
 from condor.web.auth import require_server_access
 from condor.web.models import (
     BalanceItem,
@@ -72,6 +76,7 @@ async def get_portfolio(
 
     # Parse portfolio state into structured response
     # API returns: {account_name: {connector_name: [balance_dicts]}}
+    state, unified = dedupe_unified_accounts(state)
     connectors: list[ConnectorBalance] = []
     total_usd = 0.0
 
@@ -121,48 +126,16 @@ async def get_portfolio(
                         connector=connector_name,
                         balances=balances,
                         total_usd=connector_total,
+                        note=(
+                            UNIFIED_ACCOUNT_NOTE
+                            if (account_name, connector_name) in unified
+                            else None
+                        ),
                     )
                 )
 
-    _dedupe_hyperliquid_unified(connectors)
     total_usd = sum(c.total_usd for c in connectors)
     return PortfolioResponse(server=name, connectors=connectors, total_usd=total_usd)
-
-
-# Hyperliquid stable/quote symbols (perp margin reports "USD", spot holds "USDC").
-_HL_STABLES = {"USD", "USDC"}
-
-
-def _dedupe_hyperliquid_unified(connectors: list[ConnectorBalance]) -> None:
-    """Avoid double-counting Hyperliquid balances for unified / portfolio-margin accounts.
-
-    In unified or portfolio-margin mode the SAME USDC collateral is reported by BOTH the spot
-    (``hyperliquid``) and perp (``hyperliquid_perpetual``) clearinghouse states, which inflates the
-    portfolio. Hyperliquid exposes no account-mode flag, so detect the unified case by the near-equal
-    shared stable balance and drop the perp duplicate — Hyperliquid's own guidance is to use the spot
-    clearinghouse state as the unified account balance. No-op in standard mode, where the spot and
-    perp balances are separate and differ. Mutates ``connectors`` in place.
-    """
-    spot = next((c for c in connectors if c.connector == "hyperliquid"), None)
-    perp = next((c for c in connectors if c.connector == "hyperliquid_perpetual"), None)
-    if spot is None or perp is None:
-        return
-
-    spot_stable = sum(b.usd_value for b in spot.balances if b.token in _HL_STABLES)
-    perp_stable = sum(b.usd_value for b in perp.balances if b.token in _HL_STABLES)
-    if spot_stable <= 0 or perp_stable <= 0:
-        return
-
-    # Unified when the perp stable collateral matches the spot stable within ~1% (one shared pool).
-    if abs(perp_stable - spot_stable) > max(0.01, 0.01 * spot_stable):
-        return
-
-    # Drop the duplicated stable collateral from the perp side; keep any non-stable (perp-only) items.
-    perp.balances = [b for b in perp.balances if b.token not in _HL_STABLES]
-    perp.total_usd = sum(b.usd_value for b in perp.balances)
-    perp.note = (
-        "Unified account — USDC balance is reflected in the hyperliquid (spot) balance."
-    )
 
 
 @router.get(
