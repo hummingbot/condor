@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import {
   ArrowUpRight,
   Bot,
+  BrainCircuit,
   ChevronDown,
   MessageSquare,
   PanelLeftClose,
@@ -12,6 +13,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 
+import { AgentBrainSheet } from "@/components/agent/AgentBrainSheet";
 import { deriveAgentStatus } from "@/components/agent/agentStatus";
 import { BrainPicker, type BrainSelection } from "@/components/chat/BrainPicker";
 import { ChatInput } from "@/components/chat/ChatInput";
@@ -72,6 +74,8 @@ export function AgentChatTab() {
    * `null` means "never touched it", which is what falls back to `defaultAgent`.
    */
   const [pendingAgentKey, setPendingAgentKey] = useState<string | null>(null);
+  /** Whose brain the panel is showing, or null when it is closed. */
+  const [brainSlug, setBrainSlug] = useState<string | null>(null);
 
   // Same keys and intervals the fleet tab uses, so react-query dedupes rather
   // than polling `/agents` twice.
@@ -208,6 +212,19 @@ export function AgentChatTab() {
     : undefined;
   const heroAgent = activeSlot ? undefined : pendingAgent;
 
+  /**
+   * Whose knowledge the panel is about, and what to call them.
+   *
+   * Both read off the slug, never off `boundAgent`/`pendingAgent` in their own
+   * order: an unbound Condor conversation leaves `boundAgent` undefined while a
+   * rail click can leave `pendingAgent` pointing at a specialist, so a name
+   * resolved separately from the slug titled the panel "Orca LP Expert" over
+   * Condor's brain until the fetch landed and corrected it.
+   */
+  const knowledgeSlug = selectedSlug || CHAT_SLUG;
+  const agentName = (slug: string) =>
+    agents.find((a) => a.slug === slug)?.name || "Condor";
+
   // Condor is in the registry like every other Agent (FEAT-033), but it is not
   // a specialist you bind: you get it by binding nothing, which is what the
   // empty slug means everywhere else here. So it is lifted out of the list and
@@ -328,7 +345,20 @@ export function AgentChatTab() {
                 isStreaming={isActiveStreaming}
                 onSelectBrain={switchBrain}
               />
-              {/* Strategies, brain and routines stay on the agent's own page. */}
+              {/* What the thing on the other side of this conversation
+                  actually knows — its brain, playbooks, memories, tools,
+                  strategies and routines. Offered for Condor too, which has no
+                  "Manage" link and was until now the one agent you could not
+                  read at all. */}
+              <button
+                onClick={() => setBrainSlug(knowledgeSlug)}
+                className="flex items-center gap-1 rounded px-1.5 py-1 text-[11px] text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-primary)]"
+                title={`What ${agentName(knowledgeSlug)} knows and can do`}
+              >
+                <BrainCircuit className="h-3.5 w-3.5" />
+                <span className="hidden sm:inline">Knowledge</span>
+              </button>
+              {/* Editing any of it stays on the agent's own page. */}
               {boundAgent && (
                 <Link
                   to={`/agents/${boundAgent.slug}`}
@@ -382,6 +412,14 @@ export function AgentChatTab() {
           agentSlug={activeSlot?.info.agent_slug || ""}
         />
       </div>
+
+      {brainSlug && (
+        <AgentBrainSheet
+          slug={brainSlug}
+          fallbackName={agentName(brainSlug)}
+          onClose={() => setBrainSlug(null)}
+        />
+      )}
     </div>
   );
 }

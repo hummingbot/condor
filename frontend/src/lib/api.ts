@@ -743,6 +743,75 @@ export interface AgentDetail {
   strategies: StrategySummary[];
 }
 
+/**
+ * The Agent's brain, read back for a human.
+ *
+ * The four libraries the model is handed at the top of every turn — its
+ * playbooks, what it remembers about you, the scripts it can run and the
+ * strategies it owns — plus its identity and tool allowlist. Metadata only:
+ * a skill's or memory's body costs a deliberate fetch (`getAgentSkill` /
+ * `getAgentMemory`), so opening the panel never pulls the whole library.
+ */
+export interface AgentBrain {
+  slug: string;
+  name: string;
+  description: string;
+  agent_md: string;
+  agent_key: string;
+  when_to_consult: string;
+  server_required: boolean;
+  server_name: string;
+  tools: string[];
+  /** Empty allowlist = every discovered tool, which is not "no tools". */
+  tools_unrestricted: boolean;
+  skills: SkillCard[];
+  memories: MemoryCard[];
+  routines: RoutineCard[];
+  strategies: StrategyCard[];
+}
+
+export interface SkillCard {
+  slug: string;
+  name: string;
+  description: string;
+  when_to_use: string;
+  /** From `agents/_shared/skills` rather than this Agent's own library. */
+  shared: boolean;
+  /** Shared *and* not writable from here — read-only for this Agent. */
+  inherited: boolean;
+  references_routine: string;
+  routine_ok: boolean;
+}
+
+export interface MemoryCard {
+  name: string;
+  description: string;
+  type: string;
+  created: string;
+  source: string;
+}
+
+export interface RoutineCard {
+  name: string;
+  description: string;
+  continuous: boolean;
+  /** `"global"` for the shared library, `"agent:<slug>"` for its own. */
+  source: string;
+  category: string;
+}
+
+export interface StrategyCard {
+  slug: string;
+  name: string;
+  description: string;
+  status: string;
+}
+
+export interface SkillBody extends SkillCard {
+  body: string;
+  files: string[];
+}
+
 // How a delegation ended. `running`…`stopped` come from the live registry;
 // `interrupted` is a task whose process died mid-flight, and `unknown` a
 // transcript too old to say — both only ever arrive from history.
@@ -1758,6 +1827,20 @@ export const api = {
 
   getAgent: (slug: string) =>
     apiFetch<AgentDetail>(`/api/v1/agents/${encodeURIComponent(slug)}`),
+
+  /** Identity + the four libraries, for the panel behind a conversation. */
+  getAgentBrain: (slug: string) =>
+    apiFetch<AgentBrain>(`/api/v1/agents/${encodeURIComponent(slug)}/brain`),
+
+  getAgentSkill: (slug: string, name: string) =>
+    apiFetch<SkillBody>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/skills/${encodeURIComponent(name)}`,
+    ),
+
+  getAgentMemory: (slug: string, name: string) =>
+    apiFetch<{ name: string; body: string }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/memories/${encodeURIComponent(name)}`,
+    ),
 
   createAgent: (data: {
     name: string;
