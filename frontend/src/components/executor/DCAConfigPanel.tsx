@@ -14,6 +14,7 @@ import {
 } from "./fields";
 import type { ChartPriceMapping, ExecutorValidation, ExtraLine, PickSlot } from "./types";
 import { getThemeColors } from "@/lib/theme-colors";
+import { DCA_DEFAULTS_KEY } from "@/lib/sessionState";
 
 // ── State ──
 
@@ -59,7 +60,7 @@ const DEFAULTS: DCAState = {
   showAdvanced: false,
 };
 
-const STORAGE_KEY = "condor_dca_defaults";
+const STORAGE_KEY = DCA_DEFAULTS_KEY;
 
 const PERSISTED_FIELDS: (keyof DCAState)[] = [
   "side", "leverage", "amounts_quote", "take_profit", "stop_loss",

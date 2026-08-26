@@ -4,6 +4,7 @@ import { useEffect, useMemo, useReducer } from "react";
 import type { ChartPriceMapping, ExecutorValidation, PickSlot } from "./types";
 import { api, type DexPoolInfo } from "@/lib/api";
 import { getThemeColors } from "@/lib/theme-colors";
+import { LP_DEFAULTS_KEY } from "@/lib/sessionState";
 
 // ── Sides ──
 // `side` is a TradeType enum, not a direction: it says which token(s) you are
@@ -80,7 +81,7 @@ const DEFAULTS: LPState = {
   poolTouched: false,
 };
 
-const STORAGE_KEY = "condor_lp_defaults";
+const STORAGE_KEY = LP_DEFAULTS_KEY;
 
 // The pool and the range belong to a pair, not to the user's habits, so neither is
 // persisted — only the shape of position they tend to open.

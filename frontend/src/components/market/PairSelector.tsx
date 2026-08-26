@@ -6,6 +6,7 @@ import { AnchoredMenu } from "@/components/ui/AnchoredMenu";
 import { api } from "@/lib/api";
 import { formatCompactVolume } from "@/lib/formatters";
 import { useTickers } from "./useTickers";
+import { DEX_PAIRS_KEY_PREFIX } from "@/lib/sessionState";
 
 interface PairSelectorProps {
   server: string;
@@ -29,12 +30,13 @@ interface PairSelectorProps {
 const MAX_VISIBLE = 50;
 
 /** Recently-entered DEX pairs, per network. */
-const DEX_PAIRS_KEY = "condor_dex_pairs";
+const DEX_PAIRS_KEY = DEX_PAIRS_KEY_PREFIX;
+
 const MAX_DEX_RECENTS = 12;
 
 function loadDexRecents(connector: string): string[] {
   try {
-    const raw = localStorage.getItem(`${DEX_PAIRS_KEY}:${connector}`);
+    const raw = localStorage.getItem(`${DEX_PAIRS_KEY}${connector}`);
     const parsed = raw ? JSON.parse(raw) : [];
     return Array.isArray(parsed) ? parsed.filter((p) => typeof p === "string") : [];
   } catch {
@@ -65,7 +67,7 @@ function rememberDexPair(connector: string, pair: string) {
       0,
       MAX_DEX_RECENTS,
     );
-    localStorage.setItem(`${DEX_PAIRS_KEY}:${connector}`, JSON.stringify(next));
+    localStorage.setItem(`${DEX_PAIRS_KEY}${connector}`, JSON.stringify(next));
   } catch {
     /* ok */
   }

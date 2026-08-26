@@ -16,6 +16,7 @@ import {
 import { ORDER_TYPE_OPTIONS } from "./field-options";
 import type { ChartPriceMapping, ExecutorValidation, ExtraLine, PickSlot } from "./types";
 import { getThemeColors } from "@/lib/theme-colors";
+import { POSITION_DEFAULTS_KEY } from "@/lib/sessionState";
 
 // ── State ──
 
@@ -62,7 +63,7 @@ const DEFAULTS: PositionState = {
   showAdvanced: false,
 };
 
-const STORAGE_KEY = "condor_position_defaults";
+const STORAGE_KEY = POSITION_DEFAULTS_KEY;
 
 const PERSISTED_FIELDS: (keyof PositionState)[] = [
   "side", "amount", "leverage", "stop_loss", "take_profit",

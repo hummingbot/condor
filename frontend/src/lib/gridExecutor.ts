@@ -1,5 +1,7 @@
 // ── Grid executor state machine (shared by CreateExecutor, GridConfigPanel and DexPool) ──
 
+import { GRID_STORAGE_KEY, LAST_MARKET_KEY } from "@/lib/sessionState";
+
 export interface GridState {
   connector: string;
   pair: string;
@@ -57,10 +59,9 @@ export const GRID_DEFAULTS: GridState = {
   showAdvanced: false,
 };
 
-export const GRID_STORAGE_KEY = "condor_grid_defaults";
-
-/** localStorage key for the last connector/pair selected on the unified create page. */
-export const LAST_MARKET_KEY = "condor_last_market";
+// Both are session state, cleared at the session boundary, so `sessionState`
+// defines them and this module re-exports for its existing importers.
+export { GRID_STORAGE_KEY, LAST_MARKET_KEY };
 
 /** Fields persisted across sessions (no prices — those are per-trade). */
 export const GRID_PERSISTED_FIELDS: (keyof GridState)[] = [

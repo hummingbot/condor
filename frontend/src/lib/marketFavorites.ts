@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 
+import { MARKET_FAVORITES_KEY } from "@/lib/sessionState";
+
 /**
  * Starred markets, kept in localStorage.
  *
@@ -8,9 +10,10 @@ import { useCallback, useEffect, useState } from "react";
  * as any other row in the browser — the star records *what* you are watching,
  * never a copy of how it looked when you clicked it.
  *
- * Per browser rather than per account, like the theme and the display currency.
+ * Per browser, but not a device preference: what you are watching describes the
+ * person trading, so the session boundary clears it (see lib/sessionState.ts).
  */
-const STORAGE_KEY = "condor_market_favorites";
+const STORAGE_KEY = MARKET_FAVORITES_KEY;
 const EVENT = "condor:market-favorites";
 
 export interface FavoriteMarket {

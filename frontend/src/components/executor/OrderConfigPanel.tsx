@@ -14,6 +14,7 @@ import {
   type FieldDispatch,
 } from "./fields";
 import type { ChartPriceMapping, ExecutorValidation, PickSlot } from "./types";
+import { ORDER_DEFAULTS_KEY } from "@/lib/sessionState";
 
 // ── State ──
 
@@ -46,7 +47,7 @@ const DEFAULTS: OrderState = {
   activePickField: null,
 };
 
-const STORAGE_KEY = "condor_order_defaults";
+const STORAGE_KEY = ORDER_DEFAULTS_KEY;
 
 const PERSISTED_FIELDS: (keyof OrderState)[] = [
   "side", "amount", "execution_strategy", "leverage",
