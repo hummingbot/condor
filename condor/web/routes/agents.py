@@ -460,6 +460,10 @@ class ConsultRequest(BaseModel):
     chat_id: int = 0
     user_id: int | None = None
     server_name: str | None = None
+    # Which agent is asking, for the consult's record (FEAT-058). "" is a person
+    # asking directly. A label on a record the caller already owns, so there is
+    # nothing here a web caller could spoof it into meaning.
+    caller: str = ""
 
 
 class StartStrategyRequest(BaseModel):
@@ -936,13 +940,21 @@ async def list_delegations(user: WebUser = Depends(get_current_user)):
 @router.get("/delegations/history")
 async def list_delegation_history(
     agent: str | None = None,
+    kind: str = "",
     limit: int = 100,
     user: WebUser = Depends(get_current_user),
 ):
-    """Every delegation ever recorded, newest first — across restarts (FEAT-035).
+    """Every agent run ever recorded, newest first — across restarts (FEAT-035).
 
     Registered above ``/delegations/{task_id}`` so the literal path wins, for the
     same reason the whole block sits above ``/{slug}``.
+
+    The path name is historical, like the directory it reads: since FEAT-058 a
+    *consult* records itself in the same store, so this route answers "what did
+    this agent do" and not only "what was it handed in the background". ``kind``
+    picks a channel — ``""`` is all of them (an agent's Activity tab),
+    ``"delegate"`` is today's behaviour exactly (the chat dock, which is about
+    background tasks and would drown in consults).
 
     Returns *summary* rows: the bodies (``result``/``error``) are dropped, since
     a hundred rows must not ship a hundred answers — a row that gets opened
@@ -952,16 +964,26 @@ async def list_delegation_history(
     """
     from condor.agents.delegate import get_all_delegations
     from condor.agents.delegation_history import list_history
+    from condor.agents.run_records import KIND_DELEGATE
 
-    live = {
-        dt.task_id: dt.to_dict()
-        for dt in get_all_delegations().values()
-        if agent in (None, dt.agent_slug)
-    }
+    # Everything in the registry is a delegation by construction, so a consult
+    # filter simply excludes it rather than needing a field to test.
+    live = (
+        {
+            dt.task_id: dt.to_dict()
+            for dt in get_all_delegations().values()
+            if agent in (None, dt.agent_slug)
+        }
+        if kind in ("", KIND_DELEGATE)
+        else {}
+    )
     records = [
         r
         for r in list_history(
-            user_id=_delegation_scope(user), agent_slug=agent, limit=limit
+            user_id=_delegation_scope(user),
+            agent_slug=agent,
+            kind=kind or None,
+            limit=limit,
         )
         if r["task_id"] not in live
     ]
@@ -1521,6 +1543,7 @@ async def consult_agent(
         server_name=req.server_name,
         task=req.task,
         context=req.context,
+        caller=req.caller,
     )
     return {"agent": slug, "answer": answer}
 

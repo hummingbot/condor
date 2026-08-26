@@ -8,6 +8,7 @@ actions), so we use a generous timeout.
 """
 
 from mcp_servers.condor.condor_client import call_main_api
+from mcp_servers.condor.settings import caller_slug as _caller_slug
 from mcp_servers.condor.settings import settings
 
 # Long enough to cover a pending user confirmation (CONFIRMATION_TIMEOUT=120) plus
@@ -29,6 +30,10 @@ async def consult(agent: str, task: str, context: str = "") -> dict:
             "chat_id": settings.chat_id,
             "user_id": settings.user_id,
             "server_name": settings.active_server or None,
+            # Who is asking, stamped onto the consult's record (FEAT-058) so an
+            # agent's Activity tab can say "asked by condor" rather than only
+            # that something asked. Same one rule ``run_code`` attributes with.
+            "caller": _caller_slug(),
         },
         timeout=_CONSULT_TIMEOUT,
     )
