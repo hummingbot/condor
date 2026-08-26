@@ -56,7 +56,10 @@ export function SharingIndicator({ conversationId }: { conversationId: string })
 
   if (status.excluded) {
     return (
-      <div className="flex shrink-0 items-center gap-1.5 border-b border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-1.5 text-[11px] text-[var(--color-text-muted)]">
+      <div
+        data-sharing-chip="excluded"
+        className="flex shrink-0 items-center gap-1.5 border-b border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-1.5 text-[11px] text-[var(--color-text-muted)]"
+      >
         <Share2 className="h-3 w-3 shrink-0 opacity-50" />
         <span className="flex-1">
           Excluded — this conversation is not shared automatically.
@@ -73,7 +76,10 @@ export function SharingIndicator({ conversationId }: { conversationId: string })
   }
 
   return (
-    <div className="flex shrink-0 items-center gap-1.5 border-b border-[var(--color-primary)]/30 bg-[var(--color-primary)]/10 px-4 py-1.5 text-[11px] text-[var(--color-text)]">
+    <div
+      data-sharing-chip={status.shared ? "shared" : "will-share"}
+      className="flex shrink-0 items-center gap-1.5 border-b border-[var(--color-primary)]/30 bg-[var(--color-primary)]/10 px-4 py-1.5 text-[11px] text-[var(--color-text)]"
+    >
       <Share2 className="h-3 w-3 shrink-0 text-[var(--color-primary)]" />
       <span className="flex-1">
         {status.shared

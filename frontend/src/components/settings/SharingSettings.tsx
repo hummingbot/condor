@@ -97,6 +97,10 @@ export function SharingSettings() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: SHARES_KEY });
       queryClient.invalidateQueries({ queryKey: ["conversations"] });
+      // Same reason the purge below does it: unsharing one row also excludes
+      // that conversation, so an open chat header must stop saying it is
+      // shared without waiting for a reload.
+      queryClient.invalidateQueries({ queryKey: ["conversation-sharing"] });
     },
   });
 

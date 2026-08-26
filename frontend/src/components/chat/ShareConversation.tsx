@@ -182,6 +182,12 @@ export function ShareConversation({
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ["conversations"] });
     queryClient.invalidateQueries({ queryKey: ["shared-conversations"] });
+    // The header chip reads this per conversation, and both buttons here move
+    // it: sharing flips `shared`, and unsharing clears the receipt *and*
+    // excludes the chat for good. Left stale, the chip would go on promising a
+    // transcript is shared after the user took it back — a false statement
+    // about consent on the one surface built to make consent unforgettable.
+    queryClient.invalidateQueries({ queryKey: ["conversation-sharing"] });
   };
 
   const shareMutation = useMutation({
