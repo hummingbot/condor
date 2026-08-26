@@ -87,7 +87,7 @@ export function DelegationSheet({
           <DelegationTranscript taskId={task.task_id} />
         )
       ) : record ? (
-        <DelegationDetail delegation={record} clamped={false} />
+        <DelegationDetail delegation={record} />
       ) : (
         <div className="flex items-center gap-2 text-xs text-[var(--color-text-muted)]">
           <Loader2 className="h-3 w-3 animate-spin" />
