@@ -59,7 +59,7 @@ For each RUNNING lp_executor you own, read `net_pnl_pct`, `state`, and `out_of_r
 ### 3. Rank — ONE routine call (only if free_slots > 0)
 Pass the pools and base mints you already hold so the ranking excludes them:
 ```
-manage_routines(action="run", name="lp_scanner", strategy_id="solana_dex_lp_expert.lp_slot_operator",
+manage_routines(action="run", name="lp_scanner", agent="solana_dex_lp_expert",
   config={"quote_asset": <quote>, "venues": <venues>, "ranking_window": <window>, "top_n": 5,
           "exclude_pools": [<held pool_addresses>], "exclude_mints": [<held base mints>]})
 ```

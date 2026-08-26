@@ -1,9 +1,9 @@
 """Which library does a `manage_skill` / `manage_routines` write land in?
 
 Skills and routines are both keyed by the **agent** — there is no per-strategy
-library — so the target parameter is `agent`. The old `strategy_id` spelling
-stays accepted (older MCP hosts and playbooks name it) and resolves a composite
-"agent_slug.strategy_slug" key to its *owning agent*.
+library — so the only target parameter is `agent`. A composite
+"agent_slug.strategy_slug" key is still tolerated there and resolves to its
+*owning agent* (the `strategy_id` alias itself is gone — FEAT-067).
 
 These tests pin the resolution, because getting it wrong is silent: the skill
 lands in Condor's own library and only the chat ever sees it.
@@ -83,17 +83,17 @@ def test_without_a_target_the_chat_writes_its_own(chat):
     assert (chat / "agents" / "condor" / "skills" / "band_walk" / "SKILL.md").exists()
 
 
-def test_strategy_id_alias_resolves_to_the_owning_agent(chat):
-    """The deprecated spelling still works — and a strategy key lands one level up."""
-    _create(strategy_id=STRATEGY_KEY)
+def test_a_strategy_key_resolves_to_the_owning_agent(chat):
+    """A composite key is tolerated on `agent` — and lands one level up."""
+    _create(agent=STRATEGY_KEY)
 
     assert (chat / "agents" / AGENT_SLUG / "skills" / "band_walk" / "SKILL.md").exists()
 
 
-def test_agent_wins_over_the_deprecated_alias(chat):
-    _create(agent=AGENT_SLUG, strategy_id="nonexistent.thing")
-
-    assert (chat / "agents" / AGENT_SLUG / "skills" / "band_walk" / "SKILL.md").exists()
+def test_the_deprecated_alias_is_gone(chat):
+    """`strategy_id` was removed from the signature — passing it is an error."""
+    with pytest.raises(TypeError):
+        _create(strategy_id=STRATEGY_KEY)
 
 
 def test_unknown_target_errors_instead_of_writing_to_the_chat(chat):

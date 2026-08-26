@@ -292,44 +292,6 @@ def _manage_agent(
 
 
 # ---------------------------------------------------------------------------
-# Strategy-scoped routine listing
-# ---------------------------------------------------------------------------
-
-
-def _strategy_list_routines(strategy_id: str) -> dict:
-    """List global + agent-local routines for a strategy, with scope labels."""
-    from routines.base import discover_routines, discover_routines_from_path
-
-    result = []
-
-    for name, routine in sorted(discover_routines(force_reload=True).items()):
-        result.append(
-            {
-                "name": name,
-                "description": routine.description,
-                "type": "continuous" if routine.is_continuous else "one-shot",
-                "scope": "global",
-            }
-        )
-
-    from mcp_servers.condor.tools.routines import _get_agent_routines_dir
-
-    routines_dir = _get_agent_routines_dir(strategy_id)
-    if routines_dir and routines_dir.exists():
-        for name, routine in sorted(discover_routines_from_path(routines_dir).items()):
-            result.append(
-                {
-                    "name": name,
-                    "description": routine.description,
-                    "type": "continuous" if routine.is_continuous else "one-shot",
-                    "scope": "agent",
-                }
-            )
-
-    return {"routines": result}
-
-
-# ---------------------------------------------------------------------------
 # Agent lifecycle (delegates to main process via web API)
 # ---------------------------------------------------------------------------
 
@@ -718,20 +680,8 @@ async def manage_trading_agent(
             config,
         )
 
-    # Routine actions scoped to a strategy
-    if action == "list_routines":
-        if not strategy_id:
-            return {"error": "strategy_id is required"}
-        return _strategy_list_routines(strategy_id)
-
-    if action == "run_routine":
-        if not strategy_id:
-            return {"error": "strategy_id is required"}
-        if not name:
-            return {"error": "name is required"}
-        from mcp_servers.condor.tools.routines import run_routine
-
-        return await run_routine(name, config, strategy_id)
+    # Routines are NOT actions here: an agent's routine library is reached with
+    # manage_routines(action="list"/"run", agent="<agent_slug>") (FEAT-067).
 
     # Agent lifecycle actions
     lifecycle_actions = {

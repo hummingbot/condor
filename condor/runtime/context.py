@@ -148,7 +148,6 @@ def build_initial_context(
                 "mcp__mcp-hummingbot__set_account_position_mode_and_leverage",
                 "mcp__condor__manage_routines",
                 "mcp__condor__manage_servers",
-                "mcp__condor__get_user_context",
                 "mcp__condor__manage_trading_agent",
                 "mcp__condor__trading_agent_journal_read",
                 "mcp__condor__trading_agent_journal_write",

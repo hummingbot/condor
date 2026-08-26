@@ -55,7 +55,7 @@ def test_worker_instructions_own_the_authoring_and_close_delegation(
     assert "routine_cookbook" in text
     # Into the GLOBAL library — an agent-private dir would hide the result from
     # the very user who asked for it.
-    assert "GLOBAL" in text and "no `strategy_id`" in text
+    assert "GLOBAL" in text and "no `agent`" in text
     assert "TEST it with" in text
     # And it never spawns another background agent.
     assert 'NEVER start another delegation: `delegate(action="start", ...)`' in text

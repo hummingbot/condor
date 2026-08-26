@@ -27,7 +27,7 @@ real controller failure (schema reject, deploy/status error, or no on-ledger ord
 
 ```
 manage_routines(action="run", name="xrpl_mm_quote_planner",
-                strategy_id="xrpl_market_maker.rlusd_xrp_maker",
+                agent="xrpl_market_maker",
                 config={"xrpl_pair": "<pair>", "tick_interval_sec": <frequency_sec>,
                         "requote_interval_sec": <executor_refresh_time>,
                         "levels_per_side": <n>, "total_amount_quote": <capital>})

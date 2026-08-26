@@ -29,11 +29,10 @@ _Connecting/removing exchange API keys is not available to the assistant — key
 - `manage_routines` — run/list analysis scripts
 - `manage_trading_agent` — manage autonomous trading agents
 - `trading_agent_journal_read` / `trading_agent_journal_write` — agent journals
-- `manage_servers` — server management
+- `manage_servers` — server management; `list` also reports who you are (role/admin) and which server is active
 - `manage_memory` — your persistent memory about the user (see MEMORY below)
 - `manage_skill` — your playbooks/skills, know-how you can follow (see SKILLS below)
 - `consult` / `delegate` — route domain work to a specialized agent, blocking or async (see AGENTS + "Consult vs delegate" below)
-- `get_user_context` — user preferences and context
 
 ## Routing — check skills & agents before raw tools
 

@@ -11,13 +11,9 @@ from mcp_servers.condor.middleware import handle_errors
 from mcp_servers.condor.tools import available_models as available_models_tool
 from mcp_servers.condor.tools import code as code_tool
 from mcp_servers.condor.tools import consult as consult_tool
-from mcp_servers.condor.tools import (
-    context,
-)
 from mcp_servers.condor.tools import delegate as delegate_tool
 from mcp_servers.condor.tools import (
     memory,
-    notes,
     notification,
     routines,
     servers,
@@ -64,7 +60,7 @@ _WORKER_ROUTINES_RULE = (
     'Read `manage_skill(action="read", name="routine_cookbook")` FIRST (and the '
     "companion file for what the routine does), create it into the GLOBAL "
     'routine library with `manage_routines(action="create_routine", name="...", '
-    'code="...")` — no `strategy_id`, so the user and the chat can see it — then '
+    'code="...")` — no `agent`, so the user and the chat can see it — then '
     'TEST it with `manage_routines(action="run", name="...")` and fix it until '
     "the output is clean BEFORE reporting. Reporting an untested routine is a "
     "failed delegation. (RUNNING an existing routine is not authoring — for that "
@@ -410,7 +406,6 @@ async def manage_routines(
     config: dict | None = None,
     agent: str | None = None,
     code: str | None = None,
-    strategy_id: str | None = None,
     shared: bool | None = None,
 ) -> dict:
     """Manage and run Condor routines (auto-discoverable Python scripts).
@@ -462,9 +457,6 @@ async def manage_routines(
             A run started with it is attributed to that agent. Omit to use
             the current assistant's own library.
         code: Python source code for create_routine / edit_routine.
-        strategy_id: DEPRECATED alias of `agent`, kept for older callers. A
-            composite "agent_slug.strategy_slug" key resolves to its owning
-            agent; prefer passing that agent's slug as `agent`.
         shared: Target the shared library every assistant reads (routine CRUD).
             Condor only, and only without `agent` — for an agent it is ignored
             and the write stays in its own dir.
@@ -472,9 +464,7 @@ async def manage_routines(
     Returns:
         Action-specific result dict.
     """
-    return await routines.manage_routines(
-        action, name, config, agent, code, strategy_id, shared
-    )
+    return await routines.manage_routines(action, name, config, agent, code, shared)
 
 
 @mcp.tool()
@@ -555,10 +545,13 @@ async def manage_servers(
     action: str,
     name: str | None = None,
 ) -> dict:
-    """Manage Hummingbot API servers (list, check status).
+    """Manage Hummingbot API servers — and answer where you are pointed, as whom.
 
     Actions:
-    - "list": List all accessible servers with permissions and active status
+    - "list": List all accessible servers with permissions and active status. Also
+      returns the caller's context: active_server, user_role, is_admin, plus the
+      active_agent_key (the LLM new agents inherit — never invent one) and the
+      custom_llm_endpoints the user has saved.
     - "status": Check if a server is online (optional name, defaults to active server)
 
     Args:
@@ -569,21 +562,6 @@ async def manage_servers(
         Action-specific result dict.
     """
     return await servers.manage_servers(action, name)
-
-
-@mcp.tool()
-@handle_errors("get user context")
-@telemetry_taps.tracked("get_user_context")
-async def get_user_context() -> dict:
-    """Get the current user's context within Condor.
-
-    Returns:
-        A dict with:
-        - active_server: Currently active Hummingbot server name
-        - user_role: User's role (admin, user, pending, blocked)
-        - is_admin: Whether the user is an admin
-    """
-    return await context.get_user_context()
 
 
 @mcp.tool()
@@ -706,9 +684,8 @@ async def manage_trading_agent(
     - "pause_agent": Pause a running agent (requires agent_id)
     - "resume_agent": Resume a paused agent (requires agent_id)
 
-    Actions -- Routines (scoped to a strategy):
-    - "list_routines": List global + agent-local routines for a strategy (requires strategy_id)
-    - "run_routine": Execute a one-shot routine (requires strategy_id, name, optional config)
+    Routines are not actions here: reach an agent's routine library with
+    manage_routines(action="list"/"run", agent="<agent_slug>").
 
     Journal reads/writes are the dedicated trading_agent_journal_read /
     trading_agent_journal_write tools, not actions of this tool.
@@ -720,16 +697,16 @@ async def manage_trading_agent(
     Args:
         action: The action to perform.
         agent_id: Agent instance ID (for lifecycle/monitoring/journal actions).
-        strategy_id: Strategy key "agent_slug.strategy_slug" (for strategy/routine/start
+        strategy_id: Strategy key "agent_slug.strategy_slug" (for strategy/start
             actions). For start_agent a bare agent slug also works — see start_agent.
         agent_slug: Owning Agent slug — required for create_strategy and for the
             agent CRUD actions get_agent/update_agent/delete_agent.
-        name: Agent name (create_agent), strategy name (create/update_strategy), or routine name (run_routine).
+        name: Agent name (create_agent) or strategy name (create/update_strategy).
         description: Agent or strategy description (for create/update).
         instructions: AGENT.md body (create/update_agent) or strategy instructions text (create/update_strategy).
         agent_key: Default LLM. Examples: "claude-code", "gemini", "copilot", "ollama:llama3.1", "ollama:qwen3:32b", "groq:llama-3.3-70b-versatile". Any model can be consulted; a pydantic-ai key (e.g. "ollama:...") additionally enforces the tools allowlist on consult. Default "claude-code".
         skills: List of optional skill names to enable (for create/update_strategy).
-        config: Agent config overrides (for create/update_strategy/start) or routine config (for run_routine).
+        config: Agent config overrides (for create/update_strategy/start).
             For start_agent, supports: agent_key (override strategy default), model_base_url (for LM Studio/vLLM),
             execution_mode, frequency_sec, tick_timeout_sec (wall-clock budget for one tick's
             agent session; 0 = runtime default of 600s), total_amount_quote, trading_context,
@@ -827,7 +804,6 @@ async def manage_skill(
     query: str | None = None,
     max_entries: int = 30,
     agent: str | None = None,
-    strategy_id: str | None = None,
     file: str | None = None,
     content: str | None = None,
     shared: bool | None = None,
@@ -894,9 +870,6 @@ async def manage_skill(
         max_entries: Cap for search results (default 30).
         agent: Slug of the agent whose skill library to target (chat-side
             authoring). Omit to use the current assistant's own library.
-        strategy_id: DEPRECATED alias of `agent`, kept for older callers. A
-            composite "agent_slug.strategy_slug" key resolves to its owning
-            agent; prefer passing that agent's slug as `agent`.
         file: Bare name of a bundled companion file (for read_file/write_file).
         content: Full contents to write to the companion file (for write_file).
         shared: Publish this playbook to every assistant by moving it into the
@@ -916,41 +889,10 @@ async def manage_skill(
         query=query,
         max_entries=max_entries,
         agent=agent,
-        strategy_id=strategy_id,
         file=file,
         content=content,
         shared=shared,
     )
-
-
-@mcp.tool()
-@handle_errors("manage notes")
-@telemetry_taps.tracked("manage_notes")
-async def manage_notes(
-    action: str,
-    key: str | None = None,
-    value: str | None = None,
-) -> dict:
-    """DEPRECATED — use manage_memory instead.
-
-    Thin alias kept for one release: "set"->write (type="reference"), "get"->read,
-    "list"->list, "delete"->delete. New code should call manage_memory directly.
-
-    Actions:
-    - "list": List all saved notes
-    - "get": Get a specific note (requires key)
-    - "set": Save a note (requires key and value)
-    - "delete": Delete a note (requires key)
-
-    Args:
-        action: The action to perform (list, get, set, delete)
-        key: The note key (required for get, set, delete)
-        value: The note value (required for set)
-
-    Returns:
-        Action-specific result dict.
-    """
-    return await notes.manage_notes(action, key, value)
 
 
 # ---------------------------------------------------------------------------

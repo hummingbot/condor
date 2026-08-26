@@ -645,13 +645,11 @@ async def manage_routines(
     config: dict | None = None,
     agent: str | None = None,
     code: str | None = None,
-    strategy_id: str | None = None,
     shared: bool | None = None,
 ) -> dict:
-    # ``strategy_id`` is the deprecated spelling of ``agent`` — routines live at
-    # the agent level, never per strategy. Kept so existing MCP hosts and the
-    # playbooks that name it keep working.
-    target = agent or strategy_id
+    # Routines live at the agent level, never per strategy — ``agent`` is the
+    # only target selector.
+    target = agent
     # Publish/target the shared library. Chat-only; ignored for an agent, whose
     # writes therefore stay in its own dir (see _get_agent_routines_dir).
     publish = bool(shared)

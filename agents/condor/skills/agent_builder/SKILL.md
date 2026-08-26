@@ -87,9 +87,9 @@ manage_trading_agent(
 > **Never invent an `agent_key`.** You cannot tell which backends are installed,
 > running, or authenticated — a guessed key names a model that may not exist, and it
 > only fails on the first consult, long after creation "succeeded". Pass one *only*
-> when the user named a specific model. `get_user_context()` reports the user's
-> `active_agent_key` and their saved `custom_llm_endpoints` if you need to show or
-> confirm the choice.
+> when the user named a specific model. `manage_servers(action="list")` reports the
+> user's `active_agent_key` and their saved `custom_llm_endpoints` if you need to show
+> or confirm the choice.
 
 > **Leave `server_name` empty.** Same discipline, different field. An empty
 > `server_name` means "follow whichever server the chat is on", which is right for
@@ -149,8 +149,8 @@ as the upgrade, then guide the user through it one routine at a time:
 3. **Analyze the output** — run it and read it together; iterate until it's clean and
    useful:
    ```
-   manage_trading_agent(action="run_routine", strategy_id="<agent_slug>",
-                        name="band_scanner", config={…})
+   manage_routines(action="run", agent="<agent_slug>",
+                   name="band_scanner", config={…})
    ```
 
 Then update the AGENT.md so the agent knows to call the routine by name and how to read
