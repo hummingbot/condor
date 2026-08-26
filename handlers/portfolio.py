@@ -160,6 +160,56 @@ def build_connector_detail_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+# ============================================
+# SERVER RESOLUTION (access-checked)
+# ============================================
+
+NO_ACCESSIBLE_SERVERS = (
+    "No accessible API servers available. Ask an admin to share a server with you."
+)
+
+
+def _resolve_server_for_user(context: ContextTypes.DEFAULT_TYPE) -> str:
+    """Pick the server this user's portfolio may be read from.
+
+    Both /portfolio and its refresh callback used to choose from *every* enabled
+    server on the install and fall back to the first one, which handed a user
+    with no shared server (or a stale ``active_server`` preference) somebody
+    else's balance sheet. Candidates are now only the servers the caller can
+    actually reach, exactly as ``handlers/bots/_shared.get_bots_client`` does.
+
+    Raises:
+        ValueError: when the user has no enabled server they can access.
+    """
+    from config_manager import get_config_manager
+    from handlers.config.user_preferences import get_active_server
+
+    cm = get_config_manager()
+    user_id = context.user_data.get("_user_id")
+
+    if user_id is None:
+        # Every entry point is decorated @restricted, which stamps _user_id
+        # before the handler body runs. Without it there is no access list to
+        # check against, so refuse rather than serve an arbitrary server.
+        logger.warning("Portfolio server resolution without _user_id - refusing")
+        raise ValueError(NO_ACCESSIBLE_SERVERS)
+
+    accessible = set(cm.get_accessible_servers(user_id))
+    enabled_accessible = [
+        name
+        for name, cfg in cm.list_servers().items()
+        if cfg.get("enabled", True) and name in accessible
+    ]
+
+    if not enabled_accessible:
+        raise ValueError(NO_ACCESSIBLE_SERVERS)
+
+    preferred = get_active_server(context.user_data)
+    if preferred and preferred in enabled_accessible:
+        return preferred
+    return enabled_accessible[0]
+
+
 @restricted
 @hummingbot_api_required
 async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -186,28 +236,14 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     try:
         from config_manager import get_config_manager
 
-        # Get first enabled server
-        servers = get_config_manager().list_servers()
-        enabled_servers = [
-            name for name, cfg in servers.items() if cfg.get("enabled", True)
-        ]
-
-        if not enabled_servers:
-            error_message = format_error_message(
-                "No enabled API servers. Edit servers.yml to enable a server."
+        # Only servers this user has access to are candidates
+        try:
+            server_name = _resolve_server_for_user(context)
+        except ValueError as e:
+            await message.reply_text(
+                format_error_message(str(e)), parse_mode="MarkdownV2"
             )
-            await message.reply_text(error_message, parse_mode="MarkdownV2")
             return
-
-        # Use user's preferred server
-        from handlers.config.user_preferences import get_active_server
-
-        preferred = get_active_server(context.user_data)
-        server_name = (
-            preferred
-            if preferred and preferred in enabled_servers
-            else enabled_servers[0]
-        )
 
         # Send initial loading message immediately
         text_msg = await message.reply_text(
@@ -451,23 +487,12 @@ async def refresh_portfolio_dashboard(
     try:
         from config_manager import get_config_manager
 
-        # Use user's preferred server
-        servers = get_config_manager().list_servers()
-        enabled_servers = [
-            name for name, cfg in servers.items() if cfg.get("enabled", True)
-        ]
-
-        if not enabled_servers:
+        # Same access-checked resolution as the command
+        try:
+            server_name = _resolve_server_for_user(context)
+        except ValueError as e:
+            logger.warning(f"Portfolio refresh without an accessible server: {e}")
             return
-
-        from handlers.config.user_preferences import get_active_server
-
-        preferred = get_active_server(context.user_data)
-        server_name = (
-            preferred
-            if preferred and preferred in enabled_servers
-            else enabled_servers[0]
-        )
 
         client = await get_config_manager().get_client(server_name)
         server_status = "online"
