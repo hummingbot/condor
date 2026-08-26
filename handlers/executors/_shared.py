@@ -11,11 +11,15 @@ Contains:
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import ContextTypes
+
 from condor.cache import DEFAULT_CACHE_TTL
 from condor.cache import cached_call as _cached_call
 from condor.cache import clear_cache as _clear_cache
 from condor.cache import get_cached as _get_cached
 from condor.cache import set_cached as _set_cached
+from utils.telegram_formatters import escape_markdown_v2
 
 logger = logging.getLogger(__name__)
 
@@ -325,6 +329,72 @@ def format_executor_summary(executor: Dict[str, Any]) -> str:
         lines.append(f"Fees: ${fees:,.2f}")
 
     return "\n".join(lines)
+
+
+# ============================================
+# WIZARD SHARED UI
+# ============================================
+
+
+async def _show_pair_suggestions(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    error_msg: str,
+    suggestions: list,
+    *,
+    title: str,
+    select_prefix: str,
+    back_callback: str,
+) -> None:
+    """Show trading pair suggestions when a wizard's pair validation fails.
+
+    Shared by the grid and position wizards, which differ only in the step
+    title and the two callback-data strings.
+    """
+    chat_id = update.effective_chat.id
+    msg_id = context.user_data.get("executor_wizard_msg_id")
+
+    help_text = f"{title}\n"
+    help_text += "─────────────────────────\n\n"
+    help_text += f"❌ *{escape_markdown_v2(error_msg)}*\n\n"
+
+    if suggestions:
+        help_text += "💡 *Did you mean:*\n"
+    else:
+        help_text += "_No similar pairs found\\._\n"
+
+    keyboard = []
+    for pair in suggestions:
+        keyboard.append(
+            [InlineKeyboardButton(f"📈 {pair}", callback_data=f"{select_prefix}{pair}")]
+        )
+
+    keyboard.append(
+        [
+            InlineKeyboardButton("⬅️ Back", callback_data=back_callback),
+            InlineKeyboardButton("❌ Cancel", callback_data="executors:menu"),
+        ]
+    )
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    if update.callback_query:
+        try:
+            await update.callback_query.message.edit_text(
+                help_text, parse_mode="MarkdownV2", reply_markup=reply_markup
+            )
+        except Exception as e:
+            logger.debug(f"Could not update wizard message: {e}")
+    elif msg_id:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=help_text,
+                parse_mode="MarkdownV2",
+                reply_markup=reply_markup,
+            )
+        except Exception as e:
+            logger.debug(f"Could not update wizard message: {e}")
 
 
 # ============================================
