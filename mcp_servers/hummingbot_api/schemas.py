@@ -30,6 +30,8 @@ class ManageExecutorsRequest(BaseModel):
     9. action="reset_preferences" -> Reset preferences to defaults
     10. action="positions_summary" -> Get positions (or specific if connector_name+trading_pair given)
     11. action="clear_position" + connector_name + trading_pair -> Clear position
+    12. action="orphaned" -> List terminated executors that may still own an on-chain position
+    13. action="resolve_orphan" + executor_id -> Mark an orphaned position as recovered
     """
 
     action: (
@@ -44,6 +46,8 @@ class ManageExecutorsRequest(BaseModel):
             "positions_summary",
             "clear_position",
             "performance_report",
+            "orphaned",
+            "resolve_orphan",
         ]
         | None
     ) = Field(
@@ -188,6 +192,10 @@ class ManageExecutorsRequest(BaseModel):
             return "clear_position"
         elif self.action == "performance_report":
             return "performance_report"
+        elif self.action == "orphaned":
+            return "orphaned"
+        elif self.action == "resolve_orphan":
+            return "resolve_orphan"
         elif self.executor_type is not None:
             return "show_schema"
         else:
@@ -394,9 +402,13 @@ class GatewaySwapRequest(BaseModel):
     4. action="search" + filters -> Query swap history
     """
 
-    action: Literal["quote", "execute", "search", "get_status"] = Field(
-        description="Action to perform: 'quote' (get price), 'execute' (perform swap), "
-        "'search' (query history), 'get_status' (check tx status)"
+    action: Literal["quote", "execute", "execute_quote", "search", "get_status"] = (
+        Field(
+            description="Action to perform: 'quote' (get price), 'execute' (perform swap at the "
+            "price found at execution), 'execute_quote' (execute a quote you already have, by its "
+            "quote_id — the price you were shown is the price you get), 'search' (query history), "
+            "'get_status' (check tx status)"
+        )
     )
 
     # Common swap parameters (required for quote/execute)
@@ -433,15 +445,31 @@ class GatewaySwapRequest(BaseModel):
     )
 
     slippage_pct: str | None = Field(
-        default="1.0",
-        description="Maximum slippage percentage (optional, default: 1.0). "
-        "Example: '1.5' for 1.5% slippage tolerance",
+        default=None,
+        description="Maximum slippage percentage (optional). "
+        "Omit to use the connector's configured slippage. "
+        "Example: '1.5' for 1.5% slippage tolerance ('0' is a real value, not 'use default')",
+    )
+
+    extra_params: dict[str, Any] | None = Field(
+        default=None,
+        description="Connector-specific parameters for quote/execute (optional). "
+        "Supported key: 'approximateIfNoExactOut' (bool, jupiter/dflow/okx/titan routers only) - "
+        "allow an approximate quote when no exact-out route exists",
     )
 
     # Execute-specific parameter
     wallet_address: str | None = Field(
         default=None,
         description="Wallet address for execute action (optional, uses default wallet if not provided)",
+    )
+
+    # Execute-quote parameter
+    quote_id: str | None = Field(
+        default=None,
+        description="quote_id from a prior quote action (required for execute_quote). Only the "
+        "router connectors return one — jupiter, dflow, okx, titan, 0x — because only they hold "
+        "a price; a pool-scoped connector prices against the pool at execution and has none.",
     )
 
     # Get status parameter
@@ -531,6 +559,18 @@ class GatewayCLMMRequest(BaseModel):
         default=None, description="Pool contract address (required for get_pool_info)"
     )
 
+    bin_count: int = Field(
+        default=0,
+        ge=0,
+        le=401,
+        description=(
+            "For get_pool_info: if > 0, include the per-tick liquidity distribution "
+            "(`bins`) around the active price. Meteora always returns its bins; "
+            "orca, raydium, uniswap and pancakeswap compute them on request. "
+            "Default 0 skips the extra on-chain reads."
+        ),
+    )
+
     # Pool listing parameters
     page: int = Field(
         default=0, ge=0, description="Page number for list_pools (default: 0)"
@@ -549,7 +589,11 @@ class GatewayCLMMRequest(BaseModel):
     )
 
     sort_key: str | None = Field(
-        default="volume", description="Sort by field (volume, tvl, feetvlratio, etc.)"
+        default="tvl",
+        description="Sort by field. Defaults to tvl — depth is the LP question, and "
+        "volume ties at zero across every pool on a quiet pair. "
+        "meteora: tvl, volume, feetvlratio. "
+        "orca: tvl, volume, fees, rewards, yieldovertvl.",
     )
 
     order_by: str | None = Field(
@@ -590,8 +634,6 @@ class AMMRequest(BaseModel):
             "pool_info",
             "position_info",
             "positions_owned",
-            "quote_swap",
-            "execute_swap",
             "quote_liquidity",
             "add_liquidity",
             "remove_liquidity",
@@ -609,7 +651,8 @@ class AMMRequest(BaseModel):
     )
     network: str | None = Field(
         default=None,
-        description="Network ID in 'chain-network' format. Examples: 'solana-mainnet-beta', 'ethereum-mainnet', 'base-mainnet'",
+        description="Network ID in 'chain-network' format, built from Gateway's chain/network "
+        "config names. Examples: 'solana-mainnet-beta', 'ethereum-mainnet', 'ethereum-base'",
     )
     wallet_address: str | None = Field(
         default=None,
@@ -621,20 +664,13 @@ class AMMRequest(BaseModel):
         description="Meteora NFT position: REQUIRED for remove_liquidity, optional for add_liquidity (omit = open a new position). Ignored by fungible-LP AMMs.",
     )
 
-    # Swap params
+    # Token params
     base_token: str | None = Field(
-        default=None,
-        description="Base token symbol or address (swap direction / pool base)",
+        default=None, description="Base token symbol or address (create_pool)"
     )
     quote_token: str | None = Field(
         default=None,
         description="Quote token symbol or address (pool quote, for create_pool)",
-    )
-    amount: str | None = Field(
-        default=None, description="Swap amount (as string; parsed to Decimal)"
-    )
-    side: Literal["BUY", "SELL"] | None = Field(
-        default=None, description="Swap direction"
     )
     slippage_pct: str | None = Field(
         default=None, description="Maximum slippage percentage (as string)"
@@ -659,18 +695,113 @@ class AMMRequest(BaseModel):
         default=None,
         description="Initial price as quote per base (create_pool; overrides quote_token_amount)",
     )
-    config_address: str | None = Field(
+    extra_params: dict[str, Any] | None = Field(
         default=None,
-        description="Meteora DAMM v2 config account address (required for meteora create_pool)",
+        description="Connector-specific create_pool params under Gateway's own names: "
+        "configAddress (meteora DAMM v2, required there), ammConfigIndex (raydium CPMM). "
+        "uniswap/pancakeswap (EVM) AMM take no extra params. Unknown keys are "
+        "rejected by the API with a 400.",
     )
-    fee_config_index: int | None = Field(
+
+
+class CLMMRequest(BaseModel):
+    """Request model for the direct, chain- & DEX-agnostic CLMM tool (manage_clmm).
+
+    Drives concentrated-liquidity position operations across Meteora DLMM, Raydium CLMM, Orca
+    Whirlpools (Solana), and Uniswap V3 / PancakeSwap V3 (EVM).
+
+    Progressive disclosure: action=None returns the CLMM guide.
+
+    This is the direct, unmanaged path. The managed path for normal LP work is
+    manage_executors(lp_executor), which owns range monitoring, rebalancing and close retries.
+    Use manage_clmm to inspect positions and to recover orphaned ones that no executor owns
+    any more — a terminated executor cannot be told to close its position.
+    """
+
+    action: (
+        Literal[
+            "position_info",
+            "open",
+            "add_liquidity",
+            "remove_liquidity",
+            "close",
+            "collect_fees",
+            "create_pool",
+        ]
+        | None
+    ) = Field(
+        default=None, description="CLMM action. Leave empty to load the CLMM guide."
+    )
+
+    connector: str | None = Field(
         default=None,
-        description="Raydium CPMM fee config index (optional, create_pool)",
+        description="CLMM connector (required for any action): 'meteora', 'raydium', 'orca', "
+        "'pancakeswap-sol' (Solana), 'uniswap', 'pancakeswap' (EVM). A '<name>/clmm' form is "
+        "accepted, so an orphan record's lp_provider (e.g. 'orca/clmm') can be passed through "
+        "unchanged.",
     )
-    gas_price: str | None = Field(
+    network: str | None = Field(
         default=None,
-        description="Uniswap (EVM) gas price in gwei (optional, create_pool)",
+        description="Network ID in 'chain-network' format, built from Gateway's chain/network "
+        "config names. Examples: 'solana-mainnet-beta', 'ethereum-mainnet', 'ethereum-base', "
+        "'ethereum-bsc'",
     )
-    max_gas: int | None = Field(
-        default=None, description="Uniswap (EVM) max gas limit (optional, create_pool)"
+    wallet_address: str | None = Field(
+        default=None,
+        description="Wallet address (optional, uses default if not provided)",
+    )
+    pool_address: str | None = Field(
+        default=None,
+        description="Pool contract address. Required for open. Optional and informational "
+        "everywhere else: the API never reads it on close or collect_fees (Gateway needs only "
+        "position_address, and the pre-close fee snapshot does not use it), and position_info "
+        "lists every position the wallet owns without a pool filter.",
+    )
+    position_address: str | None = Field(
+        default=None,
+        description="Position NFT address. Required for add_liquidity, remove_liquidity, close, collect_fees.",
+    )
+
+    # Range params (open)
+    lower_price: str | None = Field(
+        default=None, description="Lower price bound of the position range (open)"
+    )
+    upper_price: str | None = Field(
+        default=None, description="Upper price bound of the position range (open)"
+    )
+
+    # Liquidity params
+    base_token_amount: str | None = Field(
+        default=None, description="Base token amount (open / add_liquidity)"
+    )
+    quote_token_amount: str | None = Field(
+        default=None, description="Quote token amount (open / add_liquidity)"
+    )
+    percentage_to_remove: str | None = Field(
+        default=None,
+        description="Percentage of liquidity to remove, 0-100 (remove_liquidity). 100 empties the position but "
+        "leaves the account open — use action='close' to withdraw and close it.",
+    )
+    slippage_pct: str | None = Field(
+        default=None, description="Maximum slippage percentage (as string)"
+    )
+
+    # create_pool params
+    base_token: str | None = Field(
+        default=None, description="Base token symbol or address (create_pool)"
+    )
+    quote_token: str | None = Field(
+        default=None, description="Quote token symbol or address (create_pool)"
+    )
+    initial_price: str | None = Field(
+        default=None,
+        description="Initial pool price as quote per base (create_pool, optional — "
+        "the API fetches the market price when omitted)",
+    )
+    extra_params: dict[str, Any] | None = Field(
+        default=None,
+        description="Connector-specific parameters under Gateway's own names. "
+        "open/add_liquidity: strategyType (meteora DLMM, e.g. {'strategyType': 0}). "
+        "create_pool: binStep (meteora/orca), feeBps (meteora/uniswap/pancakeswap), "
+        "ammConfigIndex (raydium/pancakeswap-sol). Unknown keys are rejected by the API with a 400.",
     )

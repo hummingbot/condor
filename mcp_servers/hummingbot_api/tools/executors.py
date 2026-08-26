@@ -306,9 +306,29 @@ async def manage_executors(
                 keep_position=request.keep_position,
             )
 
-            formatted = f"Executor stopped successfully!\n\n"
-            formatted += f"Executor ID: {request.executor_id}\n"
-            formatted += f"Keep Position: {request.keep_position}\n"
+            if result.get("status") == "already_terminated":
+                # No-op: the executor was already terminal. Say so — a generic
+                # "stopped successfully" would hide the one payload that matters
+                # (an orphaned on-chain position needing recovery).
+                formatted = f"Executor was ALREADY terminated (stop was a no-op).\n\n"
+                formatted += f"Executor ID: {request.executor_id}\n"
+                formatted += f"Final close_type: {result.get('close_type')}\n"
+                if result.get("orphaned_position"):
+                    formatted += (
+                        f"\n🚨 ORPHANED POSITION: {result.get('position_address')} is still "
+                        "open on-chain with no automated owner. Stopping the executor does not "
+                        "close it — it has already terminated. Close it with "
+                        'manage_clmm(action="close", position_address=..., pool_address=...), '
+                        'then mark it recovered with action="resolve_orphan", '
+                        f'executor_id="{request.executor_id}".\n'
+                        'Run action="orphaned" to get the dex, pool and network for the call.\n'
+                    )
+                elif result.get("position_address"):
+                    formatted += f"Position address (final state): {result.get('position_address')}\n"
+            else:
+                formatted = f"Executor stopped successfully!\n\n"
+                formatted += f"Executor ID: {request.executor_id}\n"
+                formatted += f"Keep Position: {request.keep_position}\n"
 
             return {
                 "action": "stop",
@@ -323,6 +343,104 @@ async def manage_executors(
                 "action": "stop",
                 "error": str(e),
                 "formatted_output": f"Error stopping executor {request.executor_id}: {e}",
+            }
+
+    elif flow_stage == "orphaned":
+        # List terminated executors that may still own an on-chain position
+        try:
+            resp = await client.executors.session.get(
+                f"{client.executors.base_url}/executors/positions/orphaned",
+            )
+            resp.raise_for_status()
+            result = await resp.json()
+
+            orphans = result.get("orphans", [])
+            formatted = (
+                f"Orphaned position candidates: {result.get('count', len(orphans))}\n\n"
+            )
+            if not orphans:
+                formatted += (
+                    "No orphaned positions. All terminated executors closed cleanly."
+                )
+            else:
+                for o in orphans:
+                    formatted += (
+                        f"- {o.get('executor_id')} ({o.get('executor_type')}, "
+                        f"{o.get('trading_pair')} on {o.get('connector_name')}, "
+                        f"close_type={o.get('close_type')}, closed_at={o.get('closed_at')})\n"
+                    )
+                    if o.get("position_address"):
+                        formatted += f"    position: {o['position_address']}\n"
+                    if o.get("lp_provider") or o.get("pool_address"):
+                        formatted += f"    dex: {o.get('lp_provider')}  pool: {o.get('pool_address')}\n"
+                    if o.get("needs_onchain_reconciliation"):
+                        formatted += (
+                            "    position address unknown (API restart) - reconcile against "
+                            "on-chain positions (get_portfolio_overview include_lp_positions=True)\n"
+                        )
+                    elif o.get("lp_provider") and o.get("pool_address"):
+                        # Spell the recovery call out: the executor is terminated, so stopping it is
+                        # a no-op and the position can only be closed by address.
+                        formatted += (
+                            '    close with: manage_clmm(action="close", '
+                            f"connector=\"{o.get('lp_provider')}\", "
+                            f"network=\"{o.get('connector_name')}\", "
+                            f"position_address=\"{o.get('position_address')}\", "
+                            f"pool_address=\"{o.get('pool_address')}\")\n"
+                        )
+                formatted += (
+                    '\nRecover each by closing the position with manage_clmm(action="close") - '
+                    "pool_address is required because LP-executor positions are not in the API "
+                    "database. Stopping the executor will NOT close it; it has already terminated. "
+                    'Then mark it recovered with action="resolve_orphan", executor_id="...".'
+                )
+
+            return {
+                "action": "orphaned",
+                "result": result,
+                "formatted_output": formatted,
+            }
+
+        except Exception as e:
+            return {
+                "action": "orphaned",
+                "error": str(e),
+                "formatted_output": f"Error listing orphaned positions: {e}",
+            }
+
+    elif flow_stage == "resolve_orphan":
+        # Mark an orphaned position as recovered (after closing it externally)
+        if not request.executor_id:
+            return {
+                "action": "resolve_orphan",
+                "error": "executor_id is required",
+                "formatted_output": (
+                    "resolve_orphan requires executor_id. "
+                    'Run manage_executors(action="orphaned") to list candidates.'
+                ),
+            }
+        try:
+            resp = await client.executors.session.post(
+                f"{client.executors.base_url}/executors/{request.executor_id}/resolve-orphan",
+            )
+            resp.raise_for_status()
+            result = await resp.json()
+
+            return {
+                "action": "resolve_orphan",
+                "executor_id": request.executor_id,
+                "result": result,
+                "formatted_output": (
+                    f"Orphaned position for executor {request.executor_id} marked recovered. "
+                    "It will no longer appear in orphan listings or warnings."
+                ),
+            }
+
+        except Exception as e:
+            return {
+                "action": "resolve_orphan",
+                "error": str(e),
+                "formatted_output": f"Error resolving orphan for executor {request.executor_id}: {e}",
             }
 
     elif flow_stage == "get_logs":

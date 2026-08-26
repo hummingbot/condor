@@ -5,7 +5,7 @@ description = "Telegram bot for Hummingbot trading via Backend API"
 requires-python = ">=3.12"
 dependencies = [
     "python-telegram-bot[job-queue]",
-    "hummingbot-api-client==1.5.7",
+    "hummingbot-api-client==1.5.8",
     "python-dotenv",
     "PyYAML",
     "aiohttp",
@@ -32,6 +32,20 @@ dependencies = [
 # optional-dependencies extra it was invisible to ``--dev``, so CI ran
 # ``black --check`` with no black on PATH and failed to spawn it.
 dev = ["pytest", "pytest-asyncio", "black", "isort", "pre-commit"]
+
+[tool.uv.sources]
+# 1.5.8 is not on PyPI yet (hummingbot/hummingbot-api-client#26). Until that
+# releases, resolve the ==1.5.8 pin from the PR branch so ``uv sync`` works in
+# CI and locally. Drop this whole block and re-run ``uv lock`` once 1.5.8 ships.
+#
+# A branch MOVES, and the lockfile pins a commit on it. Re-run
+# ``uv lock --upgrade-package hummingbot-api-client`` after every push to that
+# branch: the lock once sat four commits behind the method condor calls, and only
+# tests/test_client_surface.py notices, because every other test stubs the client.
+#
+# Merge order: this PR merges LAST — client PR merged and 1.5.8 published to PyPI
+# first, then drop this block here.
+hummingbot-api-client = { git = "https://github.com/hummingbot/hummingbot-api-client.git", branch = "feat/clmm-bin-count" }
 
 [tool.isort]
 profile = "black"

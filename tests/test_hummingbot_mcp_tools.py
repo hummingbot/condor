@@ -22,7 +22,7 @@ import pytest
 
 from mcp_servers.hummingbot_api.tools.controllers import modify_controllers
 from mcp_servers.hummingbot_api.tools.portfolio import (
-    MAX_CONCURRENT_POOL_FETCHES,
+    MAX_CONCURRENT_POSITION_FETCHES,
     get_portfolio_overview,
 )
 
@@ -81,15 +81,20 @@ POOL_LATENCY = 0.05
 
 
 class FakeGatewayClmm:
-    """CLMM surface where each pool read costs POOL_LATENCY, as an on-chain read does.
+    """CLMM surface where each venue read costs POOL_LATENCY, as an on-chain read does.
 
-    ``failing_pool`` raises the way a dead RPC does, so the skip-and-continue
-    behaviour of the serial loop stays pinned.
+    ``get_positions_owned`` mirrors the real SDK signature exactly — connector,
+    network, wallet_address, and NO pool_address. Gateway's positions-owned has
+    no pool filter; every returned row carries its own ``pool_address``. A fake
+    that accepted one hid a live TypeError at two call sites.
+
+    ``failing_venue`` raises the way a dead RPC does, so the skip-and-continue
+    behaviour stays pinned.
     """
 
-    def __init__(self, pools, failing_pool=None):
+    def __init__(self, pools, failing_venue=None):
         self.pools = pools
-        self.failing_pool = failing_pool
+        self.failing_venue = failing_venue
         self.max_in_flight = 0
         self._in_flight = 0
 
@@ -101,21 +106,22 @@ class FakeGatewayClmm:
             ]
         }
 
-    async def get_positions_owned(
-        self, connector, network, pool_address, wallet_address=None
-    ):
+    async def get_positions_owned(self, connector, network, wallet_address=None):
         self._in_flight += 1
         self.max_in_flight = max(self.max_in_flight, self._in_flight)
         try:
             await asyncio.sleep(POOL_LATENCY)
-            if pool_address == self.failing_pool:
+            if (connector, network) == self.failing_venue:
                 raise RuntimeError("gateway RPC down")
-            # No connector/network of its own: the tool stamps them per pool.
+            # No connector/network of its own: the tool stamps them per venue.
             return [
                 {
                     "trading_pair": f"PAIR-{pool_address}",
                     "position_address": pool_address,
+                    "pool_address": pool_address,
                 }
+                for (c, n, pool_address) in self.pools
+                if (c, n) == (connector, network)
             ]
         finally:
             self._in_flight -= 1
@@ -138,9 +144,9 @@ def _lp_overview(client):
     )
 
 
-def test_clmm_pools_are_fetched_concurrently_not_one_at_a_time():
-    """K on-chain pool reads must cost ~1 round-trip, not K of them stacked."""
-    pools = [("meteora", "mainnet-beta", f"pool{i}") for i in range(8)]
+def test_clmm_venues_are_fetched_concurrently_not_one_at_a_time():
+    """K on-chain venue reads must cost ~1 round-trip, not K of them stacked."""
+    pools = [("meteora", f"net{i}", f"pool{i}") for i in range(8)]
     clmm = FakeGatewayClmm(pools)
 
     start = time.monotonic()
@@ -150,22 +156,37 @@ def test_clmm_pools_are_fetched_concurrently_not_one_at_a_time():
     serial = len(pools) * POOL_LATENCY
     assert (
         elapsed < serial / 2
-    ), f"{len(pools)} pools took {elapsed:.3f}s; serial would be ~{serial:.3f}s"
+    ), f"{len(pools)} venues took {elapsed:.3f}s; serial would be ~{serial:.3f}s"
 
     section = next(s for s in result["sections"] if s["title"] == "LP Positions (CLMM)")
     assert section["total_positions"] == len(pools)
 
 
-def test_one_failing_pool_is_skipped_and_the_rest_still_return():
-    """A dead pool degrades exactly as it did serially: logged, skipped, no propagation."""
-    pools = [("meteora", "mainnet-beta", f"pool{i}") for i in range(4)]
-    clmm = FakeGatewayClmm(pools, failing_pool="pool2")
+def test_one_failing_venue_is_skipped_and_the_rest_still_return():
+    """A dead venue degrades gracefully: logged, skipped, no propagation."""
+    pools = [("meteora", f"net{i}", f"pool{i}") for i in range(4)]
+    clmm = FakeGatewayClmm(pools, failing_venue=("meteora", "net2"))
 
     result = _lp_overview(FakeGatewayClient(clmm))
 
     section = next(s for s in result["sections"] if s["title"] == "LP Positions (CLMM)")
     assert section["total_positions"] == 3
     assert "pool2" not in section["content"]
+
+
+def test_one_venue_with_many_pools_is_read_once_and_not_duplicated():
+    """positions-owned takes no pool filter: querying per pool would repeat the
+    same list once per pool. One call per venue, each position exactly once."""
+    pools = [("meteora", "mainnet-beta", f"pool{i}") for i in range(5)]
+    clmm = FakeGatewayClmm(pools)
+
+    result = _lp_overview(FakeGatewayClient(clmm))
+
+    assert clmm.max_in_flight == 1, "five pools on one venue is one Gateway read"
+    section = next(s for s in result["sections"] if s["title"] == "LP Positions (CLMM)")
+    assert section["total_positions"] == len(pools)
+    for _, _, pool_address in pools:
+        assert section["content"].count(f"PAIR-{pool_address}") == 1
 
 
 def test_each_position_keeps_its_own_pools_connector_and_network():
@@ -189,17 +210,17 @@ def test_each_position_keeps_its_own_pools_connector_and_network():
         ), f"{pool_address} was stamped with the wrong connector"
 
 
-def test_pool_fan_out_is_bounded_by_an_explicit_constant():
-    """A many-pool account must not burst unlimited simultaneous Gateway requests."""
+def test_position_fan_out_is_bounded_by_an_explicit_constant():
+    """A many-venue account must not burst unlimited simultaneous Gateway requests."""
     pools = [
-        ("meteora", "mainnet-beta", f"pool{i}")
-        for i in range(MAX_CONCURRENT_POOL_FETCHES * 3)
+        ("meteora", f"net{i}", f"pool{i}")
+        for i in range(MAX_CONCURRENT_POSITION_FETCHES * 3)
     ]
     clmm = FakeGatewayClmm(pools)
 
     _lp_overview(FakeGatewayClient(clmm))
 
-    assert clmm.max_in_flight <= MAX_CONCURRENT_POOL_FETCHES
+    assert clmm.max_in_flight <= MAX_CONCURRENT_POSITION_FETCHES
     assert clmm.max_in_flight > 1, "the reads should still overlap"
 
 

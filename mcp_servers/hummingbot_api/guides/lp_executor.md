@@ -51,7 +51,7 @@ NOT_ACTIVE → OPENING → IN_RANGE ↔ OUT_OF_RANGE → CLOSING → COMPLETE
                                                        ↘ SWAPPING → COMPLETE
 ```
 
-Any state may transition to `FAILED` if max retries are exhausted (open / close / swap) or if `early_stop` is called while still `OPENING`.
+Any state may transition to `FAILED` if max retries are exhausted with nothing left on-chain (open / swap) or if `early_stop` is called while still `OPENING`. An exhausted **close** instead terminates as an involuntary `POSITION_HOLD` (`hold_reason: "close_retries_exhausted"`) because the position is still live on-chain.
 
 - **NOT_ACTIVE**: Initial state, no position yet
 - **OPENING**: `add_liquidity` submitted, waiting for confirmation
@@ -60,7 +60,7 @@ Any state may transition to `FAILED` if max retries are exhausted (open / close 
 - **CLOSING**: `remove_liquidity` submitted, waiting for confirmation
 - **SWAPPING**: Close-out swap in progress (only when `keep_position=False`, to return to the original quote asset)
 - **COMPLETE**: Position closed permanently
-- **FAILED**: Max retries reached or invalid config; manual intervention required
+- **FAILED**: Max retries reached with nothing left on-chain, or invalid config. A failed close retries in `CLOSING` with fresh on-chain state (bounded by `max_retries`); if the retries run out with the position still live, the executor terminates as an involuntary `POSITION_HOLD` with `hold_reason: "close_retries_exhausted"` and the record is flagged `orphaned_position` in `custom_info` — recover it (see below) before opening new positions
 
 #### Key Parameters
 
@@ -81,6 +81,16 @@ Any state may transition to `FAILED` if max retries are exhausted (open / close 
 - `quote_amount`: Amount of quote token to provide (default: `0`)
 - `extra_params`: Connector-specific params, e.g., `{"strategyType": 0}` for Meteora
 - `keep_position`: Default `True` — keep the net token change as a held spot position when closed. Set `False` to swap back to the original quote asset on close.
+
+**Slippage (a ramp, not a single value):**
+- `slippage_pct`: What the *first* attempt asks for. Default `0.05` — deliberately tight, so a position that can be opened or closed at near-spot is.
+- `slippage_multiplier`: How much wider each retry goes. Default `5`.
+- `max_slippage_pct`: The ceiling. Default `5`.
+- Together the defaults give the ramp **0.05 → 0.25 → 1.25 → 5**. It widens **only** on a failure Gateway attributed to slippage (`SLIPPAGE_EXCEEDED`); a wrong tick, an insufficient balance or a transport error retries at the same tolerance, because loosening one that was never too tight just pays more for the same trade.
+- The ramp resets at each phase boundary — open, close, close-out swap — so a close starts tight again rather than inheriting however wide the open had to go.
+- At the ceiling an **exit keeps trying** (the position is real and has to come out) and an **entry stops** (nothing is stranded by abandoning it).
+- Enforcement is per connector on the close: orca, uniswap and pancakeswap apply a minimum-amount check; meteora, raydium and pancakeswap-sol currently close without one, so the ramp changes nothing there.
+- `current_retries` and the live `slippage_pct` are both in the executor's `custom_info`, so a position that took several widenings says so.
 
 **Limit Prices (auto-close triggers, grid-executor style):**
 - `upper_limit_price`: Close when current price ≥ this value (default `None` = no upper limit)
@@ -177,7 +187,15 @@ manage_executors(
 - If position is closed on-chain but executor still shows `RUNNING`, manually update executor status in database to `TERMINATED`
 - If position is open on-chain but executor still shows `OPENING`, the executor should eventually sync — if stuck, check API logs for errors
 
-**Exception: Executor not found in API (404 error):**
-- If API was restarted, executors may no longer exist in memory but positions remain on-chain
-- In this case, close the on-chain position directly via the DEX UI or gateway API
-- Then manually update the executor status in the database to `TERMINATED`
+**Orphaned positions (executor terminated with a live on-chain position):**
+- `manage_executors(action="orphaned")` lists terminated executors that may still own an on-chain position: involuntary holds (`POSITION_HOLD` with `hold_reason` set — a close that exhausted its retries), legacy `FAILED` executors whose final state carries a `position_address`, and `SYSTEM_CLEANUP` LP executors from an API restart (position address unknown — reconcile against `get_portfolio_overview(include_lp_positions=True)` or the gateway positions-owned endpoints)
+- Each entry reports the `lp_provider` (the DEX, e.g. `orca/clmm`) and `pool_address` needed to close it. Note `connector_name` holds the **network** (e.g. `solana-mainnet-beta`), not the DEX
+- Recover with `manage_clmm(action="close", connector=<lp_provider>, network=<connector_name>, position_address=..., pool_address=...)`. `pool_address` is REQUIRED here: LP-executor positions are opened by the bot straight against Gateway, so the API database has no row to read the pool from and the close returns 400 without it
+- Stopping the executor will NOT close the position — it has already terminated, so `manage_executors(action="stop")` is correctly a no-op. A fresh `lp_executor` CANNOT adopt an existing position either; it always mints a new one, which would stack a second funded position on top of the orphan
+- After the position is closed on-chain, mark it recovered with `manage_executors(action="resolve_orphan", executor_id="...")` so it stops appearing in orphan listings and warnings
+- If an `lp_rebalancer` controller was managing the executor, restart the controller (or its bot) after resolving: the controller's orphan halt is held in memory and only clears on restart. `resolve_orphan` updates the API database, not the running controller
+- Do NOT open new positions on the same funds until the orphan is recovered
+
+**Stopping an already-terminated executor is a no-op, not an error:**
+- `manage_executors(action="stop")` on a terminated executor returns `status="already_terminated"` with its final `close_type`, `position_address`, and `orphaned_position` flag instead of a 404
+- A 404 means the executor ID is unknown to the API's database (never existed, or the database was unavailable at that moment)
