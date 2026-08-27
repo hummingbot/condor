@@ -266,3 +266,11 @@ export function formatPct(val: number): string {
 export function isExecutorActive(status: string) {
   return status === "active" || status === "running";
 }
+
+// Format connector name for display (e.g. "binance_perpetual" -> "Binance Perp")
+export function formatConnectorName(name: string) {
+  return name
+    .replace(/_perpetual$/, " perp")
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}

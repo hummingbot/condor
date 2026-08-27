@@ -2,6 +2,7 @@ import { useCallback, useState } from "react";
 import { ChevronDown } from "lucide-react";
 
 import { AnchoredMenu } from "@/components/ui/AnchoredMenu";
+import { formatConnectorName } from "@/lib/formatters";
 
 /**
  * Every venue this selector lists has an order book. Gateway networks live on
@@ -12,14 +13,6 @@ interface ExchangeSelectorProps {
   connectors: string[];
   value: string;
   onChange: (v: string) => void;
-}
-
-// Format connector name for display (e.g. "binance_perpetual" -> "Binance Perp")
-export function formatConnectorName(name: string) {
-  return name
-    .replace(/_perpetual$/, " perp")
-    .replace(/_/g, " ")
-    .replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
 export function ExchangeSelector({

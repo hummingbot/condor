@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowDown, ArrowUp, Loader2, Search, Star, X } from "lucide-react";
 
-import { formatConnectorName } from "@/components/market/ExchangeSelector";
+import { formatConnectorName } from "@/lib/formatters";
 import { useEscapeKey } from "@/hooks/useEscapeKey";
 import { api, type Ticker } from "@/lib/api";
 import { formatCompactVolume, formatPrice } from "@/lib/formatters";
