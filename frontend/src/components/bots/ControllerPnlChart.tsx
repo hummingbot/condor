@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { useMemo } from "react";
+import { useCallback, useMemo } from "react";
 import {
   Area,
   CartesianGrid,
@@ -14,7 +14,7 @@ import {
 } from "recharts";
 
 import { api, type ControllerInfo } from "@/lib/api";
-import { formatCurrencyVolume, formatCurrencyPnl, formatTime, pnlColor } from "@/lib/formatters";
+import { formatAxisCurrency, formatCurrencyVolume, formatCurrencyPnl, formatTime, pnlColor } from "@/lib/formatters";
 import { aggregatePnlSeries, PNL_SERIES_COLORS } from "@/lib/pnl-chart";
 import type { ConvertFn } from "@/lib/rates";
 import { getThemeColors } from "@/lib/theme-colors";
@@ -59,6 +59,9 @@ export function ControllerPnlChart({ server, controllerId, botName, deployedAt, 
   );
   const hasPosition = data.some((p) => p.position !== 0);
   const latest = data.length > 0 ? data[data.length - 1] : null;
+  // recharts compares `tickFormatter` by identity, so these stay stable per symbol.
+  const fmtAxis = useCallback((v: number) => formatAxisCurrency(v, currencySymbol, "pnl"), [currencySymbol]);
+  const fmtVolAxis = useCallback((v: number) => formatAxisCurrency(v, currencySymbol, "volume"), [currencySymbol]);
 
   if (isLoading) {
     return (
@@ -84,8 +87,6 @@ export function ControllerPnlChart({ server, controllerId, botName, deployedAt, 
   const pnlH = Math.round(height * 0.65);
   const bottomH = height - pnlH;
   const fmtPnl = (v: number) => formatCurrencyPnl(v, currencySymbol);
-  const fmtAxis = (v: number) => `${currencySymbol}${Math.abs(v) >= 1000 ? (v / 1000).toFixed(1) + "K" : v.toFixed(Math.abs(v) < 10 ? 2 : 0)}`;
-  const fmtVolAxis = (v: number) => `${currencySymbol}${Math.abs(v) >= 1000 ? (v / 1000).toFixed(1) + "K" : v.toFixed(0)}`;
 
   return (
     <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden">

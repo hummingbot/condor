@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import {
   Area,
   CartesianGrid,
@@ -13,7 +13,7 @@ import {
 } from "recharts";
 
 import type { ControllerInfo, ControllerPerformanceSnapshot } from "@/lib/api";
-import { formatCurrencyVolume, formatCurrencyPnl, formatTime, pnlColor } from "@/lib/formatters";
+import { formatAxisCurrency, formatCurrencyVolume, formatCurrencyPnl, formatTime, pnlColor } from "@/lib/formatters";
 import { aggregatePnlSeries, PNL_SERIES_COLORS } from "@/lib/pnl-chart";
 import type { ConvertFn } from "@/lib/rates";
 import { getThemeColors } from "@/lib/theme-colors";
@@ -84,6 +84,9 @@ export function AggregatedPnlChart({ snapshots, controllers, currencySymbol = "$
     () => aggregatePnlSeries(snapshots, enabled, controllers, convert),
     [snapshots, enabled, controllers, convert],
   );
+  // recharts compares `tickFormatter` by identity, so these stay stable per symbol.
+  const fmtAxis = useCallback((v: number) => formatAxisCurrency(v, currencySymbol, "pnl"), [currencySymbol]);
+  const fmtVolAxis = useCallback((v: number) => formatAxisCurrency(v, currencySymbol, "volume"), [currencySymbol]);
   // Latest point is the live "now" point appended by aggregatePnlSeries
   const latest = data.length > 0 ? data[data.length - 1] : null;
   const hasPosition = data.some((p) => p.position !== 0);
@@ -93,8 +96,6 @@ export function AggregatedPnlChart({ snapshots, controllers, currencySymbol = "$
   const tc = getThemeColors();
   const totalColor = (latest?.total ?? 0) >= 0 ? tc.up : tc.down;
   const fmtPnl = (v: number) => formatCurrencyPnl(v, currencySymbol);
-  const fmtAxis = (v: number) => `${currencySymbol}${Math.abs(v) >= 1000 ? (v / 1000).toFixed(1) + "K" : v.toFixed(Math.abs(v) < 10 ? 2 : 0)}`;
-  const fmtVolAxis = (v: number) => `${currencySymbol}${Math.abs(v) >= 1000 ? (v / 1000).toFixed(1) + "K" : v.toFixed(0)}`;
 
   return (
     <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden">

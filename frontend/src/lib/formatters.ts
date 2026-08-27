@@ -104,6 +104,28 @@ export function formatCompactVolume(val: number, symbol = "$"): string {
   return symbol + val.toFixed(0);
 }
 
+/**
+ * Y-axis tick labels for the PnL evolution charts.
+ *
+ * Same B/M/K ladder as `formatCompactVolume`, so a tick never renders the same
+ * number differently from the header strip and the tooltip drawn beside it
+ * (both `formatCurrencyVolume`): a $2.4M cumulative volume used to print
+ * "$2400.0K" on the axis and "$2.4M" everywhere else.
+ *
+ * The axis needs its own rule only *below* $1K, because it is drawn at
+ * fontSize 10 inside a 52px gutter and its ticks are chosen by recharts, not by
+ * the data: `"pnl"` keeps 2 decimals under $10 (a young controller's PnL axis
+ * spans cents), `"volume"` never shows decimals (volume ticks are whole
+ * dollars, and a decimal there only costs width).
+ */
+export function formatAxisCurrency(val: number, symbol = "$", kind: "pnl" | "volume" = "volume"): string {
+  const abs = Math.abs(val);
+  if (abs >= 1_000_000_000) return symbol + (val / 1_000_000_000).toFixed(2) + "B";
+  if (abs >= 1_000_000) return symbol + (val / 1_000_000).toFixed(1) + "M";
+  if (abs >= 1_000) return symbol + (val / 1_000).toFixed(1) + "K";
+  return symbol + val.toFixed(kind === "pnl" && abs < 10 ? 2 : 0);
+}
+
 export function formatPnl(val: number) {
   return formatCurrencyPnl(val);
 }
