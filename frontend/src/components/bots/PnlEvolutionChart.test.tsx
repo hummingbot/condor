@@ -33,6 +33,7 @@ import {
   PLOT_INSET_RIGHT,
   PNL_SERIES_LABELS,
   positionAreaExtent,
+  positionAxisDomain,
   zeroGradientOffset,
   type PnlChartPoint,
 } from "@/lib/pnl-chart";
@@ -757,5 +758,224 @@ describe("PnlEvolutionChart hover card (READ-248)", () => {
     for (const t of [top, bottom]) {
       expect((t.props.wrapperStyle as { zIndex: number }).zIndex).toBeGreaterThan(0);
     }
+  });
+});
+
+describe("PnlEvolutionChart range zoom (READ-249)", () => {
+  const HOUR = 3_600_000;
+  const t0 = new Date(2026, 2, 14, 8, 0).getTime();
+
+  /** Five hourly points, $100 traded in each bucket after the first. */
+  const hourly: PnlChartPoint[] = [0, 1, 2, 3, 4].map((h) => ({
+    time: t0 + h * HOUR,
+    realized: 10 * h,
+    unrealized: 0,
+    total: 10 * h,
+    volume: 100 * h,
+    volumeDelta: h === 0 ? 0 : 100,
+    position: 0,
+  }));
+  /** The same series one socket frame later. */
+  const grown: PnlChartPoint[] = [
+    ...hourly,
+    { ...hourly[4], time: t0 + 5 * HOUR, realized: 50, total: 50, volume: 500, volumeDelta: 100 },
+  ];
+
+  const chart = (data: PnlChartPoint[]) => (
+    <PnlEvolutionChart data={data} title="Portfolio PnL" pnlHeight={220} volumeHeight={120} />
+  );
+
+  /**
+   * The strip is drawn in percentages and reads pointers from its live bounding
+   * box, which jsdom has no layout to give it — so it gets one. 400px over a
+   * four-hour window is 100px an hour, which is what every clientX below means.
+   */
+  function track(): HTMLElement {
+    const el = container.querySelector("[data-range-track]") as HTMLElement;
+    expect(el).toBeTruthy();
+    el.getBoundingClientRect = () =>
+      ({ left: 0, right: 400, width: 400, top: 0, bottom: 24, height: 24, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect;
+    return el;
+  }
+
+  /** Press on `el`, move the pointer to `toX`, release. */
+  function drag(el: Element, toX: number, { release = true } = {}) {
+    act(() => {
+      el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, clientX: 0 }));
+    });
+    act(() => {
+      window.dispatchEvent(new MouseEvent("mousemove", { clientX: toX }));
+    });
+    if (release) act(() => window.dispatchEvent(new MouseEvent("mouseup", {})));
+  }
+
+  const traveller = (end: "start" | "end") =>
+    container.querySelector(`[data-range-traveller="${end}"]`) as HTMLElement;
+
+  /**
+   * The series each pane was last told to draw. Both `recorded` and `panes()`
+   * accumulate across re-renders, so only the last two panes are this render's.
+   */
+  function drawn(): PnlChartPoint[][] {
+    return panes()
+      .slice(-2)
+      .map((pane) => pane[0].props.data as PnlChartPoint[]);
+  }
+
+  /** The header legend row for one series. */
+  const legend = (series: string) =>
+    container.querySelector(`[data-legend-entry="${series}"]`)!.textContent!;
+
+  it("narrows both panes to the same window when a traveller is dragged", () => {
+    render(chart(hourly));
+    expect(drawn()[0]).toHaveLength(5);
+
+    // The left traveller pulled to the 2h mark, leaving the right one on the
+    // live edge: the window becomes the last two hours.
+    track();
+    drag(traveller("start"), 200);
+
+    const [top, bottom] = drawn();
+    expect(top.map((p) => p.time)).toEqual([t0 + 2 * HOUR, t0 + 3 * HOUR, t0 + 4 * HOUR]);
+    // The two panes are separate charts; drawing the same array is the only
+    // reason a column in one is the same instant as the column in the other.
+    expect(bottom).toBe(top);
+  });
+
+  it("rescales both panes' domains to the brushed slice", () => {
+    const holding = hourly.map((p, i) => ({ ...p, position: i < 3 ? 5_000 : 100 }));
+    render(chart(holding));
+    track();
+    drag(traveller("start"), 300); // the last hour only
+
+    const [top] = drawn();
+    expect(top).toHaveLength(2);
+    // recharts derives an auto Y domain from the data it is given, so the PnL
+    // pane rescales by being handed the slice...
+    expect(top.map((p) => p.total)).toEqual([30, 40]);
+    // ...and the position axis, whose domain this component pins itself, is
+    // computed from the same slice rather than from the whole window.
+    const axis = panes()
+      .slice(-2)[1]
+      .find((r) => r.type === "YAxis" && r.props.yAxisId === "pos")!;
+    expect(axis.props.domain).toEqual(positionAxisDomain(top.slice()));
+    const [, max] = axis.props.domain as [number, number];
+    expect(max).toBeLessThan(5_000); // the 5,000 held earlier is off screen
+  });
+
+  it("reports the volume actually on screen, not the whole loaded window", () => {
+    render(chart(hourly));
+    expect(legend("volumeDelta")).toContain("$400"); // four buckets of $100
+
+    track();
+    drag(traveller("start"), 300);
+    // Two of the four buckets left on screen — the figure has to follow the
+    // bars beside it, or the header quietly reports a window the chart is not
+    // drawing (which is exactly what it did while it read from `data`).
+    expect(legend("volumeDelta")).toContain("$200");
+    expect(legend("volumeDelta")).toContain("on screen");
+  });
+
+  it("keeps a window pinned to the live edge following the new points", () => {
+    render(chart(hourly));
+    track();
+    drag(traveller("start"), 200); // the last two hours, right end on the live edge
+
+    render(chart(grown)); // one socket frame later
+    const [top] = drawn();
+    // Still two hours wide, and it has slid to cover the point that just landed.
+    expect(top.map((p) => p.time)).toEqual([t0 + 3 * HOUR, t0 + 4 * HOUR, t0 + 5 * HOUR]);
+  });
+
+  it("leaves a window that does not touch the live edge exactly where it was put", () => {
+    render(chart(hourly));
+    track();
+    drag(traveller("end"), 200); // the *first* two hours
+
+    const before = drawn()[0].map((p) => p.time);
+    expect(before).toEqual([t0, t0 + HOUR, t0 + 2 * HOUR]);
+
+    render(chart(grown));
+    // A brush that reset itself every time the socket delivered would be worse
+    // than no brush: the selection is stored as instants, so it cannot.
+    expect(drawn()[0].map((p) => p.time)).toEqual(before);
+  });
+
+  it("survives the data being replaced under it by a chip toggle", () => {
+    render(chart(hourly));
+    track();
+    drag(traveller("end"), 200);
+
+    // A controller dropped: the same window, at a different sampling interval,
+    // somewhere else entirely on the timeline.
+    const elsewhere = hourly.map((p) => ({ ...p, time: p.time + 30 * 86_400_000 }));
+    render(chart(elsewhere));
+    // No out-of-range slice and no blank pane: the selection cannot be honoured,
+    // so the chart is back to the full loaded window.
+    expect(drawn()[0]).toHaveLength(elsewhere.length);
+  });
+
+  it("zooms to a preset window in one click, and back out again", () => {
+    render(chart(hourly));
+    const chip = (label: string) => container.querySelector(`[data-range-preset="${label}"]`) as HTMLElement;
+
+    // Only the levels shorter than the four hours loaded are offered.
+    expect(chip("1h")).toBeTruthy();
+    expect(chip("1d")).toBeNull();
+    expect(chip("All").getAttribute("aria-pressed")).toBe("true");
+
+    act(() => chip("1h").dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(drawn()[0].map((p) => p.time)).toEqual([t0 + 3 * HOUR, t0 + 4 * HOUR]);
+    expect(chip("1h").getAttribute("aria-pressed")).toBe("true");
+    expect(chip("All").getAttribute("aria-pressed")).toBe("false");
+
+    act(() => chip("All").dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(drawn()[0]).toBe(hourly); // the same array, not a copy of it
+  });
+
+  it("keeps the hover card out of a drag", () => {
+    render(chart(hourly));
+    const pane = container.querySelector('[data-pane="pnl"]')!;
+    const cardVisible = () =>
+      panes()
+        .slice(-2)
+        .map((p) => {
+          const tooltip = p.find((r) => r.type === "Tooltip")!;
+          return ((tooltip.props.content as { props: { visible: boolean } }).props.visible);
+        });
+
+    act(() => {
+      pane.dispatchEvent(new MouseEvent("mouseover", { bubbles: true, relatedTarget: document.body }));
+    });
+    expect(cardVisible()).toEqual([true, false]);
+
+    // Mid-drag the pointer routinely leaves the pane it started in — and a
+    // traveller pulled upward crosses the PnL pane, whose enter handler would
+    // otherwise pop the card over the window being resized.
+    track();
+    drag(traveller("start"), 200, { release: false });
+    expect(cardVisible()).toEqual([false, false]);
+
+    act(() => window.dispatchEvent(new MouseEvent("mouseup", {})));
+    expect(cardVisible()).toEqual([true, false]);
+  });
+
+  it("never puts a NaN in the strip's path, whatever the fold hands it", () => {
+    // The live series really does carry non-finite totals — a snapshot whose
+    // pnl did not arrive as a number folds to one — and the panes answer that
+    // with a break in the curve. One NaN in a `d` attribute makes the browser
+    // reject the whole path, so the strip would blank itself and log an SVG
+    // error on every socket frame instead.
+    const broken = hourly.map((p, i) => (i === 3 ? { ...p, total: Number.NaN } : p));
+    render(chart(broken));
+    const d = container.querySelector("[data-range-track] path")!.getAttribute("d")!;
+    expect(d).not.toContain("NaN");
+    // The pen lifts over the gap rather than drawing a straight line across it.
+    expect((d.match(/M/g) ?? []).length).toBe(2);
+  });
+
+  it("offers no strip at all when there is nothing to zoom", () => {
+    render(chart(flat)); // two points
+    expect(container.querySelector("[data-range-track]")).toBeNull();
   });
 });

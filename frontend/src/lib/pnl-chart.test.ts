@@ -28,6 +28,8 @@ import {
   formatBucketLabel,
   pickSamplingInterval,
   positionAreaExtent,
+  resolveTimeRange,
+  sliceToRange,
   positionAxisDomain,
   positionQuoteValue,
   samplingIntervalSince,
@@ -1041,5 +1043,91 @@ describe("formatBucketLabel", () => {
 
   it("has nothing to name when the series has no spacing", () => {
     expect(formatBucketLabel(0)).toBeUndefined();
+  });
+});
+
+describe("resolveTimeRange (READ-249)", () => {
+  /** An hourly series over four hours. */
+  const hourly = [0, 1, 2, 3, 4].map((h) => ({
+    time: 10_000_000 + h * 3_600_000,
+    realized: h,
+    unrealized: 0,
+    total: h,
+    volume: h * 100,
+    volumeDelta: 100,
+    position: 0,
+  }));
+  const first = hourly[0].time;
+  const last = hourly[hourly.length - 1].time;
+
+  it("defaults to the whole loaded window", () => {
+    expect(resolveTimeRange(hourly, null)).toEqual([first, last]);
+  });
+
+  it("measures a trailing window back from the newest point, so it slides", () => {
+    expect(resolveTimeRange(hourly, { start: null, end: null, trailing: 2 * 3_600_000 })).toEqual([
+      last - 2 * 3_600_000,
+      last,
+    ]);
+
+    // The same selection against a series that has grown by an hour: the width
+    // is kept and the window has moved with the data, which is what "following
+    // the live edge" has to mean.
+    const grown = [...hourly, { ...hourly[4], time: last + 3_600_000 }];
+    expect(resolveTimeRange(grown, { start: null, end: null, trailing: 2 * 3_600_000 })).toEqual([
+      last - 3_600_000,
+      last + 3_600_000,
+    ]);
+  });
+
+  it("leaves a window that does not touch the live edge exactly where it was put", () => {
+    const frozen = { start: first, end: first + 2 * 3_600_000 };
+    const grown = [...hourly, { ...hourly[4], time: last + 3_600_000 }];
+    // Two more socket frames' worth of points arrive; the selection does not move.
+    expect(resolveTimeRange(grown, frozen)).toEqual([frozen.start, frozen.end]);
+    expect(resolveTimeRange([...grown, { ...hourly[4], time: last + 7_200_000 }], frozen)).toEqual([
+      frozen.start,
+      frozen.end,
+    ]);
+  });
+
+  it("clamps a selection that reaches past either end of the data", () => {
+    expect(resolveTimeRange(hourly, { start: first - 99_999_999, end: last + 99_999_999 })).toEqual([
+      first,
+      last,
+    ]);
+  });
+
+  it("falls back to the full window rather than to a slice that cannot be drawn", () => {
+    // A controller chip toggled off, or a refetch at a coarser interval, can
+    // leave the stored window holding no points at all — the case that would
+    // otherwise blank both panes, and the one an index-based brush turns into
+    // an out-of-range index.
+    const elsewhere = hourly.map((p) => ({ ...p, time: p.time + 30 * 86_400_000 }));
+    expect(resolveTimeRange(elsewhere, { start: first, end: first + 60_000 })).toEqual([
+      elsewhere[0].time,
+      elsewhere[elsewhere.length - 1].time,
+    ]);
+    // ...and one point is not a series either.
+    expect(resolveTimeRange(hourly, { start: first - 1, end: first + 1 })).toEqual([first, last]);
+  });
+
+  it("has nothing to resolve against an empty series", () => {
+    expect(resolveTimeRange([], null)).toEqual([0, 0]);
+    expect(resolveTimeRange([], { start: 1, end: 2 })).toEqual([0, 0]);
+  });
+
+  describe("sliceToRange", () => {
+    it("hands back the very same array when the window is everything", () => {
+      // Identity, not just equality: both panes pass this straight to recharts
+      // as their `data`, and a fresh array on every render would re-derive every axis.
+      expect(sliceToRange(hourly, first, last)).toBe(hourly);
+      expect(sliceToRange(hourly, first - 1_000, last + 1_000)).toBe(hourly);
+    });
+
+    it("keeps the points inside the window, ends included", () => {
+      const slice = sliceToRange(hourly, hourly[1].time, hourly[3].time);
+      expect(slice.map((p) => p.time)).toEqual([hourly[1].time, hourly[2].time, hourly[3].time]);
+    });
   });
 });

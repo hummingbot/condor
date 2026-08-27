@@ -595,3 +595,107 @@ export function formatBucketLabel(bucketMs: number): SamplingInterval | undefine
   }
   return best;
 }
+
+// ── Zooming the loaded window (READ-249) ──
+
+/**
+ * A user's zoom over the loaded window, expressed in **time** rather than in
+ * point indices — which is the whole design of this feature, not an
+ * implementation detail.
+ *
+ * The series underneath a PNL chart is not static: the socket rebuilds it every
+ * few seconds, a controller chip drops or restores a whole controller's
+ * contribution, and widening the history window re-fetches it at a different
+ * sampling interval. An index into that array means a different instant after
+ * every one of those, so a selection stored as `[startIndex, endIndex]` would
+ * slide, jump or point past the end. A pair of timestamps means the same
+ * instants forever, and the worst a re-fetch can do to it is put those instants
+ * outside the data, which `resolveTimeRange` answers by clamping.
+ *
+ * This is also why the chart does not use recharts' own `<Brush>`. recharts
+ * keeps the brush as exactly those two indices in its store, and
+ * `ChartDataContextProvider` resets them to the full range on *every* change of
+ * the `data` prop's identity — cleanup dispatches `setChartData(undefined)`
+ * (start and end to 0) and the re-run puts the end back at `length - 1`. On a
+ * chart fed by a live socket that is a brush which silently opens itself every
+ * few seconds, which is worse than no brush at all.
+ *
+ * The two nullable fields are what makes a selection able to *follow* the live
+ * edge instead of being left behind by it:
+ *
+ *  - `end: null` — the window ends at the newest point there is, so points
+ *    arriving after the selection was made are inside it.
+ *  - `trailing` — the window keeps its width and slides, measured back from
+ *    that live end. This is what the preset chips set ("the last hour" is a
+ *    width, not a pair of instants) and what a drag that lands on the right
+ *    edge is stored as.
+ *
+ * One rule follows from those, and it is the answer to "what happens to my
+ * selection when new data arrives": **a selection touching the live edge keeps
+ * its width and slides; a selection that does not is frozen where the user put
+ * it.** Nothing resets.
+ */
+export interface TimeRange {
+  /** Absolute window start, or null when `trailing` measures it from the end. */
+  start: number | null;
+  /** Absolute window end, or null for "the newest point there is". */
+  end: number | null;
+  /** Window width measured back from the end, in ms — a sliding window. */
+  trailing?: number;
+}
+
+/** The one-click zoom levels offered beside the header stats. */
+export const RANGE_PRESETS = [
+  { label: "1h", ms: 3_600_000 },
+  { label: "6h", ms: 6 * 3_600_000 },
+  { label: "1d", ms: 24 * 3_600_000 },
+] as const;
+
+/** First and last instant on a series, or null when there is nothing to measure. */
+export function seriesExtent(data: PnlChartPoint[]): [number, number] | null {
+  if (data.length === 0) return null;
+  return [data[0].time, data[data.length - 1].time];
+}
+
+/**
+ * A selection resolved against the data actually loaded, as absolute
+ * `[start, end]` instants.
+ *
+ * Everything that can go wrong with a stored selection is answered here rather
+ * than at the call sites: a window that reaches past either end is clamped, and
+ * one that no longer holds two points — a chip toggle that emptied it, a
+ * re-fetch that moved the history somewhere else entirely — falls back to the
+ * full loaded window rather than to a slice the panes cannot draw.
+ */
+export function resolveTimeRange(data: PnlChartPoint[], range: TimeRange | null): [number, number] {
+  const extent = seriesExtent(data);
+  if (!extent) return [0, 0];
+  if (!range) return extent;
+  const [first, last] = extent;
+  const clamp = (t: number) => Math.min(Math.max(t, first), last);
+  const end = clamp(range.end ?? last);
+  const start = clamp(range.trailing != null ? end - range.trailing : (range.start ?? first));
+  if (!(end > start)) return extent;
+  let count = 0;
+  for (const point of data) {
+    if (point.time < start || point.time > end) continue;
+    if (++count > 1) return [start, end];
+  }
+  return extent;
+}
+
+/**
+ * The points inside `[start, end]` — and the *same array* when that is all of
+ * them.
+ *
+ * Preserving identity for the unzoomed case is not a micro-optimisation: both
+ * panes hand this straight to recharts as their `data`, and a fresh array on
+ * every render re-dispatches the chart's data into its store, re-deriving every
+ * axis domain each time. The default view has to cost exactly what it cost
+ * before this feature existed.
+ */
+export function sliceToRange(data: PnlChartPoint[], start: number, end: number): PnlChartPoint[] {
+  if (data.length === 0) return data;
+  if (start <= data[0].time && end >= data[data.length - 1].time) return data;
+  return data.filter((point) => point.time >= start && point.time <= end);
+}

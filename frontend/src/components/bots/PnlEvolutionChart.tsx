@@ -56,16 +56,21 @@ import {
   PANE_LABELS,
   PNL_SERIES_COLORS,
   PNL_SERIES_LABELS,
+  RANGE_PRESETS,
   chartBucketMs,
   formatBucketLabel,
   positionAreaExtent,
   positionAxisDomain,
+  resolveTimeRange,
+  sliceToRange,
   volumeBarWidth,
   zeroGradientOffset,
   type PnlChartPoint,
+  type TimeRange,
 } from "@/lib/pnl-chart";
 import { getThemeColors } from "@/lib/theme-colors";
 import { PnlEvolutionTooltip } from "./PnlChartTooltips";
+import { PnlRangeStrip } from "./PnlRangeStrip";
 
 /**
  * The hover card floats over whichever pane it escaped into, so it needs to
@@ -236,6 +241,28 @@ function LegendEntry({
   );
 }
 
+/**
+ * One zoom level, styled as the aggregated chart's controller chips are — the
+ * card already has a vocabulary for "a small toggle above the panes".
+ */
+function RangeChip({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      data-range-preset={label}
+      aria-pressed={active}
+      onClick={onClick}
+      className={`rounded-full px-2 py-0.5 text-[10px] font-medium tabular-nums transition-colors ${
+        active
+          ? "bg-[var(--color-text-muted)]/20 text-[var(--color-text)]"
+          : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+      }`}
+    >
+      {label}
+    </button>
+  );
+}
+
 /** The entries belonging to one pane, under that pane's own name. */
 function LegendGroup({ label, children }: { label: string; children: ReactNode }) {
   return (
@@ -289,6 +316,44 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
   const totalChipId = `totalChip${instanceId}`;
   const posChipId = `posChip${instanceId}`;
 
+  // ── Zooming the loaded window (READ-249) ──
+  //
+  // The card draws whatever slice of `data` the user has selected, and the
+  // selection is two *timestamps* rather than two point indices. Both of those
+  // are load-bearing and both are explained at `TimeRange` in lib/pnl-chart:
+  // this series is rebuilt by a socket every few seconds, so an index means a
+  // different instant almost immediately — and recharts' own `<Brush>`, which
+  // this item originally proposed, stores exactly those indices and resets them
+  // to the full range on every change of the `data` prop's identity.
+  //
+  // Slicing here instead of asking recharts to narrow anything is also what
+  // makes the rest of this file untouched by the feature: both panes are handed
+  // the same array, so their X domains, their Y domains, the bar geometry, the
+  // synced cursor and the tooltip indices all narrow together, by construction,
+  // with no second source of truth to drift from the first.
+  const [range, setRange] = useState<TimeRange | null>(null);
+  const [viewStart, viewEnd] = resolveTimeRange(data, range);
+  const visible = useMemo(() => sliceToRange(data, viewStart, viewEnd), [data, viewStart, viewEnd]);
+  const fullSpanMs = data.length > 1 ? data[data.length - 1].time - data[0].time : 0;
+
+  const selectRange = useCallback(
+    (start: number, end: number, atLiveEdge: boolean) => {
+      // Dragged back out to both ends: that is not a zoom, it is the default,
+      // and storing it as one would leave "All" reading as unselected.
+      if (atLiveEdge && start <= (data[0]?.time ?? 0)) return setRange(null);
+      // A window touching the live edge keeps its width and slides with the
+      // points arriving behind it; one that does not is frozen where it was put.
+      setRange(atLiveEdge ? { start: null, end: null, trailing: end - start } : { start, end });
+    },
+    [data],
+  );
+
+  // A drag is not a hover. The strip lives outside both pane wrappers, so a
+  // traveller pulled up across a pane would fire that pane's `onMouseEnter` and
+  // pop the hover card over the very window being resized (and blank it again
+  // on the way out). The card stays out of the whole gesture instead.
+  const [scrubbing, setScrubbing] = useState(false);
+
   // recharts compares `tickFormatter` by identity, so these stay stable per symbol.
   const fmtAxis = useCallback((v: number) => formatAxisCurrency(v, currencySymbol, "pnl"), [currencySymbol]);
   const fmtVolAxis = useCallback((v: number) => formatAxisCurrency(v, currencySymbol, "volume"), [currencySymbol]);
@@ -297,21 +362,29 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
   // `HH:MM` alone repeats itself across every day of a multi-day window
   // (READ-250). The series is sorted, so its ends are its extremes; both panes
   // share the one formatter so their columns stay labelled alike.
-  const spanMs = data.length > 1 ? data[data.length - 1].time - data[0].time : 0;
+  const spanMs = visible.length > 1 ? visible[visible.length - 1].time - visible[0].time : 0;
   const fmtTimeAxis = useCallback((v: number) => formatAxisTime(v, spanMs), [spanMs]);
 
-  // Latest point is the live "now" point appended by aggregatePnlSeries
-  const latest = data.length > 0 ? data[data.length - 1] : null;
+  // The right-hand end of what is drawn: the live "now" point appended by
+  // aggregatePnlSeries when the window is following it, and the last point of
+  // the selection when it is not. The header's per-series values read from
+  // here, so they describe the series where the reader can see them end rather
+  // than reporting a live figure over a window that stops in the past.
+  const latest = visible.length > 0 ? visible[visible.length - 1] : null;
+  // Whether this chart draws a position series at all is a property of the
+  // whole loaded window, not of the slice on screen: deriving it from the slice
+  // would make the position axis' ticks, the area and its legend entry appear
+  // and vanish as the user drags across a flat stretch.
   const hasPosition = data.some((p) => p.position !== 0);
 
   // The position axis is pinned across zero rather than left to recharts, so
   // the signed area always has its baseline on screen (READ-246). Memoised
   // because recharts keeps the domain in its own store and a fresh array on
   // every render would churn it.
-  const positionDomain = useMemo(() => positionAxisDomain(data), [data]);
+  const positionDomain = useMemo(() => positionAxisDomain(visible), [visible]);
   // Measured against the area's own extent, not the padded domain: the fill's
   // gradient is in objectBoundingBox units. See zeroGradientOffset.
-  const positionZeroOffset = useMemo(() => zeroGradientOffset(positionAreaExtent(data)), [data]);
+  const positionZeroOffset = useMemo(() => zeroGradientOffset(positionAreaExtent(visible)), [visible]);
 
   // ── Volume bars (READ-245) ──
   //
@@ -331,7 +404,7 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
   // recharts".
   const [activityWidth, setActivityWidth] = useState(0);
   const onActivityResize = useCallback((width: number) => setActivityWidth(width), []);
-  const bucketMs = useMemo(() => chartBucketMs(data), [data]);
+  const bucketMs = useMemo(() => chartBucketMs(visible), [visible]);
   // The bucket has to be named in the tooltip: "Volume" used to be a running
   // total, which needs no qualifier, and is now one bucket's worth, which means
   // nothing until you know how long a bucket is.
@@ -379,8 +452,8 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
   // total has to say what the bars beside it add up to, and one absent bar is
   // not grounds for withdrawing the other four hundred.
   const windowVolume = useMemo(
-    () => data.reduce((sum, p) => (Number.isFinite(p.volumeDelta) ? sum + p.volumeDelta : sum), 0),
-    [data],
+    () => visible.reduce((sum, p) => (Number.isFinite(p.volumeDelta) ? sum + p.volumeDelta : sum), 0),
+    [visible],
   );
 
   // ── One hover card for both panes (READ-248) ──
@@ -422,7 +495,11 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
           controller modal is narrower than the bots page, and an entry pushed
           off the end would be a series left unnamed again. */}
       <div className="flex items-start justify-between gap-3 border-b border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5">
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] tabular-nums">
+        {/* `min-w-0` so this block may shrink past its longest entry and wrap
+            instead: a flex item's automatic minimum is its min-content width,
+            which in the narrow controller modal pushed the zoom chips past the
+            card's `overflow-hidden` edge and clipped the last one. */}
+        <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1 text-[11px] tabular-nums">
           <p className="text-[10px] font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
             {title}
           </p>
@@ -559,14 +636,34 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
             </>
           )}
         </div>
-        {notice && (
-          <span
-            title={notice.detail}
-            className="rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide bg-[var(--color-yellow)]/15 text-[var(--color-yellow)] cursor-help"
-          >
-            {notice.label}
-          </span>
-        )}
+        <div className="flex shrink-0 items-center gap-2">
+          {/* One-click zoom levels, beside the stats rather than in a pane's
+              caption: they set the window both panes draw, so they belong to
+              the card, and a control sitting above one pane would read as that
+              pane's. Only the levels shorter than what is loaded are offered —
+              "1d" over an eight-hour history is a button that does nothing. */}
+          {fullSpanMs > 0 && (
+            <div className="flex items-center gap-0.5" data-range-presets>
+              {RANGE_PRESETS.filter((preset) => preset.ms < fullSpanMs).map((preset) => (
+                <RangeChip
+                  key={preset.label}
+                  label={preset.label}
+                  active={range?.trailing === preset.ms}
+                  onClick={() => setRange({ start: null, end: null, trailing: preset.ms })}
+                />
+              ))}
+              <RangeChip label="All" active={range === null} onClick={() => setRange(null)} />
+            </div>
+          )}
+          {notice && (
+            <span
+              title={notice.detail}
+              className="rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide bg-[var(--color-yellow)]/15 text-[var(--color-yellow)] cursor-help"
+            >
+              {notice.label}
+            </span>
+          )}
+        </div>
       </div>
 
       {filters}
@@ -575,7 +672,7 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
       <PaneCaption label={PANE_LABELS.pnl} />
       <div data-pane="pnl" style={PANE_PADDING} onMouseEnter={enterPnlPane} onMouseLeave={leavePnlPane}>
         <ResponsiveContainer width="100%" height={pnlHeight}>
-          <ComposedChart data={data} margin={{ top: 12, right: PANE_MARGIN_RIGHT, left: 0, bottom: 0 }} syncId={instanceId}>
+          <ComposedChart data={visible} margin={{ top: 12, right: PANE_MARGIN_RIGHT, left: 0, bottom: 0 }} syncId={instanceId}>
             <defs>
               <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
                 <stop offset="5%" stopColor={totalColor} stopOpacity={0.15} />
@@ -623,7 +720,7 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
                   symbol={currencySymbol}
                   bucket={bucketLabel}
                   hasPosition={hasPosition}
-                  visible={hoveredPane === "pnl"}
+                  visible={!scrubbing && hoveredPane === "pnl"}
                 />
               }
               wrapperStyle={TOOLTIP_WRAPPER_STYLE}
@@ -645,7 +742,7 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
       <PaneCaption label={PANE_LABELS.activity} divider />
       <div data-pane="activity" style={PANE_PADDING} onMouseEnter={enterActivityPane} onMouseLeave={leaveActivityPane}>
         <ResponsiveContainer width="100%" height={volumeHeight} onResize={onActivityResize}>
-          <ComposedChart data={data} margin={{ top: 4, right: PANE_MARGIN_RIGHT, left: 0, bottom: 4 }} syncId={instanceId}>
+          <ComposedChart data={visible} margin={{ top: 4, right: PANE_MARGIN_RIGHT, left: 0, bottom: 4 }} syncId={instanceId}>
             {/* One fill, two sides: a hard stop exactly where the position axis
                 crosses zero, so the part of the area above the baseline is
                 long-coloured and the part below is short-coloured. The two
@@ -706,7 +803,7 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
                   symbol={currencySymbol}
                   bucket={bucketLabel}
                   hasPosition={hasPosition}
-                  visible={hoveredPane === "activity"}
+                  visible={!scrubbing && hoveredPane === "activity"}
                 />
               }
               allowEscapeViewBox={ESCAPE_UPWARD}
@@ -779,6 +876,17 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
           </ComposedChart>
         </ResponsiveContainer>
       </div>
+
+      {/* The range strip, below the shared time axis it operates on and inset to
+          the same plot area, so a column on it is the column above it. */}
+      <PnlRangeStrip
+        data={data}
+        start={viewStart}
+        end={viewEnd}
+        color={totalColor}
+        onSelect={selectRange}
+        onScrub={setScrubbing}
+      />
     </div>
   );
 }
