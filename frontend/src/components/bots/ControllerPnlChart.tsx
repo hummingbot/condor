@@ -1,24 +1,10 @@
 import { useQuery } from "@tanstack/react-query";
-import { useCallback, useMemo } from "react";
-import {
-  Area,
-  CartesianGrid,
-  ComposedChart,
-  Legend,
-  Line,
-  ReferenceLine,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
+import { useMemo } from "react";
 
 import { api, type ControllerInfo } from "@/lib/api";
-import { formatAxisCurrency, formatCurrencyVolume, formatCurrencyPnl, formatTime, pnlColor } from "@/lib/formatters";
-import { aggregatePnlSeries, AXIS_WIDTH, PNL_SERIES_COLORS } from "@/lib/pnl-chart";
+import { aggregatePnlSeries } from "@/lib/pnl-chart";
 import type { ConvertFn } from "@/lib/rates";
-import { getThemeColors } from "@/lib/theme-colors";
-import { BottomTooltip, PnlTooltip } from "./PnlChartTooltips";
+import { PnlEvolutionChart } from "./PnlEvolutionChart";
 
 // ── Component ──
 
@@ -33,6 +19,11 @@ interface Props {
   controller?: ControllerInfo;
 }
 
+/**
+ * One controller's PNL chart: this component owns the history query and the
+ * loading/empty states around it. The drawing is PnlEvolutionChart's (ARCH-242)
+ * and the fold is aggregatePnlSeries' (ARCH-243).
+ */
 export function ControllerPnlChart({ server, controllerId, botName, deployedAt, height = 400, currencySymbol = "$", convert, controller }: Props) {
   const { data: raw, isLoading } = useQuery({
     queryKey: ["controller-perf-history", server, controllerId, deployedAt],
@@ -57,11 +48,6 @@ export function ControllerPnlChart({ server, controllerId, botName, deployedAt, 
     () => aggregatePnlSeries(snapshots, new Set([controllerId]), controller ? [controller] : [], convert),
     [snapshots, controllerId, controller, convert],
   );
-  const hasPosition = data.some((p) => p.position !== 0);
-  const latest = data.length > 0 ? data[data.length - 1] : null;
-  // recharts compares `tickFormatter` by identity, so these stay stable per symbol.
-  const fmtAxis = useCallback((v: number) => formatAxisCurrency(v, currencySymbol, "pnl"), [currencySymbol]);
-  const fmtVolAxis = useCallback((v: number) => formatAxisCurrency(v, currencySymbol, "volume"), [currencySymbol]);
 
   if (isLoading) {
     return (
@@ -82,139 +68,15 @@ export function ControllerPnlChart({ server, controllerId, botName, deployedAt, 
     );
   }
 
-  const tc = getThemeColors();
-  const totalColor = (latest?.total ?? 0) >= 0 ? tc.up : tc.down;
   const pnlH = Math.round(height * 0.65);
-  const bottomH = height - pnlH;
-  const fmtPnl = (v: number) => formatCurrencyPnl(v, currencySymbol);
 
   return (
-    <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden">
-      {/* Header with live stats */}
-      <div className="flex items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5">
-        <p className="text-[10px] font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
-          PnL Evolution
-        </p>
-        {latest && (
-          <div className="flex items-center gap-3 text-xs tabular-nums">
-            <span style={{ color: pnlColor(latest.total) }} className="font-semibold">
-              {fmtPnl(latest.total)}
-            </span>
-            <span className="text-[var(--color-text-muted)]">
-              R: <span style={{ color: "var(--color-green)" }}>{fmtPnl(latest.realized)}</span>
-            </span>
-            <span className="text-[var(--color-text-muted)]">
-              U: <span style={{ color: PNL_SERIES_COLORS.unrealized }}>{fmtPnl(latest.unrealized)}</span>
-            </span>
-            <span className="text-[var(--color-text-muted)]">
-              Vol: <span style={{ color: PNL_SERIES_COLORS.volume }}>{formatCurrencyVolume(latest.volume, currencySymbol)}</span>
-            </span>
-          </div>
-        )}
-      </div>
-
-      {/* PnL chart */}
-      <div className="px-1">
-        <ResponsiveContainer width="100%" height={pnlH}>
-          <ComposedChart data={data} margin={{ top: 12, right: 12, left: 0, bottom: 0 }} syncId="ctrl">
-            <defs>
-              <linearGradient id="ctrlPnlGrad" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%" stopColor={totalColor} stopOpacity={0.15} />
-                <stop offset="95%" stopColor={totalColor} stopOpacity={0.02} />
-              </linearGradient>
-            </defs>
-            <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" strokeOpacity={0.5} />
-            <XAxis
-              dataKey="time"
-              type="number"
-              domain={["dataMin", "dataMax"]}
-              tickFormatter={formatTime}
-              tick={false}
-              stroke="var(--color-border)"
-              tickLine={false}
-              height={1}
-            />
-            <YAxis
-              tickFormatter={fmtAxis}
-              tick={{ fontSize: 10, fill: "var(--color-text-muted)" }}
-              stroke="var(--color-border)"
-              tickLine={false}
-              axisLine={false}
-              width={AXIS_WIDTH}
-            />
-            {/* Invisible right gutter mirroring the bottom pane's position
-                axis (same `hasPosition` guard) so both panes keep identical
-                plot areas — see AXIS_WIDTH in lib/pnl-chart.ts. */}
-            {hasPosition && (
-              <YAxis
-                yAxisId="spacer"
-                orientation="right"
-                tick={false}
-                tickLine={false}
-                axisLine={false}
-                width={AXIS_WIDTH}
-              />
-            )}
-            <ReferenceLine y={0} stroke="var(--color-text-muted)" strokeOpacity={0.3} strokeDasharray="4 4" />
-            <Tooltip content={<PnlTooltip symbol={currencySymbol} />} />
-            <Area type="monotone" dataKey="total" stroke="none" fill="url(#ctrlPnlGrad)" activeDot={false} legendType="none" />
-            <Line type="monotone" dataKey="total" stroke={totalColor} strokeWidth={2} dot={false} strokeOpacity={0.6} />
-            <Line type="monotone" dataKey="realized" stroke={tc.up} strokeWidth={2} dot={false} />
-            <Line type="monotone" dataKey="unrealized" stroke={PNL_SERIES_COLORS.unrealized} strokeWidth={2} strokeDasharray="5 3" dot={false} />
-            <Legend
-              verticalAlign="top"
-              align="right"
-              iconType="plainline"
-              wrapperStyle={{ fontSize: 10, paddingBottom: 4 }}
-              formatter={(value: string) => <span className="text-[var(--color-text-muted)] text-[10px] capitalize">{value}</span>}
-            />
-          </ComposedChart>
-        </ResponsiveContainer>
-      </div>
-
-      {/* Volume + Position chart */}
-      <div className="px-1">
-        <ResponsiveContainer width="100%" height={bottomH}>
-          <ComposedChart data={data} margin={{ top: 4, right: 12, left: 0, bottom: 4 }} syncId="ctrl">
-            <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" strokeOpacity={0.5} />
-            <XAxis
-              dataKey="time"
-              type="number"
-              domain={["dataMin", "dataMax"]}
-              tickFormatter={formatTime}
-              tick={{ fontSize: 10, fill: "var(--color-text-muted)" }}
-              stroke="var(--color-border)"
-              tickLine={false}
-            />
-            <YAxis
-              yAxisId="vol"
-              tickFormatter={fmtVolAxis}
-              tick={{ fontSize: 10, fill: PNL_SERIES_COLORS.volume }}
-              stroke="var(--color-border)"
-              tickLine={false}
-              axisLine={false}
-              width={AXIS_WIDTH}
-            />
-            {hasPosition && (
-              <YAxis
-                yAxisId="pos"
-                orientation="right"
-                tickFormatter={fmtVolAxis}
-                tick={{ fontSize: 10, fill: PNL_SERIES_COLORS.position }}
-                stroke="var(--color-border)"
-                tickLine={false}
-                axisLine={false}
-                width={AXIS_WIDTH}
-              />
-            )}
-            <Tooltip content={<BottomTooltip symbol={currencySymbol} />} />
-            <Line yAxisId="vol" type="monotone" dataKey="volume" stroke={PNL_SERIES_COLORS.volume} strokeWidth={1.5} dot={false} />
-            {hasPosition && (
-              <Line yAxisId="pos" type="monotone" dataKey="position" stroke={PNL_SERIES_COLORS.position} strokeWidth={1.5} dot={false} />
-            )}
-          </ComposedChart>
-        </ResponsiveContainer>
-      </div>
-    </div>
+    <PnlEvolutionChart
+      data={data}
+      title="PnL Evolution"
+      pnlHeight={pnlH}
+      volumeHeight={height - pnlH}
+      currencySymbol={currencySymbol}
+    />
   );
 }
