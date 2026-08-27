@@ -306,6 +306,18 @@ class ConversationMeta(BaseModel):
         ),
     )
 
+    # ── Reflection (FEAT-061) ──
+    # The marker is the *attempt*, not the success: a conversation whose answer
+    # could not be parsed is stamped all the same, because retrying an
+    # unparseable answer forever on a job queue is how a background pass becomes
+    # a token leak. ``reflected_ok`` is what distinguishes "we learned nothing
+    # from it" from "we never looked", which is a support question, not a
+    # scheduling one.
+    reflected_at: datetime | None = None
+    reflected_ok: bool = Field(
+        default=False, description="Did the pass actually learn something?"
+    )
+
 
 class TurnEntry(BaseModel):
     """One line of the transcript.
