@@ -311,3 +311,154 @@ async def reflect(user_id: int, meta: ConversationMeta) -> bool:
             except Exception:  # noqa: BLE001
                 log.debug("Could not stop the reflection client", exc_info=True)
         _mark(user_id, meta.id, learned)
+
+
+# ── The sweep ────────────────────────────────────────────────────────────
+
+
+def _users() -> list[int]:
+    """Every user with a conversation store on this install.
+
+    Sharing reads its list from the consent record; there is no consent record
+    here, so the list is the filesystem. A directory whose name is not an id is
+    skipped rather than guessed at — the runtime root is not only conversations.
+    """
+    from condor import paths
+
+    found: list[int] = []
+    root: Path = paths.users_root()
+    try:
+        children = sorted(root.iterdir())
+    except OSError:
+        return []
+    for child in children:
+        if not (child / paths.CONVERSATIONS_DIRNAME).is_dir():
+            continue
+        try:
+            found.append(int(child.name))
+        except ValueError:
+            log.debug("Skipping non-numeric user directory %s", child.name)
+    return found
+
+
+def eligible(user_id: int, now: float | None = None) -> list[ConversationMeta]:
+    """This user's conversations the pass may read right now, oldest first.
+
+    Pure but for reading ``meta.json``: no model, no writes. Four rules, each
+    able to refuse a conversation on its own and each therefore testable on its
+    own against a conversation that fails only that one:
+
+    **Off.** ``CONDOR_REFLECTION=off`` is checked here rather than in
+    :func:`sweep`, so a disabled install produces no candidates at all instead
+    of building a candidate list it then declines to use.
+
+    **Idle.** Nothing has happened for :data:`IDLE_S`. The only available notion
+    of "finished" (see the module docstring), and it will sometimes take a chat
+    the user was about to continue — harmless, because the intent merges into
+    the same row the next time it comes up.
+
+    **Grown.** At least :data:`MIN_TURNS` turns. One turn is a greeting; there
+    is no task in it to name.
+
+    **Unread.** ``reflected_at`` unset. This is what makes a conversation cost
+    one model run for its whole life.
+    """
+    if not enabled():
+        return []
+
+    now = time.time() if now is None else now
+    ready: list[ConversationMeta] = []
+    for meta in conversations.list_conversations(user_id, limit=0):
+        if meta.reflected_at is not None:
+            continue
+        if meta.turn_count < MIN_TURNS:
+            continue
+        if now - meta.updated_at.timestamp() <= IDLE_S:
+            continue
+        ready.append(meta)
+
+    ready.sort(key=lambda m: m.updated_at)
+    return ready
+
+
+def _candidates(now: float) -> list[tuple[int, ConversationMeta]]:
+    """Everything ready across every user, oldest waiting first.
+
+    Pooled and sorted together rather than swept user by user, exactly as
+    ``condor.sharing.sweep._candidates`` does, so one user with a large backlog
+    drains at the same rate as everyone else instead of owning every tick.
+    """
+    found: list[tuple[int, ConversationMeta]] = []
+    for user_id in _users():
+        try:
+            found.extend((user_id, meta) for meta in eligible(user_id, now))
+        except Exception:  # noqa: BLE001 - one unreadable store is not the tick
+            log.debug("Could not list conversations for %s", user_id, exc_info=True)
+    found.sort(key=lambda pair: pair[1].updated_at)
+    return found
+
+
+async def sweep(now: float | None = None) -> int:
+    """Reflect what is finished. Never raises; returns how many ran.
+
+    Runs on the job queue, so a failure here must not be able to take the bot
+    down or stall the jobs behind it. The listing is a ``meta.json`` per
+    conversation per user, which is blocking work on a loop uvicorn shares, so
+    it goes to a thread; the reflections themselves are already async.
+    """
+    if not enabled():
+        return 0
+
+    now = time.time() if now is None else now
+    candidates = await asyncio.to_thread(_candidates, now)
+    if not candidates:
+        return 0
+
+    ran = 0
+    for user_id, meta in candidates[:PER_TICK]:
+        try:
+            await reflect(user_id, meta)
+            ran += 1
+        except Exception:  # noqa: BLE001 - one bad conversation is not the tick
+            log.warning("Could not reflect conversation %s", meta.id, exc_info=True)
+
+    if len(candidates) > PER_TICK:
+        log.info(
+            "Reflection ran on %d of %d finished conversations; the rest wait "
+            "for the next tick",
+            ran,
+            len(candidates),
+        )
+    return ran
+
+
+async def _reflection_job(context) -> None:  # pragma: no cover - PTB plumbing
+    try:
+        await sweep()
+    except Exception:  # noqa: BLE001 - a sweep must never take the bot down
+        log.debug("Reflection sweep job failed", exc_info=True)
+
+
+def register_jobs(application) -> None:
+    """Register the pass beside the sharing sweep, the house pattern.
+
+    Registered unconditionally and free on an install with nothing to read: the
+    first thing :func:`sweep` does is walk the stores, and a conversation still
+    being used, already reflected or a single turn long produces no candidate.
+
+    ``first`` is a long way out for the same reason it is there: a conversation
+    has to be idle for :data:`IDLE_S` to qualify at all, so a sweep at boot can
+    find nothing a sweep a few minutes later will miss — and the first minutes
+    after a restart are when the rest of the runtime is reconciling.
+    """
+    try:
+        queue = getattr(application, "job_queue", None)
+        if queue is None:
+            return
+        for job in queue.get_jobs_by_name(REFLECTION_JOB):
+            job.schedule_removal()
+        queue.run_repeating(
+            _reflection_job, interval=SWEEP_INTERVAL_S, first=300, name=REFLECTION_JOB
+        )
+    except Exception:  # noqa: BLE001
+        log.debug("Could not register the reflection sweep job", exc_info=True)

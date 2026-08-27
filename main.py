@@ -714,6 +714,18 @@ async def startup(application: Application) -> None:
     except Exception:
         logger.exception("Sharing job registration failed (continuing without it)")
 
+    # Reflection (FEAT-061): read a finished conversation back once, for the
+    # facts and the intents in it. The sharing sweep's neighbour by shape and
+    # not by subject — it shares no consent record, no queue and no endpoint
+    # with it, and nothing it reads leaves the machine. Free on an install with
+    # nothing finished to read, and off entirely with CONDOR_REFLECTION=off.
+    try:
+        from condor.agents import reflection
+
+        reflection.register_jobs(application)
+    except Exception:
+        logger.exception("Reflection job registration failed (continuing without it)")
+
     # Start file watcher
     asyncio.create_task(watch_and_reload(application))
 
