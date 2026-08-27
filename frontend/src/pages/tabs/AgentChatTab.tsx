@@ -1,13 +1,17 @@
 import { useQuery } from "@tanstack/react-query";
 import {
+  Activity,
   ArrowUpRight,
   Bot,
   BrainCircuit,
   ChevronDown,
+  ClipboardList,
   MessageSquare,
   PanelLeftClose,
   PanelLeftOpen,
   Plus,
+  ShieldAlert,
+  Wallet,
   Zap,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -21,6 +25,7 @@ import { ChatThread } from "@/components/chat/ChatThread";
 import { ContextDock } from "@/components/chat/ContextDock";
 import { ConversationList } from "@/components/chat/ConversationList";
 import { SessionTabs } from "@/components/chat/SessionTabs";
+import { Starters, type Starter } from "@/components/chat/Starters";
 import { useBrainSwitch } from "@/hooks/useBrainSwitch";
 import { useChat, useSessionOptions } from "@/hooks/useChat";
 import { useServer } from "@/hooks/useServer";
@@ -32,12 +37,35 @@ import {
 } from "@/lib/api";
 
 /** Openers offered when nothing is bound, and when something is. */
-const CONDOR_STARTERS = [
-  "How is my portfolio doing?",
-  "What are my bots doing right now?",
-  "Any positions at risk?",
+const CONDOR_STARTERS: Starter[] = [
+  {
+    icon: Wallet,
+    title: "How is my portfolio doing?",
+    hint: "Balances, PNL and what moved since yesterday",
+  },
+  {
+    icon: Bot,
+    title: "What are my bots doing right now?",
+    hint: "Running controllers, open executors and their state",
+  },
+  {
+    icon: ShieldAlert,
+    title: "Any positions at risk?",
+    hint: "Exposure, drawdown and anything near a limit",
+  },
 ];
-const AGENT_STARTERS = ["What are you working on?", "Review your last session"];
+const AGENT_STARTERS: Starter[] = [
+  {
+    icon: Activity,
+    title: "What are you working on?",
+    hint: "Current strategies, open tasks and the last tick",
+  },
+  {
+    icon: ClipboardList,
+    title: "Review your last session",
+    hint: "What it decided, what it traded, what it learned",
+  },
+];
 
 /** Go to my conversation with them, or start another one regardless. */
 type TalkIntent = "focus" | "fresh";
@@ -380,6 +408,9 @@ export function AgentChatTab() {
             }
             onAbort={() => chat.activeSlotId && chat.abortPrompt(chat.activeSlotId)}
             boundAgent={boundAgent}
+            // The hero's openers, again — a session that spawned but was never
+            // written in is as empty as no session at all.
+            starters={activeSlot?.info.agent_slug ? AGENT_STARTERS : CONDOR_STARTERS}
             columnClassName="mx-auto w-full max-w-3xl"
             autoFocus
             emptyState={
@@ -625,17 +656,7 @@ function Hero({
           <ChatInput onSend={onAsk} autoFocus />
         </div>
 
-        <div className="mt-3 flex flex-wrap justify-center gap-2">
-          {starters.map((text) => (
-            <button
-              key={text}
-              onClick={() => onAsk(text)}
-              className="rounded-full border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs text-[var(--color-text-muted)] transition-colors hover:border-[var(--color-primary)]/40 hover:text-[var(--color-text)]"
-            >
-              {text}
-            </button>
-          ))}
-        </div>
+        <Starters starters={starters} onAsk={onAsk} className="mt-4" />
       </div>
     </div>
   );

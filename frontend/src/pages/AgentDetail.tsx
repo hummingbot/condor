@@ -456,14 +456,21 @@ export function AgentDetail() {
                 and the `/agents` route is a bare Navigate to `/` that drops the
                 query string with it — so this used to land on the chat home
                 without focusing anyone. It matters more now that Knowledge in
-                the chat comes straight here: this is the way back. */}
+                the chat comes straight here: this is the way back.
+
+                Labelled "Open chat", not "Chat": it lands in the workspace,
+                which is a different surface from the bubble docked on this
+                page, and it continues the live conversation with this agent
+                when there is one rather than always starting another. The bare
+                verb read as "go back to the conversation I am in" and cost a
+                tester their place in it. */}
             <button
               onClick={() => navigate(`/?agent=${encodeURIComponent(agent.slug)}`)}
               className="flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] transition-all hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
-              title={`Chat with ${agent.name}`}
+              title={`Open your chat with ${agent.name} in the workspace — continues the live conversation if there is one`}
             >
               <MessageSquareText className="h-3.5 w-3.5" />
-              <span className="hidden sm:inline">Chat</span>
+              <span className="hidden sm:inline">Open chat</span>
             </button>
             {/* Condor is the default agent: deleting its AGENT.md would leave
                 every unbound session without instructions or a model, so the

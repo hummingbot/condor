@@ -40,6 +40,7 @@ const NAV_ITEMS = [
   { to: "/bots", icon: Bot, label: "Bots" },
   { to: "/executors", icon: Activity, label: "Executors" },
   { to: "/routines", icon: Zap, label: "Routines" },
+  { to: "/settings", icon: Settings, label: "Settings" },
 ] as const;
 
 /**
@@ -157,20 +158,6 @@ function AppShellBody() {
             >
               <Bug className="h-4 w-4" />
             </button>
-
-            <NavLink
-              to="/settings"
-              className={({ isActive }) =>
-                `rounded p-1.5 transition-colors ${
-                  isActive
-                    ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
-                    : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-accent)]"
-                }`
-              }
-              title="Settings"
-            >
-              <Settings className="h-4 w-4" />
-            </NavLink>
 
             <button
               onClick={toggleTheme}

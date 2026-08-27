@@ -99,13 +99,15 @@ def _run_condor(**overrides):
 # ---------------------------------------------------------------------------
 
 
-def _fake_fs(has_frontend=True, has_bundle=True):
-    """Pretend frontend/ and frontend/dist/index.html do (not) exist."""
+def _fake_fs(has_frontend=True, has_bundle=True, has_node_modules=True):
+    """Pretend frontend/, its bundle and its node_modules do (not) exist."""
     real_isdir, real_isfile = os.path.isdir, os.path.isfile
 
     def isdir(path):
         if path == updater.FRONTEND_DIR:
             return has_frontend
+        if path == os.path.join(updater.FRONTEND_DIR, "node_modules"):
+            return has_node_modules
         return real_isdir(path)
 
     def isfile(path):
@@ -159,6 +161,73 @@ def test_identical_commits_change_nothing():
 
 
 # ---------------------------------------------------------------------------
+# Reinstalling the JS dependencies
+#
+# `node_modules` exists from the previous boot forever after, so guarding the
+# install on the directory meant a pull that added a devDependency built
+# against a tree that never got it — and `tsc -b` type-checks the new files,
+# so the whole bundle failed on an unresolvable import.
+# ---------------------------------------------------------------------------
+
+
+def test_npm_installs_when_the_lockfile_moved():
+    with (
+        _fake_fs(),
+        patch.object(
+            updater,
+            "_run_git",
+            AsyncMock(return_value=(0, "frontend/package-lock.json")),
+        ),
+    ):
+        assert asyncio.run(updater.npm_deps_stale("old_sha", "new_sha")) is True
+
+
+def test_npm_install_skipped_when_the_manifest_stood_still():
+    with _fake_fs(), patch.object(updater, "_run_git", AsyncMock(return_value=(0, ""))):
+        assert asyncio.run(updater.npm_deps_stale("old_sha", "new_sha")) is False
+
+
+def test_npm_installs_when_node_modules_is_missing():
+    with (
+        _fake_fs(has_node_modules=False),
+        patch.object(updater, "_run_git", AsyncMock()) as git,
+    ):
+        assert asyncio.run(updater.npm_deps_stale("same", "same")) is True
+        git.assert_not_awaited()  # short-circuits before diffing
+
+
+def test_npm_installs_when_the_commit_range_is_unknown():
+    """No shas to diff (a manual build): install rather than risk a stale tree."""
+    with _fake_fs(), patch.object(updater, "_run_git", AsyncMock()) as git:
+        assert asyncio.run(updater.npm_deps_stale()) is True
+        git.assert_not_awaited()
+
+
+def _build_script(**stale):
+    """Run build_frontend and hand back the shell script it would have run."""
+    with (
+        _fake_fs(),
+        patch.object(updater, "npm_deps_stale", AsyncMock(**stale)),
+        patch.object(updater, "_run_cmd", AsyncMock(return_value=(0, "built"))) as cmd,
+    ):
+        assert asyncio.run(updater.build_frontend("old_sha", "new_sha")) == (
+            True,
+            "built",
+        )
+    return cmd.await_args.args[2]
+
+
+def test_the_build_installs_first_when_the_deps_are_stale():
+    assert "npm ci && npm run build" in _build_script(return_value=True)
+
+
+def test_the_build_skips_the_install_when_the_deps_are_current():
+    script = _build_script(return_value=False)
+    assert "npm ci" not in script
+    assert script.endswith("npm run build")
+
+
+# ---------------------------------------------------------------------------
 # The update pipeline
 # ---------------------------------------------------------------------------
 
@@ -169,9 +238,10 @@ def test_update_pulls_syncs_builds_then_reports_ready():
 
     steps["fast_forward"].assert_awaited_once()
     steps["install_dependencies"].assert_awaited_once()
-    steps["build_frontend"].assert_awaited_once()
-    # The diff is taken across the pull, not against an arbitrary commit.
+    # The diff is taken across the pull, not against an arbitrary commit — and
+    # the build gets the same range, so it can tell whether npm has to re-run.
     steps["frontend_needs_build"].assert_awaited_once_with("old_sha", "new_sha")
+    steps["build_frontend"].assert_awaited_once_with("old_sha", "new_sha")
     # The commit it aims at is journaled before the process is signalled, or
     # the restart it does not survive could never be judged.
     assert run.state == update_run.RESTARTING

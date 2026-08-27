@@ -500,7 +500,7 @@ async def _update_condor(run: Run) -> bool:
         if not await updater.frontend_needs_build(before, after):
             await _finish(run, step, SKIPPED, "The update did not touch frontend/.")
         else:
-            ok, output = await updater.build_frontend()
+            ok, output = await updater.build_frontend(before, after)
             await _finish(run, step, OK if ok else FAILED, output)
             if not ok:
                 await _fail(

@@ -15,7 +15,7 @@ interface ExchangeSelectorProps {
 }
 
 // Format connector name for display (e.g. "binance_perpetual" -> "Binance Perp")
-function formatName(name: string) {
+export function formatConnectorName(name: string) {
   return name
     .replace(/_perpetual$/, " perp")
     .replace(/_/g, " ")
@@ -40,7 +40,7 @@ export function ExchangeSelector({
         aria-haspopup="listbox"
         className="flex items-center gap-1.5 px-3 py-2.5 text-xs transition-colors hover:bg-[var(--color-surface-hover)]"
       >
-        <span className="font-medium text-[var(--color-primary)]">{formatName(value)}</span>
+        <span className="font-medium text-[var(--color-primary)]">{formatConnectorName(value)}</span>
         <ChevronDown className={`h-3 w-3 text-[var(--color-text-muted)] transition-transform ${open ? "rotate-180" : ""}`} />
       </button>
 
@@ -85,7 +85,7 @@ function ConnectorOption({
           : "text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]"
       }`}
     >
-      {formatName(name)}
+      {formatConnectorName(name)}
     </button>
   );
 }

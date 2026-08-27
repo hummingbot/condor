@@ -15,9 +15,13 @@ import { resolveAgentLabel } from "./ChatThread";
  * only its own conversation can approve — and an X, which is the only way to
  * end a session at all.
  *
- * Closing a tab ends the session and nothing else: the transcript stays on the
- * server, so the conversation remains in the rail and clicking it there
- * respawns it.
+ * Every tab carries a status marker in a fixed slot at its head: a green dot
+ * while the session is live and idle, a spinner in its place while it answers.
+ * That is the rail's own vocabulary — the green dot on a conversation row —
+ * brought up here, because the strip used to read as a row of plain labels and
+ * gave no hint that each one is a process that is alive right now. The dots
+ * carry that on their own; a "N live" count chip beside them only restated
+ * what the row already shows.
  *
  * It renders inside the header row rather than above it. The active tab
  * already names who is answering, which is the identity row's own job, so a
@@ -57,7 +61,7 @@ export function SessionTabs({
   const seen = new Map<string, number>();
 
   return (
-    <div className={`flex items-center gap-0 overflow-x-auto ${className}`}>
+    <div className={`flex items-center gap-1 overflow-x-auto ${className}`}>
       {slots.map((slot) => {
         const key = groupKey(slot);
         const ordinal = (seen.get(key) || 0) + 1;
@@ -89,6 +93,21 @@ export function SessionTabs({
 /** What makes two tabs "the same agent" for numbering. */
 function groupKey(slot: ChatSlot): string {
   return slot.info.agent_slug || slot.info.agent_key;
+}
+
+/**
+ * A session is alive.
+ *
+ * `--color-green` rather than a literal `green-500`, so the colour-blind theme
+ * — where green is redefined as blue — still gets a hue it can separate from
+ * the yellow that means "waiting on you".
+ */
+function LiveDot() {
+  return (
+    <span className="relative flex h-1.5 w-1.5 shrink-0">
+      <span className="relative h-1.5 w-1.5 rounded-full bg-[var(--color-green)]" />
+    </span>
+  );
 }
 
 /** Shorten agent label for tab display */
@@ -133,19 +152,36 @@ function SessionTab({
     ? slot.info.label || slot.info.agent_slug
     : shortAgentLabel(slot.info.agent_key, agents);
   const TabIcon = slot.info.agent_slug ? Bot : Zap;
+  const busy = isStreaming || slot.pending;
 
   return (
     <button
       onClick={onClick}
-      className={`group relative flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded px-3 py-1.5 text-xs transition-colors ${
+      // The active tab borrows the rail's own highlight — a primary tint and
+      // primary text — so the tab and the rail row for the same conversation
+      // read as one selection rather than two unrelated ones. The bottom
+      // border is on every tab, transparent when inactive, so switching does
+      // not shift the row by 2 px.
+      className={`group relative flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-t border-b-2 px-3 py-1.5 text-xs transition-colors ${
         isActive
-          ? "bg-[var(--color-bg)] text-[var(--color-text)]"
-          : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+          ? "border-[var(--color-primary)] bg-[var(--color-primary)]/10 font-medium text-[var(--color-primary)]"
+          : "border-transparent text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
       }`}
     >
-      {isActive && (
-        <div className="absolute bottom-0 left-1 right-1 h-0.5 rounded-full bg-[var(--color-primary)]" />
-      )}
+      {/* One marker, in a fixed-width slot so the label does not jump when a
+          steady dot becomes a spinner: green while the session is live and
+          idle, spinning while it is answering. */}
+      <span
+        className="flex h-3 w-3 shrink-0 items-center justify-center"
+        title={busy ? "Answering" : "Session live"}
+        aria-label={busy ? "Answering" : "Session live"}
+      >
+        {busy ? (
+          <Loader2 className="h-3 w-3 animate-spin text-[var(--color-primary)]" />
+        ) : (
+          <LiveDot />
+        )}
+      </span>
       <TabIcon className="h-3 w-3 shrink-0" />
       <span className="max-w-[140px] truncate">
         {agentShort}
@@ -159,9 +195,6 @@ function SessionTab({
           className="h-3 w-3 shrink-0 text-[var(--color-yellow)]"
           aria-label="Waiting for your approval"
         />
-      )}
-      {(isStreaming || slot.pending) && (
-        <Loader2 className="h-3 w-3 shrink-0 animate-spin text-[var(--color-primary)]" />
       )}
       <span
         role="button"

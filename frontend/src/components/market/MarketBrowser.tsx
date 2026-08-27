@@ -1,10 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowDown, ArrowUp, Loader2, Search, Star, X } from "lucide-react";
 
-import { ExchangeSelector } from "@/components/market/ExchangeSelector";
+import { formatConnectorName } from "@/components/market/ExchangeSelector";
 import { useEscapeKey } from "@/hooks/useEscapeKey";
-import { useDismissOnOutsideClick } from "@/hooks/useDismissOnOutsideClick";
 import { api, type Ticker } from "@/lib/api";
 import { formatCompactVolume, formatPrice } from "@/lib/formatters";
 import {
@@ -22,9 +21,12 @@ export interface MarketPick {
 
 interface MarketBrowserProps {
   server: string;
-  /** Every venue the browser may switch to. */
-  connectors: string[];
-  /** The trade surface's venue — where the browser opens. */
+  /**
+   * The trade surface's venue — the only one the browser lists. Changing venue
+   * is the top bar's exchange selector's job: a second one in here was a copy
+   * of a control already on screen, and picking a venue in it left the trade
+   * surface on the old one until a row was clicked.
+   */
   connector: string;
   /** The trade surface's pair, highlighted in the list. */
   pair: string;
@@ -40,35 +42,47 @@ const MAX_ROWS = 300;
 
 export function MarketBrowser({
   server,
-  connectors,
   connector,
   pair,
   onPick,
   onClose,
 }: MarketBrowserProps) {
-  // The venue is the browser's own until a row is picked: switching it re-scopes
-  // the list, and the pick carries it back to the trade surface.
-  const [venue, setVenue] = useState(connector);
   const [search, setSearch] = useState("");
   const [sortKey, setSortKey] = useState<SortKey>("usd_volume");
   const [sortAsc, setSortAsc] = useState(false);
   const [favoritesOnly, setFavoritesOnly] = useState(false);
-  const [activeIndex, setActiveIndex] = useState(0);
+  // The keyboard cursor belongs to the venue it was moved in. A venue switch
+  // upstairs is a whole new list, so the cursor simply stops matching and reads
+  // 0 again — no effect, and no render where Enter points into the old venue.
+  const [cursorAt, setCursorAt] = useState({ venue: connector, index: 0 });
+  const activeIndex = cursorAt.venue === connector ? cursorAt.index : 0;
+  const setActiveIndex = useCallback(
+    (next: number | ((i: number) => number)) =>
+      setCursorAt((c) => {
+        const base = c.venue === connector ? c.index : 0;
+        return {
+          venue: connector,
+          index: typeof next === "function" ? next(base) : next,
+        };
+      }),
+    [connector],
+  );
 
-  const panelRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
+  // Esc and the header's X close it; the Browse button that opened it toggles
+  // it shut. No outside-click dismiss — the venue selector and the config panel
+  // stay usable while the list is up, and a click on either is not a dismissal.
   useEscapeKey(true, onClose);
-  useDismissOnOutsideClick(true, onClose, [panelRef]);
 
-  const { tickers, isLoading, isFetching } = useTickers(server, venue);
+  const { tickers, isLoading, isFetching } = useTickers(server, connector);
   const { toggle, isFavorite } = useMarketFavorites();
 
   // Only offer pairs the venue actually accepts orders for.
   const { data: rulesData } = useQuery({
-    queryKey: ["trading-rules", server, venue],
-    queryFn: () => api.getTradingRules(server, venue),
-    enabled: !!server && !!venue,
+    queryKey: ["trading-rules", server, connector],
+    queryFn: () => api.getTradingRules(server, connector),
+    enabled: !!server && !!connector,
     staleTime: 5 * 60 * 1000,
   });
 
@@ -83,7 +97,7 @@ export function MarketBrowser({
       : tickers;
 
     if (favoritesOnly) {
-      list = list.filter((t) => isFavorite({ connector: venue, pair: t.trading_pair }));
+      list = list.filter((t) => isFavorite({ connector, pair: t.trading_pair }));
     }
     if (search) {
       const q = search.toUpperCase();
@@ -110,7 +124,7 @@ export function MarketBrowser({
     const starred: Ticker[] = [];
     const rest: Ticker[] = [];
     for (const t of sorted) {
-      (isFavorite({ connector: venue, pair: t.trading_pair }) ? starred : rest).push(t);
+      (isFavorite({ connector, pair: t.trading_pair }) ? starred : rest).push(t);
     }
     return [...starred, ...rest];
   }, [
@@ -121,7 +135,7 @@ export function MarketBrowser({
     sortAsc,
     favoritesOnly,
     isFavorite,
-    venue,
+    connector,
   ]);
 
   const visible = rows.slice(0, MAX_ROWS);
@@ -146,7 +160,7 @@ export function MarketBrowser({
     items?.[cursor]?.scrollIntoView({ block: "nearest" });
   }, [cursor]);
 
-  const pick = (t: Ticker) => onPick({ connector: venue, pair: t.trading_pair });
+  const pick = (t: Ticker) => onPick({ connector, pair: t.trading_pair });
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "ArrowDown") {
@@ -186,7 +200,6 @@ export function MarketBrowser({
 
   return (
     <div
-      ref={panelRef}
       role="dialog"
       aria-label="Browse markets"
       onKeyDown={handleKeyDown}
@@ -194,16 +207,11 @@ export function MarketBrowser({
     >
       {/* Header: venue, search, favourites filter, close */}
       <div className="flex items-center gap-2 border-b border-[var(--color-border)] bg-[var(--color-surface)] pr-2">
-        <div className="border-r border-[var(--color-border)]">
-          <ExchangeSelector
-            connectors={connectors}
-            value={venue}
-            onChange={(v) => {
-              setVenue(v);
-              setActiveIndex(0);
-            }}
-          />
-        </div>
+        {/* Which venue is being listed — a label, not a control. The top bar's
+            exchange selector stays on screen above and re-scopes this list. */}
+        <span className="shrink-0 border-r border-[var(--color-border)] px-3 py-2.5 text-xs font-medium text-[var(--color-primary)]">
+          {formatConnectorName(connector)}
+        </span>
 
         <Search className="h-3.5 w-3.5 shrink-0 text-[var(--color-text-muted)]" />
         <input
@@ -297,8 +305,8 @@ export function MarketBrowser({
         ) : (
           visible.map((t, i) => {
             const [base, quote] = t.trading_pair.split("-");
-            const selected = t.trading_pair === pair && venue === connector;
-            const starred = isFavorite({ connector: venue, pair: t.trading_pair });
+            const selected = t.trading_pair === pair;
+            const starred = isFavorite({ connector, pair: t.trading_pair });
             return (
               <div
                 key={t.trading_pair}
@@ -310,7 +318,7 @@ export function MarketBrowser({
                 }`}
               >
                 <button
-                  onClick={() => toggle({ connector: venue, pair: t.trading_pair })}
+                  onClick={() => toggle({ connector, pair: t.trading_pair })}
                   aria-pressed={starred}
                   aria-label={`${starred ? "Unstar" : "Star"} ${t.trading_pair}`}
                   className="flex h-6 w-6 items-center justify-center"

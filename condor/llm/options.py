@@ -31,6 +31,7 @@ AGENT_OPTIONS: dict[str, dict[str, Any]] = {
     "claude-code": {"label": "Claude Code"},
     "claude-acp:opus": {"label": "Claude (ACP) — Opus"},
     "claude-acp:sonnet": {"label": "Claude (ACP) — Sonnet"},
+    "claude-acp:haiku": {"label": "Claude (ACP) — Haiku"},
     "gemini": {"label": "Gemini CLI"},
     "copilot": {"label": "GitHub Copilot CLI"},
     "codex": {"label": "ChatGPT Codex"},

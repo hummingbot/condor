@@ -1,10 +1,17 @@
 import { useQuery } from "@tanstack/react-query";
-import { ArrowUpRight, Eye, MessageSquare, Minus } from "lucide-react";
+import {
+  ArrowUpRight,
+  Eye,
+  MessageSquare,
+  Minus,
+  ShieldAlert,
+} from "lucide-react";
 import { useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
 import { ChatInput } from "@/components/chat/ChatInput";
 import { ChatThread } from "@/components/chat/ChatThread";
+import { Starters, type Starter } from "@/components/chat/Starters";
 import { useChat, useSessionOptions } from "@/hooks/useChat";
 import { useServer } from "@/hooks/useServer";
 import { api, CHAT_SLUG } from "@/lib/api";
@@ -154,12 +161,18 @@ export function ChatBubble() {
         </span>
         {facts && <ContextChip label={facts.label} />}
         <div className="ml-auto flex shrink-0 items-center gap-1">
+          {/* Labelled, not a bare glyph: this is the way back to the full
+              conversation, and a 16px arrow in a corner was missed by every
+              tester who then reached for the page's own chat button and left
+              the conversation they were in. The words are what make the two
+              buttons tell themselves apart. */}
           <button
             onClick={openInWorkspace}
-            className="rounded p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-            title="Open in workspace"
+            className="flex items-center gap-1 whitespace-nowrap rounded px-1.5 py-1 text-[11px] font-medium text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+            title="Continue this conversation in the full chat workspace"
           >
-            <ArrowUpRight className="h-4 w-4" />
+            <ArrowUpRight className="h-3.5 w-3.5 shrink-0" />
+            Back to chat
           </button>
           <button
             onClick={() => toggle(false)}
@@ -188,6 +201,7 @@ export function ChatBubble() {
         }
         columnClassName=""
         autoFocus
+        starters={bubbleStarters(facts?.label)}
         emptyState={
           <BubbleHero name={name} routeLabel={facts?.label} onAsk={ask} />
         }
@@ -212,6 +226,28 @@ function ContextChip({ label }: { label: string }) {
   );
 }
 
+/** Openers for the page the bubble is standing on. */
+function bubbleStarters(routeLabel?: string): Starter[] {
+  return [
+    {
+      icon: Eye,
+      title: "What am I looking at?",
+      hint: routeLabel
+        ? `Walk me through this ${routeLabel.toLowerCase()}`
+        : "Walk me through what is on this page",
+      prompt: routeLabel
+        ? `Tell me about this ${routeLabel.toLowerCase()}`
+        : "What am I looking at?",
+    },
+    {
+      icon: ShieldAlert,
+      title: "Anything need my attention?",
+      hint: "Risks, stalled work or numbers that look off",
+      prompt: "Anything here that needs my attention?",
+    },
+  ];
+}
+
 /** No conversation yet — a composer and a reason to use it. */
 function BubbleHero({
   name,
@@ -222,10 +258,6 @@ function BubbleHero({
   routeLabel?: string;
   onAsk: (text: string) => void;
 }) {
-  const starters = [
-    routeLabel ? `Tell me about this ${routeLabel.toLowerCase()}` : "What am I looking at?",
-    "Anything here that needs my attention?",
-  ];
   return (
     <div className="flex flex-1 flex-col items-center justify-center px-3 text-center">
       <MessageSquare className="mb-3 h-8 w-8 text-[var(--color-text-muted)] opacity-30" />
@@ -240,17 +272,7 @@ function BubbleHero({
       <div className="mt-3 w-full">
         <ChatInput onSend={onAsk} autoFocus />
       </div>
-      <div className="flex flex-wrap justify-center gap-2">
-        {starters.map((text) => (
-          <button
-            key={text}
-            onClick={() => onAsk(text)}
-            className="rounded-full border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs text-[var(--color-text-muted)] transition-colors hover:border-[var(--color-primary)]/40 hover:text-[var(--color-text)]"
-          >
-            {text}
-          </button>
-        ))}
-      </div>
+      <Starters starters={bubbleStarters(routeLabel)} onAsk={onAsk} />
     </div>
   );
 }

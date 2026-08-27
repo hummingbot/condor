@@ -636,9 +636,15 @@ export function CreateExecutor() {
           </div>
           {caps.hasOrderBook && (
             <button
-              onClick={() => setBrowserOpen(true)}
-              title="Browse all markets (/)"
-              className="flex items-center gap-1.5 border-l border-[var(--color-border)] px-3 py-2.5 text-xs text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+              onClick={() => setBrowserOpen((v) => !v)}
+              aria-pressed={browserOpen}
+              aria-expanded={browserOpen}
+              title={browserOpen ? "Close market list (Esc)" : "Browse all markets (/)"}
+              className={`flex items-center gap-1.5 border-l border-[var(--color-border)] px-3 py-2.5 text-xs transition-colors ${
+                browserOpen
+                  ? "bg-[var(--color-surface-hover)] text-[var(--color-primary)]"
+                  : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+              }`}
             >
               <List className="h-3.5 w-3.5" />
               Browse
@@ -694,10 +700,9 @@ export function CreateExecutor() {
       <div className="flex min-h-0 flex-1">
         {/* Chart + Bottom Pane */}
         <div className="relative min-w-0 flex-1 flex flex-col">
-          {browserOpen && (
+          {browserOpen && caps.hasOrderBook && (
             <MarketBrowser
               server={server}
-              connectors={allConnectors}
               connector={connector}
               pair={pair}
               onPick={applyMarket}

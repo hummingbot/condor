@@ -433,20 +433,49 @@ async def frontend_needs_build(old_commit: str, new_commit: str) -> bool:
     return await paths_changed(old_commit, new_commit, "frontend")
 
 
-async def build_frontend() -> tuple[bool, str]:
+async def npm_deps_stale(old_commit: str = "", new_commit: str = "") -> bool:
+    """Whether ``frontend/node_modules`` has to be reinstalled before a build.
+
+    "node_modules exists" answers "is *something* installed", not "is it
+    current" — and after the first boot it is always true. A pull that adds a
+    devDependency therefore left the install skipped, and since the bundle is
+    built with ``tsc -b`` the new test files were type-checked against a
+    dependency tree that never got it: the build failed on an import it could
+    not resolve. Key off the manifest moving instead, which is the thing that
+    actually invalidates the tree.
+
+    Unknown commit range => :func:`paths_changed` returns True, so an
+    unresolvable diff installs rather than skips.
+    """
+    if not os.path.isdir(os.path.join(FRONTEND_DIR, "node_modules")):
+        return True
+    return await paths_changed(
+        old_commit,
+        new_commit,
+        "frontend/package.json",
+        "frontend/package-lock.json",
+    )
+
+
+async def build_frontend(
+    old_commit: str = "", new_commit: str = ""
+) -> tuple[bool, str]:
     """Build the dashboard bundle, mirroring the Makefile's build-frontend target.
 
     Node usually lives under nvm rather than on the PATH Condor inherited, so
     source nvm.sh first exactly like the Makefile does.
+
+    The commit range is the one the pull just moved through; it decides whether
+    the JS dependencies are reinstalled first (see :func:`npm_deps_stale`).
     """
     if not os.path.isdir(FRONTEND_DIR):
         return True, "No frontend directory; skipped."
 
+    install = "npm ci && " if await npm_deps_stale(old_commit, new_commit) else ""
     script = (
         'export NVM_DIR="$HOME/.nvm"; '
         '[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"; '
-        'cd "$1" || exit 1; '
-        "{ [ -d node_modules ] || npm ci; } && npm run build"
+        'cd "$1" || exit 1; ' + install + "npm run build"
     )
     rc, output = await _run_cmd(
         "bash", "-c", script, "bash", FRONTEND_DIR, timeout=FRONTEND_BUILD_TIMEOUT

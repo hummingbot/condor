@@ -6,6 +6,7 @@ import type { ChatAgentOption } from "@/lib/api";
 import { ChatInput } from "./ChatInput";
 import { ChatMessageView } from "./ChatMessage";
 import { SharingIndicator } from "./SharingIndicator";
+import { Starters, type Starter } from "./Starters";
 
 /** How close to the end still counts as "following the answer", in pixels. */
 const NEAR_BOTTOM_PX = 80;
@@ -43,6 +44,7 @@ export function ChatThread({
   onSend,
   onAbort,
   emptyState,
+  starters = [],
   boundAgent,
   columnClassName = "",
   autoFocus = false,
@@ -69,6 +71,12 @@ export function ChatThread({
   onAbort: () => void;
   /** Rendered instead of a transcript when there is no slot. */
   emptyState?: React.ReactNode;
+  /**
+   * Openers for a session that exists but has not been written in yet. The
+   * `emptyState` hero carries its own copy for the no-slot case; these are the
+   * same list, kept on screen for as long as the transcript is empty.
+   */
+  starters?: Starter[];
   /**
    * The domain Agent this conversation is bound to, when the surface knows it.
    * A bound chat opens under that agent's name — the user picked Backpack MM,
@@ -240,6 +248,14 @@ export function ChatThread({
                   Warming up — type away, it will be sent
                 </p>
               )}
+              {/* Still offered here, not only on the hero: the session spawns
+                  before the first word is typed, and the openers used to
+                  vanish with it. */}
+              <Starters
+                starters={starters}
+                onAsk={onSend}
+                className="mt-5 max-w-sm"
+              />
             </div>
           ) : (
             // Which bubble is being written into is the transcript's own

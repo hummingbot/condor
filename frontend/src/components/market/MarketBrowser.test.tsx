@@ -5,9 +5,9 @@
  * measure, so the header label is derived from what the backend actually
  * reported — 24h when it is 24h, the true hours when the history is younger, a
  * bare Δ when there is nothing to compare against. And picking a row has to
- * carry the *browser's* venue back to the trade surface, not the one the
- * surface was already on, or switching exchanges in here would silently pick a
- * pair on the wrong exchange.
+ * carry the venue the list was scoped to back to the trade surface — the
+ * browser has no venue selector of its own, so that is always the venue the
+ * trade surface handed it.
  *
  * Needs a DOM, so this file overrides vitest's default `node` environment.
  *
@@ -69,7 +69,6 @@ async function render() {
       <QueryClientProvider client={client}>
         <MarketBrowser
           server="srv"
-          connectors={["binance", "kucoin"]}
           connector="binance"
           pair="BTC-USDT"
           onPick={(m) => picked.push(m)}
@@ -173,7 +172,7 @@ describe("the Δ column never claims a window it did not measure", () => {
 });
 
 describe("picking a row", () => {
-  it("carries the pair back to the trade surface", async () => {
+  it("carries the pair and the venue it was scoped to back to the trade surface", async () => {
     TICKERS = [ticker({ trading_pair: "SOL-USDC", change_pct: 1, change_window_s: HOUR })];
     await render();
 
@@ -184,25 +183,17 @@ describe("picking a row", () => {
     expect(picked).toEqual([{ connector: "binance", pair: "SOL-USDC" }]);
   });
 
-  it("carries the venue the browser switched to, not the one it opened on", async () => {
+  it("names its venue without offering a second way to change it", async () => {
     TICKERS = [ticker({ trading_pair: "SOL-USDC" })];
     await render();
 
-    const venueButton = [...document.querySelectorAll("button")].find((b) =>
-      /Binance/.test(b.textContent ?? ""),
-    )!;
-    await act(async () => venueButton.click());
-    const kucoin = [...document.querySelectorAll("button")].find(
-      (b) => b.textContent?.trim() === "Kucoin",
-    )!;
-    await act(async () => kucoin.click());
-    await flush(); // the new venue's tickers are a new query
-
-    await act(async () => {
-      rowCells("SOL-USDC")[1].click();
-    });
-
-    expect(picked).toEqual([{ connector: "kucoin", pair: "SOL-USDC" }]);
+    // The venue reads as a label; the only exchange selector is the trade
+    // surface's own, which stays on screen above this panel.
+    expect(container.textContent).toContain("Binance");
+    const venueButton = [...container.querySelectorAll("button")].find(
+      (b) => b.getAttribute("aria-haspopup") === "listbox",
+    );
+    expect(venueButton).toBeUndefined();
   });
 });
 

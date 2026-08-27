@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
+
+import { useServer } from "@/hooks/useServer";
 import {
   api,
   type AppNotification,
@@ -272,6 +274,16 @@ export const NOTIFICATIONS_KEY = ["notifications"] as const;
 export function useChatSocket() {
   const { token, user } = useAuth();
   const queryClient = useQueryClient();
+  // Which trading server a prewarmed chat is born on. Read through a ref
+  // rather than a dependency: the selection changes while the socket lives,
+  // and rebuilding every callback that transitively reaches it would tear the
+  // connection down with them. Seeded from localStorage on the first render,
+  // so it is already right when the prewarm fires.
+  const { server } = useServer();
+  const serverRef = useRef(server);
+  useEffect(() => {
+    serverRef.current = server;
+  }, [server]);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   // Whether this hook still wants a socket. `close()` is asynchronous, so the
@@ -667,7 +679,60 @@ export function useChatSocket() {
   );
 
   /**
-   * One spawn on connect, for the thread the user is most likely to continue.
+   * Open a brand new conversation. The tab is live before the spawn is.
+   *
+   * Returns the tab's id so the caller can talk into it on the same tick — a
+   * composer that starts the chat with its first message needs that, and
+   * `slotsRef` only catches up on the next commit, so the new slot is written
+   * there eagerly rather than left for `sendMessage` to miss.
+   */
+  const startSession = useCallback(
+    (
+      agentKey: string,
+      serverName?: string,
+      agentSlug?: string,
+      opts?: {
+        /**
+         * `false` keeps `activeSlotId` where it is: the bubble starts sessions
+         * from other pages, and stealing the focus would change which
+         * conversation the workspace at `/` shows (FEAT-059).
+         */
+        focus?: boolean;
+      },
+    ): string => {
+      const ref = nextClientRef();
+      const slot: ChatSlot = {
+        info: {
+          slot_id: ref,
+          agent_key: agentKey,
+          server_name: serverName,
+          agent_slug: agentSlug || "",
+        },
+        messages: [],
+        pending: true,
+      };
+      slotsRef.current = [...slotsRef.current, slot];
+      setSlots((prev) => [...prev, slot]);
+      if (opts?.focus === false) unfocusedRefs.current.add(ref);
+      else setActiveSlotId(ref);
+      hydratedSlots.current.add(ref);
+      prewarmed.current = true; // An explicit start is the warm session.
+      send({
+        action: "start_session",
+        agent_key: agentKey,
+        server_name: serverName,
+        agent_slug: agentSlug,
+        client_ref: ref,
+      });
+      return ref;
+    },
+    [send],
+  );
+
+  /**
+   * One spawn on arrival at the workspace, so the first message never pays for
+   * the spawn: the thread the user is most likely to continue, or — when there
+   * is nothing to continue — an empty chat waiting for its first word.
    *
    * Not a pool: a session's subprocess carries per-user environment, so there
    * is no user-agnostic warm process to hand out. Prewarming on *selection* —
@@ -689,21 +754,42 @@ export function useChatSocket() {
     prewarmed.current = true;
     api
       .listConversations(1)
-      .then((list) => {
+      .then(async (list) => {
         const latest = list[0];
         // Re-checked after the fetch: a session may have arrived meanwhile,
         // and prewarming on top of it would spawn a second subprocess.
-        if (!latest || slotsRef.current.length > 0) return;
-        resumeConversation(latest.id, {
-          agent_key: latest.agent_key,
-          server_name: latest.server_name || undefined,
-          agent_slug: latest.agent_slug,
+        if (slotsRef.current.length > 0) return;
+        if (latest) {
+          resumeConversation(latest.id, {
+            agent_key: latest.agent_key,
+            server_name: latest.server_name || undefined,
+            agent_slug: latest.agent_slug,
+          });
+          return;
+        }
+        // Nobody to pick up with — a first visit, or every conversation
+        // deleted. The user is here to talk anyway, so the chat they are about
+        // to write in is spawned now rather than by their first message: the
+        // same warm arrival a returning user gets, minus the transcript. It
+        // opens unbound, on the user's own default brain, which is exactly what
+        // the hero's composer would have started (`""` here would silently
+        // hand them `DEFAULT_AGENT` instead of the model they last picked).
+        // The options payload is the one every chat surface already reads, on
+        // its own react-query key, so this shares that fetch rather than
+        // adding one.
+        const options = await queryClient.fetchQuery({
+          queryKey: ["session-options"],
+          queryFn: api.getSessionOptions,
+          staleTime: Infinity,
         });
+        if (slotsRef.current.length > 0) return;
+        startSession(options.default_agent, serverRef.current || undefined);
       })
       .catch(() => {
-        // No history, or the API is down. Either way the panel still works.
+        // The API is down, or the options never came. Either way the panel
+        // still works: the composer starts a session on its first message.
       });
-  }, [resumeConversation]);
+  }, [queryClient, resumeConversation, startSession]);
 
   /**
    * Say that this surface is a chat.
@@ -1181,57 +1267,6 @@ export function useChatSocket() {
       send({ action: "send_message", slot_id: slotId, text, view_context: view });
     },
     [flushChunks, send, updateSlotMessages],
-  );
-
-  /**
-   * Open a brand new conversation. The tab is live before the spawn is.
-   *
-   * Returns the tab's id so the caller can talk into it on the same tick — a
-   * composer that starts the chat with its first message needs that, and
-   * `slotsRef` only catches up on the next commit, so the new slot is written
-   * there eagerly rather than left for `sendMessage` to miss.
-   */
-  const startSession = useCallback(
-    (
-      agentKey: string,
-      serverName?: string,
-      agentSlug?: string,
-      opts?: {
-        /**
-         * `false` keeps `activeSlotId` where it is: the bubble starts sessions
-         * from other pages, and stealing the focus would change which
-         * conversation the workspace at `/` shows (FEAT-059).
-         */
-        focus?: boolean;
-      },
-    ): string => {
-      const ref = nextClientRef();
-      const slot: ChatSlot = {
-        info: {
-          slot_id: ref,
-          agent_key: agentKey,
-          server_name: serverName,
-          agent_slug: agentSlug || "",
-        },
-        messages: [],
-        pending: true,
-      };
-      slotsRef.current = [...slotsRef.current, slot];
-      setSlots((prev) => [...prev, slot]);
-      if (opts?.focus === false) unfocusedRefs.current.add(ref);
-      else setActiveSlotId(ref);
-      hydratedSlots.current.add(ref);
-      prewarmed.current = true; // An explicit start is the warm session.
-      send({
-        action: "start_session",
-        agent_key: agentKey,
-        server_name: serverName,
-        agent_slug: agentSlug,
-        client_ref: ref,
-      });
-      return ref;
-    },
-    [send],
   );
 
   /**

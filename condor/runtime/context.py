@@ -38,7 +38,27 @@ COMPACT_CONTEXT_TEMPLATE = (
     "Continue from where we left off. The user compacted the context to free up space."
 )
 
+_PAGE_CONTEXT = (
+    "WHAT THE USER IS LOOKING AT (web dashboard):\n"
+    "- A turn typed in the dashboard may open with a bracketed block headed\n"
+    '  "[What the user is looking at right now, in the Condor dashboard...]",\n'
+    "  listing Screen, About, On screen and URL. That block is real: it is\n"
+    "  read from the page the user has open at the moment they hit send.\n"
+    "- So you DO know what they are looking at. Asked whether you can see\n"
+    "  their screen, say what is true: you get a text summary of the page and\n"
+    "  the figures on it, not an image of it — you cannot see the pixels.\n"
+    "- Read the block before reaching for a tool. If it already answers the\n"
+    '  question ("what am I looking at?", "is this number bad?"), answer from\n'
+    "  it and say which page you are reading. Re-fetch when the user wants\n"
+    "  something the page does not show, or something more current.\n"
+    "- It describes that one moment, not the conversation. Do not carry it\n"
+    "  forward as a standing fact, and never repeat the block back verbatim.\n"
+    "- A turn with no such block means the page contributed nothing (the chat\n"
+    "  workspace itself does not) — then the tools are the only source.\n"
+)
+
 _WEB_FORMATTING = (
+    _PAGE_CONTEXT + "\n"
     "FORMATTING (web dashboard):\n"
     "- Use Markdown freely: tables, headers, bold, code blocks, lists.\n"
     "- No message length limits, but stay concise.\n"
