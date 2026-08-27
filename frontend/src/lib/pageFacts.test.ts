@@ -36,7 +36,7 @@ describe("routeFacts", () => {
   it("labels every plain page", () => {
     expect(routeFacts("/portfolio", "")?.label).toBe("Portfolio");
     expect(routeFacts("/bots", "")?.label).toBe("Bots");
-    expect(routeFacts("/trade", "")?.label).toBe("Trade — create executor");
+    expect(routeFacts("/trade", "")?.label).toBe("Trade");
     expect(routeFacts("/dex", "")?.label).toBe("DEX pools");
     expect(routeFacts("/executors", "")?.label).toBe("Executors");
     expect(routeFacts("/routines", "")?.label).toBe("Routines");
@@ -70,6 +70,14 @@ describe("routeFacts", () => {
     expect(routeFacts("/bots", "?tab=backtest")?.label).toBe("Backtests");
     expect(routeFacts("/bots", "?tab=archived")?.label).toBe("Archived bots");
     expect(routeFacts("/routines", "?tab=reports")?.label).toBe("Routine reports");
+  });
+
+  it("labels every tab /bots actually has, not just the three it used to", () => {
+    // `?tab=runs` and `?tab=editor` were both announced as "Bots" — a screen
+    // the user is not on, and the one the block is supposed to prevent.
+    expect(routeFacts("/bots", "?tab=runs")?.label).toBe("Bot runs");
+    expect(routeFacts("/bots", "?tab=editor")?.label).toBe("Controller config editor");
+    expect(routeFacts("/bots", "?tab=active")?.label).toBe("Bots");
   });
 
   it("says nothing on a route it does not know", () => {
@@ -108,6 +116,37 @@ describe("renderViewBlock", () => {
     );
     expect(block).toContain("On screen: total 3");
     expect(block).not.toContain("filter");
+  });
+
+  it("renders one section per screen, merging contributors that share a label", () => {
+    // What /trade does: the route table names the screen, the form contributes
+    // what the user typed. Two `Screen:` blocks would read as two pages.
+    const block = renderViewBlock(
+      [
+        { label: "Trade", onScreen: { side: "buy", amount: 500 } },
+        {
+          label: "Trade",
+          subject: "a Grid Executor on binance SOL-USDC",
+          onScreen: { amount: 750, "blocked by": "Start must be < end" },
+        },
+      ],
+      "/trade",
+    );
+    expect(block.match(/^Screen: /gm)).toHaveLength(1);
+    expect(block).toContain("About: a Grid Executor on binance SOL-USDC");
+    // Later contributors win the fields they both name.
+    expect(block).toContain("side buy");
+    expect(block).toContain("amount 750");
+    expect(block).not.toContain("amount 500");
+    expect(block).toContain("blocked by Start must be < end");
+  });
+
+  it("keeps genuinely different screens apart", () => {
+    const block = renderViewBlock(
+      [{ label: "Routine report" }, { label: "Controller" }],
+      "/routines",
+    );
+    expect(block.match(/^Screen: /gm)).toHaveLength(2);
   });
 
   it("caps the block and marks the cut", () => {

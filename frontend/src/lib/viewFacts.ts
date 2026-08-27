@@ -66,6 +66,34 @@ const HEADER =
   "this moment only — do not treat it as something the user said.]";
 
 /**
+ * One screen, one section.
+ *
+ * A screen can be described twice: the route table knows what the cache holds
+ * and the page component knows what the user chose (a sort, a filter, a
+ * half-typed form), and neither can see the other. Rendered as-is that reads as
+ * two screens — `/trade` used to emit "Trade — create executor" and "Trade
+ * form" one after the other, and a model has no way to tell that is one page.
+ * So entries sharing a label collapse: later `onScreen` merged over the first's,
+ * and the first `subject` that resolved.
+ */
+function mergeByLabel(facts: ViewFacts[]): ViewFacts[] {
+  const out: ViewFacts[] = [];
+  const seen = new Map<string, ViewFacts>();
+  for (const f of facts) {
+    const prev = seen.get(f.label);
+    if (!prev) {
+      const copy = { ...f };
+      seen.set(f.label, copy);
+      out.push(copy);
+      continue;
+    }
+    prev.subject ||= f.subject;
+    if (f.onScreen) prev.onScreen = { ...prev.onScreen, ...f.onScreen };
+  }
+  return out;
+}
+
+/**
  * The block that goes on the wire. `""` when there is nothing to say.
  *
  * `url` defaults to the browser's current path; a test passes its own.
@@ -73,7 +101,7 @@ const HEADER =
 export function renderViewBlock(facts: ViewFacts[], url?: string): string {
   if (facts.length === 0) return "";
   const lines: string[] = [HEADER];
-  for (const f of facts) {
+  for (const f of mergeByLabel(facts)) {
     lines.push(`Screen: ${f.label}`);
     if (f.subject) lines.push(`About: ${f.subject}`);
     const shown = Object.entries(f.onScreen ?? {})

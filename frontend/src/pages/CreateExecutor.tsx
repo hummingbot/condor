@@ -218,71 +218,6 @@ export function CreateExecutor() {
   // Declared above the connector/pair propagation effects that dispatch into it.
   const lpConfig = useLpConfig(server ?? null, connector, pair, caps.supportsLp);
 
-  // What the form currently says, for the chat bubble (FEAT-060).
-  //
-  // The one page that registers its own facts: everywhere else the numbers on
-  // screen came out of a react-query cache the fact table can read at send
-  // time, but a half-filled order form is local reducer state and no cache
-  // holds it. Read at send time like every other contributor, so it is what
-  // the user is looking at when they ask — not what they had typed when the
-  // bubble was opened.
-  useViewFacts(() => {
-    const side = (n: number) => (n === 1 ? "buy" : "sell");
-    const lev = (n: number) => (isSpot ? undefined : `${n}x`);
-    const range = (low: number, high: number) =>
-      low > 0 || high > 0 ? `${formatPriceSig(low)}–${formatPriceSig(high)}` : undefined;
-    const shown: Record<string, string | number | null | undefined> =
-      executorType === "grid"
-        ? {
-            side: side(gridState.side),
-            amount: gridState.total_amount_quote,
-            range: range(gridState.start_price, gridState.end_price),
-            leverage: lev(gridState.leverage),
-          }
-        : executorType === "position"
-          ? {
-              side: side(positionConfig.state.side),
-              amount: positionConfig.state.amount,
-              entry: positionConfig.state.entry_price
-                ? formatPriceSig(positionConfig.state.entry_price)
-                : "market",
-              leverage: lev(positionConfig.state.leverage),
-            }
-          : executorType === "order"
-            ? {
-                side: side(orderConfig.state.side),
-                "order type": orderConfig.state.execution_strategy,
-                amount: orderConfig.state.amount,
-                price:
-                  orderConfig.state.execution_strategy === "MARKET"
-                    ? undefined
-                    : formatPriceSig(orderConfig.state.price),
-                leverage: lev(orderConfig.state.leverage),
-              }
-            : executorType === "dca"
-              ? {
-                  side: side(dcaConfig.state.side),
-                  orders: dcaConfig.state.amounts_quote.length,
-                  amount: dcaConfig.state.amounts_quote.reduce((a, b) => a + b, 0),
-                  leverage: lev(dcaConfig.state.leverage),
-                }
-              : {
-                  side:
-                    lpConfig.state.side === LP_SIDE_RANGE
-                      ? "range"
-                      : side(lpConfig.state.side),
-                  base: lpConfig.state.base_amount || undefined,
-                  quote: lpConfig.state.quote_amount || undefined,
-                  range: range(lpConfig.state.lower_price, lpConfig.state.upper_price),
-                  pool: lpConfig.state.pool_address || undefined,
-                };
-    return {
-      label: "Trade form",
-      subject: `a ${TYPE_LABELS[executorType]} on ${connector} ${pair}`,
-      onScreen: shown,
-    };
-  });
-
   // WS for executor data (candle streams are managed by candleStore)
   const wsChannels = useMemo(
     () => server ? [`executors:${server}`] : [],
@@ -454,6 +389,83 @@ export function CreateExecutor() {
       case "lp": return lpConfig.validation;
     }
   }, [executorType, gridValidation, positionConfig.validation, orderConfig.validation, dcaConfig.validation, lpConfig.validation]);
+
+  // What the form currently says, for the chat bubble (FEAT-060/FEAT-072).
+  //
+  // The one page that registers its own facts: everywhere else the numbers on
+  // screen came out of a react-query cache the fact table can read at send
+  // time, but a half-filled order form is local reducer state and no cache
+  // holds it. Read at send time like every other contributor, so it is what
+  // the user is looking at when they ask — not what they had typed when the
+  // bubble was opened.
+  //
+  // Declared after `activeValidation` so the validation it reports is the one
+  // the submit button is reading.
+  useViewFacts(() => {
+    const side = (n: number) => (n === 1 ? "buy" : "sell");
+    const lev = (n: number) => (isSpot ? undefined : `${n}x`);
+    const range = (low: number, high: number) =>
+      low > 0 || high > 0 ? `${formatPriceSig(low)}–${formatPriceSig(high)}` : undefined;
+    const shown: Record<string, string | number | null | undefined> =
+      executorType === "grid"
+        ? {
+            side: side(gridState.side),
+            amount: gridState.total_amount_quote,
+            range: range(gridState.start_price, gridState.end_price),
+            leverage: lev(gridState.leverage),
+          }
+        : executorType === "position"
+          ? {
+              side: side(positionConfig.state.side),
+              amount: positionConfig.state.amount,
+              entry: positionConfig.state.entry_price
+                ? formatPriceSig(positionConfig.state.entry_price)
+                : "market",
+              leverage: lev(positionConfig.state.leverage),
+            }
+          : executorType === "order"
+            ? {
+                side: side(orderConfig.state.side),
+                "order type": orderConfig.state.execution_strategy,
+                amount: orderConfig.state.amount,
+                price:
+                  orderConfig.state.execution_strategy === "MARKET"
+                    ? undefined
+                    : formatPriceSig(orderConfig.state.price),
+                leverage: lev(orderConfig.state.leverage),
+              }
+            : executorType === "dca"
+              ? {
+                  side: side(dcaConfig.state.side),
+                  orders: dcaConfig.state.amounts_quote.length,
+                  amount: dcaConfig.state.amounts_quote.reduce((a, b) => a + b, 0),
+                  leverage: lev(dcaConfig.state.leverage),
+                }
+              : {
+                  side:
+                    lpConfig.state.side === LP_SIDE_RANGE
+                      ? "range"
+                      : side(lpConfig.state.side),
+                  base: lpConfig.state.base_amount || undefined,
+                  quote: lpConfig.state.quote_amount || undefined,
+                  range: range(lpConfig.state.lower_price, lpConfig.state.upper_price),
+                  pool: lpConfig.state.pool_address || undefined,
+                };
+    // R2/R3: the two facts a user on this form actually asks about — what
+    // they have to spend, and why the button is greyed out.
+    shown["available"] =
+      balances.quote != null && pair
+        ? `${balances.quote.toLocaleString("en-US", { maximumFractionDigits: 4 })} ${pair.split("-")[1]}`
+        : undefined;
+    shown["blocked by"] = activeValidation.valid
+      ? undefined
+      : activeValidation.errors[0];
+    return {
+      label: "Trade",
+      subject: `a ${TYPE_LABELS[executorType]} on ${connector} ${pair}`,
+      onScreen: shown,
+    };
+  });
 
   // Chart props depend on active type
   const chartProps = useMemo(() => {

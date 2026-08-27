@@ -38,6 +38,7 @@ import {
   formatCurrencyPnl,
   formatCurrencyVolume,
 } from "@/lib/formatters";
+import { useViewFacts } from "@/lib/viewFacts";
 
 // ── Multi-select dropdown ──
 
@@ -456,6 +457,37 @@ export function Executors() {
     }
     return result;
   }, [executors, filters.trading_pair, filters.executor_types, filters.controller_ids]);
+
+  // What the *selection* is, for the chat bubble (FEAT-072).
+  //
+  // The route fact table reads everything this page fetched straight out of
+  // `["executors-infinite", server]`, but what the user chose — the sort, the
+  // filter chips, the KPI window — is local state and no cache holds it.
+  // Without it the block invites an answer about the whole history derived
+  // from a filtered, sorted slice of it. Merged with the route's entry under
+  // the same "Executors" label, so the two render as one screen.
+  // Declared after `filteredExecutors` so `showing` counts the rows the
+  // filters actually left on screen.
+  useViewFacts(() => {
+    const chips = [
+      filters.trading_pair ? `pair ~ "${filters.trading_pair}"` : "",
+      filters.executor_types.length ? `type ${filters.executor_types.join("/")}` : "",
+      filters.controller_ids.length
+        ? `controller ${filters.controller_ids.length === 1 ? filters.controller_ids[0] : `${filters.controller_ids.length} selected`}`
+        : "",
+    ].filter(Boolean);
+    return {
+      label: "Executors",
+      onScreen: {
+        sort: `${sortKey} ${sortDir}`,
+        // Said either way round: "none" is a fact about the table, and leaving
+        // it out reads as "filters unknown" rather than "showing everything".
+        filters: chips.length ? chips.join(", ") : "none",
+        showing: filteredExecutors.length,
+        "kpi period": kpiPeriod,
+      },
+    };
+  });
 
   // Split into active and archived
   const activeExecutors = useMemo(
