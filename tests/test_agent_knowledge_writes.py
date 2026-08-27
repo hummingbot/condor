@@ -16,7 +16,7 @@ from starlette.testclient import TestClient
 
 from condor.agents import agent as agent_module
 from condor.agents.agent import AgentStore
-from condor.memory import MemoryStore, SkillStore
+from condor.memory import MemoryStore, SkillStore, proposals
 from condor.memory.paths import shared_skills_root
 from condor.web.auth import get_current_user
 from condor.web.models import WebUser
@@ -261,3 +261,72 @@ def test_deleting_the_default_agent_is_a_refusal_not_a_crash(env):
     assert res.status_code == 400
     assert "default agent" in res.json()["detail"]
     assert (env / "condor" / "AGENT.md").exists()
+
+
+# ── Proposed playbooks (FEAT-062) ──
+
+
+def _propose(name: str = "CLMM rebalance") -> None:
+    proposals.put(
+        "brigado",
+        name=name,
+        description="Re-centre a CLMM position when price leaves the range",
+        when_to_use="The user asks to check or rebalance an LP range",
+        body="1. Pull the pool state\n2. Compare to the position bounds",
+        conversation_id="8f2c1a4b90de",
+    )
+
+
+def test_a_pending_proposal_rides_along_with_the_brain(env):
+    client = _client()
+    assert client.get("/agents/brigado/brain").json()["skill_proposal"] is None
+
+    _propose()
+
+    brain = client.get("/agents/brigado/brain").json()
+    assert brain["skill_proposal"]["name"] == "clmm_rebalance"
+    assert brain["skill_proposal"]["from_conversation"] == "8f2c1a4b90de"
+    assert "Pull the pool state" in brain["skill_proposal"]["body"]
+    # Offered, not owned: it is not in the library and not in the count.
+    assert brain["skills"] == []
+
+
+def test_accepting_a_proposal_puts_it_in_the_library_and_takes_the_card_away(env):
+    client = _client()
+    _propose()
+
+    res = client.post("/agents/brigado/skill-proposals/accept")
+
+    assert res.status_code == 200, res.text
+    assert res.json() == {"accepted": True, "name": "clmm_rebalance"}
+    brain = client.get("/agents/brigado/brain").json()
+    assert [s["slug"] for s in brain["skills"]] == ["clmm_rebalance"]
+    assert brain["skill_proposal"] is None
+    # An ordinary playbook from here on — readable, editable, deletable.
+    assert (
+        "Pull the pool state"
+        in client.get("/agents/brigado/skills/clmm_rebalance").json()["body"]
+    )
+    assert client.delete("/agents/brigado/skills/clmm_rebalance").status_code == 200
+
+
+def test_discarding_a_proposal_leaves_the_library_untouched(env):
+    client = _client()
+    client.post(
+        "/agents/brigado/skills",
+        json={"name": "Kept", "description": "d", "when_to_use": "w", "body": "b"},
+    )
+    _propose()
+
+    assert client.delete("/agents/brigado/skill-proposals").status_code == 200
+
+    brain = client.get("/agents/brigado/brain").json()
+    assert brain["skill_proposal"] is None
+    assert [s["slug"] for s in brain["skills"]] == ["kept"]
+
+
+def test_ruling_on_a_proposal_that_is_not_there_says_so(env):
+    client = _client()
+
+    assert client.delete("/agents/brigado/skill-proposals").status_code == 404
+    assert client.post("/agents/brigado/skill-proposals/accept").status_code == 400

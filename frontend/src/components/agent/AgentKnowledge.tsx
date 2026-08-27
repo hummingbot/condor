@@ -3,6 +3,9 @@ import {
   ArrowLeft,
   BookOpen,
   Brain,
+  Check,
+  ChevronDown,
+  ChevronRight,
   Loader2,
   Pencil,
   Plus,
@@ -27,6 +30,7 @@ import {
   type MemoryCard,
   type SkillBody,
   type SkillCard,
+  type SkillProposal,
 } from "@/lib/api";
 import { formatRoutineName } from "@/lib/routineUtils";
 
@@ -271,6 +275,8 @@ export function AgentKnowledge({
             {tab === "skills" && (
               <SkillsTab
                 brain={brain}
+                slug={slug}
+                onRuled={refresh}
                 onOpen={(card) => setReading({ kind: "skill", card })}
                 onEdit={(card) => {
                   setReading({ kind: "skill", card });
@@ -686,18 +692,113 @@ function BrainTab({
   );
 }
 
+/**
+ * The playbook the agent offered, above the library it is not in yet (FEAT-062).
+ *
+ * The agent worked a procedure out in a conversation and proposed it; it has
+ * been written nowhere the agent can read, because a skill is per-agent and
+ * reaches every future prompt of everyone using it. So this card is the accept:
+ * until somebody clicks it the injected index is exactly what it was.
+ *
+ * Dashed, like the `+ New playbook` button beside it, because both are the same
+ * statement — a playbook that does not exist yet.
+ */
+function ProposedSkill({
+  slug,
+  proposal,
+  onRuled,
+}: {
+  slug: string;
+  proposal: SkillProposal;
+  onRuled: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const accept = useMutation({
+    mutationFn: () => api.acceptAgentSkillProposal(slug),
+    onSuccess: onRuled,
+  });
+  const discard = useMutation({
+    mutationFn: () => api.discardAgentSkillProposal(slug),
+    onSuccess: onRuled,
+  });
+  const busy = accept.isPending || discard.isPending;
+  const failure = accept.error || discard.error;
+
+  return (
+    <div className="rounded border border-dashed border-[var(--color-primary)]/40 bg-[var(--color-surface)] px-3 py-2">
+      <div className="flex items-center gap-1.5 text-[10px] text-[var(--color-primary)]">
+        <Sparkles className="h-3 w-3" /> Proposed from a conversation
+      </div>
+      <p className="mt-1 text-xs font-medium text-[var(--color-text)]">
+        {proposal.name}
+      </p>
+      <p className="mt-0.5 text-[11px] leading-snug text-[var(--color-text-muted)]">
+        {proposal.when_to_use || proposal.description}
+      </p>
+
+      <button
+        onClick={() => setOpen((was) => !was)}
+        className="mt-1.5 flex items-center gap-1 text-[11px] text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-text)]"
+      >
+        {open ? (
+          <ChevronDown className="h-3 w-3" />
+        ) : (
+          <ChevronRight className="h-3 w-3" />
+        )}
+        {open ? "Hide the steps" : "Read the steps"}
+      </button>
+      {open && (
+        <div className="chat-markdown mt-2 text-xs text-[var(--color-text)]">
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>{proposal.body}</ReactMarkdown>
+        </div>
+      )}
+
+      <div className="mt-2 flex items-center gap-1.5">
+        <button
+          onClick={() => accept.mutate()}
+          disabled={busy}
+          className="flex items-center gap-1 rounded border border-[var(--color-primary)]/50 px-2 py-1 text-[11px] text-[var(--color-primary)] transition-colors hover:bg-[var(--color-primary)]/10 disabled:opacity-50"
+        >
+          {accept.isPending ? (
+            <Loader2 className="h-3 w-3 animate-spin" />
+          ) : (
+            <Check className="h-3 w-3" />
+          )}
+          Accept
+        </button>
+        <button
+          onClick={() => discard.mutate()}
+          disabled={busy}
+          className="flex items-center gap-1 rounded border border-[var(--color-border)] px-2 py-1 text-[11px] text-[var(--color-text-muted)] transition-colors hover:border-[var(--color-red)]/50 hover:text-[var(--color-red)] disabled:opacity-50"
+        >
+          <X className="h-3 w-3" /> Discard
+        </button>
+      </div>
+      {failure && (
+        <p className="mt-1.5 text-[11px] text-[var(--color-red)]">
+          {failure instanceof Error ? failure.message : "Could not do that."}
+        </p>
+      )}
+    </div>
+  );
+}
+
 function SkillsTab({
   brain,
+  slug,
   onOpen,
   onEdit,
   onDelete,
   onCreate,
+  onRuled,
 }: {
   brain: AgentBrain;
+  slug: string;
   onOpen: (skill: SkillCard) => void;
   onEdit: (skill: SkillCard) => void;
   onDelete: (skill: SkillCard) => void;
   onCreate: () => void;
+  onRuled: () => void;
 }) {
   return (
     <div className="space-y-1.5">
@@ -708,6 +809,13 @@ function SkillsTab({
         </p>
         <AddButton onClick={onCreate} label="New playbook" />
       </div>
+      {brain.skill_proposal && (
+        <ProposedSkill
+          slug={slug}
+          proposal={brain.skill_proposal}
+          onRuled={onRuled}
+        />
+      )}
       {brain.skills.length === 0 ? (
         <Empty>No playbooks in this agent's library.</Empty>
       ) : (

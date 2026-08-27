@@ -766,9 +766,29 @@ export interface AgentBrain {
   /** Empty allowlist = every discovered tool, which is not "no tools". */
   tools_unrestricted: boolean;
   skills: SkillCard[];
+  /** The one playbook this agent has offered and nobody has ruled on yet. */
+  skill_proposal: SkillProposal | null;
   memories: MemoryCard[];
   routines: RoutineCard[];
   strategies: StrategyCard[];
+}
+
+/**
+ * A playbook the agent proposed from a conversation (FEAT-062).
+ *
+ * It is not in the library and reaches no prompt until somebody accepts it, so
+ * unlike a `SkillCard` it carries its body: the whole point of the card is
+ * reading what you are about to put in every future turn before saying yes.
+ */
+export interface SkillProposal {
+  name: string;
+  description: string;
+  when_to_use: string;
+  body: string;
+  source: string;
+  /** The conversation it was worked out in. */
+  from_conversation: string;
+  created: string;
 }
 
 /**
@@ -2146,6 +2166,21 @@ export const api = {
   deleteAgentSkill: (slug: string, name: string) =>
     apiFetch<{ deleted: boolean }>(
       `/api/v1/agents/${encodeURIComponent(slug)}/skills/${encodeURIComponent(name)}`,
+      { method: "DELETE" },
+    ),
+
+  /** Accept the offered playbook: it becomes an ordinary skill in this Agent's
+   *  own library. The only path by which a proposal ever reaches a prompt. */
+  acceptAgentSkillProposal: (slug: string) =>
+    apiFetch<{ accepted: boolean; name: string }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/skill-proposals/accept`,
+      { method: "POST" },
+    ),
+
+  /** Throw the offered playbook away. The library is untouched either way. */
+  discardAgentSkillProposal: (slug: string) =>
+    apiFetch<{ discarded: boolean }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/skill-proposals`,
       { method: "DELETE" },
     ),
 

@@ -258,6 +258,23 @@ class SkillCard(BaseModel):
     routine_ok: bool = True
 
 
+class SkillProposal(BaseModel):
+    """A playbook the Agent *offered*, waiting for a human (FEAT-062).
+
+    Carries its body, unlike a :class:`SkillCard`: there is at most one of
+    these and the whole point of the card is that somebody reads what they are
+    about to put in every future prompt before accepting it.
+    """
+
+    name: str
+    description: str = ""
+    when_to_use: str = ""
+    body: str = ""
+    source: str = ""
+    from_conversation: str = ""
+    created: str = ""
+
+
 class MemoryCard(BaseModel):
     """One thing this Agent remembers about the caller. Body on demand."""
 
@@ -311,6 +328,11 @@ class AgentBrain(BaseModel):
     tools: list[str] = []
     tools_unrestricted: bool = True
     skills: list[SkillCard] = []
+    # The one playbook the Agent has offered and nobody has ruled on yet. It
+    # rides along with the libraries because the panel already reads them all in
+    # one fetch — a review surface that cost its own query and its own loading
+    # state would be a worse trade than a nullable field.
+    skill_proposal: SkillProposal | None = None
     memories: list[MemoryCard] = []
     routines: list[RoutineCard] = []
     strategies: list[StrategyCard] = []
@@ -1209,6 +1231,12 @@ def _memory_store_for(slug: str, user_id: int):
     return MemoryStore(user_id, slug)
 
 
+def _proposals():
+    from condor.memory import proposals
+
+    return proposals
+
+
 def _strategy_cards(slug: str) -> list[StrategyCard]:
     """Strategy rows without the performance rollup.
 
@@ -1274,6 +1302,13 @@ async def get_agent_brain(slug: str, user: WebUser = Depends(get_current_user)):
     except Exception:
         log.debug("brain: skill catalog failed for %s", slug, exc_info=True)
 
+    proposal: SkillProposal | None = None
+    try:
+        pending = _proposals().get(agent.slug)
+        proposal = SkillProposal(**pending) if pending else None
+    except Exception:
+        log.debug("brain: skill proposal failed for %s", slug, exc_info=True)
+
     memories: list[MemoryCard] = []
     try:
         memories = [
@@ -1307,6 +1342,7 @@ async def get_agent_brain(slug: str, user: WebUser = Depends(get_current_user)):
         tools=agent.tools,
         tools_unrestricted=not agent.tools,
         skills=skills,
+        skill_proposal=proposal,
         memories=memories,
         routines=routines,
         strategies=strategies,
@@ -1443,6 +1479,32 @@ async def delete_agent_skill(
     if not result:
         raise HTTPException(status_code=404, detail=f"Skill '{name}' not found")
     return {"deleted": True}
+
+
+@router.post("/{slug}/skill-proposals/accept")
+async def accept_agent_skill_proposal(
+    slug: str, user: WebUser = Depends(get_current_user)
+):
+    """Turn the offered playbook into a real one in this Agent's own library.
+
+    This is the human in "the agent proposes, a human accepts" (FEAT-062) — the
+    only path by which a proposed playbook ever reaches a prompt. The store does
+    the work with the same ``create`` the panel's New playbook button uses, so
+    what lands is an ordinary skill from here on.
+    """
+    agent = _get_agent(slug)
+    return _store_result(_proposals().accept(agent.slug))
+
+
+@router.delete("/{slug}/skill-proposals")
+async def discard_agent_skill_proposal(
+    slug: str, user: WebUser = Depends(get_current_user)
+):
+    """Throw the offered playbook away. The library is untouched either way."""
+    agent = _get_agent(slug)
+    if not _proposals().discard(agent.slug):
+        raise HTTPException(status_code=404, detail="No proposal is pending")
+    return {"discarded": True}
 
 
 @router.put("/{slug}/memories/{name}")
