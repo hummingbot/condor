@@ -18,7 +18,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 
 import { deriveAgentStatus } from "@/components/agent/agentStatus";
-import { BrainPicker, type BrainSelection } from "@/components/chat/BrainPicker";
+import {
+  BrainPicker,
+  type BrainSelection,
+} from "@/components/chat/BrainPicker";
 import { ChatInput } from "@/components/chat/ChatInput";
 import { ChatSessionIdentity } from "@/components/chat/ChatSessionIdentity";
 import { ChatThread } from "@/components/chat/ChatThread";
@@ -29,6 +32,7 @@ import { Starters, type Starter } from "@/components/chat/Starters";
 import { useBrainSwitch } from "@/hooks/useBrainSwitch";
 import { useChat, useSessionOptions } from "@/hooks/useChat";
 import { useServer } from "@/hooks/useServer";
+import { useStarters } from "@/hooks/useStarters";
 import {
   api,
   CHAT_SLUG,
@@ -238,6 +242,16 @@ export function AgentChatTab() {
     : undefined;
   const heroAgent = activeSlot ? undefined : pendingAgent;
 
+  // What the agent in focus has learned this user asks it for, over the
+  // static list. Two calls because the two empty states can be looking at
+  // different agents at once: the thread renders the slot that exists, the
+  // hero the one the rail is pointing at before any slot does.
+  const slotSlug = activeSlot?.info.agent_slug ?? "";
+  const slotStarters = useStarters(
+    slotSlug,
+    slotSlug ? AGENT_STARTERS : CONDOR_STARTERS,
+  );
+
   /**
    * Whose knowledge the Knowledge link opens, and what to call them.
    *
@@ -259,7 +273,9 @@ export function AgentChatTab() {
   const condor = agents.find((a) => a.slug === CHAT_SLUG);
   const specialists = agents.filter((a) => a.slug !== CHAT_SLUG);
 
-  const liveAgents = specialists.filter((a) => deriveAgentStatus(a) === "running");
+  const liveAgents = specialists.filter(
+    (a) => deriveAgentStatus(a) === "running",
+  );
   const runningTasks = (delegationData?.delegations ?? []).filter(
     (d) => d.status === "running",
   ).length;
@@ -299,7 +315,9 @@ export function AgentChatTab() {
             <RailRow
               key={agent.slug}
               label={agent.name}
-              icon={<Bot className="h-3 w-3 shrink-0 text-[var(--color-accent)]" />}
+              icon={
+                <Bot className="h-3 w-3 shrink-0 text-[var(--color-accent)]" />
+              }
               live={deriveAgentStatus(agent) === "running"}
               active={activeSlot?.info.agent_slug === agent.slug}
               title={agent.description || agent.name}
@@ -406,11 +424,13 @@ export function AgentChatTab() {
             onSend={(text) =>
               activeSlot && chat.sendMessage(activeSlot.info.slot_id, text)
             }
-            onAbort={() => chat.activeSlotId && chat.abortPrompt(chat.activeSlotId)}
+            onAbort={() =>
+              chat.activeSlotId && chat.abortPrompt(chat.activeSlotId)
+            }
             boundAgent={boundAgent}
             // The hero's openers, again — a session that spawned but was never
             // written in is as empty as no session at all.
-            starters={activeSlot?.info.agent_slug ? AGENT_STARTERS : CONDOR_STARTERS}
+            starters={slotStarters}
             columnClassName="mx-auto w-full max-w-3xl"
             autoFocus
             emptyState={
@@ -425,7 +445,8 @@ export function AgentChatTab() {
                 // the rail's question, and it is already answered by the row
                 // the user highlighted.
                 onPickBrain={(sel) => {
-                  if (sel.agentKey !== undefined) setPendingAgentKey(sel.agentKey);
+                  if (sel.agentKey !== undefined)
+                    setPendingAgentKey(sel.agentKey);
                 }}
               />
             }
@@ -438,7 +459,6 @@ export function AgentChatTab() {
           agentSlug={activeSlot?.info.agent_slug || ""}
         />
       </div>
-
     </div>
   );
 }
@@ -479,7 +499,9 @@ function LiveStrip({
       {agents.length === 0 ? (
         <span className={rowClass}>
           {icon}
-          <span className="min-w-0 flex-1 truncate">Nothing looping{tasks}</span>
+          <span className="min-w-0 flex-1 truncate">
+            Nothing looping{tasks}
+          </span>
         </span>
       ) : agents.length === 1 ? (
         <Link
@@ -627,7 +649,10 @@ function Hero({
   onAsk: (text: string) => void;
   onPickBrain: (selection: BrainSelection) => void;
 }) {
-  const starters = agent ? AGENT_STARTERS : CONDOR_STARTERS;
+  const starters = useStarters(
+    agent?.slug || "",
+    agent ? AGENT_STARTERS : CONDOR_STARTERS,
+  );
 
   return (
     <div className="flex flex-1 flex-col items-center justify-center px-2">

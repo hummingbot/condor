@@ -338,6 +338,33 @@ class MemoryBody(BaseModel):
     body: str = ""
 
 
+class StarterRow(BaseModel):
+    """One learned opener, in the shape the chip renders (FEAT-061).
+
+    ``prompt`` is sent verbatim on click and is the label, because the label
+    *is* the message — the reflection pass names an intent as the sentence the
+    user would send to start it again. It is carried explicitly all the same, so
+    the wire says what will be sent rather than leaving the client to infer it.
+    """
+
+    title: str
+    hint: str = ""
+    prompt: str = ""
+    icon: str = ""
+    skill: str = ""
+
+
+class StarterList(BaseModel):
+    """What this Agent has learned the caller asks it for. Learned rows only."""
+
+    starters: list[StarterRow] = []
+
+
+# How many learned openers the chip row can hold. The store keeps more so a
+# revived intent can climb back without being re-learned; this is what fits.
+STARTERS_SERVED = 3
+
+
 class StrategyDetail(BaseModel):
     slug: str
     agent_slug: str
@@ -1308,6 +1335,38 @@ async def get_agent_memory(
     if body is None:
         raise HTTPException(status_code=404, detail=f"Memory '{name}' not found")
     return MemoryBody(name=name, body=body)
+
+
+@router.get("/{slug}/starters", response_model=StarterList)
+async def get_agent_starters(slug: str, user: WebUser = Depends(get_current_user)):
+    """The openers this Agent learned *this caller* asks it for (FEAT-061).
+
+    Per-user by the same dependency that makes ``/memories`` per-user, because
+    "what you keep asking for" is a fact about one person and serving another's
+    would be the bug, not a nicety.
+
+    **Learned rows only — the static defaults are never sent.** The client has
+    always owned its own cold-start copy and still does, so the split stays
+    clean: the server knows what was learned, the client knows what to say when
+    nothing has been. A user with nothing learned therefore gets an empty list
+    and sees exactly today's chips.
+    """
+    from condor.agents import starters as starters_store
+
+    agent = _get_agent(slug)
+    rows = starters_store.top(user.id, agent.slug, limit=STARTERS_SERVED)
+    return StarterList(
+        starters=[
+            StarterRow(
+                title=row.label,
+                hint=row.hint,
+                prompt=row.label,
+                icon=row.icon,
+                skill=row.skill,
+            )
+            for row in rows
+        ]
+    )
 
 
 # ── The brain, written back ──

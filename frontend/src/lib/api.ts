@@ -771,6 +771,24 @@ export interface AgentBrain {
   strategies: StrategyCard[];
 }
 
+/**
+ * One opener this Agent learned the caller keeps asking it for (FEAT-061).
+ *
+ * Learned rows only: the server never sends the static defaults, because the
+ * client has always owned its own cold-start copy. An empty list is therefore
+ * the correct answer for a new user, not a missing one.
+ */
+export interface StarterRow {
+  title: string;
+  hint: string;
+  /** Sent verbatim on click. */
+  prompt: string;
+  /** A keyword from the icon vocabulary, or "" — see `Starters.tsx`. */
+  icon: string;
+  /** The playbook this intent maps to, when it maps to one. */
+  skill: string;
+}
+
 export interface SkillCard {
   slug: string;
   name: string;
@@ -1396,7 +1414,10 @@ export function parseCustomAgentKey(
   if (colon < 0) return null;
   const prefix = agentKey.slice(0, colon);
   if (!prefix.startsWith("custom@")) return null;
-  return { provider: prefix.slice("custom@".length), model: agentKey.slice(colon + 1) };
+  return {
+    provider: prefix.slice("custom@".length),
+    model: agentKey.slice(colon + 1),
+  };
 }
 
 // ── Backtesting ──
@@ -1432,8 +1453,7 @@ export interface ControllerPerformanceHistoryQuery {
 }
 
 /** A whole history, assembled from however many pages it took. */
-export interface ControllerPerformanceHistoryAllResponse
-  extends ControllerPerformanceHistoryResponse {
+export interface ControllerPerformanceHistoryAllResponse extends ControllerPerformanceHistoryResponse {
   /** How many requests were issued. */
   pages: number;
   /** True when a cap or a failure ended the walk before the history ran out. */
@@ -1444,7 +1464,10 @@ export interface ControllerPerformanceHistoryAllResponse
 
 function fetchControllerPerformanceHistoryPage(
   server: string,
-  params: ControllerPerformanceHistoryQuery & { limit?: number; cursor?: string } = {},
+  params: ControllerPerformanceHistoryQuery & {
+    limit?: number;
+    cursor?: string;
+  } = {},
   init?: RequestInit,
 ) {
   const qs = new URLSearchParams();
@@ -1492,7 +1515,12 @@ function fetchControllerPerformanceHistoryPage(
 async function fetchControllerPerformanceHistoryAll(
   server: string,
   params: ControllerPerformanceHistoryQuery = {},
-  opts: { pageSize?: number; maxRows?: number; maxPages?: number; signal?: AbortSignal } = {},
+  opts: {
+    pageSize?: number;
+    maxRows?: number;
+    maxPages?: number;
+    signal?: AbortSignal;
+  } = {},
 ): Promise<ControllerPerformanceHistoryAllResponse> {
   let first: ControllerPerformanceHistoryResponse | undefined;
 
@@ -1504,7 +1532,10 @@ async function fetchControllerPerformanceHistoryAll(
         { signal: opts.signal },
       );
       first ??= page;
-      return { rows: page.snapshots ?? [], nextCursor: page.next_cursor ?? null };
+      return {
+        rows: page.snapshots ?? [],
+        nextCursor: page.next_cursor ?? null,
+      };
     },
     {
       pageSize: opts.pageSize,
@@ -1550,10 +1581,14 @@ export const api = {
     ),
 
   getBots: (server: string) =>
-    apiFetch<BotsPageResponse>(`/api/v1/servers/${encodeURIComponent(server)}/bots`),
+    apiFetch<BotsPageResponse>(
+      `/api/v1/servers/${encodeURIComponent(server)}/bots`,
+    ),
 
   getBot: (server: string, botId: string) =>
-    apiFetch<BotDetail>(`/api/v1/servers/${encodeURIComponent(server)}/bots/${encodeURIComponent(botId)}`),
+    apiFetch<BotDetail>(
+      `/api/v1/servers/${encodeURIComponent(server)}/bots/${encodeURIComponent(botId)}`,
+    ),
 
   getAvailableConfigs: (server: string) =>
     apiFetch<AvailableControllersResponse>(
@@ -1565,62 +1600,110 @@ export const api = {
       `/api/v1/servers/${encodeURIComponent(server)}/controllers/configs/${encodeURIComponent(configId)}`,
     ),
 
-  updateConfig: (server: string, configId: string, data: Record<string, unknown>) =>
-    apiFetch<{ updated: boolean }>(`/api/v1/servers/${encodeURIComponent(server)}/controllers/configs/${encodeURIComponent(configId)}`, {
-      method: "PUT",
-      body: JSON.stringify(data),
-    }),
+  updateConfig: (
+    server: string,
+    configId: string,
+    data: Record<string, unknown>,
+  ) =>
+    apiFetch<{ updated: boolean }>(
+      `/api/v1/servers/${encodeURIComponent(server)}/controllers/configs/${encodeURIComponent(configId)}`,
+      {
+        method: "PUT",
+        body: JSON.stringify(data),
+      },
+    ),
 
-  updateBotControllerConfig: (server: string, botName: string, configId: string, data: Record<string, unknown>) =>
-    apiFetch<{ updated: boolean }>(`/api/v1/servers/${encodeURIComponent(server)}/bots/${encodeURIComponent(botName)}/controllers/${encodeURIComponent(configId)}/config`, {
-      method: "PUT",
-      body: JSON.stringify(data),
-    }),
+  updateBotControllerConfig: (
+    server: string,
+    botName: string,
+    configId: string,
+    data: Record<string, unknown>,
+  ) =>
+    apiFetch<{ updated: boolean }>(
+      `/api/v1/servers/${encodeURIComponent(server)}/bots/${encodeURIComponent(botName)}/controllers/${encodeURIComponent(configId)}/config`,
+      {
+        method: "PUT",
+        body: JSON.stringify(data),
+      },
+    ),
 
   updateConfigYaml: (server: string, configId: string, yamlContent: string) =>
-    apiFetch<{ updated: boolean }>(`/api/v1/servers/${encodeURIComponent(server)}/controllers/configs/${encodeURIComponent(configId)}`, {
-      method: "PUT",
-      body: JSON.stringify({ yaml_content: yamlContent }),
-    }),
+    apiFetch<{ updated: boolean }>(
+      `/api/v1/servers/${encodeURIComponent(server)}/controllers/configs/${encodeURIComponent(configId)}`,
+      {
+        method: "PUT",
+        body: JSON.stringify({ yaml_content: yamlContent }),
+      },
+    ),
 
-  getControllerConfigTemplate: (server: string, controllerType: string, controllerName: string) =>
+  getControllerConfigTemplate: (
+    server: string,
+    controllerType: string,
+    controllerName: string,
+  ) =>
     apiFetch<Record<string, unknown>>(
       `/api/v1/servers/${encodeURIComponent(server)}/controllers/${encodeURIComponent(controllerType)}/${encodeURIComponent(controllerName)}/template`,
     ),
 
-  createControllerConfig: (server: string, configId: string, data: Record<string, unknown>) =>
-    apiFetch<{ created: boolean; config_id: string }>(`/api/v1/servers/${encodeURIComponent(server)}/controllers/configs`, {
-      method: "POST",
-      body: JSON.stringify({ ...data, id: configId }),
-    }),
+  createControllerConfig: (
+    server: string,
+    configId: string,
+    data: Record<string, unknown>,
+  ) =>
+    apiFetch<{ created: boolean; config_id: string }>(
+      `/api/v1/servers/${encodeURIComponent(server)}/controllers/configs`,
+      {
+        method: "POST",
+        body: JSON.stringify({ ...data, id: configId }),
+      },
+    ),
 
   deleteControllerConfig: (server: string, configId: string) =>
-    apiFetch<{ deleted: boolean }>(`/api/v1/servers/${encodeURIComponent(server)}/controllers/configs/${encodeURIComponent(configId)}`, {
-      method: "DELETE",
-    }),
+    apiFetch<{ deleted: boolean }>(
+      `/api/v1/servers/${encodeURIComponent(server)}/controllers/configs/${encodeURIComponent(configId)}`,
+      {
+        method: "DELETE",
+      },
+    ),
 
-  deleteController: (server: string, controllerType: string, controllerName: string) =>
+  deleteController: (
+    server: string,
+    controllerType: string,
+    controllerName: string,
+  ) =>
     apiFetch<{ deleted: boolean }>(
       `/api/v1/servers/${encodeURIComponent(server)}/controllers/${encodeURIComponent(controllerType)}/${encodeURIComponent(controllerName)}`,
       { method: "DELETE" },
     ),
 
-  getControllerSource: (server: string, controllerType: string, controllerName: string) =>
+  getControllerSource: (
+    server: string,
+    controllerType: string,
+    controllerName: string,
+  ) =>
     apiFetch<ControllerSourceResponse>(
       `/api/v1/servers/${encodeURIComponent(server)}/controllers/${encodeURIComponent(controllerType)}/${encodeURIComponent(controllerName)}/source`,
     ),
 
-  updateControllerSource: (server: string, controllerType: string, controllerName: string, source: string) =>
+  updateControllerSource: (
+    server: string,
+    controllerType: string,
+    controllerName: string,
+    source: string,
+  ) =>
     apiFetch<{ updated: boolean }>(
       `/api/v1/servers/${encodeURIComponent(server)}/controllers/${encodeURIComponent(controllerType)}/${encodeURIComponent(controllerName)}/source`,
       { method: "PUT", body: JSON.stringify({ source }) },
     ),
 
   deployBot: (server: string, data: DeployBotRequest) =>
-    apiFetch<Record<string, unknown>>(`/api/v1/servers/${encodeURIComponent(server)}/bots/deploy`, {
-      method: "POST",
-      body: JSON.stringify(data),
-    }),
+    apiFetch<Record<string, unknown>>(
+      `/api/v1/servers/${encodeURIComponent(server)}/bots/deploy`,
+      {
+        method: "POST",
+        body: JSON.stringify(data),
+      },
+    ),
 
   stopBot: (server: string, botName: string) =>
     apiFetch<Record<string, unknown>>(
@@ -1628,16 +1711,30 @@ export const api = {
       { method: "POST" },
     ),
 
-  stopControllers: (server: string, botName: string, controllerNames: string[]) =>
+  stopControllers: (
+    server: string,
+    botName: string,
+    controllerNames: string[],
+  ) =>
     apiFetch<Record<string, unknown>>(
       `/api/v1/servers/${encodeURIComponent(server)}/bots/${encodeURIComponent(botName)}/controllers/stop`,
-      { method: "POST", body: JSON.stringify({ controller_names: controllerNames }) },
+      {
+        method: "POST",
+        body: JSON.stringify({ controller_names: controllerNames }),
+      },
     ),
 
-  startControllers: (server: string, botName: string, controllerNames: string[]) =>
+  startControllers: (
+    server: string,
+    botName: string,
+    controllerNames: string[],
+  ) =>
     apiFetch<Record<string, unknown>>(
       `/api/v1/servers/${encodeURIComponent(server)}/bots/${encodeURIComponent(botName)}/controllers/start`,
-      { method: "POST", body: JSON.stringify({ controller_names: controllerNames }) },
+      {
+        method: "POST",
+        body: JSON.stringify({ controller_names: controllerNames }),
+      },
     ),
 
   /** One page of controller performance history. Charts want the whole thing — see below. */
@@ -1665,7 +1762,8 @@ export const api = {
     const qs = new URLSearchParams();
     if (params.bot_name) qs.set("bot_name", params.bot_name);
     if (params.run_status) qs.set("run_status", params.run_status);
-    if (params.deployment_status) qs.set("deployment_status", params.deployment_status);
+    if (params.deployment_status)
+      qs.set("deployment_status", params.deployment_status);
     if (params.limit) qs.set("limit", String(params.limit));
     if (params.offset) qs.set("offset", String(params.offset));
     const q = qs.toString();
@@ -1675,13 +1773,22 @@ export const api = {
   },
 
   deleteBotRun: (server: string, botRunId: number) =>
-    apiFetch<{ deleted: boolean }>(`/api/v1/servers/${encodeURIComponent(server)}/bot-runs/${botRunId}`, {
-      method: "DELETE",
-    }),
+    apiFetch<{ deleted: boolean }>(
+      `/api/v1/servers/${encodeURIComponent(server)}/bot-runs/${botRunId}`,
+      {
+        method: "DELETE",
+      },
+    ),
 
   getExecutors: (
     server: string,
-    params?: { executor_type?: string; trading_pair?: string; status?: string; controller_id?: string; limit?: number },
+    params?: {
+      executor_type?: string;
+      trading_pair?: string;
+      status?: string;
+      controller_id?: string;
+      limit?: number;
+    },
   ) => {
     const qs = new URLSearchParams();
     if (params?.executor_type) qs.set("executor_type", params.executor_type);
@@ -1725,7 +1832,12 @@ export const api = {
 
   createExecutor: (
     server: string,
-    data: { executor_type: string; config: Record<string, unknown>; account_name?: string; controller_id?: string },
+    data: {
+      executor_type: string;
+      config: Record<string, unknown>;
+      account_name?: string;
+      controller_id?: string;
+    },
   ) =>
     apiFetch<{ status: string; executor_id: string }>(
       `/api/v1/servers/${encodeURIComponent(server)}/executors`,
@@ -1739,10 +1851,19 @@ export const api = {
     ),
 
   getPositionsHeld: (server: string) =>
-    apiFetch<PositionsResponse>(`/api/v1/servers/${encodeURIComponent(server)}/executors/positions`),
+    apiFetch<PositionsResponse>(
+      `/api/v1/servers/${encodeURIComponent(server)}/executors/positions`,
+    ),
 
-  clearPositionHeld: (server: string, connector: string, pair: string, controllerId?: string) => {
-    const params = controllerId ? `?controller_id=${encodeURIComponent(controllerId)}` : "";
+  clearPositionHeld: (
+    server: string,
+    connector: string,
+    pair: string,
+    controllerId?: string,
+  ) => {
+    const params = controllerId
+      ? `?controller_id=${encodeURIComponent(controllerId)}`
+      : "";
     return apiFetch<{ status: string }>(
       `/api/v1/servers/${encodeURIComponent(server)}/executors/positions/${encodeURIComponent(connector)}/${encodeURIComponent(pair)}${params}`,
       { method: "DELETE" },
@@ -1750,13 +1871,19 @@ export const api = {
   },
 
   getConsolidatedPositions: (server: string) =>
-    apiFetch<ConsolidatedPositionsResponse>(`/api/v1/servers/${encodeURIComponent(server)}/positions`),
+    apiFetch<ConsolidatedPositionsResponse>(
+      `/api/v1/servers/${encodeURIComponent(server)}/positions`,
+    ),
 
   getConnectors: (server: string) =>
-    apiFetch<string[]>(`/api/v1/servers/${encodeURIComponent(server)}/market/connectors`),
+    apiFetch<string[]>(
+      `/api/v1/servers/${encodeURIComponent(server)}/market/connectors`,
+    ),
 
   getConnectedExchanges: (server: string) =>
-    apiFetch<string[]>(`/api/v1/servers/${encodeURIComponent(server)}/market/connected-exchanges`),
+    apiFetch<string[]>(
+      `/api/v1/servers/${encodeURIComponent(server)}/market/connected-exchanges`,
+    ),
 
   /** Venues the trade panel can offer, with the traits each UI decision rests on. */
   getVenues: (server: string) =>
@@ -1789,13 +1916,13 @@ export const api = {
       pools: PoolSummary[];
       has_more?: boolean;
       upstream?: DexUpstream;
-    }>(`/api/v1/servers/${encodeURIComponent(server)}/dex/pools?${params}`).then(
-      (r) => ({
-        pools: r.pools ?? [],
-        has_more: !!r.has_more,
-        upstream: r.upstream,
-      }),
-    );
+    }>(
+      `/api/v1/servers/${encodeURIComponent(server)}/dex/pools?${params}`,
+    ).then((r) => ({
+      pools: r.pools ?? [],
+      has_more: !!r.has_more,
+      upstream: r.upstream,
+    }));
   },
 
   /**
@@ -1890,7 +2017,12 @@ export const api = {
    * `available: false` with a reason rather than failing: a venue Condor cannot
    * read bins from is something to say, not an error to raise.
    */
-  getPoolBins: (server: string, address: string, network: string, connector: string) =>
+  getPoolBins: (
+    server: string,
+    address: string,
+    network: string,
+    connector: string,
+  ) =>
     apiFetch<PoolBins>(
       `/api/v1/servers/${encodeURIComponent(server)}/dex/pools/${encodeURIComponent(address)}/bins?network=${encodeURIComponent(network)}&connector=${encodeURIComponent(connector)}`,
     ),
@@ -1919,12 +2051,7 @@ export const api = {
       `/api/v1/servers/${encodeURIComponent(server)}/market/tickers?connector=${encodeURIComponent(connector)}`,
     ),
 
-  getOrderBook: (
-    server: string,
-    connector: string,
-    pair: string,
-    depth = 20,
-  ) =>
+  getOrderBook: (server: string, connector: string, pair: string, depth = 20) =>
     apiFetch<OrderBookResponse>(
       `/api/v1/servers/${encodeURIComponent(server)}/market/order-book?connector=${encodeURIComponent(connector)}&trading_pair=${encodeURIComponent(pair)}&depth=${depth}`,
     ),
@@ -1974,6 +2101,12 @@ export const api = {
   getAgentMemory: (slug: string, name: string) =>
     apiFetch<{ name: string; body: string }>(
       `/api/v1/agents/${encodeURIComponent(slug)}/memories/${encodeURIComponent(name)}`,
+    ),
+
+  /** What this Agent learned *you* ask it for — the openers on an empty chat. */
+  getAgentStarters: (slug: string) =>
+    apiFetch<{ starters: StarterRow[] }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/starters`,
     ),
 
   /** Add a playbook to this Agent's own library. Publishing to the shared one
@@ -2035,17 +2168,24 @@ export const api = {
     ),
 
   updateAgentMd: (slug: string, content: string) =>
-    apiFetch<{ updated: boolean }>(`/api/v1/agents/${encodeURIComponent(slug)}`, {
-      method: "PUT",
-      body: JSON.stringify({ content }),
-    }),
+    apiFetch<{ updated: boolean }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}`,
+      {
+        method: "PUT",
+        body: JSON.stringify({ content }),
+      },
+    ),
 
   /** Set or clear the Agent's server pin and model. An empty `server_name`
    *  clears the pin, so the Agent follows whatever server the chat is pointed
    *  at; an empty `agent_key` clears the model, falling back to the chat's. */
   updateAgentConfig: (
     slug: string,
-    data: { server_name?: string; server_required?: boolean; agent_key?: string },
+    data: {
+      server_name?: string;
+      server_required?: boolean;
+      agent_key?: string;
+    },
   ) =>
     apiFetch<{
       updated: boolean;
@@ -2058,9 +2198,12 @@ export const api = {
     }),
 
   deleteAgent: (slug: string) =>
-    apiFetch<{ deleted: boolean }>(`/api/v1/agents/${encodeURIComponent(slug)}`, {
-      method: "DELETE",
-    }),
+    apiFetch<{ deleted: boolean }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}`,
+      {
+        method: "DELETE",
+      },
+    ),
 
   // ── Delegations (fire-and-forget background agent tasks) ──
 
@@ -2155,7 +2298,11 @@ export const api = {
       `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/performance`,
     ),
 
-  getStrategySessionExecutors: (slug: string, sslug: string, sessionNum: number) =>
+  getStrategySessionExecutors: (
+    slug: string,
+    sslug: string,
+    sessionNum: number,
+  ) =>
     apiFetch<{
       executors: AgentExecutorRow[];
       performance: AgentPerformance;
@@ -2223,7 +2370,12 @@ export const api = {
       `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/sessions/${sessionNum}/report`,
     ),
 
-  getSnapshot: (slug: string, sslug: string, sessionNum: number, tick: number) =>
+  getSnapshot: (
+    slug: string,
+    sslug: string,
+    sessionNum: number,
+    tick: number,
+  ) =>
     apiFetch<{ content: string; tick: number }>(
       `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/sessions/${sessionNum}/snapshots/${tick}`,
     ),
@@ -2240,13 +2392,18 @@ export const api = {
       trade_cost?: number;
     },
   ) =>
-    apiFetch<BacktestTask>(`/api/v1/servers/${encodeURIComponent(server)}/backtesting/tasks`, {
-      method: "POST",
-      body: JSON.stringify(data),
-    }),
+    apiFetch<BacktestTask>(
+      `/api/v1/servers/${encodeURIComponent(server)}/backtesting/tasks`,
+      {
+        method: "POST",
+        body: JSON.stringify(data),
+      },
+    ),
 
   listBacktestTasks: (server: string) =>
-    apiFetch<BacktestTask[]>(`/api/v1/servers/${encodeURIComponent(server)}/backtesting/tasks`),
+    apiFetch<BacktestTask[]>(
+      `/api/v1/servers/${encodeURIComponent(server)}/backtesting/tasks`,
+    ),
 
   getBacktestTask: (server: string, taskId: string) =>
     apiFetch<BacktestTask>(
@@ -2269,21 +2426,39 @@ export const api = {
   // ── Archived Bots ──
 
   getArchivedBots: (server: string) =>
-    apiFetch<{ bots: ArchivedBotSummary[] }>(`/api/v1/servers/${encodeURIComponent(server)}/archived`),
+    apiFetch<{ bots: ArchivedBotSummary[] }>(
+      `/api/v1/servers/${encodeURIComponent(server)}/archived`,
+    ),
 
-  getArchivedBotPerformance: (server: string, dbPath: string, includeExecutors = false) =>
+  getArchivedBotPerformance: (
+    server: string,
+    dbPath: string,
+    includeExecutors = false,
+  ) =>
     apiFetch<ArchivedBotPerformance>(
       `/api/v1/servers/${encodeURIComponent(server)}/archived/performance?db_path=${encodeURIComponent(dbPath)}&include_executors=${includeExecutors}`,
     ),
 
-  getArchivedExecutors: (server: string, dbPath: string, offset = 0, limit = 50) =>
+  getArchivedExecutors: (
+    server: string,
+    dbPath: string,
+    offset = 0,
+    limit = 50,
+  ) =>
     apiFetch<PaginatedExecutors>(
       `/api/v1/servers/${encodeURIComponent(server)}/archived/executors?db_path=${encodeURIComponent(dbPath)}&offset=${offset}&limit=${limit}`,
     ),
 
   // ── Reports ──
 
-  getReports: (params?: { source_type?: string; tag?: string; search?: string; agent?: string; limit?: number; offset?: number }) => {
+  getReports: (params?: {
+    source_type?: string;
+    tag?: string;
+    search?: string;
+    agent?: string;
+    limit?: number;
+    offset?: number;
+  }) => {
     const qs = new URLSearchParams();
     if (params?.source_type) qs.set("source_type", params.source_type);
     if (params?.tag) qs.set("tag", params.tag);
@@ -2298,7 +2473,8 @@ export const api = {
   getReport: (id: string) =>
     apiFetch<ReportSummary>(`/api/v1/reports/${encodeURIComponent(id)}`),
 
-  getReportsGrouped: () => apiFetch<ReportGroup[]>("/api/v1/reports/latest-by-source"),
+  getReportsGrouped: () =>
+    apiFetch<ReportGroup[]>("/api/v1/reports/latest-by-source"),
 
   /**
    * A report's rendered HTML body.
@@ -2308,13 +2484,18 @@ export const api = {
    * iframe as `srcDoc`, keeping the token in a header instead of the URL.
    */
   getReportHtml: async (id: string): Promise<string> => {
-    const res = await authFetch(`/api/v1/reports/${encodeURIComponent(id)}/html`);
+    const res = await authFetch(
+      `/api/v1/reports/${encodeURIComponent(id)}/html`,
+    );
     if (!res.ok) throw new Error(`Failed to load report (${res.status})`);
     return res.text();
   },
 
   deleteReport: (id: string) =>
-    apiFetch<{ deleted: boolean }>(`/api/v1/reports/${encodeURIComponent(id)}`, { method: "DELETE" }),
+    apiFetch<{ deleted: boolean }>(
+      `/api/v1/reports/${encodeURIComponent(id)}`,
+      { method: "DELETE" },
+    ),
 
   // ── Routines ──
 
@@ -2324,13 +2505,19 @@ export const api = {
     apiFetch<RoutineInstance[]>("/api/v1/routines/instances"),
 
   getRoutineInstance: (id: string) =>
-    apiFetch<RoutineInstance>(`/api/v1/routines/instances/${encodeURIComponent(id)}`),
-
-  runRoutine: (server: string, name: string, config: Record<string, unknown> = {}) =>
-    apiFetch<{ instance_id: string }>(
-      `/api/v1/routines/run`,
-      { method: "POST", body: JSON.stringify({ routine_name: name, server_name: server, config }) },
+    apiFetch<RoutineInstance>(
+      `/api/v1/routines/instances/${encodeURIComponent(id)}`,
     ),
+
+  runRoutine: (
+    server: string,
+    name: string,
+    config: Record<string, unknown> = {},
+  ) =>
+    apiFetch<{ instance_id: string }>(`/api/v1/routines/run`, {
+      method: "POST",
+      body: JSON.stringify({ routine_name: name, server_name: server, config }),
+    }),
 
   scheduleRoutine: (
     server: string,
@@ -2338,15 +2525,23 @@ export const api = {
     config: Record<string, unknown> = {},
     interval_sec: number = 300,
   ) =>
-    apiFetch<{ instance_id: string }>(
-      `/api/v1/routines/schedule`,
-      { method: "POST", body: JSON.stringify({ routine_name: name, server_name: server, config, interval_sec }) },
-    ),
+    apiFetch<{ instance_id: string }>(`/api/v1/routines/schedule`, {
+      method: "POST",
+      body: JSON.stringify({
+        routine_name: name,
+        server_name: server,
+        config,
+        interval_sec,
+      }),
+    }),
 
   stopRoutineInstance: (id: string) =>
-    apiFetch<{ stopped: boolean }>(`/api/v1/routines/instances/${encodeURIComponent(id)}/stop`, {
-      method: "POST",
-    }),
+    apiFetch<{ stopped: boolean }>(
+      `/api/v1/routines/instances/${encodeURIComponent(id)}/stop`,
+      {
+        method: "POST",
+      },
+    ),
 
   getRoutineSource: (name: string) =>
     apiFetch<{ filename: string; source: string }>(
@@ -2364,72 +2559,127 @@ export const api = {
     ),
 
   getRoutineHooks: (name: string) =>
-    apiFetch<RoutineHooks>(`/api/v1/routines/${encodeURIComponent(name)}/hooks`),
+    apiFetch<RoutineHooks>(
+      `/api/v1/routines/${encodeURIComponent(name)}/hooks`,
+    ),
 
   saveRoutineHooks: (name: string, hooks: RoutineHooks) =>
-    apiFetch<RoutineHooks>(`/api/v1/routines/${encodeURIComponent(name)}/hooks`, {
-      method: "PUT",
-      body: JSON.stringify(hooks),
-    }),
+    apiFetch<RoutineHooks>(
+      `/api/v1/routines/${encodeURIComponent(name)}/hooks`,
+      {
+        method: "PUT",
+        body: JSON.stringify(hooks),
+      },
+    ),
 
   // ── Settings ──
 
   getSettingsServers: () => apiFetch<ServerInfo[]>("/api/v1/settings/servers"),
 
-  addServer: (data: { name: string; host: string; port: number; username: string; password: string }) =>
+  addServer: (data: {
+    name: string;
+    host: string;
+    port: number;
+    username: string;
+    password: string;
+  }) =>
     apiFetch<{ added: boolean; name: string }>("/api/v1/settings/servers", {
       method: "POST",
       body: JSON.stringify(data),
     }),
 
-  updateServer: (name: string, data: { host?: string; port?: number; username?: string; password?: string }) =>
-    apiFetch<{ updated: boolean }>(`/api/v1/settings/servers/${encodeURIComponent(name)}`, {
-      method: "PUT",
-      body: JSON.stringify(data),
-    }),
+  updateServer: (
+    name: string,
+    data: {
+      host?: string;
+      port?: number;
+      username?: string;
+      password?: string;
+    },
+  ) =>
+    apiFetch<{ updated: boolean }>(
+      `/api/v1/settings/servers/${encodeURIComponent(name)}`,
+      {
+        method: "PUT",
+        body: JSON.stringify(data),
+      },
+    ),
 
   deleteServer: (name: string) =>
-    apiFetch<{ deleted: boolean }>(`/api/v1/settings/servers/${encodeURIComponent(name)}`, {
-      method: "DELETE",
-    }),
+    apiFetch<{ deleted: boolean }>(
+      `/api/v1/settings/servers/${encodeURIComponent(name)}`,
+      {
+        method: "DELETE",
+      },
+    ),
 
   setDefaultServer: (name: string) =>
-    apiFetch<{ default: boolean }>(`/api/v1/settings/servers/${encodeURIComponent(name)}/default`, {
-      method: "POST",
-    }),
+    apiFetch<{ default: boolean }>(
+      `/api/v1/settings/servers/${encodeURIComponent(name)}/default`,
+      {
+        method: "POST",
+      },
+    ),
 
   getGatewayStatus: (server: string) =>
-    apiFetch<GatewayStatus>(`/api/v1/settings/gateway/status?server=${encodeURIComponent(server)}`),
+    apiFetch<GatewayStatus>(
+      `/api/v1/settings/gateway/status?server=${encodeURIComponent(server)}`,
+    ),
 
   startGateway: (server: string, data: { image: string; port?: number }) =>
-    apiFetch<{ started: boolean }>(`/api/v1/settings/gateway/start?server=${encodeURIComponent(server)}`, {
-      method: "POST",
-      body: JSON.stringify(data),
-    }),
+    apiFetch<{ started: boolean }>(
+      `/api/v1/settings/gateway/start?server=${encodeURIComponent(server)}`,
+      {
+        method: "POST",
+        body: JSON.stringify(data),
+      },
+    ),
 
   stopGateway: (server: string) =>
-    apiFetch<{ stopped: boolean }>(`/api/v1/settings/gateway/stop?server=${encodeURIComponent(server)}`, {
-      method: "POST",
-    }),
+    apiFetch<{ stopped: boolean }>(
+      `/api/v1/settings/gateway/stop?server=${encodeURIComponent(server)}`,
+      {
+        method: "POST",
+      },
+    ),
 
   restartGateway: (server: string) =>
-    apiFetch<{ restarted: boolean }>(`/api/v1/settings/gateway/restart?server=${encodeURIComponent(server)}`, {
-      method: "POST",
-    }),
+    apiFetch<{ restarted: boolean }>(
+      `/api/v1/settings/gateway/restart?server=${encodeURIComponent(server)}`,
+      {
+        method: "POST",
+      },
+    ),
 
   pullGatewayImage: (server: string, data: { image: string }) =>
-    apiFetch<{ pulled: boolean; image: string }>(`/api/v1/settings/gateway/pull?server=${encodeURIComponent(server)}`, {
-      method: "POST",
-      body: JSON.stringify(data),
-    }),
+    apiFetch<{ pulled: boolean; image: string }>(
+      `/api/v1/settings/gateway/pull?server=${encodeURIComponent(server)}`,
+      {
+        method: "POST",
+        body: JSON.stringify(data),
+      },
+    ),
 
   getGatewayPullStatus: (server: string) =>
-    apiFetch<{ pull_operations: Record<string, { status: string; progress: string; duration_seconds: number; started_at: number }>; total_operations: number }>(
+    apiFetch<{
+      pull_operations: Record<
+        string,
+        {
+          status: string;
+          progress: string;
+          duration_seconds: number;
+          started_at: number;
+        }
+      >;
+      total_operations: number;
+    }>(
       `/api/v1/settings/gateway/pull-status?server=${encodeURIComponent(server)}`,
     ),
 
   getGatewayLogs: (server: string) =>
-    apiFetch<{ logs: string }>(`/api/v1/settings/gateway/logs?server=${encodeURIComponent(server)}`),
+    apiFetch<{ logs: string }>(
+      `/api/v1/settings/gateway/logs?server=${encodeURIComponent(server)}`,
+    ),
 
   getGatewayNetworks: (server: string) =>
     apiFetch<{ networks: GatewayNetworkInfo[] }>(
@@ -2460,12 +2710,20 @@ export const api = {
     server: string,
     data: { chain: string; private_key: string; set_default?: boolean },
   ) =>
-    apiFetch<{ added: boolean; chain: string; address: string | null; is_default: boolean }>(
+    apiFetch<{
+      added: boolean;
+      chain: string;
+      address: string | null;
+      is_default: boolean;
+    }>(
       `/api/v1/settings/gateway/wallets?server=${encodeURIComponent(server)}`,
       { method: "POST", body: JSON.stringify(data) },
     ),
 
-  setDefaultGatewayWallet: (server: string, data: { chain: string; address: string }) =>
+  setDefaultGatewayWallet: (
+    server: string,
+    data: { chain: string; address: string },
+  ) =>
     apiFetch<{ default: boolean }>(
       `/api/v1/settings/gateway/wallets/default?server=${encodeURIComponent(server)}`,
       { method: "POST", body: JSON.stringify(data) },
@@ -2478,7 +2736,9 @@ export const api = {
     ),
 
   getCredentials: (server: string) =>
-    apiFetch<{ credentials: (CredentialInfo | string)[] }>(`/api/v1/settings/credentials?server=${encodeURIComponent(server)}`),
+    apiFetch<{ credentials: (CredentialInfo | string)[] }>(
+      `/api/v1/settings/credentials?server=${encodeURIComponent(server)}`,
+    ),
 
   getAvailableConnectors: (server: string, type?: string) => {
     let url = `/api/v1/settings/connectors?server=${encodeURIComponent(server)}`;
@@ -2491,11 +2751,17 @@ export const api = {
       `/api/v1/settings/connectors/${encodeURIComponent(name)}/config-map?server=${encodeURIComponent(server)}`,
     ),
 
-  addCredential: (server: string, data: { connector_name: string; credentials: Record<string, string> }) =>
-    apiFetch<{ added: boolean }>(`/api/v1/settings/credentials?server=${encodeURIComponent(server)}`, {
-      method: "POST",
-      body: JSON.stringify(data),
-    }),
+  addCredential: (
+    server: string,
+    data: { connector_name: string; credentials: Record<string, string> },
+  ) =>
+    apiFetch<{ added: boolean }>(
+      `/api/v1/settings/credentials?server=${encodeURIComponent(server)}`,
+      {
+        method: "POST",
+        body: JSON.stringify(data),
+      },
+    ),
 
   deleteCredential: (server: string, connector: string) =>
     apiFetch<{ deleted: boolean }>(
@@ -2522,15 +2788,17 @@ export const api = {
   /** Admin only (403 otherwise), and 409 when `CONDOR_TELEMETRY` is pinned.
    * `off` records a refusal and purges whatever was collected. */
   setTelemetryLevel: (level: TelemetryEffectiveLevel) =>
-    apiFetch<{ level: TelemetryEffectiveLevel; consent: TelemetryConsentState }>(
-      `/api/v1/settings/telemetry?level=${level}`,
-      { method: "PUT" },
-    ),
+    apiFetch<{
+      level: TelemetryEffectiveLevel;
+      consent: TelemetryConsentState;
+    }>(`/api/v1/settings/telemetry?level=${level}`, { method: "PUT" }),
 
   // ── Chat ──
 
   getOpenRouterModels: () =>
-    apiFetch<{ models: OpenRouterModelOption[] }>("/api/v1/chat/openrouter/models"),
+    apiFetch<{ models: OpenRouterModelOption[] }>(
+      "/api/v1/chat/openrouter/models",
+    ),
 
   // ── Sessions (runtime API) ──
   //
@@ -2568,19 +2836,23 @@ export const api = {
     ),
 
   renameConversation: (id: string, title: string) =>
-    apiFetch<ConversationMeta>(`/api/v1/conversations/${encodeURIComponent(id)}`, {
-      method: "PATCH",
-      body: JSON.stringify({ title }),
-    }),
+    apiFetch<ConversationMeta>(
+      `/api/v1/conversations/${encodeURIComponent(id)}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({ title }),
+      },
+    ),
 
   /** The only way to lose a transcript. Killing a session no longer does.
    *  A shared conversation is unshared on the way out — otherwise "delete"
    *  would mean "delete here, keep there". */
   deleteConversation: (id: string) =>
-    apiFetch<{ deleted: boolean; sessions_destroyed: number; unshared: boolean }>(
-      `/api/v1/conversations/${encodeURIComponent(id)}`,
-      { method: "DELETE" },
-    ),
+    apiFetch<{
+      deleted: boolean;
+      sessions_destroyed: number;
+      unshared: boolean;
+    }>(`/api/v1/conversations/${encodeURIComponent(id)}`, { method: "DELETE" }),
 
   // ── Sharing a conversation (FEAT-054) ──
 
@@ -2593,9 +2865,12 @@ export const api = {
     ),
 
   shareConversation: (id: string) =>
-    apiFetch<ShareReceipt>(`/api/v1/sharing/conversations/${encodeURIComponent(id)}`, {
-      method: "POST",
-    }),
+    apiFetch<ShareReceipt>(
+      `/api/v1/sharing/conversations/${encodeURIComponent(id)}`,
+      {
+        method: "POST",
+      },
+    ),
 
   unshareConversation: (id: string) =>
     apiFetch<{ unshared: boolean; conversation_id: string }>(
@@ -2649,11 +2924,17 @@ export const api = {
   // ── Custom OpenAI-compatible LLM endpoints ──
 
   getCustomProviders: () =>
-    apiFetch<{ providers: CustomProvider[] }>("/api/v1/settings/custom-providers"),
+    apiFetch<{ providers: CustomProvider[] }>(
+      "/api/v1/settings/custom-providers",
+    ),
 
   /** Validates the endpoint server-side before saving; rejects with the
    *  provider's own error text (bad key, unreachable host, wrong shape). */
-  addCustomProvider: (data: { base_url: string; api_key?: string; name?: string }) =>
+  addCustomProvider: (data: {
+    base_url: string;
+    api_key?: string;
+    name?: string;
+  }) =>
     apiFetch<{ provider: CustomProvider; models: string[] }>(
       "/api/v1/settings/custom-providers",
       { method: "POST", body: JSON.stringify(data) },

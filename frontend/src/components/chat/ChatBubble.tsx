@@ -14,6 +14,7 @@ import { ChatThread } from "@/components/chat/ChatThread";
 import { Starters, type Starter } from "@/components/chat/Starters";
 import { useChat, useSessionOptions } from "@/hooks/useChat";
 import { useServer } from "@/hooks/useServer";
+import { useStarters } from "@/hooks/useStarters";
 import { api, CHAT_SLUG } from "@/lib/api";
 import { routeFacts } from "@/lib/pageFacts";
 import { collectViewFacts, renderViewBlock } from "@/lib/viewFacts";
@@ -82,6 +83,12 @@ export function ChatBubble() {
 
   const msgCount = slot?.messages.length ?? 0;
 
+  const facts = routeFacts(pathname, search);
+  // Learned openers over the page-shaped ones — up here with the other hooks,
+  // and gated on `open` for the same reason the agent list is: a user on
+  // /portfolio who never opens the bubble pays nothing for it.
+  const starters = useStarters(slug, bubbleStarters(facts?.label), open);
+
   // Hooks above, bail-out below: `/agents/:slug` keeps the bubble, `/` alone
   // loses it.
   if (pathname === "/") return null;
@@ -124,8 +131,6 @@ export function ChatBubble() {
   const name = slug
     ? slot?.info.label || boundSummary?.name || slug
     : agents.find((a) => a.slug === CHAT_SLUG)?.name || "Condor";
-
-  const facts = routeFacts(pathname, search);
 
   const ask = (text: string) => {
     let id = slotId;
@@ -201,9 +206,14 @@ export function ChatBubble() {
         }
         columnClassName=""
         autoFocus
-        starters={bubbleStarters(facts?.label)}
+        starters={starters}
         emptyState={
-          <BubbleHero name={name} routeLabel={facts?.label} onAsk={ask} />
+          <BubbleHero
+            name={name}
+            routeLabel={facts?.label}
+            starters={starters}
+            onAsk={ask}
+          />
         }
       />
     </div>
@@ -252,10 +262,13 @@ function bubbleStarters(routeLabel?: string): Starter[] {
 function BubbleHero({
   name,
   routeLabel,
+  starters,
   onAsk,
 }: {
   name: string;
   routeLabel?: string;
+  /** Resolved by the bubble, so the hero and the thread never disagree. */
+  starters: Starter[];
   onAsk: (text: string) => void;
 }) {
   return (
@@ -272,7 +285,7 @@ function BubbleHero({
       <div className="mt-3 w-full">
         <ChatInput onSend={onAsk} autoFocus />
       </div>
-      <Starters starters={bubbleStarters(routeLabel)} onAsk={onAsk} />
+      <Starters starters={starters} onAsk={onAsk} />
     </div>
   );
 }

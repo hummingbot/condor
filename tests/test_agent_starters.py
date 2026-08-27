@@ -207,3 +207,79 @@ def test_a_naive_timestamp_on_disk_still_ranks():
 
     [entry] = starters.merge(USER, AGENT, [_intent("Rebalance")], NOW)
     assert entry.count == 2
+
+
+# ── Serving them ──
+
+
+def _client(user_id: int = USER):
+    from fastapi import FastAPI
+    from starlette.testclient import TestClient
+
+    from condor.web.auth import get_current_user
+    from condor.web.models import WebUser
+    from condor.web.routes import agents as routes
+
+    app = FastAPI()
+    app.include_router(routes.router)
+    app.dependency_overrides[get_current_user] = lambda: WebUser(
+        id=user_id, username="u", first_name="U", role="user"
+    )
+    return TestClient(app)
+
+
+def _agent(tmp_path, monkeypatch):
+    from condor.agents import agent as agent_module
+    from condor.agents.agent import AgentStore
+
+    root = tmp_path / "agents"
+    root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(agent_module, "_DATA_ROOT", root)
+    return AgentStore().create(name="Market Making Expert").slug
+
+
+def test_a_user_with_nothing_learned_is_served_an_empty_list(tmp_path, monkeypatch):
+    slug = _agent(tmp_path, monkeypatch)
+
+    body = _client().get(f"/agents/{slug}/starters").json()
+
+    assert body == {"starters": []}
+
+
+def test_the_endpoint_serves_the_learned_rows_best_first(tmp_path, monkeypatch):
+    slug = _agent(tmp_path, monkeypatch)
+    starters.merge(
+        USER, slug, [_intent("Rebalance my range", hint="Re-centre it")], NOW
+    )
+    starters.merge(USER, slug, [_intent("Rebalance my range")], NOW)
+    starters.merge(USER, slug, [_intent("Show me funding", icon="chart")], NOW)
+
+    rows = _client().get(f"/agents/{slug}/starters").json()["starters"]
+
+    assert [row["title"] for row in rows] == ["Rebalance my range", "Show me funding"]
+    assert rows[0]["prompt"] == "Rebalance my range"
+    assert rows[0]["hint"] == "Re-centre it"
+    assert rows[1]["icon"] == "chart"
+
+
+def test_the_endpoint_serves_at_most_three(tmp_path, monkeypatch):
+    slug = _agent(tmp_path, monkeypatch)
+    for i in range(6):
+        starters.merge(USER, slug, [_intent(f"Intent {i}")], NOW)
+
+    assert len(_client().get(f"/agents/{slug}/starters").json()["starters"]) == 3
+
+
+def test_one_users_habits_are_not_served_to_another(tmp_path, monkeypatch):
+    slug = _agent(tmp_path, monkeypatch)
+    starters.merge(USER, slug, [_intent("Rebalance my range")], NOW)
+
+    assert _client(user_id=9999).get(f"/agents/{slug}/starters").json() == {
+        "starters": []
+    }
+
+
+def test_an_unknown_agent_is_a_404(tmp_path, monkeypatch):
+    _agent(tmp_path, monkeypatch)
+
+    assert _client().get("/agents/nobody_here/starters").status_code == 404
