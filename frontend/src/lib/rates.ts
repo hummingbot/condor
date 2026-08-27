@@ -17,6 +17,19 @@
 
 import { CURRENCY_SYMBOLS, type DisplayCurrency } from "@/hooks/useDisplayCurrency";
 
+/**
+ * `useRates().convert`: a value in `quoteCurrency` moved into the display
+ * currency. `converted: false` means there was no rate path, so the value is
+ * still in quote units and must be labelled with the quote's own symbol and a
+ * `⚠` (see the rule above). Declared here — the module that owns the rule —
+ * so the hook and every consumer that receives `convert` as a prop share one
+ * signature instead of hand-mirroring it (READ-253).
+ */
+export type ConvertFn = (
+  value: number,
+  quoteCurrency: string,
+) => { value: number; converted: boolean };
+
 /** USD-pegged stablecoins — conversions between these are 1:1, no rate needed. */
 export const STABLECOINS = new Set(["USDT", "USDC", "FDUSD", "BUSD", "DAI", "TUSD", "USD"]);
 

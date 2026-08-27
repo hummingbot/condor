@@ -16,12 +16,11 @@ import {
 import { api, type ControllerInfo } from "@/lib/api";
 import { formatCurrencyVolume, formatCurrencyPnl, formatTime, pnlColor, toMs } from "@/lib/formatters";
 import { positionQuoteValue, PNL_SERIES_COLORS, type PnlChartPoint } from "@/lib/pnl-chart";
+import type { ConvertFn } from "@/lib/rates";
 import { getThemeColors } from "@/lib/theme-colors";
 import { BottomTooltip, PnlTooltip } from "./PnlChartTooltips";
 
 // ── Component ──
-
-type ConvertFn = (value: number, quoteCurrency: string) => { value: number; converted: boolean };
 
 interface Props {
   server: string;

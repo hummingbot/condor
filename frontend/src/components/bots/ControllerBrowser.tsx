@@ -20,9 +20,8 @@ import { ControllerPnlChart } from "@/components/bots/ControllerPnlChart";
 import { api, type ControllerInfo } from "@/lib/api";
 import { configToYaml, CONTROLLER_HIDDEN_KEYS } from "@/lib/configYaml";
 import { formatCurrencyVolume, formatCurrencyPnl, pnlColor } from "@/lib/formatters";
+import type { ConvertFn } from "@/lib/rates";
 import { useViewFacts } from "@/lib/viewFacts";
-
-type ConvertFn = (value: number, quoteCurrency: string) => { value: number; converted: boolean };
 
 function parseSide(raw: string): string {
   const dot = raw.lastIndexOf(".");

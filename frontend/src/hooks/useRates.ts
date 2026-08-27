@@ -3,7 +3,7 @@ import { useMemo } from "react";
 
 import { api } from "@/lib/api";
 import { formatCurrency, formatCurrencyPnl, formatCurrencyVolume } from "@/lib/formatters";
-import { formatWithRate, rateFor, resolveSymbol, STABLECOINS } from "@/lib/rates";
+import { formatWithRate, rateFor, resolveSymbol, STABLECOINS, type ConvertFn } from "@/lib/rates";
 import { useDisplayCurrency } from "./useDisplayCurrency";
 import { useServer } from "./useServer";
 
@@ -74,8 +74,8 @@ export function useRates(quoteCurrencies: string[]) {
 
   // The rule itself lives in `lib/rates.ts`, shared with the chat's
   // page-context block so the two never drift apart again (ARCH-228).
-  const convert = useMemo(() => {
-    return (value: number, quoteCurrency: string): { value: number; converted: boolean } => {
+  const convert = useMemo<ConvertFn>(() => {
+    return (value, quoteCurrency) => {
       const rate = rateFor(rates, currency, quoteCurrency);
       return rate != null ? { value: value / rate, converted: true } : { value, converted: false };
     };
