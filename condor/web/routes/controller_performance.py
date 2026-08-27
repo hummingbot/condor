@@ -212,7 +212,13 @@ async def get_controller_performance_history(
     start_time: Optional[str] = Query(None),
     end_time: Optional[str] = Query(None),
     interval: str = Query("5m"),
-    limit: Optional[int] = Query(None, ge=1, le=5000),
+    # Upstream caps the page at 1000 (``le=1000`` on the Hummingbot API route),
+    # so advertising more here only turned a request Condor called valid into a
+    # 422 the except block below reported as an offline server. The explicit
+    # default matters too: an omitted limit used not to be forwarded at all, and
+    # upstream then served its own default of 100 rows — minutes of history —
+    # with nothing to say the page had been truncated.
+    limit: int = Query(1000, ge=1, le=1000),
     cursor: Optional[str] = Query(None),
     user: WebUser = Depends(require_server_access),
 ):
