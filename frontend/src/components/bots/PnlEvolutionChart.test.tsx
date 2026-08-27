@@ -31,8 +31,11 @@ import {
   PANE_PAD_X,
   PLOT_INSET_LEFT,
   PLOT_INSET_RIGHT,
+  positionAreaExtent,
+  zeroGradientOffset,
   type PnlChartPoint,
 } from "@/lib/pnl-chart";
+import { getThemeColors } from "@/lib/theme-colors";
 
 declare global {
   // eslint-disable-next-line no-var
@@ -163,13 +166,13 @@ describe("PnlEvolutionChart pane geometry", () => {
     const quiet = recorded.find((r) => r.type === "YAxis" && r.props.yAxisId === "pos");
     expect(quiet?.props.tick).toBe(false);
     // ...and draws no position series at all.
-    expect(recorded.some((r) => r.type === "Line" && r.props.dataKey === "position")).toBe(false);
+    expect(recorded.some((r) => r.props.dataKey === "position")).toBe(false);
 
     recorded.length = 0;
     render(<PnlEvolutionChart data={withPosition} title="PnL" pnlHeight={220} volumeHeight={120} />);
     const labelled = recorded.find((r) => r.type === "YAxis" && r.props.yAxisId === "pos");
     expect(labelled?.props.tick).toBeTruthy();
-    expect(recorded.some((r) => r.type === "Line" && r.props.dataKey === "position")).toBe(true);
+    expect(recorded.some((r) => r.props.dataKey === "position")).toBe(true);
   });
 
   it("passes the requested heights straight through to the two panes", () => {
@@ -177,6 +180,110 @@ describe("PnlEvolutionChart pane geometry", () => {
 
     const heights = recorded.filter((r) => r.type === "ResponsiveContainer").map((r) => r.props.height);
     expect(heights).toEqual([130, 70]);
+  });
+});
+
+describe("PnlEvolutionChart signed position area", () => {
+  const series = (...positions: number[]): PnlChartPoint[] =>
+    positions.map((position, i) => ({ ...flat[i % flat.length], time: 1_000 * (i + 1), position }));
+
+  const longOnly = series(400, 1_200);
+  const shortOnly = series(-400, -1_200);
+  const flipped = series(900, -500);
+
+  /** The bottom pane's position axis, as recharts was told to draw it. */
+  function positionAxis(): Record<string, unknown> {
+    const axis = recorded.find((r) => r.type === "YAxis" && r.props.yAxisId === "pos");
+    expect(axis).toBeDefined();
+    return axis!.props;
+  }
+
+  /** The two stops of the signed-area gradient: [offset, color] each. */
+  function fillStops(): Array<[number, string]> {
+    const gradient = container.querySelector("[id^=posGrad]");
+    return [...(gradient?.querySelectorAll("stop") ?? [])].map((s) => [
+      Number(s.getAttribute("offset")),
+      String(s.getAttribute("stop-color")),
+    ]);
+  }
+
+  it("draws the position as an area filled from zero, not as a bare line", () => {
+    render(<PnlEvolutionChart data={flipped} title="PnL" pnlHeight={220} volumeHeight={120} />);
+
+    const area = recorded.find((r) => r.type === "Area" && r.props.dataKey === "position");
+    expect(area).toBeDefined();
+    // Pinned explicitly: recharts bases an area at the domain edge, not at
+    // zero, whenever the domain does not straddle zero.
+    expect(area!.props.baseValue).toBe(0);
+    expect(area!.props.yAxisId).toBe("pos");
+    expect(recorded.some((r) => r.type === "Line" && r.props.dataKey === "position")).toBe(false);
+    // Volume is still a line on its own axis — that pairing is READ-245's call.
+    const volume = recorded.find((r) => r.props.dataKey === "volume");
+    expect(volume?.props.yAxisId).toBe("vol");
+  });
+
+  it("keeps zero inside the position axis whichever side the book is on", () => {
+    for (const data of [longOnly, shortOnly, flipped]) {
+      recorded.length = 0;
+      render(<PnlEvolutionChart data={data} title="PnL" pnlHeight={220} volumeHeight={120} />);
+
+      const [min, max] = positionAxis().domain as [number, number];
+      // Strictly straddles: an all-long book must not have its baseline lying
+      // on the pane's bottom edge, where it would read as a border.
+      expect(min).toBeLessThan(0);
+      expect(max).toBeGreaterThan(0);
+      // ...and still shows the whole series, so recharts never has to widen it.
+      expect(min).toBeLessThanOrEqual(Math.min(...data.map((p) => p.position)));
+      expect(max).toBeGreaterThanOrEqual(Math.max(...data.map((p) => p.position)));
+    }
+  });
+
+  it("splits the fill at the baseline: long above it, short below it", () => {
+    const tc = getThemeColors();
+
+    render(<PnlEvolutionChart data={flipped} title="PnL" pnlHeight={220} volumeHeight={120} />);
+    const stops = fillStops();
+    expect(stops).toHaveLength(2);
+    // Both stops sit on the same offset — a hard colour change, not a blend.
+    const zero = zeroGradientOffset(positionAreaExtent(flipped));
+    expect(stops[0][0]).toBeCloseTo(zero, 10);
+    expect(stops[1][0]).toBeCloseTo(zero, 10);
+    expect(stops[0][1]).toBe(tc.up); // above zero: net long
+    expect(stops[1][1]).toBe(tc.down); // below zero: net short
+    // 900 up, 500 down: the split sits where the fill actually crosses zero.
+    expect(zero).toBeCloseTo(900 / 1_400, 10);
+  });
+
+  it("measures the split against the fill's own box, not the padded axis", () => {
+    // A gradient is in objectBoundingBox units, so its 0..1 runs over the
+    // filled path — which stops at the data — and not over the axis, which is
+    // padded past it. Taking the offset from the domain would paint a band of
+    // the wrong colour along the baseline of a book that never changes sign.
+    render(<PnlEvolutionChart data={longOnly} title="PnL" pnlHeight={220} volumeHeight={120} />);
+    expect(fillStops()[0][0]).toBe(1); // all long: no short colour at all
+    const domainZero = zeroGradientOffset(positionAxis().domain as [number, number]);
+    expect(domainZero).toBeLessThan(1); // ...which the padded domain would not give
+
+    recorded.length = 0;
+    render(<PnlEvolutionChart data={shortOnly} title="PnL" pnlHeight={220} volumeHeight={120} />);
+    expect(fillStops()[0][0]).toBe(0); // all short: no long colour at all
+    expect(zeroGradientOffset(positionAxis().domain as [number, number])).toBeGreaterThan(0);
+  });
+
+  it("marks zero with a reference line exactly while the series is drawn", () => {
+    render(<PnlEvolutionChart data={flipped} title="PnL" pnlHeight={220} volumeHeight={120} />);
+    const zeroLines = recorded.filter((r) => r.type === "ReferenceLine" && r.props.yAxisId === "pos");
+    expect(zeroLines).toHaveLength(1);
+    expect(zeroLines[0].props.y).toBe(0);
+    // Drawn after the fill, so the baseline stays legible through it.
+    const order = (pred: (r: Recorded) => boolean) => recorded.findIndex(pred);
+    expect(order((r) => r.type === "ReferenceLine" && r.props.yAxisId === "pos")).toBeGreaterThan(
+      order((r) => r.type === "Area" && r.props.dataKey === "position"),
+    );
+
+    recorded.length = 0;
+    render(<PnlEvolutionChart data={flat} title="PnL" pnlHeight={220} volumeHeight={120} />);
+    expect(recorded.some((r) => r.type === "ReferenceLine" && r.props.yAxisId === "pos")).toBe(false);
   });
 });
 
@@ -202,14 +309,24 @@ describe("PnlEvolutionChart instance identity", () => {
     const syncIds = recorded.filter((r) => r.type === "ComposedChart").map((r) => r.props.syncId);
     expect(new Set(syncIds).size).toBe(2); // two charts, two sync groups, two panes each
 
-    const gradientIds = [...container.querySelectorAll("linearGradient")].map((g) => g.id);
-    expect(gradientIds).toHaveLength(2);
-    expect(new Set(gradientIds).size).toBe(2);
-    for (const id of gradientIds) expect(id).not.toMatch(/[^a-zA-Z0-9]/);
+    const allGradientIds = [...container.querySelectorAll("linearGradient")].map((g) => g.id);
+    for (const id of allGradientIds) expect(id).not.toMatch(/[^a-zA-Z0-9]/);
+    expect(new Set(allGradientIds).size).toBe(allGradientIds.length);
 
-    // Each area fills from its own gradient, not from whichever mounted first.
-    const fills = recorded.filter((r) => r.type === "Area").map((r) => r.props.fill);
-    expect(fills).toEqual(gradientIds.map((id) => `url(#${id})`));
+    // Each pane's area fills from its own instance's gradient, not from
+    // whichever chart mounted first: the PNL area from that instance's
+    // pnlGrad, the position area from its posGrad.
+    for (const prefix of ["pnlGrad", "posGrad"]) {
+      const ids = allGradientIds.filter((id) => id.startsWith(prefix));
+      const fills = recorded
+        .filter((r) => r.type === "Area" && String(r.props.fill).includes(prefix))
+        .map((r) => r.props.fill);
+      expect(fills).toEqual(ids.map((id) => `url(#${id})`));
+    }
+    // Every chart has a PNL gradient; only the one actually holding a position
+    // pays for the signed-area one.
+    expect(allGradientIds.filter((id) => id.startsWith("pnlGrad"))).toHaveLength(2);
+    expect(allGradientIds.filter((id) => id.startsWith("posGrad"))).toHaveLength(1);
   });
 });
 

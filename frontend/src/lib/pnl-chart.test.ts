@@ -18,11 +18,16 @@ import type { ControllerInfo, ControllerPerformanceSnapshot } from "./api";
 import { controllerKey } from "./controller-identity";
 import {
   HISTORY_POINT_BUDGET,
+  POSITION_AXIS_PAD,
   SAMPLING_INTERVALS,
   aggregatePnlSeries,
   pickSamplingInterval,
+  positionAreaExtent,
+  positionAxisDomain,
   positionQuoteValue,
   samplingIntervalSince,
+  zeroGradientOffset,
+  type PnlChartPoint,
 } from "./pnl-chart";
 
 const NOW = Date.parse("2026-08-27T12:00:00Z");
@@ -495,6 +500,107 @@ describe("positionQuoteValue", () => {
     expect(positionQuoteValue([{ amount: 1, breakeven_price: 3, entry_price: 5, current_price: 7 }])).toBe(3);
     expect(positionQuoteValue([{ amount: 1, entry_price: 5, current_price: 7 }])).toBe(5);
     expect(positionQuoteValue([{ amount: 1, current_price: 7 }])).toBe(7);
+  });
+});
+
+/**
+ * The position axis (READ-246).
+ *
+ * The series is drawn as an area filled from zero because its sign is what it
+ * is *for* — `positionQuoteValue` above negates shorts, so a net-short book is
+ * a negative number and the reader has to be able to see that at a glance. An
+ * area from zero only says that if zero is on the axis, and recharts will not
+ * put it there on its own: a user-provided bound is widened to fit the data,
+ * never narrowed, so the default `[0, "auto"]` collapses to the data's own
+ * range the moment any value is negative.
+ */
+/** A bare timeline carrying nothing but the positions a case cares about. */
+const series = (...positions: number[]): PnlChartPoint[] =>
+  positions.map((position, i) => ({
+    time: 1_000 * (i + 1),
+    realized: 0,
+    unrealized: 0,
+    total: 0,
+    volume: 0,
+    position,
+  }));
+
+describe("positionAxisDomain", () => {
+  it("straddles zero for a book that never leaves one side", () => {
+    const [longMin, longMax] = positionAxisDomain(series(400, 1_200));
+    expect(longMin).toBeLessThan(0);
+    expect(longMax).toBeGreaterThanOrEqual(1_200);
+
+    const [shortMin, shortMax] = positionAxisDomain(series(-400, -1_200));
+    expect(shortMin).toBeLessThanOrEqual(-1_200);
+    expect(shortMax).toBeGreaterThan(0);
+  });
+
+  it("covers both extremes of a book that flips", () => {
+    const [min, max] = positionAxisDomain(series(900, -500, 300));
+    expect(min).toBeLessThanOrEqual(-500);
+    expect(max).toBeGreaterThanOrEqual(900);
+  });
+
+  it("pads by a fraction of the span it is padding", () => {
+    // 0..1000 spans 1000, so each end gets POSITION_AXIS_PAD of that.
+    expect(positionAxisDomain(series(0, 1_000))).toEqual([
+      -1_000 * POSITION_AXIS_PAD,
+      1_000 * (1 + POSITION_AXIS_PAD),
+    ]);
+  });
+
+  it("stays a usable domain for an empty or flat series", () => {
+    for (const data of [[], series(0, 0)]) {
+      const [min, max] = positionAxisDomain(data);
+      expect(min).toBeLessThan(0);
+      expect(max).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe("positionAreaExtent", () => {
+  it("clamps both ends through zero, because the fill starts there", () => {
+    expect(positionAreaExtent(series(400, 1_200))).toEqual([0, 1_200]);
+    expect(positionAreaExtent(series(-400, -1_200))).toEqual([-1_200, 0]);
+    expect(positionAreaExtent(series(900, -500))).toEqual([-500, 900]);
+    expect(positionAreaExtent([])).toEqual([0, 0]);
+  });
+
+  it("is the unpadded inside of the axis domain", () => {
+    const data = series(900, -500);
+    const [extentMin, extentMax] = positionAreaExtent(data);
+    const [domainMin, domainMax] = positionAxisDomain(data);
+    expect(domainMin).toBeLessThan(extentMin);
+    expect(domainMax).toBeGreaterThan(extentMax);
+  });
+});
+
+/**
+ * The gradient's units are the *fill's* bounding box, not the plot area
+ * (objectBoundingBox is the SVG default), so the offset is taken from the
+ * area's extent. Handing it the padded domain instead paints a sliver of the
+ * opposite side's colour along the baseline of a one-sided book — which is
+ * precisely the misreading this item exists to remove.
+ */
+describe("zeroGradientOffset", () => {
+  it("puts the colour change where zero falls, measured from the top", () => {
+    expect(zeroGradientOffset([-100, 100])).toBeCloseTo(0.5, 10);
+    expect(zeroGradientOffset([-300, 100])).toBeCloseTo(0.25, 10);
+    expect(zeroGradientOffset([-100, 300])).toBeCloseTo(0.75, 10);
+  });
+
+  it("collapses to a single colour when the series never changes sign", () => {
+    expect(zeroGradientOffset(positionAreaExtent(series(400, 1_200)))).toBe(1);
+    expect(zeroGradientOffset(positionAreaExtent(series(-400, -1_200)))).toBe(0);
+  });
+
+  it("never leaves the 0..1 range an SVG stop accepts", () => {
+    for (const extent of [[0, 0], [5, 5], [100, -100], [-1, 0], [0, 1]] as Array<[number, number]>) {
+      const offset = zeroGradientOffset(extent);
+      expect(offset).toBeGreaterThanOrEqual(0);
+      expect(offset).toBeLessThanOrEqual(1);
+    }
   });
 });
 

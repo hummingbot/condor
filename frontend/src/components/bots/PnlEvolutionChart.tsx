@@ -30,7 +30,7 @@
 //     second instance's area resolve to the first instance's gradient (and
 //     cross-sync the two charts' tooltips) the moment both are on the page.
 
-import { useCallback, useId, type ReactNode } from "react";
+import { useCallback, useId, useMemo, type ReactNode } from "react";
 import {
   Area,
   CartesianGrid,
@@ -52,6 +52,9 @@ import {
   PLOT_INSET_LEFT,
   PLOT_INSET_RIGHT,
   PNL_SERIES_COLORS,
+  positionAreaExtent,
+  positionAxisDomain,
+  zeroGradientOffset,
   type PnlChartPoint,
 } from "@/lib/pnl-chart";
 import { getThemeColors } from "@/lib/theme-colors";
@@ -129,6 +132,7 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
   // an id but awkward in selectors, so strip them.
   const instanceId = useId().replace(/[^a-zA-Z0-9]/g, "");
   const gradientId = `pnlGrad${instanceId}`;
+  const posGradientId = `posGrad${instanceId}`;
 
   // recharts compares `tickFormatter` by identity, so these stay stable per symbol.
   const fmtAxis = useCallback((v: number) => formatAxisCurrency(v, currencySymbol, "pnl"), [currencySymbol]);
@@ -144,6 +148,15 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
   // Latest point is the live "now" point appended by aggregatePnlSeries
   const latest = data.length > 0 ? data[data.length - 1] : null;
   const hasPosition = data.some((p) => p.position !== 0);
+
+  // The position axis is pinned across zero rather than left to recharts, so
+  // the signed area always has its baseline on screen (READ-246). Memoised
+  // because recharts keeps the domain in its own store and a fresh array on
+  // every render would churn it.
+  const positionDomain = useMemo(() => positionAxisDomain(data), [data]);
+  // Measured against the area's own extent, not the padded domain: the fill's
+  // gradient is in objectBoundingBox units. See zeroGradientOffset.
+  const positionZeroOffset = useMemo(() => zeroGradientOffset(positionAreaExtent(data)), [data]);
 
   const tc = getThemeColors();
   const totalColor = (latest?.total ?? 0) >= 0 ? tc.up : tc.down;
@@ -253,6 +266,20 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
       <div data-pane="activity" style={PANE_PADDING}>
         <ResponsiveContainer width="100%" height={volumeHeight}>
           <ComposedChart data={data} margin={{ top: 4, right: PANE_MARGIN_RIGHT, left: 0, bottom: 4 }} syncId={instanceId}>
+            {/* One fill, two sides: a hard stop exactly where the position axis
+                crosses zero, so the part of the area above the baseline is
+                long-coloured and the part below is short-coloured. The two
+                colours are the app's own side colours (see sideColor in
+                lib/theme-colors), so they follow the theme — the colourblind
+                palette included. */}
+            {hasPosition && (
+              <defs>
+                <linearGradient id={posGradientId} x1="0" y1="0" x2="0" y2="1">
+                  <stop offset={positionZeroOffset} stopColor={tc.up} />
+                  <stop offset={positionZeroOffset} stopColor={tc.down} />
+                </linearGradient>
+              </defs>
+            )}
             <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" strokeOpacity={0.5} />
             <XAxis
               dataKey="time"
@@ -277,6 +304,7 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
             <YAxis
               yAxisId="pos"
               orientation="right"
+              domain={positionDomain}
               tickFormatter={fmtVolAxis}
               tick={hasPosition ? { fontSize: 10, fill: PNL_SERIES_COLORS.position } : false}
               stroke="var(--color-border)"
@@ -286,8 +314,37 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
             />
             <Tooltip content={<BottomTooltip symbol={currencySymbol} />} />
             <Line yAxisId="vol" type="monotone" dataKey="volume" stroke={PNL_SERIES_COLORS.volume} strokeWidth={1.5} dot={false} />
+            {/* Net position: an area filled from zero, not a bare line. The
+                stroke keeps the series' own violet — the colour the right-hand
+                ticks, the header's Pos stat and the tooltip already use — so
+                the fill is free to carry the *sign*. baseValue is pinned to 0
+                rather than left to recharts, which otherwise bases an area at
+                the domain edge whenever the domain does not straddle zero. */}
             {hasPosition && (
-              <Line yAxisId="pos" type="monotone" dataKey="position" stroke={PNL_SERIES_COLORS.position} strokeWidth={1.5} dot={false} />
+              <Area
+                yAxisId="pos"
+                type="monotone"
+                dataKey="position"
+                baseValue={0}
+                stroke={PNL_SERIES_COLORS.position}
+                strokeWidth={1.5}
+                fill={`url(#${posGradientId})`}
+                fillOpacity={0.22}
+                dot={false}
+              />
+            )}
+            {/* Drawn after the area so the baseline stays visible through the
+                fill. It is violet, not neutral: this pane has two Y axes and
+                only the right-hand one has a zero worth marking — the volume
+                axis starts at zero by construction, at the pane's floor. */}
+            {hasPosition && (
+              <ReferenceLine
+                yAxisId="pos"
+                y={0}
+                stroke={PNL_SERIES_COLORS.position}
+                strokeOpacity={0.45}
+                strokeDasharray="4 4"
+              />
             )}
           </ComposedChart>
         </ResponsiveContainer>

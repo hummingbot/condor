@@ -61,6 +61,14 @@ export const PANE_MARGIN_RIGHT = 12;
 export const PLOT_INSET_LEFT = PANE_PAD_X + AXIS_WIDTH;
 export const PLOT_INSET_RIGHT = PANE_PAD_X + PANE_MARGIN_RIGHT + AXIS_WIDTH;
 
+/**
+ * How much headroom the position axis keeps beyond the series, as a fraction of
+ * its own span. Small enough not to flatten the shape, big enough that a series
+ * that never changes sign still shows its zero line as a *line* rather than as
+ * the pane's bottom (or top) edge.
+ */
+export const POSITION_AXIS_PAD = 0.08;
+
 /** A single point on a PNL evolution chart (per-controller or aggregated). */
 export interface PnlChartPoint {
   time: number;
@@ -83,6 +91,70 @@ export function positionQuoteValue(positions: Record<string, unknown>[]): number
     value += isSell ? -notional : notional;
   }
   return value;
+}
+
+/**
+ * The Y domain for the position axis — always straddling zero (READ-246).
+ *
+ * `positionQuoteValue` above returns a *signed* notional: a short subtracts, so
+ * the sign of `position` is the single most important thing about it, and the
+ * series is drawn as an area filled from zero to say so. That only reads
+ * correctly if zero is actually inside the axis, which recharts' default
+ * `[0, "auto"]` does not guarantee: a user-provided bound is only ever widened
+ * to fit the data (`allowDataOverflow` is false), so a book that has been net
+ * short all session gets a domain of, say, [-800, -120] and an "area from zero"
+ * whose zero is off the top of the pane — filled edge to edge, sign invisible.
+ *
+ * So both ends are clamped through zero and then padded. The padding is what
+ * makes the never-flipped cases legible: with a bare [0, max] an all-long book
+ * would have its zero line sitting exactly on the pane's bottom edge, which
+ * reads as a border, not as a baseline the fill grows out of.
+ */
+export function positionAxisDomain(data: PnlChartPoint[]): [number, number] {
+  const [min, max] = positionAreaExtent(data);
+  // An all-zero (or empty) series has no span of its own to take a fraction of;
+  // any symmetric domain will do, since nothing is drawn on it.
+  const pad = (max - min || 1) * POSITION_AXIS_PAD;
+  return [min - pad, max + pad];
+}
+
+/**
+ * How far the drawn area actually reaches, top and bottom: the series' own
+ * extremes, each clamped through zero because the area is filled *from* zero
+ * and so always touches it.
+ *
+ * This is deliberately the unpadded extent, and it is not the axis domain. See
+ * `zeroGradientOffset`.
+ */
+export function positionAreaExtent(data: PnlChartPoint[]): [number, number] {
+  let min = 0;
+  let max = 0;
+  for (const point of data) {
+    if (point.position < min) min = point.position;
+    if (point.position > max) max = point.position;
+  }
+  return [min, max];
+}
+
+/**
+ * Where zero falls inside `extent`, as a 0..1 offset measured from the top.
+ *
+ * The signed area is filled from a vertical gradient with two stops at this
+ * exact offset — the long colour above it, the short colour below — which is
+ * how one `<Area>` shows two sides without splitting the series in two.
+ *
+ * The subtlety, and the reason this takes the *area's extent* rather than the
+ * axis domain it would be natural to reach for: an SVG gradient's default
+ * `gradientUnits` is `objectBoundingBox`, so offset 0 and offset 1 are the top
+ * and bottom of the **filled path**, not of the plot area. The filled path runs
+ * from the series' highest point to its lowest, both clamped through zero — the
+ * axis's padding is not part of it. Feeding the padded domain in here puts the
+ * colour change a few percent off the baseline, which on a book that never
+ * changes sign shows up as a band of the *wrong* colour hugging the zero line.
+ */
+export function zeroGradientOffset([min, max]: [number, number]): number {
+  if (!(max > min)) return 0.5;
+  return Math.min(1, Math.max(0, max / (max - min)));
 }
 
 /**
