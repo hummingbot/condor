@@ -28,6 +28,7 @@ import { useServer } from "@/hooks/useServer";
 import { useCondorWebSocket } from "@/hooks/useWebSocket";
 import { api, type BotLogEntry, type BotSummary, type ControllerInfo, type ControllerPerformanceSnapshot } from "@/lib/api";
 import { formatCurrencyVolume, pnlColor } from "@/lib/formatters";
+import { historyRowBudget } from "@/lib/history-pagination";
 import { samplingIntervalSince } from "@/lib/pnl-chart";
 
 function formatUptime(deployedAt: string | null): string {
@@ -580,18 +581,26 @@ export function ActiveBotsTab() {
   // actually asked for.
   const perfInterval = useMemo(() => samplingIntervalSince(earliestDeploy), [earliestDeploy]);
 
-  // Fetch performance history for sparklines (all controllers at once)
+  // Fetch performance history for sparklines (all controllers at once).
+  //
+  // Walked page by page rather than requested once: a page is capped at 1000
+  // ROWS and the sampler writes one row per controller per dump, so the single
+  // request this used to make showed 1000/N instants — eight hours for ten
+  // controllers, four for twenty, whatever `start_time` asked for (CORR-237).
+  // The row budget is sized to the fleet for the same reason: the interval was
+  // already chosen so the span fits ~1000 *instants* (PERF-238), and N
+  // controllers turn each of those into up to N rows.
   const { data: perfHistory } = useQuery({
     // The interval is part of the key so two resolutions never share a cache
     // entry, and last in it so the shared socket's prefix-matched live merge
     // (`mergeIntoMatchingQueries`) still finds this query (PERF-238).
     queryKey: ["controller-perf-history-all", server, earliestDeploy, perfInterval],
-    queryFn: () =>
-      api.getControllerPerformanceHistory(server!, {
-        interval: perfInterval,
-        limit: 1000,
-        start_time: earliestDeploy,
-      }),
+    queryFn: ({ signal }) =>
+      api.getControllerPerformanceHistoryAll(
+        server!,
+        { interval: perfInterval, start_time: earliestDeploy },
+        { maxRows: historyRowBudget(data?.controllers?.length ?? 0), signal },
+      ),
     enabled: !!server && (data?.controllers?.length ?? 0) > 0,
     refetchInterval: 120_000,
     staleTime: 60_000,
@@ -757,6 +766,7 @@ export function ActiveBotsTab() {
           controllers={controllers}
           currencySymbol={currencySymbol}
           convert={convert}
+          truncated={perfHistory?.truncated ?? false}
         />
       )}
 

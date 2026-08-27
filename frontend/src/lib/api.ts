@@ -1,3 +1,6 @@
+import { controllerKey } from "@/lib/controller-identity";
+import { collectCursorPages, type WalkOutcome } from "@/lib/history-pagination";
+
 import { authFetch, authHeaders } from "./auth-token";
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
@@ -1417,6 +1420,117 @@ export interface BacktestTask {
   saved?: boolean;
 }
 
+// ── Controller performance history ──
+
+/** Everything the history route accepts except the two the walk owns. */
+export interface ControllerPerformanceHistoryQuery {
+  bot_name?: string;
+  controller_id?: string;
+  start_time?: string;
+  end_time?: string;
+  interval?: string;
+}
+
+/** A whole history, assembled from however many pages it took. */
+export interface ControllerPerformanceHistoryAllResponse
+  extends ControllerPerformanceHistoryResponse {
+  /** How many requests were issued. */
+  pages: number;
+  /** True when a cap or a failure ended the walk before the history ran out. */
+  truncated: boolean;
+  /** Why it stopped — `"complete"` is the only one that means "this is all of it". */
+  outcome: WalkOutcome;
+}
+
+function fetchControllerPerformanceHistoryPage(
+  server: string,
+  params: ControllerPerformanceHistoryQuery & { limit?: number; cursor?: string } = {},
+  init?: RequestInit,
+) {
+  const qs = new URLSearchParams();
+  if (params.bot_name) qs.set("bot_name", params.bot_name);
+  if (params.controller_id) qs.set("controller_id", params.controller_id);
+  if (params.start_time) qs.set("start_time", params.start_time);
+  if (params.end_time) qs.set("end_time", params.end_time);
+  if (params.interval) qs.set("interval", params.interval);
+  if (params.limit) qs.set("limit", String(params.limit));
+  if (params.cursor) qs.set("cursor", params.cursor);
+  const q = qs.toString();
+  return apiFetch<ControllerPerformanceHistoryResponse>(
+    `/api/v1/servers/${encodeURIComponent(server)}/controller-performance/history${q ? `?${q}` : ""}`,
+    init,
+  );
+}
+
+/**
+ * The whole history a query describes, walked page by page.
+ *
+ * One request answers with at most `limit` ROWS, and the route caps `limit` at
+ * 1000 (CORR-260) — but the sampler writes one row per controller per dump, so
+ * for a fleet of N controllers those 1000 rows are only 1000/N instants. Both
+ * charts used to issue that single request and never look at `next_cursor`, so
+ * the visible window silently collapsed as controllers were added: ten
+ * controllers at five-minute dumps drew eight hours however far back the bots
+ * actually went (CORR-237). The cursor is the only way to ask for more, and
+ * since CORR-259 the route actually forwards it.
+ *
+ * **The interval is bound once, here, and every page carries that same value.**
+ * It is not a detail: `pickSamplingInterval` chooses a resolution from how long
+ * the fleet has been running (PERF-238), and a follow-up page fetched at a
+ * different resolution would splice two resolutions into one series — a line
+ * whose left half is hourly and whose right half is five-minutely, with no
+ * visible seam. `params` is spread into every request unchanged and only
+ * `limit`/`cursor` vary between pages, which is what makes that true by
+ * construction rather than by discipline.
+ *
+ * The result is shape-compatible with a single page — same `snapshots`, same
+ * `interval` — because the shared socket merges live frames into whatever these
+ * queries cached (`mergeIntoMatchingQueries`) by spreading it. It adds only
+ * `pages`/`truncated`/`outcome`, and `next_cursor` becomes "where a resumed
+ * walk would continue", which is null exactly when the history ran out.
+ */
+async function fetchControllerPerformanceHistoryAll(
+  server: string,
+  params: ControllerPerformanceHistoryQuery = {},
+  opts: { pageSize?: number; maxRows?: number; maxPages?: number; signal?: AbortSignal } = {},
+): Promise<ControllerPerformanceHistoryAllResponse> {
+  let first: ControllerPerformanceHistoryResponse | undefined;
+
+  const walk = await collectCursorPages<ControllerPerformanceSnapshot>(
+    async ({ limit, cursor }) => {
+      const page = await fetchControllerPerformanceHistoryPage(
+        server,
+        { ...params, limit, cursor },
+        { signal: opts.signal },
+      );
+      first ??= page;
+      return { rows: page.snapshots ?? [], nextCursor: page.next_cursor ?? null };
+    },
+    {
+      pageSize: opts.pageSize,
+      maxRows: opts.maxRows,
+      maxPages: opts.maxPages,
+      signal: opts.signal,
+      // Pages overlap when the newest one is being appended to as it is read.
+      // Keyed on bot + controller + timestamp, because a bare controller id is
+      // a config id two bots can share (CORR-241) and their rows land on one
+      // shared dump timestamp.
+      dedupeKey: (snap) => `${controllerKey(snap)}:${snap.timestamp}`,
+    },
+  );
+
+  return {
+    snapshots: walk.rows,
+    next_cursor: walk.nextCursor,
+    interval: first?.interval ?? params.interval ?? "5m",
+    server_online: first?.server_online,
+    error_hint: first?.error_hint,
+    pages: walk.pages,
+    truncated: walk.truncated,
+    outcome: walk.outcome,
+  };
+}
+
 // ── API functions ──
 
 export const api = {
@@ -1526,31 +1640,17 @@ export const api = {
       { method: "POST", body: JSON.stringify({ controller_names: controllerNames }) },
     ),
 
-  getControllerPerformanceHistory: (
-    server: string,
-    params: {
-      bot_name?: string;
-      controller_id?: string;
-      start_time?: string;
-      end_time?: string;
-      interval?: string;
-      limit?: number;
-      cursor?: string;
-    } = {},
-  ) => {
-    const qs = new URLSearchParams();
-    if (params.bot_name) qs.set("bot_name", params.bot_name);
-    if (params.controller_id) qs.set("controller_id", params.controller_id);
-    if (params.start_time) qs.set("start_time", params.start_time);
-    if (params.end_time) qs.set("end_time", params.end_time);
-    if (params.interval) qs.set("interval", params.interval);
-    if (params.limit) qs.set("limit", String(params.limit));
-    if (params.cursor) qs.set("cursor", params.cursor);
-    const q = qs.toString();
-    return apiFetch<ControllerPerformanceHistoryResponse>(
-      `/api/v1/servers/${encodeURIComponent(server)}/controller-performance/history${q ? `?${q}` : ""}`,
-    );
-  },
+  /** One page of controller performance history. Charts want the whole thing — see below. */
+  getControllerPerformanceHistory: fetchControllerPerformanceHistoryPage,
+
+  /**
+   * Every page of controller performance history, at one constant interval.
+   *
+   * What the charts call: a single page is at most 1000 rows, and rows are per
+   * controller, so one request is a window that shrinks as the fleet grows
+   * (CORR-237).
+   */
+  getControllerPerformanceHistoryAll: fetchControllerPerformanceHistoryAll,
 
   getBotRuns: (
     server: string,

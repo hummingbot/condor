@@ -62,9 +62,20 @@ interface Props {
   currencySymbol?: string;
   /** Optional row between the header and the panes (the aggregated chart's controller chips). */
   filters?: ReactNode;
+  /**
+   * A short warning shown beside the header stats.
+   *
+   * It exists for one case in particular: a history assembled from a bounded
+   * cursor walk that hit its cap, or lost a page to a failing server, is missing
+   * its *oldest* end — and a truncated series drawn without comment is
+   * indistinguishable from a complete one, which is exactly the bug that made
+   * this chart show eight hours of a five-day fleet (CORR-237). Whatever
+   * shortens a series has to say so here.
+   */
+  notice?: { label: string; detail?: string };
 }
 
-export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, currencySymbol = "$", filters }: Props) {
+export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, currencySymbol = "$", filters, notice }: Props) {
   // Unique per mounted instance: two charts on one page must not share a
   // gradient element or a sync group. useId() emits colons, which are legal in
   // an id but awkward in selectors, so strip them.
@@ -113,6 +124,14 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
             </div>
           )}
         </div>
+        {notice && (
+          <span
+            title={notice.detail}
+            className="rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide bg-[var(--color-yellow)]/15 text-[var(--color-yellow)] cursor-help"
+          >
+            {notice.label}
+          </span>
+        )}
       </div>
 
       {filters}

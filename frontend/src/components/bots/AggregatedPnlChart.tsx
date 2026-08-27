@@ -24,6 +24,13 @@ interface Props {
   controllers: ControllerInfo[];
   currencySymbol?: string;
   convert?: ConvertFn;
+  /**
+   * The snapshots are only part of the history — the cursor walk that fetched
+   * them stopped at a cap or on a failed page, so the line starts later than the
+   * fleet did. Surfaced rather than absorbed: a short series that looks complete
+   * is the bug (CORR-237).
+   */
+  truncated?: boolean;
 }
 
 /**
@@ -31,7 +38,7 @@ interface Props {
  * the only thing this component decides. The drawing is PnlEvolutionChart's
  * (ARCH-242) and the fold is aggregatePnlSeries' (ARCH-243).
  */
-export function AggregatedPnlChart({ snapshots, controllers, currencySymbol = "$", convert }: Props) {
+export function AggregatedPnlChart({ snapshots, controllers, currencySymbol = "$", convert, truncated = false }: Props) {
   /**
    * One entry per controller in the fleet: `key` is what the fold and the
    * selection are keyed on, `label` is what the chip says.
@@ -162,6 +169,15 @@ export function AggregatedPnlChart({ snapshots, controllers, currencySymbol = "$
       volumeHeight={120}
       currencySymbol={currencySymbol}
       filters={chips}
+      notice={
+        truncated
+          ? {
+              label: "partial history",
+              detail:
+                "This fleet has more stored history than one chart may load at once, so the series starts later than the earliest deploy.",
+            }
+          : undefined
+      }
     />
   );
 }

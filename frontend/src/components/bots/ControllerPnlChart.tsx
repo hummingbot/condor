@@ -3,6 +3,7 @@ import { useMemo } from "react";
 
 import { api, type ControllerInfo } from "@/lib/api";
 import { controllerKey } from "@/lib/controller-identity";
+import { historyRowBudget } from "@/lib/history-pagination";
 import { aggregatePnlSeries, samplingIntervalSince } from "@/lib/pnl-chart";
 import type { ConvertFn } from "@/lib/rates";
 import { PnlEvolutionChart } from "./PnlEvolutionChart";
@@ -46,14 +47,22 @@ export function ControllerPnlChart({ server, controllerId, botName, deployedAt, 
     // live frames by *prefix* (`mergeIntoMatchingQueries`), so appending to the
     // key leaves that routing intact.
     queryKey: ["controller-perf-history", server, botName, controllerId, deployedAt, interval],
-    queryFn: () =>
-      api.getControllerPerformanceHistory(server, {
-        controller_id: controllerId,
-        bot_name: botName,
-        interval,
-        limit: 1000,
-        start_time: deployedAt ?? undefined,
-      }),
+    // Walked page by page: a page holds 1000 ROWS, and while one controller is
+    // usually one row per instant, the bucketing is not guaranteed to be — so
+    // the ceiling on a single request is a ceiling on the visible window unless
+    // the cursor is followed (CORR-237). Every page carries `interval`
+    // unchanged, so the series is one resolution end to end (PERF-238).
+    queryFn: ({ signal }) =>
+      api.getControllerPerformanceHistoryAll(
+        server,
+        {
+          controller_id: controllerId,
+          bot_name: botName,
+          interval,
+          start_time: deployedAt ?? undefined,
+        },
+        { maxRows: historyRowBudget(1), signal },
+      ),
     refetchInterval: 60_000,
     staleTime: 30_000,
   });
@@ -100,6 +109,15 @@ export function ControllerPnlChart({ server, controllerId, botName, deployedAt, 
       pnlHeight={pnlH}
       volumeHeight={height - pnlH}
       currencySymbol={currencySymbol}
+      notice={
+        raw?.truncated
+          ? {
+              label: "partial history",
+              detail:
+                "This controller has more stored history than one chart may load at once, so the series starts later than its deploy.",
+            }
+          : undefined
+      }
     />
   );
 }
