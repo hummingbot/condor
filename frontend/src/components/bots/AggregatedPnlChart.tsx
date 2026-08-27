@@ -9,6 +9,13 @@ import { PnlEvolutionChart } from "./PnlEvolutionChart";
 
 const CTRL_COLORS = ["#22c55e", "#3b82f6", "#f59e0b", "#ef4444", "#a78bfa", "#ec4899", "#14b8a6", "#f97316"];
 
+/** Do two selections hold exactly the same ids? */
+function sameIds(a: Set<string>, b: Set<string>): boolean {
+  if (a.size !== b.size) return false;
+  for (const id of a) if (!b.has(id)) return false;
+  return true;
+}
+
 // ── Main component ──
 
 interface Props {
@@ -37,20 +44,35 @@ export function AggregatedPnlChart({ snapshots, controllers, currencySymbol = "$
     return ids;
   }, [controllers]);
 
-  const [enabled, setEnabled] = useState<Set<string>>(() => new Set(controllerIds.map((c) => c.id)));
+  /**
+   * The fleet's ids as one string. The prune below keys on this and not on
+   * `controllerIds`, because every `bots` WS frame rebuilds the `controllers`
+   * array — and with it `controllerIds` — out of the same ids: keying on the
+   * array identity re-synced the selection on every frame, and since the
+   * updater always built a fresh Set, `enabled` got a new identity each time,
+   * invalidating the `data` memo below and forcing a second render pass for a
+   * selection that had not changed (PERF-240).
+   */
+  const idSignature = controllerIds.map((c) => c.id).join("\u0000");
 
-  // Sync when controllers change
-  useMemo(() => {
-    const allIds = new Set(controllerIds.map((c) => c.id));
+  const [enabled, setEnabled] = useState<Set<string>>(() => new Set(controllerIds.map((c) => c.id)));
+  const [syncedIds, setSyncedIds] = useState(idSignature);
+
+  // Drop ids that left the fleet, while rendering rather than in an effect, so
+  // the chips and the fold never paint a controller that is already gone.
+  if (syncedIds !== idSignature) {
+    setSyncedIds(idSignature);
     setEnabled((prev) => {
-      const next = new Set(prev);
-      for (const id of prev) {
-        if (!allIds.has(id)) next.delete(id);
-      }
-      if (next.size === 0) return allIds;
-      return next;
+      const allIds = new Set(controllerIds.map((c) => c.id));
+      const kept = new Set<string>();
+      for (const id of prev) if (allIds.has(id)) kept.add(id);
+      // Nothing survived the prune -> fall back to the whole fleet.
+      const resolved = kept.size === 0 ? allIds : kept;
+      // Same selection, expressed differently: keep the identity so the
+      // aggregation memo holds.
+      return sameIds(resolved, prev) ? prev : resolved;
     });
-  }, [controllerIds]); // eslint-disable-line react-hooks/exhaustive-deps
+  }
 
   const toggleController = (id: string) => {
     setEnabled((prev) => {
