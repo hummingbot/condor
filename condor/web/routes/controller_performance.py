@@ -5,6 +5,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
 
+from condor.fetchers._pagination import next_cursor as _next_cursor
 from condor.fetchers.bot_performance import extract_snapshots as _extract_snapshots
 from condor.fetchers.bot_performance import fetch_all_bot_performance
 from condor.web.auth import require_server_access
@@ -240,12 +241,11 @@ async def get_controller_performance_history(
         )
 
     snapshots = _extract_snapshots(result)
-    next_cursor = None
-    if isinstance(result, dict):
-        next_cursor = result.get("next_cursor") or result.get("cursor")
 
     return ControllerPerformanceHistoryResponse(
         snapshots=[ControllerPerformanceSnapshot.from_raw(s) for s in snapshots],
-        next_cursor=next_cursor,
+        # Upstream nests the cursor under "pagination"; the shared extractor
+        # reads all four spellings the backend has used (CORR-259).
+        next_cursor=_next_cursor(result),
         interval=interval,
     )
