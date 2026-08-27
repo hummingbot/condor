@@ -3,7 +3,7 @@ import { useMemo } from "react";
 
 import { api, type ControllerInfo } from "@/lib/api";
 import { controllerKey } from "@/lib/controller-identity";
-import { aggregatePnlSeries } from "@/lib/pnl-chart";
+import { aggregatePnlSeries, samplingIntervalSince } from "@/lib/pnl-chart";
 import type { ConvertFn } from "@/lib/rates";
 import { PnlEvolutionChart } from "./PnlEvolutionChart";
 
@@ -26,18 +26,31 @@ interface Props {
  * and the fold is aggregatePnlSeries' (ARCH-243).
  */
 export function ControllerPnlChart({ server, controllerId, botName, deployedAt, height = 400, currencySymbol = "$", convert, controller }: Props) {
+  // How finely to sample depends on how long this controller has actually been
+  // running: a month-old bot at 5m is 8,640 points to draw a line 720 hourly
+  // ones draw identically — and the route caps a page at 1000 rows, so asking
+  // for them silently returned a truncated history (PERF-238). Memoised on the
+  // deploy time rather than recomputed from a live clock each render: the
+  // thresholds are days apart, so a session that crosses one can carry the
+  // finer interval until it remounts, and in exchange the query key is stable.
+  const interval = useMemo(() => samplingIntervalSince(deployedAt), [deployedAt]);
+
   const { data: raw, isLoading } = useQuery({
     // `bot_name` is part of the key, not just the request: the query asks
     // upstream for one bot's rows, so two bots running the same controller
     // config would otherwise share a cache entry — and the socket, which routes
     // live frames by this key's prefix, would push each bot's snapshots into
     // the other's chart (CORR-241).
-    queryKey: ["controller-perf-history", server, botName, controllerId, deployedAt],
+    // The interval is part of the key so a coarser and a finer series never
+    // share a cache entry (PERF-238). It goes last: the shared socket routes
+    // live frames by *prefix* (`mergeIntoMatchingQueries`), so appending to the
+    // key leaves that routing intact.
+    queryKey: ["controller-perf-history", server, botName, controllerId, deployedAt, interval],
     queryFn: () =>
       api.getControllerPerformanceHistory(server, {
         controller_id: controllerId,
         bot_name: botName,
-        interval: "5m",
+        interval,
         limit: 1000,
         start_time: deployedAt ?? undefined,
       }),

@@ -85,12 +85,12 @@ function mergeSnapshots(
 /**
  * Merge snapshots into every cached performance-history query under `prefix`.
  *
- * The readers of these caches append a time bound to the key
- * (`["controller-perf-history-all", server, earliestDeploy]`,
- * `["controller-perf-history", server, botName, controllerId, deployedAt]`) that is
- * derived from data this module never sees. `setQueryData` matches by exact key
- * hash, so the socket has to discover the live keys rather than reconstruct
- * them. Entries that don't exist yet are left alone — the query's own fetch
+ * The readers of these caches append a time bound and a sampling interval to
+ * the key (`["controller-perf-history-all", server, earliestDeploy, interval]`,
+ * `["controller-perf-history", server, botName, controllerId, deployedAt, interval]`)
+ * that is derived from data this module never sees. `setQueryData` matches by
+ * exact key hash, so the socket has to discover the live keys rather than
+ * reconstruct them. Entries that don't exist yet are left alone — the query's own fetch
  * seeds them, and merging into a missing entry would produce a history with no
  * beginning.
  */
@@ -232,10 +232,13 @@ export function handleMessage(channel: string, data: unknown): void {
     if (incoming?.snapshots) {
       // Both readers key on a time bound the socket cannot know — the fleet
       // query adds `earliestDeploy` (ActiveBotsTab) and the per-controller one
-      // adds `deployedAt` (ControllerPnlChart). `setQueryData` matches the key
-      // hash exactly, so writing the short prefix here landed on an entry that
-      // never exists and every frame was silently dropped. Resolve the live
-      // keys from the cache instead, the way the `executors` branch above does.
+      // adds `deployedAt` (ControllerPnlChart) — and on the sampling interval
+      // derived from it (PERF-238). `setQueryData` matches the key hash
+      // exactly, so writing the short prefix here landed on an entry that never
+      // exists and every frame was silently dropped. Resolve the live keys from
+      // the cache instead, the way the `executors` branch above does. Live
+      // frames arrive at the socket's own cadence and are merged whatever the
+      // cache's interval: they only add detail at the right-hand edge.
       mergeIntoMatchingQueries(["controller-perf-history-all", server], incoming.snapshots);
 
       // Same, per controller. The per-controller cache is scoped to one bot

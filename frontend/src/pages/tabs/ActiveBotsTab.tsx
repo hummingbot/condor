@@ -28,6 +28,7 @@ import { useServer } from "@/hooks/useServer";
 import { useCondorWebSocket } from "@/hooks/useWebSocket";
 import { api, type BotLogEntry, type BotSummary, type ControllerInfo, type ControllerPerformanceSnapshot } from "@/lib/api";
 import { formatCurrencyVolume, pnlColor } from "@/lib/formatters";
+import { samplingIntervalSince } from "@/lib/pnl-chart";
 
 function formatUptime(deployedAt: string | null): string {
   if (!deployedAt) return "—";
@@ -570,12 +571,24 @@ export function ActiveBotsTab() {
     return earliest ? new Date(earliest).toISOString() : undefined;
   }, [data?.bots]);
 
+  // How finely to sample the fleet's history depends on how long the fleet has
+  // actually been running: pinned at 5m, a month-old fleet asked for 8,640
+  // points per controller to draw what 720 hourly ones draw identically — and
+  // since the route caps a page at 1000 rows it got the first 1000 and drew a
+  // truncated history (PERF-238). Derived from the same `earliestDeploy` the
+  // request sends as `start_time`, so the interval always describes the window
+  // actually asked for.
+  const perfInterval = useMemo(() => samplingIntervalSince(earliestDeploy), [earliestDeploy]);
+
   // Fetch performance history for sparklines (all controllers at once)
   const { data: perfHistory } = useQuery({
-    queryKey: ["controller-perf-history-all", server, earliestDeploy],
+    // The interval is part of the key so two resolutions never share a cache
+    // entry, and last in it so the shared socket's prefix-matched live merge
+    // (`mergeIntoMatchingQueries`) still finds this query (PERF-238).
+    queryKey: ["controller-perf-history-all", server, earliestDeploy, perfInterval],
     queryFn: () =>
       api.getControllerPerformanceHistory(server!, {
-        interval: "5m",
+        interval: perfInterval,
         limit: 1000,
         start_time: earliestDeploy,
       }),

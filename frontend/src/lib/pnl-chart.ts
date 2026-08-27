@@ -184,3 +184,94 @@ export function aggregatePnlSeries(
 
   return points;
 }
+
+// ── Sampling interval selection (PERF-238) ──
+
+/**
+ * The sampling intervals the controller-performance-history endpoint accepts,
+ * finest first.
+ *
+ * This is not a guess and not the client docstring's abridged `"5m", "1h",
+ * "1d"`: upstream validates the query parameter against the pattern
+ * `^(5m|15m|30m|1h|4h|12h|1d)$` and answers 422 for anything else, so this
+ * tuple is the whole accepted set and requesting a value outside it turns a
+ * chart into an error, not a coarser chart.
+ */
+export const SAMPLING_INTERVALS = ["5m", "15m", "30m", "1h", "4h", "12h", "1d"] as const;
+
+export type SamplingInterval = (typeof SAMPLING_INTERVALS)[number];
+
+const SAMPLING_INTERVAL_MS: Record<SamplingInterval, number> = {
+  "5m": 5 * 60_000,
+  "15m": 15 * 60_000,
+  "30m": 30 * 60_000,
+  "1h": 60 * 60_000,
+  "4h": 4 * 60 * 60_000,
+  "12h": 12 * 60 * 60_000,
+  "1d": 24 * 60 * 60_000,
+};
+
+/**
+ * How many points one history query may ask for.
+ *
+ * Two independent limits happen to agree on this number, which is why it is a
+ * good budget rather than a round one: the route caps `limit` at 1000
+ * (CORR-260, `Query(1000, ge=1, le=1000)`), so a request for more points than
+ * this cannot be answered in one page anyway; and the chart is drawn about a
+ * thousand pixels wide, so a thousand points is already roughly one point per
+ * column and everything beyond it is transferred, parsed, merged,
+ * deep-compared and folded to land on a pixel that is already lit.
+ */
+export const HISTORY_POINT_BUDGET = 1000;
+
+/**
+ * Choose the finest sampling interval whose point count over `spanMs` fits the
+ * budget.
+ *
+ * Both charts used to pin `"5m"` whatever span they asked for, so a fleet that
+ * had been running a month requested 8,640 points per controller to draw a line
+ * that ~720 hourly points draw identically — and then, because the route caps a
+ * page at 1000 rows, actually got the first 1000 of them and silently drew a
+ * partial history. Deriving the interval from how long the bots have really been
+ * running is the cheapest possible reduction: it happens at the source, before
+ * the bytes exist.
+ *
+ * Kept pure and span-shaped (rather than reading a deploy time and a clock) so
+ * every threshold is a one-line test. With the default budget the ladder works
+ * out to roughly: up to ~3.5d → 5m, ~10d → 15m, ~20d → 30m, ~41d → 1h,
+ * ~166d → 4h, ~500d → 12h, beyond that → 1d.
+ *
+ * A span that is absent, zero, negative or not finite means "we do not know how
+ * far back this goes", and the answer there is the finest interval — the
+ * previous behaviour — not a coarse one: guessing coarse would throw away
+ * detail for a bot that started ten minutes ago.
+ */
+export function pickSamplingInterval(
+  spanMs: number | undefined,
+  budget: number = HISTORY_POINT_BUDGET,
+): SamplingInterval {
+  if (spanMs === undefined || !Number.isFinite(spanMs) || spanMs <= 0) return "5m";
+  for (const interval of SAMPLING_INTERVALS) {
+    if (Math.ceil(spanMs / SAMPLING_INTERVAL_MS[interval]) <= budget) return interval;
+  }
+  return SAMPLING_INTERVALS[SAMPLING_INTERVALS.length - 1];
+}
+
+/**
+ * The sampling interval for a history query that starts at `startTime`.
+ *
+ * The runtime comes from the data the callers already hold — a bot's
+ * `deployed_at`, or the earliest `deployed_at` across the fleet — which is the
+ * same value they pass as `start_time`, so the interval always describes the
+ * window actually requested. An unparseable or missing start time falls back to
+ * `"5m"` through `pickSamplingInterval`.
+ */
+export function samplingIntervalSince(
+  startTime: string | null | undefined,
+  now: number = Date.now(),
+): SamplingInterval {
+  if (!startTime) return "5m";
+  const startMs = Date.parse(startTime);
+  if (Number.isNaN(startMs)) return "5m";
+  return pickSamplingInterval(now - startMs);
+}

@@ -16,7 +16,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ControllerInfo, ControllerPerformanceSnapshot } from "./api";
 import { controllerKey } from "./controller-identity";
-import { aggregatePnlSeries, positionQuoteValue } from "./pnl-chart";
+import {
+  HISTORY_POINT_BUDGET,
+  SAMPLING_INTERVALS,
+  aggregatePnlSeries,
+  pickSamplingInterval,
+  positionQuoteValue,
+  samplingIntervalSince,
+} from "./pnl-chart";
 
 const NOW = Date.parse("2026-08-27T12:00:00Z");
 
@@ -488,5 +495,121 @@ describe("positionQuoteValue", () => {
     expect(positionQuoteValue([{ amount: 1, breakeven_price: 3, entry_price: 5, current_price: 7 }])).toBe(3);
     expect(positionQuoteValue([{ amount: 1, entry_price: 5, current_price: 7 }])).toBe(5);
     expect(positionQuoteValue([{ amount: 1, current_price: 7 }])).toBe(7);
+  });
+});
+
+/**
+ * Interval selection (PERF-238).
+ *
+ * The rule under test is one sentence — pick the finest interval upstream
+ * accepts whose point count over the span fits the budget — and the reason it
+ * is worth pinning is that both halves of it are external facts that can drift:
+ * the accepted set is a regex on the server (`^(5m|15m|30m|1h|4h|12h|1d)$`,
+ * anything else is a 422) and the budget is the route's `limit` ceiling of
+ * 1000. A test per threshold makes a change to either one fail loudly here
+ * rather than quietly on a chart.
+ */
+describe("pickSamplingInterval", () => {
+  const MIN = 60_000;
+  const HOUR = 60 * MIN;
+  const DAY = 24 * HOUR;
+
+  it("only ever returns a value the endpoint accepts", () => {
+    const accepted = /^(5m|15m|30m|1h|4h|12h|1d)$/;
+    // Every interval in the ladder is one upstream takes...
+    for (const iv of SAMPLING_INTERVALS) expect(iv).toMatch(accepted);
+    // ...and no span, however absurd, can produce anything outside it.
+    for (const span of [1, MIN, HOUR, DAY, 400 * DAY, 100_000 * DAY, Number.MAX_SAFE_INTEGER]) {
+      expect(pickSamplingInterval(span)).toMatch(accepted);
+    }
+  });
+
+  it("keeps 5m for a bot deployed minutes or hours ago", () => {
+    expect(pickSamplingInterval(10 * MIN)).toBe("5m");
+    expect(pickSamplingInterval(HOUR)).toBe("5m");
+    expect(pickSamplingInterval(DAY)).toBe("5m");
+  });
+
+  it("steps up one rung at each budget threshold", () => {
+    // The exact boundary for each rung is budget * interval; one millisecond
+    // past it the rung no longer fits and the next one is chosen.
+    const boundaries: [number, string, string][] = [
+      [HISTORY_POINT_BUDGET * 5 * MIN, "5m", "15m"],
+      [HISTORY_POINT_BUDGET * 15 * MIN, "15m", "30m"],
+      [HISTORY_POINT_BUDGET * 30 * MIN, "30m", "1h"],
+      [HISTORY_POINT_BUDGET * HOUR, "1h", "4h"],
+      [HISTORY_POINT_BUDGET * 4 * HOUR, "4h", "12h"],
+      [HISTORY_POINT_BUDGET * 12 * HOUR, "12h", "1d"],
+    ];
+    for (const [edge, atEdge, past] of boundaries) {
+      expect(pickSamplingInterval(edge)).toBe(atEdge);
+      expect(pickSamplingInterval(edge + 1)).toBe(past);
+    }
+  });
+
+  it("asks for hourly points, not 5-minute ones, for a month-old fleet", () => {
+    // The case the item is about: 30 days at 5m is 8,640 points, of which the
+    // route would return the first 1000.
+    expect(pickSamplingInterval(30 * DAY)).toBe("1h");
+    expect(30 * DAY / HOUR).toBeLessThanOrEqual(HISTORY_POINT_BUDGET);
+  });
+
+  it("never exceeds the budget, and never coarsens further than it must", () => {
+    const ms: Record<string, number> = {
+      "5m": 5 * MIN, "15m": 15 * MIN, "30m": 30 * MIN,
+      "1h": HOUR, "4h": 4 * HOUR, "12h": 12 * HOUR, "1d": DAY,
+    };
+    for (let days = 1; days <= 600; days++) {
+      const span = days * DAY;
+      const chosen = pickSamplingInterval(span);
+      expect(Math.ceil(span / ms[chosen])).toBeLessThanOrEqual(HISTORY_POINT_BUDGET);
+      // and the rung below it genuinely did not fit
+      const finer = SAMPLING_INTERVALS[SAMPLING_INTERVALS.indexOf(chosen) - 1];
+      if (finer) expect(Math.ceil(span / ms[finer])).toBeGreaterThan(HISTORY_POINT_BUDGET);
+    }
+  });
+
+  it("saturates at 1d rather than inventing a coarser interval", () => {
+    // 1d over 10,000 days is 10,000 points, well past the budget — but "1w" is
+    // a 422, so the ladder's last rung is the answer, not the next power of ten.
+    expect(pickSamplingInterval(10_000 * DAY)).toBe("1d");
+  });
+
+  it("falls back to the finest interval when the span is unknown or nonsense", () => {
+    // Not knowing how far back the window goes must not cost detail for a bot
+    // that started ten minutes ago, so "unknown" means 5m — the old behaviour.
+    expect(pickSamplingInterval(undefined)).toBe("5m");
+    expect(pickSamplingInterval(0)).toBe("5m");
+    expect(pickSamplingInterval(-DAY)).toBe("5m");
+    expect(pickSamplingInterval(NaN)).toBe("5m");
+    expect(pickSamplingInterval(Infinity)).toBe("5m");
+  });
+
+  it("honours a caller-supplied budget", () => {
+    expect(pickSamplingInterval(DAY, 100)).toBe("15m");
+    expect(pickSamplingInterval(DAY, 10)).toBe("4h");
+  });
+});
+
+describe("samplingIntervalSince", () => {
+  const DAY = 24 * 60 * 60_000;
+
+  it("measures the span from a deploy timestamp to now", () => {
+    expect(samplingIntervalSince("2026-08-27T11:00:00Z", NOW)).toBe("5m");
+    expect(samplingIntervalSince(new Date(NOW - 30 * DAY).toISOString(), NOW)).toBe("1h");
+    expect(samplingIntervalSince(new Date(NOW - 300 * DAY).toISOString(), NOW)).toBe("12h");
+  });
+
+  it("returns 5m when there is no usable start time", () => {
+    // The callers pass `deployed_at`/`earliestDeploy` straight through, and both
+    // are optional: no start time is an unbounded request, not a wide one.
+    expect(samplingIntervalSince(undefined, NOW)).toBe("5m");
+    expect(samplingIntervalSince(null, NOW)).toBe("5m");
+    expect(samplingIntervalSince("", NOW)).toBe("5m");
+    expect(samplingIntervalSince("not a date", NOW)).toBe("5m");
+  });
+
+  it("treats a start time in the future as unknown rather than coarse", () => {
+    expect(samplingIntervalSince(new Date(NOW + DAY).toISOString(), NOW)).toBe("5m");
   });
 });
