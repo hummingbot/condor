@@ -13,106 +13,11 @@ import {
 } from "recharts";
 
 import type { ControllerInfo, ControllerPerformanceSnapshot } from "@/lib/api";
-import { formatCurrencyVolume, formatCurrencyPnl, formatTime, pnlColor, toMs } from "@/lib/formatters";
-import { positionQuoteValue, PNL_SERIES_COLORS, type PnlChartPoint } from "@/lib/pnl-chart";
+import { formatCurrencyVolume, formatCurrencyPnl, formatTime, pnlColor } from "@/lib/formatters";
+import { aggregatePnlSeries, PNL_SERIES_COLORS } from "@/lib/pnl-chart";
 import type { ConvertFn } from "@/lib/rates";
 import { getThemeColors } from "@/lib/theme-colors";
 import { BottomTooltip, PnlTooltip } from "./PnlChartTooltips";
-
-// ── Aggregation ──
-
-function aggregate(
-  snapshots: ControllerPerformanceSnapshot[],
-  enabledIds: Set<string>,
-  controllers: ControllerInfo[],
-  convertFn?: ConvertFn,
-): PnlChartPoint[] {
-  if (!snapshots || snapshots.length === 0) return [];
-
-  // Build a lookup from controller id -> trading_pair using live controller data
-  const pairByCtrl: Record<string, string> = {};
-  for (const ctrl of controllers) {
-    const cid = ctrl.controller_id || ctrl.controller_name;
-    if (ctrl.trading_pair) pairByCtrl[cid] = ctrl.trading_pair;
-  }
-
-  const cv = (val: number, pair: string) => {
-    if (!convertFn) return val;
-    const quote = pair?.split("-")[1] || "USDT";
-    return convertFn(val, quote).value;
-  };
-
-  const byCtrl: Record<string, ControllerPerformanceSnapshot[]> = {};
-  for (const snap of snapshots) {
-    const key = snap.controller_id || snap.controller_name;
-    if (!key || !enabledIds.has(key)) continue;
-    (byCtrl[key] ??= []).push(snap);
-  }
-
-  for (const snaps of Object.values(byCtrl)) {
-    snaps.sort((a, b) => toMs(a.timestamp) - toMs(b.timestamp));
-  }
-
-  const timeSet = new Set<number>();
-  for (const snaps of Object.values(byCtrl))
-    for (const s of snaps) timeSet.add(toMs(s.timestamp));
-  const times = Array.from(timeSet).sort((a, b) => a - b);
-  if (times.length === 0) return [];
-
-  const cids = Object.keys(byCtrl);
-  const cursors: Record<string, number> = {};
-  for (const c of cids) cursors[c] = 0;
-
-  const points: PnlChartPoint[] = [];
-  for (const t of times) {
-    let realized = 0, unrealized = 0, volume = 0, position = 0;
-    for (const cid of cids) {
-      const snaps = byCtrl[cid];
-      while (cursors[cid] < snaps.length - 1 && toMs(snaps[cursors[cid] + 1].timestamp) <= t)
-        cursors[cid]++;
-      if (toMs(snaps[cursors[cid]].timestamp) <= t) {
-        const s = snaps[cursors[cid]];
-        const pair = s.trading_pair || pairByCtrl[cid] || "";
-        realized += cv(s.realized_pnl_quote, pair);
-        unrealized += cv(s.unrealized_pnl_quote, pair);
-        volume += cv(s.volume_traded, pair);
-        if (Array.isArray(s.positions_summary)) {
-          position += cv(positionQuoteValue(s.positions_summary as Record<string, unknown>[]), pair);
-        }
-      }
-    }
-    points.push({ time: t, realized, unrealized, total: realized + unrealized, volume, position });
-  }
-
-  // Append a live "now" point from controllers so the graph ends at real-time values
-  const now = Date.now();
-  let liveRealized = 0, liveUnrealized = 0, liveVolume = 0, livePosition = 0;
-  let hasLive = false;
-  for (const ctrl of controllers) {
-    const cid = ctrl.controller_id || ctrl.controller_name;
-    if (!enabledIds.has(cid)) continue;
-    hasLive = true;
-    const pair = ctrl.trading_pair || "";
-    liveRealized += cv(ctrl.realized_pnl_quote, pair);
-    liveUnrealized += cv(ctrl.unrealized_pnl_quote, pair);
-    liveVolume += cv(ctrl.volume_traded, pair);
-    if (Array.isArray(ctrl.positions_summary)) {
-      livePosition += cv(positionQuoteValue(ctrl.positions_summary as Record<string, unknown>[]), pair);
-    }
-  }
-  if (hasLive) {
-    points.push({
-      time: now,
-      realized: liveRealized,
-      unrealized: liveUnrealized,
-      total: liveRealized + liveUnrealized,
-      volume: liveVolume,
-      position: livePosition,
-    });
-  }
-
-  return points;
-}
 
 // ── Controller color palette ──
 
@@ -176,10 +81,10 @@ export function AggregatedPnlChart({ snapshots, controllers, currencySymbol = "$
   };
 
   const data = useMemo(
-    () => aggregate(snapshots, enabled, controllers, convert),
+    () => aggregatePnlSeries(snapshots, enabled, controllers, convert),
     [snapshots, enabled, controllers, convert],
   );
-  // Latest point is the live "now" point appended by aggregate
+  // Latest point is the live "now" point appended by aggregatePnlSeries
   const latest = data.length > 0 ? data[data.length - 1] : null;
   const hasPosition = data.some((p) => p.position !== 0);
 

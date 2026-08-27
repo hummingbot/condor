@@ -472,7 +472,6 @@ export function ControllerBrowser({
               botName={activeCtrl.bot_name}
               deployedAt={activeCtrl.deployed_at}
               height={200}
-              tradingPair={activeCtrl.trading_pair}
               convert={convert}
               currencySymbol={currencySymbol}
               controller={activeCtrl}

@@ -1,0 +1,376 @@
+/**
+ * The PNL chart fold, pinned (ARCH-243).
+ *
+ * `aggregatePnlSeries` is what turns stored controller snapshots into the line
+ * the dashboard draws, and its subtle part is the forward-fill: at any point on
+ * the merged timeline every enabled controller must contribute its latest value
+ * at or before that instant, or the portfolio total visibly dips every time one
+ * controller happens not to have a snapshot at that second. These tests pin the
+ * fold's observed behaviour before the windowing/pagination work changes it.
+ *
+ * The live "now" point uses `Date.now()`, so the suites that care about it
+ * freeze the clock.
+ */
+
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import type { ControllerInfo, ControllerPerformanceSnapshot } from "./api";
+import { aggregatePnlSeries, positionQuoteValue } from "./pnl-chart";
+
+const NOW = Date.parse("2026-08-27T12:00:00Z");
+
+/** A snapshot with every field the fold reads; `over` supplies what a case cares about. */
+function snap(over: Partial<ControllerPerformanceSnapshot> = {}): ControllerPerformanceSnapshot {
+  return {
+    timestamp: "2026-08-27T10:00:00Z",
+    bot_name: "bot",
+    controller_id: "ctrl-a",
+    controller_name: "ctrl-a",
+    connector: "binance",
+    trading_pair: "SOL-USDC",
+    realized_pnl_quote: 0,
+    unrealized_pnl_quote: 0,
+    global_pnl_quote: 0,
+    global_pnl_pct: 0,
+    volume_traded: 0,
+    positions_summary: [],
+    ...over,
+  };
+}
+
+/** A live controller, the source of the appended "now" point. */
+function ctrl(over: Partial<ControllerInfo> = {}): ControllerInfo {
+  return {
+    controller_name: "ctrl-a",
+    controller_id: "ctrl-a",
+    bot_name: "bot",
+    status: "running",
+    connector: "binance",
+    trading_pair: "SOL-USDC",
+    realized_pnl_quote: 0,
+    unrealized_pnl_quote: 0,
+    global_pnl_quote: 0,
+    global_pnl_pct: 0,
+    volume_traded: 0,
+    close_type_counts: {},
+    positions_summary: [],
+    deployed_at: null,
+    config: {},
+    ...over,
+  };
+}
+
+const at = (hhmm: string) => `2026-08-27T${hhmm}:00Z`;
+const ms = (hhmm: string) => Date.parse(at(hhmm));
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+describe("aggregatePnlSeries — degenerate inputs", () => {
+  it("returns nothing for no snapshots, even when live controllers are enabled", () => {
+    // The live "now" point rides on the snapshot timeline: no history, no chart.
+    expect(aggregatePnlSeries([], new Set(["ctrl-a"]), [ctrl()])).toEqual([]);
+  });
+
+  it("returns nothing when every snapshot belongs to a disabled controller", () => {
+    const points = aggregatePnlSeries([snap()], new Set(["ctrl-b"]), []);
+    expect(points).toEqual([]);
+  });
+
+  it("drops snapshots whose controller has no id at all", () => {
+    const orphan = snap({ controller_id: "", controller_name: "" });
+    expect(aggregatePnlSeries([orphan], new Set(["ctrl-a"]), [])).toEqual([]);
+  });
+
+  it("turns a single snapshot into a single point", () => {
+    const points = aggregatePnlSeries(
+      [snap({ timestamp: at("10:00"), realized_pnl_quote: 7, unrealized_pnl_quote: 3, volume_traded: 100 })],
+      new Set(["ctrl-a"]),
+      [],
+    );
+    expect(points).toEqual([
+      { time: ms("10:00"), realized: 7, unrealized: 3, total: 10, volume: 100, position: 0 },
+    ]);
+  });
+
+  it("falls back to controller_name when controller_id is empty", () => {
+    const named = snap({ controller_id: "", controller_name: "by-name", realized_pnl_quote: 5 });
+    const points = aggregatePnlSeries([named], new Set(["by-name"]), []);
+    expect(points).toHaveLength(1);
+    expect(points[0].realized).toBe(5);
+  });
+});
+
+describe("aggregatePnlSeries — the merged timeline", () => {
+  it("sorts unsorted input into a strictly increasing timeline", () => {
+    const points = aggregatePnlSeries(
+      [
+        snap({ timestamp: at("10:20"), realized_pnl_quote: 3 }),
+        snap({ timestamp: at("10:00"), realized_pnl_quote: 1 }),
+        snap({ timestamp: at("10:10"), realized_pnl_quote: 2 }),
+      ],
+      new Set(["ctrl-a"]),
+      [],
+    );
+    expect(points.map((p) => p.time)).toEqual([ms("10:00"), ms("10:10"), ms("10:20")]);
+    expect(points.map((p) => p.realized)).toEqual([1, 2, 3]);
+  });
+
+  it("collapses duplicate timestamps into one point, keeping the last snapshot at that instant", () => {
+    const points = aggregatePnlSeries(
+      [
+        snap({ timestamp: at("10:00"), realized_pnl_quote: 1 }),
+        snap({ timestamp: at("10:00"), realized_pnl_quote: 9 }),
+      ],
+      new Set(["ctrl-a"]),
+      [],
+    );
+    expect(points).toHaveLength(1);
+    expect(points[0].realized).toBe(9);
+  });
+
+  it("accepts epoch seconds and epoch millis alongside ISO strings", () => {
+    const seconds = ms("10:00") / 1000;
+    const points = aggregatePnlSeries(
+      [
+        snap({ timestamp: ms("10:10") as unknown as string, realized_pnl_quote: 2 }),
+        snap({ timestamp: seconds as unknown as string, realized_pnl_quote: 1 }),
+      ],
+      new Set(["ctrl-a"]),
+      [],
+    );
+    expect(points.map((p) => p.time)).toEqual([ms("10:00"), ms("10:10")]);
+  });
+});
+
+describe("aggregatePnlSeries — folding several controllers into one series", () => {
+  it("sums the enabled controllers at every point on the merged timeline", () => {
+    const points = aggregatePnlSeries(
+      [
+        snap({ controller_id: "a", timestamp: at("10:00"), realized_pnl_quote: 1, volume_traded: 10 }),
+        snap({ controller_id: "b", timestamp: at("10:05"), realized_pnl_quote: 4, volume_traded: 40 }),
+        snap({ controller_id: "a", timestamp: at("10:10"), realized_pnl_quote: 2, volume_traded: 20 }),
+      ],
+      new Set(["a", "b"]),
+      [],
+    );
+    expect(points.map((p) => [p.time, p.realized, p.volume])).toEqual([
+      [ms("10:00"), 1, 10], // only a has reported
+      [ms("10:05"), 5, 50], // a forward-filled at 1/10, plus b
+      [ms("10:10"), 6, 60], // a moves to 2/20, b forward-filled at 4/40
+    ]);
+  });
+
+  it("forward-fills a sparse controller at every later timestamp", () => {
+    const points = aggregatePnlSeries(
+      [
+        snap({ controller_id: "sparse", timestamp: at("10:00"), realized_pnl_quote: 100 }),
+        snap({ controller_id: "busy", timestamp: at("10:01"), realized_pnl_quote: 1 }),
+        snap({ controller_id: "busy", timestamp: at("10:02"), realized_pnl_quote: 2 }),
+        snap({ controller_id: "busy", timestamp: at("10:03"), realized_pnl_quote: 3 }),
+      ],
+      new Set(["sparse", "busy"]),
+      [],
+    );
+    // `sparse` stopped reporting after 10:00 but still counts for 100 throughout.
+    expect(points.map((p) => p.realized)).toEqual([100, 101, 102, 103]);
+  });
+
+  it("contributes nothing for a controller before its first snapshot", () => {
+    const points = aggregatePnlSeries(
+      [
+        snap({ controller_id: "early", timestamp: at("10:00"), realized_pnl_quote: 10 }),
+        snap({ controller_id: "late", timestamp: at("10:10"), realized_pnl_quote: 5 }),
+      ],
+      new Set(["early", "late"]),
+      [],
+    );
+    expect(points.map((p) => p.realized)).toEqual([10, 15]);
+  });
+
+  it("excludes a disabled controller from every point, not just from the last one", () => {
+    const snapshots = [
+      snap({ controller_id: "keep", timestamp: at("10:00"), realized_pnl_quote: 1 }),
+      snap({ controller_id: "drop", timestamp: at("10:05"), realized_pnl_quote: 1000 }),
+      snap({ controller_id: "keep", timestamp: at("10:10"), realized_pnl_quote: 2 }),
+    ];
+    const points = aggregatePnlSeries(snapshots, new Set(["keep"]), []);
+    // 10:05 was only `drop`'s timestamp, so it is not even on the timeline.
+    expect(points.map((p) => [p.time, p.realized])).toEqual([
+      [ms("10:00"), 1],
+      [ms("10:10"), 2],
+    ]);
+  });
+
+  it("keeps total as realized + unrealized at every point", () => {
+    const points = aggregatePnlSeries(
+      [
+        snap({ controller_id: "a", timestamp: at("10:00"), realized_pnl_quote: 3, unrealized_pnl_quote: -1 }),
+        snap({ controller_id: "b", timestamp: at("10:00"), realized_pnl_quote: 2, unrealized_pnl_quote: 4 }),
+      ],
+      new Set(["a", "b"]),
+      [],
+    );
+    expect(points[0]).toMatchObject({ realized: 5, unrealized: 3, total: 8 });
+  });
+});
+
+describe("aggregatePnlSeries — positions", () => {
+  it("folds positions_summary into a signed quote value per point", () => {
+    const points = aggregatePnlSeries(
+      [
+        snap({
+          timestamp: at("10:00"),
+          positions_summary: [
+            { amount: 2, breakeven_price: 50, side: "BUY" },
+            { amount: 1, breakeven_price: 10, side: "SELL" },
+          ],
+        }),
+      ],
+      new Set(["ctrl-a"]),
+      [],
+    );
+    expect(points[0].position).toBe(90); // +100 long, -10 short
+  });
+
+  it("ignores a positions_summary that is not an array", () => {
+    const points = aggregatePnlSeries(
+      [snap({ timestamp: at("10:00"), positions_summary: null as unknown as Record<string, unknown>[] })],
+      new Set(["ctrl-a"]),
+      [],
+    );
+    expect(points[0].position).toBe(0);
+  });
+});
+
+describe("aggregatePnlSeries — currency conversion", () => {
+  const convert = vi.fn((value: number, quote: string) => ({
+    value: quote === "USDC" ? value * 2 : value,
+    converted: quote === "USDC",
+  }));
+
+  it("converts every series with the quote of the snapshot's own pair", () => {
+    convert.mockClear();
+    const points = aggregatePnlSeries(
+      [
+        snap({
+          timestamp: at("10:00"),
+          trading_pair: "SOL-USDC",
+          realized_pnl_quote: 1,
+          unrealized_pnl_quote: 2,
+          volume_traded: 3,
+          positions_summary: [{ amount: 1, breakeven_price: 4, side: "BUY" }],
+        }),
+      ],
+      new Set(["ctrl-a"]),
+      [],
+      convert,
+    );
+    expect(points[0]).toMatchObject({ realized: 2, unrealized: 4, total: 6, volume: 6, position: 8 });
+    expect(convert).toHaveBeenCalledWith(expect.any(Number), "USDC");
+  });
+
+  it("falls back to the live controller's pair when the snapshot carries none", () => {
+    convert.mockClear();
+    aggregatePnlSeries(
+      [snap({ timestamp: at("10:00"), trading_pair: "", realized_pnl_quote: 1 })],
+      new Set(["ctrl-a"]),
+      [ctrl({ trading_pair: "SOL-USDC" })],
+      convert,
+    );
+    expect(convert).toHaveBeenCalledWith(1, "USDC");
+  });
+
+  it("assumes USDT when neither the snapshot nor a controller names a pair", () => {
+    convert.mockClear();
+    aggregatePnlSeries(
+      [snap({ timestamp: at("10:00"), trading_pair: "", realized_pnl_quote: 1 })],
+      new Set(["ctrl-a"]),
+      [],
+      convert,
+    );
+    expect(convert).toHaveBeenCalledWith(1, "USDT");
+  });
+
+  it("leaves values untouched when no convert function is given", () => {
+    const points = aggregatePnlSeries(
+      [snap({ timestamp: at("10:00"), realized_pnl_quote: 1.5, volume_traded: 9 })],
+      new Set(["ctrl-a"]),
+      [],
+    );
+    expect(points[0]).toMatchObject({ realized: 1.5, volume: 9 });
+  });
+});
+
+describe("aggregatePnlSeries — the live \"now\" point", () => {
+  it("appends one point at the current time from the enabled live controllers", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const points = aggregatePnlSeries(
+      [snap({ timestamp: at("10:00"), realized_pnl_quote: 1 })],
+      new Set(["ctrl-a"]),
+      [ctrl({ realized_pnl_quote: 11, unrealized_pnl_quote: 2, volume_traded: 500 })],
+    );
+    expect(points).toHaveLength(2);
+    expect(points[1]).toEqual({
+      time: NOW,
+      realized: 11,
+      unrealized: 2,
+      total: 13,
+      volume: 500,
+      position: 0,
+    });
+  });
+
+  it("sums the live point over the enabled controllers only", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const points = aggregatePnlSeries(
+      [snap({ controller_id: "a", timestamp: at("10:00") })],
+      new Set(["a"]),
+      [ctrl({ controller_id: "a", realized_pnl_quote: 7 }), ctrl({ controller_id: "b", realized_pnl_quote: 99 })],
+    );
+    expect(points[points.length - 1]).toMatchObject({ time: NOW, realized: 7 });
+  });
+
+  it("appends no live point when no live controller is enabled", () => {
+    const points = aggregatePnlSeries(
+      [snap({ controller_id: "a", timestamp: at("10:00") })],
+      new Set(["a"]),
+      [ctrl({ controller_id: "b", realized_pnl_quote: 99 })],
+    );
+    expect(points).toHaveLength(1);
+  });
+
+  it("takes the live point from the controller alone, not forward-filled from snapshots", () => {
+    // The live point is a fresh read: a controller with history but a live
+    // reading of zero lands at zero, it does not inherit its last snapshot.
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const points = aggregatePnlSeries(
+      [snap({ controller_id: "a", timestamp: at("10:00"), realized_pnl_quote: 42 })],
+      new Set(["a"]),
+      [ctrl({ controller_id: "a", realized_pnl_quote: 0 })],
+    );
+    expect(points.map((p) => p.realized)).toEqual([42, 0]);
+  });
+});
+
+describe("positionQuoteValue", () => {
+  it("is zero for no positions", () => {
+    expect(positionQuoteValue([])).toBe(0);
+  });
+
+  it("signs shorts negative and longs positive", () => {
+    expect(positionQuoteValue([{ amount: 2, breakeven_price: 10, side: "BUY" }])).toBe(20);
+    expect(positionQuoteValue([{ amount: 2, breakeven_price: 10, side: "SELL" }])).toBe(-20);
+    expect(positionQuoteValue([{ net_amount_base: 2, entry_price: 10, position_side: "SHORT" }])).toBe(-20);
+  });
+
+  it("prefers breakeven price, then entry, then current", () => {
+    expect(positionQuoteValue([{ amount: 1, breakeven_price: 3, entry_price: 5, current_price: 7 }])).toBe(3);
+    expect(positionQuoteValue([{ amount: 1, entry_price: 5, current_price: 7 }])).toBe(5);
+    expect(positionQuoteValue([{ amount: 1, current_price: 7 }])).toBe(7);
+  });
+});

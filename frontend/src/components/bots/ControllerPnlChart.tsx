@@ -14,8 +14,8 @@ import {
 } from "recharts";
 
 import { api, type ControllerInfo } from "@/lib/api";
-import { formatCurrencyVolume, formatCurrencyPnl, formatTime, pnlColor, toMs } from "@/lib/formatters";
-import { positionQuoteValue, PNL_SERIES_COLORS, type PnlChartPoint } from "@/lib/pnl-chart";
+import { formatCurrencyVolume, formatCurrencyPnl, formatTime, pnlColor } from "@/lib/formatters";
+import { aggregatePnlSeries, PNL_SERIES_COLORS } from "@/lib/pnl-chart";
 import type { ConvertFn } from "@/lib/rates";
 import { getThemeColors } from "@/lib/theme-colors";
 import { BottomTooltip, PnlTooltip } from "./PnlChartTooltips";
@@ -29,12 +29,11 @@ interface Props {
   deployedAt?: string | null;
   height?: number;
   currencySymbol?: string;
-  tradingPair?: string;
   convert?: ConvertFn;
   controller?: ControllerInfo;
 }
 
-export function ControllerPnlChart({ server, controllerId, botName, deployedAt, height = 400, currencySymbol = "$", tradingPair, convert, controller }: Props) {
+export function ControllerPnlChart({ server, controllerId, botName, deployedAt, height = 400, currencySymbol = "$", convert, controller }: Props) {
   const { data: raw, isLoading } = useQuery({
     queryKey: ["controller-perf-history", server, controllerId, deployedAt],
     queryFn: () =>
@@ -51,51 +50,15 @@ export function ControllerPnlChart({ server, controllerId, botName, deployedAt, 
 
   const snapshots = raw?.snapshots ?? [];
 
-  const { data, hasPosition, latest } = useMemo(() => {
-    if (snapshots.length === 0) return { data: [], hasPosition: false, latest: null };
-
-    const quote = tradingPair?.split("-")[1] || "USDT";
-    const cv = (val: number) => convert ? convert(val, quote).value : val;
-
-    const sorted = [...snapshots].sort((a, b) => toMs(a.timestamp) - toMs(b.timestamp));
-    let hasPos = false;
-
-    const pts: PnlChartPoint[] = sorted.map((s) => {
-      let posValue = 0;
-      if (s.positions_summary) {
-        posValue = positionQuoteValue(s.positions_summary as Record<string, unknown>[]);
-      }
-      if (posValue !== 0) hasPos = true;
-
-      return {
-        time: toMs(s.timestamp),
-        realized: cv(s.realized_pnl_quote),
-        unrealized: cv(s.unrealized_pnl_quote),
-        total: cv(s.realized_pnl_quote + s.unrealized_pnl_quote),
-        volume: cv(s.volume_traded),
-        position: cv(posValue),
-      };
-    });
-
-    // Append live "now" point from controller so graph ends at real-time values
-    if (controller) {
-      let livePos = 0;
-      if (Array.isArray(controller.positions_summary)) {
-        livePos = positionQuoteValue(controller.positions_summary as Record<string, unknown>[]);
-      }
-      if (livePos !== 0) hasPos = true;
-      pts.push({
-        time: Date.now(),
-        realized: cv(controller.realized_pnl_quote),
-        unrealized: cv(controller.unrealized_pnl_quote),
-        total: cv(controller.realized_pnl_quote + controller.unrealized_pnl_quote),
-        volume: cv(controller.volume_traded),
-        position: cv(livePos),
-      });
-    }
-
-    return { data: pts, hasPosition: hasPos, latest: pts[pts.length - 1] || null };
-  }, [snapshots, convert, tradingPair, controller]);
+  // One controller is the degenerate case of the aggregate fold: a single
+  // enabled id, so the shared function does the sorting, the conversion and the
+  // live "now" point (ARCH-243) instead of a second hand-rolled copy here.
+  const data = useMemo(
+    () => aggregatePnlSeries(snapshots, new Set([controllerId]), controller ? [controller] : [], convert),
+    [snapshots, controllerId, controller, convert],
+  );
+  const hasPosition = data.some((p) => p.position !== 0);
+  const latest = data.length > 0 ? data[data.length - 1] : null;
 
   if (isLoading) {
     return (
