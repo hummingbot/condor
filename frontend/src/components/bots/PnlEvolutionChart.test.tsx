@@ -24,6 +24,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { formatAxisTime } from "@/lib/formatters";
 import { AXIS_WIDTH, type PnlChartPoint } from "@/lib/pnl-chart";
 
 declare global {
@@ -228,5 +229,51 @@ describe("PnlEvolutionChart header", () => {
 
     expect(container.textContent).toContain("Portfolio PnL");
     expect(container.textContent).toContain("chips go here");
+  });
+});
+
+describe("PnlEvolutionChart X axis", () => {
+  /** Both panes' X tick formatters, applied to one instant. */
+  function xLabels(at: number): string[] {
+    return recorded
+      .filter((r) => r.type === "XAxis")
+      .map((r) => (r.props.tickFormatter as (v: number) => string)(at));
+  }
+
+  const DAY = 86_400_000;
+  const start = new Date(2026, 2, 14, 8, 30).getTime();
+  const series = (spanMs: number): PnlChartPoint[] => [
+    { ...flat[0], time: start },
+    { ...flat[1], time: start + spanMs },
+  ];
+
+  it("labels a few hours with a bare time, and a multi-day window with the day (READ-250)", () => {
+    render(<PnlEvolutionChart data={series(6 * 3_600_000)} title="PnL" pnlHeight={220} volumeHeight={120} />);
+    expect(xLabels(start)).toEqual(["08:30", "08:30"]);
+
+    recorded.length = 0;
+    render(<PnlEvolutionChart data={series(5 * DAY)} title="PnL" pnlHeight={220} volumeHeight={120} />);
+    expect(xLabels(start)).toEqual(["Mar 14 08:30", "Mar 14 08:30"]);
+  });
+
+  it("gives both panes the same formatter, so their columns read alike", () => {
+    render(<PnlEvolutionChart data={series(400 * DAY)} title="PnL" pnlHeight={220} volumeHeight={120} />);
+    const formatters = recorded.filter((r) => r.type === "XAxis").map((r) => r.props.tickFormatter);
+    expect(formatters).toHaveLength(2);
+    expect(formatters[1]).toBe(formatters[0]);
+    expect(xLabels(start)).toEqual(["Mar '26", "Mar '26"]);
+  });
+
+  it("takes the span from the series' own ends, not from a fixed guess", () => {
+    for (const span of [2 * 3_600_000, 3 * DAY, 30 * DAY, 400 * DAY]) {
+      recorded.length = 0;
+      render(<PnlEvolutionChart data={series(span)} title="PnL" pnlHeight={220} volumeHeight={120} />);
+      expect(xLabels(start)).toEqual([formatAxisTime(start, span), formatAxisTime(start, span)]);
+    }
+  });
+
+  it("survives a single-point series without a span to measure", () => {
+    render(<PnlEvolutionChart data={[flat[0]]} title="PnL" pnlHeight={220} volumeHeight={120} />);
+    expect(xLabels(start)).toEqual(["08:30", "08:30"]);
   });
 });

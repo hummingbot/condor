@@ -44,7 +44,7 @@ import {
   YAxis,
 } from "recharts";
 
-import { formatAxisCurrency, formatCurrencyVolume, formatCurrencyPnl, formatTime, pnlColor } from "@/lib/formatters";
+import { formatAxisCurrency, formatAxisTime, formatCurrencyVolume, formatCurrencyPnl, pnlColor } from "@/lib/formatters";
 import { AXIS_WIDTH, PNL_SERIES_COLORS, type PnlChartPoint } from "@/lib/pnl-chart";
 import { getThemeColors } from "@/lib/theme-colors";
 import { BottomTooltip, PnlTooltip } from "./PnlChartTooltips";
@@ -85,6 +85,13 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
   // recharts compares `tickFormatter` by identity, so these stay stable per symbol.
   const fmtAxis = useCallback((v: number) => formatAxisCurrency(v, currencySymbol, "pnl"), [currencySymbol]);
   const fmtVolAxis = useCallback((v: number) => formatAxisCurrency(v, currencySymbol, "volume"), [currencySymbol]);
+
+  // How much time the axis is actually showing decides how a tick is written:
+  // `HH:MM` alone repeats itself across every day of a multi-day window
+  // (READ-250). The series is sorted, so its ends are its extremes; both panes
+  // share the one formatter so their columns stay labelled alike.
+  const spanMs = data.length > 1 ? data[data.length - 1].time - data[0].time : 0;
+  const fmtTimeAxis = useCallback((v: number) => formatAxisTime(v, spanMs), [spanMs]);
 
   // Latest point is the live "now" point appended by aggregatePnlSeries
   const latest = data.length > 0 ? data[data.length - 1] : null;
@@ -151,7 +158,7 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
               dataKey="time"
               type="number"
               domain={["dataMin", "dataMax"]}
-              tickFormatter={formatTime}
+              tickFormatter={fmtTimeAxis}
               tick={false}
               stroke="var(--color-border)"
               tickLine={false}
@@ -201,7 +208,7 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
               dataKey="time"
               type="number"
               domain={["dataMin", "dataMax"]}
-              tickFormatter={formatTime}
+              tickFormatter={fmtTimeAxis}
               tick={{ fontSize: 10, fill: "var(--color-text-muted)" }}
               stroke="var(--color-border)"
               tickLine={false}

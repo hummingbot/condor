@@ -153,6 +153,44 @@ export function formatDateTime(ms: number): string {
   return `${d.toLocaleDateString("en-US", { month: "short", day: "numeric" })} ${d.toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" })}`;
 }
 
+/**
+ * X-axis tick labels for the PnL evolution charts, chosen from the span the
+ * axis is actually showing.
+ *
+ * The axis used to be hardcoded to `formatTime`, i.e. `HH:MM` and nothing else
+ * (READ-250). That was only ever right by accident: the sampling interval is
+ * derived from the bot's real runtime (PERF-238) and ranges `5m` to `1d`, so a
+ * single chart's visible span runs from a couple of hours to well over a year.
+ * Past a day, `08:00 / 12:00 / 16:00` simply repeats across every day in the
+ * window with nothing to say which day a drawdown happened on.
+ *
+ * The ladder is picked on one rule: **the shortest label whose parts can still
+ * differ across the span, and no more**. That cuts both ways, and the second
+ * half is the reason this is not just "prepend the date":
+ *
+ *  - under a day, the date is the *same on every tick*, so printing it is pure
+ *    noise in a gutter that is already tight — `HH:MM`;
+ *  - a day to a week, both halves move and both are needed — `Mon D HH:MM`,
+ *    exactly the tooltip's `formatDateTime`, so a tick and the tooltip that
+ *    opens over it read alike;
+ *  - a week to a year, recharts' ~5 ticks are more than a day apart, so the
+ *    time is decoration on a label that is already unique — `Mon D`;
+ *  - a year and beyond, the day is that decoration and the year is what is
+ *    ambiguous (a month/day pair repeats only after 365 days, which is exactly
+ *    where this tier begins) — `Mon 'YY`.
+ *
+ * `spanMs` is `last.time - first.time` of the series being drawn; a
+ * zero/negative/NaN span (a single point, an empty chart) falls back to `HH:MM`.
+ */
+export function formatAxisTime(ms: number, spanMs: number): string {
+  const DAY = 86_400_000;
+  if (!(spanMs >= DAY)) return formatTime(ms);
+  if (spanMs < 7 * DAY) return formatDateTime(ms);
+  const d = new Date(ms);
+  if (spanMs < 365 * DAY) return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  return `${d.toLocaleDateString("en-US", { month: "short" })} '${String(d.getFullYear() % 100).padStart(2, "0")}`;
+}
+
 export function formatAge(timestamp: number): string {
   if (!timestamp) return "\u2014";
   try {
