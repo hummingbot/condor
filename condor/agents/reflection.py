@@ -1,10 +1,12 @@
 """Reading a finished conversation back, once, to learn from it (FEAT-061).
 
-Two things come out of a chat that has gone quiet: **facts worth remembering
-about this user**, which go to the agent's per-user memory like any other, and
+Three things come out of a chat that has gone quiet: **facts worth remembering
+about this user**, which go to the agent's per-user memory like any other;
 **what the user actually came for**, which goes to
 :mod:`condor.agents.starters` and becomes the openers on their next empty chat
-with that agent.
+with that agent; and, occasionally, **a procedure the conversation worked out**,
+which goes to :mod:`condor.memory.proposals` as an *offer* — a playbook a human
+accepts before it ever reaches a prompt (FEAT-062).
 
 The shape of this module is borrowed on purpose.
 
@@ -118,7 +120,11 @@ def load_policy(agent_slug: str | None = None) -> str:
 
 
 def build_prompt(
-    policy: str, transcript: str, memory_index: str, known: list[str]
+    policy: str,
+    transcript: str,
+    memory_index: str,
+    known: list[str],
+    skill_index: str = "",
 ) -> str:
     """Policy, then everything the model needs and nothing it does not.
 
@@ -126,6 +132,12 @@ def build_prompt(
     model what it has already named and asking it to reuse one verbatim is
     cheaper and truer than fuzzy-matching labels in Python, where a near-miss
     would silently fuse two different intents (FEAT-061 §1).
+
+    The skill index is here for the same reason at the other end: the bar for
+    proposing a playbook (FEAT-062) is "no existing skill covers it", which is
+    only a checkable bar if the model is shown the library. It is the same
+    index line the agent itself is handed at the top of every turn, so what the
+    pass reasons against is what the agent would actually read.
     """
     from condor.agents import starters
 
@@ -133,6 +145,12 @@ def build_prompt(
     parts.append(f"## The conversation\n\n{transcript}")
     if memory_index:
         parts.append(f"## What you already remember about this user\n\n{memory_index}")
+    if skill_index:
+        parts.append(
+            "## Playbooks this assistant already has\n\n"
+            + skill_index
+            + "\n\nPropose a playbook only if none of these covers it."
+        )
     if known:
         parts.append(
             "## Intent slugs you have already named for this user\n\n"
@@ -219,6 +237,36 @@ def _rows(data: dict, key: str, limit: int) -> list[dict]:
 # ── The pass ─────────────────────────────────────────────────────────────
 
 
+def _file_proposal(data: dict, meta: ConversationMeta) -> bool:
+    """File the answer's playbook, if it offered one. True when one was filed.
+
+    The model **cannot** write a skill — the run is tool-less, so there is no
+    ``manage_skill`` for it to call — and this is the whole of what it can do
+    instead: hand the runtime four fields, which land in ``proposals/`` for a
+    human to accept or discard (FEAT-062). Guarded like the memories beside it:
+    a missing, mistyped or half-filled proposal is dropped, never fatal to the
+    intents and memories in the same answer.
+    """
+    from condor.memory import proposals
+
+    row = data.get("skill_proposal")
+    if not isinstance(row, dict):
+        return False
+    try:
+        filed = proposals.put(
+            meta.agent_slug or None,
+            name=str(row.get("name") or ""),
+            description=str(row.get("description") or ""),
+            when_to_use=str(row.get("when_to_use") or ""),
+            body=str(row.get("body") or ""),
+            conversation_id=meta.id,
+        )
+        return bool(filed.get("saved"))
+    except Exception:  # noqa: BLE001 - a bad proposal is not the pass
+        log.warning("Could not file a proposed playbook", exc_info=True)
+        return False
+
+
 def _mark(user_id: int, conv_id: str, ok: bool) -> None:
     """Stamp the attempt. Written as ISO, like every other meta datetime."""
     conversations.update_meta(
@@ -238,7 +286,7 @@ async def reflect(user_id: int, meta: ConversationMeta) -> bool:
     """
     from condor.agents import starters
     from condor.agents.agent import AgentStore
-    from condor.memory import MemoryStore
+    from condor.memory import MemoryStore, SkillStore
 
     slug = meta.agent_slug or CHAT_SLUG
     learned = False
@@ -266,6 +314,7 @@ async def reflect(user_id: int, meta: ConversationMeta) -> bool:
             transcript,
             store.list_index(),
             [entry.slug for entry in starters.read(user_id, meta.agent_slug or None)],
+            SkillStore(meta.agent_slug or None).list_index(),
         )
 
         from condor.runtime.llm_client import build_llm_client
@@ -300,6 +349,8 @@ async def reflect(user_id: int, meta: ConversationMeta) -> bool:
         if intents:
             starters.merge(user_id, meta.agent_slug or None, intents)
             learned = True
+
+        learned = _file_proposal(data, meta) or learned
         return learned
     except Exception:  # noqa: BLE001 - a failed reflection is not a crash
         log.warning("Reflection failed for conversation %s", meta.id, exc_info=True)

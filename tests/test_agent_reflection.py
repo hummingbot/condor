@@ -23,7 +23,7 @@ import pytest
 from condor.agents import agent as agent_module
 from condor.agents import reflection, starters
 from condor.agents.agent import AgentStore
-from condor.memory import MemoryStore
+from condor.memory import MemoryStore, SkillStore, proposals
 from condor.runtime import conversations
 from condor.runtime.conversations import TurnEntry
 
@@ -317,3 +317,101 @@ async def test_the_same_intent_twice_is_counted_not_duplicated(env, stub):
     [entry] = starters.read(USER, SLUG)
     assert entry.count == 2
     assert entry.score > 1.0
+
+
+# ── The playbook it may only offer (FEAT-062) ──
+
+PROPOSES = json.dumps(
+    {
+        "intents": [{"label": "Rebalance my SOL-USDC range"}],
+        "memories": [],
+        "skill_proposal": {
+            "name": "CLMM rebalance",
+            "description": "Re-centre a CLMM position when price leaves the range",
+            "when_to_use": "The user asks to check or rebalance an LP range",
+            "body": "1. Pull the pool state\n2. Compare to the position bounds",
+        },
+    }
+)
+
+
+def test_the_prompt_shows_the_model_the_library_it_must_not_duplicate(env):
+    prompt = reflection.build_prompt("P", "T", "", [], "- [clmm_rebalance] LP ranges")
+
+    assert "clmm_rebalance" in prompt
+    assert "only if none of these covers it" in prompt
+
+
+@pytest.mark.asyncio
+async def test_a_proposed_playbook_is_filed_and_names_its_conversation(env, stub):
+    stub.answer = PROPOSES
+    meta = _conversation()
+
+    assert await reflection.reflect(USER, meta) is True
+
+    pending = proposals.get(SLUG)
+    assert pending["name"] == "clmm_rebalance"
+    assert pending["when_to_use"].startswith("The user asks")
+    assert pending["from_conversation"] == meta.id
+
+
+@pytest.mark.asyncio
+async def test_the_model_cannot_write_a_playbook_only_offer_one(env, stub):
+    """The central guarantee: the pass has no tools, so the library is untouched.
+
+    Asserted against the client the pass actually built rather than against the
+    prompt it was given, because "propose, don't write" being an *instruction*
+    is precisely what this feature exists not to rely on.
+    """
+    stub.answer = PROPOSES
+
+    await reflection.reflect(USER, _conversation())
+
+    assert stub.built["mcp_servers"] is None
+    assert SkillStore(SLUG).catalog() == []
+    assert SkillStore(SLUG).list_index() == ""
+    # It is on disk, but nowhere the agent reads.
+    assert proposals.get(SLUG) is not None
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_proposal_is_dropped_without_costing_the_rest(env, stub):
+    stub.answer = json.dumps(
+        {
+            "intents": [{"label": "Rebalance my SOL-USDC range"}],
+            "memories": [
+                {"name": "tight-ranges", "description": "d", "content": "c"},
+            ],
+            "skill_proposal": {"name": "Half a playbook"},
+        }
+    )
+
+    assert await reflection.reflect(USER, _conversation()) is True
+
+    assert proposals.get(SLUG) is None
+    assert [e.label for e in starters.read(USER, SLUG)] == [
+        "Rebalance my SOL-USDC range"
+    ]
+    assert len(MemoryStore(USER, SLUG).catalog()) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", [None, "a playbook, sure", [], 7])
+async def test_no_proposal_files_nothing(env, stub, value):
+    stub.answer = json.dumps({"intents": [], "skill_proposal": value})
+
+    await reflection.reflect(USER, _conversation())
+
+    assert proposals.get(SLUG) is None
+
+
+@pytest.mark.asyncio
+async def test_a_second_proposal_replaces_the_standing_one(env, stub):
+    stub.answer = PROPOSES
+    await reflection.reflect(USER, _conversation())
+    stub.answer = PROPOSES.replace("CLMM rebalance", "Range check")
+
+    await reflection.reflect(USER, _conversation())
+
+    assert proposals.get(SLUG)["name"] == "range_check"
+    assert len(list(proposals.proposals_root(SLUG).glob("*.md"))) == 1
