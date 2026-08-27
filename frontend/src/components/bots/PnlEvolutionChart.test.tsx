@@ -25,7 +25,14 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { formatAxisTime } from "@/lib/formatters";
-import { AXIS_WIDTH, type PnlChartPoint } from "@/lib/pnl-chart";
+import {
+  AXIS_WIDTH,
+  PANE_MARGIN_RIGHT,
+  PANE_PAD_X,
+  PLOT_INSET_LEFT,
+  PLOT_INSET_RIGHT,
+  type PnlChartPoint,
+} from "@/lib/pnl-chart";
 
 declare global {
   // eslint-disable-next-line no-var
@@ -275,5 +282,55 @@ describe("PnlEvolutionChart X axis", () => {
   it("survives a single-point series without a span to measure", () => {
     render(<PnlEvolutionChart data={[flat[0]]} title="PnL" pnlHeight={220} volumeHeight={120} />);
     expect(xLabels(start)).toEqual(["08:30", "08:30"]);
+  });
+});
+
+describe("PnlEvolutionChart pane captions", () => {
+  /** The two caption rows, in document order. */
+  function captions(): HTMLElement[] {
+    return [...container.querySelectorAll("[data-pane-caption]")] as HTMLElement[];
+  }
+
+  it("names each pane and rules the lower one off from the upper (READ-247)", () => {
+    render(<PnlEvolutionChart data={flat} title="Portfolio PnL" pnlHeight={220} volumeHeight={120} />);
+
+    expect(captions().map((c) => c.textContent)).toEqual(["PnL", "Activity"]);
+    // Only the lower caption carries the rule; the upper one already has the
+    // header's border above it, and two rules in a row would read as a gap.
+    expect(captions()[0].className).not.toContain("border-t");
+    expect(captions()[1].className).toContain("border-t");
+  });
+
+  it("insets the rule to the plot area the two panes share, not to the card", () => {
+    render(<PnlEvolutionChart data={flat} title="Portfolio PnL" pnlHeight={220} volumeHeight={120} />);
+
+    // jsdom has no layout, so what is checkable here is that the inset is the
+    // one derived from AXIS_WIDTH rather than a literal that would silently
+    // drift off the grid the moment the gutter contract changed.
+    for (const caption of captions()) {
+      expect(caption.style.marginLeft).toBe(`${PLOT_INSET_LEFT}px`);
+      expect(caption.style.marginRight).toBe(`${PLOT_INSET_RIGHT}px`);
+    }
+    expect(PLOT_INSET_LEFT).toBeGreaterThan(AXIS_WIDTH);
+  });
+
+  it("keeps that inset true by drawing the panes' own padding and margin from it", () => {
+    render(<PnlEvolutionChart data={flat} title="Portfolio PnL" pnlHeight={220} volumeHeight={120} />);
+
+    const wrappers = [...container.querySelectorAll("[data-pane]")] as HTMLElement[];
+    expect(wrappers).toHaveLength(2);
+    for (const wrapper of wrappers) {
+      expect(wrapper.style.paddingLeft).toBe(`${PANE_PAD_X}px`);
+      expect(wrapper.style.paddingRight).toBe(`${PANE_PAD_X}px`);
+    }
+
+    const margins = recorded
+      .filter((r) => r.type === "ComposedChart")
+      .map((r) => r.props.margin as { left: number; right: number });
+    expect(margins).toHaveLength(2);
+    for (const margin of margins) {
+      expect(margin.left).toBe(0);
+      expect(margin.right).toBe(PANE_MARGIN_RIGHT);
+    }
   });
 });

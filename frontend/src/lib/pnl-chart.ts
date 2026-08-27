@@ -42,6 +42,25 @@ export const PNL_SERIES_COLORS = {
  */
 export const AXIS_WIDTH = 52;
 
+/**
+ * The other two numbers that decide where a pane's plot area starts and stops:
+ * the horizontal padding each pane wrapper puts around its chart, and the
+ * right-hand margin every ComposedChart is given (the left margin is 0).
+ *
+ * They live here beside AXIS_WIDTH because the rule that separates the two
+ * panes (READ-247) is inset to the plot area, and the only way to know where
+ * the plot area is, is to add these to the gutter. Change one of them in the
+ * JSX without changing it here and the rule stops tracing the grid it is drawn
+ * to trace — the same silent drift AXIS_WIDTH exists to prevent, so both panes
+ * read their padding and margin from here too.
+ */
+export const PANE_PAD_X = 4;
+export const PANE_MARGIN_RIGHT = 12;
+
+/** Where a pane's plot area begins and ends, measured from the card's edges. */
+export const PLOT_INSET_LEFT = PANE_PAD_X + AXIS_WIDTH;
+export const PLOT_INSET_RIGHT = PANE_PAD_X + PANE_MARGIN_RIGHT + AXIS_WIDTH;
+
 /** A single point on a PNL evolution chart (per-controller or aggregated). */
 export interface PnlChartPoint {
   time: number;

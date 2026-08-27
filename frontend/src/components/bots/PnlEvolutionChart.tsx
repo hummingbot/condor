@@ -45,9 +45,57 @@ import {
 } from "recharts";
 
 import { formatAxisCurrency, formatAxisTime, formatCurrencyVolume, formatCurrencyPnl, pnlColor } from "@/lib/formatters";
-import { AXIS_WIDTH, PNL_SERIES_COLORS, type PnlChartPoint } from "@/lib/pnl-chart";
+import {
+  AXIS_WIDTH,
+  PANE_MARGIN_RIGHT,
+  PANE_PAD_X,
+  PLOT_INSET_LEFT,
+  PLOT_INSET_RIGHT,
+  PNL_SERIES_COLORS,
+  type PnlChartPoint,
+} from "@/lib/pnl-chart";
 import { getThemeColors } from "@/lib/theme-colors";
 import { BottomTooltip, PnlTooltip } from "./PnlChartTooltips";
+
+/** Both panes pad their chart identically; the divider's inset counts this in. */
+const PANE_PADDING = { paddingLeft: PANE_PAD_X, paddingRight: PANE_PAD_X } as const;
+
+/**
+ * The caption above one pane and, on the lower one, the rule that separates the
+ * two (READ-247).
+ *
+ * Before this the two ComposedCharts were bare sibling divs with nothing
+ * between them, and because the upper pane deliberately hides its X axis the
+ * boundary fell in dead space — so the card read as one chart whose bottom half
+ * inexplicably switched units, rather than as two panes measuring two different
+ * things.
+ *
+ * The rule is inset to the plot area instead of running edge to edge. Both
+ * panes reserve AXIS_WIDTH on each side (invariant 1 above), so the columns the
+ * user is actually reading start at PLOT_INSET_LEFT and stop at
+ * PLOT_INSET_RIGHT. A full-bleed rule would cut across both gutters and look
+ * like the seam between two stacked cards; one that begins and ends where the
+ * grid does reads as what this is — one chart, two panes, one shared time axis.
+ * The inset is derived from the gutter for the same reason the axes are: move
+ * the gutter and the rule follows it, rather than drifting a few pixels off the
+ * grid it is drawn to trace.
+ *
+ * The row is a flex with the caption on the left and the right-hand slot left
+ * empty, so a per-pane legend can sit there later without moving anything.
+ */
+function PaneCaption({ label, divider = false }: { label: string; divider?: boolean }) {
+  return (
+    <div
+      data-pane-caption={label.toLowerCase()}
+      className={`flex items-center justify-between pb-0.5 ${divider ? "border-t border-[var(--color-border)] pt-2" : "pt-1.5"}`}
+      style={{ marginLeft: PLOT_INSET_LEFT, marginRight: PLOT_INSET_RIGHT }}
+    >
+      <span className="text-[10px] font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
+        {label}
+      </span>
+    </div>
+  );
+}
 
 interface Props {
   /** The timeline both panes draw. Callers own how it is built and when it is empty. */
@@ -144,9 +192,10 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
       {filters}
 
       {/* PnL pane (top) */}
-      <div className="px-1">
+      <PaneCaption label="PnL" />
+      <div data-pane="pnl" style={PANE_PADDING}>
         <ResponsiveContainer width="100%" height={pnlHeight}>
-          <ComposedChart data={data} margin={{ top: 12, right: 12, left: 0, bottom: 0 }} syncId={instanceId}>
+          <ComposedChart data={data} margin={{ top: 12, right: PANE_MARGIN_RIGHT, left: 0, bottom: 0 }} syncId={instanceId}>
             <defs>
               <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
                 <stop offset="5%" stopColor={totalColor} stopOpacity={0.15} />
@@ -199,10 +248,11 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
         </ResponsiveContainer>
       </div>
 
-      {/* Volume + Position pane (bottom) */}
-      <div className="px-1">
+      {/* Volume + Position pane (bottom), ruled off from the one above */}
+      <PaneCaption label="Activity" divider />
+      <div data-pane="activity" style={PANE_PADDING}>
         <ResponsiveContainer width="100%" height={volumeHeight}>
-          <ComposedChart data={data} margin={{ top: 4, right: 12, left: 0, bottom: 4 }} syncId={instanceId}>
+          <ComposedChart data={data} margin={{ top: 4, right: PANE_MARGIN_RIGHT, left: 0, bottom: 4 }} syncId={instanceId}>
             <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" strokeOpacity={0.5} />
             <XAxis
               dataKey="time"
