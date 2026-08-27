@@ -9,6 +9,7 @@ import { GatewaySettings } from "@/components/settings/GatewaySettings";
 import { ServersSettings } from "@/components/settings/ServersSettings";
 import { SharingSettings } from "@/components/settings/SharingSettings";
 import { TelemetrySettings } from "@/components/settings/TelemetrySettings";
+import { UpdatesSettings } from "@/components/settings/UpdatesSettings";
 import { VoiceSettings } from "@/components/settings/VoiceSettings";
 import { ADMIN_USERS_KEY, adminApi } from "@/lib/admin-api";
 import { useAuth } from "@/lib/auth";
@@ -25,7 +26,14 @@ const TABS = [
 /** Admin-only, appended to TABS when the user turns out to be an admin (ARCH-177). */
 const ADMIN_TAB = { key: "admin", label: "Admin" } as const;
 
-type TabKey = (typeof TABS)[number]["key"] | typeof ADMIN_TAB.key;
+/** Admin-only too, on the same probe: an update restarts the process (FEAT-071). */
+const UPDATES_TAB = { key: "updates", label: "Updates" } as const;
+
+const ADMIN_TABS = [ADMIN_TAB, UPDATES_TAB] as const;
+
+type TabKey =
+  | (typeof TABS)[number]["key"]
+  | (typeof ADMIN_TABS)[number]["key"];
 
 export function Settings() {
   const [params, setParams] = useSearchParams();
@@ -41,10 +49,10 @@ export function Settings() {
     retry: false,
   });
 
-  const tabs = isAdmin ? [...TABS, ADMIN_TAB] : TABS;
+  const tabs = isAdmin ? [...TABS, ...ADMIN_TABS] : TABS;
   const requested = (params.get("tab") as TabKey) || "servers";
-  // A deep link to ?tab=admin from a seat that is not (or no longer) an admin
-  // falls back rather than rendering an empty page.
+  // A deep link to ?tab=admin or ?tab=updates from a seat that is not (or no
+  // longer) an admin falls back rather than rendering an empty page.
   const tab = tabs.some((t) => t.key === requested) ? requested : "servers";
 
   return (
@@ -96,6 +104,7 @@ export function Settings() {
         </div>
       )}
       {tab === "admin" && <AdminSettings />}
+      {tab === "updates" && <UpdatesSettings />}
     </div>
   );
 }

@@ -210,9 +210,11 @@ def test_preflight_passes_blocks_and_warnings_through(as_user, admin, monkeypatc
 
     monkeypatch.setattr(updates, "preflight", fake_preflight)
 
-    body = as_user(admin).post(
-        "/api/v1/updates/preflight", json={"components": ["condor"]}
-    ).json()
+    body = (
+        as_user(admin)
+        .post("/api/v1/updates/preflight", json={"components": ["condor"]})
+        .json()
+    )
 
     assert body["ok"] is False
     assert body["blocks"][0]["paths"] == ["condor/paths.py", "main.py"]
@@ -255,9 +257,13 @@ def test_resolve_reports_an_unknown_action_as_a_failure(as_user, admin, monkeypa
 
     monkeypatch.setattr(updates, "resolve", fake_resolve)
 
-    body = as_user(admin).post(
-        "/api/v1/updates/resolve", json={"component": "condor", "action": "rm -rf"}
-    ).json()
+    body = (
+        as_user(admin)
+        .post(
+            "/api/v1/updates/resolve", json={"component": "condor", "action": "rm -rf"}
+        )
+        .json()
+    )
 
     assert body["ok"] is False
     assert "Unknown resolution" in body["message"]

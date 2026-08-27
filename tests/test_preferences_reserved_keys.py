@@ -16,6 +16,7 @@ import pytest
 from fastapi import HTTPException
 
 import config_manager as cm_module
+from condor.web import auth as web_auth
 from condor.web.models import WebUser
 from condor.web.routes import admin as admin_routes
 from condor.web.routes import auth as auth_routes
@@ -44,7 +45,7 @@ def cm(tmp_path, monkeypatch):
     manager._data["user_preferences"] = {}
     manager._audit_log = []
     manager._save_config()
-    for module in (cm_module, admin_routes, auth_routes, code_routes):
+    for module in (cm_module, web_auth, admin_routes, auth_routes, code_routes):
         monkeypatch.setattr(module, "get_config_manager", lambda: manager)
     return manager
 

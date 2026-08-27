@@ -31,7 +31,15 @@ export function isForbidden(error: unknown): boolean {
   return error instanceof AdminApiError && error.status === 403;
 }
 
-async function adminFetch<T>(path: string, init?: RequestInit): Promise<T> {
+/**
+ * Fetch an admin route, preserving the status code on failure.
+ *
+ * Exported because `lib/updates-api.ts` needs the identical contract — admin
+ * routes, and a 403 that must survive as a status rather than be flattened
+ * into a message. A second copy would be a second place for the auth header
+ * and the error shape to drift.
+ */
+export async function adminFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
     ...init,
     headers: {
