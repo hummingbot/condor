@@ -12,6 +12,20 @@ interface TooltipProps {
   symbol: string;
 }
 
+interface BottomTooltipProps extends TooltipProps {
+  /**
+   * How long one volume bar covers — `"5m"`, `"1h"`, `"1d"` … — as chosen by
+   * the sampling ladder (PERF-238) and read back off the series.
+   *
+   * The Volume row used to report a running total, which is self-explanatory.
+   * Since READ-245 it reports what was traded in one bucket, and that number is
+   * unreadable without its bucket: the same $40k means a busy hour or a dead
+   * day. Absent (a series too short to have a spacing) the row just says
+   * "Volume" rather than inventing an interval.
+   */
+  bucket?: string;
+}
+
 /** Top chart tooltip: Total / Realized / Unrealized rows. */
 export function PnlTooltip({ active, payload, label, symbol }: TooltipProps) {
   if (!active || !payload?.length || !label) return null;
@@ -42,7 +56,7 @@ export function PnlTooltip({ active, payload, label, symbol }: TooltipProps) {
 }
 
 /** Bottom chart tooltip: Volume / Position rows. */
-export function BottomTooltip({ active, payload, label, symbol }: TooltipProps) {
+export function BottomTooltip({ active, payload, label, symbol, bucket }: BottomTooltipProps) {
   if (!active || !payload?.length || !label) return null;
   const byKey: Record<string, number> = {};
   for (const p of payload) byKey[p.dataKey] = p.value;
@@ -50,9 +64,14 @@ export function BottomTooltip({ active, payload, label, symbol }: TooltipProps) 
   return (
     <div className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)]/95 backdrop-blur-sm px-2.5 py-2 text-[11px] leading-relaxed shadow-lg min-w-[130px]">
       <div className="text-[var(--color-text-muted)] text-[10px] mb-1">{formatDateTime(label)}</div>
+      {/* The bar's own value — this bucket's trading, not the running total.
+          The total is the header's Vol stat; repeating it here would be the
+          number the pane deliberately stopped drawing. */}
       <div className="flex justify-between gap-3">
-        <span style={{ color: PNL_SERIES_COLORS.volume }}>Volume</span>
-        <span style={{ color: PNL_SERIES_COLORS.volume }}>{formatCurrencyVolume(byKey.volume ?? 0, symbol)}</span>
+        <span style={{ color: PNL_SERIES_COLORS.volume }}>
+          Volume{bucket ? <span className="text-[var(--color-text-muted)]"> / {bucket}</span> : null}
+        </span>
+        <span style={{ color: PNL_SERIES_COLORS.volume }}>{formatCurrencyVolume(byKey.volumeDelta ?? 0, symbol)}</span>
       </div>
       {byKey.position !== undefined && byKey.position !== 0 && (
         <div className="flex justify-between gap-3">

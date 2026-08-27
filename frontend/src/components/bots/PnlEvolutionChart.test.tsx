@@ -58,10 +58,12 @@ vi.mock("recharts", async () => {
   };
   return {
     Area: stub("Area"),
+    Bar: stub("Bar"),
     CartesianGrid: stub("CartesianGrid"),
     ComposedChart: stub("ComposedChart"),
     Legend: stub("Legend"),
     Line: stub("Line"),
+    Rectangle: stub("Rectangle"),
     ReferenceLine: stub("ReferenceLine"),
     ResponsiveContainer: stub("ResponsiveContainer"),
     Tooltip: stub("Tooltip"),
@@ -74,8 +76,8 @@ const { PnlEvolutionChart } = await import("./PnlEvolutionChart");
 
 /** Two points, no position held anywhere on the timeline. */
 const flat: PnlChartPoint[] = [
-  { time: 1_000, realized: 10, unrealized: 2, total: 12, volume: 500, position: 0 },
-  { time: 2_000, realized: 20, unrealized: -3, total: 17, volume: 900, position: 0 },
+  { time: 1_000, realized: 10, unrealized: 2, total: 12, volume: 500, volumeDelta: 500, position: 0 },
+  { time: 2_000, realized: 20, unrealized: -3, total: 17, volume: 900, volumeDelta: 400, position: 0 },
 ];
 
 /** The same timeline, but the controller is holding something. */
@@ -217,8 +219,10 @@ describe("PnlEvolutionChart signed position area", () => {
     expect(area!.props.baseValue).toBe(0);
     expect(area!.props.yAxisId).toBe("pos");
     expect(recorded.some((r) => r.type === "Line" && r.props.dataKey === "position")).toBe(false);
-    // Volume is still a line on its own axis — that pairing is READ-245's call.
-    const volume = recorded.find((r) => r.props.dataKey === "volume");
+    // ...and volume is bars on its own axis (READ-245), so the pane's two
+    // series no longer share a shape at all.
+    const volume = recorded.find((r) => r.props.dataKey === "volumeDelta");
+    expect(volume?.type).toBe("Bar");
     expect(volume?.props.yAxisId).toBe("vol");
   });
 

@@ -20,12 +20,18 @@ import {
   HISTORY_POINT_BUDGET,
   POSITION_AXIS_PAD,
   SAMPLING_INTERVALS,
+  VOLUME_BAR_DUTY,
+  VOLUME_BAR_MAX_PX,
+  VOLUME_BAR_MIN_PX,
   aggregatePnlSeries,
+  chartBucketMs,
+  formatBucketLabel,
   pickSamplingInterval,
   positionAreaExtent,
   positionAxisDomain,
   positionQuoteValue,
   samplingIntervalSince,
+  volumeBarWidth,
   zeroGradientOffset,
   type PnlChartPoint,
 } from "./pnl-chart";
@@ -110,7 +116,9 @@ describe("aggregatePnlSeries — degenerate inputs", () => {
       [],
     );
     expect(points).toEqual([
-      { time: ms("10:00"), realized: 7, unrealized: 3, total: 10, volume: 100, position: 0 },
+      // A lone snapshot is an opening reading, so it carries no bucket of
+      // its own: nothing to have been a difference from.
+      { time: ms("10:00"), realized: 7, unrealized: 3, total: 10, volume: 100, volumeDelta: 0, position: 0 },
     ]);
   });
 
@@ -339,6 +347,9 @@ describe("aggregatePnlSeries — the live \"now\" point", () => {
       unrealized: 2,
       total: 13,
       volume: 500,
+      // The live point closes an in-progress bucket: everything the counter has
+      // moved since the last stored snapshot, which reported nothing traded.
+      volumeDelta: 500,
       position: 0,
     });
   });
@@ -522,6 +533,7 @@ const series = (...positions: number[]): PnlChartPoint[] =>
     unrealized: 0,
     total: 0,
     volume: 0,
+    volumeDelta: 0,
     position,
   }));
 
@@ -717,5 +729,317 @@ describe("samplingIntervalSince", () => {
 
   it("treats a start time in the future as unknown rather than coarse", () => {
     expect(samplingIntervalSince(new Date(NOW + DAY).toISOString(), NOW)).toBe("5m");
+  });
+});
+
+/**
+ * Per-interval volume (READ-245).
+ *
+ * `volume_traded` is a running counter, so the series drawn from it could only
+ * ever slope up-right. `volumeDelta` is the flow behind that stock, and every
+ * case here is a way the *summed* series would get it wrong — which is the
+ * whole reason the diff is taken per controller, inside the fold, rather than
+ * by a helper differencing `volume` afterwards.
+ */
+describe("aggregatePnlSeries — volumeDelta", () => {
+  const shared = "grid-1";
+  const alpha = (over: Partial<ControllerPerformanceSnapshot> = {}) =>
+    snap({ bot_name: "alpha", controller_id: shared, ...over });
+  const beta = (over: Partial<ControllerPerformanceSnapshot> = {}) =>
+    snap({ bot_name: "beta", controller_id: shared, ...over });
+
+  const deltas = (points: PnlChartPoint[]) => points.map((p) => p.volumeDelta);
+
+  it("differences the running counter into what each bucket actually traded", () => {
+    const points = aggregatePnlSeries(
+      [
+        snap({ timestamp: at("10:00"), volume_traded: 100 }),
+        snap({ timestamp: at("10:05"), volume_traded: 100 }),
+        snap({ timestamp: at("10:10"), volume_traded: 450 }),
+        snap({ timestamp: at("10:15"), volume_traded: 470 }),
+      ],
+      new Set([key("ctrl-a")]),
+      [],
+    );
+    // The cumulative series climbs and never falls; the deltas say *when* the
+    // trading happened — and 10:05 says "nothing", which the ramp could not.
+    expect(points.map((p) => p.volume)).toEqual([100, 100, 450, 470]);
+    expect(deltas(points)).toEqual([0, 0, 350, 20]);
+  });
+
+  it("draws no bar for a controller's opening reading, whatever the counter already says", () => {
+    // The first reading has no predecessor to be a difference from, and its
+    // absolute value is everything the controller has ever traded — the one
+    // quantity this series exists to stop drawing. Charged to the opening
+    // bucket it becomes a bar millions high and the axis scales to it, which
+    // flattens every real bucket to a pixel.
+    const points = aggregatePnlSeries(
+      [
+        snap({ timestamp: at("10:00"), volume_traded: 11_600_000 }),
+        snap({ timestamp: at("10:05"), volume_traded: 11_600_400 }),
+      ],
+      new Set([key("ctrl-a")]),
+      [],
+    );
+    expect(deltas(points)).toEqual([0, 400]);
+  });
+
+  it("totals the volume traded across the drawn window", () => {
+    const points = aggregatePnlSeries(
+      [
+        snap({ timestamp: at("10:00"), volume_traded: 40 }),
+        snap({ timestamp: at("10:05"), volume_traded: 90 }),
+        snap({ timestamp: at("10:10"), volume_traded: 91.5 }),
+      ],
+      new Set([key("ctrl-a")]),
+      [],
+    );
+    // The bars are the flow whose stock is `volume`: they add up to how much
+    // the counter moved between the ends of the window. They do *not* add up
+    // to the header's lifetime Vol stat, and are not meant to — that is the
+    // stock, this is the flow, and the tooltip names the bucket so the two
+    // cannot be mistaken for each other.
+    const summed = points.reduce((acc, p) => acc + p.volumeDelta, 0);
+    expect(summed).toBeCloseTo(points[points.length - 1].volume - points[0].volume, 10);
+  });
+
+  it("charges a bucket in which a controller stood still nothing at all", () => {
+    // beta reports at 10:05 and 10:10 and is forward-filled at 10:15. Its
+    // filled bucket must diff to zero — otherwise every idle controller would
+    // keep drawing bars for as long as the chart ran.
+    const points = aggregatePnlSeries(
+      [
+        alpha({ timestamp: at("10:00"), volume_traded: 10 }),
+        alpha({ timestamp: at("10:05"), volume_traded: 30 }),
+        beta({ timestamp: at("10:05"), volume_traded: 70 }),
+        beta({ timestamp: at("10:10"), volume_traded: 95 }),
+        alpha({ timestamp: at("10:15"), volume_traded: 30 }),
+      ],
+      new Set([key(shared, "alpha"), key(shared, "beta")]),
+      [],
+    );
+    expect(points.map((p) => p.volume)).toEqual([10, 100, 125, 125]);
+    // 10:05 is alpha's 20 alone (beta is opening); 10:10 is beta's 25 alone;
+    // 10:15 neither moved.
+    expect(deltas(points)).toEqual([0, 20, 25, 0]);
+  });
+
+  it("never turns a controller joining mid-window into a bar for the whole fleet", () => {
+    // The sum jumps 10 -> 5010 when beta appears, because before its first
+    // snapshot beta contributes nothing at all. Differencing the summed series
+    // would read that as $5,000 traded in one bucket by a fleet that in fact
+    // stood still — and alpha's stillness stays visible in the same instant.
+    const points = aggregatePnlSeries(
+      [
+        alpha({ timestamp: at("10:00"), volume_traded: 10 }),
+        alpha({ timestamp: at("10:05"), volume_traded: 10 }),
+        beta({ timestamp: at("10:05"), volume_traded: 5_000 }),
+        beta({ timestamp: at("10:10"), volume_traded: 5_060 }),
+        alpha({ timestamp: at("10:10"), volume_traded: 10 }),
+      ],
+      new Set([key(shared, "alpha"), key(shared, "beta")]),
+      [],
+    );
+    expect(points.map((p) => p.volume)).toEqual([10, 5_010, 5_070]);
+    expect(deltas(points)).toEqual([0, 0, 60]);
+  });
+
+  it("never draws a negative bar when a controller restarts and its counter resets", () => {
+    const points = aggregatePnlSeries(
+      [
+        snap({ timestamp: at("10:00"), volume_traded: 900 }),
+        snap({ timestamp: at("10:05"), volume_traded: 940 }),
+        snap({ timestamp: at("10:10"), volume_traded: 20 }),
+        snap({ timestamp: at("10:15"), volume_traded: 55 }),
+      ],
+      new Set([key("ctrl-a")]),
+      [],
+    );
+    // The reset itself is not tradeable volume, so it is worth zero — and the
+    // counter is then followed from its new base rather than being abandoned.
+    expect(deltas(points)).toEqual([0, 40, 0, 35]);
+  });
+
+  it("clamps the reset per controller, so one restart cannot erase another's trading", () => {
+    // alpha resets 900 -> 0 in the same bucket beta trades 300. On the summed
+    // series that is 1000 -> 400, a fall, and a clamp there would report the
+    // fleet as idle in the one bucket it was busiest.
+    const points = aggregatePnlSeries(
+      [
+        alpha({ timestamp: at("10:00"), volume_traded: 900 }),
+        beta({ timestamp: at("10:00"), volume_traded: 100 }),
+        alpha({ timestamp: at("10:05"), volume_traded: 0 }),
+        beta({ timestamp: at("10:05"), volume_traded: 400 }),
+      ],
+      new Set([key(shared, "alpha"), key(shared, "beta")]),
+      [],
+    );
+    expect(points.map((p) => p.volume)).toEqual([1_000, 400]);
+    expect(deltas(points)).toEqual([0, 300]);
+  });
+
+  it("measures the live point against each controller's last snapshot", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const points = aggregatePnlSeries(
+      [
+        alpha({ timestamp: at("10:00"), volume_traded: 200 }),
+        beta({ timestamp: at("10:00"), volume_traded: 50 }),
+      ],
+      new Set([key(shared, "alpha"), key(shared, "beta")]),
+      [
+        ctrl({ bot_name: "alpha", controller_id: shared, volume_traded: 260 }),
+        ctrl({ bot_name: "beta", controller_id: shared, volume_traded: 50 }),
+      ],
+    );
+    // alpha has traded 60 since its last stored snapshot, beta nothing: the
+    // final bar is an in-progress bucket, honestly short until it fills.
+    expect(deltas(points)).toEqual([0, 60]);
+  });
+
+  it("gives no bar to a live controller that has no stored snapshot to be measured from", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const points = aggregatePnlSeries(
+      [alpha({ timestamp: at("10:00"), volume_traded: 200 })],
+      new Set([key(shared, "alpha"), key(shared, "beta")]),
+      [
+        ctrl({ bot_name: "alpha", controller_id: shared, volume_traded: 200 }),
+        // beta is enabled and live but contributed no history: its lifetime
+        // counter is an opening reading like any other, not a bucket.
+        ctrl({ bot_name: "beta", controller_id: shared, volume_traded: 900_000 }),
+      ],
+    );
+    expect(deltas(points)).toEqual([0, 0]);
+    expect(points[points.length - 1].volume).toBe(900_200);
+  });
+
+  it("converts before differencing, so a bar is in the same currency as the total", () => {
+    const points = aggregatePnlSeries(
+      [
+        snap({ timestamp: at("10:00"), volume_traded: 100 }),
+        snap({ timestamp: at("10:05"), volume_traded: 300 }),
+      ],
+      new Set([key("ctrl-a")]),
+      [],
+      (val: number) => ({ value: val * 2, converted: true }),
+    );
+    expect(deltas(points)).toEqual([0, 400]);
+  });
+});
+
+/**
+ * Bar geometry (READ-245).
+ *
+ * recharts sizes a bar on a numeric axis from the *smallest* gap between two
+ * adjacent points and clamps an explicit `barSize` back under it, so these two
+ * helpers are what stop one short gap — the live "now" point, a few seconds
+ * after the last snapshot — from setting the width of every bar in the pane.
+ */
+describe("chartBucketMs", () => {
+  const point = (time: number): PnlChartPoint => ({
+    time,
+    realized: 0,
+    unrealized: 0,
+    total: 0,
+    volume: 0,
+    volumeDelta: 0,
+    position: 0,
+  });
+  const MIN = 60_000;
+
+  it("has no bucket to report for a series too short to have a gap", () => {
+    expect(chartBucketMs([])).toBe(0);
+    expect(chartBucketMs([point(0)])).toBe(0);
+  });
+
+  it("reports the spacing of an evenly sampled series", () => {
+    expect(chartBucketMs([0, 5, 10, 15, 20].map((m) => point(m * MIN)))).toBe(5 * MIN);
+  });
+
+  it("ignores the short final gap the live point leaves behind", () => {
+    // This is the case the whole helper exists for: five 5m buckets and then
+    // "now", four seconds after the last snapshot. The minimum gap is 4s and
+    // would draw every bar 4/300ths of a bucket wide.
+    const times = [0, 5 * MIN, 10 * MIN, 15 * MIN, 20 * MIN, 20 * MIN + 4_000];
+    expect(chartBucketMs(times.map(point))).toBe(5 * MIN);
+  });
+
+  it("absorbs a gap that is too wide as well as one that is too narrow", () => {
+    // A missing bucket at one end and the live point at the other: the typical
+    // spacing is unmoved, which is the property a mean would not have.
+    const times = [0, 5 * MIN, 15 * MIN, 20 * MIN, 25 * MIN, 25 * MIN + 3_000];
+    expect(chartBucketMs(times.map(point))).toBe(5 * MIN);
+  });
+
+  it("follows the majority when a merged timeline really does tick twice a bucket", () => {
+    // Two controllers persistently a couple of seconds out of step is not a
+    // stray gap, it is the series' actual spacing — half a bucket's trading
+    // lands on each point — and the bars narrow to match rather than being
+    // drawn a bucket wide and overlapping each other.
+    const times = [0, 2_000, 5 * MIN, 5 * MIN + 2_000, 10 * MIN, 10 * MIN + 2_000];
+    expect(chartBucketMs(times.map(point))).toBe(2_000);
+  });
+
+  it("tracks whichever rung of the sampling ladder the series was fetched at", () => {
+    for (const bucket of [5 * MIN, 60 * MIN, 4 * 60 * MIN, 24 * 60 * MIN]) {
+      const times = [0, 1, 2, 3, 4, 5].map((i) => point(i * bucket));
+      expect(chartBucketMs(times)).toBe(bucket);
+    }
+  });
+});
+
+describe("volumeBarWidth", () => {
+  it("gives a bar its bucket's share of the plot", () => {
+    // 60 buckets across 1200px is 20px each; the duty cycle leaves the gap that
+    // makes it a bar rather than a filled block.
+    expect(volumeBarWidth(1200, 60 * 60_000, 60_000)).toBeCloseTo(20 * VOLUME_BAR_DUTY, 6);
+  });
+
+  it("is the same bar at every rung of the sampling ladder", () => {
+    // A 5m bucket on a 2-day window and a 1d bucket on a 576-day one are the
+    // same fraction of the axis, which is exactly why the width is derived
+    // from the proportion rather than from the interval's name.
+    const fine = volumeBarWidth(900, 2 * 24 * 60 * 60_000, 5 * 60_000);
+    const coarse = volumeBarWidth(900, 576 * 24 * 60 * 60_000, 24 * 60 * 60_000);
+    expect(fine).toBeCloseTo(coarse!, 6);
+  });
+
+  it("keeps a dense window's bars visible and a sparse window's bars from becoming blocks", () => {
+    // 5,000 buckets across 900px is a fifth of a pixel; 2 buckets is 450.
+    expect(volumeBarWidth(900, 5_000 * 60_000, 60_000)).toBe(VOLUME_BAR_MIN_PX);
+    expect(volumeBarWidth(900, 2 * 60_000, 60_000)).toBe(VOLUME_BAR_MAX_PX);
+  });
+
+  it("declines to answer before the pane has been measured, leaving recharts its default", () => {
+    expect(volumeBarWidth(0, 60_000, 5_000)).toBeUndefined();
+    expect(volumeBarWidth(-40, 60_000, 5_000)).toBeUndefined();
+    expect(volumeBarWidth(900, 0, 5_000)).toBeUndefined();
+    expect(volumeBarWidth(900, 60_000, 0)).toBeUndefined();
+  });
+});
+
+describe("formatBucketLabel", () => {
+  it("names the bucket with the same word the history request used", () => {
+    expect(formatBucketLabel(5 * 60_000)).toBe("5m");
+    expect(formatBucketLabel(60 * 60_000)).toBe("1h");
+    expect(formatBucketLabel(24 * 60 * 60_000)).toBe("1d");
+  });
+
+  it("snaps a spacing that is a few seconds off a round interval", () => {
+    expect(formatBucketLabel(15 * 60_000 + 3_000)).toBe("15m");
+    expect(formatBucketLabel(4 * 60 * 60_000 - 11_000)).toBe("4h");
+  });
+
+  it("snaps in proportion, not in absolute time", () => {
+    // Linearly, 8m is far nearer 5m than 15m in the sense that matters to a
+    // reader — it is 1.6x one and 0.53x the other — and a distance measured in
+    // milliseconds would drag everything toward the long end of the ladder.
+    expect(formatBucketLabel(8 * 60_000)).toBe("5m");
+    expect(formatBucketLabel(11 * 60_000)).toBe("15m");
+  });
+
+  it("has nothing to name when the series has no spacing", () => {
+    expect(formatBucketLabel(0)).toBeUndefined();
   });
 });

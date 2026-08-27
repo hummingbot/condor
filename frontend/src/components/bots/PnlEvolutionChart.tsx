@@ -30,18 +30,21 @@
 //     second instance's area resolve to the first instance's gradient (and
 //     cross-sync the two charts' tooltips) the moment both are on the page.
 
-import { useCallback, useId, useMemo, type ReactNode } from "react";
+import { useCallback, useId, useMemo, useState, type ReactNode } from "react";
 import {
   Area,
+  Bar,
   CartesianGrid,
   ComposedChart,
   Legend,
   Line,
+  Rectangle,
   ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
+  type BarShapeProps,
 } from "recharts";
 
 import { formatAxisCurrency, formatAxisTime, formatCurrencyVolume, formatCurrencyPnl, pnlColor } from "@/lib/formatters";
@@ -52,8 +55,11 @@ import {
   PLOT_INSET_LEFT,
   PLOT_INSET_RIGHT,
   PNL_SERIES_COLORS,
+  chartBucketMs,
+  formatBucketLabel,
   positionAreaExtent,
   positionAxisDomain,
+  volumeBarWidth,
   zeroGradientOffset,
   type PnlChartPoint,
 } from "@/lib/pnl-chart";
@@ -157,6 +163,59 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
   // Measured against the area's own extent, not the padded domain: the fill's
   // gradient is in objectBoundingBox units. See zeroGradientOffset.
   const positionZeroOffset = useMemo(() => zeroGradientOffset(positionAreaExtent(data)), [data]);
+
+  // ── Volume bars (READ-245) ──
+  //
+  // The bars are sized by us, not by recharts. On a numeric X axis recharts
+  // takes a bar's width from the *smallest* gap between two adjacent points and
+  // clamps any explicit `barSize` back under it — and this series always has
+  // one gap far smaller than the rest, because the fold ends it with a live
+  // "now" point a fraction of a bucket after the last snapshot. Left alone,
+  // every bar in the pane would be drawn at that fraction, thinning to a
+  // hairline and thickening again with each snapshot that lands. See
+  // `volumeBarWidth` and `chartBucketMs`.
+  //
+  // The measurement comes from the pane's own ResponsiveContainer, which is
+  // already observing its size, rather than from a second observer of ours. It
+  // is 0 until the first callback — and stays 0 where there is no layout at all
+  // — which `volumeBarWidth` answers with `undefined`, i.e. "leave it to
+  // recharts".
+  const [activityWidth, setActivityWidth] = useState(0);
+  const onActivityResize = useCallback((width: number) => setActivityWidth(width), []);
+  const bucketMs = useMemo(() => chartBucketMs(data), [data]);
+  // The bucket has to be named in the tooltip: "Volume" used to be a running
+  // total, which needs no qualifier, and is now one bucket's worth, which means
+  // nothing until you know how long a bucket is.
+  const bucketLabel = useMemo(() => formatBucketLabel(bucketMs), [bucketMs]);
+  const barWidth = volumeBarWidth(
+    // The plot area, not the card: both gutters and the right margin are
+    // outside the time domain the bars are placed in.
+    activityWidth - 2 * AXIS_WIDTH - PANE_MARGIN_RIGHT,
+    spanMs,
+    bucketMs,
+  );
+  // Centred on its instant rather than starting there (recharts' own
+  // convention on a numeric axis), so a bar sits under the synced cursor and
+  // the tooltip that reports it, in both panes.
+  const volumeBar = useCallback(
+    (props: BarShapeProps) => {
+      const width = barWidth ?? props.width;
+      const x = props.x + props.width / 2 - width / 2;
+      return (
+        <Rectangle
+          x={x}
+          y={props.y}
+          width={width}
+          height={props.height}
+          radius={props.radius}
+          fill={props.fill}
+          fillOpacity={props.fillOpacity}
+          stroke="none"
+        />
+      );
+    },
+    [barWidth],
+  );
 
   const tc = getThemeColors();
   const totalColor = (latest?.total ?? 0) >= 0 ? tc.up : tc.down;
@@ -264,7 +323,7 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
       {/* Volume + Position pane (bottom), ruled off from the one above */}
       <PaneCaption label="Activity" divider />
       <div data-pane="activity" style={PANE_PADDING}>
-        <ResponsiveContainer width="100%" height={volumeHeight}>
+        <ResponsiveContainer width="100%" height={volumeHeight} onResize={onActivityResize}>
           <ComposedChart data={data} margin={{ top: 4, right: PANE_MARGIN_RIGHT, left: 0, bottom: 4 }} syncId={instanceId}>
             {/* One fill, two sides: a hard stop exactly where the position axis
                 crosses zero, so the part of the area above the baseline is
@@ -312,8 +371,38 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
               axisLine={false}
               width={AXIS_WIDTH}
             />
-            <Tooltip content={<BottomTooltip symbol={currencySymbol} />} />
-            <Line yAxisId="vol" type="monotone" dataKey="volume" stroke={PNL_SERIES_COLORS.volume} strokeWidth={1.5} dot={false} />
+            <Tooltip content={<BottomTooltip symbol={currencySymbol} bucket={bucketLabel} />} />
+            {/* Trading activity, one bar per sampling bucket (READ-245). The
+                cumulative counter it is differenced from stays in the header's
+                Vol stat, where a running total belongs; here the question is
+                *when* the fleet traded, which a monotone ramp cannot answer.
+                Bars grow from the vol axis's own zero — the pane floor — and
+                that floor is not the position series' baseline: the violet rule
+                below is the only zero worth marking on this pane (READ-246).
+
+                Layered behind the position area, and that takes `zIndex`
+                rather than JSX order: recharts groups graphical items by type
+                and paints every Bar after every Area, so written in the
+                obvious order these rectangles come out *over* the one line
+                whose shape this pane exists to show. Behind it they read as
+                the background histogram they are, and the area's 0.22 fill —
+                left exactly where READ-246 set it — tints them without hiding
+                either. The fill opacity here is what keeps them a backdrop
+                rather than a wall. */}
+            <Bar
+              zIndex={-1}
+              yAxisId="vol"
+              dataKey="volumeDelta"
+              fill={PNL_SERIES_COLORS.volume}
+              fillOpacity={0.45}
+              radius={[2, 2, 0, 0]}
+              shape={volumeBar}
+              // A wide window is hundreds of rects; recharts would animate
+              // every one of them on every refresh, and the socket refreshes
+              // this series continuously. The lines above are one path each and
+              // can afford it — a histogram cannot.
+              isAnimationActive={false}
+            />
             {/* Net position: an area filled from zero, not a bare line. The
                 stroke keeps the series' own violet — the colour the right-hand
                 ticks, the header's Pos stat and the tooltip already use — so

@@ -75,7 +75,46 @@ export interface PnlChartPoint {
   realized: number;
   unrealized: number;
   total: number;
+  /** Cumulative volume traded, summed across the enabled controllers. */
   volume: number;
+  /**
+   * Volume traded *in this sampling bucket alone* — the flow behind `volume`'s
+   * stock (READ-245).
+   *
+   * `volume_traded` is a running counter, so a series drawn from it can only
+   * ever slope up-right: it says how much has been traded since the bots were
+   * deployed and nothing at all about *when*. The delta says when. It is what
+   * the activity pane draws as bars, and it is computed here rather than by
+   * diffing `volume` afterwards for two reasons the summed series cannot
+   * recover from:
+   *
+   *  - **A controller's first appearance.** The fold forward-fills, so a
+   *    controller that joins the fleet mid-window contributes nothing before
+   *    its first snapshot and its whole cumulative counter after it. On the
+   *    summed series that arrives as one enormous step, which a post-hoc diff
+   *    reads as a bucket in which the fleet traded everything it has ever
+   *    traded. Per controller it is recognisable as what it is: a first
+   *    reading, with no predecessor to be a difference from, and so worth no
+   *    bar at all.
+   *  - **A restart.** A controller that restarts resets its counter, which
+   *    shows up as a fall. Clamped per controller, that one controller
+   *    contributes 0 for that bucket; clamped on the summed series, its fall
+   *    would cancel every *other* controller's real trading in the same bucket
+   *    and the bar would vanish.
+   *
+   * Both are the same principle: the diff belongs where the counter lives.
+   *
+   * What the bars therefore total is the volume traded **over the window on
+   * screen**, not since deploy — the opening reading of each controller is the
+   * baseline the rest are measured from, not a bar. The lifetime figure is the
+   * header's Vol stat, and the two are different quantities rather than a
+   * disagreement: this series is the flow, that one is the stock. Charging the
+   * opening reading to the first bucket to make the two tally is what the
+   * first draft of this did, and on any window shorter than the fleet's life
+   * it put millions into one bar and scaled the axis to it, flattening every
+   * real bucket to a pixel.
+   */
+  volumeDelta: number;
   position: number;
 }
 
@@ -182,6 +221,12 @@ export function zeroGradientOffset([min, max]: [number, number]): number {
  *    live controller's pair otherwise (defaulting to USDT).
  *  - Finally a live "now" point is appended from `controllers`, so the chart
  *    ends at real-time values rather than at the last stored snapshot.
+ *  - Alongside the cumulative `volume`, each point carries `volumeDelta`: how
+ *    much was traded since that controller's *previous* value, summed and
+ *    clamped per controller (READ-245, see PnlChartPoint). Because the
+ *    forward-fill re-uses a controller's last value verbatim, a bucket in
+ *    which it produced no new snapshot diffs to exactly zero — no bar — which
+ *    is the whole point of drawing the flow.
  */
 export function aggregatePnlSeries(
   snapshots: ControllerPerformanceSnapshot[],
@@ -225,9 +270,16 @@ export function aggregatePnlSeries(
   const cursors: Record<string, number> = {};
   for (const c of cids) cursors[c] = 0;
 
+  // The cumulative volume each controller last contributed, in display
+  // currency. This is what the per-bucket delta is measured against, and it is
+  // deliberately the last *value* rather than the last snapshot index: a
+  // forward-filled bucket re-reads the same snapshot, so it diffs to zero on
+  // its own without a separate "did this controller move" flag.
+  const prevVolume: Record<string, number> = {};
+
   const points: PnlChartPoint[] = [];
   for (const t of times) {
-    let realized = 0, unrealized = 0, volume = 0, position = 0;
+    let realized = 0, unrealized = 0, volume = 0, volumeDelta = 0, position = 0;
     for (const cid of cids) {
       const snaps = byCtrl[cid];
       while (cursors[cid] < snaps.length - 1 && toMs(snaps[cursors[cid] + 1].timestamp) <= t)
@@ -237,18 +289,28 @@ export function aggregatePnlSeries(
         const pair = s.trading_pair || pairByCtrl[cid] || "";
         realized += cv(s.realized_pnl_quote, pair);
         unrealized += cv(s.unrealized_pnl_quote, pair);
-        volume += cv(s.volume_traded, pair);
+        const vol = cv(s.volume_traded, pair);
+        volume += vol;
+        // A controller's *first* reading is worth no bar at all. It has no
+        // predecessor to be a difference from, and its absolute value is a
+        // stock — everything the controller has ever traded — which is the one
+        // quantity this series exists to stop drawing. Charging it to the
+        // opening bucket puts the whole lifetime counter into one bar and
+        // scales the axis to it, flattening every real bucket to nothing.
+        const prev = prevVolume[cid];
+        if (prev !== undefined) volumeDelta += Math.max(0, vol - prev);
+        prevVolume[cid] = vol;
         if (Array.isArray(s.positions_summary)) {
           position += cv(positionQuoteValue(s.positions_summary as Record<string, unknown>[]), pair);
         }
       }
     }
-    points.push({ time: t, realized, unrealized, total: realized + unrealized, volume, position });
+    points.push({ time: t, realized, unrealized, total: realized + unrealized, volume, volumeDelta, position });
   }
 
   // Append a live "now" point from controllers so the graph ends at real-time values
   const now = Date.now();
-  let liveRealized = 0, liveUnrealized = 0, liveVolume = 0, livePosition = 0;
+  let liveRealized = 0, liveUnrealized = 0, liveVolume = 0, liveVolumeDelta = 0, livePosition = 0;
   let hasLive = false;
   for (const ctrl of controllers) {
     const cid = controllerKey(ctrl);
@@ -257,7 +319,14 @@ export function aggregatePnlSeries(
     const pair = ctrl.trading_pair || "";
     liveRealized += cv(ctrl.realized_pnl_quote, pair);
     liveUnrealized += cv(ctrl.unrealized_pnl_quote, pair);
-    liveVolume += cv(ctrl.volume_traded, pair);
+    const vol = cv(ctrl.volume_traded, pair);
+    liveVolume += vol;
+    // The live point closes an *in-progress* bucket: whatever the counter has
+    // moved since this controller's last stored snapshot. Its bar is therefore
+    // honestly short until the bucket fills — and a controller with no stored
+    // snapshot at all still gets no bar, for the same reason as above.
+    const prev = prevVolume[cid];
+    if (prev !== undefined) liveVolumeDelta += Math.max(0, vol - prev);
     if (Array.isArray(ctrl.positions_summary)) {
       livePosition += cv(positionQuoteValue(ctrl.positions_summary as Record<string, unknown>[]), pair);
     }
@@ -269,6 +338,7 @@ export function aggregatePnlSeries(
       unrealized: liveUnrealized,
       total: liveRealized + liveUnrealized,
       volume: liveVolume,
+      volumeDelta: liveVolumeDelta,
       position: livePosition,
     });
   }
@@ -379,4 +449,107 @@ export function samplingIntervalSince(
   const startMs = Date.parse(startTime);
   if (Number.isNaN(startMs)) return "5m";
   return pickSamplingInterval(now - startMs);
+}
+
+// ── Volume bar geometry (READ-245) ──
+
+/**
+ * The typical spacing between two adjacent points on a folded series, in ms —
+ * the width one volume bar is meant to cover.
+ *
+ * It is the **median** gap, not the minimum and not the mean, and that is the
+ * whole reason this function exists rather than the series being handed to
+ * recharts as-is.
+ *
+ * On a numeric X axis recharts has no band to work from, so it derives a bar's
+ * width from the *smallest* distance between two adjacent points
+ * (`getBandSizeOfAxis` over the categorical domain), and an explicit `barSize`
+ * is clamped back down to 0.9 of that — it can narrow a bar, never widen one.
+ * That rule is fine for evenly spaced data, and this series is never quite
+ * evenly spaced: the fold ends it with a live "now" point at `Date.now()`,
+ * which lands a *fraction* of a bucket after the last stored snapshot. One gap
+ * of a few seconds among hundreds a whole bucket wide would set the width of
+ * every bar in the pane — so the bars would thin to a hairline and thicken
+ * again as each new snapshot landed, on a loop.
+ *
+ * The median is what makes that one gap (and any other minority of odd ones —
+ * a bucket the history is missing, a controller a beat out of step) count for
+ * nothing, leaving the sampling interval the series was actually fetched at,
+ * whichever rung of the PERF-238 ladder that is (`5m` … `1d`), without this
+ * module having to be told which one. It is a *typical* spacing, not a
+ * declared one: a merged timeline that genuinely ticks twice per bucket
+ * reports the half-bucket it genuinely has, and the bars narrow to match
+ * rather than overlapping each other.
+ *
+ * Returns 0 for a series too short to have a gap.
+ */
+export function chartBucketMs(data: PnlChartPoint[]): number {
+  const gaps: number[] = [];
+  for (let i = 1; i < data.length; i++) {
+    const gap = data[i].time - data[i - 1].time;
+    if (gap > 0) gaps.push(gap);
+  }
+  if (gaps.length === 0) return 0;
+  gaps.sort((a, b) => a - b);
+  return gaps[gaps.length >> 1];
+}
+
+/** Fraction of its bucket a bar fills; the rest is the gap that makes it a bar. */
+export const VOLUME_BAR_DUTY = 0.72;
+/** Below this a bar stops being visible; above it, bars on a short series look like blocks. */
+export const VOLUME_BAR_MIN_PX = 1;
+export const VOLUME_BAR_MAX_PX = 28;
+
+/**
+ * How wide, in px, to draw one volume bar — or `undefined` while that cannot
+ * yet be known, in which case the caller leaves recharts to its own sizing.
+ *
+ * A bucket is `bucketMs` of a `spanMs` window drawn across `plotWidthPx`, so
+ * its share of the plot is a plain proportion. Deriving it this way is what
+ * makes the same code work at every rung of the sampling ladder: a 5m bucket
+ * on a two-day window and a 1d bucket on a two-year one are the same fraction
+ * of the axis and get the same bar.
+ *
+ * `plotWidthPx` is the *plot* width — the container minus both gutters and the
+ * right margin — because that, not the card, is what the time domain is
+ * stretched across.
+ */
+export function volumeBarWidth(
+  plotWidthPx: number,
+  spanMs: number,
+  bucketMs: number,
+): number | undefined {
+  if (!(plotWidthPx > 0) || !(spanMs > 0) || !(bucketMs > 0)) return undefined;
+  const ideal = (plotWidthPx * bucketMs) / spanMs;
+  return Math.min(VOLUME_BAR_MAX_PX, Math.max(VOLUME_BAR_MIN_PX, ideal * VOLUME_BAR_DUTY));
+}
+
+/**
+ * A sampling bucket rendered as the label the API uses for it — `"5m"`, `"1h"`,
+ * `"1d"` — by snapping to the nearest rung of the PERF-238 ladder.
+ *
+ * The tooltip needs this because the number beside "Volume" changed meaning:
+ * it used to be a running total, which needs no qualifier, and is now the
+ * volume of one bucket, which is meaningless until you know how long a bucket
+ * is. Snapping rather than formatting the raw median keeps the label the same
+ * word the request used, and absorbs a series whose gaps are a second or two
+ * off a round interval.
+ *
+ * Returns `undefined` when there is no bucket to name.
+ */
+export function formatBucketLabel(bucketMs: number): SamplingInterval | undefined {
+  if (!(bucketMs > 0)) return undefined;
+  let best: SamplingInterval = SAMPLING_INTERVALS[0];
+  let bestDistance = Infinity;
+  for (const interval of SAMPLING_INTERVALS) {
+    // Compared in log space so "twice as long" counts the same whether the
+    // rungs are minutes or days apart; a linear distance would snap almost
+    // everything to "1d".
+    const distance = Math.abs(Math.log(bucketMs / SAMPLING_INTERVAL_MS[interval]));
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      best = interval;
+    }
+  }
+  return best;
 }
