@@ -111,6 +111,44 @@ function mergeIntoMatchingQueries(
 }
 
 /**
+ * Whether this socket has ever been up, so the first connect is not read as a gap.
+ */
+let everConnected = false;
+
+/**
+ * Re-check the performance histories after the connection came back.
+ *
+ * While the socket is up, `mergeIntoMatchingQueries` keeps these entries at the
+ * live edge and the queries' own timer is only a long safety net
+ * (`HISTORY_REFETCH_MS`). A drop breaks the first half of that: frames sent
+ * while the connection was down are gone — the stream broadcasts the *latest*
+ * snapshot every 30s and never replays — so the cached series has a hole
+ * between the disconnect and now, and waiting up to ten minutes for the net to
+ * catch it would be exactly the "quietly stale to save requests" trade this
+ * whole change exists not to make.
+ *
+ * Invalidating instead makes the repair immediate and still cheap: each active
+ * chart refetches, and a refetch is now a tail fetch from its own newest cached
+ * snapshot (`refreshControllerHistory`), so the request that closes the gap is
+ * bounded by the length of the gap rather than by the length of the history.
+ * That is what makes an aggressive repair affordable here.
+ *
+ * The first connect of a socket is skipped: nothing was missed before there was
+ * a connection, and the queries are loading their first full walk at that exact
+ * moment. Both prefixes are listed because react-query matches key arrays
+ * element by element — `"controller-perf-history"` is not a prefix of
+ * `"controller-perf-history-all"`.
+ */
+function resyncPerformanceHistories(): void {
+  if (!everConnected) {
+    everConnected = true;
+    return;
+  }
+  queryClient.invalidateQueries({ queryKey: ["controller-perf-history-all"] });
+  queryClient.invalidateQueries({ queryKey: ["controller-perf-history"] });
+}
+
+/**
  * The single message handler for the shared socket.
  *
  * Registered once per connection at module scope, so it cannot close over any
@@ -281,6 +319,7 @@ function openSocket(token: string): CondorWebSocket {
   ws.onMessage(handleMessage);
   ws.onConnect(() => {
     version++;
+    resyncPerformanceHistories();
     for (const handler of connectHandlers) handler();
   });
 

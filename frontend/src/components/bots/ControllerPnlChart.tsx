@@ -1,9 +1,14 @@
 import { useQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
 
-import { api, type ControllerInfo } from "@/lib/api";
+import { api, type ControllerInfo, type ControllerPerformanceHistoryAllResponse } from "@/lib/api";
 import { controllerKey } from "@/lib/controller-identity";
 import { historyRowBudget } from "@/lib/history-pagination";
+import {
+  HISTORY_REFETCH_MS,
+  TAIL_MAX_PAGES,
+  refreshControllerHistory,
+} from "@/lib/history-refresh";
 import { aggregatePnlSeries, samplingIntervalSince } from "@/lib/pnl-chart";
 import type { ConvertFn } from "@/lib/rates";
 import { PnlEvolutionChart } from "./PnlEvolutionChart";
@@ -47,23 +52,46 @@ export function ControllerPnlChart({ server, controllerId, botName, deployedAt, 
     // live frames by *prefix* (`mergeIntoMatchingQueries`), so appending to the
     // key leaves that routing intact.
     queryKey: ["controller-perf-history", server, botName, controllerId, deployedAt, interval],
-    // Walked page by page: a page holds 1000 ROWS, and while one controller is
-    // usually one row per instant, the bucketing is not guaranteed to be — so
-    // the ceiling on a single request is a ceiling on the visible window unless
-    // the cursor is followed (CORR-237). Every page carries `interval`
-    // unchanged, so the series is one resolution end to end (PERF-238).
-    queryFn: ({ signal }) =>
-      api.getControllerPerformanceHistoryAll(
-        server,
-        {
-          controller_id: controllerId,
-          bot_name: botName,
-          interval,
-          start_time: deployedAt ?? undefined,
-        },
-        { maxRows: historyRowBudget(1), signal },
-      ),
-    refetchInterval: 60_000,
+    // The first load is walked page by page: a page holds 1000 ROWS, and while
+    // one controller is usually one row per instant, the bucketing is not
+    // guaranteed to be — so the ceiling on a single request is a ceiling on the
+    // visible window unless the cursor is followed (CORR-237). Every page
+    // carries `interval` unchanged, so the series is one resolution end to end
+    // (PERF-238).
+    //
+    // Every *later* load is a tail: the `controller_perf` channel has been
+    // pushing this controller's newest snapshot into this very entry all along,
+    // so re-requesting the window from `deployedAt` re-downloaded a history
+    // that was already here — and after CORR-237, re-downloaded it as several
+    // sequential requests (PERF-239). The previous entry is read from the cache
+    // rather than from a ref because that is what the refresh has to extend,
+    // and because the socket writes into it between refreshes. Reading it under
+    // this query's own key is also what keeps the interval part of the cache
+    // identity: the key ends with it (PERF-238), so a tail can never be spliced
+    // onto a series sampled at another resolution.
+    queryFn: ({ signal, queryKey: key, client }) => {
+      const budget = historyRowBudget(1);
+      const load = (startTime: string | undefined, maxPages?: number) =>
+        api.getControllerPerformanceHistoryAll(
+          server,
+          {
+            controller_id: controllerId,
+            bot_name: botName,
+            interval,
+            start_time: startTime,
+          },
+          { maxRows: budget, maxPages, signal },
+        );
+      return refreshControllerHistory({
+        previous: client.getQueryData<ControllerPerformanceHistoryAllResponse>(key),
+        interval,
+        full: () => load(deployedAt ?? undefined),
+        tail: (from) => load(from, TAIL_MAX_PAGES),
+        maxRows: budget,
+      });
+    },
+    // The socket is the update path; this is only the net under it.
+    refetchInterval: HISTORY_REFETCH_MS,
     staleTime: 30_000,
   });
 

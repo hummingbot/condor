@@ -212,6 +212,20 @@ const SAMPLING_INTERVAL_MS: Record<SamplingInterval, number> = {
 };
 
 /**
+ * One sampling bucket, in milliseconds.
+ *
+ * Takes a plain `string` because that is what comes back on the wire:
+ * `ControllerPerformanceHistoryResponse.interval` is whatever the route
+ * echoed, and a value outside `SAMPLING_INTERVALS` is a server that changed
+ * under us rather than a caller mistake. Falling back to the finest interval
+ * keeps every consumer conservative — an incremental refresh sizes its overlap
+ * window from this, and a *too small* overlap is the one that loses a bucket.
+ */
+export function samplingIntervalMs(interval: string | undefined): number {
+  return SAMPLING_INTERVAL_MS[interval as SamplingInterval] ?? SAMPLING_INTERVAL_MS["5m"];
+}
+
+/**
  * How many points one history query may ask for.
  *
  * Two independent limits happen to agree on this number, which is why it is a

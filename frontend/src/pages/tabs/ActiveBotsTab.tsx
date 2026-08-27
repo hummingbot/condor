@@ -26,9 +26,14 @@ import { FallbackSpinner } from "@/components/ui/FallbackSpinner";
 import { useRates } from "@/hooks/useRates";
 import { useServer } from "@/hooks/useServer";
 import { useCondorWebSocket } from "@/hooks/useWebSocket";
-import { api, type BotLogEntry, type BotSummary, type ControllerInfo, type ControllerPerformanceSnapshot } from "@/lib/api";
+import { api, type BotLogEntry, type BotSummary, type ControllerInfo, type ControllerPerformanceHistoryAllResponse, type ControllerPerformanceSnapshot } from "@/lib/api";
 import { formatCurrencyVolume, pnlColor } from "@/lib/formatters";
 import { historyRowBudget } from "@/lib/history-pagination";
+import {
+  HISTORY_REFETCH_MS,
+  TAIL_MAX_PAGES,
+  refreshControllerHistory,
+} from "@/lib/history-refresh";
 import { samplingIntervalSince } from "@/lib/pnl-chart";
 
 function formatUptime(deployedAt: string | null): string {
@@ -595,14 +600,33 @@ export function ActiveBotsTab() {
     // entry, and last in it so the shared socket's prefix-matched live merge
     // (`mergeIntoMatchingQueries`) still finds this query (PERF-238).
     queryKey: ["controller-perf-history-all", server, earliestDeploy, perfInterval],
-    queryFn: ({ signal }) =>
-      api.getControllerPerformanceHistoryAll(
-        server!,
-        { interval: perfInterval, start_time: earliestDeploy },
-        { maxRows: historyRowBudget(data?.controllers?.length ?? 0), signal },
-      ),
+    // Full on the first load, a tail on every one after it (PERF-239). The
+    // `controller_perf` channel this page subscribes to writes each fleet
+    // snapshot straight into this cache entry every 30s, so the old 120s poll
+    // re-downloaded a history that had already arrived — and after CORR-237 it
+    // re-downloaded it as up to ten sequential requests. `previous` is read
+    // back under this query's own key, which is what ties the refresh to one
+    // resolution: the key ends with `perfInterval` (PERF-238), so a coarser and
+    // a finer series each extend themselves and never each other.
+    queryFn: ({ signal, queryKey: key, client }) => {
+      const budget = historyRowBudget(data?.controllers?.length ?? 0);
+      const load = (startTime: string | undefined, maxPages?: number) =>
+        api.getControllerPerformanceHistoryAll(
+          server!,
+          { interval: perfInterval, start_time: startTime },
+          { maxRows: budget, maxPages, signal },
+        );
+      return refreshControllerHistory({
+        previous: client.getQueryData<ControllerPerformanceHistoryAllResponse>(key),
+        interval: perfInterval,
+        full: () => load(earliestDeploy),
+        tail: (from) => load(from, TAIL_MAX_PAGES),
+        maxRows: budget,
+      });
+    },
     enabled: !!server && (data?.controllers?.length ?? 0) > 0,
-    refetchInterval: 120_000,
+    // The socket is the update path; this is only the net under it.
+    refetchInterval: HISTORY_REFETCH_MS,
     staleTime: 60_000,
   });
 
