@@ -7,6 +7,10 @@ And the restart was a bare ``os.execv`` from inside the handler, which dropped
 the process image before ``teardown()`` could flush persistence or reap ACP/MCP
 subprocesses. These tests pin both: the build runs exactly when it is needed,
 and a restart request goes through the normal shutdown path.
+
+The pipeline moved out of the Telegram handler and into :mod:`condor.updates.run`
+(FEAT-070), so these drive the engine instead — but they patch the same
+``utils.updater`` seam, and what they pin is unchanged.
 """
 
 import asyncio
@@ -16,7 +20,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-import handlers.admin.update as update_handler
+from condor.updates import components
+from condor.updates import run as update_run
 from utils import updater
 
 
@@ -24,31 +29,69 @@ from utils import updater
 def _reset_restart_flag():
     """Keep the module-level restart flag from leaking between tests."""
     updater._restart_pending = False
+    update_run._current = None
+    update_run._observers.clear()
     yield
     updater._restart_pending = False
+    update_run._current = None
+    update_run._observers.clear()
 
 
-class FakeQuery:
-    """Collects what the admin would have seen, in order."""
+class Watcher:
+    """An observer, collecting what the admin would have been shown."""
 
     def __init__(self):
         self.messages = []
 
-    async def edit_message_text(self, text, parse_mode=None, reply_markup=None):
-        self.messages.append(text)
+    async def __call__(self, run):
+        failed = next((s for s in run.steps if s.state == "failed"), None)
+        self.messages.append(
+            "\n".join(
+                [run.error or ""] + ([failed.output_tail] if failed else [])
+            ).strip()
+        )
+
+
+def _a_run():
+    """A Condor run with its plan laid out, the way :func:`start` builds it."""
+    return update_run.Run(
+        id="u-test",
+        started=0.0,
+        actor={},
+        components=[components.CONDOR],
+        steps=update_run._plan([components.CONDOR], {}),
+    )
 
 
 def _stub_pipeline(**overrides):
     """Patch every step of the Condor update; each override replaces one step."""
     steps = dict(
         get_local_commit_full=AsyncMock(side_effect=["old_sha", "new_sha"]),
-        pull_updates=AsyncMock(return_value=(True, "3 files changed")),
+        fast_forward=AsyncMock(return_value=(True, "3 files changed")),
         install_dependencies=AsyncMock(return_value=(True, "Resolved 120 packages")),
         frontend_needs_build=AsyncMock(return_value=True),
         build_frontend=AsyncMock(return_value=(True, "built in 297ms")),
+        request_restart=lambda: None,
     )
     steps.update(overrides)
     return patch.multiple("utils.updater", **steps), steps
+
+
+def _run_condor(**overrides):
+    """Drive one Condor update; hand back (ok, run, watcher, steps)."""
+    pipeline, steps = _stub_pipeline(**overrides)
+    run, watcher = _a_run(), Watcher()
+    update_run.register_observer(watcher)
+    try:
+        # Nothing blocks here: the blocker policy has its own tests.
+        with (
+            pipeline,
+            patch.object(components, "repo_blocks", AsyncMock(return_value=[])),
+        ):
+            ok = asyncio.run(update_run._update_condor(run))
+    finally:
+        update_run.unregister_observer(watcher)
+    return ok, run, watcher, steps
 
 
 # ---------------------------------------------------------------------------
@@ -121,53 +164,77 @@ def test_identical_commits_change_nothing():
 
 
 def test_update_pulls_syncs_builds_then_reports_ready():
-    ctx, steps = _stub_pipeline()
-    query = FakeQuery()
-    with ctx:
-        assert asyncio.run(update_handler._update_condor(query)) is True
+    ok, run, _watcher, steps = _run_condor()
+    assert ok is True
 
-    steps["pull_updates"].assert_awaited_once()
+    steps["fast_forward"].assert_awaited_once()
     steps["install_dependencies"].assert_awaited_once()
     steps["build_frontend"].assert_awaited_once()
     # The diff is taken across the pull, not against an arbitrary commit.
     steps["frontend_needs_build"].assert_awaited_once_with("old_sha", "new_sha")
+    # The commit it aims at is journaled before the process is signalled, or
+    # the restart it does not survive could never be judged.
+    assert run.state == update_run.RESTARTING
+    assert run.target_commit == "new_sha"
 
 
 def test_update_does_not_build_when_the_frontend_is_untouched():
-    ctx, steps = _stub_pipeline(frontend_needs_build=AsyncMock(return_value=False))
-    with ctx:
-        assert asyncio.run(update_handler._update_condor(FakeQuery())) is True
+    ok, run, _watcher, steps = _run_condor(
+        frontend_needs_build=AsyncMock(return_value=False)
+    )
+    assert ok is True
     steps["build_frontend"].assert_not_awaited()
+    assert run.step("condor.frontend").state == update_run.SKIPPED
 
 
 def test_failed_pull_stops_before_touching_dependencies():
-    ctx, steps = _stub_pipeline(
-        pull_updates=AsyncMock(return_value=(False, "uncommitted changes"))
+    ok, run, watcher, steps = _run_condor(
+        fast_forward=AsyncMock(return_value=(False, "would be overwritten"))
     )
-    query = FakeQuery()
-    with ctx:
-        assert asyncio.run(update_handler._update_condor(query)) is False
+    assert ok is False
 
     steps["install_dependencies"].assert_not_awaited()
     steps["build_frontend"].assert_not_awaited()
-    assert "uncommitted changes" in query.messages[-1]
+    assert "would be overwritten" in watcher.messages[-1]
+    assert run.state == update_run.FAILED
+
+
+def test_a_blocked_checkout_never_reaches_git_at_all():
+    """The preflight already said why; the run must not try it anyway."""
+    block = components.Block(
+        component=components.CONDOR,
+        code="dirty-conflict",
+        message="1 file changed locally would be overwritten.",
+        paths=["main.py"],
+    )
+    pipeline, steps = _stub_pipeline()
+    run = _a_run()
+    with (
+        pipeline,
+        patch.object(components, "repo_blocks", AsyncMock(return_value=[block])),
+    ):
+        assert asyncio.run(update_run._update_condor(run)) is False
+
+    steps["fast_forward"].assert_not_awaited()
+    assert "overwritten" in (run.error or "")
 
 
 def test_failed_build_blocks_the_restart():
     """Restarting here would bring the dashboard back on the previous bundle."""
-    ctx, steps = _stub_pipeline(
-        build_frontend=AsyncMock(return_value=(False, "TS2304: Cannot find name"))
-    )
-    query = FakeQuery()
-    with ctx:
-        assert asyncio.run(update_handler._update_condor(query)) is False
+    with patch.object(updater, "request_restart") as request_restart:
+        ok, run, watcher, _steps = _run_condor(
+            build_frontend=AsyncMock(return_value=(False, "TS2304: Cannot find name"))
+        )
 
-    assert "TS2304" in query.messages[-1]
+    assert ok is False
+    assert "TS2304" in watcher.messages[-1]
+    assert run.state == update_run.FAILED
+    request_restart.assert_not_called()
 
 
 def test_command_output_is_trimmed_for_telegram():
     """Build logs run to thousands of lines; only the tail is worth sending."""
-    trimmed = update_handler._tail("\n".join(str(i) for i in range(500)))
+    trimmed = update_run.tail("\n".join(str(i) for i in range(500)))
     assert trimmed.startswith("...")
     assert trimmed.endswith("499")
     assert len(trimmed.split("\n")) <= 16

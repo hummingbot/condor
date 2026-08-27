@@ -1,16 +1,21 @@
-"""
-Auto-update handler for Condor and Hummingbot API.
+"""The ``/update`` screen: a view over :mod:`condor.updates`.
 
-Provides /update command (admin-only) and periodic update checks.
+There is no git, no docker and no build in this file, and that is the point.
+Every question it asks — what version is this, what is in the way, what will
+happen, how is it going — is answered by the engine, which is headless. That is
+what lets the dashboard render the same update without reimplementing a step.
+
+What this module does own is Telegram: the cards, the buttons, and an observer
+that edits one message as the run walks its plan.
 """
 
 import asyncio
 import logging
-from datetime import datetime, timezone
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
+from condor import updates
 from utils.auth import admin_required
 from utils.telegram_formatters import escape_markdown_v2, escape_markdown_v2_code
 
@@ -19,6 +24,17 @@ logger = logging.getLogger(__name__)
 # Job name for the periodic check
 UPDATE_CHECK_JOB = "update_check"
 
+# All of it, for the "Update all" button.
+ALL = "all"
+
+_STEP_GLYPH = {
+    "pending": "·",
+    "running": "»",
+    "ok": "✓",
+    "failed": "✗",
+    "skipped": "–",
+}
+
 
 @admin_required
 async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -26,422 +42,395 @@ async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     from handlers import clear_all_input_states
 
     clear_all_input_states(context)
-    await _check_and_show(update.message, context)
+    await _show_status(update.message, context)
 
 
-async def _check_and_show(message_or_query, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Check for updates on both repos and display result."""
-    from utils.updater import check_for_updates, check_hb_api_updates
+# ---------------------------------------------------------------------------
+# Screen 1: what is running, and what is available
+# ---------------------------------------------------------------------------
 
-    is_callback = hasattr(message_or_query, "edit_message_text")
-    if is_callback:
-        await message_or_query.edit_message_text("Checking for updates...")
-    else:
-        msg = await message_or_query.reply_text("Checking for updates...")
 
-    # Check both repos in parallel
-    condor_info, hb_info = await asyncio.gather(
-        check_for_updates(),
-        check_hb_api_updates(),
-    )
+def _facet_line(label: str, facet) -> str:
+    """One version, and where it could go. Never a bare "up to date" on an error."""
+    current = f"`{escape_markdown_v2_code(facet.current)}`"
+    if facet.error:
+        return f"{label}: {current}\n" f"  {escape_markdown_v2('⚠ ' + facet.error)}"
+    if facet.up_to_date:
+        return f"{label}: {current} — up to date"
 
-    # --- Build Condor section ---
+    line = f"{label}: {current}"
+    if facet.available:
+        line += f" → `{escape_markdown_v2_code(facet.available)}`"
+    if facet.behind > 1:
+        line += f" \\({facet.behind} commits behind\\)"
+    elif facet.kind == "image":
+        line += " \\(newer available\\)"
+    return line
+
+
+def _status_text(statuses) -> str:
     sections = []
-    condor_has_update = False
-    hb_has_update = False
+    for status in statuses:
+        header = f"*{escape_markdown_v2(status.name)}*"
+        if status.mode and status.mode != "unknown":
+            header += f" _\\({escape_markdown_v2(status.mode)} mode\\)_"
+        lines = [header]
 
-    if condor_info["error"]:
-        sections.append(
-            f"*Condor*\n" f"Error: `{escape_markdown_v2(condor_info['error'])}`"
+        for key in ("image", "repo"):
+            facet = status.facets.get(key)
+            if facet is None:
+                continue
+            lines.append(_facet_line("Image" if key == "image" else "Repo", facet))
+            if facet.detail and not facet.up_to_date:
+                body = "\n".join(escape_markdown_v2_code(line) for line in facet.detail)
+                lines.append(f"```\n{body}\n```")
+
+        sections.append("\n".join(lines))
+
+    return "\n\n".join(sections) or escape_markdown_v2("No components to update.")
+
+
+def _status_keyboard(statuses) -> InlineKeyboardMarkup:
+    stale = [s for s in statuses if not s.up_to_date]
+    rows = []
+
+    if len(stale) > 1:
+        rows.append(
+            [InlineKeyboardButton("Update All", callback_data=f"admin:update_go:{ALL}")]
         )
-    else:
-        local = escape_markdown_v2(condor_info["local_commit"])
-        branch = escape_markdown_v2(condor_info["branch"])
-        condor_has_update = not condor_info["up_to_date"]
-
-        if condor_info["up_to_date"]:
-            sections.append(
-                f"*Condor*\n"
-                f"Branch: `{branch}` \\| Version: `{local}`\n"
-                f"Status: Up to date"
-            )
-        else:
-            remote = escape_markdown_v2(condor_info["remote_commit"])
-            behind = condor_info["commits_behind"]
-            log_lines = condor_info["commit_log"].split("\n")[:5]
-            log_display = "\n".join(escape_markdown_v2_code(line) for line in log_lines)
-            if behind > 5:
-                log_display += f"\n_\\.\\.\\.and {behind - 5} more_"
-            sections.append(
-                f"*Condor*\n"
-                f"Branch: `{branch}` \\| Version: `{local}`\n"
-                f"Status: *{behind} commit{'s' if behind != 1 else ''} behind*\n"
-                f"```\n{log_display}\n```"
-            )
-
-    # --- Build HB API section ---
-    if hb_info["available"]:
-        hb_git = hb_info["git_info"]
-        docker = hb_info["docker"]
-
-        if hb_git["error"]:
-            sections.append(
-                f"\n*Hummingbot API*\n"
-                f"Error: `{escape_markdown_v2(hb_git['error'])}`"
-            )
-        else:
-            hb_local = escape_markdown_v2(hb_git["local_commit"])
-            hb_branch = escape_markdown_v2(hb_git["branch"])
-            hb_has_update = not hb_git["up_to_date"]
-
-            docker_line = ""
-            if docker:
-                status = docker["status"]
-                started = docker.get("started_at", "")
-                age = _format_docker_age(started)
-                docker_line = f"\nDocker: {escape_markdown_v2(status)}"
-                if age:
-                    docker_line += f" \\(started {escape_markdown_v2(age)}\\)"
-
-            if hb_git["up_to_date"]:
-                sections.append(
-                    f"\n*Hummingbot API*\n"
-                    f"Branch: `{hb_branch}` \\| Version: `{hb_local}`\n"
-                    f"Status: Up to date{docker_line}"
-                )
-            else:
-                hb_remote = escape_markdown_v2(hb_git["remote_commit"])
-                hb_behind = hb_git["commits_behind"]
-                hb_log_lines = hb_git["commit_log"].split("\n")[:5]
-                hb_log_display = "\n".join(
-                    escape_markdown_v2_code(l) for l in hb_log_lines
-                )
-                if hb_behind > 5:
-                    hb_log_display += f"\n_\\.\\.\\.and {hb_behind - 5} more_"
-                sections.append(
-                    f"\n*Hummingbot API*\n"
-                    f"Branch: `{hb_branch}` \\| Version: `{hb_local}`\n"
-                    f"Status: *{hb_behind} commit{'s' if hb_behind != 1 else ''} behind*{docker_line}\n"
-                    f"```\n{hb_log_display}\n```"
-                )
-
-    text = "\n".join(sections)
-
-    # --- Build keyboard ---
-    keyboard = []
-
-    if condor_has_update and hb_has_update:
-        keyboard.append(
-            [InlineKeyboardButton("Update All", callback_data="admin:update_all")]
-        )
-        keyboard.append(
+    for status in stale:
+        rows.append(
             [
                 InlineKeyboardButton(
-                    "Update Condor", callback_data="admin:update_pull"
-                ),
-                InlineKeyboardButton("Update HB API", callback_data="admin:update_hb"),
-            ]
-        )
-    elif condor_has_update:
-        keyboard.append(
-            [
-                InlineKeyboardButton(
-                    "Update Condor & Restart", callback_data="admin:update_pull"
+                    f"Update {status.name}",
+                    callback_data=f"admin:update_go:{status.key}",
                 )
             ]
         )
-    elif hb_has_update:
-        keyboard.append(
-            [InlineKeyboardButton("Update HB API", callback_data="admin:update_hb")]
-        )
 
-    keyboard.append(
-        [InlineKeyboardButton("Refresh", callback_data="admin:update_check")]
-    )
-    keyboard.append(
+    rows.append([InlineKeyboardButton("Refresh", callback_data="admin:update_refresh")])
+    rows.append(
         [InlineKeyboardButton("Force Restart", callback_data="admin:update_restart")]
     )
-    keyboard.append([InlineKeyboardButton("Back", callback_data="admin:back")])
+    rows.append([InlineKeyboardButton("Back", callback_data="admin:back")])
+    return InlineKeyboardMarkup(rows)
 
-    reply_markup = InlineKeyboardMarkup(keyboard)
 
+async def _show_status(target, context, *, force: bool = False) -> None:
+    """Render the per-component card. ``target`` is a message or a callback query."""
+    is_callback = hasattr(target, "edit_message_text")
     if is_callback:
-        await message_or_query.edit_message_text(
-            text,
-            parse_mode="MarkdownV2",
-            reply_markup=reply_markup,
-        )
+        await target.edit_message_text("Checking for updates...")
+        editor = target.edit_message_text
     else:
-        await msg.edit_text(
-            text,
-            parse_mode="MarkdownV2",
-            reply_markup=reply_markup,
+        message = await target.reply_text("Checking for updates...")
+        editor = message.edit_text
+
+    statuses = await updates.check(force=force)
+    await editor(
+        _status_text(statuses),
+        parse_mode="MarkdownV2",
+        reply_markup=_status_keyboard(statuses),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Screen 2: what it will do, and what is in the way
+# ---------------------------------------------------------------------------
+
+
+def _selection(key: str) -> list[str]:
+    return list(updates.keys()) if key == ALL else [key]
+
+
+def _preflight_text(preflight) -> str:
+    parts = []
+
+    if preflight.blocks:
+        parts.append(f"*{escape_markdown_v2('Blocked')}*")
+        for block in preflight.blocks:
+            body = escape_markdown_v2(block.message)
+            if block.paths:
+                shown = block.paths[:10]
+                listing = "\n".join(escape_markdown_v2_code(p) for p in shown)
+                if len(block.paths) > len(shown):
+                    listing += f"\n…and {len(block.paths) - len(shown)} more"
+                body += f"\n```\n{listing}\n```"
+            parts.append(body)
+
+    for warning in preflight.warnings:
+        parts.append(escape_markdown_v2(f"⚠ {warning.message}"))
+
+    if preflight.steps:
+        plan = "\n".join(
+            escape_markdown_v2_code(f"{i}. {step}")
+            for i, step in enumerate(preflight.steps, 1)
+        )
+        parts.append(f"*Plan*\n```\n{plan}\n```")
+
+    return "\n\n".join(parts)
+
+
+def _preflight_keyboard(key: str, preflight) -> InlineKeyboardMarkup:
+    rows = []
+
+    # One button per (component, action), even when two blocks offer the same
+    # one: the resolution acts on the whole component's conflict set at once.
+    offered: list[tuple[str, str]] = []
+    for block in preflight.blocks:
+        for action in block.resolutions:
+            if action == "cancel":
+                continue
+            pair = (block.component, action)
+            if pair not in offered:
+                offered.append(pair)
+
+    # The scope rides along as one character: callback_data caps at 64 bytes,
+    # and spelling a component key out twice was already within 3 of it.
+    scope = "a" if key == ALL else "s"
+    for component, action in offered:
+        label = f"{action.title()} conflicts in {component}"
+        # Discarding destroys work, so it gets its own confirm screen.
+        prefix = "update_cfix" if action == "discard" else "update_fix"
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    label, callback_data=f"admin:{prefix}:{component}:{action}:{scope}"
+                )
+            ]
         )
 
+    if preflight.ok and preflight.steps:
+        rows.append(
+            [InlineKeyboardButton("Confirm", callback_data=f"admin:update_run:{key}")]
+        )
 
-def _format_docker_age(started_at: str) -> str:
-    """Format a Docker StartedAt timestamp as a human-readable age."""
-    if not started_at:
-        return ""
-    try:
-        # Docker uses ISO 8601 format
-        started = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
-        delta = datetime.now(timezone.utc) - started
-        total_secs = int(delta.total_seconds())
-        if total_secs < 60:
-            return f"{total_secs}s ago"
-        elif total_secs < 3600:
-            return f"{total_secs // 60}m ago"
-        elif total_secs < 86400:
-            return f"{total_secs // 3600}h ago"
-        else:
-            return f"{total_secs // 86400}d ago"
-    except Exception:
-        return ""
+    rows.append([InlineKeyboardButton("Cancel", callback_data="admin:update_refresh")])
+    return InlineKeyboardMarkup(rows)
 
 
-async def handle_update_callback(
-    query, context: ContextTypes.DEFAULT_TYPE, action: str
-) -> None:
-    """Handle update-related callbacks."""
-    if action == "update_check":
-        await _check_and_show(query, context)
-    elif action == "update_pull":
-        await _do_update(query, context)
-    elif action == "update_hb":
-        await _do_update_hb(query, context)
-    elif action == "update_all":
-        await _do_update_all(query, context)
-    elif action == "update_restart":
-        await _do_restart(query, context)
+async def _show_preflight(query, key: str) -> None:
+    await query.edit_message_text("Checking what this would do...")
+    preflight = await updates.preflight(_selection(key))
+    await query.edit_message_text(
+        _preflight_text(preflight) or escape_markdown_v2("Nothing to do."),
+        parse_mode="MarkdownV2",
+        reply_markup=_preflight_keyboard(key, preflight),
+    )
 
 
-async def _progress(query, text: str) -> None:
-    """Show the current step. Plain text: no escaping to get wrong mid-flow."""
-    try:
-        await query.edit_message_text(text)
-    except Exception as e:
-        # A failed progress edit (message unchanged, too old) must never abort
-        # an update that is otherwise going fine.
-        logger.debug("Could not update progress message: %s", e)
+async def _confirm_fix(query, component: str, action: str, key: str) -> None:
+    """Discarding is unrecoverable, so it is asked twice."""
+    preflight = await updates.preflight(_selection(key))
+    paths = sorted(
+        {
+            p
+            for block in preflight.blocks
+            if block.component == component and action in block.resolutions
+            for p in block.paths
+        }
+    )
+    listing = "\n".join(escape_markdown_v2_code(p) for p in paths[:20]) or "(none)"
+    text = (
+        f"*{escape_markdown_v2('Discard local changes?')}*\n\n"
+        + escape_markdown_v2(
+            f"This permanently throws away local work on {len(paths)} "
+            f"file{'s' if len(paths) != 1 else ''} in {component}. It cannot be undone."
+        )
+        + f"\n```\n{listing}\n```"
+    )
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "Yes, discard",
+                callback_data=(
+                    f"admin:update_fix:{component}:{action}:"
+                    f"{'a' if key == ALL else 's'}"
+                ),
+            )
+        ],
+        [InlineKeyboardButton("Keep them", callback_data=f"admin:update_go:{key}")],
+    ]
+    await query.edit_message_text(
+        text, parse_mode="MarkdownV2", reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
 
-def _tail(output: str, max_lines: int = 15, max_chars: int = 1500) -> str:
-    """Last few lines of command output — build logs are far past Telegram's limit."""
-    text = (output or "").strip() or "(no output)"
-    lines = text.split("\n")
-    if len(lines) > max_lines:
-        lines = ["..."] + lines[-max_lines:]
-    text = "\n".join(lines)
-    if len(text) > max_chars:
-        text = "..." + text[-max_chars:]
-    return text
+async def _apply_fix(query, component: str, action: str, key: str) -> None:
+    await query.edit_message_text(f"Resolving conflicts in {component}...")
+    ok, message = await updates.resolve(component, action)
+    if not ok:
+        await query.edit_message_text(
+            f"Could not {action}:\n\n{message}",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("Back", callback_data="admin:update_refresh")]]
+            ),
+        )
+        return
+    # A stash ref is the one thing the admin has to be told, so it leads.
+    await query.edit_message_text(message)
+    await asyncio.sleep(1.5)
+    await _show_preflight(query, key)
 
 
-async def _fail(
-    query, title: str, detail: str, note: str | None = None, retry_restart: bool = False
-) -> None:
-    """Render a failed step, with the tail of whatever the command printed."""
-    text = f"*{escape_markdown_v2(title)}*\n\n```\n{escape_markdown_v2_code(_tail(detail))}\n```"
-    if note:
-        text += f"\n{escape_markdown_v2(note)}"
+# ---------------------------------------------------------------------------
+# Screen 3: the run
+# ---------------------------------------------------------------------------
 
-    keyboard = []
-    if retry_restart:
-        keyboard.append(
+
+def _run_text(run) -> str:
+    """The plan with its progress. Plain text: no escaping to get wrong mid-flow."""
+    header = {
+        "running": "Updating...",
+        "restarting": "Restarting Condor...",
+        "succeeded": "Update complete.",
+        "failed": "Update failed.",
+    }.get(run.state, "Updating...")
+
+    lines = [header, ""]
+    for step in run.steps:
+        lines.append(f"{_STEP_GLYPH.get(step.state, '·')} {step.label}")
+
+    if run.error:
+        lines += ["", run.error]
+
+    failed = next((s for s in run.steps if s.state == "failed"), None)
+    if failed is not None and failed.output_tail:
+        lines += ["", failed.output_tail]
+
+    return "\n".join(lines)
+
+
+def _run_keyboard(run) -> InlineKeyboardMarkup | None:
+    if run.live:
+        return None
+    rows = []
+    if run.state == "failed":
+        rows.append(
             [
                 InlineKeyboardButton(
                     "Restart Anyway", callback_data="admin:update_restart"
                 )
             ]
         )
-    keyboard.append([InlineKeyboardButton("Back", callback_data="admin:update_check")])
-
-    await query.edit_message_text(
-        text,
-        parse_mode="MarkdownV2",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
+    rows.append([InlineKeyboardButton("Back", callback_data="admin:update_refresh")])
+    return InlineKeyboardMarkup(rows)
 
 
-async def _update_condor(query) -> bool:
-    """Pull Condor, sync deps, rebuild the dashboard if the pull touched it.
+async def _start_run(query, context: ContextTypes.DEFAULT_TYPE, key: str) -> None:
+    """Hand the run to the engine and watch it through an observer.
 
-    Returns True when the process is ready to restart. On failure it renders the
-    error itself and returns False.
+    The observer is how a surface that is already in-process gets zero-latency
+    transitions; the journal is what a surface that is not (or that outlives the
+    restart) reads instead.
     """
-    from utils.updater import (
-        build_frontend,
-        frontend_needs_build,
-        get_local_commit_full,
-        install_dependencies,
-        pull_updates,
-    )
 
-    before = await get_local_commit_full()
-
-    await _progress(query, "Pulling Condor updates...")
-    success, msg = await pull_updates()
-    if not success:
-        await _fail(query, "Condor pull failed", msg)
-        return False
-
-    after = await get_local_commit_full()
-
-    await _progress(query, "Installing dependencies...")
-    success, dep_msg = await install_dependencies()
-    if not success:
-        await _fail(
-            query,
-            "Dependencies failed",
-            dep_msg,
-            note="Code was pulled but deps failed. Fix it manually before restarting.",
-            retry_restart=True,
-        )
-        return False
-
-    # The Makefile builds the frontend before starting; an in-place update has
-    # to do it here or the dashboard keeps serving the previous bundle.
-    if await frontend_needs_build(before, after):
-        await _progress(query, "Building the dashboard (this can take a minute)...")
-        success, build_msg = await build_frontend()
-        if not success:
-            await _fail(
-                query,
-                "Dashboard build failed",
-                build_msg,
-                note=(
-                    "Code and deps are updated, but the dashboard would come back "
-                    "on the previous bundle."
-                ),
-                retry_restart=True,
+    async def render(run) -> None:
+        try:
+            await query.edit_message_text(
+                _run_text(run), reply_markup=_run_keyboard(run)
             )
-            return False
+        except Exception as e:  # noqa: BLE001
+            # A failed progress edit (unchanged text, message too old) must
+            # never abort an update that is otherwise going fine.
+            logger.debug("Could not render update progress: %s", e)
+        if not run.live:
+            updates.unregister_observer(render)
 
-    return True
+    updates.register_observer(render)
+    run = await updates.start(
+        _selection(key),
+        actor_user_id=query.from_user.id if query.from_user else None,
+        actor_chat_id=query.message.chat_id if query.message else None,
+    )
+    await render(run)
 
 
-async def _restart_now(query) -> None:
-    """Send the last message, then hand the process over to a clean restart."""
+# ---------------------------------------------------------------------------
+# Routing
+# ---------------------------------------------------------------------------
+
+
+async def handle_update_callback(
+    query, context: ContextTypes.DEFAULT_TYPE, action: str
+) -> None:
+    """Handle update-related callbacks."""
+    head, _, rest = action.partition(":")
+
+    if head in ("update_check", "update_refresh"):
+        await _show_status(query, context, force=head == "update_refresh")
+    elif head == "update_go":
+        await _show_preflight(query, rest or ALL)
+    elif head in ("update_fix", "update_cfix"):
+        component, _, tail = rest.partition(":")
+        fix, _, scope = tail.partition(":")
+        key = ALL if scope == "a" else component
+        if head == "update_cfix":
+            await _confirm_fix(query, component, fix, key)
+        else:
+            await _apply_fix(query, component, fix, key)
+    elif head == "update_run":
+        await _start_run(query, context, rest or ALL)
+    elif head == "update_restart":
+        await _do_restart(query)
+
+
+async def _do_restart(query) -> None:
+    """Force a restart without updating anything. Reachable from every screen."""
     from utils.updater import request_restart
 
-    await _progress(query, "Restarting Condor...")
+    await query.edit_message_text("Restarting Condor...")
     # Let Telegram flush the edit before the shutdown starts.
     await asyncio.sleep(1)
     request_restart()
 
 
-async def _do_update(query, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Pull Condor updates, install deps, rebuild the dashboard, and restart."""
-    if await _update_condor(query):
-        await _restart_now(query)
-
-
-async def _do_update_hb(query, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Update hummingbot-api: git pull + docker compose rebuild."""
-    from utils.updater import update_hb_api
-
-    await _progress(query, "Updating hummingbot-api...")
-
-    success, msg = await update_hb_api()
-
-    if not success:
-        await _fail(query, "HB API update failed", msg)
-        return
-
-    text = (
-        f"*Hummingbot API updated*\n\n"
-        f"```\n{escape_markdown_v2_code(_tail(msg))}\n```"
-    )
-    keyboard = [
-        [InlineKeyboardButton("Back", callback_data="admin:update_check")],
-    ]
-    await query.edit_message_text(
-        text,
-        parse_mode="MarkdownV2",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
-
-
-async def _do_update_all(query, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Update hummingbot-api first, then Condor + restart."""
-    from utils.updater import update_hb_api
-
-    # HB API first: it restarts its own containers, and Condor reconnects to it
-    # on the way back up.
-    await _progress(query, "Updating hummingbot-api...")
-    hb_ok, hb_msg = await update_hb_api()
-    if not hb_ok:
-        await _fail(
-            query, "HB API update failed", hb_msg, note="Condor update skipped."
-        )
-        return
-
-    if await _update_condor(query):
-        await _restart_now(query)
-
-
-async def _do_restart(query, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Force restart without pulling."""
-    await _restart_now(query)
+# ---------------------------------------------------------------------------
+# The hourly notice
+# ---------------------------------------------------------------------------
 
 
 async def _periodic_update_check(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Periodic job that checks for updates and notifies admin."""
+    from condor import notifications
     from utils.config import ADMIN_USER_ID
-    from utils.updater import check_for_updates, check_hb_api_updates
 
     if not ADMIN_USER_ID:
         return
 
-    condor_info, hb_info = await asyncio.gather(
-        check_for_updates(),
-        check_hb_api_updates(),
-    )
-
-    condor_update = not condor_info.get("error") and not condor_info["up_to_date"]
-    hb_update = (
-        hb_info["available"]
-        and not hb_info["git_info"].get("error")
-        and not hb_info["git_info"]["up_to_date"]
-    )
-
-    if not condor_update and not hb_update:
+    stale = [s for s in await updates.check() if not s.up_to_date]
+    if not stale:
         return
 
-    parts = []
-    if condor_update:
-        behind = condor_info["commits_behind"]
-        local = escape_markdown_v2(condor_info["local_commit"])
-        remote = escape_markdown_v2(condor_info["remote_commit"])
-        parts.append(
-            f"*Condor*: `{local}` → `{remote}` "
-            f"\\(*{behind} commit{'s' if behind != 1 else ''}*\\)"
-        )
-    if hb_update:
-        hb_git = hb_info["git_info"]
-        hb_behind = hb_git["commits_behind"]
-        hb_local = escape_markdown_v2(hb_git["local_commit"])
-        hb_remote = escape_markdown_v2(hb_git["remote_commit"])
-        parts.append(
-            f"*HB API*: `{hb_local}` → `{hb_remote}` "
-            f"\\(*{hb_behind} commit{'s' if hb_behind != 1 else ''}*\\)"
-        )
+    lines = []
+    for status in stale:
+        for facet in status.facets.values():
+            if facet.up_to_date or facet.error:
+                continue
+            if facet.behind > 1:
+                lines.append(
+                    f"{status.name}: {facet.current} → {facet.available} "
+                    f"({facet.behind} commits)"
+                )
+            else:
+                lines.append(f"{status.name}: {facet.current} → {facet.available}")
 
-    text = (
-        f"*Updates available\\!*\n\n"
-        + "\n".join(parts)
-        + f"\n\nUse /update to review and install\\."
+    if not lines:
+        return
+
+    text = "Updates available\n\n" + "\n".join(lines) + "\n\nUse /update to install."
+
+    # announce() reaches Telegram *and* the dashboard bell in one call, which is
+    # what makes the update panel discoverable without any new badge plumbing.
+    await notifications.announce(
+        int(ADMIN_USER_ID),
+        int(ADMIN_USER_ID),
+        text,
+        kind="system",
+        bot=context.bot,
+        title="Updates available",
+        link="/settings?tab=updates",
     )
-
-    try:
-        await context.bot.send_message(
-            chat_id=ADMIN_USER_ID,
-            text=text,
-            parse_mode="MarkdownV2",
-        )
-    except Exception as e:
-        logger.warning("Failed to send update notification: %s", e)
 
 
 def schedule_update_checks(application) -> None:

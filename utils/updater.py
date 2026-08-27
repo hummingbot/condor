@@ -1,8 +1,11 @@
 """
-Auto-update utilities for Condor and Hummingbot API.
+Update primitives: the commands, none of the policy.
 
-Compares local HEAD against the remote branch, pulls new commits, rebuilds
-whatever the new commits invalidated, and restarts the process when requested.
+Everything here shells out to git, docker, uv or npm and reports what happened.
+It decides nothing -- which components exist, what blocks an update, in what
+order the steps run and what is recorded lives one layer up in
+:mod:`condor.updates`, and the surfaces (Telegram, the dashboard) read that.
+That split is why a second surface costs no orchestration.
 
 The restart is a *graceful* one: :func:`request_restart` asks the running
 process to wind itself down through the normal shutdown path (so persistence is
@@ -12,10 +15,12 @@ pane it was started in.
 """
 
 import asyncio
+import json
 import logging
 import os
 import signal
 import sys
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
@@ -163,29 +168,136 @@ async def check_for_updates(repo_dir: str = CONDOR_DIR) -> dict:
     return result
 
 
-async def pull_updates(repo_dir: str = CONDOR_DIR) -> tuple[bool, str]:
-    """
-    Pull latest changes from remote.
+@dataclass(frozen=True)
+class DirtyState:
+    """What is uncommitted in a working tree, split by how git sees it.
 
-    Returns (success, message).
+    Kept apart because the resolutions differ: a tracked change is discarded
+    with ``git checkout HEAD --``, an untracked file with ``git clean``. The
+    caller that only wants "everything uncommitted" reads :attr:`paths`.
+    """
+
+    modified: tuple[str, ...] = ()
+    staged: tuple[str, ...] = ()
+    untracked: tuple[str, ...] = ()
+
+    @property
+    def paths(self) -> tuple[str, ...]:
+        """Every uncommitted path, deduplicated, in a stable order."""
+        seen: dict[str, None] = {}
+        for group in (self.staged, self.modified, self.untracked):
+            for path in group:
+                seen.setdefault(path, None)
+        return tuple(seen)
+
+    @property
+    def tracked(self) -> tuple[str, ...]:
+        """Staged and unstaged modifications to files git already knows."""
+        seen: dict[str, None] = {}
+        for group in (self.staged, self.modified):
+            for path in group:
+                seen.setdefault(path, None)
+        return tuple(seen)
+
+
+def _lines(output: str) -> tuple[str, ...]:
+    """Split command output into non-empty stripped lines."""
+    return tuple(line.strip() for line in (output or "").split("\n") if line.strip())
+
+
+async def fetch(repo_dir: str = CONDOR_DIR) -> tuple[bool, str]:
+    """Update ``origin/<branch>`` without touching the working tree."""
+    branch = await get_current_branch(repo_dir)
+    rc, out = await _run_git("fetch", "origin", branch, repo_dir=repo_dir)
+    if rc != 0:
+        return False, out or "Failed to fetch from remote"
+    return True, out
+
+
+async def dirty_state(repo_dir: str = CONDOR_DIR) -> DirtyState:
+    """Uncommitted work in ``repo_dir``, by category.
+
+    Three plumbing commands rather than one ``status --porcelain`` parse: the
+    porcelain format conflates the three categories into a two-column code that
+    then has to be decoded, and the whole point of this split is that they are
+    resolved differently.
+    """
+    _, modified = await _run_git("diff", "--name-only", repo_dir=repo_dir)
+    _, staged = await _run_git("diff", "--name-only", "--cached", repo_dir=repo_dir)
+    _, untracked = await _run_git(
+        "ls-files", "--others", "--exclude-standard", repo_dir=repo_dir
+    )
+    return DirtyState(
+        modified=_lines(modified),
+        staged=_lines(staged),
+        untracked=_lines(untracked),
+    )
+
+
+async def incoming_paths(repo_dir: str = CONDOR_DIR, branch: str = "") -> list[str]:
+    """Files the pending fast-forward would write, ``HEAD..origin/<branch>``.
+
+    This is the half of the question that matters. "Is the tree clean" blocks
+    forever on a checkout that is also a runtime working directory; "would the
+    incoming commits clobber something local" is answerable, and is almost
+    always no.
+    """
+    branch = branch or await get_current_branch(repo_dir)
+    rc, out = await _run_git(
+        "diff", "--name-only", f"HEAD..origin/{branch}", repo_dir=repo_dir
+    )
+    if rc != 0:
+        # Unresolvable diff (no remote ref, shallow clone): treat every dirty
+        # path as potentially conflicting rather than waving the update through.
+        logger.warning("Could not diff HEAD..origin/%s in %s", branch, repo_dir)
+        return []
+    return list(_lines(out))
+
+
+async def ahead_count(repo_dir: str = CONDOR_DIR, branch: str = "") -> int:
+    """How many local commits are not on ``origin/<branch>``.
+
+    Non-zero means the checkout diverged and cannot be fast-forwarded; saying
+    so beats producing a merge commit from a Telegram button.
+    """
+    branch = branch or await get_current_branch(repo_dir)
+    rc, out = await _run_git(
+        "rev-list", "--count", f"origin/{branch}..HEAD", repo_dir=repo_dir
+    )
+    if rc != 0 or not out.strip().isdigit():
+        return 0
+    return int(out.strip())
+
+
+async def is_git_repo(repo_dir: str) -> bool:
+    """Whether ``repo_dir`` is inside a git work tree."""
+    if not os.path.isdir(repo_dir):
+        return False
+    rc, out = await _run_git("rev-parse", "--is-inside-work-tree", repo_dir=repo_dir)
+    return rc == 0 and out.strip() == "true"
+
+
+async def fast_forward(repo_dir: str = CONDOR_DIR) -> tuple[bool, str]:
+    """Fetch and fast-forward to ``origin/<branch>``. Never merges.
+
+    Replaces the old ``git pull``: an update means "take upstream's commits",
+    and anything that is not a fast-forward is a state the admin has to look
+    at, not something a button should resolve.
     """
     branch = await get_current_branch(repo_dir)
 
-    # Check for uncommitted changes
-    rc, status = await _run_git("status", "--porcelain", repo_dir=repo_dir)
-    if status:
-        return (
-            False,
-            "Cannot update: there are uncommitted changes. Please commit or stash first.",
-        )
-
-    # The sha we are leaving, so a successful pull can report what it moved.
+    # The sha we are leaving, so a successful move can report what it moved.
     before = await get_local_commit(repo_dir)
 
-    # Pull
-    rc, output = await _run_git("pull", "origin", branch, repo_dir=repo_dir)
+    ok, out = await fetch(repo_dir)
+    if not ok:
+        return False, f"Fetch failed:\n{out}"
+
+    rc, output = await _run_git(
+        "merge", "--ff-only", f"origin/{branch}", repo_dir=repo_dir
+    )
     if rc != 0:
-        return False, f"Pull failed:\n{output}"
+        return False, f"Fast-forward failed:\n{output}"
 
     # Version adoption telemetry (FEAT-023): two short shas and how far behind
     # this install had drifted. Only for the Condor repo itself, and a no-op
@@ -205,6 +317,68 @@ async def pull_updates(repo_dir: str = CONDOR_DIR) -> tuple[bool, str]:
         logger.debug("Could not record version change", exc_info=True)
 
     return True, output
+
+
+# ---------------------------------------------------------------------------
+# Resolutions: offered to the admin, never taken on their behalf
+# ---------------------------------------------------------------------------
+
+
+async def discard_paths(repo_dir: str, paths: list[str]) -> tuple[bool, str]:
+    """Throw away local work on exactly ``paths``, and nothing else.
+
+    Tracked paths go back to HEAD (index and worktree both, so a staged change
+    does not survive), untracked ones are deleted. Destructive and unrecoverable
+    -- the surface offering this must confirm first.
+    """
+    if not paths:
+        return True, "Nothing to discard."
+
+    state = await dirty_state(repo_dir)
+    tracked = set(state.tracked)
+    untracked = set(state.untracked)
+
+    to_checkout = [p for p in paths if p in tracked]
+    to_clean = [p for p in paths if p in untracked]
+
+    messages = []
+    if to_checkout:
+        rc, out = await _run_git(
+            "checkout", "HEAD", "--", *to_checkout, repo_dir=repo_dir
+        )
+        if rc != 0:
+            return False, f"Could not restore {len(to_checkout)} file(s):\n{out}"
+        messages.append(f"Restored {len(to_checkout)} tracked file(s).")
+    if to_clean:
+        rc, out = await _run_git("clean", "-fd", "--", *to_clean, repo_dir=repo_dir)
+        if rc != 0:
+            return False, f"Could not remove {len(to_clean)} file(s):\n{out}"
+        messages.append(f"Removed {len(to_clean)} untracked file(s).")
+
+    return True, " ".join(messages) or "Nothing to discard."
+
+
+async def stash_paths(repo_dir: str, paths: list[str]) -> tuple[bool, str]:
+    """Park local work on ``paths`` in a stash and report the ref back.
+
+    Deliberately not popped afterwards: a pop that conflicts leaves a
+    half-merged tree plus a stash entry nobody was told about. The admin gets
+    the ref and decides.
+    """
+    if not paths:
+        return True, "Nothing to stash."
+
+    rc, out = await _run_git(
+        "stash", "push", "-u", "-m", "condor /update", "--", *paths, repo_dir=repo_dir
+    )
+    if rc != 0:
+        return False, f"Stash failed:\n{out}"
+
+    _, ref = await _run_git("rev-parse", "--short", "stash@{0}", repo_dir=repo_dir)
+    ref = ref.strip()
+    if ref:
+        return True, f"Stashed as stash@{{0}} ({ref}). Restore with: git stash pop"
+    return True, out or "Stashed."
 
 
 async def install_dependencies() -> tuple[bool, str]:
@@ -330,102 +504,168 @@ def exec_restart() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Hummingbot API helpers
+# Docker: what the container actually runs
 # ---------------------------------------------------------------------------
 
 
-def hb_api_available() -> bool:
-    """Check if the hummingbot-api directory exists."""
-    return os.path.isdir(HUMMINGBOT_API_DIR)
+async def compose_service(repo_dir: str, service: str) -> dict | None:
+    """The fully resolved compose definition for one service, or None.
 
-
-async def get_docker_container_info(
-    container_name: str = "hummingbot-api",
-) -> dict | None:
+    ``docker compose config`` is the only thing that knows how this install
+    produces the container: it merges every override file and expands the
+    environment, so the answer it gives is the deployment's own, not a guess
+    from reading ``docker-compose.yml`` by hand.
     """
-    Inspect a Docker container and return basic info.
-
-    Returns {"status", "started_at", "image"} or None if unavailable.
-    """
-    rc, output = await _run_cmd(
+    rc, out = await _run_cmd(
         "docker",
-        "inspect",
+        "compose",
+        "config",
         "--format",
-        "{{.State.Status}}|{{.State.StartedAt}}|{{.Config.Image}}",
-        container_name,
+        "json",
+        cwd=repo_dir,
+        timeout=60,
+    )
+    if rc != 0 or not out:
+        logger.debug("docker compose config failed in %s: %s", repo_dir, out[:200])
+        return None
+    try:
+        parsed = json.loads(out)
+    except ValueError:
+        logger.debug("docker compose config returned non-JSON in %s", repo_dir)
+        return None
+    services = parsed.get("services")
+    if not isinstance(services, dict):
+        return None
+    definition = services.get(service)
+    return definition if isinstance(definition, dict) else None
+
+
+async def compose_mode(repo_dir: str, service: str) -> str:
+    """How this install produces ``service``: ``source``, ``image`` or ``unknown``.
+
+    A ``build:`` key means the image is built here, so an update is
+    ``compose build``. No ``build:`` key means a published image is pulled, so
+    an update is ``compose pull`` -- and the git checkout, whatever it says,
+    has nothing to do with the version running inside the container.
+    """
+    definition = await compose_service(repo_dir, service)
+    if definition is None:
+        return "unknown"
+    return "source" if definition.get("build") else "image"
+
+
+async def local_image_digest(image_ref: str) -> str | None:
+    """The registry digest of the local copy of ``image_ref``, or None.
+
+    ``RepoDigests[0]`` is index-level when the image was pulled by tag, which
+    makes it directly comparable to what the registry reports. An image loaded
+    from a tarball has no RepoDigest at all -- that is "unknown", never
+    "behind".
+    """
+    rc, out = await _run_cmd(
+        "docker",
+        "image",
+        "inspect",
+        image_ref,
+        "--format",
+        "{{json .RepoDigests}}",
         timeout=30,
     )
-    if rc != 0 or not output:
+    if rc != 0 or not out:
         return None
-
-    parts = output.split("|", 2)
-    if len(parts) < 3:
+    try:
+        digests = json.loads(out)
+    except ValueError:
         return None
-
-    return {
-        "status": parts[0],
-        "started_at": parts[1],
-        "image": parts[2],
-    }
+    if not isinstance(digests, list) or not digests:
+        return None
+    first = str(digests[0])
+    return first.split("@", 1)[1] if "@" in first else None
 
 
-async def check_hb_api_updates() -> dict:
+async def registry_image_digest(image_ref: str) -> str | None:
+    """The index digest ``image_ref`` currently resolves to upstream, or None.
+
+    ``buildx imagetools inspect`` is the only probe used. ``docker manifest
+    inspect`` returns the *inner* per-platform manifests rather than the index,
+    so it is not a drop-in fallback and a wrong comparison is worse than an
+    honest "unknown".
     """
-    Check hummingbot-api for git updates and Docker status.
-
-    Returns {"available": bool, "git_info": dict, "docker": dict | None}.
-    If HUMMINGBOT_API_DIR doesn't exist, returns {"available": False}.
-    """
-    if not hb_api_available():
-        return {"available": False}
-
-    git_info = await check_for_updates(repo_dir=HUMMINGBOT_API_DIR)
-
-    # Try to get Docker container info (non-fatal if Docker unavailable)
-    docker = await get_docker_container_info()
-
-    return {
-        "available": True,
-        "git_info": git_info,
-        "docker": docker,
-    }
-
-
-async def update_hb_api() -> tuple[bool, str]:
-    """
-    Update hummingbot-api: git pull, docker compose build, docker compose up -d.
-
-    Returns (success, message).
-    """
-    if not hb_api_available():
-        return False, f"Hummingbot API directory not found: {HUMMINGBOT_API_DIR}"
-
-    # Git pull
-    success, msg = await pull_updates(repo_dir=HUMMINGBOT_API_DIR)
-    if not success:
-        return False, f"Git pull failed: {msg}"
-
-    # Docker compose build
-    rc, output = await _run_cmd(
+    rc, out = await _run_cmd(
         "docker",
-        "compose",
-        "build",
-        cwd=HUMMINGBOT_API_DIR,
-        timeout=DOCKER_TIMEOUT,
+        "buildx",
+        "imagetools",
+        "inspect",
+        image_ref,
+        "--format",
+        "{{.Manifest.Digest}}",
+        timeout=30,
     )
     if rc != 0:
-        return False, f"Docker build failed:\n{output}"
+        return None
+    digest = (out or "").strip()
+    return digest if digest.startswith("sha256:") else None
 
-    # Docker compose up -d
+
+async def compose_pull(repo_dir: str, service: str) -> tuple[bool, str]:
+    """Pull the published image for one service."""
     rc, output = await _run_cmd(
-        "docker",
-        "compose",
-        "up",
-        "-d",
-        cwd=HUMMINGBOT_API_DIR,
-        timeout=DOCKER_TIMEOUT,
+        "docker", "compose", "pull", service, cwd=repo_dir, timeout=DOCKER_TIMEOUT
     )
     if rc != 0:
-        return False, f"Docker restart failed:\n{output}"
+        return False, output or "docker compose pull failed (no output)"
+    return True, output
 
-    return True, "Hummingbot API updated and restarted successfully."
+
+async def compose_build(repo_dir: str, service: str) -> tuple[bool, str]:
+    """Rebuild one service's image from source."""
+    rc, output = await _run_cmd(
+        "docker", "compose", "build", service, cwd=repo_dir, timeout=DOCKER_TIMEOUT
+    )
+    if rc != 0:
+        return False, output or "docker compose build failed (no output)"
+    return True, output
+
+
+async def compose_up(repo_dir: str) -> tuple[bool, str]:
+    """Recreate the stack on whatever images are now on disk."""
+    rc, output = await _run_cmd(
+        "docker", "compose", "up", "-d", cwd=repo_dir, timeout=DOCKER_TIMEOUT
+    )
+    if rc != 0:
+        return False, output or "docker compose up failed (no output)"
+    return True, output
+
+
+async def wait_healthy(
+    url: str, timeout: float = 120, interval: float = 2
+) -> tuple[bool, str]:
+    """Poll ``url`` until it answers 200, or give up.
+
+    ``compose up -d`` returns the moment the container is *created*, which is
+    well before it serves. Without this a crash-looping container reports as a
+    successful update.
+    """
+    import aiohttp
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    last = "no response"
+    attempts = 0
+
+    async with aiohttp.ClientSession() as session:
+        while loop.time() < deadline:
+            attempts += 1
+            try:
+                async with session.get(
+                    url, timeout=aiohttp.ClientTimeout(total=interval * 2)
+                ) as response:
+                    if response.status == 200:
+                        waited = int(timeout - (deadline - loop.time()))
+                        return True, f"Healthy after {waited}s ({attempts} probes)."
+                    last = f"HTTP {response.status}"
+            except Exception as e:  # noqa: BLE001 - a refused connection is normal here
+                last = type(e).__name__
+            await asyncio.sleep(interval)
+
+    return False, f"Not serving {url} after {int(timeout)}s (last: {last})."

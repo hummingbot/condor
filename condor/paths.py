@@ -185,6 +185,15 @@ def routine_hooks_path() -> Path:
     return data_dir() / "routine_hooks.json"
 
 
+def update_run_path() -> Path:
+    """The current or last ``/update`` run (``condor.updates.run``).
+
+    Durable because the process that starts a Condor update is the process that
+    dies: this file is how the machine that comes back up answers "did it work".
+    """
+    return data_dir() / "update_run.json"
+
+
 def backtests_dir() -> Path:
     """One JSON file per backtest, plus ``_index.json`` (``backtest_store.py``)."""
     return data_dir() / "backtests"
