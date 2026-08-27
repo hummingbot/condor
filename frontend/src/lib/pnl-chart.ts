@@ -1,6 +1,7 @@
 // ── Shared helpers for PNL evolution charts ──
 
 import type { ControllerInfo, ControllerPerformanceSnapshot } from "@/lib/api";
+import { controllerKey } from "@/lib/controller-identity";
 import { toMs } from "@/lib/formatters";
 import type { ConvertFn } from "@/lib/rates";
 
@@ -73,9 +74,11 @@ export function positionQuoteValue(positions: Record<string, unknown>[]): number
  * in and render what comes back.
  *
  * The shape of the fold:
- *  - Snapshots are grouped by controller id (`controller_id` falling back to
- *    `controller_name`); anything not in `enabledIds` is dropped entirely, so a
- *    controller toggled off contributes to no point at all.
+ *  - Snapshots are grouped by `controllerKey` — the bot joined to the
+ *    controller id, because the id alone is a *config* id two bots can share
+ *    (CORR-241) — and `enabledIds` holds those same composite keys; anything
+ *    not in it is dropped entirely, so a controller toggled off contributes to
+ *    no point at all.
  *  - Every distinct snapshot timestamp across the enabled controllers becomes
  *    one point on a single, ascending, de-duplicated timeline — input order
  *    does not matter.
@@ -97,11 +100,11 @@ export function aggregatePnlSeries(
 ): PnlChartPoint[] {
   if (!snapshots || snapshots.length === 0) return [];
 
-  // Build a lookup from controller id -> trading_pair using live controller data
+  // Build a lookup from controller key -> trading_pair using live controller data
   const pairByCtrl: Record<string, string> = {};
   for (const ctrl of controllers) {
-    const cid = ctrl.controller_id || ctrl.controller_name;
-    if (ctrl.trading_pair) pairByCtrl[cid] = ctrl.trading_pair;
+    const cid = controllerKey(ctrl);
+    if (cid && ctrl.trading_pair) pairByCtrl[cid] = ctrl.trading_pair;
   }
 
   const cv = (val: number, pair: string) => {
@@ -112,7 +115,7 @@ export function aggregatePnlSeries(
 
   const byCtrl: Record<string, ControllerPerformanceSnapshot[]> = {};
   for (const snap of snapshots) {
-    const key = snap.controller_id || snap.controller_name;
+    const key = controllerKey(snap);
     if (!key || !enabledIds.has(key)) continue;
     (byCtrl[key] ??= []).push(snap);
   }
@@ -157,8 +160,8 @@ export function aggregatePnlSeries(
   let liveRealized = 0, liveUnrealized = 0, liveVolume = 0, livePosition = 0;
   let hasLive = false;
   for (const ctrl of controllers) {
-    const cid = ctrl.controller_id || ctrl.controller_name;
-    if (!enabledIds.has(cid)) continue;
+    const cid = controllerKey(ctrl);
+    if (!cid || !enabledIds.has(cid)) continue;
     hasLive = true;
     const pair = ctrl.trading_pair || "";
     liveRealized += cv(ctrl.realized_pnl_quote, pair);

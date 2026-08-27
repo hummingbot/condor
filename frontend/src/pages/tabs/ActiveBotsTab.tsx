@@ -17,6 +17,7 @@ import { useCallback, useMemo, useState } from "react";
 
 import { NoServerCard } from "@/components/NoServerCard";
 import { AggregatedPnlChart } from "@/components/bots/AggregatedPnlChart";
+import { controllerKey } from "@/lib/controller-identity";
 import { ControllerBrowser } from "@/components/bots/ControllerBrowser";
 import { DeployBotDialog } from "@/components/bots/DeployBotDialog";
 import { PnlSparkline } from "@/components/bots/PnlSparkline";
@@ -608,8 +609,7 @@ export function ActiveBotsTab() {
     const raw = data?.controllers ?? [];
     const seen = new Map<string, ControllerInfo>();
     for (const ctrl of raw) {
-      const key = `${ctrl.bot_name}:${ctrl.controller_id || ctrl.controller_name}`;
-      seen.set(key, ctrl); // last wins (most recent data)
+      seen.set(controllerKey(ctrl), ctrl); // last wins (most recent data)
     }
     return Array.from(seen.values());
   }, [data?.controllers]);
@@ -623,16 +623,19 @@ export function ActiveBotsTab() {
   const activeSnapshots = useMemo(() => {
     if (!perfHistory?.snapshots || controllers.length === 0) return [];
 
-    // Build set of active controller IDs and their deploy times
-    const activeControllers = new Map<string, number>(); // id -> deployedAt ms
+    // Build set of active controller keys and their deploy times. Keyed by
+    // bot + controller, because a bare controller id is a config id two bots
+    // can share: one map entry per id meant last-write-wins on the deploy
+    // time, so an hour-old bot truncated its five-day sibling's history to an
+    // hour of points (CORR-241).
+    const activeControllers = new Map<string, number>(); // key -> deployedAt ms
     for (const ctrl of controllers) {
-      const cid = ctrl.controller_id || ctrl.controller_name;
       const deployMs = ctrl.deployed_at ? Date.parse(ctrl.deployed_at) : 0;
-      activeControllers.set(cid, deployMs);
+      activeControllers.set(controllerKey(ctrl), deployMs);
     }
 
     return perfHistory.snapshots.filter((snap) => {
-      const key = snap.controller_id || snap.controller_name;
+      const key = controllerKey(snap);
       if (!key || !activeControllers.has(key)) return false;
       const deployMs = activeControllers.get(key)!;
       if (!deployMs) return true; // no deploy time known, keep it
@@ -641,14 +644,15 @@ export function ActiveBotsTab() {
     });
   }, [perfHistory, controllers]);
 
-  // Build a map: controller_id -> sorted pnl values for sparklines
+  // Build a map: bot + controller -> sorted pnl values for sparklines. Two
+  // bots on one controller config each get their own line rather than sharing
+  // a single interleaved one (CORR-241).
   const sparklineMap = useMemo(() => {
     const map: Record<string, number[]> = {};
     if (activeSnapshots.length === 0) return map;
-    // Group by controller_id
     const grouped: Record<string, ControllerPerformanceSnapshot[]> = {};
     for (const snap of activeSnapshots) {
-      const key = snap.controller_id || snap.controller_name;
+      const key = controllerKey(snap);
       if (!key) continue;
       (grouped[key] ??= []).push(snap);
     }
@@ -776,17 +780,17 @@ export function ActiveBotsTab() {
                   </thead>
                   <tbody>
                     {sortedControllers.map((ctrl) => {
-                      const cid = ctrl.controller_id || ctrl.controller_name;
+                      const key = controllerKey(ctrl);
                       return (
                         <ControllerRow
-                          key={`${ctrl.bot_name}-${cid}`}
+                          key={key}
                           ctrl={ctrl}
                           server={server!}
-                          isSelected={selectedKey === `${ctrl.bot_name}-${ctrl.controller_id || ctrl.controller_name}`}
-                          onSelect={() => setSelectedKey(`${ctrl.bot_name}-${ctrl.controller_id || ctrl.controller_name}`)}
+                          isSelected={selectedKey === key}
+                          onSelect={() => setSelectedKey(key)}
                           formatPnlValue={formatPnlValue}
                           formatValue={formatValue}
-                          sparklineValues={sparklineMap[cid]}
+                          sparklineValues={sparklineMap[key]}
                           isBotStopping={stoppingBotNames.has(ctrl.bot_name)}
                         />
                       );

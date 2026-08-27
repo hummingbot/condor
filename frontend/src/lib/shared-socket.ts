@@ -22,6 +22,7 @@
  */
 
 import { candleStore } from "./candle-store";
+import { controllerKey } from "./controller-identity";
 import { executorsQuery, parseExecutorsKey, queryClient } from "./queryClient";
 import type {
   BotsPageResponse,
@@ -57,16 +58,22 @@ const connectHandlers = new Set<() => void>();
 
 /**
  * Merge incoming performance snapshots into existing ones, deduplicating by
- * `controller_id:timestamp`.
+ * controller *and bot* plus timestamp.
+ *
+ * The bot is not decoration in this key: `controller_id` is a config id two
+ * bots can be running at once, and the sampler dumps them at one shared
+ * timestamp, so deduping on `id:timestamp` threw away the second bot's frame
+ * every tick as if it were a repeat of the first (CORR-241).
  */
 function mergeSnapshots(
   existing: ControllerPerformanceSnapshot[],
   incoming: ControllerPerformanceSnapshot[],
 ): ControllerPerformanceSnapshot[] {
   const merged = [...existing];
-  const seen = new Set(existing.map((s) => `${s.controller_id}:${s.timestamp}`));
+  const snapKey = (s: ControllerPerformanceSnapshot) => `${controllerKey(s)}:${s.timestamp}`;
+  const seen = new Set(existing.map(snapKey));
   for (const snap of incoming) {
-    const key = `${snap.controller_id}:${snap.timestamp}`;
+    const key = snapKey(snap);
     if (!seen.has(key)) {
       merged.push(snap);
       seen.add(key);
@@ -80,7 +87,7 @@ function mergeSnapshots(
  *
  * The readers of these caches append a time bound to the key
  * (`["controller-perf-history-all", server, earliestDeploy]`,
- * `["controller-perf-history", server, controllerId, deployedAt]`) that is
+ * `["controller-perf-history", server, botName, controllerId, deployedAt]`) that is
  * derived from data this module never sees. `setQueryData` matches by exact key
  * hash, so the socket has to discover the live keys rather than reconstruct
  * them. Entries that don't exist yet are left alone — the query's own fetch
@@ -96,7 +103,7 @@ function mergeIntoMatchingQueries(
       entry.queryKey,
       (old: ControllerPerformanceHistoryResponse | undefined) => {
         if (!old) return old;
-        // Append new snapshots and deduplicate by controller_id+timestamp
+        // Append new snapshots and deduplicate by bot+controller+timestamp
         return { ...old, snapshots: mergeSnapshots(old.snapshots ?? [], snapshots) };
       },
     );
@@ -150,19 +157,19 @@ export function handleMessage(channel: string, data: unknown): void {
       if (!incoming?.controllers) return old ?? data;
       if (!old?.controllers?.length) return incoming;
 
-      // Key by controller_id (stable) — controller_name may differ between REST and WS
+      // Key by bot + controller_id (stable) — controller_name may differ
+      // between REST and WS, and the id alone is shared by every bot running
+      // the same controller config (CORR-241).
       const oldMap = new Map<string, ControllerInfo>();
       for (const c of old.controllers) {
-        const key = `${c.bot_name}-${c.controller_id || c.controller_name}`;
-        oldMap.set(key, c);
+        oldMap.set(controllerKey(c), c);
       }
       const oldBotMap = new Map(old.bots.map((b) => [b.bot_name, b]));
 
       return {
         ...incoming,
         controllers: incoming.controllers.map((c) => {
-          const key = `${c.bot_name}-${c.controller_id || c.controller_name}`;
-          const prev = oldMap.get(key);
+          const prev = oldMap.get(controllerKey(c));
           if (!prev) return c;
           return {
             ...c,
@@ -231,17 +238,26 @@ export function handleMessage(channel: string, data: unknown): void {
       // keys from the cache instead, the way the `executors` branch above does.
       mergeIntoMatchingQueries(["controller-perf-history-all", server], incoming.snapshots);
 
-      // Same, per controller.
+      // Same, per controller. The per-controller cache is scoped to one bot
+      // (ControllerPnlChart asks upstream for a single `bot_name`), so the
+      // routing has to be scoped to one bot too: grouping on the bare
+      // `controller_id` pushed a sibling bot's rows into its neighbour's chart
+      // whenever both ran the same controller config (CORR-241).
       const byController = new Map<string, ControllerPerformanceSnapshot[]>();
       for (const snap of incoming.snapshots) {
         const cid = snap.controller_id || snap.controller_name;
         if (!cid) continue;
-        const arr = byController.get(cid) ?? [];
+        const key = `${snap.bot_name ?? ""}\u0000${cid}`;
+        const arr = byController.get(key) ?? [];
         arr.push(snap);
-        byController.set(cid, arr);
+        byController.set(key, arr);
       }
-      for (const [cid, snaps] of byController) {
-        mergeIntoMatchingQueries(["controller-perf-history", server, cid], snaps);
+      for (const [key, snaps] of byController) {
+        const [botName, cid] = key.split("\u0000");
+        mergeIntoMatchingQueries(
+          ["controller-perf-history", server, botName, cid],
+          snaps,
+        );
       }
     }
   } else if (prefix === "orderbook") {

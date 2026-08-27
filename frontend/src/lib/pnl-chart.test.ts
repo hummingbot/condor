@@ -15,6 +15,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ControllerInfo, ControllerPerformanceSnapshot } from "./api";
+import { controllerKey } from "./controller-identity";
 import { aggregatePnlSeries, positionQuoteValue } from "./pnl-chart";
 
 const NOW = Date.parse("2026-08-27T12:00:00Z");
@@ -60,6 +61,13 @@ function ctrl(over: Partial<ControllerInfo> = {}): ControllerInfo {
   };
 }
 
+/**
+ * The fold's identity key. A controller is identified by its bot *and* its
+ * config id (CORR-241), so `enabledIds` holds composites — the fixtures above
+ * all belong to bot "bot" unless a case says otherwise.
+ */
+const key = (cid: string, bot = "bot") => controllerKey({ bot_name: bot, controller_id: cid });
+
 const at = (hhmm: string) => `2026-08-27T${hhmm}:00Z`;
 const ms = (hhmm: string) => Date.parse(at(hhmm));
 
@@ -70,23 +78,23 @@ afterEach(() => {
 describe("aggregatePnlSeries — degenerate inputs", () => {
   it("returns nothing for no snapshots, even when live controllers are enabled", () => {
     // The live "now" point rides on the snapshot timeline: no history, no chart.
-    expect(aggregatePnlSeries([], new Set(["ctrl-a"]), [ctrl()])).toEqual([]);
+    expect(aggregatePnlSeries([], new Set([key("ctrl-a")]), [ctrl()])).toEqual([]);
   });
 
   it("returns nothing when every snapshot belongs to a disabled controller", () => {
-    const points = aggregatePnlSeries([snap()], new Set(["ctrl-b"]), []);
+    const points = aggregatePnlSeries([snap()], new Set([key("ctrl-b")]), []);
     expect(points).toEqual([]);
   });
 
   it("drops snapshots whose controller has no id at all", () => {
     const orphan = snap({ controller_id: "", controller_name: "" });
-    expect(aggregatePnlSeries([orphan], new Set(["ctrl-a"]), [])).toEqual([]);
+    expect(aggregatePnlSeries([orphan], new Set([key("ctrl-a")]), [])).toEqual([]);
   });
 
   it("turns a single snapshot into a single point", () => {
     const points = aggregatePnlSeries(
       [snap({ timestamp: at("10:00"), realized_pnl_quote: 7, unrealized_pnl_quote: 3, volume_traded: 100 })],
-      new Set(["ctrl-a"]),
+      new Set([key("ctrl-a")]),
       [],
     );
     expect(points).toEqual([
@@ -96,7 +104,7 @@ describe("aggregatePnlSeries — degenerate inputs", () => {
 
   it("falls back to controller_name when controller_id is empty", () => {
     const named = snap({ controller_id: "", controller_name: "by-name", realized_pnl_quote: 5 });
-    const points = aggregatePnlSeries([named], new Set(["by-name"]), []);
+    const points = aggregatePnlSeries([named], new Set([key("by-name")]), []);
     expect(points).toHaveLength(1);
     expect(points[0].realized).toBe(5);
   });
@@ -110,7 +118,7 @@ describe("aggregatePnlSeries — the merged timeline", () => {
         snap({ timestamp: at("10:00"), realized_pnl_quote: 1 }),
         snap({ timestamp: at("10:10"), realized_pnl_quote: 2 }),
       ],
-      new Set(["ctrl-a"]),
+      new Set([key("ctrl-a")]),
       [],
     );
     expect(points.map((p) => p.time)).toEqual([ms("10:00"), ms("10:10"), ms("10:20")]);
@@ -123,7 +131,7 @@ describe("aggregatePnlSeries — the merged timeline", () => {
         snap({ timestamp: at("10:00"), realized_pnl_quote: 1 }),
         snap({ timestamp: at("10:00"), realized_pnl_quote: 9 }),
       ],
-      new Set(["ctrl-a"]),
+      new Set([key("ctrl-a")]),
       [],
     );
     expect(points).toHaveLength(1);
@@ -137,7 +145,7 @@ describe("aggregatePnlSeries — the merged timeline", () => {
         snap({ timestamp: ms("10:10") as unknown as string, realized_pnl_quote: 2 }),
         snap({ timestamp: seconds as unknown as string, realized_pnl_quote: 1 }),
       ],
-      new Set(["ctrl-a"]),
+      new Set([key("ctrl-a")]),
       [],
     );
     expect(points.map((p) => p.time)).toEqual([ms("10:00"), ms("10:10")]);
@@ -152,7 +160,7 @@ describe("aggregatePnlSeries — folding several controllers into one series", (
         snap({ controller_id: "b", timestamp: at("10:05"), realized_pnl_quote: 4, volume_traded: 40 }),
         snap({ controller_id: "a", timestamp: at("10:10"), realized_pnl_quote: 2, volume_traded: 20 }),
       ],
-      new Set(["a", "b"]),
+      new Set([key("a"), key("b")]),
       [],
     );
     expect(points.map((p) => [p.time, p.realized, p.volume])).toEqual([
@@ -170,7 +178,7 @@ describe("aggregatePnlSeries — folding several controllers into one series", (
         snap({ controller_id: "busy", timestamp: at("10:02"), realized_pnl_quote: 2 }),
         snap({ controller_id: "busy", timestamp: at("10:03"), realized_pnl_quote: 3 }),
       ],
-      new Set(["sparse", "busy"]),
+      new Set([key("sparse"), key("busy")]),
       [],
     );
     // `sparse` stopped reporting after 10:00 but still counts for 100 throughout.
@@ -183,7 +191,7 @@ describe("aggregatePnlSeries — folding several controllers into one series", (
         snap({ controller_id: "early", timestamp: at("10:00"), realized_pnl_quote: 10 }),
         snap({ controller_id: "late", timestamp: at("10:10"), realized_pnl_quote: 5 }),
       ],
-      new Set(["early", "late"]),
+      new Set([key("early"), key("late")]),
       [],
     );
     expect(points.map((p) => p.realized)).toEqual([10, 15]);
@@ -195,7 +203,7 @@ describe("aggregatePnlSeries — folding several controllers into one series", (
       snap({ controller_id: "drop", timestamp: at("10:05"), realized_pnl_quote: 1000 }),
       snap({ controller_id: "keep", timestamp: at("10:10"), realized_pnl_quote: 2 }),
     ];
-    const points = aggregatePnlSeries(snapshots, new Set(["keep"]), []);
+    const points = aggregatePnlSeries(snapshots, new Set([key("keep")]), []);
     // 10:05 was only `drop`'s timestamp, so it is not even on the timeline.
     expect(points.map((p) => [p.time, p.realized])).toEqual([
       [ms("10:00"), 1],
@@ -209,7 +217,7 @@ describe("aggregatePnlSeries — folding several controllers into one series", (
         snap({ controller_id: "a", timestamp: at("10:00"), realized_pnl_quote: 3, unrealized_pnl_quote: -1 }),
         snap({ controller_id: "b", timestamp: at("10:00"), realized_pnl_quote: 2, unrealized_pnl_quote: 4 }),
       ],
-      new Set(["a", "b"]),
+      new Set([key("a"), key("b")]),
       [],
     );
     expect(points[0]).toMatchObject({ realized: 5, unrealized: 3, total: 8 });
@@ -228,7 +236,7 @@ describe("aggregatePnlSeries — positions", () => {
           ],
         }),
       ],
-      new Set(["ctrl-a"]),
+      new Set([key("ctrl-a")]),
       [],
     );
     expect(points[0].position).toBe(90); // +100 long, -10 short
@@ -237,7 +245,7 @@ describe("aggregatePnlSeries — positions", () => {
   it("ignores a positions_summary that is not an array", () => {
     const points = aggregatePnlSeries(
       [snap({ timestamp: at("10:00"), positions_summary: null as unknown as Record<string, unknown>[] })],
-      new Set(["ctrl-a"]),
+      new Set([key("ctrl-a")]),
       [],
     );
     expect(points[0].position).toBe(0);
@@ -263,7 +271,7 @@ describe("aggregatePnlSeries — currency conversion", () => {
           positions_summary: [{ amount: 1, breakeven_price: 4, side: "BUY" }],
         }),
       ],
-      new Set(["ctrl-a"]),
+      new Set([key("ctrl-a")]),
       [],
       convert,
     );
@@ -275,7 +283,7 @@ describe("aggregatePnlSeries — currency conversion", () => {
     convert.mockClear();
     aggregatePnlSeries(
       [snap({ timestamp: at("10:00"), trading_pair: "", realized_pnl_quote: 1 })],
-      new Set(["ctrl-a"]),
+      new Set([key("ctrl-a")]),
       [ctrl({ trading_pair: "SOL-USDC" })],
       convert,
     );
@@ -286,7 +294,7 @@ describe("aggregatePnlSeries — currency conversion", () => {
     convert.mockClear();
     aggregatePnlSeries(
       [snap({ timestamp: at("10:00"), trading_pair: "", realized_pnl_quote: 1 })],
-      new Set(["ctrl-a"]),
+      new Set([key("ctrl-a")]),
       [],
       convert,
     );
@@ -296,7 +304,7 @@ describe("aggregatePnlSeries — currency conversion", () => {
   it("leaves values untouched when no convert function is given", () => {
     const points = aggregatePnlSeries(
       [snap({ timestamp: at("10:00"), realized_pnl_quote: 1.5, volume_traded: 9 })],
-      new Set(["ctrl-a"]),
+      new Set([key("ctrl-a")]),
       [],
     );
     expect(points[0]).toMatchObject({ realized: 1.5, volume: 9 });
@@ -309,7 +317,7 @@ describe("aggregatePnlSeries — the live \"now\" point", () => {
     vi.setSystemTime(NOW);
     const points = aggregatePnlSeries(
       [snap({ timestamp: at("10:00"), realized_pnl_quote: 1 })],
-      new Set(["ctrl-a"]),
+      new Set([key("ctrl-a")]),
       [ctrl({ realized_pnl_quote: 11, unrealized_pnl_quote: 2, volume_traded: 500 })],
     );
     expect(points).toHaveLength(2);
@@ -328,7 +336,7 @@ describe("aggregatePnlSeries — the live \"now\" point", () => {
     vi.setSystemTime(NOW);
     const points = aggregatePnlSeries(
       [snap({ controller_id: "a", timestamp: at("10:00") })],
-      new Set(["a"]),
+      new Set([key("a")]),
       [ctrl({ controller_id: "a", realized_pnl_quote: 7 }), ctrl({ controller_id: "b", realized_pnl_quote: 99 })],
     );
     expect(points[points.length - 1]).toMatchObject({ time: NOW, realized: 7 });
@@ -337,7 +345,7 @@ describe("aggregatePnlSeries — the live \"now\" point", () => {
   it("appends no live point when no live controller is enabled", () => {
     const points = aggregatePnlSeries(
       [snap({ controller_id: "a", timestamp: at("10:00") })],
-      new Set(["a"]),
+      new Set([key("a")]),
       [ctrl({ controller_id: "b", realized_pnl_quote: 99 })],
     );
     expect(points).toHaveLength(1);
@@ -350,10 +358,118 @@ describe("aggregatePnlSeries — the live \"now\" point", () => {
     vi.setSystemTime(NOW);
     const points = aggregatePnlSeries(
       [snap({ controller_id: "a", timestamp: at("10:00"), realized_pnl_quote: 42 })],
-      new Set(["a"]),
+      new Set([key("a")]),
       [ctrl({ controller_id: "a", realized_pnl_quote: 0 })],
     );
     expect(points.map((p) => p.realized)).toEqual([42, 0]);
+  });
+});
+
+/**
+ * Two bots deployed from one controller config (CORR-241).
+ *
+ * `controller_id` is the config id, so both bots' rows arrive under the same
+ * one. Folded on that id alone they became a single series whose forward-fill
+ * alternated between the two bots' values instead of summing them — while the
+ * live "now" point, which iterates the controllers, summed them anyway and put
+ * a step at the right edge of the chart.
+ */
+describe("aggregatePnlSeries — two bots sharing a controller config id", () => {
+  const shared = "grid_sol";
+  const alpha = (over: Partial<ControllerPerformanceSnapshot> = {}) =>
+    snap({ bot_name: "alpha", controller_id: shared, controller_name: shared, ...over });
+  const beta = (over: Partial<ControllerPerformanceSnapshot> = {}) =>
+    snap({ bot_name: "beta", controller_id: shared, controller_name: shared, ...over });
+
+  it("keeps them apart, so a shared timestamp sums instead of overwriting", () => {
+    const points = aggregatePnlSeries(
+      [
+        alpha({ timestamp: at("10:00"), realized_pnl_quote: 10, volume_traded: 100 }),
+        beta({ timestamp: at("10:00"), realized_pnl_quote: 3, volume_traded: 30 }),
+      ],
+      new Set([key(shared, "alpha"), key(shared, "beta")]),
+      [],
+    );
+
+    expect(points).toHaveLength(1);
+    expect(points[0]).toMatchObject({ realized: 13, volume: 130 });
+  });
+
+  it("forward-fills each bot on its own, rather than alternating between them", () => {
+    // alpha reports at 10:00 and 11:00, beta only at 10:30. At 11:00 the total
+    // must still carry beta's last value; keyed on the bare id the two bots
+    // shared one cursor and 11:00 read as alpha's 5 alone.
+    const points = aggregatePnlSeries(
+      [
+        alpha({ timestamp: at("10:00"), realized_pnl_quote: 1 }),
+        beta({ timestamp: at("10:30"), realized_pnl_quote: 100 }),
+        alpha({ timestamp: at("11:00"), realized_pnl_quote: 5 }),
+      ],
+      new Set([key(shared, "alpha"), key(shared, "beta")]),
+      [],
+    );
+
+    expect(points.map((p) => p.realized)).toEqual([1, 101, 105]);
+  });
+
+  it("folds only the bot whose chip is enabled", () => {
+    const points = aggregatePnlSeries(
+      [
+        alpha({ timestamp: at("10:00"), realized_pnl_quote: 10 }),
+        beta({ timestamp: at("10:00"), realized_pnl_quote: 3 }),
+      ],
+      new Set([key(shared, "beta")]),
+      [],
+    );
+
+    expect(points.map((p) => p.realized)).toEqual([3]);
+  });
+
+  it("ends flush with the live point instead of stepping up at the right edge", () => {
+    // Acceptance: the last historical total and the live "now" total agree when
+    // the live controllers read what they last dumped. The live point always
+    // summed both bots; only the history half was collapsing into one series.
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const points = aggregatePnlSeries(
+      [
+        alpha({ timestamp: at("10:00"), realized_pnl_quote: 10, unrealized_pnl_quote: 1 }),
+        beta({ timestamp: at("10:00"), realized_pnl_quote: 3, unrealized_pnl_quote: 2 }),
+      ],
+      new Set([key(shared, "alpha"), key(shared, "beta")]),
+      [
+        ctrl({ bot_name: "alpha", controller_id: shared, realized_pnl_quote: 10, unrealized_pnl_quote: 1 }),
+        ctrl({ bot_name: "beta", controller_id: shared, realized_pnl_quote: 3, unrealized_pnl_quote: 2 }),
+      ],
+    );
+
+    expect(points).toHaveLength(2);
+    expect(points[0].total).toBe(16);
+    expect(points[1].total).toBe(16);
+  });
+
+  it("reads each bot's trading pair from its own live controller", () => {
+    // `pairByCtrl` is keyed the same way, so a bot quoting in USDC is not
+    // converted through its namesake's USDT pair.
+    const convert = vi.fn((value: number, quote: string) => ({
+      value: quote === "USDC" ? value * 2 : value,
+      converted: quote === "USDC",
+    }));
+    aggregatePnlSeries(
+      [
+        alpha({ timestamp: at("10:00"), trading_pair: "", realized_pnl_quote: 1 }),
+        beta({ timestamp: at("10:00"), trading_pair: "", realized_pnl_quote: 1 }),
+      ],
+      new Set([key(shared, "alpha"), key(shared, "beta")]),
+      [
+        ctrl({ bot_name: "alpha", controller_id: shared, trading_pair: "SOL-USDT" }),
+        ctrl({ bot_name: "beta", controller_id: shared, trading_pair: "SOL-USDC" }),
+      ],
+      convert,
+    );
+
+    expect(convert).toHaveBeenCalledWith(1, "USDT");
+    expect(convert).toHaveBeenCalledWith(1, "USDC");
   });
 });
 

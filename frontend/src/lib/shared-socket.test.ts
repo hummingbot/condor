@@ -23,10 +23,11 @@ function snapshot(
   controllerId: string,
   timestamp: string,
   pnl = 1,
+  botName = "epsilon",
 ): ControllerPerformanceSnapshot {
   return {
     timestamp,
-    bot_name: "epsilon",
+    bot_name: botName,
     controller_id: controllerId,
     controller_name: controllerId,
     connector: "binance",
@@ -67,8 +68,8 @@ describe("controller_perf cache writes", () => {
   });
 
   it("extends a per-controller history keyed by deployedAt", () => {
-    // ControllerPnlChart.tsx: ["controller-perf-history", server, controllerId, deployedAt]
-    const key = ["controller-perf-history", SERVER, "pmm_1", "2026-08-01T00:00:00.000Z"];
+    // ControllerPnlChart.tsx: ["controller-perf-history", server, botName, controllerId, deployedAt]
+    const key = ["controller-perf-history", SERVER, "epsilon", "pmm_1", "2026-08-01T00:00:00.000Z"];
     queryClient.setQueryData(key, history([snapshot("pmm_1", "100")]));
 
     handleMessage(`controller_perf:${SERVER}`, {
@@ -81,7 +82,7 @@ describe("controller_perf cache writes", () => {
     expect(merged?.every((s) => s.controller_id === "pmm_1")).toBe(true);
   });
 
-  it("deduplicates by controller_id + timestamp on a repeated frame", () => {
+  it("deduplicates by bot + controller + timestamp on a repeated frame", () => {
     const key = ["controller-perf-history-all", SERVER, undefined];
     queryClient.setQueryData(key, history([snapshot("pmm_1", "100")]));
 
@@ -109,7 +110,7 @@ describe("controller_perf cache writes", () => {
 
   it("keeps the fleet and per-controller caches apart", () => {
     const fleet = ["controller-perf-history-all", SERVER, "d0"];
-    const single = ["controller-perf-history", SERVER, "pmm_2", "d0"];
+    const single = ["controller-perf-history", SERVER, "epsilon", "pmm_2", "d0"];
     queryClient.setQueryData(fleet, history([]));
     queryClient.setQueryData(single, history([]));
 
@@ -119,6 +120,53 @@ describe("controller_perf cache writes", () => {
 
     expect(snapshotsAt(fleet)).toHaveLength(2);
     expect(snapshotsAt(single)?.map((s) => s.controller_id)).toEqual(["pmm_2"]);
+  });
+
+  /**
+   * Two bots running one controller config dump at the same instant, and the
+   * frame carries both rows. Deduping on `controller_id:timestamp` treated the
+   * second as a repeat of the first and dropped it, so one of the two bots
+   * simply stopped receiving live points (CORR-241).
+   */
+  it("keeps both bots' snapshots at a shared controller id and timestamp", () => {
+    const key = ["controller-perf-history-all", SERVER, "d0"];
+    queryClient.setQueryData(key, history([]));
+
+    handleMessage(`controller_perf:${SERVER}`, {
+      snapshots: [
+        snapshot("grid_sol", "200", 5, "alpha"),
+        snapshot("grid_sol", "200", 9, "beta"),
+      ],
+    });
+
+    const merged = snapshotsAt(key);
+    expect(merged).toHaveLength(2);
+    expect(merged?.map((s) => s.bot_name)).toEqual(["alpha", "beta"]);
+    // Still one row per bot when the very same frame arrives again.
+    handleMessage(`controller_perf:${SERVER}`, {
+      snapshots: [
+        snapshot("grid_sol", "200", 5, "alpha"),
+        snapshot("grid_sol", "200", 9, "beta"),
+      ],
+    });
+    expect(snapshotsAt(key)).toHaveLength(2);
+  });
+
+  it("routes a per-controller history to its own bot, not its namesake's", () => {
+    const alpha = ["controller-perf-history", SERVER, "alpha", "grid_sol", "d0"];
+    const beta = ["controller-perf-history", SERVER, "beta", "grid_sol", "d0"];
+    queryClient.setQueryData(alpha, history([]));
+    queryClient.setQueryData(beta, history([]));
+
+    handleMessage(`controller_perf:${SERVER}`, {
+      snapshots: [
+        snapshot("grid_sol", "200", 5, "alpha"),
+        snapshot("grid_sol", "200", 9, "beta"),
+      ],
+    });
+
+    expect(snapshotsAt(alpha)?.map((s) => s.global_pnl_quote)).toEqual([5]);
+    expect(snapshotsAt(beta)?.map((s) => s.global_pnl_quote)).toEqual([9]);
   });
 
   it("ignores frames for a different server", () => {

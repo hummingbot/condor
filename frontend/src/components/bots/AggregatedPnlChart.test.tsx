@@ -52,10 +52,10 @@ vi.mock("./PnlEvolutionChart", async () => {
 const { AggregatedPnlChart } = await import("./AggregatedPnlChart");
 
 /** A stored snapshot for `id` at `hhmm`. */
-function snap(id: string, hhmm: string): ControllerPerformanceSnapshot {
+function snap(id: string, hhmm: string, botName = "bot"): ControllerPerformanceSnapshot {
   return {
     timestamp: `2026-08-27T${hhmm}:00Z`,
-    bot_name: "bot",
+    bot_name: botName,
     controller_id: id,
     controller_name: id,
     connector: "binance",
@@ -73,11 +73,11 @@ function snap(id: string, hhmm: string): ControllerPerformanceSnapshot {
  * A live controller. Every call returns a fresh object, which is the point:
  * a WS frame never reuses the objects it decoded, only the ids inside them.
  */
-function ctrl(id: string): ControllerInfo {
+function ctrl(id: string, botName = "bot"): ControllerInfo {
   return {
     controller_name: id,
     controller_id: id,
-    bot_name: "bot",
+    bot_name: botName,
     status: "running",
     connector: "binance",
     trading_pair: "SOL-USDC",
@@ -101,11 +101,17 @@ let root: Root;
 /** Render one WS frame's worth of controllers, always as freshly built objects. */
 function render(ids: string[]) {
   act(() => {
-    root.render(<AggregatedPnlChart snapshots={snapshots} controllers={ids.map(ctrl)} />);
+    root.render(<AggregatedPnlChart snapshots={snapshots} controllers={ids.map((id) => ctrl(id))} />);
   });
 }
 
-/** The ids of the chips currently on screen, in order ("All" excluded). */
+/**
+ * The selection key for a controller of bot "bot" — the fold is keyed by bot
+ * *and* controller id, never the id alone (CORR-241).
+ */
+const key = (id: string) => `bot:${id}`;
+
+/** The labels of the chips currently on screen, in order ("All" excluded). */
 function chips(): string[] {
   return [...container.querySelectorAll("button")].map((b) => b.textContent ?? "").filter((t) => t !== "All");
 }
@@ -134,12 +140,58 @@ afterEach(() => {
   container.remove();
 });
 
+/**
+ * Two bots deployed from one controller config (CORR-241).
+ *
+ * They share a `controller_id`, so keyed on that alone the fleet collapsed to
+ * one chip driving one series. Each bot is its own controller, so each gets its
+ * own chip — and since the bare id would then name two different lines, the
+ * label picks up the bot to tell them apart.
+ */
+describe("AggregatedPnlChart with two bots on one controller config", () => {
+  const shared = "grid_sol";
+  const controllers = [ctrl(shared, "alpha"), ctrl(shared, "beta"), ctrl("pmm", "alpha")];
+  const twoBotSnapshots = [
+    snap(shared, "10:00", "alpha"),
+    snap(shared, "10:00", "beta"),
+    snap("pmm", "10:00", "alpha"),
+    snap(shared, "11:00", "alpha"),
+    snap(shared, "11:00", "beta"),
+    snap("pmm", "11:00", "alpha"),
+  ];
+
+  function renderFleet() {
+    act(() => {
+      root.render(<AggregatedPnlChart snapshots={twoBotSnapshots} controllers={controllers} />);
+    });
+  }
+
+  it("gives each bot its own chip and its own selection key", () => {
+    renderFleet();
+
+    expect([...lastFold()].sort()).toEqual([
+      "alpha:grid_sol",
+      "alpha:pmm",
+      "beta:grid_sol",
+    ]);
+    // The ambiguous id is qualified by its bot; the unique one is left alone.
+    expect(chips()).toEqual(["grid_sol · alpha", "grid_sol · beta", "pmm"]);
+  });
+
+  it("drops only the clicked bot's series, leaving its namesake folded in", () => {
+    renderFleet();
+    clickChip("grid_sol · beta");
+
+    expect([...lastFold()].sort()).toEqual(["alpha:grid_sol", "alpha:pmm"]);
+  });
+});
+
 describe("AggregatedPnlChart selection identity", () => {
   it("keeps the same Set — and folds once — when a frame only brings new objects", () => {
     render(["ctrl-a", "ctrl-b"]);
     expect(folds).toHaveLength(1);
     const first = lastFold();
-    expect([...first].sort()).toEqual(["ctrl-a", "ctrl-b"]);
+    expect([...first].sort()).toEqual([key("ctrl-a"), key("ctrl-b")]);
 
     // Same fleet, three more WS frames: new arrays, new objects, same ids.
     render(["ctrl-a", "ctrl-b"]);
@@ -168,33 +220,33 @@ describe("AggregatedPnlChart selection identity", () => {
     render(["ctrl-a", "ctrl-b"]);
     render(["ctrl-a"]);
 
-    expect([...lastFold()]).toEqual(["ctrl-a"]);
+    expect([...lastFold()]).toEqual([key("ctrl-a")]);
     expect(chips()).toEqual([]); // a single controller needs no chip strip
   });
 
   it("falls back to the whole fleet when nothing in the selection survives", () => {
     render(["ctrl-a", "ctrl-b"]);
     clickChip("ctrl-b"); // user narrows the chart down to ctrl-a
-    expect([...lastFold()]).toEqual(["ctrl-a"]);
+    expect([...lastFold()]).toEqual([key("ctrl-a")]);
 
     render(["ctrl-b", "ctrl-c"]); // ctrl-a is gone: the selection is now empty
 
-    expect([...lastFold()].sort()).toEqual(["ctrl-b", "ctrl-c"]);
+    expect([...lastFold()].sort()).toEqual([key("ctrl-b"), key("ctrl-c")]);
   });
 
   it("still toggles a controller in and out on click", () => {
     render(["ctrl-a", "ctrl-b"]);
 
     clickChip("ctrl-a");
-    expect([...lastFold()]).toEqual(["ctrl-b"]);
+    expect([...lastFold()]).toEqual([key("ctrl-b")]);
 
     clickChip("ctrl-a");
-    expect([...lastFold()].sort()).toEqual(["ctrl-a", "ctrl-b"]);
+    expect([...lastFold()].sort()).toEqual([key("ctrl-a"), key("ctrl-b")]);
 
     // The last enabled controller cannot be toggled off — that would leave the
     // chart with nothing to draw.
     clickChip("ctrl-a");
     clickChip("ctrl-b");
-    expect([...lastFold()]).toEqual(["ctrl-b"]);
+    expect([...lastFold()]).toEqual([key("ctrl-b")]);
   });
 });

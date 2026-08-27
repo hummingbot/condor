@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 
 import type { ControllerInfo, ControllerPerformanceSnapshot } from "@/lib/api";
+import { controllerKey } from "@/lib/controller-identity";
 import { aggregatePnlSeries } from "@/lib/pnl-chart";
 import type { ConvertFn } from "@/lib/rates";
 import { PnlEvolutionChart } from "./PnlEvolutionChart";
@@ -31,17 +32,35 @@ interface Props {
  * (ARCH-242) and the fold is aggregatePnlSeries' (ARCH-243).
  */
 export function AggregatedPnlChart({ snapshots, controllers, currencySymbol = "$", convert }: Props) {
+  /**
+   * One entry per controller in the fleet: `key` is what the fold and the
+   * selection are keyed on, `label` is what the chip says.
+   *
+   * The two are not the same string. A controller is identified by its bot
+   * *and* its config id, because deploying one config to two bots gives two
+   * live controllers sharing an id — keyed on the id alone they collapsed into
+   * a single chip and a single series (CORR-241). The label stays the plain
+   * controller id, which is what a user recognises, and only picks up its bot
+   * when some other bot is running that very id and the bare label would name
+   * two different lines.
+   */
   const controllerIds = useMemo(() => {
-    const ids: { id: string }[] = [];
+    const entries: { key: string; label: string; botName: string }[] = [];
     const seen = new Set<string>();
+    const labelCounts = new Map<string, number>();
     for (const c of controllers) {
-      const cid = c.controller_id || c.controller_name;
-      if (!seen.has(cid)) {
-        seen.add(cid);
-        ids.push({ id: cid });
-      }
+      const key = controllerKey(c);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      const label = c.controller_id || c.controller_name;
+      labelCounts.set(label, (labelCounts.get(label) ?? 0) + 1);
+      entries.push({ key, label, botName: c.bot_name });
     }
-    return ids;
+    return entries.map((e) =>
+      (labelCounts.get(e.label) ?? 0) > 1 && e.botName
+        ? { ...e, label: `${e.label} · ${e.botName}` }
+        : e,
+    );
   }, [controllers]);
 
   /**
@@ -53,9 +72,9 @@ export function AggregatedPnlChart({ snapshots, controllers, currencySymbol = "$
    * invalidating the `data` memo below and forcing a second render pass for a
    * selection that had not changed (PERF-240).
    */
-  const idSignature = controllerIds.map((c) => c.id).join("\u0000");
+  const idSignature = controllerIds.map((c) => c.key).join("\u0000");
 
-  const [enabled, setEnabled] = useState<Set<string>>(() => new Set(controllerIds.map((c) => c.id)));
+  const [enabled, setEnabled] = useState<Set<string>>(() => new Set(controllerIds.map((c) => c.key)));
   const [syncedIds, setSyncedIds] = useState(idSignature);
 
   // Drop ids that left the fleet, while rendering rather than in an effect, so
@@ -63,7 +82,7 @@ export function AggregatedPnlChart({ snapshots, controllers, currencySymbol = "$
   if (syncedIds !== idSignature) {
     setSyncedIds(idSignature);
     setEnabled((prev) => {
-      const allIds = new Set(controllerIds.map((c) => c.id));
+      const allIds = new Set(controllerIds.map((c) => c.key));
       const kept = new Set<string>();
       for (const id of prev) if (allIds.has(id)) kept.add(id);
       // Nothing survived the prune -> fall back to the whole fleet.
@@ -90,7 +109,7 @@ export function AggregatedPnlChart({ snapshots, controllers, currencySymbol = "$
   const allEnabled = enabled.size === controllerIds.length;
   const toggleAll = () => {
     if (allEnabled) return;
-    setEnabled(new Set(controllerIds.map((c) => c.id)));
+    setEnabled(new Set(controllerIds.map((c) => c.key)));
   };
 
   const data = useMemo(
@@ -114,11 +133,11 @@ export function AggregatedPnlChart({ snapshots, controllers, currencySymbol = "$
       </button>
       {controllerIds.map((c, i) => {
         const color = CTRL_COLORS[i % CTRL_COLORS.length];
-        const active = enabled.has(c.id);
+        const active = enabled.has(c.key);
         return (
           <button
-            key={c.id}
-            onClick={() => toggleController(c.id)}
+            key={c.key}
+            onClick={() => toggleController(c.key)}
             className={`rounded-full px-2.5 py-0.5 text-[10px] font-medium transition-all whitespace-nowrap ${
               active ? "text-white" : "opacity-40 hover:opacity-70"
             }`}
@@ -128,7 +147,7 @@ export function AggregatedPnlChart({ snapshots, controllers, currencySymbol = "$
               color: active ? "white" : color,
             }}
           >
-            {c.id}
+            {c.label}
           </button>
         );
       })}

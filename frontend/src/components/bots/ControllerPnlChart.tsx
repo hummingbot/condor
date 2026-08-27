@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
 
 import { api, type ControllerInfo } from "@/lib/api";
+import { controllerKey } from "@/lib/controller-identity";
 import { aggregatePnlSeries } from "@/lib/pnl-chart";
 import type { ConvertFn } from "@/lib/rates";
 import { PnlEvolutionChart } from "./PnlEvolutionChart";
@@ -26,7 +27,12 @@ interface Props {
  */
 export function ControllerPnlChart({ server, controllerId, botName, deployedAt, height = 400, currencySymbol = "$", convert, controller }: Props) {
   const { data: raw, isLoading } = useQuery({
-    queryKey: ["controller-perf-history", server, controllerId, deployedAt],
+    // `bot_name` is part of the key, not just the request: the query asks
+    // upstream for one bot's rows, so two bots running the same controller
+    // config would otherwise share a cache entry — and the socket, which routes
+    // live frames by this key's prefix, would push each bot's snapshots into
+    // the other's chart (CORR-241).
+    queryKey: ["controller-perf-history", server, botName, controllerId, deployedAt],
     queryFn: () =>
       api.getControllerPerformanceHistory(server, {
         controller_id: controllerId,
@@ -41,12 +47,16 @@ export function ControllerPnlChart({ server, controllerId, botName, deployedAt, 
 
   const snapshots = raw?.snapshots ?? [];
 
+  // The fold keys on bot + controller, so the enabled set holds that composite
+  // and not the bare id (CORR-241).
+  const seriesKey = controllerKey({ bot_name: botName, controller_id: controllerId });
+
   // One controller is the degenerate case of the aggregate fold: a single
-  // enabled id, so the shared function does the sorting, the conversion and the
-  // live "now" point (ARCH-243) instead of a second hand-rolled copy here.
+  // enabled key, so the shared function does the sorting, the conversion and
+  // the live "now" point (ARCH-243) instead of a second hand-rolled copy here.
   const data = useMemo(
-    () => aggregatePnlSeries(snapshots, new Set([controllerId]), controller ? [controller] : [], convert),
-    [snapshots, controllerId, controller, convert],
+    () => aggregatePnlSeries(snapshots, new Set([seriesKey]), controller ? [controller] : [], convert),
+    [snapshots, seriesKey, controller, convert],
   );
 
   if (isLoading) {

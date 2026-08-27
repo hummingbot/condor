@@ -18,6 +18,7 @@ import yamlLib from "js-yaml";
 import { CodeEditor } from "@/components/editor/CodeEditor";
 import { ControllerPnlChart } from "@/components/bots/ControllerPnlChart";
 import { api, type ControllerInfo } from "@/lib/api";
+import { controllerKey } from "@/lib/controller-identity";
 import { configToYaml, CONTROLLER_HIDDEN_KEYS } from "@/lib/configYaml";
 import { formatCurrencyVolume, formatCurrencyPnl, pnlColor } from "@/lib/formatters";
 import type { ConvertFn } from "@/lib/rates";
@@ -199,10 +200,10 @@ export function ControllerBrowser({
   const [isCompact, setIsCompact] = useState(false);
   const sidebarRef = useRef<HTMLDivElement>(null);
 
-  const ctrlKey = useCallback(
-    (c: ControllerInfo) => `${c.bot_name}-${c.controller_id || c.controller_name}`,
-    [],
-  );
+  // The same composite `ActiveBotsTab` hands over as `initialControllerKey`:
+  // a controller is identified by its bot *and* its config id, never the id
+  // alone (CORR-241).
+  const ctrlKey = useCallback((c: ControllerInfo) => controllerKey(c), []);
 
   const [activeKey, setActiveKey] = useState(initialControllerKey);
 
@@ -466,7 +467,10 @@ export function ControllerBrowser({
           <div className="flex-1 overflow-y-auto p-5 space-y-4 min-w-0">
             {/* PnL Evolution Chart */}
             <ControllerPnlChart
-              key={configId}
+              // Keyed by bot + config id: two bots can be running this very
+              // config, and a key that did not tell them apart would keep the
+              // sibling's mounted state when the user switches (CORR-241).
+              key={ctrlKey(activeCtrl)}
               server={server}
               controllerId={configId}
               botName={activeCtrl.bot_name}
@@ -618,7 +622,9 @@ export function ControllerBrowser({
           {/* Right column: Config + Logs */}
           <div className="w-[380px] xl:w-[440px] shrink-0 border-l border-[var(--color-border)] flex flex-col bg-[var(--color-surface)]">
             <YamlConfigEditor
-              key={configId}
+              // Same: an editor keyed on the config id alone kept its unsaved
+              // buffer when the user switched to the other bot running it.
+              key={ctrlKey(activeCtrl)}
               config={activeCtrl.config || {}}
               server={server}
               configId={configId}
