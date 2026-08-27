@@ -15,6 +15,28 @@ export const PNL_SERIES_COLORS = {
   position: "#a78bfa",
 } as const;
 
+/**
+ * Width in px reserved by every YAxis gutter in a PNL evolution chart.
+ *
+ * The PNL pane and the volume/position pane below it are two separate charts
+ * tied together only by `syncId`: recharts syncs the cursor and the tooltip
+ * index, never the geometry. Each pane computes its own plot area as
+ * (container width - left gutter - right gutter), so the two plot areas land on
+ * the same x pixels — and a given instant sits under the same column in both —
+ * only for as long as their gutters add up to the same total. That is why the
+ * PNL pane renders an invisible right-hand YAxis (`yAxisId="spacer"`) under the
+ * same `hasPosition` guard as the bottom pane's position axis: it buys back the
+ * gutter the bottom pane spends, so the panes stay aligned in both cases.
+ *
+ * So this one number is a contract, not a style choice. Change it here and both
+ * panes move together; hard-code a different value at one axis — to fit a longer
+ * tick label, say — and the panes silently drift apart, with the grid lines and
+ * the synced cursor of the top pane pointing at a different instant than the
+ * bottom one. Nothing throws when that happens. Every YAxis in both charts must
+ * read its width from here, and the two `hasPosition` guards must stay paired.
+ */
+export const AXIS_WIDTH = 52;
+
 /** A single point on a PNL evolution chart (per-controller or aggregated). */
 export interface PnlChartPoint {
   time: number;

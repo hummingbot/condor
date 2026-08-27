@@ -14,7 +14,7 @@ import {
 
 import type { ControllerInfo, ControllerPerformanceSnapshot } from "@/lib/api";
 import { formatAxisCurrency, formatCurrencyVolume, formatCurrencyPnl, formatTime, pnlColor } from "@/lib/formatters";
-import { aggregatePnlSeries, PNL_SERIES_COLORS } from "@/lib/pnl-chart";
+import { aggregatePnlSeries, AXIS_WIDTH, PNL_SERIES_COLORS } from "@/lib/pnl-chart";
 import type { ConvertFn } from "@/lib/rates";
 import { getThemeColors } from "@/lib/theme-colors";
 import { BottomTooltip, PnlTooltip } from "./PnlChartTooltips";
@@ -192,8 +192,11 @@ export function AggregatedPnlChart({ snapshots, controllers, currencySymbol = "$
               stroke="var(--color-border)"
               tickLine={false}
               axisLine={false}
-              width={52}
+              width={AXIS_WIDTH}
             />
+            {/* Invisible right gutter mirroring the bottom pane's position
+                axis (same `hasPosition` guard) so both panes keep identical
+                plot areas — see AXIS_WIDTH in lib/pnl-chart.ts. */}
             {hasPosition && (
               <YAxis
                 yAxisId="spacer"
@@ -201,7 +204,7 @@ export function AggregatedPnlChart({ snapshots, controllers, currencySymbol = "$
                 tick={false}
                 tickLine={false}
                 axisLine={false}
-                width={52}
+                width={AXIS_WIDTH}
               />
             )}
             <ReferenceLine y={0} stroke="var(--color-text-muted)" strokeOpacity={0.3} strokeDasharray="4 4" />
@@ -242,7 +245,7 @@ export function AggregatedPnlChart({ snapshots, controllers, currencySymbol = "$
               stroke="var(--color-border)"
               tickLine={false}
               axisLine={false}
-              width={52}
+              width={AXIS_WIDTH}
             />
             {hasPosition && (
               <YAxis
@@ -253,7 +256,7 @@ export function AggregatedPnlChart({ snapshots, controllers, currencySymbol = "$
                 stroke="var(--color-border)"
                 tickLine={false}
                 axisLine={false}
-                width={52}
+                width={AXIS_WIDTH}
               />
             )}
             <Tooltip content={<BottomTooltip symbol={currencySymbol} />} />
