@@ -36,6 +36,7 @@ from condor.web.routes import (
     settings,
     sharing,
     transcribe,
+    updates,
     ws,
 )
 
@@ -102,6 +103,7 @@ def create_app() -> FastAPI:
     app.include_router(conversations.router, prefix="/api/v1")
     app.include_router(sharing.router, prefix="/api/v1")
     app.include_router(transcribe.router, prefix="/api/v1")
+    app.include_router(updates.router, prefix="/api/v1")
 
     # Report bodies are NOT mounted here. They used to be served by an
     # unauthenticated ``/reports/{filename:path}`` route, which made every
