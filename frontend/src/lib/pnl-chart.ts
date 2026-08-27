@@ -17,6 +17,36 @@ export const PNL_SERIES_COLORS = {
 } as const;
 
 /**
+ * The one name each drawn series goes by, keyed by the `dataKey` it is drawn
+ * from (READ-244).
+ *
+ * Five series used to be spelled three different ways at once: the recharts
+ * `<Legend>` on the PNL pane capitalised raw dataKeys and covered only the
+ * three series in that pane, the header strip abbreviated to `R:` / `U:` /
+ * `Vol:` / `Pos:`, and the tooltips used full words of their own. Three
+ * vocabularies meant nothing on screen could be matched to anything else on
+ * screen by reading it — and the two series in the lower pane were never named
+ * at all, decodable only by matching a stroke colour to a coloured axis tick.
+ *
+ * The legend in the chart header and both tooltips now read from here, so a
+ * series is renamed in one place or not at all.
+ *
+ * `volumeDelta` is deliberately just "Volume": what that series needs beside it
+ * is not a longer noun but the length of one bar, which is data rather than a
+ * name — see `formatBucketLabel`. And `position` is "Net position", not
+ * "Position", because `positionQuoteValue` returns a *signed* notional that
+ * nets longs against shorts; the word carries the same meaning the signed area
+ * and its zero baseline draw (READ-246).
+ */
+export const PNL_SERIES_LABELS = {
+  total: "Total",
+  realized: "Realized",
+  unrealized: "Unrealized",
+  volumeDelta: "Volume",
+  position: "Net position",
+} as const;
+
+/**
  * Width in px reserved by every YAxis gutter in a PNL evolution chart.
  *
  * The PNL pane and the volume/position pane below it are two separate charts

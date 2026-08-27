@@ -36,7 +36,6 @@ import {
   Bar,
   CartesianGrid,
   ComposedChart,
-  Legend,
   Line,
   Rectangle,
   ReferenceLine,
@@ -55,6 +54,7 @@ import {
   PLOT_INSET_LEFT,
   PLOT_INSET_RIGHT,
   PNL_SERIES_COLORS,
+  PNL_SERIES_LABELS,
   chartBucketMs,
   formatBucketLabel,
   positionAreaExtent,
@@ -68,6 +68,17 @@ import { BottomTooltip, PnlTooltip } from "./PnlChartTooltips";
 
 /** Both panes pad their chart identically; the divider's inset counts this in. */
 const PANE_PADDING = { paddingLeft: PANE_PAD_X, paddingRight: PANE_PAD_X } as const;
+
+/**
+ * What each pane is called — above the pane, and again on the legend group that
+ * lists that pane's series (READ-244).
+ *
+ * The words are shared rather than typed twice because they are the only thing
+ * tying the two halves of the header legend to the two panes below it: the
+ * reader matches "Activity" in the legend to "Activity" over the lower pane.
+ * Let those drift and the grouping stops pointing anywhere.
+ */
+const PANE_LABELS = { pnl: "PnL", activity: "Activity" } as const;
 
 /**
  * The caption above one pane and, on the lower one, the rule that separates the
@@ -90,7 +101,10 @@ const PANE_PADDING = { paddingLeft: PANE_PAD_X, paddingRight: PANE_PAD_X } as co
  * grid it is drawn to trace.
  *
  * The row is a flex with the caption on the left and the right-hand slot left
- * empty, so a per-pane legend can sit there later without moving anything.
+ * empty. READ-247 left it for a per-pane legend; READ-244 then put the legend
+ * in the header instead — one legend for all five series rather than two that
+ * would have to agree with each other — so the slot is still free, and the
+ * caption's job here is to carry the name that legend's groups point back to.
  */
 function PaneCaption({ label, divider = false }: { label: string; divider?: boolean }) {
   return (
@@ -102,6 +116,131 @@ function PaneCaption({ label, divider = false }: { label: string; divider?: bool
       <span className="text-[10px] font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
         {label}
       </span>
+    </div>
+  );
+}
+
+// ── The legend (READ-244) ──
+//
+// One legend, in the header strip, for every series in both panes.
+//
+// There used to be no legend for the lower pane at all: its two series were
+// decodable only by matching a stroke colour to a coloured Y-axis tick, and
+// nothing on screen ever said the words "volume" or "position". The upper pane
+// had a recharts <Legend> — which covered only its own three series, printed
+// capitalised dataKeys, and rendered inside the plot area one row below the
+// "PnL" caption, so it read as a second caption competing with the first. That
+// element is gone; a legend that can only ever describe the pane it lives in is
+// what made five series need three vocabularies.
+//
+// Two things the header can do that a recharts legend cannot, and both are the
+// point:
+//
+//  1. **Group by pane.** The entries come in two groups named exactly as the
+//     two panes are (PANE_LABELS), so the header states the separation the user
+//     complained was invisible — these three are PnL, these two are Activity —
+//     before they have looked at the chart at all.
+//  2. **Draw the real mark.** Each swatch is the SVG the series is actually
+//     drawn with: a solid stroke, a dashed stroke, a stroke over its gradient,
+//     a row of bars, a two-tone area over its dashed baseline. recharts offers
+//     a fixed set of `iconType`s and would have given the volume bars and the
+//     position area the same little line as the PnL curves — a legend that says
+//     "line" for a bar series is worse than none.
+//
+// The one licence taken with "the swatch is the real mark": fill opacities are
+// raised at chip scale (see SWATCH_FILL_OPACITY). The chart's fills are faint
+// because they are tints spread over 100+ px of pane; the same alpha over 12 px
+// is nothing at all, and an invisible fill would misreport a filled series as a
+// bare line. Shape, colour, dash and the two-tone split are exact.
+
+/** One swatch, drawn at the size of a word. */
+const SWATCH_W = 20;
+const SWATCH_H = 12;
+/** A pane's fill spread over 12px would vanish; see the note above. */
+const SWATCH_FILL_OPACITY = 0.4;
+
+function Swatch({ children }: { children?: ReactNode }) {
+  return (
+    <svg
+      width={SWATCH_W}
+      height={SWATCH_H}
+      viewBox={`0 0 ${SWATCH_W} ${SWATCH_H}`}
+      aria-hidden="true"
+      className="shrink-0"
+    >
+      {children}
+    </svg>
+  );
+}
+
+/** A stroked series: `dashed` reproduces the Unrealized line's own dash array. */
+function StrokeSwatch({ color, dashed = false, opacity = 1 }: { color: string; dashed?: boolean; opacity?: number }) {
+  return (
+    <Swatch>
+      <line
+        x1={0}
+        y1={SWATCH_H / 2}
+        x2={SWATCH_W}
+        y2={SWATCH_H / 2}
+        stroke={color}
+        strokeWidth={2}
+        strokeOpacity={opacity}
+        strokeDasharray={dashed ? "5 3" : undefined}
+      />
+    </Swatch>
+  );
+}
+
+/**
+ * One legend row: the mark, the name, and the series' live value.
+ *
+ * `hint` qualifies the *name* (what one bar covers) and `suffix` qualifies the
+ * *value* (over what window it was measured) — the two halves of keeping the
+ * volume flow apart from the volume stock. A row with no swatch is a number the
+ * chart does not draw.
+ */
+function LegendEntry({
+  series,
+  swatch,
+  name,
+  hint,
+  value,
+  color,
+  suffix,
+  strong = false,
+}: {
+  series: string;
+  swatch?: ReactNode;
+  name: string;
+  hint?: string;
+  value: string;
+  color: string;
+  suffix?: string;
+  strong?: boolean;
+}) {
+  return (
+    <span className="flex items-center gap-1.5 whitespace-nowrap" data-legend-entry={series}>
+      {swatch ?? <Swatch />}
+      <span className="text-[var(--color-text-muted)]">
+        {name}
+        {hint && <span className="opacity-60"> {hint}</span>}
+      </span>
+      <span className={strong ? "font-semibold" : undefined} style={{ color }}>
+        {value}
+      </span>
+      {suffix && <span className="text-[var(--color-text-muted)] opacity-60">{suffix}</span>}
+    </span>
+  );
+}
+
+/** The entries belonging to one pane, under that pane's own name. */
+function LegendGroup({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="flex items-center gap-3" data-legend-group={label.toLowerCase()}>
+      <span className="text-[9px] font-bold uppercase tracking-widest text-[var(--color-text-muted)] opacity-70">
+        {label}
+      </span>
+      {children}
     </div>
   );
 }
@@ -139,6 +278,13 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
   const instanceId = useId().replace(/[^a-zA-Z0-9]/g, "");
   const gradientId = `pnlGrad${instanceId}`;
   const posGradientId = `posGrad${instanceId}`;
+  // The legend's two filled swatches carry their own copies of those gradients:
+  // an SVG paint server lives in the document, not in the element that declared
+  // it, so a chip could reference the pane's gradient — until the pane it
+  // borrows from is the one conditional on `hasPosition`, or a second chart
+  // mounts. Its own id, derived from the same instance, cannot dangle.
+  const totalChipId = `totalChip${instanceId}`;
+  const posChipId = `posChip${instanceId}`;
 
   // recharts compares `tickFormatter` by identity, so these stay stable per symbol.
   const fmtAxis = useCallback((v: number) => formatAxisCurrency(v, currencySymbol, "pnl"), [currencySymbol]);
@@ -217,38 +363,170 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
     [barWidth],
   );
 
+  // What the bars on screen add up to — the flow the activity pane draws, as
+  // opposed to `latest.volume`, the lifetime counter they were differenced from
+  // (READ-245). The legend reports both, side by side and each with its own
+  // qualifier, because they are different quantities rather than a
+  // disagreement: pan the window and this moves, that does not.
+  //
+  // Non-finite deltas are skipped rather than summed, because that is what the
+  // pane does with them: a snapshot whose `volume_traded` did not arrive as a
+  // number folds to a NaN delta, and recharts answers that by drawing no bar.
+  // A plain `+` would answer it by turning the whole figure into "$NaN" — this
+  // total has to say what the bars beside it add up to, and one absent bar is
+  // not grounds for withdrawing the other four hundred.
+  const windowVolume = useMemo(
+    () => data.reduce((sum, p) => (Number.isFinite(p.volumeDelta) ? sum + p.volumeDelta : sum), 0),
+    [data],
+  );
+
   const tc = getThemeColors();
   const totalColor = (latest?.total ?? 0) >= 0 ? tc.up : tc.down;
   const fmtPnl = (v: number) => formatCurrencyPnl(v, currencySymbol);
+  const fmtVol = (v: number) => formatCurrencyVolume(v, currencySymbol);
 
   return (
     <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden">
-      {/* Header with live stats */}
-      <div className="flex items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5">
-        <div className="flex items-center gap-4">
+      {/* Header: the one legend for both panes' five series, with each series'
+          live value (READ-244). It wraps rather than truncating — the
+          controller modal is narrower than the bots page, and an entry pushed
+          off the end would be a series left unnamed again. */}
+      <div className="flex items-start justify-between gap-3 border-b border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] tabular-nums">
           <p className="text-[10px] font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
             {title}
           </p>
           {latest && (
-            <div className="flex items-center gap-3 text-xs tabular-nums">
-              <span style={{ color: pnlColor(latest.total) }} className="font-semibold">
-                {fmtPnl(latest.total)}
-              </span>
-              <span className="text-[var(--color-text-muted)]">
-                R: <span style={{ color: "var(--color-green)" }}>{fmtPnl(latest.realized)}</span>
-              </span>
-              <span className="text-[var(--color-text-muted)]">
-                U: <span style={{ color: PNL_SERIES_COLORS.unrealized }}>{fmtPnl(latest.unrealized)}</span>
-              </span>
-              <span className="text-[var(--color-text-muted)]">
-                Vol: <span style={{ color: PNL_SERIES_COLORS.volume }}>{formatCurrencyVolume(latest.volume, currencySymbol)}</span>
-              </span>
-              {latest.position !== 0 && (
-                <span className="text-[var(--color-text-muted)]">
-                  Pos: <span style={{ color: PNL_SERIES_COLORS.position }}>{formatCurrencyVolume(latest.position, currencySymbol)}</span>
-                </span>
-              )}
-            </div>
+            <>
+              <LegendGroup label={PANE_LABELS.pnl}>
+                <LegendEntry
+                  series="total"
+                  name={PNL_SERIES_LABELS.total}
+                  value={fmtPnl(latest.total)}
+                  color={pnlColor(latest.total)}
+                  strong
+                  swatch={
+                    // A stroke at the line's own 0.6 opacity, over the gradient
+                    // the area beneath it is filled with.
+                    <Swatch>
+                      <defs>
+                        <linearGradient id={totalChipId} x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor={totalColor} stopOpacity={SWATCH_FILL_OPACITY} />
+                          <stop offset="95%" stopColor={totalColor} stopOpacity={0.03} />
+                        </linearGradient>
+                      </defs>
+                      <rect x={0} y={3} width={SWATCH_W} height={SWATCH_H - 3} fill={`url(#${totalChipId})`} />
+                      <line x1={0} y1={4} x2={SWATCH_W} y2={4} stroke={totalColor} strokeWidth={2} strokeOpacity={0.6} />
+                    </Swatch>
+                  }
+                />
+                <LegendEntry
+                  series="realized"
+                  name={PNL_SERIES_LABELS.realized}
+                  value={fmtPnl(latest.realized)}
+                  color={tc.up}
+                  swatch={<StrokeSwatch color={tc.up} />}
+                />
+                <LegendEntry
+                  series="unrealized"
+                  name={PNL_SERIES_LABELS.unrealized}
+                  value={fmtPnl(latest.unrealized)}
+                  color={PNL_SERIES_COLORS.unrealized}
+                  swatch={<StrokeSwatch color={PNL_SERIES_COLORS.unrealized} dashed />}
+                />
+              </LegendGroup>
+
+              <span aria-hidden="true" className="h-3.5 w-px bg-[var(--color-border)]" />
+
+              <LegendGroup label={PANE_LABELS.activity}>
+                <LegendEntry
+                  series="volumeDelta"
+                  name={PNL_SERIES_LABELS.volumeDelta}
+                  // The bucket qualifies the *bars*: without it "$40K" is a busy
+                  // hour or a dead day and the reader cannot tell which.
+                  hint={bucketLabel ? `${bucketLabel} bars` : "bars"}
+                  // ...and the suffix qualifies the *number*: this is what the
+                  // bars on screen add up to, which is not the lifetime figure
+                  // one entry along.
+                  value={fmtVol(windowVolume)}
+                  suffix="on screen"
+                  color={PNL_SERIES_COLORS.volume}
+                  swatch={
+                    <Swatch>
+                      {[
+                        [1, 7],
+                        [7.5, 11],
+                        [14, 5],
+                      ].map(([x, h]) => (
+                        <rect
+                          key={x}
+                          x={x}
+                          y={SWATCH_H - h}
+                          width={5}
+                          height={h}
+                          rx={1}
+                          fill={PNL_SERIES_COLORS.volume}
+                          fillOpacity={SWATCH_FILL_OPACITY}
+                        />
+                      ))}
+                    </Swatch>
+                  }
+                />
+                {hasPosition && (
+                  <LegendEntry
+                    series="position"
+                    name={PNL_SERIES_LABELS.position}
+                    value={fmtVol(latest.position)}
+                    color={PNL_SERIES_COLORS.position}
+                    swatch={
+                      // The series' violet stroke crossing its own dashed zero,
+                      // with the fill splitting long/short at that baseline —
+                      // the mark READ-246 gave it, at chip scale.
+                      <Swatch>
+                        <defs>
+                          <linearGradient id={posChipId} x1="0" y1="0" x2="0" y2="1">
+                            <stop offset={0.5} stopColor={tc.up} />
+                            <stop offset={0.5} stopColor={tc.down} />
+                          </linearGradient>
+                        </defs>
+                        <path
+                          d={`M0,${SWATCH_H / 2} L0,2 L${SWATCH_W / 2},${SWATCH_H / 2} L${SWATCH_W},10 L${SWATCH_W},${SWATCH_H / 2} Z`}
+                          fill={`url(#${posChipId})`}
+                          fillOpacity={SWATCH_FILL_OPACITY}
+                        />
+                        <line
+                          x1={0}
+                          y1={SWATCH_H / 2}
+                          x2={SWATCH_W}
+                          y2={SWATCH_H / 2}
+                          stroke={PNL_SERIES_COLORS.position}
+                          strokeOpacity={0.45}
+                          strokeDasharray="4 4"
+                        />
+                        <polyline
+                          points={`0,2 ${SWATCH_W / 2},${SWATCH_H / 2} ${SWATCH_W},10`}
+                          fill="none"
+                          stroke={PNL_SERIES_COLORS.position}
+                          strokeWidth={1.5}
+                        />
+                      </Swatch>
+                    }
+                  />
+                )}
+                {/* No swatch, and that is the entry's whole point: the lifetime
+                    counter is the one number here that nothing on the chart
+                    draws. The bars are the flow, this is the stock; keeping
+                    both visible, each with its qualifier, is what stops the
+                    "on screen" total from reading as a shrunken lifetime one. */}
+                <LegendEntry
+                  series="volume"
+                  name="Traded"
+                  hint="lifetime"
+                  value={fmtVol(latest.volume)}
+                  color="var(--color-text-muted)"
+                />
+              </LegendGroup>
+            </>
           )}
         </div>
         {notice && (
@@ -264,7 +542,7 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
       {filters}
 
       {/* PnL pane (top) */}
-      <PaneCaption label="PnL" />
+      <PaneCaption label={PANE_LABELS.pnl} />
       <div data-pane="pnl" style={PANE_PADDING}>
         <ResponsiveContainer width="100%" height={pnlHeight}>
           <ComposedChart data={data} margin={{ top: 12, right: PANE_MARGIN_RIGHT, left: 0, bottom: 0 }} syncId={instanceId}>
@@ -305,23 +583,21 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
             />
             <ReferenceLine y={0} stroke="var(--color-text-muted)" strokeOpacity={0.3} strokeDasharray="4 4" />
             <Tooltip content={<PnlTooltip symbol={currencySymbol} />} />
-            <Area type="monotone" dataKey="total" stroke="none" fill={`url(#${gradientId})`} activeDot={false} legendType="none" />
+            <Area type="monotone" dataKey="total" stroke="none" fill={`url(#${gradientId})`} activeDot={false} />
             <Line type="monotone" dataKey="total" stroke={totalColor} strokeWidth={2} dot={false} strokeOpacity={0.6} />
             <Line type="monotone" dataKey="realized" stroke={tc.up} strokeWidth={2} dot={false} />
             <Line type="monotone" dataKey="unrealized" stroke={PNL_SERIES_COLORS.unrealized} strokeWidth={2} strokeDasharray="5 3" dot={false} />
-            <Legend
-              verticalAlign="top"
-              align="right"
-              iconType="plainline"
-              wrapperStyle={{ fontSize: 10, paddingBottom: 4 }}
-              formatter={(value: string) => <span className="text-[var(--color-text-muted)] text-[10px] capitalize">{value}</span>}
-            />
+            {/* No <Legend> here, in either pane. It could only ever name this
+                pane's three series — it printed capitalised dataKeys as one
+                little line apiece, a row below the "PnL" caption and inside the
+                plot area — while the two series below stayed anonymous. The
+                header legend names all five (READ-244). */}
           </ComposedChart>
         </ResponsiveContainer>
       </div>
 
       {/* Volume + Position pane (bottom), ruled off from the one above */}
-      <PaneCaption label="Activity" divider />
+      <PaneCaption label={PANE_LABELS.activity} divider />
       <div data-pane="activity" style={PANE_PADDING}>
         <ResponsiveContainer width="100%" height={volumeHeight} onResize={onActivityResize}>
           <ComposedChart data={data} margin={{ top: 4, right: PANE_MARGIN_RIGHT, left: 0, bottom: 4 }} syncId={instanceId}>

@@ -1,9 +1,11 @@
 // ── Shared recharts tooltips + series colors for PNL evolution charts ──
-// Used by AggregatedPnlChart and ControllerPnlChart so styling, colors and the
-// Total/Realized/Unrealized and Volume/Position rows stay in sync across both.
+// Used by PnlEvolutionChart for both of its panes, so styling and colors stay in
+// sync across the two. Every row is named from PNL_SERIES_LABELS — the same
+// vocabulary the chart's header legend reads (READ-244) — so a series reads the
+// same word wherever the user meets it.
 
 import { formatCurrencyVolume, formatDateTime, pnlColor } from "@/lib/formatters";
-import { PNL_SERIES_COLORS } from "@/lib/pnl-chart";
+import { PNL_SERIES_COLORS, PNL_SERIES_LABELS } from "@/lib/pnl-chart";
 
 interface TooltipProps {
   active?: boolean;
@@ -38,17 +40,17 @@ export function PnlTooltip({ active, payload, label, symbol }: TooltipProps) {
     <div className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)]/95 backdrop-blur-sm px-2.5 py-2 text-[11px] leading-relaxed shadow-lg min-w-[150px]">
       <div className="text-[var(--color-text-muted)] text-[10px] mb-1">{formatDateTime(label)}</div>
       <div className="flex justify-between gap-3">
-        <span className="text-[var(--color-text-muted)]">Total</span>
+        <span className="text-[var(--color-text-muted)]">{PNL_SERIES_LABELS.total}</span>
         <span className="font-semibold" style={{ color: pnlColor(total) }}>
           {sign(total)}{formatCurrencyVolume(total, symbol)}
         </span>
       </div>
       <div className="flex justify-between gap-3">
-        <span className="text-[var(--color-text-muted)]">Realized</span>
+        <span className="text-[var(--color-text-muted)]">{PNL_SERIES_LABELS.realized}</span>
         <span style={{ color: "var(--color-green)" }}>{sign(byKey.realized ?? 0)}{formatCurrencyVolume(byKey.realized ?? 0, symbol)}</span>
       </div>
       <div className="flex justify-between gap-3">
-        <span className="text-[var(--color-text-muted)]">Unrealized</span>
+        <span className="text-[var(--color-text-muted)]">{PNL_SERIES_LABELS.unrealized}</span>
         <span style={{ color: PNL_SERIES_COLORS.unrealized }}>{sign(byKey.unrealized ?? 0)}{formatCurrencyVolume(byKey.unrealized ?? 0, symbol)}</span>
       </div>
     </div>
@@ -65,17 +67,20 @@ export function BottomTooltip({ active, payload, label, symbol, bucket }: Bottom
     <div className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)]/95 backdrop-blur-sm px-2.5 py-2 text-[11px] leading-relaxed shadow-lg min-w-[130px]">
       <div className="text-[var(--color-text-muted)] text-[10px] mb-1">{formatDateTime(label)}</div>
       {/* The bar's own value — this bucket's trading, not the running total.
-          The total is the header's Vol stat; repeating it here would be the
-          number the pane deliberately stopped drawing. */}
+          The running total is the header legend's "Traded lifetime" entry, the
+          one entry there with no swatch precisely because nothing draws it;
+          repeating it here would be the number the pane deliberately stopped
+          drawing. */}
       <div className="flex justify-between gap-3">
         <span style={{ color: PNL_SERIES_COLORS.volume }}>
-          Volume{bucket ? <span className="text-[var(--color-text-muted)]"> / {bucket}</span> : null}
+          {PNL_SERIES_LABELS.volumeDelta}
+          {bucket ? <span className="text-[var(--color-text-muted)]"> / {bucket}</span> : null}
         </span>
         <span style={{ color: PNL_SERIES_COLORS.volume }}>{formatCurrencyVolume(byKey.volumeDelta ?? 0, symbol)}</span>
       </div>
       {byKey.position !== undefined && byKey.position !== 0 && (
         <div className="flex justify-between gap-3">
-          <span style={{ color: PNL_SERIES_COLORS.position }}>Position</span>
+          <span style={{ color: PNL_SERIES_COLORS.position }}>{PNL_SERIES_LABELS.position}</span>
           <span style={{ color: PNL_SERIES_COLORS.position }}>{formatCurrencyVolume(byKey.position, symbol)}</span>
         </div>
       )}

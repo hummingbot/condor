@@ -31,6 +31,7 @@ import {
   PANE_PAD_X,
   PLOT_INSET_LEFT,
   PLOT_INSET_RIGHT,
+  PNL_SERIES_LABELS,
   positionAreaExtent,
   zeroGradientOffset,
   type PnlChartPoint,
@@ -334,16 +335,154 @@ describe("PnlEvolutionChart instance identity", () => {
   });
 });
 
-describe("PnlEvolutionChart header", () => {
-  it("shows the Pos stat whenever a position is held, for every caller", () => {
-    render(<PnlEvolutionChart data={withPosition} title="PnL Evolution" pnlHeight={130} volumeHeight={70} />);
-    expect(container.textContent).toContain("Pos:");
+describe("PnlEvolutionChart header legend", () => {
+  const FIFTEEN_MIN = 15 * 60_000;
+  const t0 = new Date(2026, 2, 14, 8, 30).getTime();
 
-    recorded.length = 0;
-    render(<PnlEvolutionChart data={flat} title="PnL Evolution" pnlHeight={130} volumeHeight={70} />);
-    expect(container.textContent).not.toContain("Pos:");
+  /** Traded $400 over the window on screen, out of $5,400 traded since deploy. */
+  const traded: PnlChartPoint[] = [
+    { time: t0, realized: 10, unrealized: 2, total: 12, volume: 5_000, volumeDelta: 0, position: 0 },
+    { time: t0 + FIFTEEN_MIN, realized: 20, unrealized: -3, total: 17, volume: 5_400, volumeDelta: 400, position: 0 },
+  ];
+  const tradedShort: PnlChartPoint[] = [traded[0], { ...traded[1], position: -1_234 }];
+
+  /** Every legend row, keyed by the series it names. */
+  function entries(): Record<string, HTMLElement> {
+    const out: Record<string, HTMLElement> = {};
+    for (const el of container.querySelectorAll("[data-legend-entry]"))
+      out[el.getAttribute("data-legend-entry")!] = el as HTMLElement;
+    return out;
+  }
+
+  /** The series listed under one group, in order. */
+  function grouped(label: string): string[] {
+    const group = container.querySelector(`[data-legend-group="${label}"]`);
+    return [...(group?.querySelectorAll("[data-legend-entry]") ?? [])].map(
+      (el) => el.getAttribute("data-legend-entry")!,
+    );
+  }
+
+  it("names every drawn series in words, permanently, without hovering", () => {
+    render(<PnlEvolutionChart data={tradedShort} title="PnL Evolution" pnlHeight={130} volumeHeight={70} />);
+
+    // All five, including the two that used to be identifiable only by matching
+    // a stroke colour to a coloured Y-axis tick.
+    for (const [series, label] of Object.entries(PNL_SERIES_LABELS)) {
+      expect(entries()[series], `no legend entry for ${series}`).toBeDefined();
+      expect(entries()[series].textContent).toContain(label);
+    }
   });
 
+  it("is the only legend: the recharts <Legend> is gone from both panes", () => {
+    render(<PnlEvolutionChart data={tradedShort} title="PnL Evolution" pnlHeight={130} volumeHeight={70} />);
+    expect(recorded.some((r) => r.type === "Legend")).toBe(false);
+  });
+
+  it("groups the series by pane, under the panes' own names", () => {
+    render(<PnlEvolutionChart data={tradedShort} title="PnL Evolution" pnlHeight={130} volumeHeight={70} />);
+
+    // The groups are named exactly as the pane captions are — that shared word
+    // is the only thing pointing a group at the pane it describes.
+    const captions = [...container.querySelectorAll("[data-pane-caption]")].map((c) =>
+      c.textContent!.toLowerCase(),
+    );
+    const groups = [...container.querySelectorAll("[data-legend-group]")].map((g) =>
+      g.getAttribute("data-legend-group"),
+    );
+    expect(groups).toEqual(captions);
+
+    expect(grouped("pnl")).toEqual(["total", "realized", "unrealized"]);
+    expect(grouped("activity")).toEqual(["volumeDelta", "position", "volume"]);
+  });
+
+  it("draws each swatch as the mark that series is actually drawn with", () => {
+    render(<PnlEvolutionChart data={tradedShort} title="PnL Evolution" pnlHeight={130} volumeHeight={70} />);
+    const swatch = (series: string) => entries()[series].querySelector("svg")!;
+    const drawn = (type: string, dataKey: string) =>
+      recorded.find((r) => r.type === type && r.props.dataKey === dataKey)!.props;
+
+    // Strokes are read off the series themselves, so a restyled line cannot
+    // leave the legend describing the old one.
+    const realized = swatch("realized").querySelector("line")!;
+    expect(realized.getAttribute("stroke")).toBe(drawn("Line", "realized").stroke);
+    expect(realized.getAttribute("stroke-dasharray")).toBeNull();
+
+    const unrealized = swatch("unrealized").querySelector("line")!;
+    expect(unrealized.getAttribute("stroke")).toBe(drawn("Line", "unrealized").stroke);
+    expect(unrealized.getAttribute("stroke-dasharray")).toBe(drawn("Line", "unrealized").strokeDasharray);
+
+    // Total: a stroke over the tint its area is filled with.
+    expect(swatch("total").querySelector("rect")).toBeTruthy();
+    expect(swatch("total").querySelector("line")).toBeTruthy();
+
+    // Volume is a Bar, so its swatch is bars — not the little line recharts
+    // would have drawn for it.
+    expect(swatch("volumeDelta").querySelectorAll("rect").length).toBeGreaterThan(1);
+    expect(swatch("volumeDelta").querySelector("line")).toBeNull();
+    expect(swatch("volumeDelta").querySelector("rect")!.getAttribute("fill")).toBe(
+      drawn("Bar", "volumeDelta").fill,
+    );
+
+    // Position is a signed Area: a violet stroke over a fill that splits at a
+    // dashed zero baseline, exactly as READ-246 draws it.
+    const positionChip = swatch("position");
+    expect(positionChip.querySelector("path")).toBeTruthy();
+    expect(positionChip.querySelector("polyline")!.getAttribute("stroke")).toBe(
+      drawn("Area", "position").stroke,
+    );
+    expect(positionChip.querySelector("line")!.getAttribute("stroke-dasharray")).toBeTruthy();
+    expect(positionChip.querySelectorAll("stop")).toHaveLength(2);
+
+    // ...and the lifetime figure has no mark at all, because nothing draws it.
+    expect(swatch("volume").children).toHaveLength(0);
+  });
+
+  it("keeps the bars' window total apart from the lifetime counter", () => {
+    render(<PnlEvolutionChart data={traded} title="PnL Evolution" pnlHeight={130} volumeHeight={70} />);
+
+    // The bars add up to what was traded over the window on screen...
+    const bars = entries().volumeDelta.textContent!;
+    expect(bars).toContain("$400");
+    expect(bars).toContain("on screen");
+    // ...each one covering a named slice of it, without which the number could
+    // be a busy hour or a dead day.
+    expect(bars).toContain("15m bars");
+
+    // ...while the counter they were differenced from stays its own entry,
+    // labelled as the different quantity it is.
+    const lifetime = entries().volume.textContent!;
+    expect(lifetime).toContain("$5.4K");
+    expect(lifetime).toContain("lifetime");
+  });
+
+  it("totals the bars the pane can draw, not the ones it cannot", () => {
+    // A snapshot whose volume did not arrive as a number folds to a NaN delta
+    // and recharts draws no bar for it. The total has to agree with the bars
+    // beside it, so it skips that one too rather than reading "$NaN".
+    const withGap: PnlChartPoint[] = [
+      traded[0],
+      { ...traded[1], time: traded[1].time, volumeDelta: Number.NaN },
+      { ...traded[1], time: traded[1].time + FIFTEEN_MIN, volumeDelta: 400 },
+    ];
+    render(<PnlEvolutionChart data={withGap} title="PnL Evolution" pnlHeight={130} volumeHeight={70} />);
+
+    expect(entries().volumeDelta.textContent).toContain("$400");
+    expect(entries().volumeDelta.textContent).not.toContain("NaN");
+  });
+
+  it("lists the position exactly while the position series is drawn", () => {
+    render(<PnlEvolutionChart data={traded} title="PnL Evolution" pnlHeight={130} volumeHeight={70} />);
+    expect(entries().position).toBeUndefined();
+    expect(recorded.some((r) => r.type === "Area" && r.props.dataKey === "position")).toBe(false);
+
+    recorded.length = 0;
+    render(<PnlEvolutionChart data={tradedShort} title="PnL Evolution" pnlHeight={130} volumeHeight={70} />);
+    expect(entries().position.textContent).toContain(PNL_SERIES_LABELS.position);
+    expect(recorded.some((r) => r.type === "Area" && r.props.dataKey === "position")).toBe(true);
+  });
+});
+
+describe("PnlEvolutionChart header", () => {
   it("renders the caller's title and filter row", () => {
     render(
       <PnlEvolutionChart
