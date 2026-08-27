@@ -1023,16 +1023,32 @@ async def _run_dual(application: Application) -> None:
             )
             version = f" ({branch} @ {commit})" if commit else ""
             boot_text = f"Condor is online and ready.{version}"
-            if not LOCAL_MODE:
-                await application.bot.send_message(
-                    chat_id=int(ADMIN_USER_ID),
-                    text=boot_text,
-                )
-            # The same notice on the dashboard bell (FEAT-048), so an admin who
-            # only has the browser open still sees which commit came up.
-            from condor.notifications import record
 
-            await record(int(ADMIN_USER_ID), boot_text, kind="system")
+            # An update that ends in a restart cannot report its own outcome:
+            # the process that would have is the one that died. The journal
+            # carries the question across, and HEAD answers it -- here, at the
+            # only moment anyone can (FEAT-070).
+            from condor import updates
+
+            finished = await updates.finalize_pending_run()
+            if finished is not None and finished.state == "succeeded":
+                moved = f"{(finished.from_commit or '')[:7]} → {commit}"
+                boot_text = f"Update complete: {branch} {moved}. Condor is ready."
+            elif finished is not None:
+                boot_text = f"Update failed: {finished.error} Condor is ready.{version}"
+
+            # One call reaches Telegram *and* the dashboard bell (FEAT-048), so
+            # an admin who only has the browser open still sees which commit
+            # came up -- and whether the update that asked for it worked.
+            from condor import notifications
+
+            await notifications.announce(
+                int(ADMIN_USER_ID),
+                None if LOCAL_MODE else int(ADMIN_USER_ID),
+                boot_text,
+                kind="system",
+                bot=None if LOCAL_MODE else application.bot,
+            )
         except Exception as e:
             logger.warning(f"Failed to send startup notification to admin: {e}")
 
