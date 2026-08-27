@@ -166,9 +166,7 @@ class ControllerPerformanceSnapshot(BaseModel):
     global_pnl_quote: float = 0.0
     global_pnl_pct: float = 0.0
     volume_traded: float = 0.0
-    close_type_counts: dict[str, int] = {}
     positions_summary: list[dict[str, Any]] = []
-    custom_info: dict[str, Any] = {}
 
     @classmethod
     def from_raw(cls, raw: dict) -> "ControllerPerformanceSnapshot":
@@ -180,6 +178,19 @@ class ControllerPerformanceSnapshot(BaseModel):
         the same thing however it reached the dashboard -- the frontend merges
         the two into one cache entry and would otherwise read a socket frame's
         PnL as zero.
+
+        A snapshot is a *point on a chart*, so it carries only what a point is
+        drawn from. Upstream also hands back ``close_type_counts`` and a
+        ``custom_info`` blob per snapshot, and history returns one of these per
+        sampled interval -- for a grid or LP controller ``custom_info`` is by
+        far the largest object in the payload, and tens of thousands of them
+        dominated the response size, the JSON parse, react-query's structural
+        sharing walk and the browser's retained memory. Nothing ever read
+        either one off a snapshot: the dashboard reads ``close_type_counts``
+        off ``ControllerInfo`` and the agent performance rows, and
+        ``custom_info`` off executors. So they are dropped here rather than
+        only on the history route, which keeps REST rows and WS frames the one
+        identical shape they have to be (PERF-261).
         """
         perf = raw.get("performance", raw)
         if not isinstance(perf, dict):
@@ -197,9 +208,7 @@ class ControllerPerformanceSnapshot(BaseModel):
             global_pnl_quote=float(perf.get("global_pnl_quote", 0) or 0),
             global_pnl_pct=float(perf.get("global_pnl_pct", 0) or 0),
             volume_traded=float(perf.get("volume_traded", 0) or 0),
-            close_type_counts=perf.get("close_type_counts", {}),
             positions_summary=perf.get("positions_summary", []),
-            custom_info=perf.get("custom_info", raw.get("custom_info", {})),
         )
 
 

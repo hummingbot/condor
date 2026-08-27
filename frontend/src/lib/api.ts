@@ -173,9 +173,7 @@ export interface ControllerPerformanceSnapshot {
   global_pnl_quote: number;
   global_pnl_pct: number;
   volume_traded: number;
-  close_type_counts: Record<string, number>;
   positions_summary: Record<string, unknown>[];
-  custom_info: Record<string, unknown>;
 }
 
 export interface ControllerPerformanceHistoryResponse {

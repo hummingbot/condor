@@ -36,9 +36,7 @@ function snapshot(
     global_pnl_quote: pnl,
     global_pnl_pct: 0,
     volume_traded: 0,
-    close_type_counts: {},
     positions_summary: [],
-    custom_info: {},
   };
 }
 

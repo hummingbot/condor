@@ -41,8 +41,23 @@ def test_from_raw_flattens_nested_performance():
     assert snap.realized_pnl_quote == 1.5
     assert snap.global_pnl_quote == 1.0
     assert snap.volume_traded == 1234.5
-    assert snap.close_type_counts == {"TAKE_PROFIT": 3}
     assert snap.positions_summary == [{"pair": "BTC-USDT"}]
+
+
+def test_snapshot_drops_the_fields_no_chart_reads():
+    """A snapshot is a chart point, not the whole controller payload (PERF-261).
+
+    ``custom_info`` is the biggest object upstream sends per snapshot -- for a
+    grid or LP controller by a wide margin -- and history returns one snapshot
+    per sampled interval. Nothing ever read it, nor ``close_type_counts``, off
+    a snapshot, so neither may come back onto this model without a consumer.
+    """
+    wire = ControllerPerformanceSnapshot.from_raw(
+        {**RAW_NESTED, "custom_info": {"grid_levels": [{}] * 500}}
+    ).model_dump()
+
+    assert "custom_info" not in wire
+    assert "close_type_counts" not in wire
 
 
 def test_from_raw_accepts_already_flat_payload():
