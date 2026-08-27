@@ -20,7 +20,7 @@
  * @vitest-environment jsdom
  */
 
-import { act } from "react";
+import { act, cloneElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -591,6 +591,171 @@ describe("PnlEvolutionChart pane captions", () => {
     for (const margin of margins) {
       expect(margin.left).toBe(0);
       expect(margin.right).toBe(PANE_MARGIN_RIGHT);
+    }
+  });
+});
+
+describe("PnlEvolutionChart hover card (READ-248)", () => {
+  /**
+   * The `content` element each pane hands its <Tooltip>, as of the *latest*
+   * render — `recorded` accumulates across re-renders, and hovering causes one.
+   */
+  function tooltipContents(): React.ReactElement<Record<string, unknown>>[] {
+    return panes().slice(-2).map((pane) => {
+      const tooltip = pane.find((r) => r.type === "Tooltip");
+      if (!tooltip) throw new Error("pane has no Tooltip");
+      return tooltip.props.content as React.ReactElement<Record<string, unknown>>;
+    });
+  }
+
+  /**
+   * Render one pane's card the way recharts would: clone its `content` element
+   * with the active flag, the hovered row's payload and its label. The payload
+   * carries only the series *that pane* draws — the point of the exercise.
+   */
+  function card(content: React.ReactElement<Record<string, unknown>>, keys: string[], row: PnlChartPoint) {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const hostRoot = createRoot(host);
+    act(() => {
+      hostRoot.render(
+        cloneElement(content, {
+          active: true,
+          label: row.time,
+          payload: keys.map((dataKey) => ({ dataKey, value: row[dataKey as keyof PnlChartPoint], payload: row })),
+        }),
+      );
+    });
+    const html = host.innerHTML;
+    act(() => hostRoot.unmount());
+    host.remove();
+    return html;
+  }
+
+  const PNL_KEYS = ["total", "realized", "unrealized"];
+  const ACTIVITY_KEYS = ["volumeDelta", "position"];
+
+  /** Move the pointer into one pane, the way React derives enter/leave. */
+  function hover(pane: "pnl" | "activity" | null) {
+    const target = pane
+      ? (container.querySelector(`[data-pane="${pane}"]`) as HTMLElement)
+      : document.body;
+    act(() => {
+      target.dispatchEvent(new MouseEvent("mouseover", { bubbles: true, relatedTarget: document.body }));
+    });
+  }
+
+  it("gives both panes the very same card, so either hover reads the same", () => {
+    render(<PnlEvolutionChart data={withPosition} title="PnL" pnlHeight={220} volumeHeight={120} />);
+
+    const [top, bottom] = tooltipContents();
+    expect(top.type).toBe(bottom.type);
+  });
+
+  it("draws exactly one card per hover — the pane under the pointer", () => {
+    render(<PnlEvolutionChart data={withPosition} title="PnL" pnlHeight={220} volumeHeight={120} />);
+
+    // Nothing hovered: the panes are mounted but neither card is drawn.
+    let [top, bottom] = tooltipContents();
+    expect(top.props.visible).toBe(false);
+    expect(bottom.props.visible).toBe(false);
+
+    hover("pnl");
+    [top, bottom] = tooltipContents();
+    expect(top.props.visible).toBe(true);
+    // The lower pane is active too — that is what syncId does — and still
+    // draws nothing, which is the whole fix.
+    expect(bottom.props.visible).toBe(false);
+    expect(card(bottom, ACTIVITY_KEYS, withPosition[1])).toBe("");
+
+    hover("activity");
+    [top, bottom] = tooltipContents();
+    expect(top.props.visible).toBe(false);
+    expect(bottom.props.visible).toBe(true);
+    expect(card(top, PNL_KEYS, withPosition[1])).toBe("");
+  });
+
+  it("reports both panes' series under one timestamp, from either pane's payload", () => {
+    render(<PnlEvolutionChart data={withPosition} title="PnL" pnlHeight={220} volumeHeight={120} />);
+    hover("pnl");
+    const [top] = tooltipContents();
+    hover("activity");
+    const [, bottom] = tooltipContents();
+
+    // The activity pane's payload has no PnL series in it and the PnL pane's
+    // has no volume — each card recovers the rest from the row the point was
+    // drawn from, so the two read alike.
+    const fromTop = card(top, PNL_KEYS, withPosition[1]);
+    const fromBottom = card(bottom, ACTIVITY_KEYS, withPosition[1]);
+
+    for (const html of [fromTop, fromBottom]) {
+      for (const label of Object.values(PNL_SERIES_LABELS)) expect(html).toContain(label);
+      // One header, not one per section.
+      expect(html.match(/data-tooltip-row/g)).toHaveLength(5);
+    }
+    expect(fromTop).toBe(fromBottom);
+  });
+
+  it("keeps the position row at a long→short crossover, where the value is 0", () => {
+    // A book that is net long, then flat, then net short: the flat instant is
+    // exactly the one a reader hovers, and the row used to disappear there.
+    const crossover: PnlChartPoint[] = [
+      { ...flat[0], position: 800 },
+      { ...flat[1], time: 2_000, position: 0 },
+      { ...flat[1], time: 3_000, position: -600 },
+    ];
+    render(<PnlEvolutionChart data={crossover} title="PnL" pnlHeight={220} volumeHeight={120} />);
+    hover("activity");
+    const [, bottom] = tooltipContents();
+
+    expect(card(bottom, ACTIVITY_KEYS, crossover[1])).toContain(PNL_SERIES_LABELS.position);
+  });
+
+  it("drops the position row only when no position series is drawn at all", () => {
+    render(<PnlEvolutionChart data={flat} title="PnL" pnlHeight={220} volumeHeight={120} />);
+    hover("activity");
+    const [, bottom] = tooltipContents();
+
+    expect(card(bottom, ACTIVITY_KEYS, flat[1])).not.toContain(PNL_SERIES_LABELS.position);
+  });
+
+  it("colours the PnL rows from the same theme pair as their lines", () => {
+    render(<PnlEvolutionChart data={withPosition} title="PnL" pnlHeight={220} volumeHeight={120} />);
+    hover("pnl");
+    const [top] = tooltipContents();
+    const html = card(top, PNL_KEYS, withPosition[1]);
+
+    const realizedLine = panes().slice(-2)[0].find((r) => r.type === "Line" && r.props.dataKey === "realized");
+    expect(realizedLine?.props.stroke).toBe(getThemeColors().up);
+    // Through an element, because the DOM re-serialises an inline hex as rgb().
+    const probe = document.createElement("div");
+    probe.style.color = getThemeColors().up;
+    expect(html).toContain(probe.style.color);
+    // Neither this row nor the Total above it goes through `--color-green` any
+    // more: the same value as `--chart-up` in every theme shipped today, and a
+    // different one the moment a theme parts them.
+    expect(html).not.toContain("--color-green");
+    expect(html).not.toContain("--color-red");
+  });
+
+  it("still gives both panes a Tooltip, so the synced cursor spans both", () => {
+    render(<PnlEvolutionChart data={withPosition} title="PnL" pnlHeight={220} volumeHeight={120} />);
+    expect(recorded.filter((r) => r.type === "Tooltip")).toHaveLength(2);
+  });
+
+  it("lets the lower pane's card escape upward, where there is room for it", () => {
+    render(<PnlEvolutionChart data={withPosition} title="PnL" pnlHeight={220} volumeHeight={120} />);
+    const [top, bottom] = panes().map((pane) => pane.find((r) => r.type === "Tooltip")!);
+
+    // The activity pane is a fraction of the height of the one above it, so a
+    // card listing five series does not fit inside it.
+    expect(bottom.props.allowEscapeViewBox).toEqual({ x: false, y: true });
+    expect(bottom.props.reverseDirection).toEqual({ x: false, y: true });
+    // The tall pane needs neither, and escaping there would leave the card.
+    expect(top.props.allowEscapeViewBox).toBeUndefined();
+    // Both float over the neighbouring pane's SVG.
+    for (const t of [top, bottom]) {
+      expect((t.props.wrapperStyle as { zIndex: number }).zIndex).toBeGreaterThan(0);
     }
   });
 });

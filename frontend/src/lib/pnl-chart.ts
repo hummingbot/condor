@@ -17,6 +17,18 @@ export const PNL_SERIES_COLORS = {
 } as const;
 
 /**
+ * The name of each pane, in the one place both the panes and the things that
+ * point at them can read it (READ-244, READ-247, READ-248).
+ *
+ * Three separate surfaces name these two panes: the caption drawn above each
+ * one, the two groups the header legend sorts the five series into, and the two
+ * sections of the hover card. They are the same two words or the grouping stops
+ * being a grouping — a card headed "Trading" over a pane captioned "Activity"
+ * is a card about some other pane.
+ */
+export const PANE_LABELS = { pnl: "PnL", activity: "Activity" } as const;
+
+/**
  * The one name each drawn series goes by, keyed by the `dataKey` it is drawn
  * from (READ-244).
  *

@@ -53,6 +53,7 @@ import {
   PANE_PAD_X,
   PLOT_INSET_LEFT,
   PLOT_INSET_RIGHT,
+  PANE_LABELS,
   PNL_SERIES_COLORS,
   PNL_SERIES_LABELS,
   chartBucketMs,
@@ -64,21 +65,23 @@ import {
   type PnlChartPoint,
 } from "@/lib/pnl-chart";
 import { getThemeColors } from "@/lib/theme-colors";
-import { BottomTooltip, PnlTooltip } from "./PnlChartTooltips";
+import { PnlEvolutionTooltip } from "./PnlChartTooltips";
+
+/**
+ * The hover card floats over whichever pane it escaped into, so it needs to
+ * paint above the other pane's SVG rather than under it.
+ */
+const TOOLTIP_WRAPPER_STYLE = { zIndex: 10 } as const;
+
+/**
+ * Let the card leave the activity pane through its top edge — see the tooltip
+ * in that pane. `allowEscapeViewBox` lifts the clamp; `reverseDirection` is
+ * what makes the released direction *up* instead of down.
+ */
+const ESCAPE_UPWARD = { x: false, y: true } as const;
 
 /** Both panes pad their chart identically; the divider's inset counts this in. */
 const PANE_PADDING = { paddingLeft: PANE_PAD_X, paddingRight: PANE_PAD_X } as const;
-
-/**
- * What each pane is called — above the pane, and again on the legend group that
- * lists that pane's series (READ-244).
- *
- * The words are shared rather than typed twice because they are the only thing
- * tying the two halves of the header legend to the two panes below it: the
- * reader matches "Activity" in the legend to "Activity" over the lower pane.
- * Let those drift and the grouping stops pointing anywhere.
- */
-const PANE_LABELS = { pnl: "PnL", activity: "Activity" } as const;
 
 /**
  * The caption above one pane and, on the lower one, the rule that separates the
@@ -380,6 +383,33 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
     [data],
   );
 
+  // ── One hover card for both panes (READ-248) ──
+  //
+  // The panes share a `syncId`, which propagates the active index *and* the
+  // active flag: hovering either one activates the tooltip in both. Two
+  // <Tooltip>s with two different contents therefore popped two cards at once,
+  // each repeating the same timestamp, and the reader had to join them.
+  //
+  // There is now one card, and it is mounted on both panes rather than on one,
+  // because a synced chart's tooltip is placed by projecting the source
+  // coordinate proportionally into the receiving chart's viewBox
+  // (useChartSynchronisation). Mounted only on the PnL pane, a hover down in
+  // the activity pane would draw the card somewhere up in the PnL pane — near
+  // the right column, nowhere near the cursor. So both panes carry it and the
+  // one under the pointer draws it; the other returns null, which leaves the
+  // synced cursor line spanning both panes exactly as before.
+  //
+  // Which pane that is comes from the pane wrappers rather than from recharts,
+  // whose "am I the source or the receiver of a sync" state is internal. The
+  // leave handler only clears its own pane, so the leave/enter pair fired when
+  // the pointer crosses from one pane to the other cannot land in that order
+  // and blank the card.
+  const [hoveredPane, setHoveredPane] = useState<keyof typeof PANE_LABELS | null>(null);
+  const enterPnlPane = useCallback(() => setHoveredPane("pnl"), []);
+  const leavePnlPane = useCallback(() => setHoveredPane((p) => (p === "pnl" ? null : p)), []);
+  const enterActivityPane = useCallback(() => setHoveredPane("activity"), []);
+  const leaveActivityPane = useCallback(() => setHoveredPane((p) => (p === "activity" ? null : p)), []);
+
   const tc = getThemeColors();
   const totalColor = (latest?.total ?? 0) >= 0 ? tc.up : tc.down;
   const fmtPnl = (v: number) => formatCurrencyPnl(v, currencySymbol);
@@ -543,7 +573,7 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
 
       {/* PnL pane (top) */}
       <PaneCaption label={PANE_LABELS.pnl} />
-      <div data-pane="pnl" style={PANE_PADDING}>
+      <div data-pane="pnl" style={PANE_PADDING} onMouseEnter={enterPnlPane} onMouseLeave={leavePnlPane}>
         <ResponsiveContainer width="100%" height={pnlHeight}>
           <ComposedChart data={data} margin={{ top: 12, right: PANE_MARGIN_RIGHT, left: 0, bottom: 0 }} syncId={instanceId}>
             <defs>
@@ -582,7 +612,22 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
               width={AXIS_WIDTH}
             />
             <ReferenceLine y={0} stroke="var(--color-text-muted)" strokeOpacity={0.3} strokeDasharray="4 4" />
-            <Tooltip content={<PnlTooltip symbol={currencySymbol} />} />
+            {/* The card, drawn here only while the pointer is in this pane.
+                Left to recharts' default placement: this pane is tall enough
+                that the card fits beside the cursor, and the default flips it
+                to the other side of the cursor near an edge rather than over
+                the point being read. */}
+            <Tooltip
+              content={
+                <PnlEvolutionTooltip
+                  symbol={currencySymbol}
+                  bucket={bucketLabel}
+                  hasPosition={hasPosition}
+                  visible={hoveredPane === "pnl"}
+                />
+              }
+              wrapperStyle={TOOLTIP_WRAPPER_STYLE}
+            />
             <Area type="monotone" dataKey="total" stroke="none" fill={`url(#${gradientId})`} activeDot={false} />
             <Line type="monotone" dataKey="total" stroke={totalColor} strokeWidth={2} dot={false} strokeOpacity={0.6} />
             <Line type="monotone" dataKey="realized" stroke={tc.up} strokeWidth={2} dot={false} />
@@ -598,7 +643,7 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
 
       {/* Volume + Position pane (bottom), ruled off from the one above */}
       <PaneCaption label={PANE_LABELS.activity} divider />
-      <div data-pane="activity" style={PANE_PADDING}>
+      <div data-pane="activity" style={PANE_PADDING} onMouseEnter={enterActivityPane} onMouseLeave={leaveActivityPane}>
         <ResponsiveContainer width="100%" height={volumeHeight} onResize={onActivityResize}>
           <ComposedChart data={data} margin={{ top: 4, right: PANE_MARGIN_RIGHT, left: 0, bottom: 4 }} syncId={instanceId}>
             {/* One fill, two sides: a hard stop exactly where the position axis
@@ -647,7 +692,27 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
               axisLine={false}
               width={AXIS_WIDTH}
             />
-            <Tooltip content={<BottomTooltip symbol={currencySymbol} bucket={bucketLabel} />} />
+            {/* The same card, drawn here instead while the pointer is in this
+                pane. It is anchored *above* the cursor: this pane is a fraction
+                of the height of the one above it and a card listing five series
+                is routinely taller than it, so recharts' default — clamp the
+                card inside the pane — would pin it to the pane's top edge and
+                let it spill out through the card's `overflow-hidden` bottom.
+                Escaping upward puts it over the tall PnL pane, where there is
+                always room, and never over the bar it is describing. */}
+            <Tooltip
+              content={
+                <PnlEvolutionTooltip
+                  symbol={currencySymbol}
+                  bucket={bucketLabel}
+                  hasPosition={hasPosition}
+                  visible={hoveredPane === "activity"}
+                />
+              }
+              allowEscapeViewBox={ESCAPE_UPWARD}
+              reverseDirection={ESCAPE_UPWARD}
+              wrapperStyle={TOOLTIP_WRAPPER_STYLE}
+            />
             {/* Trading activity, one bar per sampling bucket (READ-245). The
                 cumulative counter it is differenced from stays in the header's
                 Vol stat, where a running total belongs; here the question is
