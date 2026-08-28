@@ -19,6 +19,7 @@ import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { ChatBubble } from "@/components/chat/ChatBubble";
 import { ConnectKeysOverlay } from "@/components/ConnectKeysOverlay";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
+import { RelaunchBanner } from "@/components/RelaunchBanner";
 import { ReportIssueDialog } from "@/components/ReportIssueDialog";
 import { TelemetryConsentBanner } from "@/components/TelemetryConsentBanner";
 import { ChatProvider } from "@/hooks/useChat";
@@ -176,6 +177,13 @@ function AppShellBody() {
           </div>
         </div>
       </header>
+
+      {/* An update landed but this process is still the old one, so the bundle
+          in the browser is ahead of the API answering it. Above `main` for the
+          same reason the consent strip is: every page needs it, and the chat
+          workspace owns its own scrolling. Renders nothing the rest of the
+          time, which is nearly always. */}
+      <RelaunchBanner />
 
       {/* Asks once, for an install that has never answered (FEAT-023). Renders
           nothing for everyone else, including on the chat workspace, which owns

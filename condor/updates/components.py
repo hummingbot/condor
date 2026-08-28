@@ -522,7 +522,7 @@ def _steps_for(component_key: str, status_: ComponentStatus) -> list[str]:
         steps.append("Fast-forward the Condor checkout")
         steps.append("Sync dependencies")
         steps.append("Rebuild the dashboard if the update touched it")
-        steps.append("Restart Condor")
+        steps.append("Ask you to relaunch Condor to apply it")
     return steps
 
 
@@ -611,10 +611,12 @@ async def preflight(component_keys: list[str]) -> Preflight:
         warnings.append(
             Warning(
                 component=CONDOR,
-                code="sessions-will-restart",
+                code="relaunch-to-apply",
                 message=(
-                    "Condor restarts to finish. Bots keep running; continuous "
-                    "routines and agent loops are restored on the way back up."
+                    "Condor keeps running the code it booted with until you "
+                    "relaunch it yourself — nothing is interrupted, and nothing "
+                    "new takes effect either. Every surface will say so until "
+                    "you do."
                 ),
             )
         )

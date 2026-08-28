@@ -7,11 +7,13 @@ import {
   Loader2,
   MinusCircle,
   RefreshCw,
+  RotateCw,
   XCircle,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 
 import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
+import { RELAUNCH_KEY, useRelaunch } from "@/hooks/useRelaunch";
 import {
   type Block,
   type ComponentStatus,
@@ -31,17 +33,12 @@ import {
  * started there shows up here and vice versa. Nothing about *how* to update
  * lives in this file.
  *
- * The panel has four states, and the interesting one is the third: starting a
- * Condor update kills the server rendering this page. That is not an error path
- * to survive, it is the normal middle of the happy path. The engine writes
- * `state: "restarting"` to the journal *before* the process exits, so a failed
- * fetch that follows that state means "restarting", not "the backend died" —
- * we keep polling through the gap and the first answer that comes back carries
- * a run the boot hook has already judged.
+ * A Condor update no longer takes this page with it. The engine stops with the
+ * new code on disk and the dashboard rebuilt, and asks for the relaunch instead
+ * of exec'ing itself into a race with whatever started it — so the run finishes
+ * in the process that began it, and the last thing this panel says is what is
+ * still owed. The shell's `RelaunchBanner` says the same thing everywhere else.
  */
-
-/** How long to wait on a restart before the copy stops being reassuring. */
-const RESTART_PATIENCE_MS = 5 * 60 * 1000;
 
 export function UpdatesSettings() {
   const qc = useQueryClient();
@@ -56,9 +53,10 @@ export function UpdatesSettings() {
     retry: false,
   });
 
-  // Polled while a run is live. `retry` is pinned rather than left at the
-  // default: during a Condor update a failed fetch is the expected signal, and
-  // a query that gave up would strand the panel exactly when it matters.
+  // Polled while a run is live. A hummingbot-api update recreates containers
+  // and the API can stop answering mid-run, so `retry` is pinned rather than
+  // left at the default: a query that gave up would strand the panel exactly
+  // when it matters.
   const runQuery = useQuery({
     queryKey: UPDATES_RUN_KEY,
     queryFn: updatesApi.getRun,
@@ -66,8 +64,8 @@ export function UpdatesSettings() {
     refetchInterval: (query) => (isLive(query.state.data?.run) ? 2000 : false),
   });
 
-  // On error TanStack keeps the last successful data, which is what lets the
-  // restart gap render from the run we saw just before the process exited.
+  // On error TanStack keeps the last successful data, so a hiccup mid-run
+  // renders the last step we saw rather than blanking the panel.
   const run = runQuery.data?.run ?? null;
   const active = run && run.id !== dismissedRunId ? run : null;
 
@@ -103,10 +101,13 @@ export function UpdatesSettings() {
   });
 
   // A run that just finished leaves the status stale — the whole point is that
-  // the versions moved.
+  // the versions moved — and may have left a relaunch owed, which the banner
+  // above this page should not wait a poll interval to hear about.
   const finishedId = !isLive(run) ? (run?.id ?? null) : null;
   useEffect(() => {
-    if (finishedId) qc.invalidateQueries({ queryKey: UPDATES_STATUS_KEY });
+    if (!finishedId) return;
+    qc.invalidateQueries({ queryKey: UPDATES_STATUS_KEY });
+    qc.invalidateQueries({ queryKey: RELAUNCH_KEY });
   }, [finishedId, qc]);
 
   if (status.isLoading) {
@@ -188,8 +189,9 @@ export function UpdatesSettings() {
     <div className="space-y-4">
       <div className="flex items-center justify-between gap-3">
         <p className="text-xs leading-relaxed text-[var(--color-text-muted)]">
-          Updating restarts the component. Condor restarting takes this page with
-          it — it reconnects on its own.
+          Updating the API recreates its containers. Updating Condor does not
+          restart it: the new code lands on disk and you relaunch when it suits
+          you.
         </p>
         <button
           onClick={() => checkMut.mutate()}
@@ -432,40 +434,19 @@ function PreflightView({
   );
 }
 
-/** Step by step, including the stretch where there is no server to ask. */
+/** Step by step, including a stretch where the server is busy enough to miss a poll. */
 function RunningView({ run, offline }: { run: Run; offline: boolean }) {
-  const restarting = run.state === "restarting";
-
-  // When patience runs out the copy stops promising a reconnect. The panel
-  // keeps polling regardless — if Condor does come back, this heals itself.
-  const since = useRef<number | null>(null);
-  const [waitedTooLong, setWaitedTooLong] = useState(false);
-  useEffect(() => {
-    if (!restarting) {
-      since.current = null;
-      setWaitedTooLong(false);
-      return;
-    }
-    since.current ??= Date.now();
-    const timer = setInterval(() => {
-      if (since.current && Date.now() - since.current > RESTART_PATIENCE_MS) {
-        setWaitedTooLong(true);
-      }
-    }, 5000);
-    return () => clearInterval(timer);
-  }, [restarting]);
-
   return (
     <div className="space-y-4">
-      {/* A failed fetch after `restarting` is the expected signal, not an error,
-          so both render the same reassurance. */}
-      {(restarting || offline) && (
+      {/* Rebuilding an image or recreating containers can starve the API of a
+          reply for a while. The run is still going; say so rather than letting
+          the panel look stuck. */}
+      {offline && (
         <div className="flex items-start gap-2 rounded-lg border border-[var(--color-primary)]/40 bg-[var(--color-primary)]/10 p-3 text-xs text-[var(--color-text)]">
           <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin text-[var(--color-primary)]" />
           <span>
-            {waitedTooLong
-              ? "Condor has not come back. Check the terminal — this page will keep trying."
-              : "Condor is restarting — this page will reconnect on its own."}
+            Not getting an answer right now — this page keeps trying and picks
+            the run back up on its own.
           </span>
         </div>
       )}
@@ -525,9 +506,12 @@ function StepIcon({ state }: { state: Step["state"] }) {
   return <Circle className={`${cls} text-[var(--color-text-muted)]`} />;
 }
 
-/** How it ended — including a run this process only learned about at boot. */
+/** How it ended, and what is still owed. */
 function FinishedView({ run, onDismiss }: { run: Run; onDismiss: () => void }) {
   const ok = run.state === "succeeded";
+  // From the same query the shell's banner reads, so the two cannot disagree
+  // about whether the relaunch has happened.
+  const { data: relaunch } = useRelaunch();
 
   return (
     <div className="space-y-4">
@@ -552,6 +536,26 @@ function FinishedView({ run, onDismiss }: { run: Run; onDismiss: () => void }) {
           <p className="mt-1.5 text-xs text-[var(--color-text-muted)]">{run.error}</p>
         )}
       </div>
+
+      {/* The one step the engine deliberately leaves undone. Spelled out here
+          rather than left to the banner alone: this is the screen the person
+          who just pressed Update is looking at. */}
+      {relaunch?.required && (
+        <div className="flex items-start gap-2 rounded-lg border border-[var(--color-yellow)]/40 bg-[var(--color-yellow)]/10 p-3 text-xs leading-relaxed text-[var(--color-text)]">
+          <RotateCw className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[var(--color-yellow)]" />
+          <span>
+            Condor is still running{" "}
+            <span className="font-mono">{relaunch.from_commit}</span>. Relaunch
+            it —{" "}
+            <code className="rounded bg-[var(--color-surface-hover)] px-1 py-0.5 font-mono text-[11px]">
+              make restart
+            </code>{" "}
+            — to come up on{" "}
+            <span className="font-mono">{relaunch.target_commit}</span>. Bots and
+            open positions are untouched.
+          </span>
+        </div>
+      )}
 
       <ul className="space-y-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
         {run.steps.map((step) => (

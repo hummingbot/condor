@@ -1,8 +1,8 @@
 """Tests for the dashboard's update surface (FEAT-071).
 
-Two things are worth holding still here. First the gate: these routes restart
-the process and can reap running executors, so every one of them must answer
-403 to a seat that is not an admin, whatever the client believes. Second the
+Two things are worth holding still here. First the gate: these routes move the
+checkout and can reap running executors, so every one of them must answer 403 to
+a seat that is not an admin, whatever the client believes. Second the
 shape: the panel is a view over ``condor.updates`` and must stay one — the
 routes serialize the engine's dataclasses and start work in the background,
 and the moment one of them grows its own idea of what an update is, Telegram
@@ -161,13 +161,13 @@ def test_run_with_no_journal_returns_null(as_user, admin, monkeypatch):
 
 
 def test_run_falls_back_to_the_journal_across_a_restart(as_user, admin, monkeypatch):
-    """After the process re-execs, in-process state is empty and the file is the truth."""
+    """After a relaunch, in-process state is empty and the file is the truth."""
     journaled = run_mod.Run(
         id="u-1",
         started=1.0,
         actor={"user_id": 7, "chat_id": 7},
         components=["condor"],
-        steps=[run_mod.Step("condor.restart", "Restarting Condor", run_mod.OK)],
+        steps=[run_mod.Step("condor.frontend", "Rebuilding the dashboard", run_mod.OK)],
         state=run_mod.SUCCEEDED,
     )
     monkeypatch.setattr(updates, "read_journal", lambda: journaled)
@@ -201,7 +201,7 @@ def test_preflight_passes_blocks_and_warnings_through(as_user, admin, monkeypatc
                 message="3 running executors will be reaped",
             )
         ],
-        steps=["Fast-forwarding Condor", "Restarting Condor"],
+        steps=["Fast-forward the Condor checkout", "Sync dependencies"],
     )
 
     async def fake_preflight(keys):
@@ -220,7 +220,7 @@ def test_preflight_passes_blocks_and_warnings_through(as_user, admin, monkeypatc
     assert body["blocks"][0]["paths"] == ["condor/paths.py", "main.py"]
     assert body["blocks"][0]["resolutions"] == ["stash", "discard"]
     assert body["warnings"][0]["code"] == "executors_reaped"
-    assert body["steps"] == ["Fast-forwarding Condor", "Restarting Condor"]
+    assert body["steps"] == ["Fast-forward the Condor checkout", "Sync dependencies"]
 
 
 def test_resolve_sends_no_paths_to_the_engine(as_user, admin, monkeypatch):
@@ -297,7 +297,7 @@ def test_start_returns_202_without_awaiting_the_run(as_user, admin, monkeypatch)
 
 
 def test_start_records_the_admin_as_the_actor(as_user, admin, monkeypatch):
-    """Who pressed it is journaled, so the run is attributable after the restart."""
+    """Who pressed it is journaled, so the run is attributable after a relaunch."""
     seen = {}
 
     async def fake_start(keys, *, actor_user_id=None, actor_chat_id=None):

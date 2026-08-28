@@ -1,16 +1,20 @@
-"""The /update pipeline: rebuild what the pull invalidated, restart cleanly.
+"""The /update pipeline: rebuild what the pull invalidated, then stop.
 
-Two things used to be missing from an in-place update. The dashboard bundle was
-never rebuilt — ``make run`` builds it before starting, but /update pulls and
-re-execs, so pulled frontend commits kept serving the previous ``frontend/dist``.
-And the restart was a bare ``os.execv`` from inside the handler, which dropped
-the process image before ``teardown()`` could flush persistence or reap ACP/MCP
-subprocesses. These tests pin both: the build runs exactly when it is needed,
-and a restart request goes through the normal shutdown path.
+The dashboard bundle used to be missed by an in-place update — ``make run``
+builds it before starting, but /update only pulled, so pulled frontend commits
+kept serving the previous ``frontend/dist``. These tests pin that the build runs
+exactly when it is needed.
+
+The restart is now the admin's, not Condor's: the pipeline ends with the new
+code on disk and a relaunch owed, because exec'ing a process that is almost
+never the top of its own tree races whatever started it into a second copy.
+What survives here is the manual path — ``request_restart`` is still reachable
+from ``/update``'s own button, and it must still go through the normal shutdown
+rather than a bare ``os.execv`` that would skip ``teardown()``.
 
 The pipeline moved out of the Telegram handler and into :mod:`condor.updates.run`
 (FEAT-070), so these drive the engine instead — but they patch the same
-``utils.updater`` seam, and what they pin is unchanged.
+``utils.updater`` seam.
 """
 
 import asyncio
@@ -30,10 +34,12 @@ def _reset_restart_flag():
     """Keep the module-level restart flag from leaking between tests."""
     updater._restart_pending = False
     update_run._current = None
+    update_run._relaunch = None
     update_run._observers.clear()
     yield
     updater._restart_pending = False
     update_run._current = None
+    update_run._relaunch = None
     update_run._observers.clear()
 
 
@@ -71,7 +77,10 @@ def _stub_pipeline(**overrides):
         install_dependencies=AsyncMock(return_value=(True, "Resolved 120 packages")),
         frontend_needs_build=AsyncMock(return_value=True),
         build_frontend=AsyncMock(return_value=(True, "built in 297ms")),
-        request_restart=lambda: None,
+        get_current_branch=AsyncMock(return_value="main"),
+        # Still patched, still never called: the assertion that it is not is the
+        # point (see ``test_the_pipeline_ends_without_restarting_the_process``).
+        request_restart=AsyncMock(),
     )
     steps.update(overrides)
     return patch.multiple("utils.updater", **steps), steps
@@ -242,10 +251,21 @@ def test_update_pulls_syncs_builds_then_reports_ready():
     # the build gets the same range, so it can tell whether npm has to re-run.
     steps["frontend_needs_build"].assert_awaited_once_with("old_sha", "new_sha")
     steps["build_frontend"].assert_awaited_once_with("old_sha", "new_sha")
-    # The commit it aims at is journaled before the process is signalled, or
-    # the restart it does not survive could never be judged.
-    assert run.state == update_run.RESTARTING
     assert run.target_commit == "new_sha"
+
+
+def test_the_pipeline_ends_without_restarting_the_process():
+    """The last step belongs to a human; Condor only records that it is owed."""
+    ok, _run, _watcher, steps = _run_condor()
+    assert ok is True
+    steps["request_restart"].assert_not_called()
+
+    pending = update_run.relaunch_pending()
+    assert pending is not None
+    assert (pending["from_commit"], pending["target_commit"]) == (
+        "old_sha",
+        "new_sha",
+    )
 
 
 def test_update_does_not_build_when_the_frontend_is_untouched():
@@ -289,17 +309,16 @@ def test_a_blocked_checkout_never_reaches_git_at_all():
     assert "overwritten" in (run.error or "")
 
 
-def test_failed_build_blocks_the_restart():
-    """Restarting here would bring the dashboard back on the previous bundle."""
-    with patch.object(updater, "request_restart") as request_restart:
-        ok, run, watcher, _steps = _run_condor(
-            build_frontend=AsyncMock(return_value=(False, "TS2304: Cannot find name"))
-        )
+def test_a_failed_build_asks_for_no_relaunch():
+    """Relaunching here would bring the dashboard back on the previous bundle."""
+    ok, run, watcher, _steps = _run_condor(
+        build_frontend=AsyncMock(return_value=(False, "TS2304: Cannot find name"))
+    )
 
     assert ok is False
     assert "TS2304" in watcher.messages[-1]
     assert run.state == update_run.FAILED
-    request_restart.assert_not_called()
+    assert update_run.relaunch_pending() is None
 
 
 def test_command_output_is_trimmed_for_telegram():

@@ -56,7 +56,7 @@ export function Settings() {
   const tab = tabs.some((t) => t.key === requested) ? requested : "servers";
 
   return (
-    <div className="mx-auto max-w-3xl">
+    <div className="mx-auto max-w-5xl">
       <div className="mb-4 flex items-center justify-between">
         <h1 className="text-xl font-bold text-[var(--color-text)]">Settings</h1>
         <button

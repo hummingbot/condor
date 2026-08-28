@@ -87,7 +87,20 @@ def _status_text(statuses) -> str:
 
         sections.append("\n".join(lines))
 
-    return "\n\n".join(sections) or escape_markdown_v2("No components to update.")
+    body = "\n\n".join(sections) or escape_markdown_v2("No components to update.")
+
+    # An update that has landed but not been applied is the first thing this
+    # screen should say: every version line above it is about the checkout, not
+    # about what this process is actually running.
+    pending = updates.relaunch_pending()
+    if pending is not None:
+        notice = escape_markdown_v2(
+            f"⚠ Updated to {pending['target_commit'][:7]}. Condor is still "
+            f"running {pending['from_commit'][:7]} — relaunch to apply."
+        )
+        return f"{notice}\n\n{body}"
+
+    return body
 
 
 def _status_keyboard(statuses) -> InlineKeyboardMarkup:
@@ -291,6 +304,17 @@ def _run_text(run) -> str:
     for step in run.steps:
         lines.append(f"{_STEP_GLYPH.get(step.state, '·')} {step.label}")
 
+    # The last step of a Condor update belongs to a human: the new code is on
+    # disk, this process is still the old one, and nothing applies until it is
+    # relaunched. Saying so here is the whole point of not exec'ing.
+    pending = updates.relaunch_pending()
+    if pending is not None and not run.live:
+        lines += [
+            "",
+            f"Relaunch Condor to apply {pending['target_commit'][:7]} — "
+            "it is still running the old code until you do.",
+        ]
+
     if run.error:
         lines += ["", run.error]
 
@@ -305,13 +329,12 @@ def _run_keyboard(run) -> InlineKeyboardMarkup | None:
     if run.live:
         return None
     rows = []
-    if run.state == "failed":
+    # Offered, never taken automatically: an in-process restart is an ``execv``
+    # that can race whatever started Condor into a second copy of it, so it is
+    # only ever something the admin chooses (see :mod:`condor.updates.run`).
+    if run.state == "failed" or updates.relaunch_pending() is not None:
         rows.append(
-            [
-                InlineKeyboardButton(
-                    "Restart Anyway", callback_data="admin:update_restart"
-                )
-            ]
+            [InlineKeyboardButton("Restart Now", callback_data="admin:update_restart")]
         )
     rows.append([InlineKeyboardButton("Back", callback_data="admin:update_refresh")])
     return InlineKeyboardMarkup(rows)

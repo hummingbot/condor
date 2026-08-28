@@ -10,7 +10,8 @@ are views over this API, which is why the dashboard costs no orchestration:
     current()               the run in flight, or the last one
     read_journal()          the durable record, across restarts
     register_observer(fn)   in-process, zero-latency step transitions
-    finalize_pending_run()  judge the run the restart interrupted (boot only)
+    relaunch_pending()      whether this process is older than the code on disk
+    finalize_pending_run()  judge a legacy self-restarting run (boot only)
 """
 
 from condor.updates.components import (
@@ -37,6 +38,7 @@ from condor.updates.run import (
     finalize_pending_run,
     read_journal,
     register_observer,
+    relaunch_pending,
     resolve,
     start,
     tail,
@@ -62,6 +64,7 @@ __all__ = [
     "keys",
     "preflight",
     "read_journal",
+    "relaunch_pending",
     "repo_blocks",
     "register_observer",
     "resolve",

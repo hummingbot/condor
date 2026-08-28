@@ -26,11 +26,13 @@ def _no_live_run():
     """The engine's single-run state is process-wide; do not leak it."""
     run_module._current = None
     run_module._task = None
+    run_module._relaunch = None
     run_module._observers.clear()
     components.invalidate()
     yield
     run_module._current = None
     run_module._task = None
+    run_module._relaunch = None
     run_module._observers.clear()
     components.invalidate()
 
@@ -229,7 +231,8 @@ def test_the_plan_is_laid_out_before_anything_runs():
         {components.HUMMINGBOT_API: status},
     )
     keys = [s.key for s in steps]
-    # hummingbot-api first: Condor's last step ends the process.
+    # Condor last, and it stops with the code on disk: there is no restart step
+    # because the engine never restarts the process (it asks instead).
     assert keys == [
         "hummingbot-api.fast-forward",
         "hummingbot-api.image",
@@ -238,7 +241,6 @@ def test_the_plan_is_laid_out_before_anything_runs():
         "condor.fast-forward",
         "condor.deps",
         "condor.frontend",
-        "condor.restart",
     ]
     assert all(s.state == "pending" for s in steps)
     assert "Pulling" in steps[1].label
@@ -302,3 +304,85 @@ def test_a_blocker_that_offers_no_such_resolution_is_not_acted_on():
         ok, _ = asyncio.run(run_module.resolve(components.CONDOR, "discard"))
     assert ok
     discard.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# The update stops one step short, on purpose
+# ---------------------------------------------------------------------------
+
+BEFORE = "73e5400aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+AFTER = "0ed2a0f1234567890abcdef1234567890abcdef1"
+
+
+def _run_condor_update(*, before: str, after: str) -> run_module.Run:
+    """Drive ``_update_condor`` with every shell-out stubbed out."""
+    run = _a_run(
+        steps=run_module._plan([components.CONDOR], {}),
+        components=[components.CONDOR],
+    )
+    commits = iter([before, after])
+    with (
+        patch.object(components, "repo_blocks", AsyncMock(return_value=[])),
+        patch.object(
+            run_module.updater,
+            "get_local_commit_full",
+            AsyncMock(side_effect=lambda *a, **k: next(commits)),
+        ),
+        patch.object(
+            run_module.updater, "fast_forward", AsyncMock(return_value=(True, "ok"))
+        ),
+        patch.object(
+            run_module.updater,
+            "install_dependencies",
+            AsyncMock(return_value=(True, "ok")),
+        ),
+        patch.object(
+            run_module.updater,
+            "frontend_needs_build",
+            AsyncMock(return_value=False),
+        ),
+        patch.object(
+            run_module.updater, "get_current_branch", AsyncMock(return_value="main")
+        ),
+        patch.object(run_module.updater, "request_restart") as restart,
+    ):
+        assert asyncio.run(run_module._update_condor(run)) is True
+        restart.assert_not_called()
+    return run
+
+
+def test_a_condor_update_never_restarts_the_process():
+    """Condor is rarely the top of its own process tree; exec'ing races it.
+
+    ``request_restart`` not being called is the whole feature — the assertion
+    lives in the helper because every test here depends on it.
+    """
+    run = _run_condor_update(before=BEFORE, after=AFTER)
+    assert [s.key for s in run.steps][-1] == "condor.frontend"
+    assert run.target_commit == AFTER
+
+
+def test_a_landed_update_records_the_relaunch_it_owes():
+    _run_condor_update(before=BEFORE, after=AFTER)
+
+    pending = run_module.relaunch_pending()
+    assert pending is not None
+    assert pending["from_commit"] == BEFORE
+    assert pending["target_commit"] == AFTER
+    assert pending["branch"] == "main"
+
+
+def test_an_update_that_moved_nothing_owes_no_relaunch():
+    """Re-running an update at HEAD must not ask for a pointless restart."""
+    _run_condor_update(before=BEFORE, after=BEFORE)
+    assert run_module.relaunch_pending() is None
+
+
+def test_the_relaunch_notice_is_never_journaled():
+    """It asks whether this *process* is stale, and a journal outlives it.
+
+    Written to disk, the banner would survive the very relaunch it asked for.
+    """
+    run = _run_condor_update(before=BEFORE, after=AFTER)
+    run_module._write_journal(run)
+    assert "relaunch" not in json.dumps(_journal())

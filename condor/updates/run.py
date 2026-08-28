@@ -1,14 +1,21 @@
 """One update run: its steps, its journal, and who is watching it.
 
-The process that starts a Condor update is the process that dies. Any live
-transport therefore has a hole in it exactly where the interesting part
-happens, so the durable record is the contract: every step transition is one
+A Condor update ends one step short of running the new code. It used to
+``exec`` the process at the end, and that is the one part of an update Condor
+cannot do safely: it is almost never the top of its own process tree. Started
+through ``make run``, a shell wrapper or a supervisor, re-execing races the
+parent into bringing a *second* Condor up on the same port, against the same
+config and the same Telegram token. So the run stops at the last safe point —
+code on disk, dependencies synced, dashboard rebuilt — records that a relaunch
+is owed (:func:`relaunch_pending`), and lets a human do the one thing a human
+is better placed to do. The surfaces turn that record into a banner.
+
+The durable record is still the contract: every step transition is one
 ``atomic_write_json`` to ``data/update_run.json``, and both surfaces read that
 file. Telegram, being in-process, additionally registers an observer for
 zero-latency message edits — the same "core emits, a surface registers itself"
 shape as :func:`condor.notifications.register_push_sink`. The dashboard polls
-the journal and needs nothing else: the restart gap is a few failed fetches,
-and by the time the server answers again the journal has been finalized at boot.
+the journal and needs nothing else.
 
 One run at a time, process-wide. A second :func:`start` returns the run already
 in flight rather than queueing it, which is what lets an admin start the update
@@ -31,7 +38,9 @@ from utils import updater
 
 log = logging.getLogger(__name__)
 
-# Run states.
+# Run states. ``RESTARTING`` is legacy: it is what a version of Condor that
+# exec'd itself left in the journal, and boot still judges such a run
+# (:func:`finalize_pending_run`). Nothing writes it any more.
 RUNNING = "running"
 RESTARTING = "restarting"
 SUCCEEDED = "succeeded"
@@ -221,6 +230,38 @@ async def _emit(run: Run) -> None:
             log.warning("Update observer failed", exc_info=True)
 
 
+# ── The relaunch notice ──
+#
+# Deliberately in memory and nowhere else. The question it answers is "is this
+# *process* older than the code on disk", and a process cannot be older than
+# code that landed before it booted — so a fresh start is the only correct way
+# to clear it, and that is exactly what module state does for free. Journaling
+# it would survive the relaunch it asks for and the banner would never go away.
+
+_relaunch: dict[str, Any] | None = None
+
+
+def relaunch_pending() -> dict[str, Any] | None:
+    """What this process is missing, or ``None`` if it is running the update.
+
+    ``{"run_id", "from_commit", "target_commit", "branch", "at"}``. Read by both
+    surfaces; the dashboard turns it into the banner every page carries.
+    """
+    return dict(_relaunch) if _relaunch else None
+
+
+def _note_relaunch(run: Run, before: str, after: str, branch: str) -> None:
+    global _relaunch
+    _relaunch = {
+        "run_id": run.id,
+        "from_commit": before,
+        "target_commit": after,
+        "branch": branch,
+        "at": time.time(),
+    }
+    log.info("Update %s landed %s → %s; relaunch owed", run.id, before[:7], after[:7])
+
+
 # ── The live run ──
 
 _current: Run | None = None
@@ -293,10 +334,11 @@ def _plan(component_keys: list[str], statuses: dict[str, components.ComponentSta
             steps.append(Step(f"{key}.up", "Recreating the containers"))
             steps.append(Step(f"{key}.health", "Waiting for the API to answer"))
         else:
+            # No restart step: the run stops with the new code on disk and asks
+            # for the relaunch instead (see the module docstring).
             steps.append(Step(f"{key}.fast-forward", "Fast-forwarding Condor"))
             steps.append(Step(f"{key}.deps", "Syncing dependencies"))
             steps.append(Step(f"{key}.frontend", "Rebuilding the dashboard"))
-            steps.append(Step(f"{key}.restart", "Restarting Condor"))
     return steps
 
 
@@ -384,8 +426,8 @@ async def _execute(run: Run, resolutions: dict[str, str]) -> None:
         await _emit(run)
         run.done.set()
     except asyncio.CancelledError:
-        # The restart cancels us on the way out; the journal already says
-        # ``restarting`` and boot decides how it went.
+        # A shutdown mid-run: the journal keeps whatever the last transition
+        # said, and the next boot shows it as the run that never finished.
         raise
     except Exception as e:  # noqa: BLE001 - an update must never die silently
         log.exception("Update run %s crashed", run.id)
@@ -481,6 +523,7 @@ async def _update_condor(run: Run) -> bool:
             return False
 
     after = await updater.get_local_commit_full(component.repo_dir)
+    run.target_commit = after
 
     step = await _begin(run, f"{prefix}.deps")
     if step is not None:
@@ -510,16 +553,12 @@ async def _update_condor(run: Run) -> bool:
                 )
                 return False
 
-    step = await _begin(run, f"{prefix}.restart")
-    if step is not None:
-        # Journal the target *before* signalling: from here on the answer to
-        # "did it work" is whatever commit comes back up.
-        run.target_commit = after
-        run.state = RESTARTING
-        await _finish(run, step, RUNNING, f"Restarting onto {after[:7]}.")
-        # Let the surfaces flush their last edit before the shutdown starts.
-        await asyncio.sleep(1)
-        updater.request_restart()
+    # Everything that can be done without ending the process is done. The one
+    # remaining step belongs to a human, so the run is judged here rather than
+    # at the next boot: it succeeded, and it owes a relaunch.
+    if after and after != before:
+        branch = await updater.get_current_branch(component.repo_dir)
+        _note_relaunch(run, before, after, branch)
 
     return True
 
@@ -528,10 +567,16 @@ async def _update_condor(run: Run) -> bool:
 
 
 async def finalize_pending_run() -> Run | None:
-    """Judge a run that the restart interrupted. Called once, at boot.
+    """Judge a run that a restart interrupted. Called once, at boot.
 
-    A run left at ``restarting`` is asking one question: did the process come
-    back on the commit it aimed at? HEAD answers it.
+    Legacy path, kept for exactly one crossing: updating *from* a Condor that
+    still exec'd itself. That version journals ``restarting`` and dies, and the
+    version it lands on — this one — is the only thing that can say whether it
+    worked. A run left at ``restarting`` is asking one question: did the process
+    come back on the commit it aimed at? HEAD answers it.
+
+    Runs started by this version never reach ``restarting``, so from here on
+    this returns ``None`` and boot has nothing to report.
     """
     global _current
 

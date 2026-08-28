@@ -522,7 +522,7 @@ async def register_bot_commands(application: Application) -> None:
     if ADMIN_USER_ID:
         admin_commands = commands + [
             BotCommand("admin", "Admin panel - manage users and access"),
-            BotCommand("update", "Check for updates and restart"),
+            BotCommand("update", "Check for and install updates"),
         ]
         try:
             await application.bot.set_my_commands(
@@ -1080,10 +1080,12 @@ async def _run_dual(application: Application) -> None:
             version = f" ({branch} @ {commit})" if commit else ""
             boot_text = f"Condor is online and ready.{version}"
 
-            # An update that ends in a restart cannot report its own outcome:
-            # the process that would have is the one that died. The journal
-            # carries the question across, and HEAD answers it -- here, at the
-            # only moment anyone can (FEAT-070).
+            # Legacy crossing only: a Condor old enough to exec itself at the
+            # end of an update could not report its own outcome, because the
+            # process that would have is the one that died. The journal carries
+            # the question across and HEAD answers it here (FEAT-070). Updates
+            # run by this version finish in the process that started them and
+            # ask for the relaunch instead, so this finds nothing to judge.
             from condor import updates
 
             finished = await updates.finalize_pending_run()

@@ -1451,6 +1451,24 @@ export interface AppEnvResponse {
   in_docker: boolean;
 }
 
+/**
+ * Whether the running process is older than the code on disk.
+ *
+ * A Condor update lands the new commit and rebuilds this bundle but does not
+ * exec the server (`condor/updates/run.py`), so until someone relaunches it the
+ * browser is new and the backend is old. Everything but `required` is absent
+ * when nothing is owed.
+ */
+export interface RelaunchResponse {
+  required: boolean;
+  branch?: string;
+  /** Short sha the process is still running. */
+  from_commit?: string;
+  /** Short sha on disk, waiting for the relaunch. */
+  target_commit?: string;
+  at?: number | null;
+}
+
 export interface BacktestTask {
   task_id: string;
   status: "pending" | "running" | "completed" | "failed";
@@ -1619,6 +1637,9 @@ export const api = {
 
   /** Build identity — shown to the user when they file an issue. */
   getEnv: () => apiFetch<AppEnvResponse>("/api/v1/meta/env"),
+
+  /** Whether an update has landed that this process is not running yet. */
+  getRelaunch: () => apiFetch<RelaunchResponse>("/api/v1/meta/relaunch"),
 
   getPortfolio: (server: string, refresh = false) =>
     apiFetch<PortfolioResponse>(
