@@ -22,6 +22,7 @@ import { ActivityFeed } from "@/components/agent/ActivityFeed";
 import { EntityCard } from "@/components/agent/EntityCard";
 import { BrainPicker } from "@/components/chat/BrainPicker";
 import { ReportBrowser } from "@/components/routines/ReportBrowser";
+import { AnchoredMenu } from "@/components/ui/AnchoredMenu";
 import { useEscapeKey } from "@/hooks/useEscapeKey";
 import { useSessionOptions } from "@/hooks/useChat";
 import { CHAT_SLUG, type StrategySummary, api } from "@/lib/api";
@@ -148,6 +149,9 @@ function CreateStrategyDialog({
 function ServerPinPicker({ slug, serverName }: { slug: string; serverName: string }) {
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
+  // State, not a ref: the portalled panel only gets coordinates once a render
+  // has handed it the resolved trigger element.
+  const [anchor, setAnchor] = useState<HTMLElement | null>(null);
 
   const { data: servers } = useQuery({
     queryKey: ["servers"],
@@ -166,10 +170,13 @@ function ServerPinPicker({ slug, serverName }: { slug: string; serverName: strin
   };
 
   return (
-    <div className="relative">
+    <>
       <button
+        ref={setAnchor}
         onClick={() => setOpen((v) => !v)}
         disabled={pin.isPending}
+        aria-expanded={open}
+        aria-haspopup="listbox"
         title={
           serverName
             ? `Pinned to ${serverName} — every run uses this server`
@@ -184,43 +191,52 @@ function ServerPinPicker({ slug, serverName }: { slug: string; serverName: strin
         <Server className="h-3 w-3" /> {serverName || "No server pin"}
       </button>
 
-      {open && (
-        <>
-          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className="absolute left-0 top-full z-50 mt-1 min-w-[220px] rounded border border-[var(--color-border)] bg-[var(--color-surface)] py-0.5 shadow-lg">
-            <div className="px-2.5 pb-1 pt-1.5 text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
-              Pin to server
-            </div>
-            {(servers ?? []).map((s) => (
-              <button
-                key={s.name}
-                onClick={() => choose(s.name)}
-                className={`flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs hover:bg-[var(--color-surface-hover)] ${
-                  s.name === serverName
-                    ? "font-medium text-[var(--color-primary)]"
-                    : "text-[var(--color-text)]"
-                }`}
-              >
-                <CircleDot
-                  className={`h-2.5 w-2.5 shrink-0 ${
-                    s.online ? "text-[var(--color-green)]" : "text-[var(--color-text-muted)]"
-                  }`}
-                />
-                <span className="truncate">{s.name}</span>
-              </button>
-            ))}
-            <button
-              onClick={() => choose("")}
-              className={`mt-0.5 w-full border-t border-[var(--color-border)] px-2.5 py-1.5 text-left text-xs hover:bg-[var(--color-surface-hover)] ${
-                serverName ? "text-[var(--color-text)]" : "font-medium text-[var(--color-primary)]"
+      {/* Portalled, not `absolute`: this is the last chip in a `flex-wrap` row
+          inside `main`'s `overflow-auto`, so a 220px panel hanging off its left
+          edge is both clipped and, on a narrow window, off the right of the
+          page. The `maxHeight` also travels as a prop — a Tailwind `max-h-*`
+          would lose to the inline height the portalled panel sets — so a long
+          server list scrolls inside the panel instead of past the fold. */}
+      <AnchoredMenu
+        anchor={anchor}
+        open={open}
+        onClose={() => setOpen(false)}
+        align="left"
+        maxHeight={288}
+        role="listbox"
+        className="min-w-[220px] py-0.5"
+      >
+        <div className="px-2.5 pb-1 pt-1.5 text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
+          Pin to server
+        </div>
+        {(servers ?? []).map((s) => (
+          <button
+            key={s.name}
+            onClick={() => choose(s.name)}
+            className={`flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs hover:bg-[var(--color-surface-hover)] ${
+              s.name === serverName
+                ? "font-medium text-[var(--color-primary)]"
+                : "text-[var(--color-text)]"
+            }`}
+          >
+            <CircleDot
+              className={`h-2.5 w-2.5 shrink-0 ${
+                s.online ? "text-[var(--color-green)]" : "text-[var(--color-text-muted)]"
               }`}
-            >
-              No pin — follow the chat's selection
-            </button>
-          </div>
-        </>
-      )}
-    </div>
+            />
+            <span className="truncate">{s.name}</span>
+          </button>
+        ))}
+        <button
+          onClick={() => choose("")}
+          className={`mt-0.5 w-full border-t border-[var(--color-border)] px-2.5 py-1.5 text-left text-xs hover:bg-[var(--color-surface-hover)] ${
+            serverName ? "text-[var(--color-text)]" : "font-medium text-[var(--color-primary)]"
+          }`}
+        >
+          No pin — follow the chat's selection
+        </button>
+      </AnchoredMenu>
+    </>
   );
 }
 

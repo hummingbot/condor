@@ -29,6 +29,7 @@ import { ContextDock } from "@/components/chat/ContextDock";
 import { ConversationList } from "@/components/chat/ConversationList";
 import { SessionTabs } from "@/components/chat/SessionTabs";
 import { Starters, type Starter } from "@/components/chat/Starters";
+import { AnchoredMenu } from "@/components/ui/AnchoredMenu";
 import { useBrainSwitch } from "@/hooks/useBrainSwitch";
 import { useChat, useSessionOptions } from "@/hooks/useChat";
 import { useServer } from "@/hooks/useServer";
@@ -487,6 +488,9 @@ function LiveStrip({
   runningTasks: number;
 }) {
   const [open, setOpen] = useState(false);
+  // State, not a ref: the portalled panel only gets coordinates once a render
+  // has handed it the resolved trigger element.
+  const [anchor, setAnchor] = useState<HTMLElement | null>(null);
   const tasks =
     runningTasks > 0
       ? ` · ${runningTasks} task${runningTasks !== 1 ? "s" : ""}`
@@ -501,7 +505,7 @@ function LiveStrip({
     "flex min-w-0 flex-1 items-center gap-2 text-left text-[11px] text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-text)]";
 
   return (
-    <div className="relative flex items-center gap-2 border-b border-[var(--color-border)] px-3 py-2">
+    <div className="flex items-center gap-2 border-b border-[var(--color-border)] px-3 py-2">
       {agents.length === 0 ? (
         <span className={rowClass}>
           {icon}
@@ -523,8 +527,11 @@ function LiveStrip({
         </Link>
       ) : (
         <button
+          ref={setAnchor}
           onClick={() => setOpen((v) => !v)}
           className={rowClass}
+          aria-expanded={open}
+          aria-haspopup="listbox"
           title="Open a running agent's strategies"
         >
           {icon}
@@ -535,25 +542,32 @@ function LiveStrip({
         </button>
       )}
 
-      {open && (
-        <>
-          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className="absolute left-2 top-full z-50 mt-1 flex w-[236px] flex-col rounded border border-[var(--color-border)] bg-[var(--color-surface)] py-0.5 shadow-lg">
-            {agents.map((agent) => (
-              <Link
-                key={agent.slug}
-                to={`/agents/${agent.slug}`}
-                onClick={() => setOpen(false)}
-                className="flex items-center gap-2 px-2.5 py-1.5 text-xs text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]"
-              >
-                <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400" />
-                <span className="min-w-0 flex-1 truncate">{agent.name}</span>
-                <ArrowUpRight className="h-3 w-3 shrink-0 text-[var(--color-text-muted)]" />
-              </Link>
-            ))}
-          </div>
-        </>
-      )}
+      {/* Portalled, not `absolute`: the rail sits in the chat workspace, whose
+          `main` is `overflow-hidden`, so an absolute panel was clipped at the
+          strip's own border with no scroll to recover it. The old `fixed
+          inset-0` backdrop also swallowed the click that followed. */}
+      <AnchoredMenu
+        anchor={anchor}
+        open={open}
+        onClose={() => setOpen(false)}
+        align="left"
+        maxHeight={288}
+        role="listbox"
+        className="flex w-[236px] flex-col py-0.5"
+      >
+        {agents.map((agent) => (
+          <Link
+            key={agent.slug}
+            to={`/agents/${agent.slug}`}
+            onClick={() => setOpen(false)}
+            className="flex items-center gap-2 px-2.5 py-1.5 text-xs text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]"
+          >
+            <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400" />
+            <span className="min-w-0 flex-1 truncate">{agent.name}</span>
+            <ArrowUpRight className="h-3 w-3 shrink-0 text-[var(--color-text-muted)]" />
+          </Link>
+        ))}
+      </AnchoredMenu>
     </div>
   );
 }

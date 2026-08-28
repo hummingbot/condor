@@ -3,6 +3,7 @@ import { Circle, Lock, Server } from "lucide-react";
 import { useState } from "react";
 import { Link } from "react-router-dom";
 
+import { AnchoredMenu } from "@/components/ui/AnchoredMenu";
 import { api, type ServerInfo } from "@/lib/api";
 
 /**
@@ -42,6 +43,9 @@ export function SessionServerChip({
   onSelect: (serverName: string) => void;
 }) {
   const [open, setOpen] = useState(false);
+  // State, not a ref: the portalled panel only gets coordinates once a render
+  // has handed it the resolved trigger element.
+  const [anchor, setAnchor] = useState<HTMLElement | null>(null);
 
   const { data: servers } = useQuery({
     queryKey: ["servers"],
@@ -86,8 +90,9 @@ export function SessionServerChip({
   const offline = servers?.filter((s) => !s.online) ?? [];
 
   return (
-    <div className="relative shrink-0">
+    <div className="shrink-0">
       <button
+        ref={setAnchor}
         onClick={() => setOpen((v) => !v)}
         disabled={disabled}
         aria-haspopup="listbox"
@@ -103,57 +108,62 @@ export function SessionServerChip({
         <span className="max-w-[120px] truncate">{serverName}</span>
       </button>
 
-      {open && (
-        <>
-          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div
-            role="listbox"
-            className="absolute right-0 top-full z-50 mt-1 min-w-[200px] rounded border border-[var(--color-border)] bg-[var(--color-surface)] py-0.5 shadow-lg"
+      {/* Portalled, not `absolute`: the chip lives in the chat workspace, whose
+          `main` is `overflow-hidden` — an absolute panel there is clipped with
+          no scroll to bring it back. The old `fixed inset-0` backdrop also ate
+          the user's next click; `AnchoredMenu` dismisses on outside mousedown
+          and lets that click reach what it was aimed at. */}
+      <AnchoredMenu
+        anchor={anchor}
+        open={open}
+        onClose={() => setOpen(false)}
+        align="right"
+        maxHeight={288}
+        role="listbox"
+        className="min-w-[200px] py-0.5"
+      >
+        <div className="px-2.5 pb-1 pt-1.5 text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
+          Move this chat to
+        </div>
+        {online.map((s: ServerInfo) => (
+          <button
+            key={s.name}
+            onClick={() => {
+              setOpen(false);
+              if (s.name !== serverName) onSelect(s.name);
+            }}
+            className={`flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs hover:bg-[var(--color-surface-hover)] ${
+              s.name === serverName
+                ? "font-medium text-[var(--color-primary)]"
+                : "text-[var(--color-text)]"
+            }`}
           >
-            <div className="px-2.5 pb-1 pt-1.5 text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
-              Move this chat to
-            </div>
-            {online.map((s: ServerInfo) => (
-              <button
-                key={s.name}
-                onClick={() => {
-                  setOpen(false);
-                  if (s.name !== serverName) onSelect(s.name);
-                }}
-                className={`flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs hover:bg-[var(--color-surface-hover)] ${
-                  s.name === serverName
-                    ? "font-medium text-[var(--color-primary)]"
-                    : "text-[var(--color-text)]"
-                }`}
-              >
-                <Circle className="h-2 w-2 shrink-0 fill-current text-[var(--color-green)]" />
-                <span className="truncate">{s.name}</span>
-              </button>
-            ))}
-            {/* An offline server would spawn a subprocess with nothing to talk
-                to, so it is listed for orientation but not selectable. */}
-            {offline.map((s: ServerInfo) => (
-              <div
-                key={s.name}
-                className="flex w-full cursor-not-allowed items-center gap-2 px-2.5 py-1.5 text-xs text-[var(--color-text-muted)] opacity-50"
-                title="Offline"
-              >
-                <Circle className="h-2 w-2 shrink-0 fill-current text-[var(--color-text-muted)]" />
-                <span className="truncate">{s.name}</span>
-              </div>
-            ))}
-            {servers && servers.length === 0 && (
-              <div className="px-2.5 py-1.5 text-xs text-[var(--color-text-muted)]">
-                No servers configured
-              </div>
-            )}
-            <div className="mt-0.5 border-t border-[var(--color-border)] px-2.5 py-1.5 text-[10px] leading-snug text-[var(--color-text-muted)]">
-              Switching restarts the agent's tools on the new server. The
-              conversation is kept.
-            </div>
+            <Circle className="h-2 w-2 shrink-0 fill-current text-[var(--color-green)]" />
+            <span className="truncate">{s.name}</span>
+          </button>
+        ))}
+        {/* An offline server would spawn a subprocess with nothing to talk
+            to, so it is listed for orientation but not selectable. */}
+        {offline.map((s: ServerInfo) => (
+          <div
+            key={s.name}
+            className="flex w-full cursor-not-allowed items-center gap-2 px-2.5 py-1.5 text-xs text-[var(--color-text-muted)] opacity-50"
+            title="Offline"
+          >
+            <Circle className="h-2 w-2 shrink-0 fill-current text-[var(--color-text-muted)]" />
+            <span className="truncate">{s.name}</span>
           </div>
-        </>
-      )}
+        ))}
+        {servers && servers.length === 0 && (
+          <div className="px-2.5 py-1.5 text-xs text-[var(--color-text-muted)]">
+            No servers configured
+          </div>
+        )}
+        <div className="mt-0.5 border-t border-[var(--color-border)] px-2.5 py-1.5 text-[10px] leading-snug text-[var(--color-text-muted)]">
+          Switching restarts the agent's tools on the new server. The
+          conversation is kept.
+        </div>
+      </AnchoredMenu>
     </div>
   );
 }
