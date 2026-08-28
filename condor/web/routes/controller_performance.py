@@ -7,7 +7,10 @@ from fastapi import APIRouter, Depends, Query
 
 from condor.fetchers._pagination import next_cursor as _next_cursor
 from condor.fetchers.bot_performance import extract_snapshots as _extract_snapshots
-from condor.fetchers.bot_performance import fetch_all_bot_performance
+from condor.fetchers.bot_performance import (
+    fetch_all_bot_performance,
+    fetch_archived_paths,
+)
 from condor.web.auth import require_server_access
 from condor.web.models import (
     BotRunInfo,
@@ -28,7 +31,11 @@ router = APIRouter(tags=["controller-performance"])
 # ── Helpers ──
 
 
-def _parse_bot_run(raw: dict, perf_by_bot: dict[str, dict] | None = None) -> BotRunInfo:
+def _parse_bot_run(
+    raw: dict,
+    perf_by_bot: dict[str, dict] | None = None,
+    archive_paths: dict[str, str] | None = None,
+) -> BotRunInfo:
     """Normalize a raw bot run dict into our model."""
     bot_name = raw.get("bot_name", "")
     realized = 0.0
@@ -58,6 +65,7 @@ def _parse_bot_run(raw: dict, perf_by_bot: dict[str, dict] | None = None) -> Bot
         global_pnl_quote=realized + unrealized,
         volume_traded=volume,
         num_controllers=num_controllers,
+        archive_db_path=(archive_paths or {}).get(bot_name),
     )
 
 
@@ -109,8 +117,24 @@ async def get_bot_runs(
             )
             return {}
 
+    async def _fetch_archives() -> dict[str, str]:
+        """Which of these runs left a database behind, and where.
+
+        This is what lets one Runs table stand in for the old separate Archived
+        tab: the upstream listing is a directory walk that opens no sqlite, so
+        marking every archived run costs one cheap call instead of the per-database
+        ``/summary`` fan-out the archived list used to pay for.
+        """
+        try:
+            return await fetch_archived_paths(client)
+        except Exception:
+            logger.debug("Could not list archived databases for bot runs enrichment")
+            return {}
+
     try:
-        result, perf_by_bot = await asyncio.gather(_fetch_runs(), _fetch_perf())
+        result, perf_by_bot, archive_paths = await asyncio.gather(
+            _fetch_runs(), _fetch_perf(), _fetch_archives()
+        )
     except Exception as e:
         logger.exception("Failed to fetch bot runs from '%s'", name)
         raise upstream_error("Failed to fetch bot runs", e)
@@ -118,7 +142,7 @@ async def get_bot_runs(
     runs_list = _extract_runs_list(result)
 
     return BotRunsResponse(
-        runs=[_parse_bot_run(r, perf_by_bot) for r in runs_list],
+        runs=[_parse_bot_run(r, perf_by_bot, archive_paths) for r in runs_list],
         total=len(runs_list),
     )
 

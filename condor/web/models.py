@@ -144,6 +144,10 @@ class BotRunInfo(BaseModel):
     global_pnl_quote: float = 0.0
     volume_traded: float = 0.0
     num_controllers: int = 0
+    # Path to this run's archived sqlite database, when one survived the bot.
+    # Present iff the run has a deep history to open; the archived-bot routes take
+    # it as their ``db_path``.
+    archive_db_path: Optional[str] = None
 
 
 class BotRunsResponse(BaseModel):
@@ -472,6 +476,48 @@ class NormalizedExecutor(BaseModel):
     controller_id: str = ""
     custom_info: dict[str, Any] = {}
     config: dict[str, Any] = {}
+    # USD value of one unit of this market's quote currency. `pnl`, `volume` and
+    # `cum_fees_quote` above stay quote-denominated so prices on the same row
+    # remain comparable to the market's candles; renderers multiply by this.
+    usd_rate: float = 1.0
+
+
+class ArchivedVolumeBucket(BaseModel):
+    time: float
+    buy_vol: float = 0.0
+    sell_vol: float = 0.0
+    buy_count: int = 0
+    sell_count: int = 0
+
+
+class ArchivedPositionDelta(BaseModel):
+    time: float
+    delta: float
+
+
+class ArchivedPnlEvolutionPoint(BaseModel):
+    time: float
+    net_pnl: float
+    trade_pnl: float
+    cum_fees: float
+
+
+class ArchivedChartSeries(BaseModel):
+    """Everything the archived-run chart draws, aggregated over all executors.
+
+    Bounded by the candle count rather than the executor count, so a run with
+    tens of thousands of executors still sends a few kilobytes.
+    """
+
+    interval: str
+    interval_sec: int
+    start: float
+    end: float
+    executor_count: int = 0
+    volume_buckets: list[ArchivedVolumeBucket] = []
+    position_deltas: list[ArchivedPositionDelta] = []
+    pnl_evolution: list[ArchivedPnlEvolutionPoint] = []
+    pool_address: str | None = None
 
 
 class ArchivedBotPerformance(BaseModel):
@@ -491,6 +537,20 @@ class ArchivedBotPerformance(BaseModel):
     primary_connector: str = ""
     primary_trading_pair: str = ""
     executor_count: int = 0
+    # Per-market chart series keyed "{connector}:{trading_pair}", aggregated
+    # over every executor so the chart is not limited to one executor page.
+    chart_series: dict[str, ArchivedChartSeries] = {}
+    # Quote currency of the primary market, for labelling a converted figure.
+    quote_currency: str = ""
+    # USD rate per quote currency seen in the run.
+    usd_rates: dict[str, float] = {}
+    # False when some quote had no path to USD and its figures are reported at
+    # face value in their own currency rather than silently passed off as USD.
+    converted: bool = True
+    # Which source the headline stats above were computed from. An archived
+    # database with an empty trades table falls back to executors, and the UI
+    # labels the count card accordingly instead of claiming zero trades.
+    stats_source: str = "trades"
 
 
 class PaginatedExecutors(BaseModel):

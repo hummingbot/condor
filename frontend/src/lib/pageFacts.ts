@@ -6,7 +6,6 @@ import { getDisplayCurrency } from "@/hooks/useDisplayCurrency";
 import type {
   AgentBrain,
   AgentDetail,
-  ArchivedBotSummary,
   BotDetail,
   BotRunsResponse,
   BotsPageResponse,
@@ -336,7 +335,7 @@ type Reader = (
 ) => ViewFacts["onScreen"];
 
 /**
- * The five tabs `/bots` actually has (`Bots.tsx`). Labelling only three left
+ * The four tabs `/bots` actually has (`Bots.tsx`). Labelling only three left
  * `?tab=runs` and `?tab=editor` both announced as "Bots", which is a screen
  * the user is not on.
  */
@@ -344,7 +343,9 @@ const BOTS_TAB_LABELS: Record<string, string> = {
   runs: "Bot runs",
   editor: "Controller config editor",
   backtest: "Backtests",
-  archived: "Archived bots",
+  // Retired: Runs absorbed the Archived tab and `Bots.tsx` redirects the old
+  // query string into it, so a stale link has to name where the user lands.
+  archived: "Bot runs",
 };
 
 /** `?tab=runs` — the run history, which carries its own denominator (R3). */
@@ -370,18 +371,6 @@ function runsFacts(qc: QueryClient): ViewFacts["onScreen"] {
     best,
     worst,
     "as of": asOf(qc, ["bot-runs"]),
-  };
-}
-
-/** `?tab=archived` — bots whose database outlived them. */
-function archivedFacts(qc: QueryClient): ViewFacts["onScreen"] {
-  const bots = fresh<ArchivedBotSummary[]>(qc, ["archived-bots"]);
-  if (!bots) return undefined;
-  return {
-    "archived bots": bots.length,
-    bots: names(bots.map((b) => b.bot_name)),
-    trades: bots.reduce((n, b) => n + (b.total_trades ?? 0), 0),
-    "as of": asOf(qc, ["archived-bots"]),
   };
 }
 
@@ -485,13 +474,13 @@ const ROUTES: {
     pattern: /^\/bots$/,
     facts: (_p, tab) => ({ label: BOTS_TAB_LABELS[tab] ?? "Bots" }),
     onScreen: (_p, tab, qc) => {
-      // Five tabs, five different tables. The live fleet is only what the
+      // Four tabs, four different tables. The live fleet is only what the
       // *active* tab shows, so reading it under "Bot runs" would describe a
       // screen the user is not on — the failure R3 exists to prevent. Backtest
       // and the config editor hold nothing the fact table can honestly read,
-      // and their label already says where the user is.
-      if (tab === "runs") return runsFacts(qc);
-      if (tab === "archived") return archivedFacts(qc);
+      // and their label already says where the user is. `?tab=archived` is the
+      // retired tab that Bots.tsx redirects into `runs`, which now covers both.
+      if (tab === "runs" || tab === "archived") return runsFacts(qc);
       if (tab === "backtest" || tab === "editor") return undefined;
 
       const data = fresh<BotsPageResponse>(qc, ["bots"]);

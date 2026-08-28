@@ -1,8 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Circle, Database, Trash2 } from "lucide-react";
+import { Archive, ChevronRight, Circle, Database, Trash2 } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import { NoServerCard } from "@/components/NoServerCard";
+import { ArchivedBotDetail } from "@/components/bots/ArchivedBotDetail";
 import { FallbackSpinner } from "@/components/ui/FallbackSpinner";
 import { useServer } from "@/hooks/useServer";
 import { api, type BotRunInfo } from "@/lib/api";
@@ -36,6 +37,13 @@ function formatDuration(start: string | null, end: string | null): string {
   if (days > 0) return `${days}d ${hours}h`;
   if (hours > 0) return `${hours}h ${mins}m`;
   return `${mins}m`;
+}
+
+/** ISO timestamp to epoch seconds, or undefined when absent/unparseable. */
+function toEpochSeconds(ts: string | null): number | undefined {
+  if (!ts) return undefined;
+  const ms = new Date(ts).getTime();
+  return Number.isFinite(ms) ? ms / 1000 : undefined;
 }
 
 function formatPnl(value: number): string {
@@ -120,6 +128,9 @@ export function BotRunsTab() {
   const [deleting, setDeleting] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [confirmTarget, setConfirmTarget] = useState<BotRunInfo | "bulk" | null>(null);
+  // The run whose archived database is open, if any. Runs and Archived are one
+  // tab: a row with an ``archive_db_path`` drills into its own deep history.
+  const [openRun, setOpenRun] = useState<BotRunInfo | null>(null);
   const queryClient = useQueryClient();
 
   const { data, isLoading, error } = useQuery({
@@ -222,6 +233,18 @@ export function BotRunsTab() {
     }
   };
 
+  if (openRun?.archive_db_path) {
+    return (
+      <ArchivedBotDetail
+        dbPath={openRun.archive_db_path}
+        botName={openRun.bot_name}
+        startTime={toEpochSeconds(openRun.created_at)}
+        endTime={toEpochSeconds(openRun.stopped_at)}
+        onBack={() => setOpenRun(null)}
+      />
+    );
+  }
+
   if (!server) {
     return <NoServerCard message="Select a server from the sidebar to view bot runs." />;
   }
@@ -295,7 +318,7 @@ export function BotRunsTab() {
                 <th className="px-4 py-3 text-right text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
                   Duration
                 </th>
-                <th className="w-10 px-2 py-3" />
+                <th className="w-16 px-2 py-3" />
               </tr>
             </thead>
             <tbody>
@@ -307,6 +330,7 @@ export function BotRunsTab() {
                   isDeleting={deleting === run.bot_name}
                   onToggleSelect={() => toggleSelect(run.bot_name)}
                   onRequestDelete={() => setConfirmTarget(run)}
+                  onOpen={() => setOpenRun(run)}
                 />
               ))}
             </tbody>
@@ -335,21 +359,34 @@ function BotRunRow({
   isDeleting,
   onToggleSelect,
   onRequestDelete,
+  onOpen,
 }: {
   run: BotRunInfo;
   isSelected: boolean;
   isDeleting: boolean;
   onToggleSelect: () => void;
   onRequestDelete: () => void;
+  onOpen: () => void;
 }) {
   const deplClass = DEPLOYMENT_COLORS[run.deployment_status] ?? "bg-[var(--color-surface)] text-[var(--color-text-muted)]";
   const isArchived = run.deployment_status === "ARCHIVED";
   const pnl = run.global_pnl_quote;
   const pnlClass = pnlTextClass(pnl);
+  // Only a run that actually left a database behind has anything to drill into.
+  // A run can be ARCHIVED in Postgres with its directory already deleted, and a
+  // still-DEPLOYED one never has an archive yet.
+  const hasArchive = !!run.archive_db_path && !isDeleting;
 
   return (
-    <tr className={`border-b border-[var(--color-border)]/30 transition-colors ${isDeleting ? "opacity-40" : "hover:bg-[var(--color-surface-hover)]/50"}`}>
-      <td className="w-8 px-2 py-2.5">
+    <tr
+      onClick={hasArchive ? onOpen : undefined}
+      className={`border-b border-[var(--color-border)]/30 transition-colors ${
+        isDeleting
+          ? "opacity-40"
+          : `hover:bg-[var(--color-surface-hover)]/50 ${hasArchive ? "cursor-pointer" : ""}`
+      }`}
+    >
+      <td className="w-8 px-2 py-2.5" onClick={(e) => e.stopPropagation()}>
         {isArchived && (
           <input
             type="checkbox"
@@ -361,7 +398,13 @@ function BotRunRow({
         )}
       </td>
       <td className="px-4 py-2.5">
-        <div>
+        <div className="flex items-center gap-1.5">
+          {hasArchive && (
+            <Archive
+              className="h-3 w-3 shrink-0 text-[var(--color-text-muted)]"
+              aria-label="Has archived database"
+            />
+          )}
           <span className="font-medium">{run.bot_name}</span>
           {run.num_controllers > 0 && (
             <span className="ml-2 text-[10px] text-[var(--color-text-muted)]">
@@ -400,19 +443,24 @@ function BotRunRow({
       <td className="px-4 py-2.5 text-right tabular-nums">
         {formatDuration(run.created_at, run.stopped_at)}
       </td>
-      <td className="w-10 px-2 py-2.5">
-        {isArchived && !isDeleting && (
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              onRequestDelete();
-            }}
-            className="rounded p-1 text-[var(--color-text-muted)] hover:text-[var(--color-red)] hover:bg-[var(--color-red)]/10 transition-colors"
-            title="Delete bot run"
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-          </button>
-        )}
+      <td className="w-16 px-2 py-2.5">
+        <div className="flex items-center justify-end gap-0.5">
+          {isArchived && !isDeleting && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onRequestDelete();
+              }}
+              className="rounded p-1 text-[var(--color-text-muted)] hover:text-[var(--color-red)] hover:bg-[var(--color-red)]/10 transition-colors"
+              title="Delete bot run"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+            </button>
+          )}
+          {hasArchive && (
+            <ChevronRight className="h-3.5 w-3.5 text-[var(--color-text-muted)]" />
+          )}
+        </div>
       </td>
     </tr>
   );

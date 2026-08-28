@@ -180,7 +180,7 @@ describe("/bots", () => {
   });
 
   it("describes the tab the user is actually on, not the live fleet", () => {
-    // Five tabs, five tables. Reading the fleet under "Bot runs" would report a
+    // Four tabs, four tables. Reading the fleet under "Bot runs" would report a
     // screen the user is not looking at.
     qc.setQueryData(["bot-runs", SRV], {
       total: 312,
@@ -196,18 +196,26 @@ describe("/bots", () => {
     expect(runs).toContain("best backpack-mm-3 +$1,220.00");
     expect(runs).not.toContain("total volume");
 
-    qc.setQueryData(["archived-bots", SRV], [
-      { bot_name: "old-mm-1", db_path: "a", total_trades: 400 },
-      { bot_name: "old-mm-2", db_path: "b", total_trades: 112 },
-    ]);
-    const archived = onScreenLine("/bots", "?tab=archived");
-    expect(archived).toContain("archived bots 2");
-    expect(archived).toContain("bots old-mm-1, old-mm-2");
-    expect(archived).toContain("trades 512");
-
     // Backtest and the editor hold nothing readable; the label says enough.
     expect(onScreenLine("/bots", "?tab=backtest")).toBe("");
     expect(onScreenLine("/bots", "?tab=editor")).toBe("");
+  });
+
+  it("reads a stale ?tab=archived link as the Runs tab that absorbed it", () => {
+    // Runs and Archived listed the same stopped bots off two different stores;
+    // Bots.tsx now redirects `?tab=archived` into `runs`, so the fact table has
+    // to describe where the user actually lands, not a tab that no longer exists.
+    qc.setQueryData(["bot-runs", SRV], {
+      total: 2,
+      runs: [
+        { bot_name: "old-mm-1", run_status: "STOPPED", global_pnl_quote: 400 },
+        { bot_name: "old-mm-2", run_status: "STOPPED", global_pnl_quote: 112 },
+      ],
+    });
+    const archived = onScreenLine("/bots", "?tab=archived");
+    expect(archived).toContain("runs 2 of 2");
+    expect(archived).toContain("best old-mm-1 +$400.00");
+    expect(archived).not.toContain("archived bots");
   });
 
   it("caps the exception list and says how many it left out", () => {

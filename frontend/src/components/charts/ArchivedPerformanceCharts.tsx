@@ -2,7 +2,14 @@ import { useEffect, useMemo, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
 
 import { PairLabel } from "@/components/executor/PairLabel";
-import { api, type CandleData, type ExecutorInfo, type PnlPoint } from "@/lib/api";
+import {
+  api,
+  type ArchivedChartSeries,
+  type ArchivedPositionDelta,
+  type CandleData,
+  type ExecutorInfo,
+  type PnlPoint,
+} from "@/lib/api";
 import {
   computeMultiOverlays,
   getExecutorColor,
@@ -16,8 +23,20 @@ import { getThemeColors } from "@/lib/theme-colors";
 
 interface Props {
   server: string;
+  /**
+   * One page of executors, used only for the per-executor overlays the chart
+   * draws below `MANY_EXECUTORS_THRESHOLD`. Every aggregate series comes from
+   * `series` instead, because a run can archive far more executors than one
+   * page holds.
+   */
   executors: ExecutorInfo[];
   cumulativePnl: PnlPoint[];
+  /**
+   * Server-aggregated series for this market, computed over *all* executors.
+   * Absent only for callers that have not been migrated; the component then
+   * falls back to computing the same series from `executors`.
+   */
+  series?: ArchivedChartSeries;
   connector: string;
   tradingPair: string;
   startTime?: number;
@@ -127,6 +146,34 @@ function computeResampledPosition(
   return result;
 }
 
+/**
+ * Running-sum the server's per-bucket position deltas onto the candle grid.
+ *
+ * Deltas travel instead of levels because they are sparse where nothing traded,
+ * and the running sum is still exact at every bucket boundary.
+ */
+function resamplePositionFromDeltas(
+  deltas: ArchivedPositionDelta[],
+  candleTimes: number[],
+): PositionSample[] {
+  if (candleTimes.length === 0 || deltas.length === 0) return [];
+
+  const sorted = [...deltas].sort((a, b) => a.time - b.time);
+  let idx = 0;
+  let net = 0;
+  const result: PositionSample[] = [];
+
+  for (const t of candleTimes) {
+    while (idx < sorted.length && sorted[idx].time <= t) {
+      net += sorted[idx].delta;
+      idx++;
+    }
+    result.push({ time: t, net: Math.round(net * 10000) / 10000 });
+  }
+
+  return result;
+}
+
 type ChartApi = import("lightweight-charts").IChartApi;
 type UTCTimestamp = import("lightweight-charts").UTCTimestamp;
 
@@ -172,6 +219,7 @@ export function ArchivedPerformanceCharts({
   server,
   executors,
   cumulativePnl,
+  series,
   connector,
   tradingPair,
   startTime: propStartTime,
@@ -180,14 +228,36 @@ export function ArchivedPerformanceCharts({
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<ChartApi | null>(null);
 
-  const pnlEvolution = useMemo(() => computePnlEvolution(executors), [executors]);
+  const localPnlEvolution = useMemo(() => computePnlEvolution(executors), [executors]);
+  const pnlEvolution = useMemo(
+    () =>
+      series
+        ? series.pnl_evolution.map((p) => ({
+            time: p.time,
+            netPnl: p.net_pnl,
+            tradePnl: p.trade_pnl,
+            cumFees: p.cum_fees,
+          }))
+        : localPnlEvolution,
+    [series, localPnlEvolution],
+  );
 
   const cappedExecutors = useMemo(() => capExecutorsForOverlays(executors), [executors]);
   const overlays = useMemo(() => computeMultiOverlays(cappedExecutors), [cappedExecutors]);
   const executorTimeRange = useMemo(() => getOverlayTimeRange(overlays), [overlays]);
 
-  // Compute full time range: union of bot range, executor range, and PnL range
+  // Time range for the candle window.
+  //
+  // With a server series this is the run's *actual* activity range, taken over
+  // every executor. Deliberately not unioned with the bot's own start/stop or
+  // with the PnL range: a stop stamp written days after the last fill used to
+  // stretch a 28-minute run across four days of hourly candles, squeezing the
+  // real activity into the left margin.
   const timeRange = useMemo(() => {
+    if (series && series.start > 0) {
+      return { start: series.start, end: Math.max(series.end, series.start) };
+    }
+
     let start = executorTimeRange.start;
     let end = executorTimeRange.end;
 
@@ -202,26 +272,49 @@ export function ArchivedPerformanceCharts({
     }
 
     return { start, end };
-  }, [propStartTime, propEndTime, executorTimeRange, cumulativePnl]);
+  }, [series, propStartTime, propEndTime, executorTimeRange, cumulativePnl]);
 
   const paddingSeconds = 300;
   const fetchStart = Math.floor(timeRange.start - paddingSeconds);
   const fetchEnd = Math.ceil(timeRange.end + paddingSeconds);
 
-  const { interval, limit } = pickCandleInterval(fetchStart, fetchEnd);
-  const intervalSec = intervalToSeconds(interval);
+  const local = pickCandleInterval(fetchStart, fetchEnd);
+  const interval = series?.interval ?? local.interval;
+  const intervalSec = series?.interval_sec ?? intervalToSeconds(interval);
+  // With a server interval, ask for exactly the candles the window needs rather
+  // than a fixed page: a fixed 500 either overshot a short run or fell short of
+  // a long one at the same interval.
+  const limit = series
+    ? Math.min(2000, Math.max(100, Math.ceil((fetchEnd - fetchStart) / intervalSec) + 10))
+    : local.limit;
 
   // Volume buckets for executor activity visualization
-  const volumeBuckets = useMemo(
+  const localVolumeBuckets = useMemo(
     () => computeVolumeBuckets(executors, intervalSec),
     [executors, intervalSec],
   );
+  const volumeBuckets = useMemo(
+    () =>
+      series
+        ? series.volume_buckets.map((b) => ({
+            time: b.time,
+            buyVol: b.buy_vol,
+            sellVol: b.sell_vol,
+            buyCount: b.buy_count,
+            sellCount: b.sell_count,
+          }))
+        : localVolumeBuckets,
+    [series, localVolumeBuckets],
+  );
 
-  const isManyExecutors = executors.length > MANY_EXECUTORS_THRESHOLD;
+  // Counted over the whole run, not over the executor page the overlays use.
+  const chartedExecutorCount = series?.executor_count ?? executors.length;
+  const isManyExecutors = chartedExecutorCount > MANY_EXECUTORS_THRESHOLD;
 
   // See ExecutorChart: a DEX/LP pool address routes candles to GeckoTerminal, and
   // charts the exact pool these archived positions traded in.
-  const poolAddress = useMemo(() => getPoolAddress(executors), [executors]);
+  const localPoolAddress = useMemo(() => getPoolAddress(executors), [executors]);
+  const poolAddress = series?.pool_address ?? localPoolAddress;
 
   const { data: candles } = useQuery({
     queryKey: ["archived-candles", server, connector, tradingPair, fetchStart, fetchEnd, interval, poolAddress ?? null],
@@ -489,7 +582,9 @@ export function ArchivedPerformanceCharts({
       // PANE 2: Net Position (resampled to candle intervals)
       // ═════════════════════════════════════════════════
 
-      const positionSamples = computeResampledPosition(executors, candleTimes);
+      const positionSamples = series
+        ? resamplePositionFromDeltas(series.position_deltas, candleTimes)
+        : computeResampledPosition(executors, candleTimes);
       const hasPosition = positionSamples.some((p) => p.net !== 0);
 
       if (hasPosition) {
@@ -544,18 +639,22 @@ export function ArchivedPerformanceCharts({
         chartRef.current = null;
       }
     };
-  }, [candles, overlays, cumulativePnl, pnlEvolution, executors, volumeBuckets, isManyExecutors, hasPnl, intervalSec]);
+  }, [candles, overlays, cumulativePnl, pnlEvolution, executors, series, volumeBuckets, isManyExecutors, hasPnl, intervalSec]);
 
-  const overlayNote = executors.length > 50
-    ? ` (top 50 of ${executors.length} by PnL)`
-    : "";
+  // Below the threshold the chart draws per-executor overlays, which are capped
+  // at 50; above it, aggregated volume covers every executor and there is
+  // nothing to disclaim.
+  const overlayNote =
+    !isManyExecutors && executors.length > 50
+      ? ` (top 50 of ${executors.length} by PnL)`
+      : "";
 
   return (
     <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden">
       {/* Header */}
       <div className="flex items-center justify-between px-3 py-1.5 bg-[var(--color-bg)]">
         <p className="text-[10px] text-[var(--color-text-muted)]">
-          <PairLabel tradingPair={tradingPair} connector={connector} /> &middot; {interval} &middot; {executors.length} executors{overlayNote}
+          <PairLabel tradingPair={tradingPair} connector={connector} /> &middot; {interval} &middot; {chartedExecutorCount.toLocaleString()} executors{overlayNote}
         </p>
         <div className="flex items-center gap-4 text-[10px]">
           {isManyExecutors && (

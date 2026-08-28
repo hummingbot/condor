@@ -1,12 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
+import { ArrowLeft, ChevronLeft, ChevronRight, Loader2, TrendingDown, TrendingUp } from "lucide-react";
 import { useMemo, useState } from "react";
-import { ArrowLeft, Calendar, ChevronLeft, ChevronRight, Database, Loader2, TrendingDown, TrendingUp } from "lucide-react";
 
-import { NoServerCard } from "@/components/NoServerCard";
 import { ArchivedPerformanceCharts } from "@/components/charts/ArchivedPerformanceCharts";
 import { useServer } from "@/hooks/useServer";
 import { api } from "@/lib/api";
-import type { ArchivedBotSummary, ExecutorInfo } from "@/lib/api";
+import type { ArchivedBotPerformance, ExecutorInfo } from "@/lib/api";
 import { pnlTextClass } from "@/lib/formatters";
 
 function formatUsd(v: number) {
@@ -20,136 +19,36 @@ function formatPnl(v: number) {
   return `${sign}${formatUsd(v)}`;
 }
 
-function formatDate(epoch: number | null) {
-  if (!epoch) return "—";
-  const d = new Date(epoch * 1000);
-  return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
-}
+/**
+ * Says which currency the run actually traded in and what it was converted at.
+ *
+ * A BRL-quoted run rendered behind a bare "$" overstated itself by the whole
+ * BRL/USD rate, so a converted figure has to show its work. Stablecoin quotes
+ * are already dollars and say nothing.
+ */
+function ConversionNote({ perf }: { perf: ArchivedBotPerformance }) {
+  const rate = perf.usd_rates[perf.quote_currency];
 
-function formatAge(startEpoch: number | null, endEpoch: number | null) {
-  if (!startEpoch || !endEpoch) return "—";
-  const diffSec = endEpoch - startEpoch;
-  if (diffSec < 3600) return `${Math.round(diffSec / 60)}m`;
-  if (diffSec < 86400) return `${(diffSec / 3600).toFixed(1)}h`;
-  return `${(diffSec / 86400).toFixed(1)}d`;
-}
-
-// ── List View ──
-
-function BotCard({ bot, onClick }: { bot: ArchivedBotSummary; onClick: () => void }) {
-  return (
-    <button
-      onClick={onClick}
-      className="w-full text-left rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4 hover:border-[var(--color-primary)]/50 hover:bg-[var(--color-surface-hover)] transition-colors"
-    >
-      <div className="flex items-start justify-between mb-2">
-        <h3 className="font-semibold text-sm truncate">{bot.bot_name}</h3>
-        <span className="text-xs text-[var(--color-text-muted)] whitespace-nowrap ml-2">
-          {formatAge(bot.start_time, bot.end_time)}
-        </span>
-      </div>
-
-      <div className="flex items-center gap-2 mb-2 text-xs text-[var(--color-text-muted)]">
-        <Calendar className="h-3 w-3" />
-        <span>{formatDate(bot.start_time)} — {formatDate(bot.end_time)}</span>
-      </div>
-
-      <div className="flex items-center gap-3 text-xs">
-        <span className="text-[var(--color-text-muted)]">
-          {bot.total_trades} trades
-        </span>
-        <span className="text-[var(--color-text-muted)]">
-          {bot.total_orders} orders
-        </span>
-      </div>
-
-      {bot.trading_pairs.length > 0 && (
-        <div className="flex flex-wrap gap-1 mt-2">
-          {bot.trading_pairs.slice(0, 4).map((pair) => (
-            <span
-              key={pair}
-              className="rounded bg-[var(--color-bg)] px-1.5 py-0.5 text-[10px] text-[var(--color-text-muted)]"
-            >
-              {pair}
-            </span>
-          ))}
-          {bot.trading_pairs.length > 4 && (
-            <span className="text-[10px] text-[var(--color-text-muted)]">
-              +{bot.trading_pairs.length - 4}
-            </span>
-          )}
-        </div>
-      )}
-    </button>
-  );
-}
-
-function ArchivedBotsList() {
-  const { server } = useServer();
-  const [selectedBot, setSelectedBot] = useState<ArchivedBotSummary | null>(null);
-
-  const { data, isLoading, error } = useQuery({
-    queryKey: ["archived-bots", server],
-    queryFn: () => api.getArchivedBots(server!),
-    enabled: !!server,
-  });
-
-  if (selectedBot) {
+  if (!perf.converted) {
     return (
-      <ArchivedBotDetail
-        dbPath={selectedBot.db_path}
-        startTime={selectedBot.start_time ?? undefined}
-        endTime={selectedBot.end_time ?? undefined}
-        onBack={() => setSelectedBot(null)}
-      />
+      <p className="text-[10px] text-amber-500/90">
+        No USD rate for {perf.quote_currency || "this run's quote"} — figures are
+        shown in their own quote currency, not dollars.
+      </p>
     );
   }
 
-  if (!server) {
-    return <NoServerCard message="Select a server from the sidebar to view archived bots." />;
-  }
-
-  if (isLoading) {
-    return (
-      <div className="flex items-center justify-center h-64">
-        <Loader2 className="h-6 w-6 animate-spin text-[var(--color-text-muted)]" />
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div className="flex items-center justify-center h-64 text-red-400">
-        Failed to load archived bots: {(error as Error).message}
-      </div>
-    );
-  }
-
-  const bots = data?.bots ?? [];
-
-  if (bots.length === 0) {
-    return (
-      <div className="flex flex-col items-center justify-center h-64 text-[var(--color-text-muted)]">
-        <Database className="h-10 w-10 mb-3 opacity-40" />
-        <p>No archived bots found</p>
-      </div>
-    );
-  }
+  // A dollar-quoted run has nothing to disclose.
+  if (!rate || rate === 1) return null;
 
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-      {bots.map((bot) => (
-        <BotCard
-          key={bot.db_path}
-          bot={bot}
-          onClick={() => setSelectedBot(bot)}
-        />
-      ))}
-    </div>
+    <p className="text-[10px] text-[var(--color-text-muted)]">
+      Converted from {perf.quote_currency} at 1 USD ={" "}
+      {(1 / rate).toLocaleString(undefined, { maximumFractionDigits: 4 })}{" "}
+      {perf.quote_currency}
+    </p>
   );
 }
-
-// ── Detail View ──
 
 function StatCard({ label, value, className }: { label: string; value: string; className?: string }) {
   return (
@@ -209,9 +108,13 @@ function ExecutorTable({ server, dbPath, executorCount }: { server: string; dbPa
   const sorted = useMemo(() => {
     const arr = [...executors];
     arr.sort((a, b) => {
-      const av = a[sortField];
-      const bv = b[sortField];
-      return sortDir === "desc" ? (bv as number) - (av as number) : (av as number) - (bv as number);
+      // Money columns sort on their USD value: across markets with different
+      // quotes, raw quote figures are not comparable to each other.
+      const scale = (ex: ExecutorInfo) =>
+        sortField === "timestamp" ? 1 : ex.usd_rate ?? 1;
+      const av = (a[sortField] as number) * scale(a);
+      const bv = (b[sortField] as number) * scale(b);
+      return sortDir === "desc" ? bv - av : av - bv;
     });
     return arr;
   }, [executors, sortField, sortDir]);
@@ -227,7 +130,7 @@ function ExecutorTable({ server, dbPath, executorCount }: { server: string; dbPa
 
   const sortIndicator = (field: SortField) => {
     if (sortField !== field) return "";
-    return sortDir === "desc" ? " \u2193" : " \u2191";
+    return sortDir === "desc" ? " ↓" : " ↑";
   };
 
   if (executorCount === 0) return null;
@@ -289,13 +192,13 @@ function ExecutorTable({ server, dbPath, executorCount }: { server: string; dbPa
                       {ex.current_price > 0 ? ex.current_price.toPrecision(6) : "—"}
                     </td>
                     <td className={`px-3 py-1.5 text-right font-mono ${pnlTextClass(ex.pnl)}`}>
-                      {formatPnl(ex.pnl)}
+                      {formatPnl(ex.pnl * (ex.usd_rate ?? 1))}
                     </td>
                     <td className="px-3 py-1.5 text-right font-mono text-amber-400/80">
-                      {formatUsd(ex.cum_fees_quote)}
+                      {formatUsd(ex.cum_fees_quote * (ex.usd_rate ?? 1))}
                     </td>
                     <td className="px-3 py-1.5 text-right font-mono">
-                      {formatUsd(ex.volume)}
+                      {formatUsd(ex.volume * (ex.usd_rate ?? 1))}
                     </td>
                   </tr>
                 );
@@ -338,7 +241,26 @@ function ExecutorTable({ server, dbPath, executorCount }: { server: string; dbPa
 
 // ── Detail View ──
 
-function ArchivedBotDetail({ dbPath, startTime: botStartTime, endTime: botEndTime, onBack }: { dbPath: string; startTime?: number; endTime?: number; onBack: () => void }) {
+interface Props {
+  /** The run's archived sqlite path, from ``BotRunInfo.archive_db_path``. */
+  dbPath: string;
+  /** Shown in the header while the (slow) performance fetch is still in flight. */
+  botName: string;
+  /** Run window in epoch seconds, for the candle range. */
+  startTime?: number;
+  endTime?: number;
+  onBack: () => void;
+}
+
+/**
+ * Deep history for one stopped bot, read out of the sqlite its container left
+ * behind. Reached from a Runs row that has an ``archive_db_path``.
+ *
+ * The performance fetch is slow and unbounded — see ``condor/web/routes/archived.py``
+ * — so the header and its back button render immediately, above the spinner,
+ * rather than stranding the reader on a bare loader.
+ */
+export function ArchivedBotDetail({ dbPath, botName, startTime, endTime, onBack }: Props) {
   const { server } = useServer();
 
   // Query 1: Performance summary (no executors) — fast path
@@ -360,8 +282,21 @@ function ArchivedBotDetail({ dbPath, startTime: botStartTime, endTime: botEndTim
   const executors: ExecutorInfo[] = execData?.executors ?? [];
   const executorCount = execData?.total ?? perf?.executor_count ?? 0;
 
-  // Derive available connector+pair combos from executors for pair selector
+  // Available connector+pair combos for the pair selector. Preferred from the
+  // server's per-market series, which is keyed over every executor of the run —
+  // deriving it from the loaded executor page hides markets that page missed
+  // and undercounts the ones it caught.
   const pairOptions = useMemo(() => {
+    const series = perf?.chart_series;
+    if (series && Object.keys(series).length > 0) {
+      return Object.entries(series)
+        .map(([key, s]) => {
+          const [connector, ...rest] = key.split(":");
+          return { connector, pair: rest.join(":"), count: s.executor_count };
+        })
+        .sort((a, b) => b.count - a.count);
+    }
+
     if (!executors.length) return [];
     const counts = new Map<string, { connector: string; pair: string; count: number }>();
     for (const ex of executors) {
@@ -375,7 +310,7 @@ function ArchivedBotDetail({ dbPath, startTime: botStartTime, endTime: botEndTim
       }
     }
     return Array.from(counts.values()).sort((a, b) => b.count - a.count);
-  }, [executors]);
+  }, [perf?.chart_series, executors]);
 
   const [selectedPairKey, setSelectedPairKey] = useState<string | null>(null);
 
@@ -398,10 +333,26 @@ function ArchivedBotDetail({ dbPath, startTime: botStartTime, endTime: botEndTim
     );
   }, [executors, currentConnector, currentPair]);
 
+  const backButton = (
+    <button
+      onClick={onBack}
+      className="flex items-center gap-2 text-sm text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition-colors"
+    >
+      <ArrowLeft className="h-4 w-4" /> Back to runs
+    </button>
+  );
+
   if (isLoading) {
     return (
-      <div className="flex items-center justify-center h-64">
-        <Loader2 className="h-6 w-6 animate-spin text-[var(--color-text-muted)]" />
+      <div className="space-y-4">
+        <div className="flex items-center gap-3">
+          {backButton}
+          <h2 className="text-lg font-semibold">{botName}</h2>
+        </div>
+        <div className="flex flex-col items-center justify-center h-48 gap-3">
+          <Loader2 className="h-6 w-6 animate-spin text-[var(--color-text-muted)]" />
+          <p className="text-xs text-[var(--color-text-muted)]">Reading archived database…</p>
+        </div>
       </div>
     );
   }
@@ -409,13 +360,11 @@ function ArchivedBotDetail({ dbPath, startTime: botStartTime, endTime: botEndTim
   if (error || !perf) {
     return (
       <div className="space-y-4">
-        <button
-          onClick={onBack}
-          className="flex items-center gap-2 text-sm text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition-colors"
-        >
-          <ArrowLeft className="h-4 w-4" /> Back to list
-        </button>
-        <div className="flex items-center justify-center h-48 text-red-400">
+        <div className="flex items-center gap-3">
+          {backButton}
+          <h2 className="text-lg font-semibold">{botName}</h2>
+        </div>
+        <div className="flex items-center justify-center h-48 text-[var(--color-red)]">
           Failed to load performance data
         </div>
       </div>
@@ -432,13 +381,8 @@ function ArchivedBotDetail({ dbPath, startTime: botStartTime, endTime: botEndTim
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <button
-            onClick={onBack}
-            className="flex items-center gap-2 text-sm text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition-colors"
-          >
-            <ArrowLeft className="h-4 w-4" /> Back
-          </button>
-          <h2 className="text-lg font-semibold">{perf.bot_name}</h2>
+          {backButton}
+          <h2 className="text-lg font-semibold">{perf.bot_name || botName}</h2>
         </div>
         <div className={`flex items-center gap-1 text-lg font-bold ${pnlTextClass(perf.total_pnl)}`}>
           {perf.total_pnl >= 0 ? <TrendingUp className="h-5 w-5" /> : <TrendingDown className="h-5 w-5" />}
@@ -451,10 +395,15 @@ function ArchivedBotDetail({ dbPath, startTime: botStartTime, endTime: botEndTim
         <StatCard label="Total PnL" value={formatPnl(perf.total_pnl)} className={pnlTextClass(perf.total_pnl)} />
         <StatCard label="Volume" value={formatUsd(perf.total_volume)} />
         <StatCard label="Fees" value={formatUsd(perf.total_fees)} />
-        <StatCard label="Trades" value={String(perf.trade_count)} />
+        <StatCard
+          label={perf.stats_source === "executors" ? "Executors" : "Trades"}
+          value={perf.trade_count.toLocaleString()}
+        />
         <StatCard label="Buy / Sell" value={`${perf.buy_count} / ${perf.sell_count}`} />
         <StatCard label="Pairs" value={String(perf.trading_pairs.length)} />
       </div>
+
+      <ConversionNote perf={perf} />
 
       {/* Pair selector (if multiple pairs from executors) */}
       {pairOptions.length > 1 && (
@@ -492,10 +441,11 @@ function ArchivedBotDetail({ dbPath, startTime: botStartTime, endTime: botEndTim
           server={server}
           executors={filteredExecutors}
           cumulativePnl={perf.cumulative_pnl}
+          series={perf.chart_series?.[`${currentConnector}:${currentPair}`]}
           connector={currentConnector}
           tradingPair={currentPair}
-          startTime={botStartTime}
-          endTime={botEndTime}
+          startTime={startTime}
+          endTime={endTime}
         />
       )}
 
@@ -523,10 +473,4 @@ function ArchivedBotDetail({ dbPath, startTime: botStartTime, endTime: botEndTim
       )}
     </div>
   );
-}
-
-// ── Main Page ──
-
-export function ArchivedBotsTab() {
-  return <ArchivedBotsList />;
 }

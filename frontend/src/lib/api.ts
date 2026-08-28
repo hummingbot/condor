@@ -157,6 +157,8 @@ export interface BotRunInfo {
   global_pnl_quote: number;
   volume_traded: number;
   num_controllers: number;
+  /** This run's archived sqlite path, or null when no database survived it. */
+  archive_db_path: string | null;
 }
 
 export interface BotRunsResponse {
@@ -206,6 +208,9 @@ export interface ExecutorInfo {
   close_timestamp: number;
   custom_info: Record<string, unknown>;
   config: Record<string, unknown>;
+  /** USD value of one unit of this market's quote. `pnl`, `volume` and
+   *  `cum_fees_quote` are quote-denominated; multiply by this to show USD. */
+  usd_rate?: number;
 }
 
 /** Executor totals for a period, aggregated server-side over the full history.
@@ -1054,6 +1059,43 @@ export interface PnlPoint {
   pnl: number;
 }
 
+export interface ArchivedVolumeBucket {
+  time: number;
+  buy_vol: number;
+  sell_vol: number;
+  buy_count: number;
+  sell_count: number;
+}
+
+export interface ArchivedPositionDelta {
+  time: number;
+  delta: number;
+}
+
+export interface ArchivedPnlEvolutionPoint {
+  time: number;
+  net_pnl: number;
+  trade_pnl: number;
+  cum_fees: number;
+}
+
+/**
+ * Chart series aggregated server-side over every executor of an archived run.
+ * Bounded by the candle count, not the executor count, so a run that archived
+ * tens of thousands of executors still charts from all of them.
+ */
+export interface ArchivedChartSeries {
+  interval: string;
+  interval_sec: number;
+  start: number;
+  end: number;
+  executor_count: number;
+  volume_buckets: ArchivedVolumeBucket[];
+  position_deltas: ArchivedPositionDelta[];
+  pnl_evolution: ArchivedPnlEvolutionPoint[];
+  pool_address: string | null;
+}
+
 export interface ArchivedBotPerformance {
   bot_name: string;
   db_path: string;
@@ -1071,6 +1113,16 @@ export interface ArchivedBotPerformance {
   primary_connector: string;
   primary_trading_pair: string;
   executor_count: number;
+  /** Keyed "{connector}:{trading_pair}". Money series are USD-denominated. */
+  chart_series: Record<string, ArchivedChartSeries>;
+  /** Quote currency of the primary market, e.g. "BRL". */
+  quote_currency: string;
+  /** USD rate per quote currency seen in the run. */
+  usd_rates: Record<string, number>;
+  /** False when a quote had no path to USD; its figures stay in that currency. */
+  converted: boolean;
+  /** "trades" or "executors" — which source the headline stats came from. */
+  stats_source: string;
 }
 
 export interface PaginatedExecutors {

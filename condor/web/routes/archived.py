@@ -13,6 +13,7 @@ from condor.web.auth import require_server_access
 from condor.web.models import (
     ArchivedBotPerformance,
     ArchivedBotSummary,
+    ArchivedChartSeries,
     NormalizedExecutor,
     PaginatedExecutors,
     PnlPoint,
@@ -38,6 +39,11 @@ _performance_cache: OrderedDict[tuple[str, str], ArchivedBotPerformance] = Order
 _performance_inflight: dict[tuple[str, str], "asyncio.Task[ArchivedBotPerformance]"] = (
     {}
 )
+
+# Attempts per page of the archived trade walk. A run with tens of thousands of
+# trades needs dozens of round trips, and one transient failure must not decide
+# the whole run's headline numbers.
+_TRADE_PAGE_ATTEMPTS = 3
 
 
 def _cache_get(cache_key: tuple[str, str]) -> ArchivedBotPerformance | None:
@@ -253,17 +259,45 @@ async def _fetch_performance(
     trading_pairs = summary.get("trading_pairs", [])
     exchanges = summary.get("exchanges", [])
 
-    # Fetch all trades (paginated)
+    # Fetch all trades (paginated).
+    #
+    # A run with tens of thousands of trades takes dozens of round trips, and a
+    # single transient 5xx used to end the walk silently: the summary was then
+    # built from a truncated (often empty) trade list, reported $0.00 across the
+    # header, and was cached under that. Each page is retried, and a walk that
+    # still fails is reported as incomplete so the caller can fall back to
+    # executors rather than publishing zeros as fact.
     all_trades: list[dict] = []
     offset = 0
     limit = 500
+    trades_complete = True
     while True:
-        try:
-            resp = await client.archived_bots.get_database_trades(
-                db_path, limit=limit, offset=offset
+        resp = None
+        last_error: Exception | None = None
+        for attempt in range(_TRADE_PAGE_ATTEMPTS):
+            try:
+                resp = await client.archived_bots.get_database_trades(
+                    db_path, limit=limit, offset=offset
+                )
+                last_error = None
+                break
+            except Exception as e:
+                last_error = e
+                if attempt + 1 < _TRADE_PAGE_ATTEMPTS:
+                    await asyncio.sleep(0.5 * (attempt + 1))
+
+        if last_error is not None:
+            logger.warning(
+                "Archived trade walk for %s stopped at offset %d after %d "
+                "attempts: %s",
+                db_path,
+                offset,
+                _TRADE_PAGE_ATTEMPTS,
+                last_error,
             )
-        except Exception:
+            trades_complete = False
             break
+
         if not resp:
             break
         trades = resp.get("trades", [])
@@ -293,14 +327,49 @@ async def _fetch_performance(
         executors, exchanges, trading_pairs
     )
 
-    # Calculate PnL from trades
-    from condor.archived_pnl import calculate_pnl_from_trades
+    # Resolve one USD rate per quote currency before any money is totalled.
+    # A run's PnL, fees and volume are quote-denominated, and most of this
+    # history is BRL-quoted, so reporting them behind a "$" without this
+    # overstated every such run by the whole BRL/USD rate.
+    from condor.quote_conversion import (
+        convert_trades_to_usd,
+        quote_of,
+        quotes_in,
+        resolve_usd_rates,
+    )
 
-    pnl_data = calculate_pnl_from_trades(all_trades)
+    pair_sources = [ex.trading_pair for ex in executors if ex.trading_pair]
+    pair_sources.extend(trading_pairs)
+    quote_rates = await resolve_usd_rates(name, quotes_in(pair_sources))
+    convert_trades_to_usd(all_trades, quote_rates)
 
-    # Count buy/sell
-    buy_count = sum(1 for t in all_trades if t.get("trade_type", "").upper() == "BUY")
-    sell_count = len(all_trades) - buy_count
+    # Calculate PnL, preferring trades and falling back to executors.
+    # A run can archive tens of thousands of executors alongside an empty
+    # trades table; reading the summary only from trades then reports zeros
+    # across the header while the chart below it, which reads executors,
+    # plots real PnL. Whichever source answered is reported as
+    # ``stats_source`` so the UI can label the count card honestly.
+    from condor.archived_pnl import (
+        calculate_pnl_from_executors,
+        calculate_pnl_from_trades,
+    )
+
+    if all_trades and trades_complete:
+        stats_source = "trades"
+        pnl_data = calculate_pnl_from_trades(all_trades)
+        fill_count = len(all_trades)
+        buy_count = sum(
+            1 for t in all_trades if str(t.get("trade_type", "")).upper() == "BUY"
+        )
+        sell_count = fill_count - buy_count
+    else:
+        stats_source = "executors"
+        pnl_data = calculate_pnl_from_executors(executors, quote_rates)
+        fill_count = len(executors)
+        # Counted separately rather than as the complement of buys: an
+        # unrecognized side stays uncounted instead of inflating the sells.
+        buy_count = sum(1 for ex in executors if ex.side == "BUY")
+        sell_count = sum(1 for ex in executors if ex.side == "SELL")
 
     # Convert cumulative_pnl to PnlPoint list with epoch seconds
     raw_cumulative = pnl_data.get("cumulative_pnl", [])
@@ -332,13 +401,27 @@ async def _fetch_performance(
                 epoch = 0
             cumulative_pnl.append(PnlPoint(timestamp=epoch, pnl=last.get("pnl", 0)))
 
+    from condor.archived_chart_series import build_chart_series
+
+    chart_series = {
+        key: ArchivedChartSeries(**payload)
+        for key, payload in build_chart_series(executors, quote_rates).items()
+    }
+
+    # Each executor carries its own rate so the executor table can render its
+    # money columns in USD without re-deriving the market's quote, while prices
+    # on the row stay native to the market they traded in.
+    for ex in executors:
+        ex.usd_rate = quote_rates.for_pair(ex.trading_pair)
+
     result = ArchivedBotPerformance(
         bot_name=bot_name,
         db_path=db_path,
         total_pnl=pnl_data.get("total_pnl", 0),
         total_fees=pnl_data.get("total_fees", 0),
         total_volume=pnl_data.get("total_volume", 0),
-        trade_count=len(all_trades),
+        trade_count=fill_count,
+        stats_source=stats_source,
         buy_count=buy_count,
         sell_count=sell_count,
         pnl_by_pair=pnl_data.get("pnl_by_pair", {}),
@@ -349,6 +432,10 @@ async def _fetch_performance(
         primary_connector=primary_connector,
         primary_trading_pair=primary_trading_pair,
         executor_count=len(executors),
+        chart_series=chart_series,
+        quote_currency=quote_of(primary_trading_pair),
+        usd_rates=quote_rates.rates,
+        converted=quote_rates.converted,
     )
 
     # Cache full result (executors included — the executors route pages out of it)

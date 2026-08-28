@@ -1,4 +1,4 @@
-import { Archive, Bot, FlaskConical, History, TerminalSquare } from "lucide-react";
+import { Bot, FlaskConical, History, TerminalSquare } from "lucide-react";
 import { lazy, Suspense, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
 
@@ -9,9 +9,6 @@ const ActiveBotsTab = lazy(() =>
 );
 const BotRunsTab = lazy(() =>
   import("@/pages/tabs/BotRunsTab").then((m) => ({ default: m.BotRunsTab })),
-);
-const ArchivedBotsTab = lazy(() =>
-  import("@/pages/tabs/ArchivedBotsTab").then((m) => ({ default: m.ArchivedBotsTab })),
 );
 const BacktestingTab = lazy(() =>
   import("@/pages/tabs/BacktestingTab").then((m) => ({ default: m.BacktestingTab })),
@@ -25,14 +22,23 @@ const TABS = [
   { key: "runs", label: "Runs", icon: History },
   { key: "editor", label: "Editor", icon: TerminalSquare },
   { key: "backtest", label: "Backtest", icon: FlaskConical },
-  { key: "archived", label: "Archived", icon: Archive },
 ] as const;
 
 type TabKey = (typeof TABS)[number]["key"];
 
+/**
+ * Runs absorbed the old Archived tab: both listed the same stopped bots, one
+ * off `bot_runs` in Postgres and one off a per-database walk of every archived
+ * sqlite. A run that left a database behind now carries `archive_db_path` and
+ * drills into that history from its row. Old `?tab=archived` links land on Runs.
+ */
+const RETIRED_TABS: Record<string, TabKey> = { archived: "runs" };
+
 export function Bots() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const currentTab = (searchParams.get("tab") as TabKey) || "active";
+  const requestedTab = searchParams.get("tab") ?? "";
+  const currentTab =
+    RETIRED_TABS[requestedTab] ?? ((requestedTab as TabKey) || "active");
   const visitedRef = useRef<Set<TabKey>>(new Set([currentTab]));
   visitedRef.current.add(currentTab);
 
@@ -74,11 +80,6 @@ export function Bots() {
         {visitedRef.current.has("runs") && (
           <div style={{ display: currentTab === "runs" ? undefined : "none" }}>
             <BotRunsTab />
-          </div>
-        )}
-        {visitedRef.current.has("archived") && (
-          <div style={{ display: currentTab === "archived" ? undefined : "none" }}>
-            <ArchivedBotsTab />
           </div>
         )}
         {visitedRef.current.has("backtest") && (

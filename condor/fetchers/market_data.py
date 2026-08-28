@@ -256,10 +256,12 @@ async def fetch_rates(
 
 
 # Quote assets already denominated in (approximately) USD, used when the pool has
-# no market to price them off.
-_USD_QUOTES = frozenset(
+# no market to price them off. Public because quote-to-USD conversion elsewhere
+# needs the same list, and a second copy of it would drift.
+USD_QUOTES = frozenset(
     {"USDT", "USDC", "USD", "BUSD", "FDUSD", "TUSD", "DAI", "USDE", "PYUSD"}
 )
+_USD_QUOTES = USD_QUOTES
 
 
 def _usd_rate(quote: str, prices: Dict[str, float]) -> Optional[float]:

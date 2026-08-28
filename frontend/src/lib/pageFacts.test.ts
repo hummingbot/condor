@@ -68,7 +68,8 @@ describe("routeFacts", () => {
 
   it("reads the tab from the query string", () => {
     expect(routeFacts("/bots", "?tab=backtest")?.label).toBe("Backtests");
-    expect(routeFacts("/bots", "?tab=archived")?.label).toBe("Archived bots");
+    // Retired tab: Runs absorbed Archived, so a stale link names where it lands.
+    expect(routeFacts("/bots", "?tab=archived")?.label).toBe("Bot runs");
     expect(routeFacts("/routines", "?tab=reports")?.label).toBe("Routine reports");
   });
 
