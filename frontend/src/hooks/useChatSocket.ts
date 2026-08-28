@@ -301,9 +301,20 @@ export function useChatSocket() {
   const MAX_RECONNECT_DELAY = 30000;
   // Which bubble a slot is streaming into is not tracked here: it is the
   // `open` message in the slot's own transcript. See `foldIntoStream`.
-  // Conversations already fetched, so a WS reconnect doesn't re-hydrate a slot
-  // that is mid-answer and clobber the streaming bubble.
+  // Conversations already fetched, so an ordinary roster refresh doesn't
+  // re-hydrate a slot and clobber what is on screen.
   const hydratedSlots = useRef<Set<string>>(new Set());
+  // Has this hook ever had a socket up? The second and every later `onopen` is
+  // a *re*-connect, which is the one event that means "the wire may have
+  // skipped a push" — a delegation's completion note, a routine's result. Those
+  // are broadcast once and never replayed, so the transcript is their only
+  // record. See `needsResync`.
+  const hasConnected = useRef(false);
+  // Set by a reconnect, consumed by the `sessions_list` that follows it: the
+  // roster the server sends on connect is where the re-read is issued, one GET
+  // per listed conversation. A `list_sessions` the client asked for itself does
+  // not set this, so a roster refresh stays free.
+  const needsResync = useRef(false);
   // Text typed into a tab whose spawn is still in flight. Keyed by the tab's
   // id (a client_ref for a new chat, the conversation id for a resume) and
   // flushed on session_started — that queue IS the warm session. Each entry
@@ -572,6 +583,13 @@ export function useChatSocket() {
 
     ws.onopen = () => {
       reconnectDelay.current = 1000;
+      // Anything pushed while this hook had no socket — the gap between a drop
+      // and this moment — was delivered to nobody. Ask the next roster to
+      // re-read the transcripts rather than trusting a wire that just proved
+      // it can miss frames. The first connect of a page load is exempt: its
+      // hydrate is the read.
+      needsResync.current = hasConnected.current;
+      hasConnected.current = true;
       setIsConnected(true);
       const queued = unsent.current;
       unsent.current = [];
@@ -605,28 +623,63 @@ export function useChatSocket() {
     setIsConnected(false);
   }, [closeSocket]);
 
-  // Pull a slot's transcript from the server and drop it into the slot. Only
-  // ever runs once per slot: the WS is authoritative for anything after.
+  /**
+   * Pull a slot's transcript from the server and drop it into the slot.
+   *
+   * Runs once per slot for the life of the page, *except* on a reconnect
+   * (`resync`), which is the one moment the WS has demonstrably stopped being
+   * authoritative: a `system_note` is broadcast once, with no queue and no ack,
+   * so a socket that was down when one was pushed loses it permanently. The
+   * transcript is the record it was written to, so re-reading it is the
+   * recovery path.
+   *
+   * The two modes merge differently, because they mean different things:
+   *
+   * - First hydrate — *prepend*. Everything already in the slot was typed or
+   *   streamed after the fetch was issued (the outbox a spawn flushes, a turn
+   *   that landed mid-flight), so none of it is in the transcript yet and all
+   *   of it belongs after.
+   * - Resync — *replace*. Everything on screen when the re-read was issued is
+   *   also in the transcript that comes back, so keeping it would double the
+   *   whole conversation. Only what arrived while the fetch was in flight, plus
+   *   a bubble still being streamed into (its turn is not recorded yet, and
+   *   dropping it would split the answer), survives to be appended.
+   */
   const hydrateSlot = useCallback(
-    async (conversationId: string, slotId: string) => {
-      if (!conversationId || hydratedSlots.current.has(slotId)) return;
+    async (conversationId: string, slotId: string, resync = false) => {
+      if (!conversationId) return;
+      if (hydratedSlots.current.has(slotId) && !resync) return;
       hydratedSlots.current.add(slotId);
+      // Snapshotted before the await, so "was already on screen" is judged
+      // against the moment the read was issued, not the moment it returned.
+      const superseded = resync
+        ? new Set(
+            (
+              slotsRef.current.find((s) => s.info.slot_id === slotId)?.messages ?? []
+            )
+              .filter((m) => !m.open)
+              .map((m) => m.id),
+          )
+        : null;
       try {
         const detail = await api.getConversation(conversationId);
         const restored = turnsToMessages(detail.turns);
+        // An empty transcript never wipes the screen: on a resync that would
+        // trade a missed note for a lost conversation.
         if (restored.length === 0) return;
         setSlots((prev) =>
-          prev.map((s) =>
-            // Prepend rather than replace: a turn that streamed in while the
-            // fetch was in flight must survive it.
-            s.info.slot_id === slotId
-              ? { ...s, messages: [...restored, ...s.messages] }
-              : s,
-          ),
+          prev.map((s) => {
+            if (s.info.slot_id !== slotId) return s;
+            const kept = superseded
+              ? s.messages.filter((m) => !superseded.has(m.id))
+              : s.messages;
+            return { ...s, messages: [...restored, ...kept] };
+          }),
         );
       } catch {
         // A conversation we cannot read is not worth breaking the chat over.
-        hydratedSlots.current.delete(slotId);
+        // The slot keeps whatever it had; a later reconnect tries again.
+        if (!resync) hydratedSlots.current.delete(slotId);
       }
     },
     [],
@@ -815,6 +868,11 @@ export function useChatSocket() {
       switch (event) {
         case "sessions_list": {
           const sessions = data.sessions as SlotInfo[];
+          // Claimed unconditionally: a reconnect that finds no live session has
+          // nothing to re-read, and leaving the flag armed would spend the
+          // re-read on some later roster instead.
+          const resync = needsResync.current;
+          needsResync.current = false;
           if (sessions.length > 0) {
             const known = new Set(sessions.map((s) => s.slot_id));
             // A tab opened before the socket finished connecting — "Chat" on an
@@ -852,7 +910,11 @@ export function useChatSocket() {
               return latest.slot_id;
             });
             for (const info of sessions) {
-              void hydrateSlot(info.conversation_id || info.slot_id, info.slot_id);
+              void hydrateSlot(
+                info.conversation_id || info.slot_id,
+                info.slot_id,
+                resync,
+              );
             }
             prewarmed.current = true; // Live sessions already are the warm one.
           } else {
