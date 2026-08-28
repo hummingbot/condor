@@ -13,9 +13,14 @@ import { ChatInput } from "@/components/chat/ChatInput";
 import { ChatThread } from "@/components/chat/ChatThread";
 import { Starters, type Starter } from "@/components/chat/Starters";
 import { useChat, useSessionOptions } from "@/hooks/useChat";
+import type { ChatSlot } from "@/hooks/useChatSocket";
 import { useServer } from "@/hooks/useServer";
 import { useStarters } from "@/hooks/useStarters";
-import { bubbleAgentSlug } from "@/lib/agentSlug";
+import {
+  bubbleAgentSlug,
+  isAgentPage,
+  normalizeAgentSlug,
+} from "@/lib/agentSlug";
 import { api, CHAT_SLUG } from "@/lib/api";
 import { routeFacts } from "@/lib/pageFacts";
 import { collectViewFacts, renderViewBlock } from "@/lib/viewFacts";
@@ -52,8 +57,9 @@ export function ChatBubble() {
     }
   });
   // The bubble's own conversation, one per bound agent ("" is Condor).
-  // Deliberately not the workspace's active conversation: a quick question
+  // Deliberately not the workspace's *active* conversation: a quick question
   // from /bots must not land in whatever deep specialist chat was open at `/`.
+  // On an agent's own page that reasoning inverts — see the adoption below.
   const [slotBySlug, setSlotBySlug] = useState<Record<string, string>>({});
   // Message count last seen with the panel open, per slug — the unread dot.
   const [seen, setSeen] = useState<Record<string, number>>({});
@@ -72,9 +78,12 @@ export function ChatBubble() {
   const storedId = slotBySlug[slug];
   // The spawn renames the tab (client_ref → real slot id), so the stored id
   // is followed through the socket's alias map rather than trusted verbatim.
-  const slotId = storedId ? chat.resolveSlotId(storedId) : undefined;
+  const storedSlotId = storedId ? chat.resolveSlotId(storedId) : undefined;
   const slot =
-    (slotId && chat.slots.find((s) => s.info.slot_id === slotId)) || null;
+    (storedSlotId &&
+      chat.slots.find((s) => s.info.slot_id === storedSlotId)) ||
+    adoptableSlot(chat.slots, pathname, slug);
+  const slotId = slot?.info.slot_id;
 
   const msgCount = slot?.messages.length ?? 0;
 
@@ -129,8 +138,9 @@ export function ChatBubble() {
 
   const ask = (text: string) => {
     let id = slotId;
-    // The liveness check matters: the workspace's session tabs can close a
-    // slot the bubble is holding, and a send into a dead id would be dropped.
+    // `slotId` is read off a live slot, so this is belt and braces rather than
+    // the load-bearing check it used to be — but a send into a dead id is
+    // dropped silently, so the guard stays.
     if (!id || !chat.slots.some((s) => s.info.slot_id === id)) {
       // Same shape as the workspace's `talkTo`: "" asks whoever is bound for
       // their own model, so a bound agent is not forced onto Condor's.
@@ -212,6 +222,43 @@ export function ChatBubble() {
         }
       />
     </div>
+  );
+}
+
+/**
+ * The live conversation the bubble should show when it has none of its own.
+ *
+ * Only on `/agents/:slug`, and there it is the same lookup the workspace's
+ * `talkTo("focus")` does: the conversation bound to this agent, if one is
+ * already open. Without it the bubble on an agent's page rendered its empty
+ * hero over a conversation with that very agent running two clicks away, and
+ * the first message spawned a durable second one beside it (CORR-255) — the
+ * common way there being the workspace's own "Knowledge" link.
+ *
+ * Read-only with respect to the workspace: the caller must not focus what it
+ * adopts. `startSession(..., { focus: false })` and `permissionFor` being a
+ * selector exist precisely so a second surface can drive a slot it did not
+ * focus, and "Back to chat" stays the only gesture that moves focus.
+ *
+ * Off an agent page the fallback must not fire, which is why the route — not
+ * `slug !== ""` — is the test: `/agents/condor` normalizes to the empty slug
+ * and is exactly the case that has to keep working, while `/bots` produces the
+ * same empty slug and must keep FEAT-059's rule.
+ */
+function adoptableSlot(
+  slots: ChatSlot[],
+  pathname: string,
+  slug: string,
+): ChatSlot | null {
+  if (!isAgentPage(pathname)) return null;
+  // Last match wins: `slots` is append-ordered by `startSession` /
+  // `resumeConversation`, so the newest conversation with this agent is the
+  // one the user was most recently in. The slot's own binding is normalized
+  // too — a conversation resumed from a record written before the slugs were
+  // reconciled can still carry the registry's spelling.
+  return (
+    slots.findLast((s) => normalizeAgentSlug(s.info.agent_slug) === slug) ??
+    null
   );
 }
 

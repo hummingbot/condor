@@ -27,6 +27,9 @@ export function normalizeAgentSlug(slug: string | null | undefined): string {
   return s === CHAT_SLUG ? "" : s;
 }
 
+/** `/agents/:slug` and anything under it. The index `/agents` is not a match. */
+const AGENT_PAGE = /^\/agents\/([^/]+)/;
+
 /**
  * Whose bubble this is: the agent whose page you are on, else Condor.
  *
@@ -34,6 +37,22 @@ export function normalizeAgentSlug(slug: string | null | undefined): string {
  * specialist that happens to share its name.
  */
 export function bubbleAgentSlug(pathname: string): string {
-  const m = pathname.match(/^\/agents\/([^/]+)/);
+  const m = pathname.match(AGENT_PAGE);
   return normalizeAgentSlug(m ? decodeURIComponent(m[1]) : "");
+}
+
+/**
+ * Is this an agent's own page — the route where the bubble's bound agent and
+ * the workspace's conversation are the same counterpart?
+ *
+ * Not answerable from `bubbleAgentSlug(pathname) !== ""`, and that is the
+ * whole reason this exists: normalization collapses `/agents/condor` onto the
+ * empty slug, which is also what `/bots` and `/portfolio` produce. The two
+ * must not be confused — on an agent page the bubble adopts the live
+ * conversation with that agent, and off it the bubble deliberately does not
+ * (FEAT-059: a quick question from /bots must not land in a deep specialist
+ * chat).
+ */
+export function isAgentPage(pathname: string): boolean {
+  return AGENT_PAGE.test(pathname);
 }
