@@ -1,35 +1,32 @@
 import { useQuery } from "@tanstack/react-query";
 import {
   Activity,
-  ArrowUpRight,
   Bot,
   BrainCircuit,
-  ChevronDown,
   ClipboardList,
-  MessageSquare,
   PanelLeftClose,
   PanelLeftOpen,
-  Plus,
   ShieldAlert,
   Wallet,
-  Zap,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 
-import { deriveAgentStatus } from "@/components/agent/agentStatus";
 import {
   BrainPicker,
   type BrainSelection,
 } from "@/components/chat/BrainPicker";
 import { ChatInput } from "@/components/chat/ChatInput";
+import { ChatRail } from "@/components/chat/ChatRail";
 import { ChatSessionIdentity } from "@/components/chat/ChatSessionIdentity";
 import { ChatThread } from "@/components/chat/ChatThread";
 import { ContextDock } from "@/components/chat/ContextDock";
-import { ConversationList } from "@/components/chat/ConversationList";
 import { SessionTabs } from "@/components/chat/SessionTabs";
+import {
+  WorkspacePaneOutlet,
+  WorkspacePaneProvider,
+} from "@/components/chat/WorkspacePane";
 import { Starters, type Starter } from "@/components/chat/Starters";
-import { AnchoredMenu } from "@/components/ui/AnchoredMenu";
 import { useBrainSwitch } from "@/hooks/useBrainSwitch";
 import { useChat, useSessionOptions } from "@/hooks/useChat";
 import { useServer } from "@/hooks/useServer";
@@ -234,7 +231,6 @@ export function AgentChatTab() {
   );
   const openConversation = useCallback(
     (meta: ConversationMeta) => {
-      setRailOpen(false);
       chat.resumeConversation(meta.id, {
         agent_key: meta.agent_key,
         server_name: meta.server_name || undefined,
@@ -243,6 +239,16 @@ export function AgentChatTab() {
     },
     [chat.resumeConversation],
   );
+  // The rail says who was picked and the tab remembers it, because the hero it
+  // colours is the tab's, not the rail's.
+  const onTalk = useCallback(
+    (slug: string, agent: AgentSummary | null, fresh?: boolean) => {
+      setPendingAgent(agent);
+      talkTo(slug, fresh ? { intent: "fresh" } : undefined);
+    },
+    [talkTo],
+  );
+  const closeRail = useCallback(() => setRailOpen(false), []);
 
   const boundAgent = activeSlot?.info.agent_slug
     ? agents.find((a) => a.slug === activeSlot.info.agent_slug)
@@ -272,373 +278,148 @@ export function AgentChatTab() {
   const agentName = (slug: string) =>
     agents.find((a) => a.slug === slug)?.name || "Condor";
 
-  // Condor is in the registry like every other Agent (FEAT-033), but it is not
-  // a specialist you bind: you get it by binding nothing, which is what the
-  // empty slug means everywhere else here. So it is lifted out of the list and
-  // rendered once, at the top, as the row it has always been — reading its name
-  // and description off its own AGENT.md rather than repeating them here.
-  const condor = agents.find((a) => a.slug === CHAT_SLUG);
-  const specialists = agents.filter((a) => a.slug !== CHAT_SLUG);
-
-  const liveAgents = specialists.filter(
-    (a) => deriveAgentStatus(a) === "running",
-  );
   const runningTasks = (delegationData?.delegations ?? []).filter(
     (d) => d.status === "running",
   ).length;
 
   return (
-    <div className="flex h-full min-h-0">
-      {/* ── Rail ── */}
-      <aside
-        className={`${
-          railOpen ? "flex" : "hidden"
-        } absolute inset-y-0 left-0 z-30 w-[260px] shrink-0 flex-col border-r border-[var(--color-border)] bg-[var(--color-bg)] md:relative md:flex`}
-      >
-        {/* What is looping right now, and the way into it. */}
-        <LiveStrip agents={liveAgents} runningTasks={runningTasks} />
-
-        {/* Who you can talk to */}
-        <div className="border-b border-[var(--color-border)] py-1">
-          <div className="px-3 pb-1 pt-1.5 text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
-            Agents
-          </div>
-          <RailRow
-            label={condor?.name || "Condor"}
-            icon={<MessageSquare className="h-3 w-3 shrink-0" />}
-            active={!!activeSlot && !activeSlot.info.agent_slug}
-            title={condor?.description || "General trading assistant"}
-            onClick={() => {
-              setPendingAgent(null);
-              talkTo("");
-            }}
-            newTitle={`New chat with ${condor?.name || "Condor"}`}
-            onNew={() => {
-              setPendingAgent(null);
-              talkTo("", { intent: "fresh" });
-            }}
-          />
-          {specialists.map((agent) => (
-            <RailRow
-              key={agent.slug}
-              label={agent.name}
-              icon={
-                <Bot className="h-3 w-3 shrink-0 text-[var(--color-accent)]" />
-              }
-              live={deriveAgentStatus(agent) === "running"}
-              active={activeSlot?.info.agent_slug === agent.slug}
-              title={agent.description || agent.name}
-              onClick={() => {
-                setPendingAgent(agent);
-                talkTo(agent.slug);
-              }}
-              newTitle={`New chat with ${agent.name}`}
-              onNew={() => {
-                setPendingAgent(agent);
-                talkTo(agent.slug, { intent: "fresh" });
-              }}
-            />
-          ))}
-        </div>
-
-        {/* What you already said — the rail's own list, in flow */}
-        <ConversationList
+    <WorkspacePaneProvider>
+      <div className="flex h-full min-h-0">
+        <ChatRail
+          agents={agents}
+          runningTasks={runningTasks}
+          activeSlug={activeSlot?.info.agent_slug || ""}
+          hasSession={!!activeSlot}
           liveIds={liveIds}
           activeId={activeSlot?.info.conversation_id || chat.activeSlotId}
-          // "New chat" means a fresh one with whoever is selected — Condor
-          // only when Condor is who you are pointing at.
+          open={railOpen}
+          onClose={closeRail}
+          onTalk={onTalk}
           onNew={openFresh}
-          onOpen={openConversation}
+          onOpenConversation={openConversation}
         />
-      </aside>
 
-      {/* ── Conversation, and what it set in motion ──
-          `relative` so the dock overlays the transcript below `xl` rather than
-          escaping to the page, the mirror of what the rail does below `md`. */}
-      <div className="relative flex min-w-0 flex-1">
-        <div className="flex min-w-0 flex-1 flex-col">
-          {/* Which sessions are live, and who is answering in this one — one
-              row, because the active tab and the identity name the same chat. */}
-          <div className="flex shrink-0 items-center gap-2 border-b border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2">
-            <button
-              onClick={() => setRailOpen((v) => !v)}
-              className="rounded p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)] md:hidden"
-              title={railOpen ? "Hide conversations" : "Show conversations"}
-            >
-              {railOpen ? (
-                <PanelLeftClose className="h-4 w-4" />
-              ) : (
-                <PanelLeftOpen className="h-4 w-4" />
-              )}
-            </button>
-            {/* Every live session, including the ones answering in the
-                background — switching, and the only way to stop one. */}
-            <SessionTabs
-              slots={chat.slots}
-              agents={modelOptions}
-              activeSlotId={chat.activeSlotId}
-              isSlotStreaming={chat.isSlotStreaming}
-              permissionRequests={chat.permissionRequests}
-              onSelect={(slotId) => chat.setActiveSlotId(slotId)}
-              // The session ends; the transcript stays on the server, so the
-              // conversation is still in the rail and clicking it respawns it.
-              onClose={(slotId) => chat.destroySession(slotId)}
-              className="min-w-0 flex-1"
-            />
-            {/* Who is answering and where it runs, plus the way out to the
-                agent's own page — pinned right, whatever the strip does. */}
-            <div className="ml-auto flex shrink-0 items-center gap-2">
-              <ChatSessionIdentity
-                slot={activeSlot}
-                agents={modelOptions}
-                customProviders={customProviders}
-                agentBindings={agentBindings}
-                isStreaming={isActiveStreaming}
-                onSelectBrain={switchBrain}
-                onSelectServer={(name) => {
-                  if (activeSlot) switchServer(activeSlot.info.slot_id, name);
-                }}
-              />
-              {/* What the thing on the other side of this conversation
-                  actually knows — its brain, playbooks, memories, tools,
-                  strategies and routines — and the place to change any of it.
-                  It goes straight to the agent's page: this used to open a
-                  sheet over the chat that carried a link to that same page,
-                  which is one door too many for the one destination. The
-                  conversation is held by the shell's socket, not by this
-                  route, so it is still there when you come back — and the
-                  page's own Chat button is that way back. */}
-              <Link
-                to={`/agents/${encodeURIComponent(knowledgeSlug)}`}
-                className="flex items-center gap-1 rounded px-1.5 py-1 text-[11px] text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-primary)]"
-                title={`What ${agentName(knowledgeSlug)} knows and can do — read and edit`}
+        {/* ── Conversation, and what it set in motion ──
+            `relative` so the dock overlays the transcript below `xl` rather than
+            escaping to the page, the mirror of what the rail does below `md`. */}
+        <div className="relative flex min-w-0 flex-1">
+          <div className="flex min-w-0 flex-1 flex-col">
+            {/* Which sessions are live, and who is answering in this one — one
+                row, because the active tab and the identity name the same chat. */}
+            <div className="flex shrink-0 items-center gap-2 border-b border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2">
+              <button
+                onClick={() => setRailOpen((v) => !v)}
+                className="rounded p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)] md:hidden"
+                title={railOpen ? "Hide conversations" : "Show conversations"}
               >
-                <BrainCircuit className="h-3.5 w-3.5" />
-                <span className="hidden sm:inline">Knowledge</span>
-              </Link>
+                {railOpen ? (
+                  <PanelLeftClose className="h-4 w-4" />
+                ) : (
+                  <PanelLeftOpen className="h-4 w-4" />
+                )}
+              </button>
+              {/* Every live session, including the ones answering in the
+                  background — switching, and the only way to stop one. */}
+              <SessionTabs
+                slots={chat.slots}
+                agents={modelOptions}
+                activeSlotId={chat.activeSlotId}
+                isSlotStreaming={chat.isSlotStreaming}
+                permissionRequests={chat.permissionRequests}
+                onSelect={(slotId) => chat.setActiveSlotId(slotId)}
+                // The session ends; the transcript stays on the server, so the
+                // conversation is still in the rail and clicking it respawns it.
+                onClose={(slotId) => chat.destroySession(slotId)}
+                className="min-w-0 flex-1"
+              />
+              {/* Who is answering and where it runs, plus the way out to the
+                  agent's own page — pinned right, whatever the strip does. */}
+              <div className="ml-auto flex shrink-0 items-center gap-2">
+                <ChatSessionIdentity
+                  slot={activeSlot}
+                  agents={modelOptions}
+                  customProviders={customProviders}
+                  agentBindings={agentBindings}
+                  isStreaming={isActiveStreaming}
+                  onSelectBrain={switchBrain}
+                  onSelectServer={(name) => {
+                    if (activeSlot) switchServer(activeSlot.info.slot_id, name);
+                  }}
+                />
+                {/* What the thing on the other side of this conversation
+                    actually knows — its brain, playbooks, memories, tools,
+                    strategies and routines — and the place to change any of it.
+                    It goes straight to the agent's page: this used to open a
+                    sheet over the chat that carried a link to that same page,
+                    which is one door too many for the one destination. The
+                    conversation is held by the shell's socket, not by this
+                    route, so it is still there when you come back — and the
+                    page's own Chat button is that way back. */}
+                <Link
+                  to={`/agents/${encodeURIComponent(knowledgeSlug)}`}
+                  className="flex items-center gap-1 rounded px-1.5 py-1 text-[11px] text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-primary)]"
+                  title={`What ${agentName(knowledgeSlug)} knows and can do — read and edit`}
+                >
+                  <BrainCircuit className="h-3.5 w-3.5" />
+                  <span className="hidden sm:inline">Knowledge</span>
+                </Link>
+              </div>
             </div>
+
+            <ChatThread
+              slot={activeSlot}
+              agents={modelOptions}
+              isStreaming={isActiveStreaming}
+              isQueued={chat.isSlotQueued(chat.activeSlotId)}
+              permissionRequest={chat.permissionFor(chat.activeSlotId)}
+              onResolvePermission={chat.resolvePermission}
+              switchError={switchError}
+              onDismissSwitchError={dismissSwitchError}
+              onSend={(text) =>
+                activeSlot && chat.sendMessage(activeSlot.info.slot_id, text)
+              }
+              onAbort={() =>
+                chat.activeSlotId && chat.abortPrompt(chat.activeSlotId)
+              }
+              boundAgent={boundAgent}
+              // The hero's openers, again — a session that spawned but was never
+              // written in is as empty as no session at all.
+              starters={slotStarters}
+              columnClassName="mx-auto w-full max-w-3xl"
+              autoFocus
+              emptyState={
+                <Hero
+                  agent={heroAgent}
+                  modelOptions={modelOptions}
+                  customProviders={customProviders}
+                  agentBindings={agentBindings}
+                  selectedKey={pendingAgentKey ?? defaultAgent}
+                  onAsk={(text) => talkTo(heroAgent?.slug || "", { text })}
+                  // The picker moves the model and nothing else; who answers is
+                  // the rail's question, and it is already answered by the row
+                  // the user highlighted.
+                  onPickBrain={(sel) => {
+                    if (sel.agentKey !== undefined)
+                      setPendingAgentKey(sel.agentKey);
+                  }}
+                />
+              }
+            />
           </div>
 
-          <ChatThread
-            slot={activeSlot}
-            agents={modelOptions}
-            isStreaming={isActiveStreaming}
-            isQueued={chat.isSlotQueued(chat.activeSlotId)}
-            permissionRequest={chat.permissionFor(chat.activeSlotId)}
-            onResolvePermission={chat.resolvePermission}
-            switchError={switchError}
-            onDismissSwitchError={dismissSwitchError}
-            onSend={(text) =>
-              activeSlot && chat.sendMessage(activeSlot.info.slot_id, text)
-            }
-            onAbort={() =>
-              chat.activeSlotId && chat.abortPrompt(chat.activeSlotId)
-            }
-            boundAgent={boundAgent}
-            // The hero's openers, again — a session that spawned but was never
-            // written in is as empty as no session at all.
-            starters={slotStarters}
-            columnClassName="mx-auto w-full max-w-3xl"
-            autoFocus
-            emptyState={
-              <Hero
-                agent={heroAgent}
-                modelOptions={modelOptions}
-                customProviders={customProviders}
-                agentBindings={agentBindings}
-                selectedKey={pendingAgentKey ?? defaultAgent}
-                onAsk={(text) => talkTo(heroAgent?.slug || "", { text })}
-                // The picker moves the model and nothing else; who answers is
-                // the rail's question, and it is already answered by the row
-                // the user highlighted.
-                onPickBrain={(sel) => {
-                  if (sel.agentKey !== undefined)
-                    setPendingAgentKey(sel.agentKey);
-                }}
-              />
-            }
+          {/* What a dock row opened, beside the conversation rather than on top
+              of it — so the agent that produced the report is still there to
+              ask about it. */}
+          <WorkspacePaneOutlet />
+
+          <ContextDock
+            delegations={delegationData?.delegations ?? []}
+            conversationId={activeSlot?.info.conversation_id || ""}
+            agentSlug={activeSlot?.info.agent_slug || ""}
           />
         </div>
-
-        <ContextDock
-          delegations={delegationData?.delegations ?? []}
-          conversationId={activeSlot?.info.conversation_id || ""}
-          agentSlug={activeSlot?.info.agent_slug || ""}
-        />
       </div>
-    </div>
-  );
-}
-
-// ── Live strip ──
-
-/**
- * What is looping, and the door into it.
- *
- * Strategies live on an agent's own page, so that is where this points — one
- * live agent is a direct link, several open a short list. This replaced the
- * fleet grid: the grid's only unique job was showing which agents are running,
- * and a line at the top of the rail does that without a second page.
- */
-function LiveStrip({
-  agents,
-  runningTasks,
-}: {
-  agents: AgentSummary[];
-  runningTasks: number;
-}) {
-  const [open, setOpen] = useState(false);
-  // State, not a ref: the portalled panel only gets coordinates once a render
-  // has handed it the resolved trigger element.
-  const [anchor, setAnchor] = useState<HTMLElement | null>(null);
-  const tasks =
-    runningTasks > 0
-      ? ` · ${runningTasks} task${runningTasks !== 1 ? "s" : ""}`
-      : "";
-
-  const icon = (
-    <Zap
-      className={`h-3 w-3 shrink-0 ${agents.length > 0 ? "text-emerald-400" : ""}`}
-    />
-  );
-  const rowClass =
-    "flex min-w-0 flex-1 items-center gap-2 text-left text-[11px] text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-text)]";
-
-  return (
-    <div className="flex items-center gap-2 border-b border-[var(--color-border)] px-3 py-2">
-      {agents.length === 0 ? (
-        <span className={rowClass}>
-          {icon}
-          <span className="min-w-0 flex-1 truncate">
-            Nothing looping{tasks}
-          </span>
-        </span>
-      ) : agents.length === 1 ? (
-        <Link
-          to={`/agents/${agents[0].slug}`}
-          className={rowClass}
-          title={`Open ${agents[0].name}'s strategies`}
-        >
-          {icon}
-          <span className="min-w-0 flex-1 truncate">
-            {agents[0].name} live{tasks}
-          </span>
-          <ArrowUpRight className="h-3 w-3 shrink-0" />
-        </Link>
-      ) : (
-        <button
-          ref={setAnchor}
-          onClick={() => setOpen((v) => !v)}
-          className={rowClass}
-          aria-expanded={open}
-          aria-haspopup="listbox"
-          title="Open a running agent's strategies"
-        >
-          {icon}
-          <span className="min-w-0 flex-1 truncate">
-            {agents.length} live{tasks}
-          </span>
-          <ChevronDown className="h-3 w-3 shrink-0" />
-        </button>
-      )}
-
-      {/* Portalled, not `absolute`: the rail sits in the chat workspace, whose
-          `main` is `overflow-hidden`, so an absolute panel was clipped at the
-          strip's own border with no scroll to recover it. The old `fixed
-          inset-0` backdrop also swallowed the click that followed. */}
-      <AnchoredMenu
-        anchor={anchor}
-        open={open}
-        onClose={() => setOpen(false)}
-        align="left"
-        maxHeight={288}
-        role="listbox"
-        className="flex w-[236px] flex-col py-0.5"
-      >
-        {agents.map((agent) => (
-          <Link
-            key={agent.slug}
-            to={`/agents/${agent.slug}`}
-            onClick={() => setOpen(false)}
-            className="flex items-center gap-2 px-2.5 py-1.5 text-xs text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]"
-          >
-            <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400" />
-            <span className="min-w-0 flex-1 truncate">{agent.name}</span>
-            <ArrowUpRight className="h-3 w-3 shrink-0 text-[var(--color-text-muted)]" />
-          </Link>
-        ))}
-      </AnchoredMenu>
-    </div>
-  );
-}
-
-// ── Rail row ──
-
-function RailRow({
-  label,
-  icon,
-  live,
-  active,
-  title,
-  onClick,
-  onNew,
-  newTitle,
-}: {
-  label: string;
-  icon: React.ReactNode;
-  live?: boolean;
-  active?: boolean;
-  title?: string;
-  onClick: () => void;
-  /** Start a *second* conversation with this row, rather than focusing one. */
-  onNew?: () => void;
-  newTitle?: string;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      title={title}
-      className={`group flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors ${
-        active
-          ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
-          : "text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]"
-      }`}
-    >
-      {icon}
-      <span className="min-w-0 flex-1 truncate">{label}</span>
-      {live && (
-        <span
-          className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400"
-          title="Loop running"
-        />
-      )}
-      {onNew && (
-        // A span, not a button: this sits inside the row's own button. Below
-        // `md` the rail is a touch overlay where hover does not exist, so the
-        // `+` stays visible there and only hides behind hover on the desktop
-        // rail. The same shape the panel's session tabs use to close.
-        <span
-          role="button"
-          tabIndex={0}
-          aria-label={newTitle}
-          title={newTitle}
-          onClick={(e) => {
-            e.stopPropagation();
-            onNew();
-          }}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" || e.key === " ") {
-              e.preventDefault();
-              e.stopPropagation();
-              onNew();
-            }
-          }}
-          className="shrink-0 rounded p-0.5 text-[var(--color-text-muted)] transition-opacity hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)] focus-visible:opacity-100 group-focus-within:opacity-100 md:opacity-0 md:group-hover:opacity-100"
-        >
-          <Plus className="h-3 w-3" />
-        </span>
-      )}
-    </button>
+    </WorkspacePaneProvider>
   );
 }
 

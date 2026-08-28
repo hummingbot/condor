@@ -1,6 +1,8 @@
 import { Maximize2, Minimize2, X } from "lucide-react";
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 
+import { useWorkspacePane } from "@/hooks/useWorkspacePane";
 import { useEscapeKey } from "@/hooks/useEscapeKey";
 
 /** Remembers the last zen choice, so a reader who wants the whole window keeps it. */
@@ -12,16 +14,20 @@ function readZen(fallback: boolean): boolean {
 }
 
 /**
- * The dock's read view: one full-screen overlay for whatever a dock row points
- * at — a delegation's result, a routine run's report.
+ * The dock's read view: whatever a dock row points at — a delegation's result,
+ * a routine run's report.
  *
  * The dock is 300px wide and deliberately terse; anything worth reading in full
  * opens here instead of squeezing into the column.
  *
- * Two sizes. The windowed one floats over the chat, which is right for a result
- * you glance at and dismiss. Zen takes the entire viewport — no backdrop, no
- * rounding, no inset — because a report is a page laid out for a page's width,
- * and 90vh of it behind a border reads as a cramped preview of the real thing.
+ * Three sizes. Beside a conversation (see {@link useWorkspacePane}) it opens as
+ * the workspace's right-hand pane: the transcript keeps the left of the window
+ * and stays live, so the report and the agent that produced it are on screen at
+ * once and you can keep asking about what you are reading. Away from a
+ * conversation — an agent's own page — there is nothing to sit beside, so it
+ * opens windowed, floating over the page for a result you glance at and
+ * dismiss. Zen, from either, takes the entire viewport: no backdrop, no
+ * rounding, no inset, for when reading is the whole job.
  */
 export function WorkspaceSheet({
   title,
@@ -39,16 +45,38 @@ export function WorkspaceSheet({
    * content that brings its own page, i.e. a report's iframe.
    */
   bleed?: boolean;
-  /** Open at full viewport, for content that wants the room (reports). */
+  /**
+   * Open at full viewport, for content that wants the room (reports). Ignored
+   * beside a conversation, where the pane is already the room — a report that
+   * blanked the chat is the thing the pane exists to stop.
+   */
   defaultZen?: boolean;
   children: React.ReactNode;
 }) {
-  const [zen, setZen] = useState(() => readZen(defaultZen));
+  const pane = useWorkspacePane();
+  const canSplit = !!pane?.canSplit;
+  const [zen, setZen] = useState(() =>
+    canSplit ? false : readZen(defaultZen),
+  );
+  const split = canSplit && !zen;
 
-  useEscapeKey(true, onClose);
+  // Hold the pane open for as long as this sheet is in it, so the outlet takes
+  // width exactly while something occupies it.
+  const claim = pane?.claim;
+  useEffect(() => {
+    if (!split || !claim) return;
+    return claim();
+  }, [split, claim]);
+
+  // Esc closes, as it does for every overlay here. Not in the pane, though: the
+  // chat beside it is live and Esc belongs to whatever has focus there.
+  useEscapeKey(!split, onClose);
 
   // `f` toggles, matching the report browser's own fullscreen key. Ignored while
-  // a field has focus — the chat composer is still mounted behind the sheet.
+  // a field has focus — the chat composer is still mounted beside the sheet.
+  // The choice only persists for the overlay: in the pane, "make this one full
+  // screen" is about the page you are reading now, and remembering it would
+  // quietly cover the chat again on the next report.
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.key !== "f" || e.metaKey || e.ctrlKey || e.altKey) return;
@@ -59,20 +87,93 @@ export function WorkspaceSheet({
       )
         return;
       setZen((z) => {
-        localStorage.setItem(ZEN_KEY, z ? "0" : "1");
+        if (!canSplit) localStorage.setItem(ZEN_KEY, z ? "0" : "1");
         return !z;
       });
       e.preventDefault();
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, []);
+  }, [canSplit]);
 
   const toggleZen = () =>
     setZen((z) => {
-      localStorage.setItem(ZEN_KEY, z ? "0" : "1");
+      if (!canSplit) localStorage.setItem(ZEN_KEY, z ? "0" : "1");
       return !z;
     });
+
+  const chrome = (
+    <>
+      <div
+        className={`flex shrink-0 items-center justify-between gap-3 border-b border-[var(--color-border)] ${
+          zen || split ? "px-4 py-2" : "px-6 py-3"
+        }`}
+      >
+        <div className="min-w-0">
+          <h2 className="truncate text-sm font-semibold text-[var(--color-text)]">
+            {title}
+          </h2>
+          {subtitle && (
+            <p className="truncate text-[11px] text-[var(--color-text-muted)]">
+              {subtitle}
+            </p>
+          )}
+        </div>
+        <div className="flex shrink-0 items-center gap-1">
+          <button
+            onClick={toggleZen}
+            className="rounded p-1 text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+            title={
+              zen
+                ? canSplit
+                  ? "Back beside the chat (f)"
+                  : "Exit full screen (f)"
+                : "Full screen (f)"
+            }
+          >
+            {zen ? (
+              <Minimize2 className="h-4 w-4" />
+            ) : (
+              <Maximize2 className="h-4 w-4" />
+            )}
+          </button>
+          <button
+            onClick={onClose}
+            className="rounded p-1 text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+            title={split ? "Close" : "Close (Esc)"}
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+      </div>
+      {/* Zen and the pane both drop the sheet's max width, which is right for a
+          report and wrong for prose — so text keeps its measure by centering
+          instead. */}
+      <div
+        className={
+          bleed
+            ? "flex min-h-0 flex-1 flex-col overflow-hidden"
+            : `min-h-0 flex-1 overflow-auto px-6 py-4 ${
+                zen || split ? "mx-auto w-full max-w-5xl" : ""
+              }`
+        }
+      >
+        {children}
+      </div>
+    </>
+  );
+
+  if (split) {
+    // No host on the very first render of a provider still mounting; the outlet
+    // is always mounted, so the next one has one.
+    if (!pane?.host) return null;
+    return createPortal(
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+        {chrome}
+      </div>,
+      pane.host,
+    );
+  }
 
   return (
     <div
@@ -94,55 +195,7 @@ export function WorkspaceSheet({
               }`
         }
       >
-        <div
-          className={`flex shrink-0 items-center justify-between gap-3 border-b border-[var(--color-border)] ${
-            zen ? "px-4 py-2" : "px-6 py-3"
-          }`}
-        >
-          <div className="min-w-0">
-            <h2 className="truncate text-sm font-semibold text-[var(--color-text)]">
-              {title}
-            </h2>
-            {subtitle && (
-              <p className="truncate text-[11px] text-[var(--color-text-muted)]">
-                {subtitle}
-              </p>
-            )}
-          </div>
-          <div className="flex shrink-0 items-center gap-1">
-            <button
-              onClick={toggleZen}
-              className="rounded p-1 text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-              title={zen ? "Exit full screen (f)" : "Full screen (f)"}
-            >
-              {zen ? (
-                <Minimize2 className="h-4 w-4" />
-              ) : (
-                <Maximize2 className="h-4 w-4" />
-              )}
-            </button>
-            <button
-              onClick={onClose}
-              className="rounded p-1 text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-              title="Close (Esc)"
-            >
-              <X className="h-4 w-4" />
-            </button>
-          </div>
-        </div>
-        {/* Zen drops the sheet's max width, which is right for a report and
-            wrong for prose — so text keeps its measure by centering instead. */}
-        <div
-          className={
-            bleed
-              ? "flex min-h-0 flex-1 flex-col overflow-hidden"
-              : `min-h-0 flex-1 overflow-auto px-6 py-4 ${
-                  zen ? "mx-auto w-full max-w-5xl" : ""
-                }`
-          }
-        >
-          {children}
-        </div>
+        {chrome}
       </div>
     </div>
   );
