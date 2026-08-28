@@ -34,9 +34,6 @@ class _ConfigManager:
     def has_server_access(self, user_id, name, min_permission=None):
         return user_id in _ACCESS.get(name, set())
 
-    async def get_client(self, name):
-        raise RuntimeError("no live api in tests")
-
 
 def _envelope(net_pnl=12.5, pair="BTC-USDT"):
     return {
@@ -103,17 +100,16 @@ def test_the_archive_can_still_be_scoped_to_one_server(store):
 
 def test_no_listing_response_carries_a_payload(store):
     """The defect this feature closes: a 1 GB response to fill six columns."""
-    body = _archive(ALICE)
+    body = _archive(ALICE, server="local")
     assert "processed_data" not in json.dumps(body)
 
-    tasks = asyncio.run(bt_routes.list_backtest_tasks("local", user=ALICE))
-    assert [t["task_id"] for t in tasks] == ["task-local"]
-    assert "result" not in tasks[0]
-    assert "processed_data" not in json.dumps(tasks)
-    assert tasks[0]["metrics"]["net_pnl_quote"] == 1.0
+    rows = body["summaries"]
+    assert [r["task_id"] for r in rows] == ["task-local"]
+    assert "result" not in rows[0]
+    assert rows[0]["metrics"]["net_pnl_quote"] == 1.0
     # The six fields the list actually renders all survive the trim.
-    assert tasks[0]["config"]["config"]["trading_pair"] == "BTC-USDT"
-    assert tasks[0]["config"]["backtesting_resolution"] == "1m"
+    assert rows[0]["config"]["config"]["trading_pair"] == "BTC-USDT"
+    assert rows[0]["config"]["backtesting_resolution"] == "1m"
 
 
 def test_the_task_list_stays_far_under_the_wire_budget(store):
@@ -121,9 +117,9 @@ def test_the_task_list_stays_far_under_the_wire_budget(store):
     for i in range(22):
         store.save_result("local", f"bulk-{i}", _envelope())
 
-    tasks = asyncio.run(bt_routes.list_backtest_tasks("local", user=ALICE))
-    assert len(tasks) == 23
-    assert len(json.dumps(tasks).encode()) < 100_000
+    rows = _archive(ALICE, server="local")["summaries"]
+    assert len(rows) == 23
+    assert len(json.dumps(rows).encode()) < 100_000
 
 
 # ── id-addressed reads ────────────────────────────────────────────────────────

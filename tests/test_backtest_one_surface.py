@@ -228,12 +228,17 @@ def test_both_routines_are_published_to_every_assistant(monkeypatch):
 # ── One coercion ──────────────────────────────────────────────────────────────
 
 
-def test_the_web_route_shares_the_one_coercion():
-    """No private copy survives in the web route (nor in the routine)."""
+def test_the_web_route_has_no_coercion_left_to_share():
+    """FEAT-039 gave the web route the one coercion; FEAT-076 took the caller.
+
+    The route no longer submits anything, so it needs neither the shared helper
+    nor a private copy -- and `core` still owns the only one there is.
+    """
     import condor.web.routes.backtesting as web
 
-    assert web.coerce_controller_config is core.coerce_controller_config
+    assert not hasattr(web, "coerce_controller_config")
     assert not hasattr(web, "_coerce_numeric_values")
+    assert callable(core.coerce_controller_config)
 
 
 def test_coercion_reaches_the_engine(routine):

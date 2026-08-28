@@ -46,10 +46,6 @@ function tsToShortDate(ts: number): string {
   });
 }
 
-function dateToTs(dateStr: string): number {
-  return Math.floor(new Date(dateStr).getTime() / 1000);
-}
-
 function toDateInputValue(ts: number): string {
   return new Date(ts * 1000).toISOString().slice(0, 10);
 }
@@ -621,13 +617,14 @@ export function BacktestingTab() {
     }
   }, [toast]);
 
-  // Submit the current form as a backtest task
+  // Submit the current form as a backtest run. The dates go through as dates:
+  // the routine speaks `YYYY-MM-DD`, which is what the form already holds.
   const submitBacktest = useCallback(() => {
     submitMutation.mutate(
       {
         config_id: configId,
-        start_time: dateToTs(startDate),
-        end_time: dateToTs(endDate),
+        start_date: startDate,
+        end_date: endDate,
         backtesting_resolution: resolution,
         trade_cost: parseFloat(tradeCost),
       },

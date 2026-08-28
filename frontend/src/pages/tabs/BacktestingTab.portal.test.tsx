@@ -55,10 +55,13 @@ vi.mock("@/hooks/useTheme", () => ({ useTheme: () => ({ theme: "dark" }) }));
 vi.mock("@/lib/api", () => ({
   api: {
     getAvailableConfigs: vi.fn(async () => CONFIGS),
-    listBacktestTasks: vi.fn(async () => []),
-    getBacktestTask: vi.fn(async () => null),
-    submitBacktest: vi.fn(async () => ({})),
-    deleteBacktestTask: vi.fn(async () => ({})),
+    getRoutineInstances: vi.fn(async () => []),
+    getRoutineInstance: vi.fn(async () => null),
+    listBacktestArchive: vi.fn(async () => ({ migrated: true, summaries: [] })),
+    getArchivedBacktest: vi.fn(async () => null),
+    runRoutine: vi.fn(async () => ({ instance_id: "i-1" })),
+    stopRoutineInstance: vi.fn(async () => ({ stopped: true })),
+    deleteArchivedBacktest: vi.fn(async () => ({})),
   },
 }));
 

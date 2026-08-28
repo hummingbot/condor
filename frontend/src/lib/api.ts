@@ -1012,6 +1012,8 @@ export interface RoutineInstance {
   config: Record<string, unknown>;
   status: string;
   source: string;
+  /** The server the run was launched against. */
+  server_name?: string;
   /**
    * The conversation that asked for this run, "" for the scheduler, the
    * dashboard and Telegram. Set since ARCH-089, and what scopes a run to a
@@ -1543,6 +1545,12 @@ export interface BacktestTask {
 export interface BacktestSummary {
   task_id: string;
   status: "pending" | "running" | "completed" | "failed" | "unknown";
+  /**
+   * Set while the run is still a routine instance rather than a stored result
+   * (FEAT-076). Such a row is keyed by its instance id, because a backtest has
+   * no `task_id` until the engine has accepted it.
+   */
+  instance_id?: string;
   /** Which server ran it. Provenance, not a scope: the archive spans servers. */
   server?: string;
   config?: Record<string, unknown>;
@@ -2520,29 +2528,6 @@ export const api = {
 
   // ── Backtesting ──
 
-  submitBacktest: (
-    server: string,
-    data: {
-      config_id: string;
-      start_time: number;
-      end_time: number;
-      backtesting_resolution?: string;
-      trade_cost?: number;
-    },
-  ) =>
-    apiFetch<BacktestTask>(
-      `/api/v1/servers/${encodeURIComponent(server)}/backtesting/tasks`,
-      {
-        method: "POST",
-        body: JSON.stringify(data),
-      },
-    ),
-
-  listBacktestTasks: (server: string) =>
-    apiFetch<BacktestSummary[]>(
-      `/api/v1/servers/${encodeURIComponent(server)}/backtesting/tasks`,
-    ),
-
   /** Every saved run the caller can reach, across every server. */
   listBacktestArchive: (server?: string) =>
     apiFetch<BacktestArchiveResponse>(
@@ -2558,17 +2543,6 @@ export const api = {
   deleteArchivedBacktest: (taskId: string) =>
     apiFetch<Record<string, unknown>>(
       `/api/v1/backtesting/archive/${encodeURIComponent(taskId)}`,
-      { method: "DELETE" },
-    ),
-
-  getBacktestTask: (server: string, taskId: string) =>
-    apiFetch<BacktestTask>(
-      `/api/v1/servers/${encodeURIComponent(server)}/backtesting/tasks/${encodeURIComponent(taskId)}`,
-    ),
-
-  deleteBacktestTask: (server: string, taskId: string) =>
-    apiFetch<Record<string, unknown>>(
-      `/api/v1/servers/${encodeURIComponent(server)}/backtesting/tasks/${encodeURIComponent(taskId)}`,
       { method: "DELETE" },
     ),
 
