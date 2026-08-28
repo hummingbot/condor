@@ -643,6 +643,18 @@ async def startup(application: Application) -> None:
 
     asyncio.get_event_loop().run_in_executor(None, _get_model, DEFAULT_MODEL)
 
+    # Same reason, different work: bringing the backtest archive to its tiered
+    # v2 layout (FEAT-075) parses and re-compresses every saved payload, which
+    # is minutes on a store measured in gigabytes. It is deliberately NOT part
+    # of ``ensure_migrated`` above -- that one runs before the first update is
+    # served. The archive degrades honestly while this runs (summaries report
+    # ``status: unknown`` and the dashboard says "indexing"), so the tab stays
+    # usable throughout, and the work is per-file and idempotent so a crash
+    # resumes rather than restarts.
+    from condor.backtest_store import migrate_backtest_archive
+
+    asyncio.get_event_loop().run_in_executor(None, migrate_backtest_archive)
+
     # Whatever this process pushes at users from here on. In local mode there is
     # no Telegram to push to, so it is the dashboard bell (FEAT-048) instead —
     # which is what keeps the documented "context.bot is never None" contract

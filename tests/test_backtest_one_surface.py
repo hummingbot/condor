@@ -298,7 +298,7 @@ def test_an_agent_run_is_filed_under_the_server_it_was_launched_with(store, rout
     routine(_completed("task-agent"), context=context)
 
     assert store.get_result("task-agent")["server"] == SERVER
-    assert store.list_results(SERVER), "an agent's run must be rankable too"
+    assert store.list_summaries(SERVER), "an agent's run must be rankable too"
 
 
 def test_the_task_id_is_reported(routine):

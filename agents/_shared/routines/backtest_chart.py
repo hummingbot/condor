@@ -120,6 +120,26 @@ def _format_date(ts) -> str:
     return datetime.fromtimestamp(float(ts), tz=timezone.utc).strftime("%Y-%m-%d")
 
 
+def _retention_days() -> int:
+    from condor.backtest_store import retention_days
+
+    return retention_days()
+
+
+def _is_saved(task_id: str) -> bool:
+    """Whether a chart could be rendered from the store, by id or unique prefix.
+
+    A miss is exactly the case that has to fall through to the server before it
+    gives up. A run whose payload was pruned is a miss too -- asking the server
+    for it once is the only thing that could bring the chart back.
+    """
+    from condor.backtest_store import get_backtest_store
+
+    store = get_backtest_store()
+    resolved = store.resolve_task_id(task_id)
+    return isinstance(resolved, str) and store.has_payload(resolved)
+
+
 def _load_saved_task(task_id: str) -> tuple[dict, "Config"] | str:
     """Load a stored backtest result, or return an error message.
 
@@ -129,19 +149,27 @@ def _load_saved_task(task_id: str) -> tuple[dict, "Config"] | str:
     from condor.backtest_store import get_backtest_store
 
     store = get_backtest_store()
-    known = list(store._index.keys())
+    resolved = store.resolve_task_id(task_id)
 
-    if task_id not in known:
-        matches = [t for t in known if t.startswith(task_id)]
-        if not matches:
-            saved = ", ".join(sorted(known)) or "none"
-            return f"No saved backtest matching '{task_id}'. Saved: {saved}"
-        if len(matches) > 1:
-            return f"'{task_id}' is ambiguous: {', '.join(sorted(matches))}"
-        task_id = matches[0]
+    if resolved is None:
+        saved = ", ".join(sorted(store.known_task_ids())) or "none"
+        return f"No saved backtest matching '{task_id}'. Saved: {saved}"
+    if isinstance(resolved, list):
+        return f"'{task_id}' is ambiguous: {', '.join(resolved)}"
+    task_id = resolved
 
     task = store.get_result(task_id)
-    if not task or task.get("status") != "completed" or not task.get("result"):
+    if task is None:
+        # The run is real and its metrics are still in the index; only the
+        # candles are gone. Saying "no saved backtest" here would be a lie.
+        summary = store.get_summary(task_id) or {}
+        ran_on = _format_date(summary.get("completed_at")) or "an earlier date"
+        return (
+            f"Backtest '{task_id}' was run on {ran_on} but its chart data has "
+            f"expired (payloads are kept {_retention_days()} days). Its metrics "
+            "are still available in backtest_compare."
+        )
+    if task.get("status") != "completed" or not task.get("result"):
         return f"Backtest '{task_id}' has no completed result to render"
 
     task_config = task.get("config") or {}

@@ -61,20 +61,32 @@ def test_delete_task_same_server_deletes(store):
     assert store.get_result("task-b") is None
 
 
-def test_delete_saved_cross_server_is_404_and_keeps_record(store):
+def test_a_pruned_task_stays_scoped_to_its_server(store):
+    """Retention must not open a hole: no payload is not the same as no owner.
+
+    The ownership check used to read the payload, so once FEAT-075 let a
+    payload expire, "no saved result" and "someone else's saved result" became
+    the same answer -- and the second one is a cross-server delete.
+    """
+    store.prune_payloads(0)  # keep the summary, drop the payload by hand
+    store._unlink_payload("task-b")
+
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(bt_routes.delete_saved_result("server-a", "task-b", user=None))
+        asyncio.run(bt_routes.delete_backtest_task("server-a", "task-b", user=None))
     assert exc.value.status_code == 404
-    assert store.get_result("task-b") is not None
+    assert store.get_summary("task-b") is not None
 
-
-def test_delete_saved_same_server_deletes(store):
-    result = asyncio.run(bt_routes.delete_saved_result("server-b", "task-b", user=None))
-    assert result == {"deleted": True}
-    assert store.get_result("task-b") is None
-
-
-def test_delete_saved_unknown_id_is_404(store):
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(bt_routes.delete_saved_result("server-b", "missing", user=None))
+        asyncio.run(bt_routes.get_backtest_task("server-a", "task-b", user=None))
     assert exc.value.status_code == 404
+
+
+def test_an_expired_payload_on_the_right_server_is_409_not_404(store):
+    """The distinct state: the run is real, its chart is not."""
+    store._unlink_payload("task-b")
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(bt_routes.get_backtest_task("server-b", "task-b", user=None))
+    assert exc.value.status_code == 409
+    assert exc.value.detail["reason"] == "payload_expired"
+    assert exc.value.detail["summary"]["task_id"] == "task-b"

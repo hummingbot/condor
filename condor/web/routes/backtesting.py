@@ -7,9 +7,9 @@ from pydantic import BaseModel
 
 from condor.backtest_store import get_backtest_store
 from condor.backtesting import coerce_controller_config, normalize_backtest_task
-from condor.web.auth import require_server_access
+from condor.web.auth import get_current_user, require_server_access
 from condor.web.models import WebUser
-from config_manager import get_config_manager
+from config_manager import ServerPermission, get_config_manager
 
 logger = logging.getLogger(__name__)
 
@@ -67,34 +67,20 @@ async def list_backtest_tasks(
     except Exception:
         live_tasks = []
 
-    # Merge with saved results
-    live_ids = (
-        {t["task_id"] for t in live_tasks} if isinstance(live_tasks, list) else set()
+    if not isinstance(live_tasks, list):
+        live_tasks = []
+
+    # Summaries, never payloads. This response used to carry every saved
+    # envelope's ``result`` -- 1 GB for 22 runs on ``local`` -- to fill a list
+    # that reads six fields per row, and the dashboard polls it every 5s.
+    entries = [_live_entry(task, store) for task in live_tasks]
+    live_ids = {t.get("task_id") for t in live_tasks}
+    entries.extend(
+        _summary_entry(summary)
+        for summary in store.list_summaries(name)
+        if summary["task_id"] not in live_ids
     )
-    saved = store.list_results(name)
-
-    # Add saved results that aren't in live tasks
-    for entry in saved:
-        if entry["task_id"] not in live_ids:
-            live_tasks.append(
-                {
-                    "task_id": entry["task_id"],
-                    "status": "completed",
-                    "result": entry.get("result"),
-                    "config": entry.get("config"),
-                    "saved": True,
-                }
-            )
-
-    # Mark live completed tasks as saved if they are
-    if isinstance(live_tasks, list):
-        for task in live_tasks:
-            tid = task.get("task_id", "")
-            if store.get_result(tid):
-                task["saved"] = True
-            normalize_backtest_task(task)
-
-    return live_tasks
+    return entries
 
 
 @router.get("/servers/{name}/backtesting/tasks/{task_id}")
@@ -121,12 +107,20 @@ async def get_backtest_task(
     except Exception:
         pass
 
-    # Fallback to saved (only if the result belongs to this server)
-    saved = store.get_result(task_id)
-    if saved and saved.get("server") == name:
-        return normalize_backtest_task({**saved, "saved": True})
+    # Fallback to saved. Ownership is checked against the *summary*: it is the
+    # tier that survives retention, so a pruned run stays scoped to its server
+    # instead of falling through the "no payload" hole into everyone's reach.
+    summary = store.get_summary(task_id)
+    if summary is None or summary.get("server") != name:
+        raise HTTPException(status_code=404, detail="Task not found")
 
-    raise HTTPException(status_code=404, detail="Task not found")
+    saved = store.get_result(task_id)
+    if saved is None:
+        raise HTTPException(
+            status_code=409,
+            detail={"reason": "payload_expired", "summary": _summary_entry(summary)},
+        )
+    return normalize_backtest_task({**saved, "saved": True})
 
 
 @router.delete("/servers/{name}/backtesting/tasks/{task_id}")
@@ -138,8 +132,8 @@ async def delete_backtest_task(
     cm = get_config_manager()
 
     store = get_backtest_store()
-    saved = store.get_result(task_id)
-    if saved is not None and saved.get("server") != name:
+    summary = store.get_summary(task_id)
+    if summary is not None and summary.get("server") != name:
         # Result belongs to another server; don't let this server delete it
         raise HTTPException(status_code=404, detail="Task not found")
     store.delete_result(task_id)
@@ -152,29 +146,140 @@ async def delete_backtest_task(
         return {"deleted": True}
 
 
-# ── Saved results endpoints ──
+# ── Archive (server-agnostic) ──
+#
+# Not under ``/servers/{name}``: a backtest is a computation over candles, and
+# the server is only the box that ran it. Once listing reads the index instead
+# of every payload, scoping by server is a filter rather than a precondition --
+# so the archive spans every server the caller can reach and authorization
+# *filters* rather than gates. The per-server ``/saved`` pair these replace had
+# zero consumers.
 
 
-@router.get("/servers/{name}/backtesting/saved")
-async def list_saved_results(
-    name: str,
-    user: WebUser = Depends(require_server_access),
+def _accessible_servers(user_id: int) -> set[str]:
+    cm = get_config_manager()
+    return {
+        name
+        for name in cm.list_servers()
+        if cm.has_server_access(user_id, name, ServerPermission.TRADER)
+    }
+
+
+def _summary_entry(summary: dict) -> dict:
+    """A summary in the shape the task list already speaks.
+
+    The dashboard reads a run's parameters out of ``config.config``; rebuilding
+    that nesting here is what lets one renderer handle a live task and an
+    archived summary without branching, and it still costs ~1.6 KB because the
+    payload never enters it.
+    """
+    return {
+        "task_id": summary["task_id"],
+        "status": summary.get("status") or "completed",
+        "server": summary.get("server", ""),
+        "config": {
+            "config": {
+                "id": summary.get("config_id", ""),
+                "controller_name": summary.get("controller", ""),
+                "trading_pair": summary.get("trading_pair", ""),
+                "connector_name": summary.get("connector", ""),
+            },
+            "start_time": summary.get("start_time"),
+            "end_time": summary.get("end_time"),
+            "backtesting_resolution": summary.get("resolution", ""),
+            "trade_cost": summary.get("trade_cost"),
+        },
+        "metrics": summary.get("metrics") or {},
+        "has_payload": summary.get("has_payload", True),
+        "created_at": summary.get("created_at"),
+        "completed_at": summary.get("completed_at"),
+        "error": summary.get("error"),
+        "saved": True,
+    }
+
+
+def _live_entry(task: dict, store) -> dict:
+    """A server-side task, stripped to the same listing tier.
+
+    ``result`` is dropped here too: a completed live task carries the same
+    hundred-megabyte payload the store does, and the list needs its metrics,
+    not its candles.
+    """
+    if not isinstance(task, dict):
+        return task
+    entry = {k: v for k, v in task.items() if k != "result"}
+    result = task.get("result")
+    metrics = result.get("results") if isinstance(result, dict) else None
+    entry["metrics"] = metrics if isinstance(metrics, dict) else {}
+    summary = store.get_summary(task.get("task_id", ""))
+    if summary is not None:
+        entry["saved"] = True
+        entry["server"] = summary.get("server", "")
+        entry["has_payload"] = summary.get("has_payload", True)
+    return entry
+
+
+@router.get("/backtesting/archive")
+async def list_backtest_archive(
+    server: str | None = None,
+    user: WebUser = Depends(get_current_user),
 ):
-
     store = get_backtest_store()
-    return [normalize_backtest_task(entry) for entry in store.list_results(name)]
+    allowed = _accessible_servers(user.id)
+    # A summary with no server provenance belongs to no server's access list and
+    # so is reachable by nobody -- which is exactly how the per-server listing it
+    # replaces behaved, since no server name ever equalled "".
+    return {
+        "migrated": store.migrated,
+        "summaries": [
+            _summary_entry(s)
+            for s in store.list_summaries(server)
+            if s.get("server") in allowed
+        ],
+    }
 
 
-@router.delete("/servers/{name}/backtesting/saved/{task_id}")
-async def delete_saved_result(
-    name: str,
+def _archived_or_404(task_id: str, user: WebUser) -> dict:
+    """The summary for ``task_id``, or 404 if the caller cannot reach its server.
+
+    404 rather than 403 on purpose: an id-addressed route that answers "you may
+    not see this" tells an unauthorized caller the run exists. Same rule
+    SEC-197 established for ``get_backtest_task``, applied to a route whose
+    server arrives from the record instead of the path.
+    """
+    summary = get_backtest_store().get_summary(task_id)
+    if summary is None:
+        raise HTTPException(status_code=404, detail="Backtest not found")
+    server = summary.get("server") or ""
+    if not server or server not in _accessible_servers(user.id):
+        raise HTTPException(status_code=404, detail="Backtest not found")
+    return summary
+
+
+@router.get("/backtesting/archive/{task_id}")
+async def get_archived_backtest(
     task_id: str,
-    user: WebUser = Depends(require_server_access),
+    user: WebUser = Depends(get_current_user),
 ):
-
+    summary = _archived_or_404(task_id, user)
     store = get_backtest_store()
-    saved = store.get_result(task_id)
-    if saved is None or saved.get("server") != name:
-        raise HTTPException(status_code=404, detail="Saved result not found")
-    store.delete_result(task_id)
+
+    payload = store.get_result(task_id)
+    if payload is None:
+        # Not "not found": the run is real and its metrics are right here. The
+        # UI has to be able to say "chart expired" rather than deny the run.
+        raise HTTPException(
+            status_code=409,
+            detail={"reason": "payload_expired", "summary": _summary_entry(summary)},
+        )
+    return normalize_backtest_task({**payload, "task_id": task_id, "saved": True})
+
+
+@router.delete("/backtesting/archive/{task_id}")
+async def delete_archived_backtest(
+    task_id: str,
+    user: WebUser = Depends(get_current_user),
+):
+    _archived_or_404(task_id, user)
+    get_backtest_store().delete_result(task_id)
     return {"deleted": True}
