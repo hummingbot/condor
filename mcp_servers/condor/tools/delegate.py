@@ -40,8 +40,9 @@ def _next_steps(session_key: str) -> str:
     surface = (session_key or "").split(":", 1)[0].strip().lower()
     where = TRACK_TELEGRAM if surface == "tg" else TRACK_DASHBOARD
     return (
-        "Running in the background — the user is notified automatically "
-        f"when it finishes. Tell them {where}. You can poll it yourself "
+        "Running in the background — the user is notified automatically when it "
+        "finishes, and the outcome is written into this conversation and shown "
+        f"here as it lands. Tell them {where}. You can poll it yourself "
         'with delegate(action="get", task_id="<id>"). Do NOT invent any '
         "other status command (e.g. there is no /task command)."
     )

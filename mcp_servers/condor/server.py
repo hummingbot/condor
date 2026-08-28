@@ -368,11 +368,15 @@ async def delegate(
         task: The one-off task, in plain language (for start).
         task_id: Delegation id returned by start (for get/stop).
         on_complete: What this conversation gets when the task ends (for start).
-            "notify" (default) pings the user with the result and nothing else —
-            the result is FOR THE HUMAN. "resume" additionally hands the result
-            back to you in a new turn of THIS conversation, so use it when you
-            intend to do something with the result yourself ("research X, then
-            draft the summary"). With "resume" you must end your turn after
+            "notify" (default) pings the user with the result AND writes the
+            outcome into THIS conversation — recorded in the transcript and shown
+            in the chat as it lands, so an already-open session sees it without a
+            reload. What it does not do is give you a turn: the result is there
+            for the human to read, not handed back to you. So never tell the user
+            the result will not reach the chat. "resume" additionally hands the
+            result back to you in a new turn of THIS conversation, so use it when
+            you intend to do something with the result yourself ("research X,
+            then draft the summary"). With "resume" you must end your turn after
             starting the task: you will be woken with the answer.
 
     Returns:

@@ -151,8 +151,9 @@ def max_records_for(kind: str) -> int:
 
 # What happens to the conversation that asked for the work when the task ends.
 #
-# ``notify`` -- Telegram push + transcript note, and nothing else. The outcome is
-#              for the human to read.
+# ``notify`` -- Telegram push, transcript note, and the same line shown in the
+#              live conversation (CORR-262/263). The outcome is for the human to
+#              read; the agent gets no turn.
 # ``resume`` -- additionally wake the live session with the result so the agent
 #              continues whatever it was going to do with it (FEAT-034).
 ON_COMPLETE_NOTIFY = "notify"

@@ -32,8 +32,9 @@ def _hint(session_key: str) -> str:
 
 
 TODAYS_TELEGRAM_WORDING = (
-    "Running in the background — the user is notified automatically "
-    "when it finishes. Tell them they can check progress anytime with "
+    "Running in the background — the user is notified automatically when it "
+    "finishes, and the outcome is written into this conversation and shown "
+    "here as it lands. Tell them they can check progress anytime with "
     "the /delegations command in Telegram. You can poll it yourself "
     'with delegate(action="get", task_id="<id>"). Do NOT invent any '
     "other status command (e.g. there is no /task command)."
@@ -123,6 +124,35 @@ def test_the_tool_docstring_no_longer_asserts_telegram_only_tracking():
     assert "dashboard" in doc
     assert "The user tracks a delegation in Telegram with the /delegations" not in doc
     assert "Never invent a status command" in doc
+
+
+# ── Half 1b: the hint and the docstring describe what actually happens ──
+
+
+@pytest.mark.parametrize("key", ["tg:42", "web:7:slot-1", ""])
+def test_the_hint_says_the_outcome_lands_in_this_conversation(key):
+    """CORR-264: the model relays this verbatim, and it used to say only that
+    the *user* is pinged -- so the model told the user to stop looking here."""
+    hint = _hint(key)
+
+    assert "written into this conversation" in hint
+    assert "shown here as it lands" in hint
+
+
+def test_the_docstring_no_longer_says_notify_does_nothing_else():
+    """The parameter description CORR-262 left behind. ``notify`` pings the
+    user *and* writes the outcome back into this conversation; what it does
+    not do is hand the model a turn."""
+    from mcp_servers.condor.server import delegate as delegate_tool_fn
+
+    doc = " ".join((delegate_tool_fn.__doc__ or "").split())
+
+    assert "pings the user with the result and nothing else" not in doc
+    assert "nothing else" not in doc
+    assert "writes the outcome into THIS conversation" in doc
+    # The contrast that still holds: "resume" is the one that gives you a turn.
+    assert "does not do is give you a turn" in doc
+    assert "hands the result back to you in a new turn" in doc
 
 
 # ── Half 2: the finished task shows itself in a live session ──
@@ -382,3 +412,36 @@ def test_a_finished_task_shows_itself_after_its_session_was_reaped(
             "kind": "delegation",
         }
     ]
+
+
+def test_notify_does_exactly_what_the_docstring_now_promises(
+    tmp_path, monkeypatch, deliveries
+):
+    """The documented surface, checked against reality (CORR-264).
+
+    The docstring and the ``next_steps`` hint are the only description of this
+    path the model ever reads, and they drifted from it twice. Four claims, one
+    delegation: the user is pinged, the outcome is recorded in the conversation,
+    the same line is shown in it live, and no model turn is spent.
+    """
+    notes, resumes = deliveries
+    _agent_root(tmp_path, monkeypatch)
+    monkeypatch.setattr(consult_module, "_run_agent_to_completion", _answer())
+
+    recorded: list[tuple] = []
+
+    from condor.runtime import conversations as conversations_module
+
+    def fake_record_system(user_id, conversation_id, text, kind=""):
+        recorded.append((user_id, conversation_id, text, kind))
+
+    monkeypatch.setattr(conversations_module, "record_system", fake_record_system)
+
+    bot = _FakeBot()
+    dt = _run_delegation(bot=bot, conversation_id="conv-1", session_key="web:1:conv-1")
+    outcome = delegate_module._completion_text(dt)
+
+    assert bot.messages == [outcome]
+    assert recorded == [(1, "conv-1", outcome, "delegation")]
+    assert [n["text"] for n in notes] == [outcome]
+    assert resumes == []
