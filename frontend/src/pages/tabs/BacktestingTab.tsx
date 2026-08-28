@@ -19,6 +19,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { IChartApi } from "lightweight-charts";
 
 import { NoServerCard } from "@/components/NoServerCard";
+import { AnchoredMenu } from "@/components/ui/AnchoredMenu";
 import { useBacktest } from "@/hooks/useBacktest";
 import { useServer } from "@/hooks/useServer";
 import { useTheme } from "@/hooks/useTheme";
@@ -566,6 +567,13 @@ export function BacktestingTab() {
   );
   const [configDropdownOpen, setConfigDropdownOpen] = useState(false);
   const [configSearch, setConfigSearch] = useState("");
+  // State, not a ref: `AnchoredMenu` has to re-measure once the trigger exists,
+  // and a ref assignment does not re-render (see BrainPicker).
+  const [configAnchor, setConfigAnchor] = useState<HTMLElement | null>(null);
+  const closeConfigDropdown = useCallback(() => {
+    setConfigDropdownOpen(false);
+    setConfigSearch("");
+  }, []);
   const [activePreset, setActivePreset] = useState<string | null>("1W");
   const [toast, setToast] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
@@ -688,8 +696,9 @@ export function BacktestingTab() {
             <label className="mb-1.5 block text-xs font-medium text-[var(--color-text-muted)] uppercase tracking-wide">
               Controller Config
             </label>
-            <div className="relative">
+            <div>
               <button
+                ref={setConfigAnchor}
                 onClick={() => setConfigDropdownOpen((o) => !o)}
                 aria-expanded={configDropdownOpen}
                 aria-haspopup="listbox"
@@ -709,62 +718,62 @@ export function BacktestingTab() {
                 </div>
                 <ChevronDown className={`h-4 w-4 shrink-0 ml-2 text-[var(--color-text-muted)] transition-transform ${configDropdownOpen ? "rotate-180" : ""}`} />
               </button>
-              {configDropdownOpen && configsData && (
-                <>
-                  <div className="fixed inset-0 z-10" onClick={() => { setConfigDropdownOpen(false); setConfigSearch(""); }} />
-                  <div className="absolute left-0 top-full z-20 mt-1 w-[420px] max-w-[90vw] rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] shadow-xl">
-                    <div className="p-2 border-b border-[var(--color-border)]">
-                      <input
-                        type="text"
-                        value={configSearch}
-                        onChange={(e) => setConfigSearch(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Escape") {
-                            setConfigDropdownOpen(false);
-                            setConfigSearch("");
-                          }
-                        }}
-                        placeholder="Search configs..."
-                        autoFocus
-                        className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1.5 text-sm focus:border-[var(--color-primary)] focus:outline-none"
-                      />
-                    </div>
-                    <div className="max-h-72 overflow-auto">
-                      {configsData.configs.length === 0 && (
-                        <div className="px-3 py-4 text-xs text-center text-[var(--color-text-muted)]">
-                          No configs available
-                        </div>
-                      )}
-                      {groupedConfigs && Object.entries(groupedConfigs).map(([group, configs]) => (
-                        <div key={group}>
-                          <div className="sticky top-0 bg-[var(--color-bg)] px-3 py-1.5 text-[10px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider border-b border-[var(--color-border)]">
-                            {group}
-                          </div>
-                          {configs.map((c) => (
-                            <button
-                              key={c.id}
-                              onClick={() => {
-                                setConfigId(c.id);
-                                setConfigDropdownOpen(false);
-                                setConfigSearch("");
-                              }}
-                              className={`flex w-full flex-col gap-0.5 px-3 py-2.5 text-left transition-colors hover:bg-[var(--color-surface-hover)] ${
-                                c.id === configId ? "bg-[var(--color-primary)]/10" : ""
-                              }`}
-                            >
-                              <span className={`text-sm font-medium truncate ${c.id === configId ? "text-[var(--color-primary)]" : ""}`}>
-                                {c.id}
-                              </span>
-                              <span className="text-[11px] text-[var(--color-text-muted)] truncate">
-                                {c.connector_name} &middot; {c.trading_pair}
-                              </span>
-                            </button>
-                          ))}
-                        </div>
-                      ))}
-                    </div>
+              {configsData && (
+                // Portalled rather than `absolute` + a `fixed inset-0` backdrop:
+                // that backdrop ate the click that dismissed it, so reaching the
+                // next control (Time Range, a preset, Run) cost two clicks.
+                <AnchoredMenu
+                  anchor={configAnchor}
+                  open={configDropdownOpen}
+                  onClose={closeConfigDropdown}
+                  align="left"
+                  matchAnchorWidth="min"
+                  className="w-[420px] max-w-[90vw]"
+                >
+                  <div className="p-2 border-b border-[var(--color-border)]">
+                    <input
+                      type="text"
+                      value={configSearch}
+                      onChange={(e) => setConfigSearch(e.target.value)}
+                      placeholder="Search configs..."
+                      autoFocus
+                      className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1.5 text-sm focus:border-[var(--color-primary)] focus:outline-none"
+                    />
                   </div>
-                </>
+                  <div className="max-h-72 overflow-auto">
+                    {configsData.configs.length === 0 && (
+                      <div className="px-3 py-4 text-xs text-center text-[var(--color-text-muted)]">
+                        No configs available
+                      </div>
+                    )}
+                    {groupedConfigs && Object.entries(groupedConfigs).map(([group, configs]) => (
+                      <div key={group}>
+                        <div className="sticky top-0 bg-[var(--color-bg)] px-3 py-1.5 text-[10px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider border-b border-[var(--color-border)]">
+                          {group}
+                        </div>
+                        {configs.map((c) => (
+                          <button
+                            key={c.id}
+                            onClick={() => {
+                              setConfigId(c.id);
+                              closeConfigDropdown();
+                            }}
+                            className={`flex w-full flex-col gap-0.5 px-3 py-2.5 text-left transition-colors hover:bg-[var(--color-surface-hover)] ${
+                              c.id === configId ? "bg-[var(--color-primary)]/10" : ""
+                            }`}
+                          >
+                            <span className={`text-sm font-medium truncate ${c.id === configId ? "text-[var(--color-primary)]" : ""}`}>
+                              {c.id}
+                            </span>
+                            <span className="text-[11px] text-[var(--color-text-muted)] truncate">
+                              {c.connector_name} &middot; {c.trading_pair}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                </AnchoredMenu>
               )}
             </div>
           </div>
