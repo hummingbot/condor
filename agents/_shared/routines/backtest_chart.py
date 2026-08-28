@@ -13,7 +13,7 @@ from plotly.subplots import make_subplots
 from pydantic import BaseModel, Field
 from telegram.ext import ContextTypes
 
-from condor.backtesting import run_and_save
+from condor.backtesting import fetch_and_save, run_and_save
 from config_manager import get_client
 from routines.base import RoutineResult
 
@@ -965,7 +965,9 @@ def generate_chart(
     pnl_color = COLORS["green"] if net_pnl >= 0 else COLORS["red"]
     pnl_sign = "+" if net_pnl >= 0 else ""
     sharpe_color = (
-        COLORS["green"] if sharpe >= 1 else (COLORS["yellow"] if sharpe >= 0 else COLORS["red"])
+        COLORS["green"]
+        if sharpe >= 1
+        else (COLORS["yellow"] if sharpe >= 0 else COLORS["red"])
     )
 
     title_text = (
@@ -1039,9 +1041,13 @@ def generate_chart(
 
     fig.update_yaxes(title_text="Price", title_font=dict(size=10), row=1, col=1)
     if has_macd:
-        fig.update_yaxes(title_text="MACD", title_font=dict(size=10), row=row_idx["macd"], col=1)
+        fig.update_yaxes(
+            title_text="MACD", title_font=dict(size=10), row=row_idx["macd"], col=1
+        )
     if has_pnl:
-        fig.update_yaxes(title_text="PnL ($)", title_font=dict(size=10), row=row_idx["pnl"], col=1)
+        fig.update_yaxes(
+            title_text="PnL ($)", title_font=dict(size=10), row=row_idx["pnl"], col=1
+        )
         fig.update_yaxes(
             title_text="Vol ($)",
             title_font=dict(size=10),
@@ -1052,7 +1058,10 @@ def generate_chart(
         )
     if has_position:
         fig.update_yaxes(
-            title_text="Position", title_font=dict(size=10), row=row_idx["position"], col=1
+            title_text="Position",
+            title_font=dict(size=10),
+            row=row_idx["position"],
+            col=1,
         )
 
     if not render_png:
@@ -1257,11 +1266,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> RoutineResu
         if not _is_saved(task_id):
             client = await get_client(chat_id, context=context)
             if client:
-                try:
-                    from condor.backtesting import fetch_and_save as _fetch_and_save
-                    await _fetch_and_save(client, _server_name(chat_id, context), task_id)
-                except ImportError:
-                    pass  # older runtime without fetch_and_save — miss is handled below
+                await fetch_and_save(client, _server_name(chat_id, context), task_id)
         loaded = _load_saved_task(task_id)
         if isinstance(loaded, str):
             return RoutineResult(text=loaded)
