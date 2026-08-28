@@ -275,7 +275,7 @@ async def _poll_until_done(instance_id: str) -> dict | None:
 
 
 async def _submit_oneshot(
-    name: str, config: dict | None, target: str | None
+    name: str, config: dict | None, target: str | None, on_complete: str = "notify"
 ) -> tuple[str | None, dict | None]:
     """Resolve, validate and start a one-shot run. Returns (instance_id, error).
 
@@ -286,7 +286,9 @@ async def _submit_oneshot(
     the dock while it runs, fires its post-run hooks, and keeps its result.
 
     Shared by the blocking ``run`` and the fire-and-forget ``run_async`` — the
-    two differ only in whether they then wait for the instance to finish.
+    two differ in whether they then wait for the instance to finish, and
+    therefore in ``on_complete``: a caller that waits reads the outcome itself,
+    a caller that does not is woken with it.
     """
     routine, agent = _resolve_with_owner(name, target)
     if not routine:
@@ -316,6 +318,7 @@ async def _submit_oneshot(
                     "server_name": settings.active_server,
                     "config": config or {},
                     "attribute_to": agent,
+                    "on_complete": on_complete,
                 }
             ),
         )
@@ -326,6 +329,52 @@ async def _submit_oneshot(
     if not instance_id:
         return None, {"error": f"Routine '{name}' did not start: {started}"}
     return instance_id, None
+
+
+async def _hand_off(name: str, instance_id: str) -> dict:
+    """Stop waiting on a run and arrange to be woken by it instead.
+
+    Reached when a blocking ``run`` outlives its budget. The run itself is fine —
+    it belongs to the main process — so the only question is how its outcome
+    gets back here, and the answer must not be "poll it": an agent that keeps
+    asking spends a model turn per check and, when the answer finally arrives as
+    a passive note, is no longer listening for it.
+
+    Best-effort by construction. If the hand-off cannot be arranged the caller
+    still gets a usable instruction, just the slower one.
+    """
+    try:
+        handoff = await call_main_api(
+            "POST",
+            f"/routines/instances/{instance_id}/on_complete",
+            {"on_complete": "resume"},
+        )
+    except APIError:
+        handoff = None
+
+    if isinstance(handoff, dict) and handoff.get("applied"):
+        return {
+            "started": True,
+            "instance_id": instance_id,
+            "routine": name,
+            "note": (
+                f"'{name}' outlived the {int(_RUN_BUDGET)}s wait, so it was handed "
+                "off to the background. Do NOT poll it and do NOT wait: you will "
+                "be given its result automatically when it finishes. Tell the "
+                "user it is running and END YOUR TURN."
+            ),
+        }
+
+    # Either it finished while we were arranging the hand-off, or nobody is
+    # listening for a wake on this session. Reading it back is then the honest
+    # instruction — it is one call, not a loop.
+    return {
+        "error": f"Routine '{name}' timed out after {int(_RUN_BUDGET)}s. It is "
+        "still running — read its result later with "
+        f"action='get_instance', name='{instance_id}'. For a routine you "
+        "know is slow, submit it with action='run_async' instead of waiting.",
+        "instance_id": instance_id,
+    }
 
 
 def _result_payload(name: str, instance_id: str, inst: dict) -> dict:
@@ -361,13 +410,7 @@ async def run_routine(
         return {"error": f"Routine '{name}' could not be run: {e}"}
 
     if inst is None:
-        return {
-            "error": f"Routine '{name}' timed out after {int(_RUN_BUDGET)}s. It is "
-            "still running — read its result later with "
-            f"action='get_instance', name='{instance_id}'. For a routine you "
-            "know is slow, submit it with action='run_async' instead of waiting.",
-            "instance_id": instance_id,
-        }
+        return await _hand_off(name, instance_id)
     if inst.get("error"):
         return {
             "error": f"Routine '{name}' failed: {inst['error']}",
@@ -385,9 +428,19 @@ async def run_async_routine(
     The counterpart of ``run`` for work that outlives a turn (a backtest, a long
     scan): the run is a normal instance in the main process, so it keeps going,
     fires its post-run hooks and stores its result whether or not anyone is
-    waiting. Read it back later with ``get_instance``.
+    waiting.
+
+    Submitted with ``on_complete="resume"``, so the finished run hands its
+    outcome *back* to this conversation as a turn (see
+    ``RoutineStore._report_run``). That is what makes "do not wait" a real
+    instruction rather than a polite one: before it, the only way an agent could
+    act on a background run was to keep asking whether it was done, which spends
+    a turn per check and still misses the answer, because the completion note
+    was passive and woke nobody.
     """
-    instance_id, error = await _submit_oneshot(name, config, target)
+    instance_id, error = await _submit_oneshot(
+        name, config, target, on_complete="resume"
+    )
     if error:
         return error
 
@@ -396,8 +449,11 @@ async def run_async_routine(
         "instance_id": instance_id,
         "routine": name,
         "note": (
-            "Running in the background — do NOT wait for it. Read the result "
-            f"later with action='get_instance', name='{instance_id}'."
+            "Running in the background. Do NOT poll it and do NOT wait: you "
+            "will be given its result automatically when it finishes. Tell the "
+            "user it is running and END YOUR TURN. Only if the user asks about "
+            "it later, read it with action='get_instance', "
+            f"name='{instance_id}'."
         ),
     }
 
@@ -419,11 +475,19 @@ async def get_instance(instance_id: str) -> dict:
 
     name = inst.get("routine_name") or instance_id
     if inst.get("status") == "running":
+        note = "Still running."
+        if inst.get("on_complete") == "resume":
+            note += (
+                " You will be given its result automatically when it finishes — "
+                "do not check again, just end your turn."
+            )
+        else:
+            note += " Check again later, but not in a loop: report to the user."
         return {
             "name": name,
             "instance_id": instance_id,
             "status": "running",
-            "note": "Still running — check again later.",
+            "note": note,
         }
     if inst.get("error"):
         return {

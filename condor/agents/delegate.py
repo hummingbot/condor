@@ -65,6 +65,12 @@ from condor.agents.run_records import (
     TERMINAL_STATES,
     record_run,
 )
+from condor.runtime.wake import (  # noqa: F401 - re-exported, see ON_COMPLETE below
+    ON_COMPLETE_CHOICES,
+    ON_COMPLETE_NOTIFY,
+    ON_COMPLETE_RESUME,
+    normalize_on_complete,
+)
 
 log = logging.getLogger(__name__)
 
@@ -149,16 +155,11 @@ def max_records_for(kind: str) -> int:
     return MAX_CONSULT_RECORDS if kind == KIND_CONSULT else MAX_DELEGATION_RECORDS
 
 
-# What happens to the conversation that asked for the work when the task ends.
-#
-# ``notify`` -- Telegram push, transcript note, and the same line shown in the
-#              live conversation (CORR-262/263). The outcome is for the human to
-#              read; the agent gets no turn.
-# ``resume`` -- additionally wake the live session with the result so the agent
-#              continues whatever it was going to do with it (FEAT-034).
-ON_COMPLETE_NOTIFY = "notify"
-ON_COMPLETE_RESUME = "resume"
-ON_COMPLETE_CHOICES = (ON_COMPLETE_NOTIFY, ON_COMPLETE_RESUME)
+# What happens to the conversation that asked for the work when the task ends --
+# ``notify`` (bell, transcript note, pushed line) or ``resume`` (the agent is
+# woken with the outcome and continues from it). Defined in ``runtime.wake``,
+# which owns both deliveries and is shared with the routine runner; re-exported
+# here because this module is where callers have always read them from.
 
 
 @dataclass
@@ -258,9 +259,7 @@ async def start_delegation(
         # Unknown values degrade to the passive behaviour rather than raising
         # here: the caller-facing validation is at the edges (the MCP tool and
         # the route), and a delegation must not fail to *start* over a flag.
-        on_complete=(
-            on_complete if on_complete in ON_COMPLETE_CHOICES else ON_COMPLETE_NOTIFY
-        ),
+        on_complete=normalize_on_complete(on_complete),
     )
     _delegations[dt.task_id] = dt
     _record_delegation_status(dt)

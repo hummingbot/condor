@@ -248,3 +248,236 @@ def test_a_runner_with_no_session_sends_no_provenance(api, monkeypatch):
     asyncio.run(mcp_routines.run_async_routine("probe", {}))
 
     assert "session_key" not in api.posted
+
+
+# ── on_complete: a run an agent asked for wakes it instead of noting at it ──
+
+
+@pytest.fixture
+def woken(monkeypatch):
+    """Capture the turns a finished run drives into a live session."""
+    turns: list[dict] = []
+    from condor.runtime import wake
+
+    async def resume(**kwargs):
+        turns.append(kwargs)
+        return True
+
+    monkeypatch.setattr(wake, "resume_session", resume)
+    return turns
+
+
+def _resuming_store(session_key: str = "web:7:slot-1") -> RoutineStore:
+    store = RoutineStore()
+    store._instances["i1"] = store._new_instance_meta(
+        "probe",
+        {},
+        "srv",
+        7,
+        source="mcp",
+        conversation_id="conv-1",
+        session_key=session_key,
+        on_complete="resume",
+    )
+    return store
+
+
+def test_a_run_submitted_with_resume_wakes_the_agent_that_asked(woken, shown):
+    """The whole point: an agent that ended its turn is handed the outcome.
+
+    Before this it got the same passive note a human gets, which woke nobody —
+    so the only way to act on a background run was to poll it.
+    """
+    _run(_resuming_store(), _ok)
+
+    assert len(woken) == 1
+    assert woken[0]["session_key"] == "web:7:slot-1"
+    assert woken[0]["conversation_id"] == "conv-1"
+    assert woken[0]["kind"] == "resume"
+    assert "24 pairs scanned" in woken[0]["text"]
+    # Exactly one delivery: the wake already carries the outcome.
+    assert shown == []
+
+
+def test_a_failed_run_wakes_it_too(woken):
+    """A failure is what the agent most needs to hear: it can fix the config."""
+    _run(_resuming_store(), _boom)
+
+    assert len(woken) == 1
+    assert "no server" in woken[0]["text"]
+
+
+def test_the_wake_tells_the_agent_where_the_full_result_is(woken):
+    """The pushed summary is clipped, so the turn must name what to read."""
+    _run(_resuming_store(), _ok)
+
+    assert "get_instance" in woken[0]["text"]
+    assert "i1" in woken[0]["text"]
+
+
+def test_a_run_defaults_to_the_delivery_that_spends_nothing(woken, shown):
+    """The dashboard, the scheduler and Telegram must not start paying for turns."""
+    _run(_store("conv-1", "web:7:slot-1"), _ok)
+
+    assert woken == []
+    assert len(shown) == 1
+
+
+def test_a_wake_with_nobody_listening_falls_back_to_the_note(monkeypatch, shown):
+    """A closed tab must not lose an outcome it would previously have been shown."""
+    from condor.runtime import wake
+
+    async def nobody(**kwargs):
+        return False
+
+    monkeypatch.setattr(wake, "resume_session", nobody)
+
+    _run(_resuming_store(), _ok)
+
+    assert len(shown) == 1
+    assert shown[0]["kind"] == "routine"
+
+
+def test_a_wake_that_raises_does_not_cost_the_run_its_result(monkeypatch, shown):
+    """Delivery is best-effort; the run is not."""
+    from condor.runtime import wake
+
+    async def explode(**kwargs):
+        raise RuntimeError("session is gone")
+
+    monkeypatch.setattr(wake, "resume_session", explode)
+
+    meta = _run(_resuming_store(), _ok)
+
+    assert meta["status"] == "completed"
+    assert meta["last_result"] == "24 pairs scanned"
+    assert len(shown) == 1
+
+
+def test_a_run_with_no_session_behind_it_is_never_woken(woken, notes):
+    """``resume`` on a scheduled run has nothing to prompt — and must not try."""
+    store = RoutineStore()
+    store._instances["i1"] = store._new_instance_meta(
+        "probe",
+        {},
+        "srv",
+        7,
+        source="web",
+        conversation_id="conv-1",
+        on_complete="resume",
+    )
+    _run(store, _ok)
+
+    assert woken == []
+    assert len(notes) == 1
+
+
+# ── set_on_complete: a blocking run that ran out of patience ──
+
+
+def test_a_running_instance_can_be_converted_to_wake_its_caller():
+    store = _store("conv-1", "web:7:slot-1")
+
+    assert store.set_on_complete("i1", "resume") == "running"
+    assert store._instances["i1"]["on_complete"] == "resume"
+
+
+def test_a_finished_instance_is_never_converted():
+    """Otherwise the caller reads the result AND the agent is woken with it."""
+    store = _store("conv-1", "web:7:slot-1")
+    store._instances["i1"]["status"] = "completed"
+
+    assert store.set_on_complete("i1", "resume") == "completed"
+    assert store._instances["i1"]["on_complete"] == "notify"
+
+
+def test_converting_an_unknown_instance_reports_nothing_to_convert():
+    assert RoutineStore().set_on_complete("nope", "resume") is None
+
+
+# ── The MCP runner: which delivery each action asks for ──
+
+
+def test_run_async_asks_to_be_woken(api, monkeypatch):
+    _stub_routine(monkeypatch, continuous=False)
+    monkeypatch.setattr(mcp_routines.settings, "session_key", "web:7:slot-1")
+
+    out = asyncio.run(mcp_routines.run_async_routine("probe", {}))
+
+    assert api.posted["on_complete"] == "resume"
+    assert "END YOUR TURN" in out["note"]
+
+
+def test_a_blocking_run_reads_its_own_result(api, monkeypatch):
+    """It is still waiting, so waking it would deliver the same outcome twice."""
+    _stub_routine(monkeypatch, continuous=False)
+    monkeypatch.setattr(mcp_routines.settings, "session_key", "web:7:slot-1")
+
+    asyncio.run(mcp_routines.run_routine("probe", {}))
+
+    assert api.posted["on_complete"] == "notify"
+
+
+class _StuckAPI:
+    """A run that never leaves ``running`` — what the blocking budget is for."""
+
+    def __init__(self, applied: bool = True):
+        self.applied = applied
+        self.handed_off: dict | None = None
+
+    async def __call__(self, method, path, body=None):
+        if method == "POST" and path == "/routines/run":
+            return {"instance_id": "inst-1"}
+        if method == "POST" and path.endswith("/on_complete"):
+            self.handed_off = body or {}
+            return {"applied": self.applied, "status": "running"}
+        return {"instance_id": "inst-1", "status": "running"}
+
+
+def _run_with_no_patience(monkeypatch, api) -> dict:
+    _stub_routine(monkeypatch, continuous=False)
+    monkeypatch.setattr(mcp_routines, "call_main_api", api)
+    monkeypatch.setattr(mcp_routines.settings, "active_server", "srv")
+    monkeypatch.setattr(mcp_routines.settings, "session_key", "web:7:slot-1")
+    # Give up immediately instead of holding the suite for the real budget.
+    monkeypatch.setattr(mcp_routines, "_RUN_BUDGET", 0.0)
+    return asyncio.run(mcp_routines.run_routine("probe", {}))
+
+
+def test_a_blocking_run_that_outlives_its_budget_hands_off_instead_of_polling(
+    monkeypatch,
+):
+    api = _StuckAPI()
+
+    out = _run_with_no_patience(monkeypatch, api)
+
+    assert api.handed_off == {"on_complete": "resume"}
+    assert out["started"] is True
+    assert out["instance_id"] == "inst-1"
+    assert "END YOUR TURN" in out["note"]
+    assert "error" not in out
+
+
+def test_a_hand_off_that_could_not_be_arranged_says_how_to_read_it(monkeypatch):
+    """The run finished mid-hand-off, or nothing is listening: read it, once."""
+    api = _StuckAPI(applied=False)
+
+    out = _run_with_no_patience(monkeypatch, api)
+
+    assert "get_instance" in out["error"]
+    assert out["instance_id"] == "inst-1"
+
+
+# ── The route: the same depth-1 bound the delegate route holds ──
+
+
+def test_a_run_started_from_inside_a_wake_may_not_wake_again(monkeypatch):
+    """Otherwise a routine that ends by starting another drives turns forever."""
+    from condor.runtime import wake
+    from condor.web.routes.routines import _bounded_on_complete
+
+    monkeypatch.setattr(wake, "is_waking", lambda conv: conv == "conv-1")
+
+    assert _bounded_on_complete("resume", "conv-1") == "notify"
+    assert _bounded_on_complete("resume", "conv-2") == "resume"
+    assert _bounded_on_complete("notify", "conv-2") == "notify"

@@ -85,6 +85,26 @@ _note_sinks: dict[str, NoteSink] = {}
 _in_flight: dict[str, int] = {}
 
 
+# What the conversation that asked for background work gets when it ends. One
+# vocabulary for both producers -- a delegation (``condor.agents.delegate``) and
+# a routine run (``condor.routine_store``) -- because they are the same question
+# asked of the same two deliveries below.
+#
+# ``notify`` -- the bell, the transcript note, and :func:`deliver_note` into
+#              whatever surface is attached. The outcome is for the human to
+#              read; the agent gets no turn.
+# ``resume`` -- :func:`resume_session` instead, so the agent that asked is handed
+#              the outcome and continues from it (FEAT-034).
+ON_COMPLETE_NOTIFY = "notify"
+ON_COMPLETE_RESUME = "resume"
+ON_COMPLETE_CHOICES = (ON_COMPLETE_NOTIFY, ON_COMPLETE_RESUME)
+
+
+def normalize_on_complete(value: str | None) -> str:
+    """A caller's ``on_complete`` reduced to a value the producers can trust."""
+    return value if value in ON_COMPLETE_CHOICES else ON_COMPLETE_NOTIFY
+
+
 def register_sink_factory(surface: str, factory: SinkFactory) -> None:
     """Bind a surface's renderer. Called by the surface, at import time."""
     _sink_factories[surface] = factory

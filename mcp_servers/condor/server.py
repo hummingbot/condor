@@ -425,10 +425,10 @@ async def manage_routines(
       Blocks for up to 120s, so use it only for routines that finish fast.
     - "run_async": Submit a one-shot routine and return its instance_id immediately,
       without waiting (requires name, optional config). Use this for slow work — a
-      backtest, a wide scan — then read the result later with "get_instance" instead
-      of holding up the conversation.
-    - "get_instance": Read a run back by id (requires name=instance_id). Returns
-      status="running" while it is still going, or the finished result and report_id.
+      backtest, a wide scan. The finished run is handed back to you automatically as
+      a new turn, so say it is running and END YOUR TURN. NEVER poll it in a loop.
+    - "get_instance": Read a run back by id (requires name=instance_id). For a user
+      asking about a run later — not for waiting on one you just started.
     - "start": Start a continuous routine as a background task (requires name, optional config)
     - "stop": Stop a running routine instance (requires name=instance_id)
     - "list_instances": List all running/scheduled routine instances

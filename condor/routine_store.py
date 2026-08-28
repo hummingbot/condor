@@ -138,6 +138,37 @@ def _run_outcome_text(routine_name: str, summary: str, error: str | None) -> str
     return f"✅ Routine {routine_name} done\n\n{(summary or '').strip()}".rstrip()
 
 
+def _normalize_on_complete(value: str) -> str:
+    """``notify`` unless the caller asked for a wake. Lazy like every other
+    ``condor.runtime`` touchpoint in this module."""
+    from condor.runtime.wake import normalize_on_complete
+
+    return normalize_on_complete(value)
+
+
+RESUME_INSTRUCTION = (
+    "Continue with whatever you were going to do with this run. The result "
+    "above is clipped — read the whole thing with manage_routines("
+    "action='get_instance', name='{instance_id}') if you need it. If the run "
+    "failed, fix what caused it or tell the user; do not silently retry the "
+    "same config. If nothing remains, say so in one line — do not restate the "
+    "result."
+)
+
+
+def _run_resume_text(instance_id: str, outcome: str) -> str:
+    """The turn a woken conversation reads when a run it started finishes.
+
+    Built on :func:`_run_outcome_text` so the wake, the bell and the transcript
+    note cannot tell three different stories about one run. The closing
+    instruction is the cost control that matters in practice: without it the
+    common wake turn is the agent paraphrasing a result the user can already
+    read — the same lesson ``delegate.RESUME_INSTRUCTION`` encodes.
+    """
+    instruction = RESUME_INSTRUCTION.format(instance_id=instance_id)
+    return f"[routine complete] {outcome}\n\n{instruction}"
+
+
 class WebRoutineContext:
     """Lightweight context so routines can run without Telegram."""
 
@@ -305,6 +336,30 @@ class RoutineStore:
             out.append(entry)
         return out
 
+    def set_on_complete(self, instance_id: str, on_complete: str) -> str | None:
+        """Change what a run's conversation gets when it ends. Returns its status.
+
+        For the caller that started out waiting and ran out of patience: a
+        blocking ``run`` that hits its budget leaves a live run and an agent
+        holding an instance id, and without this its only options are to poll or
+        to forget. Flipping the still-running instance to ``resume`` turns it
+        into the ``run_async`` it should have been.
+
+        ``None`` when the instance is unknown; otherwise the status it had *at
+        the moment of the check*, and the change is applied only while that is
+        ``running``. Synchronous on purpose: ``_execute_and_record`` sets the
+        final status and reports the run without yielding in between, so a
+        check-and-set that never awaits cannot land between the two and cause
+        the outcome to be delivered twice.
+        """
+        meta = self._instances.get(instance_id)
+        if not meta:
+            return None
+        status = meta.get("status")
+        if status == "running":
+            meta["on_complete"] = _normalize_on_complete(on_complete)
+        return status
+
     def get_instance(self, instance_id: str) -> dict | None:
         meta = self._instances.get(instance_id)
         if not meta:
@@ -442,11 +497,22 @@ class RoutineStore:
         ``system`` turn so the replay reads it as a parenthetical note rather
         than as the agent's own words.
 
-        The push is what the user *sees*. A recorded turn reaches an already-open
+        The push is what the user *sees*, and which of the two pushes it is is
+        the caller's ``on_complete``. A recorded turn reaches an already-open
         dashboard only when the page is reloaded, so a run that failed thirty
         seconds in stayed invisible until someone refreshed. ``deliver_note``
-        shows the same line immediately and costs nothing: a finished routine is
-        worth showing, not worth a model turn to announce it.
+        shows the same line immediately and costs nothing — the right delivery
+        for a run a *human* started, which is worth showing and not worth a
+        model turn to announce.
+
+        ``resume`` is for the other caller: an agent that submitted the run with
+        ``run_async`` and ended its turn. A note leaves that agent asleep holding
+        an instance id, which is why it used to sit in a polling loop burning a
+        turn a minute instead — the run finishing is the event it was waiting
+        for, so it is handed the outcome and continues (ARCH-089/FEAT-034).
+        Exactly one of the two fires: the resume turn already carries the
+        outcome, and a wake that found nothing live falls back to the note, so a
+        closed tab loses nothing it used to get.
 
         A run with no conversation behind it — the scheduler, the dashboard, the
         Telegram menu, an instance restored on boot — still lights the owner's
@@ -491,9 +557,30 @@ class RoutineStore:
         session_key = meta.get("session_key") or ""
         if not session_key:
             return
-        try:
-            from condor.runtime import wake
 
+        from condor.runtime import wake
+
+        if meta.get("on_complete") == wake.ON_COMPLETE_RESUME:
+            try:
+                woke = await wake.resume_session(
+                    session_key=session_key,
+                    conversation_id=conversation_id,
+                    text=_run_resume_text(instance_id, text),
+                    kind="resume",
+                )
+            except Exception:
+                logger.debug(
+                    f"Could not resume conversation {conversation_id} "
+                    f"for run {instance_id}",
+                    exc_info=True,
+                )
+                woke = False
+            if woke:
+                return
+            # Nothing live to wake — the tab may still be open, so fall through
+            # to the note rather than leaving the run's outcome unpushed.
+
+        try:
             await wake.deliver_note(
                 session_key=session_key,
                 conversation_id=conversation_id,
@@ -519,6 +606,7 @@ class RoutineStore:
         source: str,
         conversation_id: str = "",
         session_key: str = "",
+        on_complete: str = "",
         **extra,
     ) -> dict:
         """Fresh instance-metadata dict shared by execute/start_continuous/schedule.
@@ -528,6 +616,12 @@ class RoutineStore:
         live session behind that conversation, which the outcome is *shown* in
         while it is still open. Both empty for everything with no conversation
         behind it (dashboard, Telegram, restored schedules).
+
+        ``on_complete`` says which push that outcome gets — a note to read, or a
+        turn the asking agent continues from (see :meth:`_report_run`). Anything
+        unrecognised, this default included, is ``notify``: the delivery that
+        spends nothing is the only safe thing to assume about a caller that did
+        not ask.
         """
         return {
             "routine_name": routine_name,
@@ -538,6 +632,7 @@ class RoutineStore:
             "user_id": user_id,
             "conversation_id": conversation_id,
             "session_key": session_key,
+            "on_complete": _normalize_on_complete(on_complete),
             "created_at": time.time(),
             "last_run_at": None,
             "last_result": None,
@@ -690,12 +785,15 @@ class RoutineStore:
         agent: str = "",
         conversation_id: str = "",
         session_key: str = "",
+        on_complete: str = "",
     ) -> str:
         """Run a one-shot routine from the web. Returns instance_id.
 
         ``agent`` overrides report attribution (see ``_execute_and_record``);
         ``conversation_id`` and ``session_key`` are where the finished run
-        reports back to and shows itself (see ``_report_run``).
+        reports back to and shows itself, and ``on_complete`` whether that
+        session is merely shown the outcome or woken with it (see
+        ``_report_run``).
         """
         routine = self._resolve_routine(routine_name)
         if not routine:
@@ -710,6 +808,7 @@ class RoutineStore:
             source="web",
             conversation_id=conversation_id,
             session_key=session_key,
+            on_complete=on_complete,
         )
 
         task = asyncio.create_task(
