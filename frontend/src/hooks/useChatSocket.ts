@@ -93,6 +93,16 @@ export interface SlotInfo {
   server_pinned?: boolean;
   /** Bound domain Agent, or "" for the plain assistant. */
   agent_slug?: string;
+  /**
+   * Whether an agent subprocess is behind the slot right now.
+   *
+   * `false` is a slot the backend reaped — an idle detach, an eviction, a
+   * subprocess that died — and not a slot that ended: the conversation is
+   * intact, so the tab stays, its transcript still hydrates, and the first
+   * message sent into it reattaches a session on the way through (CORR-265).
+   * Absent from a backend older than that, which listed only live slots.
+   */
+  alive?: boolean;
   /** Display name of whoever is answering. */
   label?: string;
   /**
@@ -932,7 +942,11 @@ export function useChatSocket() {
                 resync,
               );
             }
-            prewarmed.current = true; // Live sessions already are the warm one.
+            // A roster with anything on it is the conversation to be in, so
+            // there is nothing to go looking for. A slot the backend reaped
+            // counts: prewarming would respawn it behind the user's back, and
+            // the message they eventually send reattaches it anyway.
+            prewarmed.current = true;
           } else {
             prewarmLatest();
           }

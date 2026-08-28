@@ -103,11 +103,18 @@ async def _await_spawn(user_id: int, slot_id: str) -> None:
 
 
 async def _get_user_sessions(user_id: int) -> list[dict]:
-    """This user's live web sessions, as the frontend expects them.
+    """This user's web slots, as the frontend expects them.
 
     Derived from the runtime rather than from local slot bookkeeping, so a
     session survives a WebSocket reconnect and a session killed elsewhere
     (Telegram, the REST API) disappears here without any cross-talk.
+
+    The roster describes the user's conversations on this surface, not the
+    subprocesses behind them (CORR-265): a slot the runtime reaped while the
+    socket was down — the idle detach, an eviction, a subprocess that died — is
+    still listed, with ``alive`` false, so its tab and its messages survive the
+    reconnect and the next message reattaches it. A slot the runtime has no
+    memory of is the one the user really did end, and it is still absent.
     """
     return [
         {
@@ -130,9 +137,14 @@ async def _get_user_sessions(user_id: int) -> list[dict]:
             "last_prompt_at": (
                 info.last_prompt_at.isoformat() if info.last_prompt_at else None
             ),
+            # Whether a subprocess is behind the slot right now. Added, never
+            # substituted: every key above keeps its name and its meaning, so a
+            # bundle shipped before this one reads the roster exactly as it did
+            # and simply does not know the difference.
+            "alive": info.alive,
         }
-        for info in await runtime.list_sessions(user_id)
-        if info.surface == WEB and info.alive
+        for info in await runtime.list_sessions(user_id, include_detached=True)
+        if info.surface == WEB
     ]
 
 

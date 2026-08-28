@@ -44,6 +44,28 @@ MAX_SESSIONS_PER_USER = 5
 # Not persisted -- subprocesses can't survive restarts.
 _sessions: dict[str, "AgentSession"] = {}
 
+# The slots whose subprocess went away but whose conversation did not (CORR-265),
+# keyed like ``_sessions``; the value is the last SessionInfo that session
+# reported, with ``alive`` false.
+#
+# "Reaped" and "destroyed" are different answers to "where did my chat go", and
+# only the registry can tell them apart. An idle detach (PERF-226), an LRU
+# eviction and the health monitor's sweep of a dead subprocess all keep the
+# conversation and reattach on the next message, so the slot is remembered here
+# and a frontend can still list it. An explicit destroy -- Telegram /new,
+# ``destroy_session``, the REST endpoint -- means the user asked for it to be
+# gone, so it leaves nothing behind and disappears from every roster.
+#
+# Only slots with a durable conversation to come back to are remembered: without
+# one there is nothing a reattach could resume.
+_detached: dict[str, SessionInfo] = {}
+
+# How many detached slots to remember, per user per surface. The same bound as
+# the live cap, so the registry never remembers more retired slots than it
+# allows running ones -- a long-lived process cannot grow an unbounded tab
+# strip, and a busy Telegram user cannot evict a web tab's memory of itself.
+MAX_DETACHED_PER_USER = MAX_SESSIONS_PER_USER
+
 # Creation serialization (CORR-187). get_or_create_session is a check-then-
 # create that spans many awaits (subprocess spawn, eager context prompt), so
 # without a lock two concurrent calls for the same key both spawn a full
@@ -300,8 +322,10 @@ async def _enforce_session_budget(user_id: int, surface: str | None = None) -> N
         if session.user_id == user_id and not session.client.alive:
             # Dropped straight from the registry rather than through
             # _destroy_session_internal (the subprocess is already gone), so
-            # the sweep it owns has to be repeated here.
+            # the sweeps it owns have to be repeated here -- including
+            # remembering the slot, which a dead subprocess does not end.
             _deny_pending_confirmations(raw_key)
+            _remember_detached(session)
             _sessions.pop(raw_key, None)
 
     while True:
@@ -335,7 +359,7 @@ async def _enforce_session_budget(user_id: int, surface: str | None = None) -> N
             victim.conversation_id or "none",
             ", crossing surfaces" if crossed else "",
         )
-        await _destroy_session_internal(victim.key)
+        await _destroy_session_internal(victim.key, retain=True)
         if crossed:
             await _notify_detached_by_budget(victim.key)
 
@@ -677,6 +701,9 @@ async def _spawn_session(
         raise
 
     _sessions[raw_key] = session
+    # The slot is running again, so the memory of it being reaped is stale --
+    # and leaving it would list the slot twice on the next roster.
+    _detached.pop(raw_key, None)
     log.info("Created agent session %s: %s (%s)", raw_key, agent_key, bound.label)
     return session
 
@@ -686,25 +713,111 @@ def get_session(key: SessionKey) -> AgentSession | None:
     return _sessions.get(str(key))
 
 
-def list_sessions(user_id: int | None = None) -> list[SessionInfo]:
-    """List every registered session, optionally filtered by owning user."""
+def _remember_detached(session: "AgentSession") -> None:
+    """File a reaped session under ``_detached`` so its slot can still be listed.
+
+    Only a session with an owner and a durable conversation is worth
+    remembering: a reattach resumes the transcript, so without one there is
+    nothing for the slot to come back to.
+    """
+    if session.user_id is None or not session.conversation_id:
+        return
+    _detached[str(session.key)] = session.info().model_copy(
+        update={"alive": False, "is_busy": False}
+    )
+    _trim_detached(session.user_id, session.key.surface)
+
+
+def _trim_detached(user_id: int, surface: str) -> None:
+    """Keep only the most recent MAX_DETACHED_PER_USER slots for one surface."""
+    mine = [
+        (raw_key, info)
+        for raw_key, info in _detached.items()
+        if info.user_id == user_id and info.surface == surface
+    ]
+    if len(mine) <= MAX_DETACHED_PER_USER:
+        return
+    mine.sort(key=lambda pair: pair[1].last_prompt_at or pair[1].created_at)
+    for raw_key, _ in mine[: len(mine) - MAX_DETACHED_PER_USER]:
+        _detached.pop(raw_key, None)
+
+
+def _detached_infos(user_id: int | None) -> list[SessionInfo]:
+    """The remembered slots that are still resumable, dropping the ones that aren't.
+
+    A conversation deleted since the reap (from the dashboard, from Telegram, by
+    hand on disk) has nothing to resume, and listing it would put a tab on
+    screen whose first message could only fail. The check doubles as the
+    garbage collection for this dict: there is no delete hook to subscribe to,
+    and the read is the moment the truth is needed.
+    """
+    infos: list[SessionInfo] = []
+    for raw_key, info in list(_detached.items()):
+        if user_id is not None and info.user_id != user_id:
+            continue
+        if str(raw_key) in _sessions:  # respawned; the live entry is the truth
+            continue
+        try:
+            alive_conversation = (
+                conversations.get_conversation(info.user_id, info.conversation_id)
+                is not None
+            )
+        except Exception:  # noqa: BLE001 - an unreadable id is a gone conversation
+            alive_conversation = False
+        if not alive_conversation:
+            _detached.pop(raw_key, None)
+            continue
+        infos.append(info)
+    return infos
+
+
+def list_sessions(
+    user_id: int | None = None, *, include_detached: bool = False
+) -> list[SessionInfo]:
+    """List every registered session, optionally filtered by owning user.
+
+    ``include_detached`` widens the answer from "the subprocesses running right
+    now" to "the slots this user has on the surface", adding the reaped ones
+    with ``alive`` false (CORR-265). It is opt-in because the two are genuinely
+    different questions: the REST session list and the teardown that walks live
+    sessions want the narrow one, and a frontend rebuilding its tab strip wants
+    the wide one.
+    """
     infos: list[SessionInfo] = []
     for session in list(_sessions.values()):
         if user_id is not None and session.user_id != user_id:
             continue
         infos.append(session.info())
+    if include_detached:
+        infos.extend(_detached_infos(user_id))
     return infos
 
 
 async def destroy_session(key: SessionKey) -> bool:
-    """Destroy the session for a key. Returns True if a session existed."""
+    """Destroy the session for a key. Returns True if a live session existed.
+
+    Destroying is the deliberate one: it also forgets any memory of the slot, so
+    the tab disappears from every roster instead of coming back as resumable.
+    """
     return await _destroy_session_internal(key)
 
 
-async def _destroy_session_internal(key: SessionKey) -> bool:
+async def _destroy_session_internal(key: SessionKey, *, retain: bool = False) -> bool:
+    """Tear down one session; ``retain`` remembers the slot as resumable.
+
+    Every teardown funnels through here, and ``retain`` is what tells them
+    apart: the reaps that keep the conversation (idle detach, LRU eviction, a
+    dead subprocess swept up) pass True, and everything that means "this chat is
+    over" leaves the default False, which also clears any earlier memory of the
+    slot.
+    """
     raw_key = str(key)
     _deny_pending_confirmations(raw_key)
     session = _sessions.pop(raw_key, None)
+    if retain and session is not None:
+        _remember_detached(session)
+    elif not retain:
+        _detached.pop(raw_key, None)
     if session:
         try:
             await session.client.stop()
@@ -720,6 +833,9 @@ async def destroy_all_sessions() -> None:
     keys = [session.key for session in list(_sessions.values())]
     for key in keys:
         await _destroy_session_internal(key)
+    # Nothing survives the process, so nothing is resumable on the other side of
+    # this call either.
+    _detached.clear()
     log.info("Destroyed all %d agent session(s)", len(keys))
 
 
@@ -772,7 +888,9 @@ async def _sweep_sessions() -> None:
     reattaches — silently, like the LRU's same-surface detach.
 
     Both go out through ``_destroy_session_internal``, the one funnel that also
-    denies whatever the session was still asking a human to approve.
+    denies whatever the session was still asking a human to approve — and both
+    ``retain`` the slot, because neither is the user saying the chat is over: a
+    frontend can still list it, and the next message reattaches it (CORR-265).
     """
     ttl = TIMEOUTS.session_idle
     now = _utcnow()
@@ -804,7 +922,7 @@ async def _sweep_sessions() -> None:
 
     for key in dead_keys:
         log.warning("Health monitor: dead session %s, cleaning up", key)
-        await _destroy_session_internal(key)
+        await _destroy_session_internal(key, retain=True)
         # Only Telegram sessions have a chat to notify.
         chat_id = key.telegram_chat_id
         if _health_bot and chat_id is not None:
@@ -825,4 +943,4 @@ async def _sweep_sessions() -> None:
             ttl,
             conversation_id or "none",
         )
-        await _destroy_session_internal(key)
+        await _destroy_session_internal(key, retain=True)

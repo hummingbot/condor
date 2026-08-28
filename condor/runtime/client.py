@@ -110,9 +110,17 @@ async def conversation_for_session(session_key: str) -> str:
         return ""
 
 
-async def list_sessions(user_id: int | None = None) -> list[SessionInfo]:
-    """List sessions, optionally filtered by owning user."""
-    return _local().list_sessions(user_id)
+async def list_sessions(
+    user_id: int | None = None, *, include_detached: bool = False
+) -> list[SessionInfo]:
+    """List sessions, optionally filtered by owning user.
+
+    ``include_detached`` adds the slots whose subprocess was reaped but whose
+    conversation is still there, reported with ``alive`` false. That is the
+    roster a frontend rebuilds its tab strip from; the default stays "what is
+    running right now".
+    """
+    return _local().list_sessions(user_id, include_detached=include_detached)
 
 
 async def destroy(key: SessionKey) -> bool:
