@@ -331,13 +331,26 @@ def test_the_conversation_guard_survives_on_telegram(ws_env, monkeypatch):
     """``tg:{chat_id}`` is stable but the conversation behind it is not, so a
     task started before ``/new`` must still stay quiet there — the check that
     the web surface no longer needs, because there the slot *is* the
-    conversation."""
-    delivered: list[tuple] = []
+    conversation.
 
-    async def sink(key, user_id, text, kind):
-        delivered.append((str(key), user_id, text, kind))
+    Driven through the *registered* Telegram sink (CORR-266): this used to have
+    to inject ``_note_sinks["tg"]`` by hand, because production registered only
+    the wake half — so the note it asserted was never delivered was being
+    dropped for the wrong reason. The guard now has to be what stops it.
+    """
+    from condor.agents import delegate as delegate_module
+    from handlers.agents import wake as tg_wake
 
-    monkeypatch.setitem(wake._note_sinks, "tg", sink)
+    assert wake._note_sinks.get("tg") is tg_wake._deliver_note
+
+    delivered: list[dict] = []
+
+    class _Recorder:
+        async def send_message(self, **kw):
+            delivered.append(kw)
+            return None
+
+    monkeypatch.setattr(delegate_module, "resolve_bot", lambda b=None: _Recorder())
 
     async def scenario():
         return await wake.deliver_note(

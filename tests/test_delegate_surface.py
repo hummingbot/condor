@@ -445,3 +445,39 @@ def test_notify_does_exactly_what_the_docstring_now_promises(
     assert recorded == [(1, "conv-1", outcome, "delegation")]
     assert [n["text"] for n in notes] == [outcome]
     assert resumes == []
+
+
+def test_a_telegram_delegation_is_shown_once_not_twice(
+    tmp_path, monkeypatch, deliveries
+):
+    """CORR-266: one event, one channel per surface.
+
+    On the web the completion notice and the transcript note are different
+    surfaces -- the bell and the tab. On Telegram they are the same chat:
+    ``chat_id`` is the chat and ``session_key`` is ``tg:{chat_id}``, so with a
+    Telegram note sink registered both would push ``_completion_text`` into it
+    and the user would read the same completion twice. ``_notify_done`` keeps
+    the delegation because it delivers in strictly more states.
+    """
+    notes, resumes = deliveries
+    _agent_root(tmp_path, monkeypatch)
+    monkeypatch.setattr(consult_module, "_run_agent_to_completion", _answer())
+    bot = _FakeBot()
+
+    dt = _run_delegation(bot=bot, conversation_id="conv-1", session_key="tg:42")
+
+    assert dt.status == "done"
+    assert bot.messages == [delegate_module._completion_text(dt)]
+    assert notes == []
+    assert resumes == []
+
+
+def test_a_web_delegation_still_shows_its_note(tmp_path, monkeypatch, deliveries):
+    """The Telegram exception above must not cost the web surface its note."""
+    notes, _ = deliveries
+    _agent_root(tmp_path, monkeypatch)
+    monkeypatch.setattr(consult_module, "_run_agent_to_completion", _answer())
+
+    _run_delegation(conversation_id="conv-1", session_key="web:1:conv-1")
+
+    assert len(notes) == 1

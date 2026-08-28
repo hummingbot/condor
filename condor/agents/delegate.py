@@ -844,9 +844,29 @@ async def _show_completion(dt: DelegateTask) -> None:
     session or no conversation behind it (consult- or tick-started) is a no-op,
     and nothing here may raise: by now the user has already been notified and
     the transcript already carries the outcome.
+
+    **Not on Telegram** (CORR-266). One event, one channel per surface. On the
+    web the two deliveries are genuinely different surfaces -- ``_notify_done``
+    lights the bell, this shows the line in the transcript that is on screen --
+    but on Telegram they are the same chat: ``dt.chat_id`` is the chat and
+    ``dt.session_key`` is ``tg:{chat_id}``, so once a Telegram note sink exists
+    both would send ``_completion_text(dt)`` into it and the user would read the
+    same completion twice. ``_notify_done`` keeps the delegation, because it is
+    the channel that delivers in strictly more states: it needs only a chat id,
+    while a note additionally needs a live session still on this conversation,
+    and it is the one that also reaches the bell and the no-Telegram install.
+    The note sink is not wasted -- the routine path (``routine_store``) rings
+    only the bell and never pushes to Telegram, so there it is the sole delivery.
     """
     if not dt.session_key or not dt.conversation_id:
         return
+    from condor.runtime.keys import SessionKey
+
+    try:
+        if SessionKey.parse(dt.session_key).is_telegram:
+            return
+    except ValueError:
+        pass
     try:
         from condor.runtime import wake
 
