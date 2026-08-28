@@ -113,9 +113,12 @@ def _coordinator_base(routines_rule: str) -> str:
         "instead of reimplementing it by hand.\n"
         "- If a domain AGENT matches, delegate with "
         '`consult(agent="<slug>", task="...", context="...")` and summarize its answer. '
-        "For a long, one-off task you want run in the background until done (it pings "
-        'the user when finished), use `delegate(action="start", agent="<slug>", '
-        'task="...")` instead and poll with `delegate(action="get", task_id="...")`.\n'
+        "For a long, one-off task you want run in the background until done, use "
+        '`delegate(action="start", agent="<slug>", task="...")` instead. It returns a '
+        "task id immediately; say the task is running and END YOUR TURN. When it "
+        "finishes, the result is pushed back into this conversation and to the user on "
+        "its own -- do NOT poll the task you just started. Reach for "
+        '`delegate(action="get"/"list")` only when the user asks about a task later.\n'
         f"{routines_rule}"
         f"{_RUN_CODE_RULE}"
         "- Only fall back to raw tools when nothing matches.\n"
