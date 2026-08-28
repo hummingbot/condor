@@ -52,7 +52,6 @@ async function render() {
           agents={AGENTS}
           selectedAgentKey="claude-code:"
           onSelect={(sel) => picked.push(sel.agentKey ?? "")}
-          variant="inline"
         />
       </QueryClientProvider>,
     );

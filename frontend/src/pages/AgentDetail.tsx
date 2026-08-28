@@ -269,7 +269,6 @@ function ModelPicker({ slug, agentKey }: { slug: string; agentKey: string }) {
           pick.mutate(sel.agentKey);
         }
       }}
-      variant="inline"
       disabled={pick.isPending}
     />
   );

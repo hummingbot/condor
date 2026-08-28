@@ -83,7 +83,6 @@ export function BrainPicker({
   selectedAgentKey,
   selectedAgentSlug = "",
   onSelect,
-  variant,
   disabled = false,
 }: {
   agents: ChatAgentOption[];
@@ -92,7 +91,6 @@ export function BrainPicker({
   selectedAgentKey: string;
   selectedAgentSlug?: string;
   onSelect: (selection: BrainSelection) => void;
-  variant: "block" | "inline";
   disabled?: boolean;
 }) {
   const [open, setOpen] = useState(false);
@@ -191,11 +189,7 @@ export function BrainPicker({
         aria-expanded={open}
         aria-haspopup="listbox"
         title={boundAgent ? boundAgent.description || boundAgent.name : label}
-        className={`${
-          variant === "block"
-            ? "flex w-full items-center justify-between rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1.5 text-left text-xs text-[var(--color-text)] hover:border-[var(--color-primary)]/40"
-            : "flex items-center gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs text-[var(--color-text)] hover:border-[var(--color-primary)]/40"
-        } disabled:cursor-not-allowed disabled:opacity-50`}
+        className="flex items-center gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs text-[var(--color-text)] hover:border-[var(--color-primary)]/40 disabled:cursor-not-allowed disabled:opacity-50"
       >
         {boundAgent && <Bot className="h-3 w-3 shrink-0 text-[var(--color-accent)]" />}
         <span className="truncate">{label}</span>
@@ -213,8 +207,7 @@ export function BrainPicker({
         onClose={closeAll}
         align="left"
         maxHeight={288}
-        matchAnchorWidth={variant === "block" ? "exact" : undefined}
-        className={`flex flex-col py-0.5 ${variant === "block" ? "" : "w-64"}`}
+        className="flex w-64 flex-col py-0.5"
       >
         {submenu === null ? (
           <>

@@ -67,7 +67,6 @@ export function ChatSessionIdentity({
           selectedAgentKey={slot.info.agent_key}
           selectedAgentSlug={slot.info.agent_slug || ""}
           onSelect={onSelectBrain}
-          variant="inline"
           disabled={busy}
         />
       )}

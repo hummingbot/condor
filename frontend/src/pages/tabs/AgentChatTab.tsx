@@ -693,7 +693,6 @@ function Hero({
             selectedAgentKey={selectedKey}
             selectedAgentSlug={agent?.slug || ""}
             onSelect={onPickBrain}
-            variant="inline"
           />
         </div>
 
