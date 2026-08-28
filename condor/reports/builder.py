@@ -107,8 +107,27 @@ class ReportBuilder:
         )
         return self
 
-    def plotly(self, fig: Any) -> ReportBuilder:
-        content = fig.to_html(full_html=False, include_plotlyjs=False)
+    def plotly(self, fig: Any, optimize: bool = True) -> ReportBuilder:
+        """Attach a Plotly figure.
+
+        Large figures are re-encoded for display (see
+        :mod:`condor.reports.figure_opt`): evenly spaced x arrays collapse to
+        ``x0``/``dx`` and dense traces move to the WebGL renderer, which keeps a
+        month of 1m candles both small on disk and smooth to pan. The figure
+        passed in is not mutated, so a caller that also exports it via kaleido
+        still holds a plain SVG figure. Pass ``optimize=False`` when the report
+        needs the figure serialized exactly as built.
+        """
+        if optimize:
+            import plotly.io as pio
+
+            from condor.reports.figure_opt import optimize_figure
+
+            content = pio.to_html(
+                optimize_figure(fig), full_html=False, include_plotlyjs=False
+            )
+        else:
+            content = fig.to_html(full_html=False, include_plotlyjs=False)
         self._sections.append({"type": "plotly", "content": content})
         return self
 
