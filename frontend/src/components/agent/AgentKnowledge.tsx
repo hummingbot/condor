@@ -817,7 +817,11 @@ function SkillsTab({
         />
       )}
       {brain.skills.length === 0 ? (
-        <Empty>No playbooks in this agent's library.</Empty>
+        // A pending proposal is already the whole tab: an empty-library notice
+        // under its card reads as a contradiction.
+        brain.skill_proposal ? null : (
+          <Empty>No playbooks in this agent's library.</Empty>
+        )
       ) : (
         brain.skills.map((s) => (
           <Row
