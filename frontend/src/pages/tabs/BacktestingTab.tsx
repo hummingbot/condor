@@ -68,7 +68,23 @@ const STATUS_STYLES: Record<string, { bg: string; text: string }> = {
   running: { bg: "var(--color-primary)", text: "#000" },
   completed: { bg: "var(--color-green)", text: "#000" },
   failed: { bg: "var(--color-red)", text: "#fff" },
+  unknown: { bg: "var(--color-surface-hover)", text: "var(--color-text-muted)" },
 };
+
+/**
+ * What a run whose payload has expired can still show.
+ *
+ * Retention drops the candles, never the metrics — these come straight off the
+ * summary the archive already listed, so the panel needs no request at all.
+ */
+const EXPIRED_METRICS: [string, string, (v: number) => string][] = [
+  ["net_pnl_quote", "Net PnL", formatPnl],
+  ["net_pnl", "Return", formatPct],
+  ["sharpe_ratio", "Sharpe", (v) => v.toFixed(2)],
+  ["profit_factor", "Profit Factor", (v) => v.toFixed(2)],
+  ["max_drawdown_usd", "Max Drawdown", formatUsd],
+  ["total_executors_with_position", "Trades", (v) => String(Math.round(v))],
+];
 
 const CLOSE_TYPE_LABELS: Record<string, { label: string; color: string }> = {
   TAKE_PROFIT: { label: "TP", color: "#26a69a" },
@@ -544,16 +560,35 @@ export function BacktestingTab() {
     configsData,
     tasks,
     tasksLoading,
+    indexing,
     selectedTask,
     selectedTaskLoading,
     selectedTaskId,
     setSelectedTaskId,
+    selectedEntry,
+    selectedChartExpired,
     pinnedTask,
     pinnedTaskId,
     setPinnedTaskId,
     submit: submitMutation,
     remove: deleteMutation,
   } = useBacktest(server);
+
+  // The archive spans every server the user can reach, so the list needs a way
+  // to narrow it. "all" is the default: which box ran a backtest is provenance,
+  // not the question you usually came here with.
+  const [serverFilter, setServerFilter] = useState<string>("all");
+  const archiveServers = useMemo(
+    () => [...new Set(tasks.map((t) => t.server ?? "").filter(Boolean))].sort(),
+    [tasks],
+  );
+  const visibleTasks = useMemo(
+    () =>
+      serverFilter === "all"
+        ? tasks
+        : tasks.filter((t) => (t.server ?? "") === serverFilter),
+    [tasks, serverFilter],
+  );
 
   // Form state
   const [configId, setConfigId] = useState("");
@@ -647,9 +682,6 @@ export function BacktestingTab() {
     };
   }, []);
 
-  if (!server)
-    return <NoServerCard message="Select a server from the sidebar to run backtests." />;
-
   const selectedConfig = configsData?.configs.find((c) => c.id === configId);
 
   // Group configs by controller_name
@@ -688,7 +720,11 @@ export function BacktestingTab() {
         </div>
       )}
 
-      {/* Config Panel */}
+      {/* Config Panel. Picking a server is required to *launch* a backtest, not
+          to *read* one — the archive below spans every server either way. */}
+      {!server ? (
+        <NoServerCard message="Select a server from the sidebar to run a backtest." />
+      ) : (
       <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-end">
           {/* Left: Config selector (wider) */}
@@ -894,6 +930,7 @@ export function BacktestingTab() {
           </div>
         </div>
       </div>
+      )}
 
       {submitMutation.isError && (
         <div className="rounded-lg border border-[var(--color-red)]/30 bg-[var(--color-red)]/10 px-3 py-2 text-xs text-[var(--color-red)]">
@@ -905,9 +942,32 @@ export function BacktestingTab() {
       <div className="grid gap-4 lg:grid-cols-[300px_1fr]">
         {/* Task list sidebar */}
         <div className="space-y-2">
-          <h3 className="text-xs font-medium text-[var(--color-text-muted)] uppercase tracking-wide">
-            Tasks {tasks && tasks.length > 0 && `(${tasks.length})`}
-          </h3>
+          <div className="flex items-center justify-between gap-2">
+            <h3 className="text-xs font-medium text-[var(--color-text-muted)] uppercase tracking-wide">
+              Tasks {visibleTasks.length > 0 && `(${visibleTasks.length})`}
+            </h3>
+            {archiveServers.length > 1 && (
+              <select
+                value={serverFilter}
+                onChange={(e) => setServerFilter(e.target.value)}
+                aria-label="Filter backtests by server"
+                className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-1.5 py-0.5 text-[10px] text-[var(--color-text-muted)]"
+              >
+                <option value="all">All servers</option>
+                {archiveServers.map((name) => (
+                  <option key={name} value={name}>
+                    {name}
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
+
+          {indexing && (
+            <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-[10px] text-[var(--color-text-muted)]">
+              Indexing the backtest archive… older runs will fill in their details.
+            </div>
+          )}
 
           {tasksLoading && (
             <div className="flex items-center gap-2 py-4 text-xs text-[var(--color-text-muted)]">
@@ -915,13 +975,13 @@ export function BacktestingTab() {
             </div>
           )}
 
-          {!tasksLoading && (!tasks || tasks.length === 0) && (
+          {!tasksLoading && visibleTasks.length === 0 && (
             <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-6 text-center text-xs text-[var(--color-text-muted)]">
               No backtest tasks yet
             </div>
           )}
 
-          {tasks?.map((task) => {
+          {visibleTasks.map((task) => {
             const style = STATUS_STYLES[task.status] ?? STATUS_STYLES.pending;
             const isSelected = task.task_id === selectedTaskId;
             const isPinned = task.task_id === pinnedTaskId;
@@ -930,16 +990,13 @@ export function BacktestingTab() {
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             const taskInfo = getTaskConfigInfo(task as any);
 
-            // Try to get quick PnL from task result for completed tasks
-            let quickPnl: number | null = null;
-            if (task.status === "completed") {
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              const r = (task as any).result;
-              if (r) {
-                const metrics = (r.results && typeof r.results === "object") ? r.results : r;
-                quickPnl = metrics?.net_pnl_quote ?? metrics?.net_pnl ?? null;
-              }
-            }
+            // Straight off the summary. This used to dig through `task.result`,
+            // which is why the list response had to carry one (FEAT-075).
+            const quickPnl =
+              task.status === "completed"
+                ? (task.metrics?.net_pnl_quote ?? task.metrics?.net_pnl ?? null)
+                : null;
+            const chartExpired = task.has_payload === false;
 
             return (
               <button
@@ -976,8 +1033,16 @@ export function BacktestingTab() {
                   </div>
 
                   {/* Row 2: Details line */}
-                  {(taskInfo.tradingPair || taskInfo.resolution || taskInfo.startTime > 0) && (
-                    <div className="mt-1 flex items-center gap-1.5 text-[10px] text-[var(--color-text-muted)]">
+                  {(taskInfo.tradingPair || taskInfo.resolution || taskInfo.startTime > 0 || task.server) && (
+                    <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[10px] text-[var(--color-text-muted)]">
+                      {task.server && (
+                        <span
+                          className="rounded bg-[var(--color-surface-hover)] px-1 py-px font-medium"
+                          title={`Ran on ${task.server}`}
+                        >
+                          {task.server}
+                        </span>
+                      )}
                       {taskInfo.tradingPair && (
                         <span className="font-medium">{taskInfo.tradingPair}</span>
                       )}
@@ -997,14 +1062,21 @@ export function BacktestingTab() {
                   )}
 
                   {/* Row 3: Quick PnL for completed */}
-                  {quickPnl !== null && (
-                    <div className="mt-1">
-                      <span
-                        className="text-xs font-semibold tabular-nums"
-                        style={{ color: pnlColor(quickPnl) }}
-                      >
-                        {formatPnl(quickPnl)}
-                      </span>
+                  {(quickPnl !== null || chartExpired) && (
+                    <div className="mt-1 flex items-center gap-2">
+                      {quickPnl !== null && (
+                        <span
+                          className="text-xs font-semibold tabular-nums"
+                          style={{ color: pnlColor(quickPnl) }}
+                        >
+                          {formatPnl(quickPnl)}
+                        </span>
+                      )}
+                      {chartExpired && (
+                        <span className="text-[10px] text-[var(--color-text-muted)]">
+                          chart expired
+                        </span>
+                      )}
                     </div>
                   )}
                 </div>
@@ -1073,7 +1145,42 @@ export function BacktestingTab() {
 
         {/* Results panel */}
         <div className="space-y-4">
-          {selectedTask?.status === "pending" || selectedTask?.status === "running" ? (
+          {selectedChartExpired ? (
+            /* The run is real and its numbers are right here; only the candles
+               are gone. Saying "not found" would be the phantom this state
+               exists to prevent (FEAT-075). */
+            <div className="space-y-4">
+              <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
+                <h4 className="mb-1 text-sm font-medium">
+                  {getTaskConfigInfo(selectedEntry as unknown as Record<string, unknown>)
+                    .configId || selectedEntry?.task_id}
+                </h4>
+                <p className="text-xs text-[var(--color-text-muted)]">
+                  Chart data expired (payloads are kept 30 days). The metrics below
+                  are kept for good.
+                </p>
+              </div>
+              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                {EXPIRED_METRICS.map(([key, label, format]) => {
+                  const value = selectedEntry?.metrics?.[key];
+                  if (value === undefined || value === null) return null;
+                  return (
+                    <div
+                      key={key}
+                      className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2"
+                    >
+                      <div className="text-[10px] uppercase tracking-wide text-[var(--color-text-muted)]">
+                        {label}
+                      </div>
+                      <div className="text-sm font-semibold tabular-nums">
+                        {format(Number(value))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ) : selectedTask?.status === "pending" || selectedTask?.status === "running" ? (
             <div className="flex flex-col items-center justify-center rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] py-16">
               <Circle className="h-6 w-6 animate-spin text-[var(--color-primary)] mb-3" />
               <p className="text-sm text-[var(--color-text-muted)]">

@@ -1461,6 +1461,36 @@ export interface BacktestTask {
   saved?: boolean;
 }
 
+/**
+ * One row of the backtest archive: everything the list renders, and nothing
+ * else.
+ *
+ * The listing endpoints deliberately do NOT carry `result` — a completed run's
+ * payload runs to ~137 MB and the list reads six fields — so `metrics` (the
+ * engine's `result.results`) is where a row's numbers come from. Opening a run
+ * is what fetches the payload, via `getArchivedBacktest`.
+ */
+export interface BacktestSummary {
+  task_id: string;
+  status: "pending" | "running" | "completed" | "failed" | "unknown";
+  /** Which server ran it. Provenance, not a scope: the archive spans servers. */
+  server?: string;
+  config?: Record<string, unknown>;
+  metrics?: Record<string, number | null>;
+  /** False once the payload has been pruned — the run ranks, the chart cannot. */
+  has_payload?: boolean;
+  created_at?: number | null;
+  completed_at?: number | null;
+  error?: string | null;
+  saved?: boolean;
+}
+
+export interface BacktestArchiveResponse {
+  /** False while the v2 index is still being built in the background. */
+  migrated: boolean;
+  summaries: BacktestSummary[];
+}
+
 // ── Controller performance history ──
 
 /** Everything the history route accepts except the two the walk owns. */
@@ -2436,8 +2466,26 @@ export const api = {
     ),
 
   listBacktestTasks: (server: string) =>
-    apiFetch<BacktestTask[]>(
+    apiFetch<BacktestSummary[]>(
       `/api/v1/servers/${encodeURIComponent(server)}/backtesting/tasks`,
+    ),
+
+  /** Every saved run the caller can reach, across every server. */
+  listBacktestArchive: (server?: string) =>
+    apiFetch<BacktestArchiveResponse>(
+      `/api/v1/backtesting/archive${server ? `?server=${encodeURIComponent(server)}` : ""}`,
+    ),
+
+  /** The full envelope for one archived run, whichever server ran it. */
+  getArchivedBacktest: (taskId: string) =>
+    apiFetch<BacktestTask>(
+      `/api/v1/backtesting/archive/${encodeURIComponent(taskId)}`,
+    ),
+
+  deleteArchivedBacktest: (taskId: string) =>
+    apiFetch<Record<string, unknown>>(
+      `/api/v1/backtesting/archive/${encodeURIComponent(taskId)}`,
+      { method: "DELETE" },
     ),
 
   getBacktestTask: (server: string, taskId: string) =>
