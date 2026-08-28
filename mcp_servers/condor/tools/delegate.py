@@ -14,6 +14,38 @@ from mcp_servers.condor.settings import settings
 # which deliberately talks to the main process over HTTP and never imports it.
 ON_COMPLETE_CHOICES = ("notify", "resume")
 
+# How the user tracks a delegation, per surface. The two surfaces have genuinely
+# different UIs for this, and the hint is quoted back to the user verbatim, so a
+# dashboard-only install was being told to run a command it does not have
+# (CORR-262). Only the middle clause varies -- the "do NOT invent a status
+# command" guard is what the hint existed for and is surface-independent.
+TRACK_TELEGRAM = (
+    "they can check progress anytime with the /delegations command in Telegram"
+)
+TRACK_DASHBOARD = (
+    "they can check progress anytime in the dashboard, in the Tasks list of the "
+    "chat's context dock"
+)
+
+
+def _next_steps(session_key: str) -> str:
+    """The tracking hint for the surface this subprocess was spawned from.
+
+    ``session_key`` is a canonical key ("web:7:slot-1", "tg:42", …) minted by
+    ``_spawn_session``; the prefix is the surface. An unknown or empty key means
+    the seat is not a Telegram chat (a consult, a tick, an external MCP host), so
+    the dashboard wording is the honest default: it names a UI that exists on
+    every install, while /delegations only exists where Telegram does.
+    """
+    surface = (session_key or "").split(":", 1)[0].strip().lower()
+    where = TRACK_TELEGRAM if surface == "tg" else TRACK_DASHBOARD
+    return (
+        "Running in the background — the user is notified automatically "
+        f"when it finishes. Tell them {where}. You can poll it yourself "
+        'with delegate(action="get", task_id="<id>"). Do NOT invent any '
+        "other status command (e.g. there is no /task command)."
+    )
+
 
 async def delegate(
     action: str,
@@ -85,16 +117,10 @@ async def delegate(
             },
         )
         # Spell out how the user tracks this so the model never INVENTS a status
-        # command. There is no "/task" command — the user-facing one is
-        # "/delegations"; the user is also pinged automatically on completion.
+        # command, and name the surface they are actually on: there is no "/task"
+        # command anywhere, and no "/delegations" one outside Telegram.
         if isinstance(result, dict) and not result.get("error"):
-            result["next_steps"] = (
-                "Running in the background — the user is notified automatically "
-                "when it finishes. Tell them they can check progress anytime with "
-                "the /delegations command in Telegram. You can poll it yourself "
-                'with delegate(action="get", task_id="<id>"). Do NOT invent any '
-                "other status command (e.g. there is no /task command)."
-            )
+            result["next_steps"] = _next_steps(settings.session_key)
             if on_complete == "resume":
                 # Said explicitly so the model ends its turn instead of
                 # burning it polling for a result that will be handed to it.

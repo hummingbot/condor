@@ -498,8 +498,17 @@ async def _run(dt: DelegateTask, bot, timeout_s: int) -> None:
             # produced something is worth continuing from -- a failed or timed
             # out one gives the agent nothing to work with, and the error is
             # already in the chat and in the transcript.
+            #
+            # Exactly one of the two reaches the session: the resume turn already
+            # carries the outcome, so pushing the note as well would say the same
+            # thing twice and wake the conversation twice for one task. Every
+            # other outcome -- "notify", or a "resume" that failed -- gets the
+            # free note, which is what makes a finished task visible in a
+            # dashboard that is already open (CORR-262).
             if dt.on_complete == ON_COMPLETE_RESUME and dt.status == "done":
                 await _resume_conversation(dt)
+            else:
+                await _show_completion(dt)
         # Last of all, and only once the transcript, the sidecar and the status
         # record are on disk: this may drop older finished entries, and nothing
         # may be evicted that a reader cannot still find in history.
@@ -819,6 +828,42 @@ async def _resume_conversation(dt: DelegateTask) -> None:
         log.exception("Failed to resume conversation for delegation %s", dt.task_id)
 
 
+async def _show_completion(dt: DelegateTask) -> None:
+    """Show the outcome in the live session that asked for it (CORR-262).
+
+    The cheap sibling of :func:`_resume_conversation`, and the same shape
+    ``RoutineStore`` already uses after its own ``record_system``. The transcript
+    note written by :func:`_record_completion_turn` is read at *load* time, so an
+    already-open dashboard learned nothing until someone reloaded the page. This
+    pushes the same line immediately and pays for no model turn: a finished
+    delegation is worth showing, not worth an agent paraphrasing it.
+
+    Fires only where the resume turn does not -- the caller picks one -- so a
+    ``resume`` task is never woken twice for one outcome. A delegation with no
+    session or no conversation behind it (consult- or tick-started) is a no-op,
+    and nothing here may raise: by now the user has already been notified and
+    the transcript already carries the outcome.
+    """
+    if not dt.session_key or not dt.conversation_id:
+        return
+    try:
+        from condor.runtime import wake
+
+        await wake.deliver_note(
+            session_key=dt.session_key,
+            conversation_id=dt.conversation_id,
+            text=_completion_text(dt),
+            kind="delegation",
+        )
+    except Exception:
+        log.debug(
+            "Could not show delegation %s in conversation %s",
+            dt.task_id,
+            dt.conversation_id,
+            exc_info=True,
+        )
+
+
 def resolve_bot(bot=None):
     """The best Telegram sender available in this process.
 
@@ -867,6 +912,18 @@ async def _notify_done(dt: DelegateTask, bot) -> None:
     # transcript note carries, so the three surfaces cannot tell three stories
     # about one task. ``announce`` owns the "don't file it twice when the
     # resolved sender is the bell itself" rule (ARCH-212).
+    #
+    # The link is what makes the bell entry worth clicking (CORR-262): a
+    # delegation is the one notification whose whole value is a transcript the
+    # user wants to open, and an entry with no link is inert in the bell. There
+    # is no single-delegation route in the SPA, so the honest target is the
+    # agent's own page -- one the router actually resolves.
     await announce(
-        dt.user_id, dt.chat_id, _completion_text(dt), kind="delegation", bot=bot
+        dt.user_id,
+        dt.chat_id,
+        _completion_text(dt),
+        kind="delegation",
+        bot=bot,
+        title=f"Delegation · {dt.agent_slug}",
+        link=f"/agents/{dt.agent_slug}",
     )

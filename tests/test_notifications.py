@@ -381,6 +381,66 @@ def test_delegation_over_the_bell_ladder_is_not_recorded_twice(
     assert len(list_for(USER_A)) == 1
 
 
+def test_delegation_bell_entry_is_clickable(store, known_users):
+    """An entry whose whole value is a transcript must have somewhere to go
+    (CORR-262). ``/agents/{slug}`` is a route the SPA actually resolves."""
+    from condor.agents.delegate import DelegateTask, _notify_done
+
+    dt = DelegateTask(
+        task_id="t3",
+        agent_slug="scout",
+        user_id=USER_A,
+        chat_id=USER_A,
+        server_name=None,
+        task="do the thing",
+        status="done",
+        result="all done",
+    )
+
+    class _Bot:
+        async def send_message(self, **kw):
+            return {"ok": True}
+
+    asyncio.run(_notify_done(dt, _Bot()))
+
+    item = list_for(USER_A)[0]
+    assert item.link == "/agents/scout"
+    assert item.title == "Delegation · scout"
+
+
+def test_the_link_survives_the_bell_only_ladder(store, known_users, monkeypatch):
+    """On a dashboard-only install ``NotifyBot`` files the single entry itself,
+    so it is the one rung that must not drop the link."""
+    monkeypatch.delenv("TELEGRAM_TOKEN", raising=False)
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+
+    class _NoBotStore:
+        def get_bot(self):
+            return None
+
+    monkeypatch.setattr("condor.routine_store.get_routine_store", lambda: _NoBotStore())
+
+    from condor.agents.delegate import DelegateTask, _notify_done
+
+    dt = DelegateTask(
+        task_id="t4",
+        agent_slug="scout",
+        user_id=USER_A,
+        chat_id=USER_A,
+        server_name=None,
+        task="do the thing",
+        status="done",
+        result="all done",
+    )
+
+    asyncio.run(_notify_done(dt, None))
+
+    items = list_for(USER_A)
+    assert len(items) == 1
+    assert items[0].link == "/agents/scout"
+    assert items[0].kind == "delegation"
+
+
 def test_finished_routine_links_to_the_reports_tab(store):
     """Even with no conversation behind the run, the owner is told."""
     from condor.routine_store import RoutineStore

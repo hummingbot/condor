@@ -269,8 +269,12 @@ class NotifyBot:
     already serves routine reports through ``GET /reports/{id}/html``.
     """
 
-    def __init__(self, kind: str = "system"):
+    def __init__(
+        self, kind: str = "system", title: str | None = None, link: str | None = None
+    ):
         self._kind = kind
+        self._title = title
+        self._link = link
 
     # -- helpers --
 
@@ -282,7 +286,13 @@ class NotifyBot:
         user_id = user_for_chat(chat_id)
         if user_id is None:
             return None
-        return await record(user_id, text, kind=self._kind, link=link)
+        return await record(
+            user_id,
+            text,
+            kind=self._kind,
+            title=self._title,
+            link=link or self._link,
+        )
 
     # -- the bot surface --
 
@@ -409,9 +419,12 @@ async def announce(
         target = resolve_bot(bot)
         if isinstance(target, NotifyBot):
             # That rung files the message itself, so hand it this producer's
-            # own kind: the single entry is then the one :func:`record` below
-            # would have written, not a generic ``system`` one.
-            target = NotifyBot(kind)
+            # own kind, title and link: the single entry is then the one
+            # :func:`record` below would have written, not a generic ``system``
+            # one with nowhere to click. On a dashboard-only install this is the
+            # *only* entry the producer gets, so dropping the link here would
+            # lose it on exactly the surface that renders it (CORR-262).
+            target = NotifyBot(kind, title=title, link=link)
         result = await _send(target, chat_id, text, parse_mode)
         if isinstance(result, Notification):
             filed = result
