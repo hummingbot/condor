@@ -12,6 +12,7 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { ChatInput } from "@/components/chat/ChatInput";
 import { ChatThread } from "@/components/chat/ChatThread";
 import { Starters, type Starter } from "@/components/chat/Starters";
+import { useBubbleResume } from "@/hooks/useBubbleResume";
 import { useChat, useSessionOptions } from "@/hooks/useChat";
 import type { ChatSlot } from "@/hooks/useChatSocket";
 import { useServer } from "@/hooks/useServer";
@@ -84,6 +85,25 @@ export function ChatBubble() {
       chat.slots.find((s) => s.info.slot_id === storedSlotId)) ||
     adoptableSlot(chat.slots, pathname, slug);
   const slotId = slot?.info.slot_id;
+
+  // Nothing live to adopt, on the agent's own page, with the panel open: the
+  // conversation may still exist on the server. Reattach to it rather than
+  // letting the first message mint a second one (CORR-257) — spawning stays
+  // the last resort, for an agent with no history at all.
+  useBubbleResume(open && !slot && isAgentPage(pathname), slug, (meta) => {
+    chat.resumeConversation(
+      meta.id,
+      {
+        agent_key: meta.agent_key,
+        server_name: meta.server_name || undefined,
+        agent_slug: meta.agent_slug,
+      },
+      // Read-only with respect to the workspace, exactly as the adoption is:
+      // "Back to chat" stays the only gesture that moves `activeSlotId`.
+      { focus: false },
+    );
+    setSlotBySlug((m) => (m[slug] === meta.id ? m : { ...m, [slug]: meta.id }));
+  });
 
   const msgCount = slot?.messages.length ?? 0;
 

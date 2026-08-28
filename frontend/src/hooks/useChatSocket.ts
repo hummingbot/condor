@@ -693,13 +693,26 @@ export function useChatSocket() {
    * conversation would replace a perfectly good subprocess.
    */
   const resumeConversation = useCallback(
-    (conversationId: string, meta?: Partial<SlotInfo>) => {
+    (
+      conversationId: string,
+      meta?: Partial<SlotInfo>,
+      opts?: {
+        /**
+         * `false` keeps `activeSlotId` where it is, the same escape hatch
+         * `startSession` carries: the bubble reattaches to an agent's newest
+         * conversation from that agent's page (CORR-257), and a background
+         * surface must not decide what the workspace at `/` is showing.
+         */
+        focus?: boolean;
+      },
+    ) => {
       if (!conversationId) return;
+      const focus = opts?.focus !== false;
       const existing = slotsRef.current.find(
         (s) => s.info.slot_id === conversationId,
       );
       if (existing) {
-        setActiveSlotId(conversationId);
+        if (focus) setActiveSlotId(conversationId);
         return;
       }
 
@@ -722,7 +735,10 @@ export function useChatSocket() {
           pending: true,
         },
       ]);
-      setActiveSlotId(conversationId);
+      // A resume's `session_started` carries no `client_ref`, so the
+      // conversation's own id is what marks it unfocused over there.
+      if (focus) setActiveSlotId(conversationId);
+      else unfocusedRefs.current.add(conversationId);
       // In parallel with the spawn: the transcript is readable long before the
       // agent that will continue it is up.
       void hydrateSlot(conversationId, conversationId);
@@ -941,8 +957,11 @@ export function useChatSocket() {
             refAliases.current[ref] = newSlot.slot_id;
           }
           // `delete` doubles as the membership test: an unfocused spawn is
-          // one-shot, and the set must not grow for the life of the tab.
-          const adopt = ref ? !unfocusedRefs.current.delete(ref) : true;
+          // one-shot, and the set must not grow for the life of the tab. A
+          // resume has no ref, so it is filed under the conversation id — and
+          // a focused one is simply not in the set, which is the `false` that
+          // keeps every other resume adopting as before.
+          const adopt = !unfocusedRefs.current.delete(ref || newSlot.slot_id);
           setSlots((prev) =>
             prev.some((s) => s.info.slot_id === tabId)
               ? prev.map((s) =>
