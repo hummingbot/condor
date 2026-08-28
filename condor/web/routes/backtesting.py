@@ -6,7 +6,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from condor.backtest_store import get_backtest_store
-from condor.backtesting import coerce_controller_config, normalize_backtest_task
+from condor.backtesting import (
+    coerce_controller_config,
+    get_task,
+    normalize_backtest_task,
+)
 from condor.web.auth import get_current_user, require_server_access
 from condor.web.models import WebUser
 from config_manager import ServerPermission, get_config_manager
@@ -96,7 +100,7 @@ async def get_backtest_task(
     # Try live first
     try:
         client = await cm.get_client(name)
-        result = await client.backtesting.get_task(task_id)
+        result = await get_task(client, task_id)
 
         # Auto-save completed results
         if isinstance(result, dict) and result.get("status") == "completed":

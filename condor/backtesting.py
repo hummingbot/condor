@@ -15,6 +15,8 @@ import logging
 import time
 from typing import Any
 
+import aiohttp
+
 from condor.fetchers.executors import normalize_executor_side
 
 logger = logging.getLogger(__name__)
@@ -24,6 +26,18 @@ logger = logging.getLogger(__name__)
 # action='run_async') rather than shortening this.
 DEFAULT_POLL_INTERVAL = 2.0
 DEFAULT_TIMEOUT = 600.0
+
+# The one response that carries the whole backtest -- every executor plus
+# processed_data -- is the poll that finally succeeds, and aiohttp's ``total``
+# covers the body read, so the shared client's 60s cap (config_manager.get_client)
+# applied to it: a multi-month 1m window does not transfer and parse in a minute,
+# the run completed on the server and Condor timed out reading the answer.
+# ``sock_read`` is the knob that fits both shapes of slowness on this path -- a
+# payload that is streaming keeps resetting it however long the transfer takes,
+# while an API server stalled computing sends nothing and still trips it in a
+# minute, which is the case _poll_task retries. ``total`` stays only as a backstop
+# against a connection that dribbles forever.
+TASK_READ_TIMEOUT = aiohttp.ClientTimeout(total=600, connect=15, sock_read=60)
 
 _TERMINAL = ("completed", "failed", "error", "cancelled")
 
@@ -148,25 +162,103 @@ async def run_and_save(
 async def _poll_task(
     client, task_id: str, poll_interval: float, timeout: float
 ) -> dict:
-    """Poll a submitted task until it reaches a terminal state."""
+    """Poll a submitted task until it reaches a terminal state.
+
+    A poll that times out is *not* a failed backtest. The API server computes a
+    backtest on the same event loop it answers HTTP on, so a wide window over
+    fine candles stalls every request to it — including this one, which then
+    hits the client's own request timeout and raised a bare ``TimeoutError``
+    that killed a run whose task was still healthy on the server. The deadline
+    below is what bounds the wait; an individual poll failing to answer only
+    means "ask again".
+    """
     deadline = time.monotonic() + timeout
-    task: dict = {}
+    last_status: str | None = None
     while True:
-        task = await client.backtesting.get_task(task_id)
-        if not isinstance(task, dict):
-            raise BacktestError(
-                f"Backtest {task_id} returned an unreadable task: {task}"
+        stalled = False
+        try:
+            task = await get_task(client, task_id)
+        except TimeoutError:
+            # Covers asyncio.TimeoutError too — the same object since 3.11, and
+            # what aiohttp raises when a request outlives its ClientTimeout.
+            logger.debug(
+                "Poll for backtest %s timed out; the server is busy, retrying",
+                task_id,
             )
-        if task.get("status") in _TERMINAL:
-            return normalize_backtest_task(task)
+            stalled = True
+
+        if not stalled:
+            if not isinstance(task, dict):
+                raise BacktestError(
+                    f"Backtest {task_id} returned an unreadable task: {task}"
+                )
+            if task.get("status") in _TERMINAL:
+                return normalize_backtest_task(task)
+            last_status = task.get("status")
+
         if time.monotonic() >= deadline:
             raise BacktestError(
-                f"Backtest {task_id} is still {task.get('status') or 'running'} after "
+                f"Backtest {task_id} is still {last_status or 'running'} after "
                 f"{int(timeout)}s. It keeps running on the server — render it later "
                 f"with task_id='{task_id}'. For a window this long, submit the routine "
                 "with action='run_async' instead of waiting."
             )
         await asyncio.sleep(poll_interval)
+
+
+async def get_task(client, task_id: str) -> Any:
+    """GET one backtest task with a read deadline sized for its result payload.
+
+    ``BacktestingRouter.get_task`` takes no per-request timeout, and the
+    session-wide one belongs to every other caller of the shared client -- 60s is
+    right for a chat-latency call and wrong for this one. The request therefore
+    goes to the same authenticated session directly, carrying
+    :data:`TASK_READ_TIMEOUT`. A client that does not expose its session (the
+    test doubles, a future client shape) falls back to the router.
+    """
+    router = getattr(client, "backtesting", None)
+    session = getattr(router, "session", None)
+    base_url = getattr(router, "base_url", None)
+    if session is None or base_url is None:
+        return await router.get_task(task_id)
+
+    url = f"{base_url}/backtesting/tasks/{task_id}"
+    async with session.get(url, timeout=TASK_READ_TIMEOUT) as response:
+        if not response.ok:
+            detail = (await response.text())[:300].strip()
+            raise BacktestError(
+                f"Backtest {task_id} could not be read: "
+                f"HTTP {response.status} {detail}".strip()
+            )
+        return await response.json()
+
+
+async def fetch_and_save(client, server: str, task_id: str) -> dict | None:
+    """Fetch a finished task from the server and persist it; None if there is none.
+
+    ``_save`` only ever runs at the end of a wait, so a run whose result read timed
+    out completed on the server and never reached the store -- and "render it later
+    with task_id=..." then found nothing to render. This is the fall-through that
+    makes that advice true: fetched once, saved, and every later render is local.
+    """
+    try:
+        task = await get_task(client, task_id)
+    except Exception:
+        logger.debug(
+            "Could not fetch backtest %s from the server", task_id, exc_info=True
+        )
+        return None
+
+    if (
+        not isinstance(task, dict)
+        or task.get("status") != "completed"
+        or not task.get("result")
+    ):
+        return None
+
+    task = normalize_backtest_task(task)
+    _save(server, task_id, task)
+    return task
 
 
 def _save(server: str, task_id: str, task: dict) -> None:
