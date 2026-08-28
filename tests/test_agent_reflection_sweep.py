@@ -1,4 +1,4 @@
-"""The idle sweep behind the reflection pass (FEAT-061).
+"""The idle sweep behind the reflection pass (FEAT-073).
 
 The pass spends the agent's own model, unattended, on conversations nobody
 asked it to read. So these tests are almost entirely about what the sweep

@@ -1,4 +1,4 @@
-"""The reflection pass (FEAT-061).
+"""The reflection pass (FEAT-073).
 
 The pass spends the agent's own model on a chat the user may never return to,
 and it writes into their memory without anyone reading the answer first. So the
@@ -319,7 +319,7 @@ async def test_the_same_intent_twice_is_counted_not_duplicated(env, stub):
     assert entry.score > 1.0
 
 
-# ── The playbook it may only offer (FEAT-062) ──
+# ── The playbook it may only offer (FEAT-074) ──
 
 PROPOSES = json.dumps(
     {

@@ -774,7 +774,7 @@ export interface AgentBrain {
 }
 
 /**
- * A playbook the agent proposed from a conversation (FEAT-062).
+ * A playbook the agent proposed from a conversation (FEAT-074).
  *
  * It is not in the library and reaches no prompt until somebody accepts it, so
  * unlike a `SkillCard` it carries its body: the whole point of the card is
@@ -792,7 +792,7 @@ export interface SkillProposal {
 }
 
 /**
- * One opener this Agent learned the caller keeps asking it for (FEAT-061).
+ * One opener this Agent learned the caller keeps asking it for (FEAT-073).
  *
  * Learned rows only: the server never sends the static defaults, because the
  * client has always owned its own cold-start copy. An empty list is therefore

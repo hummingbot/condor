@@ -1,6 +1,6 @@
 /**
  * The openers on an empty chat: what this agent learned you ask it for, over
- * the static list its consumer ships (FEAT-061).
+ * the static list its consumer ships (FEAT-073).
  *
  * Lives beside the component rather than inside it because `Starters.tsx`
  * exports a component and the lint gate lets it export nothing else — and

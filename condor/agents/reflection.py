@@ -1,4 +1,4 @@
-"""Reading a finished conversation back, once, to learn from it (FEAT-061).
+"""Reading a finished conversation back, once, to learn from it (FEAT-073).
 
 Three things come out of a chat that has gone quiet: **facts worth remembering
 about this user**, which go to the agent's per-user memory like any other;
@@ -6,7 +6,7 @@ about this user**, which go to the agent's per-user memory like any other;
 :mod:`condor.agents.starters` and becomes the openers on their next empty chat
 with that agent; and, occasionally, **a procedure the conversation worked out**,
 which goes to :mod:`condor.memory.proposals` as an *offer* — a playbook a human
-accepts before it ever reaches a prompt (FEAT-062).
+accepts before it ever reaches a prompt (FEAT-074).
 
 The shape of this module is borrowed on purpose.
 
@@ -131,10 +131,10 @@ def build_prompt(
     The known slugs are the whole of the de-duplication strategy: showing the
     model what it has already named and asking it to reuse one verbatim is
     cheaper and truer than fuzzy-matching labels in Python, where a near-miss
-    would silently fuse two different intents (FEAT-061 §1).
+    would silently fuse two different intents (FEAT-073 §1).
 
     The skill index is here for the same reason at the other end: the bar for
-    proposing a playbook (FEAT-062) is "no existing skill covers it", which is
+    proposing a playbook (FEAT-074) is "no existing skill covers it", which is
     only a checkable bar if the model is shown the library. It is the same
     index line the agent itself is handed at the top of every turn, so what the
     pass reasons against is what the agent would actually read.
@@ -243,7 +243,7 @@ def _file_proposal(data: dict, meta: ConversationMeta) -> bool:
     The model **cannot** write a skill — the run is tool-less, so there is no
     ``manage_skill`` for it to call — and this is the whole of what it can do
     instead: hand the runtime four fields, which land in ``proposals/`` for a
-    human to accept or discard (FEAT-062). Guarded like the memories beside it:
+    human to accept or discard (FEAT-074). Guarded like the memories beside it:
     a missing, mistyped or half-filled proposal is dropped, never fatal to the
     intents and memories in the same answer.
     """

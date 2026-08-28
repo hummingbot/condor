@@ -1,4 +1,4 @@
-"""The learned-openers store (FEAT-061).
+"""The learned-openers store (FEAT-073).
 
 Everything here is arithmetic and a file, which is the point: the model only
 ever names an intent, and every claim the openers make about "what you usually

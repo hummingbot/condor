@@ -14,7 +14,7 @@ the repo already decided per-user-per-agent data goes
 fact. The skill library next door is keyed by the *agent alone* and read by
 every user of it, so a habit stored there would be one person's routine served
 to everybody — which is why an opener is not a skill even though it looks like
-one (FEAT-061 §Alternatives).
+one (FEAT-073 §Alternatives).
 
 **The ranking is Python, not the model's recollection.** An intent carries a
 decayed count: each time it comes up again its score is aged toward now and

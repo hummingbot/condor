@@ -714,7 +714,7 @@ async def startup(application: Application) -> None:
     except Exception:
         logger.exception("Sharing job registration failed (continuing without it)")
 
-    # Reflection (FEAT-061): read a finished conversation back once, for the
+    # Reflection (FEAT-073): read a finished conversation back once, for the
     # facts and the intents in it. The sharing sweep's neighbour by shape and
     # not by subject — it shares no consent record, no queue and no endpoint
     # with it, and nothing it reads leaves the machine. Free on an install with

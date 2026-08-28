@@ -1,4 +1,4 @@
-"""Proposed playbooks — offered by the agent, accepted by a human (FEAT-062).
+"""Proposed playbooks — offered by the agent, accepted by a human (FEAT-074).
 
 The whole point of this module is a boundary, so the test that matters most is
 the negative one: while a proposal is pending, the agent's injected skills

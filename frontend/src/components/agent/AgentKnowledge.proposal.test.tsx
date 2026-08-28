@@ -1,5 +1,5 @@
 /**
- * The playbook the agent offered, and the click that accepts it (FEAT-062).
+ * The playbook the agent offered, and the click that accepts it (FEAT-074).
  *
  * The card is the human half of "the agent proposes, a human accepts": until
  * one of its two buttons is pressed the proposal is on disk and in no prompt.

@@ -263,7 +263,7 @@ def test_deleting_the_default_agent_is_a_refusal_not_a_crash(env):
     assert (env / "condor" / "AGENT.md").exists()
 
 
-# ── Proposed playbooks (FEAT-062) ──
+# ── Proposed playbooks (FEAT-074) ──
 
 
 def _propose(name: str = "CLMM rebalance") -> None:

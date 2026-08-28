@@ -259,7 +259,7 @@ class SkillCard(BaseModel):
 
 
 class SkillProposal(BaseModel):
-    """A playbook the Agent *offered*, waiting for a human (FEAT-062).
+    """A playbook the Agent *offered*, waiting for a human (FEAT-074).
 
     Carries its body, unlike a :class:`SkillCard`: there is at most one of
     these and the whole point of the card is that somebody reads what they are
@@ -361,7 +361,7 @@ class MemoryBody(BaseModel):
 
 
 class StarterRow(BaseModel):
-    """One learned opener, in the shape the chip renders (FEAT-061).
+    """One learned opener, in the shape the chip renders (FEAT-073).
 
     ``prompt`` is sent verbatim on click and is the label, because the label
     *is* the message — the reflection pass names an intent as the sentence the
@@ -1375,7 +1375,7 @@ async def get_agent_memory(
 
 @router.get("/{slug}/starters", response_model=StarterList)
 async def get_agent_starters(slug: str, user: WebUser = Depends(get_current_user)):
-    """The openers this Agent learned *this caller* asks it for (FEAT-061).
+    """The openers this Agent learned *this caller* asks it for (FEAT-073).
 
     Per-user by the same dependency that makes ``/memories`` per-user, because
     "what you keep asking for" is a fact about one person and serving another's
@@ -1487,7 +1487,7 @@ async def accept_agent_skill_proposal(
 ):
     """Turn the offered playbook into a real one in this Agent's own library.
 
-    This is the human in "the agent proposes, a human accepts" (FEAT-062) — the
+    This is the human in "the agent proposes, a human accepts" (FEAT-074) — the
     only path by which a proposed playbook ever reaches a prompt. The store does
     the work with the same ``create`` the panel's New playbook button uses, so
     what lands is an ordinary skill from here on.

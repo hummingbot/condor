@@ -693,7 +693,7 @@ function BrainTab({
 }
 
 /**
- * The playbook the agent offered, above the library it is not in yet (FEAT-062).
+ * The playbook the agent offered, above the library it is not in yet (FEAT-074).
  *
  * The agent worked a procedure out in a conversation and proposed it; it has
  * been written nowhere the agent can read, because a skill is per-agent and

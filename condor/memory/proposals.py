@@ -1,4 +1,4 @@
-"""A playbook an agent *offered*, waiting for a human to accept it (FEAT-062).
+"""A playbook an agent *offered*, waiting for a human to accept it (FEAT-074).
 
 The reflection pass (:mod:`condor.agents.reflection`) reads a finished
 conversation back and sometimes notices that it just worked out a **procedure**
