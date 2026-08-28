@@ -1288,9 +1288,18 @@ def get_effective_server(chat_id: int, user_data: dict = None) -> str | None:
     return None
 
 
-async def get_client(chat_id: int, user_id: int = None, context=None):
-    """Get the API client for the user's preferred server."""
-    preferred_server = None
+async def get_client(
+    chat_id: int, user_id: int = None, context=None, server: str = None
+):
+    """Get the API client for the user's preferred server.
+
+    ``server`` names it outright, for a caller that has already resolved which
+    server the work belongs to and must not have that answer re-derived. A
+    routine is the case: it files its results under the server it was launched
+    against, so resolving the client from the chat's ambient preferences
+    instead is how a run gets executed on one box and recorded under another.
+    """
+    preferred_server = server
     if context is not None:
         # Handle both normal context and job context (where user_data may be None)
         user_data = context.user_data
@@ -1299,7 +1308,8 @@ async def get_client(chat_id: int, user_id: int = None, context=None):
 
         if user_id is None and user_data is not None:
             user_id = user_data.get("_user_id")
-        preferred_server = get_effective_server(chat_id, user_data)
+        if preferred_server is None:
+            preferred_server = get_effective_server(chat_id, user_data)
 
     return await get_config_manager().get_client_for_chat(
         chat_id, user_id, preferred_server

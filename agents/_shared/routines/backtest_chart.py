@@ -1257,6 +1257,15 @@ def _server_name(chat_id: int | None, context: ContextTypes.DEFAULT_TYPE) -> str
 async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> RoutineResult:
     chat_id = context._chat_id if hasattr(context, "_chat_id") else None
 
+    # One answer to "which server is this run", used for both halves of it: the
+    # box the backtest executes on and the key the store files it under. They
+    # were resolved separately -- the client from the chat's ambient
+    # preferences, the record from the launch -- so a dashboard or agent run,
+    # which carries no chat, could execute on the default server and be
+    # recorded under the one it was launched against. Naming the server to
+    # ``get_client`` is what makes the two the same server by construction.
+    server = _server_name(chat_id, context)
+
     # Rendering a stored run needs neither the API nor the controller config --
     # unless the run is not stored. A backtest whose result read timed out finished
     # on the server and never reached the store, so a miss asks the server once and
@@ -1264,16 +1273,16 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> RoutineResu
     if config.task_id.strip():
         task_id = config.task_id.strip()
         if not _is_saved(task_id):
-            client = await get_client(chat_id, context=context)
+            client = await get_client(chat_id, context=context, server=server)
             if client:
-                await fetch_and_save(client, _server_name(chat_id, context), task_id)
+                await fetch_and_save(client, server, task_id)
         loaded = _load_saved_task(task_id)
         if isinstance(loaded, str):
             return RoutineResult(text=loaded)
         result, config = loaded
         return await _render(result, config, chat_id, context)
 
-    client = await get_client(chat_id, context=context)
+    client = await get_client(chat_id, context=context, server=server)
     if not client:
         return RoutineResult(text="No server available")
 
@@ -1294,7 +1303,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> RoutineResu
     # is keyed by, so every run — chat, web or agent — is rankable by backtest_compare.
     task_id, task = await run_and_save(
         client,
-        _server_name(chat_id, context),
+        server,
         ctrl_config,
         start_ts,
         end_ts,
