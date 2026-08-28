@@ -205,6 +205,10 @@ agents/**/learnings.md
 agents/**/sessions/
 agents/**/dry_runs/
 agents/**/delegations/
+# An agent's proposed playbook (FEAT-074) starts as its own output, the same
+# way a learning does. It becomes a skill by being promoted into skills/,
+# which is tracked; the proposal it came from is not.
+agents/**/proposals/
 
 # Editor and AI-assistant workspace config: local to each developer's setup,
 # not repo policy. .claude/settings.local.json is already covered above.
