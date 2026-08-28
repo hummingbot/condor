@@ -103,7 +103,7 @@ class SharingPreferenceUpdate(BaseModel):
 
 
 class ConversationSharingStatus(BaseModel):
-    """What the chat header chip renders for one conversation."""
+    """What the share dialog renders for one conversation."""
 
     conversation_id: str
     excluded: bool = False

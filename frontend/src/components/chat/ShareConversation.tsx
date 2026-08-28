@@ -143,9 +143,10 @@ function TurnPreview({ turn }: { turn: SharePreview["turns"][number] }) {
  * Hand one conversation to the Condor project — after reading exactly what goes.
  *
  * The dialog is the last gate on *this* path — the one the button opens. It is
- * not evidence that no sweep exists: the background producer is the
- * neighbouring SharingIndicator, mounted in the same header, and it ships no
- * dialog because nobody is watching it. The scrubber replaces every
+ * not evidence that no sweep exists: with Always on, the background sweep sends
+ * without a dialog because nobody is watching it, which is why this dialog also
+ * carries that sweep's per-conversation opt-out — it is the only surface left
+ * that names it. The scrubber replaces every
  * value the install knows about itself and then pattern-matches the shapes it
  * does not, but no regex knows that "the vault key is hunter2" is a secret. So
  * the payload is rendered here, verbatim, before anyone consents to it: the
@@ -168,6 +169,32 @@ export function ShareConversation({
   const [confirming, setConfirming] = useState(false);
   useEscapeKey(open, onClose);
 
+  // The automatic sweep, only when the user actually turned it on. It used to
+  // announce itself in a bar above every chat; that bar is gone, so this dialog
+  // is where a covered conversation says so and where the opt-out lives.
+  const { data: preference } = useQuery({
+    queryKey: ["sharing-preference"],
+    queryFn: api.getSharingPreference,
+    retry: false,
+  });
+
+  const sweepKey = ["conversation-sharing", conversationId] as const;
+  const { data: sweep } = useQuery({
+    queryKey: sweepKey,
+    queryFn: () => api.getConversationSharing(conversationId),
+    enabled: open && !!conversationId && !!preference?.sweeping,
+    retry: false,
+  });
+
+  const exclude = useMutation({
+    mutationFn: (excluded: boolean) =>
+      api.setConversationExcluded(conversationId, excluded),
+    onSuccess: (next) => {
+      queryClient.setQueryData(sweepKey, next);
+      queryClient.invalidateQueries({ queryKey: ["conversations"] });
+    },
+  });
+
   const { data, isLoading, error } = useQuery({
     queryKey: ["share-preview", conversationId],
     queryFn: () => api.previewShare(conversationId),
@@ -182,7 +209,7 @@ export function ShareConversation({
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ["conversations"] });
     queryClient.invalidateQueries({ queryKey: ["shared-conversations"] });
-    // The header chip reads this per conversation, and both buttons here move
+    // The sweep row above reads this per conversation, and both buttons here move
     // it: sharing flips `shared`, and unsharing clears the receipt *and*
     // excludes the chat for good. Left stale, the chip would go on promising a
     // transcript is shared after the user took it back — a false statement
@@ -260,6 +287,35 @@ export function ShareConversation({
         {data && (
           <>
             <div className="space-y-2 border-b border-[var(--color-border)] px-5 py-3">
+              {/* The standing answer, and the one place left to take this chat
+                  out of it. Only rendered when Always is on and a rule actually
+                  covers (or excluded) this conversation — with Always off there
+                  is no sweep to opt out of, and a chat the rules never covered
+                  gives the user nothing to act on. */}
+              {sweep && (sweep.covered || sweep.excluded) && (
+                <div
+                  data-sharing-sweep={
+                    sweep.excluded ? "excluded" : sweep.shared ? "shared" : "will-share"
+                  }
+                  className="flex items-center gap-2 rounded-md bg-[var(--color-surface-hover)] px-2.5 py-1.5 text-xs text-[var(--color-text)]"
+                >
+                  <Share2 className="h-3.5 w-3.5 shrink-0 text-[var(--color-text-muted)]" />
+                  <span className="flex-1">
+                    {sweep.excluded
+                      ? "Excluded — this chat is not shared automatically."
+                      : sweep.shared
+                        ? "Shared automatically. You can take it back below."
+                        : "Automatic sharing is on: this chat will be sent once it has been idle for half an hour."}
+                  </span>
+                  <button
+                    onClick={() => exclude.mutate(!sweep.excluded)}
+                    disabled={exclude.isPending}
+                    className="shrink-0 rounded px-1.5 py-0.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface)] hover:text-[var(--color-text)] disabled:opacity-60"
+                  >
+                    {sweep.excluded ? "Include it" : "Not this one"}
+                  </button>
+                </div>
+              )}
               <p className="flex items-start gap-2 text-xs text-[var(--color-text)]">
                 <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[var(--color-green)]" />
                 <span>{redactionSentence(data.counts)}</span>
@@ -297,12 +353,12 @@ export function ShareConversation({
             <div className="border-t border-[var(--color-border)] p-4">
               {/* Said before the button is pressed, not discovered a sweep
                   later: unsharing is a standing refusal, and the way back in is
-                  the header chip's Include it. */}
+                  the Include it button above. */}
               {data.shared && (
                 <p className="mb-3 text-xs leading-relaxed text-[var(--color-text-muted)]">
                   Unsharing deletes our copy and stops this chat being shared
-                  automatically — it will not be sent again unless you include
-                  it from the header chip or press Share here yourself.
+                  automatically — it will not be sent again unless you press
+                  Include it above, or Share here yourself.
                 </p>
               )}
               <div className="flex items-center justify-between gap-2">

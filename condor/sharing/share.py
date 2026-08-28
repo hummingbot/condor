@@ -219,7 +219,7 @@ def unshare(user_id: int, conv_id: str) -> bool:
     transcript under a fresh ``share_id`` half an hour later. ``share_excluded``
     is the one flag the sweep honours forever, and it is inert for users at
     ``off`` or ``explicit`` — nothing was going to be taken from them anyway. The
-    way back in is the header chip's *Include it*, which is a deliberate act
+    way back in is the share dialog's *Include it*, which is a deliberate act
     rather than an automatic one.
     """
     meta = _meta(user_id, conv_id)
@@ -267,7 +267,7 @@ def unshare_all(user_id: int) -> int:
     permanently and with no bulk way back — they just asked for all of it
     deleted, so re-uploading any of it on the next tick would be the wrong
     reading. Settings says so on the button, and an individual chat can be
-    re-included from its header chip.
+    re-included from its share dialog.
     """
     removed = 0
     for meta in conversations.list_conversations(user_id, limit=0):

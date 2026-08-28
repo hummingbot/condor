@@ -271,10 +271,11 @@ export function SharingSettings() {
           <p className="mt-2 text-xs text-[var(--color-text-muted)]">
             Unsharing deletes the copy on our side, and takes that chat out of
             automatic sharing for good — it will not be sent again on its own,
-            however much it grows. To put one back, open it and use{" "}
-            <span className="text-[var(--color-text)]">Include it</span> on the
-            header chip. Deleting a conversation here unshares it first, so it
-            never outlives the chat it came from.
+            however much it grows. To put one back, open its share dialog from
+            the conversation list and use{" "}
+            <span className="text-[var(--color-text)]">Include it</span>.
+            Deleting a conversation here unshares it first, so it never outlives
+            the chat it came from.
           </p>
         )}
         {unshare.isError && (
@@ -300,8 +301,8 @@ export function SharingSettings() {
                   the chats one at a time, so they are told before, not after. */}
               <p className="mt-1 text-xs text-[var(--color-text-muted)]">
                 {state === "always"
-                  ? "All of them also stop being shared automatically, permanently. Turning Always back on will not cover them again — each one has to be included from its own header chip."
-                  : "All of them are also taken out of automatic sharing, so turning Always on later will not cover them — each one has to be included from its own header chip."}
+                  ? "All of them also stop being shared automatically, permanently. Turning Always back on will not cover them again — each one has to be included from its own share dialog."
+                  : "All of them are also taken out of automatic sharing, so turning Always on later will not cover them — each one has to be included from its own share dialog."}
               </p>
               <div className="mt-2 flex gap-2">
                 <button
