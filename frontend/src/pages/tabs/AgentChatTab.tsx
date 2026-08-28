@@ -33,6 +33,7 @@ import { useBrainSwitch } from "@/hooks/useBrainSwitch";
 import { useChat, useSessionOptions } from "@/hooks/useChat";
 import { useServer } from "@/hooks/useServer";
 import { useStarters } from "@/hooks/useStarters";
+import { normalizeAgentSlug } from "@/lib/agentSlug";
 import {
   api,
   CHAT_SLUG,
@@ -155,9 +156,14 @@ export function AgentChatTab() {
    */
   const talkTo = useCallback(
     (agentSlug: string, opts?: { intent?: TalkIntent; text?: string }) => {
+      // Links speak the registry's spelling — `/?agent=condor` from an agent
+      // page — while a chat binds Condor by binding nobody. Translate once,
+      // here, or the lookup below misses the live Condor conversation and
+      // spawns a bound-`"condor"` one the rail can never light up.
+      const slug = normalizeAgentSlug(agentSlug);
       if ((opts?.intent ?? "focus") === "focus") {
         const live = slotsRef.current.find(
-          (s) => (s.info.agent_slug || "") === agentSlug,
+          (s) => (s.info.agent_slug || "") === slug,
         );
         if (live) {
           chat.setActiveSlotId(live.info.slot_id);
@@ -170,9 +176,9 @@ export function AgentChatTab() {
         // needs a model named. Volunteering `defaultAgent` here is what used to
         // claim an override the user never made, so a bound Agent ran on
         // Condor's model instead of its own.
-        pendingAgentKey ?? (agentSlug ? "" : defaultAgent),
+        pendingAgentKey ?? (slug ? "" : defaultAgent),
         server || undefined,
-        agentSlug || undefined,
+        slug || undefined,
       );
       // The tab is on screen before the spawn is; the outbox flushes this the
       // moment the session lands, which is what makes a new chat feel warm.

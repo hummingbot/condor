@@ -15,17 +15,12 @@ import { Starters, type Starter } from "@/components/chat/Starters";
 import { useChat, useSessionOptions } from "@/hooks/useChat";
 import { useServer } from "@/hooks/useServer";
 import { useStarters } from "@/hooks/useStarters";
+import { bubbleAgentSlug } from "@/lib/agentSlug";
 import { api, CHAT_SLUG } from "@/lib/api";
 import { routeFacts } from "@/lib/pageFacts";
 import { collectViewFacts, renderViewBlock } from "@/lib/viewFacts";
 
 const OPEN_KEY = "condor_bubble_open";
-
-/** Whose bubble this is: the agent whose page you are on, else Condor. */
-function bubbleAgentSlug(pathname: string): string {
-  const m = pathname.match(/^\/agents\/([^/]+)/);
-  return m ? decodeURIComponent(m[1]) : "";
-}
 
 /**
  * A quick chat over whatever page the user is on (FEAT-059).
