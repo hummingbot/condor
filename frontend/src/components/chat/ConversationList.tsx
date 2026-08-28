@@ -154,7 +154,11 @@ export const ConversationList = memo(function ConversationList({
 
         {grouped.map(({ group, items }) => (
           <div key={group}>
-            <div className="sticky top-0 bg-[var(--color-bg)] px-3 pb-1 pt-2.5 text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
+            {/* `z-10` is load-bearing, not decoration: the rows below are
+                `relative`, so with both at `z-index: auto` they paint after
+                the header in tree order and a scrolled row slides *over* the
+                day label instead of under it. */}
+            <div className="sticky top-0 z-10 bg-[var(--color-bg)] px-3 pb-1 pt-2.5 text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
               {group}
             </div>
             {items.map((meta) => {
