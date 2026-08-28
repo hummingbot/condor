@@ -86,6 +86,7 @@ export function AnchoredMenu({
     left?: number;
     right?: number;
     maxHeight: number;
+    maxWidth: number;
     width?: number;
     minWidth?: number;
   } | null>(null);
@@ -106,11 +107,23 @@ export function AnchoredMenu({
         below < Math.min(MIN_ROOM, above)
           ? { bottom: window.innerHeight - r.top + gap, maxHeight: cap(above) }
           : { top: r.bottom + gap, maxHeight: cap(below) };
+      const horizontal =
+        align === "right"
+          ? { right: Math.max(EDGE, window.innerWidth - r.right) }
+          : { left: Math.max(EDGE, r.left) };
       setPos({
         ...vertical,
-        ...(align === "right"
-          ? { right: Math.max(EDGE, window.innerWidth - r.right) }
-          : { left: Math.max(EDGE, r.left) }),
+        ...horizontal,
+        // The horizontal mirror of maxHeight: never wider than the room left
+        // on the side the panel is pinned to. A fixed-width panel (`w-64`) on
+        // a trigger near the far edge would otherwise run off the window,
+        // where — unlike vertical overflow — nothing scrolls it back.
+        maxWidth: Math.max(
+          window.innerWidth -
+            (horizontal.right ?? horizontal.left ?? EDGE) -
+            EDGE,
+          0,
+        ),
         width: matchAnchorWidth === "exact" ? r.width : undefined,
         minWidth: matchAnchorWidth === "min" ? r.width : undefined,
       });
@@ -175,6 +188,7 @@ export function AnchoredMenu({
         // Never taller than the room on the side it opened to, so a long list
         // scrolls inside the panel rather than running off the window.
         maxHeight: pos.maxHeight,
+        maxWidth: pos.maxWidth,
         width: pos.width,
         minWidth: pos.minWidth,
       }}
