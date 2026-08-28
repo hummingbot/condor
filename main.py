@@ -589,6 +589,31 @@ def _outbound_bot(application: Application):
     return NotifyBot()
 
 
+# Strong references to fire-and-forget boot tasks. asyncio only holds a weak
+# one, so a task nobody awaits can be garbage-collected mid-flight; keeping the
+# handle here (and discarding it on completion) is the documented fix.
+_BACKGROUND_TASKS: set[asyncio.Task] = set()
+
+
+def _spawn_background(coro, label: str) -> asyncio.Task:
+    """Run ``coro`` off the critical path, logging rather than swallowing errors.
+
+    For work the process wants done soon but must not wait for — cache warm-up
+    being the case that used to gate the uvicorn bind behind a dead server's
+    connect timeouts.
+    """
+    task = asyncio.create_task(coro)
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
+
+    def _report(t: asyncio.Task) -> None:
+        if not t.cancelled() and t.exception() is not None:
+            logger.error("%s failed: %s", label, t.exception())
+
+    task.add_done_callback(_report)
+    return task
+
+
 async def startup(application: Application) -> None:
     """Bring the process up: commands, caches, supervisors, boot reconciliation.
 
@@ -646,7 +671,14 @@ async def startup(application: Application) -> None:
     sds_register()
     sds = get_server_data_service()
     sds.start()
-    await sds.auto_subscribe_servers()
+    # Warm the cache in the background, never on the critical path: every
+    # subscription's initial fetch opens a client, and client creation is
+    # serialized per server (ConfigManager._client_locks), so one unreachable
+    # server used to hold the Telegram start and the uvicorn bind behind a
+    # queue of connect timeouts. A cold read degrades to what a down server
+    # already returns (None) and the poll loop fills it in; a reachable server
+    # is warm within a second either way.
+    _spawn_background(sds.auto_subscribe_servers(), "SDS auto-subscribe")
 
     # Ride the ticker-pool poll the SDS just started: an hourly price snapshot
     # per server is the only source of 24h change on the CLOB side, and it costs

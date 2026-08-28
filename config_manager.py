@@ -79,6 +79,13 @@ class ConfigManager:
         self._client_locks: Dict[str, asyncio.Lock] = (
             {}
         )  # per-server lock for get_client
+        # When a connect last failed, per server. Client creation is serialized
+        # by _client_locks, so without this every caller queued behind a down
+        # server pays the full connect timeout again, one after another: the 10
+        # concurrent fetches SDS fires per server at boot turned one unreachable
+        # host into ~110s of serial timeouts before the dashboard could bind.
+        self._client_failures: Dict[str, float] = {}  # server_name -> failed_at
+        self._client_failure_ttl = 30  # seconds to fail fast after a failure
         # Short-lived memo of check_server_status results so the N parallel
         # probes fired by one menu render (and repeated taps) collapse to one
         # probe per server. Kept well under _client_verify_interval.
@@ -455,6 +462,8 @@ class ConfigManager:
         """
         self._clients.pop(name, None)
         self._status_cache.pop(name, None)
+        # New credentials deserve a real attempt, not the old failure's cooldown.
+        self._client_failures.pop(name, None)
 
     async def get_client(self, name: str = None):
         """Get or create API client for a server."""
@@ -515,6 +524,20 @@ class ConfigManager:
                     pass
                 del self._clients[name]
 
+        # Fail fast while a recent connect failure is still fresh, so a queue of
+        # callers behind an unreachable host costs one connect timeout in total
+        # rather than one each. Cleared on success, on a config change, and by
+        # simply ageing out — so a server that comes back is retried within
+        # _client_failure_ttl without anything having to notice it recovered.
+        failed_at = self._client_failures.get(name)
+        if failed_at is not None:
+            if time.time() - failed_at < self._client_failure_ttl:
+                raise ConnectionError(
+                    f"Server '{name}' is unreachable (last attempt "
+                    f"{time.time() - failed_at:.0f}s ago); not retrying yet"
+                )
+            del self._client_failures[name]
+
         # Create new client
         server = self._data["servers"][name]
         base_url = f"http://{server['host']}:{server['port']}"
@@ -529,10 +552,12 @@ class ConfigManager:
             await client.init()
             await client.accounts.list_accounts()
             self._clients[name] = (client, time.time())
+            self._client_failures.pop(name, None)
             logger.info(f"Connected to server '{name}' at {base_url}")
             return client
         except Exception as e:
             await client.close()
+            self._client_failures[name] = time.time()
             logger.error(f"Failed to connect to '{name}': {e}")
             raise
 
