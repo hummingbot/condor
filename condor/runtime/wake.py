@@ -23,8 +23,9 @@ on handler or web code (see ``client._local()``).
 Two deliveries, one shape. :func:`resume_session` spends a model turn — the
 agent continues from the result. :func:`deliver_note` spends nothing: it shows a
 note the transcript already holds, which is all a finished routine needs (its
-outcome is text, not work to continue from). Both address the surface the same
-way and both degrade to silence when nobody is attached.
+outcome is text, not work to continue from). Both degrade to silence when nobody
+is attached, but they do not have the same precondition: a wake needs a live
+subprocess to prompt, a note needs only an owner and a slot to address.
 
 Deliberately narrow: a background producer passes its session key, the
 conversation it belongs to, and the line to show. Do not generalise further.
@@ -36,7 +37,7 @@ import logging
 from typing import Awaitable, Callable, Protocol
 
 from condor.runtime.events import RuntimeEvent
-from condor.runtime.keys import SessionKey
+from condor.runtime.keys import WEB, SessionKey
 from condor.runtime.models import PromptRequest
 
 log = logging.getLogger(__name__)
@@ -125,31 +126,51 @@ def _build_sink(key: SessionKey, user_id: int | None) -> "TurnSink | None":
         return None
 
 
-async def _live_session(session_key: str, conversation_id: str):
-    """The session a background task can still reach, or None.
-
-    Shared by both deliveries below so they agree on what "there is nobody to
-    talk to" means: a malformed key, no session, a dead one, or a session that
-    has since moved to another conversation. That last check is load-bearing on
-    Telegram, where the key ``tg:{chat_id}`` is stable but the conversation
-    behind it is not — without it a task started before ``/new`` would report
-    into a chat about something else.
-
-    Returns ``(key, info)`` so the caller can address a sink by slot.
-    """
-    from condor.runtime import client
-
+def _parse_key(session_key: str) -> "SessionKey | None":
+    """The canonical key, or None when the caller's string is not one."""
     try:
-        key = SessionKey.parse(session_key)
+        return SessionKey.parse(session_key)
     except ValueError:
         log.debug("Cannot reach %r: not a canonical session key", session_key)
         return None
 
+
+async def _session_info(key: SessionKey):
+    """The registry's view of a session, or None when there is no view.
+
+    A lookup that blew up is "nothing registered": a background producer must
+    not lose its delivery to a registry hiccup any more than to a closed tab.
+    """
+    from condor.runtime import client
+
     try:
-        info = await client.get_info(key)
+        return await client.get_info(key)
     except Exception:  # noqa: BLE001 - a lookup failure is "nothing to reach"
         log.warning("Could not look up session %s", key, exc_info=True)
         return None
+
+
+async def _live_session(session_key: str, conversation_id: str):
+    """The session a background task can still *prompt*, or None.
+
+    What "there is nobody to talk to" means for :func:`resume_session`: a
+    malformed key, no session, a dead one, or a session that has since moved to
+    another conversation. That last check is load-bearing on Telegram, where the
+    key ``tg:{chat_id}`` is stable but the conversation behind it is not —
+    without it a task started before ``/new`` would report into a chat about
+    something else.
+
+    Only the wake goes through here. A note is not a turn: it needs a socket,
+    not a subprocess, so :func:`deliver_note` deliberately does not share this
+    precondition (CORR-263).
+
+    Returns ``(key, info)`` so the caller can address a sink by slot.
+    """
+    key = _parse_key(session_key)
+    if key is None:
+        return None
+
+    info = await _session_info(key)
 
     if info is None or not info.alive:
         log.debug("Not reaching %s: no live session", key)
@@ -171,6 +192,7 @@ async def deliver_note(
     conversation_id: str,
     text: str,
     kind: str,
+    user_id: int | None = None,
 ) -> bool:
     """Show an already-recorded transcript note on the surface that is attached.
 
@@ -181,6 +203,22 @@ async def deliver_note(
     with no prompt behind it: a finished routine is worth *showing*, not worth
     paying for a model turn to announce.
 
+    Addressed like the bell it fires next to, not like a wake (CORR-263): a note
+    needs an owner and a slot, never a live subprocess. Requiring one dropped
+    the note in every state where the tab is still on screen but the session
+    behind it is gone — reaped on ``session_idle``, evicted by the per-user cap,
+    or simply dead — while the bell for the same event arrived on the same
+    socket. ``user_id`` is the caller's fallback for exactly those states, where
+    there is no session left to read the owner off; the delegation knows it as
+    ``dt.user_id`` and a routine run as its instance's owner.
+
+    The conversation guard survives where it means something. On ``tg`` the key
+    is the stable ``tg:{chat_id}`` and the conversation behind it moves, so a
+    task started before ``/new`` must still stay quiet — that check needs the
+    live session and keeps it. On ``web`` the slot *is* the conversation, so the
+    same guard is an identity between the key and the caller's id, checked here
+    without asking the registry anything.
+
     Returns False — never raises — when there is nobody to show it to. The note
     is in the transcript either way, so this degrades to exactly the passive
     behaviour it extends.
@@ -188,15 +226,36 @@ async def deliver_note(
     if not session_key or not conversation_id or not text:
         return False
 
-    found = await _live_session(session_key, conversation_id)
-    if found is None:
+    key = _parse_key(session_key)
+    if key is None:
         return False
-    key, info = found
+
+    info = await _session_info(key)
+    owner = info.user_id if info is not None and info.user_id is not None else user_id
+    if owner is None:
+        log.debug("Not showing a note on %s: nobody to address it to", key)
+        return False
+
+    if key.surface == WEB:
+        if key.slot != conversation_id:
+            log.debug(
+                "Not showing a note on %s: slot is not conversation %s",
+                key,
+                conversation_id,
+            )
+            return False
+    elif info is None or not info.alive or info.conversation_id != conversation_id:
+        log.debug(
+            "Not showing a note on %s: no live session on conversation %s",
+            key,
+            conversation_id,
+        )
+        return False
 
     sink = _note_sinks.get(key.surface)
     if sink is None:
         return False
-    return await _guard(sink(key, info.user_id, text, kind), "deliver a note")
+    return await _guard(sink(key, owner, text, kind), "deliver a note")
 
 
 async def resume_session(

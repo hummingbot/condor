@@ -338,3 +338,47 @@ def test_a_push_that_blows_up_costs_the_user_nothing(tmp_path, monkeypatch, deli
 
     assert dt.status == "done"
     assert bot.messages == [delegate_module._completion_text(dt)]
+
+
+def test_a_finished_task_shows_itself_after_its_session_was_reaped(
+    tmp_path, monkeypatch
+):
+    """CORR-263, and the case ``deliveries`` structurally cannot see.
+
+    Every other test here monkeypatches ``wake.deliver_note``, so none of them
+    ever exercised its precondition: the note required the originating session
+    to still be registered and alive, while the bell it fires microseconds
+    earlier is addressed to the user and does not. This drives the real
+    delivery with an empty session registry -- what the idle reaper leaves
+    behind while the dashboard tab is still open -- and asserts the frame
+    reaches the socket.
+    """
+    import json
+
+    from condor.runtime import sessions as session_module
+    from condor.web.routes import chat_ws
+
+    class _FakeWS:
+        def __init__(self):
+            self.sent: list[dict] = []
+
+        async def send_text(self, raw: str) -> None:
+            self.sent.append(json.loads(raw))
+
+    _agent_root(tmp_path, monkeypatch)
+    monkeypatch.setattr(consult_module, "_run_agent_to_completion", _answer())
+    monkeypatch.setattr(session_module, "_sessions", {})
+    ws = _FakeWS()
+    monkeypatch.setattr(chat_ws, "_attached_sockets", {1: {ws}})
+
+    dt = _run_delegation(conversation_id="conv-1", session_key="web:1:conv-1")
+
+    notes = [e for e in ws.sent if e.get("event") == "system_note"]
+    assert notes == [
+        {
+            "event": "system_note",
+            "slot_id": "conv-1",
+            "text": delegate_module._completion_text(dt),
+            "kind": "delegation",
+        }
+    ]

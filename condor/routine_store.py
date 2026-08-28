@@ -499,6 +499,10 @@ class RoutineStore:
                 conversation_id=conversation_id,
                 text=text,
                 kind="routine",
+                # The same owner the bell above is addressed to, so a note
+                # whose session has since been reaped still reaches the tabs
+                # that are watching (CORR-263).
+                user_id=meta.get("user_id"),
             )
         except Exception:
             logger.debug(

@@ -854,6 +854,10 @@ async def _show_completion(dt: DelegateTask) -> None:
             conversation_id=dt.conversation_id,
             text=_completion_text(dt),
             kind="delegation",
+            # Who to address when the session is gone: reaped on idle, evicted
+            # by the per-user cap, or dead. The tab is still open in all three
+            # -- the bell fired microseconds earlier proves it (CORR-263).
+            user_id=dt.user_id,
         )
     except Exception:
         log.debug(
