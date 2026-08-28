@@ -83,8 +83,8 @@ export function SharingIndicator({ conversationId }: { conversationId: string })
       <Share2 className="h-3 w-3 shrink-0 text-[var(--color-primary)]" />
       <span className="flex-1">
         {status.shared
-          ? "Shared with Condor — redacted, and you can take it back any time."
-          : "Will be shared with Condor once you are done, redacted."}
+          ? "Shared with Condor. Sensitive content was redacted first. Take it back any time."
+          : "Will be shared with Condor when you are done. Sensitive content is redacted first."}
       </span>
       <button
         onClick={() => exclude.mutate(true)}

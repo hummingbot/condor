@@ -145,8 +145,8 @@ export function SharingSettings() {
             Telemetry is anonymous counts the admin turns on once for this whole
             install. A shared conversation is <strong>content</strong>: only you
             can share one of yours, and by default only after reading the
-            redacted transcript we would send. You choose below whether that
-            stays one button press at a time.
+            transcript we would send, with its sensitive content redacted first.
+            You choose below whether that stays one button press at a time.
           </p>
           <p>
             Keys, wallet addresses, server names, accounts and file paths are

@@ -143,6 +143,11 @@ async function settle() {
 const chip = () =>
   document.querySelector<HTMLElement>("[data-sharing-chip]")?.textContent ?? "";
 
+/** Only the chip's sentence — `chip()` also carries the ⨯ button's label. */
+const sentence = () =>
+  document.querySelector<HTMLElement>("[data-sharing-chip] span")?.textContent ??
+  "";
+
 /** Which of the three states it is in, independent of the copy. */
 const state = () =>
   document.querySelector<HTMLElement>("[data-sharing-chip]")?.dataset
@@ -221,5 +226,34 @@ describe("the chip stops claiming a withdrawn conversation is shared", () => {
 
     expect(state()).toBe("shared");
     expect(chip()).toContain("Shared with Condor");
+  });
+});
+
+describe("the chip says what is redacted, not just that something was", () => {
+  // READ-254. A comma-appended, subjectless `redacted` reads as a label stamped
+  // on the conversation — a warning that something of the user's was cut —
+  // rather than as the reassurance it is meant to be. Both states have to name
+  // the noun (sensitive content) and the timing (first), and neither may claim
+  // more than the scrubber delivers.
+  it("names the noun and the timing once the share has gone out", async () => {
+    await render("dialog");
+
+    expect(state()).toBe("shared");
+    expect(sentence()).toContain("Shared with Condor");
+    expect(sentence()).toContain("Sensitive content was redacted first");
+    // The withdrawal offer is the other half of the reassurance; a rewrite that
+    // drops it trades one silence for another.
+    expect(sentence()).toContain("Take it back any time");
+    expect(sentence()).not.toMatch(/,\s*redacted\.?\s*$/);
+  });
+
+  it("reads as a sentence pair while the share is still pending", async () => {
+    STATUS = { ...STATUS, shared: false, shared_at: null };
+    await render("dialog");
+
+    expect(state()).toBe("will-share");
+    expect(sentence()).toContain("Will be shared with Condor when you are done");
+    expect(sentence()).toContain("Sensitive content is redacted first");
+    expect(sentence()).not.toMatch(/,\s*redacted\.?\s*$/);
   });
 });
