@@ -31,11 +31,33 @@ import { RoutineConfigForm } from "./RoutineConfigForm";
 import { RoutineHooksPanel } from "./RoutineHooksPanel";
 import { ScheduleDropdown } from "./ScheduleDropdown";
 
+/**
+ * The conversation a run launched from here belongs to.
+ *
+ * Without one — the `/routines` page, an agent's own page — a run is what it
+ * has always been: the dashboard's server, no conversation behind it.
+ */
+export interface RoutineRunContext {
+  /** The server the conversation is talking to, which is where its runs go. */
+  serverName: string;
+  /** Resolved server-side into the conversation the run reports back to. */
+  sessionKey: string;
+  /** Who the run's reports are filed under, as the chat's own runs are. */
+  agentSlug?: string;
+}
+
 interface ReportBrowserProps {
   initialSource?: string;
   initialSourceTypeFilter?: string;
   instances: RoutineInstance[];
   onClose: () => void;
+  /**
+   * Rendered inside the workspace pane: fill the container instead of the
+   * viewport, and leave the window's keys and the Close button to the host.
+   */
+  hosted?: boolean;
+  /** Run and schedule as this conversation, on its server. */
+  runContext?: RoutineRunContext;
 }
 
 export function ReportBrowser({
@@ -43,11 +65,19 @@ export function ReportBrowser({
   initialSource,
   initialSourceTypeFilter,
   onClose,
+  hosted = false,
+  runContext,
 }: ReportBrowserProps) {
   const { server } = useServer();
+  // The conversation's server wins over the dashboard's selector: a routine
+  // asked for beside a chat runs where that chat is pointed, not where a page
+  // the reader last touched happens to point.
+  const runServer = runContext?.serverName || server;
   const qc = useQueryClient();
   const [sourceTypeFilter, setSourceTypeFilter] = useState<string>(initialSourceTypeFilter || "all");
-  const [isCompact, setIsCompact] = useState(false);
+  // 550px of pane cannot hold a 256px list and a report: hosted opens on the
+  // 48px rail, the page keeps its list, and the toggle still works either way.
+  const [isCompact, setIsCompact] = useState(hosted);
   const [showConfigPanel, setShowConfigPanel] = useState(false);
   const [showNotifyPanel, setShowNotifyPanel] = useState(false);
   const [showSourceModal, setShowSourceModal] = useState(false);
@@ -166,7 +196,11 @@ export function ReportBrowser({
   }, [polledInstance, activeSource, qc]);
 
   const runMutation = useMutation({
-    mutationFn: () => api.runRoutine(server!, activeSource, configValues),
+    mutationFn: () =>
+      api.runRoutine(runServer!, activeSource, configValues, {
+        sessionKey: runContext?.sessionKey,
+        attributeTo: runContext?.agentSlug,
+      }),
     onSuccess: (data) => {
       setPollingInstanceId(data.instance_id);
       qc.invalidateQueries({ queryKey: ["routine-instances"] });
@@ -176,7 +210,7 @@ export function ReportBrowser({
 
   const scheduleMutation = useMutation({
     mutationFn: (intervalSec: number) =>
-      api.scheduleRoutine(server!, activeSource, configValues, intervalSec),
+      api.scheduleRoutine(runServer!, activeSource, configValues, intervalSec),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["routine-instances"] });
       setShowConfigPanel(false);
@@ -206,7 +240,7 @@ export function ReportBrowser({
   const [runAllProgress, setRunAllProgress] = useState<{ current: number; total: number } | null>(null);
 
   const runAll = useCallback(async () => {
-    if (!server || filteredRoutines.length === 0) return;
+    if (!runServer || filteredRoutines.length === 0) return;
     const toRun = filteredRoutines;
     setRunAllProgress({ current: 0, total: toRun.length });
     for (let i = 0; i < toRun.length; i++) {
@@ -214,7 +248,10 @@ export function ReportBrowser({
       const routine = toRun[i];
       const cfg = buildConfigValues(routine);
       try {
-        await api.runRoutine(server, routine.name, cfg);
+        await api.runRoutine(runServer, routine.name, cfg, {
+          sessionKey: runContext?.sessionKey,
+          attributeTo: runContext?.agentSlug,
+        });
       } catch {
         // continue with remaining routines
       }
@@ -222,7 +259,7 @@ export function ReportBrowser({
     setRunAllProgress(null);
     invalidateRoutineQueries(qc);
     qc.invalidateQueries({ queryKey: ["routine-reports"] });
-  }, [server, filteredRoutines, qc]);
+  }, [runServer, runContext, filteredRoutines, qc]);
 
   const [confirmDelete, setConfirmDelete] = useState(false);
 
@@ -266,8 +303,18 @@ export function ReportBrowser({
     if (selectedReportIdx < reports.length - 1) setSelectedReportIdx((i) => i + 1);
   }, [selectedReportIdx, reports.length]);
 
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
+  /**
+   * The browser's own keys.
+   *
+   * Full screen they are the window's, because the browser *is* the window.
+   * Hosted they are the container's: a live composer sits beside the pane, and
+   * a "k" typed into the chat that paged the report list would make the whole
+   * arrangement feel broken. Escape is the host's too — {@link WorkspaceSheet}
+   * owns closing the pane, and Escape belongs to the conversation — so hosted
+   * it only dismisses this browser's own panels.
+   */
+  const handleKey = useCallback(
+    (e: Pick<KeyboardEvent, "key" | "target" | "preventDefault">) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement) return;
       if (e.key === "ArrowUp") { goSourceUp(); e.preventDefault(); }
       else if (e.key === "ArrowDown") { goSourceDown(); e.preventDefault(); }
@@ -277,13 +324,27 @@ export function ReportBrowser({
         if (showSourceModal) setShowSourceModal(false);
         else if (showConfigPanel) setShowConfigPanel(false);
         else if (showNotifyPanel) setShowNotifyPanel(false);
-        else onClose();
+        else if (!hosted) onClose();
+        else return;
         e.preventDefault();
       }
-    };
+    },
+    [goSourceUp, goSourceDown, goPrevReport, goNextReport, onClose, hosted, showConfigPanel, showNotifyPanel, showSourceModal],
+  );
+
+  useEffect(() => {
+    if (hosted) return;
+    const handler = (e: KeyboardEvent) => handleKey(e);
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [goSourceUp, goSourceDown, goPrevReport, goNextReport, onClose, showConfigPanel, showNotifyPanel, showSourceModal]);
+  }, [hosted, handleKey]);
+
+  // Hosted, the keys only reach the browser while it has focus — so it takes
+  // focus once, on open. The click that opened it already left the composer.
+  const rootRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (hosted) rootRef.current?.focus({ preventScroll: true });
+  }, [hosted]);
 
   // Scroll active source into view
   useEffect(() => {
@@ -302,7 +363,17 @@ export function ReportBrowser({
   );
 
   return (
-    <div className="fixed inset-0 z-50 flex bg-[var(--color-bg)]">
+    <div
+      ref={rootRef}
+      // Hosted, the pane already sizes and paints; full screen, this is the page.
+      className={
+        hosted
+          ? "flex min-h-0 w-full flex-1 overflow-hidden outline-none"
+          : "fixed inset-0 z-50 flex bg-[var(--color-bg)]"
+      }
+      tabIndex={hosted ? -1 : undefined}
+      onKeyDown={hosted ? handleKey : undefined}
+    >
       {/* Left sidebar: routine list */}
       <div
         className={`flex flex-col border-r border-[var(--color-border)] bg-[var(--color-surface)] transition-all ${
@@ -484,10 +555,13 @@ export function ReportBrowser({
       </div>
 
       {/* Main content */}
-      <div className="flex flex-1 flex-col">
-        {/* Top bar */}
-        <div className="flex items-center justify-between border-b border-[var(--color-border)] px-4 py-2">
-          <div className="flex items-center gap-3 min-w-0">
+      <div className="flex min-w-0 flex-1 flex-col">
+        {/* Top bar — wraps rather than widening the column: at pane width the
+            actions drop to a second row, and the routine's name keeps its own.
+            Left to overflow it would lay the whole column out wider than the
+            pane and clip the report off the right of the screen. */}
+        <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-[var(--color-border)] px-4 py-2">
+          <div className="flex min-w-0 flex-1 items-center gap-3">
             <h2 className="truncate text-sm font-semibold text-[var(--color-text)]">
               {activeSource.replace(/_/g, " ")}
             </h2>
@@ -524,7 +598,7 @@ export function ReportBrowser({
           </div>
           <div className="flex items-center gap-1">
             {/* Run / Config actions — always show when routine exists */}
-            {activeRoutine && server && (
+            {activeRoutine && runServer && (
               <div className="flex items-center gap-1 mr-2">
                 <button
                   onClick={() => setShowSourceModal(true)}
@@ -566,7 +640,7 @@ export function ReportBrowser({
                 </button>
                 <button
                   onClick={() => runMutation.mutate()}
-                  disabled={runMutation.isPending || !server}
+                  disabled={runMutation.isPending || !runServer}
                   className="flex items-center gap-1 rounded bg-[var(--color-primary)] px-2.5 py-1 text-[10px] font-semibold text-white transition-colors hover:bg-[var(--color-primary)]/80 disabled:opacity-50"
                   title="Run with current config"
                 >
@@ -580,13 +654,13 @@ export function ReportBrowser({
                 {!activeRoutine.is_continuous && (
                   <ScheduleDropdown
                     onSchedule={(sec) => scheduleMutation.mutate(sec)}
-                    disabled={scheduleMutation.isPending || !server}
+                    disabled={scheduleMutation.isPending || !runServer}
                   />
                 )}
                 {filteredRoutines.length > 1 && (
                   <button
                     onClick={runAll}
-                    disabled={!!runAllProgress || !server}
+                    disabled={!!runAllProgress || !runServer}
                     className="flex items-center gap-1 rounded bg-[var(--color-surface-hover)] px-2.5 py-1 text-[10px] font-semibold text-[var(--color-text)] transition-colors hover:bg-[var(--color-border)] disabled:opacity-50"
                     title="Run all filtered routines with default configs"
                   >
@@ -675,15 +749,16 @@ export function ReportBrowser({
             >
               {reportTheme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
             </button>
-            {/* Agent chat toggle */}
-            {/* Close */}
-            <button
-              onClick={onClose}
-              className="ml-1 rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-              title="Close (Esc)"
-            >
-              <X className="h-4 w-4" />
-            </button>
+            {/* Close — the sheet's header has one when hosted */}
+            {!hosted && (
+              <button
+                onClick={onClose}
+                className="ml-1 rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+                title="Close (Esc)"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            )}
           </div>
         </div>
 
@@ -823,7 +898,7 @@ export function ReportBrowser({
                     <pre className="whitespace-pre-wrap break-words text-left font-mono text-xs text-[var(--color-text-muted)] bg-[var(--color-surface)] rounded p-3 max-h-60 overflow-y-auto">
                       {(polledInstance?.status === "failed" ? polledInstance.error : latestFailedInstance?.error) || "Unknown error"}
                     </pre>
-                    {activeRoutine && server && (
+                    {activeRoutine && runServer && (
                       <button
                         onClick={() => runMutation.mutate()}
                         disabled={runMutation.isPending}
@@ -866,7 +941,7 @@ export function ReportBrowser({
                       />
                     </div>
                   )}
-                  {activeRoutine && server && (
+                  {activeRoutine && runServer && (
                     <button
                       onClick={() => runMutation.mutate()}
                       disabled={runMutation.isPending}
