@@ -1,5 +1,12 @@
 import { useQuery } from "@tanstack/react-query";
-import { ChevronDown, ChevronRight, PanelRightClose, Radio, Zap } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronRight,
+  Library,
+  PanelRightClose,
+  Radio,
+  Zap,
+} from "lucide-react";
 import { useEffect, useState } from "react";
 
 import {
@@ -7,6 +14,7 @@ import {
   conversationInstances,
 } from "@/components/chat/DockRoutines";
 import { DockTasks } from "@/components/chat/DockTasks";
+import type { RoutineRunContext } from "@/components/routines/ReportBrowser";
 import { api, type Delegation } from "@/lib/api";
 
 const OPEN_KEY = "condor.dock.open";
@@ -42,11 +50,17 @@ export function ContextDock({
   delegations,
   conversationId,
   agentSlug,
+  agentName,
+  runContext,
 }: {
   /** The shared `["delegations"]` result — the dock adds no poll of its own. */
   delegations: Delegation[];
   conversationId: string;
   agentSlug: string;
+  /** Who is answering, for the library's subtitle. */
+  agentName?: string;
+  /** The conversation a run launched from the library belongs to. */
+  runContext?: RoutineRunContext;
 }) {
   const [open, setOpen] = useState(defaultOpen);
   const [tasksOpen, setTasksOpen] = useState(true);
@@ -54,6 +68,9 @@ export function ContextDock({
   // "where do I watch this?" was the question both of them exist to answer.
   // The extra poll it costs is one endpoint on a page that is already open.
   const [routinesOpen, setRoutinesOpen] = useState(true);
+  // Held here rather than inside DockRoutines because the button that opens it
+  // lives in the section's header and the sheet it opens lives in the body.
+  const [libraryOpen, setLibraryOpen] = useState(false);
 
   useEffect(() => {
     localStorage.setItem(OPEN_KEY, String(open));
@@ -163,11 +180,28 @@ export function ContextDock({
         count={routinesRunning || undefined}
         open={routinesOpen}
         onToggle={() => setRoutinesOpen((v) => !v)}
+        action={
+          <button
+            type="button"
+            onClick={() => {
+              setRoutinesOpen(true);
+              setLibraryOpen(true);
+            }}
+            className="flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium normal-case tracking-normal text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-primary)]"
+            title="Every routine this agent can run — config, schedule and reports"
+          >
+            <Library className="h-3 w-3" /> Browse all
+          </button>
+        }
       >
         <DockRoutines
           instances={instances}
           agentSlug={agentSlug}
+          agentName={agentName}
           conversationId={conversationId}
+          runContext={runContext}
+          libraryOpen={libraryOpen}
+          onLibraryChange={setLibraryOpen}
         />
       </DockSection>
     </aside>
@@ -197,6 +231,7 @@ function DockSection({
   count,
   open,
   onToggle,
+  action,
   children,
 }: {
   icon: React.ReactNode;
@@ -206,6 +241,12 @@ function DockSection({
   count?: number;
   open: boolean;
   onToggle: () => void;
+  /**
+   * A control beside the count — the door to the whole of what this section
+   * shows the recent end of. Sits outside the toggle rather than inside it: a
+   * button nested in a button is neither valid nor clickable on its own.
+   */
+  action?: React.ReactNode;
   children: React.ReactNode;
 }) {
   return (
@@ -214,22 +255,25 @@ function DockSection({
         open ? "min-h-[72px] flex-1 basis-0 overflow-hidden" : "shrink-0"
       }`}
     >
-      <button
-        onClick={onToggle}
-        title={hint}
-        className="flex w-full shrink-0 items-center gap-1.5 px-3 py-1.5 text-left text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-text)]"
-      >
-        {open ? (
-          <ChevronDown className="h-3 w-3 shrink-0" />
-        ) : (
-          <ChevronRight className="h-3 w-3 shrink-0" />
-        )}
-        {icon}
-        <span className="min-w-0 flex-1 truncate">{label}</span>
-        {count !== undefined && (
-          <span className="shrink-0 text-emerald-400">{count}</span>
-        )}
-      </button>
+      <div className="flex w-full shrink-0 items-center gap-1 pr-2">
+        <button
+          onClick={onToggle}
+          title={hint}
+          className="flex min-w-0 flex-1 items-center gap-1.5 px-3 py-1.5 text-left text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-text)]"
+        >
+          {open ? (
+            <ChevronDown className="h-3 w-3 shrink-0" />
+          ) : (
+            <ChevronRight className="h-3 w-3 shrink-0" />
+          )}
+          {icon}
+          <span className="min-w-0 flex-1 truncate">{label}</span>
+          {count !== undefined && (
+            <span className="shrink-0 text-emerald-400">{count}</span>
+          )}
+        </button>
+        {action}
+      </div>
       {open && (
         <div className="min-h-0 flex-1 overflow-y-auto pb-1">{children}</div>
       )}

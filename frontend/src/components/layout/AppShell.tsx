@@ -12,7 +12,6 @@ import {
   Sun,
   Swords,
   Wallet,
-  Zap,
 } from "lucide-react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 
@@ -33,6 +32,14 @@ import { CurrencySelector } from "./CurrencySelector";
 import { NotificationBell } from "./NotificationBell";
 import { ServerSelector } from "./ServerSelector";
 
+/**
+ * The main nav.
+ *
+ * Routines left it in FEAT-077: the library now opens beside the conversation
+ * that wants it, from the dock's Routines header. `/routines` is still the
+ * full-width page — reachable from that pane, from an agent's Routines tab and
+ * by URL — it is just no longer the first door.
+ */
 const NAV_ITEMS = [
   { to: "/", icon: Brain, label: "Agents" },
   { to: "/portfolio", icon: Wallet, label: "Portfolio" },
@@ -40,7 +47,6 @@ const NAV_ITEMS = [
   { to: "/dex", icon: Droplets, label: "DEX" },
   { to: "/bots", icon: Bot, label: "Bots" },
   { to: "/executors", icon: Activity, label: "Executors" },
-  { to: "/routines", icon: Zap, label: "Routines" },
   { to: "/settings", icon: Settings, label: "Settings" },
 ] as const;
 

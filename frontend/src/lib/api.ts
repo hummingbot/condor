@@ -2639,14 +2639,31 @@ export const api = {
       `/api/v1/routines/instances/${encodeURIComponent(id)}`,
     ),
 
+  /**
+   * Run a routine once.
+   *
+   * `opts` is the conversation behind the run, when there is one: the route
+   * resolves `session_key` into a conversation id, stamps the instance with it
+   * — which is what puts the run in that conversation's dock — and posts the
+   * outcome back into the chat when it lands (`on_complete` defaults to
+   * `notify` there). Omitted, the run is what it always was: nobody's but the
+   * dashboard's.
+   */
   runRoutine: (
     server: string,
     name: string,
     config: Record<string, unknown> = {},
+    opts?: { sessionKey?: string; attributeTo?: string },
   ) =>
     apiFetch<{ instance_id: string }>(`/api/v1/routines/run`, {
       method: "POST",
-      body: JSON.stringify({ routine_name: name, server_name: server, config }),
+      body: JSON.stringify({
+        routine_name: name,
+        server_name: server,
+        config,
+        ...(opts?.sessionKey ? { session_key: opts.sessionKey } : {}),
+        ...(opts?.attributeTo ? { attribute_to: opts.attributeTo } : {}),
+      }),
     }),
 
   scheduleRoutine: (

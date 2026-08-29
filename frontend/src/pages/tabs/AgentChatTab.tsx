@@ -29,7 +29,9 @@ import {
 import { Starters, type Starter } from "@/components/chat/Starters";
 import { useBrainSwitch } from "@/hooks/useBrainSwitch";
 import { useChat, useSessionOptions } from "@/hooks/useChat";
+import { webSessionKey } from "@/hooks/useChatSocket";
 import { useServer } from "@/hooks/useServer";
+import { useAuth } from "@/lib/auth";
 import { useStarters } from "@/hooks/useStarters";
 import { normalizeAgentSlug } from "@/lib/agentSlug";
 import {
@@ -85,6 +87,8 @@ type TalkIntent = "focus" | "fresh";
 export function AgentChatTab() {
   const chat = useChat();
   const { server } = useServer();
+  // Its id is half the session key a run from the dock's library carries.
+  const { user } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
   const {
     agents: modelOptions,
@@ -416,6 +420,19 @@ export function AgentChatTab() {
             delegations={delegationData?.delegations ?? []}
             conversationId={activeSlot?.info.conversation_id || ""}
             agentSlug={activeSlot?.info.agent_slug || ""}
+            agentName={boundAgent?.name}
+            // A routine launched from the dock's library is this
+            // conversation's: it runs on the server the chat is talking to,
+            // reports back into it, and is filed under whoever is answering.
+            runContext={
+              activeSlot && user
+                ? {
+                    serverName: activeSlot.info.server_name || server || "",
+                    sessionKey: webSessionKey(user.id, activeSlot.info.slot_id),
+                    agentSlug: activeSlot.info.agent_slug || undefined,
+                  }
+                : undefined
+            }
           />
         </div>
       </div>

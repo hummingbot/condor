@@ -1,8 +1,13 @@
 import { useQuery } from "@tanstack/react-query";
-import { FileText, Loader2 } from "lucide-react";
+import { ExternalLink, FileText, Loader2 } from "lucide-react";
 import { useState } from "react";
+import { Link } from "react-router-dom";
 
 import { WorkspaceSheet } from "@/components/chat/WorkspaceSheet";
+import {
+  ReportBrowser,
+  type RoutineRunContext,
+} from "@/components/routines/ReportBrowser";
 import { ReportFrame } from "@/components/routines/ReportFrame";
 import { RoutineResultView } from "@/components/routines/RoutineResultView";
 import { api, type ReportSummary, type RoutineInstance } from "@/lib/api";
@@ -64,13 +69,24 @@ export function conversationInstances(
 export function DockRoutines({
   instances,
   agentSlug,
+  agentName,
   conversationId,
+  runContext,
+  libraryOpen = false,
+  onLibraryChange,
 }: {
   instances: RoutineInstance[];
   /** Bound agent's slug, or "" for the unbound Condor conversation. */
   agentSlug: string;
+  /** Who is answering, for the library's subtitle. */
+  agentName?: string;
   /** The conversation on screen, so its own runs are never filtered out. */
   conversationId: string;
+  /** Passed to the library so a run from it belongs to this conversation. */
+  runContext?: RoutineRunContext;
+  /** The whole library, opened from the section header (see {@link ContextDock}). */
+  libraryOpen?: boolean;
+  onLibraryChange?: (open: boolean) => void;
 }) {
   const [openKey, setOpenKey] = useState<string | null>(null);
 
@@ -115,7 +131,15 @@ export function DockRoutines({
       })),
   ].sort((a, b) => b.at - a.at);
 
-  const open = runs.find((r) => r.key === openKey);
+  // The pane takes one claimant at a time. The library is the loudest of them,
+  // so it wins outright: a row opened behind it would stack a second sheet in
+  // the same 550px and leave the reader with no way to tell which they closed.
+  const open = libraryOpen ? undefined : runs.find((r) => r.key === openKey);
+
+  const openRun = (key: string) => {
+    onLibraryChange?.(false);
+    setOpenKey(key);
+  };
 
   return (
     <>
@@ -130,13 +154,13 @@ export function DockRoutines({
               <InstanceRow
                 key={run.key}
                 instance={run.instance}
-                onOpen={() => setOpenKey(run.key)}
+                onOpen={() => openRun(run.key)}
               />
             ) : (
               <ReportRow
                 key={run.key}
                 report={run.report}
-                onOpen={() => setOpenKey(run.key)}
+                onOpen={() => openRun(run.key)}
               />
             ),
           )}
@@ -151,6 +175,37 @@ export function DockRoutines({
       )}
       {open?.kind === "report" && (
         <ReportSheet report={open.report} onClose={() => setOpenKey(null)} />
+      )}
+
+      {/* The whole library, beside the conversation that wanted it: pick a
+          routine, configure it, run it, and read what it wrote — without the
+          chat leaving the screen. */}
+      {libraryOpen && (
+        <WorkspaceSheet
+          title="Routines"
+          subtitle={agentName || "Every routine"}
+          actions={
+            <Link
+              to={`/routines${agentSlug ? `?agent=${agentSlug}` : ""}`}
+              className="flex items-center gap-1 rounded px-2 py-1 text-[11px] text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+              title="Open the full-width library on its own page"
+            >
+              <ExternalLink className="h-3 w-3" /> Full page
+            </Link>
+          }
+          onClose={() => onLibraryChange?.(false)}
+          bleed
+          // Below `xl` there is no pane, so this is today's full-screen browser.
+          defaultZen
+        >
+          <ReportBrowser
+            hosted
+            initialSourceTypeFilter={agentSlug || "all"}
+            instances={instances}
+            runContext={runContext}
+            onClose={() => onLibraryChange?.(false)}
+          />
+        </WorkspaceSheet>
       )}
     </>
   );

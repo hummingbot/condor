@@ -78,6 +78,19 @@ export interface ChatMessage {
   open?: boolean;
 }
 
+/**
+ * The backend's name for one web chat session: `web:{user}:{slot}`.
+ *
+ * `SlotInfo` deliberately does not carry it — the slot id is what the socket
+ * addresses — but anything that hands work to the backend *as this
+ * conversation* (a routine run launched from the dock, a brain switch) has to
+ * spell it the way `SessionKey.parse` reads it. One place, so it stays spelled
+ * the same in all of them.
+ */
+export function webSessionKey(userId: number | string, slotId: string): string {
+  return `web:${userId}:${slotId}`;
+}
+
 export interface SlotInfo {
   slot_id: string;
   /** Durable conversation behind the slot. Same value as slot_id for web. */
@@ -1374,7 +1387,7 @@ export function useChatSocket() {
   const switchBrain = useCallback(
     async (slotId: string, selection: { agentSlug?: string; agentKey?: string }) => {
       if (!user) return;
-      const key = `web:${user.id}:${slotId}`;
+      const key = webSessionKey(user.id, slotId);
       const { session } = await api.switchSession(key, {
         agent_slug: selection.agentSlug,
         agent_key: selection.agentKey,
@@ -1431,7 +1444,7 @@ export function useChatSocket() {
   const switchServer = useCallback(
     async (slotId: string, serverName: string) => {
       if (!user) return;
-      const key = `web:${user.id}:${slotId}`;
+      const key = webSessionKey(user.id, slotId);
       const { session } = await api.switchSession(key, { server_name: serverName });
       // Same ordering rule as the brain switch: buffered text first, divider
       // after it.

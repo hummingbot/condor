@@ -4,6 +4,7 @@ import {
   ArrowLeft,
   Brain,
   CircleDot,
+  ExternalLink,
   History,
   MessageSquareText,
   Plus,
@@ -14,7 +15,7 @@ import {
   Wrench,
 } from "lucide-react";
 import { useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 
 import { AgentKnowledge } from "@/components/agent/AgentKnowledge";
 import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
@@ -516,13 +517,24 @@ export function AgentDetail() {
         slots={{
           strategies: strategiesTab,
           routinesAction: (
-            <button
-              onClick={() => setShowRoutinesBrowser(true)}
-              className="flex shrink-0 items-center gap-1 rounded border border-[var(--color-border)] px-2 py-1 text-[11px] text-[var(--color-text-muted)] transition-colors hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
-              title="Every run these routines produced, and their reports"
-            >
-              <ScrollText className="h-3 w-3" /> Reports
-            </button>
+            <div className="flex shrink-0 items-center gap-1.5">
+              <button
+                onClick={() => setShowRoutinesBrowser(true)}
+                className="flex shrink-0 items-center gap-1 rounded border border-[var(--color-border)] px-2 py-1 text-[11px] text-[var(--color-text-muted)] transition-colors hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
+                title="Every run these routines produced, and their reports"
+              >
+                <ScrollText className="h-3 w-3" /> Reports
+              </button>
+              {/* The full-width library, which is no longer in the main nav
+                  (FEAT-077) — this and the chat's pane are its doors. */}
+              <Link
+                to={`/routines?agent=${agent.slug}`}
+                className="flex shrink-0 items-center gap-1 px-1 py-1 text-[11px] text-[var(--color-text-muted)]/70 transition-colors hover:text-[var(--color-text)]"
+                title="The full library, on its own page"
+              >
+                <ExternalLink className="h-3 w-3" /> Full library
+              </Link>
+            </div>
           ),
         }}
         extraTabs={[

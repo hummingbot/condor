@@ -32,6 +32,7 @@ function readZen(fallback: boolean): boolean {
 export function WorkspaceSheet({
   title,
   subtitle,
+  actions,
   onClose,
   bleed = false,
   defaultZen = false,
@@ -39,6 +40,11 @@ export function WorkspaceSheet({
 }: {
   title: string;
   subtitle?: string;
+  /**
+   * Sheet-level controls, left of full-screen and Close — the door out to the
+   * full page for content that has one.
+   */
+  actions?: React.ReactNode;
   onClose: () => void;
   /**
    * Give the body the whole sheet — no padding, no scroll of its own. For
@@ -120,6 +126,7 @@ export function WorkspaceSheet({
           )}
         </div>
         <div className="flex shrink-0 items-center gap-1">
+          {actions}
           <button
             onClick={toggleZen}
             className="rounded p-1 text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
