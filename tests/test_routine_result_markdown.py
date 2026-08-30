@@ -201,6 +201,20 @@ def test_bold_only_result_renders_bold_outside_code_block():
     assert render_markdown_v2(out) == "Profit: 5%"
 
 
+def test_italic_only_result_renders_italic_outside_code_block():
+    out = format_routine_result("*Profit: 5%*")
+    assert "```" not in out
+    assert render_markdown_v2(out) == "Profit: 5%"
+
+
+def test_mixed_emphasis_and_link_renders():
+    out = format_routine_result(
+        "**Bold** and *italic* and [link](https://x.example)"
+    )
+    assert "```" not in out
+    assert render_markdown_v2(out) == "Bold and italic and link"
+
+
 def test_link_result_renders_clickable_link():
     out = format_routine_result("[GeckoTerminal](https://www.geckoterminal.com/solana)")
     assert "```" not in out
