@@ -138,14 +138,14 @@ def escape_markdown_v2_code(text: str) -> str:
 def format_routine_result(result: str, max_len: int = 400) -> str:
     """Format a routine result for a Telegram MarkdownV2 message.
 
-    Results containing ``[label](url)`` links are rendered outside a code
-    block (which would suppress the links), keeping the links clickable and
-    ``**bold**`` markers rendered, with everything else escaped. Results
-    without links keep the monospace code block, so existing routines render
-    exactly as before.
+    Results containing ``[label](url)`` links or ``**bold**`` markers are
+    rendered outside a code block (which would suppress both), keeping the
+    links clickable and the bold rendered, with everything else escaped.
+    Results with neither keep the monospace code block, so existing routines
+    render exactly as before.
     """
     result = str(result)[:max_len]
-    if not re.search(r"\[[^\]\n]+\]\(https?://[^)\s]+\)", result):
+    if not re.search(r"\[[^\]\n]+\]\(https?://[^)\s]+\)|\*\*[^*\n]+\*\*", result):
         return f"```\n{escape_markdown_v2_code(result)}\n```"
     return _markdown_v2_with_links(result)
 

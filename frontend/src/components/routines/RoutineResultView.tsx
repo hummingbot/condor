@@ -8,6 +8,7 @@ interface Props {
 }
 
 const CELL_LINK_RE = /^\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)(\s*\S*)?$/;
+const HTML_ANCHOR_RE = /^<a href="(https?:\/\/[^"]+)"[^>]*>(.*?)<\/a>$/;
 
 function formatCellValue(val: unknown) {
   if (typeof val === "number") {
@@ -26,6 +27,16 @@ function formatCellValue(val: unknown) {
         </a>
         {m[3] ?? ""}
       </>
+    );
+  }
+  const m2 = HTML_ANCHOR_RE.exec(s);
+  if (m2 && !m2[2].includes("<") && !m2[2].includes(">")) {
+    // Existing HTML anchors (e.g. the pool scanner's Link cell) render as
+    // links too, mirroring ReportBuilder's _escape_cell.
+    return (
+      <a href={m2[1]} target="_blank" rel="noopener noreferrer" className="underline hover:opacity-80">
+        {m2[2]}
+      </a>
     );
   }
   return s;

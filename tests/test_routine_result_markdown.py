@@ -14,7 +14,10 @@ import pytest
 from pydantic import BaseModel
 
 import handlers.routines as hr
-from utils.telegram_formatters import escape_markdown_v2_code
+from utils.telegram_formatters import (
+    escape_markdown_v2_code,
+    format_routine_result,
+)
 
 # Backtick (closes the fence), backslash (eats the next char), and a few chars
 # that are reserved outside a fence but literal inside one.
@@ -55,6 +58,17 @@ def render_markdown_v2(text: str) -> str:
                 raise ValueError("Can't parse entities: can't find end of Pre entity")
             out.append(c)
             i += 1
+            continue
+        if c == "[":
+            end = text.find("](", i)
+            close = text.find(")", end + 2) if end != -1 else -1
+            if end == -1 or close == -1:
+                raise ValueError(
+                    f"Can't parse entities: character '[' is reserved "
+                    f"and must be escaped at byte offset {i}"
+                )
+            out.append(text[i + 1 : end].replace("\\", ""))
+            i = close + 1
             continue
         if c in "*_":
             if stack and stack[-1] == c:
@@ -179,3 +193,22 @@ def test_truncation_happens_before_escaping():
     escaped = escape_markdown_v2_code("\\" * 400)
     assert len(escaped) == 800
     assert render_markdown_v2(f"```\n{escaped}\n```") == "\n" + "\\" * 400 + "\n"
+
+
+def test_bold_only_result_renders_bold_outside_code_block():
+    out = format_routine_result("**Profit: 5%**")
+    assert "```" not in out
+    assert render_markdown_v2(out) == "Profit: 5%"
+
+
+def test_link_result_renders_clickable_link():
+    out = format_routine_result("[GeckoTerminal](https://www.geckoterminal.com/solana)")
+    assert "```" not in out
+    assert "](https://www.geckoterminal.com/solana)" in out
+    assert render_markdown_v2(out) == "GeckoTerminal"
+
+
+def test_plain_result_keeps_code_block():
+    out = format_routine_result("just text, no markers")
+    assert out.startswith("```")
+    assert render_markdown_v2(out) == "\njust text, no markers\n"
