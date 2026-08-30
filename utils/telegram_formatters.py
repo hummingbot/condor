@@ -167,7 +167,11 @@ def _markdown_v2_with_links(text: str) -> str:
             label, url = part[1:].split("](", 1)
             if url.endswith(")"):
                 url = url[:-1]
-            out.append(f"[{escape_markdown_v2(label)}]({url})")
+            # A backslash in the destination would escape the closing ")"
+            # (or the next char) in MarkdownV2 and make Telegram reject the
+            # whole message, so double it to render literally.
+            escaped_url = url.replace("\\", "\\\\")
+            out.append(f"[{escape_markdown_v2(label)}]({escaped_url})")
         elif part.startswith("**") and part.endswith("**"):
             out.append(f"*{escape_markdown_v2(part[2:-2])}*")
         elif part.startswith("*") and part.endswith("*"):
