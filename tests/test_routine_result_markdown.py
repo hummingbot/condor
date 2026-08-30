@@ -222,6 +222,14 @@ def test_link_result_renders_clickable_link():
     assert render_markdown_v2(out) == "GeckoTerminal"
 
 
+def test_link_with_backslash_in_url_is_escaped():
+    # A raw backslash in the destination would escape the closing ")" in
+    # MarkdownV2 and make Telegram reject the whole message.
+    out = format_routine_result("[x](https://x.example/a\\b)")
+    assert "\\\\" in out
+    assert render_markdown_v2(out) == "x"
+
+
 def test_plain_result_keeps_code_block():
     out = format_routine_result("just text, no markers")
     assert out.startswith("```")
