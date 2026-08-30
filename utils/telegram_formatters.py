@@ -135,6 +135,41 @@ def escape_markdown_v2_code(text: str) -> str:
     return str(text).replace("\\", "\\\\").replace("`", "\\`")
 
 
+def format_routine_result(result: str, max_len: int = 400) -> str:
+    """Format a routine result for a Telegram MarkdownV2 message.
+
+    Results containing ``[label](url)`` links are rendered outside a code
+    block (which would suppress the links), keeping the links clickable and
+    ``**bold**`` markers rendered, with everything else escaped. Results
+    without links keep the monospace code block, so existing routines render
+    exactly as before.
+    """
+    result = str(result)[:max_len]
+    if not re.search(r"\[[^\]\n]+\]\(https?://[^)\s]+\)", result):
+        return f"```\n{escape_markdown_v2_code(result)}\n```"
+    return _markdown_v2_with_links(result)
+
+
+def _markdown_v2_with_links(text: str) -> str:
+    """Escape text for MarkdownV2 but keep [label](url) links and **bold**
+    markers rendered instead of escaped."""
+    pattern = re.compile(r"(\[[^\]\n]+\]\(https?://[^)\s]+\)|\*\*[^*\n]+\*\*)")
+    out = []
+    for part in pattern.split(text):
+        if not part:
+            continue
+        if part.startswith("[") and "](http" in part:
+            label, url = part[1:].split("](", 1)
+            if url.endswith(")"):
+                url = url[:-1]
+            out.append(f"[{escape_markdown_v2(label)}]({url})")
+        elif part.startswith("**") and part.endswith("**"):
+            out.append(f"*{escape_markdown_v2(part[2:-2])}*")
+        else:
+            out.append(escape_markdown_v2(part))
+    return "".join(out)
+
+
 def format_number(value: float, decimals: int = 2) -> str:
     """Format a number with commas and specified decimals"""
     if value >= 1000000:

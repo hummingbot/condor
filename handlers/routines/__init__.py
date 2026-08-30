@@ -30,7 +30,11 @@ from routines.base import (
     normalize_result,
 )
 from utils.auth import restricted
-from utils.telegram_formatters import escape_markdown_v2, escape_markdown_v2_code
+from utils.telegram_formatters import (
+    escape_markdown_v2,
+    escape_markdown_v2_code,
+    format_routine_result,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -547,7 +551,7 @@ async def _interval_job_callback(context: CallbackContext) -> None:
     text = (
         f"{icon} *{escape_markdown_v2(_display_name(routine_name))}* `{instance_id}`\n"
         f"⏱️ {escape_markdown_v2(interval_str)} \\| Run \\#{run_count} \\| {escape_markdown_v2(_format_duration(duration))}\n\n"
-        f"```\n{escape_markdown_v2_code(result[:400])}\n```"
+        f"{format_routine_result(result)}"
     )
     try:
         keyboard = None
@@ -614,7 +618,7 @@ async def _oneshot_job_callback(context: CallbackContext) -> None:
         text = (
             f"{icon} *{escape_markdown_v2(_display_name(routine_name))}*\n"
             f"Duration: {escape_markdown_v2(_format_duration(duration))}\n\n"
-            f"```\n{escape_markdown_v2_code(result[:400])}\n```"
+            f"{format_routine_result(result)}"
         )
         try:
             keyboard = None
@@ -688,7 +692,7 @@ async def _daily_job_callback(context: CallbackContext) -> None:
     icon = "✅" if not result.startswith("Error") else "❌"
     text = (
         f"{icon} *Daily: {escape_markdown_v2(_display_name(routine_name))}*\n"
-        f"```\n{escape_markdown_v2_code(result[:400])}\n```"
+        f"{format_routine_result(result)}"
     )
     try:
         keyboard = None
@@ -1340,7 +1344,7 @@ async def _refresh_detail_msg(
         dur_str = _format_duration(duration) if duration else ""
         result_section = (
             f"\n\n┌─ {icon} Result ─ {escape_markdown_v2(dur_str)} ────\n"
-            f"```\n{escape_markdown_v2_code(result[:250])}\n```\n"
+            f"{format_routine_result(result, max_len=250)}\n"
             f"└────────────────────────────"
         )
 
