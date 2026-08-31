@@ -237,42 +237,57 @@ export function AgentKnowledge({
   };
 
   const nav = rail ? (
-    // A column of icons, because eight tabs wrap to three rows in a 400px
-    // pane. Same tabs, same counts, same order — only turned on its side.
+    // A column down the *right* edge, because eight tabs wrap to three rows in
+    // a 400px pane — and because in the chat this rail sits against the dock,
+    // where everything else you click to open something already is. Same tabs,
+    // same counts, same order; only turned on their side, which buys the name
+    // back. An icon alone made the reader learn seven glyphs to find "Tools".
     <div
       role="tablist"
       aria-orientation="vertical"
       aria-label="Sections"
-      className="flex w-11 shrink-0 flex-col items-center gap-0.5 border-r border-[var(--color-border)] py-1"
+      className="flex w-9 shrink-0 flex-col items-center gap-0.5 overflow-y-auto border-l border-[var(--color-border)] py-1"
     >
       {tabs.map((t) => {
-        // The count is the only text in the button, so without this the tab
-        // announces itself as "15" — the label has to be said out loud too.
         const name =
           t.count !== undefined && t.count > 0 ? `${t.label} (${t.count})` : t.label;
+        const active = activeTab === t.id;
         return (
         <button
           key={t.id}
           role="tab"
-          aria-selected={activeTab === t.id}
+          aria-selected={active}
           aria-label={name}
           onClick={() => openTab(t.id)}
           title={name}
-          className={`relative flex h-9 w-9 items-center justify-center rounded transition-colors ${
-            activeTab === t.id
+          className={`relative flex w-full shrink-0 flex-col items-center gap-1.5 rounded-l py-2.5 transition-colors ${
+            active
               ? "bg-[var(--color-surface-hover)] text-[var(--color-text)]"
               : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
           }`}
         >
-          {t.icon}
-          {t.count !== undefined && t.count > 0 && (
+          {/* On the outer edge, where a tool window's selected tab marks
+              itself — the seam it is attached to. */}
+          {active && (
             <span
               aria-hidden
-              className="absolute right-0.5 top-0.5 text-[9px] leading-none text-[var(--color-text-muted)]"
-            >
-              {t.count}
-            </span>
+              className="absolute inset-y-1 right-0 w-0.5 rounded-full bg-[var(--color-primary)]"
+            />
           )}
+          {t.icon}
+          {/* Vertical writing turns the flex row on its side too, so the count
+              lands under the name rather than beside it. */}
+          <span
+            aria-hidden
+            className="flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-[0.08em] [writing-mode:vertical-rl]"
+          >
+            <span>{t.label}</span>
+            {t.count !== undefined && t.count > 0 && (
+              <span className="text-[9px] text-[var(--color-text-muted)]">
+                {t.count}
+              </span>
+            )}
+          </span>
         </button>
         );
       })}
@@ -456,8 +471,8 @@ export function AgentKnowledge({
   // where the page's own scroll is the only one.
   return rail ? (
     <div className="flex min-h-0 flex-1 overflow-hidden">
-      {nav}
       <div className="min-w-0 flex-1 overflow-y-auto px-3 py-2">{body}</div>
+      {nav}
     </div>
   ) : (
     <div>

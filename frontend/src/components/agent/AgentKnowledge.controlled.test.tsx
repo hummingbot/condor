@@ -219,20 +219,24 @@ describe("the open section", () => {
 });
 
 describe("the rail layout", () => {
-  it("is a vertical column of icons, labelled by title", async () => {
+  it("is a vertical column that still says the section's name", async () => {
     await render({ slug: "orca", layout: "rail" });
 
     expect(tablist().getAttribute("aria-orientation")).toBe("vertical");
-    // No prose in the column — an icon and, at most, its count. Eight labelled
-    // tabs wrap to three rows in a 400px pane, which is what the rail avoids.
+    // Eight labelled tabs wrap to three rows in a 400px pane, which is what
+    // the rail avoids — but turning the name on its side costs no width at
+    // all, so the reader is not asked to learn seven glyphs. The name is set
+    // vertically; the count, when there is one, follows it down the column.
     for (const t of tabs()) {
-      expect(t.textContent?.trim()).toMatch(/^\d*$/);
+      const label = t.querySelector("[class*=vertical-rl]");
+      expect(label).toBeTruthy();
+      expect(label!.textContent).toContain(t.title.split(" (")[0]);
       expect(t.title).not.toBe("");
     }
-    // The counts survive the turn — Skills still says there is one, and the
-    // label is said out loud: a count is the only text in the button, so
-    // without a name of its own the tab announces itself as "1".
+    // The counts survive the turn, and the label is said out loud rather than
+    // left to the glyph: the tab must never announce itself as "1".
     expect(tabNamed("Skills").title).toBe("Skills (1)");
+    expect(tabNamed("Skills").textContent).toContain("1");
     expect(tabNamed("Skills").getAttribute("aria-label")).toBe("Skills (1)");
     expect(tabNamed("Brain").getAttribute("aria-label")).toBe("Brain");
   });

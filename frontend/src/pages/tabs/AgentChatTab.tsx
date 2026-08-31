@@ -20,6 +20,7 @@ import { ChatInput } from "@/components/chat/ChatInput";
 import { ChatRail } from "@/components/chat/ChatRail";
 import { ChatThread } from "@/components/chat/ChatThread";
 import { ContextDock } from "@/components/chat/ContextDock";
+import { DockAgentCard } from "@/components/chat/DockAgent";
 import type { LibraryFocus } from "@/components/chat/DockRoutines";
 import { SessionTabs } from "@/components/chat/SessionTabs";
 import {
@@ -442,25 +443,6 @@ export function AgentChatTab() {
             <AgentPanel
               slug={panelSlug}
               name={panelAgent?.name || "Condor"}
-              description={panelAgent?.description}
-              slot={activeSlot}
-              pendingAgentKey={pendingAgentKey ?? defaultAgent}
-              ambientServer={server || ""}
-              agents={modelOptions}
-              customProviders={customProviders}
-              agentBindings={agentBindings}
-              isStreaming={isActiveStreaming}
-              // With a session this moves the conversation; without one it is
-              // the model the next `start_session` carries, which is the same
-              // field the hero's picker sets.
-              onSelectBrain={(sel) => {
-                if (activeSlot) switchBrain(sel);
-                else if (sel.agentKey !== undefined)
-                  setPendingAgentKey(sel.agentKey);
-              }}
-              onSelectServer={(name) => {
-                if (activeSlot) switchServer(activeSlot.info.slot_id, name);
-              }}
               // The pane's routine house is the one FEAT-077 built; the panel
               // hands it over rather than growing a second one.
               onOpenRoutine={(name) =>
@@ -475,6 +457,43 @@ export function AgentChatTab() {
             conversationId={activeSlot?.info.conversation_id || ""}
             agentSlug={activeSlot?.info.agent_slug || ""}
             agentName={boundAgent?.name}
+            // Who is answering, on what, where — and the door to the rest of
+            // it. In the dock rather than in the panel it opens, so reading an
+            // agent is the same gesture as reading a routine's report: click
+            // in this column, it opens in the pane beside the conversation.
+            agentCard={
+              <DockAgentCard
+                name={panelAgent?.name || "Condor"}
+                description={panelAgent?.description}
+                slot={activeSlot}
+                pendingAgentKey={pendingAgentKey ?? defaultAgent}
+                ambientServer={server || ""}
+                agents={modelOptions}
+                customProviders={customProviders}
+                agentBindings={agentBindings}
+                isStreaming={isActiveStreaming}
+                open={pane?.kind === "agent"}
+                onOpen={() =>
+                  setPane((p) =>
+                    p?.kind === "agent" ? null : { kind: "agent" },
+                  )
+                }
+                // With a session this moves the conversation; without one it is
+                // the model the next `start_session` carries, which is the same
+                // field the hero's picker sets.
+                onSelectBrain={(sel) => {
+                  if (activeSlot) switchBrain(sel);
+                  else if (sel.agentKey !== undefined)
+                    setPendingAgentKey(sel.agentKey);
+                }}
+                onSelectServer={(name) => {
+                  if (activeSlot) switchServer(activeSlot.info.slot_id, name);
+                }}
+              />
+            }
+            // The panel in the pane is this column's own: its pickers are up
+            // here, so the column stays rather than folding away under it.
+            borrowable={pane?.kind !== "agent"}
             // A routine launched from the dock's library is this
             // conversation's: it runs on the server the chat is talking to,
             // reports back into it, and is filed under whoever is answering.

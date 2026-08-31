@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import {
+  Bot,
   ChevronDown,
   ChevronRight,
   PanelRightClose,
@@ -60,11 +61,16 @@ function defaultOpen(): boolean {
  * mirror of what the rail does below `md`.
  *
  * And like the rail, it steps back to its icon strip while something is in the
- * workspace pane: a routine's report or the agent panel opens on a conversation
- * with both flanks folded away, so what you asked for and what you asked it of
- * are the only two things on screen. It is a loan — the column comes back the
- * moment the pane closes, and only a collapse of the reader's own is written
- * down as how the workspace opens next time.
+ * workspace pane: a routine's report opens on a conversation with both flanks
+ * folded away, so what you asked for and what you asked it of are the only two
+ * things on screen. It is a loan — the column comes back the moment the pane
+ * closes, and only a collapse of the reader's own is written down as how the
+ * workspace opens next time. The agent panel is the exception (`borrowable`):
+ * it is opened from the card at the top of this column and steered by it, so
+ * lending the column away would be lending away its own controls.
+ *
+ * The card comes first, then the sections: who is answering, then what that
+ * has set in motion.
  *
  * The two sections are panes, not a stack: each scrolls inside itself, so an
  * expanded Tasks can never push Routines off the bottom. Both headers stay on
@@ -78,6 +84,8 @@ export function ContextDock({
   conversationId,
   agentSlug,
   agentName,
+  agentCard,
+  borrowable = true,
   runContext,
   library,
   onLibraryChange,
@@ -88,6 +96,23 @@ export function ContextDock({
   agentSlug: string;
   /** Who is answering, for the library bar's accessible name. */
   agentName?: string;
+  /**
+   * Who is answering, as a card — the identity, the model and the server.
+   *
+   * Passed in rather than built here: it is wired to the session, and this
+   * column knows about work, not about sessions. What it does know is that the
+   * card belongs above Tasks, because "who" comes before "what they are doing".
+   */
+  agentCard?: React.ReactNode;
+  /**
+   * Whether the pane may borrow this column while it is open.
+   *
+   * False when the pane holds the very thing this column steers: the agent
+   * panel is opened *from* the card above, and its model and server pickers
+   * are the card, so folding the column away to make room would take them off
+   * screen at the moment they are most likely to be wanted.
+   */
+  borrowable?: boolean;
   /** The conversation a run launched from the library belongs to. */
   runContext?: RoutineRunContext;
   /**
@@ -128,19 +153,21 @@ export function ContextDock({
   const paneOpen = useWorkspacePane()?.open ?? false;
   const lent = useRef<boolean | null>(null);
   useEffect(() => {
-    if (paneOpen) {
+    if (paneOpen && borrowable) {
       if (lent.current === null) {
         lent.current = open;
         setOpen(false);
       }
     } else if (lent.current !== null) {
+      // Also the way the column comes back mid-pane: opening the agent panel
+      // over a report repays the loan without the pane ever closing.
       setOpen(lent.current);
       lent.current = null;
     }
     // `open` is read, not watched: re-running this on the reader's own expand
     // would take the column straight back off them.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [paneOpen]);
+  }, [paneOpen, borrowable]);
 
   /**
    * Only the reader's own toggle is written down. What the layout does on its
@@ -309,6 +336,15 @@ export function ContextDock({
     return (
       <>
         <aside className="flex w-10 shrink-0 flex-col items-center gap-3 border-l border-[var(--color-border)] bg-[var(--color-bg)] py-2">
+          {agentCard && (
+            <button
+              onClick={() => toggle(true)}
+              className="rounded p-1 text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+              title="Show who is answering"
+            >
+              <Bot className="h-4 w-4" />
+            </button>
+          )}
           <button
             onClick={() => toggle(true)}
             className="flex flex-col items-center gap-0.5 rounded p-1 text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
@@ -367,6 +403,8 @@ export function ContextDock({
               <PanelRightClose className="h-3.5 w-3.5" />
             </button>
           </div>
+
+          {agentCard}
 
           <DockSection
             icon={

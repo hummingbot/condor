@@ -1,16 +1,21 @@
 /**
- * One control names the agent, the model and the server — and opens all three
- * (FEAT-081).
+ * Who is answering, on what, where — and the one door to all of it (FEAT-081).
  *
  * The workspace header used to carry a model picker, a server chip and a link
- * that *left* the conversation to read what the agent knows. This is the one
- * button that replaced them, and the panel behind it. What is pinned here is
- * what a refactor of the panel's chrome must not lose: the button says all
- * three facts and the `title` says them whatever the window does; the session
- * strip is on screen before anything is clicked; both switches go dead with a
- * reason while a turn is in flight; a pinned server offers no picker; and with
- * no session the model row still sets what the next conversation starts on
- * while the server row is a statement rather than a dead control.
+ * that *left* the conversation to read what the agent knows. What replaced them
+ * is pinned here across two homes: the header button that still names all three
+ * facts, and the dock's agent card, which is where the two switches actually
+ * live now. The card sits in the right-hand column so that opening an agent is
+ * the same gesture as opening a routine's report — click in the dock, it opens
+ * in the pane — and so the pickers stay on screen while the panel is open.
+ *
+ * What a refactor of this chrome must not lose: the button says all three facts
+ * and the `title` says them whatever the window does; the card is a card, not a
+ * spec sheet, and both switches go dead with a reason while a turn is in
+ * flight; a pinned server offers no picker; with no session the model field
+ * still sets what the next conversation starts on while the server field is a
+ * statement rather than a dead control; and the panel keeps no link out of the
+ * workspace.
  *
  * Needs a DOM, so this file overrides vitest's default `node` environment.
  *
@@ -49,6 +54,7 @@ vi.mock("@/hooks/useChat", () => ({
 }));
 
 const { AgentPanel, AgentPanelButton } = await import("./AgentPanel");
+const { DockAgentCard } = await import("./DockAgent");
 
 declare global {
   var IS_REACT_ACT_ENVIRONMENT: boolean;
@@ -104,6 +110,7 @@ function slot(over: Partial<ChatSlot["info"]> = {}): ChatSlot {
 let container: HTMLDivElement;
 let root: Root;
 let closed: number;
+let opened: number;
 let picked: { model?: string; server?: string };
 
 async function settle() {
@@ -114,18 +121,41 @@ async function settle() {
   }
 }
 
+function client() {
+  return new QueryClient({
+    defaultOptions: { queries: { retry: false, gcTime: 0 } },
+  });
+}
+
 type PanelProps = Parameters<typeof AgentPanel>[0];
 
 async function renderPanel(over: Partial<PanelProps> = {}) {
-  const client = new QueryClient({
-    defaultOptions: { queries: { retry: false, gcTime: 0 } },
-  });
   await act(async () => {
     root.render(
       <MemoryRouter>
-        <QueryClientProvider client={client}>
+        <QueryClientProvider client={client()}>
           <AgentPanel
             slug="orca"
+            name="Orca LP Expert"
+            onOpenRoutine={() => {}}
+            onClose={() => (closed += 1)}
+            {...over}
+          />
+        </QueryClientProvider>
+      </MemoryRouter>,
+    );
+  });
+  await settle();
+}
+
+type CardProps = Parameters<typeof DockAgentCard>[0];
+
+async function renderCard(over: Partial<CardProps> = {}) {
+  await act(async () => {
+    root.render(
+      <MemoryRouter>
+        <QueryClientProvider client={client()}>
+          <DockAgentCard
             name="Orca LP Expert"
             description="Solana liquidity"
             slot={slot()}
@@ -135,10 +165,10 @@ async function renderPanel(over: Partial<PanelProps> = {}) {
             customProviders={[]}
             agentBindings={BINDINGS}
             isStreaming={false}
+            open={false}
+            onOpen={() => (opened += 1)}
             onSelectBrain={(sel) => (picked.model = sel.agentKey)}
             onSelectServer={(name) => (picked.server = name)}
-            onOpenRoutine={() => {}}
-            onClose={() => (closed += 1)}
             {...over}
           />
         </QueryClientProvider>
@@ -151,12 +181,9 @@ async function renderPanel(over: Partial<PanelProps> = {}) {
 type ButtonProps = Parameters<typeof AgentPanelButton>[0];
 
 async function renderButton(over: Partial<ButtonProps> = {}) {
-  const client = new QueryClient({
-    defaultOptions: { queries: { retry: false, gcTime: 0 } },
-  });
   await act(async () => {
     root.render(
-      <QueryClientProvider client={client}>
+      <QueryClientProvider client={client()}>
         <AgentPanelButton
           name="Orca LP Expert"
           slot={slot()}
@@ -199,6 +226,7 @@ async function click(el: HTMLElement) {
 beforeEach(() => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   closed = 0;
+  opened = 0;
   picked = {};
   container = document.createElement("div");
   document.body.appendChild(container);
@@ -250,16 +278,27 @@ describe("the one header control", () => {
   });
 });
 
-describe("the session strip", () => {
-  it("is on screen before anything is clicked", async () => {
-    await renderPanel();
+describe("the dock's agent card", () => {
+  it("names who is answering, on what, where", async () => {
+    await renderCard();
 
-    expect(row("model")!.textContent).toContain("Claude (ACP) — Sonnet");
+    expect(container.textContent).toContain("Orca LP Expert");
+    expect(container.textContent).toContain("Solana liquidity");
+    // Beside the server in a 300px column the model wears its short name; the
+    // catalogue name it was cut from is still one hover away.
+    expect(row("model")!.textContent).toContain("Sonnet");
+    expect(row("model")!.title).toContain("Claude (ACP) — Sonnet");
     expect(row("server")!.textContent).toContain("brigado_2");
   });
 
+  it("is the door to the panel", async () => {
+    await renderCard();
+    await click(container.querySelector("button")!);
+    expect(opened).toBe(1);
+  });
+
   it("switches the model through the same list the picker offers", async () => {
-    await renderPanel();
+    await renderCard();
     place(row("model")!);
     await click(row("model")!);
 
@@ -268,7 +307,7 @@ describe("the session strip", () => {
   });
 
   it("moves the conversation to another server", async () => {
-    await renderPanel();
+    await renderCard();
     place(row("server")!);
     await click(row("server")!);
 
@@ -277,7 +316,7 @@ describe("the session strip", () => {
   });
 
   it("goes dead with a reason while a turn is in flight", async () => {
-    await renderPanel({ isStreaming: true });
+    await renderCard({ isStreaming: true });
 
     for (const name of ["model", "server"]) {
       const control = row(name) as HTMLButtonElement;
@@ -287,7 +326,7 @@ describe("the session strip", () => {
   });
 
   it("offers no picker for a server the agent pinned", async () => {
-    await renderPanel({
+    await renderCard({
       slot: slot({ server_pinned: true, label: "Orca LP Expert" }),
     });
 
@@ -299,10 +338,10 @@ describe("the session strip", () => {
 });
 
 describe("with no session yet", () => {
-  it("still opens, and the model row is the next chat's", async () => {
-    await renderPanel({ slot: null, pendingAgentKey: "gpt-5" });
+  it("still reads, and the model field is the next chat's", async () => {
+    await renderCard({ slot: null, pendingAgentKey: "gpt-5" });
 
-    expect(row("model")!.textContent).toContain("OpenAI — GPT-5");
+    expect(row("model")!.textContent).toContain("GPT-5");
     expect(row("model")!.title).toContain("next conversation");
 
     place(row("model")!);
@@ -312,7 +351,7 @@ describe("with no session yet", () => {
   });
 
   it("states the server rather than offering a dead control", async () => {
-    await renderPanel({ slot: null });
+    await renderCard({ slot: null });
 
     const control = row("server")!;
     // Nothing to respawn, and the ambient selector already owns the choice.
@@ -322,7 +361,20 @@ describe("with no session yet", () => {
   });
 });
 
-describe("closing it", () => {
+describe("the panel", () => {
+  it("keeps the sections, and no door out of the workspace", async () => {
+    await renderPanel();
+
+    // The sections are a rail of vertical names, not a link to the page that
+    // has them laid out horizontally: everything the agent is stays in here.
+    const sections = [...document.querySelectorAll('[role="tab"]')].map((t) =>
+      t.getAttribute("aria-label"),
+    );
+    expect(sections).toContain("Brain");
+    expect(container.textContent).not.toContain("Full page");
+    expect(container.querySelector("a")).toBeNull();
+  });
+
   it("just closes when nothing is being edited", async () => {
     await renderPanel();
     await click(document.querySelector<HTMLElement>('button[title^="Close"]')!);
