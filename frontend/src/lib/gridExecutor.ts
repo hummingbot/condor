@@ -1,5 +1,6 @@
 // ── Grid executor state machine (shared by CreateExecutor, GridConfigPanel and DexPool) ──
 
+import { roundToPricePrecision } from "@/lib/formatters";
 import { GRID_STORAGE_KEY, LAST_MARKET_KEY } from "@/lib/sessionState";
 
 export interface GridState {
@@ -160,3 +161,128 @@ export const LOOKBACK_OPTIONS: { label: string; seconds: number }[] = [
   { label: "14d", seconds: 14 * 86400 },
   { label: "30d", seconds: 30 * 86400 },
 ];
+
+// ── Price rules ──
+//
+// One copy of the grid's ordering rules, read by the panel's error list, by the
+// page's sticky footer / chat "blocked by" fact, by the per-field validity icons
+// and by the chart write-back. They used to be written out three times in
+// GridConfigPanel with drifting wording, so for the same state the footer could
+// name a different rule than the panel's first red line.
+
+/** Relative gap the clamp leaves, so the strict inequalities survive rounding. */
+export const GRID_MIN_SEPARATION = 0.0001;
+
+function tickOf(pricePrecision?: number | null): number {
+  return pricePrecision != null ? 1 / 10 ** pricePrecision : 0;
+}
+
+/** The nearest price strictly below `bound`, on the tick grid when there is one. */
+function justBelow(bound: number, pricePrecision?: number | null): number {
+  const gap = Math.max(bound * GRID_MIN_SEPARATION, tickOf(pricePrecision));
+  const rounded = roundToPricePrecision(bound - gap, pricePrecision);
+  return rounded < bound ? rounded : bound - gap;
+}
+
+/** The nearest price strictly above `bound`, on the tick grid when there is one. */
+function justAbove(bound: number, pricePrecision?: number | null): number {
+  const gap = Math.max(bound * GRID_MIN_SEPARATION, tickOf(pricePrecision));
+  const rounded = roundToPricePrecision(bound + gap, pricePrecision);
+  return rounded > bound ? rounded : bound + gap;
+}
+
+/**
+ * Bound a proposed price against the other two prices and the side, returning the
+ * nearest legal price.
+ *
+ * Written for a gesture: a chart click today and a chart drag tomorrow hand over a
+ * candidate price and get back one the form will accept, so the rules apply during
+ * the gesture instead of turning into red text underneath it. A `0` neighbour means
+ * "not set yet" and imposes no bound — picking `start` first must not clamp against
+ * an `end` the user has not chosen.
+ *
+ * When both bounds could apply, the start/end ordering wins: that pair is the range
+ * the user is drawing, and the limit trails it.
+ */
+export function clampGridPrice(
+  field: "start" | "end" | "limit",
+  price: number,
+  state: GridState,
+  pricePrecision?: number | null,
+): number {
+  if (!Number.isFinite(price) || price <= 0) return price;
+  const { start_price: start, end_price: end, limit_price: limit, side } = state;
+
+  switch (field) {
+    case "start":
+      if (end > 0 && price >= end) return justBelow(end, pricePrecision);
+      if (side === 1 && limit > 0 && price <= limit) return justAbove(limit, pricePrecision);
+      return price;
+    case "end":
+      if (start > 0 && price <= start) return justAbove(start, pricePrecision);
+      if (side === 2 && limit > 0 && price >= limit) return justBelow(limit, pricePrecision);
+      return price;
+    case "limit":
+      if (side === 1) return start > 0 && price >= start ? justBelow(start, pricePrecision) : price;
+      return end > 0 && price <= end ? justAbove(end, pricePrecision) : price;
+  }
+}
+
+/** The ordering rules, as the messages the user reads. */
+export function gridPriceErrors(state: GridState): string[] {
+  const errors: string[] = [];
+
+  if (state.start_price > 0 && state.end_price > 0 && state.start_price >= state.end_price) {
+    errors.push("Start price must be < end price");
+  }
+  if (state.side === 1 && state.limit_price > 0 && state.start_price > 0 && state.limit_price >= state.start_price) {
+    errors.push("LONG: limit must be < start price");
+  }
+  if (state.side === 2 && state.limit_price > 0 && state.end_price > 0 && state.limit_price <= state.end_price) {
+    errors.push("SHORT: limit must be > end price");
+  }
+  if (state.start_price <= 0 || state.end_price <= 0 || state.limit_price <= 0) {
+    errors.push("All prices required");
+  }
+
+  return errors;
+}
+
+/** Everything that blocks a grid from being created: the price rules plus the amounts. */
+export function gridConfigErrors(state: GridState): string[] {
+  const errors = gridPriceErrors(state);
+
+  if (state.total_amount_quote <= 0) {
+    errors.push("Total amount required");
+  }
+  if (
+    state.total_amount_quote > 0 &&
+    state.min_order_amount_quote > 0 &&
+    state.total_amount_quote < state.min_order_amount_quote
+  ) {
+    errors.push("Total must be >= min order amount");
+  }
+
+  return errors;
+}
+
+/**
+ * Whether one price field is settled: set, and ordered against the price it is
+ * measured from. An unset neighbour leaves it unsettled — this answers "show the
+ * check or the warning", not "is this price legal", which is `clampGridPrice`.
+ */
+export function gridPriceFieldValid(field: "start" | "end" | "limit", state: GridState): boolean {
+  switch (field) {
+    case "start":
+      return state.start_price > 0 && state.start_price < state.end_price;
+    case "end":
+      return state.end_price > 0 && state.end_price > state.start_price;
+    case "limit":
+      return (
+        state.limit_price > 0 &&
+        (state.side === 1
+          ? state.limit_price < state.start_price
+          : state.limit_price > state.end_price)
+      );
+  }
+}

@@ -47,6 +47,7 @@ import { connectorCapabilities } from "@/lib/connector-capabilities";
 import { executorsQuery } from "@/lib/queryClient";
 import type { ExecutorType, PickSlot } from "@/components/executor/types";
 import {
+  clampGridPrice,
   gridReducer,
   isSpotConnector,
   loadGridDefaults,
@@ -496,9 +497,9 @@ export function CreateExecutor() {
   // bought that stability with a stale closure -- the callback kept calling
   // whichever `handleChartPriceSet` existed when the type last changed, not the
   // current one. A latest-value ref gives the stability without the staleness.
-  const priceSetTargets = useRef({ positionConfig, orderConfig, dcaConfig, lpConfig });
+  const priceSetTargets = useRef({ positionConfig, orderConfig, dcaConfig, lpConfig, gridState, pricePrecision });
   useEffect(() => {
-    priceSetTargets.current = { positionConfig, orderConfig, dcaConfig, lpConfig };
+    priceSetTargets.current = { positionConfig, orderConfig, dcaConfig, lpConfig, gridState, pricePrecision };
   });
 
   const handlePriceSet = useCallback(
@@ -509,7 +510,14 @@ export function CreateExecutor() {
           // The grid panel arms only start/end/limit; `limit2` belongs to the LP
           // lower limit and would name a grid field that does not exist.
           if (field === "limit2") break;
-          gridDispatch({ type: "SET_FIELD", field: `${field}_price`, value: price });
+          // Bound the picked price against the two the user already set, so a
+          // click (and, later, a drag) cannot write a price the form will only
+          // reject afterwards. The chart stays ignorant of grid semantics.
+          gridDispatch({
+            type: "SET_FIELD",
+            field: `${field}_price`,
+            value: clampGridPrice(field, price, targets.gridState, targets.pricePrecision),
+          });
           gridDispatch({ type: "SET_FIELD", field: "activePickField", value: null });
           break;
         case "position":

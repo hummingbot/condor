@@ -10,6 +10,7 @@ import {
 
 import { LeverageField, SelectField, ToggleField, type FieldDispatch } from "@/components/executor/fields";
 import { ORDER_TYPE_OPTIONS } from "@/components/executor/field-options";
+import { gridConfigErrors, gridPriceFieldValid } from "@/lib/gridExecutor";
 import type { GridState, GridAction } from "@/lib/gridExecutor";
 
 interface GridConfigPanelProps {
@@ -171,40 +172,8 @@ function SectionHeader({ children }: { children: React.ReactNode }) {
 
 export function GridConfigPanel({ state, dispatch, currentPrice, isSpot = false, quoteCurrency = "USDT" }: GridConfigPanelProps) {
   const validation = useMemo(() => {
-    const errors: string[] = [];
+    const errors = gridConfigErrors(state);
     const warnings: string[] = [];
-
-    if (state.start_price > 0 && state.end_price > 0) {
-      if (state.start_price >= state.end_price) {
-        errors.push("Start price must be < end price");
-      }
-    }
-
-    if (state.side === 1 && state.limit_price > 0 && state.start_price > 0) {
-      if (state.limit_price >= state.start_price) {
-        errors.push("LONG: limit must be < start price");
-      }
-    }
-
-    if (state.side === 2 && state.limit_price > 0 && state.end_price > 0) {
-      if (state.limit_price <= state.end_price) {
-        errors.push("SHORT: limit must be > end price");
-      }
-    }
-
-    if (state.start_price <= 0 || state.end_price <= 0 || state.limit_price <= 0) {
-      errors.push("All prices required");
-    }
-
-    if (state.total_amount_quote <= 0) {
-      errors.push("Total amount required");
-    }
-
-    if (state.total_amount_quote > 0 && state.min_order_amount_quote > 0) {
-      if (state.total_amount_quote < state.min_order_amount_quote) {
-        errors.push("Total must be >= min order amount");
-      }
-    }
 
     // Compute estimated levels (mirrors _generate_grid_levels logic)
     let levels = 0;
@@ -307,7 +276,7 @@ export function GridConfigPanel({ state, dispatch, currentPrice, isSpot = false,
           field="start"
           activePickField={state.activePickField}
           dispatch={dispatch}
-          valid={state.start_price > 0 && state.start_price < state.end_price}
+          valid={gridPriceFieldValid("start", state)}
         />
         <PriceField
           label="End Price (upper boundary)"
@@ -315,7 +284,7 @@ export function GridConfigPanel({ state, dispatch, currentPrice, isSpot = false,
           field="end"
           activePickField={state.activePickField}
           dispatch={dispatch}
-          valid={state.end_price > 0 && state.end_price > state.start_price}
+          valid={gridPriceFieldValid("end", state)}
         />
         <PriceField
           label={`Limit Price (${state.side === 1 ? "stop-loss below" : "stop-loss above"})`}
@@ -323,12 +292,7 @@ export function GridConfigPanel({ state, dispatch, currentPrice, isSpot = false,
           field="limit"
           activePickField={state.activePickField}
           dispatch={dispatch}
-          valid={
-            state.limit_price > 0 &&
-            (state.side === 1
-              ? state.limit_price < state.start_price
-              : state.limit_price > state.end_price)
-          }
+          valid={gridPriceFieldValid("limit", state)}
           hint={state.side === 1 ? "Must be below start price" : "Must be above end price"}
         />
       </div>
@@ -504,27 +468,7 @@ export function GridConfigPanel({ state, dispatch, currentPrice, isSpot = false,
 
 export function useGridValidation(state: GridState) {
   return useMemo(() => {
-    const errors: string[] = [];
-
-    if (state.start_price <= 0 || state.end_price <= 0 || state.limit_price <= 0) {
-      errors.push("All prices required");
-    }
-    if (state.start_price > 0 && state.end_price > 0 && state.start_price >= state.end_price) {
-      errors.push("Start must be < end");
-    }
-    if (state.side === 1 && state.limit_price > 0 && state.start_price > 0 && state.limit_price >= state.start_price) {
-      errors.push("LONG: limit < start");
-    }
-    if (state.side === 2 && state.limit_price > 0 && state.end_price > 0 && state.limit_price <= state.end_price) {
-      errors.push("SHORT: limit > end");
-    }
-    if (state.total_amount_quote <= 0) {
-      errors.push("Total amount required");
-    }
-    if (state.total_amount_quote > 0 && state.min_order_amount_quote > 0 && state.total_amount_quote < state.min_order_amount_quote) {
-      errors.push("Total >= min order");
-    }
-
+    const errors = gridConfigErrors(state);
     return { valid: errors.length === 0, errors };
   }, [state]);
 }
