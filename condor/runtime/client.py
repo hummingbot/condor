@@ -60,9 +60,9 @@ def _local():
     return sessions
 
 
-def bound_agent_context(bound, user_id: int, platform: str) -> str:
+def bound_agent_context(bound, user_id: int, platform: str, agent_key: str = "") -> str:
     """Opening context for a chat bound to a specialist Agent."""
-    return _local().bound_agent_context(bound, user_id, platform)
+    return _local().bound_agent_context(bound, user_id, platform, agent_key)
 
 
 async def create_session(

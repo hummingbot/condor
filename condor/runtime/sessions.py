@@ -22,7 +22,11 @@ from condor.acp.pydantic_ai_client import PydanticAIClient
 from condor.agents.agent import identity_header as agent_identity_header
 from condor.runtime import binding, conversations
 from condor.runtime.confirmations import get_registry as get_confirmation_registry
-from condor.runtime.context import build_initial_context, platform_formatting
+from condor.runtime.context import (
+    build_initial_context,
+    chat_tool_preload,
+    platform_formatting,
+)
 from condor.runtime.keys import SessionKey
 from condor.runtime.models import SessionInfo, SessionSpec
 from condor.runtime.timeouts import TIMEOUTS
@@ -365,7 +369,10 @@ async def _enforce_session_budget(user_id: int, surface: str | None = None) -> N
 
 
 def bound_agent_context(
-    bound: binding.SessionBinding, user_id: int, platform: str
+    bound: binding.SessionBinding,
+    user_id: int,
+    platform: str,
+    agent_key: str = "",
 ) -> str:
     """The opening context of a chat bound to a specialist Agent.
 
@@ -376,15 +383,25 @@ def bound_agent_context(
     speaking into renders a reply: no tables and no charts on the dashboard, no
     length rules on Telegram. The formatting section is appended here, at the
     branch that skips the other path, so both teach it exactly once.
+
+    The ToolSearch preload was the second thing stranded on this branch
+    (CORR-272): under ACP the MCP tools are deferred, so a specialist that is
+    never told the names has every orchestration tool mounted and no way to
+    find one — it would read the repo for a way to stop a loop that
+    ``control_agent`` was authorized to stop the whole time. ``agent_key``
+    falls back to the binding's own; the caller passes the resolved key, since
+    a model picked in the UI overrides what the Agent front matter configured.
     """
-    return "\n\n".join(
-        (
-            binding.agent_identity_context(
-                bound.agent_slug, user_id, bound.instructions, bound.label
-            ),
-            platform_formatting(platform),
-        )
-    )
+    sections = [
+        binding.agent_identity_context(
+            bound.agent_slug, user_id, bound.instructions, bound.label
+        ),
+        platform_formatting(platform),
+    ]
+    preload = chat_tool_preload(agent_key or bound.agent_key)
+    if preload:
+        sections.append(preload)
+    return "\n\n".join(sections)
 
 
 def _resolve_conversation(
@@ -626,7 +643,9 @@ async def _spawn_session(
         # the chat's — that is what makes it a different brain, not a skin.
         initial_context = ""
         if bound.is_agent and spec.user_id:
-            initial_context = bound_agent_context(bound, spec.user_id, spec.platform)
+            initial_context = bound_agent_context(
+                bound, spec.user_id, spec.platform, agent_key
+            )
         elif spec.user_id:
             initial_context = build_initial_context(
                 spec.user_id,

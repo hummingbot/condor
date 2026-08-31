@@ -100,6 +100,73 @@ def platform_formatting(platform: str = "telegram") -> str:
     return _WEB_FORMATTING if platform == "web" else _TELEGRAM_FORMATTING
 
 
+# Every MCP tool an attended chat seat has mounted (the ``agent`` profile in
+# ``mcp_servers/condor/server.py``). Under ACP these are *deferred*: the session
+# only ever sees the names it has been told about, so a tool missing from this
+# list is a tool that seat can never discover. The tick seat keeps its own,
+# deliberately narrower list in ``condor/agents/prompts.py`` — a tick must not be
+# able to start or stop the loop it is running inside. Do not unify them.
+_CHAT_MCP_TOOLS = (
+    "mcp__mcp-hummingbot__get_prices",
+    "mcp__mcp-hummingbot__get_candles",
+    "mcp__mcp-hummingbot__get_portfolio_overview",
+    "mcp__mcp-hummingbot__list_executors",
+    "mcp__mcp-hummingbot__get_executor",
+    "mcp__mcp-hummingbot__stop_executor",
+    "mcp__mcp-hummingbot__create_position_executor",
+    "mcp__mcp-hummingbot__create_grid_executor",
+    "mcp__mcp-hummingbot__create_dca_executor",
+    "mcp__mcp-hummingbot__create_order_executor",
+    "mcp__mcp-hummingbot__create_lp_executor",
+    "mcp__mcp-hummingbot__manage_bots",
+    "mcp__mcp-hummingbot__manage_controllers",
+    "mcp__mcp-hummingbot__explore_dex_pools",
+    "mcp__mcp-hummingbot__explore_geckoterminal",
+    "mcp__mcp-hummingbot__manage_amm",
+    "mcp__mcp-hummingbot__search_history",
+    "mcp__mcp-hummingbot__set_account_position_mode_and_leverage",
+    "mcp__condor__manage_routines",
+    "mcp__condor__manage_servers",
+    "mcp__condor__manage_agents",
+    "mcp__condor__manage_strategies",
+    "mcp__condor__control_agent",
+    "mcp__condor__get_available_models",
+    "mcp__condor__consult",
+    "mcp__condor__delegate",
+    "mcp__condor__run_code",
+    "mcp__condor__trading_agent_journal_read",
+    "mcp__condor__trading_agent_journal_write",
+    "mcp__condor__send_notification",
+    "mcp__condor__manage_memory",
+    "mcp__condor__manage_skill",
+)
+
+
+def chat_tool_preload(agent_key: str | None) -> str:
+    """The ToolSearch preload line for a chat seat, or ``""`` when it needs none.
+
+    ACP seats (Claude Code and friends) get MCP tools deferred: they must
+    ``ToolSearch`` a name before they can call it, so anything not named here is
+    invisible to them no matter that it is mounted and authorized. Pydantic-ai
+    seats auto-discover their toolset and must never receive the line.
+
+    Public because both chat branches need it: the coordinator's
+    :func:`build_initial_context` and the specialist's ``bound_agent_context``,
+    which skips that builder entirely (CORR-272).
+    """
+    from condor.acp.pydantic_ai_client import is_pydantic_ai_model
+
+    if not agent_key or is_pydantic_ai_model(agent_key):
+        return ""
+    return (
+        "IMPORTANT: At the very start of the session (before your first response), "
+        "load ALL MCP tools in a single ToolSearch call:\n"
+        f'ToolSearch(query="select:{",".join(_CHAT_MCP_TOOLS)}")\n'
+        "This avoids repeated ToolSearch calls that waste context tokens. "
+        "Do this silently without telling the user."
+    )
+
+
 def _build_system_prompt(platform: str = "telegram") -> str:
     """Condor's own AGENT.md plus the platform's formatting rules."""
     agent = _chat_agent()
@@ -119,7 +186,6 @@ def build_initial_context(
     server_name: str | None = None,
 ) -> str:
     """Build an initial context prompt telling the agent about server, permissions, and formatting rules."""
-    from condor.acp.pydantic_ai_client import is_pydantic_ai_model
     from config_manager import get_config_manager, get_effective_server
 
     cm = get_config_manager()
@@ -150,47 +216,9 @@ def build_initial_context(
         active_perm = cm.get_server_permission(user_id, active_name)
         active_perm_label = active_perm.value.upper() if active_perm else "UNKNOWN"
 
-        # For ACP agents (Claude Code): instruct them to preload MCP tools via ToolSearch
-        # Pydantic-ai agents get tools directly, no preload needed
-        tool_preload_hint = ""
-        if agent_key and not is_pydantic_ai_model(agent_key):
-            mcp_tools = [
-                "mcp__mcp-hummingbot__get_prices",
-                "mcp__mcp-hummingbot__get_candles",
-                "mcp__mcp-hummingbot__get_portfolio_overview",
-                "mcp__mcp-hummingbot__list_executors",
-                "mcp__mcp-hummingbot__get_executor",
-                "mcp__mcp-hummingbot__stop_executor",
-                "mcp__mcp-hummingbot__create_position_executor",
-                "mcp__mcp-hummingbot__create_grid_executor",
-                "mcp__mcp-hummingbot__create_dca_executor",
-                "mcp__mcp-hummingbot__create_order_executor",
-                "mcp__mcp-hummingbot__create_lp_executor",
-                "mcp__mcp-hummingbot__manage_bots",
-                "mcp__mcp-hummingbot__manage_controllers",
-                "mcp__mcp-hummingbot__explore_dex_pools",
-                "mcp__mcp-hummingbot__explore_geckoterminal",
-                "mcp__mcp-hummingbot__manage_amm",
-                "mcp__mcp-hummingbot__search_history",
-                "mcp__mcp-hummingbot__set_account_position_mode_and_leverage",
-                "mcp__condor__manage_routines",
-                "mcp__condor__manage_servers",
-                "mcp__condor__manage_agents",
-                "mcp__condor__manage_strategies",
-                "mcp__condor__control_agent",
-                "mcp__condor__trading_agent_journal_read",
-                "mcp__condor__trading_agent_journal_write",
-                "mcp__condor__send_notification",
-                "mcp__condor__manage_memory",
-                "mcp__condor__manage_skill",
-            ]
-            tool_preload_hint = (
-                "IMPORTANT: At the very start of the session (before your first response), "
-                "load ALL MCP tools in a single ToolSearch call:\n"
-                f'ToolSearch(query="select:{",".join(mcp_tools)}")\n'
-                "This avoids repeated ToolSearch calls that waste context tokens. "
-                "Do this silently without telling the user."
-            )
+        # For ACP agents (Claude Code): instruct them to preload MCP tools via
+        # ToolSearch. Pydantic-ai agents get tools directly, no preload needed.
+        tool_preload_hint = chat_tool_preload(agent_key)
 
         # Build server info section
         server_info = [
