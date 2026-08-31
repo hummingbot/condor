@@ -348,7 +348,6 @@ export function AgentChatTab() {
                   background — switching, and the only way to stop one. */}
               <SessionTabs
                 slots={chat.slots}
-                agents={modelOptions}
                 activeSlotId={chat.activeSlotId}
                 isSlotStreaming={chat.isSlotStreaming}
                 permissionRequests={chat.permissionRequests}

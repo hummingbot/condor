@@ -1,9 +1,6 @@
 import { AlertTriangle, Bot, Loader2, X, Zap } from "lucide-react";
 
 import type { ChatSlot } from "@/hooks/useChatSocket";
-import type { ChatAgentOption } from "@/lib/api";
-
-import { resolveAgentLabel } from "./ChatThread";
 
 /**
  * The live sessions, as tabs.
@@ -30,7 +27,6 @@ import { resolveAgentLabel } from "./ChatThread";
  */
 export function SessionTabs({
   slots,
-  agents,
   activeSlotId,
   isSlotStreaming,
   permissionRequests,
@@ -39,7 +35,6 @@ export function SessionTabs({
   className = "",
 }: {
   slots: ChatSlot[];
-  agents: ChatAgentOption[];
   activeSlotId: string | null;
   isSlotStreaming: (slotId: string | null) => boolean;
   /** Keyed by slot id — a request in a background chat is only visible here. */
@@ -73,7 +68,6 @@ export function SessionTabs({
           <SessionTab
             key={slot.info.slot_id}
             slot={slot}
-            agents={agents}
             suffix={suffix}
             isActive={slot.info.slot_id === activeSlotId}
             isStreaming={isSlotStreaming(slot.info.slot_id)}
@@ -110,24 +104,10 @@ function LiveDot() {
   );
 }
 
-/** Shorten agent label for tab display */
-function shortAgentLabel(agentKey: string, agents: ChatAgentOption[]): string {
-  const full = resolveAgentLabel(agentKey, agents);
-  // Shorten common names
-  const shortMap: Record<string, string> = {
-    "Claude Code": "Claude",
-    "Gemini CLI": "Gemini",
-    "GitHub Copilot CLI": "Copilot",
-    "ChatGPT Codex": "Codex",
-  };
-  return shortMap[full] || (full.length > 12 ? full.slice(0, 12) + "..." : full);
-}
-
 // ── Session Tab ──
 
 function SessionTab({
   slot,
-  agents,
   suffix,
   isActive,
   isStreaming,
@@ -136,7 +116,6 @@ function SessionTab({
   onClose,
 }: {
   slot: ChatSlot;
-  agents: ChatAgentOption[];
   /** `#2`, `#3` … when this agent has more than one chat open. */
   suffix: string;
   isActive: boolean;
@@ -146,17 +125,23 @@ function SessionTab({
   onClick: () => void;
   onClose: () => void;
 }) {
-  // A bound Agent names the tab; only an unbound one falls back to the model,
-  // which is the same rule the header's picker follows.
-  const agentShort = slot.info.agent_slug
-    ? slot.info.label || slot.info.agent_slug
-    : shortAgentLabel(slot.info.agent_key, agents);
+  // The tab answers one question: *who* you are talking to. The model belongs
+  // to `BrainPicker` and the server to `SessionServerChip`, both a few pixels
+  // to the right, so neither is restated here. An unbound chat is "Condor" —
+  // the same word the rail uses for the same conversation.
+  const agentShort = slot.info.label || slot.info.agent_slug || "Condor";
   const TabIcon = slot.info.agent_slug ? Bot : Zap;
   const busy = isStreaming || slot.pending;
+  // The server is not on the tab, but a background tab's chip is not on screen
+  // either, so the tooltip is where that fact stays reachable.
+  const title = slot.info.server_name
+    ? `${agentShort}${suffix} — ${slot.info.server_name}`
+    : `${agentShort}${suffix}`;
 
   return (
     <button
       onClick={onClick}
+      title={title}
       // The active tab borrows the rail's own highlight — a primary tint and
       // primary text — so the tab and the rail row for the same conversation
       // read as one selection rather than two unrelated ones. The bottom
@@ -186,9 +171,6 @@ function SessionTab({
       <span className="max-w-[140px] truncate">
         {agentShort}
         {suffix}
-        {slot.info.server_name && (
-          <span className="text-[var(--color-text-muted)]"> · {slot.info.server_name}</span>
-        )}
       </span>
       {needsApproval && (
         <AlertTriangle
