@@ -49,6 +49,7 @@ class ReportBuilder:
         self._source_type: str = ""
         self._source_name: str = ""
         self._tags: list[str] = []
+        self._subject: str = ""
         self._sections: list[dict] = []
         self._datasets: dict[str, list[dict]] = {}
         self._manual_order = False
@@ -57,6 +58,16 @@ class ReportBuilder:
     def source(self, source_type: str, source_name: str) -> ReportBuilder:
         self._source_type = source_type
         self._source_name = source_name
+        return self
+
+    def subject(self, key: str) -> ReportBuilder:
+        """Record what this report is *about*, so it can be found again by it.
+
+        ``key`` must come from :mod:`condor.reports.subjects`, never be spelled
+        as a literal — that module is the only place a key is built, on both the
+        stamping and the looking-up side.
+        """
+        self._subject = key or ""
         return self
 
     def tags(self, tags: list[str]) -> ReportBuilder:
@@ -470,6 +481,7 @@ class ReportBuilder:
                 entry["updated_at"] = now.isoformat()
                 entry["title"] = self._title
                 entry["tags"] = self._tags
+                entry["subject"] = self._subject
                 store._write_index(entries)
                 store._last_report_id.set(report_id)
                 logger.info(f"Report updated: {entry['filename']}")
@@ -488,6 +500,9 @@ class ReportBuilder:
                 "source_type": source_type,
                 "source_name": source_name,
                 "tags": self._tags,
+                # What the report is about, if anything (FEAT-078): an opaque
+                # key from condor.reports.subjects, matched exactly on lookup.
+                "subject": self._subject,
                 "agent": store._report_agent.get() or "condor",
                 # The authenticated principal the run executes for (SEC-196):
                 # every runner wraps execution in store.attribute_owner, and the

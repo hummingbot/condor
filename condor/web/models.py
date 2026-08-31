@@ -571,6 +571,9 @@ class ReportSummary(BaseModel):
     source_type: str = ""
     source_name: str = ""
     tags: list[str] = []
+    # What the report is about, if anything (FEAT-078); "" for entries saved
+    # before the field existed. Keys come from condor.reports.subjects.
+    subject: str = ""
     agent: str = ""  # producing assistant/expert (e.g. "condor", "executor_manager")
     # Authenticated owner stamped at save time (SEC-196); None = legacy/ownerless,
     # visible to admins only.

@@ -208,6 +208,7 @@ def list_reports(
     tag: str | None = None,
     search: str | None = None,
     agent: str | None = None,
+    subject: str | None = None,
     limit: int = 50,
     offset: int = 0,
     owner_id: int | None = None,
@@ -219,6 +220,11 @@ def list_reports(
     are dropped (fail closed, SEC-196). ``None`` means no owner filter,
     which the web routes reserve for admins; internal callers that match
     on ``source_name`` (routine run lists) also pass ``None``.
+
+    ``subject`` matches what a report is about exactly (FEAT-078): pass a key
+    built by :mod:`condor.reports.subjects`. Entries saved without a subject —
+    every entry written before the field existed — never match one, and a key
+    whose report has since been pruned simply matches nothing.
     """
     entries = _read_index()
     entries.sort(key=lambda entry: entry.get("created_at", ""), reverse=True)
@@ -233,6 +239,8 @@ def list_reports(
         entries = [entry for entry in entries if tag in entry.get("tags", [])]
     if agent:
         entries = [entry for entry in entries if entry.get("agent") == agent]
+    if subject:
+        entries = [entry for entry in entries if entry.get("subject") == subject]
     if search:
         query = search.lower()
         entries = [

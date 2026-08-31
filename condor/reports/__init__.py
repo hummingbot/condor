@@ -1,5 +1,6 @@
 """Composable HTML reports and persistent report storage."""
 
+from . import subjects
 from .builder import LiveReport, ReportBuilder
 from .rendering import hydrate
 from .store import (
@@ -24,6 +25,7 @@ from .store import (
 __all__ = [
     "ReportBuilder",
     "LiveReport",
+    "subjects",
     "CHARTS_DIR",
     "INDEX_FILE",
     "MAX_REPORTS",
