@@ -20,10 +20,8 @@ import {
 } from "@/components/executor/ExecutorSuccessModal";
 import { LPConfigPanel } from "@/components/executor/LPConfigPanel";
 import { useLpConfig } from "@/components/executor/lp-config";
-import {
-  OrderConfigPanel,
-  useOrderConfig,
-} from "@/components/executor/OrderConfigPanel";
+import { OrderConfigPanel } from "@/components/executor/OrderConfigPanel";
+import { useOrderConfig } from "@/components/executor/order-config";
 import { TradeBottomPane } from "@/components/trade/TradeBottomPane";
 import { TradeChart, type ChartPriceAxis } from "@/components/trade/TradeChart";
 import { useDexUpstream } from "@/hooks/useDexUpstream";
@@ -44,8 +42,7 @@ import { executorsQuery } from "@/lib/queryClient";
 type Tab = "order" | "lp";
 
 // Only the fine intervals: 1h/4h/1d candles read as duplicates of the 1h/1d
-// lookback buttons sitting next to them, and a 3-day window of 15m candles
-// already fits GeckoTerminal's 1000-candle cap.
+// lookback buttons sitting next to them.
 const DEX_INTERVALS = ["1m", "5m", "15m"];
 
 const DEPTH_KEY = "condor.dex.depth-collapsed";
@@ -73,12 +70,16 @@ export function DexPool() {
   const upstream = useDexUpstream(server ?? null);
 
   const [wantedTab, setTab] = useState<Tab>("order");
-  // 5m over 3 days, matching the executor pages. Not 1m: GeckoTerminal caps a
-  // response at 1000 candles, so 1m can only ever fill ~16h of this window (the
-  // buffer then sits permanently short and re-backfills), while 5m covers the
-  // full 3 days in one request and halves the poll rate on a shared budget.
-  const [interval, setIntervalValue] = useState("5m");
-  const [lookbackSeconds, setLookbackSeconds] = useState(3 * 86400);
+  // 15m over 7 days: the widest window one GeckoTerminal request pays for, at
+  // the coarsest interval that still shows a pool's intraday shape. One request
+  // is 1000 candles at most (see `gecko-candles.ts`), so 15m spans ~10 days
+  // while 1m fills only ~16h of any window — the buffer then sits permanently
+  // short and re-backfills. Coarser candles also earn a slower live poll (the
+  // gecko budget is shared by every chart on the dashboard; see
+  // `_gecko_poll_interval` in condor/web/streams/candles.py), so this default
+  // costs a third of what 5m did and shows twice the history.
+  const [interval, setIntervalValue] = useState("15m");
+  const [lookbackSeconds, setLookbackSeconds] = useState(7 * 86400);
   const [rightPanelWidth, setRightPanelWidth] = useState(288);
   const [bottomPaneHeight, setBottomPaneHeight] = useState(200);
   const [selectedExecutorId, setSelectedExecutorId] = useState<string | null>(null);

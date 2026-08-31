@@ -10,7 +10,7 @@ import {
 
 import { LeverageField, SelectField, ToggleField, type FieldDispatch } from "@/components/executor/fields";
 import { ORDER_TYPE_OPTIONS } from "@/components/executor/field-options";
-import { gridConfigErrors, gridPriceFieldValid } from "@/lib/gridExecutor";
+import { autoFillGridPrices, gridConfigErrors, gridPriceFieldValid } from "@/lib/gridExecutor";
 import type { GridState, GridAction } from "@/lib/gridExecutor";
 
 interface GridConfigPanelProps {
@@ -202,24 +202,21 @@ export function GridConfigPanel({ state, dispatch, currentPrice, isSpot = false,
   }, [state]);
 
   const handleAutoFill = () => {
-    if (!currentPrice || currentPrice <= 0) return;
-    const p = currentPrice;
-    if (state.side === 1) {
-      const start = p * 0.99;
-      const end = p * 1.03;
-      const limit = start * 0.995;
-      dispatch({ type: "SET_FIELD", field: "start_price", value: parseFloat(start.toPrecision(6)) });
-      dispatch({ type: "SET_FIELD", field: "end_price", value: parseFloat(end.toPrecision(6)) });
-      dispatch({ type: "SET_FIELD", field: "limit_price", value: parseFloat(limit.toPrecision(6)) });
-    } else {
-      const start = p * 0.97;
-      const end = p * 1.01;
-      const limit = end * 1.005;
-      dispatch({ type: "SET_FIELD", field: "start_price", value: parseFloat(start.toPrecision(6)) });
-      dispatch({ type: "SET_FIELD", field: "end_price", value: parseFloat(end.toPrecision(6)) });
-      dispatch({ type: "SET_FIELD", field: "limit_price", value: parseFloat(limit.toPrecision(6)) });
+    const filled = autoFillGridPrices(state.side, currentPrice ?? 0);
+    if (!filled) return;
+    for (const [field, value] of Object.entries(filled)) {
+      dispatch({ type: "SET_FIELD", field, value });
     }
   };
+
+  // Draw the range around this market's price once, so the panel opens with its
+  // three lines already on the chart and ready to be dragged. Spent per market,
+  // so a range the user cleared or is mid-way through typing stays theirs.
+  useEffect(() => {
+    if (currentPrice && currentPrice > 0 && !state.anchored) {
+      dispatch({ type: "ANCHOR", price: currentPrice });
+    }
+  }, [currentPrice, state.anchored, dispatch]);
 
   const perLevel = validation.levels > 0 ? state.total_amount_quote / validation.levels : 0;
   const totalRange = state.start_price > 0 && state.end_price > 0 && state.start_price < state.end_price
@@ -271,7 +268,7 @@ export function GridConfigPanel({ state, dispatch, currentPrice, isSpot = false,
         </div>
 
         <PriceField
-          label="Start Price (lower boundary)"
+          label="Lower Price (grid start)"
           value={state.start_price}
           field="start"
           activePickField={state.activePickField}
@@ -279,7 +276,7 @@ export function GridConfigPanel({ state, dispatch, currentPrice, isSpot = false,
           valid={gridPriceFieldValid("start", state)}
         />
         <PriceField
-          label="End Price (upper boundary)"
+          label="Upper Price (grid end)"
           value={state.end_price}
           field="end"
           activePickField={state.activePickField}
@@ -287,13 +284,13 @@ export function GridConfigPanel({ state, dispatch, currentPrice, isSpot = false,
           valid={gridPriceFieldValid("end", state)}
         />
         <PriceField
-          label={`Limit Price (${state.side === 1 ? "stop-loss below" : "stop-loss above"})`}
+          label={`${state.side === 1 ? "Lower" : "Upper"} Limit (stop-loss)`}
           value={state.limit_price}
           field="limit"
           activePickField={state.activePickField}
           dispatch={dispatch}
           valid={gridPriceFieldValid("limit", state)}
-          hint={state.side === 1 ? "Must be below start price" : "Must be above end price"}
+          hint={state.side === 1 ? "Must be below the lower price" : "Must be above the upper price"}
         />
       </div>
 

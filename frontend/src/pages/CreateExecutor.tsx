@@ -16,8 +16,7 @@ import {
 } from "lucide-react";
 
 import { NoServerCard } from "@/components/NoServerCard";
-import { ExchangeSelector } from "@/components/market/ExchangeSelector";
-import { PairSelector, useTradingRules } from "@/components/market/PairSelector";
+import { useTradingRules } from "@/components/market/useTradingRules";
 import { PriceTicker } from "@/components/market/PriceTicker";
 import { MarketDepthPanel } from "@/components/market/MarketDepthPanel";
 import { MarketBrowser, type MarketPick } from "@/components/market/MarketBrowser";
@@ -29,9 +28,12 @@ import {
   ErrorToast,
   ExecutorSuccessModal,
 } from "@/components/executor/ExecutorSuccessModal";
-import { PositionConfigPanel, usePositionConfig } from "@/components/executor/PositionConfigPanel";
-import { OrderConfigPanel, useOrderConfig } from "@/components/executor/OrderConfigPanel";
-import { DCAConfigPanel, useDCAConfig } from "@/components/executor/DCAConfigPanel";
+import { PositionConfigPanel } from "@/components/executor/PositionConfigPanel";
+import { usePositionConfig } from "@/components/executor/position-config";
+import { OrderConfigPanel } from "@/components/executor/OrderConfigPanel";
+import { useOrderConfig } from "@/components/executor/order-config";
+import { DCAConfigPanel } from "@/components/executor/DCAConfigPanel";
+import { useDCAConfig } from "@/components/executor/dca-config";
 import { LPConfigPanel } from "@/components/executor/LPConfigPanel";
 import { LP_SIDE_RANGE, useLpConfig } from "@/components/executor/lp-config";
 import { TradeBottomPane } from "@/components/trade/TradeBottomPane";
@@ -46,10 +48,13 @@ import { api } from "@/lib/api";
 import { candleStore } from "@/lib/candle-store";
 import { connectorCapabilities, orderBookVenues } from "@/lib/connector-capabilities";
 import { executorsQuery } from "@/lib/queryClient";
-import type { ExecutorType, PickSlot } from "@/components/executor/types";
+import { isChartLineSlot } from "@/components/executor/types";
+import type { ChartPriceMapping, ExecutorType, PickSlot } from "@/components/executor/types";
 import {
   clampGridPrice,
+  gridLineLabels,
   gridReducer,
+  hasRememberedMarket,
   isSpotConnector,
   loadGridDefaults,
   saveGridDefaults,
@@ -57,7 +62,7 @@ import {
   INTERVALS,
   LOOKBACK_OPTIONS,
 } from "@/lib/gridExecutor";
-import { formatPriceSig } from "@/lib/formatters";
+import { formatConnectorName, formatPriceSig } from "@/lib/formatters";
 import { useViewFacts } from "@/lib/viewFacts";
 
 // ── Type tabs config ──
@@ -145,7 +150,13 @@ export function CreateExecutor() {
 
   const [successInfo, setSuccessInfo] = useState<{ id: string; type: ExecutorType; connector: string; pair: string } | null>(null);
   const [rightPanel, setRightPanel] = useState<"config" | "depth">("config");
-  const [browserOpen, setBrowserOpen] = useState(false);
+  // Cold start lands on the market list (FEAT-053): with no remembered market
+  // there is nothing to come back to, and the alternative is a chart on a pair
+  // the reset effect picked. A URL that names a pair *is* a choice, so it skips
+  // the list — the effect above has not stripped the param yet on this render.
+  const [browserOpen, setBrowserOpen] = useState(
+    () => !searchParams.get("pair") && !hasRememberedMarket(),
+  );
   const [rightPanelWidth, setRightPanelWidth] = useState(288);
   const [bottomPaneHeight, setBottomPaneHeight] = useState(200);
   // The selection belongs to the market it was made in, so it carries that
@@ -477,7 +488,7 @@ export function CreateExecutor() {
   });
 
   // Chart props depend on active type
-  const chartProps = useMemo(() => {
+  const chartProps = useMemo((): ChartPriceMapping => {
     switch (executorType) {
       case "grid":
         return {
@@ -487,6 +498,7 @@ export function CreateExecutor() {
           side: gridState.side,
           minSpread: gridState.min_spread_between_orders,
           activePickField: gridState.activePickField,
+          lineLabels: gridLineLabels(gridState.side),
         };
       case "position": return positionConfig.chartProps;
       case "order": return orderConfig.chartProps;
@@ -513,9 +525,10 @@ export function CreateExecutor() {
       const targets = priceSetTargets.current;
       switch (executorType) {
         case "grid":
-          // The grid panel arms only start/end/limit; `limit2` belongs to the LP
-          // lower limit and would name a grid field that does not exist.
-          if (field === "limit2") break;
+          // The grid owns exactly the chart's own three lines; any other slot
+          // belongs to a panel that draws its own and would name a grid field
+          // that does not exist.
+          if (!isChartLineSlot(field)) break;
           // Bound the picked price against the two the user already set, so a
           // click (and, later, a drag) cannot write a price the form will only
           // reject afterwards. The chart stays ignorant of grid semantics.
@@ -638,50 +651,45 @@ export function CreateExecutor() {
           <ArrowLeft className="h-3.5 w-3.5" />
         </button>
 
-        {/* Pair + Exchange */}
+        {/* The market: one chip, one door.
+            Pair and venue used to be two dropdowns beside a Browse button —
+            three controls answering one question, and the venue one committed
+            on its own, dropping the page onto the new venue's default pair
+            before you had chosen one. The chip states the market and opens the
+            browser, which is where both halves are now chosen together. */}
         <div className="flex items-center border-r border-[var(--color-border)]">
           {/* Star the pair in the header, without a round trip through Browse.
               Reads as a mark on the pair name, so it leads it. */}
-          {caps.hasOrderBook && (
-            <StarMarketButton server={server} connector={connector} pair={pair} />
-          )}
-          <PairSelector
-            server={server}
-            connector={connector}
-            value={pair}
-            onChange={(v) => gridDispatch({ type: "SET_PAIR", value: v })}
-            hasTradingRules={caps.hasTradingRules}
-            onBrowseAll={caps.hasOrderBook ? () => setBrowserOpen(true) : undefined}
-          />
-          <div className="relative border-l border-[var(--color-border)]">
-            <ExchangeSelector
-              connectors={allConnectors}
-              credentialed={credentialedConnectors}
-              value={connector}
-              onChange={(v) => gridDispatch({ type: "SET_CONNECTOR", value: v })}
-            />
-          </div>
-          {caps.hasOrderBook && (
-            <button
-              onClick={() => setBrowserOpen((v) => !v)}
-              aria-pressed={browserOpen}
-              aria-expanded={browserOpen}
-              title={browserOpen ? "Close market list (Esc)" : "Browse all markets (/)"}
-              className={`flex items-center gap-1.5 border-l border-[var(--color-border)] px-3 py-2.5 text-xs transition-colors ${
-                browserOpen
-                  ? "bg-[var(--color-surface-hover)] text-[var(--color-primary)]"
-                  : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+          <StarMarketButton server={server} connector={connector} pair={pair} />
+          <button
+            onClick={() => setBrowserOpen((v) => !v)}
+            aria-pressed={browserOpen}
+            aria-expanded={browserOpen}
+            aria-haspopup="dialog"
+            title={browserOpen ? "Close market list (Esc)" : "Change market (/)"}
+            className={`flex items-center gap-2 px-3 py-2.5 text-left transition-colors ${
+              browserOpen
+                ? "bg-[var(--color-surface-hover)]"
+                : "hover:bg-[var(--color-surface-hover)]"
+            }`}
+          >
+            {/* The pair is the identity of everything on this page; the venue
+                qualifies it, so it stays body text beside it. */}
+            <span className="text-sm font-semibold text-[var(--color-text)]">{pair}</span>
+            <span className="text-xs text-[var(--color-text-muted)]">
+              {formatConnectorName(connector)}
+            </span>
+            <List
+              className={`h-3.5 w-3.5 ${
+                browserOpen ? "text-[var(--color-primary)]" : "text-[var(--color-text-muted)]"
               }`}
-            >
-              <List className="h-3.5 w-3.5" />
-              Browse
-              {/* The key is already bound and already in the title; spelling it
-                  on the button is what makes anyone find it without hovering. */}
-              <kbd className="rounded border border-[var(--color-border)] px-1 font-mono text-[10px] leading-4 text-[var(--color-text-muted)]">
-                /
-              </kbd>
-            </button>
-          )}
+            />
+            {/* The key is already bound and already in the title; spelling it
+                on the chip is what makes anyone find it without hovering. */}
+            <kbd className="rounded border border-[var(--color-border)] px-1 font-mono text-[10px] leading-4 text-[var(--color-text-muted)]">
+              /
+            </kbd>
+          </button>
         </div>
 
         {/* Price ticker */}
@@ -747,6 +755,8 @@ export function CreateExecutor() {
               server={server}
               connector={connector}
               pair={pair}
+              connectors={allConnectors}
+              credentialed={credentialedConnectors}
               onPick={applyMarket}
               onClose={() => setBrowserOpen(false)}
             />

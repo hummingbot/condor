@@ -373,13 +373,13 @@ describe("TradeChart price-line drag", () => {
           color: "#f00",
           lineStyle: "dotted",
           lineWidth: 1,
-          slot: "limit2",
+          slot: "lower_limit_price",
         },
       ],
     });
     await drag(yAtPrice(650), 360);
 
-    expect(onPriceSet).toHaveBeenLastCalledWith("limit2", priceAtY(360));
+    expect(onPriceSet).toHaveBeenLastCalledWith("lower_limit_price", priceAtY(360));
   });
 
   it("leaves a decorative extra line inert", async () => {
@@ -407,5 +407,30 @@ describe("TradeChart drag hover cursor", () => {
       externalId: "drag:start",
     });
     expect(primitive.hitTest?.(300, 150)).toBeNull();
+  });
+});
+
+/**
+ * One criterion for the lines every executor draws: a range's two bounds look
+ * the same as each other (solid), and only a stop-out price is dotted. The grid
+ * and the LP ride the same three slots with the bounds mapped in opposite order,
+ * so a style that differed per slot marked the top edge on one and the bottom
+ * edge on the other.
+ */
+describe("TradeChart price-line styling", () => {
+  function priceLineOpts(): Record<string, unknown>[] {
+    const series = chartState.series as { createPriceLine: Mock };
+    return series.createPriceLine.mock.calls.map(([opts]) => opts as Record<string, unknown>);
+  }
+
+  it("draws both range bounds solid and the limit dotted", async () => {
+    (chartState.series as { createPriceLine: Mock }).createPriceLine.mockClear();
+    await render({ lineLabels: { start: "Lower", end: "Upper", limit: "Lower limit" } });
+
+    const byTitle = new Map(priceLineOpts().map((opts) => [opts.title, opts]));
+    // The mocked module numbers the styles Solid: 0, Dotted: 1, Dashed: 2.
+    expect(byTitle.get("Lower")?.lineStyle).toBe(0);
+    expect(byTitle.get("Upper")?.lineStyle).toBe(0);
+    expect(byTitle.get("Lower limit")?.lineStyle).toBe(1);
   });
 });

@@ -5,7 +5,7 @@ import { useCandleStore } from "@/hooks/useCandleStore";
 import { useRates } from "@/hooks/useRates";
 import { api, type ConsolidatedPosition } from "@/lib/api";
 import { candleChannelKey, candleStore } from "@/lib/candle-store";
-import type { ExtraLine, PickSlot } from "@/components/executor/types";
+import type { ChartLineSlot, ExtraLine, PickSlot } from "@/components/executor/types";
 import { getExecutorColor, type ExecutorOverlay } from "@/lib/executor-overlays";
 import { getThemeColors, pnlHexColor, sideColor } from "@/lib/theme-colors";
 import { escapeHtml, formatPriceSig, roundToPricePrecision } from "@/lib/formatters";
@@ -14,13 +14,26 @@ import { usePriceLineDrag } from "./usePriceLineDrag";
 
 type PickField = PickSlot | null;
 
-/** What each pick slot is called in the hint the chart shows while picking. */
-const PICK_LABELS: Record<PickSlot, string> = {
+/**
+ * What the chart's own three lines are called when a panel names none of them.
+ *
+ * A slot a panel minted for one of its extra lines has no entry here and needs
+ * none: the panel that invented the id is the only thing that knows what the
+ * price means, and says so in `lineLabels`.
+ */
+const PICK_LABELS: Record<ChartLineSlot, string> = {
   start: "start",
   end: "end",
   limit: "limit",
-  limit2: "lower limit",
 };
+
+/** The wording of the pick banner for whichever slot is armed. */
+function pickLabel(slot: PickSlot, lineLabels?: Partial<Record<PickSlot, string>>): string {
+  const named = lineLabels?.[slot] ?? PICK_LABELS[slot as ChartLineSlot];
+  // Last resort: the raw slot id. Reached only by a panel that armed a line it
+  // never labelled, which is a bug in that panel and reads like one.
+  return (named ?? slot).toLowerCase();
+}
 
 /**
  * How far the pointer may drift between press and release and still count as a
@@ -714,7 +727,11 @@ export function TradeChart({
         price: endPrice,
         color: getThemeColors().green,
         lineWidth: 2,
-        lineStyle: mod.LineStyle.Dashed,
+        // Solid, like `start`: the two are the same kind of thing — the bounds of
+        // the range being drawn — and a different style on one of them only ever
+        // read as a difference in kind. Limits stay dotted, which is the real
+        // distinction: a bound the executor works inside vs. a price it stops at.
+        lineStyle: mod.LineStyle.Solid,
         axisLabelVisible: true,
         title: lineLabels?.end ?? "End",
       });
@@ -901,8 +918,9 @@ export function TradeChart({
           ]);
           overlaySeriesRef.current.push(top);
 
+          // Solid, matching the top edge — both are grid bounds.
           const bottom = chart.addSeries(mod.LineSeries, {
-            color: boxColor, lineWidth: lineW, lineStyle: mod.LineStyle.Dashed,
+            color: boxColor, lineWidth: lineW,
             priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
           });
           bottom.setData([
@@ -1153,12 +1171,12 @@ export function TradeChart({
         <div className="flex items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5">
           <p className="text-[10px] text-[var(--color-text-muted)]">
             Click on chart to set{" "}
-            {(lineLabels?.[activePickField] ?? PICK_LABELS[activePickField]).toLowerCase()}{" "}
+            {pickLabel(activePickField, lineLabels)}{" "}
             price
           </p>
           <span className="animate-pulse rounded bg-[var(--color-primary)]/20 px-2 py-0.5 text-xs text-[var(--color-primary)]">
             Pick mode:{" "}
-            {(lineLabels?.[activePickField] ?? PICK_LABELS[activePickField]).toLowerCase()}
+            {pickLabel(activePickField, lineLabels)}
           </span>
         </div>
       )}

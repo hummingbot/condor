@@ -13,6 +13,7 @@ import {
   GRID_DEFAULTS,
   clampGridPrice,
   gridConfigErrors,
+  gridLineLabels,
   gridPriceErrors,
   gridPriceFieldValid,
   type GridState,
@@ -138,14 +139,28 @@ describe("gridPriceErrors", () => {
 
   it("names the ordering rule before the missing prices", () => {
     const errors = gridPriceErrors(grid({ start_price: 110, end_price: 100, limit_price: 0 }));
-    expect(errors).toEqual(["Start price must be < end price", "All prices required"]);
+    expect(errors).toEqual(["Lower price must be < upper price", "All prices required"]);
   });
 
   it("holds the limit to the side it is protecting", () => {
     expect(gridPriceErrors(grid({ side: 1, start_price: 100, end_price: 110, limit_price: 105 })))
-      .toContain("LONG: limit must be < start price");
+      .toContain("LONG: limit must be < lower price");
     expect(gridPriceErrors(grid({ side: 2, start_price: 100, end_price: 110, limit_price: 105 })))
-      .toContain("SHORT: limit must be > end price");
+      .toContain("SHORT: limit must be > upper price");
+  });
+});
+
+describe("gridLineLabels", () => {
+  it("names the bounds by where they sit, not by the API field", () => {
+    // start_price is the *lower* bound, so the chart must not call it "Start"
+    // while the LP beside it calls its own lower bound "Lower".
+    expect(gridLineLabels(1).start).toBe("Lower");
+    expect(gridLineLabels(1).end).toBe("Upper");
+  });
+
+  it("names the limit for the side the stop trails on", () => {
+    expect(gridLineLabels(1).limit).toBe("Lower limit");
+    expect(gridLineLabels(2).limit).toBe("Upper limit");
   });
 });
 

@@ -5,9 +5,9 @@
  * measure, so the header label is derived from what the backend actually
  * reported — 24h when it is 24h, the true hours when the history is younger, a
  * bare Δ when there is nothing to compare against. And picking a row has to
- * carry the venue the list was scoped to back to the trade surface — the
- * browser has no venue selector of its own, so that is always the venue the
- * trade surface handed it.
+ * carry the venue the list was scoped to back to the trade surface — which,
+ * now that the venue rail lives in here, is not necessarily the venue the trade
+ * surface handed it. The rail scopes; only a pick commits.
  *
  * Needs a DOM, so this file overrides vitest's default `node` environment.
  *
@@ -51,6 +51,8 @@ function ticker(over: Partial<Ticker> & { trading_pair: string }): Ticker {
 
 let TICKERS: Ticker[] = [];
 
+const CONNECTORS = ["binance", "hyperliquid_perpetual", "kraken"];
+
 declare global {
   // eslint-disable-next-line no-var
   var IS_REACT_ACT_ENVIRONMENT: boolean;
@@ -71,6 +73,8 @@ async function render() {
           server="srv"
           connector="binance"
           pair="BTC-USDT"
+          connectors={CONNECTORS}
+          credentialed={new Set(["binance"])}
           onPick={(m) => picked.push(m)}
           onClose={() => {}}
         />
@@ -95,6 +99,26 @@ function changeHeader(): HTMLElement {
     /Δ/.test(b.textContent ?? ""),
   );
   return headers[0] as HTMLElement;
+}
+
+/** The quote-asset filter, and a change event React will actually see. */
+function selectQuote(value: string) {
+  const select = container.querySelector("select") as HTMLSelectElement;
+  const setter = Object.getOwnPropertyDescriptor(
+    HTMLSelectElement.prototype,
+    "value",
+  )!.set!;
+  setter.call(select, value);
+  select.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
+/** A venue in the rail, by its display name. */
+function venueOption(label: string): HTMLElement {
+  const found = [...document.querySelectorAll('[role="option"]')].find(
+    (o) => o.textContent === label,
+  );
+  if (!found) throw new Error(`no venue option ${label}`);
+  return found as HTMLElement;
 }
 
 function rowCells(pair: string): HTMLElement[] {
@@ -183,22 +207,55 @@ describe("picking a row", () => {
     expect(picked).toEqual([{ connector: "binance", pair: "SOL-USDC" }]);
   });
 
-  it("names its venue once, in the search field, without offering a second way to change it", async () => {
+  it("carries the venue the rail is on, not the one the chart is on", async () => {
     TICKERS = [ticker({ trading_pair: "SOL-USDC" })];
     await render();
 
-    // The venue scopes the search rather than sitting in a chip of its own —
-    // the trade surface's exchange selector stays on screen above this panel
-    // and is the only control that changes it.
-    const input = container.querySelector("input")!;
-    expect(input.placeholder).toBe("Search Binance markets...");
-    expect(input.getAttribute("aria-label")).toBe("Search Binance markets");
+    await act(async () => venueOption("Hyperliquid Perp").click());
+    await flush();
+    // The rail alone commits nothing: the chart is still on binance until a row
+    // is picked, which is what spares the page a render on a default pair of
+    // the new venue that nobody asked for.
+    expect(picked).toEqual([]);
 
-    expect(container.textContent).not.toContain("Binance");
-    const venueButton = [...container.querySelectorAll("button")].find(
-      (b) => b.getAttribute("aria-haspopup") === "listbox",
-    );
-    expect(venueButton).toBeUndefined();
+    await act(async () => {
+      rowCells("SOL-USDC")[1].click();
+    });
+    expect(picked).toEqual([
+      { connector: "hyperliquid_perpetual", pair: "SOL-USDC" },
+    ]);
+  });
+
+  it("names the browsed venue in the search field, and marks the chart's own", async () => {
+    TICKERS = [ticker({ trading_pair: "SOL-USDC" })];
+    await render();
+
+    const input = () => container.querySelector("input")!;
+    expect(input().placeholder).toBe("Search Binance markets...");
+
+    await act(async () => venueOption("Kraken").click());
+    await flush();
+    expect(input().placeholder).toBe("Search Kraken markets...");
+    expect(input().getAttribute("aria-label")).toBe("Search Kraken markets");
+
+    // Two different truths, both on screen: the rail's selection is what the
+    // table lists, `aria-current` is the venue waiting behind the overlay.
+    expect(venueOption("Kraken").getAttribute("aria-selected")).toBe("true");
+    expect(venueOption("Binance").getAttribute("aria-current")).toBe("true");
+    expect(venueOption("Kraken").getAttribute("aria-current")).toBeNull();
+  });
+
+  it("highlights the chart's pair only while the chart's venue is the one listed", async () => {
+    TICKERS = [ticker({ trading_pair: "BTC-USDT" })];
+    await render();
+    const pairCell = () => rowCells("BTC-USDT")[1];
+    const highlighted = () => /color-primary/.test(pairCell().className);
+
+    expect(highlighted()).toBe(true);
+    // The same pair on another venue is another market, not where you are.
+    await act(async () => venueOption("Kraken").click());
+    await flush();
+    expect(highlighted()).toBe(false);
   });
 });
 
@@ -230,6 +287,58 @@ describe("the footer", () => {
 
     expect(container.textContent).toContain("Showing 1 of 1");
     expect(document.querySelectorAll("[data-market-row]").length).toBe(1);
+  });
+});
+
+describe("the quote filter", () => {
+  it("narrows the table to one quote asset", async () => {
+    TICKERS = [
+      ticker({ trading_pair: "BTC-USDT" }),
+      ticker({ trading_pair: "ETH-USDT" }),
+      ticker({ trading_pair: "SOL-USDC" }),
+    ];
+    await render();
+    expect(container.textContent).toContain("Showing 3 of 3");
+
+    await act(async () => selectQuote("USDC"));
+    expect(container.textContent).toContain("Showing 1 of 1");
+    expect(rowCells("SOL-USDC")).toBeTruthy();
+  });
+
+  it("offers every quote the venue has, whichever one is picked", async () => {
+    TICKERS = [
+      ticker({ trading_pair: "BTC-USDT" }),
+      ticker({ trading_pair: "SOL-USDC" }),
+      ticker({ trading_pair: "ETH-BTC" }),
+    ];
+    await render();
+    const options = () =>
+      [...container.querySelectorAll("option")].map((o) => o.textContent);
+    // Priority order, not alphabetical: the quotes a trader looks for first.
+    expect(options()).toEqual(["All quotes", "USDT", "USDC", "BTC"]);
+
+    // The list is derived from the venue, not from the filtered rows, so
+    // filtering never removes the other quotes from the control that filtered.
+    await act(async () => selectQuote("BTC"));
+    expect(options()).toEqual(["All quotes", "USDT", "USDC", "BTC"]);
+  });
+
+  it("resets on a venue switch, so no filter outlives the list it was for", async () => {
+    TICKERS = [
+      ticker({ trading_pair: "BTC-USDT" }),
+      ticker({ trading_pair: "SOL-USDC" }),
+    ];
+    await render();
+
+    await act(async () => selectQuote("USDC"));
+    expect(container.textContent).toContain("Showing 1 of 1");
+
+    // A quote that exists here may not exist on the venue you moved to; a
+    // filter that survived the move would show an empty table and no reason why.
+    await act(async () => venueOption("Kraken").click());
+    await flush();
+    expect((container.querySelector("select") as HTMLSelectElement).value).toBe("");
+    expect(container.textContent).toContain("Showing 2 of 2");
   });
 });
 

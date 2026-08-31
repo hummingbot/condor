@@ -173,7 +173,11 @@ export function NumberField({
   suffix?: string;
   isPercent?: boolean;
 }) {
-  const displayValue = isPercent ? value * 100 : value;
+  // A percentage is stored as a fraction, and scaling one back up lands on
+  // binary-float noise: 0.0212 * 100 is 2.1199999999999997, which the input then
+  // renders in full. Harmless when it only surfaced on blur; not harmless now
+  // that dragging a barrier line rewrites this field on every frame.
+  const displayValue = isPercent ? Number((value * 100).toPrecision(12)) : value;
   const id = useId();
   const inputRef = useRef<HTMLInputElement>(null);
   const [localValue, setLocalValue] = useState(displayValue === 0 ? "" : String(displayValue));

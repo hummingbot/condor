@@ -25,14 +25,30 @@ export interface ExtraLine {
   slot?: PickSlot;
 }
 
+/** The three price lines the chart draws on its own, from `ChartPriceMapping`. */
+export type ChartLineSlot = "start" | "end" | "limit";
+
 /**
- * A price the chart can hand back when the user clicks it.
+ * A price the chart can hand back when the user clicks or drags it.
  *
- * `start` / `end` / `limit` are the three lines the chart draws itself; `limit2`
- * is a fourth slot for a price a panel draws as an extra line (the LP lower
- * limit), so a panel with four prices offers a crosshair for every one of them.
+ * The three chart-owned lines, or an id a panel mints for one of its own extra
+ * lines. The chart never interprets an id — it carries it from the `ExtraLine`
+ * that declared it straight back into `onPriceSet` — so a panel names the slot
+ * after the field behind it (`take_profit`, `dca_price_2`) and its write-back
+ * reads as a dispatch, not a lookup through a translation table.
+ *
+ * The open half is what makes a panel with a variable number of prices work at
+ * all: DCA has one line per level, and no fixed union can have a member per
+ * level. `string & {}` keeps the three literals in autocomplete.
  */
-export type PickSlot = "start" | "end" | "limit" | "limit2";
+export type PickSlot = ChartLineSlot | (string & {});
+
+const CHART_LINE_SLOTS: readonly string[] = ["start", "end", "limit"];
+
+/** Whether a slot is one of the chart's own three, rather than a panel's. */
+export function isChartLineSlot(slot: PickSlot): slot is ChartLineSlot {
+  return CHART_LINE_SLOTS.includes(slot);
+}
 
 export interface ChartPriceMapping {
   startPrice: number;
@@ -43,10 +59,12 @@ export interface ChartPriceMapping {
   activePickField: PickSlot | null;
   extraLines?: ExtraLine[];
   /**
-   * What the chart calls each slot's line and pick hint. The slots are named
-   * for the grid executor ("Start", "End", "Limit"); a panel that rides them
-   * with different semantics — LP's upper/lower bounds — relabels them here
-   * rather than letting the chart mislabel its prices.
+   * What the chart calls each slot's line and pick hint. The slot names are
+   * internal plumbing ("start", "end", "limit"); every panel says here what its
+   * prices actually are, so the two range executors share one vocabulary —
+   * `Upper` / `Lower` for the bounds a grid or an LP works inside, `Upper limit`
+   * / `Lower limit` for the stop that trails them — and the single-price panels
+   * name their own price ("Entry", "Price", "Level").
    */
   lineLabels?: Partial<Record<PickSlot, string>>;
 }
