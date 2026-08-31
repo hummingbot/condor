@@ -124,11 +124,29 @@ dashboard.
 Local mode logs in as `ADMIN_USER_ID` — the same id `config.yml`, your servers,
 preferences and defaults already key on. `make setup` writes `ADMIN_USER_ID=1`
 for an install that never had a Telegram id; an install that has one **keeps
-it**, so switching modes keeps everything you had.
+it**, so a Telegram install switching to local keeps everything it had.
 
 Switching later is a `make setup` re-run — it shows the current mode and offers
 the other one — or editing `CONDOR_MODE` in `.env`. Your `TELEGRAM_TOKEN` is left
 in place either way, so switching back is one line.
+
+**Start local, grow later.** The usual route is Local first, Telegram once you
+want alerts reaching your phone, and a server once real capital is involved:
+
+- **Add Telegram:** re-run `make setup` and pick Telegram, with a bot token and
+  your user id. An install that never had Telegram runs as user id `1`, and
+  adding a bot switches your login to your Telegram id — configured servers
+  carry over, but dashboard preferences and agent conversations are keyed per
+  user and stay behind, so make this hop early.
+- **Add a server without moving Condor:** bots and executors run on the
+  Hummingbot API host, so a laptop Condor driving a VPS API keeps strategies
+  running while the laptop sleeps. Deploy the API on the VPS with Tailscale
+  ([Install only Hummingbot API](#install-only-hummingbot-api)), then add it
+  under **Settings → Servers** in the dashboard (or `/servers` in Telegram).
+- **Move Condor too:** install on the VPS the same way, then copy `.env`,
+  `config.yml`, `data/` and `condor/.runtime/` over from the old machine, and
+  stop the old install so two Condors are not driving the same accounts. Full
+  steps: [Start local, grow later](https://condor.hummingbot.org/getting-started/installing#start-local-grow-later).
 
 A mode that cannot work stops at boot, in `make run`, naming the `.env` line to
 fix: telegram mode with no token, an `ADMIN_USER_ID` that is not a positive
@@ -360,7 +378,7 @@ make tailscale-status   # confirm hummingbot-api appears on your tailnet
 ### On the Condor machine
 
 1. Install [Tailscale](https://tailscale.com/download) and sign in to the **same account**
-2. In Telegram, open **`/servers`** and add the API with:
+2. In Telegram, open **`/servers`** — or in Local mode, **Settings → Servers** in the dashboard — and add the API with:
    - **Host**: `hummingbot-api` (MagicDNS name, not a public IP)
    - **Port**: `8000`
    - **Username / Password**: same as the API `.env`
@@ -407,7 +425,7 @@ tailscale status
 
 Both `condor` and `hummingbot-api` should appear as connected peers.
 
-**Do not open port 8000 on your public firewall** when Tailscale is enabled. Allow SSH (port 22) for server administration only.
+**Do not open port 8000 on your public firewall** when Tailscale is enabled. Allow SSH (port 22) for server administration only. Close 8000 in your **cloud provider's firewall / security group** rather than with `ufw`: Docker publishes the API's port on every interface, and published ports bypass `ufw` rules — a provider firewall is enforced off-host, so it actually holds.
 
 ## Troubleshooting
 
@@ -425,6 +443,7 @@ whatever it finds. The table below covers the rest.
 | Connection refused | Check server host:port in `/servers`; use `hummingbot-api` (not `localhost`) when API is on another machine via Tailscale |
 | Auth error | Verify server credentials match the API `.env` |
 | DEX features unavailable | Ensure Gateway is configured and running |
+| After an update, `make run` fails building the frontend | A newly added frontend dependency is missing from a stale `node_modules` — `cd frontend && npm install`, then `make run` |
 | Tailscale: name `hummingbot-api` does not work | Enable **MagicDNS** in [Tailscale DNS settings](https://login.tailscale.com/admin/dns) |
 | Tailscale: can't reach API | Run `tailscale status` — confirm both peers are connected; on API server run `make tailscale-status` |
 | Tailscale: auth key rejected | Key must start with `tskey-auth-`, check expiry in Tailscale admin |
