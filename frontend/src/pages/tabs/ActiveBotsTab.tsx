@@ -137,9 +137,9 @@ function StatusDot({ status }: { status: string }) {
         ? "text-[var(--color-red)]"
         : "text-[var(--color-yellow)]";
   return isStopping ? (
-    <span className="h-2.5 w-2.5 animate-spin rounded-full border-[1.5px] border-[var(--color-yellow)] border-t-transparent" />
+    <span className="h-2 w-2 shrink-0 animate-spin rounded-full border-[1.5px] border-[var(--color-yellow)] border-t-transparent" />
   ) : (
-    <Circle className={`h-2 w-2 fill-current ${color}`} />
+    <Circle className={`h-2 w-2 shrink-0 fill-current ${color}`} />
   );
 }
 
@@ -862,6 +862,10 @@ export function ActiveBotsTab() {
           onClose={() => setSelectedKey(null)}
           convert={convert}
           currencySymbol={currencySymbol}
+          // The fleet history this page already walked: the browser's combined
+          // scopes fold these rows rather than issuing a second walk of their own.
+          snapshots={activeSnapshots}
+          truncated={perfHistory?.truncated ?? false}
         />
       )}
 
