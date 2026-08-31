@@ -8,7 +8,7 @@ import { candleChannelKey, candleStore } from "@/lib/candle-store";
 import type { ExtraLine, PickSlot } from "@/components/executor/types";
 import { getExecutorColor, type ExecutorOverlay } from "@/lib/executor-overlays";
 import { getThemeColors, pnlHexColor, sideColor } from "@/lib/theme-colors";
-import { escapeHtml, formatPriceSig } from "@/lib/formatters";
+import { escapeHtml, formatPriceSig, roundToPricePrecision } from "@/lib/formatters";
 
 type PickField = PickSlot | null;
 
@@ -103,8 +103,9 @@ export function TradeChart({
   const chartRef = useRef<import("lightweight-charts").IChartApi | null>(null);
   const seriesRef = useRef<import("lightweight-charts").ISeriesApi<"Candlestick"> | null>(null);
   const initializedRef = useRef(false);
-  const crosshairPriceRef = useRef<number | null>(null);
-  // Exact price under the pointer (not snapped to candle close) — used by the measure tool
+  // Exact price under the pointer, never snapped to the hovered candle's close:
+  // the crosshair is free vertically, so this is the price the axis label shows
+  // and the only one a click or a measurement may report.
   const cursorPriceRef = useRef<number | null>(null);
   const crosshairTimeRef = useRef<number | null>(null);
   // ── Measure tool (Shift+click anchor → live % of range) ──
@@ -242,10 +243,11 @@ export function TradeChart({
       seriesRef.current = series;
       setChartReady(true);
 
-      // Track crosshair price for click-to-set + executor tooltip
+      // Track the pointer's price/time for click-to-set, the measure tool and
+      // the executor tooltip
       chart.subscribeCrosshairMove((param) => {
         if (!param.point || !param.seriesData) {
-          crosshairPriceRef.current = null;
+          cursorPriceRef.current = null;
           crosshairTimeRef.current = null;
           if (tooltipRef.current) tooltipRef.current.style.display = "none";
           // Leave the measure box/badge frozen at their last position — a
@@ -253,18 +255,17 @@ export function TradeChart({
           // the pane edge doesn't make it vanish.
           return;
         }
-        const data = param.seriesData.get(series);
-        if (data && "close" in data) {
-          crosshairPriceRef.current = (data as { close: number }).close;
-        } else if (param.point.y !== undefined) {
-          const price = series.coordinateToPrice(param.point.y);
-          if (price !== null) {
-            crosshairPriceRef.current = price as number;
-          }
-        }
-        // Exact pointer price (measure tool needs sub-candle precision)
+        // `seriesData` is the bar at the crosshair's *time* and carries no
+        // vertical component, so its close would be the same price for every
+        // height inside one candle's column — it serves only as a last resort
+        // when the pane can't map the pixel back to a price at all.
         const cursorP = param.point.y !== undefined ? series.coordinateToPrice(param.point.y) : null;
-        cursorPriceRef.current = cursorP !== null && cursorP !== undefined ? (cursorP as number) : crosshairPriceRef.current;
+        if (cursorP !== null && cursorP !== undefined) {
+          cursorPriceRef.current = cursorP as number;
+        } else {
+          const data = param.seriesData.get(series);
+          cursorPriceRef.current = data && "close" in data ? (data as { close: number }).close : null;
+        }
         crosshairTimeRef.current = typeof param.time === "number" ? param.time : null;
 
         // ── Measure tool: live % of range from the anchor to the cursor ──
@@ -1034,8 +1035,8 @@ export function TradeChart({
       clearMeasure();
       return;
     }
-    if (activePickField && crosshairPriceRef.current !== null) {
-      onPriceSet(activePickField, crosshairPriceRef.current);
+    if (activePickField && cursorPriceRef.current !== null) {
+      onPriceSet(activePickField, roundToPricePrecision(cursorPriceRef.current, pricePrecision));
       return;
     }
     // Click on chart background deselects executor

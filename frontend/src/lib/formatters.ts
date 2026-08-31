@@ -251,6 +251,25 @@ export function formatPriceSig(val: number | null | undefined): string {
   return val.toPrecision(6);
 }
 
+/**
+ * Round a price picked off the chart to something a config field can hold.
+ *
+ * A click reads its price from the pixel under the pointer, so it arrives with
+ * every digit a float has (`105234.87313432835`) — the field would show all of
+ * them and the payload would carry them. The venue's own tick precision is the
+ * right rounding when the caller knows it; without it, six significant digits,
+ * the same round the grid's Auto-fill already applies, which keeps sub-cent
+ * memecoin prices intact where a fixed number of decimals would flatten them.
+ */
+export function roundToPricePrecision(price: number, pricePrecision?: number | null): number {
+  if (!Number.isFinite(price)) return price;
+  if (pricePrecision != null) {
+    const factor = 10 ** pricePrecision;
+    return Math.round(price * factor) / factor;
+  }
+  return parseFloat(price.toPrecision(6));
+}
+
 export function formatPrice(val: number): string {
   if (!val) return "\u2014";
   if (val >= 1000) return val.toLocaleString("en-US", { maximumFractionDigits: 2 });

@@ -7,6 +7,7 @@ import {
   formatCurrencyVolume,
   formatDateTime,
   formatTime,
+  roundToPricePrecision,
 } from "./formatters";
 
 // The bug this suite pins (READ-251): the chart Y axes used to carry their own
@@ -237,5 +238,37 @@ describe("formatAxisTime", () => {
         }
       }
     });
+  });
+});
+
+// A chart pick reads its price off the pixel under the pointer, so it arrives
+// with every digit a float has. This is the round that stands between that and
+// the config field (CORR-263).
+describe("roundToPricePrecision", () => {
+  it("rounds to the venue's precision when it is known", () => {
+    expect(roundToPricePrecision(105234.87313432835, 2)).toBe(105234.87);
+    expect(roundToPricePrecision(105234.87513432835, 2)).toBe(105234.88);
+  });
+
+  it("precision 0 leaves a whole number", () => {
+    expect(roundToPricePrecision(105234.873, 0)).toBe(105235);
+  });
+
+  it("precision 8 keeps a sub-cent price intact", () => {
+    expect(roundToPricePrecision(0.000012345678912, 8)).toBe(0.00001235);
+  });
+
+  it("falls back to six significant digits when no precision is supplied", () => {
+    // The grid's Auto-fill round: a major keeps its cents, a memecoin keeps its
+    // digits, where a fixed number of decimals would flatten one or the other.
+    expect(roundToPricePrecision(105234.87313432835)).toBe(105235);
+    expect(roundToPricePrecision(0.000012345678912)).toBe(0.0000123457);
+    expect(roundToPricePrecision(123.4567891, undefined)).toBe(123.457);
+    expect(roundToPricePrecision(123.4567891, null)).toBe(123.457);
+  });
+
+  it("passes a non-finite price through rather than inventing one", () => {
+    expect(roundToPricePrecision(NaN, 2)).toBeNaN();
+    expect(roundToPricePrecision(Infinity, 2)).toBe(Infinity);
   });
 });
