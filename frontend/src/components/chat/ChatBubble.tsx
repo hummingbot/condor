@@ -83,7 +83,7 @@ export function ChatBubble() {
   const slot =
     (storedSlotId &&
       chat.slots.find((s) => s.info.slot_id === storedSlotId)) ||
-    adoptableSlot(chat.slots, pathname, slug);
+    adoptableSlot(chat.slots, pathname, slug, chat.activeSlotId);
   const slotId = slot?.info.slot_id;
 
   // Nothing live to adopt, on the agent's own page, with the panel open: the
@@ -248,12 +248,29 @@ export function ChatBubble() {
 /**
  * The live conversation the bubble should show when it has none of its own.
  *
- * Only on `/agents/:slug`, and there it is the same lookup the workspace's
- * `talkTo("focus")` does: the conversation bound to this agent, if one is
- * already open. Without it the bubble on an agent's page rendered its empty
- * hero over a conversation with that very agent running two clicks away, and
- * the first message spawned a durable second one beside it (CORR-255) — the
- * common way there being the workspace's own "Knowledge" link.
+ * Only on `/agents/:slug`, and there it is the conversation bound to this
+ * agent, if one is already open. Without it the bubble on an agent's page
+ * rendered its empty hero over a conversation with that very agent running two
+ * clicks away, and the first message spawned a durable second one beside it
+ * (CORR-255) — the common way there being the workspace's own "Knowledge" link.
+ *
+ * **The workspace's own focus decides, when it has one.** "The conversation
+ * with this agent" is only unambiguous while there is one; with several — and
+ * opening an older thread from the rail is how a user gets several — array
+ * order is not an answer, and answering from it is what made the bubble show a
+ * *different* conversation from the tab the user had just been reading. So
+ * `activeSlotId`, the workspace's own record of which one that is, is
+ * consulted first. Reading it is not the same as moving it: the bubble still
+ * must not focus what it adopts.
+ *
+ * Position is only the fallback, for when the workspace has no focus at all —
+ * a reload that landed straight on `/agents/X`. Last match wins there: `slots`
+ * is append-ordered by `startSession` / `resumeConversation`, so the newest
+ * conversation with this agent is the one the user was most recently in.
+ *
+ * The slot's own binding is normalized because a conversation resumed from a
+ * record written before the slugs were reconciled can still carry the
+ * registry's spelling.
  *
  * Read-only with respect to the workspace: the caller must not focus what it
  * adopts. `startSession(..., { focus: false })` and `permissionFor` being a
@@ -269,16 +286,14 @@ function adoptableSlot(
   slots: ChatSlot[],
   pathname: string,
   slug: string,
+  activeSlotId: string | null,
 ): ChatSlot | null {
   if (!isAgentPage(pathname)) return null;
-  // Last match wins: `slots` is append-ordered by `startSession` /
-  // `resumeConversation`, so the newest conversation with this agent is the
-  // one the user was most recently in. The slot's own binding is normalized
-  // too — a conversation resumed from a record written before the slugs were
-  // reconciled can still carry the registry's spelling.
+  const mine = slots.filter(
+    (s) => normalizeAgentSlug(s.info.agent_slug) === slug,
+  );
   return (
-    slots.findLast((s) => normalizeAgentSlug(s.info.agent_slug) === slug) ??
-    null
+    mine.find((s) => s.info.slot_id === activeSlotId) ?? mine.at(-1) ?? null
   );
 }
 

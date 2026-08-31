@@ -38,6 +38,7 @@ const chat = {
   sendMessage: vi.fn(),
   abortPrompt: vi.fn(),
   setActiveSlotId: vi.fn(),
+  activeSlotId: null as string | null,
 };
 
 vi.mock("@/hooks/useChat", () => ({
@@ -116,6 +117,7 @@ beforeEach(() => {
   // The panel starts open, so a test never has to click its way in.
   localStorage.setItem("condor_bubble_open", "1");
   chat.slots = [];
+  chat.activeSlotId = null;
   chat.startSession.mockClear();
   chat.sendMessage.mockClear();
   chat.setActiveSlotId.mockClear();
@@ -170,6 +172,36 @@ describe("ChatBubble on an agent's page", () => {
 
     expect(container.textContent).toContain("the one just opened");
     expect(container.textContent).not.toContain("an older thread");
+  });
+
+  it("adopts the conversation the workspace has focused, not the newest", () => {
+    // The repro: open an older thread from the rail — `resumeConversation`
+    // appends it, so array order stops meaning "most recently in" — then
+    // follow Knowledge to the agent's page. The bubble showed the *other*
+    // conversation, and the tab the user had just been reading was nowhere.
+    chat.slots = [
+      slot("slot-read", "x", "the thread I was reading"),
+      slot("slot-other", "x", "some other thread"),
+    ];
+    chat.activeSlotId = "slot-read";
+    render("/agents/x");
+
+    expect(container.textContent).toContain("the thread I was reading");
+    expect(container.textContent).not.toContain("some other thread");
+  });
+
+  it("ignores a focus that belongs to a different agent", () => {
+    // Focus answers "which of *mine*", never "whose": the workspace being on a
+    // chat with Y says nothing about which X conversation this page wants.
+    chat.slots = [
+      slot("slot-y", "y", "a chat with someone else"),
+      slot("slot-x", "x", "the only x thread"),
+    ];
+    chat.activeSlotId = "slot-y";
+    render("/agents/x");
+
+    expect(container.textContent).toContain("the only x thread");
+    expect(container.textContent).not.toContain("a chat with someone else");
   });
 
   it("matches an unbound chat on Condor's own page", () => {

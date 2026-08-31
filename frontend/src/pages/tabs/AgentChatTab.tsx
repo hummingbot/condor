@@ -147,6 +147,14 @@ export function AgentChatTab() {
     slotsRef.current = chat.slots;
   }, [chat.slots]);
 
+  // Read for the same reason and kept out of `talkTo`'s deps for the same one:
+  // focus moves on every tab switch, and a `talkTo` re-created there would
+  // defeat the rail's `memo` exactly as a `chat.slots` dependency would.
+  const activeRef = useRef(chat.activeSlotId);
+  useEffect(() => {
+    activeRef.current = chat.activeSlotId;
+  }, [chat.activeSlotId]);
+
   /**
    * Talk to someone.
    *
@@ -164,9 +172,18 @@ export function AgentChatTab() {
       // spawns a bound-`"condor"` one the rail can never light up.
       const slug = normalizeAgentSlug(agentSlug);
       if ((opts?.intent ?? "focus") === "focus") {
-        const live = slotsRef.current.find(
+        // Which conversation "mine with this agent" means, when there are
+        // several: the one already focused, else the newest. Position alone is
+        // not an answer — taking the *first* match sent "Open chat" back to the
+        // oldest thread with that agent while the bubble on the page it came
+        // from was showing another, and the two surfaces told the user
+        // different stories about which conversation they were in. Same rule as
+        // `adoptableSlot` in `ChatBubble`, deliberately.
+        const mine = slotsRef.current.filter(
           (s) => (s.info.agent_slug || "") === slug,
         );
+        const live =
+          mine.find((s) => s.info.slot_id === activeRef.current) ?? mine.at(-1);
         if (live) {
           chat.setActiveSlotId(live.info.slot_id);
           if (opts?.text) chat.sendMessage(live.info.slot_id, opts.text);
