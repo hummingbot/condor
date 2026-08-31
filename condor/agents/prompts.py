@@ -7,6 +7,7 @@ pre-computed core data, and journal context (learnings + recent decisions).
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from .agent import Agent
@@ -309,6 +310,7 @@ def build_tick_prompt(
     ledger: Any | None = None,
     canvas: str = "",
     canvas_nudge: str = "",
+    loop_state: dict[str, Any] | None = None,
 ) -> str:
     """Build the full prompt for one agent tick.
 
@@ -459,6 +461,23 @@ def build_tick_prompt(
         f"Status: {'BLOCKED - ' + rs.get('block_reason', '') if rs.get('is_blocked') else 'ACTIVE'}",
     ]
     sections.append("\n".join(risk_lines))
+
+    # Loop state -- the scratch cursors this (agent, strategy) has persisted
+    # (condor.runtime.state): a last-processed executor id, a cooldown deadline.
+    # Written from the dashboard or an attended session; the tick only reads
+    # them, since nothing in TOOL_PROFILES["tick"] can write the store. Omitted
+    # when the namespace is empty rather than teaching the model about a store
+    # it has no keys in.
+    if loop_state:
+        state_lines = [
+            "[LOOP STATE — scratch values persisted for this strategy; read-only this tick]"
+        ]
+        for key, value in sorted(loop_state.items()):
+            rendered = (
+                value if isinstance(value, str) else json.dumps(value, default=str)
+            )
+            state_lines.append(f"{key}: {rendered}")
+        sections.append("\n".join(state_lines))
 
     # Core skill data (pre-computed)
     for name, data_summary in core_data.items():

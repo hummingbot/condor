@@ -191,6 +191,75 @@ def test_namespace_for_uses_agent_and_strategy():
     assert namespace_for(engine) == "brigado.mm"
 
 
+# ── The tick reads the store (ARCH-276) ──
+
+
+def _tick_prompt(**kwargs):
+    """A minimal tick prompt, so the [LOOP STATE] block is what varies."""
+    from types import SimpleNamespace
+
+    from condor.agents.prompts import build_tick_prompt
+
+    return build_tick_prompt(
+        agent=SimpleNamespace(instructions="", agent_key="claude-code", slug="brigado"),
+        strategy=SimpleNamespace(
+            instructions="Do the thing.",
+            agent_key="claude-code",
+            slug="mm",
+            agent_slug="brigado",
+            dir=None,
+        ),
+        config={"execution_mode": "loop"},
+        core_data={},
+        learnings="",
+        summary="",
+        recent_decisions="",
+        risk_state={},
+        agent_id="brigado.mm_1",
+        **kwargs,
+    )
+
+
+def test_tick_prompt_shows_the_keys_in_its_namespace(state_root):
+    """What the dashboard or an attended session wrote is visible to the tick."""
+    set_state(NS, "last_executor_id", "exec-42")
+    set_state(NS, "cooldown_until", 1730000000)
+    set_state(NS, "seen", {"pairs": ["SOL-USDC"]})
+
+    prompt = _tick_prompt(loop_state=BoundState(NS).list())
+
+    assert "[LOOP STATE" in prompt
+    assert "last_executor_id: exec-42" in prompt
+    assert "cooldown_until: 1730000000" in prompt
+    # Structured values stay machine-readable rather than Python-repr'd.
+    assert 'seen: {"pairs": ["SOL-USDC"]}' in prompt
+
+
+def test_an_empty_namespace_renders_no_section(state_root):
+    """No keys means no block at all -- not an empty header."""
+    assert BoundState(NS).list() == {}
+
+    assert "[LOOP STATE" not in _tick_prompt(loop_state=BoundState(NS).list())
+    assert "[LOOP STATE" not in _tick_prompt(loop_state={})
+    assert "[LOOP STATE" not in _tick_prompt()  # engine passing nothing at all
+
+
+def test_the_tick_feeds_the_prompt_from_its_own_bound_state():
+    """TickEngine.state is genuinely read by the tick, not just constructed."""
+    import inspect
+
+    from condor.agents import engine
+
+    tick_src = inspect.getsource(engine.TickEngine._tick)
+    assert "self.state.list()" in tick_src
+    assert "loop_state=loop_state" in tick_src
+
+
+# The other half of ARCH-276 -- that wiring the read side did not widen the
+# tick's tool profile -- is pinned by test_the_tick_seat_cannot_reach_control_agent
+# in tests/test_dangerous_gate_names_resolve.py.
+
+
 # ── Timeout policy ──
 
 

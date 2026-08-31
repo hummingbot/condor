@@ -3,7 +3,7 @@
 One TickEngine instance per running agent.  Each tick:
 1. Pre-compute core data providers (active executors)
 2. Read journal (learnings + summary + recent decisions)
-3. Build prompt with strategy + data + risk state
+3. Build prompt with strategy + data + risk state + loop state
 4. Spawn a fresh ACP session, stream events, capture tool calls
 5. Save full snapshot and update journal
 """
@@ -567,6 +567,15 @@ class TickEngine:
             except Exception:
                 log.exception("TickEngine %s: canvas read failed", self.agent_id)
 
+        # Scratch cursors this strategy owns (condor.runtime.state). Whatever
+        # the dashboard or an attended session left there is shown to the tick;
+        # an unreadable state file must not take the tick down with it.
+        try:
+            loop_state = self.state.list()
+        except Exception:
+            log.exception("TickEngine %s: loop state read failed", self.agent_id)
+            loop_state = {}
+
         prompt = build_tick_prompt(
             agent=self.agent,
             strategy=self.strategy,
@@ -584,6 +593,7 @@ class TickEngine:
             ledger=self.ledger,
             canvas=canvas_text,
             canvas_nudge=canvas_nudge,
+            loop_state=loop_state,
         )
 
         # 6. Create a fresh agent client per tick (clean context window)
