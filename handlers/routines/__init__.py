@@ -1239,7 +1239,7 @@ async def _share_report(
     """Send a report HTML file as a Telegram document."""
     import io
 
-    from condor.reports import get_report, get_report_raw_html
+    from condor.reports import get_report, get_report_raw_html, hydrate
 
     chat_id = update.effective_chat.id
     entry = get_report(report_id)
@@ -1258,7 +1258,9 @@ async def _share_report(
     try:
         await context.bot.send_document(
             chat_id=chat_id,
-            document=io.BytesIO(found[0].encode("utf-8")),
+            # Hydrated: the file leaves the origin, so the shared plotly
+            # bundle it references gets inlined back in (PERF-267).
+            document=io.BytesIO(hydrate(found[0]).encode("utf-8")),
             filename=f"{entry['title']}.html",
             caption=f"📊 {entry['title']}",
         )

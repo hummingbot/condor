@@ -448,7 +448,9 @@ class ReportBuilder:
             meta_badges=meta_badges,
             sections_html=sections_html,
             report_spec=report_spec,
-            plotly_script=rendering.plotly_script() if needs_plotly else "",
+            plotly_script=(
+                rendering.ensure_plotly_asset(charts_dir) if needs_plotly else ""
+            ),
             report_runtime=(
                 f"<script>{rendering.report_runtime()}</script>"
                 if interactive_sections or self._auto_refresh_seconds is not None

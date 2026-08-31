@@ -14,7 +14,7 @@ def reports_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(reports, "CHARTS_DIR", tmp_path)
     monkeypatch.setattr(reports, "INDEX_FILE", tmp_path / "reports_index.json")
     monkeypatch.setattr(
-        rendering, "plotly_script", lambda: "<script>window.Plotly={};</script>"
+        rendering, "plotly_bundle", lambda: "/**\n* plotly.js v0.0.0\n*/\nwindow.Plotly={};"
     )
     return tmp_path
 

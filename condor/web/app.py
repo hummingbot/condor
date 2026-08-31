@@ -110,6 +110,10 @@ def create_app() -> FastAPI:
     # report — portfolio value, PnL, positions — readable by anyone who could
     # guess a filename. They now go through the authenticated
     # ``GET /api/v1/reports/{report_id}/html`` handler instead (SEC-112).
+    # The one report-adjacent thing served without auth is the vendored plotly
+    # bundle, at ``GET /api/v1/reports/assets/{filename}`` — library bytes, not
+    # content, behind a fixed allowlist (PERF-267). It sits under ``/api/`` so
+    # the arm below already turns a miss into a real 404 instead of index.html.
 
     # ── Serve built frontend (production) ──
     dist = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"

@@ -15,6 +15,13 @@ import { api } from "@/lib/api";
  * `allow-same-origin` the frame stays in an opaque origin, so report scripts
  * cannot reach the dashboard's `localStorage` (and thus the JWT).
  *
+ * A chart report does not carry plotly.js: it references the one shared copy at
+ * `/api/v1/reports/assets/` (PERF-267). A `srcdoc` document's base URL is the
+ * parent's and a classic script is a no-cors subresource, so the opaque-origin
+ * frame resolves it against the dashboard's own origin — and the browser caches
+ * it once instead of re-parsing 4.85 MB on every report open. Only the paths
+ * that leave the origin (Download, Telegram) inline the bundle back in.
+ *
  * The one thing the host tells a report is which theme it is in — reports listen
  * for `set-theme` and restyle themselves, which is why the message is re-sent on
  * every load and every theme flip.

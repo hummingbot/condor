@@ -2612,10 +2612,19 @@ export const api = {
    * Report bodies are authenticated (SEC-112), and an iframe `src` cannot carry
    * an Authorization header — so callers fetch the HTML here and hand it to the
    * iframe as `srcDoc`, keeping the token in a header instead of the URL.
+   *
+   * A chart report does not carry plotly.js; it references the one shared copy
+   * at `/api/v1/reports/assets/` (PERF-267), which a `srcdoc` frame resolves
+   * against the parent origin and the browser caches across reports. Pass
+   * `hydrate` to get that bundle inlined instead — for the Download button,
+   * whose file is opened at `file://` where nothing resolves.
    */
-  getReportHtml: async (id: string): Promise<string> => {
+  getReportHtml: async (
+    id: string,
+    options: { hydrate?: boolean } = {},
+  ): Promise<string> => {
     const res = await authFetch(
-      `/api/v1/reports/${encodeURIComponent(id)}/html`,
+      `/api/v1/reports/${encodeURIComponent(id)}/html${options.hydrate ? "?hydrate=1" : ""}`,
     );
     if (!res.ok) throw new Error(`Failed to load report (${res.status})`);
     return res.text();

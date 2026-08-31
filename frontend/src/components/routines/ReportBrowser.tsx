@@ -271,7 +271,9 @@ export function ReportBrowser({
    */
   const downloadReport = useCallback(async () => {
     if (!selectedReport) return;
-    const html = await api.getReportHtml(selectedReport.id);
+    // Hydrated: the saved file is opened at `file://`, where the shared plotly
+    // bundle the stored report references cannot resolve (PERF-267).
+    const html = await api.getReportHtml(selectedReport.id, { hydrate: true });
     const url = URL.createObjectURL(new Blob([html], { type: "text/html" }));
     const link = document.createElement("a");
     link.href = url;

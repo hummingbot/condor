@@ -163,6 +163,27 @@ def get_report_raw_html(report_id: str) -> tuple[str, str] | None:
     return path.read_text(encoding="utf-8"), entry["filename"]
 
 
+def resolve_report_asset(filename: str) -> Path | None:
+    """Resolve a persisted report asset (the plotly bundle) by name, or None.
+
+    The name is matched against a fixed allowlist pattern before it is joined,
+    and the resolved path must still land inside ``reports/_assets``. This is
+    deliberately *not* a ``/{name}`` handler that reads a caller-supplied path
+    — that shape is what SEC-044 and SEC-112 removed. Assets are vendored
+    library bytes, identical for every user and carrying no account data, so
+    unlike report bodies they need no authentication.
+    """
+    from . import rendering
+
+    if not rendering.PLOTLY_ASSET_PATTERN.fullmatch(filename):
+        return None
+    directory = rendering.assets_dir(_charts_dir()).resolve()
+    path = (directory / filename).resolve()
+    if not path.is_relative_to(directory) or not path.is_file():
+        return None
+    return path
+
+
 def _read_index() -> list[dict]:
     index_file = _index_file()
     if not index_file.exists():
