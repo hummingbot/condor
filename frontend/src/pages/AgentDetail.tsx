@@ -5,137 +5,26 @@ import {
   Brain,
   CircleDot,
   ExternalLink,
-  History,
   MessageSquareText,
-  Plus,
-  Repeat,
   ScrollText,
   Server,
   Trash2,
   Wrench,
 } from "lucide-react";
 import { useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 
 import { AgentKnowledge } from "@/components/agent/AgentKnowledge";
+import {
+  isKnowledgeTab,
+  type KnowledgeTabId,
+} from "@/components/agent/knowledgeTabs";
 import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
-import { ActivityFeed } from "@/components/agent/ActivityFeed";
-import { EntityCard } from "@/components/agent/EntityCard";
 import { BrainPicker } from "@/components/chat/BrainPicker";
 import { ReportBrowser } from "@/components/routines/ReportBrowser";
 import { AnchoredMenu } from "@/components/ui/AnchoredMenu";
-import { useEscapeKey } from "@/hooks/useEscapeKey";
 import { useSessionOptions } from "@/hooks/useChat";
-import { CHAT_SLUG, type StrategySummary, api } from "@/lib/api";
-
-// ── Create Strategy Dialog ──
-
-function CreateStrategyDialog({
-  agentSlug,
-  open,
-  onClose,
-}: {
-  agentSlug: string;
-  open: boolean;
-  onClose: () => void;
-}) {
-  const queryClient = useQueryClient();
-  const navigate = useNavigate();
-  useEscapeKey(open, onClose);
-  const [name, setName] = useState("");
-  const [description, setDescription] = useState("");
-  const [defaultContext, setDefaultContext] = useState("");
-
-  const createMutation = useMutation({
-    mutationFn: () =>
-      api.createStrategy(agentSlug, { name, description, default_trading_context: defaultContext }),
-    onSuccess: (strategy) => {
-      queryClient.invalidateQueries({ queryKey: ["agent", agentSlug] });
-      // The knowledge panel counts strategies off its own query.
-      queryClient.invalidateQueries({ queryKey: ["agent-brain", agentSlug] });
-      onClose();
-      setName("");
-      setDescription("");
-      setDefaultContext("");
-      navigate(`/agents/${agentSlug}/strategies/${strategy.slug}`);
-    },
-  });
-
-  if (!open) return null;
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
-      <div
-        className="w-full max-w-md rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-6 shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <h2 className="mb-4 text-lg font-semibold text-[var(--color-text)]">New Strategy</h2>
-
-        <div className="space-y-4">
-          <div>
-            <label className="mb-1 block text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
-              Name
-            </label>
-            <input
-              type="text"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="e.g. BRL Market Maker"
-              className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-text)] placeholder-[var(--color-text-muted)]/50 outline-none transition-colors focus:border-[var(--color-primary)]"
-              autoFocus
-            />
-          </div>
-          <div>
-            <label className="mb-1 block text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
-              Description
-            </label>
-            <textarea
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              placeholder="What does this strategy do?"
-              rows={2}
-              className="w-full resize-none rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-text)] placeholder-[var(--color-text-muted)]/50 outline-none transition-colors focus:border-[var(--color-primary)]"
-            />
-          </div>
-          <div>
-            <label className="mb-1 block text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
-              Default Trading Context
-            </label>
-            <textarea
-              value={defaultContext}
-              onChange={(e) => setDefaultContext(e.target.value)}
-              placeholder="e.g. Provide liquidity on BRL pairs, tight spreads, rebalance hourly..."
-              rows={3}
-              className="w-full resize-none rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-text)] placeholder-[var(--color-text-muted)]/50 outline-none transition-colors focus:border-[var(--color-primary)]"
-            />
-            <p className="mt-1 text-[11px] text-[var(--color-text-muted)]">
-              Tactic that guides this playbook's tick decisions. Can be overridden per session.
-            </p>
-          </div>
-        </div>
-
-        <div className="mt-6 flex justify-end gap-3">
-          <button
-            onClick={onClose}
-            className="rounded-lg px-4 py-2 text-sm text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={() => createMutation.mutate()}
-            disabled={!name.trim() || createMutation.isPending}
-            className="rounded-lg bg-[var(--color-primary)] px-4 py-2 text-sm font-medium text-white transition-opacity disabled:opacity-40"
-          >
-            {createMutation.isPending ? "Creating..." : "Create Strategy"}
-          </button>
-        </div>
-        {createMutation.isError && (
-          <p className="mt-3 text-xs text-red-400">Failed to create strategy.</p>
-        )}
-      </div>
-    </div>
-  );
-}
+import { CHAT_SLUG, api } from "@/lib/api";
 
 // ── Server pin ──
 
@@ -282,10 +171,26 @@ export function AgentDetail() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
 
-  const [showCreate, setShowCreate] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
-  const [deleteStrategy, setDeleteStrategy] = useState<StrategySummary | null>(null);
   const [showRoutinesBrowser, setShowRoutinesBrowser] = useState(false);
+
+  /**
+   * Which section is open, in the URL.
+   *
+   * So "Full page" from the chat's agent panel lands the reader on the section
+   * they were already reading (FEAT-081), and so a link into Skills is a link
+   * anyone can send. `replace` because reading down the sections is not seven
+   * steps of history to press Back through.
+   */
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tabParam = searchParams.get("tab");
+  const tab: KnowledgeTabId = isKnowledgeTab(tabParam) ? tabParam : "brain";
+  const setTab = (next: KnowledgeTabId) => {
+    const params = new URLSearchParams(searchParams);
+    if (next === "brain") params.delete("tab");
+    else params.set("tab", next);
+    setSearchParams(params, { replace: true });
+  };
 
   // Routine instances for ReportBrowser (routines live at the agent level,
   // shared across all of this agent's strategies)
@@ -301,26 +206,6 @@ export function AgentDetail() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["agents"] });
       navigate("/");
-    },
-  });
-
-  // Every Agent is loopable. This brings its implicit default playbook on disk
-  // so the normal strategy UI (config, start, sessions) can drive the loop.
-  const createDefaultLoopMutation = useMutation({
-    mutationFn: () => api.createDefaultStrategy(slug!),
-    onSuccess: (strategy) => {
-      queryClient.invalidateQueries({ queryKey: ["agent", slug] });
-      queryClient.invalidateQueries({ queryKey: ["agent-brain", slug] });
-      navigate(`/agents/${slug}/strategies/${strategy.slug}`);
-    },
-  });
-
-  const deleteStrategyMutation = useMutation({
-    mutationFn: () => api.deleteStrategy(slug!, deleteStrategy!.slug),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["agent", slug] });
-      queryClient.invalidateQueries({ queryKey: ["agent-brain", slug] });
-      setDeleteStrategy(null);
     },
   });
 
@@ -359,78 +244,7 @@ export function AgentDetail() {
     );
   }
 
-  const strategies = agent.strategies || [];
-  const running = strategies.filter((s) => s.status === "running");
-  const isRunning = running.length > 0;
-
-  /**
-   * This page's Strategies tab — the grid, not the panel's read-only list.
-   *
-   * `AgentKnowledge` renders a link list for the chat sheet, where a strategy is
-   * something you glance at; here it is something you create, open and delete,
-   * so the page hands its own body into that slot rather than the panel growing
-   * two modes.
-   */
-  const strategiesTab =
-    strategies.length === 0 ? (
-      <div className="flex h-56 flex-col items-center justify-center rounded-xl border border-dashed border-[var(--color-border)] bg-[var(--color-surface)]/50">
-        <CircleDot className="mb-3 h-9 w-9 text-[var(--color-text-muted)]/30" />
-        <p className="mb-1 text-sm font-medium text-[var(--color-text)]">
-          No strategies yet
-        </p>
-        <p className="mb-4 max-w-md text-center text-xs text-[var(--color-text-muted)]">
-          This agent can already be consulted and delegated to. To let it run on a
-          loop, start from its default playbook — its own brain drives each tick —
-          or write a dedicated one.
-        </p>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => createDefaultLoopMutation.mutate()}
-            disabled={createDefaultLoopMutation.isPending}
-            className="flex items-center gap-2 rounded-lg bg-[var(--color-primary)] px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
-          >
-            <CircleDot className="h-4 w-4" />
-            {createDefaultLoopMutation.isPending ? "Creating…" : "Use default loop"}
-          </button>
-          <button
-            onClick={() => setShowCreate(true)}
-            className="flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-2 text-sm font-medium text-[var(--color-text)]"
-          >
-            <Plus className="h-4 w-4" />
-            New Strategy
-          </button>
-        </div>
-        {createDefaultLoopMutation.isError && (
-          <p className="mt-3 text-xs text-[var(--color-red)]">
-            Could not create the default loop.
-          </p>
-        )}
-      </div>
-    ) : (
-      <div className="space-y-3">
-        <div className="flex items-center justify-end">
-          <button
-            onClick={() => setShowCreate(true)}
-            className="flex items-center gap-1.5 rounded-lg bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-white transition-all hover:shadow-lg hover:shadow-[var(--color-primary)]/20"
-          >
-            <Plus className="h-3.5 w-3.5" />
-            New Strategy
-          </button>
-        </div>
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
-          {strategies.map((strategy) => (
-            <EntityCard
-              key={strategy.slug}
-              entity={strategy}
-              icon={Repeat}
-              deleteLabel="Delete strategy"
-              onClick={() => navigate(`/agents/${agent.slug}/strategies/${strategy.slug}`)}
-              onDelete={() => setDeleteStrategy(strategy)}
-            />
-          ))}
-        </div>
-      </div>
-    );
+  const isRunning = (agent.strategies || []).some((st) => st.status === "running");
 
   return (
     <div className="w-full">
@@ -508,46 +322,34 @@ export function AgentDetail() {
         </div>
       </div>
 
-      {/* The same panel the chat opens behind a conversation, with this page's
-          own Strategies grid dropped into that tab and Activity added — so
-          reading an agent and changing it are one place, whichever door you
-          came through. */}
+      {/* The same panel the chat's agent button opens beside a conversation —
+          the seven sections of what this agent is, read and edited in one
+          place whichever door you came through. The page lays them out as a
+          tab strip; the chat's pane turns the same tabs on their side. */}
       <AgentKnowledge
         slug={agent.slug}
-        slots={{
-          strategies: strategiesTab,
-          routinesAction: (
-            <div className="flex shrink-0 items-center gap-1.5">
-              <button
-                onClick={() => setShowRoutinesBrowser(true)}
-                className="flex shrink-0 items-center gap-1 rounded border border-[var(--color-border)] px-2 py-1 text-[11px] text-[var(--color-text-muted)] transition-colors hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
-                title="Every run these routines produced, and their reports"
-              >
-                <ScrollText className="h-3 w-3" /> Reports
-              </button>
-              {/* The full-width library, which is no longer in the main nav
-                  (FEAT-077) — this and the chat's pane are its doors. */}
-              <Link
-                to={`/routines?agent=${agent.slug}`}
-                className="flex shrink-0 items-center gap-1 px-1 py-1 text-[11px] text-[var(--color-text-muted)]/70 transition-colors hover:text-[var(--color-text)]"
-                title="The full library, on its own page"
-              >
-                <ExternalLink className="h-3 w-3" /> Full library
-              </Link>
-            </div>
-          ),
-        }}
-        extraTabs={[
-          {
-            id: "activity",
-            label: "Activity",
-            icon: <History className="h-3.5 w-3.5" />,
-            // Everything this agent actually did — the tasks handed to it in
-            // the background and the consults it answered — this run's and
-            // every earlier one, read back from disk (FEAT-058).
-            render: () => <ActivityFeed agent={agent.slug} />,
-          },
-        ]}
+        tab={tab}
+        onTabChange={setTab}
+        routinesAction={
+          <div className="flex shrink-0 items-center gap-1.5">
+            <button
+              onClick={() => setShowRoutinesBrowser(true)}
+              className="flex shrink-0 items-center gap-1 rounded border border-[var(--color-border)] px-2 py-1 text-[11px] text-[var(--color-text-muted)] transition-colors hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
+              title="Every run these routines produced, and their reports"
+            >
+              <ScrollText className="h-3 w-3" /> Reports
+            </button>
+            {/* The full-width library, which is no longer in the main nav
+                (FEAT-077) — this and the chat's pane are its doors. */}
+            <Link
+              to={`/routines?agent=${agent.slug}`}
+              className="flex shrink-0 items-center gap-1 px-1 py-1 text-[11px] text-[var(--color-text-muted)]/70 transition-colors hover:text-[var(--color-text)]"
+              title="The full library, on its own page"
+            >
+              <ExternalLink className="h-3 w-3" /> Full library
+            </Link>
+          </div>
+        }
       />
 
       {/* Routines ReportBrowser (full-screen overlay, filtered to this agent) */}
@@ -558,13 +360,6 @@ export function AgentDetail() {
           onClose={() => setShowRoutinesBrowser(false)}
         />
       )}
-
-      {/* Create Strategy Dialog */}
-      <CreateStrategyDialog
-        agentSlug={agent.slug}
-        open={showCreate}
-        onClose={() => setShowCreate(false)}
-      />
 
       {/* Delete Agent Confirmation */}
       <ConfirmDialog
@@ -579,18 +374,6 @@ export function AgentDetail() {
         Delete <strong className="text-[var(--color-text)]">{agent.name}</strong> and all its strategies? This cannot be undone.
       </ConfirmDialog>
 
-      {/* Delete Strategy Confirmation */}
-      <ConfirmDialog
-        open={!!deleteStrategy}
-        title="Delete Strategy"
-        isPending={deleteStrategyMutation.isPending}
-        isError={deleteStrategyMutation.isError}
-        errorText="Failed to delete strategy. It may be running."
-        onConfirm={() => deleteStrategyMutation.mutate()}
-        onClose={() => setDeleteStrategy(null)}
-      >
-        Delete <strong className="text-[var(--color-text)]">{deleteStrategy?.name}</strong>? This cannot be undone.
-      </ConfirmDialog>
     </div>
   );
 }

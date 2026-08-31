@@ -116,7 +116,7 @@ async function open() {
   await act(async () => {
     root.render(
       <QueryClientProvider client={client}>
-        <AgentKnowledge slug="brigado" slots={{ strategies: null }} />
+        <AgentKnowledge slug="brigado" />
       </QueryClientProvider>,
     );
   });

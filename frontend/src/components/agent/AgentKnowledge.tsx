@@ -6,6 +6,7 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  History,
   Loader2,
   Pencil,
   Plus,
@@ -22,8 +23,14 @@ import { useCallback, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
+import { ActivityFeed } from "@/components/agent/ActivityFeed";
 import { MarkdownEditor } from "@/components/agent/AgentOverviewTab";
+import { AgentStrategies } from "@/components/agent/AgentStrategies";
 import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
+import type {
+  KnowledgeLayout,
+  KnowledgeTabId,
+} from "@/components/agent/knowledgeTabs";
 import {
   api,
   type AgentBrain,
@@ -44,15 +51,6 @@ type Reading =
 
 /** What `getAgentMemory` returns — a name and the body, nothing else. */
 type MemoryBody = { name: string; body: string };
-
-/** A tab a host can append (the agent page adds Delegations this way). */
-export type KnowledgeTab = {
-  id: string;
-  label: string;
-  icon: React.ReactNode;
-  count?: number;
-  render: () => React.ReactNode;
-};
 
 /**
  * Everything an agent is, in one editable surface.
@@ -77,19 +75,49 @@ export type KnowledgeTab = {
  */
 export function AgentKnowledge({
   slug,
-  slots,
-  extraTabs = [],
+  layout = "tabs",
+  tab,
+  onTabChange,
+  routinesAction,
+  onOpenRoutine,
+  onDirtyChange,
 }: {
   slug: string;
-  slots: {
-    /** The page's strategies grid — it creates and deletes, so it owns that tab. */
-    strategies: React.ReactNode;
-    /** Anything the page wants beside the routine catalog (e.g. Reports). */
-    routinesAction?: React.ReactNode;
-  };
-  extraTabs?: KnowledgeTab[];
+  /** How the sections are offered — see {@link KnowledgeLayout}. */
+  layout?: KnowledgeLayout;
+  /**
+   * Which section is open, when the host wants a say. The agent page reads it
+   * off `?tab=` so a link can land on Skills; the chat panel holds it in state.
+   * Left out, the component keeps its own — which is what the page did before
+   * anything outside it needed to know (FEAT-081).
+   */
+  tab?: KnowledgeTabId;
+  onTabChange?: (tab: KnowledgeTabId) => void;
+  /** Anything the host wants beside the routine catalog (e.g. Reports). */
+  routinesAction?: React.ReactNode;
+  /**
+   * Where a routine row goes. Given, the host takes over — the chat's pane
+   * hands it to the routine library it already houses (FEAT-077) rather than
+   * this panel growing a second one. Absent, a row is a plain list entry.
+   */
+  onOpenRoutine?: (routineName: string) => void;
+  /**
+   * An editor here has unsaved text. Reported outward because a host that can
+   * be closed in one click — the chat's pane — owes the reader a question
+   * before dropping it; the page, which you have to navigate away from, does
+   * not and passes nothing.
+   */
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
-  const [tab, setTab] = useState<string>("brain");
+  const [ownTab, setOwnTab] = useState<KnowledgeTabId>("brain");
+  const activeTab = tab ?? ownTab;
+  const setTab = useCallback(
+    (next: KnowledgeTabId) => {
+      setOwnTab(next);
+      onTabChange?.(next);
+    },
+    [onTabChange],
+  );
   const [reading, setReading] = useState<Reading | null>(null);
   const [creating, setCreating] = useState<"skill" | "memory" | null>(null);
   const [editing, setEditing] = useState(false);
@@ -108,7 +136,13 @@ export function AgentKnowledge({
 
   // One dirty flag for whichever editor is mounted — only ever one is.
   const [dirty, setDirty] = useState(false);
-  const markDirty = useCallback((d: boolean) => setDirty(d), []);
+  const markDirty = useCallback(
+    (d: boolean) => {
+      setDirty(d);
+      onDirtyChange?.(d);
+    },
+    [onDirtyChange],
+  );
 
   /** Leaving an editor drops its unsaved state along with the form. */
   const leaveEditor = useCallback(() => {
@@ -144,7 +178,12 @@ export function AgentKnowledge({
     routines: brain?.routines.length ?? 0,
   };
 
-  const tabs: { id: string; label: string; icon: React.ReactNode; count?: number }[] = [
+  const tabs: {
+    id: KnowledgeTabId;
+    label: string;
+    icon: React.ReactNode;
+    count?: number;
+  }[] = [
     { id: "brain", label: "Brain", icon: <Brain className="h-3.5 w-3.5" /> },
     {
       id: "skills",
@@ -178,39 +217,100 @@ export function AgentKnowledge({
       icon: <Zap className="h-3.5 w-3.5" />,
       count: counts.routines,
     },
-    ...extraTabs.map(({ id, label, icon, count }) => ({ id, label, icon, count })),
+    {
+      id: "activity",
+      label: "Activity",
+      // Everything this agent actually did — the tasks handed to it in the
+      // background and the consults it answered — this run's and every earlier
+      // one, read back from disk (FEAT-058).
+      icon: <History className="h-3.5 w-3.5" />,
+    },
   ];
 
-  return (
-    <div>
-      {/* Tabs stay put while a drill-down is open: leaving a playbook is one
-          click on the section you came from, not a hunt for a back button. */}
-      <div className="-mt-1 mb-4 flex flex-wrap items-center gap-1 border-b border-[var(--color-border)] pb-2">
-        {tabs.map((t) => (
-          <button
-            key={t.id}
-            onClick={() => {
-              setTab(t.id);
-              setReading(null);
-              leaveEditor();
-            }}
-            className={`flex items-center gap-1.5 rounded px-2.5 py-1.5 text-xs transition-colors ${
-              tab === t.id
-                ? "bg-[var(--color-surface-hover)] font-medium text-[var(--color-text)]"
-                : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
-            }`}
-          >
-            {t.icon}
-            {t.label}
-            {t.count !== undefined && t.count > 0 && (
-              <span className="text-[10px] text-[var(--color-text-muted)]">
-                {t.count}
-              </span>
-            )}
-          </button>
-        ))}
-      </div>
+  const rail = layout === "rail";
 
+  /** Every section change also leaves whatever drill-down or editor was open. */
+  const openTab = (id: KnowledgeTabId) => {
+    setTab(id);
+    setReading(null);
+    leaveEditor();
+  };
+
+  const nav = rail ? (
+    // A column of icons, because eight tabs wrap to three rows in a 400px
+    // pane. Same tabs, same counts, same order — only turned on its side.
+    <div
+      role="tablist"
+      aria-orientation="vertical"
+      aria-label="Sections"
+      className="flex w-11 shrink-0 flex-col items-center gap-0.5 border-r border-[var(--color-border)] py-1"
+    >
+      {tabs.map((t) => {
+        // The count is the only text in the button, so without this the tab
+        // announces itself as "15" — the label has to be said out loud too.
+        const name =
+          t.count !== undefined && t.count > 0 ? `${t.label} (${t.count})` : t.label;
+        return (
+        <button
+          key={t.id}
+          role="tab"
+          aria-selected={activeTab === t.id}
+          aria-label={name}
+          onClick={() => openTab(t.id)}
+          title={name}
+          className={`relative flex h-9 w-9 items-center justify-center rounded transition-colors ${
+            activeTab === t.id
+              ? "bg-[var(--color-surface-hover)] text-[var(--color-text)]"
+              : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+          }`}
+        >
+          {t.icon}
+          {t.count !== undefined && t.count > 0 && (
+            <span
+              aria-hidden
+              className="absolute right-0.5 top-0.5 text-[9px] leading-none text-[var(--color-text-muted)]"
+            >
+              {t.count}
+            </span>
+          )}
+        </button>
+        );
+      })}
+    </div>
+  ) : (
+    /* Tabs stay put while a drill-down is open: leaving a playbook is one
+       click on the section you came from, not a hunt for a back button. */
+    <div
+      role="tablist"
+      aria-label="Sections"
+      className="-mt-1 mb-4 flex flex-wrap items-center gap-1 border-b border-[var(--color-border)] pb-2"
+    >
+      {tabs.map((t) => (
+        <button
+          key={t.id}
+          role="tab"
+          aria-selected={activeTab === t.id}
+          onClick={() => openTab(t.id)}
+          className={`flex items-center gap-1.5 rounded px-2.5 py-1.5 text-xs transition-colors ${
+            activeTab === t.id
+              ? "bg-[var(--color-surface-hover)] font-medium text-[var(--color-text)]"
+              : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+          }`}
+        >
+          {t.icon}
+          {t.label}
+          {t.count !== undefined && t.count > 0 && (
+            <span className="text-[10px] text-[var(--color-text-muted)]">
+              {t.count}
+            </span>
+          )}
+        </button>
+      ))}
+    </div>
+  );
+
+  const body = (
+    <>
       {isLoading && (
         <div className="flex items-center gap-2 py-8 text-xs text-[var(--color-text-muted)]">
           <Loader2 className="h-3.5 w-3.5 animate-spin" /> Reading the brain…
@@ -262,7 +362,7 @@ export function AgentKnowledge({
           />
         ) : (
           <>
-            {tab === "brain" && (
+            {activeTab === "brain" && (
               <BrainTab
                 brain={brain}
                 slug={slug}
@@ -272,7 +372,7 @@ export function AgentKnowledge({
                 onDirtyChange={markDirty}
               />
             )}
-            {tab === "skills" && (
+            {activeTab === "skills" && (
               <SkillsTab
                 brain={brain}
                 slug={slug}
@@ -286,7 +386,7 @@ export function AgentKnowledge({
                 onCreate={() => setCreating("skill")}
               />
             )}
-            {tab === "memories" && (
+            {activeTab === "memories" && (
               <MemoriesTab
                 brain={brain}
                 onOpen={(card) => setReading({ kind: "memory", card })}
@@ -298,12 +398,18 @@ export function AgentKnowledge({
                 onCreate={() => setCreating("memory")}
               />
             )}
-            {tab === "tools" && <ToolsTab brain={brain} />}
-            {tab === "strategies" && slots.strategies}
-            {tab === "routines" && (
-              <RoutinesTab brain={brain} action={slots.routinesAction} />
+            {activeTab === "tools" && <ToolsTab brain={brain} />}
+            {activeTab === "strategies" && (
+              <AgentStrategies slug={slug} dense={rail} />
             )}
-            {extraTabs.find((t) => t.id === tab)?.render()}
+            {activeTab === "routines" && (
+              <RoutinesTab
+                brain={brain}
+                action={routinesAction}
+                onOpen={onOpenRoutine}
+              />
+            )}
+            {activeTab === "activity" && <ActivityFeed agent={slug} />}
           </>
         ))}
 
@@ -342,6 +448,21 @@ export function AgentKnowledge({
       {dirty && (
         <p className="mt-3 text-[10px] text-amber-400">Unsaved changes.</p>
       )}
+    </>
+  );
+
+  // The rail is beside its body and both scroll independently, so a long
+  // AGENT.md never scrolls the sections out of reach. The strip is above it,
+  // where the page's own scroll is the only one.
+  return rail ? (
+    <div className="flex min-h-0 flex-1 overflow-hidden">
+      {nav}
+      <div className="min-w-0 flex-1 overflow-y-auto px-3 py-2">{body}</div>
+    </div>
+  ) : (
+    <div>
+      {nav}
+      {body}
     </div>
   );
 }
@@ -943,9 +1064,12 @@ function ToolsTab({ brain }: { brain: AgentBrain }) {
 function RoutinesTab({
   brain,
   action,
+  onOpen,
 }: {
   brain: AgentBrain;
   action?: React.ReactNode;
+  /** Hand this routine to the host's own library, if it has one (FEAT-081). */
+  onOpen?: (routineName: string) => void;
 }) {
   return (
     <div className="space-y-1.5">
@@ -974,6 +1098,7 @@ function RoutinesTab({
               </>
             }
             subtitle={r.description}
+            onClick={onOpen && (() => onOpen(r.name))}
           />
         ))
       )}
