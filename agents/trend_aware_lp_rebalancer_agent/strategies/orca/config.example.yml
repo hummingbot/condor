@@ -1,0 +1,34 @@
+# Copy this file to config.yml and set the intended HAPI server, account, budget,
+# limits, and startup preferences before beginning a new Condor session.
+server_name: local
+execution_mode: loop
+frequency_sec: 120
+max_ticks: 0
+canvas_enabled: false
+bot_mode: bot
+bot_name: trend_aware_lp_rebalancer_agent-orca-v2
+account_name: master_account
+trading_context: ''
+
+total_amount_quote: 9
+min_positions: 1
+max_positions: 3
+min_position_amount_quote: 1
+min_sol_reserve: 0.1
+
+risk_profile: balanced
+min_pool_tvl_usd: 10000
+min_fee_productivity_bps_per_day: 2
+candidate_scan_limit: 6
+excluded_base_mints: []
+excluded_pool_addresses: []
+
+take_profit_ratio: 0.05
+stop_loss_ratio: 0.05
+time_limit_minutes: 720
+
+risk_limits:
+  max_position_size_quote: 9
+  max_open_executors: 5
+  max_drawdown_pct: -1
+  shutdown_drawdown_pct: -1
