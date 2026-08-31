@@ -17,6 +17,7 @@ from condor.web.models import (
     WebUser,
 )
 from config_manager import get_config_manager
+from utils.portfolio_dedupe import UNIFIED_NOTE, dedupe_hyperliquid_unified
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +71,11 @@ async def get_portfolio(
             + ("" if registered else " (fetch not registered — try restarting)"),
         )
 
+    # Valuation-only dedup, on a copy: the SDS-cached state is shared with
+    # trading views (handlers/cex/trade.py), which must keep seeing the raw
+    # perp collateral. It is tradable; it just must not be VALUED twice.
+    state, unified_accounts = dedupe_hyperliquid_unified(state)
+
     # Parse portfolio state into structured response
     # API returns: {account_name: {connector_name: [balance_dicts]}}
     connectors: list[ConnectorBalance] = []
@@ -121,48 +127,17 @@ async def get_portfolio(
                         connector=connector_name,
                         balances=balances,
                         total_usd=connector_total,
+                        note=(
+                            UNIFIED_NOTE
+                            if connector_name == "hyperliquid_perpetual"
+                            and account_name in unified_accounts
+                            else None
+                        ),
                     )
                 )
 
-    _dedupe_hyperliquid_unified(connectors)
     total_usd = sum(c.total_usd for c in connectors)
     return PortfolioResponse(server=name, connectors=connectors, total_usd=total_usd)
-
-
-# Hyperliquid stable/quote symbols (perp margin reports "USD", spot holds "USDC").
-_HL_STABLES = {"USD", "USDC"}
-
-
-def _dedupe_hyperliquid_unified(connectors: list[ConnectorBalance]) -> None:
-    """Avoid double-counting Hyperliquid balances for unified / portfolio-margin accounts.
-
-    In unified or portfolio-margin mode the SAME USDC collateral is reported by BOTH the spot
-    (``hyperliquid``) and perp (``hyperliquid_perpetual``) clearinghouse states, which inflates the
-    portfolio. Hyperliquid exposes no account-mode flag, so detect the unified case by the near-equal
-    shared stable balance and drop the perp duplicate — Hyperliquid's own guidance is to use the spot
-    clearinghouse state as the unified account balance. No-op in standard mode, where the spot and
-    perp balances are separate and differ. Mutates ``connectors`` in place.
-    """
-    spot = next((c for c in connectors if c.connector == "hyperliquid"), None)
-    perp = next((c for c in connectors if c.connector == "hyperliquid_perpetual"), None)
-    if spot is None or perp is None:
-        return
-
-    spot_stable = sum(b.usd_value for b in spot.balances if b.token in _HL_STABLES)
-    perp_stable = sum(b.usd_value for b in perp.balances if b.token in _HL_STABLES)
-    if spot_stable <= 0 or perp_stable <= 0:
-        return
-
-    # Unified when the perp stable collateral matches the spot stable within ~1% (one shared pool).
-    if abs(perp_stable - spot_stable) > max(0.01, 0.01 * spot_stable):
-        return
-
-    # Drop the duplicated stable collateral from the perp side; keep any non-stable (perp-only) items.
-    perp.balances = [b for b in perp.balances if b.token not in _HL_STABLES]
-    perp.total_usd = sum(b.usd_value for b in perp.balances)
-    perp.note = (
-        "Unified account — USDC balance is reflected in the hyperliquid (spot) balance."
-    )
 
 
 @router.get(
@@ -196,18 +171,30 @@ async def get_portfolio_history(
 
     entries, keyed = _extract_snapshot_entries(history)
 
+    # Resolve each snapshot to its state and dedupe unified-Hyperliquid
+    # collateral for valuation. Stored snapshots (and any precomputed totals
+    # in them) predate the dedup, so whenever it bites the total is recomputed
+    # from the adjusted state, which is also what fixes already-recorded
+    # (double-counted) history at read time.
+    resolved: list[tuple[float, Any, Any, bool]] = []
+    for ts, snapshot in entries:
+        state, unified = dedupe_hyperliquid_unified(_snapshot_state(snapshot, keyed))
+        resolved.append((ts, snapshot, state, bool(unified)))
+
     # Forward-fill: track per-connector totals so missing exchanges
     # carry forward their last known value instead of dropping to 0.
     points: list[PortfolioHistoryPoint] = []
     prev_connector_totals: dict[str, float] = {}
-    for ts, snapshot in entries:
+    for ts, snapshot, state, unified in resolved:
         total = (
-            0 if keyed else snapshot.get("total_value", snapshot.get("total_usd", 0))
+            0
+            if keyed or unified
+            else snapshot.get("total_value", snapshot.get("total_usd", 0))
         )
         if total == 0:
             # Sum token values from nested structure
             # API returns {timestamp, state: {account: {connector: [balances]}}}
-            cur_totals = _extract_connector_totals(_snapshot_state(snapshot, keyed))
+            cur_totals = _extract_connector_totals(state)
             if cur_totals and prev_connector_totals:
                 # Forward-fill: for connectors seen before but missing now, use previous value
                 for key, prev_val in prev_connector_totals.items():
@@ -225,7 +212,9 @@ async def get_portfolio_history(
 
     top_tokens: list[str] = []
     if breakdown and points:
-        top_tokens = _build_token_breakdown(entries, keyed, points)
+        top_tokens = _build_token_breakdown(
+            [(ts, state) for ts, _snap, state, _u in resolved], points
+        )
 
     return PortfolioHistoryResponse(
         server=name, points=points, interval=interval, top_tokens=top_tokens
@@ -279,19 +268,20 @@ def _extract_snapshot_entries(history: Any) -> tuple[list[tuple[float, Any]], bo
 
 
 def _build_token_breakdown(
-    entries: list[tuple[float, Any]],
-    keyed: bool,
+    states: list[tuple[float, Any]],
     points: list[PortfolioHistoryPoint],
 ) -> list[str]:
     """Populate each point's per-token values, collapsing beyond the top 8 into "Other".
 
-    Mutates ``point.tokens`` in place and returns the top token names.
+    ``states`` holds (timestamp, portfolio state) pairs, already resolved from
+    their snapshots and deduped for valuation. Mutates ``point.tokens`` in
+    place and returns the top token names.
     """
     # Build token values per timestamp (with forward-fill for missing exchanges)
     ts_token_map: dict[float, dict[str, float]] = {}
     prev_token_vals: dict[str, float] = {}
-    for ts, snapshot in entries:
-        token_vals = _extract_token_values(_snapshot_state(snapshot, keyed))
+    for ts, state in states:
+        token_vals = _extract_token_values(state)
         if not token_vals:
             continue
         # Forward-fill: tokens present before but missing now keep previous value

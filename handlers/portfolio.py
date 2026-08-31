@@ -12,6 +12,7 @@ from handlers import is_gateway_network
 from handlers.config import clear_config_state
 from handlers.config.user_preferences import get_all_enabled_networks
 from utils.auth import hummingbot_api_required, restricted
+from utils.portfolio_dedupe import dedupe_hyperliquid_unified
 from utils.telegram_formatters import (
     escape_markdown_v2,
     format_connector_detail,
@@ -236,6 +237,8 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
         # Filter balances by enabled networks from wallet preferences
         if balances:
+            # Valuation view: don't count unified-Hyperliquid collateral twice.
+            balances, _ = dedupe_hyperliquid_unified(balances)
             enabled_networks = get_all_enabled_networks(context.user_data)
             if enabled_networks:
                 balances = _filter_balances_by_networks(balances, enabled_networks)
@@ -481,6 +484,8 @@ async def refresh_portfolio_dashboard(
 
         # Filter balances by enabled networks
         if balances:
+            # Valuation view: don't count unified-Hyperliquid collateral twice.
+            balances, _ = dedupe_hyperliquid_unified(balances)
             enabled_networks = get_all_enabled_networks(context.user_data)
             if enabled_networks:
                 balances = _filter_balances_by_networks(balances, enabled_networks)
