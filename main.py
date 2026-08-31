@@ -1065,6 +1065,20 @@ async def _run_dual(application: Application) -> None:
     # Start WebSocket manager
     get_ws_manager().start()
 
+    # A run the journal still calls live is a run no process is driving: this one
+    # just booted, and a run is only ever executed by the process that started
+    # it. Judged before anything else looks at it, and deliberately *outside*
+    # the admin block below -- an install with no ADMIN_USER_ID used to leave
+    # the journal live for ever, which is a settings panel stuck on a spinner
+    # that neither a reload nor a relaunch could clear.
+    from condor import updates
+
+    try:
+        finished = await updates.finalize_pending_run()
+    except Exception:
+        logger.warning("Could not finalize the pending update run", exc_info=True)
+        finished = None
+
     # Notify admin that Condor has started
     from utils.config import ADMIN_USER_ID
 
@@ -1080,15 +1094,11 @@ async def _run_dual(application: Application) -> None:
             version = f" ({branch} @ {commit})" if commit else ""
             boot_text = f"Condor is online and ready.{version}"
 
-            # Legacy crossing only: a Condor old enough to exec itself at the
-            # end of an update could not report its own outcome, because the
-            # process that would have is the one that died. The journal carries
-            # the question across and HEAD answers it here (FEAT-070). Updates
-            # run by this version finish in the process that started them and
-            # ask for the relaunch instead, so this finds nothing to judge.
-            from condor import updates
-
-            finished = await updates.finalize_pending_run()
+            # Judged above, before the admin block, so the panel is correct even
+            # on an install with nobody to tell. What is left here is the
+            # telling: a Condor old enough to exec itself at the end of an
+            # update could not report its own outcome, because the process that
+            # would have is the one that died (FEAT-070).
             if finished is not None and finished.state == "succeeded":
                 moved = f"{(finished.from_commit or '')[:7]} → {commit}"
                 boot_text = f"Update complete: {branch} {moved}. Condor is ready."

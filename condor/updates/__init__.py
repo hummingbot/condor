@@ -11,7 +11,8 @@ are views over this API, which is why the dashboard costs no orchestration:
     read_journal()          the durable record, across restarts
     register_observer(fn)   in-process, zero-latency step transitions
     relaunch_pending()      whether this process is older than the code on disk
-    finalize_pending_run()  judge a legacy self-restarting run (boot only)
+    finalize_pending_run()  judge a run no process is driving (boot only)
+    acknowledge_run(id)     the admin pressed Done on a finished run
 """
 
 from condor.updates.components import (
@@ -34,6 +35,7 @@ from condor.updates.components import (
 from condor.updates.run import (
     Run,
     Step,
+    acknowledge_run,
     current,
     finalize_pending_run,
     read_journal,
@@ -56,6 +58,7 @@ __all__ = [
     "Run",
     "Step",
     "Warning",
+    "acknowledge_run",
     "check",
     "current",
     "finalize_pending_run",

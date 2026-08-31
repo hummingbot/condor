@@ -45,7 +45,6 @@ export function UpdatesSettings() {
 
   const [preflight, setPreflight] = useState<Preflight | null>(null);
   const [confirmDiscard, setConfirmDiscard] = useState<Block | null>(null);
-  const [dismissedRunId, setDismissedRunId] = useState<string | null>(null);
 
   const status = useQuery({
     queryKey: UPDATES_STATUS_KEY,
@@ -66,8 +65,13 @@ export function UpdatesSettings() {
 
   // On error TanStack keeps the last successful data, so a hiccup mid-run
   // renders the last step we saw rather than blanking the panel.
+  //
+  // What "dismissed" means lives on the run, not here. This used to be a
+  // `useState` run id, which made Done a gesture that lasted until the next
+  // render of a fresh browser — so a reload, and the relaunch the run had just
+  // asked for, both brought the finished panel back with no way to clear it.
   const run = runQuery.data?.run ?? null;
-  const active = run && run.id !== dismissedRunId ? run : null;
+  const active = run && !run.acknowledged ? run : null;
 
   const checkMut = useMutation({
     mutationFn: updatesApi.check,
@@ -95,9 +99,15 @@ export function UpdatesSettings() {
     mutationFn: (components: string[]) => updatesApi.start(components),
     onSuccess: () => {
       setPreflight(null);
-      setDismissedRunId(null);
       qc.invalidateQueries({ queryKey: UPDATES_RUN_KEY });
     },
+  });
+
+  const dismissMut = useMutation({
+    mutationFn: (runId: string) => updatesApi.dismiss(runId),
+    // The server answers with the run it marked, so the panel closes on the
+    // engine's word rather than on an optimistic guess.
+    onSuccess: (data) => qc.setQueryData(UPDATES_RUN_KEY, data),
   });
 
   // A run that just finished leaves the status stale — the whole point is that
@@ -126,8 +136,9 @@ export function UpdatesSettings() {
     return (
       <FinishedView
         run={active}
+        isDismissing={dismissMut.isPending}
         onDismiss={() => {
-          setDismissedRunId(active.id);
+          dismissMut.mutate(active.id);
           status.refetch();
         }}
       />
@@ -507,7 +518,15 @@ function StepIcon({ state }: { state: Step["state"] }) {
 }
 
 /** How it ended, and what is still owed. */
-function FinishedView({ run, onDismiss }: { run: Run; onDismiss: () => void }) {
+function FinishedView({
+  run,
+  onDismiss,
+  isDismissing,
+}: {
+  run: Run;
+  onDismiss: () => void;
+  isDismissing: boolean;
+}) {
   const ok = run.state === "succeeded";
   // From the same query the shell's banner reads, so the two cannot disagree
   // about whether the relaunch has happened.
@@ -565,9 +584,10 @@ function FinishedView({ run, onDismiss }: { run: Run; onDismiss: () => void }) {
 
       <button
         onClick={onDismiss}
-        className="w-full rounded-md border border-[var(--color-border)] px-3 py-2 text-sm font-medium text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+        disabled={isDismissing}
+        className="w-full rounded-md border border-[var(--color-border)] px-3 py-2 text-sm font-medium text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)] disabled:opacity-50"
       >
-        Done
+        {isDismissing ? "Dismissing..." : "Done"}
       </button>
     </div>
   );

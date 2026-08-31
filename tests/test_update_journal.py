@@ -173,6 +173,79 @@ def test_a_run_that_was_not_restarting_is_left_alone():
     assert _finalize_after(TARGET, state=run_module.FAILED) is None
 
 
+def test_a_run_interrupted_mid_flight_is_failed_at_boot():
+    """A `running` journal in a *fresh* process is a run nobody is driving.
+
+    The report that forced this: an update was started, the process went away
+    before the plan finished, and the panel kept polling a live-looking run for
+    ever. There is no Done button on a run in flight, so neither a reload nor
+    the relaunch the update had asked for could clear it.
+    """
+    run = _finalize_after(
+        TARGET,
+        state=run_module.RUNNING,
+        target_commit=TARGET,
+        steps=[
+            run_module.Step(
+                "condor.fast-forward", "Fast-forwarding Condor", state="ok"
+            ),
+            run_module.Step("condor.deps", "Syncing dependencies", state="running"),
+        ],
+    )
+    assert run is not None
+    assert run.state == "failed"
+    assert not run.live
+    # Named where it stopped, not just "failed".
+    assert "syncing dependencies" in (run.error or "").lower()
+    assert run.steps[1].state == "failed"
+    assert _journal()["state"] == "failed"
+
+
+def test_an_interrupted_run_is_not_judged_on_head():
+    """It stopped somewhere unknown; landing on the target proves nothing."""
+    run = _finalize_after(TARGET, state=run_module.RUNNING, target_commit=TARGET)
+    assert run is not None
+    assert run.state == "failed"
+
+
+# ---------------------------------------------------------------------------
+# Done, durably
+# ---------------------------------------------------------------------------
+
+
+def test_done_is_journaled_so_a_reload_does_not_bring_the_run_back():
+    run_module._write_journal(_a_run(state=run_module.SUCCEEDED, ended=1756300100.0))
+
+    marked = run_module.acknowledge_run("u-1756300000")
+
+    assert marked is not None and marked.acknowledged is True
+    assert _journal()["acknowledged"] is True
+    # And it survives the round trip a reload makes through the file.
+    assert run_module.read_journal().acknowledged is True
+
+
+def test_a_live_run_cannot_be_dismissed():
+    """There is nothing to dismiss yet, and the panel must keep polling it."""
+    run_module._write_journal(_a_run(state=run_module.RUNNING))
+
+    assert run_module.acknowledge_run("u-1756300000") is None
+    assert _journal().get("acknowledged") is not True
+
+
+def test_dismissing_a_stale_run_id_marks_nothing():
+    """The panel may be minutes old; a run started since is not the one seen."""
+    run_module._write_journal(_a_run(state=run_module.SUCCEEDED, ended=1.0))
+
+    assert run_module.acknowledge_run("u-some-older-run") is None
+    assert _journal().get("acknowledged") is not True
+
+
+def test_a_fresh_run_is_not_born_dismissed():
+    """`acknowledged` is per run, so the next update shows up on its own."""
+    assert _a_run().acknowledged is False
+    assert run_module.Run.from_wire(_a_run().to_wire()).acknowledged is False
+
+
 def test_no_journal_at_all_finalizes_nothing():
     with patch.object(
         run_module.updater, "get_local_commit_full", AsyncMock(return_value=TARGET)

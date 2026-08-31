@@ -43,6 +43,17 @@ class ComponentsRequest(BaseModel):
     components: list[str] = Field(default_factory=list)
 
 
+class DismissRequest(BaseModel):
+    """Which run the admin pressed Done on.
+
+    Named rather than implied: the panel may be minutes old, and dismissing
+    "whatever is current" would silently swallow a newer run started from
+    Telegram in the meantime.
+    """
+
+    run_id: str = ""
+
+
 class ResolveRequest(BaseModel):
     """Act on a blocker's offered resolution.
 
@@ -125,4 +136,19 @@ async def get_run(user: WebUser = Depends(get_current_user)):
     """
     require_admin(user)
     run = updates.current() or updates.read_journal()
+    return {"run": run.to_wire() if run is not None else None}
+
+
+@router.post("/dismiss")
+async def dismiss_run(
+    body: DismissRequest | None = None, user: WebUser = Depends(get_current_user)
+):
+    """Done: stop showing the finished run.
+
+    Journaled rather than held in the panel, because the panel is a view over
+    a durable file — a dismissal kept in component state came back on the next
+    reload, and on the relaunch the run itself asked for.
+    """
+    require_admin(user)
+    run = updates.acknowledge_run(body.run_id if body else "")
     return {"run": run.to_wire() if run is not None else None}

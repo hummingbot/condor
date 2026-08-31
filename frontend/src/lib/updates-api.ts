@@ -91,6 +91,8 @@ export interface Run {
   target_commit: string | null;
   error: string | null;
   ended: number | null;
+  /** Done was pressed on this run. Journaled, so it survives a reload. */
+  acknowledged: boolean;
 }
 
 /** True while the run has not been judged yet — the poll keeps going. */
@@ -130,6 +132,19 @@ export const updatesApi = {
     adminFetch<{ ok: boolean; message: string }>("/api/v1/updates/resolve", {
       method: "POST",
       body: JSON.stringify({ component, action }),
+    }),
+
+  /**
+   * Done: stop showing this finished run.
+   *
+   * A round trip rather than local state. The panel is a view over the
+   * engine's journal, so a dismissal the browser kept came back on the next
+   * reload — and on the relaunch the run itself asked for.
+   */
+  dismiss: (runId: string) =>
+    adminFetch<{ run: Run | null }>("/api/v1/updates/dismiss", {
+      method: "POST",
+      body: JSON.stringify({ run_id: runId }),
     }),
 
   /** Trigger the update. Answers immediately with the run to watch. */

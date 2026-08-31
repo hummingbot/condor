@@ -28,6 +28,7 @@ ROUTES = [
     ("post", "/api/v1/updates/resolve", {"component": "condor", "action": "stash"}),
     ("post", "/api/v1/updates/start", {"components": ["condor"]}),
     ("get", "/api/v1/updates/run", None),
+    ("post", "/api/v1/updates/dismiss", {"run_id": "u-1"}),
 ]
 
 
@@ -176,6 +177,44 @@ def test_run_falls_back_to_the_journal_across_a_restart(as_user, admin, monkeypa
 
     assert body["run"]["id"] == "u-1"
     assert body["run"]["state"] == "succeeded"
+
+
+def test_done_is_journaled_rather_than_kept_in_the_panel(as_user, admin, monkeypatch):
+    """Dismissal has to outlive the browser: the panel is a view over the file.
+
+    Held in component state, Done lasted until the next render of a fresh page
+    -- so a reload, and the relaunch the finished update had just asked for,
+    both brought the panel back with the run still on it.
+    """
+    seen = {}
+
+    def fake_ack(run_id=""):
+        seen["run_id"] = run_id
+        return run_mod.Run(
+            id="u-1",
+            started=1.0,
+            actor={},
+            components=["condor"],
+            state=run_mod.SUCCEEDED,
+            acknowledged=True,
+        )
+
+    monkeypatch.setattr(updates, "acknowledge_run", fake_ack)
+
+    body = as_user(admin).post("/api/v1/updates/dismiss", json={"run_id": "u-1"}).json()
+
+    assert seen["run_id"] == "u-1"
+    assert body["run"]["acknowledged"] is True
+
+
+def test_dismissing_nothing_is_not_an_error(as_user, admin, monkeypatch):
+    """A live or already-replaced run marks nothing; the panel just re-polls."""
+    monkeypatch.setattr(updates, "acknowledge_run", lambda run_id="": None)
+
+    res = as_user(admin).post("/api/v1/updates/dismiss", json={"run_id": "u-1"})
+
+    assert res.status_code == 200
+    assert res.json() == {"run": None}
 
 
 # ── Preflight and resolution ──

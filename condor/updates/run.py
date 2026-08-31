@@ -117,6 +117,11 @@ class Run:
     target_commit: str | None = None
     error: str | None = None
     ended: float | None = None
+    # The admin pressed Done on a finished run. Journaled, because the panel is
+    # a view over a durable file: dismissal held in component state came back on
+    # every reload and every relaunch, so the last update anyone ever ran was
+    # still on screen days later with no way to clear it.
+    acknowledged: bool = False
     # Not journaled: how an in-process caller waits for a run it did not await.
     done: asyncio.Event = field(
         default_factory=asyncio.Event, repr=False, compare=False
@@ -144,6 +149,7 @@ class Run:
             "target_commit": self.target_commit,
             "error": self.error,
             "ended": self.ended,
+            "acknowledged": self.acknowledged,
         }
 
     @classmethod
@@ -163,6 +169,7 @@ class Run:
             target_commit=raw.get("target_commit"),
             error=raw.get("error"),
             ended=raw.get("ended"),
+            acknowledged=bool(raw.get("acknowledged")),
         )
         if not run.live:
             run.done.set()
@@ -567,32 +574,68 @@ async def _update_condor(run: Run) -> bool:
 
 
 async def finalize_pending_run() -> Run | None:
-    """Judge a run that a restart interrupted. Called once, at boot.
+    """Judge a run this process did not start and cannot finish. At boot, once.
 
-    Legacy path, kept for exactly one crossing: updating *from* a Condor that
-    still exec'd itself. That version journals ``restarting`` and dies, and the
-    version it lands on — this one — is the only thing that can say whether it
-    worked. A run left at ``restarting`` is asking one question: did the process
-    come back on the commit it aimed at? HEAD answers it.
+    A run is only ever executed by the process that started it, so a journal
+    still reading ``running`` or ``restarting`` when a *fresh* process reads it
+    describes a run nobody is driving any more. Boot is the only place that can
+    say so, and it must, or the panel polls a live-looking run for ever: there
+    is no Done button on a run still in flight, a reload restores it, and a
+    relaunch — the very thing the run asked for — restores it too.
 
-    Runs started by this version never reach ``restarting``, so from here on
-    this returns ``None`` and boot has nothing to report.
+    Two shapes reach here.
+
+    ``restarting`` is the legacy crossing: updating *from* a Condor old enough
+    to exec itself. That version journals ``restarting`` and dies, and the
+    version it lands on is the only thing that can answer the one question it
+    left — did the process come back on the commit it aimed at? HEAD answers it,
+    so this is judged on the outcome and can succeed.
+
+    ``running`` is an update that was interrupted: the process was killed, it
+    crashed, or someone restarted it mid-run. There is no outcome to check —
+    the plan stopped somewhere unknown — so it is failed honestly, naming the
+    step it died on. Whatever landed before that is on disk and a new run
+    fast-forwards over it; nothing here touches the working tree.
     """
     global _current
 
     run = read_journal()
-    if run is None or run.state != RESTARTING:
+    if run is None or not run.live:
         return None
 
-    head = await updater.get_local_commit_full()
-    target = run.target_commit or ""
+    was_restarting = run.state == RESTARTING
+    run.ended = time.time()
 
+    # The step the process died on, whichever kind of interruption it was: the
+    # legacy path always ends on ``.restart``, an interrupted one on whatever
+    # was in flight. Both read better as "this is where it stopped" than as a
+    # spinner that never resolves.
     step = None
     for candidate in run.steps:
-        if candidate.key.endswith(".restart"):
+        if candidate.key.endswith(".restart") or candidate.state == RUNNING:
             step = candidate
     if step is not None:
         step.ended = time.time()
+
+    if not was_restarting:
+        run.state = FAILED
+        where = f" during {step.label.lower()}" if step is not None else ""
+        run.error = (
+            f"This update was interrupted{where} — Condor stopped before the "
+            "run finished. Nothing was rolled back; start it again to pick up "
+            "wherever it got to."
+        )
+        if step is not None:
+            step.state = FAILED
+            step.output_tail = run.error
+        run.done.set()
+        _current = run
+        _write_journal(run)
+        log.warning("Update %s was interrupted; judged failed at boot", run.id)
+        return run
+
+    head = await updater.get_local_commit_full()
+    target = run.target_commit or ""
 
     if target and head and head == target:
         run.state = SUCCEEDED
@@ -609,8 +652,29 @@ async def finalize_pending_run() -> Run | None:
             step.state = FAILED
             step.output_tail = run.error
 
-    run.ended = time.time()
     run.done.set()
     _current = run
     _write_journal(run)
+    return run
+
+
+def acknowledge_run(run_id: str = "") -> Run | None:
+    """Mark the finished run as seen, so the panel stops showing it.
+
+    The counterpart to Done. A run is dismissed *durably* because the panel has
+    no state of its own worth trusting — it is a view over ``update_run.json``,
+    and a dismissal that lived in the browser came back on the next reload.
+
+    Refuses a live run (there is nothing to dismiss yet) and a stale ``run_id``
+    (the panel may be minutes old and a newer run may have started since).
+    Returns the run it marked, or ``None`` when it marked nothing.
+    """
+    run = _current or read_journal()
+    if run is None or run.live:
+        return None
+    if run_id and run.id != run_id:
+        return None
+    if not run.acknowledged:
+        run.acknowledged = True
+        _write_journal(run)
     return run
