@@ -2,20 +2,27 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import asdict
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from condor.archived_controllers import group_by_controller
 from condor.fetchers.archived_run import (
     ArchivedRunUnavailable,
     cached_run,
     extract_bot_name,
     fetch_archived_run,
 )
+from condor.reports import subjects
+from condor.reports.store import list_reports
 from condor.web.auth import require_server_access
 from condor.web.models import (
     ArchivedBotPerformance,
     ArchivedBotSummary,
+    ArchivedControllerRollup,
+    ArchivedControllers,
+    ArchivedRunReport,
     PaginatedExecutors,
     WebUser,
 )
@@ -143,4 +150,61 @@ async def get_archived_executors(
         total=len(executors),
         offset=offset,
         limit=limit,
+    )
+
+
+@router.get("/servers/{name}/archived/controllers", response_model=ArchivedControllers)
+async def get_archived_controllers(
+    name: str,
+    db_path: str = Query(..., description="Database path"),
+    user: WebUser = Depends(require_server_access),
+):
+    """The run, split into the controllers that ran inside it.
+
+    Reads the same cached performance object the run's header and executor
+    pages come from, so expanding a row costs nothing once the run is warm.
+    """
+    perf = cached_run(name, db_path)
+    if perf is None:
+        client = await get_config_manager().get_client(name)
+        perf = await _load_run(client, name, db_path)
+
+    return ArchivedControllers(
+        controllers=[
+            ArchivedControllerRollup(**asdict(rollup))
+            for rollup in group_by_controller(perf.executors)
+        ]
+    )
+
+
+@router.get("/servers/{name}/archived/report", response_model=ArchivedRunReport)
+async def get_archived_report(
+    name: str,
+    db_path: str = Query(..., description="Database path"),
+    controller_id: str = Query("", description="Controller inside the run, or all"),
+    user: WebUser = Depends(require_server_access),
+):
+    """The stored report for this run (or controller), if one was ever made.
+
+    The subject key is built here, from the parts, never accepted pre-built:
+    the server is the one the caller was granted access to, so a lookup cannot
+    be pointed at another server's reports by spelling its key.
+
+    A miss is the ordinary case — nothing has charted this subject yet, or the
+    report index has since been pruned past it — so it answers 200 with a null
+    id rather than a 404.
+    """
+    entries, _ = list_reports(
+        subject=subjects.bot_run(name, db_path, controller_id),
+        owner_id=user.id,
+        limit=1,
+    )
+    if not entries:
+        return ArchivedRunReport()
+
+    entry = entries[0]
+    return ArchivedRunReport(
+        report_id=entry.get("id"),
+        created_at=entry.get("created_at"),
+        title=entry.get("title", ""),
     )

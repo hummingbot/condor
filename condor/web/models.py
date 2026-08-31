@@ -553,6 +553,40 @@ class ArchivedBotPerformance(BaseModel):
     stats_source: str = "trades"
 
 
+class ArchivedControllerRollup(BaseModel):
+    """What one controller did inside an archived run. Money is USD.
+
+    ``controller_id`` is ``""`` for the executors that ran under no controller
+    at all — an LP or a manual run — which is a row, not an omission.
+    """
+
+    controller_id: str
+    pnl_usd: float = 0.0
+    volume_usd: float = 0.0
+    fees_usd: float = 0.0
+    executor_count: int = 0
+    first_ts: float = 0.0
+    last_ts: float = 0.0
+    trading_pairs: list[str] = []
+    connectors: list[str] = []
+
+
+class ArchivedControllers(BaseModel):
+    controllers: list[ArchivedControllerRollup] = []
+
+
+class ArchivedRunReport(BaseModel):
+    """The stored report for a run (or one of its controllers), if there is one.
+
+    ``report_id`` is ``None`` for the ordinary case: nobody has charted this
+    subject yet, or the report that did has since been pruned.
+    """
+
+    report_id: str | None = None
+    created_at: str | None = None
+    title: str = ""
+
+
 class PaginatedExecutors(BaseModel):
     executors: list[NormalizedExecutor]
     total: int
