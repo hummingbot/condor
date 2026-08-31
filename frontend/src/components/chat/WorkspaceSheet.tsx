@@ -1,5 +1,5 @@
 import { Maximize2, Minimize2, X } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { useWorkspacePane } from "@/hooks/useWorkspacePane";
@@ -64,15 +64,28 @@ export function WorkspaceSheet({
   const [zen, setZen] = useState(() =>
     canSplit ? false : readZen(defaultZen),
   );
-  const split = canSplit && !zen;
+  /**
+   * Whether somebody else is already in the pane.
+   *
+   * There is only one `aside`, so two sheets portalled into it stack — a
+   * report drawn over a delegation, with no way to tell which scrollbar
+   * belongs to what. The first to arrive finds the pane free and claims it;
+   * anyone opened after that finds it taken and renders as the windowed
+   * overlay it already is everywhere below `xl`. Nobody has to remember the
+   * rule, because it is the shape of the state: the pane names its holder, and
+   * this sheet asks whether that is itself.
+   */
+  const token = useId();
+  const taken = !!pane?.holder && pane.holder !== token;
+  const split = canSplit && !zen && !taken;
 
   // Hold the pane open for as long as this sheet is in it, so the outlet takes
   // width exactly while something occupies it.
   const claim = pane?.claim;
   useEffect(() => {
     if (!split || !claim) return;
-    return claim();
-  }, [split, claim]);
+    return claim(token);
+  }, [split, claim, token]);
 
   // Esc closes, as it does for every overlay here. Not in the pane, though: the
   // chat beside it is live and Esc belongs to whatever has focus there.

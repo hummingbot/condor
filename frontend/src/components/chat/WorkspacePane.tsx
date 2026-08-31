@@ -81,7 +81,7 @@ export function WorkspacePaneProvider({
   children: React.ReactNode;
 }) {
   const [host, setHost] = useState<HTMLElement | null>(null);
-  const [claims, setClaims] = useState(0);
+  const [holder, setHolder] = useState<string | null>(null);
   const [wide, setWide] = useState(() => window.matchMedia(WIDE).matches);
   const [frac, setFracState] = useState(readFrac);
 
@@ -102,9 +102,17 @@ export function WorkspacePaneProvider({
 
   const setFrac = useCallback((f: number) => setFracState(clampFrac(f)), []);
 
-  const claim = useCallback(() => {
-    setClaims((c) => c + 1);
-    return () => setClaims((c) => c - 1);
+  /**
+   * Who has the pane.
+   *
+   * A count would say "something is in there" but not *what*, and the pane is
+   * one node: the second sheet to portal into it draws over the first. Naming
+   * the holder lets a sheet read, in its own render, whether the pane is
+   * already someone else's and stay the overlay it is below `xl` if so.
+   */
+  const claim = useCallback((token: string) => {
+    setHolder((h) => h ?? token);
+    return () => setHolder((h) => (h === token ? null : h));
   }, []);
 
   const value = useMemo<WorkspacePane>(
@@ -112,12 +120,13 @@ export function WorkspacePaneProvider({
       host,
       setHost,
       claim,
-      open: claims > 0,
+      holder,
+      open: holder !== null,
       canSplit: wide,
       frac,
       setFrac,
     }),
-    [host, claim, claims, wide, frac, setFrac],
+    [host, claim, holder, wide, frac, setFrac],
   );
 
   return (

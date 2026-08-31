@@ -4,8 +4,15 @@ export type WorkspacePane = {
   /** Where a split sheet portals its body. */
   host: HTMLElement | null;
   setHost: (el: HTMLElement | null) => void;
-  /** Take the pane; the returned function gives it back. */
-  claim: () => () => void;
+  /**
+   * Take the pane for `token`; the returned function gives it back.
+   *
+   * The first claim wins and later ones are refused, which is what keeps two
+   * sheets from portalling into the one `aside` and stacking.
+   */
+  claim: (token: string) => () => void;
+  /** Who is in the pane right now, or `null` — see {@link WorkspaceSheet}. */
+  holder: string | null;
   /** Something is in the pane right now. */
   open: boolean;
   /** There is room to split — otherwise sheets stay overlays. */

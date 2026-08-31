@@ -47,9 +47,12 @@ function setWide(matches: boolean) {
 /** The chat workspace, reduced to what the pane interacts with. */
 function Workspace({
   sheet = true,
+  second = false,
   pane = true,
 }: {
   sheet?: boolean;
+  /** A delegation opened from the dock while a report already holds the pane. */
+  second?: boolean;
   /** `false` is an agent's own page: a sheet with no conversation to sit beside. */
   pane?: boolean;
 }) {
@@ -69,6 +72,11 @@ function Workspace({
           defaultZen
         >
           <p data-testid="report">report body</p>
+        </WorkspaceSheet>
+      )}
+      {second && (
+        <WorkspaceSheet title="Delegation" onClose={() => {}}>
+          <p data-testid="delegation">delegation body</p>
         </WorkspaceSheet>
       )}
     </div>
@@ -135,6 +143,8 @@ async function drop() {
 const ratio = (px: number) => px / (AVAIL - px);
 const report = () =>
   document.querySelector<HTMLElement>('[data-testid="report"]');
+const delegation = () =>
+  document.querySelector<HTMLElement>('[data-testid="delegation"]');
 const overlay = () => document.querySelector<HTMLElement>(".fixed.inset-0");
 const button = (title: string) =>
   document.querySelector<HTMLButtonElement>(`button[title^="${title}"]`);
@@ -348,5 +358,50 @@ describe("The split between the two", () => {
     await click(button("Back beside the chat")!);
 
     expect(grow()).toBeCloseTo(ratio(500), 3);
+  });
+});
+
+/**
+ * Two sheets, one `aside`.
+ *
+ * Both portalling into the pane draws one over the other, with no way to tell
+ * which scrollbar belongs to what. It was reachable before this feature — open
+ * the routine library in the pane, then click a dock task, whose delegation is
+ * a sheet too — and the agent panel would have walked into it twice over.
+ */
+describe("Only one sheet can be in the pane", () => {
+  it("leaves the second as an overlay, with the first still beside the chat", async () => {
+    await render({ sheet: true, second: true });
+
+    expect(outlet()!.contains(report())).toBe(true);
+    // The second is on screen, and it is not in the pane.
+    expect(delegation()).toBeTruthy();
+    expect(outlet()!.contains(delegation())).toBe(false);
+    expect(overlay()).toBeTruthy();
+    // Exactly one thing portalled in, whatever else is mounted.
+    expect(outlet()!.children).toHaveLength(1);
+  });
+
+  it("does not care which order they arrive in", async () => {
+    // The delegation first this time: whoever finds the pane free keeps it,
+    // and the report opened after it is the overlay.
+    await render({ sheet: false, second: true });
+    expect(outlet()!.contains(delegation())).toBe(true);
+
+    await render({ sheet: true, second: true });
+    expect(outlet()!.contains(delegation())).toBe(true);
+    expect(outlet()!.contains(report())).toBe(false);
+    expect(outlet()!.children).toHaveLength(1);
+  });
+
+  it("hands the pane on once the sheet holding it closes", async () => {
+    await render({ sheet: true, second: true });
+    expect(outlet()!.contains(report())).toBe(true);
+
+    await render({ sheet: false, second: true });
+    // The pane is free again and the sheet still open takes it, rather than
+    // the column collapsing with a delegation stranded in an overlay.
+    expect(outlet()!.contains(delegation())).toBe(true);
+    expect(overlay()).toBeNull();
   });
 });
