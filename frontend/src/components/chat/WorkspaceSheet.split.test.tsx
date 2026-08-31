@@ -17,7 +17,7 @@
 
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { WorkspacePaneOutlet, WorkspacePaneProvider } from "./WorkspacePane";
 import { WorkspaceSheet } from "./WorkspaceSheet";
@@ -84,6 +84,55 @@ async function render(props: Parameters<typeof Workspace>[0] = {}) {
 
 const outlet = () =>
   container.querySelector<HTMLElement>('aside[aria-label="Workspace pane"]');
+const handle = () => container.querySelector<HTMLElement>('[role="separator"]');
+/** The pane's share of the row, as the flex ratio the outlet renders. */
+const grow = () => Number(outlet()!.style.flexGrow);
+
+/**
+ * The row the drag measures itself against.
+ *
+ * jsdom lays nothing out — every `offsetWidth` is 0 and every rect is empty — so
+ * the two columns are given widths and the pane a right edge, which is the whole
+ * of the reference frame `PaneResizeHandle` captures on mousedown.
+ */
+const CHAT_PX = 380;
+const PANE_PX = 620;
+const AVAIL = CHAT_PX + PANE_PX;
+const ROW_RIGHT = 1200;
+
+function stubLayout() {
+  Object.defineProperty(HTMLElement.prototype, "offsetWidth", {
+    configurable: true,
+    get(this: HTMLElement) {
+      if (this.tagName === "ASIDE") return PANE_PX;
+      if (this.dataset.testid === "chat") return CHAT_PX;
+      return 0;
+    },
+  });
+  HTMLElement.prototype.getBoundingClientRect = () =>
+    ({ right: ROW_RIGHT, left: ROW_RIGHT - PANE_PX, width: PANE_PX }) as DOMRect;
+}
+
+/** Grab the handle and drag it to `clientX`, without letting go. */
+async function dragTo(clientX: number) {
+  await act(async () => {
+    handle()!.dispatchEvent(
+      new MouseEvent("mousedown", { bubbles: true, clientX: ROW_RIGHT - PANE_PX }),
+    );
+  });
+  await act(async () => {
+    document.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, clientX }));
+  });
+}
+
+async function drop() {
+  await act(async () => {
+    document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+  });
+}
+
+/** The flex ratio a pane of `px` implies, for a row of {@link AVAIL}. */
+const ratio = (px: number) => px / (AVAIL - px);
 const report = () =>
   document.querySelector<HTMLElement>('[data-testid="report"]');
 const overlay = () => document.querySelector<HTMLElement>(".fixed.inset-0");
@@ -107,6 +156,7 @@ beforeEach(() => {
   closes = 0;
   localStorage.clear();
   setWide(true);
+  stubLayout();
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -189,5 +239,114 @@ describe("WorkspaceSheet without a pane", () => {
 
     expect(overlay()).toBeTruthy();
     expect(outlet()!.className).toBe("hidden");
+  });
+});
+
+describe("The split between the two", () => {
+  it("opens on the reader's side of the ratio it replaces", async () => {
+    await render();
+
+    // 62/38, not the 58/42 the pane was hard-coded to: what is in it is a page,
+    // and the transcript stops using width past its own measure.
+    expect(grow()).toBeCloseTo(ratio(0.62 * AVAIL), 3);
+    expect(grow()).toBeGreaterThan(1.4);
+  });
+
+  it("moves with the handle, and says so while it is moving", async () => {
+    await render();
+
+    await dragTo(ROW_RIGHT - 500);
+    expect(grow()).toBeCloseTo(ratio(500), 3);
+    // The cursor is the drag's, everywhere, and nothing selects under it.
+    expect(document.body.style.cursor).toBe("col-resize");
+    expect(document.body.style.userSelect).toBe("none");
+
+    await drop();
+    expect(grow()).toBeCloseTo(ratio(500), 3);
+    expect(document.body.style.cursor).toBe("");
+    expect(document.body.style.userSelect).toBe("");
+  });
+
+  it("lets neither column be squeezed out", async () => {
+    await render();
+
+    // Dragged past the pane's own floor, it stops at the floor.
+    await dragTo(ROW_RIGHT - 100);
+    expect(grow()).toBeCloseTo(ratio(400), 3);
+    await drop();
+
+    // And the transcript keeps 360 of the row, however far the handle is pushed.
+    await dragTo(ROW_RIGHT - 900);
+    expect(grow()).toBeCloseTo(ratio(AVAIL - 360), 3);
+    await drop();
+  });
+
+  it("is still there after a reload", async () => {
+    localStorage.setItem("condor_pane_frac", "0.5");
+    await render();
+
+    expect(grow()).toBeCloseTo(1, 3);
+
+    await dragTo(ROW_RIGHT - 500);
+    await drop();
+    expect(localStorage.getItem("condor_pane_frac")).toBe("0.5");
+  });
+
+  it("still drags when it has nowhere to write it down", async () => {
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new Error("private mode");
+    });
+    await render();
+
+    await dragTo(ROW_RIGHT - 500);
+    await drop();
+    expect(grow()).toBeCloseTo(ratio(500), 3);
+  });
+
+  it("answers the keyboard, and a double-click puts it back", async () => {
+    await render();
+
+    // Left grows the pane, right gives the room back — the handle moves the way
+    // the arrow points.
+    await act(async () => {
+      handle()!.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true }),
+      );
+    });
+    expect(grow()).toBeCloseTo(ratio(0.64 * AVAIL), 3);
+
+    await act(async () => {
+      handle()!.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    });
+    expect(grow()).toBeCloseTo(ratio(0.62 * AVAIL), 3);
+  });
+
+  it("exists only while something is in the pane", async () => {
+    await render({ sheet: false });
+    expect(handle()).toBeNull();
+
+    await render({ sheet: true });
+    expect(handle()).toBeTruthy();
+  });
+
+  it("does not exist in a window too narrow to split", async () => {
+    setWide(false);
+    await render();
+
+    // The sheet is the overlay there, so there is no seam to drag either.
+    expect(handle()).toBeNull();
+    expect(outlet()!.className).toBe("hidden");
+  });
+
+  it("is what zen comes back to, not the default", async () => {
+    await render();
+    await dragTo(ROW_RIGHT - 500);
+    await drop();
+
+    await click(button("Full screen")!);
+    expect(outlet()!.className).toBe("hidden");
+    await click(button("Back beside the chat")!);
+
+    expect(grow()).toBeCloseTo(ratio(500), 3);
   });
 });

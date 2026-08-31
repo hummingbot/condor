@@ -324,7 +324,12 @@ export function AgentChatTab() {
             `relative` so the dock overlays the transcript below `xl` rather than
             escaping to the page, the mirror of what the rail does below `md`. */}
         <div className="relative flex min-w-0 flex-1">
-          <div className="flex min-w-0 flex-1 flex-col">
+          {/* The transcript's floor is the other half of the pane's: past `xl`
+              the pane can be dragged wider, but never far enough to squeeze the
+              conversation out of readability. `xl` is the same 1280 at which the
+              split exists at all (see `WorkspacePane`), so below it this is the
+              plain `min-w-0` column it has always been. */}
+          <div className="flex min-w-0 flex-1 flex-col xl:min-w-[360px]">
             {/* Which sessions are live, and who is answering in this one — one
                 row, because the active tab and the identity name the same chat. */}
             <div className="flex shrink-0 items-center gap-2 border-b border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2">

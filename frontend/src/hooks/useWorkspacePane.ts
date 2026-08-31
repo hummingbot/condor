@@ -10,6 +10,9 @@ export type WorkspacePane = {
   open: boolean;
   /** There is room to split — otherwise sheets stay overlays. */
   canSplit: boolean;
+  /** Share of the chat+pane row the pane takes, 0..1. */
+  frac: number;
+  setFrac: (f: number) => void;
 };
 
 /** Provided by `WorkspacePaneProvider`; absent on every other surface. */
