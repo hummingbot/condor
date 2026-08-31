@@ -81,11 +81,19 @@ class SessionBinding:
 def resolve(
     spec: SessionSpec,
     user_data: dict | None = None,
+    session_key: str = "",
 ) -> SessionBinding:
     """Resolve the binding for ``spec``: one path, one registry.
 
     An empty ``agent_slug`` is not "no agent" — it is the default one, Condor.
     Callers get a fully resolved toolset and identity and never re-derive either.
+
+    ``session_key`` is the seat this binding is for, passed down to the condor
+    MCP subprocess so a tool that reports back to its origin (``delegate``,
+    ``run_code``, ``send_notification``, ``manage_routines``) knows which
+    conversation asked. Only a chat session has one; consult, the delegate
+    worker and the tick engine call :func:`toolsets.build_mcp_servers_for_session`
+    directly and correctly pass none.
     """
     from condor.agents.agent import Agent, AgentStore
 
@@ -123,6 +131,7 @@ def resolve(
         user_data,
         server_name=effective_server if agent.server_required else None,
         agent_slug=agent.slug,
+        session_key=session_key,
     )
 
     return SessionBinding(

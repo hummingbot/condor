@@ -119,6 +119,7 @@ def _condor_mcp_args(
     server_name: str | None = None,
     delegate_worker: bool = False,
     profile: str = "full",
+    session_key: str = "",
 ) -> list[str]:
     """Build CLI args for the condor MCP subprocess.
 
@@ -126,10 +127,18 @@ def _condor_mcp_args(
     ``delegate`` starts (FEAT-032). The chat and that worker share one agent
     record, so the flag is what tells the subprocess which seat it is sitting in.
 
-    The bot token travels in the server's ``env``, never here: argv is
-    world-readable via ``ps`` (SEC-095). What argv carries instead is
-    ``--bot-id``, the token's non-secret digest, which is how the startup reaper
-    recognizes our own leaked subprocess trees.
+    ``session_key`` is the seat's canonical key, and it rides argv for the same
+    reason the ids do (SEC-180): env is not a channel we control end to end. The
+    spawner puts it in ``CONDOR_SESSION_KEY`` for the *ACP* subprocess, but the
+    MCP server is a grandchild — the bridge spawns it through the MCP SDK, which
+    hands a stdio server the ``env`` from its config rather than this process's
+    environment. Everything else the subprocess needs to know who it is already
+    travels on argv precisely because of that; the key was the one identity value
+    that did not, so ``delegate``/``run_code``/``send_notification`` posted an
+    empty ``session_key`` and the route had no conversation to resolve — the
+    outcome reached the bell and never the chat that asked for it. Not a secret,
+    so ``ps`` is not an objection: it is ``web:{user}:{conversation}`` or
+    ``tg:{chat}``, both of which argv already carries in pieces.
     """
     # MCP server expects int chat_id. For web sessions (string keys like "web_42"),
     # use user_id instead — in Telegram DMs, chat_id == user_id anyway.
@@ -147,6 +156,8 @@ def _condor_mcp_args(
         args.extend(["--server-name", str(server_name)])
     if delegate_worker:
         args.append("--delegate-worker")
+    if session_key:
+        args.extend(["--session-key", str(session_key)])
     args.extend(["--profile", profile])
     return args
 
@@ -185,6 +196,7 @@ def build_mcp_servers_for_session(
     agent_slug: str | None = None,
     delegate_worker: bool = False,
     tick: bool = False,
+    session_key: str = "",
 ) -> list[dict[str, Any]]:
     """Build dynamic MCP server configs for an agent session.
 
@@ -210,6 +222,11 @@ def build_mcp_servers_for_session(
 
     ``tick`` marks the unattended loop seat, which mounts the narrowest tool
     profile on both subprocesses (FEAT-066). See :func:`seat_profile`.
+
+    ``session_key`` is the chat seat's canonical key, and only a chat has one:
+    a consult, a delegate worker and a tick run for nobody's conversation and
+    pass nothing, which is what keeps their provenance honestly empty. See
+    :func:`_condor_mcp_args` for why it travels on argv.
     """
     from config_manager import (
         ServerPermission,
@@ -274,6 +291,7 @@ def build_mcp_servers_for_session(
             server_name=server_name,
             delegate_worker=delegate_worker,
             profile=profile,
+            session_key=session_key,
         ),
         "env": _env_entries(TELEGRAM_BOT_TOKEN=_bot_token()),
     }

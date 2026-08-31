@@ -565,13 +565,20 @@ async def _spawn_session(
         # key does and is stable for the subprocess's whole life — so tools that
         # need conversation provenance (delegate) post the key back and let the
         # route resolve it where the truth lives.
+        #
+        # This env var reaches the *ACP* subprocess. It does not reliably reach
+        # the MCP server the bridge spawns beneath it — a stdio MCP child gets
+        # the ``env`` from its own config, not this process's environment — so
+        # the key also goes down on argv via ``binding.resolve`` below, which is
+        # the channel the subprocess actually reads first. Kept here too because
+        # a run started outside a session has nothing else.
         "CONDOR_SESSION_KEY": raw_key,
     }
 
     # Who is answering: the bound Agent, or Condor when none is named — with
     # its model, tool allowlist, server pin and memory scope. Raises UnknownAgent
     # before anything is spawned, so a bad slug cannot orphan a subprocess.
-    bound = binding.resolve(spec, user_data)
+    bound = binding.resolve(spec, user_data, session_key=raw_key)
     extra_env.update(bound.mcp_env)
     mcp_servers = bound.mcp_servers
     agent_key = bound.agent_key or spec.agent_key
