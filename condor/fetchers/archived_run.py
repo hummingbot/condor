@@ -28,12 +28,7 @@ from collections import OrderedDict
 from typing import Any
 
 from condor.fetchers.executors import normalize_executor_side
-from condor.web.models import (
-    ArchivedBotPerformance,
-    ArchivedChartSeries,
-    NormalizedExecutor,
-    PnlPoint,
-)
+from condor.web.models import ArchivedBotPerformance, NormalizedExecutor, PnlPoint
 
 logger = logging.getLogger(__name__)
 
@@ -409,13 +404,6 @@ async def _fetch_performance(
                 epoch = 0
             cumulative_pnl.append(PnlPoint(timestamp=epoch, pnl=last.get("pnl", 0)))
 
-    from condor.archived_chart_series import build_chart_series
-
-    chart_series = {
-        key: ArchivedChartSeries(**payload)
-        for key, payload in build_chart_series(executors, quote_rates).items()
-    }
-
     # Each executor carries its own rate so the executor table can render its
     # money columns in USD without re-deriving the market's quote, while prices
     # on the row stay native to the market they traded in.
@@ -440,7 +428,6 @@ async def _fetch_performance(
         primary_connector=primary_connector,
         primary_trading_pair=primary_trading_pair,
         executor_count=len(executors),
-        chart_series=chart_series,
         quote_currency=quote_of(primary_trading_pair),
         usd_rates=quote_rates.rates,
         converted=quote_rates.converted,

@@ -39,13 +39,6 @@ function formatDuration(start: string | null, end: string | null): string {
   return `${mins}m`;
 }
 
-/** ISO timestamp to epoch seconds, or undefined when absent/unparseable. */
-function toEpochSeconds(ts: string | null): number | undefined {
-  if (!ts) return undefined;
-  const ms = new Date(ts).getTime();
-  return Number.isFinite(ms) ? ms / 1000 : undefined;
-}
-
 function formatPnl(value: number): string {
   if (value === 0) return "—";
   const sign = value >= 0 ? "+" : "";
@@ -238,8 +231,6 @@ export function BotRunsTab() {
       <ArchivedBotDetail
         dbPath={openRun.archive_db_path}
         botName={openRun.bot_name}
-        startTime={toEpochSeconds(openRun.created_at)}
-        endTime={toEpochSeconds(openRun.stopped_at)}
         onBack={() => setOpenRun(null)}
       />
     );

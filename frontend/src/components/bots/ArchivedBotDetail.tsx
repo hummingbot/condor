@@ -1,11 +1,25 @@
 import { useQuery } from "@tanstack/react-query";
-import { ArrowLeft, ChevronLeft, ChevronRight, Loader2, TrendingDown, TrendingUp } from "lucide-react";
+import {
+  ArrowLeft,
+  BarChart3,
+  ChevronLeft,
+  ChevronRight,
+  Loader2,
+  RefreshCw,
+  TrendingDown,
+  TrendingUp,
+} from "lucide-react";
 import { useMemo, useState } from "react";
 
-import { ArchivedPerformanceCharts } from "@/components/charts/ArchivedPerformanceCharts";
+import { ReportFrame } from "@/components/routines/ReportFrame";
+import { useArchivedReport } from "@/hooks/useArchivedReport";
 import { useServer } from "@/hooks/useServer";
 import { api } from "@/lib/api";
-import type { ArchivedBotPerformance, ExecutorInfo } from "@/lib/api";
+import type {
+  ArchivedBotPerformance,
+  ArchivedControllerRollup,
+  ExecutorInfo,
+} from "@/lib/api";
 import { pnlTextClass } from "@/lib/formatters";
 
 function formatUsd(v: number) {
@@ -239,6 +253,215 @@ function ExecutorTable({ server, dbPath, executorCount }: { server: string; dbPa
   );
 }
 
+// ── Controllers ──
+
+/**
+ * The controllers that ran inside the run, and the button that charts one.
+ *
+ * Condor never had this axis: ``controller_id`` arrives on every archived
+ * executor and nothing grouped by it, so a run with five controllers read as
+ * one number. The rollup is executor-derived — archived trade rows carry no
+ * controller — so on a run whose headline came from its trades the two can
+ * differ; the report says so, and so does the note below.
+ *
+ * The unattributed row (executors that ran under no controller at all) has no
+ * chart of its own: its subject *is* the run's, so the run chart is its chart.
+ */
+function ControllerTable({
+  server,
+  dbPath,
+  perf,
+  charted,
+  onChart,
+}: {
+  server: string;
+  dbPath: string;
+  perf: ArchivedBotPerformance;
+  charted: string | null;
+  onChart: (controllerId: string | null) => void;
+}) {
+  const { data, isLoading } = useQuery({
+    queryKey: ["archived-controllers", server, dbPath],
+    queryFn: () => api.getArchivedControllers(server, dbPath),
+    enabled: !!server && !!dbPath,
+    staleTime: Infinity,
+  });
+
+  const controllers: ArchivedControllerRollup[] = data?.controllers ?? [];
+
+  // Whether the split adds up to the run's own header. It need not: a run whose
+  // headline came from its trade rows is reconstructed from a different source
+  // than these rows, and archived trades carry no controller to roll up by.
+  const reconciles =
+    perf.stats_source === "executors" ||
+    ([
+      [controllers.reduce((sum, c) => sum + c.pnl_usd, 0), perf.total_pnl],
+      [controllers.reduce((sum, c) => sum + c.volume_usd, 0), perf.total_volume],
+    ] as const).every(
+      ([parts, whole]) =>
+        Math.abs(parts - whole) <= Math.max(0.01, Math.abs(whole) * 0.01),
+    );
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center h-16">
+        <Loader2 className="h-4 w-4 animate-spin text-[var(--color-text-muted)]" />
+      </div>
+    );
+  }
+  if (controllers.length === 0) return null;
+
+  return (
+    <div>
+      <h3 className="text-xs font-medium text-[var(--color-text-muted)] mb-2 uppercase tracking-wider">
+        Controllers ({controllers.length})
+      </h3>
+      <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] overflow-auto">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="border-b border-[var(--color-border)] text-[var(--color-text-muted)]">
+              <th className="px-3 py-2 text-left font-medium">Controller</th>
+              <th className="px-3 py-2 text-left font-medium">Pairs</th>
+              <th className="px-3 py-2 text-right font-medium">PnL</th>
+              <th className="px-3 py-2 text-right font-medium">Volume</th>
+              <th className="px-3 py-2 text-right font-medium">Fees</th>
+              <th className="px-3 py-2 text-right font-medium">Executors</th>
+              <th className="px-3 py-2 text-right font-medium">Chart</th>
+            </tr>
+          </thead>
+          <tbody>
+            {controllers.map((c) => {
+              const unattributed = !c.controller_id;
+              return (
+                <tr
+                  key={c.controller_id || "__none__"}
+                  className={`border-b border-[var(--color-border)]/50 hover:bg-[var(--color-surface-hover)] ${
+                    charted === c.controller_id && !unattributed
+                      ? "bg-[var(--color-primary)]/10"
+                      : ""
+                  }`}
+                >
+                  <td className="px-3 py-1.5 font-mono">
+                    {c.controller_id || (
+                      <span className="text-[var(--color-text-muted)] italic">
+                        no controller
+                      </span>
+                    )}
+                  </td>
+                  <td className="px-3 py-1.5">{c.trading_pairs.join(", ") || "—"}</td>
+                  <td className={`px-3 py-1.5 text-right font-mono ${pnlTextClass(c.pnl_usd)}`}>
+                    {formatPnl(c.pnl_usd)}
+                  </td>
+                  <td className="px-3 py-1.5 text-right font-mono">{formatUsd(c.volume_usd)}</td>
+                  <td className="px-3 py-1.5 text-right font-mono text-amber-400/80">
+                    {formatUsd(c.fees_usd)}
+                  </td>
+                  <td className="px-3 py-1.5 text-right font-mono">
+                    {c.executor_count.toLocaleString()}
+                  </td>
+                  <td className="px-3 py-1.5 text-right">
+                    <button
+                      onClick={() => onChart(unattributed ? null : c.controller_id)}
+                      title={
+                        unattributed
+                          ? "These executors ran under no controller — the run chart is their chart"
+                          : `Chart ${c.controller_id}`
+                      }
+                      className="p-1 rounded hover:bg-[var(--color-surface-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+                    >
+                      <BarChart3 className="h-3.5 w-3.5" />
+                    </button>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      {!reconciles && (
+        <p className="mt-1.5 text-[10px] text-[var(--color-text-muted)]">
+          Rolled up from this run's executors. The cards above come from its
+          trade rows, which carry no controller — for this run the two do not
+          total the same.
+        </p>
+      )}
+    </div>
+  );
+}
+
+// ── Report ──
+
+/**
+ * The chart for this run, or for one controller of it.
+ *
+ * There is one thing that charts an archived run in Condor — the
+ * ``archived_analyzer`` routine — and this is one of its callers (FEAT-079).
+ * An archived run is immutable, so the report it produces is stored against
+ * that (server, db, controller) and found again on the next open: the first
+ * chart costs a run of the routine, every open after it is a lookup.
+ */
+function ArchivedReportPanel({
+  server,
+  dbPath,
+  controllerId,
+  label,
+}: {
+  server: string;
+  dbPath: string;
+  controllerId: string | null;
+  label: string;
+}) {
+  const { reportId, isLoading, isRunning, error, chart, regenerate } =
+    useArchivedReport(server, dbPath, controllerId ?? "");
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-2">
+        <h3 className="text-xs font-medium text-[var(--color-text-muted)] uppercase tracking-wider">
+          Chart — {label}
+        </h3>
+        {reportId && !isRunning && (
+          <button
+            onClick={regenerate}
+            className="flex items-center gap-1 text-[11px] text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+          >
+            <RefreshCw className="h-3 w-3" /> Regenerate
+          </button>
+        )}
+      </div>
+
+      <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden">
+        {isRunning ? (
+          <div className="flex flex-col items-center justify-center h-48 gap-3">
+            <Loader2 className="h-5 w-5 animate-spin text-[var(--color-text-muted)]" />
+            <p className="text-xs text-[var(--color-text-muted)]">
+              Charting {label}…
+            </p>
+          </div>
+        ) : reportId ? (
+          <ReportFrame reportId={reportId} title={`Archived run — ${label}`} className="h-[640px]" />
+        ) : isLoading ? (
+          <div className="flex items-center justify-center h-48">
+            <Loader2 className="h-5 w-5 animate-spin text-[var(--color-text-muted)]" />
+          </div>
+        ) : (
+          <div className="flex flex-col items-center justify-center h-48 gap-3">
+            <p className="text-xs text-[var(--color-text-muted)]">
+              No chart for {label} yet.
+            </p>
+            <button
+              onClick={chart}
+              className="flex items-center gap-2 rounded px-3 py-1.5 text-xs bg-[var(--color-primary)]/20 text-[var(--color-primary)] border border-[var(--color-primary)]/40 hover:bg-[var(--color-primary)]/30"
+            >
+              <BarChart3 className="h-3.5 w-3.5" /> Chart
+            </button>
+            {error && <p className="text-[10px] text-[var(--color-red)]">{error}</p>}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── Detail View ──
 
 interface Props {
@@ -246,9 +469,6 @@ interface Props {
   dbPath: string;
   /** Shown in the header while the (slow) performance fetch is still in flight. */
   botName: string;
-  /** Run window in epoch seconds, for the candle range. */
-  startTime?: number;
-  endTime?: number;
   onBack: () => void;
 }
 
@@ -260,7 +480,7 @@ interface Props {
  * — so the header and its back button render immediately, above the spinner,
  * rather than stranding the reader on a bare loader.
  */
-export function ArchivedBotDetail({ dbPath, botName, startTime, endTime, onBack }: Props) {
+export function ArchivedBotDetail({ dbPath, botName, onBack }: Props) {
   const { server } = useServer();
 
   // Query 1: Performance summary (no executors) — fast path
@@ -271,67 +491,13 @@ export function ArchivedBotDetail({ dbPath, botName, startTime, endTime, onBack 
     staleTime: Infinity,
   });
 
-  // Query 2: First page of executors — loads in background for charts + table
-  const { data: execData } = useQuery({
-    queryKey: ["archived-executors", server, dbPath, 0, EXECUTORS_PAGE_SIZE],
-    queryFn: () => api.getArchivedExecutors(server!, dbPath, 0, EXECUTORS_PAGE_SIZE),
-    enabled: !!server && !!perf,
-    staleTime: Infinity,
-  });
+  const executorCount = perf?.executor_count ?? 0;
 
-  const executors: ExecutorInfo[] = execData?.executors ?? [];
-  const executorCount = execData?.total ?? perf?.executor_count ?? 0;
-
-  // Available connector+pair combos for the pair selector. Preferred from the
-  // server's per-market series, which is keyed over every executor of the run —
-  // deriving it from the loaded executor page hides markets that page missed
-  // and undercounts the ones it caught.
-  const pairOptions = useMemo(() => {
-    const series = perf?.chart_series;
-    if (series && Object.keys(series).length > 0) {
-      return Object.entries(series)
-        .map(([key, s]) => {
-          const [connector, ...rest] = key.split(":");
-          return { connector, pair: rest.join(":"), count: s.executor_count };
-        })
-        .sort((a, b) => b.count - a.count);
-    }
-
-    if (!executors.length) return [];
-    const counts = new Map<string, { connector: string; pair: string; count: number }>();
-    for (const ex of executors) {
-      if (!ex.connector || !ex.trading_pair) continue;
-      const key = `${ex.connector}:${ex.trading_pair}`;
-      const existing = counts.get(key);
-      if (existing) {
-        existing.count++;
-      } else {
-        counts.set(key, { connector: ex.connector, pair: ex.trading_pair, count: 1 });
-      }
-    }
-    return Array.from(counts.values()).sort((a, b) => b.count - a.count);
-  }, [perf?.chart_series, executors]);
-
-  const [selectedPairKey, setSelectedPairKey] = useState<string | null>(null);
-
-  // Current connector+pair for charts
-  const currentConnector = selectedPairKey
-    ? selectedPairKey.split(":")[0]
-    : perf?.primary_connector ?? "";
-  const currentPair = selectedPairKey
-    ? selectedPairKey.split(":").slice(1).join(":")
-    : perf?.primary_trading_pair ?? "";
-
-  // Filter executors by selected pair for the candle chart
-  const filteredExecutors: ExecutorInfo[] = useMemo(() => {
-    if (!executors.length) return [];
-    if (!currentConnector && !currentPair) return executors;
-    return executors.filter(
-      (ex) =>
-        (!currentConnector || ex.connector === currentConnector) &&
-        (!currentPair || ex.trading_pair === currentPair),
-    );
-  }, [executors, currentConnector, currentPair]);
+  // Which subject the chart panel is showing: the whole run, or one controller
+  // of it. A controller is charted by *naming* it — the report is stored under
+  // that subject, so switching back to the run finds the run's own chart rather
+  // than re-deriving one.
+  const [chartedController, setChartedController] = useState<string | null>(null);
 
   const backButton = (
     <button
@@ -405,47 +571,24 @@ export function ArchivedBotDetail({ dbPath, botName, startTime, endTime, onBack 
 
       <ConversionNote perf={perf} />
 
-      {/* Pair selector (if multiple pairs from executors) */}
-      {pairOptions.length > 1 && (
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-[var(--color-text-muted)]">Chart pair:</span>
-          <div className="flex flex-wrap gap-1">
-            {pairOptions.map((opt) => {
-              const key = `${opt.connector}:${opt.pair}`;
-              const isSelected =
-                key === selectedPairKey ||
-                (!selectedPairKey &&
-                  opt.connector === perf.primary_connector &&
-                  opt.pair === perf.primary_trading_pair);
-              return (
-                <button
-                  key={key}
-                  onClick={() => setSelectedPairKey(key)}
-                  className={`rounded px-2 py-0.5 text-[11px] transition-colors ${
-                    isSelected
-                      ? "bg-[var(--color-primary)]/20 text-[var(--color-primary)] border border-[var(--color-primary)]/40"
-                      : "bg-[var(--color-bg)] text-[var(--color-text-muted)] border border-[var(--color-border)] hover:border-[var(--color-text-muted)]"
-                  }`}
-                >
-                  {opt.pair} ({opt.count})
-                </button>
-              );
-            })}
-          </div>
-        </div>
+      {/* The chart: the routine's report, looked up or generated once */}
+      {server && (
+        <ArchivedReportPanel
+          server={server}
+          dbPath={dbPath}
+          controllerId={chartedController}
+          label={chartedController ?? "whole run"}
+        />
       )}
 
-      {/* Performance charts: candles (by default), PnL, position */}
-      {server && (currentConnector || currentPair) && (
-        <ArchivedPerformanceCharts
+      {/* Controllers that ran inside this run */}
+      {server && (
+        <ControllerTable
           server={server}
-          executors={filteredExecutors}
-          cumulativePnl={perf.cumulative_pnl}
-          series={perf.chart_series?.[`${currentConnector}:${currentPair}`]}
-          connector={currentConnector}
-          tradingPair={currentPair}
-          startTime={startTime}
-          endTime={endTime}
+          dbPath={dbPath}
+          perf={perf}
+          charted={chartedController}
+          onChart={setChartedController}
         />
       )}
 

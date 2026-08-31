@@ -482,44 +482,6 @@ class NormalizedExecutor(BaseModel):
     usd_rate: float = 1.0
 
 
-class ArchivedVolumeBucket(BaseModel):
-    time: float
-    buy_vol: float = 0.0
-    sell_vol: float = 0.0
-    buy_count: int = 0
-    sell_count: int = 0
-
-
-class ArchivedPositionDelta(BaseModel):
-    time: float
-    delta: float
-
-
-class ArchivedPnlEvolutionPoint(BaseModel):
-    time: float
-    net_pnl: float
-    trade_pnl: float
-    cum_fees: float
-
-
-class ArchivedChartSeries(BaseModel):
-    """Everything the archived-run chart draws, aggregated over all executors.
-
-    Bounded by the candle count rather than the executor count, so a run with
-    tens of thousands of executors still sends a few kilobytes.
-    """
-
-    interval: str
-    interval_sec: int
-    start: float
-    end: float
-    executor_count: int = 0
-    volume_buckets: list[ArchivedVolumeBucket] = []
-    position_deltas: list[ArchivedPositionDelta] = []
-    pnl_evolution: list[ArchivedPnlEvolutionPoint] = []
-    pool_address: str | None = None
-
-
 class ArchivedBotPerformance(BaseModel):
     bot_name: str
     db_path: str
@@ -537,9 +499,6 @@ class ArchivedBotPerformance(BaseModel):
     primary_connector: str = ""
     primary_trading_pair: str = ""
     executor_count: int = 0
-    # Per-market chart series keyed "{connector}:{trading_pair}", aggregated
-    # over every executor so the chart is not limited to one executor page.
-    chart_series: dict[str, ArchivedChartSeries] = {}
     # Quote currency of the primary market, for labelling a converted figure.
     quote_currency: str = ""
     # USD rate per quote currency seen in the run.

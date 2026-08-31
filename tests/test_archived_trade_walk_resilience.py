@@ -139,11 +139,14 @@ def test_failure_partway_still_prefers_the_complete_executor_set():
     assert perf.trade_count == 40
 
 
-def test_chart_series_covers_every_executor():
+def test_every_executor_survives_the_walk_for_whoever_charts_it():
+    """The chart is built from these, by whoever draws it, so none may be lost."""
+    from condor.archived_chart_series import build_chart_series
+
     perf = _fetch(FlakyClient())
 
-    series = perf.chart_series["binance:BTC-USDT"]
-    assert series.executor_count == len(EXECUTORS)
-    assert series.interval == "1m"
-    assert series.start == EXECUTORS[0]["timestamp"]
-    assert series.end == EXECUTORS[-1]["close_timestamp"]
+    series = build_chart_series(perf.executors)["binance:BTC-USDT"]
+    assert series["executor_count"] == len(EXECUTORS)
+    assert series["interval"] == "1m"
+    assert series["start"] == EXECUTORS[0]["timestamp"]
+    assert series["end"] == EXECUTORS[-1]["close_timestamp"]

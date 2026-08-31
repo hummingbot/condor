@@ -1061,41 +1061,29 @@ export interface PnlPoint {
   pnl: number;
 }
 
-export interface ArchivedVolumeBucket {
-  time: number;
-  buy_vol: number;
-  sell_vol: number;
-  buy_count: number;
-  sell_count: number;
-}
-
-export interface ArchivedPositionDelta {
-  time: number;
-  delta: number;
-}
-
-export interface ArchivedPnlEvolutionPoint {
-  time: number;
-  net_pnl: number;
-  trade_pnl: number;
-  cum_fees: number;
+export interface ArchivedControllerRollup {
+  /** "" for the executors that ran under no controller — an LP or manual leg. */
+  controller_id: string;
+  pnl_usd: number;
+  volume_usd: number;
+  fees_usd: number;
+  executor_count: number;
+  first_ts: number;
+  last_ts: number;
+  trading_pairs: string[];
+  connectors: string[];
 }
 
 /**
- * Chart series aggregated server-side over every executor of an archived run.
- * Bounded by the candle count, not the executor count, so a run that archived
- * tens of thousands of executors still charts from all of them.
+ * The stored report for a run, or one controller of it.
+ *
+ * `report_id` is null for the ordinary case: nobody has charted this subject
+ * yet, or the report that did has since been pruned from the index.
  */
-export interface ArchivedChartSeries {
-  interval: string;
-  interval_sec: number;
-  start: number;
-  end: number;
-  executor_count: number;
-  volume_buckets: ArchivedVolumeBucket[];
-  position_deltas: ArchivedPositionDelta[];
-  pnl_evolution: ArchivedPnlEvolutionPoint[];
-  pool_address: string | null;
+export interface ArchivedRunReport {
+  report_id: string | null;
+  created_at: string | null;
+  title: string;
 }
 
 export interface ArchivedBotPerformance {
@@ -1115,8 +1103,6 @@ export interface ArchivedBotPerformance {
   primary_connector: string;
   primary_trading_pair: string;
   executor_count: number;
-  /** Keyed "{connector}:{trading_pair}". Money series are USD-denominated. */
-  chart_series: Record<string, ArchivedChartSeries>;
   /** Quote currency of the primary market, e.g. "BRL". */
   quote_currency: string;
   /** USD rate per quote currency seen in the run. */
@@ -2577,6 +2563,22 @@ export const api = {
   ) =>
     apiFetch<PaginatedExecutors>(
       `/api/v1/servers/${encodeURIComponent(server)}/archived/executors?db_path=${encodeURIComponent(dbPath)}&offset=${offset}&limit=${limit}`,
+    ),
+
+  getArchivedControllers: (server: string, dbPath: string) =>
+    apiFetch<{ controllers: ArchivedControllerRollup[] }>(
+      `/api/v1/servers/${encodeURIComponent(server)}/archived/controllers?db_path=${encodeURIComponent(dbPath)}`,
+    ),
+
+  /**
+   * The stored report for this run, or one controller of it.
+   *
+   * The subject key is built server-side from these parts — the dashboard sends
+   * components, never a key, so a lookup cannot be pointed at another server.
+   */
+  getArchivedReport: (server: string, dbPath: string, controllerId = "") =>
+    apiFetch<ArchivedRunReport>(
+      `/api/v1/servers/${encodeURIComponent(server)}/archived/report?db_path=${encodeURIComponent(dbPath)}&controller_id=${encodeURIComponent(controllerId)}`,
     ),
 
   // ── Reports ──
