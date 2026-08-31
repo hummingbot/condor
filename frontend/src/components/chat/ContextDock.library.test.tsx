@@ -18,12 +18,13 @@
  */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act } from "react";
+import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { RoutineInstance } from "@/lib/api";
+import type { LibraryFocus } from "./DockRoutines";
 import { WorkspacePaneOutlet, WorkspacePaneProvider } from "./WorkspacePane";
 
 const getRoutineInstances = vi.fn();
@@ -88,22 +89,37 @@ const INSTANCE = {
 let container: HTMLDivElement;
 let root: Root;
 
+/**
+ * The workspace around the dock, reduced to what it interacts with.
+ *
+ * The pane's occupant is the workspace's state, not the dock's (FEAT-081), so
+ * the harness holds it exactly as `AgentChatTab` does.
+ */
+function Workspace() {
+  const [library, setLibrary] = useState<LibraryFocus | null>(null);
+  return (
+    <WorkspacePaneProvider>
+      <WorkspacePaneOutlet />
+      <ContextDock
+        delegations={[]}
+        conversationId={CONVERSATION}
+        agentSlug="scout"
+        agentName="Scout"
+        runContext={RUN_CONTEXT}
+        library={library}
+        onLibraryChange={setLibrary}
+      />
+    </WorkspacePaneProvider>
+  );
+}
+
 async function render() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   await act(async () => {
     root.render(
       <MemoryRouter>
         <QueryClientProvider client={qc}>
-          <WorkspacePaneProvider>
-            <WorkspacePaneOutlet />
-            <ContextDock
-              delegations={[]}
-              conversationId={CONVERSATION}
-              agentSlug="scout"
-              agentName="Scout"
-              runContext={RUN_CONTEXT}
-            />
-          </WorkspacePaneProvider>
+          <Workspace />
         </QueryClientProvider>
       </MemoryRouter>,
     );

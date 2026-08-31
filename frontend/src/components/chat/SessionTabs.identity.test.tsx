@@ -1,8 +1,8 @@
 /**
  * A session tab names *who* is answering, and nothing else (READ-275).
  *
- * The tab strip sits ~40px left of `BrainPicker` and `SessionServerChip`, the
- * two controls that own the model and the server. It used to print both again:
+ * The tab strip sits ~40px left of `AgentPanelButton`, the one control that
+ * owns the model and the server. It used to print both again:
  * an unbound chat fell back to a model label hand-truncated to `Claude (ACP)...`
  * and appended ` · {server_name}` inside a 140px truncate, so the row said the
  * same two things twice and the tab's copies were the unreadable ones.
@@ -89,7 +89,7 @@ describe("SessionTabs identity", () => {
     ]);
 
     expect(tabs()[0].textContent).toContain("Arbitrage");
-    // `SessionServerChip` is the row's one place for the server.
+    // `AgentPanelButton` is the row's one place for the server.
     expect(tabs()[0].textContent).not.toContain("brigado_2");
   });
 

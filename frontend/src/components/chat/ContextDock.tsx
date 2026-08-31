@@ -54,6 +54,8 @@ export function ContextDock({
   agentSlug,
   agentName,
   runContext,
+  library,
+  onLibraryChange,
 }: {
   /** The shared `["delegations"]` result — the dock adds no poll of its own. */
   delegations: Delegation[];
@@ -63,6 +65,17 @@ export function ContextDock({
   agentName?: string;
   /** The conversation a run launched from the library belongs to. */
   runContext?: RoutineRunContext;
+  /**
+   * Which routine the pane is showing — `null` when the library is not in it.
+   *
+   * Held by the workspace rather than here, because the pane is one column and
+   * the library is no longer the only thing that wants it: the agent panel
+   * (FEAT-081) does too. One owner and one union means opening either closes
+   * the other by construction, instead of by a rule two components have to
+   * remember. `{}` is the whole library; a row fills in what it points at.
+   */
+  library: LibraryFocus | null;
+  onLibraryChange: (focus: LibraryFocus | null) => void;
 }) {
   const [open, setOpen] = useState(defaultOpen);
   const [tasksOpen, setTasksOpen] = useState(true);
@@ -70,11 +83,7 @@ export function ContextDock({
   // "where do I watch this?" was the question both of them exist to answer.
   // The extra poll it costs is one endpoint on a page that is already open.
   const [routinesOpen, setRoutinesOpen] = useState(true);
-  // Held here rather than inside DockRoutines because the doors into it — the
-  // section header's, and the rail's while the dock is collapsed — are outside
-  // the body the pane it opens lives in. `null` is closed; `{}` is the whole
-  // library; a row fills in what it points at.
-  const [library, setLibrary] = useState<LibraryFocus | null>(null);
+  const setLibrary = onLibraryChange;
   const openLibrary = () => {
     setOpen(true);
     setRoutinesOpen(true);

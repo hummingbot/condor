@@ -2,7 +2,6 @@ import { useQuery } from "@tanstack/react-query";
 import {
   Activity,
   Bot,
-  BrainCircuit,
   ClipboardList,
   PanelLeftClose,
   PanelLeftOpen,
@@ -10,17 +9,18 @@ import {
   Wallet,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { useSearchParams } from "react-router-dom";
 
+import { AgentPanel, AgentPanelButton } from "@/components/chat/AgentPanel";
 import {
   BrainPicker,
   type BrainSelection,
 } from "@/components/chat/BrainPicker";
 import { ChatInput } from "@/components/chat/ChatInput";
 import { ChatRail } from "@/components/chat/ChatRail";
-import { ChatSessionIdentity } from "@/components/chat/ChatSessionIdentity";
 import { ChatThread } from "@/components/chat/ChatThread";
 import { ContextDock } from "@/components/chat/ContextDock";
+import type { LibraryFocus } from "@/components/chat/DockRoutines";
 import { SessionTabs } from "@/components/chat/SessionTabs";
 import {
   WorkspacePaneOutlet,
@@ -76,6 +76,20 @@ const AGENT_STARTERS: Starter[] = [
 type TalkIntent = "focus" | "fresh";
 
 /**
+ * What is in the workspace pane, if anything.
+ *
+ * One union rather than two booleans, because the pane is one column: opening
+ * the agent panel puts the routine library away and vice versa, and that is
+ * the shape of the state rather than a rule two components have to remember
+ * (FEAT-081). The library's focus used to live inside `ContextDock`, which
+ * could not know about a second occupant.
+ */
+type PaneView =
+  | { kind: "agent" }
+  | { kind: "routines"; focus: LibraryFocus }
+  | null;
+
+/**
  * The chat workspace — what `/` opens on.
  *
  * A rail of who you can talk to and what you already said, a conversation
@@ -109,6 +123,7 @@ export function AgentChatTab() {
    * `null` means "never touched it", which is what falls back to `defaultAgent`.
    */
   const [pendingAgentKey, setPendingAgentKey] = useState<string | null>(null);
+  const [pane, setPane] = useState<PaneView>(null);
 
   // Same keys and intervals the fleet tab uses, so react-query dedupes rather
   // than polling `/agents` twice.
@@ -287,7 +302,7 @@ export function AgentChatTab() {
   );
 
   /**
-   * Whose knowledge the Knowledge link opens, and what to call them.
+   * Whose agent panel the header button opens, and what to call them.
    *
    * Both read off the slug, never off `boundAgent`/`pendingAgent` in their own
    * order: an unbound Condor conversation leaves `boundAgent` undefined while a
@@ -295,9 +310,8 @@ export function AgentChatTab() {
    * resolved separately from the slug titled the panel "Orca LP Expert" over
    * Condor's brain until the fetch landed and corrected it.
    */
-  const knowledgeSlug = selectedSlug || CHAT_SLUG;
-  const agentName = (slug: string) =>
-    agents.find((a) => a.slug === slug)?.name || "Condor";
+  const panelSlug = selectedSlug || CHAT_SLUG;
+  const panelAgent = agents.find((a) => a.slug === panelSlug);
 
   const runningTasks = (delegationData?.delegations ?? []).filter(
     (d) => d.status === "running",
@@ -357,37 +371,24 @@ export function AgentChatTab() {
                 onClose={(slotId) => chat.destroySession(slotId)}
                 className="min-w-0 flex-1"
               />
-              {/* Who is answering and where it runs, plus the way out to the
-                  agent's own page — pinned right, whatever the strip does. */}
-              <div className="ml-auto flex shrink-0 items-center gap-2">
-                <ChatSessionIdentity
+              {/* One control, not three. Who is answering, on what model,
+                  against which server — and the door to all of it, beside the
+                  conversation rather than away from it. The model picker, the
+                  server chip and a "Knowledge" link that left the workspace
+                  were three answers to the one question this asks (FEAT-081). */}
+              <div className="ml-auto flex min-w-0 shrink items-center">
+                <AgentPanelButton
+                  name={panelAgent?.name || "Condor"}
                   slot={activeSlot}
+                  pendingAgentKey={pendingAgentKey ?? defaultAgent}
+                  ambientServer={server || ""}
                   agents={modelOptions}
-                  customProviders={customProviders}
                   agentBindings={agentBindings}
-                  isStreaming={isActiveStreaming}
-                  onSelectBrain={switchBrain}
-                  onSelectServer={(name) => {
-                    if (activeSlot) switchServer(activeSlot.info.slot_id, name);
-                  }}
+                  open={pane?.kind === "agent"}
+                  onToggle={() =>
+                    setPane((p) => (p?.kind === "agent" ? null : { kind: "agent" }))
+                  }
                 />
-                {/* What the thing on the other side of this conversation
-                    actually knows — its brain, playbooks, memories, tools,
-                    strategies and routines — and the place to change any of it.
-                    It goes straight to the agent's page: this used to open a
-                    sheet over the chat that carried a link to that same page,
-                    which is one door too many for the one destination. The
-                    conversation is held by the shell's socket, not by this
-                    route, so it is still there when you come back — and the
-                    page's own Chat button is that way back. */}
-                <Link
-                  to={`/agents/${encodeURIComponent(knowledgeSlug)}`}
-                  className="flex items-center gap-1 rounded px-1.5 py-1 text-[11px] text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-primary)]"
-                  title={`What ${agentName(knowledgeSlug)} knows and can do — read and edit`}
-                >
-                  <BrainCircuit className="h-3.5 w-3.5" />
-                  <span className="hidden sm:inline">Knowledge</span>
-                </Link>
               </div>
             </div>
 
@@ -432,10 +433,42 @@ export function AgentChatTab() {
             />
           </div>
 
-          {/* What a dock row opened, beside the conversation rather than on top
-              of it — so the agent that produced the report is still there to
-              ask about it. */}
+          {/* What a dock row or the header button opened, beside the
+              conversation rather than on top of it — so the agent that produced
+              the report is still there to ask about it. */}
           <WorkspacePaneOutlet />
+
+          {pane?.kind === "agent" && (
+            <AgentPanel
+              slug={panelSlug}
+              name={panelAgent?.name || "Condor"}
+              description={panelAgent?.description}
+              slot={activeSlot}
+              pendingAgentKey={pendingAgentKey ?? defaultAgent}
+              ambientServer={server || ""}
+              agents={modelOptions}
+              customProviders={customProviders}
+              agentBindings={agentBindings}
+              isStreaming={isActiveStreaming}
+              // With a session this moves the conversation; without one it is
+              // the model the next `start_session` carries, which is the same
+              // field the hero's picker sets.
+              onSelectBrain={(sel) => {
+                if (activeSlot) switchBrain(sel);
+                else if (sel.agentKey !== undefined)
+                  setPendingAgentKey(sel.agentKey);
+              }}
+              onSelectServer={(name) => {
+                if (activeSlot) switchServer(activeSlot.info.slot_id, name);
+              }}
+              // The pane's routine house is the one FEAT-077 built; the panel
+              // hands it over rather than growing a second one.
+              onOpenRoutine={(name) =>
+                setPane({ kind: "routines", focus: { source: name } })
+              }
+              onClose={() => setPane(null)}
+            />
+          )}
 
           <ContextDock
             delegations={delegationData?.delegations ?? []}
@@ -453,6 +486,10 @@ export function AgentChatTab() {
                     agentSlug: activeSlot.info.agent_slug || undefined,
                   }
                 : undefined
+            }
+            library={pane?.kind === "routines" ? pane.focus : null}
+            onLibraryChange={(focus) =>
+              setPane(focus ? { kind: "routines", focus } : null)
             }
           />
         </div>
