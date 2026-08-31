@@ -9,6 +9,8 @@ import type { ExtraLine, PickSlot } from "@/components/executor/types";
 import { getExecutorColor, type ExecutorOverlay } from "@/lib/executor-overlays";
 import { getThemeColors, pnlHexColor, sideColor } from "@/lib/theme-colors";
 import { escapeHtml, formatPriceSig, roundToPricePrecision } from "@/lib/formatters";
+import { createDragHitPrimitive, type DragTarget } from "./priceLineDrag";
+import { usePriceLineDrag } from "./usePriceLineDrag";
 
 type PickField = PickSlot | null;
 
@@ -158,6 +160,24 @@ export function TradeChart({
   const overlaySeriesRef = useRef<import("lightweight-charts").ISeriesApi<"Line">[]>([]);
   const overlayPriceLinesRef = useRef<import("lightweight-charts").IPriceLine[]>([]);
   const positionLinesRef = useRef<import("lightweight-charts").IPriceLine[]>([]);
+
+  // ── Drag a price line ──
+  //
+  // The grabbable lines, filled in further down where the prices are known, and
+  // read only at call time — so a price moving under the pointer never restages
+  // the hit test. The gesture is installed here, above the effect that creates
+  // the chart, so that on unmount its cleanup runs *first* and hands panning
+  // back to a chart that still exists.
+  const dragTargetsRef = useRef<DragTarget[]>([]);
+  const drag = usePriceLineDrag({
+    getContainer: () => containerRef.current,
+    getChart: () => chartRef.current,
+    getSeries: () => seriesRef.current,
+    getTargets: () => dragTargetsRef.current,
+    getPricePrecision: () => pricePrecision,
+    onPriceSet,
+    slopPx: CLICK_SLOP_PX,
+  });
 
   // ── Candle data from the singleton store (WS live + cached) ──
   const { candles, mergeCandles, setDuration } = useCandleStore(
@@ -768,6 +788,40 @@ export function TradeChart({
     }
   }, [startPrice, endPrice, limitPrice, side, minSpread, totalAmountQuote, minOrderAmountQuote, activePickField, extraLines, lineLabels, chartReady]);
 
+  // ── Which of those lines can be grabbed ──
+  //
+  // The three the chart draws itself, plus every extra line a panel tagged with
+  // a slot (LP's lower limit). Published into the ref the hit test reads, so it
+  // always sees the list the last render produced.
+  const dragTargets = useMemo<DragTarget[]>(() => {
+    const targets: DragTarget[] = [];
+    if (startPrice > 0) targets.push({ slot: "start", price: startPrice });
+    if (endPrice > 0) targets.push({ slot: "end", price: endPrice });
+    if (limitPrice > 0) targets.push({ slot: "limit", price: limitPrice });
+    for (const el of extraLines ?? []) {
+      if (el.slot && el.price > 0) targets.push({ slot: el.slot, price: el.price });
+    }
+    return targets;
+  }, [startPrice, endPrice, limitPrice, extraLines]);
+  dragTargetsRef.current = dragTargets;
+
+  // ── Hover cursor over a draggable line ──
+  //
+  // A primitive that draws nothing: it exists so the library, which calls
+  // `hitTest` on every mouse move, hands the pane an `ns-resize` cursor over a
+  // grabbable line. The lines themselves stay ordinary price lines.
+  useEffect(() => {
+    const series = seriesRef.current;
+    if (!chartReady || !series) return;
+    const primitive = createDragHitPrimitive(() => dragTargetsRef.current);
+    series.attachPrimitive(primitive);
+    return () => {
+      // On unmount the chart is disposed by the init effect's cleanup, which
+      // runs first and takes the series with it.
+      try { series.detachPrimitive(primitive); } catch { /* chart already gone */ }
+    };
+  }, [chartReady]);
+
   // ── Executor overlays ──
   // `chartReady` is a dependency, not a guard for its own sake: lightweight-charts
   // is imported lazily, so on a warm cache the overlays exist before the chart
@@ -1043,7 +1097,13 @@ export function TradeChart({
     shiftKey: boolean;
   } | null>(null);
 
+  // A press that lands on a price line arms `drag` (installed above, with the
+  // refs) alongside this gate rather than instead of it. The two split the
+  // gesture on the same slop: past it the press was a drag and the release is
+  // consumed, so the drop cannot re-fire the pick or the executor deselect;
+  // inside it the press was a click and every branch below runs as before.
   const handlePointerDown = (e: React.PointerEvent) => {
+    drag.onPointerDown(e);
     pointerDownRef.current = {
       x: e.clientX,
       y: e.clientY,
@@ -1053,6 +1113,12 @@ export function TradeChart({
   };
 
   const handlePointerUp = (e: React.PointerEvent) => {
+    // A grab that actually travelled owns this release outright; one that never
+    // left the slop was a click after all, and falls through untouched.
+    if (drag.onPointerUp(e)) {
+      pointerDownRef.current = null;
+      return;
+    }
     const down = pointerDownRef.current;
     pointerDownRef.current = null;
     if (!down || down.button !== 0) return;
@@ -1102,7 +1168,9 @@ export function TradeChart({
           className="absolute inset-0"
           style={{ cursor: activePickField ? "crosshair" : "default" }}
           onPointerDown={handlePointerDown}
+          onPointerMove={drag.onPointerMove}
           onPointerUp={handlePointerUp}
+          onPointerCancel={drag.onPointerCancel}
         />
         {/* Measure box overlay — pure DOM, never touches chart series */}
         <div
@@ -1110,9 +1178,9 @@ export function TradeChart({
           className="pointer-events-none absolute z-10"
           style={{ display: "none", border: "1px dashed", borderRadius: 2 }}
         />
-        {/* Measure-tool discoverability hint */}
+        {/* Measure-tool and drag discoverability hint */}
         <div className="pointer-events-none absolute bottom-1 left-2 z-10 text-[9px] text-[var(--color-text-muted)] opacity-60">
-          ⇧+click: measure range
+          ⇧+click: measure range · drag a price line to move it
         </div>
         {/* Executor tooltip overlay — rendered via portal to escape overflow-hidden */}
         {createPortal(

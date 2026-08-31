@@ -382,6 +382,9 @@ export function useLpConfig(
                     : getThemeColors().red,
                 lineStyle: "dotted" as const,
                 lineWidth: 1,
+                // The chart draws this one for us, so name the slot it writes
+                // back to and the user can drag it like the other three.
+                slot: "limit2" as const,
               },
             ]
           : undefined,

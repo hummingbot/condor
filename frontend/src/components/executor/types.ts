@@ -14,6 +14,15 @@ export interface ExtraLine {
   color: string;
   lineStyle: "solid" | "dashed" | "dotted";
   lineWidth?: number;
+  /**
+   * The pick slot this line stands for, when it stands for one.
+   *
+   * The chart draws three prices of its own and cannot tell which of a panel's
+   * extra lines is a price the user may set — so a panel says so here, and the
+   * line becomes grabbable like the chart's own. A purely decorative extra line
+   * omits it and stays inert.
+   */
+  slot?: PickSlot;
 }
 
 /**
