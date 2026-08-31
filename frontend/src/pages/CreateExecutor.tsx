@@ -658,9 +658,6 @@ export function CreateExecutor() {
             before you had chosen one. The chip states the market and opens the
             browser, which is where both halves are now chosen together. */}
         <div className="flex items-center border-r border-[var(--color-border)]">
-          {/* Star the pair in the header, without a round trip through Browse.
-              Reads as a mark on the pair name, so it leads it. */}
-          <StarMarketButton server={server} connector={connector} pair={pair} />
           <button
             onClick={() => setBrowserOpen((v) => !v)}
             aria-pressed={browserOpen}
@@ -673,12 +670,14 @@ export function CreateExecutor() {
                 : "hover:bg-[var(--color-surface-hover)]"
             }`}
           >
-            {/* The pair is the identity of everything on this page; the venue
-                qualifies it, so it stays body text beside it. */}
-            <span className="text-sm font-semibold text-[var(--color-text)]">{pair}</span>
+            {/* The venue qualifies the pair, and reads first here so the chip
+                agrees with the browser it opens: venue rail first, pair table
+                after. The pair is still the identity of everything on this
+                page, so it keeps the body colour. */}
             <span className="text-xs text-[var(--color-text-muted)]">
               {formatConnectorName(connector)}
             </span>
+            <span className="text-sm font-semibold text-[var(--color-text)]">{pair}</span>
             <List
               className={`h-3.5 w-3.5 ${
                 browserOpen ? "text-[var(--color-primary)]" : "text-[var(--color-text-muted)]"
@@ -690,6 +689,9 @@ export function CreateExecutor() {
               /
             </kbd>
           </button>
+          {/* Star the pair in the header, without a round trip through Browse.
+              Reads as a mark on the pair name, so it trails it. */}
+          <StarMarketButton server={server} connector={connector} pair={pair} />
         </div>
 
         {/* Price ticker */}

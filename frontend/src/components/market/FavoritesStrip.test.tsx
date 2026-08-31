@@ -58,11 +58,11 @@ function chipRow(index: number): HTMLElement {
 }
 
 /**
- * The pair on each chip, in strip order. An off-venue chip appends its venue in
- * a second node, so the pair is the button's first child, not its text.
+ * The pair on each chip, in strip order. An off-venue chip prepends its venue
+ * in its own node, so the pair is the button's last child, not its text.
  */
 function pairs(): string[] {
-  return chips().map((b) => b.childNodes[0]?.textContent ?? "");
+  return chips().map((b) => b.childNodes[b.childNodes.length - 1]?.textContent ?? "");
 }
 
 /** What is actually on disk, so a test can say the store did not move. */

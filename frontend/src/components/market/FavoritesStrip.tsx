@@ -192,12 +192,12 @@ export function FavoritesStrip({
                 }
                 className="cursor-grab py-0.5 pl-2 pr-1 font-medium active:cursor-grabbing"
               >
-                {f.pair}
                 {offVenue && (
-                  <span className="ml-1 font-normal text-[var(--color-text-muted)]">
+                  <span className="mr-1 font-normal text-[var(--color-text-muted)]">
                     {formatConnectorName(f.connector)}
                   </span>
                 )}
+                {f.pair}
               </button>
               {/* Unstarring where the stars are: reaching the browser to undo a
                   chip you can see would be the same three actions again. */}
