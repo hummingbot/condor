@@ -63,13 +63,13 @@ declare global {
   var IS_REACT_ACT_ENVIRONMENT: boolean;
 }
 
-function routine(name: string): RoutineInfo {
+function routine(name: string, owner?: string): RoutineInfo {
   return {
     name,
     description: name,
     is_continuous: false,
     category: "general",
-    source: "routine",
+    source: owner ? `agent:${owner}` : "routine",
     fields: {},
     last_modified: null,
     report_count: 0,
@@ -89,6 +89,8 @@ const RUN_CONTEXT = {
 async function render(props: {
   hosted?: boolean;
   runContext?: typeof RUN_CONTEXT;
+  initialSource?: string;
+  initialSourceTypeFilter?: string;
 } = {}) {
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false } },
@@ -127,6 +129,15 @@ const button = (title: string) =>
 /** The toolbar's own theme toggle, removed in READ-274. */
 const themeButton = () =>
   container.querySelector<HTMLButtonElement>('button[title^="Switch to "]');
+/** The header row's agent badge — the sidebar rows carry one of their own. */
+const agentBadge = () =>
+  container
+    .querySelector("h2")
+    ?.parentElement?.querySelector<HTMLElement>("span.uppercase")
+    ?.textContent?.trim() ?? null;
+/** What the scope select is showing. */
+const scopeSelect = () =>
+  container.querySelector<HTMLSelectElement>('select[aria-label="Routine scope"]');
 
 async function press(key: string, on: EventTarget) {
   await act(async () => {
@@ -165,17 +176,17 @@ describe("ReportBrowser hosted in the pane", () => {
 
   it("leaves the window's keys to the conversation", async () => {
     await render({ hosted: true });
-    expect(heading()).toBe("alpha check");
+    expect(heading()).toBe("Alpha Check");
 
     // What the composer sees never reaches the report list…
     await press("ArrowDown", window);
-    expect(heading()).toBe("alpha check");
+    expect(heading()).toBe("Alpha Check");
     await press("Escape", window);
     expect(closes).toBe(0);
 
     // …but the browser still answers to keys aimed at itself.
     await press("ArrowDown", browser());
-    expect(heading()).toBe("beta check");
+    expect(heading()).toBe("Beta Check");
   });
 
   it("leaves closing to the sheet", async () => {
@@ -219,7 +230,7 @@ describe("ReportBrowser on its own page", () => {
     expect(container.querySelector(".w-64")).toBeTruthy();
 
     await press("ArrowDown", window);
-    expect(heading()).toBe("beta check");
+    expect(heading()).toBe("Beta Check");
     await press("Escape", window);
     expect(closes).toBe(1);
     expect(button("Close (Esc)")).toBeTruthy();
@@ -244,5 +255,81 @@ describe("ReportBrowser on its own page", () => {
       {},
       { sessionKey: undefined, attributeTo: undefined },
     );
+  });
+});
+
+/**
+ * READ-276: the header used to name the owning agent three times in one row —
+ * the scope select, the `{agent}/` prefix the raw key carries into the `<h2>`,
+ * and the badge. The prefix is gone from the title, and the badge appears only
+ * where the select is not already naming that agent.
+ */
+describe("ReportBrowser header, for an agent-owned routine", () => {
+  const AGENT_LIST = [
+    routine("alpha_check"),
+    routine("brigado/mm_regime_detector", "brigado"),
+    routine("scout/depth_watch", "scout"),
+  ];
+
+  beforeEach(() => {
+    getRoutines.mockResolvedValue(AGENT_LIST);
+  });
+
+  it("titles the routine without its owner's slug", async () => {
+    await render({
+      initialSource: "brigado/mm_regime_detector",
+      initialSourceTypeFilter: "brigado",
+    });
+
+    // The sheet above this pane titles it the same way (DockRoutines).
+    expect(heading()).toBe("Mm Regime Detector");
+  });
+
+  it("drops the badge when the scope already names that agent", async () => {
+    await render({
+      initialSource: "brigado/mm_regime_detector",
+      initialSourceTypeFilter: "brigado",
+    });
+
+    expect(scopeSelect()?.value).toBe("brigado");
+    expect(agentBadge()).toBeNull();
+  });
+
+  it("keeps the badge when the list is mixed", async () => {
+    await render({
+      initialSource: "brigado/mm_regime_detector",
+      initialSourceTypeFilter: "all",
+    });
+
+    expect(agentBadge()).toBe("brigado");
+  });
+
+  it("keeps the badge when the pane widens itself past the picked scope", async () => {
+    // Focused on brigado's routine while the picker says scout: the pane shows
+    // "All routines" rather than hide what the reader clicked, so the badge is
+    // the only thing naming the owner.
+    await render({
+      initialSource: "brigado/mm_regime_detector",
+      initialSourceTypeFilter: "scout",
+    });
+
+    expect(scopeSelect()?.value).toBe("all");
+    expect(agentBadge()).toBe("brigado");
+  });
+
+  it("shows no badge for a library routine", async () => {
+    await render({ initialSource: "alpha_check", initialSourceTypeFilter: "all" });
+
+    expect(heading()).toBe("Alpha Check");
+    expect(agentBadge()).toBeNull();
+  });
+
+  it("still shows the owner prefix on the sidebar rows", async () => {
+    await render({ initialSourceTypeFilter: "all" });
+
+    const rows = Array.from(
+      container.querySelectorAll(".w-64 button"),
+    ).map((b) => b.textContent ?? "");
+    expect(rows.some((t) => t.includes("brigado/mm regime detector"))).toBe(true);
   });
 });

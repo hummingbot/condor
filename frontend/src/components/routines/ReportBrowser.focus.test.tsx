@@ -167,7 +167,7 @@ describe("the library's scope picker", () => {
 
   it("narrows the list, and takes the reader with it", async () => {
     await render();
-    expect(heading()).toBe("alpha check");
+    expect(heading()).toBe("Alpha Check");
 
     await act(async () => {
       scope().value = "scout";
@@ -177,7 +177,7 @@ describe("the library's scope picker", () => {
     // Narrowing to an agent whose routines exclude the open one has to move to
     // one that is in scope, or the pane shows what its own list denies.
     expect(scope().value).toBe("scout");
-    expect(heading()).toBe("scout/beta check");
+    expect(heading()).toBe("Beta Check");
   });
 });
 
@@ -205,7 +205,10 @@ describe("the library opened on one run", () => {
     // library calls it `{slug}/{name}`, and Run and Config only work on that.
     await render({ initialSource: "beta_check" });
 
-    expect(heading()).toBe("scout/beta check");
+    // The header titles the routine, not its key (READ-276) — what proves the
+    // pane resolved the spelling is the key it goes on to fetch under.
+    expect(heading()).toBe("Beta Check");
+    expect(getRoutineReports).toHaveBeenCalledWith("scout/beta_check");
   });
 
   it("opens a run that wrote no report on its own output", async () => {

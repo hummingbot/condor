@@ -22,7 +22,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { type RoutineInfo, type RoutineInstance, api } from "@/lib/api";
 import { toMs } from "@/lib/formatters";
-import { buildConfigValues, formatAgo, formatInterval, invalidateRoutineQueries, saveConfig } from "@/lib/routineUtils";
+import { buildConfigValues, formatAgo, formatInterval, formatRoutineName, invalidateRoutineQueries, saveConfig } from "@/lib/routineUtils";
 import { useViewFacts } from "@/lib/viewFacts";
 import { useServer } from "@/hooks/useServer";
 import { ReportFrame } from "./ReportFrame";
@@ -251,7 +251,18 @@ export function ReportBrowser({
     return Array.from(names).sort();
   }, [routines]);
 
-  const isAgent = activeRoutine?.source.startsWith("agent:") ?? false;
+  /**
+   * Who owns the open routine, when an agent does.
+   *
+   * The header names it only where the scope picker does not already: with the
+   * list narrowed to that agent the badge restates the control beside it, but
+   * in a mixed list — "All routines", "All agents", or the widening this pane
+   * does for a routine outside the picked scope — it is the only thing that
+   * says whose routine this is.
+   */
+  const agentOwner = activeRoutine?.source.startsWith("agent:")
+    ? activeRoutine.source.slice("agent:".length)
+    : null;
 
   // Reports for active source — poll when a scheduled instance is active
   const hasScheduledInstance = instances.some(
@@ -709,12 +720,12 @@ export function ReportBrowser({
               />
             )}
             <h2 className="truncate text-sm font-semibold text-[var(--color-text)]">
-              {activeSource.replace(/_/g, " ")}
+              {formatRoutineName(activeSource)}
             </h2>
-            {isAgent && (
+            {agentOwner && effectiveScope !== agentOwner && (
               <span className="flex items-center gap-0.5 rounded bg-purple-500/10 px-1.5 py-0.5 text-[9px] font-bold uppercase text-purple-400">
                 <Brain className="h-2.5 w-2.5" />
-                {activeRoutine?.source.replace("agent:", "")}
+                {agentOwner}
               </span>
             )}
             {sourceInstances.length > 0 && (
