@@ -1,9 +1,19 @@
-"""Tests for FEAT-043: ``fetch_venues`` reports independent venue traits.
+"""Tests for FEAT-043 / ARCH-271: ``fetch_venues`` reports independent venue traits.
 
 The trade panel used to learn one fact — "this connector is a gateway network" —
-and use it to answer four different questions. This fetcher replaces that with two
-independent traits, each with a single authority, and the property that matters
-most is the one the binary could not express:
+and use it to answer four different questions. This fetcher replaces that with
+three independent traits, each with a single authority.
+
+ARCH-271 split the second of them. ``hummingbot_market_data`` used to mean "this
+account has API keys here", which hid every venue Condor can chart but not trade
+(26 of 29 on a typical server). The candle-capable connectors are now a third
+input, ``hummingbot_market_data`` answers "the public market reads answer", and the
+new ``credentialed`` answers "the venue reached the list from a trading source" —
+credentials *or* a configured Gateway, since a Gateway network is there because a
+wallet-backed Gateway is configured and demoting it would break the LP pages.
+
+The property that matters most is still the one the original binary could not
+express:
 
 ``xrpl`` is a first-class Hummingbot connector with a real order book whose
 *charts* come from GeckoTerminal, so it lives in ``NETWORK_TO_GECKO`` — one of the
@@ -36,11 +46,15 @@ class FakeClient:
         credentials=None,
         credentials_error=None,
         available=None,
+        candles=None,
+        candles_error=None,
     ):
         self.gateway_calls = 0
+        self.candle_calls = 0
         self.gateway = self._Gateway(self)
         self.accounts = self._Accounts(self)
         self.connectors = self._Connectors(self)
+        self.market_data = self._MarketData(self)
         self._networks = networks
         self._networks_error = networks_error
         self._credentials = credentials if credentials is not None else []
@@ -48,6 +62,9 @@ class FakeClient:
         # None means "every credentialed connector is available", which is what the
         # intersection in fetch_available_cex_connectors degrades to.
         self._available = available
+        # None is a real answer the API can give; the fetcher must tolerate it.
+        self._candles = candles
+        self._candles_error = candles_error
 
     class _Gateway:
         def __init__(self, outer):
@@ -76,6 +93,18 @@ class FakeClient:
             if self._outer._available is None:
                 raise RuntimeError("connector list unavailable")
             return list(self._outer._available)
+
+    class _MarketData:
+        def __init__(self, outer):
+            self._outer = outer
+
+        async def get_available_candle_connectors(self):
+            self._outer.candle_calls += 1
+            if self._outer._candles_error is not None:
+                raise self._outer._candles_error
+            if self._outer._candles is None:
+                return None
+            return list(self._outer._candles)
 
 
 def _fetch(**kwargs):
@@ -134,12 +163,14 @@ def test_xrpl_in_both_lists_keeps_its_hummingbot_market_data():
         "name": "xrpl",
         "hummingbot_market_data": True,
         "clmm_lp": False,
+        "credentialed": True,
     }
     # And the real gateway network in the same answer is unaffected.
     assert venues["solana-mainnet-beta"] == {
         "name": "solana-mainnet-beta",
         "hummingbot_market_data": False,
         "clmm_lp": True,
+        "credentialed": True,
     }
 
 
@@ -154,6 +185,7 @@ def test_xrpl_credentialed_and_absent_from_gateway_is_a_plain_connector():
     )
     assert venues["xrpl"]["hummingbot_market_data"] is True
     assert venues["xrpl"]["clmm_lp"] is False
+    assert venues["xrpl"]["credentialed"] is True
 
 
 # ── Trait composition ─────────────────────────────────────────────────────────
@@ -171,6 +203,7 @@ def test_a_credentialed_connector_has_market_data_and_no_lp():
         "name": "binance",
         "hummingbot_market_data": True,
         "clmm_lp": False,
+        "credentialed": True,
     }
     assert venues["binance_perpetual"]["hummingbot_market_data"] is True
 
@@ -181,6 +214,7 @@ def test_a_gateway_network_has_lp_and_no_market_data():
         "name": "solana-mainnet-beta",
         "hummingbot_market_data": False,
         "clmm_lp": True,
+        "credentialed": True,
     }
 
 
@@ -191,6 +225,7 @@ def test_a_gateway_network_with_no_clmm_venue_gets_no_lp():
         "name": "avalanche",
         "hummingbot_market_data": False,
         "clmm_lp": False,
+        "credentialed": True,
     }
 
 
@@ -198,14 +233,71 @@ def test_venues_are_sorted_and_deduplicated():
     venues = _fetch(
         credentials=["kucoin", "binance"],
         available=["kucoin", "binance"],
+        candles=["binance", "okx"],
         networks={"networks": ["solana-mainnet-beta", {"id": "base-mainnet"}]},
     )
     assert [v["name"] for v in venues] == [
         "base-mainnet",
         "binance",
         "kucoin",
+        "okx",
         "solana-mainnet-beta",
     ]
+
+
+# ── The candle-capable half (ARCH-271) ────────────────────────────────────────
+
+
+def test_a_candle_only_venue_is_chartable_but_not_credentialed():
+    """The 26 venues the old credentials-only list hid.
+
+    ``binance`` answers tickers, order book, trading rules and prices without any
+    key on the server, so it belongs in the dropdown — as a read-only venue.
+    """
+    venues = _by_name(_fetch(candles=["binance", "okx"]))
+    assert venues["binance"] == {
+        "name": "binance",
+        "hummingbot_market_data": True,
+        "clmm_lp": False,
+        "credentialed": False,
+    }
+    assert venues["okx"]["hummingbot_market_data"] is True
+    assert venues["okx"]["credentialed"] is False
+
+
+def test_a_credentialed_venue_that_is_also_candle_capable_stays_credentialed():
+    """The overlap is the common case; it must not demote the venue."""
+    venues = _by_name(
+        _fetch(
+            credentials=["binance"],
+            available=["binance"],
+            candles=["binance", "kraken"],
+        )
+    )
+    assert venues["binance"]["credentialed"] is True
+    assert venues["binance"]["hummingbot_market_data"] is True
+    assert venues["kraken"]["credentialed"] is False
+
+
+def test_a_gateway_network_in_the_candle_list_keeps_its_traits():
+    """Reaching the list twice never costs a venue a trait."""
+    venues = _by_name(
+        _fetch(
+            candles=["solana-mainnet-beta"],
+            networks={"networks": ["solana-mainnet-beta"]},
+        )
+    )
+    assert venues["solana-mainnet-beta"] == {
+        "name": "solana-mainnet-beta",
+        "hummingbot_market_data": True,
+        "clmm_lp": True,
+        "credentialed": True,
+    }
+
+
+def test_tolerates_a_missing_candle_list():
+    assert _fetch(candles=[]) == []
+    assert _fetch(candles=None) == []
 
 
 # ── The gateway half still normalizes and gates ───────────────────────────────
@@ -294,6 +386,60 @@ def test_strict_reraises_a_credentials_failure():
         asyncio.run(fetch_venues(client, strict=True))
 
 
+def test_a_candle_failure_still_yields_the_credentialed_and_gateway_venues(caplog):
+    """A dead candle-connector call must never empty the dropdown."""
+    client = FakeClient(
+        credentials=["binance"],
+        available=["binance"],
+        candles_error=RuntimeError("candles down"),
+        networks={"networks": ["solana-mainnet-beta"]},
+    )
+    with caplog.at_level("ERROR"):
+        venues = _by_name(asyncio.run(fetch_venues(client, strict=True)))
+    assert sorted(venues) == ["binance", "solana-mainnet-beta"]
+    assert venues["binance"]["hummingbot_market_data"] is True
+    assert venues["solana-mainnet-beta"]["credentialed"] is True
+    assert "candle connectors" in caplog.text
+
+
+def test_strict_reraises_a_candle_failure_that_would_leave_nothing():
+    client = FakeClient(
+        credentials=[],
+        available=[],
+        candles_error=RuntimeError("candles down"),
+        networks={"networks": []},
+    )
+    with pytest.raises(RuntimeError):
+        asyncio.run(fetch_venues(client, strict=True))
+
+
+def test_non_strict_swallows_a_candle_failure():
+    client = FakeClient(
+        credentials=[],
+        available=[],
+        candles_error=RuntimeError("candles down"),
+        networks={"networks": []},
+    )
+    assert asyncio.run(fetch_venues(client)) == []
+
+
+def test_non_strict_credentials_failure_degrades_to_the_candle_and_gateway_halves():
+    venues = _by_name(
+        asyncio.run(
+            fetch_venues(
+                FakeClient(
+                    credentials_error=RuntimeError("server down"),
+                    candles=["binance"],
+                    networks={"networks": ["solana-mainnet-beta"]},
+                )
+            )
+        )
+    )
+    assert venues["binance"]["hummingbot_market_data"] is True
+    assert venues["binance"]["credentialed"] is False
+    assert venues["solana-mainnet-beta"]["clmm_lp"] is True
+
+
 def test_non_strict_credentials_failure_degrades_to_the_gateway_half():
     venues = _by_name(
         asyncio.run(
@@ -357,11 +503,23 @@ def _call_route(monkeypatch, sds):
 
 def test_route_returns_the_venues(monkeypatch):
     payload = [
-        {"name": "binance", "hummingbot_market_data": True, "clmm_lp": False},
+        {
+            "name": "binance",
+            "hummingbot_market_data": True,
+            "clmm_lp": False,
+            "credentialed": True,
+        },
+        {
+            "name": "kraken",
+            "hummingbot_market_data": True,
+            "clmm_lp": False,
+            "credentialed": False,
+        },
         {
             "name": "solana-mainnet-beta",
             "hummingbot_market_data": False,
             "clmm_lp": True,
+            "credentialed": True,
         },
     ]
     assert _call_route(monkeypatch, _FakeSds(value=payload)) == {"venues": payload}

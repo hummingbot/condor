@@ -4,6 +4,7 @@ import logging
 from typing import Dict, List
 
 from condor.fetchers._identifiers import validate_identifier
+from condor.fetchers.market_data import fetch_candle_connectors
 from condor.pool_data import NETWORK_TO_GECKO, network_has_clmm
 
 logger = logging.getLogger(__name__)
@@ -104,28 +105,39 @@ async def fetch_venues(
 ) -> List[Dict]:
     """Venues the trade panel can offer, each with its independent traits.
 
-    Returns ``[{"name", "hummingbot_market_data", "clmm_lp"}, ...]`` sorted by name.
-    The two traits are *independent facts about the venue*, each with exactly one
-    authority, because the panel's four decisions (which executor tabs, which
-    execution strategies, whether the order-book/rules/price endpoints are called,
-    where the current price comes from) are four different questions. Answering them
-    from a single ``cex``/``dex`` membership test is what this shape replaces.
+    Returns ``[{"name", "hummingbot_market_data", "clmm_lp", "credentialed"}, ...]``
+    sorted by name, over the union of three sources: the account's credentialed
+    connectors, the candle-capable connectors and the chartable gateway networks.
+    The three traits are *independent facts about the venue*, each with exactly one
+    authority, because the panel's decisions (which executor tabs, which execution
+    strategies, whether the order-book/rules/price endpoints are called, where the
+    current price comes from, whether an order can be placed at all) are different
+    questions. Answering them from a single ``cex``/``dex`` membership test — or
+    from "does this account have keys here" — is what this shape replaces.
 
-    ``hummingbot_market_data``: the venue came from the credentialed connector list.
-    Credentials are per Hummingbot connector, so ``solana-mainnet-beta`` can never
-    appear there and presence is positive evidence that ``/market/trading-rules``,
-    ``/market/order-book``, ``/market/tickers`` and ``/market/prices`` answer.
-    **A venue in both input lists is a Hummingbot connector.** That is the ``xrpl``
-    guarantee and this is the only place it is expressed: ``xrpl`` is a first-class
-    connector with a real order book whose *charts* come from GeckoTerminal, so it
-    sits in ``NETWORK_TO_GECKO`` and would appear in the gateway half the day a
-    Gateway version reports it — without this rule it would silently lose its order
-    book, its trading rules and every strategy but MARKET.
+    ``hummingbot_market_data``: ``/market/tickers``, ``/market/order-book``,
+    ``/market/trading-rules`` and ``/market/prices`` answer for this venue. Both a
+    credentialed connector and a candle-capable one qualify: those endpoints are
+    public reads and need no keys, which is why the candle list is an input here and
+    not merely a chart detail. **A venue in the credentialed list is a Hummingbot
+    connector whatever else it is in.** That is the ``xrpl`` guarantee and this is
+    the only place it is expressed: ``xrpl`` is a first-class connector with a real
+    order book whose *charts* come from GeckoTerminal, so it sits in
+    ``NETWORK_TO_GECKO`` and would appear in the gateway half the day a Gateway
+    version reports it — without this rule it would silently lose its order book,
+    its trading rules and every strategy but MARKET.
 
     ``clmm_lp``: the venue is a gateway network *and* its gecko chain hosts a CLMM
     venue (``pool_data.network_has_clmm``), not merely that it is a gateway network.
     That is what keeps an order-book venue from being offered an LP tab it cannot
     honor.
+
+    ``credentialed``: the venue reached the list from a *trading* source — account
+    credentials or a configured Gateway — rather than from the candle list alone.
+    A gateway network counts: it is there because a wallet-backed Gateway is
+    configured, and demoting every gateway network to read-only would break the LP
+    pages that trade fine today. Whether a Gateway network has a usable *wallet* is
+    a separate question and deliberately not asked here.
 
     The candle source (CandlesFactory vs GeckoTerminal) is deliberately *not* a
     field: the server already forks on it internally and no UI decision needs it.
@@ -133,10 +145,10 @@ async def fetch_venues(
     Args:
         strict: Raise instead of reporting a venue-less server, so a failure is
             never cached as "there is nothing here". Credentials are load-bearing,
-            so their failure always re-raises under ``strict``. A gateway failure
-            only re-raises when it would leave the list empty: losing the DEX half
-            must not empty the whole dropdown, and a list that still carries the
-            credentialed venues is not a cached lie.
+            so their failure always re-raises under ``strict``. A gateway or
+            candle-connector failure only re-raises when it would leave the list
+            empty: losing one source must not empty the whole dropdown, and a list
+            that still carries the other sources' venues is not a cached lie.
     """
     # Credentials first: under strict this raises, and there is no point asking the
     # gateway about a server we cannot describe at all.
@@ -144,25 +156,34 @@ async def fetch_venues(
         client, account_name=account_name, strict=strict
     )
 
-    gateway_error = None
+    degraded_error = None
     networks: List[str] = []
     try:
         networks = await _chartable_gateway_networks(client)
     except Exception as e:
-        gateway_error = e
+        degraded_error = e
         logger.error("Error fetching gateway networks: %s", e, exc_info=True)
+
+    candles: List[str] = []
+    try:
+        candles = await fetch_candle_connectors(client) or []
+    except Exception as e:
+        degraded_error = degraded_error or e
+        logger.error("Error fetching candle connectors: %s", e, exc_info=True)
 
     credentialed = set(connectors)
     gateway = set(networks)
+    candle_capable = set(candles)
     venues = [
         {
             "name": name,
-            "hummingbot_market_data": name in credentialed,
+            "hummingbot_market_data": name in credentialed or name in candle_capable,
             "clmm_lp": name in gateway and network_has_clmm(name),
+            "credentialed": name in credentialed or name in gateway,
         }
-        for name in sorted(credentialed | gateway)
+        for name in sorted(credentialed | candle_capable | gateway)
     ]
 
-    if strict and gateway_error is not None and not venues:
-        raise gateway_error
+    if strict and degraded_error is not None and not venues:
+        raise degraded_error
     return venues
