@@ -57,6 +57,19 @@ function chipRow(index: number): HTMLElement {
   return container.querySelectorAll("span[draggable]")[index] as HTMLElement;
 }
 
+/**
+ * The pair on each chip, in strip order. An off-venue chip appends its venue in
+ * a second node, so the pair is the button's first child, not its text.
+ */
+function pairs(): string[] {
+  return chips().map((b) => b.childNodes[0]?.textContent ?? "");
+}
+
+/** What is actually on disk, so a test can say the store did not move. */
+function stored(): unknown {
+  return JSON.parse(localStorage.getItem(MARKET_FAVORITES_KEY)!);
+}
+
 function altArrow(el: HTMLElement, key: string, altKey = true) {
   el.dispatchEvent(
     new KeyboardEvent("keydown", { key, altKey, bubbles: true, cancelable: true }),
@@ -220,5 +233,120 @@ describe("FavoritesStrip", () => {
     expect(JSON.parse(localStorage.getItem(MARKET_FAVORITES_KEY)!)).toEqual([
       { server: "alpha", connector: "binance", pair: "BTC-USDT" },
     ]);
+  });
+
+  /**
+   * A strip whose render order is not its storage order.
+   *
+   * Storage: BTC-BRL, SOL-USDC (kucoin), BTC-USDT, ETH-USDT (hyperliquid).
+   * On binance that renders BTC-BRL, BTC-USDT | SOL-USDC, ETH-USDT — so the
+   * chip at render slot 1 lives at storage index 2, and any handler that hands
+   * `reorder` the rendered slot moves kucoin's star instead.
+   */
+  const INTERLEAVED = [
+    { server: "alpha", connector: "binance", pair: "BTC-BRL" },
+    { server: "alpha", connector: "kucoin", pair: "SOL-USDC" },
+    { server: "alpha", connector: "binance", pair: "BTC-USDT" },
+    { server: "alpha", connector: "hyperliquid", pair: "ETH-USDT" },
+  ];
+
+  it("puts this venue's chips first, keeping drag order inside each group", async () => {
+    seed(INTERLEAVED);
+    await render("alpha", "binance");
+
+    expect(pairs()).toEqual(["BTC-BRL", "BTC-USDT", "SOL-USDC", "ETH-USDT"]);
+    // Grouping is a view, not a write: the stored order is untouched.
+    expect(stored()).toEqual(INTERLEAVED);
+  });
+
+  it("re-groups on a venue change without touching storage", async () => {
+    seed(INTERLEAVED);
+    await render("alpha", "binance");
+    expect(pairs()).toEqual(["BTC-BRL", "BTC-USDT", "SOL-USDC", "ETH-USDT"]);
+
+    await render("alpha", "kucoin", "SOL-USDC");
+    expect(pairs()).toEqual(["SOL-USDC", "BTC-BRL", "BTC-USDT", "ETH-USDT"]);
+    expect(stored()).toEqual(INTERLEAVED);
+  });
+
+  it("marks where this venue ends, and only when there is something after it", async () => {
+    seed(INTERLEAVED);
+    await render("alpha", "binance");
+
+    const bars = container.querySelectorAll('[role="separator"]');
+    expect(bars.length).toBe(1);
+    // Immediately before the first off-venue chip, inside the same row.
+    expect(bars[0].nextElementSibling).toBe(chipRow(2));
+  });
+
+  it("draws no boundary when every chip is on this venue", async () => {
+    seed([
+      { server: "alpha", connector: "binance", pair: "SOL-USDC" },
+      { server: "alpha", connector: "binance", pair: "BTC-USDT" },
+    ]);
+    await render("alpha", "binance");
+
+    expect(container.querySelectorAll('[role="separator"]').length).toBe(0);
+  });
+
+  it("draws no boundary when no chip is on this venue", async () => {
+    seed(INTERLEAVED);
+    await render("alpha", "okx");
+
+    expect(pairs()).toEqual(["BTC-BRL", "SOL-USDC", "BTC-USDT", "ETH-USDT"]);
+    expect(container.querySelectorAll('[role="separator"]').length).toBe(0);
+  });
+
+  it("drags the chip you grabbed, not the one at that storage slot", async () => {
+    seed(INTERLEAVED);
+    await render("alpha", "binance");
+
+    // Drag BTC-USDT (render slot 1, storage index 2) onto BTC-BRL.
+    await act(async () => drag(chipRow(1), chipRow(0)));
+
+    expect(pairs()).toEqual(["BTC-USDT", "BTC-BRL", "SOL-USDC", "ETH-USDT"]);
+    // The off-venue stars are exactly where they were: only BTC-USDT moved.
+    expect(stored()).toEqual([
+      { server: "alpha", connector: "binance", pair: "BTC-USDT" },
+      { server: "alpha", connector: "binance", pair: "BTC-BRL" },
+      { server: "alpha", connector: "kucoin", pair: "SOL-USDC" },
+      { server: "alpha", connector: "hyperliquid", pair: "ETH-USDT" },
+    ]);
+  });
+
+  it("Alt-moves the chip that has focus, not the one at that storage slot", async () => {
+    seed(INTERLEAVED);
+    await render("alpha", "binance");
+
+    await act(async () => altArrow(chips()[1], "ArrowLeft"));
+
+    expect(pairs()).toEqual(["BTC-USDT", "BTC-BRL", "SOL-USDC", "ETH-USDT"]);
+    expect(stored()).toEqual([
+      { server: "alpha", connector: "binance", pair: "BTC-USDT" },
+      { server: "alpha", connector: "binance", pair: "BTC-BRL" },
+      { server: "alpha", connector: "kucoin", pair: "SOL-USDC" },
+      { server: "alpha", connector: "hyperliquid", pair: "ETH-USDT" },
+    ]);
+  });
+
+  it("Alt-moves an off-venue chip within its own group", async () => {
+    seed(INTERLEAVED);
+    await render("alpha", "binance");
+
+    // ETH-USDT (render slot 3, storage index 3) left past SOL-USDC.
+    await act(async () => altArrow(chips()[3], "ArrowLeft"));
+    expect(pairs()).toEqual(["BTC-BRL", "BTC-USDT", "ETH-USDT", "SOL-USDC"]);
+  });
+
+  it("does not walk a chip across the group boundary", async () => {
+    seed(INTERLEAVED);
+    await render("alpha", "binance");
+
+    // Last on-venue chip pushed right, first off-venue chip pushed left.
+    await act(async () => altArrow(chips()[1], "ArrowRight"));
+    await act(async () => altArrow(chips()[2], "ArrowLeft"));
+
+    expect(pairs()).toEqual(["BTC-BRL", "BTC-USDT", "SOL-USDC", "ETH-USDT"]);
+    expect(stored()).toEqual(INTERLEAVED);
   });
 });
