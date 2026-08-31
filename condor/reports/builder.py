@@ -35,6 +35,41 @@ _INTERACTIVE_SECTION_TYPES = {
 }
 
 
+_CELL_LINK_RE = re.compile(
+    r"^\[([^\]\n]+)\]\((https?://[^)\s]+)\)(\s*\S*)?$"
+)
+_HTML_ANCHOR_RE = re.compile(
+    r'^<a href="(https?://[^"]+)"[^>]*>(.*?)</a>$',
+    re.DOTALL,
+)
+
+
+def _escape_cell(value: object) -> str:
+    """Escape a table cell; a full ``[label](url)`` markdown link or an
+    existing ``<a href="https://…">…</a>`` anchor becomes a clickable link.
+
+    Only a cell whose whole value is a markdown link (an optional trailing
+    marker such as `` ⚠`` is allowed) or a well-formed http(s) anchor with
+    tag-free content is converted to an ``<a>``. Everything else is escaped
+    verbatim, so existing plain-text cells render unchanged.
+    """
+    text = str(value)
+    m = _CELL_LINK_RE.match(text)
+    if m:
+        return (
+            f'<a href="{html.escape(m.group(2), quote=True)}" '
+            f'target="_blank" rel="noopener noreferrer">'
+            f"{html.escape(m.group(1))}</a>{html.escape(m.group(3) or '')}"
+        )
+    m = _HTML_ANCHOR_RE.match(text)
+    if m and "<" not in m.group(2) and ">" not in m.group(2):
+        return (
+            f'<a href="{html.escape(m.group(1), quote=True)}" '
+            f'target="_blank" rel="noopener noreferrer">{m.group(2)}</a>'
+        )
+    return html.escape(text)
+
+
 class ReportBuilder:
     """Compose a report section by section, then ``save()`` it.
 
@@ -561,7 +596,7 @@ class ReportBuilder:
         body_rows = []
         for row in rows:
             cells = "".join(
-                f"<td>{html.escape(str(row.get(column, '')))}</td>"
+                f"<td>{_escape_cell(row.get(column, ''))}</td>"
                 for column in columns
             )
             body_rows.append(f"<tr>{cells}</tr>")

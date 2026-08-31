@@ -135,6 +135,52 @@ def escape_markdown_v2_code(text: str) -> str:
     return str(text).replace("\\", "\\\\").replace("`", "\\`")
 
 
+def format_routine_result(result: str, max_len: int = 400) -> str:
+    """Format a routine result for a Telegram MarkdownV2 message.
+
+    Results containing ``[label](url)`` links, ``**bold**`` or ``*italic*``
+    markers are rendered outside a code block (which would suppress them),
+    keeping the links clickable and the emphasis rendered, with everything
+    else escaped. Results with none of these keep the monospace code block,
+    so existing routines render exactly as before.
+    """
+    result = str(result)[:max_len]
+    if not re.search(
+        r"\[[^\]\n]+\]\(https?://[^)\s]+\)|\*\*[^*\n]+\*\*|\*[^*\n]+\*",
+        result,
+    ):
+        return f"```\n{escape_markdown_v2_code(result)}\n```"
+    return _markdown_v2_with_links(result)
+
+
+def _markdown_v2_with_links(text: str) -> str:
+    """Escape text for MarkdownV2 but keep [label](url) links, **bold** and
+    *italic* markers rendered instead of escaped."""
+    pattern = re.compile(
+        r"(\[[^\]\n]+\]\(https?://[^)\s]+\)|\*\*[^*\n]+\*\*|\*[^*\n]+\*)"
+    )
+    out = []
+    for part in pattern.split(text):
+        if not part:
+            continue
+        if part.startswith("[") and "](http" in part:
+            label, url = part[1:].split("](", 1)
+            if url.endswith(")"):
+                url = url[:-1]
+            # A backslash in the destination would escape the closing ")"
+            # (or the next char) in MarkdownV2 and make Telegram reject the
+            # whole message, so double it to render literally.
+            escaped_url = url.replace("\\", "\\\\")
+            out.append(f"[{escape_markdown_v2(label)}]({escaped_url})")
+        elif part.startswith("**") and part.endswith("**"):
+            out.append(f"*{escape_markdown_v2(part[2:-2])}*")
+        elif part.startswith("*") and part.endswith("*"):
+            out.append(f"_{escape_markdown_v2(part[1:-1])}_")
+        else:
+            out.append(escape_markdown_v2(part))
+    return "".join(out)
+
+
 def format_number(value: float, decimals: int = 2) -> str:
     """Format a number with commas and specified decimals"""
     if value >= 1000000:

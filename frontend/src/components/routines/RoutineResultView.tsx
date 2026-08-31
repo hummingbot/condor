@@ -7,6 +7,41 @@ interface Props {
   instance: RoutineInstance;
 }
 
+const CELL_LINK_RE = /^\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)(\s*\S*)?$/;
+const HTML_ANCHOR_RE = /^<a href="(https?:\/\/[^"]+)"[^>]*>(.*?)<\/a>$/;
+
+function formatCellValue(val: unknown) {
+  if (typeof val === "number") {
+    // Numbers keep their exact formatting — a link can be a numeric-looking
+    // string while only strings matching the full [label](url) pattern change.
+    return val.toFixed(val % 1 === 0 ? 0 : 2);
+  }
+  const s = String(val ?? "");
+  const m = CELL_LINK_RE.exec(s);
+  if (m) {
+    // Same [label](url) convention as report table cells (ReportBuilder).
+    return (
+      <>
+        <a href={m[2]} target="_blank" rel="noopener noreferrer" className="underline hover:opacity-80">
+          {m[1]}
+        </a>
+        {m[3] ?? ""}
+      </>
+    );
+  }
+  const m2 = HTML_ANCHOR_RE.exec(s);
+  if (m2 && !m2[2].includes("<") && !m2[2].includes(">")) {
+    // Existing HTML anchors (e.g. the pool scanner's Link cell) render as
+    // links too, mirroring ReportBuilder's _escape_cell.
+    return (
+      <a href={m2[1]} target="_blank" rel="noopener noreferrer" className="underline hover:opacity-80">
+        {m2[2]}
+      </a>
+    );
+  }
+  return s;
+}
+
 interface KpiSection {
   type: "kpi";
   label: string;
@@ -141,7 +176,7 @@ export function RoutineResultView({ instance }: Props) {
                         : "";
                     return (
                       <td key={col} className={`px-3 py-1.5 font-mono ${numColor}`}>
-                        {isNum ? (val as number).toFixed(val % 1 === 0 ? 0 : 2) : String(val ?? "")}
+                        {formatCellValue(val)}
                       </td>
                     );
                   })}

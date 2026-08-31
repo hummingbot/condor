@@ -9,6 +9,7 @@ import pytest
 
 import condor.reports as reports
 from condor.reports import rendering, store
+from condor.reports.builder import _escape_cell
 from condor.reports.footprint import (
     build_estimated_footprint_figure,
     candle_timestamps,
@@ -43,6 +44,37 @@ def test_markdown_preserves_single_newlines():
 
     assert rendered.count("<br") == 2
     assert "<strong>Market Analysis</strong>" in rendered
+
+
+def test_escape_cell_markdown_link_becomes_anchor():
+    out = _escape_cell("[GeckoTerminal](https://www.geckoterminal.com/solana)")
+    assert 'href="https://www.geckoterminal.com/solana"' in out
+    assert 'target="_blank"' in out
+    assert ">GeckoTerminal</a>" in out
+
+
+def test_escape_cell_existing_html_anchor_passes_through():
+    # The pool scanner already emits HTML anchors in its Link cell.
+    out = _escape_cell(
+        '<a href="https://www.geckoterminal.com/solana/pools/abc" '
+        'target="_blank" title="Open on Meteora">&#x1F517;</a>'
+    )
+    assert 'href="https://www.geckoterminal.com/solana/pools/abc"' in out
+    assert 'target="_blank"' in out
+    assert "&#x1F517;" in out
+
+
+def test_escape_cell_anchor_with_tags_is_escaped():
+    # An anchor whose content carries raw tags must not pass through.
+    out = _escape_cell('<a href="https://x.example">ok<script>alert(1)</script></a>')
+    assert "<script>" not in out
+    assert "&lt;script&gt;" in out
+
+
+def test_escape_cell_plain_text_is_escaped():
+    out = _escape_cell("<b>bold</b> & more")
+    assert "<b>" not in out
+    assert "&lt;b&gt;bold&lt;/b&gt;" in out
 
 
 def test_interactive_report_embeds_safe_runtime(reports_dir):

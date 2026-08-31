@@ -77,7 +77,7 @@ export function ReportFrame({
       srcDoc={html}
       className={`h-full w-full border-0 ${className}`}
       title={title}
-      sandbox="allow-scripts allow-popups allow-downloads"
+      sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-downloads"
     />
   );
 }
