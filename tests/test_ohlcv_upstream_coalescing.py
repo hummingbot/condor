@@ -33,16 +33,19 @@ def _clean_state():
 
 
 class _CountingGecko:
-    """Counts get_ohlcv calls and holds them open until the gate is released."""
+    """Counts get_ohlcv calls, records their limits, and holds them open until
+    the gate is released."""
 
     def __init__(self, gate=None, fail=False):
         self.calls = 0
+        self.limits: list[int] = []
         self._gate = gate
         self._fail = fail
 
     async def __call__(self, method, *args, **kwargs):
         assert method == "get_ohlcv"
         self.calls += 1
+        self.limits.append(kwargs.get("limit"))
         if self._gate is not None:
             await self._gate
         if self._fail:
@@ -156,8 +159,15 @@ def test_a_live_poll_skips_the_cache_read_but_refreshes_it(monkeypatch):
     assert third == 2, "the live poll bypasses the cached copy"
 
 
-def test_a_different_window_is_not_coalesced(monkeypatch):
-    """Same pool, different candle count: two genuinely different answers."""
+def test_two_windows_on_one_pool_share_one_series(monkeypatch):
+    """Same pool, different candle counts: one request, sliced two ways.
+
+    This used to cost two requests — the cache was keyed by the caller's window,
+    so a 50-candle chart and a 100-candle chart were "different answers" even
+    though the second is a superset of the first. They are one series now: the
+    cold fetch buys the full GECKO_OHLCV_MAX either caller could possibly want,
+    and each slices its own window out of it.
+    """
 
     async def scenario():
         gate = asyncio.get_running_loop().create_future()
@@ -173,10 +183,15 @@ def test_a_different_window_is_not_coalesced(monkeypatch):
         for _ in range(6):
             await asyncio.sleep(0)
         gate.set_result(None)
-        await asyncio.gather(*tasks)
-        return gecko.calls
+        results = await asyncio.gather(*tasks)
+        return gecko.calls, gecko.limits, results
 
-    assert asyncio.run(scenario()) == 2
+    calls, limits, results = asyncio.run(scenario())
+    assert calls == 1, "one pool at one timeframe is one series, not two windows"
+    assert limits == [
+        pool_data.GECKO_OHLCV_MAX
+    ], "a request costs the same whatever its limit, so a cold series buys the max"
+    assert all(err is None and rows == ROWS for rows, err in results)
 
 
 def test_a_failing_fetch_reaches_every_waiter_and_is_not_cached(monkeypatch):

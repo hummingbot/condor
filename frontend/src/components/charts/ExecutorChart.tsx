@@ -12,6 +12,7 @@ import {
   type ExecutorOverlay,
 } from "@/lib/executor-overlays";
 import { escapeHtml, formatCompactUsd, tsToSeconds } from "@/lib/formatters";
+import { geckoIntervalForSpan } from "@/lib/gecko-candles";
 import { candlesQuery } from "@/lib/queryClient";
 import { getThemeColors, pnlHexColor, sideColor } from "@/lib/theme-colors";
 
@@ -59,7 +60,7 @@ export function ExecutorChart({
   executors,
   connector,
   tradingPair,
-  interval = "1m",
+  interval: requestedInterval,
   height = 350,
   snapshots,
   onSnapshotClick,
@@ -96,6 +97,18 @@ export function ExecutorChart({
   // to GeckoTerminal, since these connectors have no CEX candle feed (which is
   // what surfaced as "Failed to load candles").
   const poolAddress = useMemo(() => getPoolAddress(executors), [executors]);
+  // A pool chart's interval is a budget decision, not a taste one: GeckoTerminal
+  // caps a response at 1000 candles and trims the *oldest*, so a week-long LP
+  // position drawn at 1m loses its own entry and shows the last ~16h. Size the
+  // candle to the executor's window instead, so one request covers it whole. CEX
+  // candles have no such cap — they keep the 1m default.
+  const interval = useMemo(() => {
+    if (requestedInterval) return requestedInterval;
+    if (!poolAddress) return "1m";
+    return geckoIntervalForSpan(
+      timeRange.end + paddingSeconds - (timeRange.start - paddingSeconds),
+    );
+  }, [requestedInterval, poolAddress, timeRange]);
   const { startTime, endTime, queryKey } = candlesQuery(
     server,
     connector,
@@ -505,9 +518,10 @@ export function ExecutorChart({
           ]);
           segmentSeriesRef.current.push(top);
 
-          // Bottom edge (start_price) — dashed
+          // Bottom edge (start_price) — solid, matching the top edge: both are
+          // bounds of the same grid, so neither gets a style of its own.
           const bottom = chart.addSeries(mod.LineSeries, {
-            color: boxColor, lineWidth: 2, lineStyle: mod.LineStyle.Dashed,
+            color: boxColor, lineWidth: 2,
             priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
           });
           bottom.setData([
