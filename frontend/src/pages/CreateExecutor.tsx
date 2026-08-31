@@ -739,7 +739,7 @@ export function CreateExecutor() {
       </div>
 
       {/* This server's starred markets — one click to the chart, no overlay. */}
-      {caps.hasOrderBook && (
+      {caps.hasOrderBook && !browserOpen && (
         <FavoritesStrip
           server={server}
           connector={connector}
