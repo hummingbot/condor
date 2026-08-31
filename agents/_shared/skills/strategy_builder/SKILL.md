@@ -111,6 +111,12 @@ the model, start it, confirm it's running, and give the user the monitoring comm
 2. `control_agent(action="list")` — running loop instances, with their status.
 3. `trading_agent_journal_read(agent_id=…, section="summary"|"runs"|"run:N")`.
 
+**Operating a loop that is already running — pausing it, resuming it, ending it — is the
+`operate_your_loop` playbook, not this one.** Read it
+(`manage_skill(action="read", name="operate_your_loop")`) before stopping anything: `stop`
+halts the ticks and leaves the positions open, `shutdown` winds them down first, and picking
+the wrong one strands live capital. This playbook ends at launch.
+
 ## Reference
 
 **Model:** the strategy's `agent_key` defaults to yours; override per launch with
