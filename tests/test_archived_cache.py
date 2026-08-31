@@ -1,6 +1,7 @@
 """Archived-bot performance cache is bounded and single-flight (PERF-185).
 
-condor/web/routes/archived.py used to keep two unbounded module-level dicts —
+The archived-run fetcher (then still inside condor/web/routes/archived.py) used
+to keep two unbounded module-level dicts —
 one full ``ArchivedBotPerformance`` (up to ~5000 PnL points) plus a duplicate
 executor list per (server, db_path) ever viewed — for the process lifetime, and
 its check-then-fetch had no in-flight coalescing, so concurrent cold-cache
@@ -13,7 +14,7 @@ cached responses identical to fresh ones.
 
 import asyncio
 
-from condor.web.routes import archived
+from condor.fetchers import archived_run as archived
 
 
 class FakeArchivedBots:
@@ -75,7 +76,7 @@ def test_cache_is_bounded_lru():
 
     async def run():
         for i in range(cap + 5):
-            await archived._fetch_and_cache_performance(client, "srv", f"db{i}.sqlite")
+            await archived.fetch_archived_run(client, "srv", f"db{i}.sqlite")
 
     asyncio.run(run())
 
@@ -95,10 +96,10 @@ def test_lru_hit_refreshes_recency():
 
     async def run():
         for i in range(cap):
-            await archived._fetch_and_cache_performance(client, "srv", f"db{i}.sqlite")
+            await archived.fetch_archived_run(client, "srv", f"db{i}.sqlite")
         # Touch the oldest entry, then overflow by one
-        await archived._fetch_and_cache_performance(client, "srv", "db0.sqlite")
-        await archived._fetch_and_cache_performance(client, "srv", "extra.sqlite")
+        await archived.fetch_archived_run(client, "srv", "db0.sqlite")
+        await archived.fetch_archived_run(client, "srv", "extra.sqlite")
 
     asyncio.run(run())
 
@@ -117,8 +118,8 @@ def test_concurrent_first_requests_share_one_fetch():
 
     async def run():
         return await asyncio.gather(
-            archived._fetch_and_cache_performance(client, "srv", "db.sqlite"),
-            archived._fetch_and_cache_performance(client, "srv", "db.sqlite"),
+            archived.fetch_archived_run(client, "srv", "db.sqlite"),
+            archived.fetch_archived_run(client, "srv", "db.sqlite"),
         )
 
     first, second = asyncio.run(run())
@@ -137,11 +138,11 @@ def test_executors_stored_once_inside_performance_entry():
     client = FakeClient()
 
     perf = asyncio.run(
-        archived._fetch_and_cache_performance(client, "srv", "db.sqlite")
+        archived.fetch_archived_run(client, "srv", "db.sqlite")
     )
 
     assert not hasattr(archived, "_executors_cache")
-    cached = archived._cache_get(("srv", "db.sqlite"))
+    cached = archived.cached_run("srv", "db.sqlite")
     assert cached is perf
     assert cached.executors is perf.executors
     assert len(perf.executors) == 1
@@ -152,16 +153,16 @@ def test_cached_response_identical_to_fresh():
     """A cached answer matches a fresh fetch of the same db_path exactly."""
     _reset_caches()
     fresh = asyncio.run(
-        archived._fetch_and_cache_performance(FakeClient(), "srv", "db.sqlite")
+        archived.fetch_archived_run(FakeClient(), "srv", "db.sqlite")
     )
     cached = asyncio.run(
-        archived._fetch_and_cache_performance(FakeClient(), "srv", "db.sqlite")
+        archived.fetch_archived_run(FakeClient(), "srv", "db.sqlite")
     )
     assert cached is fresh  # served from cache, no refetch
 
     _reset_caches()
     refetched = asyncio.run(
-        archived._fetch_and_cache_performance(FakeClient(), "srv", "db.sqlite")
+        archived.fetch_archived_run(FakeClient(), "srv", "db.sqlite")
     )
     assert refetched.model_dump() == fresh.model_dump()
     _reset_caches()

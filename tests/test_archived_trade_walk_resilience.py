@@ -15,7 +15,7 @@ import asyncio
 
 import pytest
 
-from condor.web.routes import archived
+from condor.fetchers import archived_run as archived
 
 TRADES = [
     {

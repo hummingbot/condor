@@ -58,7 +58,7 @@ _PERF_TTL = 30.0  # seconds
 # Only ids that are inactive (no registered engine, not the newest session),
 # fetched successfully, with open_count == 0, and not in controller mode land
 # here; everything else keeps flowing through the 30s TTL path above.
-# Bounded LRU (same idiom as condor.web.routes.archived): each entry holds the
+# Bounded LRU (same idiom as condor.fetchers.archived_run): each entry holds the
 # full executor rows, so an unbounded dict would grow with every session ever
 # run for the life of the process. Eviction is always safe — a miss just flows
 # through the normal fetch path and re-freezes.
