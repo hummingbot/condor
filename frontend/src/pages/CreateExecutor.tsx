@@ -35,6 +35,7 @@ import { DCAConfigPanel, useDCAConfig } from "@/components/executor/DCAConfigPan
 import { LPConfigPanel } from "@/components/executor/LPConfigPanel";
 import { LP_SIDE_RANGE, useLpConfig } from "@/components/executor/lp-config";
 import { TradeBottomPane } from "@/components/trade/TradeBottomPane";
+import { ViewOnlyOverlay } from "@/components/trade/ViewOnlyOverlay";
 import { useLastClose } from "@/hooks/useCandleStore";
 import { usePairBalances } from "@/hooks/usePairBalances";
 import { useServer } from "@/hooks/useServer";
@@ -43,7 +44,7 @@ import { useMainControllerData } from "@/hooks/useMainControllerData";
 import { useResizeDrag } from "@/hooks/useResizeDrag";
 import { api } from "@/lib/api";
 import { candleStore } from "@/lib/candle-store";
-import { connectorCapabilities } from "@/lib/connector-capabilities";
+import { connectorCapabilities, orderBookVenues } from "@/lib/connector-capabilities";
 import { executorsQuery } from "@/lib/queryClient";
 import type { ExecutorType, PickSlot } from "@/components/executor/types";
 import {
@@ -198,16 +199,21 @@ export function CreateExecutor() {
   // switch its tab to Order.
   const listsReady = !!server && !venuesPending;
 
-  // Order-book venues first, then swap-only ones — the grouping ExchangeSelector
-  // renders, and it keeps allConnectors[0] (the reset fallback) a tradable venue
-  // rather than whichever chain sorts first alphabetically.
-  // Trade is for venues with an order book — whether or not the venue is
-  // decentralized: hyperliquid and xrpl belong here, solana-mainnet-beta does
-  // not. Everything Condor trades through Gateway lives on /dex instead, where
-  // the pool rather than the pair is the unit of navigation.
-  const allConnectors = useMemo(
-    () => venues.filter((v) => v.hummingbotMarketData).map((v) => v.name),
-    [venues],
+  // Every venue with an order book, credentialed ones first — see
+  // `orderBookVenues` for why both halves of that sentence are load-bearing.
+  // View-only venues are full members of this list, which is also what keeps the
+  // correction effect below from bouncing a persisted one on reload.
+  const allConnectors = useMemo(() => orderBookVenues(venues), [venues]);
+
+  // Which of them the account can actually execute on, for the selector's
+  // `Your accounts` / `View only` split. Undefined until the query resolves, so
+  // the pending list renders flat instead of flashing every venue as view-only.
+  const credentialedConnectors = useMemo(
+    () =>
+      venuesPending
+        ? undefined
+        : new Set(venues.filter((v) => v.credentialed).map((v) => v.name)),
+    [venues, venuesPending],
   );
 
 
@@ -541,6 +547,11 @@ export function CreateExecutor() {
   const createMutation = useMutation({
     mutationFn: () => {
       if (!server) throw new Error("No server");
+      // Belt to the overlay's braces: the footer is covered on a view-only
+      // venue, so this is unreachable from the UI — but the panel should not be
+      // one stray caller away from posting a create it knows the venue will
+      // reject for want of credentials.
+      if (!caps.canTrade) throw new Error(`No API keys for ${connector}`);
 
       let payload: { executor_type: string; config: Record<string, unknown> };
 
@@ -645,6 +656,7 @@ export function CreateExecutor() {
           <div className="relative border-l border-[var(--color-border)]">
             <ExchangeSelector
               connectors={allConnectors}
+              credentialed={credentialedConnectors}
               value={connector}
               onChange={(v) => gridDispatch({ type: "SET_CONNECTOR", value: v })}
             />
@@ -858,44 +870,53 @@ export function CreateExecutor() {
                 </div>
               </div>
 
-              {/* Config Panel */}
-              <div className="flex-1 overflow-y-auto">
-                {executorType === "grid" && (
-                  <GridConfigPanel state={gridState} dispatch={gridDispatch} currentPrice={currentPrice} isSpot={isSpot} quoteCurrency={pair?.split("-")[1] || "USDT"} />
-                )}
-                {executorType === "position" && (
-                  <PositionConfigPanel state={positionConfig.state} dispatch={positionConfig.dispatch} validation={positionConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
-                )}
-                {executorType === "order" && (
-                  <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} validation={orderConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} strategies={caps.orderStrategies} baseAvailable={balances.base} quoteAvailable={balances.quote} />
-                )}
-                {executorType === "dca" && (
-                  <DCAConfigPanel state={dcaConfig.state} dispatch={dcaConfig.dispatch} validation={dcaConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
-                )}
-                {executorType === "lp" && (
-                  <LPConfigPanel state={lpConfig.state} dispatch={lpConfig.dispatch} validation={lpConfig.validation} currentPrice={currentPrice} pair={pair} pool={lpConfig.pool} poolFetching={lpConfig.poolFetching} baseAvailable={balances.base} quoteAvailable={balances.quote} />
-                )}
-              </div>
-
-              {/* Sticky Create Footer */}
-              <div className="border-t border-[var(--color-border)] p-3">
-                {!activeValidation.valid && (
-                  <p className="mb-2 text-[11px] text-[var(--color-red)]">
-                    {activeValidation.errors[0]}
-                  </p>
-                )}
-                <button
-                  onClick={() => createMutation.mutate()}
-                  disabled={!activeValidation.valid || createMutation.isPending}
-                  className="flex w-full items-center justify-center gap-2 rounded-lg bg-[var(--color-primary)] px-4 py-2.5 text-sm font-bold text-white transition-colors hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {createMutation.isPending ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <Rocket className="h-4 w-4" />
+              {/* Everything the venue's credentials gate — the config form and
+                  the Create button — sits inside this one positioned box, so
+                  the view-only overlay covers exactly that and nothing else:
+                  the type tabs above it still switch, the Data tab beside it
+                  is untouched, and the panel keeps its scroll/footer split. */}
+              <div className="relative flex min-h-0 flex-1 flex-col">
+                {/* Config Panel */}
+                <div className="flex-1 overflow-y-auto">
+                  {executorType === "grid" && (
+                    <GridConfigPanel state={gridState} dispatch={gridDispatch} currentPrice={currentPrice} isSpot={isSpot} quoteCurrency={pair?.split("-")[1] || "USDT"} />
                   )}
-                  Create {TYPE_LABELS[executorType]}
-                </button>
+                  {executorType === "position" && (
+                    <PositionConfigPanel state={positionConfig.state} dispatch={positionConfig.dispatch} validation={positionConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
+                  )}
+                  {executorType === "order" && (
+                    <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} validation={orderConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} strategies={caps.orderStrategies} baseAvailable={balances.base} quoteAvailable={balances.quote} />
+                  )}
+                  {executorType === "dca" && (
+                    <DCAConfigPanel state={dcaConfig.state} dispatch={dcaConfig.dispatch} validation={dcaConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
+                  )}
+                  {executorType === "lp" && (
+                    <LPConfigPanel state={lpConfig.state} dispatch={lpConfig.dispatch} validation={lpConfig.validation} currentPrice={currentPrice} pair={pair} pool={lpConfig.pool} poolFetching={lpConfig.poolFetching} baseAvailable={balances.base} quoteAvailable={balances.quote} />
+                  )}
+                </div>
+
+                {/* Sticky Create Footer */}
+                <div className="border-t border-[var(--color-border)] p-3">
+                  {!activeValidation.valid && (
+                    <p className="mb-2 text-[11px] text-[var(--color-red)]">
+                      {activeValidation.errors[0]}
+                    </p>
+                  )}
+                  <button
+                    onClick={() => createMutation.mutate()}
+                    disabled={!caps.canTrade || !activeValidation.valid || createMutation.isPending}
+                    className="flex w-full items-center justify-center gap-2 rounded-lg bg-[var(--color-primary)] px-4 py-2.5 text-sm font-bold text-white transition-colors hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {createMutation.isPending ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Rocket className="h-4 w-4" />
+                    )}
+                    Create {TYPE_LABELS[executorType]}
+                  </button>
+                </div>
+
+                {!caps.canTrade && <ViewOnlyOverlay connector={connector} />}
               </div>
             </>
           ) : (

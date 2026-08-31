@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { ChevronDown } from "lucide-react";
 
 import { AnchoredMenu } from "@/components/ui/AnchoredMenu";
@@ -7,22 +7,50 @@ import { formatConnectorName } from "@/lib/formatters";
 /**
  * Every venue this selector lists has an order book. Gateway networks live on
  * the DEX page, where the pool — not the venue — is the unit of navigation, so
- * there is no second group here to head.
+ * there is no group for them here.
+ *
+ * The one split that *is* worth heading is credentials (ARCH-272): most of this
+ * list is chartable but not tradable, and that difference decides whether the
+ * Execute panel opens or goes view-only. A group header says so the first time
+ * it is seen and hides nothing, which a filter toggle does neither of. A group
+ * with no members is not headed at all — on a server where every venue is
+ * credentialed the list looks exactly as it did before.
  */
 interface ExchangeSelectorProps {
   connectors: string[];
+  /**
+   * The subset of `connectors` the account holds keys on; the rest are listed
+   * under `View only`. Omitted means "no idea yet" — before the venues query
+   * resolves nothing is known to be view-only, and a flat list is the honest
+   * rendering as well as the one that does not flicker.
+   */
+  credentialed?: ReadonlySet<string>;
   value: string;
   onChange: (v: string) => void;
 }
 
 export function ExchangeSelector({
   connectors,
+  credentialed,
   value,
   onChange,
 }: ExchangeSelectorProps) {
   const [open, setOpen] = useState(false);
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
   const close = useCallback(() => setOpen(false), []);
+
+  // `connectors` already arrives credentialed-first (see `orderBookVenues`), so
+  // this is a partition that preserves the caller's order, never a re-sort.
+  const [mine, viewOnly] = useMemo(() => {
+    if (!credentialed) return [connectors, [] as string[]];
+    return [
+      connectors.filter((c) => credentialed.has(c)),
+      connectors.filter((c) => !credentialed.has(c)),
+    ];
+  }, [connectors, credentialed]);
+
+  // Headers only earn their room when there is something to tell apart.
+  const grouped = mine.length > 0 && viewOnly.length > 0;
 
   return (
     <>
@@ -52,11 +80,59 @@ export function ExchangeSelector({
         role="listbox"
         className="min-w-[180px] rounded-t-none border-t-0 py-1 shadow-black/30"
       >
-        {connectors.map((c) => (
-          <ConnectorOption key={c} name={c} value={value} onSelect={onChange} onClose={close} />
-        ))}
+        <ConnectorGroup
+          label="Your accounts"
+          heading={grouped}
+          names={mine}
+          value={value}
+          onSelect={onChange}
+          onClose={close}
+        />
+        <ConnectorGroup
+          label="View only"
+          heading={grouped}
+          names={viewOnly}
+          value={value}
+          onSelect={onChange}
+          onClose={close}
+        />
       </AnchoredMenu>
     </>
+  );
+}
+
+/**
+ * One headed run of options. `role="group"` inside the listbox is what keeps the
+ * header out of the option sequence for a screen reader while still naming the
+ * run it labels; an empty group renders nothing at all rather than a bare header.
+ */
+function ConnectorGroup({
+  label,
+  heading,
+  names,
+  value,
+  onSelect,
+  onClose,
+}: {
+  label: string;
+  heading: boolean;
+  names: string[];
+  value: string;
+  onSelect: (v: string) => void;
+  onClose: () => void;
+}) {
+  if (!names.length) return null;
+  return (
+    <div role="group" aria-label={label}>
+      {heading && (
+        <div className="px-3 pb-1 pt-1.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--color-text-muted)]">
+          {label}
+        </div>
+      )}
+      {names.map((c) => (
+        <ConnectorOption key={c} name={c} value={value} onSelect={onSelect} onClose={onClose} />
+      ))}
+    </div>
   );
 }
 

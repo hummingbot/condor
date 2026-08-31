@@ -310,6 +310,14 @@ interface WireVenue {
   name: string;
   hummingbot_market_data: boolean;
   clmm_lp: boolean;
+  /**
+   * Optional only so a frontend that gets ahead of its backend degrades the safe
+   * way: a server that predates ARCH-271 omits the key, and an absent trait must
+   * read as *credentialed* (the pre-ARCH-272 status quo, where every venue the
+   * endpoint reported was one the account held keys on). Reading it as `false`
+   * would put the whole panel behind the view-only overlay.
+   */
+  credentialed?: boolean;
 }
 
 /**
@@ -2011,6 +2019,7 @@ export const api = {
         name: v.name,
         hummingbotMarketData: !!v.hummingbot_market_data,
         clmmLp: !!v.clmm_lp,
+        credentialed: v.credentialed ?? true,
       })),
     ),
 
