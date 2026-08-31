@@ -593,6 +593,10 @@ def _no_session_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("Start", callback_data="agent:start"),
             InlineKeyboardButton("Change LLM", callback_data="agent:settings"),
         ],
+        # Here too, not only beside a live session: picking the specialist is
+        # how you say which one to *raise*, and hanging it off a running
+        # subprocess made the coordinator the only thing a chat could start as.
+        [InlineKeyboardButton("Talk to", callback_data="agent:talk_to")],
         # Reachable with no session precisely because this is when it is wanted:
         # the chat whose subprocess is gone is the one whose owner is looking for
         # what they were saying yesterday.
@@ -653,6 +657,9 @@ async def show_agent_menu(
             lines.append(f"Talking to: {bound.name or bound.slug}")
         lines.append(f"LLM: {llm_label}")
         lines.append("\nStart a session or adjust settings below.")
+        # Said where the choice is made: "Start" boots whoever the chat is bound
+        # to, so the way to start it as somebody else has to be visible here.
+        lines.append('"Talk to" starts it as a specialist — or /agent <name>.')
         text = "\n".join(lines)
         keyboard = _no_session_keyboard()
 

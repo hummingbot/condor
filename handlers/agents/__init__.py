@@ -242,9 +242,107 @@ def _reclaim_default_agent(context: ContextTypes.DEFAULT_TYPE) -> str:
     return agent_key
 
 
+# What someone can type after /agent to mean the coordinator rather than a
+# specialist, so the command can unbind a chat as well as bind it.
+_CONDOR_ALIASES = {"condor", "coordinator", "default", "none", "-"}
+
+# How many agents an unresolved argument lists back. A long roster belongs in
+# the picker, which paginates; this is only meant to name the near misses.
+_ARG_LIST_LIMIT = 10
+
+
+def _normalize_agent_query(text: str) -> str:
+    """Fold the ways one agent's name gets typed into one comparable form.
+
+    Slugs are underscored and names are spaced and capitalised, so "Orca LP
+    Expert", "orca_lp_expert" and "orca-lp-expert" all have to arrive at the
+    same string before anything can be compared.
+    """
+    return "".join(c for c in text.lower() if c.isalnum())
+
+
+def _resolve_agent_argument(arg: str) -> tuple[str, str, str]:
+    """Resolve ``/agent <name>`` to ``(slug, label, error)``.
+
+    Exact matches win over partial ones, so an agent whose name is contained in
+    another's is still reachable by typing it in full. A partial match that hits
+    more than one agent is refused rather than guessed: raising the wrong
+    specialist swaps the identity, the tools, the pinned server and the memory
+    scope at once, and the only thing on screen to catch it would be the name in
+    the header. An empty slug with no error is the coordinator.
+    """
+    from condor.agents.agent import AgentStore
+
+    if arg.strip().lower() in _CONDOR_ALIASES:
+        return "", "Condor", ""
+
+    needle = _normalize_agent_query(arg)
+    if not needle:
+        return "", "", "Tell me who to talk to, e.g. /agent orca_lp_expert."
+
+    agents = AgentStore().list_specialists()
+    if not agents:
+        return (
+            "",
+            "",
+            "No agents defined yet. Create one with /agent → Condor, or from "
+            "the dashboard's Agents page.",
+        )
+
+    def _label(agent) -> str:
+        return agent.name or agent.slug
+
+    def _listing(rows) -> str:
+        shown = "\n".join(f"• {_label(a)} ({a.slug})" for a in rows[:_ARG_LIST_LIMIT])
+        rest = len(rows) - _ARG_LIST_LIMIT
+        if rest > 0:
+            shown += f"\n…and {rest} more — see /agent → Talk to."
+        return shown
+
+    keys = {
+        a.slug: (_normalize_agent_query(a.slug), _normalize_agent_query(_label(a)))
+        for a in agents
+    }
+    matches = [a for a in agents if needle in keys[a.slug]]
+    if not matches:
+        matches = [a for a in agents if any(needle in k for k in keys[a.slug])]
+
+    if not matches:
+        return "", "", f"No agent matches '{arg}'. You can talk to:\n{_listing(agents)}"
+    if len(matches) > 1:
+        return (
+            "",
+            "",
+            f"'{arg}' matches more than one agent:\n{_listing(matches)}"
+            "\n\nType the slug in full.",
+        )
+    return matches[0].slug, _label(matches[0]), ""
+
+
+async def _handle_agent_argument(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, arg: str
+) -> None:
+    """``/agent <name>`` — raise that specialist without going through the menu.
+
+    The shortcut for the chats that always belong to the same desk: two taps and
+    a page of picker collapse into the name you already know. ``/agent condor``
+    is the way back to the coordinator.
+    """
+    slug, label, error = _resolve_agent_argument(arg)
+    if error:
+        await update.message.reply_text(error)
+        return
+
+    await _raise_agent(update, context, slug, label)
+
+
 @restricted
 async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /agent command — manage agent settings and session."""
+    """Handle /agent command — manage agent settings and session.
+
+    With an argument it names who to talk to and skips the menu entirely; with
+    none it opens the menu as it always has.
+    """
     chat_type = update.effective_chat.type
     if chat_type in ("group", "supergroup"):
         await update.message.reply_text("The agent is only available in private chats.")
@@ -274,6 +372,12 @@ async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         # logic above can restore DEFAULT_AGENT once its CLI is installed.
         set_active_llm(context, available[0])
         context.user_data["agent_llm_auto"] = True
+
+    # Checked after the CLI fallback above, so a named agent is raised on a
+    # model that can actually start rather than refused for the default's sake.
+    if context.args:
+        await _handle_agent_argument(update, context, " ".join(context.args))
+        return
 
     await show_agent_menu(update, context)
 
@@ -1577,19 +1681,15 @@ async def _handle_talk_to(
 async def _handle_talk_pick(
     update: Update, context: ContextTypes.DEFAULT_TYPE, index: int
 ) -> None:
-    """Bind (or unbind) the chat's session to a domain Agent.
+    """Bind (or unbind) the chat's session to the Agent at ``index``.
 
-    ACP cannot hot-swap an identity, so this reaps the subprocess and spawns a
-    new one under the same key. The conversation is carried across that reap and
-    the handover is marked in the transcript, so switching happens *inside* one
-    chat — the same semantics the dashboard's ``switch`` action already has.
+    The index is a position in the list the keyboard was built from, so this
+    re-reads that same list; the work of actually standing the agent up is
+    :func:`_raise_agent`, which ``/agent <name>`` reaches by another door.
     """
     from condor.agents.agent import AgentStore
-    from condor.runtime import conversations
 
     query = update.callback_query
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
 
     agent_slug = ""
     label = "Condor"
@@ -1603,15 +1703,54 @@ async def _handle_talk_pick(
         agent_slug = agents[index].slug
         label = agents[index].name or agent_slug
 
+    await _raise_agent(update, context, agent_slug, label, status=query.message)
+
+
+async def _raise_agent(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    agent_slug: str,
+    label: str,
+    status=None,
+) -> None:
+    """Put this chat in front of ``agent_slug``, spawning it if need be.
+
+    ACP cannot hot-swap an identity, so this reaps the subprocess and spawns a
+    new one under the same key. The conversation is carried across that reap and
+    the handover is marked in the transcript, so switching happens *inside* one
+    chat — the same semantics the dashboard's ``switch`` action already has.
+
+    With nothing running the same call *raises* the specialist instead, which is
+    what makes "start this chat as the funding desk" expressible at all: the
+    picker used to hang off a live session, so the only way to reach a
+    specialist was to boot the coordinator and immediately switch away from it.
+
+    ``status`` is the message that narrates the swap. The picker owns one
+    already — the menu it was tapped from, edited in place — while a command has
+    none yet and lets this reply with one, so the first thing on screen is the
+    verb rather than a placeholder.
+    """
+    from condor.runtime import conversations
+
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+
     agent_key = _reclaim_default_agent(context)
     bot = context.bot
 
     _perm_cb = _tg_permission_callback(bot, chat_id, user_id)
 
-    # Read before the teardown — afterwards there is no session left to ask.
+    # Both read before the teardown — afterwards there is no session left to ask
+    # either what conversation it was in or whether it was ever there.
     conversation_id = await _chat_conversation_id(chat_id, context.user_data)
+    session = await get_session(chat_id)
+    switching = bool(session and session.alive)
+    verb = "Switching to" if switching else "Starting"
 
-    await query.message.edit_text(f"Switching to {label}...")
+    if status is None:
+        status = await update.message.reply_text(f"{verb} {label}...")
+    else:
+        await status.edit_text(f"{verb} {label}...")
     await destroy_session(chat_id)
 
     try:
@@ -1626,7 +1765,9 @@ async def _handle_talk_pick(
         )
     except Exception as e:
         log.exception("Failed to bind session to agent %r", agent_slug)
-        await query.message.edit_text(f"Could not switch to {label}: {e}")
+        await status.edit_text(
+            f"Could not {'switch to' if switching else 'start'} {label}: {e}"
+        )
         return
 
     # Only once the session actually stands up: a chat must never be left
@@ -1643,7 +1784,7 @@ async def _handle_talk_pick(
             user_id, conversation_id, f"Switched to {label}", kind="switch"
         )
 
-    await query.message.edit_text(
+    await status.edit_text(
         f"Now talking to {label}."
         + (" The conversation so far is carried over." if carried else "")
         + "\n\nSend a message to continue."
