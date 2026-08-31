@@ -37,6 +37,7 @@ DANGEROUS_TOOLS = {
     "manage_clmm",  # every action that moves liquidity
     "manage_amm",  # every action that moves liquidity
     "manage_gateway_config",  # no resource of it is gated today; see below
+    "control_agent",  # only `start`, which launches an unattended trading loop
     # The executor family is gated by NAME (FEAT-062), the same way the swap family
     # is: a create and a stop each have their own tool, so there is no `action` to
     # read out of the arguments and no fail-closed ambiguity. Every other executor
@@ -81,6 +82,29 @@ DANGEROUS_CLMM_ACTIONS = {
 
 # Actions within manage_amm that require confirmation
 DANGEROUS_AMM_ACTIONS = {"add_liquidity", "remove_liquidity", "create_pool"}
+
+# Actions within control_agent that require confirmation (SEC-275). `start` is
+# the third capital path and the widest of them: it launches a TickEngine that
+# trades unattended every N seconds until stopped, spawning executors and
+# deploying controller-mode bots on its own — and the caller picks the
+# execution_mode, total_amount_quote and risk_limits it runs with. Creating one
+# executor already needs a human, so starting the loop that creates hundreds
+# does too.
+#
+# Everything else stays on the fast path. `list`, `get_state` and `set_state`
+# read or scribble on an instance's own scratch namespace. `stop`, `pause` and
+# `resume` are the brakes, and a confirmation in front of a brake is a
+# confirmation in front of the user stopping their own loop.
+#
+# `shutdown` is deliberately ungated too, though it does wind positions down: it
+# is the emergency exit, and the failure mode of prompting for it (a human is
+# away, the wind-down waits) is worse than the failure mode of not prompting (an
+# agent exits the market early). Exposure-reducing calls are let through
+# elsewhere for the same reason — see check_dex_action's remove_liquidity note.
+#
+# The legacy `*_agent` spellings are accepted by the tool's own _resolve_action,
+# so the gate has to know both or `start_agent` walks straight past it.
+DANGEROUS_CONTROL_ACTIONS = {"start", "start_agent"}
 
 # Resource types within manage_gateway_config that require confirmation. This tool
 # is gated on `resource_type`, not `action`, because what it edits matters and how
@@ -219,6 +243,9 @@ def is_dangerous_tool_call(tool_call: dict[str, Any]) -> bool:
         if tool_name == "manage_gateway_config":
             return _has_dangerous_resource(tool_call, DANGEROUS_CONFIG_RESOURCES)
 
+        if tool_name == "control_agent":
+            return _has_dangerous_action(tool_call, DANGEROUS_CONTROL_ACTIONS)
+
         return True
 
     # manage_bots with deploy/stop/update actions (a bot deploy places real
@@ -280,6 +307,27 @@ def format_tool_summary(tool_call: dict[str, Any]) -> str:
             config_name = input_data.get("config_name", "?")
             return f"Update config '{config_name}' on bot '{bot_name}'"
         return f"Bot '{bot_name}': {action}"
+
+    if tool_name == "control_agent":
+        # The human is approving an unattended loop, so the line has to name the
+        # strategy it will run and — when the caller overrode them — the two
+        # numbers that decide how much it can lose. Without this the prompt says
+        # "control_agent" and a config dict.
+        action = input_data.get("action", "?")
+        if action in DANGEROUS_CONTROL_ACTIONS:
+            strategy = input_data.get("strategy_id") or "?"
+            overrides = input_data.get("config")
+            overrides = overrides if isinstance(overrides, dict) else {}
+            summary = f"Start a live agent loop on '{strategy}'"
+            mode = overrides.get("execution_mode")
+            if mode:
+                summary += f" in {mode} mode"
+            amount = overrides.get("total_amount_quote")
+            if amount is not None:
+                summary += f", sized {amount} quote"
+            return summary
+        agent_id = str(input_data.get("agent_id") or "?")
+        return f"Agent instance {agent_id}: {action}"
 
     if tool_name == "execute_swap":
         pair = input_data.get("trading_pair", "?")

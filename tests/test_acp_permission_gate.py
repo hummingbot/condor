@@ -477,3 +477,50 @@ def test_every_mutating_action_of_a_fund_moving_tool_is_dangerous():
     # FEAT-062 and are gated by name instead (see test_swap_signing_action_is_dangerous
     # and tests/test_dangerous_gate_names_resolve.py).
     assert checked >= 11, f"only {checked} mutating actions found — enumeration broke"
+
+
+# ---------------------------------------------------------------------------
+# control_agent(start) launches an unattended loop: it must ask first (SEC-275)
+# ---------------------------------------------------------------------------
+
+CONTROL = "mcp__condor__control_agent"
+
+
+def test_starting_a_loop_asks_a_human_and_names_the_strategy():
+    """Starting a loop opens hundreds of positions; one executor already asks."""
+    channel = _CapturingChannel(answer=False)
+    result = _drive_acp(
+        _acp_request(
+            CONTROL,
+            {
+                "action": "start",
+                "strategy_id": "acme.momentum",
+                "config": {"execution_mode": "loop", "total_amount_quote": 500},
+            },
+        ),
+        channel,
+    )
+
+    assert len(channel.delivered) == 1, "the loop started with no confirmation"
+    assert channel.delivered[0].summary == (
+        "Start a live agent loop on 'acme.momentum' in loop mode, sized 500 quote"
+    )
+    assert result["outcome"]["outcome"] == "cancelled"
+
+
+def test_stopping_a_loop_never_asks():
+    """The brakes stay on the fast path: no prompt between a user and their stop."""
+    for action in ("list", "stop", "pause", "resume", "shutdown"):
+        channel = _CapturingChannel(answer=True)
+        result = _drive_acp(
+            _acp_request(CONTROL, {"action": action, "agent_id": "acme.momentum.1"}),
+            channel,
+        )
+        assert not channel.delivered, f"control_agent({action}) raised a confirmation"
+        assert result["outcome"]["outcome"] == "selected"
+
+
+def test_control_agent_with_unreadable_arguments_fails_closed():
+    for raw in (None, "not json", ["start"], {}, {"action": 7}):
+        call = normalize_tool_call(_acp_request(CONTROL, raw))
+        assert is_dangerous_tool_call(call), f"{raw!r} slipped past the gate"

@@ -21,13 +21,17 @@ from handlers.agents._shared import (
     DANGEROUS_BOT_ACTIONS,
     DANGEROUS_CLMM_ACTIONS,
     DANGEROUS_CONFIG_RESOURCES,
+    DANGEROUS_CONTROL_ACTIONS,
     DANGEROUS_TOOLS,
     is_dangerous_tool_call,
 )
 from mcp_servers.hummingbot_api import server as mcp_server
 
 # Gate names that belong to a different MCP server than hummingbot_api.
-_FOREIGN_TOOLS = {"place_order"}
+# ``control_agent`` is on the condor orchestration server, and gets its own
+# resolution test below rather than this file's Literal-reading one — its
+# actions are a dict in the tool module, not an annotation.
+_FOREIGN_TOOLS = {"place_order", "control_agent"}
 
 
 def _registered_tools() -> dict:
@@ -287,3 +291,109 @@ def test_gateway_config_fails_closed_on_an_unreadable_resource():
     """SEC-093: a call whose resource_type cannot be read is treated as dangerous."""
     for bad in ({}, {"resource_type": None}, {"resource_type": 7}, {"action": "add"}):
         assert is_dangerous_tool_call({"tool": "manage_gateway_config", "input": bad})
+
+
+# ---------------------------------------------------------------------------
+# control_agent: starting a loop is the third capital path (SEC-275)
+# ---------------------------------------------------------------------------
+
+
+def _control_actions() -> set[str]:
+    """Every action string ``control_agent`` actually accepts.
+
+    Its actions are not a ``Literal`` on the signature — the tool takes a bare
+    ``str`` and resolves it through ``_resolve_action``, which accepts both the
+    short spelling (``start``) and the legacy internal one (``start_agent``).
+    Both reach the same lifecycle call, so the gate has to know both.
+    """
+    from mcp_servers.condor.tools import trading_agent
+
+    accepted = set(trading_agent._CONTROL_ACTIONS)
+    accepted.update(
+        action
+        for action, (owner, _call) in trading_agent._ACTION_OWNER.items()
+        if owner == "control_agent"
+    )
+    return accepted
+
+
+def test_control_agent_is_registered_by_the_condor_server():
+    from mcp_servers.condor import server as condor_server
+
+    assert "control_agent" in DANGEROUS_TOOLS
+    tool = getattr(condor_server, "control_agent", None)
+    assert tool is not None, "control_agent is gated but the condor server drops it"
+    assert (
+        condor_server.control_agent in condor_server.ORCHESTRATION_TOOLS
+    ), "control_agent is gated but no seat mounts it — the gate is dead code"
+
+
+def test_gated_control_actions_exist_on_the_tool():
+    unknown = DANGEROUS_CONTROL_ACTIONS - _control_actions()
+    assert not unknown, f"control_agent has no such action(s): {sorted(unknown)}"
+
+
+def test_both_spellings_of_start_are_gated():
+    """``start`` and its legacy alias ``start_agent`` reach the same live loop."""
+    for action in ("start", "start_agent"):
+        assert is_dangerous_tool_call(
+            {
+                "tool": "mcp__condor__control_agent",
+                "input": {"action": action, "strategy_id": "acme.momentum"},
+            }
+        ), f"control_agent({action}) launches a live loop unconfirmed"
+
+
+def test_control_reads_and_brakes_are_not_gated():
+    """Reads and the brakes stay on the fast path — a prompt there is harmful."""
+    for action in sorted(_control_actions() - DANGEROUS_CONTROL_ACTIONS):
+        assert not is_dangerous_tool_call(
+            {
+                "tool": "mcp__condor__control_agent",
+                "input": {"action": action, "agent_id": "acme.momentum.1"},
+            }
+        ), f"control_agent({action}) needlessly gated"
+
+
+def test_control_agent_fails_closed_on_an_unreadable_action():
+    """SEC-093: a call we cannot classify is a call that goes to a human."""
+    for bad in ({}, {"action": None}, {"action": 7}, {"action": ""}, "not json", None):
+        assert is_dangerous_tool_call(
+            {"tool": "mcp__condor__control_agent", "input": bad}
+        ), f"{bad!r} slipped past the gate"
+
+
+def test_a_gated_start_names_the_strategy_it_will_run():
+    """The prompt must show the loop being started, not an opaque config blob."""
+    from handlers.agents.confirmation import format_tool_summary
+
+    summary = format_tool_summary(
+        {
+            "tool": "mcp__condor__control_agent",
+            "input": {
+                "action": "start",
+                "strategy_id": "acme.momentum",
+                "config": {"execution_mode": "loop", "total_amount_quote": 500},
+            },
+        }
+    )
+    assert "acme.momentum" in summary
+    assert "loop" in summary
+    assert "500" in summary
+    assert summary != "control_agent"
+
+    # A start with no overrides still names its strategy rather than rendering "?"
+    bare = format_tool_summary(
+        {
+            "tool": "control_agent",
+            "input": {"action": "start", "strategy_id": "acme.momentum"},
+        }
+    )
+    assert "acme.momentum" in bare
+
+
+def test_the_tick_seat_cannot_reach_control_agent():
+    """A tick must not be able to launch another loop; it never mounts the tool."""
+    from mcp_servers.condor import server as condor_server
+
+    assert condor_server.control_agent not in condor_server.TOOL_PROFILES["tick"]
