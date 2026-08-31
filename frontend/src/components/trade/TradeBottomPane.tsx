@@ -255,6 +255,7 @@ export function TradeBottomPane({
   const [tab, setTab] = useState<"executors" | "positions">("executors");
   const [stoppingIds, setStoppingIds] = useState<Set<string>>(new Set());
   const [confirmStopId, setConfirmStopId] = useState<string | null>(null);
+  const [keepPosition, setKeepPosition] = useState(false);
   const [confirmClearPos, setConfirmClearPos] = useState<ConsolidatedPosition | null>(null);
   const [clearingPositions, setClearingPositions] = useState<Set<string>>(new Set());
   const [hoveredExecutor, setHoveredExecutor] = useState<{ executor: ExecutorInfo; rect: DOMRect } | null>(null);
@@ -273,11 +274,11 @@ export function TradeBottomPane({
   const balances = usePairBalances(server, connector, baseToken, quoteToken);
 
   const stopMutation = useMutation({
-    mutationFn: (id: string) => {
+    mutationFn: ({ id, keep }: { id: string; keep: boolean }) => {
       setStoppingIds((prev) => new Set([...prev, id]));
-      return api.stopExecutor(server!, id, false);
+      return api.stopExecutor(server!, id, keep);
     },
-    onSettled: (_data, _error, id) => {
+    onSettled: (_data, _error, { id }) => {
       setStoppingIds((prev) => {
         const next = new Set(prev);
         next.delete(id);
@@ -316,6 +317,7 @@ export function TradeBottomPane({
   });
 
   const handleStop = useCallback((id: string) => {
+    setKeepPosition(false);
     setConfirmStopId(id);
   }, []);
 
@@ -709,6 +711,20 @@ export function TradeBottomPane({
             <p className="text-sm text-[var(--color-text)]">
               Stop executor <span className="font-mono text-[var(--color-text-muted)]">{confirmStopId.slice(0, 8)}</span>?
             </p>
+            <label className="mt-3 flex cursor-pointer select-none items-center gap-2">
+              <input
+                type="checkbox"
+                checked={keepPosition}
+                onChange={(e) => setKeepPosition(e.target.checked)}
+                className="h-4 w-4 rounded border-[var(--color-border)] accent-[var(--color-primary)]"
+              />
+              <span className="text-xs text-[var(--color-text)]">Keep position open</span>
+            </label>
+            <p className="mt-1 ml-6 text-[11px] text-[var(--color-text-muted)]">
+              {keepPosition
+                ? "The executor stops but the position stays open on the exchange."
+                : "The executor stops and closes any open position."}
+            </p>
             <div className="mt-3 flex justify-end gap-2">
               <button
                 onClick={() => setConfirmStopId(null)}
@@ -717,7 +733,7 @@ export function TradeBottomPane({
                 Cancel
               </button>
               <button
-                onClick={() => stopMutation.mutate(confirmStopId)}
+                onClick={() => stopMutation.mutate({ id: confirmStopId, keep: keepPosition })}
                 className="rounded bg-[var(--color-red)] px-3 py-1.5 text-xs font-medium text-white hover:brightness-110"
               >
                 Stop

@@ -361,10 +361,15 @@ function RailRow({
         />
       )}
       {onNew && (
-        // A span, not a button: this sits inside the row's own button. Below
-        // `md` the rail is a touch overlay where hover does not exist, so the
-        // `+` stays visible there and only hides behind hover on the desktop
-        // rail. The same shape the panel's session tabs use to close.
+        // A span, not a button: this sits inside the row's own button.
+        //
+        // The `+` used to appear only on hover, which made the second
+        // conversation a thing you had to already know about. Now it is always
+        // on the row and the *hover* is what explains it: the icon grows a
+        // "New" label, so the affordance is discovered by pointing rather than
+        // by guessing. Hovering the pill itself is a third step in the same
+        // gesture — it takes the accent colour, so you can see the click will
+        // land here and not on the row underneath.
         <span
           role="button"
           tabIndex={0}
@@ -381,9 +386,14 @@ function RailRow({
               onNew();
             }
           }}
-          className="shrink-0 rounded p-0.5 text-[var(--color-text-muted)] transition-opacity hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)] focus-visible:opacity-100 group-focus-within:opacity-100 md:opacity-0 md:group-hover:opacity-100"
+          className="flex shrink-0 items-center gap-0.5 rounded-full px-1 py-0.5 text-[10px] font-medium text-[var(--color-text-muted)] opacity-60 transition-all duration-200 group-hover:bg-[var(--color-surface-hover)] group-hover:opacity-100 group-focus-within:bg-[var(--color-surface-hover)] group-focus-within:opacity-100 hover:bg-[var(--color-primary)]/15! hover:text-[var(--color-primary)]! focus-visible:opacity-100"
         >
-          <Plus className="h-3 w-3" />
+          <Plus className="h-3 w-3 shrink-0" />
+          {/* Width, not display: a label that animates from nothing keeps the
+              row's own text from jumping when the pill grows. */}
+          <span className="max-w-0 overflow-hidden whitespace-nowrap opacity-0 transition-all duration-200 group-hover:max-w-[2.5rem] group-hover:pr-0.5 group-hover:opacity-100 group-focus-within:max-w-[2.5rem] group-focus-within:pr-0.5 group-focus-within:opacity-100">
+            New
+          </span>
         </span>
       )}
     </button>

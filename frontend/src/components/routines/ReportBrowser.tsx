@@ -20,9 +20,19 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { type RoutineInfo, type RoutineInstance, api } from "@/lib/api";
+import { type RoutineInstance, api } from "@/lib/api";
 import { toMs } from "@/lib/formatters";
-import { buildConfigValues, formatAgo, formatInterval, formatRoutineName, invalidateRoutineQueries, saveConfig } from "@/lib/routineUtils";
+import {
+  buildConfigValues,
+  formatAgo,
+  formatInterval,
+  formatRoutineName,
+  inScope,
+  invalidateRoutineQueries,
+  resolveRoutine,
+  routineAgents,
+  saveConfig,
+} from "@/lib/routineUtils";
 import { useViewFacts } from "@/lib/viewFacts";
 import { useServer } from "@/hooks/useServer";
 import { ReportFrame } from "./ReportFrame";
@@ -44,22 +54,6 @@ export interface RoutineRunContext {
   sessionKey: string;
   /** Who the run's reports are filed under, as the chat's own runs are. */
   agentSlug?: string;
-}
-
-/**
- * The routines one scope covers.
- *
- * `"all"`, the two families, or one agent by slug — the same vocabulary the
- * header's scope picker offers, kept out of the component because the picker
- * and the list have to agree about what a scope means.
- */
-function inScope(routines: RoutineInfo[], scope: string): RoutineInfo[] {
-  if (scope === "all") return routines;
-  if (scope === "routine")
-    return routines.filter((r) => !r.source.startsWith("agent:"));
-  if (scope === "agent")
-    return routines.filter((r) => r.source.startsWith("agent:"));
-  return routines.filter((r) => r.source === `agent:${scope}`);
 }
 
 /**
@@ -123,6 +117,15 @@ interface ReportBrowserProps {
    * viewport, and leave the window's keys and the Close button to the host.
    */
   hosted?: boolean;
+  /**
+   * The host owns the picking: it lists the routines and filters them, so this
+   * pane drops its own sidebar, scope select and title and is nothing but the
+   * report and what you can do to it. See {@link RoutinePicker}, which is what
+   * the dock puts there instead.
+   */
+  externalPicker?: boolean;
+  /** Told whenever the pane moves to another routine — its own ↑/↓ still do. */
+  onSourceChange?: (name: string) => void;
   /** Run and schedule as this conversation, on its server. */
   runContext?: RoutineRunContext;
 }
@@ -135,6 +138,8 @@ export function ReportBrowser({
   initialSourceTypeFilter,
   onClose,
   hosted = false,
+  externalPicker = false,
+  onSourceChange,
   runContext,
 }: ReportBrowserProps) {
   const { server } = useServer();
@@ -171,11 +176,24 @@ export function ReportBrowser({
     initialInstanceId && !initialReportId ? "output" : "report",
   );
 
-  /** Picking another routine is always a fresh read of it. */
-  const selectSource = useCallback((name: string) => {
-    setActiveSource(name);
-    setView("report");
-  }, []);
+  /**
+   * Picking another routine is always a fresh read of it.
+   *
+   * With a host picker, the pick is the host's to make: it holds which routine
+   * the library is on — for its own list as much as for this pane — and hands
+   * it back as `initialSource`.
+   */
+  const selectSource = useCallback(
+    (name: string) => {
+      if (onSourceChange) {
+        onSourceChange(name);
+        return;
+      }
+      setActiveSource(name);
+      setView("report");
+    },
+    [onSourceChange],
+  );
 
   /**
    * The routine on screen, said the way the library says it.
@@ -185,15 +203,10 @@ export function ReportBrowser({
    * as the report index filed it, which is the bare name. Both have to land on
    * the same routine, or the header's Run and Config would act on nothing.
    */
-  const activeRoutine = useMemo(() => {
-    if (!pickedSource) return undefined;
-    return (
-      routines.find((r) => r.name === pickedSource) ??
-      routines.find(
-        (r) => r.name.split("/").pop() === pickedSource.split("/").pop(),
-      )
-    );
-  }, [routines, pickedSource]);
+  const activeRoutine = useMemo(
+    () => resolveRoutine(routines, pickedSource),
+    [routines, pickedSource],
+  );
   const activeSource = activeRoutine?.name ?? pickedSource;
 
   /**
@@ -221,9 +234,9 @@ export function ReportBrowser({
   // Set initial source once routines load if not set — pick from filtered list
   useEffect(() => {
     if (!pickedSource && filteredRoutines.length > 0) {
-      setActiveSource(filteredRoutines[0].name);
+      selectSource(filteredRoutines[0].name);
     }
-  }, [pickedSource, filteredRoutines]);
+  }, [pickedSource, filteredRoutines, selectSource]);
 
   /** Narrowing the list moves the reader into it, rather than stranding them. */
   const changeScope = useCallback(
@@ -241,15 +254,7 @@ export function ReportBrowser({
   const hasAgents = routines.some((r) => r.source.startsWith("agent:"));
 
   // Agent names for sub-filter
-  const agentNames = useMemo(() => {
-    const names = new Set<string>();
-    for (const r of routines) {
-      if (r.source.startsWith("agent:")) {
-        names.add(r.source.replace("agent:", ""));
-      }
-    }
-    return Array.from(names).sort();
-  }, [routines]);
+  const agentNames = useMemo(() => routineAgents(routines), [routines]);
 
   /**
    * Who owns the open routine, when an agent does.
@@ -571,134 +576,138 @@ export function ReportBrowser({
       tabIndex={hosted ? -1 : undefined}
       onKeyDown={hosted ? handleKey : undefined}
     >
-      {/* Left sidebar: routine list */}
-      <div
-        className={`flex flex-col border-r border-[var(--color-border)] bg-[var(--color-surface)] transition-all ${
-          isCompact ? "w-12" : "w-64"
-        }`}
-      >
-        {/* Sidebar header */}
-        <div className="flex items-center justify-between border-b border-[var(--color-border)] px-3 py-2.5">
-          {!isCompact && (
-            <span className="text-xs font-bold uppercase tracking-wider text-[var(--color-text-muted)]">
-              Routines
-            </span>
-          )}
-          <button
-            onClick={() => setIsCompact(!isCompact)}
-            className="rounded p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
-          >
-            {isCompact ? <ChevronRight className="h-3.5 w-3.5" /> : <ChevronLeft className="h-3.5 w-3.5" />}
-          </button>
-        </div>
+      {/* Left sidebar: routine list — dropped when the host lists the
+          routines itself (the dock's picker), which is what gives the
+          report the whole pane. */}
+      {!externalPicker && (
+        <div
+          className={`flex flex-col border-r border-[var(--color-border)] bg-[var(--color-surface)] transition-all ${
+            isCompact ? "w-12" : "w-64"
+          }`}
+        >
+          {/* Sidebar header */}
+          <div className="flex items-center justify-between border-b border-[var(--color-border)] px-3 py-2.5">
+            {!isCompact && (
+              <span className="text-xs font-bold uppercase tracking-wider text-[var(--color-text-muted)]">
+                Routines
+              </span>
+            )}
+            <button
+              onClick={() => setIsCompact(!isCompact)}
+              className="rounded p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
+            >
+              {isCompact ? <ChevronRight className="h-3.5 w-3.5" /> : <ChevronLeft className="h-3.5 w-3.5" />}
+            </button>
+          </div>
 
-        {/* Routine list */}
-        <div ref={sidebarRef} className="flex-1 overflow-y-auto scrollbar-thin">
-          {filteredRoutines.map((r) => {
-            const isActive = r.name === activeSource;
-            const hasActiveInstance = instances.some(
-              (i) => i.routine_name === r.name && (i.status === "running" || i.status === "scheduled"),
-            );
-            const isRoutineAgent = r.source.startsWith("agent:");
-            const displayName = r.name.replace(/_/g, " ");
+          {/* Routine list */}
+          <div ref={sidebarRef} className="flex-1 overflow-y-auto scrollbar-thin">
+            {filteredRoutines.map((r) => {
+              const isActive = r.name === activeSource;
+              const hasActiveInstance = instances.some(
+                (i) => i.routine_name === r.name && (i.status === "running" || i.status === "scheduled"),
+              );
+              const isRoutineAgent = r.source.startsWith("agent:");
+              const displayName = r.name.replace(/_/g, " ");
 
-            if (isCompact) {
+              if (isCompact) {
+                return (
+                  <button
+                    key={r.name}
+                    onClick={() => selectSource(r.name)}
+                    {...(isActive ? { "data-active-source": true } : {})}
+                    className={`flex w-full items-center justify-center py-3 transition-colors ${
+                      isActive
+                        ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
+                        : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
+                    }`}
+                    title={displayName}
+                  >
+                    {isRoutineAgent ? (
+                      <Brain className="h-4 w-4 text-purple-400" />
+                    ) : hasActiveInstance ? (
+                      <span className="h-2.5 w-2.5 rounded-full bg-emerald-400 shadow-[0_0_6px_theme(colors.emerald.400)]" />
+                    ) : (
+                      <span className="text-[10px] font-bold uppercase leading-none">
+                        {displayName.slice(0, 2)}
+                      </span>
+                    )}
+                  </button>
+                );
+              }
+
               return (
                 <button
                   key={r.name}
                   onClick={() => selectSource(r.name)}
                   {...(isActive ? { "data-active-source": true } : {})}
-                  className={`flex w-full items-center justify-center py-3 transition-colors ${
+                  className={`w-full px-3 py-2.5 text-left transition-all ${
                     isActive
-                      ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
-                      : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
+                      ? "bg-[var(--color-primary)]/5 border-l-2 border-l-[var(--color-primary)]"
+                      : "border-l-2 border-l-transparent hover:bg-[var(--color-surface-hover)]"
                   }`}
-                  title={displayName}
                 >
-                  {isRoutineAgent ? (
-                    <Brain className="h-4 w-4 text-purple-400" />
-                  ) : hasActiveInstance ? (
-                    <span className="h-2.5 w-2.5 rounded-full bg-emerald-400 shadow-[0_0_6px_theme(colors.emerald.400)]" />
-                  ) : (
-                    <span className="text-[10px] font-bold uppercase leading-none">
-                      {displayName.slice(0, 2)}
+                  <div className="flex items-center justify-between gap-1">
+                    <span className={`truncate text-xs font-medium ${isActive ? "text-[var(--color-text)]" : "text-[var(--color-text-muted)]"}`}>
+                      {displayName}
                     </span>
-                  )}
-                </button>
-              );
-            }
-
-            return (
-              <button
-                key={r.name}
-                onClick={() => selectSource(r.name)}
-                {...(isActive ? { "data-active-source": true } : {})}
-                className={`w-full px-3 py-2.5 text-left transition-all ${
-                  isActive
-                    ? "bg-[var(--color-primary)]/5 border-l-2 border-l-[var(--color-primary)]"
-                    : "border-l-2 border-l-transparent hover:bg-[var(--color-surface-hover)]"
-                }`}
-              >
-                <div className="flex items-center justify-between gap-1">
-                  <span className={`truncate text-xs font-medium ${isActive ? "text-[var(--color-text)]" : "text-[var(--color-text-muted)]"}`}>
-                    {displayName}
-                  </span>
-                  <div className="flex items-center gap-1 shrink-0">
-                    {hasActiveInstance && (
-                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 shadow-[0_0_4px_theme(colors.emerald.400)]" />
-                    )}
-                    {r.report_count > 0 && (
-                      <span className="text-[9px] text-[var(--color-text-muted)]/60">
-                        {r.report_count}
+                    <div className="flex items-center gap-1 shrink-0">
+                      {hasActiveInstance && (
+                        <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 shadow-[0_0_4px_theme(colors.emerald.400)]" />
+                      )}
+                      {r.report_count > 0 && (
+                        <span className="text-[9px] text-[var(--color-text-muted)]/60">
+                          {r.report_count}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="mt-0.5 flex items-center gap-1.5">
+                    {isRoutineAgent && (
+                      <span className="flex items-center gap-0.5 rounded bg-purple-500/10 px-1 py-0.5 text-[8px] font-bold uppercase text-purple-400">
+                        <Brain className="h-2 w-2" />
+                        agent
                       </span>
                     )}
-                  </div>
-                </div>
-                <div className="mt-0.5 flex items-center gap-1.5">
-                  {isRoutineAgent && (
-                    <span className="flex items-center gap-0.5 rounded bg-purple-500/10 px-1 py-0.5 text-[8px] font-bold uppercase text-purple-400">
-                      <Brain className="h-2 w-2" />
-                      agent
+                    <span className="text-[9px] text-[var(--color-text-muted)]/50 truncate">
+                      {r.description}
                     </span>
-                  )}
-                  <span className="text-[9px] text-[var(--color-text-muted)]/50 truncate">
-                    {r.description}
-                  </span>
-                </div>
-              </button>
-            );
-          })}
-        </div>
-
-        {/* Navigation hint */}
-        {!isCompact && (
-          <div className="border-t border-[var(--color-border)] px-3 py-2 text-[10px] text-[var(--color-text-muted)]/60">
-            <span className="flex items-center gap-1.5">
-              <span className="flex items-center gap-0.5">
-                <kbd className="inline-flex h-4 min-w-[16px] items-center justify-center rounded border border-[var(--color-border)] bg-[var(--color-surface-hover)] px-0.5 text-[8px] font-medium">
-                  <ChevronUp className="h-2.5 w-2.5" />
-                </kbd>
-                <kbd className="inline-flex h-4 min-w-[16px] items-center justify-center rounded border border-[var(--color-border)] bg-[var(--color-surface-hover)] px-0.5 text-[8px] font-medium">
-                  <ChevronDown className="h-2.5 w-2.5" />
-                </kbd>
-                <span className="ml-0.5">source</span>
-              </span>
-              <span className="flex items-center gap-0.5">
-                <kbd className="inline-flex h-4 min-w-[16px] items-center justify-center rounded border border-[var(--color-border)] bg-[var(--color-surface-hover)] px-0.5 text-[8px] font-medium">
-                  <ChevronLeft className="h-2.5 w-2.5" />
-                </kbd>
-                <kbd className="inline-flex h-4 min-w-[16px] items-center justify-center rounded border border-[var(--color-border)] bg-[var(--color-surface-hover)] px-0.5 text-[8px] font-medium">
-                  <ChevronRight className="h-2.5 w-2.5" />
-                </kbd>
-                <span className="ml-0.5">report</span>
-              </span>
-              <kbd className="inline-flex h-4 items-center justify-center rounded border border-[var(--color-border)] bg-[var(--color-surface-hover)] px-1 text-[8px] font-medium">
-                esc
-              </kbd>
-            </span>
+                  </div>
+                </button>
+              );
+            })}
           </div>
-        )}
-      </div>
+
+          {/* Navigation hint */}
+          {!isCompact && (
+            <div className="border-t border-[var(--color-border)] px-3 py-2 text-[10px] text-[var(--color-text-muted)]/60">
+              <span className="flex items-center gap-1.5">
+                <span className="flex items-center gap-0.5">
+                  <kbd className="inline-flex h-4 min-w-[16px] items-center justify-center rounded border border-[var(--color-border)] bg-[var(--color-surface-hover)] px-0.5 text-[8px] font-medium">
+                    <ChevronUp className="h-2.5 w-2.5" />
+                  </kbd>
+                  <kbd className="inline-flex h-4 min-w-[16px] items-center justify-center rounded border border-[var(--color-border)] bg-[var(--color-surface-hover)] px-0.5 text-[8px] font-medium">
+                    <ChevronDown className="h-2.5 w-2.5" />
+                  </kbd>
+                  <span className="ml-0.5">source</span>
+                </span>
+                <span className="flex items-center gap-0.5">
+                  <kbd className="inline-flex h-4 min-w-[16px] items-center justify-center rounded border border-[var(--color-border)] bg-[var(--color-surface-hover)] px-0.5 text-[8px] font-medium">
+                    <ChevronLeft className="h-2.5 w-2.5" />
+                  </kbd>
+                  <kbd className="inline-flex h-4 min-w-[16px] items-center justify-center rounded border border-[var(--color-border)] bg-[var(--color-surface-hover)] px-0.5 text-[8px] font-medium">
+                    <ChevronRight className="h-2.5 w-2.5" />
+                  </kbd>
+                  <span className="ml-0.5">report</span>
+                </span>
+                <kbd className="inline-flex h-4 items-center justify-center rounded border border-[var(--color-border)] bg-[var(--color-surface-hover)] px-1 text-[8px] font-medium">
+                  esc
+                </kbd>
+              </span>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Main content */}
       <div className="flex min-w-0 flex-1 flex-col">
@@ -707,26 +716,35 @@ export function ReportBrowser({
             Left to overflow it would lay the whole column out wider than the
             pane and clip the report off the right of the screen. */}
         <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-[var(--color-border)] px-4 py-2">
+          {/* Nothing to say on the left once the host names the routine and no
+              run is live — and an empty column here would keep the width the
+              actions need. */}
+          {(!externalPicker || sourceInstances.length > 0) && (
           <div className="flex min-w-0 flex-1 items-center gap-3">
-            {/* Whose routines this pane is listing. In the header rather than
-                in the sidebar because the sidebar is a 48px rail whenever this
-                is hosted beside a chat, and a filter you can only reach by
-                widening the list is a filter nobody uses. */}
-            {hasAgents && (
-              <ScopePicker
-                scope={effectiveScope}
-                agents={agentNames}
-                onChange={changeScope}
-              />
-            )}
-            <h2 className="truncate text-sm font-semibold text-[var(--color-text)]">
-              {formatRoutineName(activeSource)}
-            </h2>
-            {agentOwner && effectiveScope !== agentOwner && (
-              <span className="flex items-center gap-0.5 rounded bg-purple-500/10 px-1.5 py-0.5 text-[9px] font-bold uppercase text-purple-400">
-                <Brain className="h-2.5 w-2.5" />
-                {agentOwner}
-              </span>
+            {/* Whose routines this pane is listing, and which one it is on —
+                unless the host is already saying both. Beside a conversation
+                the dock's picker names the routine and the sheet above titles
+                it, and a header that repeated them spent the row that the run
+                controls need. */}
+            {!externalPicker && (
+              <>
+                {hasAgents && (
+                  <ScopePicker
+                    scope={effectiveScope}
+                    agents={agentNames}
+                    onChange={changeScope}
+                  />
+                )}
+                <h2 className="truncate text-sm font-semibold text-[var(--color-text)]">
+                  {formatRoutineName(activeSource)}
+                </h2>
+                {agentOwner && effectiveScope !== agentOwner && (
+                  <span className="flex items-center gap-0.5 rounded bg-purple-500/10 px-1.5 py-0.5 text-[9px] font-bold uppercase text-purple-400">
+                    <Brain className="h-2.5 w-2.5" />
+                    {agentOwner}
+                  </span>
+                )}
+              </>
             )}
             {sourceInstances.length > 0 && (
               <div className="flex items-center gap-2">
@@ -753,7 +771,11 @@ export function ReportBrowser({
               </div>
             )}
           </div>
-          <div className="flex items-center gap-1">
+          )}
+          {/* Wraps within itself: at pane width the run controls and the report
+              pager together outrun one row, and a group that cannot break is a
+              group whose right-hand end is simply cut off. */}
+          <div className="flex flex-wrap items-center justify-end gap-1">
             {/* Run / Config actions — always show when routine exists */}
             {activeRoutine && runServer && (
               <div className="flex items-center gap-1 mr-2">

@@ -1,15 +1,19 @@
 import { useQuery } from "@tanstack/react-query";
-import { ExternalLink } from "lucide-react";
-import { Link } from "react-router-dom";
 
 import { WorkspaceSheet } from "@/components/chat/WorkspaceSheet";
 import {
   ReportBrowser,
   type RoutineRunContext,
 } from "@/components/routines/ReportBrowser";
-import { api, type ReportSummary, type RoutineInstance } from "@/lib/api";
+import { RoutinePicker } from "@/components/routines/RoutinePicker";
+import {
+  api,
+  type ReportSummary,
+  type RoutineInfo,
+  type RoutineInstance,
+} from "@/lib/api";
 import { formatRelativeTime, toMs } from "@/lib/formatters";
-import { formatRoutineName } from "@/lib/routineUtils";
+import { formatRoutineName, type RoutineScope } from "@/lib/routineUtils";
 
 /**
  * A row in the dock: one routine run.
@@ -27,9 +31,10 @@ type Run =
 /**
  * What the library pane opens on.
  *
- * `{}` is "the whole library" — the section header's own door. A row fills in
- * what it points at: the routine, the report it wrote, and the run behind it,
- * whose text output is all there is when it wrote no report.
+ * A row fills in what it points at: the routine, the report it wrote, and the
+ * run behind it, whose text output is all there is when it wrote no report.
+ * `{}` is "the whole library", which is what a scope with nothing in it leaves
+ * the pane on — the dock has no door of its own onto the unfocused library.
  */
 export type LibraryFocus = {
   source?: string;
@@ -279,31 +284,56 @@ function ReportRow({
 export function RoutineLibrarySheet({
   library,
   instances,
-  agentSlug,
+  routines,
+  scope,
+  onScopeChange,
+  onSelectRoutine,
+  dockOpen,
   agentName,
   runContext,
   onClose,
 }: {
   library: LibraryFocus;
   instances: RoutineInstance[];
-  agentSlug: string;
+  /** The library, for the header's own picker and for naming what is open. */
+  routines: RoutineInfo[];
+  scope: RoutineScope;
+  onScopeChange: (next: RoutineScope) => void;
+  onSelectRoutine: (name: string) => void;
+  /** Whether the dock's scope select is on screen — if not, this bar carries it. */
+  dockOpen: boolean;
+  /** Who is answering, for the bar's accessible name with nothing picked yet. */
   agentName?: string;
   runContext?: RoutineRunContext;
   onClose: () => void;
 }) {
   return (
     <WorkspaceSheet
-      title={library.source ? formatRoutineName(library.source) : "Routines"}
-      subtitle={agentName || "Every routine"}
-      actions={
-        <Link
-          to={`/routines${agentSlug ? `?agent=${agentSlug}` : ""}`}
-          className="flex items-center gap-1 rounded px-2 py-1 text-[11px] text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-          title="Open the full-width library on its own page"
-        >
-          <ExternalLink className="h-3 w-3" /> Full page
-        </Link>
+      // The bar names what is open with the control that changes it, so this
+      // is only the accessible name behind it.
+      title={
+        library.source
+          ? formatRoutineName(library.source)
+          : agentName
+            ? `Every routine ${agentName} can run`
+            : "Routines"
       }
+      header={({ zen }) => (
+        <RoutinePicker
+          variant="inline"
+          routines={routines}
+          instances={instances}
+          scope={scope}
+          onScopeChange={onScopeChange}
+          source={library.source}
+          onSelect={onSelectRoutine}
+          // The scope is the dock's question while the dock is on screen; full
+          // screen the sheet covers it, and a collapsed dock has none to cover,
+          // so it is asked here instead of nowhere.
+          parts={zen || !dockOpen ? "both" : "routine"}
+          arrows
+        />
+      )}
       onClose={onClose}
       bleed
       // Below `xl` there is no pane, so this is today's full-screen browser.
@@ -312,12 +342,16 @@ export function RoutineLibrarySheet({
       <ReportBrowser
         // Remounted per focus: opening the pane on another run is a fresh
         // read of it, not a browser that has to be talked out of the last.
-        key={`${library.source ?? ""}:${library.reportId ?? ""}:${library.instanceId ?? ""}`}
+        key={`${scope}:${library.source ?? ""}:${library.reportId ?? ""}:${library.instanceId ?? ""}`}
         hosted
+        // The picking is the dock's (or this header's): no sidebar, no scope
+        // select and no title in the pane, which is then only the report.
+        externalPicker
+        onSourceChange={onSelectRoutine}
         initialSource={library.source}
         initialReportId={library.reportId}
         initialInstanceId={library.instanceId}
-        initialSourceTypeFilter={agentSlug || "all"}
+        initialSourceTypeFilter={scope}
         instances={instances}
         runContext={runContext}
         onClose={onClose}

@@ -32,6 +32,7 @@ function readZen(fallback: boolean): boolean {
 export function WorkspaceSheet({
   title,
   subtitle,
+  header,
   actions,
   onClose,
   bleed = false,
@@ -41,10 +42,23 @@ export function WorkspaceSheet({
   title: string;
   subtitle?: string;
   /**
+   * The left of the bar, in place of the title and subtitle — for content whose
+   * name is better said by a control than by a label. The routine library says
+   * which routine is open with the picker that changes it, rather than with
+   * text beside a picker that repeats it.
+   *
+   * A function when it depends on the size the sheet is at, as `actions` is.
+   */
+  header?: React.ReactNode | ((state: { zen: boolean }) => React.ReactNode);
+  /**
    * Sheet-level controls, left of full-screen and Close — the door out to the
    * full page for content that has one.
+   *
+   * A function when the controls depend on the size the sheet is at: full
+   * screen the sheet covers the dock, so anything the reader was steering the
+   * content with from there has to be offered here instead.
    */
-  actions?: React.ReactNode;
+  actions?: React.ReactNode | ((state: { zen: boolean }) => React.ReactNode);
   onClose: () => void;
   /**
    * Give the body the whole sheet — no padding, no scroll of its own. For
@@ -128,18 +142,24 @@ export function WorkspaceSheet({
           zen || split ? "px-4 py-2" : "px-6 py-3"
         }`}
       >
-        <div className="min-w-0">
-          <h2 className="truncate text-sm font-semibold text-[var(--color-text)]">
-            {title}
-          </h2>
-          {subtitle && (
-            <p className="truncate text-[11px] text-[var(--color-text-muted)]">
-              {subtitle}
-            </p>
-          )}
-        </div>
+        {header ? (
+          <div className="flex min-w-0 flex-1 items-center" aria-label={title}>
+            {typeof header === "function" ? header({ zen }) : header}
+          </div>
+        ) : (
+          <div className="min-w-0">
+            <h2 className="truncate text-sm font-semibold text-[var(--color-text)]">
+              {title}
+            </h2>
+            {subtitle && (
+              <p className="truncate text-[11px] text-[var(--color-text-muted)]">
+                {subtitle}
+              </p>
+            )}
+          </div>
+        )}
         <div className="flex shrink-0 items-center gap-1">
-          {actions}
+          {typeof actions === "function" ? actions({ zen }) : actions}
           <button
             onClick={toggleZen}
             className="rounded p-1 text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"

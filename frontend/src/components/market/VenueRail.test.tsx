@@ -103,6 +103,17 @@ describe("VenueRail grouping", () => {
     expect(optionLabels()).toHaveLength(3);
   });
 
+  it("names the axis only to a screen reader, never as a visible label", () => {
+    // The column of exchange names does not need a word saying so; the band at
+    // the top of the rail is there for alignment alone (`aria-hidden`), and the
+    // listbox keeps the name for anyone who cannot see the list.
+    render({ credentialed: new Set(["hyperliquid_perpetual"]) });
+    expect(container.textContent).not.toContain("Exchange");
+    expect(
+      container.querySelector('[role="listbox"]')!.getAttribute("aria-label"),
+    ).toBe("Exchange");
+  });
+
   it("selects the same way from either group", () => {
     const onChange = vi.fn();
     render({ credentialed: new Set(["hyperliquid_perpetual"]), onChange });
