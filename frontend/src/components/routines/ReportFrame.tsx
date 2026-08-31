@@ -24,23 +24,24 @@ import { api } from "@/lib/api";
  *
  * The one thing the host tells a report is which theme it is in — reports listen
  * for `set-theme` and restyle themselves, which is why the message is re-sent on
- * every load and every theme flip.
+ * every load and every theme flip. The theme is the dashboard's, always: a report
+ * is a document inside the app, not a surface with a mode of its own (READ-274).
  */
 export function ReportFrame({
   reportId,
   title,
   className = "",
-  theme: themeOverride,
 }: {
   reportId: string;
   title: string;
   className?: string;
-  /** Show the report in this theme instead of the dashboard's (report browser). */
-  theme?: "dark" | "light";
 }) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const { theme: appTheme } = useTheme();
-  const theme = themeOverride ?? appTheme;
+  // The app has three themes, the report protocol has two. Colorblind is a
+  // dark-based palette, so it reads as dark inside the frame too — which is
+  // also what the report side assumes: anything but `light` is dark.
+  const theme = appTheme === "light" ? "light" : "dark";
 
   const { data: html, isLoading, isError, error } = useQuery({
     queryKey: ["report-html", reportId],

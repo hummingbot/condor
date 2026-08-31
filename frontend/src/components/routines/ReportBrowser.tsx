@@ -9,11 +9,9 @@ import {
   Clock,
   Download,
   Loader2,
-  Moon,
   Play,
   PlayCircle,
   Settings2,
-  Sun,
   Trash2,
   X,
   Zap,
@@ -152,7 +150,6 @@ export function ReportBrowser({
   const [showConfigPanel, setShowConfigPanel] = useState(false);
   const [showNotifyPanel, setShowNotifyPanel] = useState(false);
   const [showSourceModal, setShowSourceModal] = useState(false);
-  const [reportTheme, setReportTheme] = useState<"dark" | "light">("dark");
   const sidebarRef = useRef<HTMLDivElement>(null);
 
   // Fetch all routines for the sidebar
@@ -914,14 +911,6 @@ export function ReportBrowser({
                 </button>
               )
             )}
-            {/* Report theme toggle */}
-            <button
-              onClick={() => setReportTheme((t) => (t === "dark" ? "light" : "dark"))}
-              className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-              title={`Switch to ${reportTheme === "dark" ? "light" : "dark"} report theme`}
-            >
-              {reportTheme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-            </button>
             {/* Close — the sheet's header has one when hosted */}
             {!hosted && (
               <button
@@ -1155,11 +1144,7 @@ export function ReportBrowser({
               )}
             </div>
           ) : (
-            <ReportFrame
-              reportId={selectedReport.id}
-              title={selectedReport.title}
-              theme={reportTheme}
-            />
+            <ReportFrame reportId={selectedReport.id} title={selectedReport.title} />
           )}
 
           {/* Chevron overlays for report navigation */}

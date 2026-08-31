@@ -124,6 +124,9 @@ const browser = () => container.firstElementChild as HTMLElement;
 const heading = () => container.querySelector("h2")?.textContent?.trim();
 const button = (title: string) =>
   container.querySelector<HTMLButtonElement>(`button[title="${title}"]`);
+/** The toolbar's own theme toggle, removed in READ-274. */
+const themeButton = () =>
+  container.querySelector<HTMLButtonElement>('button[title^="Switch to "]');
 
 async function press(key: string, on: EventTarget) {
   await act(async () => {
@@ -184,6 +187,14 @@ describe("ReportBrowser hosted in the pane", () => {
     expect(closes).toBe(0);
   });
 
+  it("leaves the theme to the dashboard", async () => {
+    await render({ hosted: true });
+
+    // The report is a document inside the app, not a surface with a mode of its
+    // own: there is no second, differently-shaped theme control in the toolbar.
+    expect(themeButton()).toBeNull();
+  });
+
   it("runs on the conversation's server, as the conversation", async () => {
     await render({ hosted: true, runContext: RUN_CONTEXT });
 
@@ -212,6 +223,12 @@ describe("ReportBrowser on its own page", () => {
     await press("Escape", window);
     expect(closes).toBe(1);
     expect(button("Close (Esc)")).toBeTruthy();
+  });
+
+  it("leaves the theme to the dashboard here too", async () => {
+    await render();
+
+    expect(themeButton()).toBeNull();
   });
 
   it("runs on the dashboard's server, with no conversation behind it", async () => {
