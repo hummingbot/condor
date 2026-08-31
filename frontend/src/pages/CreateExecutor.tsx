@@ -21,6 +21,8 @@ import { PairSelector, useTradingRules } from "@/components/market/PairSelector"
 import { PriceTicker } from "@/components/market/PriceTicker";
 import { MarketDepthPanel } from "@/components/market/MarketDepthPanel";
 import { MarketBrowser, type MarketPick } from "@/components/market/MarketBrowser";
+import { FavoritesStrip } from "@/components/market/FavoritesStrip";
+import { StarMarketButton } from "@/components/market/StarMarketButton";
 import { TradeChart } from "@/components/trade/TradeChart";
 import { GridConfigPanel, useGridValidation } from "@/components/grid/GridConfigPanel";
 import {
@@ -619,6 +621,11 @@ export function CreateExecutor() {
 
         {/* Pair + Exchange */}
         <div className="flex items-center border-r border-[var(--color-border)]">
+          {/* Star the pair in the header, without a round trip through Browse.
+              Reads as a mark on the pair name, so it leads it. */}
+          {caps.hasOrderBook && (
+            <StarMarketButton server={server} connector={connector} pair={pair} />
+          )}
           <PairSelector
             server={server}
             connector={connector}
@@ -648,6 +655,11 @@ export function CreateExecutor() {
             >
               <List className="h-3.5 w-3.5" />
               Browse
+              {/* The key is already bound and already in the title; spelling it
+                  on the button is what makes anyone find it without hovering. */}
+              <kbd className="rounded border border-[var(--color-border)] px-1 font-mono text-[10px] leading-4 text-[var(--color-text-muted)]">
+                /
+              </kbd>
             </button>
           )}
         </div>
@@ -695,6 +707,16 @@ export function CreateExecutor() {
           </div>
         </div>
       </div>
+
+      {/* This server's starred markets — one click to the chart, no overlay. */}
+      {caps.hasOrderBook && (
+        <FavoritesStrip
+          server={server}
+          connector={connector}
+          pair={pair}
+          onPick={applyMarket}
+        />
+      )}
 
       {/* Main Area: Chart + Right Panel */}
       <div className="flex min-h-0 flex-1">

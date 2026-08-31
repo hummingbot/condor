@@ -1,12 +1,16 @@
 /**
- * "Browse all" — the routine library, opened beside the conversation (FEAT-077).
+ * The routine library, opened beside the conversation (FEAT-077).
  *
  * The dock's Routines section shows the recent end of what this conversation
- * ran; its header is the door to all of it. What is pinned here is the wiring
- * that makes that door useful and safe: the library lands in the workspace pane
- * scoped to the agent being talked to, it is handed the conversation so a run
- * from it belongs here, and it is the pane's only claimant — a run row opened
- * behind it would stack two sheets in the same 550px.
+ * ran; the library is all of it. What is pinned here is the wiring that makes
+ * that one pane the only way a routine is read: the header's "Browse all" opens
+ * it scoped to the agent being talked to, a row opens the *same* pane focused
+ * on the run it points at, and it is handed the conversation so a run from it
+ * belongs here.
+ *
+ * And that the door cannot go missing. The dock collapses itself on a narrow
+ * window and stays collapsed once closed, so the rail carries the library too,
+ * and a pane already open outlives the column it was opened from.
  *
  * Needs a DOM, so this file overrides vitest's default `node` environment.
  *
@@ -118,10 +122,16 @@ const runRow = () =>
   [...container.querySelectorAll("button")].find((b) =>
     b.textContent?.includes("Alpha Check"),
   )!;
+const reportRow = () =>
+  [...container.querySelectorAll("button")].find((b) =>
+    b.textContent?.includes("Beta Check"),
+  )!;
 const browseAll = () =>
   [...container.querySelectorAll("button")].find((b) =>
     b.textContent?.includes("Browse all"),
   )!;
+const byTitle = (title: string) =>
+  container.querySelector<HTMLButtonElement>(`button[title="${title}"]`)!;
 
 async function click(el: HTMLElement) {
   await act(async () => {
@@ -157,19 +167,62 @@ describe("the dock's routine library", () => {
     expect(browserProps.hosted).toBe(true);
     expect(browserProps.initialSourceTypeFilter).toBe("scout");
     expect(browserProps.runContext).toEqual(RUN_CONTEXT);
+    // "Browse all" is the whole library: nothing is picked out of it.
+    expect(browserProps.initialSource).toBeUndefined();
   });
 
-  it("is the pane's only claimant", async () => {
+  it("is what a row opens, focused on the run it points at", async () => {
     await render();
 
-    // A run row opened behind the library would be a second sheet in the pane.
-    await click(browseAll());
     await click(runRow());
-    expect(library()).toBeNull();
-    expect(pane().textContent).toContain("Alpha Check");
 
-    // And the library opened over a run row replaces it, rather than stacking.
+    expect(pane().contains(library())).toBe(true);
+    expect(browserProps.initialSource).toBe("scout/alpha_check");
+    expect(browserProps.initialInstanceId).toBe("i1");
+    // This run wrote no report, so there is none to open it on — its output is
+    // the whole of what it produced.
+    expect(browserProps.initialReportId).toBeUndefined();
+  });
+
+  it("opens a report row on that report, not on the newest", async () => {
+    getReports.mockResolvedValue({
+      reports: [
+        {
+          id: "rep-7",
+          title: "Beta Check",
+          source_name: "beta_check",
+          source_type: "routine",
+          filename: "beta.html",
+          created_at: "2026-08-28T09:00:00Z",
+        },
+      ],
+    });
+    await render();
+
+    await click(reportRow());
+
+    expect(browserProps.initialSource).toBe("beta_check");
+    expect(browserProps.initialReportId).toBe("rep-7");
+  });
+
+  it("keeps a door to it while the dock is collapsed", async () => {
+    await render();
+
+    await click(byTitle("Collapse"));
+    expect(browseAll()).toBeUndefined();
+
+    // The rail's own, so a reload that wakes up collapsed still has one.
+    await click(byTitle("Browse all routines — config, schedule and reports"));
+    expect(pane().contains(library())).toBe(true);
+  });
+
+  it("outlives the column it was opened from", async () => {
+    await render();
+
     await click(browseAll());
+    await click(byTitle("Collapse"));
+
+    // Tidying the dock away is not closing what you were reading.
     expect(pane().contains(library())).toBe(true);
   });
 });

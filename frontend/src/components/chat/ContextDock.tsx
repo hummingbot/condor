@@ -11,7 +11,9 @@ import { useEffect, useState } from "react";
 
 import {
   DockRoutines,
+  RoutineLibrarySheet,
   conversationInstances,
+  type LibraryFocus,
 } from "@/components/chat/DockRoutines";
 import { DockTasks } from "@/components/chat/DockTasks";
 import type { RoutineRunContext } from "@/components/routines/ReportBrowser";
@@ -68,9 +70,16 @@ export function ContextDock({
   // "where do I watch this?" was the question both of them exist to answer.
   // The extra poll it costs is one endpoint on a page that is already open.
   const [routinesOpen, setRoutinesOpen] = useState(true);
-  // Held here rather than inside DockRoutines because the button that opens it
-  // lives in the section's header and the sheet it opens lives in the body.
-  const [libraryOpen, setLibraryOpen] = useState(false);
+  // Held here rather than inside DockRoutines because the doors into it — the
+  // section header's, and the rail's while the dock is collapsed — are outside
+  // the body the pane it opens lives in. `null` is closed; `{}` is the whole
+  // library; a row fills in what it points at.
+  const [library, setLibrary] = useState<LibraryFocus | null>(null);
+  const openLibrary = () => {
+    setOpen(true);
+    setRoutinesOpen(true);
+    setLibrary({});
+  };
 
   useEffect(() => {
     localStorage.setItem(OPEN_KEY, String(open));
@@ -89,8 +98,10 @@ export function ContextDock({
     queryKey: ["routine-instances"],
     queryFn: api.getRoutineInstances,
     // Polled whenever the dock is open, not only while the section is: a
-    // collapsed Routines still has to be able to say "one is running".
-    enabled: open,
+    // collapsed Routines still has to be able to say "one is running". The
+    // library pane reads the same list, and it can be up while the column is
+    // not, so it keeps the poll alive on its own.
+    enabled: open || !!library,
     refetchInterval: 5000,
   });
 
@@ -103,6 +114,17 @@ export function ContextDock({
     agentSlug,
     conversationId,
   ).filter((i) => i.status === "running").length;
+
+  const librarySheet = library && (
+    <RoutineLibrarySheet
+      library={library}
+      instances={instances}
+      agentSlug={agentSlug}
+      agentName={agentName}
+      runContext={runContext}
+      onClose={() => setLibrary(null)}
+    />
+  );
 
   if (!open) {
     return (
@@ -131,6 +153,18 @@ export function ContextDock({
         >
           <Zap className="h-4 w-4" />
         </button>
+        {/* The library, from the rail as from the header. The dock collapses
+            itself on a narrow window and stays collapsed once closed, and a
+            door that exists only inside it is a door that disappears on a
+            reload — which is exactly how "Browse all" went missing. */}
+        <button
+          onClick={openLibrary}
+          className="rounded p-1 text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-primary)]"
+          title="Browse all routines — config, schedule and reports"
+        >
+          <Library className="h-4 w-4" />
+        </button>
+        {librarySheet}
       </aside>
     );
   }
@@ -183,10 +217,7 @@ export function ContextDock({
         action={
           <button
             type="button"
-            onClick={() => {
-              setRoutinesOpen(true);
-              setLibraryOpen(true);
-            }}
+            onClick={openLibrary}
             className="flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium normal-case tracking-normal text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-primary)]"
             title="Every routine this agent can run — config, schedule and reports"
           >
@@ -197,13 +228,12 @@ export function ContextDock({
         <DockRoutines
           instances={instances}
           agentSlug={agentSlug}
-          agentName={agentName}
           conversationId={conversationId}
-          runContext={runContext}
-          libraryOpen={libraryOpen}
-          onLibraryChange={setLibraryOpen}
+          onLibraryChange={setLibrary}
         />
       </DockSection>
+
+      {librarySheet}
     </aside>
   );
 }

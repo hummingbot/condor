@@ -76,7 +76,7 @@ export function MarketBrowser({
   useEscapeKey(true, onClose);
 
   const { tickers, isLoading, isFetching } = useTickers(server, connector);
-  const { toggle, isFavorite } = useMarketFavorites();
+  const { toggle, isFavorite } = useMarketFavorites(server);
 
   // Only offer pairs the venue actually accepts orders for.
   const { data: rulesData } = useQuery({

@@ -133,9 +133,9 @@ function NumberField({
   }, [displayValue]);
 
   return (
-    <div>
-      <label htmlFor={id} className="mb-1 block text-xs text-[var(--color-text-muted)]">{label}</label>
-      <div className="flex items-center gap-1">
+    <div className="min-w-0">
+      <label htmlFor={id} className="mb-1 block truncate text-xs text-[var(--color-text-muted)]">{label}</label>
+      <div className="flex min-w-0 items-center gap-1">
         <input
           id={id}
           ref={inputRef}
@@ -150,10 +150,10 @@ function NumberField({
           }}
           onBlur={() => setLocalValue(displayValue === 0 ? "" : String(displayValue))}
           placeholder="0"
-          className="flex-1 rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-text)] placeholder:text-[var(--color-text-muted)]/40 focus:border-[var(--color-primary)] focus:outline-none"
+          className="w-full min-w-0 flex-1 rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-text)] placeholder:text-[var(--color-text-muted)]/40 focus:border-[var(--color-primary)] focus:outline-none"
         />
         {suffix && (
-          <span className="text-[10px] text-[var(--color-text-muted)]">{suffix}</span>
+          <span className="shrink-0 text-[10px] text-[var(--color-text-muted)]">{suffix}</span>
         )}
       </div>
     </div>
