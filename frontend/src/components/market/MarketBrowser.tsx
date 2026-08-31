@@ -205,14 +205,10 @@ export function MarketBrowser({
       onKeyDown={handleKeyDown}
       className="absolute inset-0 z-40 flex flex-col bg-[var(--color-bg)]"
     >
-      {/* Header: venue, search, favourites filter, close */}
-      <div className="flex items-center gap-2 border-b border-[var(--color-border)] bg-[var(--color-surface)] pr-2">
-        {/* Which venue is being listed — a label, not a control. The top bar's
-            exchange selector stays on screen above and re-scopes this list. */}
-        <span className="shrink-0 border-r border-[var(--color-border)] px-3 py-2.5 text-xs font-medium text-[var(--color-primary)]">
-          {formatConnectorName(connector)}
-        </span>
-
+      {/* Header: search, favourites filter, close. The venue is named by the
+          search placeholder rather than a chip of its own — the top bar's
+          exchange selector stays on screen above and re-scopes this list. */}
+      <div className="flex items-center gap-2 border-b border-[var(--color-border)] bg-[var(--color-surface)] pl-3 pr-2">
         <Search className="h-3.5 w-3.5 shrink-0 text-[var(--color-text-muted)]" />
         <input
           autoFocus
@@ -222,8 +218,8 @@ export function MarketBrowser({
             setSearch(e.target.value);
             setActiveIndex(0);
           }}
-          placeholder="Search every market on this venue..."
-          aria-label="Search markets"
+          placeholder={`Search ${formatConnectorName(connector)} markets...`}
+          aria-label={`Search ${formatConnectorName(connector)} markets`}
           className="min-w-0 flex-1 bg-transparent py-2.5 text-sm text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:outline-none"
         />
 

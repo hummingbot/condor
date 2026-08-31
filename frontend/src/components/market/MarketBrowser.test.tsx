@@ -183,13 +183,18 @@ describe("picking a row", () => {
     expect(picked).toEqual([{ connector: "binance", pair: "SOL-USDC" }]);
   });
 
-  it("names its venue without offering a second way to change it", async () => {
+  it("names its venue once, in the search field, without offering a second way to change it", async () => {
     TICKERS = [ticker({ trading_pair: "SOL-USDC" })];
     await render();
 
-    // The venue reads as a label; the only exchange selector is the trade
-    // surface's own, which stays on screen above this panel.
-    expect(container.textContent).toContain("Binance");
+    // The venue scopes the search rather than sitting in a chip of its own —
+    // the trade surface's exchange selector stays on screen above this panel
+    // and is the only control that changes it.
+    const input = container.querySelector("input")!;
+    expect(input.placeholder).toBe("Search Binance markets...");
+    expect(input.getAttribute("aria-label")).toBe("Search Binance markets");
+
+    expect(container.textContent).not.toContain("Binance");
     const venueButton = [...container.querySelectorAll("button")].find(
       (b) => b.getAttribute("aria-haspopup") === "listbox",
     );

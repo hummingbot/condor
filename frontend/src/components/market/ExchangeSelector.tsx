@@ -33,7 +33,11 @@ export function ExchangeSelector({
         aria-haspopup="listbox"
         className="flex items-center gap-1.5 px-3 py-2.5 text-xs transition-colors hover:bg-[var(--color-surface-hover)]"
       >
-        <span className="font-medium text-[var(--color-primary)]">{formatConnectorName(value)}</span>
+        {/* The pair beside this is the identity of everything below; the venue
+            is its qualifier, so it stays body text. The accent colour in this
+            bar is reserved for state — the open Browse button, the browser's
+            selected row, this menu's selected option. */}
+        <span className="font-medium text-[var(--color-text)]">{formatConnectorName(value)}</span>
         <ChevronDown className={`h-3 w-3 text-[var(--color-text-muted)] transition-transform ${open ? "rotate-180" : ""}`} />
       </button>
 
