@@ -12,7 +12,7 @@
  * @vitest-environment jsdom
  */
 
-import { act } from "react";
+import { act, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 
@@ -107,7 +107,10 @@ let onPriceSet: Mock<(field: PickSlot, price: number) => void>;
 /** The bar the crosshair sits on — its close is nowhere near the pointer's price. */
 const HOVERED_BAR = { open: 1, high: 2, low: 0.5, close: 99000 };
 
-async function render(pricePrecision?: number) {
+async function render(
+  pricePrecision?: number,
+  extra: Partial<ComponentProps<typeof TradeChart>> = {},
+) {
   await act(async () => {
     root.render(
       <TradeChart
@@ -124,6 +127,7 @@ async function render(pricePrecision?: number) {
         activePickField="start"
         onPriceSet={onPriceSet}
         pricePrecision={pricePrecision}
+        {...extra}
       />,
     );
   });
@@ -147,10 +151,40 @@ function pane(): HTMLDivElement {
   return container.querySelector(".absolute.inset-0") as HTMLDivElement;
 }
 
-async function click(shiftKey = false) {
+/**
+ * A pointer gesture on the pane: press at `from`, release `dx`/`dy` away.
+ *
+ * jsdom has no `PointerEvent`, but React dispatches by event type, so a
+ * `MouseEvent` named `pointerdown`/`pointerup` reaches the same handlers with
+ * the `clientX`/`clientY`/`button`/`shiftKey` the gate reads.
+ */
+async function gesture({
+  shiftKey = false,
+  dx = 0,
+  dy = 0,
+  button = 0,
+  from = { x: 300, y: 200 },
+}: {
+  shiftKey?: boolean;
+  dx?: number;
+  dy?: number;
+  button?: number;
+  from?: { x: number; y: number };
+} = {}) {
   await act(async () => {
-    pane().dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey }));
+    const opts = { bubbles: true, shiftKey, button };
+    pane().dispatchEvent(
+      new MouseEvent("pointerdown", { ...opts, clientX: from.x, clientY: from.y }),
+    );
+    pane().dispatchEvent(
+      new MouseEvent("pointerup", { ...opts, clientX: from.x + dx, clientY: from.y + dy }),
+    );
   });
+}
+
+/** A stationary tap — the gesture the four click branches are meant to answer. */
+async function click(shiftKey = false) {
+  await gesture({ shiftKey });
 }
 
 beforeEach(() => {
@@ -223,6 +257,78 @@ describe("TradeChart click-to-set", () => {
     await render();
     await moveTo(200);
     await click(true);
+
+    expect(onPriceSet).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Panning must not fire the pane's click actions (CORR-264).
+ *
+ * The chart scrolls on a pressed mouse move, and the browser reports that
+ * press-drag-release as a `click` on the container all the same — so the pane
+ * gates its actions on the pointer having stayed put between press and release.
+ */
+describe("TradeChart pan vs click", () => {
+  it("does not set a price when the pointer travelled", async () => {
+    await render(8);
+    await moveTo(200);
+    await gesture({ dy: 40 });
+
+    expect(onPriceSet).not.toHaveBeenCalled();
+
+    // Pick mode is still armed: a stationary tap right after still picks.
+    await click();
+    expect(onPriceSet).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not deselect the executor when the pointer travelled", async () => {
+    const onExecutorDeselect = vi.fn();
+    await render(8, {
+      activePickField: null,
+      selectedExecutorId: "exec-1",
+      onExecutorDeselect,
+    });
+    await moveTo(200);
+    await gesture({ dx: 40 });
+
+    expect(onExecutorDeselect).not.toHaveBeenCalled();
+
+    await click();
+    expect(onExecutorDeselect).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores a press that is not the left button", async () => {
+    await render(8);
+    await moveTo(200);
+    await gesture({ button: 2 });
+
+    expect(onPriceSet).not.toHaveBeenCalled();
+  });
+
+  it("keeps the measure branches on a stationary gesture", async () => {
+    await render(8);
+    await moveTo(200);
+
+    // Shift+tap anchors the measurement rather than picking a price...
+    await click(true);
+    expect(onPriceSet).not.toHaveBeenCalled();
+
+    // ...the next plain tap clears it, still without picking...
+    await click();
+    expect(onPriceSet).not.toHaveBeenCalled();
+
+    // ...and only the tap after that reaches the pick branch.
+    await click();
+    expect(onPriceSet).toHaveBeenCalledTimes(1);
+  });
+
+  it("carries a single gesture path — a bare click event does nothing", async () => {
+    await render(8);
+    await moveTo(200);
+    await act(async () => {
+      pane().dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
 
     expect(onPriceSet).not.toHaveBeenCalled();
   });

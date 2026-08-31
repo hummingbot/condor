@@ -21,6 +21,13 @@ const PICK_LABELS: Record<PickSlot, string> = {
 };
 
 /**
+ * How far the pointer may drift between press and release and still count as a
+ * click. Past it the gesture was a pan — the chart scrolls on a pressed move —
+ * and none of the pane's click actions should fire.
+ */
+const CLICK_SLOP_PX = 4;
+
+/**
  * The chart's price mapping, and nothing else.
  *
  * A sibling drawn beside the chart — the DEX liquidity-depth column — has to put
@@ -1021,9 +1028,38 @@ export function TradeChart({
   }, []);
 
   // ── Click-to-set price / deselect executor / measure ──
-  const handleClick = (e: React.MouseEvent) => {
+  //
+  // A press-drag-release inside the pane is a chart pan, and the browser still
+  // reports it as a `click` on the container: the event fires on the common
+  // ancestor of press and release whatever the distance travelled. Bound to
+  // `onClick`, every pan would set a price or drop the executor selection. So
+  // the gesture is tracked by hand — press position recorded, release gated on
+  // having stayed put — and the modifier is read from the press, so releasing
+  // shift mid-gesture cannot switch which branch runs.
+  const pointerDownRef = useRef<{
+    x: number;
+    y: number;
+    button: number;
+    shiftKey: boolean;
+  } | null>(null);
+
+  const handlePointerDown = (e: React.PointerEvent) => {
+    pointerDownRef.current = {
+      x: e.clientX,
+      y: e.clientY,
+      button: e.button,
+      shiftKey: e.shiftKey,
+    };
+  };
+
+  const handlePointerUp = (e: React.PointerEvent) => {
+    const down = pointerDownRef.current;
+    pointerDownRef.current = null;
+    if (!down || down.button !== 0) return;
+    if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > CLICK_SLOP_PX) return;
+
     // Shift+click drops the measure anchor; move the mouse to see the % of the range
-    if (e.shiftKey) {
+    if (down.shiftKey) {
       if (cursorPriceRef.current != null && crosshairTimeRef.current != null) {
         clearMeasure();
         measureAnchorRef.current = { price: cursorPriceRef.current, time: crosshairTimeRef.current };
@@ -1065,7 +1101,8 @@ export function TradeChart({
           ref={containerRef}
           className="absolute inset-0"
           style={{ cursor: activePickField ? "crosshair" : "default" }}
-          onClick={handleClick}
+          onPointerDown={handlePointerDown}
+          onPointerUp={handlePointerUp}
         />
         {/* Measure box overlay — pure DOM, never touches chart series */}
         <div
