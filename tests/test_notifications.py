@@ -482,3 +482,119 @@ def test_notify_route_counts_a_bell_only_delivery_as_recorded(store, monkeypatch
     assert result["sent"] is False
     assert result["recorded"] is True
     assert [n.text for n in list_for(USER_A)] == ["the thing happened"]
+
+
+# ── One notice, two surfaces ──
+
+
+def test_bell_text_replaces_the_telegram_wording(store, known_users, monkeypatch):
+    """A Telegram-only next step ("use /update") must not reach the bell."""
+    sent: list[str] = []
+
+    class _Bot:
+        async def send_message(self, **kw):
+            sent.append(kw["text"])
+            return {"ok": True}
+
+    monkeypatch.setattr("condor.agents.delegate.resolve_bot", lambda b=None: _Bot())
+
+    delivery = asyncio.run(
+        notifications.announce(
+            USER_A,
+            USER_A,
+            "Updates available\n\nUse /update to install.",
+            bell_text="Updates available",
+            link="/settings?tab=updates",
+        )
+    )
+
+    assert delivery.sent is True
+    assert sent == ["Updates available\n\nUse /update to install."]
+    assert [n.text for n in list_for(USER_A)] == ["Updates available"]
+
+
+def test_bell_text_survives_the_bell_only_ladder(store, known_users, monkeypatch):
+    """``NotifyBot`` is the rung that files the *only* entry, so it is the one
+    that must be handed the bell's wording rather than Telegram's."""
+    monkeypatch.setattr(
+        "condor.agents.delegate.resolve_bot", lambda b=None: NotifyBot()
+    )
+
+    asyncio.run(
+        notifications.announce(
+            USER_A,
+            USER_A,
+            "Updates available\n\nUse /update to install.",
+            bell_text="Updates available",
+            link="/settings?tab=updates",
+        )
+    )
+
+    items = list_for(USER_A)
+    assert len(items) == 1
+    assert items[0].text == "Updates available"
+    assert items[0].link == "/settings?tab=updates"
+
+
+def test_announce_without_bell_text_is_unchanged(store, known_users, monkeypatch):
+    """The parameter is opt-in: one wording still reaches both surfaces."""
+
+    class _Bot:
+        async def send_message(self, **kw):
+            return {"ok": True}
+
+    monkeypatch.setattr("condor.agents.delegate.resolve_bot", lambda b=None: _Bot())
+
+    asyncio.run(notifications.announce(USER_A, USER_A, "boot notice"))
+
+    assert [n.text for n in list_for(USER_A)] == ["boot notice"]
+
+
+def test_update_notice_does_not_tell_the_dashboard_to_type_update(
+    store, known_users, monkeypatch
+):
+    """The hourly notice reaches both surfaces, each with its own next step."""
+    from condor.updates import components as components_mod
+    from handlers.admin import update as update_handler
+
+    stale = components_mod.ComponentStatus(
+        key="condor",
+        name="Condor",
+        facets={
+            "repo": components_mod.Facet(
+                kind="repo",
+                current="main @ 73e5400",
+                available="main @ 81b2821",
+                behind=3,
+                up_to_date=False,
+            )
+        },
+        up_to_date=False,
+    )
+
+    async def fake_check(*, force=False):
+        return [stale]
+
+    monkeypatch.setattr(update_handler.updates, "check", fake_check)
+    monkeypatch.setattr("utils.config.ADMIN_USER_ID", str(USER_A))
+
+    sent: list[str] = []
+
+    class _Bot:
+        async def send_message(self, **kw):
+            sent.append(kw["text"])
+            return {"ok": True}
+
+    monkeypatch.setattr("condor.agents.delegate.resolve_bot", lambda b=None: _Bot())
+
+    class _Ctx:
+        bot = _Bot()
+
+    asyncio.run(update_handler._periodic_update_check(_Ctx()))
+
+    assert "Use /update to install." in sent[0]
+
+    item = list_for(USER_A)[0]
+    assert "/update" not in item.text
+    assert "main @ 73e5400 → main @ 81b2821" in item.text
+    assert item.link == "/settings?tab=updates"

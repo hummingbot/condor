@@ -441,18 +441,25 @@ async def _periodic_update_check(context: ContextTypes.DEFAULT_TYPE) -> None:
     if not lines:
         return
 
-    text = "Updates available\n\n" + "\n".join(lines) + "\n\nUse /update to install."
+    body = "Updates available\n\n" + "\n".join(lines)
 
     # announce() reaches Telegram *and* the dashboard bell in one call, which is
     # what makes the update panel discoverable without any new badge plumbing.
+    # The two surfaces read differently: /update is a Telegram command, and
+    # telling a dashboard reader to type it is advice they cannot follow —
+    # their entry is already a link into the update panel.
     await notifications.announce(
         int(ADMIN_USER_ID),
         int(ADMIN_USER_ID),
-        text,
+        body + "\n\nUse /update to install.",
         kind="system",
         bot=context.bot,
         title="Updates available",
         link="/settings?tab=updates",
+        # The bell already carries "Updates available" as the title and the
+        # entry itself is the link into the panel, so its body is just the
+        # versions — which is all the three-line preview has room for anyway.
+        bell_text="\n".join(lines),
     )
 
 
