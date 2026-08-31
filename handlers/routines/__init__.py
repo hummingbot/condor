@@ -1237,7 +1237,9 @@ async def _share_report(
     update: Update, context: ContextTypes.DEFAULT_TYPE, report_id: str
 ) -> None:
     """Send a report HTML file as a Telegram document."""
-    from condor.reports import CHARTS_DIR, get_report
+    import io
+
+    from condor.reports import get_report, get_report_raw_html
 
     chat_id = update.effective_chat.id
     entry = get_report(report_id)
@@ -1245,19 +1247,21 @@ async def _share_report(
         await update.callback_query.answer("Report not found", show_alert=True)
         return
 
-    file_path = CHARTS_DIR / entry["filename"]
-    if not file_path.exists():
+    # Read through the guarded helper: the index entry is untrusted, so the
+    # resolved path must stay inside the reports directory and be an .html
+    # file. A poisoned entry yields None here, not an arbitrary file.
+    found = get_report_raw_html(report_id)
+    if not found:
         await update.callback_query.answer("Report file missing", show_alert=True)
         return
 
     try:
-        with open(file_path, "rb") as f:
-            await context.bot.send_document(
-                chat_id=chat_id,
-                document=f,
-                filename=f"{entry['title']}.html",
-                caption=f"📊 {entry['title']}",
-            )
+        await context.bot.send_document(
+            chat_id=chat_id,
+            document=io.BytesIO(found[0].encode("utf-8")),
+            filename=f"{entry['title']}.html",
+            caption=f"📊 {entry['title']}",
+        )
     except Exception as e:
         logger.error(f"Failed to share report {report_id}: {e}")
         await update.callback_query.answer(f"Error: {e}", show_alert=True)
