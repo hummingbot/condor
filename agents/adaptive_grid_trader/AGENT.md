@@ -11,8 +11,16 @@ tools:
 - list_executors
 - get_executor
 - stop_executor
+- list_positions_held
 - search_history
 - manage_routines
+- manage_agents
+- manage_strategies
+- control_agent
+- get_available_models
+- consult
+- delegate
+- send_notification
 - trading_agent_journal_read
 - trading_agent_journal_write
 - manage_memory
