@@ -40,23 +40,65 @@ prompt_visible() {
     eval "$var_name=\"$value\""
 }
 
-# Prompt for passwords (no echo)
+# Prompt for passwords (no echo). Never echoes ``default`` in cleartext --
+# unlike prompt_visible, a bracketed hint here would defeat the whole point
+# of a masked prompt the moment a caller passed one.
+#
+# Only the *edges* are trimmed. prompt_visible strips all whitespace, which is
+# right for a token or a hostname but wrong for a password: the user would
+# type "correct horse battery", get "correcthorsebattery" written to two
+# different .env files, and then be unable to log in anywhere with the
+# passphrase they believe they set. Inner whitespace is rejected instead --
+# see prompt_required_secret -- because .env is read by three different
+# parsers (python-dotenv, docker compose, and `source`) that do not agree on
+# how to quote it.
 prompt_secret() {
     local prompt="$1"
     local default="$2"
     local var_name="$3"
     if [ -n "$default" ]; then
-        echo -ne "  ${prompt} ${DIM}[${default}]${RESET}: " >&2
+        echo -ne "  ${prompt} ${DIM}[hidden]${RESET}: " >&2
     else
         echo -ne "  ${prompt}: " >&2
     fi
     read -rs value < /dev/tty || value=""
     echo "" >&2
-    value=$(echo "$value" | tr -d '[:space:]')
+    value="$(printf '%s' "$value" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
     if [ -z "$value" ] && [ -n "$default" ]; then
         value="$default"
     fi
     eval "$var_name=\"$value\""
+}
+
+# Prompt visibly, looping until non-empty. No default -- for values (like
+# credentials) that must never silently fall back to something guessable.
+prompt_required_visible() {
+    local prompt="$1" var_name="$2" warn_msg="${3:-This cannot be empty}"
+    while true; do
+        prompt_visible "$prompt" "" "$var_name"
+        if [ -z "${!var_name}" ]; then
+            msg_warn "$warn_msg"
+            continue
+        fi
+        break
+    done
+}
+
+# Same as prompt_required_visible, but masked (see prompt_secret).
+prompt_required_secret() {
+    local prompt="$1" var_name="$2" warn_msg="${3:-This cannot be empty}"
+    while true; do
+        prompt_secret "$prompt" "" "$var_name"
+        if [ -z "${!var_name}" ]; then
+            msg_warn "$warn_msg"
+            continue
+        fi
+        if [[ "${!var_name}" =~ [[:space:]] ]]; then
+            msg_warn "Spaces are not supported in this value -- please retype it without any"
+            continue
+        fi
+        break
+    done
 }
 
 # Escape special characters for .env file
@@ -73,7 +115,13 @@ set_env_var() {
     local key="$1"
     local value
     value="$(escape_env_value "$2")"
-    [ -f "$ENV_FILE" ] || touch "$ENV_FILE"
+    if [ ! -f "$ENV_FILE" ]; then
+        touch "$ENV_FILE"
+        # .env holds the bot token and the API password. 644 (the usual umask
+        # default) means every other account on a shared box or VPS can read
+        # them. Best-effort: a no-op on filesystems without POSIX modes.
+        chmod 600 "$ENV_FILE" 2>/dev/null || true
+    fi
     if grep -q "^${key}=" "$ENV_FILE"; then
         sed -i.bak "s|^${key}=.*|${key}=${value}|" "$ENV_FILE"
         rm -f "$ENV_FILE.bak"
@@ -441,27 +489,6 @@ if ! command_exists npm; then
     fi
 fi
 
-# ── Install Claude ACP globally ─────────────────────
-
-# Ensure shell environment is refreshed so npm is available after node install.
-refresh_path
-hash -r
-
-if ! npm list -g @agentclientprotocol/claude-agent-acp >/dev/null 2>&1; then
-    msg_info "Installing @agentclientprotocol/claude-agent-acp globally..."
-    if npm install -g @agentclientprotocol/claude-agent-acp; then
-        msg_ok "@agentclientprotocol/claude-agent-acp installed successfully"
-        NEEDS_RESTART=true
-        refresh_path
-    else
-        msg_error "Failed to install @agentclientprotocol/claude-agent-acp globally."
-        msg_info "You can install it later with: npm install -g @agentclientprotocol/claude-agent-acp"
-        # Don't exit - this dependency is optional for core setup flow
-    fi
-else
-    msg_ok "@agentclientprotocol/claude-agent-acp is already installed"
-fi
-
 # ── Install TypeScript globally ─────────────────────
 
 if ! command_exists tsc && ! npm list -g typescript >/dev/null 2>&1; then
@@ -581,16 +608,15 @@ else
 fi
 
 if [ "${condor_mode_choice:-}" = "2" ]; then
-    # Local mode: nothing to ask. No bot, no token — the dashboard logs in as
-    # ADMIN_USER_ID, the same id config.yml, chat defaults, preferences, memory
-    # and session keys already key on.
+    # Local mode: nothing to ask about a bot. No Telegram, no token — the
+    # dashboard logs in as ADMIN_USER_ID, the same id config.yml, chat
+    # defaults, preferences, memory and session keys already key on.
     #
     # An existing numeric id is KEPT, never overwritten with 1: a Telegram
     # install switching to local keeps its own admin, so the dashboard logs in
     # as you with every server, preference and default intact. 1 is only the
     # answer for an install that never had a Telegram id.
     CONDOR_MODE="local"
-    USE_TAILSCALE=false
     if [[ "${ADMIN_USER_ID:-}" =~ ^[1-9][0-9]*$ ]]; then
         msg_info "Local mode will log in as user ${ADMIN_USER_ID} (ADMIN_USER_ID in .env)"
     else
@@ -599,9 +625,23 @@ if [ "${condor_mode_choice:-}" = "2" ]; then
     fi
     set_env_var CONDOR_MODE "local"
     set_env_var WEB_URL "http://localhost:8088"
-    set_env_var USE_TAILSCALE "false"
     msg_ok ".env configured for local mode"
     local_mode_warning
+
+    # Tailscale is not just an option here — it is the answer to the warning
+    # above: an unauthenticated dashboard is only as safe as what can actually
+    # reach it. Asked the same way Telegram mode asks it (below), so local
+    # mode gets the identical Tailscale install/connect treatment in Step 3
+    # for hummingbot-api — and for the dashboard itself, main.py's _run_dual()
+    # binds loopback and proxies it via `tailscale serve` whenever
+    # USE_TAILSCALE is set, local mode or not.
+    prompt_visible "Use Tailscale to secure the dashboard and the hummingbot-api connection? [y/N]" "N" "use_tailscale_early"
+    if [[ "${use_tailscale_early:-}" =~ ^[Yy]$ ]]; then
+        USE_TAILSCALE=true
+    else
+        USE_TAILSCALE=false
+    fi
+    set_env_var USE_TAILSCALE "$USE_TAILSCALE"
 elif [ "${condor_mode_choice:-}" = "1" ]; then
     msg_info "Create a bot: $(make_link 'https://t.me/BotFather')"
     msg_info "Get your ID: $(make_link 'https://t.me/userinfobot')"
@@ -697,6 +737,7 @@ elif [ "${condor_mode_choice:-}" = "1" ]; then
                 echo "WEB_URL=http://$(escape_env_value "$SERVER_IP"):8088"
             fi
         } > "$ENV_FILE"
+        chmod 600 "$ENV_FILE" 2>/dev/null || true
     fi
 
     # The mode is written explicitly even for the default, so nothing downstream
@@ -718,14 +759,30 @@ echo ""
 echo -e "${BOLD}Step 2: AI Model (LLM)${RESET}"
 echo ""
 
-# The wizard renders the same readiness probes the bot uses, so it has to run in
-# the project's Python env -- which means `uv run` syncs it here, a minute before
-# `make install` would have. Never fatal: a model can be picked later with
-# `make pick-model`, and setup has more to do.
+# The wizard (condor.setup_llm) renders the same readiness probes the bot
+# uses, so it has to run in the project's Python env. Sync it FIRST, before
+# asking anything below -- otherwise `uv run`'s own venv-creation/install
+# output shows up sandwiched between "Pick an AI model now?" and the actual
+# model menu, which reads as the prompt getting interrupted mid-conversation
+# rather than as one continuous step. Unconditional (not gated behind the
+# Y/n) since both branches below need it: picking a model runs the wizard
+# directly, and skipping still needs it synced for `--status`/no-tty.
+msg_info "Setting up Condor's Python environment (~250MB first run, 1-3 min)..."
+uv run python -c "pass"
+echo ""
+
 if (: </dev/tty) 2>/dev/null; then
-    msg_info "Preparing the Python environment (first run may take a minute)..."
-    uv run python -m condor.setup_llm < /dev/tty || \
-        msg_warn "Model selection did not complete -- run 'make pick-model' later"
+    prompt_visible "Pick an AI model now? [Y/n]" "Y" "pick_model_now"
+    if [[ "${pick_model_now:-Y}" =~ ^[Nn]$ ]]; then
+        msg_ok "Skipped -- run 'make pick-model' any time"
+    else
+        # The venv is already warm above, so this goes straight to the model
+        # menu -- and if the model picked (or kept) needs a CLI bridge that
+        # isn't installed yet (e.g. `npm install -g @google/gemini-cli`),
+        # installs and confirms it right here, no separate pass afterward.
+        uv run python -m condor.setup_llm < /dev/tty || \
+            msg_warn "Model selection did not complete -- run 'make pick-model' later"
+    fi
 else
     msg_info "No terminal available -- skipping model selection"
     uv run python -m condor.setup_llm --status || true
@@ -773,9 +830,24 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
         if [[ "${override_api:-}" =~ ^[Yy]$ ]]; then
             msg_info "Will reconfigure and restart the API."
         else
-            echo "DEPLOY_HUMMINGBOT_API=false" >> "$ENV_FILE"
+            set_env_var DEPLOY_HUMMINGBOT_API "false"
             msg_ok "Keeping existing API instance"
             hb_api_deployed=false
+
+            # Keeping someone else's API still means Condor has to log in to
+            # it. Skipping this used to leave config.yml on the template's
+            # placeholder credentials, so the very next thing the user saw was
+            # every command failing with a 401 and no hint as to why.
+            echo ""
+            msg_info "Condor still needs this API's credentials to talk to it."
+            msg_info "They are USERNAME / PASSWORD in that instance's .env."
+            prompt_required_visible "API admin username" "hb_username" "Username cannot be empty"
+            prompt_required_secret "API admin password" "hb_password" "Password cannot be empty"
+            HB_API_PROTOCOL="http"
+            HB_API_HOST="localhost"
+            HB_API_PORT="8000"
+            hb_api_configured=true
+
             # Skip the rest of the API setup block
             existing_api=skip
         fi
@@ -795,7 +867,7 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
 
     if [[ "${deploy_hb:-}" =~ ^[Nn]$ ]]; then
         if [ "$finish_remote_api" != true ]; then
-            echo "DEPLOY_HUMMINGBOT_API=false" >> "$ENV_FILE"
+            set_env_var DEPLOY_HUMMINGBOT_API "false"
         fi
         msg_ok "Skipped Hummingbot API deployment"
         echo ""
@@ -805,6 +877,14 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
             HB_API_PROTOCOL="http"
             HB_API_HOST="hummingbot-api"
             HB_API_PORT="8000"
+            # Skipping local deploy + using Tailscale means hummingbot-api is
+            # on another machine (a VPS, most likely) -- this is the default
+            # hostname its own Tailscale setup assigns it, not a guess made
+            # up here.
+            msg_info "Assuming the default tailnet address: http://hummingbot-api:8000"
+            msg_info "If that machine's hummingbot-api used a different TAILSCALE_HOSTNAME"
+            msg_info "(or you renamed the device in the Tailscale admin console), update the"
+            msg_info "host afterward in config.yml, or via /servers in Telegram."
         else
             prompt_visible "API URL + port (e.g. http://your-server:8000)" "http://localhost:8000" "hb_api_url_raw"
             hb_api_url_raw="${hb_api_url_raw:-http://localhost:8000}"
@@ -813,8 +893,8 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
             _def_port=$([ "$HB_API_PROTOCOL" = "https" ] && echo "443" || echo "8000")
             HB_API_PORT=$(python3 -c "from urllib.parse import urlparse; p=urlparse('${hb_api_url_raw}'); print(p.port or ${_def_port})" 2>/dev/null || echo "$_def_port")
         fi
-        prompt_visible "API admin username" "admin" "hb_username"
-        prompt_secret "API admin password" "admin" "hb_password"
+        prompt_required_visible "API admin username" "hb_username" "Username cannot be empty"
+        prompt_required_secret "API admin password" "hb_password" "Password cannot be empty"
 
         # ── Tailscale option for external API ──────────────
         use_tailscale_remote="${use_tailscale_early:-N}"
@@ -883,7 +963,17 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
         fi
 
         # ── Tailscale option for Docker deploy ─────────────
+        # Condor is deploying hummingbot-api right here, on this same machine
+        # -- so Condor itself always reaches it over localhost, tailnet or not.
+        # Answering yes below connects THIS HOST to the tailnet (so the
+        # dashboard can be reached remotely via `tailscale serve`). Giving
+        # hummingbot-api its OWN separate tailnet node is a second, distinct
+        # question asked further down, only if this one is yes -- most
+        # installs don't need a second node just to reach something already
+        # local, and spinning one up unconditionally used to mean two tailnet
+        # devices (and two `tailscale up` connections) for one machine.
         TS_DEPLOY=false
+        HB_OWN_TAILNET_NODE=false
         ts_auth_key=""
         ts_hb_hostname="hummingbot-api"
         use_tailscale="${use_tailscale_early:-N}"
@@ -909,14 +999,13 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
                 fi
                 break
             done
-            # Hostname defaults to "hummingbot-api" — override TAILSCALE_HOSTNAME in hummingbot-api/.env if needed
             msg_info "Installing Tailscale on this machine..."
             curl -fsSL https://tailscale.com/install.sh | sh
             msg_info "Connecting to Tailscale network..."
             tailscale_up --authkey="$ts_auth_key" --hostname="condor" --accept-dns=true
             ts_condor_ip=$(tailscale ip -4 2>/dev/null | head -1)
             TS_DEPLOY=true
-            msg_ok "Tailscale connected — hummingbot-api will be reachable at http://$ts_hb_hostname:8000"
+            msg_ok "Tailscale connected — this machine (and its dashboard) is reachable on your tailnet"
             # On a VPS (SERVER_IP set), point the web dashboard at the Tailscale IP so the /web link works remotely
             if [ -n "${SERVER_IP:-}" ] && [ -n "${ts_condor_ip:-}" ]; then
                 if grep -q "^WEB_URL=" "$ENV_FILE"; then
@@ -926,15 +1015,24 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
                 fi
                 msg_ok "Web dashboard: http://$ts_condor_ip:8088 (Tailscale access)"
             fi
+
+            echo ""
+            msg_info "hummingbot-api runs on this same machine, so Condor reaches it over"
+            msg_info "localhost — it doesn't need a tailnet node of its own for that."
+            prompt_visible "Also give hummingbot-api its own Tailscale node, so other devices (e.g. an MCP client on another machine) can reach it directly? [y/N]" "N" "hb_tailscale_choice"
+            if [[ "${hb_tailscale_choice:-}" =~ ^[Yy]$ ]]; then
+                HB_OWN_TAILNET_NODE=true
+                msg_ok "hummingbot-api will join the tailnet as '$ts_hb_hostname' — reachable at http://$ts_hb_hostname:8000"
+            fi
         fi
 
         echo ""
-        prompt_visible "API admin username" "admin" "hb_username"
-        prompt_secret "API admin password" "admin" "hb_password"
-        prompt_secret "Config password" "admin" "hb_config_password"
+        prompt_required_visible "API admin username" "hb_username" "Username cannot be empty"
+        prompt_required_secret "API admin password" "hb_password" "Password cannot be empty"
+        prompt_required_secret "Config password" "hb_config_password" "Config password cannot be empty"
 
         # Save to condor's .env
-        echo "DEPLOY_HUMMINGBOT_API=true" >> "$ENV_FILE"
+        set_env_var DEPLOY_HUMMINGBOT_API "true"
 
         # Clone hummingbot-api if not present
         if [ -d "$HB_API_DIR" ]; then
@@ -965,14 +1063,25 @@ DATABASE_URL=postgresql+asyncpg://hbot:hummingbot-api@localhost:5432/hummingbot_
 GATEWAY_URL=http://localhost:15888
 GATEWAY_PASSPHRASE=${hb_config_password}
 BOTS_PATH=${hb_api_abs_path}
-TAILSCALE_ENABLED=${TS_DEPLOY}
+TAILSCALE_ENABLED=${HB_OWN_TAILNET_NODE}
 TAILSCALE_AUTH_KEY=${ts_auth_key}
 TAILSCALE_HOSTNAME=${ts_hb_hostname}
+# Condor is co-located on this machine and always reaches the API over
+# localhost, tailnet node or not -- so port 8000 never needs to sit on every
+# interface here. See docker-compose.yml / docker-compose.tailscale.yml.
+API_BIND_HOST=127.0.0.1
 HBEOF
+            # Holds the API password, the config password and (when set) a
+            # Tailscale auth key -- not a world-readable file.
+            chmod 600 "$HB_API_DIR/.env" 2>/dev/null || true
             msg_ok "Hummingbot API .env configured"
 
-            # Generate docker-compose.tailscale.yml if Tailscale is enabled
-            if [ "$TS_DEPLOY" = true ] && [ ! -f "$HB_API_DIR/docker-compose.tailscale.yml" ]; then
+            # Generate docker-compose.tailscale.yml if hummingbot-api is getting
+            # its own tailnet node. TS_SERVE_CONFIG is load-bearing, not
+            # cosmetic: API_BIND_HOST above always binds port 8000 to
+            # 127.0.0.1, so without this forward the sidecar would join the
+            # tailnet with nothing behind it -- reachable from nowhere at all.
+            if [ "$HB_OWN_TAILNET_NODE" = true ] && [ ! -f "$HB_API_DIR/docker-compose.tailscale.yml" ]; then
                 cat > "$HB_API_DIR/docker-compose.tailscale.yml" << 'TSEOF'
 services:
   tailscale:
@@ -984,9 +1093,11 @@ services:
       - TS_STATE_DIR=/var/lib/tailscale
       - TS_USERSPACE=false
       - TS_HOSTNAME=${TAILSCALE_HOSTNAME:-hummingbot-api}
+      - TS_SERVE_CONFIG=/config/tailscale-serve.json
     volumes:
       - tailscale_state:/var/lib/tailscale
       - /dev/net/tun:/dev/net/tun
+      - ./tailscale-serve.json:/config/tailscale-serve.json:ro
     cap_add:
       - NET_ADMIN
       - NET_RAW
@@ -994,11 +1105,20 @@ services:
 volumes:
   tailscale_state:
 TSEOF
+                cat > "$HB_API_DIR/tailscale-serve.json" << 'TSSEOF'
+{
+  "TCP": {
+    "8000": {
+      "TCPForward": "127.0.0.1:8000"
+    }
+  }
+}
+TSSEOF
                 msg_ok "docker-compose.tailscale.yml created"
             fi
 
             # Patch hummingbot-api Makefile so future 'make deploy' stays Tailscale-aware
-            if [ "$TS_DEPLOY" = true ] && [ -f "$HB_API_DIR/Makefile" ]; then
+            if [ "$HB_OWN_TAILNET_NODE" = true ] && [ -f "$HB_API_DIR/Makefile" ]; then
                 python3 - "$HB_API_DIR/Makefile" << 'PYEOF'
 import sys
 with open(sys.argv[1]) as f:
@@ -1039,7 +1159,7 @@ PYEOF
             # Deploy if Docker is available
             if [ "$docker_available" = true ] && [ -f "$HB_API_DIR/docker-compose.yml" ]; then
                 msg_info "Starting Hummingbot API stack..."
-                if [ "$TS_DEPLOY" = true ] && [ -f "$HB_API_DIR/docker-compose.tailscale.yml" ]; then
+                if [ "$HB_OWN_TAILNET_NODE" = true ] && [ -f "$HB_API_DIR/docker-compose.tailscale.yml" ]; then
                     _compose_cmd="docker compose -f docker-compose.yml -f docker-compose.tailscale.yml up -d"
                     msg_info "Using Tailscale sidecar overlay..."
                 else
@@ -1096,13 +1216,18 @@ fi
 # Always create/update config.yml with template
 if [ ! -f "$CONFIG_FILE" ] || [ ! -s "$CONFIG_FILE" ]; then
     msg_info "Creating $CONFIG_FILE with template..."
+    # username/password are deliberately EMPTY, not admin/admin. A template
+    # that ships working-looking credentials is a template someone deploys
+    # with, and `make doctor` cannot tell "the operator chose admin/admin"
+    # apart from "nobody ever filled this in". Empty is unambiguous: doctor
+    # names it, and the API answers 401 rather than letting a default in.
     cat > "$CONFIG_FILE" << 'CONFIGEOF'
 servers:
   local:
     host: localhost
     port: 8000
-    username: admin
-    password: admin
+    username: ""
+    password: ""
 
 default_server: local
 
@@ -1121,6 +1246,8 @@ chat_defaults:
 
 version: 1
 CONFIGEOF
+    # config.yml carries the hummingbot-api password once setup fills it in.
+    chmod 600 "$CONFIG_FILE" 2>/dev/null || true
     msg_ok "Created $CONFIG_FILE with template"
 fi
 
@@ -1165,18 +1292,15 @@ if [ "${hb_api_deployed:-}" = true ]; then
         msg_ok "Synced API credentials to $CONFIG_FILE"
     fi
 
-    # When Tailscale is enabled, update the server host to the Tailscale MagicDNS hostname
-    # so condor reaches hummingbot-api via the encrypted tailnet even on the same machine
-    if [ "${TS_DEPLOY:-false}" = true ]; then
-        sed -i.bak "/servers:/,/^[^ ]/ s/host: .*/host: $ts_hb_hostname/" "$CONFIG_FILE" && rm -f "$CONFIG_FILE.bak"
-        sed -i.bak "/servers:/,/^[^ ]/ s/port: .*/port: 8000/" "$CONFIG_FILE" && rm -f "$CONFIG_FILE.bak"
-        msg_ok "Updated server host to Tailscale hostname: $ts_hb_hostname"
-    fi
+    # host/port are left at the template default (localhost:8000): Condor is
+    # deploying this hummingbot-api right here, on this same machine, so it
+    # always reaches it over localhost -- whether or not hummingbot-api also
+    # has its own tailnet node for other clients (HB_OWN_TAILNET_NODE, above).
 fi
 
 # If user provided a remote API URL (skipped local deployment), update config.yml
 if [ "${hb_api_configured:-false}" = true ] && [ -f "$CONFIG_FILE" ]; then
-    if update_config_api_server "$HB_API_HOST" "$HB_API_PORT" "${hb_username:-admin}" "${hb_password:-admin}"; then
+    if update_config_api_server "$HB_API_HOST" "$HB_API_PORT" "${hb_username:-}" "${hb_password:-}"; then
         msg_ok "Configured $CONFIG_FILE: ${HB_API_PROTOCOL:-http}://${HB_API_HOST}:${HB_API_PORT}"
     else
         msg_warn "Configured $CONFIG_FILE with a basic edit -- review the servers: section to confirm it looks right"
@@ -1197,33 +1321,20 @@ fi
 
 # ── Step 6: Summary ────────────────────────────────
 
-# Source nvm to make node/npm available in current shell
-if [ -s "$HOME/.nvm/nvm.sh" ]; then
-    \. "$HOME/.nvm/nvm.sh"
-fi
-
 echo -e "${BOLD}══════════════════════════════════════════════${RESET}"
 echo -e "  ${GREEN}Setup complete!${RESET}"
 echo ""
-echo -e "  ${BOLD}Installed dependencies:${RESET}"
-echo -e "    • uv:         $(command_exists uv && uv --version 2>/dev/null || echo 'not found')"
-echo -e "    • tmux:       $(command_exists tmux && tmux -V 2>/dev/null || echo 'not found')"
-echo -e "    • node:       $(command_exists node && node --version 2>/dev/null || echo 'not found')"
-echo -e "    • npm:        $(command_exists npm && npm --version 2>/dev/null || echo 'not found')"
-echo -e "    • typescript: $(command_exists tsc && tsc --version 2>/dev/null || echo 'not installed')"
-echo ""
-echo -e "  ${BOLD}Configuration:${RESET}"
-echo -e "    • Mode:       ${CONDOR_MODE:-telegram}$([ "${CONDOR_MODE:-telegram}" = "local" ] && echo ' (no Telegram, dashboard only)')"
-echo -e "    • Telegram:   $([ -n "${TELEGRAM_TOKEN:-}" ] && echo 'configured' || echo 'not set')"
-echo -e "    • AI model:   ${CONDOR_DEFAULT_AGENT:-from agents/condor/AGENT.md}"
-echo ""
-echo -e "  ${BOLD}Next steps:${RESET}"
-echo -e "  ${BOLD}make install${RESET}      Install Python dependencies"
-echo -e "  ${BOLD}make run${RESET}          Run Condor locally (dev)"
+echo -e "  ${BOLD}Next:${RESET}"
+echo -e "    make run     ${DIM}- start Condor (tmux session 'condor')${RESET}"
+echo -e "    make doctor  ${DIM}- re-check dependencies, config and API access${RESET}"
+echo -e "    make logs    ${DIM}- attach to the running session (detach: Ctrl+B then D)${RESET}"
 if [ "${CONDOR_MODE:-telegram}" = "local" ]; then
 echo ""
 echo -e "  Then open ${BOLD}http://localhost:8088${RESET} — you are logged in already."
 echo -e "  ${DIM}No login, loopback only. See 'Local mode' in the README before exposing it.${RESET}"
+else
+echo ""
+echo -e "  Then send ${BOLD}/start${RESET} to your Telegram bot."
 fi
 if [ "${hb_api_deployed:-}" = true ]; then
 echo ""
@@ -1232,7 +1343,11 @@ fi
 if [ "${TS_DEPLOY:-false}" = true ]; then
 echo ""
 echo -e "  ${BOLD}Tailscale:${RESET}"
-echo -e "    hummingbot-api URL:  http://${ts_hb_hostname}:8000"
+if [ "${HB_OWN_TAILNET_NODE:-false}" = true ]; then
+echo -e "    hummingbot-api URL:  http://${ts_hb_hostname}:8000  ${CYAN}(own tailnet node)${RESET}"
+else
+echo -e "    hummingbot-api:      http://localhost:8000  ${CYAN}(local — no tailnet node needed)${RESET}"
+fi
 if [ -n "${ts_condor_ip:-}" ] && [ -n "${SERVER_IP:-}" ]; then
 echo -e "    Web dashboard URL:   http://${ts_condor_ip}:8088  ${CYAN}(Tailscale only)${RESET}"
 else
@@ -1253,9 +1368,13 @@ fi
 if [ "${TS_DEPLOY:-false}" = true ] || [[ "${use_tailscale_remote:-}" =~ ^[Yy]$ ]]; then
 echo ""
 echo -e "  ${BOLD}Accessing the web dashboard from another device:${RESET}"
-echo -e "  ${CYAN}  Install Tailscale on that device first, then connect with the same key:${RESET}"
-echo -e "    Linux / WSL:   curl -fsSL https://tailscale.com/install.sh | sh && sudo tailscale up --authkey=${ts_auth_key}"
-echo -e "    macOS / Win:   https://tailscale.com/download — then run: sudo tailscale up --authkey=${ts_auth_key}"
+echo -e "  ${CYAN}  Install Tailscale on that device, then sign in to the same account:${RESET}"
+echo -e "    Linux / WSL:   curl -fsSL https://tailscale.com/install.sh | sh && sudo tailscale up"
+echo -e "    macOS / Win:   https://tailscale.com/download — then sign in to the same account"
+echo -e "  ${DIM}A reusable auth key works too (sudo tailscale up --authkey=tskey-auth-...).${RESET}"
+echo -e "  ${DIM}Yours is not reprinted here — it is a credential, and this output ends up in${RESET}"
+echo -e "  ${DIM}scrollback and install logs. Find or reissue it at${RESET}"
+echo -e "  ${DIM}https://login.tailscale.com/admin/settings/keys${RESET}"
 fi
 echo -e "${BOLD}══════════════════════════════════════════════${RESET}"
 echo ""
