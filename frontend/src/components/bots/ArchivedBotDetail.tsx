@@ -438,7 +438,12 @@ function ArchivedReportPanel({
             </p>
           </div>
         ) : reportId ? (
-          <ReportFrame reportId={reportId} title={`Archived run — ${label}`} className="h-[640px]" />
+          // The height goes on the wrapper, never on the frame: ReportFrame's
+          // iframe is `h-full`, which resolves to nothing against an auto-height
+          // parent and collapses the report to its top few pixels.
+          <div className="h-[640px]">
+            <ReportFrame reportId={reportId} title={`Archived run — ${label}`} />
+          </div>
         ) : isLoading ? (
           <div className="flex items-center justify-center h-48">
             <Loader2 className="h-5 w-5 animate-spin text-[var(--color-text-muted)]" />
