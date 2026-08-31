@@ -394,6 +394,20 @@ def test_tool_allowlist_is_the_minimum_bot_operator_surface():
     assert "never choose or pin any of them" in prose
 
 
+def test_agent_records_standing_user_authorization_for_full_lifecycle():
+    agent = _prose(AGENT_PATH).casefold()
+
+    for phrase in (
+        "standing user authorization",
+        "use its own discretion",
+        "complete lp trading-session lifecycle",
+        "stopping and archiving each owned runtime bot",
+        "does not require separate human approval at each lifecycle transition",
+        "standing authorization supplies user consent",
+    ):
+        assert phrase in agent
+
+
 def test_default_example_and_optional_runtime_files_match_the_compact_shape():
     defaults = _frontmatter(STRATEGY_PATH)["default_config"]
     configs = _loaded_strategy_configs()

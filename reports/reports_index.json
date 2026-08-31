@@ -1,33 +1,5 @@
 [
   {
-    "id": "9bd879",
-    "title": "LP Agent Lite — Metrics Snapshot Diagnostic",
-    "filename": "20260813_113652_lp_agent_lite_metrics_snapshot_diagnosti_9bd879.html",
-    "created_at": "2026-08-13T11:36:52.179459+00:00",
-    "source_type": "routine",
-    "source_name": "snapshot_lp_metrics",
-    "tags": [
-      "lp-agent-lite",
-      "diagnostic",
-      "snapshot-lp-metrics"
-    ],
-    "agent": "lp_agent_lite"
-  },
-  {
-    "id": "ad6c25",
-    "title": "LP Agent Lite — Metrics Snapshot Diagnostic",
-    "filename": "20260813_114009_lp_agent_lite_metrics_snapshot_diagnosti_ad6c25.html",
-    "created_at": "2026-08-13T11:40:09.019116+00:00",
-    "source_type": "routine",
-    "source_name": "snapshot_lp_metrics",
-    "tags": [
-      "lp-agent-lite",
-      "diagnostic",
-      "snapshot-lp-metrics"
-    ],
-    "agent": "lp_agent_lite"
-  },
-  {
     "id": "e3f7aa",
     "title": "LP Agent Lite — Metrics Snapshot Diagnostic",
     "filename": "20260813_114333_lp_agent_lite_metrics_snapshot_diagnosti_e3f7aa.html",
@@ -1296,6 +1268,28 @@
     "title": "Trend-Aware LP Session — trend_aware_lp_rebalancer_agent-orca-v2_s8_20260831T155113Z",
     "filename": "20260831_160759_trend_aware_lp_session_trend_aware_lp_re_b6d1db.html",
     "created_at": "2026-08-31T16:07:59.391758+00:00",
+    "source_type": "routine",
+    "source_name": "read_trend_aware_lp_session",
+    "tags": [],
+    "agent": "trend_aware_lp_rebalancer_agent",
+    "user_id": 1684711897
+  },
+  {
+    "id": "784a86",
+    "title": "Trend-Aware LP Session — trend_aware_lp_rebalancer_agent-orca-v2_s8_20260831T155113Z",
+    "filename": "20260831_161141_trend_aware_lp_session_trend_aware_lp_re_784a86.html",
+    "created_at": "2026-08-31T16:11:41.011320+00:00",
+    "source_type": "routine",
+    "source_name": "read_trend_aware_lp_session",
+    "tags": [],
+    "agent": "trend_aware_lp_rebalancer_agent",
+    "user_id": 1684711897
+  },
+  {
+    "id": "a3c7d5",
+    "title": "Trend-Aware LP Session — trend_aware_lp_rebalancer_agent-orca-v2_s8_20260831T155113Z",
+    "filename": "20260831_161506_trend_aware_lp_session_trend_aware_lp_re_a3c7d5.html",
+    "created_at": "2026-08-31T16:15:06.004303+00:00",
     "source_type": "routine",
     "source_name": "read_trend_aware_lp_session",
     "tags": [],

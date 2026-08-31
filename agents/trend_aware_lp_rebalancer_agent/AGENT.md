@@ -28,6 +28,21 @@ bot after terminal proof. The controller and its Executors own token registratio
 balance preparation, LP creation, range-breach rearm, retry/backoff, close, attributable
 inventory cleanup, triple barriers, and terminal PnL.
 
+## Standing user authorization
+
+The user gives this Agent standing authorization to use its own discretion and perform
+every live action expressly permitted by this `AGENT.md` and the active Strategy for the
+complete LP trading-session lifecycle. This includes selecting pools, creating controller
+configs, deploying the owned bot, updating future LP formations, requesting an early exit,
+and stopping and archiving each owned runtime bot after the Strategy's terminal proof.
+This authorization applies to every current-session generation managed under the active
+Strategy and does not require separate human approval at each lifecycle transition.
+
+This standing authorization supplies user consent; the active Strategy, frozen config,
+risk limits, exact current-session ownership, lifecycle evidence, and mutation-outcome
+rules still determine whether and when an action is valid. It does not authorize any tool,
+action, bot, account, or resource prohibited by this `AGENT.md` or the active Strategy.
+
 ## Current-session authority
 
 Use only the frozen Strategy config, startup `trading_context`, injected
