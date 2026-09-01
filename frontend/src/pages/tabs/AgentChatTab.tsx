@@ -11,7 +11,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
-import { AgentPanel, AgentPanelButton } from "@/components/chat/AgentPanel";
+import { AgentPanel } from "@/components/chat/AgentPanel";
 import {
   BrainPicker,
   type BrainSelection,
@@ -28,6 +28,7 @@ import {
   WorkspacePaneProvider,
 } from "@/components/chat/WorkspacePane";
 import { Starters, type Starter } from "@/components/chat/Starters";
+import { WORKSPACE_BAR } from "@/components/chat/workspaceBar";
 import { useBrainSwitch } from "@/hooks/useBrainSwitch";
 import { useChat, useSessionOptions } from "@/hooks/useChat";
 import { webSessionKey } from "@/hooks/useChatSocket";
@@ -345,9 +346,12 @@ export function AgentChatTab() {
               split exists at all (see `WorkspacePane`), so below it this is the
               plain `min-w-0` column it has always been. */}
           <div className="flex min-w-0 flex-1 flex-col xl:min-w-[360px]">
-            {/* Which sessions are live, and who is answering in this one — one
-                row, because the active tab and the identity name the same chat. */}
-            <div className="flex shrink-0 items-center gap-2 border-b border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2">
+            {/* Which sessions are live. Nothing else: the agent that answers
+                this one is named by its own tab, and again by the dock card
+                that opens it — a chip here repeating both, plus the model and
+                the server the dock already carried, was the same agent said
+                three times across one row. */}
+            <div className={`${WORKSPACE_BAR} gap-2 px-3`}>
               <button
                 onClick={() => setRailOpen((v) => !v)}
                 className="rounded p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)] md:hidden"
@@ -372,25 +376,6 @@ export function AgentChatTab() {
                 onClose={(slotId) => chat.destroySession(slotId)}
                 className="min-w-0 flex-1"
               />
-              {/* One control, not three. Who is answering, on what model,
-                  against which server — and the door to all of it, beside the
-                  conversation rather than away from it. The model picker, the
-                  server chip and a "Knowledge" link that left the workspace
-                  were three answers to the one question this asks (FEAT-081). */}
-              <div className="ml-auto flex min-w-0 shrink items-center">
-                <AgentPanelButton
-                  name={panelAgent?.name || "Condor"}
-                  slot={activeSlot}
-                  pendingAgentKey={pendingAgentKey ?? defaultAgent}
-                  ambientServer={server || ""}
-                  agents={modelOptions}
-                  agentBindings={agentBindings}
-                  open={pane?.kind === "agent"}
-                  onToggle={() =>
-                    setPane((p) => (p?.kind === "agent" ? null : { kind: "agent" }))
-                  }
-                />
-              </div>
             </div>
 
             <ChatThread
@@ -443,6 +428,27 @@ export function AgentChatTab() {
             <AgentPanel
               slug={panelSlug}
               name={panelAgent?.name || "Condor"}
+              // What the conversation runs on, in the panel's own bar. It used
+              // to be in the dock card, which is why the dock was the one
+              // column the pane could not borrow.
+              slot={activeSlot}
+              pendingAgentKey={pendingAgentKey ?? defaultAgent}
+              ambientServer={server || ""}
+              agents={modelOptions}
+              customProviders={customProviders}
+              agentBindings={agentBindings}
+              isStreaming={isActiveStreaming}
+              // With a session this moves the conversation; without one it is
+              // the model the next `start_session` carries, which is the same
+              // field the hero's picker sets.
+              onSelectBrain={(sel) => {
+                if (activeSlot) switchBrain(sel);
+                else if (sel.agentKey !== undefined)
+                  setPendingAgentKey(sel.agentKey);
+              }}
+              onSelectServer={(name) => {
+                if (activeSlot) switchServer(activeSlot.info.slot_id, name);
+              }}
               // The pane's routine house is the one FEAT-077 built; the panel
               // hands it over rather than growing a second one.
               onOpenRoutine={(name) =>
@@ -457,43 +463,21 @@ export function AgentChatTab() {
             conversationId={activeSlot?.info.conversation_id || ""}
             agentSlug={activeSlot?.info.agent_slug || ""}
             agentName={boundAgent?.name}
-            // Who is answering, on what, where — and the door to the rest of
-            // it. In the dock rather than in the panel it opens, so reading an
-            // agent is the same gesture as reading a routine's report: click
-            // in this column, it opens in the pane beside the conversation.
+            // Who is answering, and the door to the rest of it. In the dock
+            // rather than in the panel it opens, so reading an agent is the
+            // same gesture as reading a routine's report: click in this
+            // column, it opens in the pane beside the conversation.
             agentCard={
               <DockAgentCard
                 name={panelAgent?.name || "Condor"}
-                description={panelAgent?.description}
-                slot={activeSlot}
-                pendingAgentKey={pendingAgentKey ?? defaultAgent}
-                ambientServer={server || ""}
-                agents={modelOptions}
-                customProviders={customProviders}
-                agentBindings={agentBindings}
-                isStreaming={isActiveStreaming}
                 open={pane?.kind === "agent"}
                 onOpen={() =>
                   setPane((p) =>
                     p?.kind === "agent" ? null : { kind: "agent" },
                   )
                 }
-                // With a session this moves the conversation; without one it is
-                // the model the next `start_session` carries, which is the same
-                // field the hero's picker sets.
-                onSelectBrain={(sel) => {
-                  if (activeSlot) switchBrain(sel);
-                  else if (sel.agentKey !== undefined)
-                    setPendingAgentKey(sel.agentKey);
-                }}
-                onSelectServer={(name) => {
-                  if (activeSlot) switchServer(activeSlot.info.slot_id, name);
-                }}
               />
             }
-            // The panel in the pane is this column's own: its pickers are up
-            // here, so the column stays rather than folding away under it.
-            borrowable={pane?.kind !== "agent"}
             // A routine launched from the dock's library is this
             // conversation's: it runs on the server the chat is talking to,
             // reports back into it, and is filed under whoever is answering.

@@ -13,6 +13,7 @@ import { Link } from "react-router-dom";
 
 import { deriveAgentStatus } from "@/components/agent/agentStatus";
 import { ConversationList } from "@/components/chat/ConversationList";
+import { WORKSPACE_BAR } from "@/components/chat/workspaceBar";
 import { AnchoredMenu } from "@/components/ui/AnchoredMenu";
 import { useWorkspacePane } from "@/hooks/useWorkspacePane";
 import { CHAT_SLUG, type AgentSummary, type ConversationMeta } from "@/lib/api";
@@ -160,7 +161,7 @@ export const ChatRail = memo(function ChatRail({
     >
       {/* What is looping right now, the way into it, and the way out of the
           column — the mirror of the dock's own collapse. */}
-      <div className="flex items-center gap-1 border-b border-[var(--color-border)] pr-1">
+      <div className={`${WORKSPACE_BAR} gap-1 pr-1`}>
         <LiveStrip agents={liveAgents} runningTasks={runningTasks} />
         <button
           onClick={() => toggle(false)}
@@ -249,8 +250,10 @@ function LiveStrip({
       className={`h-3 w-3 shrink-0 ${agents.length > 0 ? "text-emerald-400" : ""}`}
     />
   );
+  // No vertical padding of its own: the bar around it owns the height now, so
+  // what is looping cannot quietly make the rail's bar taller than the dock's.
   const rowClass =
-    "flex min-w-0 flex-1 items-center gap-2 py-2 pl-3 text-left text-[11px] text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-text)]";
+    "flex min-w-0 flex-1 items-center gap-2 self-stretch pl-3 text-left text-[11px] text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-text)]";
 
   return (
     <>

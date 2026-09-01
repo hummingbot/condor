@@ -3,19 +3,19 @@
  *
  * The workspace header used to carry a model picker, a server chip and a link
  * that *left* the conversation to read what the agent knows. What replaced them
- * is pinned here across two homes: the header button that still names all three
- * facts, and the dock's agent card, which is where the two switches actually
- * live now. The card sits in the right-hand column so that opening an agent is
- * the same gesture as opening a routine's report — click in the dock, it opens
- * in the pane — and so the pickers stay on screen while the panel is open.
+ * is pinned here across two homes: the dock card, which names the agent once
+ * and does nothing else, and the panel it opens, which holds everything the
+ * card no longer says — including the two switches. The card sits in the
+ * right-hand column so that opening an agent is the same gesture as opening a
+ * routine's report: click in the dock, it opens in the pane.
  *
- * What a refactor of this chrome must not lose: the button says all three facts
- * and the `title` says them whatever the window does; the card is a card, not a
- * spec sheet, and both switches go dead with a reason while a turn is in
- * flight; a pinned server offers no picker; with no session the model field
- * still sets what the next conversation starts on while the server field is a
- * statement rather than a dead control; and the panel keeps no link out of the
- * workspace.
+ * What a refactor of this chrome must not lose: the card is one line and one
+ * door, with no description, no model and no server restating what the panel
+ * is for; both switches live in the panel's bar and go dead with a reason
+ * while a turn is in flight; a pinned server offers no picker; with no session
+ * the model field still sets what the next conversation starts on while the
+ * server field is a statement rather than a dead control; and the panel keeps
+ * no link out of the workspace.
  *
  * Needs a DOM, so this file overrides vitest's default `node` environment.
  *
@@ -48,12 +48,12 @@ vi.mock("@/lib/api", () => ({
   customAgentKey: (p: string, m: string) => `custom:${p}:${m}`,
 }));
 
-// The dot on the button is the socket's, and the socket is the shell's.
+// The socket is the shell's; nothing under test opens one of its own.
 vi.mock("@/hooks/useChat", () => ({
   useChat: () => ({ isConnected: true }),
 }));
 
-const { AgentPanel, AgentPanelButton } = await import("./AgentPanel");
+const { AgentPanel } = await import("./AgentPanel");
 const { DockAgentCard } = await import("./DockAgent");
 
 declare global {
@@ -137,6 +137,15 @@ async function renderPanel(over: Partial<PanelProps> = {}) {
           <AgentPanel
             slug="orca"
             name="Orca LP Expert"
+            slot={slot()}
+            pendingAgentKey=""
+            ambientServer="brigado_2"
+            agents={AGENTS}
+            customProviders={[]}
+            agentBindings={BINDINGS}
+            isStreaming={false}
+            onSelectBrain={(sel) => (picked.model = sel.agentKey)}
+            onSelectServer={(name) => (picked.server = name)}
             onOpenRoutine={() => {}}
             onClose={() => (closed += 1)}
             {...over}
@@ -157,45 +166,12 @@ async function renderCard(over: Partial<CardProps> = {}) {
         <QueryClientProvider client={client()}>
           <DockAgentCard
             name="Orca LP Expert"
-            description="Solana liquidity"
-            slot={slot()}
-            pendingAgentKey=""
-            ambientServer="brigado_2"
-            agents={AGENTS}
-            customProviders={[]}
-            agentBindings={BINDINGS}
-            isStreaming={false}
             open={false}
             onOpen={() => (opened += 1)}
-            onSelectBrain={(sel) => (picked.model = sel.agentKey)}
-            onSelectServer={(name) => (picked.server = name)}
             {...over}
           />
         </QueryClientProvider>
       </MemoryRouter>,
-    );
-  });
-  await settle();
-}
-
-type ButtonProps = Parameters<typeof AgentPanelButton>[0];
-
-async function renderButton(over: Partial<ButtonProps> = {}) {
-  await act(async () => {
-    root.render(
-      <QueryClientProvider client={client()}>
-        <AgentPanelButton
-          name="Orca LP Expert"
-          slot={slot()}
-          pendingAgentKey=""
-          ambientServer="brigado_2"
-          agents={AGENTS}
-          agentBindings={BINDINGS}
-          open={false}
-          onToggle={() => {}}
-          {...over}
-        />
-      </QueryClientProvider>,
     );
   });
   await settle();
@@ -247,48 +223,18 @@ afterEach(() => {
   container.remove();
 });
 
-describe("the one header control", () => {
-  it("names the agent, the model and the server", async () => {
-    await renderButton();
-    const button = container.querySelector("button")!;
-
-    // The bound Agent's own `agent_key` resolves the empty session key, so the
-    // button never names an agent without saying what answers for it.
-    expect(button.title).toContain("Orca LP Expert");
-    expect(button.title).toContain("Sonnet");
-    expect(button.title).toContain("brigado_2");
-    // All three are in the label too — the narrow ones are hidden by CSS, not
-    // dropped, so the `title` and the text cannot disagree.
-    expect(button.textContent).toContain("Orca LP Expert");
-    expect(button.textContent).toContain("brigado_2");
-    // The socket's dot, not the session's.
-    expect(button.querySelector(".bg-green-500")).toBeTruthy();
-  });
-
-  it("says whether the panel it opens is open", async () => {
-    await renderButton();
-    expect(container.querySelector("button")!.getAttribute("aria-pressed")).toBe(
-      "false",
-    );
-
-    await renderButton({ open: true });
-    expect(container.querySelector("button")!.getAttribute("aria-pressed")).toBe(
-      "true",
-    );
-  });
-});
-
 describe("the dock's agent card", () => {
-  it("names who is answering, on what, where", async () => {
+  it("names who is answering, and nothing else", async () => {
     await renderCard();
 
     expect(container.textContent).toContain("Orca LP Expert");
-    expect(container.textContent).toContain("Solana liquidity");
-    // Beside the server in a 300px column the model wears its short name; the
-    // catalogue name it was cut from is still one hover away.
-    expect(row("model")!.textContent).toContain("Sonnet");
-    expect(row("model")!.title).toContain("Claude (ACP) — Sonnet");
-    expect(row("server")!.textContent).toContain("brigado_2");
+    // The description, the model and the server were all here once. Between
+    // this card, the session tab and the header chip beside it, the same agent
+    // was named three times on one screen — so the card was cut back to the
+    // name, and the rest is a click away in the panel it opens.
+    expect(container.textContent).not.toContain("Solana liquidity");
+    expect(row("model")).toBeNull();
+    expect(row("server")).toBeNull();
   });
 
   it("is the door to the panel", async () => {
@@ -297,8 +243,32 @@ describe("the dock's agent card", () => {
     expect(opened).toBe(1);
   });
 
-  it("switches the model through the same list the picker offers", async () => {
+  it("says whether the panel it opens is open", async () => {
     await renderCard();
+    expect(container.querySelector("button")!.getAttribute("aria-pressed")).toBe(
+      "false",
+    );
+
+    await renderCard({ open: true });
+    expect(container.querySelector("button")!.getAttribute("aria-pressed")).toBe(
+      "true",
+    );
+  });
+});
+
+describe("the panel's wiring bar", () => {
+  it("names the model and the server the conversation runs on", async () => {
+    await renderPanel();
+
+    // Beside the server in a narrow bar the model wears its short name; the
+    // catalogue name it was cut from is still one hover away.
+    expect(row("model")!.textContent).toContain("Sonnet");
+    expect(row("model")!.title).toContain("Claude (ACP) — Sonnet");
+    expect(row("server")!.textContent).toContain("brigado_2");
+  });
+
+  it("switches the model through the same list the picker offers", async () => {
+    await renderPanel();
     place(row("model")!);
     await click(row("model")!);
 
@@ -307,7 +277,7 @@ describe("the dock's agent card", () => {
   });
 
   it("moves the conversation to another server", async () => {
-    await renderCard();
+    await renderPanel();
     place(row("server")!);
     await click(row("server")!);
 
@@ -316,7 +286,7 @@ describe("the dock's agent card", () => {
   });
 
   it("goes dead with a reason while a turn is in flight", async () => {
-    await renderCard({ isStreaming: true });
+    await renderPanel({ isStreaming: true });
 
     for (const name of ["model", "server"]) {
       const control = row(name) as HTMLButtonElement;
@@ -326,7 +296,7 @@ describe("the dock's agent card", () => {
   });
 
   it("offers no picker for a server the agent pinned", async () => {
-    await renderCard({
+    await renderPanel({
       slot: slot({ server_pinned: true, label: "Orca LP Expert" }),
     });
 
@@ -339,7 +309,7 @@ describe("the dock's agent card", () => {
 
 describe("with no session yet", () => {
   it("still reads, and the model field is the next chat's", async () => {
-    await renderCard({ slot: null, pendingAgentKey: "gpt-5" });
+    await renderPanel({ slot: null, pendingAgentKey: "gpt-5" });
 
     expect(row("model")!.textContent).toContain("GPT-5");
     expect(row("model")!.title).toContain("next conversation");
@@ -351,7 +321,7 @@ describe("with no session yet", () => {
   });
 
   it("states the server rather than offering a dead control", async () => {
-    await renderCard({ slot: null });
+    await renderPanel({ slot: null });
 
     const control = row("server")!;
     // Nothing to respawn, and the ambient selector already owns the choice.

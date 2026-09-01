@@ -2,6 +2,7 @@ import { Maximize2, Minimize2, X } from "lucide-react";
 import { useEffect, useId, useState } from "react";
 import { createPortal } from "react-dom";
 
+import { WORKSPACE_BAR } from "@/components/chat/workspaceBar";
 import { useWorkspacePane } from "@/hooks/useWorkspacePane";
 import { useEscapeKey } from "@/hooks/useEscapeKey";
 
@@ -137,9 +138,13 @@ export function WorkspaceSheet({
 
   const chrome = (
     <>
+      {/* One height for every bar in this workspace — the rail's, the
+          conversation's, the dock's and this one — so four columns side by side
+          read as one strip rather than as four borders at four heights. Only
+          the inset varies: a windowed sheet floats and can afford `px-6`. */}
       <div
-        className={`flex shrink-0 items-center justify-between gap-3 border-b border-[var(--color-border)] ${
-          zen || split ? "px-4 py-2" : "px-6 py-3"
+        className={`${WORKSPACE_BAR} justify-between gap-3 ${
+          zen || split ? "px-4" : "px-6"
         }`}
       >
         {header ? (

@@ -18,6 +18,7 @@ import {
 import { DockTasks } from "@/components/chat/DockTasks";
 import type { RoutineRunContext } from "@/components/routines/ReportBrowser";
 import { RoutinePicker } from "@/components/routines/RoutinePicker";
+import { WORKSPACE_BAR } from "@/components/chat/workspaceBar";
 import { useResizeDrag } from "@/hooks/useResizeDrag";
 import { useWorkspacePane } from "@/hooks/useWorkspacePane";
 import { api, type Delegation } from "@/lib/api";
@@ -65,9 +66,14 @@ function defaultOpen(): boolean {
  * folded away, so what you asked for and what you asked it of are the only two
  * things on screen. It is a loan — the column comes back the moment the pane
  * closes, and only a collapse of the reader's own is written down as how the
- * workspace opens next time. The agent panel is the exception (`borrowable`):
- * it is opened from the card at the top of this column and steered by it, so
- * lending the column away would be lending away its own controls.
+ * workspace opens next time.
+ *
+ * Every occupant of the pane borrows it, the agent panel included. The panel
+ * used to be the exception, because the model and server pickers that steered
+ * it lived in the card up here; they were moved into the panel's own bar so
+ * that the exception could go. One rule for the whole pane is worth more than
+ * a column that folds for a report and stays put for an agent, which is a
+ * difference the reader can only learn by being surprised by it.
  *
  * The card comes first, then the sections: who is answering, then what that
  * has set in motion.
@@ -85,7 +91,6 @@ export function ContextDock({
   agentSlug,
   agentName,
   agentCard,
-  borrowable = true,
   runContext,
   library,
   onLibraryChange,
@@ -104,15 +109,6 @@ export function ContextDock({
    * card belongs above Tasks, because "who" comes before "what they are doing".
    */
   agentCard?: React.ReactNode;
-  /**
-   * Whether the pane may borrow this column while it is open.
-   *
-   * False when the pane holds the very thing this column steers: the agent
-   * panel is opened *from* the card above, and its model and server pickers
-   * are the card, so folding the column away to make room would take them off
-   * screen at the moment they are most likely to be wanted.
-   */
-  borrowable?: boolean;
   /** The conversation a run launched from the library belongs to. */
   runContext?: RoutineRunContext;
   /**
@@ -153,21 +149,19 @@ export function ContextDock({
   const paneOpen = useWorkspacePane()?.open ?? false;
   const lent = useRef<boolean | null>(null);
   useEffect(() => {
-    if (paneOpen && borrowable) {
+    if (paneOpen) {
       if (lent.current === null) {
         lent.current = open;
         setOpen(false);
       }
     } else if (lent.current !== null) {
-      // Also the way the column comes back mid-pane: opening the agent panel
-      // over a report repays the loan without the pane ever closing.
       setOpen(lent.current);
       lent.current = null;
     }
     // `open` is read, not watched: re-running this on the reader's own expand
     // would take the column straight back off them.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [paneOpen, borrowable]);
+  }, [paneOpen]);
 
   /**
    * Only the reader's own toggle is written down. What the layout does on its
@@ -391,7 +385,7 @@ export function ContextDock({
       >
         <DockResizeHandle width={width} onWidth={setWidth} />
         <div className="flex min-w-0 flex-1 flex-col overflow-y-auto">
-          <div className="flex shrink-0 items-center gap-2 border-b border-[var(--color-border)] px-3 py-2">
+          <div className={`${WORKSPACE_BAR} gap-2 px-3`}>
             <span className="min-w-0 flex-1 truncate text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
               This conversation
             </span>

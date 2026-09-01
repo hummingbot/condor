@@ -1,16 +1,16 @@
 /**
  * A session tab names *who* is answering, and nothing else (READ-275).
  *
- * The tab strip sits ~40px left of `AgentPanelButton`, the one control that
- * owns the model and the server. It used to print both again:
- * an unbound chat fell back to a model label hand-truncated to `Claude (ACP)...`
- * and appended ` · {server_name}` inside a 140px truncate, so the row said the
- * same two things twice and the tab's copies were the unreadable ones.
+ * The model and the server belong to the agent panel, one click away in the
+ * dock. The tab used to print both again: an unbound chat fell back to a model
+ * label hand-truncated to `Claude (ACP)...` and appended ` · {server_name}`
+ * inside a 140px truncate, so the row said the same two things twice and the
+ * tab's copies were the unreadable ones.
  *
  * These cases pin the identity rule the tab now follows: the bound Agent's
  * name, or `Condor` when nothing is bound — never a model, never a server — and
- * the server kept reachable in the tooltip, where a background tab still has it
- * even though its chip is off screen.
+ * the server kept reachable in the tooltip, which is now the only place in this
+ * row that carries it at all.
  *
  * Needs a DOM, so this file overrides vitest's default `node` environment.
  *
@@ -89,7 +89,8 @@ describe("SessionTabs identity", () => {
     ]);
 
     expect(tabs()[0].textContent).toContain("Arbitrage");
-    // `AgentPanelButton` is the row's one place for the server.
+    // The agent panel is where the server is named; the tooltip is the only
+    // trace of it left in this row.
     expect(tabs()[0].textContent).not.toContain("brigado_2");
   });
 

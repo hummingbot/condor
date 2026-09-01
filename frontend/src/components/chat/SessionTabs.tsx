@@ -20,10 +20,11 @@ import type { ChatSlot } from "@/hooks/useChatSocket";
  * carry that on their own; a "N live" count chip beside them only restated
  * what the row already shows.
  *
- * It renders inside the header row rather than above it. The active tab
- * already names who is answering, which is the identity row's own job, so a
- * second stacked bar would say the same thing twice and cost the transcript
- * ~36 px on every screen.
+ * It renders inside the header row rather than above it, and fills it: the
+ * tabs stretch to the bar's full height so the active one's underline lands on
+ * the bar's own bottom border, the way a tab strip is supposed to sit. The
+ * active tab already names who is answering, so a second stacked bar would say
+ * the same thing twice and cost the transcript ~36 px on every screen.
  */
 export function SessionTabs({
   slots,
@@ -56,7 +57,9 @@ export function SessionTabs({
   const seen = new Map<string, number>();
 
   return (
-    <div className={`flex items-center gap-1 overflow-x-auto ${className}`}>
+    <div
+      className={`flex items-stretch gap-1 self-stretch overflow-x-auto ${className}`}
+    >
       {slots.map((slot) => {
         const key = groupKey(slot);
         const ordinal = (seen.get(key) || 0) + 1;
@@ -126,14 +129,14 @@ function SessionTab({
   onClose: () => void;
 }) {
   // The tab answers one question: *who* you are talking to. The model and the
-  // server belong to `AgentPanelButton`, a few pixels to the right, so neither
-  // is restated here. An unbound chat is "Condor" —
-  // the same word the rail uses for the same conversation.
+  // server belong to the agent panel, one click away in the dock, so neither is
+  // restated here. An unbound chat is "Condor" — the same word the rail uses
+  // for the same conversation.
   const agentShort = slot.info.label || slot.info.agent_slug || "Condor";
   const TabIcon = slot.info.agent_slug ? Bot : Zap;
   const busy = isStreaming || slot.pending;
-  // The server is not on the tab, but a background tab's chip is not on screen
-  // either, so the tooltip is where that fact stays reachable.
+  // The server is not on the tab, and nothing else in this row carries it any
+  // more, so the tooltip is where that fact stays reachable without a click.
   const title = slot.info.server_name
     ? `${agentShort}${suffix} — ${slot.info.server_name}`
     : `${agentShort}${suffix}`;
@@ -147,7 +150,7 @@ function SessionTab({
       // read as one selection rather than two unrelated ones. The bottom
       // border is on every tab, transparent when inactive, so switching does
       // not shift the row by 2 px.
-      className={`group relative flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-t border-b-2 px-3 py-1.5 text-xs transition-colors ${
+      className={`group relative flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-t border-b-2 px-3 text-xs transition-colors ${
         isActive
           ? "border-[var(--color-primary)] bg-[var(--color-primary)]/10 font-medium text-[var(--color-primary)]"
           : "border-transparent text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
