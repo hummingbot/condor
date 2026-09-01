@@ -8,7 +8,7 @@ import { PNL_HIDDEN_SERIES_KEY } from "@/lib/sessionState";
 
 /**
  * Fixed series colors shared by strokes, axis ticks, header stats and tooltips
- * across AggregatedPnlChart and ControllerPnlChart. Realized and total are
+ * across PerfBrowser and ControllerPnlChart. Realized and total are
  * theme-driven (getThemeColors / pnlColor), so only the three fixed series live here.
  */
 export const PNL_SERIES_COLORS = {

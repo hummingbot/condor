@@ -309,7 +309,8 @@ describe("PnlEvolutionChart instance identity", () => {
   });
 
   it("does not sync or share a gradient with a second chart on the same page", () => {
-    // ControllerBrowser's modal opens over the still-mounted aggregated chart.
+    // No page mounts two of these today; this pins the invariant so that the
+    // first one that does is not debugging a silently shared gradient.
     render(
       <>
         <PnlEvolutionChart data={flat} title="Portfolio PnL" pnlHeight={220} volumeHeight={120} />

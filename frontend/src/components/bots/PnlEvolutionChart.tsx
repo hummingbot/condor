@@ -1,16 +1,16 @@
 // ── The PNL evolution chart: header strip + PNL pane + volume/position pane ──
 //
 // One component draws every PNL evolution chart in the app (ARCH-242). Before
-// this, AggregatedPnlChart (the bots page) and ControllerPnlChart (the
-// controller modal) each carried their own byte-for-byte copy of the same ~100
-// lines of recharts JSX, and the two had already drifted apart — the controller
-// header never showed the Pos stat its own bottom pane was drawing.
+// this, the bots page and the single-controller chart each carried their own
+// byte-for-byte copy of the same ~100 lines of recharts JSX, and the two had
+// already drifted apart — the controller header never showed the Pos stat its
+// own bottom pane was drawing.
 //
-// Those two callers now own only what is genuinely theirs: where the points
-// come from (a live aggregation over enabled controllers vs. a single
-// controller's history query), and what sits in the filter row. Everything you
-// can see — the header, the gradient, the axes, the tooltips, the legend, the
-// series — lives here, once.
+// Its two callers now own only what is genuinely theirs: where the points come
+// from — PerfBrowser folds the selected scope's snapshots with
+// aggregatePnlSeries and passes the series straight in; ControllerPnlChart runs
+// one controller's history query. Everything you can see — the header, the
+// gradient, the axes, the tooltips, the legend, the series — lives here, once.
 //
 // Two invariants this file owns, both of which fail *silently* if broken:
 //
@@ -25,10 +25,15 @@
 //     must add its mirror to the other.
 //
 //  2. Identity. The gradient element id and the `syncId` are derived per
-//     instance from useId(), not hardcoded. ControllerBrowser's modal opens
-//     over the still-mounted aggregated chart, so a fixed id would make the
-//     second instance's area resolve to the first instance's gradient (and
-//     cross-sync the two charts' tooltips) the moment both are on the page.
+//     instance from useId(), not hardcoded. This one is defensive: today the
+//     only mount site is PerfBrowser's ternary, which puts either
+//     ControllerPnlChart or this component on the page, never both — so no
+//     second instance exists to collide with. It is written this way because a
+//     file-global id fails silently rather than loudly: the moment anything
+//     mounts a second chart, the second instance's area would resolve to the
+//     first instance's gradient and the two would cross-sync their tooltips,
+//     with nothing in the types or the tests to say why. Deriving the id per
+//     instance costs a hook and removes the trap.
 
 import { useCallback, useId, useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
 import {
@@ -324,8 +329,8 @@ function LegendEntry({
 }
 
 /**
- * One zoom level, styled as the aggregated chart's controller chips are — the
- * card already has a vocabulary for "a small toggle above the panes".
+ * One zoom level, styled as the card's other small toggles are — the card
+ * already has a vocabulary for "a small toggle above the panes".
  */
 function RangeChip({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
   return (
@@ -368,7 +373,7 @@ interface Props {
   volumeHeight: number;
   /** Currency the values are already expressed in — used for ticks, stats and tooltips. */
   currencySymbol?: string;
-  /** Optional row between the header and the panes (the aggregated chart's controller chips). */
+  /** Optional row between the header and the panes. No caller passes one today. */
   filters?: ReactNode;
   /**
    * A short warning shown beside the header stats.
