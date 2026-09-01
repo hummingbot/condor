@@ -9,6 +9,7 @@
   "src/components/chat/ChatThread.tsx | react-refresh/only-export-components": 1,
   "src/components/chat/DockRoutines.tsx | react-refresh/only-export-components": 1,
   "src/components/editor/EditorDialogs.tsx | react-hooks/set-state-in-render": 2,
+  "src/components/editor/EditorModal.tsx | react-hooks/refs": 6,
   "src/components/executor/DCAConfigPanel.tsx | @typescript-eslint/no-unused-vars": 1,
   "src/components/executor/DCAConfigPanel.tsx | react-refresh/only-export-components": 2,
   "src/components/executor/ExecutorTable.tsx | no-empty": 1,
@@ -25,15 +26,12 @@
   "src/components/routines/RoutineHooksPanel.tsx | react-hooks/set-state-in-effect": 1,
   "src/components/settings/GatewaySettings.tsx | react-hooks/set-state-in-effect": 1,
   "src/components/settings/VoiceSettings.tsx | react-hooks/set-state-in-effect": 1,
-  "src/hooks/useBacktest.ts | react-hooks/set-state-in-effect": 1,
   "src/hooks/useCandleStore.ts | react-hooks/set-state-in-effect": 1,
   "src/hooks/useChat.tsx | react-refresh/only-export-components": 2,
   "src/pages/BotDetail.tsx | react-hooks/refs": 2,
-  "src/pages/Bots.tsx | react-hooks/refs": 12,
   "src/pages/CreateExecutor.tsx | react-hooks/set-state-in-effect": 1,
   "src/pages/Executors.tsx | react-hooks/purity": 1,
   "src/pages/Login.tsx | react-hooks/set-state-in-effect": 1,
   "src/pages/StrategyDetail.tsx | react-hooks/preserve-manual-memoization": 1,
-  "src/pages/StrategyDetail.tsx | react-hooks/set-state-in-effect": 1,
-  "src/pages/tabs/EditorTab.tsx | react-hooks/refs": 6
+  "src/pages/StrategyDetail.tsx | react-hooks/set-state-in-effect": 1
 }

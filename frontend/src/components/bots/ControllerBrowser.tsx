@@ -5,23 +5,37 @@ import {
   ChevronRight,
   ChevronUp,
   Circle,
+  History,
   Layers,
   Loader2,
   Pause,
   Play,
+  Rocket,
   RotateCcw,
   Save,
+  ScrollText,
   Server,
   SlidersHorizontal,
-  X,
+  Square,
+  TerminalSquare,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { Link, useSearchParams } from "react-router-dom";
 import yamlLib from "js-yaml";
 
 import { CodeEditor } from "@/components/editor/CodeEditor";
+import { EditorModal } from "@/components/editor/EditorModal";
 import { ControllerPnlChart } from "@/components/bots/ControllerPnlChart";
+import { DeployBotDialog } from "@/components/bots/DeployBotDialog";
+import { LogsSection } from "@/components/bots/LogsSection";
 import { PnlEvolutionChart } from "@/components/bots/PnlEvolutionChart";
-import { api, type ControllerInfo, type ControllerPerformanceSnapshot } from "@/lib/api";
+import {
+  api,
+  type BotLogEntry,
+  type BotSummary,
+  type ControllerInfo,
+  type ControllerPerformanceSnapshot,
+} from "@/lib/api";
 import { controllerKey } from "@/lib/controller-identity";
 import { configToYaml, CONTROLLER_HIDDEN_KEYS } from "@/lib/configYaml";
 import { formatCurrencyVolume, formatCurrencyPnl, pnlColor } from "@/lib/formatters";
@@ -82,20 +96,41 @@ function sameScope(a: Scope, b: Scope): boolean {
   return scopeId(a) === scopeId(b);
 }
 
+/**
+ * The inverse of `scopeId`, for the `?scope=` query parameter.
+ *
+ * The scope is the page's whole state, so it belongs in the URL: a controller
+ * is then linkable and survives a reload (FEAT-084). Split on the *first*
+ * colon only — a controller key is `bot:config_id`, which carries one of its
+ * own. Anything unreadable falls back to the fleet rather than to an empty
+ * screen.
+ */
+function parseScope(raw: string | null): Scope {
+  if (!raw) return { kind: "all" };
+  const sep = raw.indexOf(":");
+  if (sep < 0) return { kind: "all" };
+  const kind = raw.slice(0, sep);
+  const rest = raw.slice(sep + 1);
+  if (!rest) return { kind: "all" };
+  if (kind === "bot") return { kind: "bot", bot: rest };
+  if (kind === "ctrl") return { kind: "controller", key: rest };
+  return { kind: "all" };
+}
+
 // ── Types ──
 
 interface ControllerBrowserProps {
   controllers: ControllerInfo[];
+  /** The fleet's bots, for the actions a bot scope owns: Stop and Logs. */
+  bots: BotSummary[];
   server: string;
-  initialControllerKey: string;
-  onClose: () => void;
   convert: ConvertFn;
   currencySymbol: string;
   /**
-   * The fleet's performance history, already fetched by the page behind this
-   * overlay. A single controller still loads its own finer series (see
-   * ControllerPnlChart); the combined scopes fold *these* rows, so opening the
-   * browser costs no extra request.
+   * The fleet's performance history, already fetched by the page. A single
+   * controller still loads its own finer series (see ControllerPnlChart); the
+   * combined scopes fold *these* rows, so switching scope costs no extra
+   * request.
    */
   snapshots?: ControllerPerformanceSnapshot[];
   /** The fleet history above stops short of the earliest deploy. */
@@ -406,9 +441,8 @@ function SideTag({ side }: { side: string }) {
 
 export function ControllerBrowser({
   controllers,
+  bots,
   server,
-  initialControllerKey,
-  onClose,
   convert,
   currencySymbol,
   snapshots = [],
@@ -425,29 +459,59 @@ export function ControllerBrowser({
   const fmtVol = (val: number, pair: string) => formatCurrencyVolume(cv(val, pair), currencySymbol);
   const queryClient = useQueryClient();
   const [isCompact, setIsCompact] = useState(false);
-  // Collapsed by default: the editor is a thing you occasionally open, and the
-  // chart is the thing you came for — it gets the room until you ask otherwise.
-  const [showConfig, setShowConfig] = useState(false);
+  // One right-hand slot, three occupants. Config and logs used to be able to
+  // fight for the same 380px column; as one value only one can win, and a
+  // drawer the scope stops supporting simply stops being drawn (see
+  // `openDrawer`). Closed by default: a drawer is a thing you occasionally
+  // open, and the chart is the thing you came for.
+  const [drawer, setDrawer] = useState<null | "config" | "logs">(null);
   const [collapsedBots, setCollapsedBots] = useState<Set<string>>(() => new Set());
+  const [showDeploy, setShowDeploy] = useState(false);
+  // The editor is mounted from the first time it is opened and stays mounted
+  // (hidden) after that, so its unsaved buffers survive closing it — the same
+  // thing the tab it replaces did by staying mounted behind the tab bar. Two
+  // flags rather than one: `mounted` never goes back down, `open` does.
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [editorMounted, setEditorMounted] = useState(false);
+  const openEditor = useCallback(() => {
+    setEditorMounted(true);
+    setEditorOpen(true);
+  }, []);
+  // Which bot the Stop confirmation is armed for, not merely *that* it is: a
+  // bare boolean stayed armed while the sidebar moved on, so the Confirm the
+  // user was looking at belonged to one bot and would have stopped another.
+  const [confirmStopBot, setConfirmStopBot] = useState<string | null>(null);
   const sidebarRef = useRef<HTMLDivElement>(null);
   const [chartRef, chartBoxH] = useMeasuredHeight<HTMLDivElement>();
 
-  // The same composite `ActiveBotsTab` hands over as `initialControllerKey`:
-  // a controller is identified by its bot *and* its config id, never the id
+  // A controller is identified by its bot *and* its config id, never the id
   // alone (CORR-241).
   const ctrlKey = useCallback((c: ControllerInfo) => controllerKey(c), []);
 
-  const [scope, setScope] = useState<Scope>(() => ({ kind: "controller", key: initialControllerKey }));
-  const [syncedInitial, setSyncedInitial] = useState(initialControllerKey);
-
-  // The page behind the overlay can re-aim it at another controller (clicking a
-  // different row). Synced while rendering rather than from an effect, so the
-  // panes never paint one frame of the previous scope first — the same pattern
-  // AggregatedPnlChart uses to prune its selection.
-  if (syncedInitial !== initialControllerKey) {
-    setSyncedInitial(initialControllerKey);
-    setScope({ kind: "controller", key: initialControllerKey });
-  }
+  // The scope lives in the URL, so `?scope=ctrl:<bot>:<config id>` is a link to
+  // one controller and a reload lands back on it. Written with `replace` — the
+  // arrow keys walk the sidebar, and every step of that walk in the history
+  // stack would make Back useless.
+  const [searchParams, setSearchParams] = useSearchParams();
+  // Memoised on the raw parameter, not re-parsed each render: `scope` is the
+  // dependency of nearly every fold below, and a fresh object per render would
+  // make all of them recompute on every socket tick.
+  const scopeParam = searchParams.get("scope");
+  const scope = useMemo(() => parseScope(scopeParam), [scopeParam]);
+  const setScope = useCallback(
+    (next: Scope) => {
+      setSearchParams(
+        (prev) => {
+          const params = new URLSearchParams(prev);
+          if (next.kind === "all") params.delete("scope");
+          else params.set("scope", scopeId(next));
+          return params;
+        },
+        { replace: true },
+      );
+    },
+    [setSearchParams],
+  );
 
   // One group per bot, controllers keeping the order the page sorted them in.
   const groups = useMemo(() => {
@@ -489,6 +553,51 @@ export function ControllerBrowser({
     },
   });
 
+  // ── What a bot scope owns: the bot itself, its logs, and stopping it ──
+
+  const activeBot =
+    effectiveScope.kind === "bot"
+      ? bots.find((b) => b.bot_name === effectiveScope.bot)
+      : undefined;
+  const botStopping = activeBot?.status === "stopping";
+
+  // The bot is the mutation's argument rather than something it reads off the
+  // current scope, so `variables` says which bot a pending or failed stop
+  // belongs to — the sidebar can move on while a stop is in flight, and neither
+  // the spinner nor the error should follow it to the next bot.
+  const stopBotMutation = useMutation({
+    mutationFn: (botName: string) => api.stopBot(server, botName),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["bots", server] });
+      setConfirmStopBot(null);
+    },
+  });
+  const stoppingThisBot =
+    stopBotMutation.isPending && stopBotMutation.variables === activeBot?.bot_name;
+  const stopFailedHere =
+    stopBotMutation.isError && stopBotMutation.variables === activeBot?.bot_name;
+
+  const stopArmed = !!activeBot && confirmStopBot === activeBot.bot_name;
+
+  const botLogs: BotLogEntry[] = useMemo(() => {
+    if (!activeBot) return [];
+    return [
+      ...(activeBot.error_logs || []).map((l) => ({ ...l, log_category: "error" as const })),
+      ...(activeBot.general_logs || []).map((l) => ({ ...l, log_category: "general" as const })),
+    ].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+  }, [activeBot]);
+
+  /**
+   * Which drawer the current scope actually supports.
+   *
+   * Derived rather than reset from an effect: a `logs` drawer means nothing at
+   * controller scope and a `config` drawer means nothing at fleet scope, so the
+   * unsupported one is simply not drawn — and walking back to a scope that does
+   * support it finds it open again, which is the preference the user expressed.
+   */
+  const openDrawer =
+    drawer === "config" && activeCtrl ? "config" : drawer === "logs" && activeBot ? "logs" : null;
+
   // ── Keyboard navigation over the picker, in the order it is drawn ──
 
   const navItems = useMemo(() => {
@@ -506,13 +615,21 @@ export function ControllerBrowser({
 
   const goUp = useCallback(() => {
     if (navIdx > 0) setScope(navItems[navIdx - 1]);
-  }, [navIdx, navItems]);
+  }, [navIdx, navItems, setScope]);
 
   const goDown = useCallback(() => {
     if (navIdx >= 0 && navIdx < navItems.length - 1) setScope(navItems[navIdx + 1]);
-  }, [navIdx, navItems]);
+  }, [navIdx, navItems, setScope]);
+
+  // Escape used to close the browser back onto the page behind it. There is no
+  // page behind it any more — it *is* `/bots` — so only the arrows are left,
+  // and they stand down while something is layered over the sidebar: an arrow
+  // key pressed in the editor modal or the deploy dialog would otherwise walk
+  // a scope the user cannot see.
+  const modalOpen = editorOpen || showDeploy;
 
   useEffect(() => {
+    if (modalOpen) return;
     const handler = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
       // Skip if focus is inside CodeMirror editor (contenteditable div)
@@ -520,11 +637,10 @@ export function ControllerBrowser({
       if (inEditor && !e.metaKey && !e.ctrlKey) return;
       if (e.key === "ArrowUp") { goUp(); e.preventDefault(); }
       else if (e.key === "ArrowDown") { goDown(); e.preventDefault(); }
-      else if (e.key === "Escape") { onClose(); e.preventDefault(); }
     };
     window.addEventListener("keydown", handler, true);
     return () => window.removeEventListener("keydown", handler, true);
-  }, [goUp, goDown, onClose]);
+  }, [goUp, goDown, modalOpen]);
 
   // Scroll active into view
   const activeScopeId = scopeId(effectiveScope);
@@ -680,7 +796,6 @@ export function ControllerBrowser({
 
   const configId = activeCtrl ? activeCtrl.controller_id || activeCtrl.controller_name : "";
   const chartHeight = Math.max(MIN_CHART_PX, (chartBoxH || 420) - CHART_CHROME_PX);
-  const configOpen = showConfig && !!activeCtrl;
 
   // ── Picker rows ──
 
@@ -692,7 +807,7 @@ export function ControllerBrowser({
     }`;
 
   return (
-    <div className="fixed inset-0 z-50 flex bg-[var(--color-bg)]">
+    <div className="flex h-full min-h-0 bg-[var(--color-bg)]">
       {/* Left sidebar: the scope picker */}
       <div
         className={`flex flex-col border-r border-[var(--color-border)] bg-[var(--color-surface)] transition-all ${
@@ -875,9 +990,6 @@ export function ControllerBrowser({
                 </kbd>
                 <span className="ml-0.5">navigate</span>
               </span>
-              <kbd className="inline-flex h-4 items-center justify-center rounded border border-[var(--color-border)] bg-[var(--color-surface-hover)] px-1 text-[8px] font-medium">
-                esc
-              </kbd>
             </span>
           </div>
         )}
@@ -957,6 +1069,86 @@ export function ControllerBrowser({
                 <ChevronDown className="h-3.5 w-3.5" />
               </button>
             </div>
+            {/* Every action belongs to a scope, and is drawn only there: the
+                fleet deploys bots, a bot is stopped and read, a controller is
+                paused and configured. The accordion and the table that used to
+                carry the first two are gone (FEAT-084). */}
+            {effectiveScope.kind === "all" && (
+              <button
+                onClick={() => setShowDeploy(true)}
+                className="flex items-center gap-1.5 rounded px-3 py-1.5 text-xs font-medium text-[var(--color-primary)] transition-colors hover:bg-[var(--color-primary)]/10"
+                title="Deploy a new bot"
+              >
+                <Rocket className="h-3.5 w-3.5" />
+                Deploy bot
+              </button>
+            )}
+
+            {activeBot && (
+              <>
+                {botStopping ? (
+                  <span className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-[var(--color-yellow)]">
+                    <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                    Stopping
+                  </span>
+                ) : stopArmed ? (
+                  <span className="flex items-center gap-1.5">
+                    <button
+                      onClick={() => stopBotMutation.mutate(activeBot.bot_name)}
+                      disabled={stoppingThisBot}
+                      className="rounded bg-[var(--color-red)] px-2 py-1 text-xs font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+                    >
+                      {stoppingThisBot ? "Stopping..." : "Confirm"}
+                    </button>
+                    <button
+                      onClick={() => setConfirmStopBot(null)}
+                      className="rounded px-2 py-1 text-xs text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-text)]"
+                    >
+                      Cancel
+                    </button>
+                  </span>
+                ) : (
+                  <button
+                    onClick={() => setConfirmStopBot(activeBot.bot_name)}
+                    className="flex items-center gap-1.5 rounded px-3 py-1.5 text-xs font-medium text-[var(--color-red)] transition-colors hover:bg-[var(--color-red)]/10"
+                    title="Stop bot"
+                  >
+                    <Square className="h-3.5 w-3.5" />
+                    Stop bot
+                  </button>
+                )}
+                {stopFailedHere && (
+                  <span
+                    className="text-[10px] whitespace-nowrap text-[var(--color-red)]"
+                    title={
+                      stopBotMutation.error instanceof Error
+                        ? stopBotMutation.error.message
+                        : "Unknown error"
+                    }
+                  >
+                    Failed to stop
+                  </span>
+                )}
+                <button
+                  onClick={() => setDrawer((d) => (d === "logs" ? null : "logs"))}
+                  className={`flex items-center gap-1.5 rounded px-3 py-1.5 text-xs font-medium transition-colors ${
+                    openDrawer === "logs"
+                      ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+                      : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
+                  }`}
+                  title={openDrawer === "logs" ? "Hide logs" : "Show logs"}
+                >
+                  <ScrollText className="h-3.5 w-3.5" />
+                  Logs
+                  {activeBot.error_count > 0 && (
+                    <span className="text-[10px] text-[var(--color-yellow)]">
+                      {activeBot.error_count}
+                    </span>
+                  )}
+                </button>
+              </>
+            )}
+
             {activeCtrl && (
               <button
                 onClick={() => toggleMutation.mutate()}
@@ -990,24 +1182,40 @@ export function ControllerBrowser({
                 scope has nothing for it to show. */}
             {activeCtrl && (
               <button
-                onClick={() => setShowConfig((v) => !v)}
+                onClick={() => setDrawer((d) => (d === "config" ? null : "config"))}
                 className={`flex items-center gap-1.5 rounded px-3 py-1.5 text-xs font-medium transition-colors ${
-                  configOpen
+                  openDrawer === "config"
                     ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
                     : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
                 }`}
-                title={configOpen ? "Hide config" : "Show config"}
+                title={openDrawer === "config" ? "Hide config" : "Show config"}
               >
                 <SlidersHorizontal className="h-3.5 w-3.5" />
                 Config
               </button>
             )}
-            <button
-              onClick={onClose}
-              className="ml-1 rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-              title="Close (Esc)"
+
+            {/* The run history is still a table of its own until [[FEAT-086]]
+                folds terminated runs into the sidebar. With the tab bar gone,
+                this link is the only door to it. */}
+            <Link
+              to="/bots?tab=runs"
+              className="ml-1 flex items-center gap-1.5 rounded px-3 py-1.5 text-xs font-medium text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+              title="Bot run history"
             >
-              <X className="h-4 w-4" />
+              <History className="h-3.5 w-3.5" />
+              Runs
+            </Link>
+
+            {/* Controller sources and their configs, over the whole fleet — so
+                it belongs to every scope rather than to one. */}
+            <button
+              onClick={openEditor}
+              className="flex items-center gap-1.5 rounded px-3 py-1.5 text-xs font-medium text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+              title="Open the controller & config editor"
+            >
+              <TerminalSquare className="h-3.5 w-3.5" />
+              Editor
             </button>
           </div>
         </div>
@@ -1231,24 +1439,56 @@ export function ControllerBrowser({
             )}
           </div>
 
-          {/* Right drawer: the config of the one controller in scope */}
-          {configOpen && activeCtrl && (
+          {/* The right drawer: one column, whichever of the two the scope
+              supports. A controller's config, or a bot's logs — never both,
+              and never one belonging to a scope the user has left. */}
+          {openDrawer && (
             <div className="w-[380px] xl:w-[440px] shrink-0 border-l border-[var(--color-border)] flex flex-col bg-[var(--color-surface)]">
-              <YamlConfigEditor
-                // Same: an editor keyed on the config id alone kept its unsaved
-                // buffer when the user switched to the other bot running it.
-                key={ctrlKey(activeCtrl)}
-                config={activeCtrl.config || {}}
-                server={server}
-                configId={configId}
-                botName={activeCtrl.bot_name}
-                onSaved={() => queryClient.invalidateQueries({ queryKey: ["bots", server] })}
-                onCollapse={() => setShowConfig(false)}
-              />
+              {openDrawer === "config" && activeCtrl ? (
+                <YamlConfigEditor
+                  // Same: an editor keyed on the config id alone kept its unsaved
+                  // buffer when the user switched to the other bot running it.
+                  key={ctrlKey(activeCtrl)}
+                  config={activeCtrl.config || {}}
+                  server={server}
+                  configId={configId}
+                  botName={activeCtrl.bot_name}
+                  onSaved={() => queryClient.invalidateQueries({ queryKey: ["bots", server] })}
+                  onCollapse={() => setDrawer(null)}
+                />
+              ) : (
+                <div className="flex h-full min-h-0 flex-col">
+                  <div className="flex shrink-0 items-center gap-2 border-b border-[var(--color-border)]/50 px-4 py-2">
+                    <button
+                      onClick={() => setDrawer(null)}
+                      className="rounded p-0.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+                      title="Hide logs"
+                    >
+                      <ChevronRight className="h-3.5 w-3.5" />
+                    </button>
+                    <h3 className="text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
+                      Logs
+                    </h3>
+                  </div>
+                  <div className="flex-1 min-h-0 p-3">
+                    <LogsSection logs={botLogs} />
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>
       </div>
+
+      <DeployBotDialog open={showDeploy} onClose={() => setShowDeploy(false)} server={server} />
+
+      {/* Kept mounted once opened, hidden rather than unmounted while closed:
+          the editor holds unsaved buffers across tabs, and closing the modal is
+          not the same as discarding them — which is what an unmount would do,
+          silently. */}
+      {editorMounted && (
+        <EditorModal open={editorOpen} onClose={() => setEditorOpen(false)} />
+      )}
     </div>
   );
 }

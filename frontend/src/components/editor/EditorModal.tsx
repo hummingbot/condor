@@ -12,6 +12,7 @@ import {
   RotateCcw,
   Save,
   SplitSquareHorizontal,
+  TerminalSquare,
   Trash2,
   Upload,
   X,
@@ -465,14 +466,62 @@ function EditorPane({
 
 // ── Main Export ──
 
-export function EditorTab() {
+/**
+ * The frame the editor lives in: full screen, above the browser it opened
+ * from, with a title strip and a way out. `open` toggles visibility rather than
+ * mounting, so a closed editor keeps its tabs (see `EditorModal`).
+ */
+function ModalShell({
+  open,
+  onClose,
+  children,
+}: {
+  open: boolean;
+  onClose: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <div
+      className={`fixed inset-0 z-[60] flex-col bg-[var(--color-bg)] ${open ? "flex" : "hidden"}`}
+    >
+      <div className="flex h-12 shrink-0 items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-surface)] px-4">
+        <div className="flex items-center gap-2">
+          <TerminalSquare className="h-4 w-4 text-[var(--color-text-muted)]" />
+          <h2 className="text-sm font-semibold">Controllers &amp; configs</h2>
+        </div>
+        <button
+          onClick={onClose}
+          className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+          title="Close (Esc)"
+        >
+          <X className="h-4 w-4" />
+        </button>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+/**
+ * The controller & config editor, as a modal over the controller browser.
+ *
+ * It was the fourth tab of `/bots` until the browser became the page
+ * (FEAT-084). Nothing about the editor itself changed in the move except what
+ * the button that opens it is for: a config is what you come here to edit, so
+ * **Configs** is the view it opens on and the first half of the toggle.
+ *
+ * `open` hides rather than unmounts, so the caller can keep unsaved buffers
+ * alive across a close; every keyboard and query behaviour below is gated on
+ * it so a hidden editor is inert.
+ */
+export function EditorModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { server } = useServer();
   const queryClient = useQueryClient();
   const [openTabs, setOpenTabs] = useState<OpenTab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const [splitMode, setSplitMode] = useState(false);
   const [splitTabId, setSplitTabId] = useState<string | null>(null);
-  const [explorerView, setExplorerView] = useState<ExplorerView>("controllers");
+  const [explorerView, setExplorerView] = useState<ExplorerView>("configs");
 
   // Dialog state
   const [deleteTarget, setDeleteTarget] = useState<FileEntry | null>(null);
@@ -636,244 +685,273 @@ export function EditorTab() {
     [openTabs],
   );
 
+  // Escape closes the editor — but it belongs to whatever is innermost, so it
+  // stands down while one of the editor's own dialogs is up (that dialog closes
+  // on its own Escape) and while focus is inside a CodeMirror pane, where the
+  // key is the editor's to interpret.
+  const dialogOpen = !!(
+    closeTarget ||
+    deleteTarget ||
+    showUpload ||
+    cloneTarget ||
+    newConfigTarget ||
+    contextMenu
+  );
+  const closeOnEscape = useCallback(() => {
+    const el = document.activeElement;
+    if (el instanceof HTMLElement && el.closest(".cm-editor")) return;
+    onClose();
+  }, [onClose]);
+  useEscapeKey(open && !dialogOpen, closeOnEscape);
+
   if (!server) {
-    return <NoServerCard message="Select a server from the sidebar to edit controller configs." />;
+    return (
+      <ModalShell open={open} onClose={onClose}>
+        <div className="p-6">
+          <NoServerCard message="Select a server from the sidebar to edit controller configs." />
+        </div>
+      </ModalShell>
+    );
   }
 
   if (isLoading) {
     return (
-      <div className="flex items-center justify-center py-16 text-[var(--color-text-muted)]">
-        <Loader2 className="h-5 w-5 animate-spin rounded-full" />
-      </div>
+      <ModalShell open={open} onClose={onClose}>
+        <div className="flex flex-1 items-center justify-center text-[var(--color-text-muted)]">
+          <Loader2 className="h-5 w-5 animate-spin rounded-full" />
+        </div>
+      </ModalShell>
     );
   }
 
   const hasDirtyTabs = openTabs.some((t) => t.content !== t.originalContent);
 
   return (
-    <div className="flex rounded-lg border border-[var(--color-border)] overflow-hidden" style={{ height: "calc(100vh - 180px)" }}>
-      {/* Sidebar */}
-      <div className="w-56 shrink-0 border-r border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden flex flex-col">
-        {/* Header with view toggle + actions */}
-        <div className="px-2 py-2 border-b border-[var(--color-border)]/50 space-y-1.5">
-          <div className="flex items-center justify-between px-1">
-            <span className="text-xs font-medium text-[var(--color-text-muted)] uppercase tracking-wider flex items-center gap-1">
-              Explorer
-              {hasDirtyTabs && (
-                <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-warning)]" />
-              )}
-            </span>
-            <div className="flex items-center gap-0.5">
-              <button
-                onClick={() => setShowUpload(true)}
-                className="p-1 rounded hover:bg-[var(--color-surface-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition-colors"
-                title="Upload file"
-              >
-                <Upload className="h-3.5 w-3.5" />
-              </button>
-              <button
-                onClick={() => setNewConfigTarget({})}
-                className="p-1 rounded hover:bg-[var(--color-surface-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition-colors"
-                title="New config from template"
-              >
-                <Plus className="h-3.5 w-3.5" />
-              </button>
-            </div>
-          </div>
-          {/* View toggle */}
-          <div className="flex items-center gap-0.5 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-0.5">
-            <button
-              onClick={() => setExplorerView("controllers")}
-              className={`flex items-center gap-1 flex-1 justify-center rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors ${
-                explorerView === "controllers"
-                  ? "bg-[var(--color-surface)] text-[var(--color-text)] shadow-sm"
-                  : "text-[var(--color-text-muted)]"
-              }`}
-            >
-              <Code2 className="h-3 w-3" />
-              Controllers
-            </button>
-            <button
-              onClick={() => setExplorerView("configs")}
-              className={`flex items-center gap-1 flex-1 justify-center rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors ${
-                explorerView === "configs"
-                  ? "bg-[var(--color-surface)] text-[var(--color-text)] shadow-sm"
-                  : "text-[var(--color-text-muted)]"
-              }`}
-            >
-              <FileText className="h-3 w-3" />
-              Configs
-            </button>
-          </div>
-        </div>
-        <FileTree
-          files={visibleFiles}
-          activeFileId={activeTabId}
-          onSelect={openFile}
-          onContextMenu={handleContextMenu}
-        />
-      </div>
-
-      {/* Editor area */}
-      <div className="flex-1 flex flex-col min-w-0 bg-[var(--color-bg)]">
-        {openTabs.length > 0 ? (
-          <>
-            <div className="flex items-center shrink-0">
-              <div className="flex-1 min-w-0">
-                <EditorTabBar
-                  tabs={openTabs}
-                  activeTabId={activeTabId}
-                  onSelect={setActiveTabId}
-                  onClose={requestCloseTab}
-                />
-              </div>
-              {openTabs.length >= 2 && (
+    <ModalShell open={open} onClose={onClose}>
+      <div className="flex flex-1 min-h-0 overflow-hidden">
+        {/* Sidebar */}
+        <div className="w-56 shrink-0 border-r border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden flex flex-col">
+          {/* Header with view toggle + actions */}
+          <div className="px-2 py-2 border-b border-[var(--color-border)]/50 space-y-1.5">
+            <div className="flex items-center justify-between px-1">
+              <span className="text-xs font-medium text-[var(--color-text-muted)] uppercase tracking-wider flex items-center gap-1">
+                Explorer
+                {hasDirtyTabs && (
+                  <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-warning)]" />
+                )}
+              </span>
+              <div className="flex items-center gap-0.5">
                 <button
-                  onClick={() => {
-                    if (splitMode) {
-                      setSplitMode(false);
-                      setSplitTabId(null);
-                    } else {
-                      const other = openTabs.find((t) => t.file.id !== activeTabId);
-                      if (other) {
-                        setSplitMode(true);
-                        setSplitTabId(other.file.id);
-                      }
-                    }
-                  }}
-                  className={`px-2 py-1.5 border-b border-l border-[var(--color-border)] transition-colors ${
-                    splitMode
-                      ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
-                      : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
-                  }`}
-                  title="Toggle split view"
+                  onClick={() => setShowUpload(true)}
+                  className="p-1 rounded hover:bg-[var(--color-surface-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition-colors"
+                  title="Upload file"
                 >
-                  <SplitSquareHorizontal className="h-3.5 w-3.5" />
+                  <Upload className="h-3.5 w-3.5" />
                 </button>
-              )}
+                <button
+                  onClick={() => setNewConfigTarget({})}
+                  className="p-1 rounded hover:bg-[var(--color-surface-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition-colors"
+                  title="New config from template"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                </button>
+              </div>
             </div>
-
-            <div className={`flex-1 min-h-0 ${splitMode ? "flex" : ""}`}>
-              {activeTab && (
-                <div className={splitMode ? "flex-1 border-r border-[var(--color-border)]" : "h-full"}>
-                  <EditorPane
-                    tab={activeTab}
-                    server={server}
-                    onContentChange={updateContent}
-                    onSaved={markSaved}
-                    onDelete={handleDeleteRequest}
-                  />
-                </div>
-              )}
-              {splitMode && splitTab && (
-                <div className="flex-1">
-                  <EditorPane
-                    tab={splitTab}
-                    server={server}
-                    onContentChange={updateContent}
-                    onSaved={markSaved}
-                    onDelete={handleDeleteRequest}
-                  />
-                </div>
-              )}
-            </div>
-          </>
-        ) : (
-          <div className="flex items-center justify-center h-full text-[var(--color-text-muted)]">
-            <div className="text-center space-y-2">
-              <Code2 className="h-10 w-10 mx-auto opacity-40" />
-              <p className="text-sm">Select a file from the explorer</p>
-              <p className="text-xs opacity-60">
-                Controllers (.py) and Configs (.yml)
-              </p>
+            {/* View toggle */}
+            <div className="flex items-center gap-0.5 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-0.5">
+              <button
+                onClick={() => setExplorerView("configs")}
+                className={`flex items-center gap-1 flex-1 justify-center rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors ${
+                  explorerView === "configs"
+                    ? "bg-[var(--color-surface)] text-[var(--color-text)] shadow-sm"
+                    : "text-[var(--color-text-muted)]"
+                }`}
+              >
+                <FileText className="h-3 w-3" />
+                Configs
+              </button>
+              <button
+                onClick={() => setExplorerView("controllers")}
+                className={`flex items-center gap-1 flex-1 justify-center rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors ${
+                  explorerView === "controllers"
+                    ? "bg-[var(--color-surface)] text-[var(--color-text)] shadow-sm"
+                    : "text-[var(--color-text-muted)]"
+                }`}
+              >
+                <Code2 className="h-3 w-3" />
+                Controllers
+              </button>
             </div>
           </div>
+          <FileTree
+            files={visibleFiles}
+            activeFileId={activeTabId}
+            onSelect={openFile}
+            onContextMenu={handleContextMenu}
+          />
+        </div>
+
+        {/* Editor area */}
+        <div className="flex-1 flex flex-col min-w-0 bg-[var(--color-bg)]">
+          {openTabs.length > 0 ? (
+            <>
+              <div className="flex items-center shrink-0">
+                <div className="flex-1 min-w-0">
+                  <EditorTabBar
+                    tabs={openTabs}
+                    activeTabId={activeTabId}
+                    onSelect={setActiveTabId}
+                    onClose={requestCloseTab}
+                  />
+                </div>
+                {openTabs.length >= 2 && (
+                  <button
+                    onClick={() => {
+                      if (splitMode) {
+                        setSplitMode(false);
+                        setSplitTabId(null);
+                      } else {
+                        const other = openTabs.find((t) => t.file.id !== activeTabId);
+                        if (other) {
+                          setSplitMode(true);
+                          setSplitTabId(other.file.id);
+                        }
+                      }
+                    }}
+                    className={`px-2 py-1.5 border-b border-l border-[var(--color-border)] transition-colors ${
+                      splitMode
+                        ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
+                        : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+                    }`}
+                    title="Toggle split view"
+                  >
+                    <SplitSquareHorizontal className="h-3.5 w-3.5" />
+                  </button>
+                )}
+              </div>
+
+              <div className={`flex-1 min-h-0 ${splitMode ? "flex" : ""}`}>
+                {activeTab && (
+                  <div className={splitMode ? "flex-1 border-r border-[var(--color-border)]" : "h-full"}>
+                    <EditorPane
+                      tab={activeTab}
+                      server={server}
+                      onContentChange={updateContent}
+                      onSaved={markSaved}
+                      onDelete={handleDeleteRequest}
+                    />
+                  </div>
+                )}
+                {splitMode && splitTab && (
+                  <div className="flex-1">
+                    <EditorPane
+                      tab={splitTab}
+                      server={server}
+                      onContentChange={updateContent}
+                      onSaved={markSaved}
+                      onDelete={handleDeleteRequest}
+                    />
+                  </div>
+                )}
+              </div>
+            </>
+          ) : (
+            <div className="flex items-center justify-center h-full text-[var(--color-text-muted)]">
+              <div className="text-center space-y-2">
+                <Code2 className="h-10 w-10 mx-auto opacity-40" />
+                <p className="text-sm">Select a file from the explorer</p>
+                <p className="text-xs opacity-60">
+                  Controllers (.py) and Configs (.yml)
+                </p>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Hidden content loaders */}
+        {tabsToLoad.map((tab) => (
+          <FileContentLoader
+            key={tab.file.id}
+            tab={tab}
+            server={server}
+            onLoaded={(content, readOnly) => {
+              setOpenTabs((prev) =>
+                prev.map((t) =>
+                  t.file.id === tab.file.id
+                    ? { ...t, content, originalContent: content, loaded: true, readOnly }
+                    : t,
+                ),
+              );
+            }}
+            onError={(error) => {
+              setOpenTabs((prev) =>
+                prev.map((t) =>
+                  t.file.id === tab.file.id ? { ...t, loaded: true, error } : t,
+                ),
+              );
+            }}
+          />
+        ))}
+
+        {/* Context menu */}
+        {contextMenu && (
+          <ContextMenu
+            state={contextMenu}
+            onClose={() => setContextMenu(null)}
+            onDelete={handleDeleteRequest}
+            onClone={handleCloneFromMenu}
+            onNewConfig={handleNewConfigFromMenu}
+          />
+        )}
+
+        {/* Dialogs */}
+        {closeTarget && (
+          <DiscardChangesDialog
+            fileName={`${closeTarget.label}${closeTarget.kind === "config" ? ".yml" : ".py"}`}
+            onDiscard={() => {
+              closeTab(closeTarget.id);
+              setCloseTarget(null);
+            }}
+            onClose={() => setCloseTarget(null)}
+          />
+        )}
+        {deleteTarget && (
+          <DeleteConfirmDialog
+            server={server}
+            target={
+              deleteTarget.kind === "config"
+                ? { kind: "config", configId: deleteTarget.configId! }
+                : { kind: "controller", controllerType: deleteTarget.controllerType!, controllerName: deleteTarget.controllerName! }
+            }
+            onClose={() => setDeleteTarget(null)}
+            onDeleted={handleDeleted}
+          />
+        )}
+        {showUpload && (
+          <UploadDialog
+            server={server}
+            controllerTypes={controllerTypes}
+            onClose={() => setShowUpload(false)}
+          />
+        )}
+        {cloneTarget && (
+          <CloneConfigDialog
+            server={server}
+            sourceConfig={cloneTarget}
+            onClose={() => setCloneTarget(null)}
+          />
+        )}
+        {newConfigTarget && (
+          <NewConfigDialog
+            server={server}
+            controllerTypes={controllerTypes}
+            initialControllerType={newConfigTarget.type}
+            initialControllerName={newConfigTarget.name}
+            onClose={() => setNewConfigTarget(null)}
+          />
         )}
       </div>
-
-      {/* Hidden content loaders */}
-      {tabsToLoad.map((tab) => (
-        <FileContentLoader
-          key={tab.file.id}
-          tab={tab}
-          server={server}
-          onLoaded={(content, readOnly) => {
-            setOpenTabs((prev) =>
-              prev.map((t) =>
-                t.file.id === tab.file.id
-                  ? { ...t, content, originalContent: content, loaded: true, readOnly }
-                  : t,
-              ),
-            );
-          }}
-          onError={(error) => {
-            setOpenTabs((prev) =>
-              prev.map((t) =>
-                t.file.id === tab.file.id ? { ...t, loaded: true, error } : t,
-              ),
-            );
-          }}
-        />
-      ))}
-
-      {/* Context menu */}
-      {contextMenu && (
-        <ContextMenu
-          state={contextMenu}
-          onClose={() => setContextMenu(null)}
-          onDelete={handleDeleteRequest}
-          onClone={handleCloneFromMenu}
-          onNewConfig={handleNewConfigFromMenu}
-        />
-      )}
-
-      {/* Dialogs */}
-      {closeTarget && (
-        <DiscardChangesDialog
-          fileName={`${closeTarget.label}${closeTarget.kind === "config" ? ".yml" : ".py"}`}
-          onDiscard={() => {
-            closeTab(closeTarget.id);
-            setCloseTarget(null);
-          }}
-          onClose={() => setCloseTarget(null)}
-        />
-      )}
-      {deleteTarget && (
-        <DeleteConfirmDialog
-          server={server}
-          target={
-            deleteTarget.kind === "config"
-              ? { kind: "config", configId: deleteTarget.configId! }
-              : { kind: "controller", controllerType: deleteTarget.controllerType!, controllerName: deleteTarget.controllerName! }
-          }
-          onClose={() => setDeleteTarget(null)}
-          onDeleted={handleDeleted}
-        />
-      )}
-      {showUpload && (
-        <UploadDialog
-          server={server}
-          controllerTypes={controllerTypes}
-          onClose={() => setShowUpload(false)}
-        />
-      )}
-      {cloneTarget && (
-        <CloneConfigDialog
-          server={server}
-          sourceConfig={cloneTarget}
-          onClose={() => setCloneTarget(null)}
-        />
-      )}
-      {newConfigTarget && (
-        <NewConfigDialog
-          server={server}
-          controllerTypes={controllerTypes}
-          initialControllerType={newConfigTarget.type}
-          initialControllerName={newConfigTarget.name}
-          onClose={() => setNewConfigTarget(null)}
-        />
-      )}
-    </div>
+    </ModalShell>
   );
 }
 

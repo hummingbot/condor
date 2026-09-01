@@ -51,6 +51,18 @@ const NAV_ITEMS = [
 ] as const;
 
 /**
+ * Routes that lay themselves out edge to edge and scroll inside their own panes,
+ * so `main` gives them no padding and no scrollbar of its own.
+ *
+ * `/bots` joined the chat workspace when the controller browser became the page
+ * (FEAT-084): a scope sidebar and a report column, both screen-tall, have
+ * nothing to do with `main`'s 24px. Kept separate from `isChatWorkspace`, which
+ * still means *the chat* specifically — the keys-overlay exemption is about the
+ * conversation, not about padding.
+ */
+const FULL_BLEED_ROUTES = ["/", "/bots"];
+
+/**
  * The shell owns the chat state.
  *
  * There used to be two surfaces rendering a conversation — an overlay panel
@@ -79,6 +91,8 @@ function AppShellBody() {
   // — while `/agents/:slug` is an ordinary padded page, deliberately not
   // matched here.
   const isChatWorkspace = pathname === "/";
+
+  const isFullBleed = FULL_BLEED_ROUTES.includes(pathname);
 
   // The chat is the landing page and needs no exchange keys, so the blocking
   // overlay would otherwise be the first thing every unconfigured user hits —
@@ -199,7 +213,7 @@ function AppShellBody() {
       {/* Main content */}
       <main
         className={`relative flex-1 ${
-          isChatWorkspace ? "overflow-hidden" : "overflow-auto p-6"
+          isFullBleed ? "overflow-hidden" : "overflow-auto p-6"
         }`}
       >
         <ErrorBoundary resetKey={pathname + server}>
