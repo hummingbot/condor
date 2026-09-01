@@ -199,6 +199,16 @@ def backtests_dir() -> Path:
     return data_dir() / "backtests"
 
 
+def run_history_dir() -> Path:
+    """One gzipped series per finished bot run, plus ``_index.json``.
+
+    Sibling of :func:`backtests_dir` and the same shape of store: a small index
+    read on every poll, a payload opened only when someone draws the run
+    (``run_history_store.py``).
+    """
+    return data_dir() / "run_history"
+
+
 def legacy_backtests_file() -> Path:
     """The single-file backtest store ``BacktestStore`` folds in and deletes."""
     return data_dir() / "backtests.json"
