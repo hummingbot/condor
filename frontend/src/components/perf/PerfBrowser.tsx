@@ -76,7 +76,6 @@ import {
 import { aggregatePnlSeries, executorSeries, snapshotsFromRunHistory } from "@/lib/pnl-chart";
 import { buildAttributor, runWindows } from "@/lib/run-attribution";
 import type { ConvertFn } from "@/lib/rates";
-import { POSITIONS_BAND_KEY } from "@/lib/sessionState";
 import { useViewFacts } from "@/lib/viewFacts";
 
 /** `3, "bot"` → `"3 bots"`. Thousands separated, because a fleet's closed set runs to five figures. */
@@ -615,28 +614,17 @@ export function PerfBrowser({
   // It has two occupants now — the positions a scope holds and the executors
   // underneath it — and as one value only one can be open, so the band never
   // grows to fit both and the chart's height stays a function of the strip
-  // alone. Remembered per device rather than per scope: it says how this window
-  // is set up, which is the same reason the key is KEPT across a logout (see
-  // lib/sessionState). A value written before the band had two occupants reads
-  // as "positions", which is what it meant.
-  const [band, setBand] = useState<BandKey>(() => {
-    try {
-      const stored = localStorage.getItem(POSITIONS_BAND_KEY);
-      return stored === "executors" ? "executors" : stored === "open" || stored === "positions" ? "positions" : null;
-    } catch {
-      return null;
-    }
-  });
+  // alone.
+  //
+  // Shut on arrival every time, and deliberately not remembered: a device that
+  // once opened it over a one-row controller re-opened it over a twelve-row
+  // fleet, and the reader who came to read the curve was met with half a chart
+  // and a table they had not asked for on this scope. Opening it is a question
+  // about the scope in front of you, so it is answered per visit — the cost of
+  // being wrong is one click, against a squashed chart on every load.
+  const [band, setBand] = useState<BandKey>(null);
   const toggleBand = useCallback((next: Exclude<BandKey, null>) => {
-    setBand((open) => {
-      const value = open === next ? null : next;
-      try {
-        localStorage.setItem(POSITIONS_BAND_KEY, value ?? "closed");
-      } catch {
-        // Storage disabled: the band still opens, it just forgets overnight.
-      }
-      return value;
-    });
+    setBand((open) => (open === next ? null : next));
   }, []);
 
   /**
@@ -2163,7 +2151,11 @@ export function PerfBrowser({
 
         {/* Body: report pane (+ config drawer) */}
         <div className="flex flex-1 min-h-0">
-          <div className="flex flex-1 flex-col min-w-0 gap-3 p-4">
+          {/* The centre column. It scrolls only as a safety valve: the strip,
+              the chart's floor and an open band all fit a normal window, and on
+              a short one the reader can reach the rows that no longer do rather
+              than have them hang off the bottom of the screen. */}
+          <div className="flex flex-1 flex-col min-w-0 min-h-0 gap-3 overflow-y-auto scrollbar-thin p-4">
             {/* Headline numbers first: the chart below is the shape of these. */}
             <div className="shrink-0 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3">
               {/* A fixed set of tiles, not a set that depends on what the scope
@@ -2305,8 +2297,21 @@ export function PerfBrowser({
               )}
             </div>
 
-            {/* The chart takes whatever vertical room is left. */}
-            <div ref={chartRef} className="relative flex-1 min-h-[260px]">
+            {/* The chart takes whatever vertical room is left, down to the room
+                it actually occupies and no further: the panes are drawn at
+                `MIN_CHART_PX` however little is left, so a box shorter than that
+                plus its chrome does not shrink the chart — it makes the chart
+                overflow downward and paint across the band's header, which is
+                what swallowed the "Positions held" label when a twelve-row fleet
+                opened the band. The floor is the same two constants the panes are
+                sized from, so the two can't drift apart. `overflow-hidden` is the
+                belt to that braces: if a pane ever is squeezed below its floor,
+                it clips itself instead of covering its neighbour. */}
+            <div
+              ref={chartRef}
+              className="relative flex-1 overflow-hidden"
+              style={{ minHeight: MIN_CHART_PX + CHART_CHROME_PX }}
+            >
               <div className="absolute inset-0">
                 {activeCtrl && population === "running" ? (
                   <ControllerPnlChart
@@ -2364,11 +2369,16 @@ export function PerfBrowser({
 
                 Both are tables rather than grids of cards: at fleet scope these
                 are dozens or thousands of one-line facts, and a row each is
-                what makes them comparable at a glance. */}
+                what makes them comparable at a glance.
+
+                Open, it asks for up to 45% of the pane but yields to the chart's
+                floor above — the chart is the reason the reader is here, and a
+                table that scrolls two rows shorter costs less than a curve drawn
+                in half the room it needs. */}
             {(positionRows.length > 0 || scopedExecutors.length > 0) && (
               <div
-                className={`shrink-0 flex min-h-0 flex-col rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden ${
-                  band ? "max-h-[45%]" : ""
+                className={`flex min-h-0 flex-col rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden ${
+                  band ? "max-h-[45%] min-h-[132px]" : "shrink-0"
                 }`}
               >
                 <div className="flex shrink-0 items-center">

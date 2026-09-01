@@ -20,7 +20,6 @@ import {
   PANE_FRAC_KEY,
   PANE_FRAC_TUNE_KEY,
   PNL_HIDDEN_SERIES_KEY,
-  POSITIONS_BAND_KEY,
 } from "@/lib/sessionState";
 
 /** Everything the outgoing user typed or picked. */
@@ -47,7 +46,6 @@ const DEVICE = [
   "condor.dex.network",
   "condor.dex.depth-collapsed",
   PNL_HIDDEN_SERIES_KEY,
-  POSITIONS_BAND_KEY,
   // The workspace's geometry: how wide each column was dragged and whether it
   // is a column at all. Named through the module, not as literals, so a key
   // that only ever appeared at its writer cannot slip past this list (ARCH-291).

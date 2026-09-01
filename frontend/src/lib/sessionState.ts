@@ -21,8 +21,7 @@
  * KEPT — how this *device* renders the app: `condor_theme`,
  * `condor_display_currency`, `condor_bubble_open`, `condor_sheet_zen`,
  * `condor_trade_bottom_pane`, `routines_view_mode`, `condor.dex.network`,
- * `condor.dex.depth-collapsed`, `condor.pnl.hidden-series`,
- * `condor.bots.positions-open`, the workspace's own geometry
+ * `condor.dex.depth-collapsed`, `condor.pnl.hidden-series`, the workspace's own geometry
  * (`condor.dock.open`, `condor.dock.width`, `condor_pane_frac`,
  * `condor.chat.rail.open`), and the one-time hints
  * (`condor.market.browse-hint`) that record how far this browser has been
@@ -75,15 +74,6 @@ export const DEX_PAIRS_KEY_PREFIX = "condor_dex_pairs:";
  * a per-chart one — see the store in lib/pnl-chart.
  */
 export const PNL_HIDDEN_SERIES_KEY = "condor.pnl.hidden-series";
-
-/**
- * Whether the controller browser's positions band is open (FEAT-085).
- *
- * KEPT, and for the same reason `condor.dex.depth-collapsed` is: a disclosure
- * that is open or shut is a fact about this window, and the rows behind it are
- * re-fetched under whoever is logged in now.
- */
-export const POSITIONS_BAND_KEY = "condor.bots.positions-open";
 
 /**
  * How many pixels wide the reader dragged the context dock (ARCH-291).
