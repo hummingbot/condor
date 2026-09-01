@@ -16,6 +16,24 @@ import { isExecutorActive } from "@/lib/formatters";
 const MAX_LABELLED_POOLS = 30;
 
 /**
+ * The pool-label query key as a *set*, not as a ranking.
+ *
+ * The positions the labels are fetched for are sorted by live quote value, so
+ * two ranges of similar size swap places on any refetch and the grouped address
+ * lists come out in a different order for the very same pools. Keying on that
+ * order would make react-query see a cold entry, spend a GeckoTerminal call on
+ * pools it already holds, and blank every label back to a truncated mint until
+ * the answer lands. Sorting both the network names and their addresses makes the
+ * key describe which pools are wanted and nothing else.
+ */
+export function lpPoolsKey(byNetwork: Record<string, string[]>): string {
+  return Object.keys(byNetwork)
+    .sort()
+    .map((network) => `${network}:${[...byNetwork[network]].sort().join(",")}`)
+    .join("|");
+}
+
+/**
  * A pair label for a position, preferring the pool's own.
  *
  * An LP executor's `trading_pair` is `<base_mint>-<quote_symbol>` — the form the
@@ -90,7 +108,7 @@ export function useLpPositions(server: string | null): {
   }, [positions]);
 
   const { data: pools = {} } = useQuery({
-    queryKey: ["dex-lp-pools", server, JSON.stringify(byNetwork)],
+    queryKey: ["dex-lp-pools", server, lpPoolsKey(byNetwork)],
     queryFn: async () => {
       const entries = await Promise.all(
         Object.entries(byNetwork).map(([network, addresses]) =>
