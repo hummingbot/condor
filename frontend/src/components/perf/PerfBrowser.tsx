@@ -28,6 +28,9 @@ import { ControllerPnlChart } from "@/components/bots/ControllerPnlChart";
 import { DeployBotDialog } from "@/components/bots/DeployBotDialog";
 import { LogsSection } from "@/components/bots/LogsSection";
 import { PnlEvolutionChart } from "@/components/bots/PnlEvolutionChart";
+import { DetailPanel } from "@/components/executor/ExecutorTable";
+import { ExecutorRows, StopConfirmDialog } from "@/components/perf/ExecutorRows";
+import { useExecutorStop } from "@/components/perf/executorActions";
 import { ScopeTree, StatusDot } from "@/components/perf/ScopeTree";
 import {
   api,
@@ -35,18 +38,24 @@ import {
   type BotSummary,
   type ControllerInfo,
   type ControllerPerformanceSnapshot,
+  type ExecutorInfo,
 } from "@/lib/api";
 import { controllerKey } from "@/lib/controller-identity";
 import { configToYaml, CONTROLLER_HIDDEN_KEYS } from "@/lib/configYaml";
-import { formatCurrencyVolume, formatCurrencyPnl, pnlColor } from "@/lib/formatters";
+import { formatCurrencyVolume, formatCurrencyPnl, isExecutorActive, pnlColor } from "@/lib/formatters";
 import {
   buildTree,
+  collectLeaves,
+  controllerNodeId,
   foldLeaves,
   indexTree,
   leafFromController,
+  leafFromExecutor,
   resolveScope,
+  UNATTACHED_BOT,
   visibleNodeIds,
   type PerfLeaf,
+  type PerfNode,
 } from "@/lib/perf-tree";
 import { aggregatePnlSeries } from "@/lib/pnl-chart";
 import type { ConvertFn } from "@/lib/rates";
@@ -71,6 +80,9 @@ function parseSide(raw: string): string {
 
 const FLEET_SCOPE = "all";
 
+/** Which of the bottom band's two occupants is showing, if either. */
+type BandKey = "positions" | "executors" | null;
+
 // ── Types ──
 
 interface PerfBrowserProps {
@@ -89,6 +101,33 @@ interface PerfBrowserProps {
   snapshots?: ControllerPerformanceSnapshot[];
   /** The fleet history above stops short of the earliest deploy. */
   truncated?: boolean;
+  /**
+   * Every executor the page has loaded — live and archived alike, from the one
+   * bounded cursor walk. The browser takes the slice each population needs.
+   */
+  executors?: ExecutorInfo[];
+  /** How far that walk got, so the tree can say when it is only part of one. */
+  paging?: ExecutorPaging;
+  rateFormatPnl?: (val: number, quote: string) => string;
+  rateFormatValue?: (val: number, quote: string) => string;
+  rateFormatDetailed?: (val: number, quote: string) => string;
+}
+
+/**
+ * How much of the executor history is actually loaded.
+ *
+ * The walk is capped, so the tree built from it can be a partial view of the
+ * fleet — and a tree that is missing branches looks exactly like a fleet that
+ * never had them. The header says which it is (see the loaded/cap notice).
+ */
+export interface ExecutorPaging {
+  loaded: number;
+  loading: boolean;
+  /** The walk reached the end of the history. */
+  done: boolean;
+  /** The walk stopped at its page cap with more still to come. */
+  capped: boolean;
+  loadMore: () => void;
 }
 
 // ── A coarse wall clock ──
@@ -398,6 +437,33 @@ function SideTag({ side }: { side: string }) {
   );
 }
 
+/** One of the bottom band's two headers: a disclosure that is also a switch. */
+function BandTab({
+  label,
+  open,
+  onClick,
+  ...rest
+}: {
+  label: string;
+  open: boolean;
+  onClick: () => void;
+} & Record<`data-${string}`, unknown>) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-expanded={open}
+      className={`flex items-center gap-1.5 px-3 py-1.5 text-[10px] font-medium uppercase tracking-wider transition-colors hover:bg-[var(--color-surface-hover)] ${
+        open ? "text-[var(--color-text)]" : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+      }`}
+      {...rest}
+    >
+      <ChevronRight className={`h-3 w-3 transition-transform ${open ? "rotate-90" : ""}`} />
+      {label}
+    </button>
+  );
+}
+
 // ── Component ──
 
 export function PerfBrowser({
@@ -408,6 +474,11 @@ export function PerfBrowser({
   currencySymbol,
   snapshots = [],
   truncated = false,
+  executors = [],
+  paging,
+  rateFormatPnl,
+  rateFormatValue,
+  rateFormatDetailed,
 }: PerfBrowserProps) {
   const cv = useCallback(
     (val: number, pair: string) => {
@@ -443,36 +514,75 @@ export function PerfBrowser({
   const sidebarRef = useRef<HTMLDivElement>(null);
   const [chartRef, chartBoxH] = useMeasuredHeight<HTMLDivElement>();
 
-  // The positions band is a disclosure, shut until asked for (FEAT-085). It
-  // used to be a third of the pane's height standing open whether or not the
-  // reader wanted a per-position breakdown, and the chart paid for it.
+  // The bottom band is a disclosure, shut until asked for (FEAT-085). It used
+  // to be a third of the pane's height standing open whether or not the reader
+  // wanted a breakdown, and the chart paid for it.
   //
-  // Remembered per device rather than per scope: it says how this window is set
-  // up, which is the same reason the key is KEPT across a logout (see
-  // lib/sessionState).
-  const [positionsOpen, setPositionsOpen] = useState(() => {
+  // It has two occupants now — the positions a scope holds and the executors
+  // underneath it — and as one value only one can be open, so the band never
+  // grows to fit both and the chart's height stays a function of the strip
+  // alone. Remembered per device rather than per scope: it says how this window
+  // is set up, which is the same reason the key is KEPT across a logout (see
+  // lib/sessionState). A value written before the band had two occupants reads
+  // as "positions", which is what it meant.
+  const [band, setBand] = useState<BandKey>(() => {
     try {
-      return localStorage.getItem(POSITIONS_BAND_KEY) === "open";
+      const stored = localStorage.getItem(POSITIONS_BAND_KEY);
+      return stored === "executors" ? "executors" : stored === "open" || stored === "positions" ? "positions" : null;
     } catch {
-      return false;
+      return null;
     }
   });
-  const togglePositions = useCallback(() => {
-    setPositionsOpen((open) => {
+  const toggleBand = useCallback((next: Exclude<BandKey, null>) => {
+    setBand((open) => {
+      const value = open === next ? null : next;
       try {
-        localStorage.setItem(POSITIONS_BAND_KEY, open ? "closed" : "open");
+        localStorage.setItem(POSITIONS_BAND_KEY, value ?? "closed");
       } catch {
         // Storage disabled: the band still opens, it just forgets overnight.
       }
-      return !open;
+      return value;
     });
   }, []);
+
+  // Stopping and the detail panel belong to whichever executor is in reach,
+  // which is now any scope rather than one page (FEAT-086).
+  const stop = useExecutorStop(server);
+  const [detail, setDetail] = useState<ExecutorInfo | null>(null);
 
   const now = useSyncExternalStore(subscribeToClock, clockSnapshot, clockSnapshot);
 
   // ── The tree the whole page is derived from ──
 
-  const leaves = useMemo(() => controllers.map(leafFromController), [controllers]);
+  /**
+   * Which bot an executor belongs to.
+   *
+   * The executor record does not say (see `UNATTACHED_BOT`), so the only
+   * attribution available is its `controller_id` against the live fleet. A
+   * config id is shared by every bot running that config, which is normally
+   * one; where it is not, the executor is left unattached rather than
+   * arbitrarily credited to whichever bot was seen first.
+   */
+  const botByController = useMemo(() => {
+    const owners = new Map<string, string | null>();
+    for (const c of controllers) {
+      const id = c.controller_id || c.controller_name;
+      if (!id) continue;
+      const known = owners.get(id);
+      owners.set(id, known === undefined || known === c.bot_name ? c.bot_name : null);
+    }
+    return owners;
+  }, [controllers]);
+
+  const leaves = useMemo(() => {
+    const all: PerfLeaf[] = controllers.map(leafFromController);
+    for (const ex of executors) {
+      if (!isExecutorActive(ex.status)) continue;
+      all.push(leafFromExecutor(ex, botByController.get(ex.controller_id) ?? UNATTACHED_BOT));
+    }
+    return all;
+  }, [controllers, executors, botByController]);
+
   const tree = useMemo(() => buildTree(leaves, "bot", "All controllers"), [leaves]);
   const nodes = useMemo(() => indexTree(tree), [tree]);
 
@@ -501,14 +611,36 @@ export function PerfBrowser({
   // render an empty screen with no way back, so it re-aims at the nearest
   // ancestor that survived rather than resetting to the fleet (see
   // `resolveScope`, which reads that ancestry out of the id itself).
-  const effectiveScopeId = resolveScope(nodes, scopeId);
-  const scope = nodes.get(effectiveScopeId) ?? tree;
+  const effectiveScopeId = useMemo(() => resolveScope(nodes, scopeId), [nodes, scopeId]);
+  const scope = useMemo(() => nodes.get(effectiveScopeId) ?? tree, [nodes, effectiveScopeId, tree]);
 
   const scopedLeaves = scope.leaves;
   const activeCtrl =
     scope.kind === "controller" && scope.leaves[0]?.kind === "controller"
       ? (scope.leaves[0].source as ControllerInfo)
       : undefined;
+  const activeExec =
+    scope.kind === "executor" ? (scope.leaves[0]?.source as ExecutorInfo | undefined) : undefined;
+
+  /** The executors under this scope, whatever level it sits at. */
+  const scopedExecutors = useMemo(
+    () => collectLeaves(scope, "executor").map((leaf) => leaf.source as ExecutorInfo),
+    [scope],
+  );
+
+  /**
+   * The controller an executor scope hangs under, if any.
+   *
+   * An executor has no series of its own — `controller_performance_snapshots`
+   * samples controllers, and an executor is one mutable row updated in place —
+   * so the chart for one is its parent's, said in those words rather than
+   * passed off as the executor's own curve.
+   */
+  const parentController = useMemo((): PerfNode | undefined => {
+    if (scope.kind !== "executor") return undefined;
+    const parentId = controllerNodeId(scope.leaves[0]);
+    return parentId ? nodes.get(parentId) : undefined;
+  }, [scope, nodes]);
 
   const isKilled = activeCtrl?.config?.manual_kill_switch === true;
   const isStopping = activeCtrl?.status === "stopping";
@@ -669,13 +801,17 @@ export function PerfBrowser({
 
   // ── The aggregated series, folded from the fleet history the page already has ──
 
-  /** The live controllers under this scope, whatever level it sits at. */
+  /**
+   * The live controllers the chart draws, which is not always the scope's own:
+   * an executor node inherits its parent controller's series (see
+   * `parentController`).
+   */
   const scopedControllers = useMemo(
     () =>
-      scopedLeaves
+      (parentController ? parentController.leaves : scopedLeaves)
         .filter((leaf: PerfLeaf) => leaf.kind === "controller")
         .map((leaf) => leaf.source as ControllerInfo),
-    [scopedLeaves],
+    [parentController, scopedLeaves],
   );
 
   const scopedKeys = useMemo(
@@ -708,6 +844,29 @@ export function PerfBrowser({
 
   const configId = activeCtrl ? activeCtrl.controller_id || activeCtrl.controller_name : "";
   const chartHeight = Math.max(MIN_CHART_PX, (chartBoxH || 420) - CHART_CHROME_PX);
+
+  // An executor scope borrows its parent's curve, and the card says so in both
+  // places a reader might look: the title names whose series it is, and the
+  // notice says why the executor has none of its own.
+  const inheritedFrom = parentController?.label;
+  const chartTitle = inheritedFrom
+    ? `${inheritedFrom} PnL`
+    : scope.kind === "fleet"
+      ? "Fleet PnL"
+      : `${scope.label} PnL`;
+  const chartNotice = inheritedFrom
+    ? {
+        label: "parent controller's series",
+        detail:
+          "An executor is stored upstream as a single row updated in place, with no sampled history of its own, so the curve below is the controller it belongs to. The numbers above the chart are the executor's own.",
+      }
+    : truncated
+      ? {
+          label: "partial history",
+          detail:
+            "This fleet has more stored history than one chart may load at once, so the series starts later than the earliest deploy.",
+        }
+      : undefined;
 
   return (
     <div className="flex h-full min-h-0 bg-[var(--color-bg)]">
@@ -746,6 +905,33 @@ export function PerfBrowser({
             compact={isCompact}
           />
         </div>
+
+        {/* How much of the executor history the tree was built from.
+            A tree missing branches looks exactly like a fleet that never had
+            them, so a capped walk has to say so here — the cap now bounds the
+            *sidebar*, not just a table's row count (FEAT-086). */}
+        {!isCompact && paging && paging.loaded > 0 && (
+          <div className="shrink-0 border-t border-[var(--color-border)] px-3 py-1.5 text-[10px] text-[var(--color-text-muted)]">
+            <div className="flex items-center gap-1.5">
+              <span className="tabular-nums">{paging.loaded.toLocaleString()} executors loaded</span>
+              {paging.loading && <span>· loading…</span>}
+              {paging.done && <span>· all</span>}
+              {paging.capped && (
+                <button
+                  onClick={paging.loadMore}
+                  className="ml-auto rounded border border-[var(--color-border)] px-1.5 py-0.5 font-medium hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+                >
+                  Load more
+                </button>
+              )}
+            </div>
+            {paging.capped && (
+              <p className="mt-0.5 text-[var(--color-yellow)]">
+                Cap reached — this tree shows part of the history, not all of it.
+              </p>
+            )}
+          </div>
+        )}
 
         {/* Nav hints */}
         {!isCompact && (
@@ -793,6 +979,34 @@ export function PerfBrowser({
                 <div className="flex items-center gap-1.5 shrink-0">
                   <StatusDot status={isStopping ? "stopping" : isKilled ? "stopped" : activeCtrl.status} />
                   <span className="text-xs capitalize">{isStopping ? "stopping" : isKilled ? "stopped" : activeCtrl.status}</span>
+                </div>
+              </>
+            ) : activeExec ? (
+              <>
+                <div className="truncate">
+                  <h2 className="text-sm font-semibold truncate font-mono" title={activeExec.id}>
+                    {activeExec.id.slice(0, 14)}…
+                  </h2>
+                  <span className="text-[10px] text-[var(--color-text-muted)] block truncate">
+                    {activeExec.type}
+                    {activeExec.controller_id ? ` · ${activeExec.controller_id}` : ""}
+                  </span>
+                </div>
+                {activeExec.connector && (
+                  <span className="shrink-0 rounded bg-[var(--color-surface)] px-2 py-0.5 text-xs text-[var(--color-text-muted)] border border-[var(--color-border)]/50">
+                    {activeExec.connector}
+                  </span>
+                )}
+                {activeExec.trading_pair && (
+                  <span className="shrink-0 rounded bg-[var(--color-surface)] px-2 py-0.5 text-xs font-medium border border-[var(--color-border)]/50">
+                    {activeExec.trading_pair}
+                  </span>
+                )}
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <StatusDot status={activeExec.status} />
+                  <span className="text-xs capitalize">
+                    {activeExec.close_type ? parseSide(activeExec.close_type) : activeExec.status}
+                  </span>
                 </div>
               </>
             ) : (
@@ -917,6 +1131,18 @@ export function PerfBrowser({
                   )}
                 </button>
               </>
+            )}
+
+            {activeExec && isExecutorActive(activeExec.status) && (
+              <button
+                onClick={() => stop.request([activeExec.id])}
+                disabled={stop.stoppingIds.has(activeExec.id)}
+                className="flex items-center gap-1.5 rounded px-3 py-1.5 text-xs font-medium text-[var(--color-red)] transition-colors hover:bg-[var(--color-red)]/10 disabled:opacity-50"
+                title="Stop this executor"
+              >
+                <Square className="h-3.5 w-3.5" />
+                {stop.stoppingIds.has(activeExec.id) ? "Stopping…" : "Stop"}
+              </button>
             )}
 
             {activeCtrl && (
@@ -1123,19 +1349,11 @@ export function PerfBrowser({
                 ) : aggregatedData.length >= 2 ? (
                   <PnlEvolutionChart
                     data={aggregatedData}
-                    title={scope.kind === "bot" ? `${scope.label} PnL` : "Fleet PnL"}
+                    title={chartTitle}
                     pnlHeight={Math.round(chartHeight * 0.65)}
                     volumeHeight={chartHeight - Math.round(chartHeight * 0.65)}
                     currencySymbol={currencySymbol}
-                    notice={
-                      truncated
-                        ? {
-                            label: "partial history",
-                            detail:
-                              "This fleet has more stored history than one chart may load at once, so the series starts later than the earliest deploy.",
-                          }
-                        : undefined
-                    }
+                    notice={chartNotice}
                   />
                 ) : (
                   <div className="flex h-full items-center justify-center rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]">
@@ -1145,33 +1363,59 @@ export function PerfBrowser({
               </div>
             </div>
 
-            {/* The bottom band, now positions alone and shut by default
-                (FEAT-085): a one-line header pinned under the chart, opening
-                over it when the reader wants the breakdown. The close types
-                that used to share this band are up in the strip. */}
-            {positionRows.length > 0 && (
+            {/* ── The bottom band (FEAT-085, FEAT-086) ──
+
+                A one-line header pinned under the chart, opening over it when
+                the reader wants a breakdown. Two things can be underneath a
+                scope — the positions it is holding and the executors that make
+                it up — and they share one band rather than stacking, so the
+                chart's height depends on the strip alone and not on what the
+                selected node happens to have.
+
+                Both are tables rather than grids of cards: at fleet scope these
+                are dozens or thousands of one-line facts, and a row each is
+                what makes them comparable at a glance. */}
+            {(positionRows.length > 0 || scopedExecutors.length > 0) && (
               <div
                 className={`shrink-0 flex min-h-0 flex-col rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden ${
-                  positionsOpen ? "max-h-[45%]" : ""
+                  band ? "max-h-[45%]" : ""
                 }`}
               >
-                <button
-                  type="button"
-                  onClick={togglePositions}
-                  aria-expanded={positionsOpen}
-                  data-positions-toggle
-                  className="flex shrink-0 items-center gap-1.5 px-3 py-1.5 text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-                >
-                  <ChevronRight
-                    className={`h-3 w-3 transition-transform ${positionsOpen ? "rotate-90" : ""}`}
-                  />
-                  Positions held ({positionRows.length})
-                </button>
-                {positionsOpen && (
+                <div className="flex shrink-0 items-center">
+                  {positionRows.length > 0 && (
+                    <BandTab
+                      label={`Positions held (${positionRows.length})`}
+                      open={band === "positions"}
+                      onClick={() => toggleBand("positions")}
+                      data-positions-toggle
+                    />
+                  )}
+                  {scopedExecutors.length > 0 && (
+                    <BandTab
+                      label={`Executors (${scopedExecutors.length})`}
+                      open={band === "executors"}
+                      onClick={() => toggleBand("executors")}
+                      data-executors-toggle
+                    />
+                  )}
+                </div>
+
+                {band === "executors" && scopedExecutors.length > 0 && (
+                  <div className="min-h-0 flex-1 border-t border-[var(--color-border)]/60">
+                    <ExecutorRows
+                      executors={scopedExecutors}
+                      stop={stop}
+                      selectedId={detail?.id ?? null}
+                      onSelect={setDetail}
+                      rateFormatPnl={rateFormatPnl}
+                      rateFormatValue={rateFormatValue}
+                      rateFormatDetailed={rateFormatDetailed}
+                    />
+                  </div>
+                )}
+
+                {band === "positions" && positionRows.length > 0 && (
                   <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin border-t border-[var(--color-border)]/60">
-                    {/* A table rather than a grid of cards: at fleet scope these
-                        are dozens of one-line facts, and a row per position is
-                        what makes them comparable at a glance. */}
                     <div className="overflow-x-auto">
                       <table className="w-full text-[11px]">
                         <thead>
@@ -1286,6 +1530,29 @@ export function PerfBrowser({
           )}
         </div>
       </div>
+
+      {/* The executor detail panel, in the same slot the config and logs
+          drawers use: a scope-owned column, closed until a row is clicked. */}
+      {detail && (
+        <DetailPanel
+          executor={detail}
+          server={server}
+          onClose={() => setDetail(null)}
+          onStop={(id) => stop.request([id])}
+          stopping={stop.stoppingIds.has(detail.id)}
+          rateFormatPnl={rateFormatPnl}
+          rateFormatValue={rateFormatValue}
+          rateFormatDetailed={rateFormatDetailed}
+        />
+      )}
+
+      {stop.pendingIds && (
+        <StopConfirmDialog
+          ids={stop.pendingIds}
+          onConfirm={stop.confirm}
+          onCancel={stop.cancel}
+        />
+      )}
 
       <DeployBotDialog open={showDeploy} onClose={() => setShowDeploy(false)} server={server} />
 

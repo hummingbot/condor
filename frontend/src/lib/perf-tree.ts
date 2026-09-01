@@ -365,6 +365,31 @@ export function buildTree(leaves: PerfLeaf[], groupBy: GroupBy, rootLabel = "All
   return fleet;
 }
 
+/**
+ * Every leaf in a node's whole subtree, of one kind.
+ *
+ * Deliberately *not* `node.leaves`, which is the accounting spine: a live
+ * controller's spine is the controller record, and the executors under it are
+ * exactly what this returns. The two answer different questions — "what does
+ * this node add up to" and "what is underneath it" — and the rows band asks the
+ * second one while the strip above it asks the first.
+ */
+export function collectLeaves(node: PerfNode, kind: PerfLeaf["kind"]): PerfLeaf[] {
+  const found: PerfLeaf[] = [];
+  const seen = new Set<string>();
+  const walk = (n: PerfNode) => {
+    for (const leaf of n.leaves) {
+      if (leaf.kind === kind && !seen.has(leaf.id)) {
+        seen.add(leaf.id);
+        found.push(leaf);
+      }
+    }
+    n.children.forEach(walk);
+  };
+  walk(node);
+  return found;
+}
+
 /** Every node of a tree, keyed by id — the sidebar's and the scope's index. */
 export function indexTree(root: PerfNode): Map<string, PerfNode> {
   const index = new Map<string, PerfNode>();

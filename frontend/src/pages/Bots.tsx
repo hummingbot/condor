@@ -1,6 +1,6 @@
-import { useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { Bot, Rocket } from "lucide-react";
-import { lazy, Suspense, useMemo, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { NoServerCard } from "@/components/NoServerCard";
@@ -14,6 +14,7 @@ import {
   api,
   type ControllerInfo,
   type ControllerPerformanceHistoryAllResponse,
+  type ExecutorInfo,
 } from "@/lib/api";
 import { controllerKey } from "@/lib/controller-identity";
 import { historyRowBudget } from "@/lib/history-pagination";
@@ -29,6 +30,17 @@ const BotRunsTab = lazy(() =>
 );
 
 const BOTS_WS_CHANNELS = ["bots", "controller_perf"];
+
+/**
+ * The executor walk: 500 a page, four pages by default.
+ *
+ * The same bounded walk `/executors` made, under the same query key, so the
+ * shared socket's live merge and the chat's route facts both still find it
+ * (PERF/FEAT-072). The cap now bounds the *sidebar tree* as well as a table, so
+ * the browser is told where the walk stopped and says so.
+ */
+const EXECUTOR_PAGE_SIZE = 500;
+const EXECUTOR_PAGES = 4;
 
 /**
  * `/bots` is the controller browser (FEAT-084).
@@ -54,8 +66,14 @@ export function Bots() {
   // fleet to scope, which is exactly when it is needed most (see below).
   const [showDeploy, setShowDeploy] = useState(false);
 
-  // Subscribe to real-time bots updates via WS
-  useCondorWebSocket(BOTS_WS_CHANNELS, server);
+  // Real-time updates for everything the browser folds: the fleet, its
+  // performance snapshots, and the executors underneath it — the last of which
+  // came with the executors page and has to come with it (FEAT-086).
+  const wsChannels = useMemo(
+    () => (server ? [...BOTS_WS_CHANNELS, `executors:${server}`] : BOTS_WS_CHANNELS),
+    [server],
+  );
+  useCondorWebSocket(wsChannels, server);
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["bots", server],
@@ -174,12 +192,67 @@ export function Bots() {
     });
   }, [perfHistory, controllers]);
 
-  // Currency conversion
-  const quoteCurrencies = useMemo(
-    () => controllers.map((c) => c.trading_pair?.split("-")[1] || "USDT"),
-    [controllers],
+  // ── The executors the browser hangs under those controllers ──
+
+  const [maxPages, setMaxPages] = useState(EXECUTOR_PAGES);
+  const {
+    data: executorPages,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+  } = useInfiniteQuery({
+    queryKey: ["executors-infinite", server],
+    enabled: !!server,
+    initialPageParam: "" as string,
+    queryFn: ({ pageParam }) =>
+      api.getExecutorsPage(server!, { cursor: pageParam || undefined, limit: EXECUTOR_PAGE_SIZE }),
+    getNextPageParam: (lastPage) => lastPage.next_cursor ?? undefined,
+    refetchInterval: 60_000, // Slow fallback only — WS handles real-time updates
+    refetchOnWindowFocus: false,
+  });
+
+  // Progressive loading: ask for the next chunk as soon as the current arrives,
+  // up to the cap the reader has allowed.
+  const loadedPages = executorPages?.pages.length ?? 0;
+  useEffect(() => {
+    if (hasNextPage && !isFetchingNextPage && loadedPages < maxPages) {
+      fetchNextPage();
+    }
+  }, [hasNextPage, isFetchingNextPage, loadedPages, maxPages, fetchNextPage]);
+
+  const executors = useMemo(
+    () => (executorPages?.pages.flatMap((p) => p?.executors ?? []) ?? []) as ExecutorInfo[],
+    [executorPages],
   );
-  const { convert, resolvedSymbol: currencySymbol } = useRates(quoteCurrencies);
+
+  const loadMore = useCallback(() => setMaxPages((p) => p + EXECUTOR_PAGES), []);
+  const paging = useMemo(
+    () => ({
+      loaded: executors.length,
+      loading: isFetchingNextPage,
+      done: !hasNextPage && executors.length > 0,
+      capped: loadedPages >= maxPages && !!hasNextPage,
+      loadMore,
+    }),
+    [executors.length, isFetchingNextPage, hasNextPage, loadedPages, maxPages, loadMore],
+  );
+
+  // Currency conversion, over every quote on screen — the controllers' and the
+  // executors' alike, since both are folded into the same totals now.
+  const quoteCurrencies = useMemo(
+    () => [
+      ...controllers.map((c) => c.trading_pair?.split("-")[1] || "USDT"),
+      ...executors.map((ex) => ex.trading_pair?.split("-")[1] || "USDT"),
+    ],
+    [controllers, executors],
+  );
+  const {
+    convert,
+    formatPnlValue,
+    formatValue,
+    formatValueDetailed,
+    resolvedSymbol: currencySymbol,
+  } = useRates(quoteCurrencies);
 
   // The shell gives `/bots` no padding (`FULL_BLEED_ROUTES`), so everything
   // that is not the browser asks for its own.
@@ -254,6 +327,11 @@ export function Bots() {
       // these rows rather than issuing a second walk of their own.
       snapshots={activeSnapshots}
       truncated={perfHistory?.truncated ?? false}
+      executors={executors}
+      paging={paging}
+      rateFormatPnl={formatPnlValue}
+      rateFormatValue={formatValue}
+      rateFormatDetailed={formatValueDetailed}
     />
   );
 }
