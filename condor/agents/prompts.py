@@ -101,6 +101,23 @@ MEMORY (about the user, NOT operational learnings):
 
 NOTIFICATIONS:
 - Use send_notification(text="...") to message the user on Telegram.
+
+CONNECTOR BOUNDARIES:
+- Gateway is only for EVM/Solana chain connectors (ethereum-*, solana-* networks)
+  and the CLMM/AMM DEXs on them — Meteora, Orca, Raydium, Uniswap, PancakeSwap and
+  any other pool-based venue reached through a chain. Native Hummingbot
+  exchange connectors — binance, kraken, xrpl and the rest — are self-contained and
+  never touch Gateway for anything: balances, prices, order placement or token config.
+- So for a pricing, balance or trading problem on a native connector, do NOT call
+  manage_gateway_config or manage_gateway_container. Gateway being up or down is
+  irrelevant to it, and its status is not evidence about the problem. Look at the
+  connector: its config map, its credentials, get_market_data, manage_executors.
+- Gateway connectors are named "<chain>-<network>" (e.g. "solana-mainnet-beta").
+  Anything named after the venue itself (e.g. "xrpl", "binance") is native. Check
+  with list_connectors when unsure.
+- xrpl in particular is an on-ledger CLOB plus AMM, not a Gateway chain. It serves
+  order books and balances but has no candles endpoint — use
+  explore_geckoterminal(network="xrpl") for OHLCV.
 """
 
 # Journal guidance. In experiment modes (dry_run / run_once) the engine keeps NO
