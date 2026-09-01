@@ -30,7 +30,7 @@
 //     second instance's area resolve to the first instance's gradient (and
 //     cross-sync the two charts' tooltips) the moment both are on the page.
 
-import { useCallback, useId, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useId, useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
 import {
   Area,
   Bar,
@@ -56,16 +56,22 @@ import {
   PANE_LABELS,
   PNL_SERIES_COLORS,
   PNL_SERIES_LABELS,
+  PNL_SERIES_PANE,
   RANGE_PRESETS,
   chartBucketMs,
   formatBucketLabel,
+  hiddenSeriesSnapshot,
+  paneSeries,
   positionAreaExtent,
   positionAxisDomain,
   resolveTimeRange,
+  setSeriesHidden,
   sliceToRange,
+  subscribeToHiddenSeries,
   volumeBarWidth,
   zeroGradientOffset,
   type PnlChartPoint,
+  type PnlSeriesKey,
   type TimeRange,
 } from "@/lib/pnl-chart";
 import { getThemeColors } from "@/lib/theme-colors";
@@ -200,12 +206,43 @@ function StrokeSwatch({ color, dashed = false, opacity = 1 }: { color: string; d
 }
 
 /**
+ * Whether a legend entry is a control, and what it currently controls
+ * (FEAT-085).
+ *
+ * `locked` is the last series left drawn in its pane: switching it off would
+ * leave a pane with no marks, and the only thing that could put them back is
+ * the entry that emptied it — a control that cannot undo itself. Marked
+ * `aria-disabled` rather than `disabled` so it keeps its tooltip and stays
+ * reachable by the keyboard, which is where the explanation is.
+ */
+interface LegendToggle {
+  drawn: boolean;
+  locked: boolean;
+  onToggle: () => void;
+}
+
+/**
  * One legend row: the mark, the name, and the series' live value.
  *
  * `hint` qualifies the *name* (what one bar covers) and `suffix` qualifies the
  * *value* (over what window it was measured) — the two halves of keeping the
  * volume flow apart from the volume stock. A row with no swatch is a number the
  * chart does not draw.
+ *
+ * ── The row is also the switch (FEAT-085) ──
+ *
+ * Given a `toggle`, the row is a button that draws its series or does not. The
+ * legend is the control rather than a second row of chips above the chart,
+ * because every other placement would have to name the five series again —
+ * and PNL_SERIES_LABELS exists precisely so that nothing on screen names them
+ * twice (READ-244). It is also where the eye already is when deciding a line is
+ * noise.
+ *
+ * Switched off, the row dims and its swatch is struck through, but it is never
+ * removed: a control that vanishes when used cannot be used to undo itself. Its
+ * *value* does go, and that is the point rather than an omission — a live
+ * reading of a series the chart is not drawing is a number with no mark to
+ * attach it to, which is the same complaint the legend was built to answer.
  */
 function LegendEntry({
   series,
@@ -216,6 +253,7 @@ function LegendEntry({
   color,
   suffix,
   strong = false,
+  toggle,
 }: {
   series: string;
   swatch?: ReactNode;
@@ -225,19 +263,63 @@ function LegendEntry({
   color: string;
   suffix?: string;
   strong?: boolean;
+  toggle?: LegendToggle;
 }) {
-  return (
-    <span className="flex items-center gap-1.5 whitespace-nowrap" data-legend-entry={series}>
-      {swatch ?? <Swatch />}
+  const off = toggle ? !toggle.drawn : false;
+  const body = (
+    <>
+      <span className="relative inline-flex shrink-0">
+        {swatch ?? <Swatch />}
+        {off && (
+          <span
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-x-0 top-1/2 h-px -rotate-12 bg-[var(--color-text-muted)]"
+          />
+        )}
+      </span>
       <span className="text-[var(--color-text-muted)]">
         {name}
         {hint && <span className="opacity-60"> {hint}</span>}
       </span>
-      <span className={strong ? "font-semibold" : undefined} style={{ color }}>
-        {value}
+      {!off && (
+        <>
+          <span className={strong ? "font-semibold" : undefined} style={{ color }}>
+            {value}
+          </span>
+          {suffix && <span className="text-[var(--color-text-muted)] opacity-60">{suffix}</span>}
+        </>
+      )}
+    </>
+  );
+
+  if (!toggle) {
+    return (
+      <span className="flex items-center gap-1.5 whitespace-nowrap" data-legend-entry={series}>
+        {body}
       </span>
-      {suffix && <span className="text-[var(--color-text-muted)] opacity-60">{suffix}</span>}
-    </span>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      data-legend-entry={series}
+      aria-pressed={toggle.drawn}
+      aria-disabled={toggle.locked || undefined}
+      title={
+        toggle.locked
+          ? `${name} is the only series this pane still draws`
+          : toggle.drawn
+            ? `Hide ${name}`
+            : `Show ${name}`
+      }
+      onClick={toggle.locked ? undefined : toggle.onToggle}
+      className={`-mx-1 flex items-center gap-1.5 whitespace-nowrap rounded px-1 transition-colors ${
+        toggle.locked ? "cursor-default" : "hover:bg-[var(--color-surface-hover)]"
+      } ${off ? "opacity-45" : ""}`}
+    >
+      {body}
+    </button>
   );
 }
 
@@ -377,6 +459,48 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
   // and vanish as the user drags across a flat stretch.
   const hasPosition = data.some((p) => p.position !== 0);
 
+  // ── What each pane is left drawing (FEAT-085) ──
+  //
+  // Two independent says in it: `hasPosition` is a property of the series, and
+  // `hidden` is the reader's choice, shared by every chart on this device (see
+  // the store in lib/pnl-chart).
+  //
+  // Everything downstream reads these two arrays rather than testing `hidden`
+  // again — the marks, the axis ticks, the tooltip rows, the header's values,
+  // the panes' own heights. That is not tidiness: a recharts Y domain is built
+  // from the graphical items actually rendered onto it, so dropping a mark
+  // while leaving its axis labelled gives a pane scaled to a series nobody can
+  // see, and an axis whose every item is gone has no domain left to compute at
+  // all. One list decides both, or the two drift.
+  const hidden = useSyncExternalStore(subscribeToHiddenSeries, hiddenSeriesSnapshot, hiddenSeriesSnapshot);
+  const drawnPnl = useMemo(() => paneSeries("pnl").filter((key) => !hidden.has(key)), [hidden]);
+  const drawnActivity = useMemo(
+    () => paneSeries("activity").filter((key) => !hidden.has(key) && (key !== "position" || hasPosition)),
+    [hidden, hasPosition],
+  );
+  const drawn = useMemo(
+    () => new Set<PnlSeriesKey>([...drawnPnl, ...drawnActivity]),
+    [drawnPnl, drawnActivity],
+  );
+  // A pane with nothing left in it is not drawn at all: an empty grid between
+  // two axes scaled to nothing reads as a chart that has broken, not as one
+  // that has been switched off.
+  const showPnlPane = drawnPnl.length > 0;
+  const showActivityPane = drawnActivity.length > 0;
+
+  const legendToggle = useCallback(
+    (key: PnlSeriesKey): LegendToggle => {
+      const pane = PNL_SERIES_PANE[key] === "pnl" ? drawnPnl : drawnActivity;
+      const isDrawn = pane.includes(key);
+      return {
+        drawn: isDrawn,
+        locked: isDrawn && pane.length <= 1,
+        onToggle: () => setSeriesHidden(key, isDrawn),
+      };
+    },
+    [drawnPnl, drawnActivity],
+  );
+
   // The position axis is pinned across zero rather than left to recharts, so
   // the signed area always has its baseline on screen (READ-246). Memoised
   // because recharts keeps the domain in its own store and a fresh array on
@@ -509,6 +633,7 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
                 <LegendEntry
                   series="total"
                   name={PNL_SERIES_LABELS.total}
+                  toggle={legendToggle("total")}
                   value={fmtPnl(latest.total)}
                   color={pnlColor(latest.total)}
                   strong
@@ -530,6 +655,7 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
                 <LegendEntry
                   series="realized"
                   name={PNL_SERIES_LABELS.realized}
+                  toggle={legendToggle("realized")}
                   value={fmtPnl(latest.realized)}
                   color={tc.up}
                   swatch={<StrokeSwatch color={tc.up} />}
@@ -537,6 +663,7 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
                 <LegendEntry
                   series="unrealized"
                   name={PNL_SERIES_LABELS.unrealized}
+                  toggle={legendToggle("unrealized")}
                   value={fmtPnl(latest.unrealized)}
                   color={PNL_SERIES_COLORS.unrealized}
                   swatch={<StrokeSwatch color={PNL_SERIES_COLORS.unrealized} dashed />}
@@ -549,6 +676,7 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
                 <LegendEntry
                   series="volumeDelta"
                   name={PNL_SERIES_LABELS.volumeDelta}
+                  toggle={legendToggle("volumeDelta")}
                   // The bucket qualifies the *bars*: without it "$40K" is a busy
                   // hour or a dead day and the reader cannot tell which.
                   hint={bucketLabel ? `${bucketLabel} bars` : "bars"}
@@ -583,6 +711,7 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
                   <LegendEntry
                     series="position"
                     name={PNL_SERIES_LABELS.position}
+                    toggle={legendToggle("position")}
                     value={fmtVol(latest.position)}
                     color={PNL_SERIES_COLORS.position}
                     swatch={
@@ -668,17 +797,21 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
 
       {filters}
 
-      {/* PnL pane (top) */}
+      {/* PnL pane (top), drawn while it still has a series in it (FEAT-085) */}
+      {showPnlPane && (
+      <>
       <PaneCaption label={PANE_LABELS.pnl} />
       <div data-pane="pnl" style={PANE_PADDING} onMouseEnter={enterPnlPane} onMouseLeave={leavePnlPane}>
         <ResponsiveContainer width="100%" height={pnlHeight}>
           <ComposedChart data={visible} margin={{ top: 12, right: PANE_MARGIN_RIGHT, left: 0, bottom: 0 }} syncId={instanceId}>
-            <defs>
-              <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%" stopColor={totalColor} stopOpacity={0.15} />
-                <stop offset="95%" stopColor={totalColor} stopOpacity={0.02} />
-              </linearGradient>
-            </defs>
+            {drawn.has("total") && (
+              <defs>
+                <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor={totalColor} stopOpacity={0.15} />
+                  <stop offset="95%" stopColor={totalColor} stopOpacity={0.02} />
+                </linearGradient>
+              </defs>
+            )}
             <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" strokeOpacity={0.5} />
             <XAxis
               dataKey="time"
@@ -719,16 +852,24 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
                 <PnlEvolutionTooltip
                   symbol={currencySymbol}
                   bucket={bucketLabel}
-                  hasPosition={hasPosition}
+                  drawn={drawn}
                   visible={!scrubbing && hoveredPane === "pnl"}
                 />
               }
               wrapperStyle={TOOLTIP_WRAPPER_STYLE}
             />
-            <Area type="monotone" dataKey="total" stroke="none" fill={`url(#${gradientId})`} activeDot={false} />
-            <Line type="monotone" dataKey="total" stroke={totalColor} strokeWidth={2} dot={false} strokeOpacity={0.6} />
-            <Line type="monotone" dataKey="realized" stroke={tc.up} strokeWidth={2} dot={false} />
-            <Line type="monotone" dataKey="unrealized" stroke={PNL_SERIES_COLORS.unrealized} strokeWidth={2} strokeDasharray="5 3" dot={false} />
+            {drawn.has("total") && (
+              <Area type="monotone" dataKey="total" stroke="none" fill={`url(#${gradientId})`} activeDot={false} />
+            )}
+            {drawn.has("total") && (
+              <Line type="monotone" dataKey="total" stroke={totalColor} strokeWidth={2} dot={false} strokeOpacity={0.6} />
+            )}
+            {drawn.has("realized") && (
+              <Line type="monotone" dataKey="realized" stroke={tc.up} strokeWidth={2} dot={false} />
+            )}
+            {drawn.has("unrealized") && (
+              <Line type="monotone" dataKey="unrealized" stroke={PNL_SERIES_COLORS.unrealized} strokeWidth={2} strokeDasharray="5 3" dot={false} />
+            )}
             {/* No <Legend> here, in either pane. It could only ever name this
                 pane's three series — it printed capitalised dataKeys as one
                 little line apiece, a row below the "PnL" caption and inside the
@@ -737,9 +878,14 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
           </ComposedChart>
         </ResponsiveContainer>
       </div>
+      </>
+      )}
 
-      {/* Volume + Position pane (bottom), ruled off from the one above */}
-      <PaneCaption label={PANE_LABELS.activity} divider />
+      {/* Volume + Position pane (bottom), ruled off from the one above — and
+          only ruled off while there *is* one above. */}
+      {showActivityPane && (
+      <>
+      <PaneCaption label={PANE_LABELS.activity} divider={showPnlPane} />
       <div data-pane="activity" style={PANE_PADDING} onMouseEnter={enterActivityPane} onMouseLeave={leaveActivityPane}>
         <ResponsiveContainer width="100%" height={volumeHeight} onResize={onActivityResize}>
           <ComposedChart data={visible} margin={{ top: 4, right: PANE_MARGIN_RIGHT, left: 0, bottom: 4 }} syncId={instanceId}>
@@ -749,7 +895,7 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
                 colours are the app's own side colours (see sideColor in
                 lib/theme-colors), so they follow the theme — the colourblind
                 palette included. */}
-            {hasPosition && (
+            {drawn.has("position") && (
               <defs>
                 <linearGradient id={posGradientId} x1="0" y1="0" x2="0" y2="1">
                   <stop offset={positionZeroOffset} stopColor={tc.up} />
@@ -770,7 +916,10 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
             <YAxis
               yAxisId="vol"
               tickFormatter={fmtVolAxis}
-              tick={{ fontSize: 10, fill: PNL_SERIES_COLORS.volume }}
+              // Silenced along with its bars: with no item left on it, this
+              // axis has no domain to compute and its ticks would be labelling
+              // an interval nothing was measured over.
+              tick={drawn.has("volumeDelta") ? { fontSize: 10, fill: PNL_SERIES_COLORS.volume } : false}
               stroke="var(--color-border)"
               tickLine={false}
               axisLine={false}
@@ -783,7 +932,7 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
               orientation="right"
               domain={positionDomain}
               tickFormatter={fmtVolAxis}
-              tick={hasPosition ? { fontSize: 10, fill: PNL_SERIES_COLORS.position } : false}
+              tick={drawn.has("position") ? { fontSize: 10, fill: PNL_SERIES_COLORS.position } : false}
               stroke="var(--color-border)"
               tickLine={false}
               axisLine={false}
@@ -802,7 +951,7 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
                 <PnlEvolutionTooltip
                   symbol={currencySymbol}
                   bucket={bucketLabel}
-                  hasPosition={hasPosition}
+                  drawn={drawn}
                   visible={!scrubbing && hoveredPane === "activity"}
                 />
               }
@@ -827,6 +976,7 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
                 left exactly where READ-246 set it — tints them without hiding
                 either. The fill opacity here is what keeps them a backdrop
                 rather than a wall. */}
+            {drawn.has("volumeDelta") && (
             <Bar
               zIndex={-1}
               yAxisId="vol"
@@ -841,13 +991,14 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
               // can afford it — a histogram cannot.
               isAnimationActive={false}
             />
+            )}
             {/* Net position: an area filled from zero, not a bare line. The
                 stroke keeps the series' own violet — the colour the right-hand
                 ticks, the header's Pos stat and the tooltip already use — so
                 the fill is free to carry the *sign*. baseValue is pinned to 0
                 rather than left to recharts, which otherwise bases an area at
                 the domain edge whenever the domain does not straddle zero. */}
-            {hasPosition && (
+            {drawn.has("position") && (
               <Area
                 yAxisId="pos"
                 type="monotone"
@@ -864,7 +1015,7 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
                 fill. It is violet, not neutral: this pane has two Y axes and
                 only the right-hand one has a zero worth marking — the volume
                 axis starts at zero by construction, at the pane's floor. */}
-            {hasPosition && (
+            {drawn.has("position") && (
               <ReferenceLine
                 yAxisId="pos"
                 y={0}
@@ -876,6 +1027,8 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
           </ComposedChart>
         </ResponsiveContainer>
       </div>
+      </>
+      )}
 
       {/* The range strip, below the shared time axis it operates on and inset to
           the same plot area, so a column on it is the column above it. */}

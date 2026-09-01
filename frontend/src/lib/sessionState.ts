@@ -21,7 +21,8 @@
  * KEPT — how this *device* renders the app: `condor_theme`,
  * `condor_display_currency`, `condor.dock.open`, `condor_bubble_open`,
  * `condor_sheet_zen`, `condor_trade_bottom_pane`, `routines_view_mode`,
- * `condor.dex.network`, `condor.dex.depth-collapsed`, and the one-time hints
+ * `condor.dex.network`, `condor.dex.depth-collapsed`, `condor.pnl.hidden-series`,
+ * `condor.bots.positions-open`, and the one-time hints
  * (`condor.market.browse-hint`) that record how far this browser has been
  * onboarded. Wiping these would flip
  * the theme out from under someone logging out on their own laptop, and none of
@@ -53,6 +54,34 @@ export const DEX_FAVORITES_KEY = "condor_dex_favorites";
 
 /** Recently-entered DEX pairs, suffixed with the connector. */
 export const DEX_PAIRS_KEY_PREFIX = "condor_dex_pairs:";
+
+// ── KEPT keys ──
+//
+// Declared here and deliberately absent from SESSION_KEYS below. They are named
+// in this module all the same, because it is the single definition site for
+// every key name this app persists: a key that only ever appeared at its writer
+// would be one the boundary above could not be reasoned about, and sorting it
+// into CLEARED or KEPT is the decision this file exists to record.
+
+/**
+ * Which PnL series the charts draw, as a JSON array of series keys to *hide*
+ * (FEAT-085). Empty or absent means draw everything, so a browser that has
+ * never touched the legend and one whose storage is unreadable behave alike.
+ *
+ * KEPT: it says how this screen is set up, not what the last user was trading.
+ * Every PnL chart in the app reads it, so it is a device preference rather than
+ * a per-chart one — see the store in lib/pnl-chart.
+ */
+export const PNL_HIDDEN_SERIES_KEY = "condor.pnl.hidden-series";
+
+/**
+ * Whether the controller browser's positions band is open (FEAT-085).
+ *
+ * KEPT, and for the same reason `condor.dex.depth-collapsed` is: a disclosure
+ * that is open or shut is a fact about this window, and the rows behind it are
+ * re-fetched under whoever is logged in now.
+ */
+export const POSITIONS_BAND_KEY = "condor.bots.positions-open";
 
 const SESSION_KEYS = [
   ORDER_DEFAULTS_KEY,

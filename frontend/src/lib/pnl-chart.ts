@@ -4,6 +4,7 @@ import type { ControllerInfo, ControllerPerformanceSnapshot } from "@/lib/api";
 import { controllerKey } from "@/lib/controller-identity";
 import { toMs } from "@/lib/formatters";
 import type { ConvertFn } from "@/lib/rates";
+import { PNL_HIDDEN_SERIES_KEY } from "@/lib/sessionState";
 
 /**
  * Fixed series colors shared by strokes, axis ticks, header stats and tooltips
@@ -57,6 +58,116 @@ export const PNL_SERIES_LABELS = {
   volumeDelta: "Volume",
   position: "Net position",
 } as const;
+
+/** The one key each drawn series is known by, everywhere (READ-244). */
+export type PnlSeriesKey = keyof typeof PNL_SERIES_LABELS;
+
+/**
+ * Which pane draws each series.
+ *
+ * The legend groups its entries by this, the chart decides from it whether a
+ * pane still has anything left to draw, and the "you cannot hide the last one"
+ * guard counts within it. Written out rather than derived from the JSX so the
+ * three of them cannot disagree about where a series lives — the same reason
+ * PNL_SERIES_LABELS is one map rather than three spellings.
+ */
+export const PNL_SERIES_PANE: Record<PnlSeriesKey, keyof typeof PANE_LABELS> = {
+  total: "pnl",
+  realized: "pnl",
+  unrealized: "pnl",
+  volumeDelta: "activity",
+  position: "activity",
+};
+
+/** The series of one pane, in the order the legend lists them. */
+export function paneSeries(pane: keyof typeof PANE_LABELS): PnlSeriesKey[] {
+  return (Object.keys(PNL_SERIES_PANE) as PnlSeriesKey[]).filter((k) => PNL_SERIES_PANE[k] === pane);
+}
+
+// ── Which series the charts draw (FEAT-085) ──
+//
+// A module-level store rather than component state, for the reason the
+// preference itself is device-wide: every PNL chart in the app draws the same
+// set, and two of them mounted at once — the browser's aggregate chart and a
+// controller's — disagreeing about it would be a legend that lies about the
+// chart next to it.
+//
+// `localStorage` is the truth and is re-read on every snapshot rather than
+// cached behind a flag. It is one short string, `useSyncExternalStore` calls
+// this a handful of times per render, and reading through means a second tab
+// (or a test that seeds the key before the first render) is picked up without a
+// separate invalidation path. What *is* cached is the parsed Set, keyed on the
+// raw string it came from: the hook compares snapshots with `Object.is`, so
+// returning a fresh Set each call would re-render forever.
+
+const NO_HIDDEN_SERIES: ReadonlySet<PnlSeriesKey> = new Set();
+
+/** The raw string `cachedHidden` was parsed from; `undefined` = never read. */
+let cachedRawHidden: string | null | undefined;
+let cachedHidden: ReadonlySet<PnlSeriesKey> = NO_HIDDEN_SERIES;
+const hiddenListeners = new Set<() => void>();
+
+function parseHiddenSeries(raw: string | null): ReadonlySet<PnlSeriesKey> {
+  if (!raw) return NO_HIDDEN_SERIES;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return NO_HIDDEN_SERIES;
+    // Filtered against the labels rather than trusted: the key outlives the
+    // series it names, and a renamed one left in storage would otherwise hide
+    // nothing forever while still counting towards the last-series guard.
+    return new Set(parsed.filter((k): k is PnlSeriesKey => typeof k === "string" && k in PNL_SERIES_LABELS));
+  } catch {
+    return NO_HIDDEN_SERIES;
+  }
+}
+
+/** Subscribe a chart to the shared choice. Pairs with `hiddenSeriesSnapshot`. */
+export function subscribeToHiddenSeries(onChange: () => void) {
+  hiddenListeners.add(onChange);
+  return () => {
+    hiddenListeners.delete(onChange);
+  };
+}
+
+/** The series currently switched off, as a stable Set until the choice changes. */
+export function hiddenSeriesSnapshot(): ReadonlySet<PnlSeriesKey> {
+  let raw: string | null;
+  try {
+    raw = localStorage.getItem(PNL_HIDDEN_SERIES_KEY);
+  } catch {
+    // Storage disabled: the last thing written in this tab is all there is.
+    return cachedHidden;
+  }
+  if (raw !== cachedRawHidden) {
+    cachedRawHidden = raw;
+    cachedHidden = parseHiddenSeries(raw);
+  }
+  return cachedHidden;
+}
+
+/**
+ * Switch one series off, or back on, for every chart on this device.
+ *
+ * The cache is written before the store is, so a browser that refuses the write
+ * still honours the click for as long as the tab lives — a toggle that silently
+ * does nothing is worse than one that merely forgets overnight.
+ */
+export function setSeriesHidden(series: PnlSeriesKey, hide: boolean) {
+  const next = new Set(hiddenSeriesSnapshot());
+  if (hide) next.add(series);
+  else next.delete(series);
+  // Sorted so the same set is always the same string, and the snapshot's
+  // identity therefore survives a toggle that lands back where it started.
+  const raw = JSON.stringify([...next].sort());
+  cachedRawHidden = raw;
+  cachedHidden = next;
+  try {
+    localStorage.setItem(PNL_HIDDEN_SERIES_KEY, raw);
+  } catch {
+    // See above: the in-memory cache above already took the change.
+  }
+  for (const listener of [...hiddenListeners]) listener();
+}
 
 /**
  * Width in px reserved by every YAxis gutter in a PNL evolution chart.

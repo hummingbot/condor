@@ -20,7 +20,14 @@
 import type { ReactNode } from "react";
 
 import { formatCurrencyVolume, formatDateTime } from "@/lib/formatters";
-import { PANE_LABELS, PNL_SERIES_COLORS, PNL_SERIES_LABELS, type PnlChartPoint } from "@/lib/pnl-chart";
+import {
+  PANE_LABELS,
+  PNL_SERIES_COLORS,
+  PNL_SERIES_LABELS,
+  paneSeries,
+  type PnlChartPoint,
+  type PnlSeriesKey,
+} from "@/lib/pnl-chart";
 import { getThemeColors } from "@/lib/theme-colors";
 
 /** One entry of a recharts tooltip payload: the series, plus the row it came from. */
@@ -49,16 +56,20 @@ export interface PnlEvolutionTooltipProps {
    */
   bucket?: string;
   /**
-   * Whether the activity pane is actually drawing a position series.
+   * The series the panes are actually drawing right now.
    *
-   * The row follows the *series*, not this instant's value. It used to be
-   * hidden whenever the number was exactly `0`, which dropped it at a genuine
-   * long→short crossover — the one moment a reader is most likely to be
-   * hovering (READ-246). A book with no position anywhere on the timeline draws
-   * no area and gets no row; a book that is momentarily flat gets the row,
-   * reading zero.
+   * A row follows the *series*, never this instant's value. The position row
+   * used to be hidden whenever the number was exactly `0`, which dropped it at
+   * a genuine long→short crossover — the one moment a reader is most likely to
+   * be hovering (READ-246). A book with no position anywhere on the timeline
+   * draws no area and gets no row; a book that is momentarily flat gets the
+   * row, reading zero.
+   *
+   * Since FEAT-085 the same set also carries the reader's own choice: a series
+   * switched off in the legend is a value with no mark left to attach it to, so
+   * its row goes with the mark. Absent, every series is assumed drawn.
    */
-  hasPosition?: boolean;
+  drawn?: ReadonlySet<PnlSeriesKey>;
   /**
    * Whether the cursor is in *this* pane.
    *
@@ -123,6 +134,9 @@ function Section({ label }: { label: string }) {
   );
 }
 
+/** Every series, for a caller that does not narrow the set. */
+const ALL_SERIES: ReadonlySet<PnlSeriesKey> = new Set(Object.keys(PNL_SERIES_LABELS) as PnlSeriesKey[]);
+
 /** The single hover card: both panes' series, at one instant, under one timestamp. */
 export function PnlEvolutionTooltip({
   active,
@@ -130,7 +144,7 @@ export function PnlEvolutionTooltip({
   label,
   symbol,
   bucket,
-  hasPosition = false,
+  drawn = ALL_SERIES,
   visible = true,
 }: PnlEvolutionTooltipProps) {
   if (!visible || !active || !payload?.length || !label) return null;
@@ -152,34 +166,47 @@ export function PnlEvolutionTooltip({
   // card would disagree with the two lines it is describing (READ-244).
   const tc = getThemeColors();
 
+  // A section is its pane's rows: with none of them drawn there is no pane
+  // being described, and a heading over nothing would read as a series whose
+  // value failed to load.
+  const shows = (pane: keyof typeof PANE_LABELS) => paneSeries(pane).some((key) => drawn.has(key));
+
   return (
     <div className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)]/95 backdrop-blur-sm px-2.5 py-2 text-[11px] leading-relaxed shadow-lg min-w-[170px]">
       <div className="text-[var(--color-text-muted)] text-[10px]">{formatDateTime(label)}</div>
 
-      <Section label={PANE_LABELS.pnl} />
-      <div className="flex justify-between gap-3" data-tooltip-row="total">
-        <span className="text-[var(--color-text-muted)]">{PNL_SERIES_LABELS.total}</span>
-        <span className="font-semibold" style={{ color: total >= 0 ? tc.up : tc.down }}>
-          {sign(total)}{formatCurrencyVolume(total, symbol)}
-        </span>
-      </div>
-      <Row name={PNL_SERIES_LABELS.realized} color={tc.up}>
-        {sign(realized)}{formatCurrencyVolume(realized, symbol)}
-      </Row>
-      <Row name={PNL_SERIES_LABELS.unrealized} color={PNL_SERIES_COLORS.unrealized}>
-        {sign(unrealized)}{formatCurrencyVolume(unrealized, symbol)}
-      </Row>
+      {shows("pnl") && <Section label={PANE_LABELS.pnl} />}
+      {drawn.has("total") && (
+        <div className="flex justify-between gap-3" data-tooltip-row="total">
+          <span className="text-[var(--color-text-muted)]">{PNL_SERIES_LABELS.total}</span>
+          <span className="font-semibold" style={{ color: total >= 0 ? tc.up : tc.down }}>
+            {sign(total)}{formatCurrencyVolume(total, symbol)}
+          </span>
+        </div>
+      )}
+      {drawn.has("realized") && (
+        <Row name={PNL_SERIES_LABELS.realized} color={tc.up}>
+          {sign(realized)}{formatCurrencyVolume(realized, symbol)}
+        </Row>
+      )}
+      {drawn.has("unrealized") && (
+        <Row name={PNL_SERIES_LABELS.unrealized} color={PNL_SERIES_COLORS.unrealized}>
+          {sign(unrealized)}{formatCurrencyVolume(unrealized, symbol)}
+        </Row>
+      )}
 
-      <Section label={PANE_LABELS.activity} />
+      {shows("activity") && <Section label={PANE_LABELS.activity} />}
       {/* The bar's own value — this bucket's trading, not the running total.
           The running total is the header legend's "Traded lifetime" entry, the
           one entry there with no swatch precisely because nothing draws it;
           repeating it here would be the number the pane deliberately stopped
           drawing. */}
-      <Row name={PNL_SERIES_LABELS.volumeDelta} qualifier={bucket} color={PNL_SERIES_COLORS.volume}>
-        {formatCurrencyVolume(read("volumeDelta"), symbol)}
-      </Row>
-      {hasPosition && (
+      {drawn.has("volumeDelta") && (
+        <Row name={PNL_SERIES_LABELS.volumeDelta} qualifier={bucket} color={PNL_SERIES_COLORS.volume}>
+          {formatCurrencyVolume(read("volumeDelta"), symbol)}
+        </Row>
+      )}
+      {drawn.has("position") && (
         <Row name={PNL_SERIES_LABELS.position} color={PNL_SERIES_COLORS.position}>
           {formatCurrencyVolume(read("position"), symbol)}
         </Row>

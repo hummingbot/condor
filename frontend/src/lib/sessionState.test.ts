@@ -13,7 +13,11 @@
 
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { clearSessionState } from "@/lib/sessionState";
+import {
+  clearSessionState,
+  PNL_HIDDEN_SERIES_KEY,
+  POSITIONS_BAND_KEY,
+} from "@/lib/sessionState";
 
 /** Everything the outgoing user typed or picked. */
 const SESSION = [
@@ -38,6 +42,8 @@ const DEVICE = [
   "routines_view_mode",
   "condor.dex.network",
   "condor.dex.depth-collapsed",
+  PNL_HIDDEN_SERIES_KEY,
+  POSITIONS_BAND_KEY,
 ];
 
 beforeEach(() => {

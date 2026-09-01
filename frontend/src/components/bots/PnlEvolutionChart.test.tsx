@@ -37,6 +37,7 @@ import {
   zeroGradientOffset,
   type PnlChartPoint,
 } from "@/lib/pnl-chart";
+import { PNL_HIDDEN_SERIES_KEY } from "@/lib/sessionState";
 import { getThemeColors } from "@/lib/theme-colors";
 
 declare global {
@@ -127,6 +128,10 @@ function render(node: React.ReactNode) {
 beforeEach(() => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   recorded.length = 0;
+  // The hidden-series choice is device-wide and lives in localStorage, so it
+  // outlives a component the way it is meant to — including from one test into
+  // the next. Every case here starts with every series drawn.
+  localStorage.clear();
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -480,6 +485,182 @@ describe("PnlEvolutionChart header legend", () => {
     render(<PnlEvolutionChart data={tradedShort} title="PnL Evolution" pnlHeight={130} volumeHeight={70} />);
     expect(entries().position.textContent).toContain(PNL_SERIES_LABELS.position);
     expect(recorded.some((r) => r.type === "Area" && r.props.dataKey === "position")).toBe(true);
+  });
+});
+
+describe("PnlEvolutionChart legend toggles (FEAT-085)", () => {
+  const t0 = new Date(2026, 2, 14, 8, 30).getTime();
+  /** A series with every one of the five drawn: PnL, volume and a position. */
+  const full: PnlChartPoint[] = [
+    { time: t0, realized: 10, unrealized: 2, total: 12, volume: 5_000, volumeDelta: 0, position: 800 },
+    { time: t0 + 900_000, realized: 20, unrealized: -3, total: 17, volume: 5_400, volumeDelta: 400, position: -600 },
+  ];
+
+  /** Which timeline `draw` renders; the collapse case moves it off `full`. */
+  let data: PnlChartPoint[] = full;
+  beforeEach(() => {
+    data = full;
+  });
+
+  /**
+   * Render, and report *only* what that render told recharts.
+   *
+   * `recorded` accumulates across renders, and a toggle causes one — so a
+   * helper reading the whole array would answer with the marks from before the
+   * click as readily as the ones after it. Clearing and re-rendering is also
+   * how a locked entry is checked: a click that legitimately does nothing
+   * produces no render of its own to read.
+   */
+  function draw(): Recorded[][] {
+    recorded.length = 0;
+    render(<PnlEvolutionChart data={data} title="PnL" pnlHeight={220} volumeHeight={120} />);
+    return panes();
+  }
+
+  /** One legend row, by the series it names. */
+  function entry(series: string): HTMLElement {
+    const el = container.querySelector(`[data-legend-entry="${series}"]`);
+    if (!el) throw new Error(`no legend entry for ${series}`);
+    return el as HTMLElement;
+  }
+
+  function click(el: HTMLElement) {
+    act(() => {
+      el.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+  }
+
+  /** The elements drawing one series, across every pane of the latest render. */
+  function marks(dataKey: string): Recorded[] {
+    return draw()
+      .flat()
+      .filter((r) => r.props.dataKey === dataKey);
+  }
+
+  /** One Y axis, by its id, as the latest render left it. */
+  function axis(id: string): Record<string, unknown> {
+    const found = draw()
+      .flat()
+      .filter((r) => r.type === "YAxis" && r.props.yAxisId === id);
+    expect(found.length).toBe(1);
+    return found[0].props;
+  }
+
+  it("offers a toggle on every drawn series, and none on the lifetime counter", () => {
+    draw();
+
+    for (const series of Object.keys(PNL_SERIES_LABELS)) {
+      expect(entry(series).tagName, `${series} is not a control`).toBe("BUTTON");
+      expect(entry(series).getAttribute("aria-pressed")).toBe("true");
+    }
+    // "Traded lifetime" is the one entry with no swatch, precisely because
+    // nothing draws it — so there is nothing to switch off.
+    expect(entry("volume").tagName).toBe("SPAN");
+  });
+
+  it("takes the bars and the axis that scales them off together", () => {
+    expect(marks("volumeDelta")).toHaveLength(1);
+    expect(axis("vol").tick).toBeTruthy();
+
+    click(entry("volumeDelta"));
+
+    // The bars go...
+    expect(marks("volumeDelta")).toHaveLength(0);
+    // ...and so do the volume axis' ticks. recharts builds a Y domain from the
+    // graphical items actually rendered onto that axis, so an axis whose only
+    // item is gone has no domain left to compute — ticks left behind would be
+    // labelling an interval nothing was measured over.
+    expect(axis("vol").tick).toBe(false);
+    // The gutters are untouched: both panes still reserve AXIS_WIDTH on both
+    // sides, so hiding a series cannot shift one pane's columns off the other's
+    // (invariant 1).
+    const [top, bottom] = draw();
+    expect(gutters(top)).toEqual(gutters(bottom));
+    expect(gutters(top)).toEqual({ left: AXIS_WIDTH, right: AXIS_WIDTH });
+  });
+
+  it("takes a PnL line off the plot, the header value and the hover card", () => {
+    expect(marks("unrealized")).toHaveLength(1);
+
+    click(entry("unrealized"));
+
+    expect(marks("unrealized")).toHaveLength(0);
+    expect(entry("unrealized").getAttribute("aria-pressed")).toBe("false");
+    // The row stays — a control that vanishes when used cannot undo itself —
+    // but its live value goes with the mark it belonged to.
+    expect(entry("unrealized").textContent).toContain(PNL_SERIES_LABELS.unrealized);
+    expect(entry("unrealized").textContent).not.toContain("$");
+
+    const tooltip = draw()[0].find((r) => r.type === "Tooltip")!;
+    const card = tooltip.props.content as React.ReactElement<{ drawn: ReadonlySet<string> }>;
+    expect(card.props.drawn.has("unrealized")).toBe(false);
+    expect(card.props.drawn.has("realized")).toBe(true);
+  });
+
+  it("puts a hidden series back when its entry is clicked again", () => {
+    draw();
+    click(entry("realized"));
+    expect(marks("realized")).toHaveLength(0);
+
+    click(entry("realized"));
+    expect(marks("realized")).toHaveLength(1);
+    expect(entry("realized").getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("will not let a pane's last visible series be switched off", () => {
+    draw();
+    click(entry("total"));
+    click(entry("realized"));
+
+    // Unrealized is all the PnL pane has left, so its entry stops being a way
+    // to empty the pane — and says why rather than merely refusing.
+    expect(entry("unrealized").getAttribute("aria-disabled")).toBe("true");
+    expect(entry("unrealized").getAttribute("title")).toContain("only series");
+    click(entry("unrealized"));
+    expect(marks("unrealized")).toHaveLength(1);
+
+    // The two that are off are still live controls: the lock is on the last one
+    // *drawn*, not on the pane.
+    expect(entry("total").getAttribute("aria-disabled")).toBeNull();
+    click(entry("total"));
+    expect(marks("total")).toHaveLength(2); // its area and its line
+  });
+
+  it("keeps the choice across a remount, and writes it where a reload will find it", () => {
+    draw();
+    click(entry("unrealized"));
+    expect(JSON.parse(localStorage.getItem(PNL_HIDDEN_SERIES_KEY)!)).toEqual(["unrealized"]);
+
+    // A remount is what navigating away and back does; the line above is the
+    // reload, since that key is where the next boot reads from.
+    act(() => root.unmount());
+    root = createRoot(container);
+
+    expect(marks("unrealized")).toHaveLength(0);
+    expect(entry("unrealized").getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("draws no pane at all for a set of series that are all switched off", () => {
+    // Reachable without an impossible click: switch the volume bars off on a
+    // chart that also draws a position, then move to one that does not.
+    localStorage.setItem(PNL_HIDDEN_SERIES_KEY, JSON.stringify(["volumeDelta"]));
+    data = flat;
+
+    // One pane, not two with an empty grid between two axes scaled to nothing.
+    expect(draw()).toHaveLength(1);
+    expect(container.querySelector('[data-pane="activity"]')).toBeNull();
+    expect(container.querySelector('[data-pane="pnl"]')).not.toBeNull();
+    // Its entry is still there to switch back on with.
+    expect(entry("volumeDelta").getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("ignores a stored key that names no series this chart draws", () => {
+    localStorage.setItem(PNL_HIDDEN_SERIES_KEY, JSON.stringify(["realized", "pnlPerHour", 7]));
+
+    expect(marks("realized")).toHaveLength(0);
+    // The junk neither hides anything nor counts towards the last-series guard.
+    expect(marks("total")).toHaveLength(2);
+    expect(marks("unrealized")).toHaveLength(1);
   });
 });
 
