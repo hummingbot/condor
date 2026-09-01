@@ -16,7 +16,21 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
+import aiohttp
+
 logger = logging.getLogger(__name__)
+
+# What a stream should do about the error that broke it.
+WS_RETRY = "retry"
+WS_SLOW_RETRY = "slow_retry"
+WS_PERMANENT = "permanent"
+
+# Backoff ceilings, in seconds, for the two retrying verdicts.
+WS_RETRY_CAP = 60
+WS_SLOW_RETRY_CAP = 300
+
+# Handshake statuses that mean the upstream refused us rather than failed.
+_REFUSED_STATUSES = frozenset({401, 403, 404})
 
 
 class HummingbotStreamsMixin:
@@ -87,20 +101,39 @@ class HummingbotStreamsMixin:
     # -- Shared skeleton --
 
     @staticmethod
-    def _is_permanent_ws_error(error_str: str) -> bool:
-        """True if a stream error will never succeed on retry.
+    def _classify_ws_error(exc: BaseException) -> str:
+        """Say what a stream should do about the exception that broke it.
 
-        Besides auth/not-found (401/403/404), an invalid trading pair (wrong
-        symbol for this connector) will never become valid, so retrying
-        forever just spams logs and hammers the exchange until Condor
-        restarts (issue #134).
+        A refused handshake is read off ``.status``, which aiohttp puts on the
+        exception, and never off the rendered message. What ``str(exc)`` for a
+        broken stream actually carries is a trading pair, a connection id, a
+        timestamp and a host:port — any of which can spell "401" or "404"
+        without anything having been refused.
+
+        Being refused is not permanent either. hummingbot-api rejects bad
+        credentials with an HTTP 401 on the handshake, and credentials are
+        rotated by hand: giving up would mean a key fixed five seconds later
+        only takes effect at the next Condor restart. It is retried on a long
+        leash instead, slowly enough not to hammer a server that is saying no.
+
+        An invalid trading pair is the one verdict left that is really
+        permanent. The symbol is wrong for this connector, no number of
+        retries makes it right, and it arrives as prose in a message rather
+        than as a status of its own, so it is still matched as text — on words
+        that cannot collide with a number the way a bare "404" can
+        (issue #134).
         """
-        lowered = error_str.lower()
-        return (
-            any(code in error_str for code in ("401", "403", "404"))
-            or "appears to be invalid" in lowered
-            or "invalid symbol" in lowered
-        )
+        if (
+            isinstance(exc, aiohttp.WSServerHandshakeError)
+            and exc.status in _REFUSED_STATUSES
+        ):
+            return WS_SLOW_RETRY
+
+        lowered = str(exc).lower()
+        if "appears to be invalid" in lowered or "invalid symbol" in lowered:
+            return WS_PERMANENT
+
+        return WS_RETRY
 
     async def _run_ws_stream(
         self,
@@ -116,8 +149,10 @@ class HummingbotStreamsMixin:
         """Shared connect/reconnect skeleton for all Hummingbot WS streams.
 
         Owns the while-True loop, subscriber check, heartbeat/error message
-        handling, permanent-error detection (``_is_permanent_ws_error``) and
-        exponential backoff capped at 60s. Each stream supplies only:
+        handling, error classification (``_classify_ws_error``) and
+        exponential backoff capped at ``WS_RETRY_CAP`` — or, for a stream the
+        upstream is refusing, at the longer ``WS_SLOW_RETRY_CAP``. Each stream
+        supplies only:
 
         - ``open_ws``: client -> the WS async context manager to enter
           (e.g. ``lambda c: c.ws.market_data()``).
@@ -182,13 +217,14 @@ class HummingbotStreamsMixin:
                                 backoff,
                             )
                             await asyncio.sleep(backoff)
-                            backoff = min(backoff * 2, 60)
+                            backoff = min(backoff * 2, WS_RETRY_CAP)
 
             except asyncio.CancelledError:
                 return
             except Exception as e:
-                if self._is_permanent_ws_error(str(e)):
-                    logger.warning(
+                verdict = self._classify_ws_error(e)
+                if verdict == WS_PERMANENT:
+                    logger.error(
                         "%s stream permanent error for %s: %s — giving up",
                         label,
                         channel,
@@ -196,6 +232,7 @@ class HummingbotStreamsMixin:
                     )
                     return
 
+                cap = WS_SLOW_RETRY_CAP if verdict == WS_SLOW_RETRY else WS_RETRY_CAP
                 logger.warning(
                     "%s stream error for %s: %s, reconnecting in %ds...",
                     label,
@@ -204,7 +241,7 @@ class HummingbotStreamsMixin:
                     backoff,
                 )
                 await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 60)
+                backoff = min(backoff * 2, cap)
 
     # -- Trade streaming --
 
