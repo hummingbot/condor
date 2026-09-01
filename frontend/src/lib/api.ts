@@ -38,6 +38,12 @@ export interface NotificationsResponse {
 
 // ── Types ──
 
+/** Someone a server is shared with, named rather than numbered. */
+export interface ServerMember {
+  user_id: number;
+  display_name: string;
+}
+
 export interface ServerInfo {
   name: string;
   host: string;
@@ -46,6 +52,13 @@ export interface ServerInfo {
   permission: string;
   /** The server commands fall back to when none is named — shared with Telegram. */
   is_default: boolean;
+  /**
+   * Who else reaches this server (FEAT-088). The backend populates it only for
+   * the owner and for an admin, so an empty list on a server you merely trade
+   * on means "not your business" rather than "nobody" — which is why only the
+   * owner's card renders the line.
+   */
+  shared_with?: ServerMember[];
 }
 
 export interface BalanceItem {

@@ -9,7 +9,9 @@ import {
   X,
 } from "lucide-react";
 import { useState } from "react";
+import { useSearchParams } from "react-router-dom";
 
+import { useIsAdmin } from "@/hooks/useIsAdmin";
 import { useServer } from "@/hooks/useServer";
 import { type ServerInfo, api } from "@/lib/api";
 
@@ -103,6 +105,11 @@ export function ServersSettings() {
   };
 
   const isOwner = (s: ServerInfo) => s.permission === "owner";
+  // The "Shared with" names deep-link into the Admin tab, which only exists for
+  // an admin — a non-admin owner sees the same names as plain text rather than
+  // a control that navigates nowhere.
+  const isAdmin = useIsAdmin();
+  const [, setParams] = useSearchParams();
 
   if (isLoading) {
     return (
@@ -243,6 +250,33 @@ export function ServersSettings() {
                 <span className="text-xs text-[var(--color-text-muted)]">
                   {s.host}:{s.port}
                 </span>
+                {/* Who else is on this server. Read-only on purpose: grants are
+                    written in one place (the Admin tab), and a second write path
+                    into `server_access` is a second set of rules to keep in
+                    step. The backend only fills this for the owner. */}
+                {isOwner(s) && (s.shared_with?.length ?? 0) > 0 && (
+                  <span className="mt-0.5 block text-xs text-[var(--color-text-muted)]">
+                    Shared with{" "}
+                    {s.shared_with?.map((m, i) => (
+                      <span key={m.user_id}>
+                        {i > 0 && ", "}
+                        {isAdmin ? (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setParams({ tab: "admin", user: String(m.user_id) })
+                            }
+                            className="underline decoration-dotted underline-offset-2 hover:text-[var(--color-text)]"
+                          >
+                            {m.display_name}
+                          </button>
+                        ) : (
+                          m.display_name
+                        )}
+                      </span>
+                    ))}
+                  </span>
+                )}
               </div>
             </div>
 

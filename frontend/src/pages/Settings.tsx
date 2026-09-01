@@ -1,4 +1,3 @@
-import { useQuery } from "@tanstack/react-query";
 import { LogOut } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
 
@@ -11,7 +10,7 @@ import { SharingSettings } from "@/components/settings/SharingSettings";
 import { TelemetrySettings } from "@/components/settings/TelemetrySettings";
 import { UpdatesSettings } from "@/components/settings/UpdatesSettings";
 import { VoiceSettings } from "@/components/settings/VoiceSettings";
-import { ADMIN_USERS_KEY, adminApi } from "@/lib/admin-api";
+import { useIsAdmin } from "@/hooks/useIsAdmin";
 import { useAuth } from "@/lib/auth";
 
 const TABS = [
@@ -40,14 +39,10 @@ export function Settings() {
   const { logout } = useAuth();
 
   // There is no `is_admin` claim on the client, so the admin surface answering
-  // at all is the discriminator: `/admin/users` is 403 for everyone else. The
+  // at all is the discriminator: `/admin/people` is 403 for everyone else. The
   // panel reuses this query key, so opening the tab costs no second request.
   // Hiding the tab is cosmetic — routes/admin.py re-checks the role every call.
-  const { isSuccess: isAdmin } = useQuery({
-    queryKey: ADMIN_USERS_KEY,
-    queryFn: adminApi.getUsers,
-    retry: false,
-  });
+  const isAdmin = useIsAdmin();
 
   const tabs = isAdmin ? [...TABS, ...ADMIN_TABS] : TABS;
   const requested = (params.get("tab") as TabKey) || "servers";

@@ -27,6 +27,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ServerInfo } from "@/lib/api";
@@ -98,8 +99,12 @@ async function render() {
   });
   await act(async () => {
     root.render(
+      // The card deep-links its "Shared with" names into the Admin tab
+      // (FEAT-088), so the component reads the router's search params.
       <QueryClientProvider client={qc}>
-        <ServersSettings />
+        <MemoryRouter>
+          <ServersSettings />
+        </MemoryRouter>
       </QueryClientProvider>,
     );
   });
