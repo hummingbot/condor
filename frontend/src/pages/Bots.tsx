@@ -305,11 +305,35 @@ export function Bots() {
   // Nothing to scope: the browser draws nothing without controllers, and the
   // fleet header that carries Deploy is part of the browser — so the empty
   // state has to carry the one action that gets out of it.
+  //
+  // "No controllers" and "no bots" are not the same thing, and saying the first
+  // as the second is how a broker outage reads as an empty fleet. A controller
+  // is reported over the server's MQTT broker; the bot list is not (Docker
+  // answers that one). So a bot the server can see, reporting no controller,
+  // means the reports are not arriving — and that is worth naming here, on the
+  // screen where the bot is missing, rather than leaving it to be found in the
+  // API's logs.
+  const silentBots = data?.bots ?? [];
   if (controllers.length === 0) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3 text-[var(--color-text-muted)]">
         <Bot className="h-10 w-10" />
-        <p>No bots running</p>
+        {silentBots.length === 0 ? (
+          <p>No bots running</p>
+        ) : (
+          <div className="max-w-md space-y-1 text-center">
+            <p className="text-[var(--color-yellow)]">
+              {silentBots.length === 1
+                ? `${silentBots[0].bot_name} is running but reporting no controllers`
+                : `${silentBots.length} bots are running but reporting no controllers`}
+            </p>
+            <p className="text-xs">
+              Controller reports reach the API over its MQTT broker. Check that the broker
+              is up and that the API is connected to it — on the server,{" "}
+              <code className="font-mono">make doctor</code> names it.
+            </p>
+          </div>
+        )}
         <button
           onClick={() => setShowDeploy(true)}
           className="flex items-center gap-2 rounded-lg bg-[var(--color-primary)] px-5 py-2 text-sm font-medium text-white transition-all hover:shadow-lg hover:shadow-[var(--color-primary)]/20"
