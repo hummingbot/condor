@@ -41,6 +41,7 @@ import { configToYaml, CONTROLLER_HIDDEN_KEYS } from "@/lib/configYaml";
 import { formatCurrencyVolume, formatCurrencyPnl, pnlColor } from "@/lib/formatters";
 import { aggregatePnlSeries } from "@/lib/pnl-chart";
 import type { ConvertFn } from "@/lib/rates";
+import { POSITIONS_BAND_KEY } from "@/lib/sessionState";
 import { useViewFacts } from "@/lib/viewFacts";
 
 function parseSide(raw: string): string {
@@ -164,10 +165,17 @@ function clockSnapshot() {
 // ── Chart sizing ──
 
 /**
- * Everything in the chart card that is not one of the two panes: the header
+ * Everything in the chart *card* that is not one of the two panes: the header
  * strip, the two pane captions and the range strip below them. The panes are
  * sized from the space that is left, so the card fills its column exactly
  * instead of being a fixed 200px island in a screen-tall pane.
+ *
+ * It covers the card and nothing outside it. The strip above and the positions
+ * band below are siblings of the measured element, not part of it — the chart
+ * sits in a `flex-1` box between them, so growing the strip (the close-type
+ * chips, FEAT-085) or opening the band shrinks that box, the ResizeObserver
+ * below reports the new height, and the panes follow. Adding their heights here
+ * as well would subtract them twice.
  */
 const CHART_CHROME_PX = 152;
 const MIN_CHART_PX = 220;
@@ -484,6 +492,31 @@ export function ControllerBrowser({
   const sidebarRef = useRef<HTMLDivElement>(null);
   const [chartRef, chartBoxH] = useMeasuredHeight<HTMLDivElement>();
 
+  // The positions band is a disclosure, shut until asked for (FEAT-085). It
+  // used to be a third of the pane's height standing open whether or not the
+  // reader wanted a per-position breakdown, and the chart paid for it.
+  //
+  // Remembered per device rather than per scope: it says how this window is set
+  // up, which is the same reason the key is KEPT across a logout (see
+  // lib/sessionState).
+  const [positionsOpen, setPositionsOpen] = useState(() => {
+    try {
+      return localStorage.getItem(POSITIONS_BAND_KEY) === "open";
+    } catch {
+      return false;
+    }
+  });
+  const togglePositions = useCallback(() => {
+    setPositionsOpen((open) => {
+      try {
+        localStorage.setItem(POSITIONS_BAND_KEY, open ? "closed" : "open");
+      } catch {
+        // Storage disabled: the band still opens, it just forgets overnight.
+      }
+      return !open;
+    });
+  }, []);
+
   // A controller is identified by its bot *and* its config id, never the id
   // alone (CORR-241).
   const ctrlKey = useCallback((c: ControllerInfo) => controllerKey(c), []);
@@ -720,14 +753,24 @@ export function ControllerBrowser({
     return { byBot, fleetPnl, fleetVolume };
   }, [controllers, cv]);
 
-  const closeTypeCounts = useMemo(() => {
+  /**
+   * How this scope's positions ended, biggest bucket first, and how many there
+   * were in all.
+   *
+   * The total is a headline number the browser never showed: each count answers
+   * "how did they end", and only their sum answers "how many ended at all",
+   * which is what makes two scopes' mixes comparable.
+   */
+  const closeTypes = useMemo(() => {
     const merged: Record<string, number> = {};
+    let total = 0;
     for (const c of effectiveScoped) {
       for (const [type, count] of Object.entries(c.close_type_counts || {})) {
         merged[type] = (merged[type] ?? 0) + count;
+        total += count;
       }
     }
-    return Object.entries(merged).sort((a, b) => b[1] - a[1]);
+    return { counts: Object.entries(merged).sort((a, b) => b[1] - a[1]), total };
   }, [effectiveScoped]);
 
   const positionRows = useMemo<PositionRow[]>(() => {
@@ -1290,6 +1333,46 @@ export function ControllerBrowser({
                   }
                 />
               </div>
+
+              {/* ── How the positions ended (FEAT-085) ──
+
+                  Inside the same card as the tiles, because it is the same kind
+                  of fact at a different cardinality: the tiles are what this
+                  scope adds up to, and these are what it adds up to broken out
+                  by close type. They cannot *be* tiles — the fixed six-column
+                  grid above breaks the moment a fleet shows seven distinct
+                  types — and they were not worth the third of the pane the
+                  bottom band used to spend on three short chips.
+
+                  One row that scrolls sideways rather than wrapping, and that
+                  is load-bearing: the chart is sized from what this strip
+                  leaves, so a strip whose height depended on how many close
+                  types a scope happens to have would resize the chart as the
+                  reader walked the sidebar. A scope with none drops the row
+                  entirely — a fleet of LP controllers should not pay for a line
+                  that says nothing. */}
+              {closeTypes.counts.length > 0 && (
+                <div
+                  data-close-types
+                  className="mt-3 flex items-center gap-1.5 overflow-x-auto scrollbar-thin border-t border-[var(--color-border)]/60 pt-2"
+                >
+                  <span className="shrink-0 text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">
+                    Closes{" "}
+                    <span className="font-semibold tabular-nums text-[var(--color-text)]">
+                      {closeTypes.total.toLocaleString()}
+                    </span>
+                  </span>
+                  {closeTypes.counts.map(([type, count]) => (
+                    <span
+                      key={type}
+                      className="inline-flex shrink-0 items-center gap-1 rounded-md bg-[var(--color-bg)] px-2 py-0.5 text-[11px] border border-[var(--color-border)]/50"
+                    >
+                      <span className="text-[var(--color-text-muted)]">{parseSide(type)}</span>
+                      <span className="font-semibold tabular-nums">{count}</span>
+                    </span>
+                  ))}
+                </div>
+              )}
             </div>
 
             {/* The chart takes whatever vertical room is left. */}
@@ -1335,33 +1418,30 @@ export function ControllerBrowser({
               </div>
             </div>
 
-            {/* Close types + positions share the bottom band and scroll inside it. */}
-            {(closeTypeCounts.length > 0 || positionRows.length > 0) && (
-              <div className="shrink-0 max-h-[38%] overflow-y-auto scrollbar-thin space-y-3 pr-0.5">
-                {closeTypeCounts.length > 0 && (
-                  <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3 space-y-2">
-                    <h3 className="text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
-                      Close Types
-                    </h3>
-                    <div className="flex flex-wrap gap-1.5">
-                      {closeTypeCounts.map(([type, count]) => (
-                        <span
-                          key={type}
-                          className="inline-flex items-center gap-1 rounded-md bg-[var(--color-bg)] px-2 py-0.5 text-[11px] border border-[var(--color-border)]/50"
-                        >
-                          <span className="text-[var(--color-text-muted)]">{parseSide(type)}</span>
-                          <span className="font-semibold">{count}</span>
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {positionRows.length > 0 && (
-                  <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden">
-                    <h3 className="px-3 pt-2.5 pb-1.5 text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
-                      Positions held ({positionRows.length})
-                    </h3>
+            {/* The bottom band, now positions alone and shut by default
+                (FEAT-085): a one-line header pinned under the chart, opening
+                over it when the reader wants the breakdown. The close types
+                that used to share this band are up in the strip. */}
+            {positionRows.length > 0 && (
+              <div
+                className={`shrink-0 flex min-h-0 flex-col rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden ${
+                  positionsOpen ? "max-h-[45%]" : ""
+                }`}
+              >
+                <button
+                  type="button"
+                  onClick={togglePositions}
+                  aria-expanded={positionsOpen}
+                  data-positions-toggle
+                  className="flex shrink-0 items-center gap-1.5 px-3 py-1.5 text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+                >
+                  <ChevronRight
+                    className={`h-3 w-3 transition-transform ${positionsOpen ? "rotate-90" : ""}`}
+                  />
+                  Positions held ({positionRows.length})
+                </button>
+                {positionsOpen && (
+                  <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin border-t border-[var(--color-border)]/60">
                     {/* A table rather than a grid of cards: at fleet scope these
                         are dozens of one-line facts, and a row per position is
                         what makes them comparable at a glance. */}
