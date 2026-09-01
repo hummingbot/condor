@@ -76,6 +76,13 @@ export interface ChatMessage {
    * across several bubbles.
    */
   open?: boolean;
+  /**
+   * When the turn was said, in epoch seconds — the same unit and clock the
+   * stored transcript uses (`TurnEntry.ts`), so a hydrated message and a live
+   * one are formatted by the same code. Absent only for a transcript recorded
+   * before this was carried.
+   */
+  ts?: number;
 }
 
 /**
@@ -191,7 +198,14 @@ function foldIntoStream(
   const idx = streamTarget(out);
   if (idx < 0) {
     out.push(
-      patch({ id: nextMsgId(), role: "assistant", text: "", toolCalls: [], open: true }),
+      patch({
+        id: nextMsgId(),
+        role: "assistant",
+        text: "",
+        toolCalls: [],
+        open: true,
+        ts: nowTs(),
+      }),
     );
   } else {
     out[idx] = patch(out[idx]);
@@ -234,6 +248,11 @@ function settleToolCalls(msgs: ChatMessage[]): ChatMessage[] {
   );
 }
 
+/** Now, in the epoch seconds the transcript is recorded in. */
+function nowTs(): number {
+  return Date.now() / 1000;
+}
+
 let clientRefCounter = 0;
 /** Local handle for a tab that has no conversation id yet. Echoed by the
  *  backend on `session_started`, which is how the two are reconciled. */
@@ -270,6 +289,7 @@ function turnsToMessages(turns: ConversationTurn[]): ChatMessage[] {
       toolCalls,
       thought: turn.thought || undefined,
       kind: turn.kind || undefined,
+      ts: turn.ts,
     });
   });
   return messages;
@@ -1193,6 +1213,7 @@ export function useChatSocket() {
                         text: noteText,
                         kind: noteKind,
                         toolCalls: [],
+                        ts: nowTs(),
                       },
                     ],
                   }
@@ -1228,6 +1249,7 @@ export function useChatSocket() {
                         text,
                         kind: "secret_notice",
                         toolCalls: [],
+                        ts: nowTs(),
                       },
                     ],
                   }
@@ -1283,7 +1305,13 @@ export function useChatSocket() {
                   pending: false,
                   messages: [
                     ...s.messages,
-                    { id, role: "assistant" as const, text: `⚠️ ${errMsg}`, toolCalls: [] },
+                    {
+                      id,
+                      role: "assistant" as const,
+                      text: `⚠️ ${errMsg}`,
+                      toolCalls: [],
+                      ts: nowTs(),
+                    },
                   ],
                 };
               }),
@@ -1355,7 +1383,7 @@ export function useChatSocket() {
       flushChunks(slotId);
       updateSlotMessages(slotId, (msgs) => [
         ...settleToolCalls(msgs),
-        { id, role: "user" as const, text, toolCalls: [] },
+        { id, role: "user" as const, text, toolCalls: [], ts: nowTs() },
       ]);
 
       // What the user is looking at while asking, rendered here so it is true
@@ -1423,6 +1451,7 @@ export function useChatSocket() {
                 text: `Switched to ${session.label}`,
                 kind: "switch",
                 toolCalls: [],
+                ts: nowTs(),
               },
             ],
           };
@@ -1471,6 +1500,7 @@ export function useChatSocket() {
                 text: `Now using server ${session.server_name}`,
                 kind: "switch",
                 toolCalls: [],
+                ts: nowTs(),
               },
             ],
           };

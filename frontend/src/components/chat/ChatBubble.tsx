@@ -139,7 +139,7 @@ export function ChatBubble() {
     return (
       <button
         onClick={() => toggle(true)}
-        className="fixed bottom-4 right-4 z-40 flex h-12 w-12 items-center justify-center rounded-full bg-[var(--color-primary)] text-white shadow-lg transition-opacity hover:opacity-90"
+        className="fixed bottom-4 right-4 z-40 flex h-12 w-12 items-center justify-center rounded-full bg-[var(--color-primary)] text-[var(--on-primary)] shadow-lg transition-opacity hover:opacity-90"
         title="Ask about this page"
         aria-label="Open quick chat"
       >

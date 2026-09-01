@@ -393,7 +393,7 @@ export function ShareConversation({
                     <button
                       onClick={() => shareMutation.mutate()}
                       disabled={shareMutation.isPending}
-                      className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-white disabled:opacity-60"
+                      className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-[var(--on-primary)] disabled:opacity-60"
                     >
                       {shareMutation.isPending ? (
                         <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -405,7 +405,7 @@ export function ShareConversation({
                   ) : (
                     <button
                       onClick={() => setConfirming(true)}
-                      className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-white"
+                      className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-[var(--on-primary)]"
                     >
                       <Share2 className="h-3.5 w-3.5" />
                       {data.shared ? "Share again" : "Share"}

@@ -32,6 +32,29 @@
   --chart-series-3: #8a5fd6;
   --chart-series-4: #0e9e6a;
 
+  /* Chat surfaces.
+
+     `--chat-inset` is the recessed ground *inside* an answer: code fences,
+     table headers, the composer's field. It is defined per theme rather than
+     reused from `--color-bg` because the answer itself now sits on the page
+     ground, and "one step off the page" points in opposite directions by
+     theme — down in light, up in dark, where `--color-bg` is already all but
+     black and anything darker measures 1.05:1 and is not drawn at all. The
+     dark and colorblind steps are sized to the band this palette actually
+     uses — 1.13:1 against the page, 1.05:1 against a card — so a fence reads
+     as recessed in the transcript without turning into a raised panel inside
+     the cards that also render `.chat-markdown`.
+
+     `--chat-rule` is the hairline: the h2 underline, the fence border, the
+     composer's top edge, the gutter of a turn nobody is speaking in.
+
+     `--on-primary` is what may be written on `--color-primary`. White on the
+     gold is 2.22:1 here and 3.26:1 in light — both under the 4.5:1 floor,
+     which is why neither theme may spell it `text-white`. */
+  --chat-inset: #121a2e;
+  --chat-rule: #1c2541;
+  --on-primary: #080c18;
+
   color-scheme: dark;
 }
 
@@ -63,6 +86,13 @@
   --chart-series-2: #d55e00;
   --chart-series-3: #7d4dd6;
   --chart-series-4: #009e73;
+
+  /* Chat surfaces — recessed *down* from the page here, which is the bug
+     READ-293 came from: the fence used to reuse `--color-bg` and so sat
+     lighter than the container it was nested in. */
+  --chat-inset: #e9ecf5;
+  --chat-rule: #d8dce8;
+  --on-primary: #1a1204;
 
   color-scheme: light;
 }
@@ -97,6 +127,12 @@
   --chart-series-3: #8a5fd6;
   --chart-series-4: #0e9e6a;
 
+  /* Chat surfaces — same direction as dark; `--on-primary` is read on the
+     blue primary, where white is 2.2:1. */
+  --chat-inset: #151d33;
+  --chat-rule: #1e2a45;
+  --on-primary: #0a0e1a;
+
   color-scheme: dark;
 }
 
@@ -104,8 +140,12 @@ body {
   margin: 0;
   background-color: var(--color-bg);
   color: var(--color-text);
+  /* Inter is shipped, not wished for: `@fontsource-variable/inter` is imported
+     in main.tsx, self-hosted, and declares the family as "Inter Variable".
+     Nothing else may be named here — a stack that lists a font the app does
+     not load renders as the browser default on every machine without it. */
   font-family:
-    "Inter",
+    "Inter Variable",
     system-ui,
     -apple-system,
     sans-serif;
@@ -141,19 +181,34 @@ body {
 }
 
 /* ── Chat markdown styles ── */
+/* An answer is a document, so its outline has to be legible at a glance: the
+   scale used to be 1.1 / 1.0 / 0.95em against a 1em body, which left an h2 the
+   same size as the paragraph under it and told apart by weight alone. */
 .chat-markdown h1,
 .chat-markdown h2,
 .chat-markdown h3 {
   font-weight: 600;
-  margin-top: 0.75em;
-  margin-bottom: 0.25em;
+  margin-top: 0.9em;
+  margin-bottom: 0.3em;
+  line-height: 1.3;
 }
-.chat-markdown h1 { font-size: 1.1em; }
-.chat-markdown h2 { font-size: 1em; }
-.chat-markdown h3 { font-size: 0.95em; }
+.chat-markdown h1 { font-size: 1.35em; }
+.chat-markdown h2 {
+  font-size: 1.15em;
+  padding-bottom: 0.15em;
+  border-bottom: 1px solid var(--chat-rule);
+}
+.chat-markdown h3 { font-size: 1em; }
 
 .chat-markdown p {
   margin: 0.35em 0;
+}
+
+/* The reading measure, on prose only. Tables, fences and charts keep the whole
+   column — they are the things that were being squeezed. */
+.chat-markdown p,
+.chat-markdown li {
+  max-width: 68ch;
 }
 
 .chat-markdown ul,
@@ -167,9 +222,9 @@ body {
 }
 
 .chat-markdown code {
-  font-family: "JetBrains Mono", "Fira Code", monospace;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
   font-size: 0.85em;
-  background: var(--color-bg);
+  background: var(--chat-inset);
   padding: 0.15em 0.35em;
   border-radius: 4px;
 }
@@ -177,7 +232,8 @@ body {
 .chat-markdown pre {
   margin: 0.5em 0;
   padding: 0.6em 0.8em;
-  background: var(--color-bg);
+  background: var(--chat-inset);
+  border: 1px solid var(--chat-rule);
   border-radius: 6px;
   overflow-x: auto;
 }
@@ -193,6 +249,8 @@ body {
   border-collapse: collapse;
   margin: 0.5em 0;
   font-size: 0.85em;
+  /* A column of prices only reads as a column when the digits are one width. */
+  font-variant-numeric: tabular-nums;
 }
 
 .chat-markdown th,
@@ -202,8 +260,24 @@ body {
   text-align: left;
 }
 
+/* Numbers align on the right, where their magnitudes line up — column by
+   column, header included. Which columns those are is decided by the `table`
+   override in ChatMessage's markdown components and arrives as `data-num-cols`;
+   CSS cannot ask what a cell contains. Eight columns is well past what fits in
+   the chat's width. */
+.chat-markdown table[data-num-cols~="1"] :is(th, td):nth-child(1),
+.chat-markdown table[data-num-cols~="2"] :is(th, td):nth-child(2),
+.chat-markdown table[data-num-cols~="3"] :is(th, td):nth-child(3),
+.chat-markdown table[data-num-cols~="4"] :is(th, td):nth-child(4),
+.chat-markdown table[data-num-cols~="5"] :is(th, td):nth-child(5),
+.chat-markdown table[data-num-cols~="6"] :is(th, td):nth-child(6),
+.chat-markdown table[data-num-cols~="7"] :is(th, td):nth-child(7),
+.chat-markdown table[data-num-cols~="8"] :is(th, td):nth-child(8) {
+  text-align: right;
+}
+
 .chat-markdown th {
-  background: var(--color-bg);
+  background: var(--chat-inset);
   font-weight: 600;
 }
 

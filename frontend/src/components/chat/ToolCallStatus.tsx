@@ -26,15 +26,30 @@ export function ToolCallStatusIcon({
   }
 }
 
-export function ToolCallStatus({
+/**
+ * What the agent did before it answered, as one row.
+ *
+ * Reasoning and tool calls used to be two unrelated disclosures stacked above
+ * the bubble, each with its own chevron and its own wording — two afterthoughts
+ * where the running of tools is the thing that makes this a trading console
+ * rather than a chat window. They are one strip now: a single line summarising
+ * the run, which opens into the run itself in the order it happened.
+ */
+export function RunStrip({
+  thought,
   toolCalls,
   live = false,
+  thinking = false,
 }: {
+  /** The reasoning behind this turn, when the model exposed any. */
+  thought?: string;
   toolCalls: ToolCall[];
-  /** Whether the bubble these calls belong to is the one still streaming. */
+  /** Whether the turn these belong to is the one still streaming. */
   live?: boolean;
+  /** The reasoning is still arriving — no answer has started landing yet. */
+  thinking?: boolean;
 }) {
-  // Computed above the empty-list early return so the hook below always runs;
+  // Computed above the empty early return so the hook below always runs;
   // `every` on an empty list is `true`, which reads correctly as "not running".
   const allDone = toolCalls.every((tc) => toolCallState(tc.status) !== "pending");
   // Open for as long as the turn is being written, not only while a call is
@@ -49,30 +64,41 @@ export function ToolCallStatus({
   // call that looks pending forever, and that bubble is not streaming.
   const { expanded, toggle } = useLiveDisclosure(live);
 
-  if (toolCalls.length === 0) return null;
+  if (!thought && toolCalls.length === 0) return null;
+
+  const running = thinking || !allDone;
 
   return (
-    <div className="my-1.5">
+    <div className="mb-1.5">
       <button
         onClick={toggle}
-        className="flex items-center gap-1.5 text-xs text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition-colors"
+        aria-expanded={expanded}
+        className="flex items-center gap-1.5 text-xs text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-text)]"
       >
         {expanded ? (
-          <ChevronDown className="h-3 w-3" />
+          <ChevronDown className="h-3 w-3 shrink-0" />
         ) : (
-          <ChevronRight className="h-3 w-3" />
+          <ChevronRight className="h-3 w-3 shrink-0" />
         )}
-        {allDone ? (
-          <span>Used {toolCalls.length} tool{toolCalls.length > 1 ? "s" : ""}</span>
-        ) : (
-          <span className="flex items-center gap-1">
-            <Loader2 className="h-3 w-3 animate-spin" />
-            Running tools...
+        {running && <Loader2 className="h-3 w-3 shrink-0 animate-spin" />}
+        {thought && <span>{thinking ? "Thinking..." : "Thought"}</span>}
+        {thought && toolCalls.length > 0 && <span aria-hidden="true">·</span>}
+        {toolCalls.length > 0 && (
+          <span>
+            {allDone ? "Used " : "Running "}
+            {toolCalls.length} tool{toolCalls.length > 1 ? "s" : ""}
           </span>
         )}
       </button>
       {expanded && (
-        <div className="mt-1 ml-4 space-y-0.5">
+        // The run, in the order it happened, down a rule of its own: the
+        // reasoning that led to the calls, then the calls.
+        <div className="mt-1 ml-1.5 space-y-1 border-l border-[var(--chat-rule)] pl-3">
+          {thought && (
+            <div className="whitespace-pre-wrap text-xs italic text-[var(--color-text-muted)]">
+              {thought}
+            </div>
+          )}
           {toolCalls.map((tc) => (
             <div
               key={tc.tool_call_id}

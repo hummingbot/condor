@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { AlertTriangle, Bot, Brain, Loader2, MessageSquare, X } from "lucide-react";
 
 import type { ChatSlot } from "@/hooks/useChatSocket";
 import type { ChatAgentOption } from "@/lib/api";
+import { speakerNames } from "@/lib/agentColor";
 import { ChatInput } from "./ChatInput";
 import { ChatMessageView } from "./ChatMessage";
 import { Starters, type Starter } from "./Starters";
@@ -86,6 +87,24 @@ export function ChatThread({
   columnClassName?: string;
   autoFocus?: boolean;
 }) {
+  /**
+   * Who is answering at each point of the transcript.
+   *
+   * Resolved here rather than in the message: a turn does not record its
+   * author — the conversation's binding does, and a handover moves it midway
+   * — so the walk needs the whole list. The name is also the key the gutter
+   * colour is hashed from, which is what makes a transcript with two
+   * counterparts in it scannable at a glance.
+   */
+  const speakers = useMemo(
+    () =>
+      speakerNames(
+        slot?.messages ?? [],
+        boundAgent?.name || slot?.info.label || "Assistant",
+      ),
+    [slot?.messages, slot?.info.label, boundAgent?.name],
+  );
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const scrollFrameRef = useRef<number | null>(null);
@@ -255,12 +274,19 @@ export function ChatThread({
             // snapped the still-running bubble's thinking and tool blocks shut
             // the instant such a note landed behind it. `isStreaming` is
             // already scoped to the slot on screen.
-            slot.messages.map((msg) => (
-              <ChatMessageView key={msg.id} message={msg} live={isStreaming && !!msg.open} />
+            slot.messages.map((msg, i) => (
+              <ChatMessageView
+                key={msg.id}
+                message={msg}
+                live={isStreaming && !!msg.open}
+                agentName={speakers[i]}
+              />
             ))
           )}
           {isQueued && (
-            <div className="mb-3 flex items-center gap-1.5 pl-8 text-[11px] text-[var(--color-text-muted)]">
+            // Indented to the gutter every turn now hangs from, not to the
+            // avatar that used to sit there.
+            <div className="mb-3 flex items-center gap-1.5 pl-3 text-[11px] text-[var(--color-text-muted)]">
               <Loader2 className="h-3 w-3 animate-spin" />
               Waiting its turn
             </div>

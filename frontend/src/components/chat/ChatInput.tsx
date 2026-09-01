@@ -216,14 +216,18 @@ export function ChatInput({
   const isTranscribing = recordingState === "transcribing";
 
   return (
-    <div className="p-3">
+    // The composer is a deck the transcript sits on, not a card floating over
+    // it: a hairline the width of the column, its own surface below it, and the
+    // field recessed into that surface. Only the ring is gold, and only on
+    // focus.
+    <div className="border-t border-[var(--chat-rule)] bg-[var(--color-surface)] p-3">
       {voiceError && (
         <p className="mb-2 text-xs text-red-400">{voiceError}</p>
       )}
       {/* One composer chrome, owned here — the hero and the thread both get this
           box, so they cannot drift into two shapes again. */}
       <div
-        className={`flex items-end gap-2 rounded-xl border bg-[var(--color-surface)] px-2 py-1.5 transition-colors ${
+        className={`flex items-end gap-2 rounded-xl border bg-[var(--chat-inset)] px-2 py-1.5 transition-colors ${
           focused
             ? "border-[var(--color-primary)]/40 ring-1 ring-[var(--color-primary)]/20"
             : "border-[var(--color-border)]"
@@ -285,7 +289,7 @@ export function ChatInput({
           <button
             onClick={startRecording}
             disabled={disabled}
-            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-[var(--color-border)] text-[var(--color-text-muted)] transition-colors hover:border-[var(--color-primary)] hover:text-[var(--color-primary)] disabled:opacity-40"
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)] disabled:opacity-40"
             title="Record voice message (⌘M)"
           >
             <Mic className="h-4 w-4" />
@@ -312,7 +316,7 @@ export function ChatInput({
         <button
           onClick={handleSubmit}
           disabled={disabled || !value.trim() || isRecording || isTranscribing}
-          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[var(--color-primary)] text-white transition-opacity hover:opacity-90 disabled:opacity-40"
+          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[var(--color-primary)] text-[var(--on-primary)] transition-opacity hover:opacity-90 disabled:opacity-40"
           title={isStreaming ? "Send — interrupts the current answer" : "Send message"}
           aria-label="Send message"
         >

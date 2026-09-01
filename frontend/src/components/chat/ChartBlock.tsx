@@ -334,7 +334,7 @@ export function ChartBlock({ raw, live }: { raw: string; live: boolean }) {
   if (!spec) {
     if (live) {
       return (
-        <div className="my-2 flex items-center gap-1.5 rounded-lg border border-dashed border-[var(--color-border)] px-3 py-2 text-xs text-[var(--color-text-muted)]">
+        <div className="my-2 flex items-center gap-1.5 rounded-lg border border-[var(--chat-rule)] bg-[var(--chat-inset)] px-3 py-2 text-xs text-[var(--color-text-muted)]">
           <Loader2 className="h-3 w-3 animate-spin" />
           Rendering chart...
         </div>
