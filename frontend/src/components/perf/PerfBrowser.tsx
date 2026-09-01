@@ -49,7 +49,7 @@ import {
 } from "@/lib/api";
 import { controllerKey } from "@/lib/controller-identity";
 import { configToYaml, CONTROLLER_HIDDEN_KEYS } from "@/lib/configYaml";
-import { formatCurrencyVolume, formatCurrencyPnl, isExecutorActive, pnlColor } from "@/lib/formatters";
+import { formatCurrencyVolume, formatCurrencyPnl, isExecutorActive, pnlColor, toMs } from "@/lib/formatters";
 import {
   buildTree,
   collectLeaves,
@@ -71,6 +71,7 @@ import {
   type PerfNode,
 } from "@/lib/perf-tree";
 import { aggregatePnlSeries, executorSeries } from "@/lib/pnl-chart";
+import { buildAttributor, runWindows } from "@/lib/run-attribution";
 import type { ConvertFn } from "@/lib/rates";
 import { POSITIONS_BAND_KEY } from "@/lib/sessionState";
 import { useViewFacts } from "@/lib/viewFacts";
@@ -636,11 +637,21 @@ export function PerfBrowser({
   /**
    * Which bot an executor belongs to.
    *
-   * The executor record does not say (see `UNATTACHED_BOT`), so the only
-   * attribution available is its `controller_id` against the live fleet. A
-   * config id is shared by every bot running that config, which is normally
-   * one; where it is not, the executor is left unattached rather than
-   * arbitrarily credited to whichever bot was seen first.
+   * The executor record does not say (see `UNATTACHED_BOT`), so attribution
+   * means asking which bot was running its `controller_id` when it opened. Two
+   * sources answer that, and they answer for different populations:
+   *
+   *  - the **live fleet**, for an executor working right now under a controller
+   *    that is on screen. A config id is shared by every bot running that
+   *    config, which is normally one; where it is not, a live executor is left
+   *    unattached rather than credited to whichever bot was seen first.
+   *  - the **run history**, for one that has closed. Matching a closed executor
+   *    against the live fleet cannot be right for a population defined as what
+   *    has finished, so it is looked up by run window instead — the interval
+   *    each run declared the controller for (`lib/run-attribution`).
+   *
+   * The live map is the fallback for the second, not a competitor: an executor
+   * of a bot that is *still deployed* has no closed run window to sit in.
    */
   const botByController = useMemo(() => {
     const owners = new Map<string, string | null>();
@@ -652,6 +663,8 @@ export function PerfBrowser({
     }
     return owners;
   }, [controllers]);
+
+  const attribute = useMemo(() => buildAttributor(runWindows(runs)), [runs]);
 
   /**
    * What is in scope, which is the *only* thing the population toggle changes.
@@ -670,6 +683,22 @@ export function PerfBrowser({
     (which: Population): PerfLeaf[] => {
       const all: PerfLeaf[] = [];
       const botOf = (ex: ExecutorInfo) => botByController.get(ex.controller_id) ?? UNATTACHED_BOT;
+      /**
+       * The bot a *closed* executor hung under, by the run that opened it.
+       *
+       * Asked at the executor's own start time, which is the instant the
+       * question is about: a position that outlived its bot's stop still
+       * belongs to the run that opened it. Falls through to the live fleet for
+       * an executor of a bot that is still deployed — it has no closed run
+       * window to sit in — and to `(unattached)` for one that belongs to no
+       * run at all, which on a real server is every hand-opened position.
+       */
+      const closedBotOf = (ex: ExecutorInfo, startedAt: number | null) => {
+        if (!ex.controller_id) return UNATTACHED_BOT;
+        const at = startedAt ?? (ex.close_timestamp > 0 ? toMs(ex.close_timestamp) : null);
+        const owner = at === null ? null : attribute(ex.controller_id, at);
+        return owner ?? botByController.get(ex.controller_id) ?? UNATTACHED_BOT;
+      };
       if (which === "running") {
         for (const c of controllers) all.push(leafFromController(c));
         for (const ex of executors) {
@@ -683,7 +712,8 @@ export function PerfBrowser({
         const cutoff = days > 0 ? now - days * 86_400_000 : 0;
         for (const ex of executors) {
           if (isExecutorActive(ex.status)) continue;
-          const leaf = leafFromExecutor(ex, botOf(ex));
+          const started = ex.timestamp > 0 ? toMs(ex.timestamp) : null;
+          const leaf = leafFromExecutor(ex, closedBotOf(ex, started));
           if (cutoff && leaf.endedAt !== null && leaf.endedAt < cutoff) continue;
           all.push(leaf);
         }
@@ -713,7 +743,7 @@ export function PerfBrowser({
             (!!leaf.controllerId && filters.controllers.includes(leaf.controllerId))),
       );
     },
-    [controllers, executors, runs, botByController, period, now, filters],
+    [controllers, executors, runs, botByController, attribute, period, now, filters],
   );
 
   const leaves = useMemo(() => leavesFor(population), [leavesFor, population]);
