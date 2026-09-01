@@ -8,10 +8,9 @@
  * conversation so a run from it belongs here. The dock has no door onto the
  * unfocused library — the runs are the doors, and /routines is the whole of it.
  *
- * And that a pane already open outlives the column it was opened from —
- * including the collapse the pane itself asks for, which is a loan of the
- * column for as long as the library is up and no rewriting of how the
- * workspace opens next.
+ * And that a pane already open outlives the column it was opened from: the
+ * dock stays exactly as the reader left it when the library comes up, and
+ * collapsing it by hand afterwards does not take the library down with it.
  *
  * Needs a DOM, so this file overrides vitest's default `node` environment.
  *
@@ -126,13 +125,7 @@ let qc: QueryClient;
  * The pane's occupant is the workspace's state, not the dock's (FEAT-081), so
  * the harness holds it exactly as `AgentChatTab` does.
  */
-function Workspace({
-  agentSlug,
-  borrowable = true,
-}: {
-  agentSlug: string;
-  borrowable?: boolean;
-}) {
+function Workspace({ agentSlug }: { agentSlug: string }) {
   const [library, setLibrary] = useState<LibraryFocus | null>(null);
   return (
     <WorkspacePaneProvider>
@@ -142,7 +135,6 @@ function Workspace({
         conversationId={CONVERSATION}
         agentSlug={agentSlug}
         agentName="Scout"
-        borrowable={borrowable}
         runContext={RUN_CONTEXT}
         library={library}
         onLibraryChange={setLibrary}
@@ -151,16 +143,13 @@ function Workspace({
   );
 }
 
-/**
- * @param agentSlug who the conversation on screen is bound to.
- * @param borrowable whether the pane's occupant may fold the column away.
- */
-async function render(agentSlug = "scout", borrowable = true) {
+/** @param agentSlug who the conversation on screen is bound to. */
+async function render(agentSlug = "scout") {
   await act(async () => {
     root.render(
       <MemoryRouter>
         <QueryClientProvider client={qc}>
-          <Workspace agentSlug={agentSlug} borrowable={borrowable} />
+          <Workspace agentSlug={agentSlug} />
         </QueryClientProvider>
       </MemoryRouter>,
     );
@@ -188,7 +177,7 @@ const byTitle = (title: string) =>
 /** Which routine the library is on — the sheet's own nav bar carries this. */
 const trigger = () =>
   container.querySelector<HTMLButtonElement>('button[aria-label="Routine"]')!;
-/** Whose routines it lists — the dock's half of the pair. */
+/** Whose routines it lists — asked in the library's bar, beside which one. */
 const scopeSelect = () =>
   container.querySelector<HTMLSelectElement>(
     'select[aria-label="Routine scope"]',
@@ -277,35 +266,21 @@ describe("the dock's routine library", () => {
     expect(browserProps.initialReportId).toBe("rep-7");
   });
 
-  it("takes the column while it is open, and gives it back", async () => {
+  it("leaves the column where the reader put it", async () => {
     await render();
     expect(byTitle("Collapse")).toBeTruthy();
 
     await click(runRow());
 
-    // Full chat + report: the dock steps back to its icon strip, as the rail
-    // does, so the two things on screen are the conversation and what it
-    // opened.
-    expect(byTitle("Collapse")).toBeNull();
+    // The rows are the doors into the library, so folding them away at the
+    // moment it opens means putting the column back to read a second routine.
+    // The column is the reader's; nothing else touches it.
     expect(pane().contains(library())).toBe(true);
+    expect(byTitle("Collapse")).toBeTruthy();
 
     await click(byTitle("Close"));
 
-    // Exit the pane and both flanks come back.
     expect(library()).toBeNull();
-    expect(byTitle("Collapse")).toBeTruthy();
-  });
-
-  it("stays put for an occupant that may not borrow the column", async () => {
-    // The agent panel is the case: it is opened from the card at the top of
-    // this column and then worked in, one change at a time, with the reader
-    // looking back at the conversation. Folding the column on the way there
-    // takes the card away from under the cursor that clicked it.
-    await render("scout", false);
-
-    await click(runRow());
-
-    expect(pane().contains(library())).toBe(true);
     expect(byTitle("Collapse")).toBeTruthy();
   });
 
@@ -313,9 +288,11 @@ describe("the dock's routine library", () => {
     await render();
 
     await click(runRow());
+    await click(byTitle("Collapse"));
 
-    // The collapse the pane itself asked for is not a close: what the reader
-    // was reading is still in the pane, still mounted.
+    // Collapsing the column is not a close: the sheet is a sibling of the
+    // `aside`, not a child, so what the reader was reading stays mounted in
+    // the pane rather than being torn down and rebuilt.
     expect(pane().contains(library())).toBe(true);
     expect(browserProps.hosted).toBe(true);
   });
@@ -408,18 +385,21 @@ describe("the dock's routine picker", () => {
 describe("the scope's default", () => {
   it("is the agent being talked to", async () => {
     await render();
+    await click(runRow());
 
     expect(scopeSelect().value).toBe("scout");
   });
 
   it("is every routine in the unbound Condor conversation", async () => {
     await render("");
+    await click(runRow());
 
     expect(scopeSelect().value).toBe("all");
   });
 
   it("respects a pick of the reader's own", async () => {
     await render();
+    await click(runRow());
 
     await setScope("all");
     // Re-rendering the same conversation must not take the choice back.
@@ -430,6 +410,7 @@ describe("the scope's default", () => {
 
   it("re-asks it for whoever is answering next", async () => {
     await render();
+    await click(runRow());
     await setScope("all");
 
     await render("sage");

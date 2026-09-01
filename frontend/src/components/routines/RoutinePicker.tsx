@@ -22,12 +22,11 @@ import {
  * nobody uses, which is what the old arrangement proved twice: a scope select
  * stranded in the report's header, over a list that was a 48px rail.
  *
- * The pair is split across two surfaces, which is what `parts` selects. The
- * dock carries the scope — whose routines this conversation is looking at,
- * answered next to the runs it has made — and the library sheet's own nav bar
- * carries the routine, because that is the thing the sheet below it is showing.
- * The sheet takes both when the dock is not on screen (full screen, or the
- * column collapsed away), so neither question is ever unanswerable.
+ * Both live in the library sheet's own nav bar, over the report they name.
+ * The scope used to be asked in the dock instead, one column away, which is a
+ * filter that goes off screen whenever that column or its Routines section is
+ * folded — and `parts` is what is left of that split, for a surface that wants
+ * only one of the two.
  *
  * ↑/↓ step through the list, from the closed trigger's keyboard or from the
  * `arrows` buttons beside it; the routine changes under you, as it did in the

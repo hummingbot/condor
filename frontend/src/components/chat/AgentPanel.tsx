@@ -25,15 +25,16 @@ import type {
  * (FEAT-081); reading what an agent knows no longer costs you the chat.
  *
  * The model and server pickers are in the bar at the top of this panel, one
- * line above the sections they apply to, rather than in the dock card that
- * opens it — the card is one line and a door, and the panel is on screen for
+ * line above the sections they apply to, rather than beside the button that
+ * opens it — the button is a verb and a door, and the panel is on screen for
  * exactly as long as anyone is thinking about what this agent is made of.
  *
- * It takes the pane and nothing more: no full screen, and the dock keeps its
- * column (`borrowable`), because this is a panel you work in while glancing
- * back at the conversation, and the card that opens it is up there in the dock
- * saying so. A report is the other case — read, not steered — and it still
- * folds both flanks away.
+ * It takes the pane and nothing more: no full screen, because this is a panel
+ * you work in while glancing back at the conversation, and a full-screen
+ * version of it is a second layout to maintain for a gesture whose only outcome
+ * is losing the chat. The flanks fold away while it is up, as they do for a
+ * report; the door back out is the pressed Tune button in the bar above, which
+ * no amount of folding can take away.
  *
  * There is deliberately no door out to the agent's full page. Anything worth
  * doing to an agent should be worth doing here, next to the conversation that

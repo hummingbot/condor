@@ -3,19 +3,17 @@
  *
  * The workspace header used to carry a model picker, a server chip and a link
  * that *left* the conversation to read what the agent knows. What replaced them
- * is pinned here across two homes: the dock card, which names the agent once
- * and does nothing else, and the panel it opens, which holds everything the
- * card no longer says — including the two switches. The card sits in the
- * right-hand column so that opening an agent is the same gesture as opening a
- * routine's report: click in the dock, it opens in the pane.
+ * is pinned here across two homes: the Tune button back in that same header,
+ * which is a verb and a door and nothing else, and the panel it opens, which
+ * holds everything the button does not say — including the two switches.
  *
- * What a refactor of this chrome must not lose: the card is one line and one
- * door, with no description, no model and no server restating what the panel
- * is for; both switches live in the panel's bar and go dead with a reason
- * while a turn is in flight; a pinned server offers no picker; with no session
- * the model field still sets what the next conversation starts on while the
- * server field is a statement rather than a dead control; and the panel keeps
- * no link out of the workspace.
+ * What a refactor of this chrome must not lose: the button is one door, with no
+ * name, description, model or server restating what the tab beside it and the
+ * panel behind it already say; both switches live in the panel's bar and go
+ * dead with a reason while a turn is in flight; a pinned server offers no
+ * picker; with no session the model field still sets what the next conversation
+ * starts on while the server field is a statement rather than a dead control;
+ * and the panel keeps no link out of the workspace.
  *
  * Needs a DOM, so this file overrides vitest's default `node` environment.
  *
@@ -54,7 +52,7 @@ vi.mock("@/hooks/useChat", () => ({
 }));
 
 const { AgentPanel } = await import("./AgentPanel");
-const { DockAgentCard } = await import("./DockAgent");
+const { TuneAgentButton } = await import("./TuneAgent");
 
 declare global {
   var IS_REACT_ACT_ENVIRONMENT: boolean;
@@ -157,14 +155,14 @@ async function renderPanel(over: Partial<PanelProps> = {}) {
   await settle();
 }
 
-type CardProps = Parameters<typeof DockAgentCard>[0];
+type TuneProps = Parameters<typeof TuneAgentButton>[0];
 
-async function renderCard(over: Partial<CardProps> = {}) {
+async function renderTune(over: Partial<TuneProps> = {}) {
   await act(async () => {
     root.render(
       <MemoryRouter>
         <QueryClientProvider client={client()}>
-          <DockAgentCard
+          <TuneAgentButton
             name="Orca LP Expert"
             open={false}
             onOpen={() => (opened += 1)}
@@ -228,35 +226,39 @@ afterEach(() => {
   container.remove();
 });
 
-describe("the dock's agent card", () => {
-  it("says what the click does, and who it does it to", async () => {
-    await renderCard();
+describe("the header's tune button", () => {
+  it("says what the click does, and nothing the row already says", async () => {
+    await renderTune();
 
-    // The name alone was here first, under a session tab carrying the same
-    // name: a label where a door was meant, saying nothing about what clicking
-    // it would do. The verb comes first now and the agent is muted beside it.
+    // The verb is the whole label. Who that is, is on the session tab beside
+    // it and on the panel's own bar; the name was in here as a card and read
+    // as a third statement of the same thing.
     expect(container.textContent).toContain("Tune agent");
-    expect(container.textContent).toContain("Orca LP Expert");
-    // The description, the model and the server were all here once, and
-    // between this card and the panel the same wiring was on screen twice.
+    expect(container.textContent).not.toContain("Orca LP Expert");
+    // ...but the reader who wants to be sure before clicking gets it.
+    expect(container.querySelector("button")!.title).toContain(
+      "Orca LP Expert",
+    );
+    // The description, the model and the server were all in the door once, and
+    // between it and the panel the same wiring was on screen twice.
     expect(container.textContent).not.toContain("Solana liquidity");
     expect(row("model")).toBeNull();
     expect(row("server")).toBeNull();
   });
 
   it("is the door to the panel", async () => {
-    await renderCard();
+    await renderTune();
     await click(container.querySelector("button")!);
     expect(opened).toBe(1);
   });
 
   it("says whether the panel it opens is open", async () => {
-    await renderCard();
+    await renderTune();
     expect(
       container.querySelector("button")!.getAttribute("aria-pressed"),
     ).toBe("false");
 
-    await renderCard({ open: true });
+    await renderTune({ open: true });
     expect(
       container.querySelector("button")!.getAttribute("aria-pressed"),
     ).toBe("true");

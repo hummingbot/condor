@@ -3,13 +3,12 @@
  *
  * The sheet's nav bar names what is open with the control that changes it: the
  * routine picker, and the ↑/↓ that walk the list, in place of a title and a
- * subtitle that only restated it. So the routine half is always here.
+ * subtitle that only restated it.
  *
- * The scope half — whose routines the list holds — belongs to the dock, beside
- * the runs this conversation has made. But the dock is not always on screen:
- * full screen the sheet covers it, and a reader can collapse the column
- * outright. So the bar carries the scope exactly when the dock does not, and
- * never both at once.
+ * Beside it, and at every size, the scope — whose routines the list holds. The
+ * two halves used to be split with the dock, which put the filter one column
+ * away from the list it filters and took it off screen whenever that column
+ * was folded. Both questions are asked where the answer is shown.
  *
  * Needs a DOM, so this file overrides vitest's default `node` environment.
  *
@@ -82,14 +81,12 @@ let picked: string[];
  *   the dock, open or not, is behind it.
  */
 async function render({
-  dockOpen,
   split = true,
   source = "brigado/bot_report",
 }: {
-  dockOpen: boolean;
   split?: boolean;
   source?: string;
-}) {
+} = {}) {
   wide = split;
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   await act(async () => {
@@ -105,7 +102,6 @@ async function render({
               scope="brigado"
               onScopeChange={() => {}}
               onSelectRoutine={(name) => picked.push(name)}
-              dockOpen={dockOpen}
               agentName="Brigado"
               onClose={() => {}}
             />
@@ -153,7 +149,7 @@ afterEach(() => {
 
 describe("the library sheet's nav bar", () => {
   it("says which routine is open with the control that changes it", async () => {
-    await render({ dockOpen: true });
+    await render();
 
     expect(trigger()?.textContent).toContain("Bot Report");
     // No title and no subtitle repeating what the picker already says.
@@ -161,14 +157,14 @@ describe("the library sheet's nav bar", () => {
   });
 
   it("walks the list with the arrows, as the sidebar did", async () => {
-    await render({ dockOpen: true });
+    await render();
 
     await click(arrow("Next routine")!);
     expect(picked).toEqual(["brigado/mm_regime_detector"]);
   });
 
   it("walks it from the keyboard too", async () => {
-    await render({ dockOpen: true });
+    await render();
 
     await act(async () => {
       trigger()!.dispatchEvent(
@@ -180,29 +176,24 @@ describe("the library sheet's nav bar", () => {
   });
 
   it("has no arrow to walk past the end of the list", async () => {
-    await render({ dockOpen: true, source: "brigado/bot_report" });
+    await render({ source: "brigado/bot_report" });
 
     // First of the two in scope: nothing before it.
     expect(arrow("Previous routine")?.disabled).toBe(true);
     expect(arrow("Next routine")?.disabled).toBe(false);
   });
 
-  it("leaves the scope to the dock while the dock is on screen", async () => {
-    await render({ dockOpen: true });
+  it("asks whose routines beside which one, always", async () => {
+    await render();
 
-    // One scope select on screen, not two saying the same thing.
-    expect(scopeSelect()).toBeNull();
-  });
-
-  it("carries the scope when the dock is collapsed", async () => {
-    await render({ dockOpen: false });
-
+    // The pair used to be split with the dock, so the scope went off screen
+    // whenever that column did. Both questions are asked over the list.
     expect(scopeSelect()).toBeTruthy();
     expect(trigger()?.textContent).toContain("Bot Report");
   });
 
-  it("carries it full screen too, where the sheet covers the open dock", async () => {
-    await render({ dockOpen: true, split: false });
+  it("asks it full screen too, where there is no pane at all", async () => {
+    await render({ split: false });
 
     expect(scopeSelect()).toBeTruthy();
   });

@@ -1,13 +1,12 @@
 import { useQuery } from "@tanstack/react-query";
 import {
-  Bot,
   ChevronDown,
   ChevronRight,
   PanelRightClose,
   Radio,
   Zap,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 
 import {
   DockRoutines,
@@ -17,10 +16,8 @@ import {
 } from "@/components/chat/DockRoutines";
 import { DockTasks } from "@/components/chat/DockTasks";
 import type { RoutineRunContext } from "@/components/routines/ReportBrowser";
-import { RoutinePicker } from "@/components/routines/RoutinePicker";
 import { WORKSPACE_BAR } from "@/components/chat/workspaceBar";
 import { useResizeDrag } from "@/hooks/useResizeDrag";
-import { useWorkspacePane } from "@/hooks/useWorkspacePane";
 import { api, type Delegation } from "@/lib/api";
 import { inScope, resolveRoutine, type RoutineScope } from "@/lib/routineUtils";
 
@@ -61,23 +58,12 @@ function defaultOpen(): boolean {
  * Below `xl` it stops being a column and overlays the transcript instead, the
  * mirror of what the rail does below `md`.
  *
- * And like the rail, it steps back to its icon strip while something is in the
- * workspace pane: a routine's report opens on a conversation with both flanks
- * folded away, so what you asked for and what you asked it of are the only two
- * things on screen. It is a loan — the column comes back the moment the pane
- * closes, and only a collapse of the reader's own is written down as how the
- * workspace opens next time.
- *
- * A report borrows it; the agent panel does not (`borrowable`). The difference
- * is not the content, it is the gesture: a report is opened from a row in this
- * column and then *read*, so the column has done its job and can stand down —
- * while the agent panel is opened from the card at the top of this column and
- * then worked in, one change at a time, with the reader looking back and forth.
- * Folding the column on the way there takes the card away from under the
- * cursor that clicked it and leaves a panel where nothing points at it.
- *
- * The card comes first, then the sections: who is answering, then what that
- * has set in motion.
+ * Unlike the rail, it stays where it is when something opens in the workspace
+ * pane. It used to fold itself away and hand the width over — which read well
+ * for a report you only wanted to read, and badly for everything else: the runs
+ * that are the doors into the library went off screen at the exact moment the
+ * library came up, so opening a second routine meant first putting the column
+ * back. The column is the reader's to collapse; nothing else touches it.
  *
  * The two sections are panes, not a stack: each scrolls inside itself, so an
  * expanded Tasks can never push Routines off the bottom. Both headers stay on
@@ -91,8 +77,6 @@ export function ContextDock({
   conversationId,
   agentSlug,
   agentName,
-  agentCard,
-  borrowable = true,
   runContext,
   library,
   onLibraryChange,
@@ -103,23 +87,6 @@ export function ContextDock({
   agentSlug: string;
   /** Who is answering, for the library bar's accessible name. */
   agentName?: string;
-  /**
-   * Who is answering, as a card — the identity, the model and the server.
-   *
-   * Passed in rather than built here: it is wired to the session, and this
-   * column knows about work, not about sessions. What it does know is that the
-   * card belongs above Tasks, because "who" comes before "what they are doing".
-   */
-  agentCard?: React.ReactNode;
-  /**
-   * Whether whatever is in the pane may fold this column away while it is up.
-   *
-   * True for a report, which is read rather than steered. False for the agent
-   * panel, which is opened from the card at the top of this column and worked
-   * in beside the conversation — folding the column there would hide the door
-   * the reader just came through.
-   */
-  borrowable?: boolean;
   /** The conversation a run launched from the library belongs to. */
   runContext?: RoutineRunContext;
   /**
@@ -148,42 +115,9 @@ export function ContextDock({
   const [scopeAgent, setScopeAgent] = useState(agentSlug);
   const [width, setWidth] = useState(readWidth);
 
-  /**
-   * The pane borrows this column, exactly as it borrows the rail's.
-   *
-   * Four columns — rail, transcript, pane, dock — is more chrome than any
-   * window has, and of the four the two flanks are the ones you are least
-   * likely to be reading while a report is open beside the conversation. The
-   * value borrowed is the value given back, so a dock the reader had already
-   * tidied away stays tidied.
-   */
-  const paneOpen = useWorkspacePane()?.open ?? false;
-  const lent = useRef<boolean | null>(null);
-  useEffect(() => {
-    if (paneOpen && borrowable) {
-      if (lent.current === null) {
-        lent.current = open;
-        setOpen(false);
-      }
-    } else if (lent.current !== null) {
-      // Also the way back when the pane changes hands mid-loan — a routine's
-      // report handing over to the agent panel repays the column on the spot.
-      setOpen(lent.current);
-      lent.current = null;
-    }
-    // `open` is read, not watched: re-running this on the reader's own expand
-    // would take the column straight back off them.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [paneOpen, borrowable]);
-
-  /**
-   * Only the reader's own toggle is written down. What the layout does on its
-   * own — a loan to the pane, a window too narrow — is about this moment, and a
-   * passing squeeze must not become the answer for every session after it.
-   */
+  /** The reader's own toggle, and the only thing written down. */
   const toggle = (next: boolean) => {
     setOpen(next);
-    lent.current = null;
     localStorage.setItem(OPEN_KEY, String(next));
   };
 
@@ -214,13 +148,7 @@ export function ContextDock({
   // wake up with an overlay parked on top of the transcript.
   useEffect(() => {
     const mq = window.matchMedia(WIDE);
-    const onChange = () => {
-      // The default is being re-derived from the window, so there is no loan
-      // left to repay — repaying one here is how a narrow window would wake up
-      // with the dock parked back on top of the transcript.
-      lent.current = null;
-      setOpen(defaultOpen());
-    };
+    const onChange = () => setOpen(defaultOpen());
     mq.addEventListener("change", onChange);
     return () => mq.removeEventListener("change", onChange);
   }, []);
@@ -302,30 +230,9 @@ export function ContextDock({
       scope={effectiveScope}
       onScopeChange={changeScope}
       onSelectRoutine={(name) => openFocus({ source: name })}
-      // A collapsed column, or a collapsed section, is a picker off screen.
-      dockOpen={open && routinesOpen}
       agentName={agentName}
       runContext={runContext}
       onClose={() => setLibrary(null)}
-    />
-  );
-
-  /**
-   * Whose routines this conversation is looking at.
-   *
-   * Only half of the pair: which routine is open is asked in the library's own
-   * nav bar, over the report it names, so the two controls are never both on
-   * screen saying the same thing.
-   */
-  const picker = (
-    <RoutinePicker
-      parts="scope"
-      routines={routines}
-      instances={instances}
-      scope={effectiveScope}
-      onScopeChange={changeScope}
-      source={library?.source}
-      onSelect={(name) => openFocus({ source: name })}
     />
   );
 
@@ -337,21 +244,12 @@ export function ContextDock({
    * below put it at different indices, so collapsing the column unmounted it —
    * which released the pane, which gave the column back, which mounted it
    * again. Held here it keeps its identity, and the report inside it keeps its
-   * scroll, through a collapse the pane itself asked for.
+   * scroll, through a collapse of the column beside it.
    */
   if (!open) {
     return (
       <>
         <aside className="flex w-10 shrink-0 flex-col items-center gap-3 border-l border-[var(--color-border)] bg-[var(--color-bg)] py-2">
-          {agentCard && (
-            <button
-              onClick={() => toggle(true)}
-              className="rounded p-1 text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-              title="Show who is answering"
-            >
-              <Bot className="h-4 w-4" />
-            </button>
-          )}
           <button
             onClick={() => toggle(true)}
             className="flex flex-col items-center gap-0.5 rounded p-1 text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
@@ -411,8 +309,6 @@ export function ContextDock({
             </button>
           </div>
 
-          {agentCard}
-
           <DockSection
             icon={
               <Radio
@@ -443,7 +339,6 @@ export function ContextDock({
             count={routinesRunning || undefined}
             open={routinesOpen}
             onToggle={() => setRoutinesOpen((v) => !v)}
-            toolbar={picker}
           >
             <DockRoutines
               instances={instances}
@@ -538,7 +433,6 @@ function DockSection({
   count,
   open,
   onToggle,
-  toolbar,
   children,
 }: {
   icon: React.ReactNode;
@@ -548,12 +442,6 @@ function DockSection({
   count?: number;
   open: boolean;
   onToggle: () => void;
-  /**
-   * Controls that steer what the body shows, between the header and the list.
-   * Outside the scroller on purpose: a filter that scrolls away with the rows
-   * it filters is one you have to go looking for.
-   */
-  toolbar?: React.ReactNode;
   children: React.ReactNode;
 }) {
   return (
@@ -578,7 +466,6 @@ function DockSection({
           <span className="shrink-0 text-emerald-400">{count}</span>
         )}
       </button>
-      {open && toolbar}
       {open && (
         <div className="min-h-0 flex-1 overflow-y-auto pb-1">{children}</div>
       )}

@@ -20,9 +20,9 @@ import { ChatInput } from "@/components/chat/ChatInput";
 import { ChatRail } from "@/components/chat/ChatRail";
 import { ChatThread } from "@/components/chat/ChatThread";
 import { ContextDock } from "@/components/chat/ContextDock";
-import { DockAgentCard } from "@/components/chat/DockAgent";
 import type { LibraryFocus } from "@/components/chat/DockRoutines";
 import { SessionTabs } from "@/components/chat/SessionTabs";
+import { TuneAgentButton } from "@/components/chat/TuneAgent";
 import {
   WorkspacePaneOutlet,
   WorkspacePaneProvider,
@@ -344,10 +344,10 @@ export function AgentChatTab() {
               split exists at all (see `WorkspacePane`), so below it this is the
               plain `min-w-0` column it has always been. */}
           <div className="flex min-w-0 flex-1 flex-col xl:min-w-[360px]">
-            {/* Which sessions are live. Nothing else: the agent that answers
-                this one is named by its own tab, and again by the dock card
-                that opens it — a chip here repeating both, plus the model and
-                the server the dock already carried, was the same agent said
+            {/* Which sessions are live, and the one door into whoever is
+                answering. Nothing else: the agent is named by its own tab and
+                again by the panel the button opens — a chip here repeating
+                both, plus the model and the server, was the same agent said
                 three times across one row. */}
             <div className={`${WORKSPACE_BAR} gap-2 px-3`}>
               <button
@@ -373,6 +373,19 @@ export function AgentChatTab() {
                 // conversation is still in the rail and clicking it respawns it.
                 onClose={(slotId) => chat.destroySession(slotId)}
                 className="min-w-0 flex-1"
+              />
+              {/* What the conversation is talking to, opened from the chrome
+                  that belongs to the conversation as a whole. It sat in the
+                  dock for a release, which put it in the column about work
+                  rather than about who does it. */}
+              <TuneAgentButton
+                name={panelAgent?.name || "Condor"}
+                open={pane?.kind === "agent"}
+                onOpen={() =>
+                  setPane((p) =>
+                    p?.kind === "agent" ? null : { kind: "agent" },
+                  )
+                }
               />
             </div>
 
@@ -426,9 +439,8 @@ export function AgentChatTab() {
             <AgentPanel
               slug={panelSlug}
               name={panelAgent?.name || "Condor"}
-              // What the conversation runs on, in the panel's own bar. It used
-              // to be in the dock card, which is why the dock was the one
-              // column the pane could not borrow.
+              // What the conversation runs on, in the panel's own bar — the
+              // first thing waiting on the other side of the click.
               slot={activeSlot}
               pendingAgentKey={pendingAgentKey ?? defaultAgent}
               ambientServer={server || ""}
@@ -461,26 +473,6 @@ export function AgentChatTab() {
             conversationId={activeSlot?.info.conversation_id || ""}
             agentSlug={activeSlot?.info.agent_slug || ""}
             agentName={boundAgent?.name}
-            // Who is answering, and the door to the rest of it. In the dock
-            // rather than in the panel it opens, so reading an agent is the
-            // same gesture as reading a routine's report: click in this
-            // column, it opens in the pane beside the conversation.
-            // The panel this column opens is worked in beside the chat, not
-            // read like a report — so the column stays put while it is up, and
-            // the card the reader clicked stays under the cursor that clicked
-            // it. A routine's report still borrows the column as it always did.
-            borrowable={pane?.kind !== "agent"}
-            agentCard={
-              <DockAgentCard
-                name={panelAgent?.name || "Condor"}
-                open={pane?.kind === "agent"}
-                onOpen={() =>
-                  setPane((p) =>
-                    p?.kind === "agent" ? null : { kind: "agent" },
-                  )
-                }
-              />
-            }
             // A routine launched from the dock's library is this
             // conversation's: it runs on the server the chat is talking to,
             // reports back into it, and is filed under whoever is answering.

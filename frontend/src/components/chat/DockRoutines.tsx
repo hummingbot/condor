@@ -288,7 +288,6 @@ export function RoutineLibrarySheet({
   scope,
   onScopeChange,
   onSelectRoutine,
-  dockOpen,
   agentName,
   runContext,
   onClose,
@@ -300,8 +299,6 @@ export function RoutineLibrarySheet({
   scope: RoutineScope;
   onScopeChange: (next: RoutineScope) => void;
   onSelectRoutine: (name: string) => void;
-  /** Whether the dock's scope select is on screen — if not, this bar carries it. */
-  dockOpen: boolean;
   /** Who is answering, for the bar's accessible name with nothing picked yet. */
   agentName?: string;
   runContext?: RoutineRunContext;
@@ -318,7 +315,7 @@ export function RoutineLibrarySheet({
             ? `Every routine ${agentName} can run`
             : "Routines"
       }
-      header={({ zen }) => (
+      header={
         <RoutinePicker
           variant="inline"
           routines={routines}
@@ -327,13 +324,15 @@ export function RoutineLibrarySheet({
           onScopeChange={onScopeChange}
           source={library.source}
           onSelect={onSelectRoutine}
-          // The scope is the dock's question while the dock is on screen; full
-          // screen the sheet covers it, and a collapsed dock has none to cover,
-          // so it is asked here instead of nowhere.
-          parts={zen || !dockOpen ? "both" : "routine"}
+          // Both halves of the question, always: whose routines this lists and
+          // which one of them is open. The pair used to be split with the dock,
+          // which meant the scope disappeared whenever the column or its
+          // Routines section was folded — a filter you had to go and re-open
+          // something else to reach. It belongs over the list it filters.
+          parts="both"
           arrows
         />
-      )}
+      }
       onClose={onClose}
       bleed
       // Below `xl` there is no pane, so this is today's full-screen browser.
