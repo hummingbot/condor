@@ -6,9 +6,9 @@ import { useRates } from "@/hooks/useRates";
 import { api, type ConsolidatedPosition } from "@/lib/api";
 import { candleChannelKey, candleStore } from "@/lib/candle-store";
 import type { ChartLineSlot, ExtraLine, PickSlot } from "@/components/executor/types";
-import { getExecutorColor, type ExecutorOverlay } from "@/lib/executor-overlays";
-import { getThemeColors, pnlHexColor, sideColor } from "@/lib/theme-colors";
-import { escapeHtml, formatPriceSig, roundToPricePrecision } from "@/lib/formatters";
+import { getExecutorColor, renderOverlayTooltipHtml, type ExecutorOverlay } from "@/lib/executor-overlays";
+import { getThemeColors, pnlHexColor } from "@/lib/theme-colors";
+import { roundToPricePrecision } from "@/lib/formatters";
 import { createDragHitPrimitive, type DragTarget } from "./priceLineDrag";
 import { usePriceLineDrag } from "./usePriceLineDrag";
 
@@ -416,93 +416,10 @@ export function TradeChart({
           return;
         }
 
-        const o = bestOverlay;
-        const pnlClr = pnlHexColor(o.pnl);
-        const cvtPnl = convertPnlRef.current;
-        const cvtVal = convertValueRef.current;
-        const pnlStr = cvtPnl(o.pnl);
-        const pctStr = o.pnlPct !== 0 ? `${o.pnlPct > 0 ? "+" : ""}${(o.pnlPct * 100).toFixed(2)}%` : "";
-        const volStr = cvtVal(o.volume);
-        const feesStr = o.fees ? cvtVal(o.fees) : "";
-
-        // An LP position has no direction -- it is `RANGE` -- and the buy/sell
-        // normalization files everything that is not a buy under "sell", which
-        // labelled a live two-sided range position `SELL`. Neutral for that type.
-        const isRangeSide = o.type === "lp";
-        const sideLabel = isRangeSide ? "range" : o.side;
-        const sideClr = isRangeSide ? "#9ca3af" : sideColor(o.side);
-        const sideBg = isRangeSide
-          ? "rgba(156,163,175,0.15)"
-          : o.side === "buy"
-            ? "rgba(34,197,94,0.15)"
-            : "rgba(239,68,68,0.15)";
-        const statusBg = o.status?.toLowerCase() === "running" || o.status?.toLowerCase() === "active"
-          ? "rgba(34,197,94,0.15)" : "rgba(156,163,175,0.15)";
-        const statusClr = o.status?.toLowerCase() === "running" || o.status?.toLowerCase() === "active"
-          ? getThemeColors().green : "#9ca3af";
-
-        // Build config detail rows
-        const cfg = o.config || {};
-        const tripleBarrier: Record<string, unknown> = (() => {
-          const raw = cfg.triple_barrier_config;
-          if (!raw) return {};
-          if (typeof raw === "string") { try { return JSON.parse(raw); } catch { return {}; } }
-          return typeof raw === "object" ? (raw as Record<string, unknown>) : {};
-        })();
-
-        let detailRows = "";
-        const addRow = (label: string, value: string, color?: string) => {
-          detailRows += `<div style="display:flex;justify-content:space-between;gap:12px"><span style="color:#6b7994">${escapeHtml(label)}</span><span style="font-family:monospace;${color ? `color:${color}` : ""}">${escapeHtml(value)}</span></div>`;
-        };
-
-        // Range-box details. Any executor drawn as a box describes itself by its
-        // bounds, not by an entry→exit pair; only the labels differ per type.
-        if (o.gridBox) {
-          if (o.type === "lp") {
-            // startPrice is the box's upper edge (see computeLpOverlay).
-            addRow("Upper Price", formatPriceSig(o.gridBox.startPrice));
-            addRow("Lower Price", formatPriceSig(o.gridBox.endPrice));
-            if (cfg.lp_provider != null) addRow("Provider", String(cfg.lp_provider));
-          } else {
-            addRow("Start Price", formatPriceSig(o.gridBox.startPrice));
-            addRow("End Price", formatPriceSig(o.gridBox.endPrice));
-            if (o.gridBox.limitPrice) addRow("Limit Price", formatPriceSig(o.gridBox.limitPrice));
-          }
-        } else if (o.entryPrice && o.entryPrice > 0) {
-          addRow("Entry", formatPriceSig(o.entryPrice));
-          if (o.exitPrice && o.exitPrice > 0 && o.exitPrice !== o.entryPrice) {
-            addRow(o.status?.toLowerCase() === "running" ? "Current" : "Close", formatPriceSig(o.exitPrice));
-          }
-        }
-
-        if (cfg.leverage != null && Number(cfg.leverage) > 1) addRow("Leverage", `${cfg.leverage}x`);
-        if (cfg.total_amount_quote != null) addRow("Amount", cvtVal(Number(cfg.total_amount_quote)));
-        else if (cfg.amount != null && Number(cfg.amount) > 0) addRow("Amount", String(cfg.amount));
-
-        const tp = Number(tripleBarrier.take_profit || cfg.take_profit);
-        if (tp > 0 && tp !== -1) addRow("Take Profit", `${(tp * 100).toFixed(2)}%`, getThemeColors().green);
-        const sl = Number(cfg.stop_loss);
-        if (sl > 0 && sl !== -1) addRow("Stop Loss", `${(sl * 100).toFixed(2)}%`, getThemeColors().red);
-        if (cfg.keep_position != null) addRow("Keep Position", String(cfg.keep_position) === "true" ? "Yes" : "No");
-
-        tooltip.innerHTML = `
-          <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
-            <span style="font-weight:700;font-size:12px;font-family:monospace">${escapeHtml(o.executorId.slice(0, 10))}\u2026</span>
-            <span style="background:${sideBg};color:${sideClr};font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;text-transform:uppercase">${escapeHtml(sideLabel)}</span>
-            <span style="background:${statusBg};color:${statusClr};font-size:9px;font-weight:600;padding:1px 5px;border-radius:3px">${escapeHtml(o.status)}</span>
-          </div>
-          <div style="display:flex;align-items:center;gap:4px;margin-bottom:2px">
-            <span style="background:rgba(255,255,255,0.06);padding:1px 5px;border-radius:3px;font-size:10px;border:1px solid rgba(255,255,255,0.08)">${escapeHtml(o.type.toUpperCase())}</span>
-            ${o.closeType ? `<span style="font-size:10px;color:#6b7994">${escapeHtml(o.closeType)}</span>` : ""}
-          </div>
-          <div style="border-top:1px solid rgba(255,255,255,0.08);margin:6px 0;padding-top:6px;display:grid;grid-template-columns:1fr 1fr;gap:4px 16px">
-            <div><div style="color:#6b7994;font-size:9px;text-transform:uppercase;margin-bottom:1px">Net PnL</div><div style="font-weight:600;font-size:13px;color:${pnlClr};font-family:monospace">${pnlStr}</div></div>
-            <div><div style="color:#6b7994;font-size:9px;text-transform:uppercase;margin-bottom:1px">PnL %</div><div style="font-weight:600;font-size:13px;color:${pnlClr};font-family:monospace">${pctStr || "—"}</div></div>
-            <div><div style="color:#6b7994;font-size:9px;text-transform:uppercase;margin-bottom:1px">Volume</div><div style="font-family:monospace;font-size:11px">${volStr}</div></div>
-            <div><div style="color:#6b7994;font-size:9px;text-transform:uppercase;margin-bottom:1px">Fees</div><div style="font-family:monospace;font-size:11px">${feesStr || "—"}</div></div>
-          </div>
-          ${detailRows ? `<div style="border-top:1px solid rgba(255,255,255,0.08);margin-top:4px;padding-top:6px;font-size:11px;display:flex;flex-direction:column;gap:3px">${detailRows}</div>` : ""}
-        `;
+        tooltip.innerHTML = renderOverlayTooltipHtml(bestOverlay, {
+          formatValue: convertValueRef.current,
+          formatPnl: convertPnlRef.current,
+        });
         tooltip.style.display = "block";
 
         // Position tooltip using viewport-fixed coords (rendered via portal)

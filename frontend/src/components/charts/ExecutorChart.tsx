@@ -3,18 +3,20 @@ import { createPortal } from "react-dom";
 import { useQuery } from "@tanstack/react-query";
 
 import { PairLabel } from "@/components/executor/PairLabel";
+import { useRates } from "@/hooks/useRates";
 import { api, type ExecutorInfo } from "@/lib/api";
 import {
   computeMultiOverlays,
   getExecutorColor,
   getOverlayTimeRange,
   getPoolAddress,
+  renderOverlayTooltipHtml,
   type ExecutorOverlay,
 } from "@/lib/executor-overlays";
-import { escapeHtml, formatCompactUsd, tsToSeconds } from "@/lib/formatters";
+import { tsToSeconds } from "@/lib/formatters";
 import { geckoIntervalForSpan } from "@/lib/gecko-candles";
 import { candlesQuery } from "@/lib/queryClient";
-import { getThemeColors, pnlHexColor, sideColor } from "@/lib/theme-colors";
+import { getThemeColors } from "@/lib/theme-colors";
 
 export interface SnapshotBubble {
   tick: number;
@@ -78,6 +80,19 @@ export function ExecutorChart({
   const overlaysRef = useRef<ExecutorOverlay[]>([]);
   const initializedRef = useRef(false);
   const [chartReady, setChartReady] = useState(false);
+
+  // The hover card spells its amounts in the reader's display currency, the
+  // same as the trade chart's (ARCH-207) — the quote asset comes from the pair
+  // this chart is already drawing, so nothing new is threaded in from callers.
+  // The refs keep the imperative lightweight-charts crosshair callback reading
+  // the current formatters without being re-subscribed on every rate tick.
+  const quoteCurrency = tradingPair.split("-")[1] || "USDT";
+  const quoteCurrencies = useMemo(() => [quoteCurrency], [quoteCurrency]);
+  const { formatPnlValue, formatValue } = useRates(quoteCurrencies);
+  const convertValueRef = useRef<(val: number) => string>(() => "");
+  const convertPnlRef = useRef<(val: number) => string>(() => "");
+  convertValueRef.current = (val: number) => formatValue(val, quoteCurrency);
+  convertPnlRef.current = (val: number) => formatPnlValue(val, quoteCurrency);
 
   // Compute overlays
   const overlays = useMemo(() => computeMultiOverlays(executors), [executors]);
@@ -232,83 +247,10 @@ export function ExecutorChart({
           return;
         }
 
-        const o = bestOverlay;
-        // Read theme colors for tooltip content
-        const cs = getComputedStyle(document.documentElement);
-        const textMuted = cs.getPropertyValue("--color-text-muted").trim() || "#6b7994";
-        const textColor = cs.getPropertyValue("--color-text").trim() || "#e2e8f0";
-        const borderColor = cs.getPropertyValue("--color-border").trim() || "#1c2541";
-
-        const pnlClr = pnlHexColor(o.pnl);
-        const pnlSign = o.pnl >= 0 ? "+" : "";
-        const pnlStr = Math.abs(o.pnl) >= 1000 ? `${pnlSign}$${(o.pnl / 1000).toFixed(1)}K` : `${pnlSign}$${o.pnl.toFixed(2)}`;
-        const pctStr = o.pnlPct !== 0 ? `${o.pnlPct > 0 ? "+" : ""}${(o.pnlPct * 100).toFixed(2)}%` : "";
-        const volStr = Math.abs(o.volume) >= 1000 ? `$${(o.volume / 1000).toFixed(1)}K` : `$${o.volume.toFixed(0)}`;
-        const feesStr = o.fees ? `$${o.fees.toFixed(2)}` : "";
-
-        const sideClr = sideColor(o.side);
-        const sideBg = o.side === "buy" ? "rgba(34,197,94,0.15)" : "rgba(239,68,68,0.15)";
-        const statusBg = isActive(o.status) ? "rgba(34,197,94,0.15)" : "rgba(156,163,175,0.15)";
-        const statusClr = isActive(o.status) ? getThemeColors().green : textMuted;
-
-        // Build config detail rows
-        const cfg = o.config || {};
-        const tripleBarrier: Record<string, unknown> = (() => {
-          const raw = cfg.triple_barrier_config;
-          if (!raw) return {};
-          if (typeof raw === "string") { try { return JSON.parse(raw); } catch { return {}; } }
-          return typeof raw === "object" ? (raw as Record<string, unknown>) : {};
-        })();
-
-        let detailRows = "";
-        const fmtPrice = (p: number) => {
-          if (p === 0) return "—";
-          if (Math.abs(p) >= 1000) return p.toFixed(2);
-          if (Math.abs(p) >= 1) return p.toFixed(4);
-          return p.toPrecision(6);
-        };
-        const addRow = (label: string, value: string, color?: string) => {
-          detailRows += `<div style="display:flex;justify-content:space-between;gap:12px"><span style="color:${textMuted}">${escapeHtml(label)}</span><span style="font-family:monospace;${color ? `color:${color}` : `color:${textColor}`}">${escapeHtml(value)}</span></div>`;
-        };
-
-        if (o.type === "grid" && o.gridBox) {
-          addRow("Start Price", fmtPrice(o.gridBox.startPrice));
-          addRow("End Price", fmtPrice(o.gridBox.endPrice));
-          if (o.gridBox.limitPrice) addRow("Limit Price", fmtPrice(o.gridBox.limitPrice));
-        } else if (o.segment) {
-          addRow("Entry", fmtPrice(o.segment.entryPrice));
-          if (o.segment.exitPrice > 0 && o.segment.exitPrice !== o.segment.entryPrice) {
-            addRow(isActive(o.status) ? "Current" : "Close", fmtPrice(o.segment.exitPrice));
-          }
-        }
-
-        if (cfg.leverage != null && Number(cfg.leverage) > 1) addRow("Leverage", `${cfg.leverage}x`);
-        if (cfg.total_amount_quote != null) addRow("Amount", formatCompactUsd(Number(cfg.total_amount_quote)));
-        else if (cfg.amount != null && Number(cfg.amount) > 0) addRow("Amount", String(cfg.amount));
-
-        const tp = Number(tripleBarrier.take_profit || cfg.take_profit);
-        if (tp > 0 && tp !== -1) addRow("Take Profit", `${(tp * 100).toFixed(2)}%`, getThemeColors().green);
-        const sl = Number(cfg.stop_loss);
-        if (sl > 0 && sl !== -1) addRow("Stop Loss", `${(sl * 100).toFixed(2)}%`, getThemeColors().red);
-
-        tooltip.innerHTML = `
-          <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
-            <span style="font-weight:700;font-size:12px;font-family:monospace;color:${textColor}">${escapeHtml(o.executorId.slice(0, 10))}\u2026</span>
-            <span style="background:${sideBg};color:${sideClr};font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;text-transform:uppercase">${escapeHtml(o.side)}</span>
-            <span style="background:${statusBg};color:${statusClr};font-size:9px;font-weight:600;padding:1px 5px;border-radius:3px">${escapeHtml(o.status)}</span>
-          </div>
-          <div style="display:flex;align-items:center;gap:4px;margin-bottom:2px">
-            <span style="background:${borderColor};padding:1px 5px;border-radius:3px;font-size:10px;border:1px solid ${borderColor};color:${textColor}">${escapeHtml(o.type.toUpperCase())}</span>
-            ${o.closeType ? `<span style="font-size:10px;color:${textMuted}">${escapeHtml(o.closeType)}</span>` : ""}
-          </div>
-          <div style="border-top:1px solid ${borderColor};margin:6px 0;padding-top:6px;display:grid;grid-template-columns:1fr 1fr;gap:4px 16px">
-            <div><div style="color:${textMuted};font-size:9px;text-transform:uppercase;margin-bottom:1px">Net PnL</div><div style="font-weight:600;font-size:13px;color:${pnlClr};font-family:monospace">${pnlStr}</div></div>
-            <div><div style="color:${textMuted};font-size:9px;text-transform:uppercase;margin-bottom:1px">PnL %</div><div style="font-weight:600;font-size:13px;color:${pnlClr};font-family:monospace">${pctStr || "—"}</div></div>
-            <div><div style="color:${textMuted};font-size:9px;text-transform:uppercase;margin-bottom:1px">Volume</div><div style="font-family:monospace;font-size:11px;color:${textColor}">${volStr}</div></div>
-            <div><div style="color:${textMuted};font-size:9px;text-transform:uppercase;margin-bottom:1px">Fees</div><div style="font-family:monospace;font-size:11px;color:${textColor}">${feesStr || "—"}</div></div>
-          </div>
-          ${detailRows ? `<div style="border-top:1px solid ${borderColor};margin-top:4px;padding-top:6px;font-size:11px;display:flex;flex-direction:column;gap:3px">${detailRows}</div>` : ""}
-        `;
+        tooltip.innerHTML = renderOverlayTooltipHtml(bestOverlay, {
+          formatValue: convertValueRef.current,
+          formatPnl: convertPnlRef.current,
+        });
         tooltip.style.display = "block";
 
         // Position tooltip on opposite side of cursor (fixed/viewport coords)
@@ -735,10 +677,7 @@ export function ExecutorChart({
                   const wrapper = wrapperRef.current;
                   if (!tip || !wrapper) return;
 
-                  const cs = getComputedStyle(document.documentElement);
-                  const muted = cs.getPropertyValue("--color-text-muted").trim() || "#6b7994";
-                  const txt = cs.getPropertyValue("--color-text").trim() || "#e2e8f0";
-                  const bdr = cs.getPropertyValue("--color-border").trim() || "#1c2541";
+                  const { textMuted: muted, border: bdr } = getThemeColors();
 
                   const preview = snap.agentResponse
                     ? snap.agentResponse.length > 280
@@ -754,7 +693,7 @@ export function ExecutorChart({
                       <span style="background:rgba(139,92,246,0.15);color:#a78bfa;font-size:10px;font-weight:700;padding:1px 6px;border-radius:3px">TICK #${snap.tick}</span>
                       <span style="font-size:10px;color:${muted}">${snap.timestamp}</span>
                     </div>
-                    <div style="font-size:11px;line-height:1.5;color:${txt};white-space:pre-wrap;word-break:break-word">${preview.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</div>
+                    <div style="font-size:11px;line-height:1.5;white-space:pre-wrap;word-break:break-word">${preview.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</div>
                     ${toolLine}
                     <div style="margin-top:6px;font-size:9px;color:${muted};border-top:1px solid ${bdr};padding-top:4px">Click to view full snapshot</div>
                   `;
