@@ -22,7 +22,8 @@ import { formatConnectorName } from "@/lib/formatters";
  * by a word above them — the credentialed venues read at full strength and the
  * rest are dimmed behind a hard rule — because the header scrolls away long
  * before the list does. A group with no members is not headed at all: on a
- * server where every venue is credentialed the rail looks like one plain list.
+ * server where every venue is credentialed the rail looks like one plain list,
+ * and the rail's top-left corner is its first venue rather than a header.
  */
 interface VenueRailProps {
   connectors: string[];
@@ -62,17 +63,16 @@ export function VenueRail({
 
   return (
     <div className="flex w-44 shrink-0 flex-col border-r border-[var(--color-border)]">
-      {/* An empty band, not a label: the rail names itself by what is in it.
-          It is here to hold the search field opposite on the same line as the
-          rail's first venue. */}
-      <div
-        aria-hidden
-        className="h-10 shrink-0 border-b border-[var(--color-border)] bg-[var(--color-surface)]"
-      />
+      {/* No spacer band above the list. The rail used to reserve the search
+          field's height so its first venue sat level with the table's first
+          row, which cost the panel an empty rectangle in its top-left corner —
+          the one place a reader's eye lands first. The list starts at the top
+          instead: the group header takes that corner, and the venues still line
+          up with rows, one header's height further down. */}
       <div
         role="listbox"
         aria-label="Exchange"
-        className="min-h-0 flex-1 overflow-y-auto pb-2"
+        className="min-h-0 flex-1 overflow-y-auto pb-2 pt-1"
       >
         <VenueGroup
           label="Your accounts"
