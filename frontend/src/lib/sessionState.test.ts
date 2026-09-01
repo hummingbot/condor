@@ -18,6 +18,7 @@ import {
   clearSessionState,
   DOCK_WIDTH_KEY,
   PANE_FRAC_KEY,
+  PANE_FRAC_TUNE_KEY,
   PNL_HIDDEN_SERIES_KEY,
   POSITIONS_BAND_KEY,
 } from "@/lib/sessionState";
@@ -52,6 +53,7 @@ const DEVICE = [
   // that only ever appeared at its writer cannot slip past this list (ARCH-291).
   DOCK_WIDTH_KEY,
   PANE_FRAC_KEY,
+  PANE_FRAC_TUNE_KEY,
   CHAT_RAIL_OPEN_KEY,
 ];
 

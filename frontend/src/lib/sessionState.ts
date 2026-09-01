@@ -106,6 +106,19 @@ export const DOCK_WIDTH_KEY = "condor.dock.width";
 export const PANE_FRAC_KEY = "condor_pane_frac";
 
 /**
+ * The same split, for a pane that is *worked in* rather than read — the agent
+ * panel (see `PANE_PROFILES` in `WorkspacePane`).
+ *
+ * A second key rather than a second reading of the first: a report wants more
+ * of the row than the transcript and a workbench wants an even half, so one
+ * stored number would have each kind of pane inheriting the width the reader
+ * chose for the other.
+ *
+ * KEPT, for the reason above it.
+ */
+export const PANE_FRAC_TUNE_KEY = "condor_pane_frac:tune";
+
+/**
  * Whether the conversation rail is a column or a strip of icons (ARCH-291).
  *
  * KEPT: a disclosure that is open or shut is a fact about this window, and the

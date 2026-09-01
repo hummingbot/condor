@@ -1,5 +1,14 @@
 import { createContext, useContext } from "react";
 
+/**
+ * What kind of thing is in the pane — see `PANE_PROFILES` in `WorkspacePane`.
+ *
+ * `read` is content you read (a report, a delegation's result); `tune` is a
+ * surface you work in with one eye on the chat beside it (the agent panel).
+ * The two open at different splits and remember their own.
+ */
+export type PaneProfile = "read" | "tune";
+
 export type WorkspacePane = {
   /** Where a split sheet portals its body. */
   host: HTMLElement | null;
@@ -9,8 +18,11 @@ export type WorkspacePane = {
    *
    * The first claim wins and later ones are refused, which is what keeps two
    * sheets from portalling into the one `aside` and stacking.
+   *
+   * `kind` is what the claimant is, which is what decides the split it opens
+   * at — a report and a workbench want different halves of the row.
    */
-  claim: (token: string) => () => void;
+  claim: (token: string, kind?: PaneProfile) => () => void;
   /** Who is in the pane right now, or `null` — see {@link WorkspaceSheet}. */
   holder: string | null;
   /** Something is in the pane right now. */
@@ -20,6 +32,8 @@ export type WorkspacePane = {
   /** Share of the chat+pane row the pane takes, 0..1. */
   frac: number;
   setFrac: (f: number) => void;
+  /** The current occupant's opening split, which the handle resets to. */
+  defaultFrac: number;
 };
 
 /** Provided by `WorkspacePaneProvider`; absent on every other surface. */

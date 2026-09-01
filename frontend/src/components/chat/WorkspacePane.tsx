@@ -4,9 +4,10 @@ import { useResizeDrag } from "@/hooks/useResizeDrag";
 import {
   useWorkspacePane,
   WorkspacePaneContext,
+  type PaneProfile,
   type WorkspacePane,
 } from "@/hooks/useWorkspacePane";
-import { PANE_FRAC_KEY } from "@/lib/sessionState";
+import { PANE_FRAC_KEY, PANE_FRAC_TUNE_KEY } from "@/lib/sessionState";
 
 /**
  * Below this the workspace has no room for another column, so a sheet keeps its
@@ -23,14 +24,27 @@ import { PANE_FRAC_KEY } from "@/lib/sessionState";
 const WIDE = "(min-width: 1280px)";
 
 /**
- * Opening split, and what a double-click on the handle returns to.
+ * Opening split, and what a double-click on the handle returns to — one per
+ * kind of occupant, because the two want different halves of the row.
  *
- * Wider than the chat beside it, because what lands in the pane is a page — a
- * report laid out for a page's width, inside a browser that is itself two
- * columns — while the transcript is capped at `max-w-3xl` anyway, so width past
- * its measure becomes margin rather than text.
+ * `read` is a page: a report laid out for a page's width, inside a browser that
+ * is itself two columns, while the transcript is capped at `max-w-3xl` anyway,
+ * so width past its measure becomes margin rather than text. It gets the larger
+ * share.
+ *
+ * `tune` is a workbench you keep one hand on — the agent panel, which you open
+ * to change one thing and read the answer beside it. Two thirds of the row left
+ * the conversation it is meant to be read against at its 360px floor, which is
+ * a column of five-word lines. An even split is the honest default when both
+ * sides are being used at once.
+ *
+ * Each remembers the reader's own drag under its own key: one stored number
+ * would have a report's width become the panel's, and back again.
  */
-const DEFAULT_FRAC = 0.62;
+const PANE_PROFILES: Record<PaneProfile, { key: string; frac: number }> = {
+  read: { key: PANE_FRAC_KEY, frac: 0.62 },
+  tune: { key: PANE_FRAC_TUNE_KEY, frac: 0.5 },
+};
 
 /**
  * The envelope a fraction may take, whatever the window does.
@@ -46,17 +60,18 @@ const MAX_FRAC = 0.75;
 const MIN_PANE_PX = 400;
 const MIN_CHAT_PX = 360;
 
-function clampFrac(f: number) {
-  if (!Number.isFinite(f)) return DEFAULT_FRAC;
+function clampFrac(f: number, profile: PaneProfile) {
+  if (!Number.isFinite(f)) return PANE_PROFILES[profile].frac;
   return Math.max(MIN_FRAC, Math.min(MAX_FRAC, f));
 }
 
-function readFrac(): number {
+function readFrac(profile: PaneProfile): number {
+  const { key, frac } = PANE_PROFILES[profile];
   try {
-    const stored = localStorage.getItem(PANE_FRAC_KEY);
-    return stored === null ? DEFAULT_FRAC : clampFrac(parseFloat(stored));
+    const stored = localStorage.getItem(key);
+    return stored === null ? frac : clampFrac(parseFloat(stored), profile);
   } catch {
-    return DEFAULT_FRAC;
+    return frac;
   }
 }
 
@@ -81,7 +96,13 @@ export function WorkspacePaneProvider({
   const [host, setHost] = useState<HTMLElement | null>(null);
   const [holder, setHolder] = useState<string | null>(null);
   const [wide, setWide] = useState(() => window.matchMedia(WIDE).matches);
-  const [frac, setFracState] = useState(readFrac);
+  /** Which kind of pane the split is currently about — see `PANE_PROFILES`. */
+  const [profile, setProfile] = useState<PaneProfile>("read");
+  const [fracs, setFracs] = useState(() => ({
+    read: readFrac("read"),
+    tune: readFrac("tune"),
+  }));
+  const frac = fracs[profile];
 
   useEffect(() => {
     const mq = window.matchMedia(WIDE);
@@ -92,13 +113,17 @@ export function WorkspacePaneProvider({
 
   useEffect(() => {
     try {
-      localStorage.setItem(PANE_FRAC_KEY, String(frac));
+      localStorage.setItem(PANE_PROFILES[profile].key, String(frac));
     } catch {
       /* private mode; the split just lasts the session */
     }
-  }, [frac]);
+  }, [profile, frac]);
 
-  const setFrac = useCallback((f: number) => setFracState(clampFrac(f)), []);
+  const setFrac = useCallback(
+    (f: number) =>
+      setFracs((prev) => ({ ...prev, [profile]: clampFrac(f, profile) })),
+    [profile],
+  );
 
   /**
    * Who has the pane.
@@ -108,8 +133,13 @@ export function WorkspacePaneProvider({
    * the holder lets a sheet read, in its own render, whether the pane is
    * already someone else's and stay the overlay it is below `xl` if so.
    */
-  const claim = useCallback((token: string) => {
+  const claim = useCallback((token: string, kind: PaneProfile = "read") => {
     setHolder((h) => h ?? token);
+    // The occupant's kind travels with the claim, so the split it opens at is
+    // the one that kind was measured for. Only the sheet that is actually
+    // splitting ever claims — a refused sheet is an overlay and never gets
+    // here — so this cannot be some other pane's profile.
+    setProfile(kind);
     return () => setHolder((h) => (h === token ? null : h));
   }, []);
 
@@ -123,8 +153,9 @@ export function WorkspacePaneProvider({
       canSplit: wide,
       frac,
       setFrac,
+      defaultFrac: PANE_PROFILES[profile].frac,
     }),
-    [host, claim, holder, wide, frac, setFrac],
+    [host, claim, holder, wide, frac, setFrac, profile],
   );
 
   return (
@@ -150,9 +181,12 @@ export function WorkspacePaneProvider({
 function PaneResizeHandle({
   frac,
   setFrac,
+  defaultFrac,
 }: {
   frac: number;
   setFrac: (f: number) => void;
+  /** What a double-click returns to — the opening split of whoever is in. */
+  defaultFrac: number;
 }) {
   const geom = useRef({ rowRight: 0, avail: 1 });
 
@@ -200,7 +234,7 @@ function PaneResizeHandle({
       tabIndex={0}
       onMouseDown={onMouseDown}
       onKeyDown={onKeyDown}
-      onDoubleClick={() => setFrac(DEFAULT_FRAC)}
+      onDoubleClick={() => setFrac(defaultFrac)}
       title="Drag to resize — double-click to reset"
       className={`w-1.5 shrink-0 cursor-col-resize transition-colors hover:bg-[var(--color-primary)]/30 focus:outline-none focus-visible:bg-[var(--color-primary)]/30 ${
         isDragging ? "bg-[var(--color-primary)]/30" : ""
@@ -222,10 +256,16 @@ export function WorkspacePaneOutlet() {
   if (!pane) return null;
   // Destructured, not read through `pane` in the JSX: the ref lint rule reads
   // any member of an object whose property is passed as `ref` as a ref itself.
-  const { setHost, open, frac, setFrac } = pane;
+  const { setHost, open, frac, setFrac, defaultFrac } = pane;
   return (
     <>
-      {open && <PaneResizeHandle frac={frac} setFrac={setFrac} />}
+      {open && (
+        <PaneResizeHandle
+          frac={frac}
+          setFrac={setFrac}
+          defaultFrac={defaultFrac}
+        />
+      )}
       <aside
         ref={setHost}
         aria-label="Workspace pane"

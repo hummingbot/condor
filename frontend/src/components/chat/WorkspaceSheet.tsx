@@ -3,7 +3,7 @@ import { useEffect, useId, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { WORKSPACE_BAR } from "@/components/chat/workspaceBar";
-import { useWorkspacePane } from "@/hooks/useWorkspacePane";
+import { useWorkspacePane, type PaneProfile } from "@/hooks/useWorkspacePane";
 import { useEscapeKey } from "@/hooks/useEscapeKey";
 
 /** Remembers the last zen choice, so a reader who wants the whole window keeps it. */
@@ -39,6 +39,7 @@ export function WorkspaceSheet({
   bleed = false,
   defaultZen = false,
   fullscreen = true,
+  paneProfile = "read",
   children,
 }: {
   title: string;
@@ -83,6 +84,14 @@ export function WorkspaceSheet({
    * only outcome is losing the chat. The pane is the room it needs.
    */
   fullscreen?: boolean;
+  /**
+   * How much of the row this sheet wants when it opens in the pane.
+   *
+   * `"read"` for content laid out to be read at a page's width; `"tune"` for a
+   * surface worked in with the conversation live beside it, which opens at an
+   * even split. See `PANE_PROFILES` in {@link WorkspacePaneProvider}.
+   */
+  paneProfile?: PaneProfile;
   children: React.ReactNode;
 }) {
   const pane = useWorkspacePane();
@@ -110,8 +119,8 @@ export function WorkspaceSheet({
   const claim = pane?.claim;
   useEffect(() => {
     if (!split || !claim) return;
-    return claim(token);
-  }, [split, claim, token]);
+    return claim(token, paneProfile);
+  }, [split, claim, token, paneProfile]);
 
   // Esc closes, as it does for every overlay here. Not in the pane, though: the
   // chat beside it is live and Esc belongs to whatever has focus there.

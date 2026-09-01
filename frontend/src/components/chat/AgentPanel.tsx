@@ -29,12 +29,15 @@ import type {
  * opens it — the button is a verb and a door, and the panel is on screen for
  * exactly as long as anyone is thinking about what this agent is made of.
  *
- * It takes the pane and nothing more: no full screen, because this is a panel
- * you work in while glancing back at the conversation, and a full-screen
- * version of it is a second layout to maintain for a gesture whose only outcome
- * is losing the chat. The flanks fold away while it is up, as they do for a
- * report; the door back out is the pressed Tune button in the bar above, which
- * no amount of folding can take away.
+ * It takes half the pane row and nothing more: no full screen, because this is
+ * a panel you work in while glancing back at the conversation, and a
+ * full-screen version of it is a second layout to maintain for a gesture whose
+ * only outcome is losing the chat. Half rather than a report's two thirds for
+ * the same reason — a report is read and the chat behind it merely stays alive,
+ * while here both columns are being used in the same minute, and two thirds put
+ * the transcript on its 360px floor. The rail folds to a strip as it does for a
+ * report; the dock stays, and the door back out is the pressed Tune button in
+ * the bar above.
  *
  * There is deliberately no door out to the agent's full page. Anything worth
  * doing to an agent should be worth doing here, next to the conversation that
@@ -108,6 +111,10 @@ export function AgentPanel({
         // the conversation instead of over it — so the one gesture the button
         // offered was losing the chat it is meant to be read against.
         fullscreen={false}
+        // An even split, not a report's two thirds: both sides of this seam are
+        // in use at once — you change something here and read what the agent
+        // says about it there — so neither gets to be the margin of the other.
+        paneProfile="tune"
         bleed
       >
         <AgentKnowledge
