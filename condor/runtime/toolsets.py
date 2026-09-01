@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -112,6 +113,59 @@ def seat_profile(agent_slug: str | None, tick: bool) -> str:
     return "agent" if agent_slug and agent_slug != CHAT_SLUG else "full"
 
 
+def seat_tools(agent_slug: str | None, tick: bool = False) -> list[dict[str, Any]]:
+    """Every tool this seat mounts: ``{name, server, description, muted}``.
+
+    The question the brain panel asks, answered where the seat is already
+    described: :func:`seat_profile` picks the ring, the two ``profiles.py`` leaf
+    modules say which names are in it, and :func:`condor.memory.mutes.load_mutes`
+    says which of those the operator has switched off (FEAT-091).
+
+    Names come from ``mcp_servers.*.profiles`` rather than from the servers
+    themselves on purpose: importing either ``server.py`` parses argv and builds
+    a ``FastMCP`` singleton, neither of which a web request has any business
+    doing. ``server.py`` resolves the same names against its own functions at
+    import, so a table that drifts fails there, loudly, and not here.
+
+    ``muted`` is rendered, not filtered: the operator has to see the switch that
+    is off in order to switch it back on. What the *agent* gets is the rows with
+    ``muted`` false — the same shape the skill and routine catalogs already use.
+    """
+    from condor.memory.mutes import load_mutes
+    from mcp_servers.condor import profiles as condor_profiles
+    from mcp_servers.hummingbot_api import profiles as hummingbot_profiles
+
+    profile = seat_profile(agent_slug, tick)
+    muted = load_mutes(agent_slug)["tools"]
+    return [
+        {
+            "name": name,
+            "server": label,
+            "description": module.TOOL_DESCRIPTIONS.get(name, ""),
+            "muted": name in muted,
+        }
+        for label, module in (
+            ("condor", condor_profiles),
+            ("hummingbot", hummingbot_profiles),
+        )
+        for name in module.PROFILE_TOOLS[profile]
+    ]
+
+
+def _muted_tool_args(muted_tools: Sequence[str]) -> list[str]:
+    """``--mute-tools a,b,c`` — or nothing at all when nothing is muted.
+
+    Nothing on the line is the point: an install where no operator has switched
+    a tool off spawns byte-identical argv to before FEAT-091 existed, so the flag
+    can never be blamed for a session that behaves differently.
+
+    Both servers are handed the *same* list, and each ignores the names it does
+    not mount. A mute is one fact about one agent; splitting it per server would
+    give the spawner a second place to be wrong about which tool lives where.
+    """
+    return ["--mute-tools", ",".join(muted_tools)] if muted_tools else []
+
+
 def _condor_mcp_args(
     chat_id: int | str,
     user_id: int,
@@ -120,6 +174,7 @@ def _condor_mcp_args(
     delegate_worker: bool = False,
     profile: str = "full",
     session_key: str = "",
+    muted_tools: Sequence[str] = (),
 ) -> list[str]:
     """Build CLI args for the condor MCP subprocess.
 
@@ -159,11 +214,15 @@ def _condor_mcp_args(
     if session_key:
         args.extend(["--session-key", str(session_key)])
     args.extend(["--profile", profile])
+    args.extend(_muted_tool_args(muted_tools))
     return args
 
 
 def _hummingbot_mcp_args(
-    server: dict[str, Any], server_name: str, profile: str = "full"
+    server: dict[str, Any],
+    server_name: str,
+    profile: str = "full",
+    muted_tools: Sequence[str] = (),
 ) -> list[str]:
     """Build CLI args for the hummingbot MCP subprocess.
 
@@ -174,18 +233,22 @@ def _hummingbot_mcp_args(
     non-string args when starting LM Studio / other local-model sessions.
     """
     api_url = f"http://{server['host']}:{server['port']}"
-    return [
-        "run",
-        "python",
-        "-m",
-        "mcp_servers.hummingbot_api",
-        "--url",
-        api_url,
-        "--server-name",
-        str(server_name),
-        "--profile",
-        profile,
-    ] + _bot_id_args()
+    return (
+        [
+            "run",
+            "python",
+            "-m",
+            "mcp_servers.hummingbot_api",
+            "--url",
+            api_url,
+            "--server-name",
+            str(server_name),
+            "--profile",
+            profile,
+        ]
+        + _muted_tool_args(muted_tools)
+        + _bot_id_args()
+    )
 
 
 def build_mcp_servers_for_session(
@@ -228,6 +291,7 @@ def build_mcp_servers_for_session(
     pass nothing, which is what keeps their provenance honestly empty. See
     :func:`_condor_mcp_args` for why it travels on argv.
     """
+    from condor.memory.mutes import load_mutes
     from config_manager import (
         ServerPermission,
         get_config_manager,
@@ -236,6 +300,11 @@ def build_mcp_servers_for_session(
 
     cm = get_config_manager()
     profile = seat_profile(agent_slug, tick)
+    # Read once, for both subprocesses: a mute is one fact about one agent, and
+    # reading the file twice is two answers to the same question. Sorted so the
+    # spawn line is stable between restarts, and empty for every agent nobody has
+    # curated — in which case neither builder puts a flag on the line at all.
+    muted_tools = sorted(load_mutes(agent_slug)["tools"])
 
     # Resolve which hummingbot server to use (explicit override > user
     # preferences). Every candidate is held to existence *and* reach, because
@@ -292,6 +361,7 @@ def build_mcp_servers_for_session(
             delegate_worker=delegate_worker,
             profile=profile,
             session_key=session_key,
+            muted_tools=muted_tools,
         ),
         "env": _env_entries(TELEGRAM_BOT_TOKEN=_bot_token()),
     }
@@ -322,7 +392,7 @@ def build_mcp_servers_for_session(
     mcp_hummingbot = {
         "name": "mcp-hummingbot",
         "command": "uv",
-        "args": _hummingbot_mcp_args(server, server_name, profile),
+        "args": _hummingbot_mcp_args(server, server_name, profile, muted_tools),
         "env": _env_entries(
             HUMMINGBOT_API_USERNAME=server["username"],
             HUMMINGBOT_API_PASSWORD=server["password"],

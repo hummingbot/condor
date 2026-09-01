@@ -4,12 +4,14 @@ Thin wrapper layer: tool registration + docstrings only.
 All business logic lives in mcp_servers.condor.tools.*
 """
 
+from collections.abc import Iterable
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
 from condor.telemetry import taps as telemetry_taps
 from mcp_servers.condor.middleware import handle_errors
+from mcp_servers.condor.profiles import PROFILE_TOOLS
 from mcp_servers.condor.settings import DEFAULT_TOOL_PROFILE, settings
 from mcp_servers.condor.tools import available_models as available_models_tool
 from mcp_servers.condor.tools import code as code_tool
@@ -1082,59 +1084,55 @@ async def trading_agent_journal_write(
 # session MOUNTS is the whole permission model, so which tools this process
 # registers is a security boundary — hence explicit registration below instead of
 # an ``@mcp.tool()`` decorator that fires for every seat at import.
+#
+# The rings themselves — which tool sits in which one, and why — moved to
+# ``profiles.py`` as plain name strings (FEAT-091), because the web process has
+# to read them to draw a switch per tool and cannot import *this* module to ask:
+# importing it parses argv and builds the ``FastMCP`` singleton. Here the names
+# are resolved back into functions, at import, which is what keeps the table and
+# the functions provably in step.
 
-#: Everything a session needs whoever is sitting in it: its own memory and
-#: playbooks, its routines, a scratch interpreter, the journal it writes each
-#: tick, and the peers it may consult. ``consult``/``delegate`` stay even in the
-#: narrowest profile — a peer consult and a background copy of oneself are
-#: designed behaviour, and a worker already has ``delegate(action="start")``
-#: refused in code rather than by omission.
-COMMON_TOOLS = (
-    consult,
-    delegate,
-    send_notification,
-    manage_routines,
-    run_code,
-    manage_servers,
-    manage_memory,
-    manage_skill,
-    trading_agent_journal_read,
-    trading_agent_journal_write,
-)
 
-#: Orchestration: who exists, what loops they own, and which instances are
-#: running. An *attended* specialist owns these — ``strategy_builder`` is a
-#: shared playbook every agent inherits, and it tells the agent to author its own
-#: strategy with ``manage_strategies``, pick a model from ``get_available_models``
-#: and launch itself with ``control_agent``. A tick is the one seat that must
-#: not: it is already running inside the very loop these tools start and stop,
-#: and nothing in a tick playbook reaches for them.
-ORCHESTRATION_TOOLS = (
-    manage_agents,
-    manage_strategies,
-    control_agent,
-    get_available_models,
-)
+def _resolve(name: str):
+    """The tool function ``name`` refers to — or a loud failure at import.
 
-#: profile name → the tools it registers. ``agent`` and ``full`` register the
-#: same set today, and the name is kept distinct on purpose: it is the seat axis
-#: the hummingbot server narrows (no Gateway config, no container control, no
-#: repointing the API server), and keeping one profile vocabulary across both
-#: servers means a seat is described once, in ``condor.runtime.toolsets``.
+    A name in ``profiles.PROFILE_TOOLS`` with nothing behind it is a rename that
+    only landed on one side. Failing the import is the whole point: the quiet
+    alternative is a seat that mounts one tool fewer than its table claims.
+    """
+    fn = globals().get(name)
+    if not callable(fn):
+        raise RuntimeError(
+            f"profiles.py names a tool this module does not define: {name!r}"
+        )
+    return fn
+
+
+#: profile name → the tools it registers, resolved from ``profiles.PROFILE_TOOLS``
+#: (which carries the prose on what each ring is for).
 TOOL_PROFILES: dict[str, tuple] = {
-    "tick": COMMON_TOOLS,
-    "agent": COMMON_TOOLS + ORCHESTRATION_TOOLS,
-    "full": COMMON_TOOLS + ORCHESTRATION_TOOLS,
+    profile: tuple(_resolve(name) for name in names)
+    for profile, names in PROFILE_TOOLS.items()
 }
 
 
-def register_tools(server: FastMCP, profile: str = DEFAULT_TOOL_PROFILE) -> None:
-    """Register this profile's tools on ``server``.
+def register_tools(
+    server: FastMCP,
+    profile: str = DEFAULT_TOOL_PROFILE,
+    muted: Iterable[str] = (),
+) -> None:
+    """Register this profile's tools on ``server``, minus the muted ones.
 
     Raises on an unknown profile rather than degrading to ``full``: the only
     spawner that passes the flag is ``condor.runtime.toolsets``, so a name that
     does not resolve is a bug there, and silently widening a seat is the one
     failure mode this feature exists to prevent.
+
+    ``muted`` is the operator's per-agent curation (FEAT-091), arriving on argv
+    as ``--mute-tools``. It only ever subtracts — ``mute ⊆ profile``, always —
+    and a name this profile never mounts is ignored rather than refused: seats
+    mount different rings, so "off here, never mounted there" is an ordinary
+    difference between seats and not a mistake to report.
     """
     try:
         tools = TOOL_PROFILES[profile]
@@ -1143,14 +1141,17 @@ def register_tools(server: FastMCP, profile: str = DEFAULT_TOOL_PROFILE) -> None
             f"Unknown tool profile {profile!r}; expected one of "
             f"{sorted(TOOL_PROFILES)}"
         ) from None
+    switched_off = set(muted)
     for fn in tools:
+        if fn.__name__ in switched_off:
+            continue
         server.tool()(fn)
 
 
 # Registration happens at import: ``mcp`` is a module-level singleton and the
-# profile is resolved from argv at import (settings), so the server object is
-# complete for anything that inspects it before startup.
-register_tools(mcp, settings.tool_profile)
+# profile and the mute list are resolved from argv at import (settings), so the
+# server object is complete for anything that inspects it before startup.
+register_tools(mcp, settings.tool_profile, settings.muted_tools)
 
 
 if __name__ == "__main__":

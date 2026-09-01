@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import sys
+from collections.abc import Iterable
 from typing import Any, Literal
 
 from mcp.server.fastmcp import FastMCP
@@ -22,6 +23,7 @@ from mcp_servers.hummingbot_api.formatters import (
 )
 from mcp_servers.hummingbot_api.hummingbot_client import hummingbot_client
 from mcp_servers.hummingbot_api.middleware import GATEWAY_LOG_HINT, handle_errors
+from mcp_servers.hummingbot_api.profiles import PROFILE_TOOLS
 from mcp_servers.hummingbot_api.schemas import (
     AMMRequest,
     CLMMRequest,
@@ -2192,81 +2194,54 @@ async def explore_geckoterminal(
 # registers is a security boundary — hence explicit registration below instead of
 # an ``@mcp.tool()`` decorator that fires for everyone at import.
 #
-# Read the tables as nested rings, narrowest first. Nothing here changes a tool's
-# behaviour; a seat simply cannot name what was never registered.
+# The rings themselves — which tool sits in which one, and why — moved to
+# ``profiles.py`` as plain name strings (FEAT-091), because the web process has
+# to read them to draw a switch per tool and cannot import *this* module to ask:
+# importing it parses argv and builds the ``FastMCP`` singleton. Here the names
+# are resolved back into functions, at import, which is what keeps the table and
+# the functions provably in step.
 
-#: The trading surface: everything an autonomous tick needs to read a market,
-#: size a position, run it and report on it. This is the whole surface minus the
-#: two rings below.
-TRADING_TOOLS = (
-    get_portfolio_overview,
-    set_account_position_mode_and_leverage,
-    search_history,
-    get_prices,
-    get_candles,
-    get_funding_rate,
-    get_order_book,
-    manage_controllers,
-    manage_bots,
-    create_position_executor,
-    create_grid_executor,
-    create_dca_executor,
-    create_order_executor,
-    create_lp_executor,
-    list_executors,
-    get_executor,
-    stop_executor,
-    list_orphaned_positions,
-    resolve_orphaned_position,
-    list_positions_held,
-    clear_position_held,
-    get_performance_report,
-    executor_defaults,
-    explore_dex_pools,
-    quote_swap,
-    execute_swap,
-    get_swap_status,
-    search_swaps,
-    explore_geckoterminal,
-)
 
-#: Direct, un-executored liquidity operations. An attended specialist owns these
-#: — the LP experts list ``manage_amm`` in their own tools, and the shared
-#: ``recover_orphaned_position`` playbook closes a stranded position with
-#: ``manage_clmm(action="close")``. A tick does not: its orphan hint tells it to
-#: report, not to self-recover, and an unattended loop that can move liquidity
-#: outside an executor has no ledger entry to show for it.
-LIQUIDITY_TOOLS = (
-    manage_amm,
-    manage_clmm,
-)
+def _resolve(name: str):
+    """The tool function ``name`` refers to — or a loud failure at import.
 
-#: Infrastructure. Repointing the API server, rewriting Gateway's config and
-#: restarting its container are operator actions with a human in front of them:
-#: the chat, or a standalone host. No agent's tool list names one, and the chat's
-#: own context prompt already says not to call ``configure_server``.
-ADMIN_TOOLS = (
-    configure_server,
-    manage_gateway_config,
-    manage_gateway_container,
-)
+    A name in ``profiles.PROFILE_TOOLS`` with nothing behind it is a rename that
+    only landed on one side. Failing the import is the whole point: the quiet
+    alternative is a seat that mounts one tool fewer than its table claims.
+    """
+    fn = globals().get(name)
+    if not callable(fn):
+        raise RuntimeError(
+            f"profiles.py names a tool this module does not define: {name!r}"
+        )
+    return fn
 
-#: profile name → the tools it registers. ``full`` is the default because this
-#: server is also run standalone (uvx, external hosts, `.mcp.json`).
+
+#: profile name → the tools it registers, resolved from ``profiles.PROFILE_TOOLS``
+#: (which carries the prose on what each ring is for).
 TOOL_PROFILES: dict[str, tuple] = {
-    "tick": TRADING_TOOLS,
-    "agent": TRADING_TOOLS + LIQUIDITY_TOOLS,
-    "full": TRADING_TOOLS + LIQUIDITY_TOOLS + ADMIN_TOOLS,
+    profile: tuple(_resolve(name) for name in names)
+    for profile, names in PROFILE_TOOLS.items()
 }
 
 
-def register_tools(server: FastMCP, profile: str = DEFAULT_TOOL_PROFILE) -> None:
-    """Register this profile's tools on ``server``.
+def register_tools(
+    server: FastMCP,
+    profile: str = DEFAULT_TOOL_PROFILE,
+    muted: Iterable[str] = (),
+) -> None:
+    """Register this profile's tools on ``server``, minus the muted ones.
 
     Raises on an unknown profile rather than degrading to ``full``: the only
     spawner that passes the flag is ``condor.runtime.toolsets``, so a name that
     does not resolve is a bug there, and silently widening a seat is the one
     failure mode this feature exists to prevent.
+
+    ``muted`` is the operator's per-agent curation (FEAT-091), arriving on argv
+    as ``--mute-tools``. It only ever subtracts — ``mute ⊆ profile``, always —
+    and a name this profile never mounts is ignored rather than refused: seats
+    mount different rings, so "off here, never mounted there" is an ordinary
+    difference between seats and not a mistake to report.
     """
     try:
         tools = TOOL_PROFILES[profile]
@@ -2275,14 +2250,18 @@ def register_tools(server: FastMCP, profile: str = DEFAULT_TOOL_PROFILE) -> None
             f"Unknown tool profile {profile!r}; expected one of "
             f"{sorted(TOOL_PROFILES)}"
         ) from None
+    switched_off = set(muted)
     for fn in tools:
+        if fn.__name__ in switched_off:
+            continue
         server.tool()(fn)
 
 
 # Registration happens at import, not in ``_run()``: ``mcp`` is a module-level
-# singleton and the profile is resolved from argv at import (settings), so the
-# server object is complete for anything that inspects it before startup.
-register_tools(mcp, settings.tool_profile)
+# singleton and the profile and the mute list are resolved from argv at import
+# (settings), so the server object is complete for anything that inspects it
+# before startup.
+register_tools(mcp, settings.tool_profile, settings.muted_tools)
 
 
 def _apply_cli_args():

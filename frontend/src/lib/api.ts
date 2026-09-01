@@ -900,6 +900,25 @@ export interface AgentDetail {
  * a skill's or memory's body costs a deliberate fetch (`getAgentSkill` /
  * `getAgentMemory`), so opening the panel never pulls the whole library.
  */
+/**
+ * One tool this agent's seat actually mounts (FEAT-091).
+ *
+ * Not the AGENT.md allowlist: that is only enforced for pydantic-ai model keys,
+ * and an ACP bridge (claude-code, gemini, copilot) runs unrestricted — so for
+ * most seats the list is decoration and this row is the real surface. Switching
+ * one off means the next session does not register it at all.
+ */
+export interface ToolCard {
+  name: string;
+  /** Which subprocess registers it: `condor` or `hummingbot`. */
+  server: string;
+  description: string;
+  /** Switched off by the operator — the next session never mounts it. */
+  muted: boolean;
+  /** The AGENT.md allowlist names it (the pydantic-ai filter, not the mount). */
+  allowlisted: boolean;
+}
+
 export interface AgentBrain {
   slug: string;
   name: string;
@@ -909,8 +928,9 @@ export interface AgentBrain {
   when_to_consult: string;
   server_required: boolean;
   server_name: string;
-  tools: string[];
-  /** Empty allowlist = every discovered tool, which is not "no tools". */
+  /** Every tool this agent's seat mounts, each with its switch. */
+  tools: ToolCard[];
+  /** Empty AGENT.md allowlist = every mounted tool, which is not "no tools". */
   tools_unrestricted: boolean;
   skills: SkillCard[];
   /** The one playbook this agent has offered and nobody has ruled on yet. */
@@ -2604,15 +2624,16 @@ export const api = {
       { method: "PUT", body: JSON.stringify(data) },
     ),
 
-  /** Switch one playbook or routine off for this Agent, or back on.
+  /** Switch one playbook, routine or tool off for this Agent, or back on.
    *
    *  Curation, not deletion: the item stays on disk, stays in this panel and
    *  stays editable, and every other Agent reading the same shared file is
    *  untouched. It takes effect on the Agent's next tick or next session — a
-   *  system prompt already built is not rewritten. */
+   *  system prompt already built is not rewritten, and a tool is mounted when
+   *  the MCP subprocess starts, so a muted one goes with the next session. */
   setAgentMute: (
     slug: string,
-    data: { kind: "skill" | "routine"; name: string; muted: boolean },
+    data: { kind: "skill" | "routine" | "tool"; name: string; muted: boolean },
   ) =>
     apiFetch<{ kind: string; name: string; muted: boolean }>(
       `/api/v1/agents/${encodeURIComponent(slug)}/mutes`,

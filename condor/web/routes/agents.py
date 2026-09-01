@@ -310,6 +310,28 @@ class StrategyCard(BaseModel):
     status: str = "idle"
 
 
+class ToolCard(BaseModel):
+    """One tool this Agent's seat actually mounts (FEAT-091).
+
+    Not the AGENT.md allowlist: that list is only enforced for pydantic-ai model
+    keys, and an ACP bridge (claude-code, gemini, copilot) runs unrestricted, so
+    for most seats here the list is decoration. What the model is really handed
+    is what the two MCP subprocesses register — which is what this row is, and
+    what its switch turns off.
+
+    ``allowlisted`` keeps the other statement visible instead of conflating the
+    two: it says the AGENT.md list names this tool, which is a pydantic-ai fact
+    about *filtering*, while ``muted`` is an operator fact about *mounting*.
+    """
+
+    name: str
+    #: ``condor`` or ``hummingbot`` — which subprocess registers it.
+    server: str
+    description: str = ""
+    muted: bool = False
+    allowlisted: bool = False
+
+
 class AgentBrain(BaseModel):
     """Everything a conversation is actually talking to, in one read.
 
@@ -328,10 +350,12 @@ class AgentBrain(BaseModel):
     when_to_consult: str = ""
     server_required: bool = True
     server_name: str = ""
-    # The tool allowlist as written in AGENT.md. Empty means unrestricted —
-    # every discovered tool — which is a different statement from "no tools",
-    # so the reader is told which of the two it is rather than shown "0".
-    tools: list[str] = []
+    # Every tool this Agent's seat mounts, each with its switch (FEAT-091) —
+    # the real surface, not the AGENT.md allowlist, which for an ACP seat is
+    # decoration. ``tools_unrestricted`` still reports on the allowlist: empty
+    # means it names nothing, which is a different statement from "no tools", so
+    # the reader is told which of the two it is rather than shown "0".
+    tools: list[ToolCard] = []
     tools_unrestricted: bool = True
     skills: list[SkillCard] = []
     # The one playbook the Agent has offered and nobody has ruled on yet. It
@@ -484,10 +508,12 @@ class AgentConfigRequest(BaseModel):
 
 
 class MuteRequest(BaseModel):
-    """Switch one playbook or routine off for this Agent, or back on (FEAT-090)."""
+    """Switch one item off for this Agent, or back on (FEAT-090, FEAT-091)."""
 
-    kind: str = Field(description='"skill" or "routine".')
-    name: str = Field(description="The playbook's slug, or the routine's name.")
+    kind: str = Field(description='"skill", "routine" or "tool".')
+    name: str = Field(
+        description="The playbook's slug, the routine's name, or the tool's name."
+    )
     muted: bool = Field(description="True switches it off, False restores it.")
 
 
@@ -1316,6 +1342,22 @@ def _routine_cards(slug: str) -> list[RoutineCard]:
     ]
 
 
+def _tool_cards(slug: str, allowlist: list[str]) -> list[ToolCard]:
+    """The seat's real tool surface, each row carrying its two flags.
+
+    ``condor.runtime.toolsets.seat_tools`` is the single place that knows what a
+    seat mounts, so the panel asks it rather than re-deriving the rings here.
+    It reads the two ``profiles.py`` leaf modules — never ``server.py``, whose
+    import parses argv and builds a ``FastMCP`` singleton.
+    """
+    from condor.runtime.toolsets import seat_tools
+
+    named = set(allowlist)
+    return [
+        ToolCard(**row, allowlisted=row["name"] in named) for row in seat_tools(slug)
+    ]
+
+
 @router.get("/{slug}/brain", response_model=AgentBrain)
 async def get_agent_brain(slug: str, user: WebUser = Depends(get_current_user)):
     """The Agent's identity and its four libraries, for the panel behind the chat.
@@ -1362,6 +1404,12 @@ async def get_agent_brain(slug: str, user: WebUser = Depends(get_current_user)):
     except Exception:
         log.debug("brain: strategy cards failed for %s", slug, exc_info=True)
 
+    tools: list[ToolCard] = []
+    try:
+        tools = _tool_cards(agent.slug, agent.tools)
+    except Exception:
+        log.debug("brain: tool cards failed for %s", slug, exc_info=True)
+
     return AgentBrain(
         slug=agent.slug,
         name=agent.name,
@@ -1371,7 +1419,7 @@ async def get_agent_brain(slug: str, user: WebUser = Depends(get_current_user)):
         when_to_consult=agent.consult_hint,
         server_required=agent.server_required,
         server_name=agent.server_name,
-        tools=agent.tools,
+        tools=tools,
         tools_unrestricted=not agent.tools,
         skills=skills,
         skill_proposal=proposal,
@@ -1668,7 +1716,7 @@ async def update_agent_config(
 async def set_agent_mute(
     slug: str, req: MuteRequest, user: WebUser = Depends(get_current_user)
 ):
-    """Switch one playbook or routine off for this Agent — or back on.
+    """Switch one playbook, routine or tool off for this Agent — or back on.
 
     A mute is curation, not deletion: the item stays on disk, stays listed in
     this panel and stays editable, and every other Agent reading the same shared
@@ -1677,11 +1725,27 @@ async def set_agent_mute(
 
     It applies from the Agent's **next** tick or next session: a system prompt
     already built is not rewritten, and adding an invalidation for that would
-    buy a second at the cost of a moving target. The panel says so.
+    buy a second at the cost of a moving target. The panel says so. For a tool
+    the boundary is harder still — registration happens at MCP subprocess import,
+    off argv — which is why the Tools tab says "the next session this agent
+    starts" rather than "the next tick".
+
+    A tool name is checked against what this Agent's seat actually mounts
+    (FEAT-091). The subprocess ignores a name it does not know, so an unchecked
+    write would not break anything — it would just let ``mutes.yml`` fill with
+    typos nobody can see, since the panel only renders switches for tools that
+    exist.
     """
     from condor.memory.mutes import set_muted
+    from condor.runtime.toolsets import seat_tools
 
     agent = _get_agent(slug)
+    if (req.kind or "").strip().lower().rstrip("s") == "tool":
+        if req.name not in {row["name"] for row in seat_tools(agent.slug)}:
+            raise HTTPException(
+                status_code=400,
+                detail=f"'{req.name}' is not a tool this Agent's seat mounts",
+            )
     try:
         set_muted(agent.slug, req.kind, req.name, req.muted)
     except ValueError as exc:

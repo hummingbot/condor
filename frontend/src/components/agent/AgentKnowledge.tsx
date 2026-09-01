@@ -14,6 +14,7 @@ import {
   Save,
   Sparkles,
   Trash2,
+  Wand2,
   Wrench,
   X,
   Zap,
@@ -78,6 +79,7 @@ export function AgentKnowledge({
   onTabChange,
   routinesAction,
   onOpenRoutine,
+  onAskAgent,
   onDirtyChange,
 }: {
   slug: string;
@@ -99,6 +101,16 @@ export function AgentKnowledge({
    * this panel growing a second one. Absent, a row is a plain list entry.
    */
   onOpenRoutine?: (routineName: string) => void;
+  /**
+   * Put a request to this agent, in its own words (FEAT-092).
+   *
+   * The panel decides *what to say* — one sentence per kind of row, naming the
+   * item you clicked — and the host decides *how to say it*, because the two
+   * hosts have different powers: the chat sends into a fresh session, the agent
+   * page can only navigate to one. Absent, the row simply does not offer it,
+   * so a host that passes nothing sees the panel it had.
+   */
+  onAskAgent?: (text: string) => void;
   /**
    * An editor here has unsaved text. Reported outward because a host that can
    * be closed in one click — the chat's pane — owes the reader a question
@@ -173,7 +185,8 @@ export function AgentKnowledge({
   });
 
   /**
-   * Switch one playbook or routine off for this agent, or back on (FEAT-090).
+   * Switch one playbook, routine or tool off for this agent, or back on
+   * (FEAT-090, FEAT-091).
    *
    * Optimistic on the brain cache: the switch is the whole feedback and a
    * round-trip of dead switch is worse than a flicker on the rare failure.
@@ -183,7 +196,7 @@ export function AgentKnowledge({
    */
   const muteMut = useMutation({
     mutationFn: (v: {
-      kind: "skill" | "routine";
+      kind: "skill" | "routine" | "tool";
       name: string;
       muted: boolean;
     }) => api.setAgentMute(slug, v),
@@ -209,6 +222,12 @@ export function AgentKnowledge({
                       x.name === v.name ? { ...x, muted: v.muted } : x,
                     )
                   : old.routines,
+              tools:
+                v.kind === "tool"
+                  ? old.tools.map((x) =>
+                      x.name === v.name ? { ...x, muted: v.muted } : x,
+                    )
+                  : old.tools,
             }
           : old,
       );
@@ -229,13 +248,14 @@ export function AgentKnowledge({
   const counts = {
     skills: brain?.skills.filter((s) => !s.muted).length ?? 0,
     memories: brain?.memories.length ?? 0,
-    tools: brain?.tools.length ?? 0,
+    tools: brain?.tools.filter((t) => !t.muted).length ?? 0,
     strategies: brain?.strategies.length ?? 0,
     routines: brain?.routines.filter((r) => !r.muted).length ?? 0,
   };
   const totals = {
     skills: brain?.skills.length ?? 0,
     routines: brain?.routines.length ?? 0,
+    tools: brain?.tools.length ?? 0,
   };
   const withMuted = (live: number, total: number) =>
     total > live
@@ -268,9 +288,10 @@ export function AgentKnowledge({
       id: "tools",
       label: "Tools",
       icon: <Wrench className="h-3.5 w-3.5" />,
-      // Unrestricted is not zero, and a "0" next to it would say the opposite
-      // of what it means — so that case carries no count at all.
-      count: brain && !brain.tools_unrestricted ? counts.tools : undefined,
+      // The mounted surface, so it counts on every agent now — an allowlist is
+      // a different statement and no longer decides whether there is a number.
+      count: counts.tools,
+      ...withMuted(counts.tools, totals.tools),
     },
     {
       id: "strategies",
@@ -494,6 +515,7 @@ export function AgentKnowledge({
                 onMute={(name, muted) =>
                   muteMut.mutate({ kind: "skill", name, muted })
                 }
+                onAskAgent={onAskAgent}
                 onGoToRoutine={(name) => {
                   if (onOpenRoutine) {
                     onOpenRoutine(name);
@@ -515,7 +537,15 @@ export function AgentKnowledge({
                 onCreate={() => setCreating("memory")}
               />
             )}
-            {activeTab === "tools" && <ToolsTab brain={brain} />}
+            {activeTab === "tools" && (
+              <ToolsTab
+                brain={brain}
+                onMute={(name, muted) =>
+                  muteMut.mutate({ kind: "tool", name, muted })
+                }
+                onAskAgent={onAskAgent}
+              />
+            )}
             {activeTab === "strategies" && (
               <AgentStrategies slug={slug} dense={rail} />
             )}
@@ -527,6 +557,7 @@ export function AgentKnowledge({
                 onMute={(name, muted) =>
                   muteMut.mutate({ kind: "routine", name, muted })
                 }
+                onAskAgent={onAskAgent}
               />
             )}
             {activeTab === "activity" && <ActivityFeed agent={slug} />}
@@ -692,14 +723,22 @@ function Switch({
  * `toggle` is the mute switch (FEAT-090). Unlike edit and delete it is always
  * visible rather than hover-revealed, because it renders *state* and not an
  * action: a row you cannot see the switch on cannot tell you it is off.
+ *
+ * `onAsk` is the third action (FEAT-092) and rides in the same hover cluster,
+ * left of edit so the destructive one stays rightmost. It hands the row to the
+ * agent that owns it instead of to a form: some of these rows have no body to
+ * edit at all, and the ones that do are usually better revised by the thing
+ * that reads them.
  */
 function Row({
   title,
   badges,
   subtitle,
   onClick,
+  onAsk,
   onEdit,
   onDelete,
+  askTitle,
   editTitle,
   deleteTitle,
   toggle,
@@ -709,8 +748,10 @@ function Row({
   badges?: React.ReactNode;
   subtitle?: string;
   onClick?: () => void;
+  onAsk?: () => void;
   onEdit?: () => void;
   onDelete?: () => void;
+  askTitle?: string;
   editTitle?: string;
   deleteTitle?: string;
   toggle?: { on: boolean; onChange: () => void; title: string };
@@ -748,8 +789,17 @@ function Row({
         </div>
       )}
       {toggle && <Switch {...toggle} />}
-      {(onEdit || onDelete) && (
+      {(onAsk || onEdit || onDelete) && (
         <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
+          {onAsk && (
+            <button
+              onClick={onAsk}
+              title={askTitle || "Ask the agent about this"}
+              className="rounded p-1 text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-primary)]"
+            >
+              <Wand2 className="h-3 w-3" />
+            </button>
+          )}
           {onEdit && (
             <button
               onClick={onEdit}
@@ -924,6 +974,32 @@ function BodyArea({
 }
 
 // ── Tabs ──
+
+/**
+ * What the panel says to the agent when a row's wand is clicked (FEAT-092).
+ *
+ * One sentence per kind, naming the item you were looking at — because the
+ * point of the action is that you do not have to describe which one you meant.
+ * The two kinds with a body also name the tool that would apply the change,
+ * which is what turns "chat about it" into "change it". A tool row has no body
+ * to edit, so its sentence asks about the tool rather than offering to rewrite
+ * it.
+ */
+const OPENER = {
+  skill: (slug: string) =>
+    `Revise your \`${slug}\` playbook. Read it with manage_skill(action="read", name="${slug}") first, tell me what you would change and why, then apply it with manage_skill(action="edit").`,
+  /**
+   * An inherited playbook is the shared library's and the store refuses the
+   * write, so the opener names the documented fix — shadow it locally with one
+   * of its own under the same name — rather than sending the agent at a wall.
+   */
+  inheritedSkill: (slug: string) =>
+    `Revise your \`${slug}\` playbook. It is inherited from the shared library, so it is read-only for you — read it with manage_skill(action="read", name="${slug}"), tell me what you would change and why, then shadow it locally by creating your own playbook with the same name via manage_skill(action="create").`,
+  routine: (name: string) =>
+    `Improve the \`${name}\` routine. Read it, tell me what you would change and why, then apply it and test it with manage_routines(action="run").`,
+  tool: (name: string) =>
+    `Explain how you use the \`${name}\` tool and when you reach for it — and tell me whether you actually need it.`,
+};
 
 /**
  * The body of a markdown file with front matter, if it has any.
@@ -1129,6 +1205,7 @@ function SkillsTab({
   onRuled,
   onGoToRoutine,
   onMute,
+  onAskAgent,
 }: {
   brain: AgentBrain;
   slug: string;
@@ -1140,6 +1217,8 @@ function SkillsTab({
   onGoToRoutine?: (name: string) => void;
   /** Switch a playbook off for this agent, or back on (FEAT-090). */
   onMute?: (slug: string, muted: boolean) => void;
+  /** Put the revision to the agent that owns it (FEAT-092). */
+  onAskAgent?: (text: string) => void;
 }) {
   return (
     <div className="space-y-1.5">
@@ -1212,6 +1291,23 @@ function SkillsTab({
             // the store refuses the write, so the buttons are not offered.
             onEdit={s.inherited ? undefined : () => onEdit(s)}
             onDelete={s.inherited ? undefined : () => onDelete(s)}
+            // Offered on an inherited playbook too, with a different sentence:
+            // the agent cannot edit that one in place, but shadowing it locally
+            // is exactly the kind of thing the conversation is for.
+            onAsk={
+              onAskAgent &&
+              (() =>
+                onAskAgent(
+                  s.inherited
+                    ? OPENER.inheritedSkill(s.slug)
+                    : OPENER.skill(s.slug),
+                ))
+            }
+            askTitle={
+              s.inherited
+                ? "Ask the agent to specialize this shared playbook"
+                : "Ask the agent to revise this playbook"
+            }
             editTitle="Edit this playbook"
             deleteTitle="Delete this playbook"
             dimmed={s.muted}
@@ -1276,36 +1372,93 @@ function MemoriesTab({
   );
 }
 
-function ToolsTab({ brain }: { brain: AgentBrain }) {
-  if (brain.tools_unrestricted) {
-    return (
-      <div>
-        <p className="text-xs text-[var(--color-text)]">
-          Unrestricted — every tool discovered on its MCP servers.
-        </p>
-        <p className="mt-1 text-[11px] text-[var(--color-text-muted)]">
-          No allowlist in AGENT.md. Naming tools there narrows what this agent
-          may call, on both consult and its loops.
-        </p>
-      </div>
-    );
-  }
+/** The two MCP subprocesses a seat mounts, in the order the panel groups them. */
+const TOOL_SERVERS: { id: string; label: string }[] = [
+  { id: "condor", label: "Condor" },
+  { id: "hummingbot", label: "Hummingbot" },
+];
+
+/**
+ * Every tool this agent's seat actually mounts, each with a switch (FEAT-091).
+ *
+ * Not the AGENT.md allowlist. That list only binds pydantic-ai model keys — an
+ * ACP bridge runs unrestricted — so a tab that only echoed it was telling most
+ * agents something untrue about what they can reach. The switch is the honest
+ * control: a muted tool is never registered on the subprocess, so the model is
+ * never told it exists, on every backend alike.
+ */
+function ToolsTab({
+  brain,
+  onMute,
+  onAskAgent,
+}: {
+  brain: AgentBrain;
+  /** Switch a tool off for this agent, or back on. */
+  onMute?: (name: string, muted: boolean) => void;
+  /** Ask the agent about this tool — it has no body to edit (FEAT-092). */
+  onAskAgent?: (text: string) => void;
+}) {
+  const grouped = TOOL_SERVERS.map((server) => ({
+    ...server,
+    tools: brain.tools.filter((t) => t.server === server.id),
+  })).filter((group) => group.tools.length > 0);
+
   return (
-    <div>
-      <p className="mb-2 text-[11px] text-[var(--color-text-muted)]">
-        The allowlist from AGENT.md — the only tools this agent may call. Edit
-        it in the Brain tab, where it is written.
+    <div className="space-y-1.5">
+      <p className="text-[11px] text-[var(--color-text-muted)]">
+        Every tool this agent's seat mounts. Switch one off and the next session
+        never registers it — the model is not told it exists. Changes apply to
+        the next session this agent starts.
       </p>
-      <div className="flex flex-wrap gap-1.5">
-        {brain.tools.map((t) => (
-          <span
-            key={t}
-            className="rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 font-mono text-[11px] text-[var(--color-text)]"
-          >
-            {t}
-          </span>
-        ))}
-      </div>
+      <p className="text-[11px] text-[var(--color-text-muted)]">
+        {brain.tools_unrestricted
+          ? "AGENT.md names no allowlist, so nothing narrows this further. Naming tools there also narrows what the agent may call — edit it in the Brain tab, where it is written."
+          : "AGENT.md also names an allowlist, marked below. Edit it in the Brain tab, where it is written."}
+      </p>
+      {brain.tools.length === 0 ? (
+        <Empty>No tools mounted on this agent's seat.</Empty>
+      ) : (
+        grouped.map((group) => (
+          <div key={group.id} className="space-y-1.5 pt-1">
+            <p className="text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">
+              {group.label}
+            </p>
+            {group.tools.map((t) => (
+              <Row
+                key={`${t.server}:${t.name}`}
+                title={t.name}
+                badges={
+                  <>
+                    {t.muted && (
+                      <Chip title="Switched off — this agent is never told it exists">
+                        muted
+                      </Chip>
+                    )}
+                    {t.allowlisted && (
+                      <Chip title="Named in the AGENT.md tool allowlist">
+                        allowlisted
+                      </Chip>
+                    )}
+                  </>
+                }
+                subtitle={t.description}
+                dimmed={t.muted}
+                onAsk={onAskAgent && (() => onAskAgent(OPENER.tool(t.name)))}
+                askTitle="Ask the agent how it uses this tool"
+                toggle={
+                  onMute && {
+                    on: !t.muted,
+                    onChange: () => onMute(t.name, !t.muted),
+                    title: t.muted
+                      ? "Off for this agent — switch it back on"
+                      : "On — switch it off for this agent",
+                  }
+                }
+              />
+            ))}
+          </div>
+        ))
+      )}
     </div>
   );
 }
@@ -1315,6 +1468,7 @@ function RoutinesTab({
   action,
   onOpen,
   onMute,
+  onAskAgent,
 }: {
   brain: AgentBrain;
   action?: React.ReactNode;
@@ -1322,6 +1476,8 @@ function RoutinesTab({
   onOpen?: (routineName: string) => void;
   /** Switch a routine off for this agent, or back on (FEAT-090). */
   onMute?: (name: string, muted: boolean) => void;
+  /** Put the improvement to the agent that runs it (FEAT-092). */
+  onAskAgent?: (text: string) => void;
 }) {
   return (
     <div className="space-y-1.5">
@@ -1363,6 +1519,11 @@ function RoutinesTab({
             subtitle={r.description}
             onClick={onOpen && (() => onOpen(r.name))}
             dimmed={r.muted}
+            // The routine's real name, not the title-cased one the row shows:
+            // this sentence is read by the agent, which addresses it by the
+            // name `manage_routines` takes.
+            onAsk={onAskAgent && (() => onAskAgent(OPENER.routine(r.name)))}
+            askTitle="Ask the agent to improve this routine"
             toggle={
               onMute && {
                 on: !r.muted,

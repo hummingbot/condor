@@ -323,8 +323,10 @@ def test_control_agent_is_registered_by_the_condor_server():
     assert "control_agent" in DANGEROUS_TOOLS
     tool = getattr(condor_server, "control_agent", None)
     assert tool is not None, "control_agent is gated but the condor server drops it"
+    # The ring's *names* live in ``profiles.py`` now (FEAT-091); what the server
+    # actually mounts is the resolved tuple, which is the honest thing to assert.
     assert (
-        condor_server.control_agent in condor_server.ORCHESTRATION_TOOLS
+        condor_server.control_agent in condor_server.TOOL_PROFILES["agent"]
     ), "control_agent is gated but no seat mounts it — the gate is dead code"
 
 

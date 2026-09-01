@@ -37,6 +37,23 @@ def _parse_tool_profile() -> str:
     return args.profile
 
 
+def _parse_muted_tools() -> tuple[str, ...]:
+    """``--mute-tools a,b,c`` off argv, read at import (FEAT-091).
+
+    Same timing argument as ``_parse_tool_profile`` above — the mute subtracts
+    from the profile inside ``register_tools``, which runs at import — and the
+    same ``parse_known_args``, so a run under pytest resolves to nothing muted.
+
+    An empty or absent flag is the norm: the spawner only puts it on the line
+    when the operator has actually switched something off, so an uncurated
+    install keeps the argv it always had.
+    """
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--mute-tools", default="")
+    args, _ = parser.parse_known_args()
+    return tuple(n.strip() for n in (args.mute_tools or "").split(",") if n.strip())
+
+
 class ServerConfig(BaseModel):
     """Active server configuration"""
 
@@ -92,6 +109,15 @@ class Settings(BaseModel):
     # security boundary, not a convenience: see ``server.TOOL_PROFILES``.
     tool_profile: str = Field(default=DEFAULT_TOOL_PROFILE)
 
+    # Tools the operator switched off for the agent this seat belongs to
+    # (FEAT-091). Subtracted from the profile in ``server.register_tools``, so a
+    # muted tool is never registered and the model is never told it exists — the
+    # only enforcement that also holds on an ACP seat, which cannot be handed an
+    # allowlist. This server knows nothing of ``agents/``: the spawner reads the
+    # mute file and passes the names, which is what keeps a market-data server
+    # free of the agent registry.
+    muted_tools: tuple[str, ...] = Field(default=())
+
     # Connection settings
     connection_timeout: float = Field(default=30.0)
     max_retries: int = Field(default=3)
@@ -141,6 +167,7 @@ def get_settings() -> Settings:
             retry_delay=float(os.getenv("HUMMINGBOT_RETRY_DELAY", "2.0")),
             log_level=os.getenv("HUMMINGBOT_LOG_LEVEL", "INFO"),
             tool_profile=_parse_tool_profile(),
+            muted_tools=_parse_muted_tools(),
         )
     except Exception as e:
         raise ConfigurationError(f"Failed to load configuration: {e}")
