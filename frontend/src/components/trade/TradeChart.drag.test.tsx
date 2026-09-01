@@ -311,6 +311,46 @@ describe("TradeChart price-line drag", () => {
     expect(chartState.options).toMatchObject({ handleScroll: true, handleScale: true });
   });
 
+  it("takes the crosshair down for the length of the drag", async () => {
+    // The crosshair's price label rides the pointer's row, which during a drag
+    // is the row the dragged line's own label occupies — it covers the number
+    // being steered by, exactly when it matters most (PR #224 QA).
+    await render();
+
+    await act(async () => { fire("pointerdown", yAtPrice(START_PRICE)); });
+    // A press that has not travelled is still a candidate click, and keeps it.
+    expect(chartState.options.crosshair).toBeUndefined();
+
+    await act(async () => { fire("pointermove", 340); });
+    expect(chartState.options).toMatchObject({
+      crosshair: {
+        horzLine: { visible: false, labelVisible: false },
+        vertLine: { visible: false, labelVisible: false },
+      },
+    });
+
+    await act(async () => { fire("pointerup", 340); });
+    expect(chartState.options).toMatchObject({
+      crosshair: {
+        horzLine: { visible: true, labelVisible: true },
+        vertLine: { visible: true, labelVisible: true },
+      },
+    });
+  });
+
+  it("gives the crosshair back when the drag is cancelled mid-flight", async () => {
+    await render();
+    await act(async () => {
+      fire("pointerdown", yAtPrice(START_PRICE));
+      fire("pointermove", 340);
+      fire("pointercancel", 340);
+    });
+
+    expect(chartState.options).toMatchObject({
+      crosshair: { horzLine: { visible: true }, vertLine: { visible: true } },
+    });
+  });
+
   it("hands panning back when the component unmounts mid-drag", async () => {
     await render();
     await act(async () => {

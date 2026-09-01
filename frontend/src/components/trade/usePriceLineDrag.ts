@@ -14,6 +14,13 @@
 // once per animation frame while the pointer moves. Live rather than
 // commit-on-release: watching the grid's preview levels redistribute under the
 // pointer is the point of dragging a boundary at all.
+//
+// While a drag runs the chart's own crosshair is taken down. Its price-scale
+// label tracks the pointer row, which during a drag is exactly the row the
+// dragged line's label occupies — so the two land on top of each other and the
+// number you are steering by is hidden behind the number saying where the
+// cursor is. The line follows the pointer anyway, so the crosshair has nothing
+// left to say for the length of the gesture.
 
 import { useCallback, useEffect, useRef } from "react";
 
@@ -86,6 +93,22 @@ export function usePriceLineDrag(params: PriceLineDragParams): PriceLineDragHand
     onPriceSet(grab.slot, roundToPricePrecision(price as number, getPricePrecision()));
   }, []);
 
+  /**
+   * Show or hide the chart's crosshair.
+   *
+   * `applyOptions` deep-merges, so naming only the two lines leaves the
+   * crosshair's mode and colours alone — and the restore puts back the
+   * library's defaults for exactly the four flags taken away.
+   */
+  const setCrosshairVisible = useCallback((visible: boolean) => {
+    paramsRef.current.getChart()?.applyOptions({
+      crosshair: {
+        horzLine: { visible, labelVisible: visible },
+        vertLine: { visible, labelVisible: visible },
+      },
+    });
+  }, []);
+
   const cancelFrame = () => {
     if (frameRef.current !== null) {
       cancelAnimationFrame(frameRef.current);
@@ -117,7 +140,11 @@ export function usePriceLineDrag(params: PriceLineDragParams): PriceLineDragHand
       }
     }
     getChart()?.applyOptions({ handleScroll: true, handleScale: true });
-  }, []);
+    // Unconditional, like the panning handback: a press that never passed the
+    // slop never hid it, and putting back what is already there costs nothing
+    // next to leaving a chart permanently crosshair-less.
+    setCrosshairVisible(true);
+  }, [setCrosshairVisible]);
 
   useEffect(() => endGrab, [endGrab]);
 
@@ -164,6 +191,10 @@ export function usePriceLineDrag(params: PriceLineDragParams): PriceLineDragHand
         // candidate click, and a jittery finger must not set a price.
         if (travelled <= paramsRef.current.slopPx) return;
         grab.moved = true;
+        // Hidden here rather than on the press: a stationary click keeps its
+        // crosshair, and only a gesture that is really moving a line pays for
+        // the label going away.
+        setCrosshairVisible(false);
       }
       const y = rowOf(e.clientY);
       if (y === null) return;
@@ -176,7 +207,7 @@ export function usePriceLineDrag(params: PriceLineDragParams): PriceLineDragHand
         if (pending !== null) commit(pending);
       });
     },
-    [commit],
+    [commit, setCrosshairVisible],
   );
 
   const onPointerUp = useCallback(
