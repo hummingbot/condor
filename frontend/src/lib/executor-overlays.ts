@@ -68,9 +68,39 @@ export interface ExecutorOverlay {
 
 // ── Helpers ──
 
+/** Values already reported, so a bad executor cannot flood the console. */
+const reportedSides = new Set<string>();
+
+/**
+ * The drawn direction, from the one side field the backend guarantees canonical.
+ *
+ * `executor.side` is the only normalized side on the wire: `build_executor_row`
+ * folds `custom_info.side`, `config.side` and the top-level field into it through
+ * `normalize_executor_side` (condor/fetchers/executors.py), while `custom_info`
+ * and `config` are copied onto the model verbatim (condor/web/models.py). The
+ * overlays used to prefer those raw dicts, so a long whose `custom_info.side` was
+ * the stringified enum `TradeType.BUY` -- the shape hummingbot actually emits --
+ * matched neither of the old literals and was drawn as a short: down arrow, sell
+ * colour, stop loss above entry, and nothing logged (CORR-280).
+ *
+ * Anything but the canonical pair is now a broken contract upstream rather than a
+ * value to guess at, so it is reported instead of being quietly filed under sell.
+ * A warning and not a throw: overlays are recomputed for every executor on every
+ * chart tick with no `try` above them, so one unknown side must not blank a chart
+ * full of good ones. An empty side is not a contract breach -- an LP position has
+ * no direction and the hover card already labels that type `range`.
+ */
 function normSide(side: string): "buy" | "sell" {
-  const s = side.toLowerCase();
-  return s === "buy" || s === "1" ? "buy" : "sell";
+  const s = String(side ?? "").toUpperCase();
+  if (s === "BUY") return "buy";
+  if (s !== "SELL" && s !== "" && !reportedSides.has(s)) {
+    reportedSides.add(s);
+    console.warn(
+      `[executor-overlays] un-normalized executor side ${JSON.stringify(side)}; ` +
+        "expected BUY/SELL from normalize_executor_side. Drawing it as a sell.",
+    );
+  }
+  return "sell";
 }
 
 function closeTypeLabel(closeType: string): string {
@@ -92,7 +122,7 @@ function isActiveStatus(status: string): boolean {
 
 function computePositionOverlay(executor: ExecutorInfo): ExecutorOverlay {
   const customInfo = executor.custom_info || {};
-  const side = normSide(String(customInfo.side || executor.side));
+  const side = normSide(executor.side);
   const config = executor.config || {};
   const entry =
     Number(customInfo.current_position_average_price) ||
@@ -303,7 +333,7 @@ function computeGridOverlay(executor: ExecutorInfo): ExecutorOverlay {
 function computeLpOverlay(executor: ExecutorInfo): ExecutorOverlay {
   const customInfo = executor.custom_info || {};
   const config = executor.config || {};
-  const side = normSide(String(customInfo.side || executor.side || config.side));
+  const side = normSide(executor.side);
 
   // custom_info wins: a CLMM position is snapped to the venue's bins, so the
   // on-chain bounds are not the requested ones, and the box has to show where the
@@ -357,7 +387,7 @@ function computeLpOverlay(executor: ExecutorInfo): ExecutorOverlay {
 function computeOrderOverlay(executor: ExecutorInfo): ExecutorOverlay {
   const customInfo = executor.custom_info || {};
   const config = executor.config || {};
-  const side = normSide(String(customInfo.side || executor.side || config.side));
+  const side = normSide(executor.side);
   const lines: PriceLine[] = [];
   const markers: ChartMarker[] = [];
 
@@ -467,7 +497,7 @@ function computeOrderOverlay(executor: ExecutorInfo): ExecutorOverlay {
 
 function computeGenericOverlay(executor: ExecutorInfo): ExecutorOverlay {
   const customInfo = executor.custom_info || {};
-  const side = normSide(String(customInfo.side || executor.side));
+  const side = normSide(executor.side);
   const lines: PriceLine[] = [];
   const markers: ChartMarker[] = [];
   const entryPrice =
