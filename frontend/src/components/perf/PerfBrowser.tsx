@@ -4,7 +4,6 @@ import {
   ChevronLeft,
   ChevronRight,
   ChevronUp,
-  Circle,
   History,
   Layers,
   Loader2,
@@ -29,6 +28,7 @@ import { ControllerPnlChart } from "@/components/bots/ControllerPnlChart";
 import { DeployBotDialog } from "@/components/bots/DeployBotDialog";
 import { LogsSection } from "@/components/bots/LogsSection";
 import { PnlEvolutionChart } from "@/components/bots/PnlEvolutionChart";
+import { ScopeTree, StatusDot } from "@/components/perf/ScopeTree";
 import {
   api,
   type BotLogEntry,
@@ -39,6 +39,15 @@ import {
 import { controllerKey } from "@/lib/controller-identity";
 import { configToYaml, CONTROLLER_HIDDEN_KEYS } from "@/lib/configYaml";
 import { formatCurrencyVolume, formatCurrencyPnl, pnlColor } from "@/lib/formatters";
+import {
+  buildTree,
+  foldLeaves,
+  indexTree,
+  leafFromController,
+  resolveScope,
+  visibleNodeIds,
+  type PerfLeaf,
+} from "@/lib/perf-tree";
 import { aggregatePnlSeries } from "@/lib/pnl-chart";
 import type { ConvertFn } from "@/lib/rates";
 import { POSITIONS_BAND_KEY } from "@/lib/sessionState";
@@ -49,78 +58,22 @@ function parseSide(raw: string): string {
   return dot >= 0 ? raw.slice(dot + 1) : raw;
 }
 
-/**
- * The status marker, at one size for every row.
- *
- * Both branches are `shrink-0`, and that is load-bearing rather than tidy: the
- * dot sits in a flex row beside a `truncate`d controller name, whose flex base
- * is its full max-content width. Shrinkage is distributed in proportion to
- * those bases, so a name long enough to overflow the sidebar handed the 8px
- * marker its share of the deficit and drew it a pixel or two smaller than the
- * one in the row above — the longer the name, the smaller the dot. The two
- * branches are also the same 8px as each other, so a controller does not
- * change the size of its marker on its way to stopping.
- */
-function StatusDot({ status }: { status: string }) {
-  const isStopping = status === "stopping";
-  const color =
-    status === "running"
-      ? "text-[var(--color-green)]"
-      : status === "stopped" || status === "error"
-        ? "text-[var(--color-red)]"
-        : "text-[var(--color-yellow)]";
-  return isStopping ? (
-    <span className="h-2 w-2 shrink-0 animate-spin rounded-full border-[1.5px] border-[var(--color-yellow)] border-t-transparent" />
-  ) : (
-    <Circle className={`h-2 w-2 shrink-0 fill-current ${color}`} />
-  );
-}
-
 // ── Scope (READ: what the browser is currently reporting on) ──
 //
-// The sidebar is a *scope picker*, not just a controller list: the same panes
+// The sidebar is a *scope picker*, not a controller list: the same panes
 // describe one controller, one bot's controllers folded together, or the whole
 // fleet. Everything downstream — the header, the KPI row, the chart, the
 // positions table, whether a config editor is meaningful at all — is derived
-// from this one value, so there is no second notion of "what is selected".
+// from one node of the tree, so there is no second notion of "what is selected".
+//
+// A scope is a `PerfNode` id (`all`, `bot:x`, `ctrl:k`, `exec:id`), which lives
+// in the URL so a scope is linkable and survives a reload (FEAT-084).
 
-type Scope =
-  | { kind: "all" }
-  | { kind: "bot"; bot: string }
-  | { kind: "controller"; key: string };
-
-function scopeId(s: Scope): string {
-  return s.kind === "all" ? "all" : s.kind === "bot" ? `bot:${s.bot}` : `ctrl:${s.key}`;
-}
-
-function sameScope(a: Scope, b: Scope): boolean {
-  return scopeId(a) === scopeId(b);
-}
-
-/**
- * The inverse of `scopeId`, for the `?scope=` query parameter.
- *
- * The scope is the page's whole state, so it belongs in the URL: a controller
- * is then linkable and survives a reload (FEAT-084). Split on the *first*
- * colon only — a controller key is `bot:config_id`, which carries one of its
- * own. Anything unreadable falls back to the fleet rather than to an empty
- * screen.
- */
-function parseScope(raw: string | null): Scope {
-  if (!raw) return { kind: "all" };
-  const sep = raw.indexOf(":");
-  if (sep < 0) return { kind: "all" };
-  const kind = raw.slice(0, sep);
-  const rest = raw.slice(sep + 1);
-  if (!rest) return { kind: "all" };
-  if (kind === "bot") return { kind: "bot", bot: rest };
-  if (kind === "ctrl") return { kind: "controller", key: rest };
-  return { kind: "all" };
-}
+const FLEET_SCOPE = "all";
 
 // ── Types ──
 
-interface ControllerBrowserProps {
+interface PerfBrowserProps {
   controllers: ControllerInfo[];
   /** The fleet's bots, for the actions a bot scope owns: Stop and Logs. */
   bots: BotSummary[];
@@ -447,7 +400,7 @@ function SideTag({ side }: { side: string }) {
 
 // ── Component ──
 
-export function ControllerBrowser({
+export function PerfBrowser({
   controllers,
   bots,
   server,
@@ -455,7 +408,7 @@ export function ControllerBrowser({
   currencySymbol,
   snapshots = [],
   truncated = false,
-}: ControllerBrowserProps) {
+}: PerfBrowserProps) {
   const cv = useCallback(
     (val: number, pair: string) => {
       const quote = pair?.split("-")[1] || "USDT";
@@ -463,8 +416,6 @@ export function ControllerBrowser({
     },
     [convert],
   );
-  const fmtPnl = (val: number, pair: string) => formatCurrencyPnl(cv(val, pair), currencySymbol);
-  const fmtVol = (val: number, pair: string) => formatCurrencyVolume(cv(val, pair), currencySymbol);
   const queryClient = useQueryClient();
   const [isCompact, setIsCompact] = useState(false);
   // One right-hand slot, three occupants. Config and logs used to be able to
@@ -473,7 +424,7 @@ export function ControllerBrowser({
   // `openDrawer`). Closed by default: a drawer is a thing you occasionally
   // open, and the chart is the thing you came for.
   const [drawer, setDrawer] = useState<null | "config" | "logs">(null);
-  const [collapsedBots, setCollapsedBots] = useState<Set<string>>(() => new Set());
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   const [showDeploy, setShowDeploy] = useState(false);
   // The editor is mounted from the first time it is opened and stays mounted
   // (hidden) after that, so its unsaved buffers survive closing it — the same
@@ -517,27 +468,27 @@ export function ControllerBrowser({
     });
   }, []);
 
-  // A controller is identified by its bot *and* its config id, never the id
-  // alone (CORR-241).
-  const ctrlKey = useCallback((c: ControllerInfo) => controllerKey(c), []);
+  const now = useSyncExternalStore(subscribeToClock, clockSnapshot, clockSnapshot);
+
+  // ── The tree the whole page is derived from ──
+
+  const leaves = useMemo(() => controllers.map(leafFromController), [controllers]);
+  const tree = useMemo(() => buildTree(leaves, "bot", "All controllers"), [leaves]);
+  const nodes = useMemo(() => indexTree(tree), [tree]);
 
   // The scope lives in the URL, so `?scope=ctrl:<bot>:<config id>` is a link to
   // one controller and a reload lands back on it. Written with `replace` — the
   // arrow keys walk the sidebar, and every step of that walk in the history
   // stack would make Back useless.
   const [searchParams, setSearchParams] = useSearchParams();
-  // Memoised on the raw parameter, not re-parsed each render: `scope` is the
-  // dependency of nearly every fold below, and a fresh object per render would
-  // make all of them recompute on every socket tick.
-  const scopeParam = searchParams.get("scope");
-  const scope = useMemo(() => parseScope(scopeParam), [scopeParam]);
+  const scopeId = searchParams.get("scope") || FLEET_SCOPE;
   const setScope = useCallback(
-    (next: Scope) => {
+    (next: string) => {
       setSearchParams(
         (prev) => {
           const params = new URLSearchParams(prev);
-          if (next.kind === "all") params.delete("scope");
-          else params.set("scope", scopeId(next));
+          if (next === FLEET_SCOPE) params.delete("scope");
+          else params.set("scope", next);
           return params;
         },
         { replace: true },
@@ -546,32 +497,18 @@ export function ControllerBrowser({
     [setSearchParams],
   );
 
-  // One group per bot, controllers keeping the order the page sorted them in.
-  const groups = useMemo(() => {
-    const byBot = new Map<string, ControllerInfo[]>();
-    for (const c of controllers) {
-      const list = byBot.get(c.bot_name);
-      if (list) list.push(c);
-      else byBot.set(c.bot_name, [c]);
-    }
-    return Array.from(byBot, ([bot, ctrls]) => ({ bot, ctrls }));
-  }, [controllers]);
+  // A scope whose node has gone — a bot stopped, a config removed — would
+  // render an empty screen with no way back, so it re-aims at the nearest
+  // ancestor that survived rather than resetting to the fleet (see
+  // `resolveScope`, which reads that ancestry out of the id itself).
+  const effectiveScopeId = resolveScope(nodes, scopeId);
+  const scope = nodes.get(effectiveScopeId) ?? tree;
 
-  /** The controllers the current scope folds together. */
-  const scoped = useMemo(() => {
-    if (scope.kind === "all") return controllers;
-    if (scope.kind === "bot") return controllers.filter((c) => c.bot_name === scope.bot);
-    const one = controllers.find((c) => ctrlKey(c) === scope.key);
-    return one ? [one] : [];
-  }, [scope, controllers, ctrlKey]);
-
-  // A scope whose controllers all vanished (bot stopped, config removed) would
-  // render an empty screen with no way back; fall through to the fleet.
-  const effectiveScope: Scope = scoped.length === 0 ? { kind: "all" } : scope;
-  const effectiveScoped = scoped.length === 0 ? controllers : scoped;
-
-  const isSingle = effectiveScope.kind === "controller";
-  const activeCtrl = isSingle ? effectiveScoped[0] : undefined;
+  const scopedLeaves = scope.leaves;
+  const activeCtrl =
+    scope.kind === "controller" && scope.leaves[0]?.kind === "controller"
+      ? (scope.leaves[0].source as ControllerInfo)
+      : undefined;
 
   const isKilled = activeCtrl?.config?.manual_kill_switch === true;
   const isStopping = activeCtrl?.status === "stopping";
@@ -589,9 +526,7 @@ export function ControllerBrowser({
   // ── What a bot scope owns: the bot itself, its logs, and stopping it ──
 
   const activeBot =
-    effectiveScope.kind === "bot"
-      ? bots.find((b) => b.bot_name === effectiveScope.bot)
-      : undefined;
+    scope.kind === "bot" ? bots.find((b) => b.bot_name === scope.label) : undefined;
   const botStopping = activeBot?.status === "stopping";
 
   // The bot is the mutation's argument rather than something it reads off the
@@ -633,18 +568,8 @@ export function ControllerBrowser({
 
   // ── Keyboard navigation over the picker, in the order it is drawn ──
 
-  const navItems = useMemo(() => {
-    const items: Scope[] = [{ kind: "all" }];
-    for (const g of groups) {
-      items.push({ kind: "bot", bot: g.bot });
-      if (!collapsedBots.has(g.bot)) {
-        for (const c of g.ctrls) items.push({ kind: "controller", key: ctrlKey(c) });
-      }
-    }
-    return items;
-  }, [groups, collapsedBots, ctrlKey]);
-
-  const navIdx = navItems.findIndex((s) => sameScope(s, effectiveScope));
+  const navItems = useMemo(() => visibleNodeIds(tree, collapsed), [tree, collapsed]);
+  const navIdx = navItems.indexOf(effectiveScopeId);
 
   const goUp = useCallback(() => {
     if (navIdx > 0) setScope(navItems[navIdx - 1]);
@@ -653,6 +578,15 @@ export function ControllerBrowser({
   const goDown = useCallback(() => {
     if (navIdx >= 0 && navIdx < navItems.length - 1) setScope(navItems[navIdx + 1]);
   }, [navIdx, navItems, setScope]);
+
+  const toggleCollapse = useCallback((id: string) => {
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
 
   // Escape used to close the browser back onto the page behind it. There is no
   // page behind it any more — it *is* `/bots` — so only the arrows are left,
@@ -676,114 +610,40 @@ export function ControllerBrowser({
   }, [goUp, goDown, modalOpen]);
 
   // Scroll active into view
-  const activeScopeId = scopeId(effectiveScope);
   useEffect(() => {
-    const el = sidebarRef.current?.querySelector("[data-active-ctrl]");
+    const el = sidebarRef.current?.querySelector("[data-active-scope]");
     el?.scrollIntoView({ block: "nearest", behavior: "smooth" });
-  }, [activeScopeId]);
+  }, [effectiveScopeId]);
 
   // ── What the scope adds up to, in display currency ──
-
-  const totals = useMemo(() => {
-    let realized = 0, unrealized = 0, total = 0, volume = 0;
-    for (const c of effectiveScoped) {
-      realized += cv(c.realized_pnl_quote, c.trading_pair);
-      unrealized += cv(c.unrealized_pnl_quote, c.trading_pair);
-      total += cv(c.global_pnl_quote, c.trading_pair);
-      volume += cv(c.volume_traded, c.trading_pair);
-    }
-    return { realized, unrealized, total, volume };
-  }, [effectiveScoped, cv]);
-
-  /**
-   * How long the scope has actually been running, and what it has put to work.
-   *
-   * `hours` is measured from the earliest deploy in scope to now — real elapsed
-   * time, never a nominal "a day". Every per-hour figure in the KPI row divides
-   * by this, so a fleet up for 8 hours and one up for 8 days are comparable
-   * even though their totals are not.
-   *
-   * `capital` is the sum of each controller's declared `total_amount_quote`,
-   * the same field the `bot_report` routine reports as "Capital Deployed". Not
-   * every controller type declares one; the tile is dropped rather than shown
-   * as zero when none in scope does.
-   */
-  const now = useSyncExternalStore(subscribeToClock, clockSnapshot, clockSnapshot);
-  const scopeFacts = useMemo(() => {
-    let earliest: number | undefined;
-    let capital = 0;
-    const bots = new Set<string>();
-    let positions = 0;
-    for (const c of effectiveScoped) {
-      bots.add(c.bot_name);
-      positions += c.positions_summary?.length ?? 0;
-      const amount = Number(c.config?.total_amount_quote ?? 0);
-      if (Number.isFinite(amount) && amount > 0) capital += cv(amount, c.trading_pair);
-      const ms = c.deployed_at ? Date.parse(c.deployed_at) : NaN;
-      if (!Number.isNaN(ms) && (earliest === undefined || ms < earliest)) earliest = ms;
-    }
-    const hours = earliest === undefined ? 0 : Math.max(0, (now - earliest) / 3_600_000);
-    return { hours, capital, bots: bots.size, positions };
-  }, [effectiveScoped, cv, now]);
+  //
+  // One fold, for every kind of node: a controller, a bot, the fleet. The
+  // browser used to compute `totals`, `scopeFacts` and the close-type histogram
+  // as three separate passes over a `ControllerInfo[]`; they are one pass over
+  // a leaf set now (lib/perf-tree), which is what lets an executor scope be
+  // reported by the same strip without a second implementation of any of them.
+  const totals = useMemo(() => foldLeaves(scopedLeaves, cv, now), [scopedLeaves, cv, now]);
 
   /**
    * A per-hour pace, or nothing.
    *
-   * Nothing is the right answer for a scope with no known deploy time: a total
+   * Nothing is the right answer for a scope with no known start: a total
    * divided by a runtime we do not have is a made-up rate, and it would be
    * indistinguishable on screen from a measured one.
    */
   const perHour = (total: number, fmt: (v: number, symbol?: string) => string) =>
-    scopeFacts.hours > 0 ? `${fmt(total / scopeFacts.hours, currencySymbol)}/hr` : undefined;
-
-  /** Per-bot / per-controller totals for the picker rows, in display currency. */
-  const rowTotals = useMemo(() => {
-    const byBot = new Map<string, { pnl: number; volume: number }>();
-    let fleetPnl = 0, fleetVolume = 0;
-    for (const c of controllers) {
-      const pnl = cv(c.global_pnl_quote, c.trading_pair);
-      const vol = cv(c.volume_traded, c.trading_pair);
-      fleetPnl += pnl;
-      fleetVolume += vol;
-      const acc = byBot.get(c.bot_name) ?? { pnl: 0, volume: 0 };
-      acc.pnl += pnl;
-      acc.volume += vol;
-      byBot.set(c.bot_name, acc);
-    }
-    return { byBot, fleetPnl, fleetVolume };
-  }, [controllers, cv]);
-
-  /**
-   * How this scope's positions ended, biggest bucket first, and how many there
-   * were in all.
-   *
-   * The total is a headline number the browser never showed: each count answers
-   * "how did they end", and only their sum answers "how many ended at all",
-   * which is what makes two scopes' mixes comparable.
-   */
-  const closeTypes = useMemo(() => {
-    const merged: Record<string, number> = {};
-    let total = 0;
-    for (const c of effectiveScoped) {
-      for (const [type, count] of Object.entries(c.close_type_counts || {})) {
-        merged[type] = (merged[type] ?? 0) + count;
-        total += count;
-      }
-    }
-    return { counts: Object.entries(merged).sort((a, b) => b[1] - a[1]), total };
-  }, [effectiveScoped]);
+    totals.hours > 0 ? `${fmt(total / totals.hours, currencySymbol)}/hr` : undefined;
 
   const positionRows = useMemo<PositionRow[]>(() => {
     const rows: PositionRow[] = [];
-    for (const c of effectiveScoped) {
-      const label = c.controller_id || c.controller_name;
-      (c.positions_summary || []).forEach((pos, i) => {
-        const pair = String(pos.trading_pair || c.trading_pair || "");
+    for (const leaf of scopedLeaves) {
+      leaf.positions.forEach((pos, i) => {
+        const pair = String(pos.trading_pair || leaf.pair || "");
         rows.push({
-          id: `${ctrlKey(c)}#${i}`,
-          ctrlLabel: label,
+          id: `${leaf.id}#${i}`,
+          ctrlLabel: leaf.label,
           pair,
-          connector: String(pos.connector_name || pos.connector || c.connector || ""),
+          connector: String(pos.connector_name || pos.connector || leaf.connector || ""),
           side: parseSide(String(pos.side || "")),
           amount: num(pos.amount),
           breakeven: num(pos.breakeven_price),
@@ -796,7 +656,7 @@ export function ControllerBrowser({
       });
     }
     return rows;
-  }, [effectiveScoped, ctrlKey, cv]);
+  }, [scopedLeaves, cv]);
 
   /** Extra per-position fields, as columns, so the table stays one grid. */
   const extraColumns = useMemo(() => {
@@ -809,17 +669,26 @@ export function ControllerBrowser({
 
   // ── The aggregated series, folded from the fleet history the page already has ──
 
+  /** The live controllers under this scope, whatever level it sits at. */
+  const scopedControllers = useMemo(
+    () =>
+      scopedLeaves
+        .filter((leaf: PerfLeaf) => leaf.kind === "controller")
+        .map((leaf) => leaf.source as ControllerInfo),
+    [scopedLeaves],
+  );
+
   const scopedKeys = useMemo(
-    () => new Set(effectiveScoped.map((c) => ctrlKey(c))),
-    [effectiveScoped, ctrlKey],
+    () => new Set(scopedControllers.map((c) => controllerKey(c))),
+    [scopedControllers],
   );
 
   const aggregatedData = useMemo(
-    () => (isSingle ? [] : aggregatePnlSeries(snapshots, scopedKeys, effectiveScoped, convert)),
-    [isSingle, snapshots, scopedKeys, effectiveScoped, convert],
+    () => (activeCtrl ? [] : aggregatePnlSeries(snapshots, scopedKeys, scopedControllers, convert)),
+    [activeCtrl, snapshots, scopedKeys, scopedControllers, convert],
   );
 
-  // Tell the chat which controller is open, while the browser is (FEAT-059).
+  // Tell the chat which scope is open, while the browser is (FEAT-059).
   useViewFacts(() =>
     activeCtrl
       ? {
@@ -829,9 +698,9 @@ export function ControllerBrowser({
       : {
           label: "Bot performance",
           subject:
-            effectiveScope.kind === "bot"
-              ? `all ${effectiveScoped.length} controllers of bot ${effectiveScope.bot}`
-              : `all ${effectiveScoped.length} controllers across ${groups.length} bots`,
+            scope.kind === "bot"
+              ? `all ${scopedLeaves.length} controllers of bot ${scope.label}`
+              : `all ${scopedLeaves.length} controllers across ${tree.children.length} bots`,
         },
   );
 
@@ -839,15 +708,6 @@ export function ControllerBrowser({
 
   const configId = activeCtrl ? activeCtrl.controller_id || activeCtrl.controller_name : "";
   const chartHeight = Math.max(MIN_CHART_PX, (chartBoxH || 420) - CHART_CHROME_PX);
-
-  // ── Picker rows ──
-
-  const scopeRowClass = (active: boolean) =>
-    `w-full text-left transition-all border-l-[3px] ${
-      active
-        ? "bg-[var(--color-primary)]/15 border-l-[var(--color-primary)] shadow-[inset_0_0_0_1px_var(--color-primary)]/10"
-        : "border-l-transparent hover:bg-[var(--color-surface-hover)]"
-    }`;
 
   return (
     <div className="flex h-full min-h-0 bg-[var(--color-bg)]">
@@ -874,150 +734,17 @@ export function ControllerBrowser({
 
         {/* Scope list: fleet → bot → controller */}
         <div ref={sidebarRef} className="flex-1 overflow-y-auto scrollbar-thin">
-          {/* All controllers combined */}
-          {(() => {
-            const active = effectiveScope.kind === "all";
-            if (isCompact) {
-              return (
-                <button
-                  onClick={() => setScope({ kind: "all" })}
-                  {...(active ? { "data-active-ctrl": true } : {})}
-                  className={`flex w-full items-center justify-center py-3 ${
-                    active ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]" : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
-                  }`}
-                  title="All controllers"
-                >
-                  <Layers className="h-3.5 w-3.5" />
-                </button>
-              );
-            }
-            return (
-              <button
-                onClick={() => setScope({ kind: "all" })}
-                {...(active ? { "data-active-ctrl": true } : {})}
-                className={`${scopeRowClass(active)} px-3 py-2.5`}
-              >
-                <div className="flex items-center gap-2">
-                  <Layers className={`h-3.5 w-3.5 shrink-0 ${active ? "text-[var(--color-primary)]" : "text-[var(--color-text-muted)]"}`} />
-                  <span className={`text-xs ${active ? "font-semibold text-[var(--color-text)]" : "font-medium text-[var(--color-text-muted)]"}`}>
-                    All controllers
-                  </span>
-                  <span className="ml-auto tabular-nums text-xs font-semibold" style={{ color: pnlColor(rowTotals.fleetPnl) }}>
-                    {formatCurrencyPnl(rowTotals.fleetPnl, currencySymbol)}
-                  </span>
-                </div>
-                <div className="mt-0.5 flex items-center gap-2 pl-5.5 text-[10px] text-[var(--color-text-muted)]">
-                  <span>{controllers.length} controllers · {groups.length} bot{groups.length !== 1 ? "s" : ""}</span>
-                  <span className="ml-auto tabular-nums">{formatCurrencyVolume(rowTotals.fleetVolume, currencySymbol)}</span>
-                </div>
-              </button>
-            );
-          })()}
-
-          {groups.map((g) => {
-            const botActive = effectiveScope.kind === "bot" && effectiveScope.bot === g.bot;
-            const collapsed = collapsedBots.has(g.bot);
-            const agg = rowTotals.byBot.get(g.bot) ?? { pnl: 0, volume: 0 };
-            return (
-              <div key={g.bot} className="border-t border-[var(--color-border)]/40">
-                {/* Bot row: pick the bot, or fold its controllers away */}
-                {!isCompact && (
-                  <div className={`${scopeRowClass(botActive)} flex items-stretch`}>
-                    <button
-                      onClick={() =>
-                        setCollapsedBots((prev) => {
-                          const next = new Set(prev);
-                          if (next.has(g.bot)) next.delete(g.bot);
-                          else next.add(g.bot);
-                          return next;
-                        })
-                      }
-                      className="px-1.5 text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
-                      title={collapsed ? "Show controllers" : "Hide controllers"}
-                    >
-                      {collapsed ? <ChevronRight className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
-                    </button>
-                    <button
-                      onClick={() => setScope({ kind: "bot", bot: g.bot })}
-                      {...(botActive ? { "data-active-ctrl": true } : {})}
-                      className="flex-1 min-w-0 py-2 pr-3 text-left"
-                    >
-                      <div className="flex items-center gap-1.5">
-                        <Server className={`h-3 w-3 shrink-0 ${botActive ? "text-[var(--color-primary)]" : "text-[var(--color-text-muted)]"}`} />
-                        <span
-                          className={`truncate text-[11px] ${botActive ? "font-semibold text-[var(--color-text)]" : "font-medium text-[var(--color-text-muted)]"}`}
-                          title={g.bot}
-                        >
-                          {g.bot}
-                        </span>
-                        <span className="ml-auto shrink-0 tabular-nums text-[11px] font-semibold" style={{ color: pnlColor(agg.pnl) }}>
-                          {formatCurrencyPnl(agg.pnl, currencySymbol)}
-                        </span>
-                      </div>
-                      <div className="mt-0.5 flex items-center gap-2 pl-4.5 text-[10px] text-[var(--color-text-muted)]">
-                        <span>{g.ctrls.length} controller{g.ctrls.length !== 1 ? "s" : ""}</span>
-                        <span className="ml-auto tabular-nums">{formatCurrencyVolume(agg.volume, currencySymbol)}</span>
-                      </div>
-                    </button>
-                  </div>
-                )}
-
-                {(isCompact || !collapsed) &&
-                  g.ctrls.map((c) => {
-                    const key = ctrlKey(c);
-                    const isActive = effectiveScope.kind === "controller" && effectiveScope.key === key;
-                    const killed = c.config?.manual_kill_switch === true;
-                    const ctrlStopping = c.status === "stopping";
-
-                    if (isCompact) {
-                      return (
-                        <button
-                          key={key}
-                          onClick={() => setScope({ kind: "controller", key })}
-                          {...(isActive ? { "data-active-ctrl": true } : {})}
-                          className={`flex w-full items-center justify-center py-3 transition-colors ${
-                            isActive
-                              ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
-                              : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
-                          }`}
-                          title={c.controller_name}
-                        >
-                          <StatusDot status={ctrlStopping ? "stopping" : killed ? "stopped" : c.status} />
-                        </button>
-                      );
-                    }
-
-                    return (
-                      <button
-                        key={key}
-                        onClick={() => setScope({ kind: "controller", key })}
-                        {...(isActive ? { "data-active-ctrl": true } : {})}
-                        className={`${scopeRowClass(isActive)} py-2 pl-5 pr-3`}
-                      >
-                        <div className="flex items-center gap-2">
-                          <StatusDot status={ctrlStopping ? "stopping" : killed ? "stopped" : c.status} />
-                          <span
-                            className={`truncate text-xs ${isActive ? "font-semibold text-[var(--color-text)]" : "font-medium text-[var(--color-text-muted)]"}`}
-                            title={c.controller_id || c.controller_name}
-                          >
-                            {c.controller_id || c.controller_name}
-                          </span>
-                          <span className="ml-auto shrink-0 tabular-nums text-xs font-semibold" style={{ color: pnlColor(c.global_pnl_quote) }}>
-                            {fmtPnl(c.global_pnl_quote, c.trading_pair)}
-                          </span>
-                        </div>
-                        <div className="mt-0.5 flex items-center gap-2 pl-4 text-[10px] text-[var(--color-text-muted)]">
-                          {c.trading_pair && <span>{c.trading_pair}</span>}
-                          {/* Volume is what tells two similarly-profitable configs
-                              apart at a glance, so it rides beside the PnL. */}
-                          <span className="ml-auto tabular-nums">{fmtVol(c.volume_traded, c.trading_pair)}</span>
-                        </div>
-                      </button>
-                    );
-                  })}
-              </div>
-            );
-          })}
+          <ScopeTree
+            root={tree}
+            activeId={effectiveScopeId}
+            collapsed={collapsed}
+            onSelect={setScope}
+            onToggleCollapse={toggleCollapse}
+            cv={cv}
+            currencySymbol={currencySymbol}
+            now={now}
+            compact={isCompact}
+          />
         </div>
 
         {/* Nav hints */}
@@ -1071,10 +798,10 @@ export function ControllerBrowser({
             ) : (
               <div className="truncate">
                 <h2 className="text-sm font-semibold truncate flex items-center gap-2">
-                  {effectiveScope.kind === "bot" ? (
+                  {scope.kind === "bot" ? (
                     <>
                       <Server className="h-3.5 w-3.5 text-[var(--color-text-muted)]" />
-                      {effectiveScope.bot}
+                      {scope.label}
                     </>
                   ) : (
                     <>
@@ -1084,8 +811,8 @@ export function ControllerBrowser({
                   )}
                 </h2>
                 <span className="text-[10px] text-[var(--color-text-muted)] block truncate">
-                  {effectiveScoped.length} controller{effectiveScoped.length !== 1 ? "s" : ""} aggregated
-                  {effectiveScope.kind === "all" && ` · ${groups.length} bot${groups.length !== 1 ? "s" : ""}`}
+                  {scopedLeaves.length} controller{scopedLeaves.length !== 1 ? "s" : ""} aggregated
+                  {scope.kind === "fleet" && ` · ${tree.children.length} bot${tree.children.length !== 1 ? "s" : ""}`}
                 </span>
               </div>
             )}
@@ -1116,7 +843,7 @@ export function ControllerBrowser({
                 fleet deploys bots, a bot is stopped and read, a controller is
                 paused and configured. The accordion and the table that used to
                 carry the first two are gone (FEAT-084). */}
-            {effectiveScope.kind === "all" && (
+            {scope.kind === "fleet" && (
               <button
                 onClick={() => setShowDeploy(true)}
                 className="flex items-center gap-1.5 rounded px-3 py-1.5 text-xs font-medium text-[var(--color-primary)] transition-colors hover:bg-[var(--color-primary)]/10"
@@ -1238,9 +965,9 @@ export function ControllerBrowser({
               </button>
             )}
 
-            {/* The run history is still a table of its own until [[FEAT-086]]
-                folds terminated runs into the sidebar. With the tab bar gone,
-                this link is the only door to it. */}
+            {/* The run history is still a table of its own until the Terminated
+                population lands in the sidebar. With the tab bar gone, this
+                link is the only door to it. */}
             <Link
               to="/bots?tab=runs"
               className="ml-1 flex items-center gap-1.5 rounded px-3 py-1.5 text-xs font-medium text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
@@ -1271,16 +998,16 @@ export function ControllerBrowser({
               <div className="grid grid-cols-3 lg:grid-cols-6 gap-4">
                 <Kpi
                   label="Net PnL"
-                  value={formatCurrencyPnl(totals.total, currencySymbol)}
-                  color={pnlColor(totals.total)}
-                  // The return % is per-controller — each is measured against its
-                  // own notional — so it rides along only where it means
-                  // something. Summing or averaging them across a fold would
-                  // report a return nobody earned.
+                  value={formatCurrencyPnl(totals.net, currencySymbol)}
+                  color={pnlColor(totals.net)}
+                  // The return % is per-leaf — each is measured against its own
+                  // notional — so it rides along only where it means something.
+                  // Summing or averaging them across a fold would report a
+                  // return nobody earned.
                   sub={[
-                    perHour(totals.total, formatCurrencyPnl),
-                    activeCtrl
-                      ? `${activeCtrl.global_pnl_pct >= 0 ? "+" : ""}${activeCtrl.global_pnl_pct.toFixed(2)}%`
+                    perHour(totals.net, formatCurrencyPnl),
+                    totals.returnPct !== undefined
+                      ? `${totals.returnPct >= 0 ? "+" : ""}${totals.returnPct.toFixed(2)}%`
                       : undefined,
                   ]
                     .filter(Boolean)
@@ -1300,9 +1027,9 @@ export function ControllerBrowser({
                   // there is nothing for it to be, and a stale non-zero reading
                   // beside "no open positions" is worth seeing.
                   sub={
-                    scopeFacts.positions === 0
+                    totals.positions === 0
                       ? "no open positions"
-                      : `${scopeFacts.positions} position${scopeFacts.positions !== 1 ? "s" : ""}`
+                      : `${totals.positions} position${totals.positions !== 1 ? "s" : ""}`
                   }
                 />
                 <Kpi
@@ -1310,26 +1037,26 @@ export function ControllerBrowser({
                   value={formatCurrencyVolume(totals.volume, currencySymbol)}
                   sub={perHour(totals.volume, formatCurrencyVolume)}
                 />
-                {scopeFacts.capital > 0 && (
+                {totals.capital > 0 && (
                   <Kpi
                     label="Capital Deployed"
-                    value={formatCurrencyVolume(scopeFacts.capital, currencySymbol)}
+                    value={formatCurrencyVolume(totals.capital, currencySymbol)}
                     // Turnover rather than a controller count: how hard the
                     // capital is working is the thing the two numbers beside it
                     // do not already say, and the count is on the Runtime tile.
-                    sub={`${(totals.volume / scopeFacts.capital).toFixed(1)}x turnover`}
+                    sub={`${(totals.volume / totals.capital).toFixed(1)}x turnover`}
                   />
                 )}
                 <Kpi
                   label="Runtime"
-                  value={scopeFacts.hours > 0 ? `${scopeFacts.hours.toFixed(1)}h` : "—"}
+                  value={totals.hours > 0 ? `${totals.hours.toFixed(1)}h` : "—"}
                   // Named in hours, not "2d 9h", because it is the divisor of
                   // every per-hour figure in this row — the reader can check the
                   // pace against the total without converting anything.
                   sub={
                     activeCtrl
                       ? activeCtrl.bot_name
-                      : `${scopeFacts.bots} bot${scopeFacts.bots !== 1 ? "s" : ""}, ${effectiveScoped.length} controller${effectiveScoped.length !== 1 ? "s" : ""}`
+                      : `${totals.bots} bot${totals.bots !== 1 ? "s" : ""}, ${totals.count} controller${totals.count !== 1 ? "s" : ""}`
                   }
                 />
               </div>
@@ -1351,7 +1078,7 @@ export function ControllerBrowser({
                   reader walked the sidebar. A scope with none drops the row
                   entirely — a fleet of LP controllers should not pay for a line
                   that says nothing. */}
-              {closeTypes.counts.length > 0 && (
+              {totals.closeTypes.length > 0 && (
                 <div
                   data-close-types
                   className="mt-3 flex items-center gap-1.5 overflow-x-auto scrollbar-thin border-t border-[var(--color-border)]/60 pt-2"
@@ -1359,10 +1086,10 @@ export function ControllerBrowser({
                   <span className="shrink-0 text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">
                     Closes{" "}
                     <span className="font-semibold tabular-nums text-[var(--color-text)]">
-                      {closeTypes.total.toLocaleString()}
+                      {totals.closeTotal.toLocaleString()}
                     </span>
                   </span>
-                  {closeTypes.counts.map(([type, count]) => (
+                  {totals.closeTypes.map(([type, count]) => (
                     <span
                       key={type}
                       className="inline-flex shrink-0 items-center gap-1 rounded-md bg-[var(--color-bg)] px-2 py-0.5 text-[11px] border border-[var(--color-border)]/50"
@@ -1383,7 +1110,7 @@ export function ControllerBrowser({
                     // Keyed by bot + config id: two bots can be running this very
                     // config, and a key that did not tell them apart would keep the
                     // sibling's mounted state when the user switches (CORR-241).
-                    key={ctrlKey(activeCtrl)}
+                    key={controllerKey(activeCtrl)}
                     server={server}
                     controllerId={configId}
                     botName={activeCtrl.bot_name}
@@ -1396,7 +1123,7 @@ export function ControllerBrowser({
                 ) : aggregatedData.length >= 2 ? (
                   <PnlEvolutionChart
                     data={aggregatedData}
-                    title={effectiveScope.kind === "bot" ? `${effectiveScope.bot} PnL` : "Fleet PnL"}
+                    title={scope.kind === "bot" ? `${scope.label} PnL` : "Fleet PnL"}
                     pnlHeight={Math.round(chartHeight * 0.65)}
                     volumeHeight={chartHeight - Math.round(chartHeight * 0.65)}
                     currencySymbol={currencySymbol}
@@ -1528,7 +1255,7 @@ export function ControllerBrowser({
                 <YamlConfigEditor
                   // Same: an editor keyed on the config id alone kept its unsaved
                   // buffer when the user switched to the other bot running it.
-                  key={ctrlKey(activeCtrl)}
+                  key={controllerKey(activeCtrl)}
                   config={activeCtrl.config || {}}
                   server={server}
                   configId={configId}

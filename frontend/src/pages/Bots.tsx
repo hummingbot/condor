@@ -4,7 +4,7 @@ import { lazy, Suspense, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { NoServerCard } from "@/components/NoServerCard";
-import { ControllerBrowser } from "@/components/bots/ControllerBrowser";
+import { PerfBrowser } from "@/components/perf/PerfBrowser";
 import { DeployBotDialog } from "@/components/bots/DeployBotDialog";
 import { FallbackSpinner } from "@/components/ui/FallbackSpinner";
 import { useRates } from "@/hooks/useRates";
@@ -244,7 +244,7 @@ export function Bots() {
   }
 
   return (
-    <ControllerBrowser
+    <PerfBrowser
       controllers={sortedControllers}
       bots={data?.bots ?? []}
       server={server}

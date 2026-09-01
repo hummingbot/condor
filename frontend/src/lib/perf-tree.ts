@@ -113,6 +113,12 @@ export function leafFromController(c: ControllerInfo): PerfLeaf {
   // The kill switch is what actually stops a controller; `status` in this
   // payload is a hardcoded "running" (see the /bots route's own note).
   const killed = c.config?.manual_kill_switch === true;
+  // A controller is never *finished*: this payload only ever describes live
+  // ones, and a paused controller is still deployed. Reading the kill switch as
+  // "finished" would end the scope's runtime at an end nothing recorded, so a
+  // bot whose controllers were all paused would report no runtime at all — and
+  // every per-hour pace on the strip with it. Paused is a `status`, which is
+  // what the sidebar dot and the header read.
   return {
     id: controllerKey(c),
     kind: "controller",
@@ -133,7 +139,7 @@ export function leafFromController(c: ControllerInfo): PerfLeaf {
     positions: c.positions_summary || [],
     startedAt: Number.isNaN(started) ? null : started,
     endedAt: null,
-    running: !killed,
+    running: true,
     status: killed ? "stopped" : c.status,
     returnPct: c.global_pnl_pct,
     source: c,
@@ -282,8 +288,8 @@ function makeNode(id: string, kind: NodeKind, label: string, rollsUp = true): Pe
  * are the same in both trees, which is what lets a selection survive the
  * grouping switch untouched.
  */
-export function buildTree(leaves: PerfLeaf[], groupBy: GroupBy): PerfNode {
-  const fleet = makeNode("all", "fleet", "All");
+export function buildTree(leaves: PerfLeaf[], groupBy: GroupBy, rootLabel = "All"): PerfNode {
+  const fleet = makeNode("all", "fleet", rootLabel);
   const runsNode = makeNode("runs", "runs", "Archived runs", false);
   const groups = new Map<string, PerfNode>();
   const controllers = new Map<string, PerfNode>();
@@ -373,11 +379,9 @@ export function indexTree(root: PerfNode): Map<string, PerfNode> {
 /**
  * The path from a node up to the root, nearest first.
  *
- * This is what makes a population or grouping switch keep the reader where they
- * were: the chain is remembered from the tree that is on screen, and when the
- * next tree does not contain the selected node the first surviving link of the
- * chain is selected instead — the nearest surviving ancestor, rather than a
- * reset to the fleet.
+ * Walks the tree, so it only answers for a node that is actually in it. The
+ * re-aim after a switch uses `resolveScope` below instead, which does not need
+ * the tree the node used to be in.
  */
 export function ancestorChain(root: PerfNode, id: string): string[] {
   const path: string[] = [];
@@ -392,6 +396,88 @@ export function ancestorChain(root: PerfNode, id: string): string[] {
   };
   if (!walk(root)) return [];
   return path.reverse();
+}
+
+/** Every node id in the order the tree draws them, skipping what is collapsed. */
+export function visibleNodeIds(root: PerfNode, collapsed: ReadonlySet<string>): string[] {
+  const ids: string[] = [];
+  const walk = (node: PerfNode) => {
+    ids.push(node.id);
+    if (collapsed.has(node.id)) return;
+    node.children.forEach(walk);
+  };
+  walk(root);
+  return ids;
+}
+
+/**
+ * Where a scope could fall back to, nearest first, without consulting the tree
+ * it used to live in.
+ *
+ * Switching population or grouping rebuilds the tree, and a selection the new
+ * one does not contain has to land *somewhere*. Resetting to the fleet throws
+ * the reader's place away, and remembering the previous tree's path would mean
+ * carrying a copy of the old tree through every render.
+ *
+ * Neither is needed, because a node id already says where it hangs: a
+ * controller id names its bot, a run hangs under the run history, and both
+ * group levels are named after the value they group on. The one id that says
+ * nothing on its own is an executor's — deliberately, so that the *same*
+ * executor keeps the *same* id whether it is live or archived, and whichever
+ * way the tree is grouped, which is what lets the common case need no fallback
+ * at all. Its leaf is passed in when one is known and supplies the rest.
+ *
+ * Both group levels are offered whatever the current grouping is; only one of
+ * them exists in any given tree, and the caller takes the first that does.
+ * A candidate is never *deeper* than the scope it replaces — a bot scope that
+ * fell through must not land on one of its own controllers, which is a
+ * different (and much narrower) report than the one the reader had open.
+ */
+export function fallbackChain(scopeId: string, leaf?: PerfLeaf): string[] {
+  const chain = [scopeId];
+  if (leaf) {
+    const ctrl = controllerNodeId(leaf);
+    if (ctrl) chain.push(ctrl);
+    chain.push(`bot:${leaf.bot || UNKNOWN_LABEL}`, `type:${leaf.executorType || UNKNOWN_LABEL}`);
+  } else if (scopeId.startsWith("ctrl:")) {
+    // `ctrl:<bot>:<config id>` — the bot is everything up to the second colon.
+    const rest = scopeId.slice("ctrl:".length);
+    const sep = rest.indexOf(":");
+    if (sep >= 0) chain.push(`bot:${rest.slice(0, sep)}`);
+  } else if (scopeId.startsWith("run:")) {
+    chain.push("runs");
+  }
+  chain.push("all");
+
+  const depth = nodeDepth(scopeId);
+  const seen = new Set<string>();
+  return chain.filter(
+    (id) => nodeDepth(id) <= depth && !seen.has(id) && (seen.add(id), true),
+  );
+}
+
+/** How far down the tree an id sits, read off the id alone. */
+function nodeDepth(id: string): number {
+  if (id === "all") return 0;
+  if (id === "runs" || id.startsWith("bot:") || id.startsWith("type:")) return 1;
+  if (id.startsWith("ctrl:")) return 2;
+  // An executor or a run: a leaf, and the deepest thing the tree holds.
+  return 3;
+}
+
+/**
+ * The node a scope actually resolves to: itself when it still exists, and the
+ * nearest surviving ancestor when it does not.
+ *
+ * A scope whose node has gone — a bot stopped, a config removed, a population
+ * switched — would otherwise render an empty screen with no way back.
+ */
+export function resolveScope(
+  nodes: ReadonlyMap<string, PerfNode>,
+  scopeId: string,
+  leaf?: PerfLeaf,
+): string {
+  return fallbackChain(scopeId, leaf).find((id) => nodes.has(id)) ?? "all";
 }
 
 // ── The fold ──

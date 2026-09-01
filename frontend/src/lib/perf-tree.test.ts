@@ -20,6 +20,8 @@ import {
   leafFromBotRun,
   leafFromController,
   leafFromExecutor,
+  resolveScope,
+  visibleNodeIds,
   type PerfLeaf,
   type PerfNode,
 } from "./perf-tree";
@@ -123,8 +125,11 @@ describe("leaf adapters", () => {
     const leaf = leafFromController(
       controller({ status: "running", config: { manual_kill_switch: true } }),
     );
-    expect(leaf.running).toBe(false);
     expect(leaf.status).toBe("stopped");
+    // Paused, not finished: this payload only describes live controllers, and a
+    // fold that thought otherwise would report no runtime for a paused bot.
+    expect(leaf.running).toBe(true);
+    expect(foldLeaves([leaf], identity, NOW).hours).toBe(4);
   });
 
   it("declares no capital when the controller declares none", () => {
@@ -292,6 +297,101 @@ describe("ancestorChain", () => {
     const chain = ancestorChain(tree, "exec:a");
     const next = indexTree(buildTree([leafFromController(controller())], "bot"));
     expect(chain.find((id) => next.has(id))).toBe("ctrl:alpha:pmm_1");
+  });
+});
+
+describe("resolveScope", () => {
+  const running = indexTree(
+    buildTree(
+      [
+        leafFromController(controller()),
+        leafFromExecutor(executor({ id: "a", status: "active", close_timestamp: 0 }), "alpha"),
+      ],
+      "bot",
+    ),
+  );
+
+  it("keeps a scope that is still there", () => {
+    expect(resolveScope(running, "exec:a")).toBe("exec:a");
+    expect(resolveScope(running, "ctrl:alpha:pmm_1")).toBe("ctrl:alpha:pmm_1");
+    expect(resolveScope(running, "bot:alpha")).toBe("bot:alpha");
+  });
+
+  it("keeps an executor across a population switch, its id being the same in both", () => {
+    // The point of an executor node id saying nothing about where it hangs: the
+    // same executor is the same node whether it is live or archived.
+    const terminated = indexTree(buildTree([leafFromExecutor(executor({ id: "a" }))], "bot"));
+    expect(resolveScope(terminated, "exec:a")).toBe("exec:a");
+  });
+
+  it("keeps a controller across a grouping switch", () => {
+    const byType = indexTree(buildTree([leafFromController(controller())], "type"));
+    expect(resolveScope(byType, "ctrl:alpha:pmm_1")).toBe("ctrl:alpha:pmm_1");
+  });
+
+  it("falls back to the bot when a controller is gone, and to the fleet when it is not", () => {
+    const withoutCtrl = indexTree(
+      buildTree([leafFromController(controller({ controller_id: "other" }))], "bot"),
+    );
+    expect(resolveScope(withoutCtrl, "ctrl:alpha:pmm_1")).toBe("bot:alpha");
+
+    const otherBot = indexTree(
+      buildTree([leafFromController(controller({ bot_name: "beta" }))], "bot"),
+    );
+    expect(resolveScope(otherBot, "ctrl:alpha:pmm_1")).toBe("all");
+  });
+
+  it("uses a known leaf to re-aim an executor at its controller", () => {
+    const leaf = leafFromExecutor(executor({ id: "a" }), "alpha");
+    const withoutExec = indexTree(buildTree([leafFromController(controller())], "bot"));
+    expect(resolveScope(withoutExec, "exec:a", leaf)).toBe("ctrl:alpha:pmm_1");
+  });
+
+  it("re-aims a bot scope at the type node holding the same leaf, and back", () => {
+    const leaf = leafFromController(controller());
+    const byType = indexTree(buildTree([leaf], "type"));
+    expect(resolveScope(byType, "bot:alpha", leaf)).toBe("type:pmm_simple");
+    const byBot = indexTree(buildTree([leaf], "bot"));
+    expect(resolveScope(byBot, "type:pmm_simple", leaf)).toBe("bot:alpha");
+  });
+
+  it("re-aims a vanished run at the run history", () => {
+    const withRuns = indexTree(buildTree([leafFromBotRun(botRun())], "bot"));
+    expect(resolveScope(withRuns, "run:gone:2020")).toBe("runs");
+    const noRuns = indexTree(buildTree([leafFromController(controller())], "bot"));
+    expect(resolveScope(noRuns, "run:gone:2020")).toBe("all");
+  });
+
+  it("answers the fleet for something it cannot place at all", () => {
+    expect(resolveScope(running, "nonsense")).toBe("all");
+  });
+});
+
+describe("visibleNodeIds", () => {
+  const tree = buildTree(
+    [
+      leafFromController(controller()),
+      leafFromExecutor(executor({ id: "a", status: "active", close_timestamp: 0 }), "alpha"),
+    ],
+    "bot",
+  );
+
+  it("lists every row in the order the tree draws them", () => {
+    expect(visibleNodeIds(tree, new Set())).toEqual([
+      "all",
+      "bot:alpha",
+      "ctrl:alpha:pmm_1",
+      "exec:a",
+    ]);
+  });
+
+  it("skips what is collapsed, so the arrows walk what is on screen", () => {
+    expect(visibleNodeIds(tree, new Set(["ctrl:alpha:pmm_1"]))).toEqual([
+      "all",
+      "bot:alpha",
+      "ctrl:alpha:pmm_1",
+    ]);
+    expect(visibleNodeIds(tree, new Set(["all"]))).toEqual(["all"]);
   });
 });
 
