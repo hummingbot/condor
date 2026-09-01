@@ -65,9 +65,9 @@ const UNKNOWN_LABEL = "—";
  * same operation at both granularities, which is the whole point.
  */
 export interface PerfLeaf {
-  /** Unique within a population: a controller key, an executor id, a run id. */
+  /** Unique within a population: a controller key or an executor id. */
   id: string;
-  kind: "controller" | "executor" | "run";
+  kind: "controller" | "executor";
   /** What the sidebar and the row tables call it. */
   label: string;
   /** Where it hangs under `groupBy: "bot"`. */
@@ -95,7 +95,7 @@ export interface PerfLeaf {
   fees: number;
   /** Declared capital in quote, or 0 for a leaf that declares none. */
   capital: number;
-  /** One entry for an executor, a histogram for a controller, none for a run. */
+  /** One entry for an executor, a histogram for a controller. */
   closeTypes: Record<string, number>;
   positions: Record<string, unknown>[];
   /** Epoch ms, or null when the record does not say. */
@@ -114,7 +114,7 @@ export interface PerfLeaf {
    */
   returnPct?: number;
   /** The source record, for the detail panel and the row tables. */
-  source: ControllerInfo | ExecutorInfo | BotRunInfo;
+  source: ControllerInfo | ExecutorInfo;
 }
 
 function finiteOr(value: unknown, fallback: number): number {
@@ -270,45 +270,12 @@ export function runStatus(r: BotRunInfo): string {
   return (r.run_status || "").toLowerCase();
 }
 
-/** One finished bot run, as the run history recorded it. */
-export function leafFromBotRun(r: BotRunInfo): PerfLeaf {
-  const started = r.created_at ? Date.parse(r.created_at) : NaN;
-  const stopped = r.stopped_at ? Date.parse(r.stopped_at) : NaN;
-  const running = r.is_live;
-  return {
-    // A bot name is reused across runs; the start time is what tells two apart.
-    id: `run:${r.bot_name}:${r.created_at ?? r.bot_run_id ?? ""}`,
-    kind: "run",
-    label: r.bot_name,
-    bot: r.bot_name,
-    controllerId: "",
-    executorType: r.strategy_type || r.strategy_name || UNKNOWN_LABEL,
-    connector: "",
-    // A run's totals are already summed across its controllers' quotes, so
-    // there is no one pair to convert them through.
-    pair: "",
-    realized: r.realized_pnl_quote,
-    unrealized: r.unrealized_pnl_quote,
-    net: r.global_pnl_quote,
-    volume: r.volume_traded,
-    fees: 0,
-    capital: 0,
-    closeTypes: {},
-    positions: [],
-    startedAt: Number.isNaN(started) ? null : started,
-    endedAt: Number.isNaN(stopped) ? null : stopped,
-    running,
-    status: runStatus(r),
-    source: r,
-  };
-}
-
 // ── The tree ──
 
-export type NodeKind = "fleet" | "bot" | "type" | "controller" | "executor" | "run" | "runs";
+export type NodeKind = "fleet" | "bot" | "type" | "controller" | "executor";
 
 export interface PerfNode {
-  /** `all` | `bot:x` | `type:y` | `ctrl:k` | `exec:id` | `runs` | `run:id` */
+  /** `all` | `bot:x` | `type:y` | `ctrl:k` | `exec:id` */
   id: string;
   kind: NodeKind;
   label: string;
@@ -326,24 +293,11 @@ export interface PerfNode {
    */
   leaves: PerfLeaf[];
   children: PerfNode[];
-  /**
-   * Whether this node's spine rolls up into its parent's.
-   *
-   * False for exactly one node, `runs`: a finished bot run's totals and the
-   * archived executors' totals describe overlapping trading that cannot be
-   * de-duplicated on the client, because an executor record carries no bot
-   * (see `UNATTACHED_BOT`). Summing both into one fleet total would report a
-   * PnL nobody earned, so the run history hangs beside the fleet rather than
-   * inside it, folds on its own, and is labelled as what it is.
-   */
-  rollsUp: boolean;
 }
 
 /** The node id a leaf is reported under when it is selected on its own. */
 export function leafNodeId(leaf: PerfLeaf): string {
-  if (leaf.kind === "controller") return `ctrl:${leaf.id}`;
-  if (leaf.kind === "run") return `run:${leaf.id}`;
-  return `exec:${leaf.id}`;
+  return leaf.kind === "controller" ? `ctrl:${leaf.id}` : `exec:${leaf.id}`;
 }
 
 /** The node id of the controller a leaf belongs to, or `null` for none. */
@@ -352,18 +306,29 @@ export function controllerNodeId(leaf: PerfLeaf): string | null {
   return `ctrl:${leaf.bot}:${leaf.controllerId}`;
 }
 
-function makeNode(id: string, kind: NodeKind, label: string, rollsUp = true): PerfNode {
-  return { id, kind, label, leaves: [], children: [], rollsUp };
+function makeNode(id: string, kind: NodeKind, label: string): PerfNode {
+  return { id, kind, label, leaves: [], children: [] };
 }
 
 /**
  * Build the scope tree over a population's leaves.
  *
  * The shape is fleet → group → controller → executor, where the group level is
- * the bot or the leaf's own class depending on `groupBy`. Runs are the one
- * exception: they hang under a `runs` node directly off the fleet, in either
- * grouping, because a run has neither a controller nor a type of the same kind
- * as the others — and because it must not roll up (see `PerfNode.rollsUp`).
+ * the bot or the leaf's own class depending on `groupBy`. **One shape, both
+ * populations**: a finished run is a bot node with the controllers it ran
+ * beneath it, exactly as a live bot is, which is what lets one sidebar, one
+ * fold and one set of panes describe a run whether it is trading or over
+ * (FEAT-089).
+ *
+ * There used to be a second shape beside it — a `runs` branch that folded
+ * separately and did not roll up — because a run's totals and the archived
+ * executors' totals described overlapping trading that could not be
+ * de-duplicated here. That is no longer true, and the reason is the spine rule
+ * below rather than anything about runs: a run's trading arrives as controller
+ * leaves, a controller node folds its own leaf and not its executor children,
+ * so the same trading cannot be counted at both levels. The executors that
+ * belong to no run are disjoint from every controller record by construction,
+ * so a fleet total that folds both counts nothing twice.
  *
  * Only the group level depends on `groupBy`. Controller and executor node ids
  * are the same in both trees, which is what lets a selection survive the
@@ -371,7 +336,6 @@ function makeNode(id: string, kind: NodeKind, label: string, rollsUp = true): Pe
  */
 export function buildTree(leaves: PerfLeaf[], groupBy: GroupBy, rootLabel = "All"): PerfNode {
   const fleet = makeNode("all", "fleet", rootLabel);
-  const runsNode = makeNode("runs", "runs", "Archived runs", false);
   const groups = new Map<string, PerfNode>();
   const controllers = new Map<string, PerfNode>();
 
@@ -403,12 +367,6 @@ export function buildTree(leaves: PerfLeaf[], groupBy: GroupBy, rootLabel = "All
   };
 
   for (const leaf of leaves) {
-    if (leaf.kind === "run") {
-      const node = makeNode(leafNodeId(leaf), "run", leaf.label);
-      node.leaves = [leaf];
-      runsNode.children.push(node);
-      continue;
-    }
     if (leaf.kind === "controller") {
       // The controller node *is* this leaf; it may already exist because one of
       // its executors was seen first, in which case it only needs its spine.
@@ -425,19 +383,10 @@ export function buildTree(leaves: PerfLeaf[], groupBy: GroupBy, rootLabel = "All
     parent.children.push(node);
   }
 
-  if (runsNode.children.length > 0) {
-    runsNode.leaves = runsNode.children.flatMap((c) => c.leaves);
-    fleet.children.push(runsNode);
-  }
-
   // Fold the spines upward, innermost first. A node that carries its own leaf
-  // keeps it; one that does not inherits its children's, minus any branch that
-  // does not roll up.
+  // keeps it; one that does not inherits its children's.
   const settle = (node: PerfNode): PerfLeaf[] => {
-    const fromChildren = node.children.flatMap((child) => {
-      const spine = settle(child);
-      return child.rollsUp ? spine : [];
-    });
+    const fromChildren = node.children.flatMap(settle);
     if (node.leaves.length === 0) node.leaves = fromChildren;
     return node.leaves;
   };
@@ -526,8 +475,8 @@ export function visibleNodeIds(root: PerfNode, collapsed: ReadonlySet<string>): 
  * carrying a copy of the old tree through every render.
  *
  * Neither is needed, because a node id already says where it hangs: a
- * controller id names its bot, a run hangs under the run history, and both
- * group levels are named after the value they group on. The one id that says
+ * controller id names its bot, and both group levels are named after the value
+ * they group on. The one id that says
  * nothing on its own is an executor's — deliberately, so that the *same*
  * executor keeps the *same* id whether it is live or archived, and whichever
  * way the tree is grouped, which is what lets the common case need no fallback
@@ -550,8 +499,6 @@ export function fallbackChain(scopeId: string, leaf?: PerfLeaf): string[] {
     const rest = scopeId.slice("ctrl:".length);
     const sep = rest.indexOf(":");
     if (sep >= 0) chain.push(`bot:${rest.slice(0, sep)}`);
-  } else if (scopeId.startsWith("run:")) {
-    chain.push("runs");
   }
   chain.push("all");
 
@@ -565,9 +512,9 @@ export function fallbackChain(scopeId: string, leaf?: PerfLeaf): string[] {
 /** How far down the tree an id sits, read off the id alone. */
 function nodeDepth(id: string): number {
   if (id === "all") return 0;
-  if (id === "runs" || id.startsWith("bot:") || id.startsWith("type:")) return 1;
+  if (id.startsWith("bot:") || id.startsWith("type:")) return 1;
   if (id.startsWith("ctrl:")) return 2;
-  // An executor or a run: a leaf, and the deepest thing the tree holds.
+  // An executor: a leaf, and the deepest thing the tree holds.
   return 3;
 }
 

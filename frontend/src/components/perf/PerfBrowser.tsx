@@ -5,7 +5,6 @@ import {
   ChevronRight,
   ChevronUp,
   Database,
-  History,
   Layers,
   Loader2,
   Pause,
@@ -56,7 +55,6 @@ import {
   controllerNodeId,
   foldLeaves,
   indexTree,
-  leafFromBotRun,
   leafFromController,
   leafFromExecutor,
   leafFromTerminatedController,
@@ -755,16 +753,6 @@ export function PerfBrowser({
           if (cutoff && leaf.endedAt !== null && leaf.endedAt < cutoff) continue;
           all.push(leaf);
         }
-        // A run still deployed is the live fleet, which the other population
-        // already reports; only what has finished belongs here. Read off
-        // `is_live` rather than `run_status`, which upstream leaves at
-        // `CREATED` for a bot that is trading right now (FEAT-089).
-        for (const run of runs) {
-          if (run.is_live) continue;
-          const leaf = leafFromBotRun(run);
-          if (cutoff && leaf.endedAt !== null && leaf.endedAt < cutoff) continue;
-          all.push(leaf);
-        }
       }
 
       // The filters narrow the leaf set, which means they narrow the *tree*:
@@ -887,8 +875,19 @@ export function PerfBrowser({
       : undefined;
   const activeExec =
     scope.kind === "executor" ? (scope.leaves[0]?.source as ExecutorInfo | undefined) : undefined;
+  /**
+   * The run a terminated bot scope is reporting on.
+   *
+   * A finished run *is* a bot node now (FEAT-089) — the `runs` branch it used
+   * to hang under is gone — so the two actions that belonged to a run, opening
+   * its archive and deleting it, belong to the bot scope that folds its
+   * controllers. Undefined for `(unattached)`, which is not a run and has
+   * neither.
+   */
   const activeRun =
-    scope.kind === "run" ? (scope.leaves[0]?.source as BotRunInfo | undefined) : undefined;
+    population === "terminated" && scope.kind === "bot"
+      ? runByBot.get(scope.label)
+      : undefined;
 
   /** The executors under this scope, whatever level it sits at. */
   const scopedExecutors = useMemo(
@@ -1122,6 +1121,27 @@ export function PerfBrowser({
   }, [activeCtrl, population, scope, cv, snapshots, scopedKeys, scopedControllers, convert]);
 
   /**
+   * What this scope folds, in words.
+   *
+   * Terminated folds two kinds since FEAT-089: the controllers a finished run
+   * left behind, which are its spine, and the closed executors that belong to
+   * no run at all. A scope holding both is described by neither noun alone, so
+   * it is named for what is actually in it rather than for its population.
+   *
+   * Declared here rather than beside the header it labels, because the facts
+   * block below reads it too and a hook must not close over a binding a later
+   * early return can leave uninitialised.
+   */
+  const scopeNoun =
+    population === "running"
+      ? "controller"
+      : !scopedLeaves.some((leaf) => leaf.kind === "executor")
+        ? "finished controller"
+        : scopedLeaves.some((leaf) => leaf.kind === "controller")
+          ? "finished record"
+          : "closed executor";
+
+  /**
    * Tell the chat what is actually on screen (FEAT-059, FEAT-060).
    *
    * Every one of these is a choice the reader made that no cache holds: which
@@ -1146,8 +1166,8 @@ export function PerfBrowser({
         : activeRun
           ? `the finished run of bot ${activeRun.bot_name}`
           : scope.kind === "fleet"
-            ? `all ${scope.leaves.length} ${population === "running" ? "controllers" : "closed executors"} across ${tree.children.length} groups`
-            : `${scope.leaves.length} ${population === "running" ? "controllers" : "closed executors"} under ${scope.kind} "${scope.label}"`;
+            ? `all ${plural(scope.leaves.length, scopeNoun)} across ${tree.children.length} groups`
+            : `${plural(scope.leaves.length, scopeNoun)} under ${scope.kind} "${scope.label}"`;
 
     return {
       // The same label the route entry uses, so the cache's half of this screen
@@ -1175,14 +1195,6 @@ export function PerfBrowser({
   if (controllers.length === 0) return null;
 
   const configId = activeCtrl ? activeCtrl.controller_id || activeCtrl.controller_name : "";
-  // What this scope folds, in words — a controller while live, a closed
-  // executor once finished, and a run under the branch that holds runs.
-  const scopeNoun =
-    population === "running"
-      ? "controller"
-      : scope.kind === "runs" || scope.kind === "run"
-        ? "finished run"
-        : "closed executor";
   const chartHeight = Math.max(MIN_CHART_PX, (chartBoxH || 420) - CHART_CHROME_PX);
 
   // An executor scope borrows its parent's curve, and the card says so in both
@@ -1414,11 +1426,21 @@ export function PerfBrowser({
                 </div>
               </>
             ) : activeRun ? (
+              // A finished run is a bot node now, so the header a run used to
+              // get under the `runs` branch is the header this bot scope gets:
+              // the same name, the same provenance line, the same status. The
+              // controller count comes from the tree rather than from the run
+              // record, whose `num_controllers` is aggregated off the *live*
+              // fleet and is therefore zero for everything in here.
               <>
                 <div className="truncate">
                   <h2 className="text-sm font-semibold truncate">{activeRun.bot_name}</h2>
                   <span className="text-[10px] text-[var(--color-text-muted)] block truncate">
-                    {[activeRun.account_name, activeRun.strategy_name, `${activeRun.num_controllers} ctrl`]
+                    {[
+                      activeRun.account_name,
+                      activeRun.strategy_name,
+                      plural(scope.children.length, "controller"),
+                    ]
                       .filter(Boolean)
                       .join(" · ")}
                   </span>
@@ -1469,8 +1491,6 @@ export function PerfBrowser({
                     <Server className="h-3.5 w-3.5 shrink-0 text-[var(--color-text-muted)]" />
                   ) : scope.kind === "type" ? (
                     <Shapes className="h-3.5 w-3.5 shrink-0 text-[var(--color-text-muted)]" />
-                  ) : scope.kind === "runs" ? (
-                    <History className="h-3.5 w-3.5 shrink-0 text-[var(--color-text-muted)]" />
                   ) : (
                     <Layers className="h-3.5 w-3.5 shrink-0 text-[var(--color-text-muted)]" />
                   )}

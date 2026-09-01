@@ -17,7 +17,6 @@ import {
   buildTree,
   foldLeaves,
   indexTree,
-  leafFromBotRun,
   leafFromController,
   leafFromExecutor,
   leafFromTerminatedController,
@@ -201,25 +200,13 @@ describe("leaf adapters", () => {
     expect(leafFromExecutor(executor()).closeTypes).toEqual({ TAKE_PROFIT: 1 });
   });
 
-  it("identifies two runs of the same bot separately", () => {
-    const first = leafFromBotRun(botRun());
-    const second = leafFromBotRun(
-      botRun({ created_at: new Date(NOW - 40 * HOUR).toISOString() }),
-    );
-    expect(first.id).not.toBe(second.id);
-    expect(first.endedAt).toBe(NOW - 6 * HOUR);
-    expect(first.running).toBe(false);
-  });
-
   // Upstream never writes `RUNNING`. Over 150 real runs the only values are
   // `STOPPED` and `CREATED`, and every bot trading right now is a `CREATED`
-  // one — so a leaf that read that column called the live fleet finished and
-  // showed it a status dot reading "created".
+  // one — so reading that column called the live fleet finished and showed it
+  // a status dot reading "created".
   it("reads a run as live from its deployment, not from run_status", () => {
     const live = botRun({ run_status: "CREATED", deployment_status: "DEPLOYED", stopped_at: null, is_live: true });
     expect(runStatus(live)).toBe("running");
-    expect(leafFromBotRun(live).running).toBe(true);
-    expect(leafFromBotRun(live).status).toBe("running");
   });
 
   it("reads a run with a stop time as stopped, whatever the column says", () => {
@@ -266,26 +253,64 @@ describe("buildTree", () => {
     expect(foldLeaves(ctrl.leaves, identity, NOW).net).toBe(3);
   });
 
-  it("keeps the run history beside the fleet rather than inside it", () => {
-    const leaves = [leafFromExecutor(executor({ pnl: 5 })), leafFromBotRun(botRun())];
+  // The `runs` branch is gone (FEAT-089). A finished run is a bot node with the
+  // controllers it ran beneath it, exactly as a live bot is — and the branch's
+  // `rollsUp: false` guard is not needed, because the trading arrives as
+  // controller leaves and the spine rule already stops a controller being
+  // counted alongside its own executors.
+  it("builds a finished run as a bot with its controllers, not a branch beside the fleet", () => {
+    const leaves = [
+      leafFromTerminatedController(
+        controller({ bot_name: "gamma", controller_id: "gamma_1", global_pnl_quote: 60 }),
+        botRun(),
+      ),
+      leafFromTerminatedController(
+        controller({ bot_name: "gamma", controller_id: "gamma_2", global_pnl_quote: 40 }),
+        botRun(),
+      ),
+    ];
     const tree = buildTree(leaves, "bot");
-    const runs = node(tree, "runs");
 
-    expect(runs.rollsUp).toBe(false);
-    expect(foldLeaves(runs.leaves, identity, NOW).net).toBe(100);
-    // A run's totals and the archived executors' totals describe overlapping
-    // trading that cannot be de-duplicated here, so the fleet counts one of
-    // them — the executors — and the runs branch reports itself.
-    expect(foldLeaves(tree.leaves, identity, NOW).net).toBe(5);
-    expect(tree.leaves).toHaveLength(1);
+    expect(tree.children.map((c) => c.id)).toEqual(["bot:gamma"]);
+    const bot = node(tree, "bot:gamma");
+    expect(bot.children.map((c) => c.id)).toEqual(["ctrl:gamma:gamma_1", "ctrl:gamma:gamma_2"]);
+    // The run's own total, folded from its controllers — and it reaches the
+    // fleet, which the `runs` branch deliberately never did.
+    expect(foldLeaves(bot.leaves, identity, NOW).net).toBe(100);
+    expect(foldLeaves(tree.leaves, identity, NOW).net).toBe(100);
   });
 
-  it("puts a run in the same place under either grouping", () => {
-    const leaves = [leafFromBotRun(botRun())];
-    for (const groupBy of ["bot", "type"] as const) {
-      const tree = buildTree(leaves, groupBy);
-      expect(tree.children.map((c) => c.id)).toEqual(["runs"]);
-    }
+  // The guard the deleted branch existed to provide, proved to be unnecessary:
+  // a controller node folds its own record and its executor children are
+  // drill-in, so a finished run's trading is counted once even with its closed
+  // executors hanging underneath it.
+  it("counts a finished run's trading once, not once per level", () => {
+    const leaves = [
+      leafFromTerminatedController(
+        controller({ bot_name: "gamma", controller_id: "gamma_1", global_pnl_quote: 60 }),
+        botRun(),
+      ),
+      leafFromExecutor(executor({ id: "e1", pnl: 25, controller_id: "gamma_1" }), "gamma"),
+      leafFromExecutor(executor({ id: "e2", pnl: 35, controller_id: "gamma_1" }), "gamma"),
+    ];
+    const tree = buildTree(leaves, "bot");
+    expect(foldLeaves(tree.leaves, identity, NOW).net).toBe(60);
+  });
+
+  // The executors that belong to no run are disjoint from every controller
+  // record by construction — on a real server they are the positions opened by
+  // hand — so folding both into one fleet total counts nothing twice.
+  it("adds unattached executors to the fleet beside the runs, once each", () => {
+    const leaves = [
+      leafFromTerminatedController(
+        controller({ bot_name: "gamma", controller_id: "gamma_1", global_pnl_quote: 60 }),
+        botRun(),
+      ),
+      leafFromExecutor(executor({ id: "manual", pnl: 5, controller_id: "main" })),
+    ];
+    const tree = buildTree(leaves, "bot");
+    expect(tree.children.map((c) => c.id)).toEqual(["bot:gamma", `bot:${UNATTACHED_BOT}`]);
+    expect(foldLeaves(tree.leaves, identity, NOW).net).toBe(65);
   });
 
   it("groups by bot or by class, and keeps controller ids identical in both", () => {
@@ -415,12 +440,6 @@ describe("resolveScope", () => {
     expect(resolveScope(byBot, "type:pmm_simple", leaf)).toBe("bot:alpha");
   });
 
-  it("re-aims a vanished run at the run history", () => {
-    const withRuns = indexTree(buildTree([leafFromBotRun(botRun())], "bot"));
-    expect(resolveScope(withRuns, "run:gone:2020")).toBe("runs");
-    const noRuns = indexTree(buildTree([leafFromController(controller())], "bot"));
-    expect(resolveScope(noRuns, "run:gone:2020")).toBe("all");
-  });
 
   it("answers the fleet for something it cannot place at all", () => {
     expect(resolveScope(running, "nonsense")).toBe("all");

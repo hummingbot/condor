@@ -1,4 +1,4 @@
-import { Activity, ChevronDown, ChevronRight, Circle, History, Layers, Server, Shapes } from "lucide-react";
+import { Activity, ChevronDown, ChevronRight, Circle, Layers, Server, Shapes } from "lucide-react";
 import { useMemo } from "react";
 
 import { formatCurrencyPnl, formatCurrencyVolume, pnlColor } from "@/lib/formatters";
@@ -38,8 +38,6 @@ function NodeIcon({ node, active }: { node: PerfNode; active: boolean }) {
   if (node.kind === "fleet") return <Layers className={`h-3.5 w-3.5 shrink-0 ${tone}`} />;
   if (node.kind === "bot") return <Server className={`h-3 w-3 shrink-0 ${tone}`} />;
   if (node.kind === "type") return <Shapes className={`h-3 w-3 shrink-0 ${tone}`} />;
-  if (node.kind === "runs") return <History className={`h-3 w-3 shrink-0 ${tone}`} />;
-  if (node.kind === "run") return <History className={`h-3 w-3 shrink-0 ${tone}`} />;
   if (node.kind === "executor") return <Activity className={`h-3 w-3 shrink-0 ${tone}`} />;
   // A controller's marker is its state, which is the one thing the icon slot
   // can say that the label beside it cannot.
@@ -54,7 +52,6 @@ function subtitle(node: PerfNode): string {
       return `${node.leaves.length} in scope · ${n} group${n !== 1 ? "s" : ""}`;
     case "bot":
     case "type":
-    case "runs":
       return `${n} ${n === 1 ? "entry" : "entries"}`;
     case "controller": {
       const leaf = node.leaves[0];
@@ -63,8 +60,6 @@ function subtitle(node: PerfNode): string {
     }
     case "executor":
       return [node.leaves[0]?.executorType, node.leaves[0]?.pair].filter(Boolean).join(" · ");
-    case "run":
-      return node.leaves[0]?.status?.toLowerCase() ?? "";
   }
 }
 
