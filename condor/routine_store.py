@@ -111,6 +111,15 @@ class _HttpBot:
             "getChatMember", {"chat_id": chat_id, "user_id": user_id}
         )
 
+    async def get_chat(self, *a, **kw):
+        """Raw ``getChat`` envelope — the identity backfill (FEAT-088) reads
+        ``first_name`` / ``last_name`` / ``username`` out of ``result`` when no
+        live bot is around. For a private chat the bot already knows, which is
+        every registered user by construction, this is the only source of a name
+        for someone who has not spoken since their record was written."""
+        chat_id = kw.get("chat_id") or (a[0] if a else None)
+        return await self._post("getChat", {"chat_id": chat_id})
+
 
 _http_bot = _HttpBot()
 

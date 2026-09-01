@@ -46,6 +46,19 @@ PERMISSION_HIERARCHY = {
 # Declared here so the gate and the thing that grants it share one spelling.
 CODE_RUN_PREFERENCE = "code_run"
 
+# The sentinel `main.py` used to write into `username` when Telegram gave it
+# none (FEAT-088). It only ever meant "absent", but stored it is indistinguishable
+# from a real handle, so the panel renders `@No username` forever. It is dropped
+# on load and never written again — an absent handle is an absent key.
+ABSENT_USERNAME = "No username"
+
+# How stale `last_seen` is allowed to get before a contact rewrites config.yml.
+# `restricted` runs on every message *and* every button press, and each write is
+# a full YAML dump of the file, so recording the exact second would turn a menu
+# walk into a dozen rewrites. Five minutes is far finer than the "2 days ago"
+# the panel renders.
+LAST_SEEN_RESOLUTION_SEC = 300
+
 # Preference keys that are capability grants rather than settings. They live in
 # the same ``user_preferences`` map as a UI toggle, so any endpoint that merges
 # a caller-supplied dict into that map is a privilege-escalation path unless it
@@ -183,6 +196,23 @@ class ConfigManager:
         self._data.setdefault("user_preferences", {})
         self._data.setdefault("telemetry", {})
         self._data.setdefault("sharing", {})
+
+        # Drop the `"No username"` sentinel (FEAT-088). It is not a migration of
+        # meaning — the string only ever stood for "Telegram told us nothing" —
+        # so leaving it would keep `@No username` renderable for the life of the
+        # install. Healed on load and rewritten on the next save.
+        users = self._data["users"]
+        if any(
+            isinstance(r, dict) and r.get("username") == ABSENT_USERNAME
+            for r in users.values()
+        ):
+            for record in users.values():
+                if isinstance(record, dict) and record.get("username") == (
+                    ABSENT_USERNAME
+                ):
+                    record.pop("username", None)
+            self._save_config()
+
         # Migrate audit_log from config.yml to separate file (one-time)
         if "audit_log" in self._data:
             self._audit_log = self._data.pop("audit_log")
@@ -782,22 +812,93 @@ class ConfigManager:
         role = self.get_user_role(user_id)
         return role in (UserRole.ADMIN, UserRole.USER)
 
-    def register_pending(self, user_id: int, username: str = None) -> bool:
-        """Register a new pending user."""
+    def register_pending(
+        self,
+        user_id: int,
+        username: str = None,
+        first_name: str = None,
+        last_name: str = None,
+    ) -> bool:
+        """Register a new pending user.
+
+        Records the names Telegram supplied alongside the handle (FEAT-088):
+        the admin panel has to answer *who this is*, and a handle is optional on
+        Telegram while a first name is not. Absent fields are left out of the
+        record rather than stored as `None` or as a `"No username"` placeholder,
+        so "we were never told" and "they are called this" stay distinguishable.
+        """
         users = self._data["users"]
         if user_id in users:
             return False
 
-        users[user_id] = {
+        record = {
             "user_id": user_id,
-            "username": username,
             "role": UserRole.PENDING.value,
             "created_at": time.time(),
         }
+        for key, value in (
+            ("username", username),
+            ("first_name", first_name),
+            ("last_name", last_name),
+        ):
+            value = (value or "").strip()
+            if value and value != ABSENT_USERNAME:
+                record[key] = value
+        users[user_id] = record
         self._audit("user_registered", "user", str(user_id), user_id)
         self._save_config()
         logger.info(f"Registered pending user {user_id}")
         return True
+
+    def touch_user_identity(
+        self,
+        user_id: int,
+        *,
+        username: str = None,
+        first_name: str = None,
+        last_name: str = None,
+    ) -> bool:
+        """Record what Telegram currently says this person is called.
+
+        Called on every authorized contact, because a handle changes silently:
+        captured once at registration it is stale forever, and the admin panel
+        ends up naming someone by a handle nobody answers to.
+
+        **Never writes a falsy value over a stored one.** Telegram updates carry
+        whichever fields they carry, and a message that simply omits the username
+        must not erase the handle we already know — that would make the record
+        worse the more often we look at it. Only a differing, non-empty value is
+        a write.
+
+        Returns True when something changed, so callers can tell a real capture
+        from the overwhelmingly common no-op; the save happens here, like every
+        other verb on this class.
+        """
+        user = self._data.get("users", {}).get(user_id)
+        if user is None:
+            return False
+
+        changed = False
+        for key, value in (
+            ("username", username),
+            ("first_name", first_name),
+            ("last_name", last_name),
+        ):
+            value = (value or "").strip()
+            if not value or value == ABSENT_USERNAME:
+                continue
+            if user.get(key) != value:
+                user[key] = value
+                changed = True
+
+        now = time.time()
+        if now - float(user.get("last_seen") or 0) >= LAST_SEEN_RESOLUTION_SEC:
+            user["last_seen"] = now
+            changed = True
+
+        if changed:
+            self._save_config()
+        return changed
 
     def approve_user(self, user_id: int, admin_id: int) -> bool:
         """Approve a pending user."""
@@ -1099,6 +1200,42 @@ class ConfigManager:
                 pass
         return result
 
+    def list_registered_servers(self) -> list:
+        """Every server that has an access record, in a stable order.
+
+        The admin panel asks the question no per-user accessor answers — "what
+        is *this* person's access to *every* server" — and needs the full list
+        to render the servers they cannot reach as much as the ones they can.
+        """
+        return sorted(self._data.get("server_access", {}))
+
+    def get_granted_user_ids(self) -> set:
+        """Every user id holding a share on some server.
+
+        Not the same set as ``users``: a grant outlives the record it was made
+        to, and such an id is live access that nothing in the product can show
+        or revoke. The admin panel unions the two so an orphan grant is a row
+        rather than a hole in config.yml (FEAT-088).
+        """
+        ids = set()
+        for access in self._data.get("server_access", {}).values():
+            ids.update(access.get("shared_with", {}))
+        return ids
+
+    def get_server_members(self, server_name: str) -> list:
+        """Who this server is shared with, named (FEAT-088).
+
+        ``get_server_shared_users`` answers the same question in ids, which is
+        what a permission check wants and what a person reading a server card
+        cannot use. Both exist because resolving a name is a display concern the
+        access checks have no business paying for.
+        """
+        users = self._data.get("users", {})
+        return [
+            {"user_id": uid, "display_name": user_display_name(users.get(uid), uid)}
+            for uid, _perm in self.get_server_shared_users(server_name)
+        ]
+
     def get_accessible_servers(self, user_id: int) -> list:
         """Get all servers a user can access."""
         if self.is_admin(user_id):
@@ -1223,6 +1360,34 @@ class ConfigManager:
 
     def get_audit_log(self, limit: int = 50) -> list:
         return list(reversed(self._audit_log))[:limit]
+
+
+def user_display_name(record: Optional[dict], user_id: int = None) -> str:
+    """What to call this person, from whatever Telegram has told us (FEAT-088).
+
+    One ladder: full name, then the handle, then the id. It is defined here
+    rather than in the admin routes because the client resolves the same ladder
+    in ``identity.ts`` for rows it renders while a mutation is in flight, and two
+    copies of a naming rule drift into two different names for one person.
+
+    ``user_id`` is the fallback for a record that does not carry its own — an id
+    that appears only in ``server_access`` has no ``users`` entry at all, and
+    still has to be nameable enough to revoke.
+    """
+    record = record or {}
+    uid = record.get("user_id") if record.get("user_id") is not None else user_id
+
+    first = str(record.get("first_name") or "").strip()
+    last = str(record.get("last_name") or "").strip()
+    full = " ".join(part for part in (first, last) if part)
+    if full:
+        return full
+
+    username = str(record.get("username") or "").strip()
+    if username and username != ABSENT_USERNAME:
+        return username
+
+    return f"User {uid}" if uid is not None else ""
 
 
 # Convenience functions

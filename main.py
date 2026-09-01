@@ -103,10 +103,16 @@ async def web_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Start the conversation and display available commands (BotFather style)."""
     from config_manager import UserRole, get_config_manager
-    from utils.auth import _notify_admin_new_user
+    from utils.auth import _capture_identity, _notify_admin_new_user
 
-    user_id = update.effective_user.id
-    username = update.effective_user.username or "No username"
+    tg_user = update.effective_user
+    user_id = tg_user.id
+    username = tg_user.username or ""
+    # What to print where the reply says "Username:". An absent handle is shown
+    # as absent rather than stored as the "No username" string the record used
+    # to carry (FEAT-088) — the sentinel was a display default that leaked into
+    # config.yml and became a name the admin panel then had to render.
+    handle_display = f"@{username}" if username else "not set"
 
     cm = get_config_manager()
     role = cm.get_user_role(user_id)
@@ -124,7 +130,7 @@ Your access request is awaiting admin approval.
 
 Your Info:
 User ID: {user_id}
-Username: @{username}
+Username: {handle_display}
 
 You will be notified when approved."""
         await update.message.reply_text(reply_text)
@@ -132,7 +138,12 @@ You will be notified when approved."""
 
     # Handle new users - register as pending
     if role is None:
-        is_new = cm.register_pending(user_id, username)
+        is_new = cm.register_pending(
+            user_id,
+            username,
+            first_name=tg_user.first_name,
+            last_name=tg_user.last_name,
+        )
         if is_new:
             await _notify_admin_new_user(context, user_id, username)
 
@@ -142,13 +153,14 @@ Your request has been sent to the admin for approval.
 
 Your Info:
 User ID: {user_id}
-Username: @{username}
+Username: {handle_display}
 
 You will be notified when approved."""
         await update.message.reply_text(reply_text)
         return
 
     # User is approved (USER or ADMIN role)
+    _capture_identity(update)
     clear_all_input_states(context)
 
     reply_text = """I can help you create and manage trading bots on any CEX or DEX using Hummingbot API servers\\.
