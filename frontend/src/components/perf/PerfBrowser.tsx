@@ -62,6 +62,7 @@ import {
   parseGroupBy,
   parsePopulation,
   resolveScope,
+  runStatus,
   UNATTACHED_BOT,
   visibleNodeIds,
   type GroupBy,
@@ -687,9 +688,11 @@ export function PerfBrowser({
           all.push(leaf);
         }
         // A run still deployed is the live fleet, which the other population
-        // already reports; only what has finished belongs here.
+        // already reports; only what has finished belongs here. Read off
+        // `is_live` rather than `run_status`, which upstream leaves at
+        // `CREATED` for a bot that is trading right now (FEAT-089).
         for (const run of runs) {
-          if (run.run_status === "RUNNING") continue;
+          if (run.is_live) continue;
           const leaf = leafFromBotRun(run);
           if (cutoff && leaf.endedAt !== null && leaf.endedAt < cutoff) continue;
           all.push(leaf);
@@ -1356,8 +1359,8 @@ export function PerfBrowser({
                   {activeRun.deployment_status}
                 </span>
                 <div className="flex items-center gap-1.5 shrink-0">
-                  <StatusDot status={activeRun.run_status?.toLowerCase() ?? ""} />
-                  <span className="text-xs capitalize">{activeRun.run_status?.toLowerCase() || "—"}</span>
+                  <StatusDot status={runStatus(activeRun)} />
+                  <span className="text-xs capitalize">{runStatus(activeRun) || "—"}</span>
                 </div>
               </>
             ) : activeExec ? (

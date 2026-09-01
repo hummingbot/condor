@@ -205,11 +205,27 @@ export function leafFromExecutor(e: ExecutorInfo, bot: string = UNATTACHED_BOT):
   };
 }
 
+/**
+ * What a run's state actually is, in the word the dashboard shows.
+ *
+ * Not `run_status`, which is the field the question would seem to be about:
+ * upstream never writes `RUNNING`, and every bot trading right now reports the
+ * literal string `CREATED` — so the status dot read "created" for a live fleet
+ * and "stopped" was the only value that ever meant what it said. `is_live` is
+ * derived from the deployment (see `BotRunInfo`), and a run that has a stop
+ * time has stopped whatever the column says.
+ */
+export function runStatus(r: BotRunInfo): string {
+  if (r.is_live) return "running";
+  if (r.stopped_at) return "stopped";
+  return (r.run_status || "").toLowerCase();
+}
+
 /** One finished bot run, as the run history recorded it. */
 export function leafFromBotRun(r: BotRunInfo): PerfLeaf {
   const started = r.created_at ? Date.parse(r.created_at) : NaN;
   const stopped = r.stopped_at ? Date.parse(r.stopped_at) : NaN;
-  const running = r.run_status === "RUNNING";
+  const running = r.is_live;
   return {
     // A bot name is reused across runs; the start time is what tells two apart.
     id: `run:${r.bot_name}:${r.created_at ?? r.bot_run_id ?? ""}`,
@@ -233,7 +249,7 @@ export function leafFromBotRun(r: BotRunInfo): PerfLeaf {
     startedAt: Number.isNaN(started) ? null : started,
     endedAt: Number.isNaN(stopped) ? null : stopped,
     running,
-    status: r.run_status || "",
+    status: runStatus(r),
     source: r,
   };
 }

@@ -32,6 +32,7 @@ import {
   isExecutorActive,
   toMs,
 } from "./formatters";
+import { runStatus } from "./perf-tree";
 import { formatWithRate, type RateTable } from "./rates";
 import type { ViewFacts } from "./viewFacts";
 
@@ -348,9 +349,14 @@ function runsFacts(qc: QueryClient): ViewFacts["onScreen"] {
   if (!data) return undefined;
   const m = money(qc);
   const runs = data.runs ?? [];
+  // Counted through `runStatus`, the same derivation the sidebar dot and the
+  // scope header read, so the block and the screen say the same word about the
+  // same run. `run_status` itself cannot be counted: upstream leaves it at
+  // `CREATED` for a bot that is trading right now (FEAT-089).
   const statuses = new Map<string, number>();
   for (const r of runs) {
-    if (r.run_status) statuses.set(r.run_status, (statuses.get(r.run_status) ?? 0) + 1);
+    const status = runStatus(r);
+    if (status) statuses.set(status, (statuses.get(status) ?? 0) + 1);
   }
   const { best, worst } = extremes(
     runs.map((r) => ({ name: r.bot_name, value: r.global_pnl_quote ?? 0 })),
@@ -370,7 +376,7 @@ function runsFacts(qc: QueryClient): ViewFacts["onScreen"] {
   // that must not be the one truncated away.
   return {
     runs: `${runs.length} of ${data.total ?? runs.length}`,
-    "runs stopped": statuses.get("STOPPED"),
+    "runs stopped": statuses.get("stopped"),
     "best run": best,
     "worst run": worst,
   };

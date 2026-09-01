@@ -161,6 +161,22 @@ class BotRunInfo(BaseModel):
     # Present iff the run has a deep history to open; the archived-bot routes take
     # it as their ``db_path``.
     archive_db_path: Optional[str] = None
+    # The controller config ids this run was *deployed with*, straight from its
+    # own ``deployment_config``.
+    #
+    # This is the authoritative run -> controller mapping, and it is the only one
+    # that exists for a run old enough to have no performance snapshots left: the
+    # deployment declared these ids before the bot ever traded. It is what lets a
+    # closed executor be attributed to the run that created it rather than to
+    # whichever live controller happens to share its config id (FEAT-089).
+    controller_ids: list[str] = []
+    # Whether this run is the live fleet rather than history.
+    #
+    # Derived, because ``run_status`` cannot answer it: upstream never writes
+    # ``RUNNING``, and the eight bots trading right now on a real server all
+    # report the literal string ``CREATED``. A container that is deployed and has
+    # no stop time is what "still running" actually means here.
+    is_live: bool = False
 
 
 class BotRunsResponse(BaseModel):

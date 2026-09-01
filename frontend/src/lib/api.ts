@@ -172,6 +172,18 @@ export interface BotRunInfo {
   num_controllers: number;
   /** This run's archived sqlite path, or null when no database survived it. */
   archive_db_path: string | null;
+  /**
+   * The controller config ids this run was deployed with, from its own
+   * `deployment_config` — the authoritative run → controller mapping, and the
+   * only one that exists for a run with no snapshots left (FEAT-089).
+   */
+  controller_ids: string[];
+  /**
+   * Whether this run is still the live fleet. Derived server-side: upstream
+   * never writes `run_status: "RUNNING"`, so reading that string files every
+   * bot trading right now under history.
+   */
+  is_live: boolean;
 }
 
 export interface BotRunsResponse {

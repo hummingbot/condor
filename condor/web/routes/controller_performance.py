@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from typing import Optional
 
@@ -31,6 +32,45 @@ router = APIRouter(tags=["controller-performance"])
 # ── Helpers ──
 
 
+def parse_controller_ids(deployment_config: object) -> list[str]:
+    """The controller config ids a run was deployed with.
+
+    ``deployment_config`` arrives as a *JSON string* on the wire, holding the
+    whole deploy request; the one field worth keeping is
+    ``controllers_config``, which names every controller the run was started
+    with. Everything else in that blob is bulk nobody reads (see the
+    ``_fetch_bot_runs`` note in ``bots.py`` about forwarding payloads whole), so
+    the ids are lifted out here and the blob is dropped.
+
+    The ``.yml`` suffix is stripped because a controller reports itself by the
+    bare id — the snapshots, the executors and the config routes all use
+    ``btcbrl-ganjahro-1__toppnl``, while a deploy may name the file it came
+    from. Servers differ on this: brigado writes the bare id today, so the strip
+    is what makes the two spellings the same key rather than two.
+    """
+    if isinstance(deployment_config, str):
+        try:
+            deployment_config = json.loads(deployment_config)
+        except (ValueError, TypeError):
+            return []
+    if not isinstance(deployment_config, dict):
+        return []
+    raw_ids = deployment_config.get("controllers_config")
+    if not isinstance(raw_ids, list):
+        return []
+    ids = []
+    for entry in raw_ids:
+        if not isinstance(entry, str) or not entry.strip():
+            continue
+        name = entry.strip()
+        if name.endswith(".yml"):
+            name = name[:-4]
+        elif name.endswith(".yaml"):
+            name = name[:-5]
+        ids.append(name)
+    return ids
+
+
 def _parse_bot_run(
     raw: dict,
     perf_by_bot: dict[str, dict] | None = None,
@@ -50,6 +90,9 @@ def _parse_bot_run(
         volume = agg.get("volume_traded", 0.0)
         num_controllers = agg.get("num_controllers", 0)
 
+    stopped_at = str(raw["stopped_at"]) if raw.get("stopped_at") else None
+    deployment_status = raw.get("deployment_status", "")
+
     return BotRunInfo(
         bot_name=bot_name,
         bot_run_id=raw.get("id"),
@@ -57,9 +100,15 @@ def _parse_bot_run(
         strategy_type=raw.get("strategy_type", ""),
         strategy_name=raw.get("strategy_name", ""),
         run_status=raw.get("run_status", raw.get("status", "")),
-        deployment_status=raw.get("deployment_status", ""),
+        deployment_status=deployment_status,
         created_at=str(raw["deployed_at"]) if raw.get("deployed_at") else None,
-        stopped_at=str(raw["stopped_at"]) if raw.get("stopped_at") else None,
+        stopped_at=stopped_at,
+        controller_ids=parse_controller_ids(raw.get("deployment_config")),
+        # Not read off ``run_status``: upstream never writes ``RUNNING``. Over
+        # 150 runs on a real server the only values are ``STOPPED`` and
+        # ``CREATED``, and every bot trading right now is a ``CREATED`` one —
+        # so a filter on that string files the live fleet under history.
+        is_live=deployment_status == "DEPLOYED" and not stopped_at,
         realized_pnl_quote=realized,
         unrealized_pnl_quote=unrealized,
         global_pnl_quote=realized + unrealized,

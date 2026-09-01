@@ -21,6 +21,7 @@ import {
   leafFromController,
   leafFromExecutor,
   resolveScope,
+  runStatus,
   visibleNodeIds,
   type PerfLeaf,
   type PerfNode,
@@ -94,6 +95,8 @@ function botRun(over: Partial<BotRunInfo> = {}): BotRunInfo {
     volume_traded: 9000,
     num_controllers: 2,
     archive_db_path: "/data/gamma.sqlite",
+    controller_ids: ["gamma_1", "gamma_2"],
+    is_live: false,
     ...over,
   };
 }
@@ -169,6 +172,26 @@ describe("leaf adapters", () => {
     expect(first.id).not.toBe(second.id);
     expect(first.endedAt).toBe(NOW - 6 * HOUR);
     expect(first.running).toBe(false);
+  });
+
+  // Upstream never writes `RUNNING`. Over 150 real runs the only values are
+  // `STOPPED` and `CREATED`, and every bot trading right now is a `CREATED`
+  // one — so a leaf that read that column called the live fleet finished and
+  // showed it a status dot reading "created".
+  it("reads a run as live from its deployment, not from run_status", () => {
+    const live = botRun({ run_status: "CREATED", deployment_status: "DEPLOYED", stopped_at: null, is_live: true });
+    expect(runStatus(live)).toBe("running");
+    expect(leafFromBotRun(live).running).toBe(true);
+    expect(leafFromBotRun(live).status).toBe("running");
+  });
+
+  it("reads a run with a stop time as stopped, whatever the column says", () => {
+    expect(runStatus(botRun({ run_status: "CREATED" }))).toBe("stopped");
+    expect(runStatus(botRun({ run_status: "STOPPED" }))).toBe("stopped");
+  });
+
+  it("falls back to the reported status only when nothing else says", () => {
+    expect(runStatus(botRun({ run_status: "FAILED", stopped_at: null }))).toBe("failed");
   });
 });
 
