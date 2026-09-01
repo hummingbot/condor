@@ -255,7 +255,7 @@ export function formatPriceSig(val: number | null | undefined): string {
  * Round a price picked off the chart to something a config field can hold.
  *
  * A click reads its price from the pixel under the pointer, so it arrives with
- * every digit a float has (`105234.87313432835`) — the field would show all of
+ * every digit a float has (`105234.87313432834`) — the field would show all of
  * them and the payload would carry them. The venue's own tick precision is the
  * right rounding when the caller knows it; without it, six significant digits,
  * the same round the grid's Auto-fill already applies, which keeps sub-cent

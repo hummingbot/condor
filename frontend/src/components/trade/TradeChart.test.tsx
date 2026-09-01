@@ -20,7 +20,7 @@ import type { PickSlot } from "@/components/executor/types";
 import { TradeChart } from "./TradeChart";
 
 /** Pixel row → price, steep enough that two clicks 60px apart cannot collide. */
-const PRICE_AT_Y_200 = 105234.87313432835;
+const PRICE_AT_Y_200 = 105234.87313432834;
 function priceAtY(y: number): number {
   return PRICE_AT_Y_200 - (y - 200) * 10;
 }

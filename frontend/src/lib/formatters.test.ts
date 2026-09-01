@@ -246,7 +246,7 @@ describe("formatAxisTime", () => {
 // the config field (CORR-263).
 describe("roundToPricePrecision", () => {
   it("rounds to the venue's precision when it is known", () => {
-    expect(roundToPricePrecision(105234.87313432835, 2)).toBe(105234.87);
+    expect(roundToPricePrecision(105234.87313432834, 2)).toBe(105234.87);
     expect(roundToPricePrecision(105234.87513432835, 2)).toBe(105234.88);
   });
 
@@ -261,7 +261,7 @@ describe("roundToPricePrecision", () => {
   it("falls back to six significant digits when no precision is supplied", () => {
     // The grid's Auto-fill round: a major keeps its cents, a memecoin keeps its
     // digits, where a fixed number of decimals would flatten one or the other.
-    expect(roundToPricePrecision(105234.87313432835)).toBe(105235);
+    expect(roundToPricePrecision(105234.87313432834)).toBe(105235);
     expect(roundToPricePrecision(0.000012345678912)).toBe(0.0000123457);
     expect(roundToPricePrecision(123.4567891, undefined)).toBe(123.457);
     expect(roundToPricePrecision(123.4567891, null)).toBe(123.457);

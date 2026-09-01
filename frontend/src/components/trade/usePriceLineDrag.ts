@@ -67,8 +67,13 @@ export function usePriceLineDrag(params: PriceLineDragParams): PriceLineDragHand
   // The parameters carry callbacks a parent mints fresh every render. Held in a
   // ref and read at call time, so the handlers keep one identity for the life of
   // the pane and a drag in flight always writes through the current callback.
+  // The write is an effect rather than a render-time assignment: every reader
+  // below runs from a pointer event, which is always after the commit that
+  // published the params it should be writing through.
   const paramsRef = useRef(params);
-  paramsRef.current = params;
+  useEffect(() => {
+    paramsRef.current = params;
+  });
 
   const grabRef = useRef<Grab | null>(null);
   const pointerIdRef = useRef<number | null>(null);
