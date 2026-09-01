@@ -1,7 +1,7 @@
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { Bot, Rocket } from "lucide-react";
-import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Navigate, useSearchParams } from "react-router-dom";
 
 import { NoServerCard } from "@/components/NoServerCard";
 import { PerfBrowser } from "@/components/perf/PerfBrowser";
@@ -16,6 +16,7 @@ import {
   type ControllerPerformanceHistoryAllResponse,
   type ExecutorInfo,
 } from "@/lib/api";
+import { parsePopulation } from "@/lib/perf-tree";
 import { controllerKey } from "@/lib/controller-identity";
 import { historyRowBudget } from "@/lib/history-pagination";
 import {
@@ -24,10 +25,6 @@ import {
   refreshControllerHistory,
 } from "@/lib/history-refresh";
 import { samplingIntervalSince } from "@/lib/pnl-chart";
-
-const BotRunsTab = lazy(() =>
-  import("@/pages/tabs/BotRunsTab").then((m) => ({ default: m.BotRunsTab })),
-);
 
 const BOTS_WS_CHANNELS = ["bots", "controller_perf"];
 
@@ -58,10 +55,14 @@ const EXECUTOR_PAGES = 4;
  */
 export function Bots() {
   const [searchParams] = useSearchParams();
-  const tab = searchParams.get("tab") ?? "";
-  const onRuns = tab === "runs" || tab === "archived";
+  const population = parsePopulation(searchParams.get("population"));
 
   const { server } = useServer();
+  // `?tab=runs` was the run history's own padded table, and `?tab=archived` the
+  // retired link it absorbed. Both are the Terminated population now, so the
+  // old links land on the scope that answers them (FEAT-086).
+  const tab = searchParams.get("tab");
+  const legacyRunsTab = tab === "runs" || tab === "archived";
   // Deploy lives in the browser's fleet-scope header — except when there is no
   // fleet to scope, which is exactly when it is needed most (see below).
   const [showDeploy, setShowDeploy] = useState(false);
@@ -225,6 +226,15 @@ export function Bots() {
     [executorPages],
   );
 
+  // The finished runs, which only the Terminated population reports — so the
+  // request is not made at all while the reader is looking at the live fleet.
+  const { data: runsData } = useQuery({
+    queryKey: ["bot-runs", server],
+    queryFn: () => api.getBotRuns(server!, { limit: 200 }),
+    enabled: !!server && population === "terminated",
+    refetchInterval: 30_000,
+  });
+
   const loadMore = useCallback(() => setMaxPages((p) => p + EXECUTOR_PAGES), []);
   const paging = useMemo(
     () => ({
@@ -254,16 +264,8 @@ export function Bots() {
     resolvedSymbol: currencySymbol,
   } = useRates(quoteCurrencies);
 
-  // The shell gives `/bots` no padding (`FULL_BLEED_ROUTES`), so everything
-  // that is not the browser asks for its own.
-  if (onRuns) {
-    return (
-      <div className="h-full overflow-auto p-6">
-        <Suspense fallback={<FallbackSpinner />}>
-          <BotRunsTab />
-        </Suspense>
-      </div>
-    );
+  if (legacyRunsTab) {
+    return <Navigate to="/bots?population=terminated&group=bot" replace />;
   }
 
   if (!server) {
@@ -329,6 +331,7 @@ export function Bots() {
       truncated={perfHistory?.truncated ?? false}
       executors={executors}
       paging={paging}
+      runs={runsData?.runs ?? []}
       rateFormatPnl={formatPnlValue}
       rateFormatValue={formatValue}
       rateFormatDetailed={formatValueDetailed}

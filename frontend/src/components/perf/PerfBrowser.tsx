@@ -4,6 +4,7 @@ import {
   ChevronLeft,
   ChevronRight,
   ChevronUp,
+  Database,
   History,
   Layers,
   Loader2,
@@ -17,6 +18,7 @@ import {
   SlidersHorizontal,
   Square,
   TerminalSquare,
+  Trash2,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Link, useSearchParams } from "react-router-dom";
@@ -31,12 +33,15 @@ import { PnlEvolutionChart } from "@/components/bots/PnlEvolutionChart";
 import { DetailPanel } from "@/components/executor/ExecutorTable";
 import { ExecutorRows, StopConfirmDialog } from "@/components/perf/ExecutorRows";
 import { useExecutorStop } from "@/components/perf/executorActions";
+import { GroupByToggle, PopulationToggle } from "@/components/perf/PopulationToggle";
 import { ScopeTree, StatusDot } from "@/components/perf/ScopeTree";
+import { ArchivedBotDetail } from "@/components/bots/ArchivedBotDetail";
 import {
   api,
   type BotLogEntry,
   type BotSummary,
   type ControllerInfo,
+  type BotRunInfo,
   type ControllerPerformanceSnapshot,
   type ExecutorInfo,
 } from "@/lib/api";
@@ -49,15 +54,20 @@ import {
   controllerNodeId,
   foldLeaves,
   indexTree,
+  leafFromBotRun,
   leafFromController,
   leafFromExecutor,
+  parseGroupBy,
+  parsePopulation,
   resolveScope,
   UNATTACHED_BOT,
   visibleNodeIds,
+  type GroupBy,
+  type Population,
   type PerfLeaf,
   type PerfNode,
 } from "@/lib/perf-tree";
-import { aggregatePnlSeries } from "@/lib/pnl-chart";
+import { aggregatePnlSeries, executorSeries } from "@/lib/pnl-chart";
 import type { ConvertFn } from "@/lib/rates";
 import { POSITIONS_BAND_KEY } from "@/lib/sessionState";
 import { useViewFacts } from "@/lib/viewFacts";
@@ -108,6 +118,8 @@ interface PerfBrowserProps {
   executors?: ExecutorInfo[];
   /** How far that walk got, so the tree can say when it is only part of one. */
   paging?: ExecutorPaging;
+  /** The bot runs the history knows about; only the finished ones are used. */
+  runs?: BotRunInfo[];
   rateFormatPnl?: (val: number, quote: string) => string;
   rateFormatValue?: (val: number, quote: string) => string;
   rateFormatDetailed?: (val: number, quote: string) => string;
@@ -476,6 +488,7 @@ export function PerfBrowser({
   truncated = false,
   executors = [],
   paging,
+  runs = [],
   rateFormatPnl,
   rateFormatValue,
   rateFormatDetailed,
@@ -549,8 +562,49 @@ export function PerfBrowser({
   // which is now any scope rather than one page (FEAT-086).
   const stop = useExecutorStop(server);
   const [detail, setDetail] = useState<ExecutorInfo | null>(null);
+  // The run whose archived database is open, if any. The drill-in is its own
+  // view rather than a pane, because the archive is a different database with
+  // its own controllers and its own history.
+  const [openArchive, setOpenArchive] = useState<BotRunInfo | null>(null);
+  // Which run a delete is armed for, for the reason `confirmStopBot` is a name
+  // and not a boolean: the sidebar can move on while the prompt is up.
+  const [confirmDeleteRun, setConfirmDeleteRun] = useState<string | null>(null);
 
   const now = useSyncExternalStore(subscribeToClock, clockSnapshot, clockSnapshot);
+
+  // The scope lives in the URL, so `?scope=ctrl:<bot>:<config id>` is a link to
+  // one controller and a reload lands back on it. Written with `replace` — the
+  // arrow keys walk the sidebar, and every step of that walk in the history
+  // stack would make Back useless.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const scopeId = searchParams.get("scope") || FLEET_SCOPE;
+  const population = parsePopulation(searchParams.get("population"));
+  const groupBy = parseGroupBy(searchParams.get("group"));
+
+  /** Write one view parameter, dropping it when it is the default. */
+  const setParam = useCallback(
+    (key: string, value: string, fallback: string) => {
+      setSearchParams(
+        (prev) => {
+          const params = new URLSearchParams(prev);
+          if (value === fallback) params.delete(key);
+          else params.set(key, value);
+          return params;
+        },
+        { replace: true },
+      );
+    },
+    [setSearchParams],
+  );
+  const setScope = useCallback(
+    (next: string) => setParam("scope", next, FLEET_SCOPE),
+    [setParam],
+  );
+  const setPopulation = useCallback(
+    (next: Population) => setParam("population", next, "running"),
+    [setParam],
+  );
+  const setGroupBy = useCallback((next: GroupBy) => setParam("group", next, "bot"), [setParam]);
 
   // ── The tree the whole page is derived from ──
 
@@ -574,38 +628,47 @@ export function PerfBrowser({
     return owners;
   }, [controllers]);
 
+  /**
+   * What is in scope, which is the *only* thing the population toggle changes.
+   *
+   * Running is the live fleet: every controller, with the executors currently
+   * working under it. Terminated is what those controllers left behind: every
+   * executor that has closed, plus the runs that have finished. Both are folded
+   * by the same `foldLeaves` and drawn by the same panes, so nothing is
+   * measured one way while it is live and another way once it is over.
+   */
   const leaves = useMemo(() => {
-    const all: PerfLeaf[] = controllers.map(leafFromController);
-    for (const ex of executors) {
-      if (!isExecutorActive(ex.status)) continue;
-      all.push(leafFromExecutor(ex, botByController.get(ex.controller_id) ?? UNATTACHED_BOT));
+    const all: PerfLeaf[] = [];
+    const botOf = (ex: ExecutorInfo) => botByController.get(ex.controller_id) ?? UNATTACHED_BOT;
+    if (population === "running") {
+      for (const c of controllers) all.push(leafFromController(c));
+      for (const ex of executors) {
+        if (isExecutorActive(ex.status)) all.push(leafFromExecutor(ex, botOf(ex)));
+      }
+    } else {
+      for (const ex of executors) {
+        if (!isExecutorActive(ex.status)) all.push(leafFromExecutor(ex, botOf(ex)));
+      }
+      // A run still deployed is the live fleet, which the other population
+      // already reports; only what has finished belongs here.
+      for (const run of runs) {
+        if (run.run_status !== "RUNNING") all.push(leafFromBotRun(run));
+      }
     }
     return all;
-  }, [controllers, executors, botByController]);
+  }, [population, controllers, executors, runs, botByController]);
 
-  const tree = useMemo(() => buildTree(leaves, "bot", "All controllers"), [leaves]);
+  const tree = useMemo(
+    () =>
+      buildTree(
+        leaves,
+        groupBy,
+        population === "running" ? "All controllers" : "All closed executors",
+      ),
+    [leaves, groupBy, population],
+  );
   const nodes = useMemo(() => indexTree(tree), [tree]);
 
-  // The scope lives in the URL, so `?scope=ctrl:<bot>:<config id>` is a link to
-  // one controller and a reload lands back on it. Written with `replace` — the
-  // arrow keys walk the sidebar, and every step of that walk in the history
-  // stack would make Back useless.
-  const [searchParams, setSearchParams] = useSearchParams();
-  const scopeId = searchParams.get("scope") || FLEET_SCOPE;
-  const setScope = useCallback(
-    (next: string) => {
-      setSearchParams(
-        (prev) => {
-          const params = new URLSearchParams(prev);
-          if (next === FLEET_SCOPE) params.delete("scope");
-          else params.set("scope", next);
-          return params;
-        },
-        { replace: true },
-      );
-    },
-    [setSearchParams],
-  );
 
   // A scope whose node has gone — a bot stopped, a config removed — would
   // render an empty screen with no way back, so it re-aims at the nearest
@@ -621,6 +684,8 @@ export function PerfBrowser({
       : undefined;
   const activeExec =
     scope.kind === "executor" ? (scope.leaves[0]?.source as ExecutorInfo | undefined) : undefined;
+  const activeRun =
+    scope.kind === "run" ? (scope.leaves[0]?.source as BotRunInfo | undefined) : undefined;
 
   /** The executors under this scope, whatever level it sits at. */
   const scopedExecutors = useMemo(
@@ -678,6 +743,19 @@ export function PerfBrowser({
     stopBotMutation.isError && stopBotMutation.variables === activeBot?.bot_name;
 
   const stopArmed = !!activeBot && confirmStopBot === activeBot.bot_name;
+
+  // Deleting a finished run: irreversible, and the only door to it now that the
+  // runs table is gone, so it keeps the table's arm-then-confirm.
+  const deleteRunMutation = useMutation({
+    mutationFn: (botRunId: number) => api.deleteBotRun(server, botRunId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["bot-runs", server] });
+      setConfirmDeleteRun(null);
+    },
+  });
+  const deleteArmed = !!activeRun && confirmDeleteRun === activeRun.bot_name;
+  const deletingThisRun =
+    deleteRunMutation.isPending && deleteRunMutation.variables === activeRun?.bot_run_id;
 
   const botLogs: BotLogEntry[] = useMemo(() => {
     if (!activeBot) return [];
@@ -819,10 +897,26 @@ export function PerfBrowser({
     [scopedControllers],
   );
 
-  const aggregatedData = useMemo(
-    () => (activeCtrl ? [] : aggregatePnlSeries(snapshots, scopedKeys, scopedControllers, convert)),
-    [activeCtrl, snapshots, scopedKeys, scopedControllers, convert],
-  );
+  /**
+   * Where this scope's series comes from — the one place the two populations
+   * genuinely differ.
+   *
+   * A live controller, bot or fleet folds the *sampled* history the page
+   * already walked. Anything terminated has no sampled history to fold — an
+   * executor is one mutable row upstream, not a time series — so its series is
+   * built from the outcomes themselves: each close, at its close time, summed
+   * (see `executorSeries`). And a live executor has neither, so it borrows its
+   * parent controller's curve and the card says whose it is.
+   *
+   * All three return the same `PnlChartPoint[]`, so the chart is untouched by
+   * any of it. [[FEAT-087]] replaces the second and third with real snapshots,
+   * and this is the seam it swaps at.
+   */
+  const chartData = useMemo(() => {
+    if (activeCtrl) return []; // draws its own finer series instead
+    if (population === "terminated") return executorSeries(scope.leaves, cv);
+    return aggregatePnlSeries(snapshots, scopedKeys, scopedControllers, convert);
+  }, [activeCtrl, population, scope, cv, snapshots, scopedKeys, scopedControllers, convert]);
 
   // Tell the chat which scope is open, while the browser is (FEAT-059).
   useViewFacts(() =>
@@ -848,25 +942,34 @@ export function PerfBrowser({
   // An executor scope borrows its parent's curve, and the card says so in both
   // places a reader might look: the title names whose series it is, and the
   // notice says why the executor has none of its own.
-  const inheritedFrom = parentController?.label;
+  const inheritedFrom = population === "running" ? parentController?.label : undefined;
   const chartTitle = inheritedFrom
     ? `${inheritedFrom} PnL`
     : scope.kind === "fleet"
-      ? "Fleet PnL"
+      ? population === "terminated"
+        ? "Closed PnL"
+        : "Fleet PnL"
       : `${scope.label} PnL`;
-  const chartNotice = inheritedFrom
-    ? {
-        label: "parent controller's series",
-        detail:
-          "An executor is stored upstream as a single row updated in place, with no sampled history of its own, so the curve below is the controller it belongs to. The numbers above the chart are the executor's own.",
-      }
-    : truncated
+  const chartNotice =
+    population === "terminated"
       ? {
-          label: "partial history",
+          label: "closed outcomes",
           detail:
-            "This fleet has more stored history than one chart may load at once, so the series starts later than the earliest deploy.",
+            "Drawn from each executor's close time and its final PnL, not from sampled history — nothing here is still open, so there is no unrealized series and no position to hold. Each step is what closed in that bucket.",
         }
-      : undefined;
+      : inheritedFrom
+        ? {
+            label: "parent controller's series",
+            detail:
+              "An executor is stored upstream as a single row updated in place, with no sampled history of its own, so the curve below is the controller it belongs to. The numbers above the chart are the executor's own.",
+          }
+        : truncated
+          ? {
+              label: "partial history",
+              detail:
+                "This fleet has more stored history than one chart may load at once, so the series starts later than the earliest deploy.",
+            }
+          : undefined;
 
   return (
     <div className="flex h-full min-h-0 bg-[var(--color-bg)]">
@@ -876,19 +979,32 @@ export function PerfBrowser({
           isCompact ? "w-12" : "w-72"
         }`}
       >
-        {/* Header */}
-        <div className="flex items-center justify-between border-b border-[var(--color-border)] px-3 py-2.5">
+        {/* Header: what is in scope, and how it is arranged.
+
+            Both toggles live above the tree because both describe the tree
+            rather than the report — the panes to the right are the same panes
+            whichever way these are set, which is the point (FEAT-086). */}
+        <div className="shrink-0 border-b border-[var(--color-border)]">
+          <div className="flex items-center justify-between px-3 py-2.5">
+            {!isCompact && (
+              <span className="text-xs font-bold uppercase tracking-wider text-[var(--color-text-muted)]">
+                Scope
+              </span>
+            )}
+            <button
+              onClick={() => setIsCompact(!isCompact)}
+              className="rounded p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
+              title={isCompact ? "Expand sidebar" : "Collapse sidebar"}
+            >
+              {isCompact ? <ChevronRight className="h-3.5 w-3.5" /> : <ChevronLeft className="h-3.5 w-3.5" />}
+            </button>
+          </div>
           {!isCompact && (
-            <span className="text-xs font-bold uppercase tracking-wider text-[var(--color-text-muted)]">
-              Scope
-            </span>
+            <div className="flex flex-col gap-1.5 px-2 pb-2">
+              <PopulationToggle population={population} onChange={setPopulation} />
+              <GroupByToggle groupBy={groupBy} onChange={setGroupBy} />
+            </div>
           )}
-          <button
-            onClick={() => setIsCompact(!isCompact)}
-            className="rounded p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
-          >
-            {isCompact ? <ChevronRight className="h-3.5 w-3.5" /> : <ChevronLeft className="h-3.5 w-3.5" />}
-          </button>
         </div>
 
         {/* Scope list: fleet → bot → controller */}
@@ -951,7 +1067,20 @@ export function PerfBrowser({
         )}
       </div>
 
-      {/* Main content */}
+      {/* Main content — or an archived run's own database, opened over it.
+
+          The archive is a different database with its own controllers and its
+          own history, so it is a view rather than a pane; the sidebar stays put
+          so Back is one click and the scope is still where it was. */}
+      {openArchive?.archive_db_path ? (
+        <div className="flex-1 min-w-0 overflow-auto p-6">
+          <ArchivedBotDetail
+            dbPath={openArchive.archive_db_path}
+            botName={openArchive.bot_name}
+            onBack={() => setOpenArchive(null)}
+          />
+        </div>
+      ) : (
       <div className="flex flex-1 flex-col min-w-0">
         {/* Top bar */}
         <div className="flex items-center justify-between border-b border-[var(--color-border)] px-5 py-2.5">
@@ -979,6 +1108,24 @@ export function PerfBrowser({
                 <div className="flex items-center gap-1.5 shrink-0">
                   <StatusDot status={isStopping ? "stopping" : isKilled ? "stopped" : activeCtrl.status} />
                   <span className="text-xs capitalize">{isStopping ? "stopping" : isKilled ? "stopped" : activeCtrl.status}</span>
+                </div>
+              </>
+            ) : activeRun ? (
+              <>
+                <div className="truncate">
+                  <h2 className="text-sm font-semibold truncate">{activeRun.bot_name}</h2>
+                  <span className="text-[10px] text-[var(--color-text-muted)] block truncate">
+                    {[activeRun.account_name, activeRun.strategy_name, `${activeRun.num_controllers} ctrl`]
+                      .filter(Boolean)
+                      .join(" · ")}
+                  </span>
+                </div>
+                <span className="shrink-0 rounded bg-[var(--color-surface)] px-2 py-0.5 text-xs text-[var(--color-text-muted)] border border-[var(--color-border)]/50">
+                  {activeRun.deployment_status}
+                </span>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <StatusDot status={activeRun.run_status?.toLowerCase() ?? ""} />
+                  <span className="text-xs capitalize">{activeRun.run_status?.toLowerCase() || "—"}</span>
                 </div>
               </>
             ) : activeExec ? (
@@ -1133,6 +1280,58 @@ export function PerfBrowser({
               </>
             )}
 
+            {activeRun?.archive_db_path && (
+              <button
+                onClick={() => setOpenArchive(activeRun)}
+                className="flex items-center gap-1.5 rounded px-3 py-1.5 text-xs font-medium text-[var(--color-primary)] transition-colors hover:bg-[var(--color-primary)]/10"
+                title="Open this run's archived database"
+              >
+                <Database className="h-3.5 w-3.5" />
+                Open archive
+              </button>
+            )}
+
+            {activeRun?.bot_run_id && activeRun.deployment_status === "ARCHIVED" && (
+              deleteArmed ? (
+                <span className="flex items-center gap-1.5">
+                  <button
+                    onClick={() => deleteRunMutation.mutate(activeRun.bot_run_id!)}
+                    disabled={deletingThisRun}
+                    className="rounded bg-[var(--color-red)] px-2 py-1 text-xs font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+                  >
+                    {deletingThisRun ? "Deleting…" : "Confirm delete"}
+                  </button>
+                  <button
+                    onClick={() => setConfirmDeleteRun(null)}
+                    className="rounded px-2 py-1 text-xs text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-text)]"
+                  >
+                    Cancel
+                  </button>
+                </span>
+              ) : (
+                <button
+                  onClick={() => setConfirmDeleteRun(activeRun.bot_name)}
+                  className="flex items-center gap-1.5 rounded px-3 py-1.5 text-xs font-medium text-[var(--color-red)] transition-colors hover:bg-[var(--color-red)]/10"
+                  title="Delete this bot run permanently"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                  Delete run
+                </button>
+              )
+            )}
+            {deleteRunMutation.isError && activeRun && (
+              <span
+                className="text-[10px] whitespace-nowrap text-[var(--color-red)]"
+                title={
+                  deleteRunMutation.error instanceof Error
+                    ? deleteRunMutation.error.message
+                    : "Unknown error"
+                }
+              >
+                Failed to delete
+              </span>
+            )}
+
             {activeExec && isExecutorActive(activeExec.status) && (
               <button
                 onClick={() => stop.request([activeExec.id])}
@@ -1221,7 +1420,14 @@ export function PerfBrowser({
           <div className="flex flex-1 flex-col min-w-0 gap-3 p-4">
             {/* Headline numbers first: the chart below is the shape of these. */}
             <div className="shrink-0 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3">
-              <div className="grid grid-cols-3 lg:grid-cols-6 gap-4">
+              {/* A fixed set of tiles, not a set that depends on what the scope
+                  happens to have. Two reasons. The strip's height decides the
+                  chart's, so tiles coming and going would resize the chart as
+                  the reader walks the sidebar. And a tile reading "—" is a
+                  fact worth having: a terminated scope holds no unrealized PnL,
+                  and a live one has not won or lost anything yet — which is
+                  different from those numbers being unavailable. */}
+              <div className="grid grid-cols-4 lg:grid-cols-8 gap-4">
                 <Kpi
                   label="Net PnL"
                   value={formatCurrencyPnl(totals.net, currencySymbol)}
@@ -1258,21 +1464,46 @@ export function PerfBrowser({
                       : `${totals.positions} position${totals.positions !== 1 ? "s" : ""}`
                   }
                 />
+                {/* Win rate is only meaningful over what has *closed*, so the
+                    count beside it is the denominator rather than decoration:
+                    a fold of live controllers has closed nothing and says so,
+                    and a mixed fold quotes the closed subset it was measured
+                    over rather than pretending the open ones lost. */}
+                <Kpi
+                  label="Win rate"
+                  value={totals.winRate === undefined ? "—" : `${(totals.winRate * 100).toFixed(1)}%`}
+                  sub={
+                    totals.closed > 0
+                      ? `${totals.wins.toLocaleString()} of ${totals.closed.toLocaleString()} closed`
+                      : "nothing closed yet"
+                  }
+                />
                 <Kpi
                   label="Volume"
                   value={formatCurrencyVolume(totals.volume, currencySymbol)}
                   sub={perHour(totals.volume, formatCurrencyVolume)}
                 />
-                {totals.capital > 0 && (
-                  <Kpi
-                    label="Capital Deployed"
-                    value={formatCurrencyVolume(totals.capital, currencySymbol)}
-                    // Turnover rather than a controller count: how hard the
-                    // capital is working is the thing the two numbers beside it
-                    // do not already say, and the count is on the Runtime tile.
-                    sub={`${(totals.volume / totals.capital).toFixed(1)}x turnover`}
-                  />
-                )}
+                <Kpi
+                  label="Fees"
+                  value={totals.fees > 0 ? formatCurrencyVolume(totals.fees, currencySymbol) : "—"}
+                  // What the fees ate: the share of gross the venue took, which
+                  // is the thing an absolute fee total cannot say on its own.
+                  sub={
+                    totals.fees > 0 && totals.net + totals.fees !== 0
+                      ? `${((totals.fees / Math.abs(totals.net + totals.fees)) * 100).toFixed(1)}% of gross`
+                      : undefined
+                  }
+                />
+                <Kpi
+                  label="Capital"
+                  value={totals.capital > 0 ? formatCurrencyVolume(totals.capital, currencySymbol) : "—"}
+                  // Turnover rather than a controller count: how hard the
+                  // capital is working is the thing the two numbers beside it
+                  // do not already say, and the count is on the Runtime tile.
+                  sub={
+                    totals.capital > 0 ? `${(totals.volume / totals.capital).toFixed(1)}x turnover` : undefined
+                  }
+                />
                 <Kpi
                   label="Runtime"
                   value={totals.hours > 0 ? `${totals.hours.toFixed(1)}h` : "—"}
@@ -1282,7 +1513,7 @@ export function PerfBrowser({
                   sub={
                     activeCtrl
                       ? activeCtrl.bot_name
-                      : `${totals.bots} bot${totals.bots !== 1 ? "s" : ""}, ${totals.count} controller${totals.count !== 1 ? "s" : ""}`
+                      : `${totals.bots} bot${totals.bots !== 1 ? "s" : ""}, ${totals.count.toLocaleString()} ${population === "running" ? "controller" : "closed"}${totals.count !== 1 ? "s" : ""}`
                   }
                 />
               </div>
@@ -1346,9 +1577,9 @@ export function PerfBrowser({
                     currencySymbol={currencySymbol}
                     controller={activeCtrl}
                   />
-                ) : aggregatedData.length >= 2 ? (
+                ) : chartData.length >= 2 ? (
                   <PnlEvolutionChart
-                    data={aggregatedData}
+                    data={chartData}
                     title={chartTitle}
                     pnlHeight={Math.round(chartHeight * 0.65)}
                     volumeHeight={chartHeight - Math.round(chartHeight * 0.65)}
@@ -1530,6 +1761,7 @@ export function PerfBrowser({
           )}
         </div>
       </div>
+      )}
 
       {/* The executor detail panel, in the same slot the config and logs
           drawers use: a scope-owned column, closed until a row is clicked. */}

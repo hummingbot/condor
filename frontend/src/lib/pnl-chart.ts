@@ -499,6 +499,113 @@ export function aggregatePnlSeries(
   return points;
 }
 
+/** The part of a finished record this series is built from. */
+export interface ClosedOutcome {
+  /** Epoch ms; a record with no end contributes nothing. */
+  endedAt: number | null;
+  /** Final PnL and volume traded, in this record's own quote. */
+  net: number;
+  volume: number;
+  pair: string;
+}
+
+/**
+ * A cumulative series drawn from a set of closed executors (FEAT-086).
+ *
+ * The controller chart above folds *sampled history*: rows written every five
+ * minutes by an upstream sampler. Executors have no such history — upstream
+ * stores one mutable row per executor, updated in place — so a terminated scope
+ * has no series to fold and would otherwise be a strip with an empty pane under
+ * it.
+ *
+ * It does have something better than an approximation, though: a closed
+ * executor is a *known outcome at a known instant*. Its final PnL and its close
+ * time are both recorded, so a running cumulative sum over those instants is a
+ * real series — not a resampling, not an interpolation, and not a guess. It is
+ * a different kind of series from the one above it, and the caller must say so
+ * on the card (see the "closed outcomes" notice in PerfBrowser); this function
+ * returns `PnlChartPoint[]` so the chart itself needs no change at all.
+ *
+ * What follows from "these are outcomes, not samples":
+ *  - `realized` and `total` are the same running sum, and `unrealized` is 0.
+ *    Nothing here is open; there is no mark to be marked to.
+ *  - `position` is 0 for every point, which the chart reads as "no position
+ *    series" and drops from the lower pane, leaving the volume bars alone.
+ *    A closed set holds nothing.
+ *  - Closes are bucketed rather than drawn one point each: a terminated
+ *    population is tens of thousands of executors, and the chart is a thousand
+ *    pixels wide. The bucket comes off the same PERF-238 ladder the sampled
+ *    history uses, chosen from the span so the point count fits `budget` — so
+ *    the two kinds of series are drawn at comparable resolutions.
+ *  - A point sits at its bucket's **end**, which is when its closes had all
+ *    happened. The last one is pulled back to the final close rather than
+ *    running on to the end of a bucket that has not finished, and an opening
+ *    zero is placed at the first bucket's start so the first step is a step up
+ *    from nothing rather than a line beginning mid-air.
+ *
+ * Takes the shape it needs rather than a `PerfLeaf`, so the chart layer stays
+ * independent of the tree that happens to feed it today.
+ *
+ * `volumeDelta` is the volume closed *in that bucket* — the flow — while
+ * `volume` is the running total, the same division of labour as the sampled
+ * series (READ-245). Here the flow needs no clamping: an executor's volume is
+ * final and is counted once, at its close, so there is no counter to reset.
+ */
+export function executorSeries(
+  leaves: readonly ClosedOutcome[],
+  cv: (value: number, pair: string) => number,
+  budget: number = HISTORY_POINT_BUDGET,
+): PnlChartPoint[] {
+  const closed = leaves
+    .filter((leaf) => leaf.endedAt !== null)
+    .sort((a, b) => a.endedAt! - b.endedAt!);
+  if (closed.length === 0) return [];
+
+  const first = closed[0].endedAt!;
+  const last = closed[closed.length - 1].endedAt!;
+  const span = last - first;
+  // The ladder is the set of intervals the *history route* accepts, and it
+  // stops at a day. This series is bucketed on the client and has no such
+  // ceiling, so a span long enough to overrun the budget even at the coarsest
+  // rung is widened to a whole number of them — which keeps buckets aligned to
+  // a readable unit instead of landing on an arbitrary fraction of a day.
+  const rung = samplingIntervalMs(pickSamplingInterval(span, budget));
+  const bucketMs =
+    span / rung <= budget ? rung : Math.ceil(span / budget / rung) * rung;
+
+  const buckets = new Map<number, { net: number; volume: number }>();
+  for (const leaf of closed) {
+    const start = Math.floor(leaf.endedAt! / bucketMs) * bucketMs;
+    const acc = buckets.get(start) ?? { net: 0, volume: 0 };
+    acc.net += cv(leaf.net, leaf.pair);
+    acc.volume += cv(leaf.volume, leaf.pair);
+    buckets.set(start, acc);
+  }
+
+  const starts = [...buckets.keys()].sort((a, b) => a - b);
+  // Where the series begins: flat at zero, just before the first outcome.
+  const points: PnlChartPoint[] = [
+    { time: starts[0], realized: 0, unrealized: 0, total: 0, volume: 0, volumeDelta: 0, position: 0 },
+  ];
+  let net = 0;
+  let volume = 0;
+  for (const start of starts) {
+    const acc = buckets.get(start)!;
+    net += acc.net;
+    volume += acc.volume;
+    points.push({
+      time: Math.min(start + bucketMs, last),
+      realized: net,
+      unrealized: 0,
+      total: net,
+      volume,
+      volumeDelta: acc.volume,
+      position: 0,
+    });
+  }
+  return points;
+}
+
 // ── Sampling interval selection (PERF-238) ──
 
 /**

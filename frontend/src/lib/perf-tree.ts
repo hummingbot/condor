@@ -22,6 +22,22 @@ export type Population = "running" | "terminated";
 export type GroupBy = "bot" | "type";
 
 /**
+ * The view lives in the URL, so a population, a grouping and a scope together
+ * are a link — and the chat can report what is actually on screen (FEAT-060).
+ *
+ * Both parsers fall back to the default rather than throwing: a hand-edited or
+ * stale query parameter should land the reader on the live fleet, which is the
+ * page they asked for, not on an error.
+ */
+export function parsePopulation(raw: string | null): Population {
+  return raw === "terminated" ? "terminated" : "running";
+}
+
+export function parseGroupBy(raw: string | null): GroupBy {
+  return raw === "type" ? "type" : "bot";
+}
+
+/**
  * The bot a leaf hangs under when its own record does not name one.
  *
  * `ExecutorInfo` carries a `controller_id` but no bot (see `condor/web/models.py`),

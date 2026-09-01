@@ -16,6 +16,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ControllerInfo, ControllerPerformanceSnapshot } from "./api";
 import { controllerKey } from "./controller-identity";
+import type { ClosedOutcome } from "./pnl-chart";
 import {
   HISTORY_POINT_BUDGET,
   POSITION_AXIS_PAD,
@@ -25,6 +26,7 @@ import {
   VOLUME_BAR_MIN_PX,
   aggregatePnlSeries,
   chartBucketMs,
+  executorSeries,
   formatBucketLabel,
   pickSamplingInterval,
   positionAreaExtent,
@@ -1129,5 +1131,111 @@ describe("resolveTimeRange (READ-249)", () => {
       const slice = sliceToRange(hourly, hourly[1].time, hourly[3].time);
       expect(slice.map((p) => p.time)).toEqual([hourly[1].time, hourly[2].time, hourly[3].time]);
     });
+  });
+});
+
+// ── executorSeries (FEAT-086) ──
+
+describe("executorSeries", () => {
+  const MIN = 60_000;
+  const T0 = Date.parse("2026-09-01T00:00:00Z");
+
+  /** A closed outcome: a final PnL and a volume, at a known instant. */
+  const closed = (
+    endedAt: number | null,
+    net: number,
+    volume = 0,
+    pair = "SOL-USDC",
+  ): ClosedOutcome => ({ endedAt, net, volume, pair });
+
+  const identity = (value: number) => value;
+
+  it("has nothing to draw when nothing has closed", () => {
+    expect(executorSeries([], identity)).toEqual([]);
+    expect(executorSeries([closed(null, 5)], identity)).toEqual([]);
+  });
+
+  it("draws a running cumulative sum of outcomes", () => {
+    const series = executorSeries(
+      [closed(T0 + 5 * MIN, 10, 100), closed(T0 + 15 * MIN, -4, 60), closed(T0 + 25 * MIN, 7, 40)],
+      identity,
+    );
+    // An opening zero, then one point per bucket.
+    expect(series[0]).toMatchObject({ total: 0, realized: 0, volume: 0, volumeDelta: 0 });
+    expect(series.map((p) => p.total)).toEqual([0, 10, 6, 13]);
+    expect(series.map((p) => p.volume)).toEqual([0, 100, 160, 200]);
+    expect(series.map((p) => p.volumeDelta)).toEqual([0, 100, 60, 40]);
+  });
+
+  it("banks everything as realized and holds nothing", () => {
+    // A closed set has no open position and no mark to be marked to, and the
+    // chart reads an all-zero position series as "no position pane".
+    for (const point of executorSeries([closed(T0, 10, 5), closed(T0 + MIN, 2, 5)], identity)) {
+      expect(point.unrealized).toBe(0);
+      expect(point.position).toBe(0);
+      expect(point.realized).toBe(point.total);
+    }
+  });
+
+  it("does not care what order the outcomes arrive in", () => {
+    const forwards = executorSeries([closed(T0, 1), closed(T0 + 10 * MIN, 2)], identity);
+    const backwards = executorSeries([closed(T0 + 10 * MIN, 2), closed(T0, 1)], identity);
+    expect(backwards).toEqual(forwards);
+  });
+
+  it("sums outcomes that closed inside the same bucket into one point", () => {
+    const series = executorSeries(
+      [closed(T0 + MIN, 3, 10), closed(T0 + 2 * MIN, 4, 20), closed(T0 + 30 * MIN, 1, 5)],
+      identity,
+    );
+    // Three outcomes, two buckets — plus the opening zero.
+    expect(series).toHaveLength(3);
+    expect(series[1]).toMatchObject({ total: 7, volumeDelta: 30 });
+    expect(series[2]).toMatchObject({ total: 8, volumeDelta: 5 });
+  });
+
+  it("keeps the point count inside the budget however long the span", () => {
+    // A year of daily closes. The sampling ladder stops at a day, which is a
+    // constraint of the history route rather than of this series, so the bucket
+    // widens past it rather than the chart drawing one point per executor.
+    const leaves = Array.from({ length: 365 }, (_, i) => closed(T0 + i * 86_400_000, 1, 1));
+    const series = executorSeries(leaves, identity, 100);
+    expect(series.length).toBeLessThanOrEqual(101);
+    expect(series[series.length - 1].total).toBe(365);
+    expect(series[series.length - 1].volume).toBe(365);
+  });
+
+  it("ends at the last close rather than at the end of an unfinished bucket", () => {
+    const last = T0 + 7 * MIN;
+    const series = executorSeries([closed(T0 + MIN, 1), closed(last, 1)], identity);
+    expect(series[series.length - 1].time).toBe(last);
+  });
+
+  it("starts flat at zero, so the first outcome reads as a step up from nothing", () => {
+    const series = executorSeries([closed(T0 + 3 * MIN, 12)], identity);
+    expect(series).toHaveLength(2);
+    expect(series[0].total).toBe(0);
+    expect(series[0].time).toBeLessThan(series[1].time);
+    expect(series[1].total).toBe(12);
+  });
+
+  it("converts each outcome through its own pair", () => {
+    const cv = (value: number, pair: string) => (pair.endsWith("-EUR") ? value * 2 : value);
+    const series = executorSeries(
+      [closed(T0, 10, 100, "SOL-USDC"), closed(T0 + 10 * MIN, 10, 100, "SOL-EUR")],
+      cv,
+    );
+    expect(series[series.length - 1].total).toBe(30);
+    expect(series[series.length - 1].volume).toBe(300);
+  });
+
+  it("rises and falls with the outcomes rather than only rising", () => {
+    // Unlike the sampled series, whose volume counter can only go up, this one
+    // draws PnL that a losing run actually takes back.
+    const series = executorSeries(
+      [closed(T0, 10), closed(T0 + 10 * MIN, -30), closed(T0 + 20 * MIN, 5)],
+      identity,
+    );
+    expect(series.map((p) => p.total)).toEqual([0, 10, -20, -15]);
   });
 });
