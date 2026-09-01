@@ -104,7 +104,8 @@ NOTIFICATIONS:
 
 CONNECTOR BOUNDARIES:
 - Gateway is only for EVM/Solana chain connectors (ethereum-*, solana-* networks)
-  and the CLMM/AMM DEXs on them (Meteora, Raydium, Uniswap). Native Hummingbot
+  and the CLMM/AMM DEXs on them — Meteora, Orca, Raydium, Uniswap, PancakeSwap and
+  any other pool-based venue reached through a chain. Native Hummingbot
   exchange connectors — binance, kraken, xrpl and the rest — are self-contained and
   never touch Gateway for anything: balances, prices, order placement or token config.
 - So for a pricing, balance or trading problem on a native connector, do NOT call

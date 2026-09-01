@@ -31,6 +31,15 @@ def test_it_names_native_connectors_explicitly():
         assert connector in boundaries
 
 
+def test_the_gateway_venues_named_are_not_a_short_exhaustive_list():
+    """Naming only some supported venues steers an agent away from Gateway for the rest,
+    so the ones listed are followed by an explicit catch-all."""
+    boundaries = BASE_PROMPT_COMMON.split("CONNECTOR BOUNDARIES:")[1]
+    for venue in ("Meteora", "Orca", "Raydium", "Uniswap", "PancakeSwap"):
+        assert venue in boundaries
+    assert "any other pool-based venue" in boundaries
+
+
 def test_it_gives_a_rule_for_telling_them_apart():
     boundaries = BASE_PROMPT_COMMON.split("CONNECTOR BOUNDARIES:")[1]
     assert "<chain>-<network>" in boundaries
