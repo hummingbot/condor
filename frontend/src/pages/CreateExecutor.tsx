@@ -5,10 +5,10 @@ import {
   ArrowLeft,
   ArrowUpDown,
   BarChart3,
+  ChevronDown,
   Droplets,
   Grid3X3,
   Layers,
-  List,
   Loader2,
   Rocket,
   Settings2,
@@ -706,10 +706,16 @@ export function CreateExecutor() {
             <span className="text-xs text-[var(--color-text-muted)]">
               {formatConnectorName(connector)}
             </span>
-            <span className="text-sm font-semibold text-[var(--color-text)]">{pair}</span>
-            <List
-              className={`h-3.5 w-3.5 ${
-                browserOpen ? "text-[var(--color-primary)]" : "text-[var(--color-text-muted)]"
+            <span className="text-base font-semibold text-[var(--color-text)]">{pair}</span>
+            {/* A chevron, not a list glyph: the caret is the web's word for
+                "this opens", and it points at the panel that drops below. It
+                flips while the browser is open, so the chip also says how to
+                close it. */}
+            <ChevronDown
+              className={`h-4 w-4 transition-transform ${
+                browserOpen
+                  ? "rotate-180 text-[var(--color-primary)]"
+                  : "text-[var(--color-text-muted)]"
               }`}
             />
           </button>
@@ -731,7 +737,13 @@ export function CreateExecutor() {
 
         {/* Price ticker */}
         <div className="flex flex-1 items-center px-4 py-2">
-          <PriceTicker server={server} connector={connector} pair={pair} hasRestPrice={caps.hasRestPrice} />
+          <PriceTicker
+            server={server}
+            connector={connector}
+            pair={pair}
+            hasRestPrice={caps.hasRestPrice}
+            showStats={caps.hasOrderBook}
+          />
         </div>
 
         {/* Interval + Range */}
