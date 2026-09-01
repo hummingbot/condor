@@ -30,18 +30,10 @@ inventory cleanup, triple barriers, and terminal PnL.
 
 ## Standing user authorization
 
-The user gives this Agent standing authorization to use its own discretion and perform
-every live action expressly permitted by this `AGENT.md` and the active Strategy for the
-complete LP trading-session lifecycle. This includes selecting pools, creating controller
-configs, deploying the owned bot, updating future LP formations, requesting an early exit,
-and stopping and archiving each owned runtime bot after the Strategy's terminal proof.
-This authorization applies to every current-session generation managed under the active
-Strategy and does not require separate human approval at each lifecycle transition.
-
-This standing authorization supplies user consent; the active Strategy, frozen config,
-risk limits, exact current-session ownership, lifecycle evidence, and mutation-outcome
-rules still determine whether and when an action is valid. It does not authorize any tool,
-action, bot, account, or resource prohibited by this `AGENT.md` or the active Strategy.
+The user gives this Agent standing authorization for every live action expressly allowed
+by this file and Strategy, through terminal bot archive. No separate approval is required
+at each lifecycle transition. Exact ownership, evidence, limits, and mutation rules still
+gate every action and never widen scope.
 
 ## Current-session authority
 
@@ -127,6 +119,7 @@ Tool availability is not action authority:
   delete, overwrite, or broadly list.
 - `manage_bots`: allow loop-only `deploy`, complete-config `update_config` for
   formation or Agent-initiated exit, anomaly-only `logs`, and terminal `stop_bot`.
+  Terminal `stop_bot` follows the Strategy's separate-call shutdown rule.
   Never use formatted `status` as lifecycle authority, duplicate `get_config`,
   `stop_controllers`, or `start_controllers`.
 - `manage_routines`: run only `scan_orca_pools` and
@@ -164,8 +157,7 @@ Use only the Strategy's exact mutation-outcome vocabulary and journal shapes. An
 Preserve every unresolved operation for read-only reconciliation, quarantine ambiguity,
 and never retry or rename after possible submission. A corrected later attempt requires
 fresh validation, a new intent, and authoritative `rejected_before_submit` or
-`confirmed_terminal_no_effect`. Complete terminal proof may replace a reconciled prior
-operation with the same tick's archive intent.
+`confirmed_terminal_no_effect`.
 
 Outside each newly selected `VACANT` generation's admission, submit at most one external
 mutation per tick and end the tick after submission. Admission is the sole exception:
@@ -179,7 +171,7 @@ a pre-upsert journal entry.
 `read_trend_aware_lp_session` preserves raw HAPI evidence and schema `3`
 `custom_info`. The Strategy, not the reader, derives `VACANT`, `CONFIG_PENDING`,
 `DEPLOY_PENDING`, `RUNNING`, `FORMATION_UPDATE_PENDING`, `EXITING`,
-`ARCHIVE_PENDING`, or `QUARANTINED`.
+`EXITED_PENDING_ARCHIVE`, `ARCHIVE_PENDING`, or `QUARANTINED`.
 
 Fresh schema `3` telemetry, exact identities, and controller-declared ownership are the
 only LP lifecycle authority. Logs may explain a changed anomaly but cannot prove runtime

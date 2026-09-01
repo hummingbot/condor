@@ -399,11 +399,10 @@ def test_agent_records_standing_user_authorization_for_full_lifecycle():
 
     for phrase in (
         "standing user authorization",
-        "use its own discretion",
-        "complete lp trading-session lifecycle",
-        "stopping and archiving each owned runtime bot",
-        "does not require separate human approval at each lifecycle transition",
-        "standing authorization supplies user consent",
+        "every live action expressly allowed",
+        "terminal bot archive",
+        "no separate approval is required at each lifecycle transition",
+        "exact ownership",
     ):
         assert phrase in agent
 
@@ -748,7 +747,8 @@ def test_canonical_journal_schema_decisions_and_pending_shapes_are_exact():
         "formation-update intent": "FORMATION_UPDATE",
         "Agent-exit intent; journal `state: EXITING` before the call": "AGENT_EXIT",
         "controller close/cleanup before complete terminal proof": "SUPERVISE_EXIT",
-        "first complete terminal observation and same-tick archive intent": "ARCHIVE",
+        "first complete terminal observation": "SUPERVISE_EXIT",
+        "later fresh terminal reconfirmation and archive intent": "ARCHIVE",
         "exact archive record plus active-runtime absence with no same-tick admission action": "ARCHIVE_CONFIRMED",
         "unsafe evidence/manual handoff": "QUARANTINE",
     }
@@ -1193,16 +1193,20 @@ def test_journal_pending_outcomes_and_session_isolation_are_explicit():
         "RUNNING",
         "FORMATION_UPDATE_PENDING",
         "EXITING",
+        "EXITED_PENDING_ARCHIVE",
         "ARCHIVE_PENDING",
         "QUARANTINED",
     ):
         assert f"`{state.casefold()}`" in prose
 
     strategy = STRATEGY_PATH.read_text()
-    assert "In that same terminal-observation tick" in strategy
-    assert "call `stop_bot` once" in strategy
-    assert "do not delay `stop_bot`" in strategy
-    assert "reconfirm terminal evidence on a\n  later tick" not in strategy
+    assert "On the first terminal-proof tick" in strategy
+    assert "EXITED_PENDING_ARCHIVE" in strategy
+    assert "On a later tick, freshly repeat steps 3–4" in strategy
+    assert "Both may occur in the same tick." in strategy
+    assert "new direct\n   tool call containing only" in strategy
+    assert "In that same terminal-observation tick" not in strategy
+    assert "do not delay `stop_bot`" not in strategy
 
     for outcome in (
         "rejected_before_submit",
@@ -1214,7 +1218,6 @@ def test_journal_pending_outcomes_and_session_isolation_are_explicit():
         "unavailable",
     ):
         assert f"`{outcome}`" in prose
-
     for field in (
         '"decision":',
         '"reason":',
@@ -1276,6 +1279,33 @@ def test_journal_pending_outcomes_and_session_isolation_are_explicit():
         in prose
     )
     assert "on the next tick replace it with `kind: none`" in prose
+
+
+def test_archive_stop_uses_a_separate_tool_boundary_after_journal_success():
+    agent = AGENT_PATH.read_text()
+    strategy = STRATEGY_PATH.read_text()
+    exit_flow = strategy.split("## Controller exit and bot archive", 1)[1]
+
+    assert "Terminal `stop_bot` follows the Strategy's separate-call shutdown rule." in agent
+    assert "Call the journal tool alone; its success must return" in exit_flow
+    assert "Both may occur in the same tick." in exit_flow
+    assert "new direct\n   tool call containing only" in exit_flow
+    assert "Never batch,\n   parallelize, or compose these calls." in exit_flow
+    assert "Journal failure\n   blocks the stop." in exit_flow
+    assert exit_flow.index("Call the journal tool alone") < exit_flow.index(
+        "tool call containing only"
+    )
+
+
+def test_archive_retry_requires_proven_pre_submit_rejection_and_correction():
+    states = STRATEGY_PATH.read_text().split("State behavior:", 1)[1].split(
+        "## Schema 3 supervision", 1
+    )[0]
+
+    assert "never repeat a submitted,\n  uncertain, or ambiguous request" in states
+    assert "pre-dispatch rejection is\n  `rejected_before_submit`" in states
+    assert "such as batched to standalone" in states
+    assert "An unchanged standalone rejection requires\n  explicit operator approval." in states
 
 
 def test_pool_selection_and_equal_allocation_policy_are_complete():
@@ -1437,8 +1467,9 @@ def test_formation_propagation_lag_and_exit_priority_are_exact():
     assert "During close supervision, preserve an unresolved formation update." in exit_flow
     assert "Before terminal proof, record an applied update as `confirmed`." in exit_flow
     assert (
-        "At terminal proof, state `confirmed` or `confirmed_terminal_no_effect` in the "
-        "archive reason and replace it with archive intent; do not delay `stop_bot`."
+        "At first terminal proof, retain `confirmed` or `confirmed_terminal_no_effect` "
+        "in the `EXITED_PENDING_ARCHIVE` decision. Replace it with the archive intent on "
+        "the later archive tick."
         in exit_flow
     )
     assert "A formation mismatch never relaxes archive evidence requirements." in exit_flow
@@ -1470,7 +1501,7 @@ def test_formation_propagation_lag_and_exit_priority_are_exact():
     assert set(intended["pool_exact"]) == fields
     assert previous != intended
     assert "Only a durable framework receipt proving `rejected_before_submit`" in states
-    assert "replace it with archive intent" in exit_flow
+    assert "Replace it with the archive intent" in exit_flow
 
 
 def test_agent_exit_intent_preserves_original_reasoning_and_journals_exiting():

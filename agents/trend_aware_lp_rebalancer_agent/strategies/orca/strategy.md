@@ -236,8 +236,8 @@ In loop mode, use this priority order:
    the sole schema mismatch. Ambiguous current-session identity, current-session authority
    conflict, or any unrelated schema contradiction is `QUARANTINED`.
    Exact archive confirmation releases the old tuple and continues to `VACANT` admission.
-5. If identity-consistent telemetry is `EXITING` or `EXITED`, follow it before any
-   admission or formation work.
+5. If identity-consistent telemetry is `EXITING` or `EXITED`, follow Canonical shutdown
+   before any admission or formation work.
 6. If `RUNNING`, a proven explicit live human-exit instruction would take priority, but
    the current runtime lacks a proven live instruction channel. Otherwise refresh every
    configured pool, then choose documented adverse-event exit, formation update, or
@@ -251,7 +251,7 @@ In loop mode, use this priority order:
    unparseable, or mismatched config serialization blocks deployment. An exact match
    permits the tick's one deploy-intent journal entry and one same-tick bot deployment.
 9. Every other state submits at most one external mutation after journaling its exact
-   intent, then ends the tick.
+   intent, then ends the tick. Archive follows Canonical shutdown step 6.
 10. If no mutation is justified and no more specific read-only decision applies, journal
     `HOLD` with the complete current generation tuple and end the tick. Exit supervision,
     archive confirmation, and quarantine use their exact decisions below instead.
@@ -332,7 +332,8 @@ Use one decision for each condition:
 | formation-update intent | `FORMATION_UPDATE` |
 | Agent-exit intent; journal `state: EXITING` before the call | `AGENT_EXIT` |
 | controller close/cleanup before complete terminal proof | `SUPERVISE_EXIT` |
-| first complete terminal observation and same-tick archive intent | `ARCHIVE` |
+| first complete terminal observation | `SUPERVISE_EXIT` |
+| later fresh terminal reconfirmation and archive intent | `ARCHIVE` |
 | exact archive record plus active-runtime absence with no same-tick admission action | `ARCHIVE_CONFIRMED` |
 | unsafe evidence/manual handoff | `QUARANTINE` |
 
@@ -381,8 +382,8 @@ measurement list by source then field. The array contains only the bounded curre
 observations used by the exit decision, never prose, reports, logs, or secrets. It is
 non-empty for an adverse-event exit and empty only for a proven explicit live human exit.
 
-Only the last three decisions are injected, so repeat unresolved pending work. The two
-documented same-tick transitions replace resolved pending work with the next exact intent.
+Only the last three decisions are injected, so repeat unresolved pending work. The
+documented archive-confirmation transition may proceed to admission in the same tick.
 
 ## Pool count and portfolio construction
 
@@ -660,10 +661,13 @@ State behavior:
 - `EXITING`: read-only supervision of controller close/cleanup. Never repeat exit,
   stop controller/Executors/bot, or call Gateway. A proven pre-submit exit rejection with
   unchanged config returns to `RUNNING` only when the durable framework receipt proves
-  `rejected_before_submit`. Once the same tick proves complete terminal evidence, preserve
-  terminal PnL, journal the archive intent, and call `stop_bot` once.
-- `ARCHIVE_PENDING`: reconcile one exact `stop_bot`; never repeat it or treat active
-  disappearance as proof.
+  `rejected_before_submit`; otherwise follow Canonical shutdown.
+- `EXITED_PENDING_ARCHIVE`: follow Canonical shutdown from its later-tick check.
+- `ARCHIVE_PENDING`: reconcile one exact `stop_bot`; never repeat a submitted,
+  uncertain, or ambiguous request. A durable pre-dispatch rejection is
+  `rejected_before_submit`; retry after fresh terminal proof only with a material
+  correction, such as batched to standalone. An unchanged standalone rejection requires
+  explicit operator approval.
 - `QUARANTINED`: read-only manual-handoff state. Record a stable `anomaly_code`; fetch
   logs only when the code changes or a human explicitly asks. A transient read failure may
   clear when exact current evidence returns. Identity conflict, unexplained disappearance,
@@ -790,20 +794,27 @@ Canonical shutdown:
    `terminal_pnl_status: available` only when every value is numeric; otherwise use
    `terminal_pnl_status: unavailable`. Missing PnL does not block archive after terminal ownership proof and
    is never reconstructed from wallet balances.
-5. In that same terminal-observation tick, journal `state: ARCHIVE_PENDING` and
-   `decision: ARCHIVE` with exact terminal PnL, call `stop_bot` once, and end the tick.
-6. Require the exact HAPI bot-run record `deployment_status: ARCHIVED` plus absence of
+5. On the first terminal-proof tick, journal `EXITED_PENDING_ARCHIVE` and
+   `SUPERVISE_EXIT` with terminal PnL; make no mutation and end the tick.
+6. On a later tick, freshly repeat steps 3–4, then prepare `ARCHIVE_PENDING` and
+   `ARCHIVE`. Call the journal tool alone; its success must return before a new direct
+   tool call containing only
+   `manage_bots(action="stop_bot", bot_name=<exact-runtime-instance>)`. Never batch,
+   parallelize, or compose these calls. Both may occur in the same tick. Journal failure
+   blocks the stop. End the tick after the stop call; reconcile next tick.
+7. Require the exact HAPI bot-run record `deployment_status: ARCHIVED` plus absence of
    the active runtime. Unless explicitly stopped, release it and immediately continue
    through complete `VACANT` admission. A same-tick `CONFIG_CREATE` or `DEPLOY` carries
    the old identity in `released_session` and uses active fields for the new generation.
-7. If no same-tick admission action is produced, journal `state: VACANT`,
+8. If no same-tick admission action is produced, journal `state: VACANT`,
    `decision: ARCHIVE_CONFIRMED`, null active identity and pending fields, and the exact
    old identity in `released_session`.
 
 During close supervision, preserve an unresolved formation update. Before terminal proof,
-record an applied update as `confirmed`. At terminal proof, state `confirmed` or
-`confirmed_terminal_no_effect` in the archive reason and replace it with archive intent;
-do not delay `stop_bot`. A formation mismatch never relaxes archive evidence requirements.
+record an applied update as `confirmed`. At first terminal proof, retain `confirmed` or
+`confirmed_terminal_no_effect` in the `EXITED_PENDING_ARCHIVE` decision. Replace it with
+the archive intent on the later archive tick. A formation mismatch never relaxes archive
+evidence requirements.
 
 Logs, formatted bot status, wallet balances, kill-switch status, terminal messages, and
 active-bot disappearance alone are never shutdown/archive proof. `FAULTED`, stale
