@@ -93,6 +93,11 @@ async def list_settings_servers(user: WebUser = Depends(get_current_user)):
                 online=online,
                 permission=perm.value if perm else "trader",
                 is_default=name == default_server,
+                shared_with=(
+                    cm.get_server_members(name)
+                    if perm == ServerPermission.OWNER
+                    else []
+                ),
             )
         )
 

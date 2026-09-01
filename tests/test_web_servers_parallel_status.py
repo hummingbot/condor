@@ -109,7 +109,12 @@ def test_three_slow_servers_resolve_in_one_timeout_not_three(monkeypatch):
 
 
 def test_all_online_response_is_unchanged(monkeypatch):
-    """Names, hosts, ports, online flags, permission and sort order hold."""
+    """Names, hosts, ports, online flags, permission and sort order hold.
+
+    ``shared_with`` joined the payload with FEAT-088 and is additive: it is
+    populated only for a server's owner, and this fixture's permission object is
+    not the real enum, so every row takes the empty branch.
+    """
     sds = FakeSDS(
         statuses={n: {"status": "online"} for n in three_servers()},
         delay=0,
@@ -124,6 +129,7 @@ def test_all_online_response_is_unchanged(monkeypatch):
             "online": True,
             "permission": "owner",
             "is_default": False,
+            "shared_with": [],
         },
         {
             "name": "bravo",
@@ -132,6 +138,7 @@ def test_all_online_response_is_unchanged(monkeypatch):
             "online": True,
             "permission": "owner",
             "is_default": False,
+            "shared_with": [],
         },
         {
             "name": "charlie",
@@ -140,6 +147,7 @@ def test_all_online_response_is_unchanged(monkeypatch):
             "online": True,
             "permission": "owner",
             "is_default": False,
+            "shared_with": [],
         },
     ]
 

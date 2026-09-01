@@ -22,6 +22,13 @@ class WebUser(BaseModel):
 # ── Servers ──
 
 
+class ServerMember(BaseModel):
+    """Someone a server is shared with, named rather than numbered."""
+
+    user_id: int
+    display_name: str
+
+
 class ServerInfo(BaseModel):
     name: str
     host: str
@@ -31,6 +38,12 @@ class ServerInfo(BaseModel):
     # The server this user's commands land on when none is named — the same
     # `chat_defaults` entry Telegram reads, so both surfaces agree on it.
     is_default: bool = False
+    # Who else reaches this server (FEAT-088). Populated only for the owner and
+    # for an admin: a trader seeing the rest of the member list would be telling
+    # them something their own access does not entitle them to know. Empty for
+    # everyone else, which is why the card only renders the line when it owns
+    # the server.
+    shared_with: list[ServerMember] = []
 
 
 # ── Portfolio ──

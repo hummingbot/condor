@@ -12,7 +12,7 @@ from condor.server_data_service import (
 )
 from condor.web.auth import get_current_user
 from condor.web.models import ServerInfo, WebUser
-from config_manager import get_config_manager
+from config_manager import ServerPermission, get_config_manager
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +63,11 @@ async def list_servers(user: WebUser = Depends(get_current_user)):
                 online=online,
                 permission=perm.value if perm else "trader",
                 is_default=name == default_server,
+                shared_with=(
+                    cm.get_server_members(name)
+                    if perm == ServerPermission.OWNER
+                    else []
+                ),
             )
         )
 
