@@ -19,10 +19,12 @@
  * this browser, and it is actionable the moment the next session renders it.
  *
  * KEPT — how this *device* renders the app: `condor_theme`,
- * `condor_display_currency`, `condor.dock.open`, `condor_bubble_open`,
- * `condor_sheet_zen`, `condor_trade_bottom_pane`, `routines_view_mode`,
- * `condor.dex.network`, `condor.dex.depth-collapsed`, `condor.pnl.hidden-series`,
- * `condor.bots.positions-open`, and the one-time hints
+ * `condor_display_currency`, `condor_bubble_open`, `condor_sheet_zen`,
+ * `condor_trade_bottom_pane`, `routines_view_mode`, `condor.dex.network`,
+ * `condor.dex.depth-collapsed`, `condor.pnl.hidden-series`,
+ * `condor.bots.positions-open`, the workspace's own geometry
+ * (`condor.dock.open`, `condor.dock.width`, `condor_pane_frac`,
+ * `condor.chat.rail.open`), and the one-time hints
  * (`condor.market.browse-hint`) that record how far this browser has been
  * onboarded. Wiping these would flip
  * the theme out from under someone logging out on their own laptop, and none of
@@ -82,6 +84,36 @@ export const PNL_HIDDEN_SERIES_KEY = "condor.pnl.hidden-series";
  * re-fetched under whoever is logged in now.
  */
 export const POSITIONS_BAND_KEY = "condor.bots.positions-open";
+
+/**
+ * How many pixels wide the reader dragged the context dock (ARCH-291).
+ *
+ * KEPT, beside the `condor.dock.open` that decides whether the column is there
+ * at all: a column's width is a fact about this window, not about the
+ * conversation that happened to be open in it, and the rows inside it are
+ * re-fetched under whoever is logged in now.
+ */
+export const DOCK_WIDTH_KEY = "condor.dock.width";
+
+/**
+ * Where the reader put the split between the transcript and the workspace
+ * pane, as a fraction of the row (ARCH-273, ARCH-291).
+ *
+ * KEPT, for the same reason the dock's width is: it says how this screen is
+ * divided, and the report that lands in the pane is re-fetched under the
+ * incoming identity like everything else on it.
+ */
+export const PANE_FRAC_KEY = "condor_pane_frac";
+
+/**
+ * Whether the conversation rail is a column or a strip of icons (ARCH-291).
+ *
+ * KEPT: a disclosure that is open or shut is a fact about this window, and the
+ * conversations behind it are listed for whoever is logged in now. Only the
+ * reader's own toggle is ever written here — the pane borrows the rail without
+ * recording a preference — so what survives a logout is something they chose.
+ */
+export const CHAT_RAIL_OPEN_KEY = "condor.chat.rail.open";
 
 const SESSION_KEYS = [
   ORDER_DEFAULTS_KEY,

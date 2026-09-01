@@ -17,12 +17,10 @@ import { WORKSPACE_BAR } from "@/components/chat/workspaceBar";
 import { AnchoredMenu } from "@/components/ui/AnchoredMenu";
 import { useWorkspacePane } from "@/hooks/useWorkspacePane";
 import { CHAT_SLUG, type AgentSummary, type ConversationMeta } from "@/lib/api";
-
-/** Whether the rail is a column or a strip, remembered across sessions. */
-const OPEN_KEY = "condor.chat.rail.open";
+import { CHAT_RAIL_OPEN_KEY } from "@/lib/sessionState";
 
 function readOpen(): boolean {
-  return localStorage.getItem(OPEN_KEY) !== "false";
+  return localStorage.getItem(CHAT_RAIL_OPEN_KEY) !== "false";
 }
 
 /**
@@ -103,7 +101,7 @@ export const ChatRail = memo(function ChatRail({
   const toggle = (next: boolean) => {
     setExpanded(next);
     lent.current = null;
-    localStorage.setItem(OPEN_KEY, String(next));
+    localStorage.setItem(CHAT_RAIL_OPEN_KEY, String(next));
   };
 
   // Condor is in the registry like every other Agent (FEAT-033), but it is not

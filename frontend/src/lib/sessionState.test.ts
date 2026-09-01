@@ -14,7 +14,10 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
 import {
+  CHAT_RAIL_OPEN_KEY,
   clearSessionState,
+  DOCK_WIDTH_KEY,
+  PANE_FRAC_KEY,
   PNL_HIDDEN_SERIES_KEY,
   POSITIONS_BAND_KEY,
 } from "@/lib/sessionState";
@@ -44,6 +47,12 @@ const DEVICE = [
   "condor.dex.depth-collapsed",
   PNL_HIDDEN_SERIES_KEY,
   POSITIONS_BAND_KEY,
+  // The workspace's geometry: how wide each column was dragged and whether it
+  // is a column at all. Named through the module, not as literals, so a key
+  // that only ever appeared at its writer cannot slip past this list (ARCH-291).
+  DOCK_WIDTH_KEY,
+  PANE_FRAC_KEY,
+  CHAT_RAIL_OPEN_KEY,
 ];
 
 beforeEach(() => {

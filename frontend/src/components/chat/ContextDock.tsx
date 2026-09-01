@@ -20,9 +20,9 @@ import { WORKSPACE_BAR } from "@/components/chat/workspaceBar";
 import { useResizeDrag } from "@/hooks/useResizeDrag";
 import { api, type Delegation } from "@/lib/api";
 import { inScope, resolveRoutine, type RoutineScope } from "@/lib/routineUtils";
+import { DOCK_WIDTH_KEY } from "@/lib/sessionState";
 
 const OPEN_KEY = "condor.dock.open";
-const WIDTH_KEY = "condor.dock.width";
 /** Where the dock stops being a column and starts overlaying (Tailwind `xl`). */
 const WIDE = "(min-width: 1280px)";
 
@@ -33,7 +33,7 @@ const MIN_WIDTH = 220;
 const MIN_CHAT_PX = 420;
 
 function readWidth(): number {
-  const stored = Number(localStorage.getItem(WIDTH_KEY));
+  const stored = Number(localStorage.getItem(DOCK_WIDTH_KEY));
   return Number.isFinite(stored) && stored >= MIN_WIDTH
     ? stored
     : DEFAULT_WIDTH;
@@ -122,7 +122,7 @@ export function ContextDock({
   };
 
   useEffect(() => {
-    localStorage.setItem(WIDTH_KEY, String(Math.round(width)));
+    localStorage.setItem(DOCK_WIDTH_KEY, String(Math.round(width)));
   }, [width]);
 
   /**

@@ -6,6 +6,7 @@ import {
   WorkspacePaneContext,
   type WorkspacePane,
 } from "@/hooks/useWorkspacePane";
+import { PANE_FRAC_KEY } from "@/lib/sessionState";
 
 /**
  * Below this the workspace has no room for another column, so a sheet keeps its
@@ -20,9 +21,6 @@ import {
  * `AgentChatTab`, which is this same breakpoint.
  */
 const WIDE = "(min-width: 1280px)";
-
-/** Where the reader's split is remembered. */
-const FRAC_KEY = "condor_pane_frac";
 
 /**
  * Opening split, and what a double-click on the handle returns to.
@@ -55,7 +53,7 @@ function clampFrac(f: number) {
 
 function readFrac(): number {
   try {
-    const stored = localStorage.getItem(FRAC_KEY);
+    const stored = localStorage.getItem(PANE_FRAC_KEY);
     return stored === null ? DEFAULT_FRAC : clampFrac(parseFloat(stored));
   } catch {
     return DEFAULT_FRAC;
@@ -94,7 +92,7 @@ export function WorkspacePaneProvider({
 
   useEffect(() => {
     try {
-      localStorage.setItem(FRAC_KEY, String(frac));
+      localStorage.setItem(PANE_FRAC_KEY, String(frac));
     } catch {
       /* private mode; the split just lasts the session */
     }
