@@ -24,6 +24,42 @@ logger = logging.getLogger("hummingbot-mcp")
 _INTERNAL_FIELDS = {"type", "executor_type", "id"}
 
 
+# Executor config fields typed as a plain Enum of ints on the backend (TradeType,
+# OrderType). Pydantic coerces a numeric string into an int field but not into an Enum
+# member, so "1" is rejected where 1 is accepted:
+#
+#     ValidationError: Input should be 1, 2 or 3 [type=enum, input_value='1', input_type=str]
+#
+# executor_config is an untyped dict all the way from the tool call to the backend, so a
+# caller that quotes these values gets that error with nothing in the message naming the
+# fix, and retries the same shape.
+ENUM_INT_FIELDS = frozenset(
+    {
+        "side",
+        "open_order_type",
+        "take_profit_order_type",
+        "stop_loss_order_type",
+        "time_limit_order_type",
+        "order_type",
+    }
+)
+
+
+def coerce_enum_ints(config: dict[str, Any]) -> dict[str, Any]:
+    """Turn digit-strings in enum fields into ints, in place, at any nesting depth.
+
+    Nested because triple_barrier_config holds four of these fields. Anything that is not
+    a digit-string is left exactly as it is, so a genuinely wrong value still reaches the
+    backend and fails there rather than being silently reshaped here.
+    """
+    for key, value in config.items():
+        if isinstance(value, dict):
+            coerce_enum_ints(value)
+        elif key in ENUM_INT_FIELDS and isinstance(value, str) and value.strip().isdigit():
+            config[key] = int(value)
+    return config
+
+
 def validate_executor_config(
     config: dict[str, Any], schema: dict[str, Any]
 ) -> list[str]:
@@ -162,6 +198,10 @@ async def manage_executors(
         merged_config = executor_preferences.merge_with_defaults(
             executor_type, request.executor_config
         )
+
+        # A quoted "1" is rejected outright by the backend's enum fields; repair it here
+        # rather than bouncing the caller off a validation error it cannot read.
+        coerce_enum_ints(merged_config)
 
         # Ensure type is set in config
         if "type" not in merged_config and "executor_type" not in merged_config:
