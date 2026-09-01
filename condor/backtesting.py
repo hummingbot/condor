@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from dataclasses import dataclass
 from typing import Any
 
 import aiohttp
@@ -26,6 +27,13 @@ logger = logging.getLogger(__name__)
 # action='run_async') rather than shortening this.
 DEFAULT_POLL_INTERVAL = 2.0
 DEFAULT_TIMEOUT = 600.0
+
+# How many backtests a fan-out puts on the wire at once. hummingbot-api runs each
+# backtest in its own worker process behind a semaphore of BACKTESTING_MAX_CONCURRENT
+# (1 upstream; setup-environment.sh writes 4 into the .env it generates), so a caller
+# that submits more than this is not going faster -- it is only queueing on the
+# server, where a run's deadline is already ticking.
+DEFAULT_MAX_CONCURRENT = 4
 
 # The one response that carries the whole backtest -- every executor plus
 # processed_data -- is the poll that finally succeeds, and aiohttp's ``total``
@@ -157,6 +165,94 @@ async def run_and_save(
 
     _save(server, task_id, task)
     return task_id, task
+
+
+@dataclass(frozen=True)
+class BacktestOutcome:
+    """One config's place in a fan-out: the task it produced, or why it has none.
+
+    A batch of backtests is reported over, and a report that quietly covers five of
+    the seven configs it was asked about is worse than one that says two failed. So
+    the failure travels back with the config that caused it instead of being logged
+    and turned into ``None``.
+    """
+
+    config: dict
+    task_id: str | None = None
+    task: dict | None = None
+    error: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.task is not None
+
+
+async def run_many(
+    client,
+    server: str,
+    configs: list[dict],
+    start_time: int,
+    end_time: int,
+    resolution: str = "1m",
+    trade_cost: float = 0.0002,
+    max_concurrent: int | None = None,
+    poll_interval: float | None = None,
+    timeout: float | None = None,
+) -> list[BacktestOutcome]:
+    """Run a batch of backtests against one server, in input order, losing none.
+
+    Two things make a fan-out different from N calls to :func:`run_and_save`, and
+    both live here rather than in each caller:
+
+    *Bounded.* The server serializes backtests behind ``BACKTESTING_MAX_CONCURRENT``
+    worker slots, so submitting seven at once buys nothing and costs the six that
+    wait. At most ``max_concurrent`` are on the wire, and the rest wait here, where
+    waiting is free.
+
+    *Patient.* A submitted run's deadline starts at submission, not at execution, so
+    a run that shares a batch has to outlast the batch. Each therefore gets
+    ``timeout`` multiplied by the number in flight beside it -- which covers the
+    worst case, a server whose own cap is 1 running the whole batch end to end.
+
+    Returns one :class:`BacktestOutcome` per config, in the order given.
+    """
+    configs = list(configs)
+    if not configs:
+        return []
+
+    bound = DEFAULT_MAX_CONCURRENT if max_concurrent is None else int(max_concurrent)
+    in_flight = max(1, min(bound, len(configs)))
+    deadline = (DEFAULT_TIMEOUT if timeout is None else timeout) * in_flight
+    slots = asyncio.Semaphore(in_flight)
+
+    async def _one(config: dict) -> BacktestOutcome:
+        async with slots:
+            try:
+                task_id, task = await run_and_save(
+                    client,
+                    server,
+                    config,
+                    start_time,
+                    end_time,
+                    resolution=resolution,
+                    trade_cost=trade_cost,
+                    poll_interval=poll_interval,
+                    timeout=deadline,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Backtest failed for config %s: %s",
+                    config.get("id", "?"),
+                    exc,
+                    exc_info=True,
+                )
+                return BacktestOutcome(
+                    config=config, error=f"{type(exc).__name__}: {exc}"
+                )
+        task["task_id"] = task_id
+        return BacktestOutcome(config=config, task_id=task_id, task=task)
+
+    return list(await asyncio.gather(*[_one(cfg) for cfg in configs]))
 
 
 async def _poll_task(
