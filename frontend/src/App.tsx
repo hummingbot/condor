@@ -87,7 +87,6 @@ export default function App() {
                 <Route path="/executors" element={<Executors />} />
                 <Route path="/executors/new" element={<Navigate to="/trade" replace />} />
                 <Route path="/executors/new-grid" element={<Navigate to="/trade?type=grid" replace />} />
-                <Route path="/backtest" element={<Navigate to="/bots?tab=backtest" replace />} />
                 <Route path="/archived" element={<Navigate to="/bots?tab=archived" replace />} />
                 <Route path="/routines" element={<Routines />} />
                 <Route path="/reports" element={<Navigate to="/routines?tab=reports" replace />} />

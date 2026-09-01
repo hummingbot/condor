@@ -183,7 +183,6 @@ describe("describePage", () => {
   it.each([
     "/reports",
     "/agents",
-    "/backtest",
     "/archived",
     "/market",
     "/executors/new",

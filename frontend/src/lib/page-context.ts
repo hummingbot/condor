@@ -55,8 +55,8 @@ export function describePage(pathname: string, search = ""): PageContext {
     // Only the two-and-three-segment agent routes are real: `/agents` itself is
     // a `<Navigate to="/">` in App.tsx, so it redirects before any consumer of
     // this module reads the location, and a bare-`/agents` branch here would be
-    // dead code. The same is true of `/reports`, `/backtest`, `/archived`,
-    // `/market` and `/executors/new*` — none of them gets a case.
+    // dead code. The same is true of `/reports`, `/archived`, `/market` and
+    // `/executors/new*` — none of them gets a case.
     case "agents":
       if (second && third === "strategies" && fourth) {
         return of(`Strategy detail (agent "${second}", strategy "${fourth}")`, "Agents & chat");

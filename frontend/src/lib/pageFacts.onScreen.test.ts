@@ -196,9 +196,9 @@ describe("/bots", () => {
     expect(runs).toContain("best backpack-mm-3 +$1,220.00");
     expect(runs).not.toContain("total volume");
 
-    // Backtest and the editor hold nothing readable; the label says enough.
-    expect(onScreenLine("/bots", "?tab=backtest")).toBe("");
-    expect(onScreenLine("/bots", "?tab=editor")).toBe("");
+    // A stale link to a tab that no longer exists lands on the browser, and
+    // reads the fleet it is showing (FEAT-084).
+    expect(onScreenLine("/bots", "?tab=editor")).toContain("controllers");
   });
 
   it("reads a stale ?tab=archived link as the Runs tab that absorbed it", () => {
@@ -888,7 +888,7 @@ describe("an empty cache", () => {
       ["/portfolio", ""],
       ["/bots", ""],
       ["/bots", "?tab=runs"],
-      ["/bots", "?tab=editor"],
+      ["/bots", "?scope=ctrl:mm-1:pmm_0"],
       ["/bots/42", ""],
       ["/trade", ""],
       ["/dex", ""],

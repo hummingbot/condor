@@ -335,16 +335,18 @@ type Reader = (
 ) => ViewFacts["onScreen"];
 
 /**
- * The four tabs `/bots` actually has (`Bots.tsx`). Labelling only three left
- * `?tab=runs` and `?tab=editor` both announced as "Bots", which is a screen
- * the user is not on.
+ * The one tab `/bots` still has (`Bots.tsx`).
+ *
+ * The page is the controller browser now (FEAT-084) and Runs is the last thing
+ * beside it, so an unlabelled `/bots` is the browser rather than a tab that was
+ * announced as "Bots" while showing something else. The editor became a modal
+ * over the browser and Backtest went to the `backtest_chart` routine, so
+ * neither is a screen the user can be on any more.
  */
 const BOTS_TAB_LABELS: Record<string, string> = {
   runs: "Bot runs",
-  editor: "Controller config editor",
-  backtest: "Backtests",
-  // Retired: Runs absorbed the Archived tab and `Bots.tsx` redirects the old
-  // query string into it, so a stale link has to name where the user lands.
+  // Retired: Runs absorbed the Archived tab and `Bots.tsx` renders it for the
+  // old query string, so a stale link has to name where the user lands.
   archived: "Bot runs",
 };
 
@@ -474,14 +476,11 @@ const ROUTES: {
     pattern: /^\/bots$/,
     facts: (_p, tab) => ({ label: BOTS_TAB_LABELS[tab] ?? "Bots" }),
     onScreen: (_p, tab, qc) => {
-      // Four tabs, four different tables. The live fleet is only what the
-      // *active* tab shows, so reading it under "Bot runs" would describe a
-      // screen the user is not on — the failure R3 exists to prevent. Backtest
-      // and the config editor hold nothing the fact table can honestly read,
-      // and their label already says where the user is. `?tab=archived` is the
-      // retired tab that Bots.tsx redirects into `runs`, which now covers both.
+      // Two screens, two different tables. The live fleet is only what the
+      // browser shows, so reading it under "Bot runs" would describe a screen
+      // the user is not on — the failure R3 exists to prevent. `?tab=archived`
+      // is the retired tab Runs absorbed, which now covers both.
       if (tab === "runs" || tab === "archived") return runsFacts(qc);
-      if (tab === "backtest" || tab === "editor") return undefined;
 
       const data = fresh<BotsPageResponse>(qc, ["bots"]);
       if (!data) return undefined;
@@ -520,7 +519,8 @@ const ROUTES: {
         "total volume": m.volume(data.total_volume),
         best,
         worst,
-        tab: tab || "active",
+        // No `tab` any more: `/bots` is one screen, and which scope of it the
+        // user is looking at the browser itself contributes (`useViewFacts`).
         "as of": asOf(qc, ["bots"]),
       };
     },

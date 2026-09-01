@@ -67,18 +67,20 @@ describe("routeFacts", () => {
   });
 
   it("reads the tab from the query string", () => {
-    expect(routeFacts("/bots", "?tab=backtest")?.label).toBe("Backtests");
+    expect(routeFacts("/bots", "?tab=runs")?.label).toBe("Bot runs");
     // Retired tab: Runs absorbed Archived, so a stale link names where it lands.
     expect(routeFacts("/bots", "?tab=archived")?.label).toBe("Bot runs");
     expect(routeFacts("/routines", "?tab=reports")?.label).toBe("Routine reports");
   });
 
-  it("labels every tab /bots actually has, not just the three it used to", () => {
-    // `?tab=runs` and `?tab=editor` were both announced as "Bots" — a screen
-    // the user is not on, and the one the block is supposed to prevent.
-    expect(routeFacts("/bots", "?tab=runs")?.label).toBe("Bot runs");
-    expect(routeFacts("/bots", "?tab=editor")?.label).toBe("Controller config editor");
-    expect(routeFacts("/bots", "?tab=active")?.label).toBe("Bots");
+  it("labels /bots itself as the browser, tab or no tab", () => {
+    // The tab bar is gone (FEAT-084): `/bots` is the controller browser, and a
+    // stale link to a tab that no longer exists lands on it rather than being
+    // announced as a screen nobody can be on.
+    expect(routeFacts("/bots", "")?.label).toBe("Bots");
+    expect(routeFacts("/bots", "?tab=editor")?.label).toBe("Bots");
+    expect(routeFacts("/bots", "?tab=backtest")?.label).toBe("Bots");
+    expect(routeFacts("/bots", "?scope=bot:mm-1")?.label).toBe("Bots");
   });
 
   it("says nothing on a route it does not know", () => {
