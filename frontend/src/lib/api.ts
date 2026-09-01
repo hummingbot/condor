@@ -965,6 +965,8 @@ export interface SkillCard {
   shared: boolean;
   /** Shared *and* not writable from here — read-only for this Agent. */
   inherited: boolean;
+  /** Switched off for this Agent: listed here, and nowhere the agent looks. */
+  muted: boolean;
   references_routine: string;
   routine_ok: boolean;
 }
@@ -984,6 +986,8 @@ export interface RoutineCard {
   /** `"global"` for the shared library, `"agent:<slug>"` for its own. */
   source: string;
   category: string;
+  /** Switched off for this Agent. `/routines` still lists and runs it. */
+  muted: boolean;
 }
 
 export interface StrategyCard {
@@ -2597,6 +2601,21 @@ export const api = {
   ) =>
     apiFetch<SkillBody>(
       `/api/v1/agents/${encodeURIComponent(slug)}/skills/${encodeURIComponent(name)}`,
+      { method: "PUT", body: JSON.stringify(data) },
+    ),
+
+  /** Switch one playbook or routine off for this Agent, or back on.
+   *
+   *  Curation, not deletion: the item stays on disk, stays in this panel and
+   *  stays editable, and every other Agent reading the same shared file is
+   *  untouched. It takes effect on the Agent's next tick or next session — a
+   *  system prompt already built is not rewritten. */
+  setAgentMute: (
+    slug: string,
+    data: { kind: "skill" | "routine"; name: string; muted: boolean },
+  ) =>
+    apiFetch<{ kind: string; name: string; muted: boolean }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/mutes`,
       { method: "PUT", body: JSON.stringify(data) },
     ),
 

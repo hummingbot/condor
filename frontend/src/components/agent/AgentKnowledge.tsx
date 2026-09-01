@@ -172,19 +172,83 @@ export function AgentKnowledge({
     },
   });
 
+  /**
+   * Switch one playbook or routine off for this agent, or back on (FEAT-090).
+   *
+   * Optimistic on the brain cache: the switch is the whole feedback and a
+   * round-trip of dead switch is worse than a flicker on the rare failure.
+   * The cached row is patched rather than the query invalidated, so the tab
+   * does not re-fetch and re-sort under the cursor mid-curation; settling
+   * invalidates once, which is when the server's answer matters.
+   */
+  const muteMut = useMutation({
+    mutationFn: (v: {
+      kind: "skill" | "routine";
+      name: string;
+      muted: boolean;
+    }) => api.setAgentMute(slug, v),
+    onMutate: async (v) => {
+      await queryClient.cancelQueries({ queryKey: ["agent-brain", slug] });
+      const previous = queryClient.getQueryData<AgentBrain>([
+        "agent-brain",
+        slug,
+      ]);
+      queryClient.setQueryData<AgentBrain>(["agent-brain", slug], (old) =>
+        old
+          ? {
+              ...old,
+              skills:
+                v.kind === "skill"
+                  ? old.skills.map((x) =>
+                      x.slug === v.name ? { ...x, muted: v.muted } : x,
+                    )
+                  : old.skills,
+              routines:
+                v.kind === "routine"
+                  ? old.routines.map((x) =>
+                      x.name === v.name ? { ...x, muted: v.muted } : x,
+                    )
+                  : old.routines,
+            }
+          : old,
+      );
+      return { previous };
+    },
+    onError: (_e, _v, ctx) => {
+      if (ctx?.previous)
+        queryClient.setQueryData(["agent-brain", slug], ctx.previous);
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ["agent-brain", slug] });
+    },
+  });
+
+  // A count is what the *agent* gets, because that is the number the tab is
+  // asked for. When something is muted the panel lists more rows than that, so
+  // the count says "7/9" — otherwise the tab would contradict its own list.
   const counts = {
-    skills: brain?.skills.length ?? 0,
+    skills: brain?.skills.filter((s) => !s.muted).length ?? 0,
     memories: brain?.memories.length ?? 0,
     tools: brain?.tools.length ?? 0,
     strategies: brain?.strategies.length ?? 0,
+    routines: brain?.routines.filter((r) => !r.muted).length ?? 0,
+  };
+  const totals = {
+    skills: brain?.skills.length ?? 0,
     routines: brain?.routines.length ?? 0,
   };
+  const withMuted = (live: number, total: number) =>
+    total > live
+      ? { countLabel: `${live}/${total}`, countTitle: `${live} of ${total}` }
+      : {};
 
   const tabs: {
     id: KnowledgeTabId;
     label: string;
     icon: React.ReactNode;
     count?: number;
+    countLabel?: string;
+    countTitle?: string;
   }[] = [
     { id: "brain", label: "Brain", icon: <Brain className="h-3.5 w-3.5" /> },
     {
@@ -192,6 +256,7 @@ export function AgentKnowledge({
       label: "Skills",
       icon: <BookOpen className="h-3.5 w-3.5" />,
       count: counts.skills,
+      ...withMuted(counts.skills, totals.skills),
     },
     {
       id: "memories",
@@ -218,6 +283,7 @@ export function AgentKnowledge({
       label: "Routines",
       icon: <Zap className="h-3.5 w-3.5" />,
       count: counts.routines,
+      ...withMuted(counts.routines, totals.routines),
     },
     {
       id: "activity",
@@ -259,9 +325,11 @@ export function AgentKnowledge({
     >
       {tabs.map((t) => {
         const name =
-          t.count !== undefined && t.count > 0
-            ? `${t.label} (${t.count})`
-            : t.label;
+          t.countTitle !== undefined
+            ? `${t.label} (${t.countTitle})`
+            : t.count !== undefined && t.count > 0
+              ? `${t.label} (${t.count})`
+              : t.label;
         const active = activeTab === t.id;
         return (
           /* Each section is its own key rather than a name in a list: a border,
@@ -295,7 +363,7 @@ export function AgentKnowledge({
               }`}
             >
               <span>{t.label}</span>
-              {t.count !== undefined && t.count > 0 && (
+              {(t.countLabel || (t.count !== undefined && t.count > 0)) && (
                 <span
                   className={
                     active
@@ -303,7 +371,7 @@ export function AgentKnowledge({
                       : "text-[9px] text-[var(--color-text-muted)]"
                   }
                 >
-                  {t.count}
+                  {t.countLabel ?? t.count}
                 </span>
               )}
             </span>
@@ -333,9 +401,12 @@ export function AgentKnowledge({
         >
           {t.icon}
           {t.label}
-          {t.count !== undefined && t.count > 0 && (
-            <span className="text-[10px] text-[var(--color-text-muted)]">
-              {t.count}
+          {(t.countLabel || (t.count !== undefined && t.count > 0)) && (
+            <span
+              title={t.countTitle}
+              className="text-[10px] text-[var(--color-text-muted)]"
+            >
+              {t.countLabel ?? t.count}
             </span>
           )}
         </button>
@@ -420,6 +491,9 @@ export function AgentKnowledge({
                 }}
                 onDelete={(card) => setDeleting({ kind: "skill", card })}
                 onCreate={() => setCreating("skill")}
+                onMute={(name, muted) =>
+                  muteMut.mutate({ kind: "skill", name, muted })
+                }
                 onGoToRoutine={(name) => {
                   if (onOpenRoutine) {
                     onOpenRoutine(name);
@@ -450,6 +524,9 @@ export function AgentKnowledge({
                 brain={brain}
                 action={routinesAction}
                 onOpen={onOpenRoutine}
+                onMute={(name, muted) =>
+                  muteMut.mutate({ kind: "routine", name, muted })
+                }
               />
             )}
             {activeTab === "activity" && <ActivityFeed agent={slug} />}
@@ -562,11 +639,59 @@ function Chip({
 }
 
 /**
+ * The small on/off switch a row pins left of its edit and delete buttons.
+ *
+ * `on` is "the agent gets this", not "this is muted": the switch reads the way
+ * every switch reads, and the caller inverts once at the seam rather than the
+ * eye inverting on every row.
+ */
+function Switch({
+  on,
+  onChange,
+  title,
+}: {
+  on: boolean;
+  onChange: () => void;
+  title: string;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      title={title}
+      aria-label={title}
+      onClick={(e) => {
+        e.stopPropagation();
+        onChange();
+      }}
+      className={`mt-0.5 flex h-3.5 w-6 shrink-0 items-center rounded-full border p-px transition-colors ${
+        on
+          ? "border-[var(--color-primary)]/50 bg-[var(--color-primary)]/30"
+          : "border-[var(--color-border)] bg-[var(--color-surface-hover)]"
+      }`}
+    >
+      <span
+        className={`h-2.5 w-2.5 rounded-full transition-transform ${
+          on
+            ? "translate-x-[10px] bg-[var(--color-primary)]"
+            : "translate-x-0 bg-[var(--color-text-muted)]"
+        }`}
+      />
+    </button>
+  );
+}
+
+/**
  * A list row: a title line, badges, prose, and — when the thing is writable —
  * edit and delete beside it.
  *
  * The row's own click opens it for reading, so the actions are siblings of that
  * button rather than nested inside it.
+ *
+ * `toggle` is the mute switch (FEAT-090). Unlike edit and delete it is always
+ * visible rather than hover-revealed, because it renders *state* and not an
+ * action: a row you cannot see the switch on cannot tell you it is off.
  */
 function Row({
   title,
@@ -577,6 +702,8 @@ function Row({
   onDelete,
   editTitle,
   deleteTitle,
+  toggle,
+  dimmed,
 }: {
   title: string;
   badges?: React.ReactNode;
@@ -586,6 +713,9 @@ function Row({
   onDelete?: () => void;
   editTitle?: string;
   deleteTitle?: string;
+  toggle?: { on: boolean; onChange: () => void; title: string };
+  /** Render the row's content faded — it is off, not gone. */
+  dimmed?: boolean;
 }) {
   const inner = (
     <>
@@ -606,12 +736,18 @@ function Row({
   return (
     <div className="group flex items-start gap-1 rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 transition-colors focus-within:border-[var(--color-primary)]/40 hover:border-[var(--color-primary)]/40">
       {onClick ? (
-        <button onClick={onClick} className="min-w-0 flex-1 text-left">
+        <button
+          onClick={onClick}
+          className={`min-w-0 flex-1 text-left ${dimmed ? "opacity-60" : ""}`}
+        >
           {inner}
         </button>
       ) : (
-        <div className="min-w-0 flex-1">{inner}</div>
+        <div className={`min-w-0 flex-1 ${dimmed ? "opacity-60" : ""}`}>
+          {inner}
+        </div>
       )}
+      {toggle && <Switch {...toggle} />}
       {(onEdit || onDelete) && (
         <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
           {onEdit && (
@@ -992,6 +1128,7 @@ function SkillsTab({
   onCreate,
   onRuled,
   onGoToRoutine,
+  onMute,
 }: {
   brain: AgentBrain;
   slug: string;
@@ -1001,13 +1138,16 @@ function SkillsTab({
   onCreate: () => void;
   onRuled: () => void;
   onGoToRoutine?: (name: string) => void;
+  /** Switch a playbook off for this agent, or back on (FEAT-090). */
+  onMute?: (slug: string, muted: boolean) => void;
 }) {
   return (
     <div className="space-y-1.5">
       <div className="flex items-start justify-between gap-3">
         <p className="text-[11px] text-[var(--color-text-muted)]">
           Playbooks the agent reads before hand-rolling a known flow. Click one
-          to read it exactly as the agent does.
+          to read it exactly as the agent does. Switch one off and it leaves
+          this agent's context — from its next tick or next session.
         </p>
         <AddButton onClick={onCreate} label="New playbook" />
       </div>
@@ -1031,6 +1171,11 @@ function SkillsTab({
             title={s.name}
             badges={
               <>
+                {s.muted && (
+                  <Chip title="Switched off — this agent is never told it exists">
+                    muted
+                  </Chip>
+                )}
                 {s.shared && (
                   <Chip
                     title={
@@ -1069,6 +1214,18 @@ function SkillsTab({
             onDelete={s.inherited ? undefined : () => onDelete(s)}
             editTitle="Edit this playbook"
             deleteTitle="Delete this playbook"
+            dimmed={s.muted}
+            // Offered on an inherited playbook too: a mute is per-agent, so
+            // switching a shared one off here leaves every other agent's alone.
+            toggle={
+              onMute && {
+                on: !s.muted,
+                onChange: () => onMute(s.slug, !s.muted),
+                title: s.muted
+                  ? "Off for this agent — switch it back on"
+                  : "On — switch it off for this agent",
+              }
+            }
           />
         ))
       )}
@@ -1157,18 +1314,23 @@ function RoutinesTab({
   brain,
   action,
   onOpen,
+  onMute,
 }: {
   brain: AgentBrain;
   action?: React.ReactNode;
   /** Hand this routine to the host's own library, if it has one (FEAT-081). */
   onOpen?: (routineName: string) => void;
+  /** Switch a routine off for this agent, or back on (FEAT-090). */
+  onMute?: (name: string, muted: boolean) => void;
 }) {
   return (
     <div className="space-y-1.5">
       <div className="flex items-start justify-between gap-3">
         <p className="text-[11px] text-[var(--color-text-muted)]">
           Scripts this agent can run on demand or on a schedule. Its own library
-          first, then the shared one every agent reads.
+          first, then the shared one every agent reads. Switching one off takes
+          it out of this agent from its next tick or session — /routines still
+          lists and runs it.
         </p>
         {action}
       </div>
@@ -1181,6 +1343,11 @@ function RoutinesTab({
             title={formatRoutineName(r.name)}
             badges={
               <>
+                {r.muted && (
+                  <Chip title="Switched off — this agent cannot run it">
+                    muted
+                  </Chip>
+                )}
                 {r.continuous && (
                   <Chip title="Runs in a loop until stopped">
                     ♾️ continuous
@@ -1195,6 +1362,16 @@ function RoutinesTab({
             }
             subtitle={r.description}
             onClick={onOpen && (() => onOpen(r.name))}
+            dimmed={r.muted}
+            toggle={
+              onMute && {
+                on: !r.muted,
+                onChange: () => onMute(r.name, !r.muted),
+                title: r.muted
+                  ? "Off for this agent — switch it back on"
+                  : "On — switch it off for this agent",
+              }
+            }
           />
         ))
       )}

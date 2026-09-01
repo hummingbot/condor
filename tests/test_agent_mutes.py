@@ -1,6 +1,6 @@
 """FEAT-090: a muted playbook or routine never reaches the agent.
 
-Three things are asserted here, in the order the feature builds them:
+Four things are asserted here, in the order the feature builds them:
 
 1. the mute file itself — absent means nothing muted, pruning removes it again,
    and a falsy slug resolves the chat's own ``agents/condor/mutes.yml``;
@@ -8,7 +8,9 @@ Three things are asserted here, in the order the feature builds them:
    of ``read()``, still editable, and muted for **one** agent only;
 3. the routine filter — out of ``assistant_routines`` (and therefore out of the
    prompt section and out of ``_resolve_routine``) while ``discover_routines``,
-   which the human ``/routines`` page reads, is untouched.
+   which the human ``/routines`` page reads, is untouched;
+4. the panel's route — the operator's view lists what it muted, still opens it,
+   and the agent's view does not.
 """
 
 import pytest
@@ -230,3 +232,85 @@ def test_muting_for_the_chat_leaves_the_human_routines_page_alone(isolated_routi
     assert a_routine not in assistant_routines("condor")
     # ``RoutineStore.list_routines`` reads this, and it is untouched.
     assert a_routine in discover_routines(force_reload=True)
+
+
+# ── 4. through the route ──
+
+
+@pytest.fixture
+def web_env(tmp_path, monkeypatch):
+    """One real Agent on disk, reachable through the agents router."""
+    from condor.agents import agent as agent_module
+    from condor.agents.agent import AgentStore
+
+    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
+    AgentStore().create(name="Brigado", description="BRL market making")
+    return tmp_path
+
+
+def _client():
+    from fastapi import FastAPI
+    from starlette.testclient import TestClient
+
+    from condor.web.auth import get_current_user
+    from condor.web.models import WebUser
+    from condor.web.routes import agents as routes
+
+    app = FastAPI()
+    app.include_router(routes.router)
+    app.dependency_overrides[get_current_user] = lambda: WebUser(
+        id=555, username="u", first_name="U", role="user"
+    )
+    return TestClient(app)
+
+
+def test_the_panel_mutes_a_playbook_and_still_shows_it(web_env, no_routines):
+    _write_skill(web_env, "brigado", "lp_rebalance")
+    client = _client()
+
+    assert client.get("/agents/brigado/brain").json()["skills"][0]["muted"] is False
+
+    put = client.put(
+        "/agents/brigado/mutes",
+        json={"kind": "skill", "name": "lp_rebalance", "muted": True},
+    )
+    assert put.status_code == 200, put.text
+
+    card = client.get("/agents/brigado/brain").json()["skills"][0]
+    assert card["slug"] == "lp_rebalance" and card["muted"] is True
+    # Still openable and still editable from the panel — muting is not deleting.
+    body = client.get("/agents/brigado/skills/lp_rebalance")
+    assert body.status_code == 200 and body.json()["muted"] is True
+    # …while the Agent's own view no longer has it at all.
+    assert SkillStore("brigado").read("lp_rebalance") is None
+
+    client.put(
+        "/agents/brigado/mutes",
+        json={"kind": "skill", "name": "lp_rebalance", "muted": False},
+    )
+    assert client.get("/agents/brigado/brain").json()["skills"][0]["muted"] is False
+    assert SkillStore("brigado").read("lp_rebalance") is not None
+
+
+def test_the_panel_mutes_a_routine(web_env, isolated_routines, monkeypatch):
+    monkeypatch.setattr(base, "_PROJECT_ROOT", web_env)
+    _write_routine(assistant_routines_dir("brigado"), "lp_scanner")
+    client = _client()
+
+    client.put(
+        "/agents/brigado/mutes",
+        json={"kind": "routine", "name": "lp_scanner", "muted": True},
+    )
+    cards = {
+        r["name"]: r for r in client.get("/agents/brigado/brain").json()["routines"]
+    }
+    assert cards["lp_scanner"]["muted"] is True
+    assert "lp_scanner" not in assistant_routines("brigado")
+
+
+def test_the_route_refuses_a_kind_it_does_not_know(web_env):
+    bad = _client().put(
+        "/agents/brigado/mutes",
+        json={"kind": "memory", "name": "x", "muted": True},
+    )
+    assert bad.status_code == 400

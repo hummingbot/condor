@@ -254,6 +254,9 @@ class SkillCard(BaseModel):
     # Agent's own, and — when it also cannot write there — inherited read-only.
     shared: bool = False
     inherited: bool = False
+    # Switched off for this Agent by the operator (FEAT-090): the panel still
+    # lists and opens it, the Agent is never told it exists.
+    muted: bool = False
     references_routine: str = ""
     routine_ok: bool = True
 
@@ -293,6 +296,9 @@ class RoutineCard(BaseModel):
     continuous: bool = False
     source: str = "global"
     category: str = ""
+    # Switched off for this Agent (FEAT-090). ``/routines`` is unaffected — a
+    # mute says what the Agent is told, never what a person may run.
+    muted: bool = False
 
 
 class StrategyCard(BaseModel):
@@ -348,6 +354,9 @@ class SkillBody(BaseModel):
     body: str = ""
     shared: bool = False
     inherited: bool = False
+    # Switched off for this Agent by the operator (FEAT-090): the panel still
+    # lists and opens it, the Agent is never told it exists.
+    muted: bool = False
     references_routine: str = ""
     routine_ok: bool = True
     files: list[str] = []
@@ -472,6 +481,14 @@ class AgentConfigRequest(BaseModel):
         "chat, consult, delegate and loops. Empty string clears it, falling "
         "back to the chat's default model.",
     )
+
+
+class MuteRequest(BaseModel):
+    """Switch one playbook or routine off for this Agent, or back on (FEAT-090)."""
+
+    kind: str = Field(description='"skill" or "routine".')
+    name: str = Field(description="The playbook's slug, or the routine's name.")
+    muted: bool = Field(description="True switches it off, False restores it.")
 
 
 class CreateStrategyRequest(BaseModel):
@@ -1220,9 +1237,16 @@ async def get_agent(slug: str, user: WebUser = Depends(get_current_user)):
 
 
 def _skill_store_for(slug: str):
+    """The Agent's library as the **operator** sees it: muted playbooks included.
+
+    Every read behind this panel wants the whole library — the one view that has
+    to show you what you switched off is the one you switch it off from. The
+    Agent's own view is the store's default (``include_muted=False``), which is
+    what every injection site and the MCP tool build.
+    """
     from condor.memory import SkillStore
 
-    return SkillStore(slug)
+    return SkillStore(slug, include_muted=True)
 
 
 def _memory_store_for(slug: str, user_id: int):
@@ -1269,9 +1293,16 @@ def _strategy_cards(slug: str) -> list[StrategyCard]:
 
 
 def _routine_cards(slug: str) -> list[RoutineCard]:
-    """Every routine this Agent may run — its own library over the shared one."""
+    """Every routine this Agent may run — its own library over the shared one.
+
+    The operator view, like :func:`_skill_store_for`: muted routines are listed
+    and flagged rather than hidden, so the switch that muted one is still there
+    to switch it back.
+    """
+    from condor.memory.mutes import load_mutes
     from routines.base import assistant_routines
 
+    muted = load_mutes(slug)["routines"]
     return [
         RoutineCard(
             name=name,
@@ -1279,8 +1310,9 @@ def _routine_cards(slug: str) -> list[RoutineCard]:
             continuous=info.is_continuous,
             source=info.source,
             category=info.category,
+            muted=name in muted,
         )
-        for name, info in sorted(assistant_routines(slug).items())
+        for name, info in sorted(assistant_routines(slug, include_muted=True).items())
     ]
 
 
@@ -1354,11 +1386,18 @@ async def get_agent_skill(
     slug: str, name: str, user: WebUser = Depends(get_current_user)
 ):
     """Read one of the Agent's playbooks in full — what ``manage_skill`` reads."""
+    from condor.memory.mutes import is_muted
+    from condor.memory.store import _slugify
+
     agent = _get_agent(slug)
+    # The operator store, so a muted playbook still opens — you cannot decide
+    # whether to unmute something you are not allowed to read.
     skill = _skill_store_for(agent.slug).read(name)
     if not skill:
         raise HTTPException(status_code=404, detail=f"Skill '{name}' not found")
-    return SkillBody(slug=name, **skill)
+    return SkillBody(
+        slug=name, muted=is_muted(agent.slug, "skill", _slugify(name)), **skill
+    )
 
 
 @router.get("/{slug}/memories/{name}", response_model=MemoryBody)
@@ -1623,6 +1662,31 @@ async def update_agent_config(
         "server_required": agent.server_required,
         "agent_key": agent.agent_key,
     }
+
+
+@router.put("/{slug}/mutes")
+async def set_agent_mute(
+    slug: str, req: MuteRequest, user: WebUser = Depends(get_current_user)
+):
+    """Switch one playbook or routine off for this Agent — or back on.
+
+    A mute is curation, not deletion: the item stays on disk, stays listed in
+    this panel and stays editable, and every other Agent reading the same shared
+    file is untouched. What changes is that this Agent is no longer told it
+    exists and can no longer reach it — see :mod:`condor.memory.mutes`.
+
+    It applies from the Agent's **next** tick or next session: a system prompt
+    already built is not rewritten, and adding an invalidation for that would
+    buy a second at the cost of a moving target. The panel says so.
+    """
+    from condor.memory.mutes import set_muted
+
+    agent = _get_agent(slug)
+    try:
+        set_muted(agent.slug, req.kind, req.name, req.muted)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"kind": req.kind, "name": req.name, "muted": req.muted}
 
 
 @router.delete("/{slug}")

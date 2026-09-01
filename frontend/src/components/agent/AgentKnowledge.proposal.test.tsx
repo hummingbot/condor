@@ -71,6 +71,7 @@ function brain(proposal: SkillProposal | null): AgentBrain {
         when_to_use: "w",
         shared: false,
         inherited: false,
+        muted: false,
         references_routine: "",
         routine_ok: true,
       },
