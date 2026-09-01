@@ -343,6 +343,9 @@ interface PositionRow {
   side: string;
   amount: number | null;
   breakeven: number | null;
+  /** Amount x breakeven, in display currency: what the inventory is worth.
+      Unsigned — the Side column already says which way it points. */
+  notional: number | null;
   realized: number;
   unrealized: number;
   volume: number;
@@ -361,6 +364,26 @@ function formatAmount(v: number | null): string {
   const abs = Math.abs(v);
   const digits = abs >= 1000 ? 2 : abs >= 1 ? 4 : 8;
   return v.toFixed(digits).replace(/\.?0+$/, "");
+}
+
+/**
+ * The quote value of an open position, in display currency.
+ *
+ * `positions_summary` carries no mark price, so the breakeven is the price we
+ * have — this is the cost basis of the inventory, not its mark-to-market
+ * value; the two differ by exactly the Unrealized column beside it. Same
+ * convention as `positionQuoteValue` in lib/pnl-chart, which is what the
+ * chart's position series is built from, so the two agree.
+ */
+function positionNotional(
+  pos: Record<string, unknown>,
+  pair: string,
+  cv: (val: number, pair: string) => number,
+): number | null {
+  const amount = num(pos.amount);
+  const price = num(pos.breakeven_price);
+  if (amount === null || price === null) return null;
+  return cv(Math.abs(amount * price), pair);
 }
 
 function SideTag({ side }: { side: string }) {
@@ -605,6 +628,7 @@ export function ControllerBrowser({
           side: parseSide(String(pos.side || "")),
           amount: num(pos.amount),
           breakeven: num(pos.breakeven_price),
+          notional: positionNotional(pos, pair, cv),
           realized: cv(Number(pos.realized_pnl_quote || 0), pair),
           unrealized: cv(Number(pos.unrealized_pnl_quote || 0), pair),
           volume: cv(Number(pos.volume_traded_quote || pos.volume_traded || 0), pair),
@@ -1143,6 +1167,9 @@ export function ControllerBrowser({
                             <th className="px-3 py-1.5 text-left font-medium">Side</th>
                             <th className="px-3 py-1.5 text-right font-medium">Amount</th>
                             <th className="px-3 py-1.5 text-right font-medium">Breakeven</th>
+                            <th className="px-3 py-1.5 text-right font-medium" title="Amount x breakeven price">
+                              Notional
+                            </th>
                             {extraColumns.map((k) => (
                               <th key={k} className="px-3 py-1.5 text-right font-medium">{k}</th>
                             ))}
@@ -1166,6 +1193,11 @@ export function ControllerBrowser({
                                 <td className="px-3 py-1.5"><SideTag side={row.side} /></td>
                                 <td className="px-3 py-1.5 text-right tabular-nums">{formatAmount(row.amount)}</td>
                                 <td className="px-3 py-1.5 text-right tabular-nums">{formatAmount(row.breakeven)}</td>
+                                <td className="px-3 py-1.5 text-right tabular-nums">
+                                  {row.notional === null
+                                    ? "—"
+                                    : formatCurrencyVolume(row.notional, currencySymbol)}
+                                </td>
                                 {extraColumns.map((k) => {
                                   const val = extras[k];
                                   return (
