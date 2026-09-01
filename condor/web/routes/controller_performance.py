@@ -4,13 +4,22 @@ import json
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from condor.fetchers._pagination import next_cursor as _next_cursor
 from condor.fetchers.bot_performance import extract_snapshots as _extract_snapshots
 from condor.fetchers.bot_performance import (
     fetch_all_bot_performance,
     fetch_archived_paths,
+)
+from condor.fetchers.performance_history import (
+    PerformanceHistoryUnsupported,
+)
+from condor.fetchers.performance_history import extract_rows as extract_performance_rows
+from condor.fetchers.performance_history import (
+    fetch_performance_history,
+    probe_performance_history,
+    reject_foreign_filters,
 )
 from condor.fetchers.run_history import (
     RunHistoryUnavailable,
@@ -19,6 +28,7 @@ from condor.fetchers.run_history import (
     fill_pairs_from_cache,
     terminated_controllers,
 )
+from condor.server_data_service import ServerDataType, get_server_data_service
 from condor.web.auth import require_server_access
 from condor.web.models import (
     BotRunInfo,
@@ -26,6 +36,9 @@ from condor.web.models import (
     ControllerPerformanceHistoryResponse,
     ControllerPerformanceLatestResponse,
     ControllerPerformanceSnapshot,
+    PerformanceCapabilityResponse,
+    PerformanceHistoryResponse,
+    PerformanceSnapshot,
     RunHistoryResponse,
     TerminatedControllersResponse,
     WebUser,
@@ -336,6 +349,159 @@ async def get_controller_performance_history(
         # reads all four spellings the backend has used (CORR-259).
         next_cursor=_next_cursor(result),
         interval=interval,
+    )
+
+
+# ── The shared performance surface, over both populations (FEAT-087) ──
+
+
+@router.get(
+    "/servers/{name}/performance/capability",
+    response_model=PerformanceCapabilityResponse,
+)
+async def get_performance_capability(
+    name: str,
+    user: WebUser = Depends(require_server_access),
+):
+    """Whether this server serves ``/performance/history``.
+
+    A capability probe, not a version check: the question is whether the route
+    answers, which is the only thing that actually decides what the browser can
+    draw. The route landed in hummingbot/hummingbot-api#226 and is unreleased,
+    so most servers answer no — that is the normal case, not a defensive edge,
+    and the chart's notice tells a reader their series is derived *because
+    their API is older* rather than leaving them to guess.
+
+    Cached with the other per-server data, so it costs one request per server.
+    Every chart on the page asks this route and gets the same warm answer; a
+    tree click issues no request at all.
+    """
+    cm = get_config_manager()
+    sds = get_server_data_service()
+
+    try:
+        result = await sds.get_or_fetch(name, ServerDataType.PERF_HISTORY_CAPABILITY)
+    except ValueError:
+        # SDS does not know this server. Ask it directly rather than reporting
+        # a capability nobody probed — the answer is still one request.
+        try:
+            client = await cm.get_client(name)
+            result = await probe_performance_history(client)
+        except Exception as e:
+            logger.debug("Performance capability probe failed for '%s': %s", name, e)
+            result = {"supported": False, "unknown": True}
+
+    if not isinstance(result, dict):
+        return PerformanceCapabilityResponse(supported=False, unknown=True)
+    return PerformanceCapabilityResponse(
+        supported=bool(result.get("supported")),
+        unknown=bool(result.get("unknown")),
+        detail=result.get("detail"),
+    )
+
+
+@router.get(
+    "/servers/{name}/performance/history",
+    response_model=PerformanceHistoryResponse,
+)
+async def get_performance_history(
+    name: str,
+    subject: str = Query(..., pattern="^(controller|executor)$"),
+    bot_name: Optional[str] = Query(None),
+    controller_id: Optional[str] = Query(None),
+    executor_id: Optional[str] = Query(None),
+    executor_type: Optional[str] = Query(None),
+    account_name: Optional[str] = Query(None),
+    connector_name: Optional[str] = Query(None),
+    trading_pair: Optional[str] = Query(None),
+    start_time: Optional[str] = Query(None),
+    end_time: Optional[str] = Query(None),
+    interval: str = Query("5m", pattern="^(1m|5m|15m|30m|1h|4h|12h|1d)$"),
+    # The same ceiling the controller history route carries, for the same
+    # reason: upstream declares ``le=1000``, so advertising more here only turns
+    # a request Condor called valid into a 422 (CORR-260).
+    limit: int = Query(1000, ge=1, le=1000),
+    cursor: Optional[str] = Query(None),
+    user: WebUser = Depends(require_server_access),
+):
+    """One page of the shared performance history, for either population.
+
+    Three failure modes, kept distinct because the browser draws something
+    different for each:
+
+    * **the route is not there** — 200 with ``supported: false``. An older API
+      is not a broken one, and the client falls back to its derived series.
+    * **the request was wrong** — forwarded as a 400. A filter aimed at the
+      wrong population is the caller's mistake and must read as one; reporting
+      it as an offline server would send the browser to a fallback and hide the
+      bug (which is exactly why upstream 400s rather than serving an empty
+      page). The cross-population check runs here too, so the common case does
+      not spend a round trip to be told.
+    * **the server did not answer** — ``server_online: false``, matching what
+      the controller history route does for the same case.
+
+    ``interval`` is a floor, not a guarantee: the echoed value says what was
+    asked for, the timestamps say what was served.
+    """
+    foreign = reject_foreign_filters(
+        subject,
+        bot_name=bot_name,
+        executor_id=executor_id,
+        executor_type=executor_type,
+        account_name=account_name,
+        connector_name=connector_name,
+        trading_pair=trading_pair,
+    )
+    if foreign:
+        raise HTTPException(status_code=400, detail=foreign)
+
+    cm = get_config_manager()
+    client = await cm.get_client(name)
+
+    try:
+        result = await fetch_performance_history(
+            client,
+            subject=subject,
+            bot_name=bot_name,
+            controller_id=controller_id,
+            executor_id=executor_id,
+            executor_type=executor_type,
+            account_name=account_name,
+            connector_name=connector_name,
+            trading_pair=trading_pair,
+            start_time=start_time,
+            end_time=end_time,
+            interval=interval,
+            limit=limit,
+            cursor=cursor,
+        )
+    except PerformanceHistoryUnsupported as e:
+        return PerformanceHistoryResponse(
+            subject=subject, interval=interval, supported=False, error_hint=str(e)
+        )
+    except Exception as e:
+        status = getattr(e, "status", None)
+        if isinstance(status, int) and 400 <= status < 500:
+            logger.info("Performance history rejected by '%s': HTTP %s", name, status)
+            raise upstream_error("Failed to fetch performance history", e)
+        logger.warning("Failed to fetch performance history from '%s': %s", name, e)
+        return PerformanceHistoryResponse(
+            subject=subject,
+            interval=interval,
+            server_online=False,
+            error_hint=f"Connection error: {e}",
+        )
+
+    return PerformanceHistoryResponse(
+        snapshots=[
+            PerformanceSnapshot.from_raw(row)
+            for row in extract_performance_rows(result)
+        ],
+        # Upstream nests the cursor under "pagination"; the shared extractor
+        # reads every spelling the backend has used (CORR-259).
+        next_cursor=_next_cursor(result),
+        interval=interval,
+        subject=subject,
     )
 
 

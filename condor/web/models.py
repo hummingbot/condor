@@ -304,6 +304,148 @@ class ControllerPerformanceHistoryResponse(BaseModel):
     error_hint: Optional[str] = None
 
 
+# ── The shared performance surface, over both populations (FEAT-087) ──
+
+
+class PerformanceSnapshot(BaseModel):
+    """One point of a performance series, for either subject.
+
+    Deliberately **not** ``ControllerPerformanceSnapshot`` with extra fields.
+    That model is the wire shape of the old controller-only route, whose
+    ``from_raw`` digs the numbers out of a nested ``performance`` blob and whose
+    ``volume_traded`` is spelled differently from this route's ``volume_quote``;
+    the two stay separate so neither has to grow a branch for the other's
+    payload, and so the existing controller path is untouched.
+
+    Three fields carry meaning a reader must not flatten:
+
+    * ``is_terminal`` is true only on a completed executor's final row. It is
+      what makes a closed executor's series a single-table query — the terminal
+      row *is* the last point, so nothing appends a final value afterwards.
+    * ``cum_fees_quote`` is ``None`` for controllers, because
+      ``PerformanceReport`` has no fees field. Unknown is not zero, and a fees
+      chart must render the two differently.
+    * ``close_type`` is set on an executor's terminal row. ``POSITION_HOLD``
+      specifically means the position was handed to ``position_holds`` rather
+      than settled, so its PnL stays *unrealized* — upstream already makes that
+      split, and Condor must not re-derive it.
+
+    ``performance`` and ``custom_info`` are dropped rather than carried. They
+    are the raw controller passthrough — the largest objects in the payload for
+    a grid or LP controller — and PERF-261 established that nothing downstream
+    reads either off a snapshot.
+    """
+
+    timestamp: str = ""
+    subject: str = ""
+    scope_id: str = ""
+    status: str = ""
+    is_terminal: bool = False
+
+    realized_pnl_quote: float = 0.0
+    unrealized_pnl_quote: float = 0.0
+    global_pnl_quote: float = 0.0
+    global_pnl_pct: float = 0.0
+    #: Volume *generated*, in quote. On every executor type including LP, where
+    #: it is deliberately not the deposited capital.
+    volume_quote: float = 0.0
+    cum_fees_quote: Optional[float] = None
+
+    bot_name: Optional[str] = None
+    controller_id: Optional[str] = None
+    executor_id: Optional[str] = None
+    executor_type: Optional[str] = None
+    account_name: Optional[str] = None
+    connector_name: Optional[str] = None
+    trading_pair: Optional[str] = None
+    close_type: Optional[str] = None
+
+    @classmethod
+    def from_raw(cls, raw: dict) -> "PerformanceSnapshot":
+        """Build the wire model from one upstream row.
+
+        Numbers are coerced with an ``or 0`` guard because a JSON ``null`` in a
+        float column would otherwise raise, and one malformed row must not take
+        down a chart. ``cum_fees_quote`` is the exception: it is read without
+        that guard precisely so its ``None`` survives as ``None``.
+        """
+
+        def num(field: str) -> float:
+            try:
+                return float(raw.get(field) or 0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        fees = raw.get("cum_fees_quote")
+        try:
+            fees = None if fees is None else float(fees)
+        except (TypeError, ValueError):
+            fees = None
+
+        def text(field: str) -> Optional[str]:
+            value = raw.get(field)
+            return value if isinstance(value, str) and value else None
+
+        return cls(
+            timestamp=str(raw.get("timestamp", "")),
+            subject=str(raw.get("subject", "")),
+            scope_id=str(raw.get("scope_id", "")),
+            status=str(raw.get("status", "")),
+            is_terminal=bool(raw.get("is_terminal", False)),
+            realized_pnl_quote=num("realized_pnl_quote"),
+            unrealized_pnl_quote=num("unrealized_pnl_quote"),
+            global_pnl_quote=num("global_pnl_quote"),
+            global_pnl_pct=num("global_pnl_pct"),
+            volume_quote=num("volume_quote"),
+            cum_fees_quote=fees,
+            bot_name=text("bot_name"),
+            controller_id=text("controller_id"),
+            executor_id=text("executor_id"),
+            executor_type=text("executor_type"),
+            account_name=text("account_name"),
+            connector_name=text("connector_name"),
+            trading_pair=text("trading_pair"),
+            close_type=text("close_type"),
+        )
+
+
+class PerformanceHistoryResponse(BaseModel):
+    """One page of the shared history.
+
+    ``supported`` is the field that makes the fallback honest: false means this
+    API predates ``/performance/history``, which is the ordinary case for every
+    server running the published image. It is not an error and not an offline
+    server, so ``server_online`` stays true and the chart draws its derived
+    series with a notice saying why.
+    """
+
+    snapshots: list[PerformanceSnapshot] = []
+    next_cursor: Optional[str] = None
+    interval: str = "5m"
+    subject: str = ""
+    #: False when this server has no such route. See the class docstring.
+    supported: bool = True
+    server_online: bool = True
+    error_hint: Optional[str] = None
+
+
+class PerformanceCapabilityResponse(BaseModel):
+    """Whether one server serves the shared performance surface.
+
+    Cached with the other per-server fetches, so the answer costs one request
+    per server rather than one per chart — a tree click must not be a round
+    trip to ask a question whose answer only changes when the API is upgraded.
+
+    ``unknown`` separates "asked, and the route is not there" from "could not
+    ask": a server that was merely down must not have a fallback pinned to it
+    for the whole TTL after it comes back.
+    """
+
+    supported: bool = False
+    unknown: bool = False
+    detail: Optional[str] = None
+
+
 # ── Executors ──
 
 
