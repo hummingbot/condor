@@ -450,17 +450,7 @@ class HummingbotStreamsMixin:
                     logger.debug("Failed to send initial bots snapshot: %s", e)
 
         async def subscribe(ws: Any) -> None:
-            # all_bots_status is not in the client library, send raw
-            await ws._send(
-                {
-                    "action": "subscribe",
-                    "type": "all_bots_status",
-                    "update_interval": 5.0,
-                }
-            )
-            resp = await ws._receive()
-            if resp.get("type") == "error":
-                raise RuntimeError(f"Subscribe failed: {resp.get('message')}")
+            await ws.subscribe_all_bots_status(update_interval=5.0)
 
         async def on_message(msg: dict) -> None:
             if msg.get("type") != "all_bots_status":

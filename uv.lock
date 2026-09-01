@@ -639,7 +639,7 @@ requires-dist = [
     { name = "fastapi" },
     { name = "faster-whisper" },
     { name = "geckoterminal-py" },
-    { name = "hummingbot-api-client", git = "https://github.com/hummingbot/hummingbot-api-client.git?branch=feat%2Fclmm-bin-count" },
+    { name = "hummingbot-api-client", specifier = "==1.5.9" },
     { name = "kaleido" },
     { name = "markdown", specifier = ">=3.10.2" },
     { name = "matplotlib", specifier = ">=3.10.8" },
@@ -1495,10 +1495,14 @@ wheels = [
 
 [[package]]
 name = "hummingbot-api-client"
-version = "1.5.8"
-source = { git = "https://github.com/hummingbot/hummingbot-api-client.git?branch=feat%2Fclmm-bin-count#ee667f2b107cb3d8d3e3a7b01160500cdb7a5c7c" }
+version = "1.5.9"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/33/29/4e06a43536398a39280792aba7dc0d879fb2176bb8b8ea447ca547c33fdf/hummingbot_api_client-1.5.9.tar.gz", hash = "sha256:dcc9379e8dd2b548e7d090a8df325e1ad7f349f0458168e5e310221d590cb90e", size = 46936, upload-time = "2026-09-01T20:02:59.47Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/fb/61/225570a1590c57bb07c9bc55d7a64e0419a5c9689b999fc68e387093f48f/hummingbot_api_client-1.5.9-py3-none-any.whl", hash = "sha256:81fd0cccd327a81f64197ebc911ff2cdd2b22dfa0f8fdc14e5f1a9644e92c3fd", size = 51675, upload-time = "2026-09-01T20:02:58.197Z" },
 ]
 
 [[package]]
