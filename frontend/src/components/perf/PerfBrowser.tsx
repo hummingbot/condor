@@ -35,6 +35,7 @@ import { ExecutorRows, StopConfirmDialog } from "@/components/perf/ExecutorRows"
 import { useExecutorStop } from "@/components/perf/executorActions";
 import { GroupByToggle, PopulationToggle } from "@/components/perf/PopulationToggle";
 import { ScopeTree, StatusDot } from "@/components/perf/ScopeTree";
+import { MultiSelect } from "@/components/ui/MultiSelect";
 import { ArchivedBotDetail } from "@/components/bots/ArchivedBotDetail";
 import {
   api,
@@ -92,6 +93,16 @@ const FLEET_SCOPE = "all";
 
 /** Which of the bottom band's two occupants is showing, if either. */
 type BandKey = "positions" | "executors" | null;
+
+/**
+ * How far back a terminated fold reaches, and how long that is in ms.
+ *
+ * Only the terminated population offers this: a live controller's window is
+ * its deploy time, which it already reports, and cutting a live fold at a week
+ * would report a PnL its own Realized tile disagrees with.
+ */
+const PERIODS = { "1W": 7, "1M": 30, "3M": 90, All: 0 } as const;
+type PeriodKey = keyof typeof PERIODS;
 
 // ── Types ──
 
@@ -479,7 +490,7 @@ function BandTab({
 // ── Component ──
 
 export function PerfBrowser({
-  controllers,
+  controllers: controllersProp,
   bots,
   server,
   convert,
@@ -493,6 +504,7 @@ export function PerfBrowser({
   rateFormatValue,
   rateFormatDetailed,
 }: PerfBrowserProps) {
+  const controllers = controllersProp;
   const cv = useCallback(
     (val: number, pair: string) => {
       const quote = pair?.split("-")[1] || "USDT";
@@ -558,6 +570,16 @@ export function PerfBrowser({
     });
   }, []);
 
+  // The filters the executors page carried, now narrowing the whole tree rather
+  // than one table: a pair, a set of types and a set of controllers. Local
+  // state, like they were — they say what the reader is looking for right now,
+  // not where they are, which is what the URL carries.
+  const [filters, setFilters] = useState({ pair: "", types: [] as string[], controllers: [] as string[] });
+  // How far back a terminated fold reaches. It exists for the terminated
+  // population alone: a live controller's runtime is its deploy, not a window
+  // the reader picks.
+  const [period, setPeriod] = useState<PeriodKey>("3M");
+
   // Stopping and the detail panel belong to whichever executor is in reach,
   // which is now any scope rather than one page (FEAT-086).
   const stop = useExecutorStop(server);
@@ -600,11 +622,7 @@ export function PerfBrowser({
     (next: string) => setParam("scope", next, FLEET_SCOPE),
     [setParam],
   );
-  const setPopulation = useCallback(
-    (next: Population) => setParam("population", next, "running"),
-    [setParam],
-  );
-  const setGroupBy = useCallback((next: GroupBy) => setParam("group", next, "bot"), [setParam]);
+  // `switchView` is declared after the tree it needs; both setters below it.
 
   // ── The tree the whole page is derived from ──
 
@@ -636,36 +654,101 @@ export function PerfBrowser({
    * executor that has closed, plus the runs that have finished. Both are folded
    * by the same `foldLeaves` and drawn by the same panes, so nothing is
    * measured one way while it is live and another way once it is over.
+   *
+   * A function of the population rather than of *the* population, because the
+   * toggle needs to know what the other side's tree looks like before it
+   * switches — see `switchView`.
    */
-  const leaves = useMemo(() => {
-    const all: PerfLeaf[] = [];
-    const botOf = (ex: ExecutorInfo) => botByController.get(ex.controller_id) ?? UNATTACHED_BOT;
+  const leavesFor = useCallback(
+    (which: Population): PerfLeaf[] => {
+      const all: PerfLeaf[] = [];
+      const botOf = (ex: ExecutorInfo) => botByController.get(ex.controller_id) ?? UNATTACHED_BOT;
+      if (which === "running") {
+        for (const c of controllers) all.push(leafFromController(c));
+        for (const ex of executors) {
+          if (isExecutorActive(ex.status)) all.push(leafFromExecutor(ex, botOf(ex)));
+        }
+      } else {
+        // The window applies to what has finished, and is measured from each
+        // record's *end*: a period called "the last week" is the trading that
+        // stopped in it, not the trading that started in it.
+        const days = PERIODS[period];
+        const cutoff = days > 0 ? now - days * 86_400_000 : 0;
+        for (const ex of executors) {
+          if (isExecutorActive(ex.status)) continue;
+          const leaf = leafFromExecutor(ex, botOf(ex));
+          if (cutoff && leaf.endedAt !== null && leaf.endedAt < cutoff) continue;
+          all.push(leaf);
+        }
+        // A run still deployed is the live fleet, which the other population
+        // already reports; only what has finished belongs here.
+        for (const run of runs) {
+          if (run.run_status === "RUNNING") continue;
+          const leaf = leafFromBotRun(run);
+          if (cutoff && leaf.endedAt !== null && leaf.endedAt < cutoff) continue;
+          all.push(leaf);
+        }
+      }
+
+      // The filters narrow the leaf set, which means they narrow the *tree*:
+      // the sidebar, the strip, the chart and the rows all describe the same
+      // filtered population rather than a table being filtered under a total
+      // that is not.
+      const pair = filters.pair.trim().toLowerCase();
+      if (!pair && filters.types.length === 0 && filters.controllers.length === 0) return all;
+      return all.filter(
+        (leaf) =>
+          (!pair || leaf.pair.toLowerCase().includes(pair)) &&
+          (filters.types.length === 0 || filters.types.includes(leaf.executorType)) &&
+          (filters.controllers.length === 0 ||
+            (!!leaf.controllerId && filters.controllers.includes(leaf.controllerId))),
+      );
+    },
+    [controllers, executors, runs, botByController, period, now, filters],
+  );
+
+  const leaves = useMemo(() => leavesFor(population), [leavesFor, population]);
+
+  /**
+   * What the two dropdowns offer.
+   *
+   * Derived from the population *before* the filters are applied, so ticking a
+   * type never removes the other types from the list it was ticked in — a
+   * filter that eats its own options cannot be undone without clearing it.
+   */
+  const filterOptions = useMemo(() => {
+    const types = new Set<string>();
+    const controllers = new Set<string>();
+    const source =
+      population === "running"
+        ? executors.filter((ex) => isExecutorActive(ex.status))
+        : executors.filter((ex) => !isExecutorActive(ex.status));
+    for (const ex of source) {
+      if (ex.type) types.add(ex.type);
+      if (ex.controller_id) controllers.add(ex.controller_id);
+    }
     if (population === "running") {
-      for (const c of controllers) all.push(leafFromController(c));
-      for (const ex of executors) {
-        if (isExecutorActive(ex.status)) all.push(leafFromExecutor(ex, botOf(ex)));
-      }
-    } else {
-      for (const ex of executors) {
-        if (!isExecutorActive(ex.status)) all.push(leafFromExecutor(ex, botOf(ex)));
-      }
-      // A run still deployed is the live fleet, which the other population
-      // already reports; only what has finished belongs here.
-      for (const run of runs) {
-        if (run.run_status !== "RUNNING") all.push(leafFromBotRun(run));
+      for (const c of controllersProp) {
+        if (c.controller_name) types.add(c.controller_name);
+        const id = c.controller_id || c.controller_name;
+        if (id) controllers.add(id);
       }
     }
-    return all;
-  }, [population, controllers, executors, runs, botByController]);
+    return { types: [...types].sort(), controllers: [...controllers].sort() };
+  }, [population, executors, controllersProp]);
+
+  const filtersActive =
+    !!filters.pair.trim() || filters.types.length > 0 || filters.controllers.length > 0;
+
+  /** What the fleet row is called, which depends on what is under it. */
+  const rootLabel = useCallback(
+    (which: Population) => (which === "running" ? "All controllers" : "All closed"),
+    [],
+  );
 
   const tree = useMemo(
-    () =>
-      buildTree(
-        leaves,
-        groupBy,
-        population === "running" ? "All controllers" : "All closed executors",
-      ),
-    [leaves, groupBy, population],
+    () => buildTree(leaves, groupBy, rootLabel(population)),
+    [leaves, groupBy, population, rootLabel],
   );
   const nodes = useMemo(() => indexTree(tree), [tree]);
 
@@ -676,6 +759,49 @@ export function PerfBrowser({
   // `resolveScope`, which reads that ancestry out of the id itself).
   const effectiveScopeId = useMemo(() => resolveScope(nodes, scopeId), [nodes, scopeId]);
   const scope = useMemo(() => nodes.get(effectiveScopeId) ?? tree, [nodes, effectiveScopeId, tree]);
+
+  /**
+   * Change the population or the grouping, and keep the reader where they were.
+   *
+   * Both switches rebuild the tree, so the node that was selected may not exist
+   * in the next one. Rather than resetting to the fleet, the next tree is built
+   * *first* and the scope re-aimed against it: kept when it survives, and
+   * otherwise moved to the nearest surviving ancestor, with the selected node's
+   * own leaf supplying the ancestry an id cannot carry on its own (an executor
+   * id deliberately says nothing about where it hangs, so that the same
+   * executor keeps the same id in both populations and both groupings).
+   *
+   * The three parameters are written in one go, because writing them one at a
+   * time would route through a tree neither the old nor the new view describes.
+   */
+  const switchView = useCallback(
+    (next: { population?: Population; group?: GroupBy }) => {
+      const nextPopulation = next.population ?? population;
+      const nextGroup = next.group ?? groupBy;
+      if (nextPopulation === population && nextGroup === groupBy) return;
+      const nextTree = buildTree(leavesFor(nextPopulation), nextGroup, rootLabel(nextPopulation));
+      const aimed = resolveScope(indexTree(nextTree), effectiveScopeId, scope.leaves[0]);
+      setSearchParams(
+        (prev) => {
+          const params = new URLSearchParams(prev);
+          if (nextPopulation === "running") params.delete("population");
+          else params.set("population", nextPopulation);
+          if (nextGroup === "bot") params.delete("group");
+          else params.set("group", nextGroup);
+          if (aimed === FLEET_SCOPE) params.delete("scope");
+          else params.set("scope", aimed);
+          return params;
+        },
+        { replace: true },
+      );
+    },
+    [population, groupBy, leavesFor, rootLabel, effectiveScopeId, scope, setSearchParams],
+  );
+  const setPopulation = useCallback(
+    (value: Population) => switchView({ population: value }),
+    [switchView],
+  );
+  const setGroupBy = useCallback((value: GroupBy) => switchView({ group: value }), [switchView]);
 
   const scopedLeaves = scope.leaves;
   const activeCtrl =
@@ -918,21 +1044,54 @@ export function PerfBrowser({
     return aggregatePnlSeries(snapshots, scopedKeys, scopedControllers, convert);
   }, [activeCtrl, population, scope, cv, snapshots, scopedKeys, scopedControllers, convert]);
 
-  // Tell the chat which scope is open, while the browser is (FEAT-059).
-  useViewFacts(() =>
-    activeCtrl
-      ? {
-          label: "Controller config",
-          subject: `controller "${activeCtrl.controller_name}" (${activeCtrl.trading_pair}) of bot ${activeCtrl.bot_name}`,
-        }
-      : {
-          label: "Bot performance",
-          subject:
-            scope.kind === "bot"
-              ? `all ${scopedLeaves.length} controllers of bot ${scope.label}`
-              : `all ${scopedLeaves.length} controllers across ${tree.children.length} bots`,
-        },
-  );
+  /**
+   * Tell the chat what is actually on screen (FEAT-059, FEAT-060).
+   *
+   * Every one of these is a choice the reader made that no cache holds: which
+   * population, how the tree is grouped, which node is selected, what the
+   * filters left in it and how far back the window reaches. Without them the
+   * block invites an answer about the whole fleet derived from a filtered
+   * slice of one population of it.
+   */
+  useViewFacts(() => {
+    const chips = [
+      filters.pair.trim() ? `pair ~ "${filters.pair.trim()}"` : "",
+      filters.types.length ? `type ${filters.types.join("/")}` : "",
+      filters.controllers.length
+        ? `controller ${filters.controllers.length === 1 ? filters.controllers[0] : `${filters.controllers.length} selected`}`
+        : "",
+    ].filter(Boolean);
+
+    const subject = activeCtrl
+      ? `controller "${activeCtrl.controller_name}" (${activeCtrl.trading_pair}) of bot ${activeCtrl.bot_name}`
+      : activeExec
+        ? `executor ${activeExec.id} (${activeExec.type}, ${activeExec.trading_pair})`
+        : activeRun
+          ? `the finished run of bot ${activeRun.bot_name}`
+          : scope.kind === "fleet"
+            ? `all ${scope.leaves.length} ${population === "running" ? "controllers" : "closed executors"} across ${tree.children.length} groups`
+            : `${scope.leaves.length} ${population === "running" ? "controllers" : "closed executors"} under ${scope.kind} "${scope.label}"`;
+
+    return {
+      label: "Bot performance",
+      subject,
+      onScreen: {
+        population,
+        grouping: groupBy === "bot" ? "by bot" : "by type",
+        scope: effectiveScopeId,
+        // Said either way round: "none" is a fact about the tree, and leaving
+        // it out reads as "filters unknown" rather than "showing everything".
+        filters: chips.length ? chips.join(", ") : "none",
+        window: population === "terminated" ? period : undefined,
+        "in scope": scope.leaves.length,
+        "executors loaded": paging
+          ? paging.capped
+            ? `${paging.loaded} of more — not all loaded`
+            : `${paging.loaded} of ${paging.loaded}`
+          : undefined,
+      },
+    };
+  });
 
   if (controllers.length === 0) return null;
 
@@ -1003,6 +1162,63 @@ export function PerfBrowser({
             <div className="flex flex-col gap-1.5 px-2 pb-2">
               <PopulationToggle population={population} onChange={setPopulation} />
               <GroupByToggle groupBy={groupBy} onChange={setGroupBy} />
+
+              {/* The window a terminated fold reaches back over. Offered here
+                  and not for the live fleet, whose window is its own deploy —
+                  cutting a live fold at a week would report a PnL that its
+                  Realized tile disagrees with. */}
+              {population === "terminated" && (
+                <div className="flex gap-0.5 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-0.5">
+                  {(Object.keys(PERIODS) as PeriodKey[]).map((key) => (
+                    <button
+                      key={key}
+                      type="button"
+                      onClick={() => setPeriod(key)}
+                      aria-pressed={period === key}
+                      className={`flex-1 rounded px-1 py-1 text-[10px] font-medium transition-colors ${
+                        period === key
+                          ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+                          : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+                      }`}
+                    >
+                      {key}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {/* The executors page's filters, now narrowing the tree itself
+                  rather than one table under a total that ignored them. */}
+              <input
+                type="text"
+                value={filters.pair}
+                onChange={(e) => setFilters((f) => ({ ...f, pair: e.target.value }))}
+                placeholder="Filter pair…"
+                className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1 text-[11px] transition-colors hover:border-[var(--color-primary)]/50 focus:border-[var(--color-primary)] focus:outline-none"
+              />
+              <div className="flex gap-1 [&>*]:min-w-0 [&_button]:w-full [&_button]:px-2 [&_button]:py-1 [&_button]:text-[11px]">
+                <MultiSelect
+                  options={filterOptions.types}
+                  selected={filters.types}
+                  onChange={(v) => setFilters((f) => ({ ...f, types: v }))}
+                  placeholder="All types"
+                />
+                <MultiSelect
+                  options={filterOptions.controllers}
+                  selected={filters.controllers}
+                  onChange={(v) => setFilters((f) => ({ ...f, controllers: v }))}
+                  placeholder="All controllers"
+                />
+              </div>
+              {filtersActive && (
+                <button
+                  type="button"
+                  onClick={() => setFilters({ pair: "", types: [], controllers: [] })}
+                  className="self-start text-[10px] text-[var(--color-text-muted)] underline-offset-2 hover:text-[var(--color-text)] hover:underline"
+                >
+                  Clear filters
+                </button>
+              )}
             </div>
           )}
         </div>
