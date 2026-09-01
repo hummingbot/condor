@@ -21,7 +21,9 @@
  * KEPT — how this *device* renders the app: `condor_theme`,
  * `condor_display_currency`, `condor.dock.open`, `condor_bubble_open`,
  * `condor_sheet_zen`, `condor_trade_bottom_pane`, `routines_view_mode`,
- * `condor.dex.network`, `condor.dex.depth-collapsed`. Wiping these would flip
+ * `condor.dex.network`, `condor.dex.depth-collapsed`, and the one-time hints
+ * (`condor.market.browse-hint`) that record how far this browser has been
+ * onboarded. Wiping these would flip
  * the theme out from under someone logging out on their own laptop, and none of
  * them says anything about the outgoing session.
  *

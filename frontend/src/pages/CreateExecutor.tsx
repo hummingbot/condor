@@ -36,6 +36,8 @@ import { DCAConfigPanel } from "@/components/executor/DCAConfigPanel";
 import { useDCAConfig } from "@/components/executor/dca-config";
 import { LPConfigPanel } from "@/components/executor/LPConfigPanel";
 import { LP_SIDE_RANGE, useLpConfig } from "@/components/executor/lp-config";
+import { HintBubble } from "@/components/ui/HintBubble";
+import { useOneTimeHint } from "@/hooks/useOneTimeHint";
 import { TradeBottomPane } from "@/components/trade/TradeBottomPane";
 import { ViewOnlyOverlay } from "@/components/trade/ViewOnlyOverlay";
 import { useLastClose } from "@/hooks/useCandleStore";
@@ -82,6 +84,15 @@ const TYPE_LABELS: Record<ExecutorType, string> = {
   dca: "DCA Executor",
   lp: "LP Executor",
 };
+
+/**
+ * Remembers that the `/` shortcut has been taught on this browser.
+ *
+ * A device preference, not session state: it says how far this browser has been
+ * onboarded, never what the user was trading, so it survives a logout — see the
+ * KEPT list in lib/sessionState.ts.
+ */
+const BROWSE_HINT_KEY = "condor.market.browse-hint";
 
 // ── Page ──
 
@@ -376,6 +387,13 @@ export function CreateExecutor() {
     [connector],
   );
 
+  // A shortcut nobody can see. The chip used to carry a bare `<kbd>/</kbd>`,
+  // which QA reported reading as decoration until they pressed it by accident —
+  // a glyph names the key without saying what it opens. So the key is taught in
+  // words, on the first hover, once (FEAT-053 follow-up from PR #224 QA).
+  const browseHint = useOneTimeHint(BROWSE_HINT_KEY);
+  const markBrowseHintTaught = browseHint.markTaught;
+
   // "/" opens the browser, unless the keystroke belongs to something being
   // typed into. Cmd+K is the chat's (AppShell), so the market list takes the
   // key every other terminal gives a search box.
@@ -394,10 +412,12 @@ export function CreateExecutor() {
       }
       e.preventDefault();
       setBrowserOpen(true);
+      // Whoever pressed it does not need to be told it exists.
+      markBrowseHintTaught();
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, []);
+  }, [markBrowseHintTaught]);
 
   // ── Active config derived values ──
   const activeValidation = useMemo(() => {
@@ -657,13 +677,22 @@ export function CreateExecutor() {
             on its own, dropping the page onto the new venue's default pair
             before you had chosen one. The chip states the market and opens the
             browser, which is where both halves are now chosen together. */}
-        <div className="flex items-center border-r border-[var(--color-border)]">
+        <div className="relative flex items-center border-r border-[var(--color-border)]">
           <button
             onClick={() => setBrowserOpen((v) => !v)}
             aria-pressed={browserOpen}
             aria-expanded={browserOpen}
             aria-haspopup="dialog"
-            title={browserOpen ? "Close market list (Esc)" : "Change market (/)"}
+            {...browseHint.hoverProps}
+            // The hint owns the hover while it is pending, so the browser's own
+            // tooltip does not come up underneath it saying the same thing.
+            title={
+              browseHint.pending
+                ? undefined
+                : browserOpen
+                  ? "Close market list (Esc)"
+                  : "Change market (/)"
+            }
             className={`flex items-center gap-2 px-3 py-2.5 text-left transition-colors ${
               browserOpen
                 ? "bg-[var(--color-surface-hover)]"
@@ -683,15 +712,21 @@ export function CreateExecutor() {
                 browserOpen ? "text-[var(--color-primary)]" : "text-[var(--color-text-muted)]"
               }`}
             />
-            {/* The key is already bound and already in the title; spelling it
-                on the chip is what makes anyone find it without hovering. */}
-            <kbd className="rounded border border-[var(--color-border)] px-1 font-mono text-[10px] leading-4 text-[var(--color-text-muted)]">
-              /
-            </kbd>
           </button>
           {/* Star the pair in the header, without a round trip through Browse.
               Reads as a mark on the pair name, so it trails it. */}
           <StarMarketButton server={server} connector={connector} pair={pair} />
+          {/* The shortcut, in words, on the first hover only. Suppressed while
+              the list is open, where the key it teaches would do nothing. */}
+          {browseHint.visible && !browserOpen && (
+            <HintBubble>
+              Tip: press{" "}
+              <kbd className="rounded border border-[var(--color-border)] px-1 font-mono text-[10px] leading-4">
+                /
+              </kbd>{" "}
+              to browse markets.
+            </HintBubble>
+          )}
         </div>
 
         {/* Price ticker */}
