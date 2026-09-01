@@ -905,7 +905,13 @@ export function PerfBrowser({
    */
   const { data: runHistory, isFetching: runHistoryLoading } = useQuery({
     queryKey: ["run-history", server, scopeRun?.bot_name, scopeRun?.created_at],
-    queryFn: () => api.getRunHistory(server, scopeRun!.bot_name, scopeRun!.created_at!),
+    queryFn: () =>
+      api.getRunHistory(
+        server,
+        scopeRun!.bot_name,
+        scopeRun!.created_at!,
+        scopeRun!.archive_db_path,
+      ),
     enabled: !!scopeRun?.bot_name && !!scopeRun?.created_at,
     staleTime: Infinity,
     gcTime: 60 * 60_000,
@@ -939,7 +945,8 @@ export function PerfBrowser({
             queryClient
               .prefetchQuery({
                 queryKey: ["run-history", server, run.bot_name, run.created_at],
-                queryFn: () => api.getRunHistory(server, run.bot_name, run.created_at!),
+                queryFn: () =>
+                  api.getRunHistory(server, run.bot_name, run.created_at!, run.archive_db_path),
                 staleTime: Infinity,
                 gcTime: 60 * 60_000,
               })
@@ -1201,6 +1208,20 @@ export function PerfBrowser({
    * any of it. [[FEAT-087]] replaces the second and third with real snapshots,
    * and this is the seam it swaps at.
    */
+  /**
+   * A scope narrower than the run, on a run only its archive remembers.
+   *
+   * The archived database computes one curve for the whole run out of its trade
+   * table; it has no per-controller breakdown and cannot be given one without
+   * inventing a split nobody recorded. So a controller or executor scope on
+   * such a run draws nothing and says why, rather than showing the run's curve
+   * under a controller's name — which would be the same picture asserting
+   * something false.
+   */
+  const archiveOnlyController =
+    runHistory?.source === "archive" &&
+    (scope.kind === "controller" || scope.kind === "executor");
+
   const chartData = useMemo(() => {
     // A *live* controller draws its own finer series (see `ControllerPnlChart`).
     // A finished one does not: its curve is already in the run's cached history,
@@ -1215,15 +1236,24 @@ export function PerfBrowser({
       // thing available for executors that belong to no run — and for a run
       // whose history the server never recorded.
       if (runHistory && runHistory.points > 0) {
+        if (archiveOnlyController) return [];
         const expanded = snapshotsFromRunHistory(runHistory, scopeRun?.bot_name ?? "");
-        return aggregatePnlSeries(expanded, scopedKeys, scopedControllers, convert);
+        // An archive-derived curve describes the run as a whole and is filed
+        // under a reserved id, so the scope's own controller keys would drop it
+        // entirely. Enabling exactly the keys the payload carries is what makes
+        // "the run" drawable without pretending it belongs to a controller.
+        const keys =
+          runHistory.source === "archive"
+            ? new Set(expanded.map((snap) => controllerKey(snap)))
+            : scopedKeys;
+        return aggregatePnlSeries(expanded, keys, scopedControllers, convert);
       }
       return executorSeries(scope.leaves, cv);
     }
     return aggregatePnlSeries(snapshots, scopedKeys, scopedControllers, convert);
   }, [
     activeCtrl, population, scope, cv, snapshots, scopedKeys, scopedControllers,
-    convert, runHistory, scopeRun,
+    convert, runHistory, scopeRun, archiveOnlyController,
   ]);
 
   /**
@@ -2047,8 +2077,12 @@ export function PerfBrowser({
                     <p className="text-xs text-[var(--color-text-muted)]">Reading this run's history…</p>
                   </div>
                 ) : (
-                  <div className="flex h-full items-center justify-center rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]">
-                    <p className="text-xs text-[var(--color-text-muted)]">No performance history available</p>
+                  <div className="flex h-full items-center justify-center rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-6">
+                    <p className="max-w-sm text-center text-xs text-[var(--color-text-muted)]">
+                      {archiveOnlyController
+                        ? "This run predates the server's stored performance history. Its archived database records the run as a whole rather than per controller — select the bot above to see that curve."
+                        : "No performance history available"}
+                    </p>
                   </div>
                 )}
               </div>

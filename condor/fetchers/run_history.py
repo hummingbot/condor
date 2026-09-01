@@ -382,6 +382,7 @@ async def fetch_run_history(
     deployed_at: str,
     stopped_at: str | None,
     controller_ids: Iterable[str],
+    db_path: str | None = None,
 ) -> RunHistory:
     """One finished run's sampled history, walked once and cached for ever.
 
@@ -416,6 +417,7 @@ async def fetch_run_history(
                 deployed_at=deployed_at,
                 stopped_at=stopped_at,
                 controller_ids=list(controller_ids),
+                db_path=db_path,
             )
         )
         _inflight[key] = task
@@ -437,6 +439,7 @@ async def _build(
     deployed_at: str,
     stopped_at: str | None,
     controller_ids: list[str],
+    db_path: str | None,
 ) -> RunHistory:
     start_ms = _to_ms(deployed_at) or 0.0
     end_ms = _to_ms(stopped_at) if stopped_at else None
@@ -496,6 +499,17 @@ async def _build(
         controllers[controller_id] = downsample(points)
         identities[controller_id] = {"connector": connector, "trading_pair": pair}
 
+    source = "snapshots"
+    if not controllers and db_path:
+        # The snapshot table has a retention floor, and this run started before
+        # it. The archived database is the only record left of what it did, and
+        # it is already built and already cached (``archived_run.py``) — but it
+        # is a run-level trade walk, not a per-controller sampled series, so it
+        # is emphatically the fallback and is labelled as one all the way to the
+        # notice under the chart.
+        controllers, identities = await _from_archive(client, server, db_path)
+        source = "archive"
+
     if not controllers:
         raise RunHistoryUnavailable(f"No recorded history for {bot_name}", missing=True)
 
@@ -504,7 +518,7 @@ async def _build(
         controllers=controllers,
         identities=identities,
         interval=interval,
-        source="snapshots",
+        source=source,
         points=total,
     )
 
@@ -522,7 +536,7 @@ async def _build(
                 controllers=identities,
                 points=total,
                 interval=interval,
-                source="snapshots",
+                source=source,
             ),
             controllers,
         )
@@ -562,3 +576,62 @@ async def _walk(
 
 def _iso(ms: float) -> str:
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat()
+
+
+#: The controller id an archive-derived curve is filed under.
+#:
+#: The archived database's ``cumulative_pnl`` is one series for the **whole
+#: run**, computed from its trade table — it has no per-controller breakdown and
+#: cannot be given one without inventing a split nobody recorded. So it is filed
+#: under a reserved id that names what it actually is, rather than being
+#: attributed to whichever controller happened to be listed first. Deliberately
+#: not ``""``: ``controllerKey`` reads an empty id as "drop this", so the series
+#: would silently never be drawn.
+ARCHIVE_SERIES_ID = "(run)"
+
+
+async def _from_archive(
+    client: Any, server: str, db_path: str
+) -> tuple[dict[str, list[list[float]]], dict[str, dict[str, str]]]:
+    """One run's curve out of its archived sqlite, or nothing.
+
+    Weaker than the snapshot series in three ways the caller has to keep saying
+    out loud: it is per *run* rather than per controller, it has no unrealized
+    component (a closed trade has nothing left unrealized), and it carries no
+    volume series. That is what the archive records, and stating it is better
+    than drawing a fabricated split.
+    """
+    from condor.fetchers.archived_run import ArchivedRunUnavailable, fetch_archived_run
+
+    try:
+        perf = await fetch_archived_run(client, server, db_path)
+    except ArchivedRunUnavailable:
+        return {}, {}
+    except Exception:
+        logger.warning("Archived fallback failed for %s", db_path, exc_info=True)
+        return {}, {}
+
+    points = [
+        [float(p.timestamp) * 1000, float(p.pnl), 0.0, float(p.pnl), 0.0, 0.0]
+        for p in (perf.cumulative_pnl or [])
+        if p.timestamp
+    ]
+    if not points:
+        return {}, {}
+    points.sort(key=lambda p: p[0])
+
+    # ``ArchivedBotPerformance`` already restates its figures in USD when it
+    # can, and says so through ``converted``. Handing back the pair as well
+    # would convert them a second time; handing back nothing when it *could
+    # not* convert would report the run's own currency as dollars. So the pair
+    # rides along exactly when it is still needed.
+    pair = "" if perf.converted else perf.primary_trading_pair
+    return (
+        {ARCHIVE_SERIES_ID: downsample(points)},
+        {
+            ARCHIVE_SERIES_ID: {
+                "connector": perf.primary_connector,
+                "trading_pair": pair,
+            }
+        },
+    )

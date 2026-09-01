@@ -1932,8 +1932,15 @@ export const api = {
    * react-query so: `staleTime: Infinity`. The first open pays one walk behind
    * a spinner; every one after it is a file open.
    */
-  getRunHistory: (server: string, botName: string, deployedAt: string) => {
+  getRunHistory: (
+    server: string,
+    botName: string,
+    deployedAt: string,
+    /** The run's archived database, for a run older than the snapshot table. */
+    dbPath?: string | null,
+  ) => {
     const qs = new URLSearchParams({ bot_name: botName, deployed_at: deployedAt });
+    if (dbPath) qs.set("db_path", dbPath);
     return apiFetch<RunHistoryResponse>(
       `/api/v1/servers/${encodeURIComponent(server)}/terminated/history?${qs}`,
     );

@@ -436,6 +436,13 @@ async def get_run_history(
     name: str,
     bot_name: str = Query(...),
     deployed_at: str = Query(...),
+    # The run's archived database, when one survived it. Supplied by the caller
+    # rather than looked up because the caller already holds it — every run row
+    # carries ``archive_db_path`` — and the alternative is a second upstream
+    # listing on a route whose whole point is to be cheap after the first open.
+    # It is only ever reached through the same server-access check as the
+    # archived routes that already take a ``db_path`` this way.
+    db_path: Optional[str] = Query(None),
     user: WebUser = Depends(require_server_access),
 ):
     """One finished run's sampled PnL curve, per controller.
@@ -444,8 +451,13 @@ async def get_run_history(
     does — a run is walked once however many readers ask for it at once, and
     every read after that is a file open.
 
-    A run the server has no rows for answers ``source: "none"`` with a reason
-    rather than a 404. The snapshot table has a retention floor, that floor is a
+    A run older than the snapshot table's retention floor has no rows at all,
+    and falls back to its archived database when one survived it — a weaker
+    series (per run rather than per controller, and with no unrealized
+    component), labelled as such the whole way to the notice under the chart.
+
+    A run with neither answers ``source: "none"`` with a reason rather than a
+    404. The snapshot table has a retention floor, that floor is a
     property of the deployment rather than of this code, and "we have no record
     of this run" is a true statement about a run that really happened — which is
     a better thing to draw than a fabricated single step.
@@ -472,6 +484,7 @@ async def get_run_history(
             deployed_at=run.created_at or deployed_at,
             stopped_at=run.stopped_at,
             controller_ids=run.controller_ids,
+            db_path=db_path,
         )
     except RunHistoryUnavailable as e:
         if e.missing:

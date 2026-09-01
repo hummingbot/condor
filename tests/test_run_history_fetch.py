@@ -19,7 +19,6 @@ moment early is wrong for ever.
 """
 
 import asyncio
-import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -340,3 +339,184 @@ def test_the_interval_ladder_only_ever_offers_values_upstream_accepts():
 def test_an_unknown_span_falls_back_to_the_finest_interval():
     assert rh.pick_interval(0) == "5m"
     assert rh.pick_interval(-1) == "5m"
+
+
+# ── The archive fallback, for a run older than the snapshot table ──
+
+
+class ArchivePerf:
+    """What ``ArchivedBotPerformance`` gives us: one curve for the whole run."""
+
+    def __init__(self, points, *, converted=True, pair="BTC-BRL"):
+        self.cumulative_pnl = [
+            type("P", (), {"timestamp": t, "pnl": v})() for t, v in points
+        ]
+        self.converted = converted
+        self.primary_connector = "binance"
+        self.primary_trading_pair = pair
+
+
+def _with_archive(monkeypatch, perf):
+    import condor.fetchers.archived_run as ar
+
+    async def fake(client, name, db_path):
+        return perf
+
+    monkeypatch.setattr(ar, "fetch_archived_run", fake)
+
+
+def test_a_run_the_snapshot_table_forgot_falls_back_to_its_archive(monkeypatch):
+    _with_archive(
+        monkeypatch, ArchivePerf([(1_700_000_000, 5.0), (1_700_000_600, 9.0)])
+    )
+    history = asyncio.run(
+        rh.fetch_run_history(
+            FakeClient({}),
+            "brigado",
+            bot_name="ancient",
+            deployed_at=iso(-1000),
+            stopped_at=iso(-900),
+            controller_ids=["c1"],
+            db_path="/archived/ancient.sqlite",
+        )
+    )
+    assert history.source == "archive"
+    assert list(history.controllers) == [rh.ARCHIVE_SERIES_ID]
+    assert history.controllers[rh.ARCHIVE_SERIES_ID][-1][1] == 9.0
+
+
+def test_the_archive_curve_is_not_filed_under_an_empty_controller_id(monkeypatch):
+    """``controllerKey`` reads an empty id as "drop this", so an empty id would
+    mean the series was silently never drawn."""
+    _with_archive(monkeypatch, ArchivePerf([(1_700_000_000, 5.0)]))
+    history = asyncio.run(
+        rh.fetch_run_history(
+            FakeClient({}),
+            "brigado",
+            bot_name="ancient",
+            deployed_at=iso(-1000),
+            stopped_at=iso(-900),
+            controller_ids=["c1"],
+            db_path="/a.sqlite",
+        )
+    )
+    assert all(cid for cid in history.controllers)
+
+
+def test_an_already_converted_archive_carries_no_pair_to_convert_through(monkeypatch):
+    """It is already restated in USD. Handing back the pair converts it twice."""
+    _with_archive(monkeypatch, ArchivePerf([(1_700_000_000, 5.0)], converted=True))
+    history = asyncio.run(
+        rh.fetch_run_history(
+            FakeClient({}),
+            "brigado",
+            bot_name="a",
+            deployed_at=iso(-1000),
+            stopped_at=iso(-900),
+            controller_ids=["c1"],
+            db_path="/a.sqlite",
+        )
+    )
+    assert history.identities[rh.ARCHIVE_SERIES_ID]["trading_pair"] == ""
+
+
+def test_an_unconverted_archive_keeps_its_pair_rather_than_passing_brl_as_dollars(
+    monkeypatch,
+):
+    _with_archive(
+        monkeypatch,
+        ArchivePerf([(1_700_000_000, 5.0)], converted=False, pair="BTC-BRL"),
+    )
+    history = asyncio.run(
+        rh.fetch_run_history(
+            FakeClient({}),
+            "brigado",
+            bot_name="b",
+            deployed_at=iso(-1000),
+            stopped_at=iso(-900),
+            controller_ids=["c1"],
+            db_path="/a.sqlite",
+        )
+    )
+    assert history.identities[rh.ARCHIVE_SERIES_ID]["trading_pair"] == "BTC-BRL"
+
+
+def test_the_archive_is_not_consulted_when_snapshots_answered(monkeypatch):
+    """It is an unbounded trade walk. Paying for it when there is a real series
+    would make every open of every run expensive."""
+    called = []
+
+    import condor.fetchers.archived_run as ar
+
+    async def fake(client, name, db_path):
+        called.append(db_path)
+        raise AssertionError("must not be reached")
+
+    monkeypatch.setattr(ar, "fetch_archived_run", fake)
+    asyncio.run(
+        rh.fetch_run_history(
+            FakeClient(TWO),
+            "brigado",
+            bot_name="gan",
+            deployed_at=iso(-100),
+            stopped_at=iso(-10),
+            controller_ids=["c1", "c2"],
+            db_path="/a.sqlite",
+        )
+    )
+    assert called == []
+
+
+def test_a_run_with_neither_snapshots_nor_an_archive_says_so(monkeypatch):
+    with pytest.raises(rh.RunHistoryUnavailable) as excinfo:
+        asyncio.run(
+            rh.fetch_run_history(
+                FakeClient({}),
+                "brigado",
+                bot_name="gone",
+                deployed_at=iso(-1000),
+                stopped_at=iso(-900),
+                controller_ids=["c1"],
+                db_path=None,
+            )
+        )
+    assert excinfo.value.missing is True
+
+
+def test_an_archive_that_cannot_be_read_is_a_missing_run_not_a_crash(monkeypatch):
+    import condor.fetchers.archived_run as ar
+
+    async def fake(client, name, db_path):
+        raise OSError("database is locked")
+
+    monkeypatch.setattr(ar, "fetch_archived_run", fake)
+    with pytest.raises(rh.RunHistoryUnavailable) as excinfo:
+        asyncio.run(
+            rh.fetch_run_history(
+                FakeClient({}),
+                "brigado",
+                bot_name="x",
+                deployed_at=iso(-1000),
+                stopped_at=iso(-900),
+                controller_ids=["c1"],
+                db_path="/a.sqlite",
+            )
+        )
+    assert excinfo.value.missing is True
+
+
+def test_an_archive_derived_run_is_cached_as_an_archive(monkeypatch):
+    _with_archive(monkeypatch, ArchivePerf([(1_700_000_000, 5.0)]))
+    asyncio.run(
+        rh.fetch_run_history(
+            FakeClient({}),
+            "brigado",
+            bot_name="ancient",
+            deployed_at=iso(-1000),
+            stopped_at=iso(-900),
+            controller_ids=["c1"],
+            db_path="/a.sqlite",
+        )
+    )
+    entries = RunHistoryStore().list_entries()
+    assert [e.source for e in entries] == ["archive"]
