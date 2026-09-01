@@ -38,6 +38,7 @@ export function WorkspaceSheet({
   onClose,
   bleed = false,
   defaultZen = false,
+  fullscreen = true,
   children,
 }: {
   title: string;
@@ -72,12 +73,22 @@ export function WorkspaceSheet({
    * blanked the chat is the thing the pane exists to stop.
    */
   defaultZen?: boolean;
+  /**
+   * Whether the whole window is on offer.
+   *
+   * Content that is read — a report, a transcript — earns it. Content that is
+   * *steered beside a conversation* does not: the agent panel is a place you
+   * change one thing and look back at what the agent just said, and a full
+   * screen version of it is a second layout to maintain for a gesture whose
+   * only outcome is losing the chat. The pane is the room it needs.
+   */
+  fullscreen?: boolean;
   children: React.ReactNode;
 }) {
   const pane = useWorkspacePane();
   const canSplit = !!pane?.canSplit;
   const [zen, setZen] = useState(() =>
-    canSplit ? false : readZen(defaultZen),
+    !fullscreen || canSplit ? false : readZen(defaultZen),
   );
   /**
    * Whether somebody else is already in the pane.
@@ -112,6 +123,7 @@ export function WorkspaceSheet({
   // screen" is about the page you are reading now, and remembering it would
   // quietly cover the chat again on the next report.
   useEffect(() => {
+    if (!fullscreen) return;
     const handler = (e: KeyboardEvent) => {
       if (e.key !== "f" || e.metaKey || e.ctrlKey || e.altKey) return;
       if (
@@ -128,7 +140,7 @@ export function WorkspaceSheet({
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [canSplit]);
+  }, [canSplit, fullscreen]);
 
   const toggleZen = () =>
     setZen((z) => {
@@ -165,23 +177,25 @@ export function WorkspaceSheet({
         )}
         <div className="flex shrink-0 items-center gap-1">
           {typeof actions === "function" ? actions({ zen }) : actions}
-          <button
-            onClick={toggleZen}
-            className="rounded p-1 text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-            title={
-              zen
-                ? canSplit
-                  ? "Back beside the chat (f)"
-                  : "Exit full screen (f)"
-                : "Full screen (f)"
-            }
-          >
-            {zen ? (
-              <Minimize2 className="h-4 w-4" />
-            ) : (
-              <Maximize2 className="h-4 w-4" />
-            )}
-          </button>
+          {fullscreen && (
+            <button
+              onClick={toggleZen}
+              className="rounded p-1 text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+              title={
+                zen
+                  ? canSplit
+                    ? "Back beside the chat (f)"
+                    : "Exit full screen (f)"
+                  : "Full screen (f)"
+              }
+            >
+              {zen ? (
+                <Minimize2 className="h-4 w-4" />
+              ) : (
+                <Maximize2 className="h-4 w-4" />
+              )}
+            </button>
+          )}
           <button
             onClick={onClose}
             className="rounded p-1 text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"

@@ -272,3 +272,44 @@ describe("a routine row", () => {
     expect(onOpenRoutine).toHaveBeenCalledWith("orca/pool_walk");
   });
 });
+
+describe("the brain section", () => {
+  /** What the file on disk actually looks like: front matter, then prose. */
+  const WITH_FRONT_MATTER = [
+    "---",
+    "name: Orca LP Expert",
+    "description: Solana liquidity",
+    "agent_key: claude-code",
+    "server_name: ''",
+    "created_by: 481175164",
+    "---",
+    "",
+    "## Orca",
+    "",
+    "Reads pools, then --- weighs them.",
+  ].join("\n");
+
+  it("reads the prose, not the record above it", async () => {
+    getAgentBrain.mockResolvedValue({ ...BRAIN, agent_md: WITH_FRONT_MATTER });
+    await render({ slug: "orca" });
+
+    // Every field of the front matter is either said by the host's header or
+    // set by a control there, and markdown renders the block as one run-on
+    // paragraph of `key: value` above the thing you came here to read.
+    expect(body()).not.toContain("created_by");
+    expect(body()).not.toContain("agent_key:");
+    expect(body()).toContain("Reads pools");
+    // A rule inside the prose is prose: only the block at the very top goes.
+    expect(body()).toContain("--- weighs them");
+  });
+
+  it("names the agent's slug, model and server nowhere — the host does", async () => {
+    await render({ slug: "orca", layout: "rail" });
+
+    // The chat's panel carries the live model and server in its own bar one
+    // line above this, and the agent page carries slug, model and server in
+    // its header three lines above. Chips here said all of it a second time.
+    expect(body()).not.toContain("claude-code");
+    expect(body()).not.toContain("chat default model");
+  });
+});

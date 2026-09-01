@@ -188,7 +188,14 @@ const option = (label: string) =>
 /** jsdom lays nothing out, so a menu anchored to a 0×0 rect gets no room. */
 function place(el: HTMLElement) {
   el.getBoundingClientRect = () =>
-    ({ top: 100, bottom: 124, left: 900, right: 1200, width: 300, height: 24 }) as DOMRect;
+    ({
+      top: 100,
+      bottom: 124,
+      left: 900,
+      right: 1200,
+      width: 300,
+      height: 24,
+    }) as DOMRect;
 }
 
 async function click(el: HTMLElement) {
@@ -210,12 +217,10 @@ beforeEach(() => {
   getAgentBrain.mockReset().mockResolvedValue(BRAIN);
   getAgent.mockReset().mockResolvedValue({ ...BRAIN, strategies: [] });
   getDelegationHistory.mockReset().mockResolvedValue({ delegations: [] });
-  getServers
-    .mockReset()
-    .mockResolvedValue([
-      { name: "brigado_2", online: true },
-      { name: "moneymaker", online: true },
-    ]);
+  getServers.mockReset().mockResolvedValue([
+    { name: "brigado_2", online: true },
+    { name: "moneymaker", online: true },
+  ]);
 });
 
 afterEach(() => {
@@ -224,14 +229,16 @@ afterEach(() => {
 });
 
 describe("the dock's agent card", () => {
-  it("names who is answering, and nothing else", async () => {
+  it("says what the click does, and who it does it to", async () => {
     await renderCard();
 
+    // The name alone was here first, under a session tab carrying the same
+    // name: a label where a door was meant, saying nothing about what clicking
+    // it would do. The verb comes first now and the agent is muted beside it.
+    expect(container.textContent).toContain("Tune agent");
     expect(container.textContent).toContain("Orca LP Expert");
-    // The description, the model and the server were all here once. Between
-    // this card, the session tab and the header chip beside it, the same agent
-    // was named three times on one screen — so the card was cut back to the
-    // name, and the rest is a click away in the panel it opens.
+    // The description, the model and the server were all here once, and
+    // between this card and the panel the same wiring was on screen twice.
     expect(container.textContent).not.toContain("Solana liquidity");
     expect(row("model")).toBeNull();
     expect(row("server")).toBeNull();
@@ -245,14 +252,14 @@ describe("the dock's agent card", () => {
 
   it("says whether the panel it opens is open", async () => {
     await renderCard();
-    expect(container.querySelector("button")!.getAttribute("aria-pressed")).toBe(
-      "false",
-    );
+    expect(
+      container.querySelector("button")!.getAttribute("aria-pressed"),
+    ).toBe("false");
 
     await renderCard({ open: true });
-    expect(container.querySelector("button")!.getAttribute("aria-pressed")).toBe(
-      "true",
-    );
+    expect(
+      container.querySelector("button")!.getAttribute("aria-pressed"),
+    ).toBe("true");
   });
 });
 
@@ -343,6 +350,14 @@ describe("the panel", () => {
     expect(sections).toContain("Brain");
     expect(container.textContent).not.toContain("Full page");
     expect(container.querySelector("a")).toBeNull();
+  });
+
+  it("offers the pane and nothing larger", async () => {
+    await renderPanel();
+
+    // The panel is worked in while glancing back at the conversation beside
+    // it, so the one outcome a full-screen button had was losing that chat.
+    expect(document.querySelector('button[title^="Full screen"]')).toBeNull();
   });
 
   it("just closes when nothing is being edited", async () => {

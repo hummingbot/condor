@@ -24,12 +24,16 @@ import type {
  * agent's own page is built from, so anything editable there is editable here
  * (FEAT-081); reading what an agent knows no longer costs you the chat.
  *
- * The model and server pickers are in the bar at the top of this panel. They
- * were in the dock card that opens it, which forced the dock to stay put
- * whenever the panel was up — the one panel in the workspace that could not
- * fold its column away, because folding it took its own controls off screen.
- * Held here instead, the panel steers itself, and opening it borrows the dock
- * exactly the way opening a routine's report does.
+ * The model and server pickers are in the bar at the top of this panel, one
+ * line above the sections they apply to, rather than in the dock card that
+ * opens it — the card is one line and a door, and the panel is on screen for
+ * exactly as long as anyone is thinking about what this agent is made of.
+ *
+ * It takes the pane and nothing more: no full screen, and the dock keeps its
+ * column (`borrowable`), because this is a panel you work in while glancing
+ * back at the conversation, and the card that opens it is up there in the dock
+ * saying so. A report is the other case — read, not steered — and it still
+ * folds both flanks away.
  *
  * There is deliberately no door out to the agent's full page. Anything worth
  * doing to an agent should be worth doing here, next to the conversation that
@@ -98,6 +102,11 @@ export function AgentPanel({
           />
         }
         onClose={() => (dirty ? setConfirmClose(true) : onClose())}
+        // No full screen. The panel is a place you change one thing and look
+        // back at what the agent just said — the whole reason it opens beside
+        // the conversation instead of over it — so the one gesture the button
+        // offered was losing the chat it is meant to be read against.
+        fullscreen={false}
         bleed
       >
         <AgentKnowledge

@@ -68,12 +68,13 @@ function defaultOpen(): boolean {
  * closes, and only a collapse of the reader's own is written down as how the
  * workspace opens next time.
  *
- * Every occupant of the pane borrows it, the agent panel included. The panel
- * used to be the exception, because the model and server pickers that steered
- * it lived in the card up here; they were moved into the panel's own bar so
- * that the exception could go. One rule for the whole pane is worth more than
- * a column that folds for a report and stays put for an agent, which is a
- * difference the reader can only learn by being surprised by it.
+ * A report borrows it; the agent panel does not (`borrowable`). The difference
+ * is not the content, it is the gesture: a report is opened from a row in this
+ * column and then *read*, so the column has done its job and can stand down —
+ * while the agent panel is opened from the card at the top of this column and
+ * then worked in, one change at a time, with the reader looking back and forth.
+ * Folding the column on the way there takes the card away from under the
+ * cursor that clicked it and leaves a panel where nothing points at it.
  *
  * The card comes first, then the sections: who is answering, then what that
  * has set in motion.
@@ -91,6 +92,7 @@ export function ContextDock({
   agentSlug,
   agentName,
   agentCard,
+  borrowable = true,
   runContext,
   library,
   onLibraryChange,
@@ -109,6 +111,15 @@ export function ContextDock({
    * card belongs above Tasks, because "who" comes before "what they are doing".
    */
   agentCard?: React.ReactNode;
+  /**
+   * Whether whatever is in the pane may fold this column away while it is up.
+   *
+   * True for a report, which is read rather than steered. False for the agent
+   * panel, which is opened from the card at the top of this column and worked
+   * in beside the conversation — folding the column there would hide the door
+   * the reader just came through.
+   */
+  borrowable?: boolean;
   /** The conversation a run launched from the library belongs to. */
   runContext?: RoutineRunContext;
   /**
@@ -149,19 +160,21 @@ export function ContextDock({
   const paneOpen = useWorkspacePane()?.open ?? false;
   const lent = useRef<boolean | null>(null);
   useEffect(() => {
-    if (paneOpen) {
+    if (paneOpen && borrowable) {
       if (lent.current === null) {
         lent.current = open;
         setOpen(false);
       }
     } else if (lent.current !== null) {
+      // Also the way back when the pane changes hands mid-loan — a routine's
+      // report handing over to the agent panel repays the column on the spot.
       setOpen(lent.current);
       lent.current = null;
     }
     // `open` is read, not watched: re-running this on the reader's own expand
     // would take the column straight back off them.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [paneOpen]);
+  }, [paneOpen, borrowable]);
 
   /**
    * Only the reader's own toggle is written down. What the layout does on its

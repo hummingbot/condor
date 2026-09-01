@@ -87,9 +87,7 @@ type TalkIntent = "focus" | "fresh";
  * could not know about a second occupant.
  */
 type PaneView =
-  | { kind: "agent" }
-  | { kind: "routines"; focus: LibraryFocus }
-  | null;
+  { kind: "agent" } | { kind: "routines"; focus: LibraryFocus } | null;
 
 /**
  * The chat workspace — what `/` opens on.
@@ -467,6 +465,11 @@ export function AgentChatTab() {
             // rather than in the panel it opens, so reading an agent is the
             // same gesture as reading a routine's report: click in this
             // column, it opens in the pane beside the conversation.
+            // The panel this column opens is worked in beside the chat, not
+            // read like a report — so the column stays put while it is up, and
+            // the card the reader clicked stays under the cursor that clicked
+            // it. A routine's report still borrows the column as it always did.
+            borrowable={pane?.kind !== "agent"}
             agentCard={
               <DockAgentCard
                 name={panelAgent?.name || "Condor"}

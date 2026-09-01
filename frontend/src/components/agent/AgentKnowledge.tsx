@@ -12,7 +12,6 @@ import {
   Plus,
   Repeat,
   Save,
-  Server,
   Sparkles,
   Trash2,
   Wrench,
@@ -46,8 +45,7 @@ const MEMORY_TYPES = ["preference", "fact", "feedback", "reference"] as const;
 
 /** What the reader drilled into, if anything — a playbook or a memory. */
 type Reading =
-  | { kind: "skill"; card: SkillCard }
-  | { kind: "memory"; card: MemoryCard };
+  { kind: "skill"; card: SkillCard } | { kind: "memory"; card: MemoryCard };
 
 /** What `getAgentMemory` returns — a name and the body, nothing else. */
 type MemoryBody = { name: string; body: string };
@@ -125,7 +123,11 @@ export function AgentKnowledge({
 
   const queryClient = useQueryClient();
 
-  const { data: brain, isLoading, error } = useQuery({
+  const {
+    data: brain,
+    isLoading,
+    error,
+  } = useQuery({
     queryKey: ["agent-brain", slug],
     queryFn: () => api.getAgentBrain(slug),
     // A brain changes when someone edits it, not while you read it. Fresh on
@@ -246,49 +248,58 @@ export function AgentKnowledge({
       role="tablist"
       aria-orientation="vertical"
       aria-label="Sections"
-      className="flex w-9 shrink-0 flex-col items-center gap-0.5 overflow-y-auto border-l border-[var(--color-border)] py-1"
+      className="flex w-11 shrink-0 flex-col items-center gap-1.5 overflow-y-auto border-l border-[var(--color-border)] px-1 py-2"
     >
       {tabs.map((t) => {
         const name =
-          t.count !== undefined && t.count > 0 ? `${t.label} (${t.count})` : t.label;
+          t.count !== undefined && t.count > 0
+            ? `${t.label} (${t.count})`
+            : t.label;
         const active = activeTab === t.id;
         return (
-        <button
-          key={t.id}
-          role="tab"
-          aria-selected={active}
-          aria-label={name}
-          onClick={() => openTab(t.id)}
-          title={name}
-          className={`relative flex w-full shrink-0 flex-col items-center gap-1.5 rounded-l py-2.5 transition-colors ${
-            active
-              ? "bg-[var(--color-surface-hover)] text-[var(--color-text)]"
-              : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-          }`}
-        >
-          {/* On the outer edge, where a tool window's selected tab marks
-              itself — the seam it is attached to. */}
-          {active && (
+          /* Each section is its own key rather than a name in a list: a border,
+           a ground of its own and real air between it and its neighbours. The
+           rail was seven words stacked with a hairline of space, which read as
+           one striped column and made the reader parse text to find the thing
+           they wanted to click. The selected one is filled, not underlined —
+           at this width a 2px mark on the outer edge was the only difference
+           between the section you are in and the six you are not. */
+          <button
+            key={t.id}
+            role="tab"
+            aria-selected={active}
+            aria-label={name}
+            onClick={() => openTab(t.id)}
+            title={name}
+            className={`flex w-full shrink-0 flex-col items-center gap-1.5 rounded-md border py-3 transition-colors ${
+              active
+                ? "border-[var(--color-primary)]/40 bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
+                : "border-[var(--color-border)] bg-[var(--color-surface)] text-[var(--color-text-muted)] hover:border-[var(--color-primary)]/40 hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+            }`}
+          >
+            {t.icon}
+            {/* Vertical writing turns the flex row on its side too, so the count
+              lands under the name rather than beside it. */}
             <span
               aria-hidden
-              className="absolute inset-y-1 right-0 w-0.5 rounded-full bg-[var(--color-primary)]"
-            />
-          )}
-          {t.icon}
-          {/* Vertical writing turns the flex row on its side too, so the count
-              lands under the name rather than beside it. */}
-          <span
-            aria-hidden
-            className="flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-[0.08em] [writing-mode:vertical-rl]"
-          >
-            <span>{t.label}</span>
-            {t.count !== undefined && t.count > 0 && (
-              <span className="text-[9px] text-[var(--color-text-muted)]">
-                {t.count}
-              </span>
-            )}
-          </span>
-        </button>
+              className={`flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.08em] [writing-mode:vertical-rl] ${
+                active ? "" : "font-medium"
+              }`}
+            >
+              <span>{t.label}</span>
+              {t.count !== undefined && t.count > 0 && (
+                <span
+                  className={
+                    active
+                      ? "text-[9px] text-[var(--color-primary)]/70"
+                      : "text-[9px] text-[var(--color-text-muted)]"
+                  }
+                >
+                  {t.count}
+                </span>
+              )}
+            </span>
+          </button>
         );
       })}
     </div>
@@ -333,7 +344,9 @@ export function AgentKnowledge({
       )}
       {error && !brain && (
         <p className="py-8 text-xs text-[var(--color-red)]">
-          {error instanceof Error ? error.message : "Could not read this agent."}
+          {error instanceof Error
+            ? error.message
+            : "Could not read this agent."}
         </p>
       )}
 
@@ -444,8 +457,10 @@ export function AgentKnowledge({
         {deleting?.kind === "memory" ? (
           <>
             Make this agent forget{" "}
-            <strong className="text-[var(--color-text)]">{deleting.card.name}</strong>?
-            It drops out of every future conversation.
+            <strong className="text-[var(--color-text)]">
+              {deleting.card.name}
+            </strong>
+            ? It drops out of every future conversation.
           </>
         ) : (
           <>
@@ -594,7 +609,13 @@ function Row({
 }
 
 /** The button that turns a rendered section into an editable one. */
-function EditButton({ onClick, label = "Edit" }: { onClick: () => void; label?: string }) {
+function EditButton({
+  onClick,
+  label = "Edit",
+}: {
+  onClick: () => void;
+  label?: string;
+}) {
   return (
     <button
       onClick={onClick}
@@ -648,7 +669,11 @@ function Field({
           mono ? "font-mono" : ""
         }`}
       />
-      {hint && <p className="mt-0.5 text-[10px] text-[var(--color-text-muted)]">{hint}</p>}
+      {hint && (
+        <p className="mt-0.5 text-[10px] text-[var(--color-text-muted)]">
+          {hint}
+        </p>
+      )}
     </div>
   );
 }
@@ -734,6 +759,18 @@ function BodyArea({
 
 // ── Tabs ──
 
+/**
+ * The body of a markdown file with front matter, if it has any.
+ *
+ * Anchored at the very start and closed by the first lone `---` on its own
+ * line, which is YAML's own rule — a horizontal rule further down the document
+ * is prose and stays.
+ */
+function withoutFrontMatter(text: string): string {
+  const match = /^---\r?\n[\s\S]*?\r?\n---\r?\n?/.exec(text);
+  return (match ? text.slice(match[0].length) : text).trim();
+}
+
 function BrainTab({
   brain,
   slug,
@@ -780,34 +817,29 @@ function BrainTab({
     );
   }
 
+  // The file's front matter is the agent's record, not its prose: name,
+  // description, agent_key, server_name, created_by — every field of it is
+  // either said by the header above or set by a control there, and markdown
+  // renders the block as one run-on paragraph of `key: value` at the top of
+  // the thing you came here to read. The editor still gets the whole file; a
+  // reader gets what the model is actually told.
+  const prose = withoutFrontMatter(brain.agent_md);
+
+  // No identity chips here — the slug, the model and the server were all said
+  // twice on every screen this tab appears on. The agent's page carries them in
+  // its own header, three lines above; the chat's panel carries the live pair
+  // in its bar, one line above. A row that repeats the line above it is not
+  // context, it is the same sentence at a smaller size.
   return (
     <div>
-      <div className="mb-4 flex flex-wrap items-center gap-1.5">
-        <Chip title="Agent slug">{brain.slug}</Chip>
-        {brain.agent_key ? (
-          <Chip tone="accent" title="The model this agent answers on, everywhere it runs">
-            {brain.agent_key}
-          </Chip>
-        ) : (
-          <Chip title="No model pinned — it answers on the chat's default">
-            chat default model
-          </Chip>
-        )}
-        {brain.server_name && (
-          <Chip title="Pinned Hummingbot API server">
-            <Server className="mr-0.5 inline h-2.5 w-2.5" />
-            {brain.server_name}
-          </Chip>
-        )}
-        {!brain.server_required && <Chip title="Runs without a trading server">serverless</Chip>}
-      </div>
-
       {brain.when_to_consult && (
         <div className="mb-4 rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2">
           <p className="mb-0.5 text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">
             When Condor routes to it
           </p>
-          <p className="text-xs text-[var(--color-text)]">{brain.when_to_consult}</p>
+          <p className="text-xs text-[var(--color-text)]">
+            {brain.when_to_consult}
+          </p>
         </div>
       )}
 
@@ -817,9 +849,9 @@ function BrainTab({
         </p>
         <EditButton onClick={onEdit} />
       </div>
-      {brain.agent_md ? (
+      {prose ? (
         <div className="chat-markdown text-xs text-[var(--color-text)]">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{brain.agent_md}</ReactMarkdown>
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>{prose}</ReactMarkdown>
         </div>
       ) : (
         <Empty>This agent has no AGENT.md yet.</Empty>
@@ -885,7 +917,9 @@ function ProposedSkill({
       </button>
       {open && (
         <div className="chat-markdown mt-2 text-xs text-[var(--color-text)]">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{proposal.body}</ReactMarkdown>
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>
+            {proposal.body}
+          </ReactMarkdown>
         </div>
       )}
 
@@ -940,8 +974,8 @@ function SkillsTab({
     <div className="space-y-1.5">
       <div className="flex items-start justify-between gap-3">
         <p className="text-[11px] text-[var(--color-text-muted)]">
-          Playbooks the agent reads before hand-rolling a known flow. Click one to
-          read it exactly as the agent does.
+          Playbooks the agent reads before hand-rolling a known flow. Click one
+          to read it exactly as the agent does.
         </p>
         <AddButton onClick={onCreate} label="New playbook" />
       </div>
@@ -966,7 +1000,13 @@ function SkillsTab({
             badges={
               <>
                 {s.shared && (
-                  <Chip title={s.inherited ? "From the shared library — read-only here" : "In the shared library"}>
+                  <Chip
+                    title={
+                      s.inherited
+                        ? "From the shared library — read-only here"
+                        : "In the shared library"
+                    }
+                  >
                     shared
                   </Chip>
                 )}
@@ -1059,8 +1099,8 @@ function ToolsTab({ brain }: { brain: AgentBrain }) {
   return (
     <div>
       <p className="mb-2 text-[11px] text-[var(--color-text-muted)]">
-        The allowlist from AGENT.md — the only tools this agent may call. Edit it
-        in the Brain tab, where it is written.
+        The allowlist from AGENT.md — the only tools this agent may call. Edit
+        it in the Brain tab, where it is written.
       </p>
       <div className="flex flex-wrap gap-1.5">
         {brain.tools.map((t) => (
@@ -1105,10 +1145,14 @@ function RoutinesTab({
             badges={
               <>
                 {r.continuous && (
-                  <Chip title="Runs in a loop until stopped">♾️ continuous</Chip>
+                  <Chip title="Runs in a loop until stopped">
+                    ♾️ continuous
+                  </Chip>
                 )}
                 {r.source === "global" && brain.slug !== "condor" && (
-                  <Chip title="From the shared library every agent reads">shared</Chip>
+                  <Chip title="From the shared library every agent reads">
+                    shared
+                  </Chip>
                 )}
               </>
             }
@@ -1150,10 +1194,12 @@ function SkillEditor({
   const [routine, setRoutine] = useState(existing?.references_routine ?? "");
   const [body, setBody] = useState(existing?.body ?? "");
 
-  const touch = <T,>(set: (v: T) => void) => (v: T) => {
-    set(v);
-    onDirtyChange(true);
-  };
+  const touch =
+    <T,>(set: (v: T) => void) =>
+    (v: T) => {
+      set(v);
+      onDirtyChange(true);
+    };
 
   const save = useMutation({
     // The two calls answer with different shapes and neither is read — the
@@ -1265,10 +1311,12 @@ function MemoryEditor({
   const [type, setType] = useState(existing?.type ?? "fact");
   const [body, setBody] = useState(initialBody ?? "");
 
-  const touch = <T,>(set: (v: T) => void) => (v: T) => {
-    set(v);
-    onDirtyChange(true);
-  };
+  const touch =
+    <T,>(set: (v: T) => void) =>
+    (v: T) => {
+      set(v);
+      onDirtyChange(true);
+    };
 
   const save = useMutation({
     mutationFn: () =>
@@ -1331,7 +1379,11 @@ function MemoryEditor({
         <label className="mb-1 block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">
           Body
         </label>
-        <BodyArea value={body} onChange={touch(setBody)} placeholder="The fact itself." />
+        <BodyArea
+          value={body}
+          onChange={touch(setBody)}
+          placeholder="The fact itself."
+        />
       </div>
     </EditorShell>
   );
@@ -1474,7 +1526,9 @@ function BodyReader({
         )}
         {data && (
           <div className="chat-markdown text-xs text-[var(--color-text)]">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{data.body}</ReactMarkdown>
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+              {data.body}
+            </ReactMarkdown>
           </div>
         )}
       </div>

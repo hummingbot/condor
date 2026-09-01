@@ -126,7 +126,13 @@ let qc: QueryClient;
  * The pane's occupant is the workspace's state, not the dock's (FEAT-081), so
  * the harness holds it exactly as `AgentChatTab` does.
  */
-function Workspace({ agentSlug }: { agentSlug: string }) {
+function Workspace({
+  agentSlug,
+  borrowable = true,
+}: {
+  agentSlug: string;
+  borrowable?: boolean;
+}) {
   const [library, setLibrary] = useState<LibraryFocus | null>(null);
   return (
     <WorkspacePaneProvider>
@@ -136,6 +142,7 @@ function Workspace({ agentSlug }: { agentSlug: string }) {
         conversationId={CONVERSATION}
         agentSlug={agentSlug}
         agentName="Scout"
+        borrowable={borrowable}
         runContext={RUN_CONTEXT}
         library={library}
         onLibraryChange={setLibrary}
@@ -144,13 +151,16 @@ function Workspace({ agentSlug }: { agentSlug: string }) {
   );
 }
 
-/** @param agentSlug who the conversation on screen is bound to. */
-async function render(agentSlug = "scout") {
+/**
+ * @param agentSlug who the conversation on screen is bound to.
+ * @param borrowable whether the pane's occupant may fold the column away.
+ */
+async function render(agentSlug = "scout", borrowable = true) {
   await act(async () => {
     root.render(
       <MemoryRouter>
         <QueryClientProvider client={qc}>
-          <Workspace agentSlug={agentSlug} />
+          <Workspace agentSlug={agentSlug} borrowable={borrowable} />
         </QueryClientProvider>
       </MemoryRouter>,
     );
@@ -283,6 +293,19 @@ describe("the dock's routine library", () => {
 
     // Exit the pane and both flanks come back.
     expect(library()).toBeNull();
+    expect(byTitle("Collapse")).toBeTruthy();
+  });
+
+  it("stays put for an occupant that may not borrow the column", async () => {
+    // The agent panel is the case: it is opened from the card at the top of
+    // this column and then worked in, one change at a time, with the reader
+    // looking back at the conversation. Folding the column on the way there
+    // takes the card away from under the cursor that clicked it.
+    await render("scout", false);
+
+    await click(runRow());
+
+    expect(pane().contains(library())).toBe(true);
     expect(byTitle("Collapse")).toBeTruthy();
   });
 
