@@ -1,0 +1,520 @@
+// ── One leaf, one fold, one tree (FEAT-086) ──
+//
+// Controllers and executors are the same report at two granularities — volume,
+// realized/unrealized PnL, close types, win rate, runtime — and the dashboard
+// used to tell that story twice, on two pages, in two idioms. This module is
+// the vocabulary they share: every record the browser can report on becomes a
+// `PerfLeaf`, every node of the scope sidebar is a `PerfNode` over those
+// leaves, and every number on screen comes out of the one `foldLeaves`.
+//
+// Nothing here renders, fetches or converts. `foldLeaves` takes the conversion
+// as an argument for the same reason the components pass it down: the display
+// currency is a preference, and a fold that reached for it would be untestable.
+
+import type { BotRunInfo, ControllerInfo, ExecutorInfo } from "@/lib/api";
+import { controllerKey } from "@/lib/controller-identity";
+import { isExecutorActive, toMs } from "@/lib/formatters";
+
+/** Which set of records is in scope: what is live, or what has finished. */
+export type Population = "running" | "terminated";
+
+/** How the sidebar tree is built between the fleet and its controllers. */
+export type GroupBy = "bot" | "type";
+
+/**
+ * The bot a leaf hangs under when its own record does not name one.
+ *
+ * `ExecutorInfo` carries a `controller_id` but no bot (see `condor/web/models.py`),
+ * so an executor is attributed to a bot only by matching that id against a live
+ * controller. The ones that do not match are real and are exactly the rows you
+ * go looking for — an executor left behind by a controller that is gone, a
+ * position opened by hand from `/trade` — so they get a bot node of their own
+ * rather than being dropped on the floor.
+ */
+export const UNATTACHED_BOT = "(unattached)";
+
+/** The label a node falls back to when the field it groups on is empty. */
+const UNKNOWN_LABEL = "—";
+
+/**
+ * Anything the browser can report on, in one vocabulary.
+ *
+ * The numbers are in the leaf's own **quote**, not in display currency: the
+ * conversion needs the `pair` and belongs to the caller, which is why `pair`
+ * rides along beside them and why `foldLeaves` takes a converter.
+ *
+ * The one real difference between the two kinds is `closeTypes`: an executor
+ * closed exactly once, so it is a histogram with a single entry; a controller
+ * is a bag of executors, so it is a histogram of many. Folding them is then the
+ * same operation at both granularities, which is the whole point.
+ */
+export interface PerfLeaf {
+  /** Unique within a population: a controller key, an executor id, a run id. */
+  id: string;
+  kind: "controller" | "executor" | "run";
+  /** What the sidebar and the row tables call it. */
+  label: string;
+  /** Where it hangs under `groupBy: "bot"`. */
+  bot: string;
+  /** Which controller it belongs to; `""` for a leaf that belongs to none. */
+  controllerId: string;
+  /**
+   * Where it hangs under `groupBy: "type"` — the class of thing it is.
+   *
+   * A controller's is its controller type (`pmm_simple`, `grid_strike`); an
+   * executor's is its executor type (`position_executor`, `grid_executor`). The
+   * design doc said "executor type" for both, but a controller has no executor
+   * type of its own: it has as many as its executors have, so placing it under
+   * one would mean picking a winner among them (or inventing a `mixed` bucket
+   * that answers nothing). Its own class is the fact it actually carries.
+   */
+  executorType: string;
+  connector: string;
+  pair: string;
+  /** Quote-denominated. `net` is the leaf's own total, not `realized + unrealized`. */
+  realized: number;
+  unrealized: number;
+  net: number;
+  volume: number;
+  fees: number;
+  /** Declared capital in quote, or 0 for a leaf that declares none. */
+  capital: number;
+  /** One entry for an executor, a histogram for a controller, none for a run. */
+  closeTypes: Record<string, number>;
+  positions: Record<string, unknown>[];
+  /** Epoch ms, or null when the record does not say. */
+  startedAt: number | null;
+  /** Epoch ms; null while running, and also when a closed record lost its close time. */
+  endedAt: number | null;
+  /** Whether this leaf is still live — the thing `endedAt: null` cannot say alone. */
+  running: boolean;
+  status: string;
+  /**
+   * The leaf's own return, in percent.
+   *
+   * Per leaf and never folded: each is measured against its own notional, so
+   * summing or averaging them across a scope reports a return nobody earned.
+   * `foldLeaves` carries it through only for a fold of exactly one leaf.
+   */
+  returnPct?: number;
+  /** The source record, for the detail panel and the row tables. */
+  source: ControllerInfo | ExecutorInfo | BotRunInfo;
+}
+
+function finiteOr(value: unknown, fallback: number): number {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+/** A live controller, as the browser reports it. */
+export function leafFromController(c: ControllerInfo): PerfLeaf {
+  const capital = finiteOr(c.config?.total_amount_quote, 0);
+  const started = c.deployed_at ? Date.parse(c.deployed_at) : NaN;
+  // The kill switch is what actually stops a controller; `status` in this
+  // payload is a hardcoded "running" (see the /bots route's own note).
+  const killed = c.config?.manual_kill_switch === true;
+  return {
+    id: controllerKey(c),
+    kind: "controller",
+    label: c.controller_id || c.controller_name,
+    bot: c.bot_name,
+    controllerId: c.controller_id || c.controller_name,
+    executorType: c.controller_name || UNKNOWN_LABEL,
+    connector: c.connector || "",
+    pair: c.trading_pair || "",
+    realized: c.realized_pnl_quote,
+    unrealized: c.unrealized_pnl_quote,
+    net: c.global_pnl_quote,
+    volume: c.volume_traded,
+    // The controllers payload reports no fee total of its own.
+    fees: 0,
+    capital: capital > 0 ? capital : 0,
+    closeTypes: c.close_type_counts || {},
+    positions: c.positions_summary || [],
+    startedAt: Number.isNaN(started) ? null : started,
+    endedAt: null,
+    running: !killed,
+    status: killed ? "stopped" : c.status,
+    returnPct: c.global_pnl_pct,
+    source: c,
+  };
+}
+
+/**
+ * One executor, live or archived.
+ *
+ * `bot` is passed in because the record does not carry one: the caller matches
+ * `controller_id` against the live fleet and hands over what it found, or
+ * `UNATTACHED_BOT` when nothing matched.
+ *
+ * An executor reports a single `pnl` and no split. While it is open that figure
+ * is unrealised — the position is still on the book — and once it has closed it
+ * is realised. Splitting it that way rather than charging all of it to one
+ * column is what lets a controller scope and an executor scope be read side by
+ * side without one of them lying about which half of its total is banked.
+ */
+export function leafFromExecutor(e: ExecutorInfo, bot: string = UNATTACHED_BOT): PerfLeaf {
+  const running = isExecutorActive(e.status);
+  const closedAt = e.close_timestamp > 0 ? toMs(e.close_timestamp) : null;
+  return {
+    id: e.id,
+    kind: "executor",
+    label: e.id,
+    bot: bot || UNATTACHED_BOT,
+    controllerId: e.controller_id || "",
+    executorType: e.type || UNKNOWN_LABEL,
+    connector: e.connector || "",
+    pair: e.trading_pair || "",
+    realized: running ? 0 : e.pnl,
+    unrealized: running ? e.pnl : 0,
+    net: e.pnl,
+    volume: e.volume,
+    fees: e.cum_fees_quote,
+    capital: 0,
+    closeTypes: e.close_type ? { [e.close_type]: 1 } : {},
+    positions: [],
+    startedAt: e.timestamp > 0 ? toMs(e.timestamp) : null,
+    endedAt: running ? null : closedAt,
+    running,
+    status: e.status,
+    // `net_pnl_pct` is a fraction on the wire; the strip shows percent.
+    returnPct: e.net_pnl_pct ? e.net_pnl_pct * 100 : undefined,
+    source: e,
+  };
+}
+
+/** One finished bot run, as the run history recorded it. */
+export function leafFromBotRun(r: BotRunInfo): PerfLeaf {
+  const started = r.created_at ? Date.parse(r.created_at) : NaN;
+  const stopped = r.stopped_at ? Date.parse(r.stopped_at) : NaN;
+  const running = r.run_status === "RUNNING";
+  return {
+    // A bot name is reused across runs; the start time is what tells two apart.
+    id: `run:${r.bot_name}:${r.created_at ?? r.bot_run_id ?? ""}`,
+    kind: "run",
+    label: r.bot_name,
+    bot: r.bot_name,
+    controllerId: "",
+    executorType: r.strategy_type || r.strategy_name || UNKNOWN_LABEL,
+    connector: "",
+    // A run's totals are already summed across its controllers' quotes, so
+    // there is no one pair to convert them through.
+    pair: "",
+    realized: r.realized_pnl_quote,
+    unrealized: r.unrealized_pnl_quote,
+    net: r.global_pnl_quote,
+    volume: r.volume_traded,
+    fees: 0,
+    capital: 0,
+    closeTypes: {},
+    positions: [],
+    startedAt: Number.isNaN(started) ? null : started,
+    endedAt: Number.isNaN(stopped) ? null : stopped,
+    running,
+    status: r.run_status || "",
+    source: r,
+  };
+}
+
+// ── The tree ──
+
+export type NodeKind = "fleet" | "bot" | "type" | "controller" | "executor" | "run" | "runs";
+
+export interface PerfNode {
+  /** `all` | `bot:x` | `type:y` | `ctrl:k` | `exec:id` | `runs` | `run:id` */
+  id: string;
+  kind: NodeKind;
+  label: string;
+  /**
+   * The leaves this node's numbers are folded from — its **accounting spine**,
+   * which is deliberately *not* "every leaf beneath it".
+   *
+   * A controller that has both a controller leaf and executor children is
+   * covered by the controller leaf alone: the controller record is the
+   * authoritative one (it includes executors that closed long ago and were
+   * never loaded), and adding its children's leaves to it would count the same
+   * trading twice. The rule that follows is the one `buildTree` applies
+   * everywhere: **a node folds its own leaf when it has one, and its children's
+   * spines when it does not.**
+   */
+  leaves: PerfLeaf[];
+  children: PerfNode[];
+  /**
+   * Whether this node's spine rolls up into its parent's.
+   *
+   * False for exactly one node, `runs`: a finished bot run's totals and the
+   * archived executors' totals describe overlapping trading that cannot be
+   * de-duplicated on the client, because an executor record carries no bot
+   * (see `UNATTACHED_BOT`). Summing both into one fleet total would report a
+   * PnL nobody earned, so the run history hangs beside the fleet rather than
+   * inside it, folds on its own, and is labelled as what it is.
+   */
+  rollsUp: boolean;
+}
+
+/** The node id a leaf is reported under when it is selected on its own. */
+export function leafNodeId(leaf: PerfLeaf): string {
+  if (leaf.kind === "controller") return `ctrl:${leaf.id}`;
+  if (leaf.kind === "run") return `run:${leaf.id}`;
+  return `exec:${leaf.id}`;
+}
+
+/** The node id of the controller a leaf belongs to, or `null` for none. */
+export function controllerNodeId(leaf: PerfLeaf): string | null {
+  if (!leaf.controllerId) return null;
+  return `ctrl:${leaf.bot}:${leaf.controllerId}`;
+}
+
+function makeNode(id: string, kind: NodeKind, label: string, rollsUp = true): PerfNode {
+  return { id, kind, label, leaves: [], children: [], rollsUp };
+}
+
+/**
+ * Build the scope tree over a population's leaves.
+ *
+ * The shape is fleet → group → controller → executor, where the group level is
+ * the bot or the leaf's own class depending on `groupBy`. Runs are the one
+ * exception: they hang under a `runs` node directly off the fleet, in either
+ * grouping, because a run has neither a controller nor a type of the same kind
+ * as the others — and because it must not roll up (see `PerfNode.rollsUp`).
+ *
+ * Only the group level depends on `groupBy`. Controller and executor node ids
+ * are the same in both trees, which is what lets a selection survive the
+ * grouping switch untouched.
+ */
+export function buildTree(leaves: PerfLeaf[], groupBy: GroupBy): PerfNode {
+  const fleet = makeNode("all", "fleet", "All");
+  const runsNode = makeNode("runs", "runs", "Archived runs", false);
+  const groups = new Map<string, PerfNode>();
+  const controllers = new Map<string, PerfNode>();
+
+  // Insertion order is the caller's order, which is the order the sidebar
+  // draws — the page sorts its controllers before handing them over.
+  const groupFor = (leaf: PerfLeaf): PerfNode => {
+    const raw = groupBy === "bot" ? leaf.bot : leaf.executorType;
+    const label = raw || UNKNOWN_LABEL;
+    const id = `${groupBy}:${label}`;
+    let node = groups.get(id);
+    if (!node) {
+      node = makeNode(id, groupBy === "bot" ? "bot" : "type", label);
+      groups.set(id, node);
+      fleet.children.push(node);
+    }
+    return node;
+  };
+
+  const controllerFor = (leaf: PerfLeaf): PerfNode | null => {
+    const id = controllerNodeId(leaf);
+    if (!id) return null;
+    let node = controllers.get(id);
+    if (!node) {
+      node = makeNode(id, "controller", leaf.controllerId);
+      controllers.set(id, node);
+      groupFor(leaf).children.push(node);
+    }
+    return node;
+  };
+
+  for (const leaf of leaves) {
+    if (leaf.kind === "run") {
+      const node = makeNode(leafNodeId(leaf), "run", leaf.label);
+      node.leaves = [leaf];
+      runsNode.children.push(node);
+      continue;
+    }
+    if (leaf.kind === "controller") {
+      // The controller node *is* this leaf; it may already exist because one of
+      // its executors was seen first, in which case it only needs its spine.
+      const node = controllerFor(leaf);
+      if (node) {
+        node.leaves = [leaf];
+        node.label = leaf.label;
+      }
+      continue;
+    }
+    const node = makeNode(leafNodeId(leaf), "executor", leaf.label);
+    node.leaves = [leaf];
+    const parent = controllerFor(leaf) ?? groupFor(leaf);
+    parent.children.push(node);
+  }
+
+  if (runsNode.children.length > 0) {
+    runsNode.leaves = runsNode.children.flatMap((c) => c.leaves);
+    fleet.children.push(runsNode);
+  }
+
+  // Fold the spines upward, innermost first. A node that carries its own leaf
+  // keeps it; one that does not inherits its children's, minus any branch that
+  // does not roll up.
+  const settle = (node: PerfNode): PerfLeaf[] => {
+    const fromChildren = node.children.flatMap((child) => {
+      const spine = settle(child);
+      return child.rollsUp ? spine : [];
+    });
+    if (node.leaves.length === 0) node.leaves = fromChildren;
+    return node.leaves;
+  };
+  settle(fleet);
+
+  return fleet;
+}
+
+/** Every node of a tree, keyed by id — the sidebar's and the scope's index. */
+export function indexTree(root: PerfNode): Map<string, PerfNode> {
+  const index = new Map<string, PerfNode>();
+  const walk = (node: PerfNode) => {
+    index.set(node.id, node);
+    node.children.forEach(walk);
+  };
+  walk(root);
+  return index;
+}
+
+/**
+ * The path from a node up to the root, nearest first.
+ *
+ * This is what makes a population or grouping switch keep the reader where they
+ * were: the chain is remembered from the tree that is on screen, and when the
+ * next tree does not contain the selected node the first surviving link of the
+ * chain is selected instead — the nearest surviving ancestor, rather than a
+ * reset to the fleet.
+ */
+export function ancestorChain(root: PerfNode, id: string): string[] {
+  const path: string[] = [];
+  const walk = (node: PerfNode): boolean => {
+    path.push(node.id);
+    if (node.id === id) return true;
+    for (const child of node.children) {
+      if (walk(child)) return true;
+    }
+    path.pop();
+    return false;
+  };
+  if (!walk(root)) return [];
+  return path.reverse();
+}
+
+// ── The fold ──
+
+/** What a scope adds up to, in display currency. */
+export interface PerfTotals {
+  realized: number;
+  unrealized: number;
+  net: number;
+  volume: number;
+  fees: number;
+  capital: number;
+  /** Open positions held across the fold. */
+  positions: number;
+  /** Distinct bots, and how many leaves there are in all. */
+  bots: number;
+  count: number;
+  /** Leaves that have finished, and how many of those made money. */
+  closed: number;
+  wins: number;
+  /** `wins / closed`, or undefined when nothing in scope has closed yet. */
+  winRate?: number;
+  /**
+   * Measured elapsed hours, or 0 when no leaf says when it started.
+   *
+   * From the earliest start to the latest end when everything in scope has
+   * finished, and to `now` while anything is still running. A terminated fold
+   * measured to now would grow a runtime for trading that stopped last week,
+   * and every per-hour pace derived from it would shrink accordingly.
+   */
+  hours: number;
+  /** How the positions ended, biggest bucket first, and how many ended at all. */
+  closeTypes: [string, number][];
+  closeTotal: number;
+  /** Carried through only for a fold of exactly one leaf; never averaged. */
+  returnPct?: number;
+}
+
+/** Converts a quote-denominated value into display currency. */
+export type ConvertQuote = (value: number, pair: string) => number;
+
+/**
+ * `ControllerBrowser`'s `totals`, `scopeFacts` and `closeTypeCounts` in one
+ * pass, generalised over the leaf type — plus the two figures the executors
+ * page had and the browser did not: fees and win rate.
+ *
+ * The rules it encodes are the ones the browser already relied on and that a
+ * generalisation is most likely to lose: a pace is `undefined` rather than
+ * invented when no start time is known (which is why `hours` may be 0 and the
+ * caller must check it), a return % is per-leaf and is never summed, and a
+ * runtime is measured rather than nominal.
+ */
+export function foldLeaves(leaves: PerfLeaf[], cv: ConvertQuote, now: number): PerfTotals {
+  let realized = 0,
+    unrealized = 0,
+    net = 0,
+    volume = 0,
+    fees = 0,
+    capital = 0,
+    positions = 0,
+    closed = 0,
+    wins = 0,
+    closeTotal = 0;
+  let earliest: number | undefined;
+  let latestEnd: number | undefined;
+  let anyRunning = false;
+  const bots = new Set<string>();
+  const merged: Record<string, number> = {};
+
+  for (const leaf of leaves) {
+    const pair = leaf.pair;
+    realized += cv(leaf.realized, pair);
+    unrealized += cv(leaf.unrealized, pair);
+    net += cv(leaf.net, pair);
+    volume += cv(leaf.volume, pair);
+    fees += cv(leaf.fees, pair);
+    if (leaf.capital > 0) capital += cv(leaf.capital, pair);
+    positions += leaf.positions.length;
+    bots.add(leaf.bot);
+
+    if (leaf.running) {
+      anyRunning = true;
+    } else {
+      closed += 1;
+      if (leaf.net > 0) wins += 1;
+      if (leaf.endedAt !== null && (latestEnd === undefined || leaf.endedAt > latestEnd)) {
+        latestEnd = leaf.endedAt;
+      }
+    }
+    if (leaf.startedAt !== null && (earliest === undefined || leaf.startedAt < earliest)) {
+      earliest = leaf.startedAt;
+    }
+
+    for (const [type, count] of Object.entries(leaf.closeTypes)) {
+      merged[type] = (merged[type] ?? 0) + count;
+      closeTotal += count;
+    }
+  }
+
+  // A fold with nothing running ends when its last leaf ended; one that still
+  // has something live runs to now. A closed fold whose leaves all lost their
+  // close times has no end to measure to, so it reports no runtime at all
+  // rather than borrowing the clock.
+  const end = anyRunning ? now : latestEnd;
+  const hours =
+    earliest === undefined || end === undefined ? 0 : Math.max(0, (end - earliest) / 3_600_000);
+
+  return {
+    realized,
+    unrealized,
+    net,
+    volume,
+    fees,
+    capital,
+    positions,
+    bots: bots.size,
+    count: leaves.length,
+    closed,
+    wins,
+    winRate: closed > 0 ? wins / closed : undefined,
+    hours,
+    closeTypes: Object.entries(merged).sort((a, b) => b[1] - a[1]),
+    closeTotal,
+    returnPct: leaves.length === 1 ? leaves[0].returnPct : undefined,
+  };
+}
