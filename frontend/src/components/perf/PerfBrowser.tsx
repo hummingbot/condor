@@ -80,6 +80,36 @@ function plural(count: number, noun: string): string {
   return `${count.toLocaleString()} ${noun}${count === 1 ? "" : "s"}`;
 }
 
+/**
+ * Says that some of what is on screen was never converted.
+ *
+ * `foldLeaves` converts a leaf through its `pair`, so a leaf with no pair is
+ * added up **as though it were dollars** — for a BRL fleet, overstating it by
+ * the whole BRL/USD rate. The pair is not always recoverable: a
+ * controller-performance row carries no top-level pair, only the ones inside
+ * its open positions, so a controller that stopped flat has nothing left to
+ * say what it traded.
+ *
+ * The answer is the one `ArchivedBotDetail`'s `ConversionNote` already gives:
+ * fold at face value and disclose it. Never guess a quote from a bot's name,
+ * and never pass the total off as dollars in silence. Drawn wherever a scope's
+ * numbers are, which is why it is a component rather than a line in one header.
+ */
+function UnpricedNote({ leaves }: { leaves: PerfLeaf[] }) {
+  if (leaves.length === 0) return null;
+  return (
+    <span
+      className="block truncate text-[10px] text-amber-500/90"
+      title={`These stopped holding no position, so the record no longer says which pair they traded: ${leaves
+        .map((leaf) => leaf.label)
+        .join(", ")}`}
+    >
+      {plural(leaves.length, "record")} named no quote currency — counted at face value, not
+      converted
+    </span>
+  );
+}
+
 function parseSide(raw: string): string {
   const dot = raw.lastIndexOf(".");
   return dot >= 0 ? raw.slice(dot + 1) : raw;
@@ -967,6 +997,17 @@ export function PerfBrowser({
     scope.kind === "controller" && scope.leaves[0]?.kind === "controller"
       ? (scope.leaves[0].source as ControllerInfo)
       : undefined;
+  /**
+   * A controller that can still be acted on — i.e. a live one.
+   *
+   * The Terminated population selects controllers too since FEAT-089, and its
+   * records look identical: same `ControllerInfo`, same node kind. But the bot
+   * behind one of them is stopped and usually archived, so Pause would post a
+   * kill switch to a container that is gone and Config would offer to edit a
+   * deployment that has already run. Both are drawn off this rather than off
+   * `activeCtrl`, so a finished controller is a *report* and nothing else.
+   */
+  const liveCtrl = population === "running" ? activeCtrl : undefined;
   const activeExec =
     scope.kind === "executor" ? (scope.leaves[0]?.source as ExecutorInfo | undefined) : undefined;
   /**
@@ -1070,7 +1111,7 @@ export function PerfBrowser({
    * support it finds it open again, which is the preference the user expressed.
    */
   const openDrawer =
-    drawer === "config" && activeCtrl ? "config" : drawer === "logs" && activeBot ? "logs" : null;
+    drawer === "config" && liveCtrl ? "config" : drawer === "logs" && activeBot ? "logs" : null;
 
   // ── Keyboard navigation over the picker, in the order it is drawn ──
 
@@ -1246,7 +1287,14 @@ export function PerfBrowser({
           runHistory.source === "archive"
             ? new Set(expanded.map((snap) => controllerKey(snap)))
             : scopedKeys;
-        return aggregatePnlSeries(expanded, keys, scopedControllers, convert);
+        // No live controllers, deliberately. `aggregatePnlSeries` ends a series
+        // with a "now" point read off the controllers it is given, so that a
+        // live chart reaches real time rather than stopping at the last stored
+        // snapshot. A run that stopped last week has no "now": handing its
+        // records over would draw a flat line from its final trade to this
+        // instant, which reads as a bot still holding a position. The curve
+        // ends where the trading ended.
+        return aggregatePnlSeries(expanded, keys, [], convert);
       }
       return executorSeries(scope.leaves, cv);
     }
@@ -1255,6 +1303,35 @@ export function PerfBrowser({
     activeCtrl, population, scope, cv, snapshots, scopedKeys, scopedControllers,
     convert, runHistory, scopeRun, archiveOnlyController,
   ]);
+
+  /**
+   * Leaves in scope whose quote currency is unknown, and that traded.
+   *
+   * `foldLeaves` converts through `leaf.pair`, and a leaf with no pair falls to
+   * the default quote — i.e. it is added up **as though it were dollars**. For a
+   * BRL fleet that overstates every figure it touches by the whole BRL/USD
+   * rate, which is the exact failure `ArchivedBotDetail`'s `ConversionNote`
+   * exists to disclose.
+   *
+   * It is not always recoverable: a controller-performance row carries no
+   * top-level pair, only the ones inside its open positions, so a controller
+   * that stopped flat has nothing left to say what it traded. Measured on a
+   * real server, 13 of 102 finished controllers with trading activity are in
+   * that position, and all 13 are BRL. The honest answer is to fold them at
+   * face value and *say so* — never to guess a quote from a bot's name, and
+   * never to pass the total off as dollars in silence.
+   *
+   * Zero-valued leaves are excluded: a controller with nothing to convert
+   * cannot be misconverted, and warning about it would bury the cases that
+   * matter under the ones that do not.
+   */
+  const unpricedLeaves = useMemo(
+    () =>
+      scopedLeaves.filter(
+        (leaf) => !leaf.pair && (leaf.net !== 0 || leaf.volume !== 0),
+      ),
+    [scopedLeaves],
+  );
 
   /**
    * What this scope folds, in words.
@@ -1571,6 +1648,7 @@ export function PerfBrowser({
                       {activeCtrl.controller_id}
                     </span>
                   )}
+                  <UnpricedNote leaves={unpricedLeaves} />
                 </div>
                 {activeCtrl.connector && (
                   <span className="shrink-0 rounded bg-[var(--color-surface)] px-2 py-0.5 text-xs text-[var(--color-text-muted)] border border-[var(--color-border)]/50">
@@ -1606,6 +1684,7 @@ export function PerfBrowser({
                       .filter(Boolean)
                       .join(" · ")}
                   </span>
+                  <UnpricedNote leaves={unpricedLeaves} />
                 </div>
                 <span className="shrink-0 rounded bg-[var(--color-surface)] px-2 py-0.5 text-xs text-[var(--color-text-muted)] border border-[var(--color-border)]/50">
                   {activeRun.deployment_status}
@@ -1668,6 +1747,7 @@ export function PerfBrowser({
                   {plural(scopedLeaves.length, scopeNoun)} aggregated
                   {scope.kind === "fleet" && ` · ${plural(tree.children.length, "group")}`}
                 </span>
+                <UnpricedNote leaves={unpricedLeaves} />
               </div>
             )}
           </div>
@@ -1837,7 +1917,7 @@ export function PerfBrowser({
               </button>
             )}
 
-            {activeCtrl && (
+            {liveCtrl && (
               <button
                 onClick={() => toggleMutation.mutate()}
                 disabled={toggleMutation.isPending || isStopping}
@@ -1868,7 +1948,7 @@ export function PerfBrowser({
             {/* The config editor: a drawer you open, not a column that is always
                 there. It only describes a single controller, so an aggregate
                 scope has nothing for it to show. */}
-            {activeCtrl && (
+            {liveCtrl && (
               <button
                 onClick={() => setDrawer((d) => (d === "config" ? null : "config"))}
                 className={`flex items-center gap-1.5 rounded px-3 py-1.5 text-xs font-medium transition-colors ${

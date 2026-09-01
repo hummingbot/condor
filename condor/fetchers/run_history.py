@@ -146,6 +146,44 @@ def terminated_controllers(
     return out, len(seen_runs)
 
 
+def fill_pairs_from_cache(
+    controllers: list[ControllerInfo], runs: Iterable[BotRunInfo], server: str
+) -> int:
+    """Give a pairless controller the pair its cached history already knows.
+
+    The latest snapshot carries a pair only inside ``positions_summary``, so a
+    controller that stopped flat reports none — measured on a real server, 13 of
+    102 finished controllers with trading activity, and every one of them BRL.
+    ``foldLeaves`` converts through the pair, so those are added up *as though
+    they were dollars*, overstating them by the whole BRL/USD rate.
+
+    The run's own history does know: :func:`project_rows` walks forward to the
+    first row that held a position. Whenever that walk has already happened this
+    is the same answer for the cost of a dict lookup — no upstream call, no
+    guess, and never a quote inferred from a bot's name. What it cannot fill in
+    stays empty, and the browser says so rather than converting it in silence.
+
+    Returns how many were filled, for the caller's log.
+    """
+    store = get_run_history_store()
+    deployed_by_bot = {r.bot_name: r.created_at for r in runs if r.bot_name}
+    filled = 0
+    for controller in controllers:
+        if controller.trading_pair:
+            continue
+        deployed_at = deployed_by_bot.get(controller.bot_name)
+        if not deployed_at:
+            continue
+        entry = store.get_entry(run_key(server, controller.bot_name, deployed_at))
+        identity = (entry.controllers if entry else {}).get(controller.controller_id)
+        if not identity or not identity.get("trading_pair"):
+            continue
+        controller.trading_pair = identity["trading_pair"]
+        controller.connector = controller.connector or identity.get("connector", "")
+        filled += 1
+    return filled
+
+
 def declared_controllers(run: BotRunInfo) -> list[ControllerInfo]:
     """The controllers a run declared, for a run that left no snapshot at all.
 

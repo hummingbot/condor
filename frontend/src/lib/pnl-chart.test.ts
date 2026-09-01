@@ -1370,6 +1370,17 @@ describe("snapshotsFromRunHistory", () => {
     expect(series[series.length - 1].realized).toBe(25);
   });
 
+  // `aggregatePnlSeries` ends a series with a "now" point so a *live* chart
+  // reaches real time. A run that stopped last week has no "now", and giving it
+  // one draws a flat line from its final trade to this instant — which reads as
+  // a bot still holding a position.
+  it("ends where the trading ended when no live controller is supplied", () => {
+    const snaps = snapshotsFromRunHistory(history, "gan");
+    const series = aggregatePnlSeries(snaps, new Set(["gan:c1", "gan:c2"]), []);
+    expect(series[series.length - 1].time).toBe(1_700_000_300_000);
+    expect(series[series.length - 1].time).toBeLessThan(Date.now());
+  });
+
   it("expands an empty history to nothing rather than to a flat line", () => {
     expect(snapshotsFromRunHistory({ controllers: {}, identities: {} }, "gan")).toEqual([]);
   });

@@ -16,6 +16,7 @@ from condor.fetchers.run_history import (
     RunHistoryUnavailable,
     declared_controllers,
     fetch_run_history,
+    fill_pairs_from_cache,
     terminated_controllers,
 )
 from condor.web.auth import require_server_access
@@ -414,6 +415,12 @@ async def get_terminated_controllers(
     # gets no node and therefore no row — it would read as a run that never
     # happened rather than one we have no record of. See ``declared_controllers``
     # for why this tops up nothing and only fills in the empty.
+    # A controller that stopped flat reports no pair, because the payload only
+    # carries one inside its open positions — and a leaf with no pair is folded
+    # as though its quote were dollars. Any run whose history has already been
+    # walked knows better, and asking the store costs a dict lookup.
+    fill_pairs_from_cache(controllers, runs, name)
+
     covered = {c.bot_name for c in controllers}
     for run in runs:
         if run.is_live or run.bot_name in covered or not run.controller_ids:

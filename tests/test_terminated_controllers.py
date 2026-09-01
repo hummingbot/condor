@@ -256,3 +256,84 @@ def test_an_unreachable_server_is_said_to_be_offline_rather_than_empty(monkeypat
     assert out.server_online is False
     assert "boom" in (out.error_hint or "")
     assert out.controllers == []
+
+
+# ── Filling in a pair the latest snapshot could not name ──
+
+
+def test_a_pairless_controller_takes_the_pair_its_cached_history_knows(
+    tmp_path, monkeypatch
+):
+    """A controller that stopped flat reports no pair, and a leaf with no pair is
+    folded as though its quote were dollars — which on a BRL fleet overstates it
+    by the whole rate. The run's own history walked forward to a row that did
+    hold a position, and that answer is already on disk."""
+    from condor.fetchers.run_history import fill_pairs_from_cache
+    from condor.run_history_store import (
+        RunHistoryEntry,
+        get_run_history_store,
+        reset_run_history_store,
+        run_key,
+    )
+
+    monkeypatch.setenv("CONDOR_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("CONDOR_RUN_HISTORY_RETENTION_DAYS", "0")
+    reset_run_history_store()
+    try:
+        get_run_history_store().put(
+            run_key("srv", "gan", "2026-08-21T18:05:02+00:00"),
+            RunHistoryEntry(
+                server="srv",
+                bot_name="gan",
+                deployed_at="2026-08-21T18:05:02+00:00",
+                stopped_at="2026-08-25T05:46:25+00:00",
+                controllers={"c1": {"connector": "binance", "trading_pair": "BTC-BRL"}},
+            ),
+            {"c1": [[1.0, 0, 0, 0, 0, 0]]},
+        )
+
+        got, _ = terminated_controllers(
+            [snap("gan", "c1", positions_summary=[])], [run("gan")]
+        )
+        assert got[0].trading_pair == ""
+
+        assert fill_pairs_from_cache(got, [run("gan")], "srv") == 1
+        assert got[0].trading_pair == "BTC-BRL"
+        assert got[0].connector == "binance"
+    finally:
+        reset_run_history_store()
+
+
+def test_a_pair_that_is_not_cached_stays_empty_rather_than_guessed(
+    tmp_path, monkeypatch
+):
+    """Never inferred from a bot's name. Empty is what the browser labels; a
+    guess is what it would report as fact."""
+    from condor.fetchers.run_history import fill_pairs_from_cache
+    from condor.run_history_store import reset_run_history_store
+
+    monkeypatch.setenv("CONDOR_DATA_DIR", str(tmp_path))
+    reset_run_history_store()
+    try:
+        got, _ = terminated_controllers(
+            [snap("chessboard-btc-brl-1", "c1", positions_summary=[])],
+            [run("chessboard-btc-brl-1")],
+        )
+        assert fill_pairs_from_cache(got, [run("chessboard-btc-brl-1")], "srv") == 0
+        assert got[0].trading_pair == ""
+    finally:
+        reset_run_history_store()
+
+
+def test_a_controller_that_named_its_own_pair_is_left_alone(tmp_path, monkeypatch):
+    from condor.fetchers.run_history import fill_pairs_from_cache
+    from condor.run_history_store import reset_run_history_store
+
+    monkeypatch.setenv("CONDOR_DATA_DIR", str(tmp_path))
+    reset_run_history_store()
+    try:
+        got, _ = terminated_controllers([snap("gan", "c1")], [run("gan")])
+        assert fill_pairs_from_cache(got, [run("gan")], "srv") == 0
+        assert got[0].trading_pair == "BTC-BRL"
+    finally:
+        reset_run_history_store()
