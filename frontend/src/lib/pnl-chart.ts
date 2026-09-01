@@ -618,6 +618,56 @@ export function executorSeries(
   return points;
 }
 
+/**
+ * A cached run's points, back in the shape the fleet's chart already folds
+ * (FEAT-089).
+ *
+ * The wire sends six bare floats per point rather than an object, because there
+ * are up to a thousand of them per controller and the field names would be most
+ * of the bytes. Expanding here rather than teaching `aggregatePnlSeries` a
+ * second input shape is the whole reason a terminated scope draws *the same
+ * chart* the live one draws: one fold, one forward-fill, one set of series, so
+ * a run cannot be measured one way while it is trading and another way once it
+ * is over.
+ *
+ * `positions_summary` is empty on purpose. These points are a finished run's
+ * history, and the position series answers "what is open right now" — which for
+ * a run that has stopped is nothing. Synthesising one from the PnL would draw a
+ * position nobody holds.
+ */
+export function snapshotsFromRunHistory(
+  history: {
+    controllers: Record<string, number[][]>;
+    identities: Record<string, { connector: string; trading_pair: string }>;
+  },
+  botName: string,
+): ControllerPerformanceSnapshot[] {
+  const out: ControllerPerformanceSnapshot[] = [];
+  for (const [controllerId, points] of Object.entries(history.controllers ?? {})) {
+    const identity = history.identities?.[controllerId];
+    for (const [t, realized, unrealized, net, volume, pct] of points) {
+      out.push({
+        // `aggregatePnlSeries` parses this back with `toMs`, which takes an ISO
+        // string or an epoch — the number is passed through as-is, so this
+        // costs no round trip through the formatter.
+        timestamp: new Date(t).toISOString(),
+        bot_name: botName,
+        controller_id: controllerId,
+        controller_name: "",
+        connector: identity?.connector ?? "",
+        trading_pair: identity?.trading_pair ?? "",
+        realized_pnl_quote: realized,
+        unrealized_pnl_quote: unrealized,
+        global_pnl_quote: net,
+        global_pnl_pct: pct,
+        volume_traded: volume,
+        positions_summary: [],
+      });
+    }
+  }
+  return out;
+}
+
 // ── Sampling interval selection (PERF-238) ──
 
 /**

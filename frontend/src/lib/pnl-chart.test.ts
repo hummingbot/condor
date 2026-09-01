@@ -35,6 +35,7 @@ import {
   positionAxisDomain,
   positionQuoteValue,
   samplingIntervalSince,
+  snapshotsFromRunHistory,
   volumeBarWidth,
   zeroGradientOffset,
   type PnlChartPoint,
@@ -1300,5 +1301,85 @@ describe("executorSeries", () => {
       identity,
     );
     expect(series.map((p) => p.total)).toEqual([0, 10, -20, -15]);
+  });
+});
+
+
+/**
+ * A finished run's cached points draw *the same chart* a live fleet draws
+ * (FEAT-089).
+ *
+ * That is the objective of the whole feature, and it is only true if the
+ * expansion is exact: the same fold, the same forward-fill, the same series. So
+ * the tests are about the two things an expansion can quietly get wrong — the
+ * identity a value is converted through, and a position series invented out of
+ * a PnL that has none.
+ */
+describe("snapshotsFromRunHistory", () => {
+  const history = {
+    controllers: {
+      c1: [
+        [1_700_000_000_000, 10, 2, 12, 500, 0.05],
+        [1_700_000_300_000, 20, 3, 23, 900, 0.09],
+      ],
+      c2: [[1_700_000_000_000, 5, 0, 5, 100, 0.01]],
+    },
+    identities: {
+      c1: { connector: "binance", trading_pair: "BTC-BRL" },
+      c2: { connector: "binance", trading_pair: "SOL-USDC" },
+    },
+  };
+
+  it("expands every controller's points, keyed so the fold can find them", () => {
+    const snaps = snapshotsFromRunHistory(history, "gan");
+    expect(snaps).toHaveLength(3);
+    expect(new Set(snaps.map((s) => controllerKey(s)))).toEqual(
+      new Set(["gan:c1", "gan:c2"]),
+    );
+  });
+
+  it("carries each controller's own pair, so a BRL run is not folded as dollars", () => {
+    const snaps = snapshotsFromRunHistory(history, "gan");
+    expect(snaps.find((s) => s.controller_id === "c1")?.trading_pair).toBe("BTC-BRL");
+    expect(snaps.find((s) => s.controller_id === "c2")?.trading_pair).toBe("SOL-USDC");
+  });
+
+  it("keeps the realized/unrealized split the terminated chart exists to show", () => {
+    const [first] = snapshotsFromRunHistory(history, "gan");
+    expect(first.realized_pnl_quote).toBe(10);
+    expect(first.unrealized_pnl_quote).toBe(2);
+    expect(first.global_pnl_quote).toBe(12);
+    expect(first.volume_traded).toBe(500);
+  });
+
+  // A finished run holds nothing. Synthesising a position out of the PnL would
+  // draw one nobody holds.
+  it("holds no position, because a run that has stopped holds none", () => {
+    for (const snap of snapshotsFromRunHistory(history, "gan")) {
+      expect(snap.positions_summary).toEqual([]);
+    }
+  });
+
+  it("feeds aggregatePnlSeries the same way live snapshots do", () => {
+    const snaps = snapshotsFromRunHistory(history, "gan");
+    const series = aggregatePnlSeries(snaps, new Set(["gan:c1", "gan:c2"]), []);
+    expect(series.length).toBeGreaterThan(1);
+    // Both controllers folded at the first instant: 10 + 5 realized.
+    expect(series[0].realized).toBe(15);
+    // c2 forward-fills at the second instant: 20 + 5.
+    expect(series[series.length - 1].realized).toBe(25);
+  });
+
+  it("expands an empty history to nothing rather than to a flat line", () => {
+    expect(snapshotsFromRunHistory({ controllers: {}, identities: {} }, "gan")).toEqual([]);
+  });
+
+  it("survives a controller whose identity was never resolved", () => {
+    const [snap] = snapshotsFromRunHistory(
+      { controllers: { c1: [[1, 0, 0, 0, 0, 0]] }, identities: {} },
+      "gan",
+    );
+    expect(snap.trading_pair).toBe("");
+    expect(snap.connector).toBe("");
   });
 });

@@ -191,6 +191,26 @@ export interface BotRunsResponse {
   total: number;
 }
 
+/** One finished run's sampled PnL curve, per controller (FEAT-089). */
+export interface RunHistoryResponse {
+  /** `controller_id -> [[t_ms, realized, unrealized, net, volume, pct], ...]` */
+  controllers: Record<string, number[][]>;
+  /** `controller_id -> { connector, trading_pair }` — what the fold converts through. */
+  identities: Record<string, { connector: string; trading_pair: string }>;
+  interval: string;
+  /**
+   * Which source answered: sampled snapshots, the archived database, or
+   * nothing. `"none"` is an answer — a run older than the server's snapshot
+   * retention was never recorded — and the chart's notice says which it was
+   * rather than asserting one.
+   */
+  source: "snapshots" | "archive" | "none";
+  points: number;
+  /** True when it came off Condor's disk rather than off the wire. */
+  cached: boolean;
+  detail?: string | null;
+}
+
 /**
  * Every controller of every run that has finished (FEAT-089).
  *
@@ -1904,6 +1924,20 @@ export const api = {
     apiFetch<TerminatedControllersResponse>(
       `/api/v1/servers/${encodeURIComponent(server)}/terminated/controllers`,
     ),
+
+  /**
+   * One finished run's curve, walked once by Condor and cached for ever.
+   *
+   * Immutable by construction — the bot has stopped — so the caller should tell
+   * react-query so: `staleTime: Infinity`. The first open pays one walk behind
+   * a spinner; every one after it is a file open.
+   */
+  getRunHistory: (server: string, botName: string, deployedAt: string) => {
+    const qs = new URLSearchParams({ bot_name: botName, deployed_at: deployedAt });
+    return apiFetch<RunHistoryResponse>(
+      `/api/v1/servers/${encodeURIComponent(server)}/terminated/history?${qs}`,
+    );
+  },
 
   deleteBotRun: (server: string, botRunId: number) =>
     apiFetch<{ deleted: boolean }>(

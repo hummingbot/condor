@@ -1,4 +1,4 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ChevronDown,
   ChevronLeft,
@@ -69,7 +69,7 @@ import {
   type PerfLeaf,
   type PerfNode,
 } from "@/lib/perf-tree";
-import { aggregatePnlSeries, executorSeries } from "@/lib/pnl-chart";
+import { aggregatePnlSeries, executorSeries, snapshotsFromRunHistory } from "@/lib/pnl-chart";
 import { buildAttributor, runWindows } from "@/lib/run-attribution";
 import type { ConvertFn } from "@/lib/rates";
 import { POSITIONS_BAND_KEY } from "@/lib/sessionState";
@@ -97,6 +97,18 @@ function parseSide(raw: string): string {
 // in the URL so a scope is linkable and survives a reload (FEAT-084).
 
 const FLEET_SCOPE = "all";
+
+/**
+ * How many finished runs are warmed when the reader switches to Terminated,
+ * and how many walks run at once.
+ *
+ * Small on purpose. These are real upstream walks against an API that is also
+ * serving the live fleet, and the reader who arrives at Terminated is almost
+ * always looking at the most recent few — warming the whole history would pay
+ * for 137 runs to answer a question about three.
+ */
+const WARM_RUNS = 6;
+const WARM_CONCURRENCY = 2;
 
 /** Which of the bottom band's two occupants is showing, if either. */
 type BandKey = "positions" | "executors" | null;
@@ -868,6 +880,81 @@ export function PerfBrowser({
   );
   const setGroupBy = useCallback((value: GroupBy) => switchView({ group: value }), [switchView]);
 
+  /**
+   * The finished run this scope's chart is about, if any.
+   *
+   * A bot scope is the run itself; a controller or executor scope under it
+   * inherits the run its bot belongs to, which is what lets one cached walk
+   * serve every scope inside a run. `(unattached)` has no run and no curve —
+   * those executors belong to no deployment, so their outcomes are all there is.
+   */
+  const scopeRun = useMemo(() => {
+    if (population !== "terminated") return undefined;
+    const bot = scope.kind === "bot" ? scope.label : scope.leaves[0]?.bot;
+    return bot ? runByBot.get(bot) : undefined;
+  }, [population, scope, runByBot]);
+
+  /**
+   * That run's sampled history, walked once by Condor and cached for ever.
+   *
+   * `staleTime: Infinity` is not a tuning choice: a finished run's history is
+   * immutable — the bot has stopped, and nothing that happens later can change
+   * what the curve was — so a refetch could only ever return the same bytes.
+   * The long `gcTime` is the same fact said to the other end of the cache:
+   * clicking down a list of runs and back should not re-walk the first one.
+   */
+  const { data: runHistory, isFetching: runHistoryLoading } = useQuery({
+    queryKey: ["run-history", server, scopeRun?.bot_name, scopeRun?.created_at],
+    queryFn: () => api.getRunHistory(server, scopeRun!.bot_name, scopeRun!.created_at!),
+    enabled: !!scopeRun?.bot_name && !!scopeRun?.created_at,
+    staleTime: Infinity,
+    gcTime: 60 * 60_000,
+    retry: false,
+  });
+
+  /**
+   * Warm the runs the reader is most likely to open next.
+   *
+   * The first open of a cold run costs one walk — 1.7s for a three-day,
+   * three-controller run measured against a real server — and the reader
+   * usually arrives at Terminated intending to look at the most recent few. So
+   * those are fetched in the background, two at a time, as soon as the
+   * population is selected: bounded because these are real upstream walks
+   * against an API that is also serving the live fleet, and never on the path
+   * of the tree, which renders from the controllers listing regardless.
+   */
+  useEffect(() => {
+    if (population !== "terminated" || !server) return;
+    const newest = runs
+      .filter((run) => !run.is_live && run.created_at && run.controller_ids?.length)
+      .sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""))
+      .slice(0, WARM_RUNS);
+
+    let cancelled = false;
+    void (async () => {
+      for (let i = 0; i < newest.length; i += WARM_CONCURRENCY) {
+        if (cancelled) return;
+        await Promise.all(
+          newest.slice(i, i + WARM_CONCURRENCY).map((run) =>
+            queryClient
+              .prefetchQuery({
+                queryKey: ["run-history", server, run.bot_name, run.created_at],
+                queryFn: () => api.getRunHistory(server, run.bot_name, run.created_at!),
+                staleTime: Infinity,
+                gcTime: 60 * 60_000,
+              })
+              // A warm that fails costs nothing: the scope that needs it will
+              // ask again and show its own spinner and its own error.
+              .catch(() => {}),
+          ),
+        );
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [population, server, runs, queryClient]);
+
   const scopedLeaves = scope.leaves;
   const activeCtrl =
     scope.kind === "controller" && scope.leaves[0]?.kind === "controller"
@@ -1115,10 +1202,29 @@ export function PerfBrowser({
    * and this is the seam it swaps at.
    */
   const chartData = useMemo(() => {
-    if (activeCtrl) return []; // draws its own finer series instead
-    if (population === "terminated") return executorSeries(scope.leaves, cv);
+    // A *live* controller draws its own finer series (see `ControllerPnlChart`).
+    // A finished one does not: its curve is already in the run's cached history,
+    // over the run's real window rather than deploy-to-now, and folding it here
+    // means selecting a controller costs nothing and cannot disagree with the
+    // bot scope above it.
+    if (activeCtrl && population === "running") return [];
+    if (population === "terminated") {
+      // The run's own sampled history, folded by the *same* function the live
+      // fleet's is (FEAT-089). `executorSeries` is the fallback rather than the
+      // rule now: it draws each close at its close time, which is the only
+      // thing available for executors that belong to no run — and for a run
+      // whose history the server never recorded.
+      if (runHistory && runHistory.points > 0) {
+        const expanded = snapshotsFromRunHistory(runHistory, scopeRun?.bot_name ?? "");
+        return aggregatePnlSeries(expanded, scopedKeys, scopedControllers, convert);
+      }
+      return executorSeries(scope.leaves, cv);
+    }
     return aggregatePnlSeries(snapshots, scopedKeys, scopedControllers, convert);
-  }, [activeCtrl, population, scope, cv, snapshots, scopedKeys, scopedControllers, convert]);
+  }, [
+    activeCtrl, population, scope, cv, snapshots, scopedKeys, scopedControllers,
+    convert, runHistory, scopeRun,
+  ]);
 
   /**
    * What this scope folds, in words.
@@ -1208,13 +1314,39 @@ export function PerfBrowser({
         ? "Closed PnL"
         : "Fleet PnL"
       : `${scope.label} PnL`;
+  // What the terminated chart is actually drawn from, said rather than assumed.
+  //
+  // It used to claim "closed outcomes" unconditionally, which was true when
+  // that was the only thing it could draw. There are three sources now and the
+  // reader has no other way to tell them apart: a run's own sampled history
+  // reads exactly like a live one, and a fallback that looked identical while
+  // meaning something weaker would be the worst of the three.
+  const terminatedNotice =
+    population !== "terminated"
+      ? undefined
+      : runHistory && runHistory.points > 0
+        ? runHistory.source === "archive"
+          ? {
+              label: "from the archived database",
+              detail:
+                "The server kept no performance snapshots this far back, so this curve is rebuilt from the run's archived trade table. It is trade-exact and has no unrealized series, because a closed trade has nothing left unrealized.",
+            }
+          : undefined
+        : runHistory?.source === "none"
+          ? {
+              label: "no recorded history",
+              detail:
+                `The server has no stored history for this run${runHistory.detail ? ` — ${runHistory.detail}` : ""}. Its snapshot table only reaches so far back, and this run started before that. The steps below are what its executors closed, at the times they closed.`,
+            }
+          : {
+              label: "closed outcomes",
+              detail:
+                "Drawn from each executor's close time and its final PnL, not from sampled history — nothing here is still open, so there is no unrealized series and no position to hold. Each step is what closed in that bucket.",
+            };
+
   const chartNotice =
     population === "terminated"
-      ? {
-          label: "closed outcomes",
-          detail:
-            "Drawn from each executor's close time and its final PnL, not from sampled history — nothing here is still open, so there is no unrealized series and no position to hold. Each step is what closed in that bucket.",
-        }
+      ? terminatedNotice
       : inheritedFrom
         ? {
             label: "parent controller's series",
@@ -1881,7 +2013,7 @@ export function PerfBrowser({
             {/* The chart takes whatever vertical room is left. */}
             <div ref={chartRef} className="relative flex-1 min-h-[260px]">
               <div className="absolute inset-0">
-                {activeCtrl ? (
+                {activeCtrl && population === "running" ? (
                   <ControllerPnlChart
                     // Keyed by bot + config id: two bots can be running this very
                     // config, and a key that did not tell them apart would keep the
@@ -1905,6 +2037,15 @@ export function PerfBrowser({
                     currencySymbol={currencySymbol}
                     notice={chartNotice}
                   />
+                ) : runHistoryLoading ? (
+                  // The first open of a cold run pays one walk. Behind the same
+                  // spinner a cold archive already shows, and never blocking the
+                  // tree: the sidebar and the strip are drawn from the
+                  // controllers listing whether or not this has landed.
+                  <div className="flex h-full items-center justify-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]">
+                    <Loader2 className="h-4 w-4 animate-spin text-[var(--color-text-muted)]" />
+                    <p className="text-xs text-[var(--color-text-muted)]">Reading this run's history…</p>
+                  </div>
                 ) : (
                   <div className="flex h-full items-center justify-center rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]">
                     <p className="text-xs text-[var(--color-text-muted)]">No performance history available</p>
