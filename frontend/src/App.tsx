@@ -13,7 +13,6 @@ import { Bots } from "@/pages/Bots";
 import { CreateExecutor } from "@/pages/CreateExecutor";
 import { Dex } from "@/pages/Dex";
 import { DexPool } from "@/pages/DexPool";
-import { Executors } from "@/pages/Executors";
 import { Login } from "@/pages/Login";
 import { Portfolio } from "@/pages/Portfolio";
 import { Routines } from "@/pages/Routines";
@@ -84,10 +83,20 @@ export default function App() {
                 <Route path="/trade" element={<CreateExecutor />} />
             <Route path="/dex" element={<Dex />} />
             <Route path="/dex/:network/:address" element={<DexPool />} />
-                <Route path="/executors" element={<Executors />} />
+                {/* Executors are a scope of the browser now, not a page
+                    (FEAT-086). The listing this replaces was the whole
+                    history, live and archived together, which is what the
+                    Terminated population grouped by type is. */}
+                <Route
+                  path="/executors"
+                  element={<Navigate to="/bots?population=terminated&group=type" replace />}
+                />
                 <Route path="/executors/new" element={<Navigate to="/trade" replace />} />
                 <Route path="/executors/new-grid" element={<Navigate to="/trade?type=grid" replace />} />
-                <Route path="/archived" element={<Navigate to="/bots?tab=archived" replace />} />
+                <Route
+                  path="/archived"
+                  element={<Navigate to="/bots?population=terminated&group=bot" replace />}
+                />
                 <Route path="/routines" element={<Routines />} />
                 <Route path="/reports" element={<Navigate to="/routines?tab=reports" replace />} />
                 <Route path="/agents" element={<Navigate to="/" replace />} />

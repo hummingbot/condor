@@ -1,7 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import {
-  Activity,
   Bot,
   Brain,
   Bug,
@@ -39,6 +38,11 @@ import { ServerSelector } from "./ServerSelector";
  * that wants it, from the dock's Routines header. `/routines` is still the
  * full-width page — reachable from that pane, from an agent's Routines tab and
  * by URL — it is just no longer the first door.
+ *
+ * Executors left it in FEAT-086, for a different reason: they are not a
+ * separate thing to look at. A controller is a bag of executors, so both are
+ * scopes of the one browser behind Bots, and two doors to one report was the
+ * problem that feature exists to fix.
  */
 const NAV_ITEMS = [
   { to: "/", icon: Brain, label: "Agents" },
@@ -46,7 +50,6 @@ const NAV_ITEMS = [
   { to: "/trade", icon: Swords, label: "Trade" },
   { to: "/dex", icon: Droplets, label: "DEX" },
   { to: "/bots", icon: Bot, label: "Bots" },
-  { to: "/executors", icon: Activity, label: "Executors" },
   { to: "/settings", icon: Settings, label: "Settings" },
 ] as const;
 

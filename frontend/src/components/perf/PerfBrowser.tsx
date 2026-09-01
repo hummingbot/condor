@@ -5,7 +5,6 @@ import {
   ChevronRight,
   ChevronUp,
   Database,
-  History,
   Layers,
   Loader2,
   Pause,
@@ -21,7 +20,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { useSearchParams } from "react-router-dom";
 import yamlLib from "js-yaml";
 
 import { CodeEditor } from "@/components/editor/CodeEditor";
@@ -30,7 +29,7 @@ import { ControllerPnlChart } from "@/components/bots/ControllerPnlChart";
 import { DeployBotDialog } from "@/components/bots/DeployBotDialog";
 import { LogsSection } from "@/components/bots/LogsSection";
 import { PnlEvolutionChart } from "@/components/bots/PnlEvolutionChart";
-import { DetailPanel } from "@/components/executor/ExecutorTable";
+import { DetailPanel } from "@/components/perf/ExecutorTable";
 import { ExecutorRows, StopConfirmDialog } from "@/components/perf/ExecutorRows";
 import { useExecutorStop } from "@/components/perf/executorActions";
 import { GroupByToggle, PopulationToggle } from "@/components/perf/PopulationToggle";
@@ -1073,7 +1072,9 @@ export function PerfBrowser({
             : `${scope.leaves.length} ${population === "running" ? "controllers" : "closed executors"} under ${scope.kind} "${scope.label}"`;
 
     return {
-      label: "Bot performance",
+      // The same label the route entry uses, so the cache's half of this screen
+      // and the reader's half render as one screen rather than two.
+      label: "Bots",
       subject,
       onScreen: {
         population,
@@ -1605,18 +1606,6 @@ export function PerfBrowser({
                 Config
               </button>
             )}
-
-            {/* The run history is still a table of its own until the Terminated
-                population lands in the sidebar. With the tab bar gone, this
-                link is the only door to it. */}
-            <Link
-              to="/bots?tab=runs"
-              className="ml-1 flex items-center gap-1.5 rounded px-3 py-1.5 text-xs font-medium text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-              title="Bot run history"
-            >
-              <History className="h-3.5 w-3.5" />
-              Runs
-            </Link>
 
             {/* Controller sources and their configs, over the whole fleet — so
                 it belongs to every scope rather than to one. */}

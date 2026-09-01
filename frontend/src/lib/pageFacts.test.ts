@@ -38,7 +38,6 @@ describe("routeFacts", () => {
     expect(routeFacts("/bots", "")?.label).toBe("Bots");
     expect(routeFacts("/trade", "")?.label).toBe("Trade");
     expect(routeFacts("/dex", "")?.label).toBe("DEX pools");
-    expect(routeFacts("/executors", "")?.label).toBe("Executors");
     expect(routeFacts("/routines", "")?.label).toBe("Routines");
     expect(routeFacts("/settings", "")?.label).toBe("Settings");
   });
@@ -67,10 +66,17 @@ describe("routeFacts", () => {
   });
 
   it("reads the tab from the query string", () => {
-    expect(routeFacts("/bots", "?tab=runs")?.label).toBe("Bot runs");
-    // Retired tab: Runs absorbed Archived, so a stale link names where it lands.
-    expect(routeFacts("/bots", "?tab=archived")?.label).toBe("Bot runs");
+    // `?tab=runs` and `?tab=archived` are both the browser's Terminated
+    // population now (FEAT-086), and `Bots.tsx` redirects them into it — so a
+    // stale link names the one screen it lands on rather than a tab nobody can
+    // be on.
     expect(routeFacts("/routines", "?tab=reports")?.label).toBe("Routine reports");
+  });
+
+  it("says nothing for /executors, which is a scope of /bots now", () => {
+    // The page is a `<Navigate>` (FEAT-086). A branch for it here would be a
+    // screen the fact table claims the user can be on and the router disagrees.
+    expect(routeFacts("/executors", "")).toBeNull();
   });
 
   it("labels /bots itself as the browser, tab or no tab", () => {
@@ -80,6 +86,10 @@ describe("routeFacts", () => {
     expect(routeFacts("/bots", "")?.label).toBe("Bots");
     expect(routeFacts("/bots", "?tab=editor")?.label).toBe("Bots");
     expect(routeFacts("/bots", "?tab=backtest")?.label).toBe("Bots");
+    // Runs and Archived are the Terminated population now, and `Bots.tsx`
+    // redirects both into it — so they name the browser too (FEAT-086).
+    expect(routeFacts("/bots", "?tab=runs")?.label).toBe("Bots");
+    expect(routeFacts("/bots", "?tab=archived")?.label).toBe("Bots");
     expect(routeFacts("/bots", "?scope=bot:mm-1")?.label).toBe("Bots");
   });
 

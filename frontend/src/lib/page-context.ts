@@ -76,8 +76,6 @@ export function describePage(pathname: string, search = ""): PageContext {
       return second && third
         ? of(`DEX pool ("${third}" on "${second}")`, "Gateway / DEX")
         : of(withTab("DEX pools"), "Gateway / DEX");
-    case "executors":
-      return of(withTab("Executors"), "Trading & executors");
     case "routines":
       return of(withTab("Routines"), "Routines & reports");
     case "settings":

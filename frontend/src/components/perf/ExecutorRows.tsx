@@ -5,7 +5,7 @@ import {
   ExecutorTable,
   type SortDir,
   type SortKey,
-} from "@/components/executor/ExecutorTable";
+} from "@/components/perf/ExecutorTable";
 import { exportExecutorsCsv, type ExecutorStop } from "@/components/perf/executorActions";
 import { useEscapeKey } from "@/hooks/useEscapeKey";
 import { type ExecutorInfo } from "@/lib/api";

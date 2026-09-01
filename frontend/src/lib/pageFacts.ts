@@ -314,7 +314,7 @@ function extremes(
 }
 
 /** `grid 12, position 3` — what a mixed list is actually made of. */
-function byType(rows: { type: string }[]): string | undefined {
+function byType(rows: { type: string }[], cap = 2): string | undefined {
   const counts = new Map<string, number>();
   for (const row of rows) {
     if (row.type) counts.set(row.type, (counts.get(row.type) ?? 0) + 1);
@@ -322,7 +322,7 @@ function byType(rows: { type: string }[]): string | undefined {
   const ranked = [...counts.entries()].sort((a, b) => b[1] - a[1]);
   return names(
     ranked.map(([type, n]) => `${type} ${n}`),
-    4,
+    cap,
   );
 }
 
@@ -335,22 +335,14 @@ type Reader = (
 ) => ViewFacts["onScreen"];
 
 /**
- * The one tab `/bots` still has (`Bots.tsx`).
+ * The finished runs, which carry their own denominator (R3).
  *
- * The page is the controller browser now (FEAT-084) and Runs is the last thing
- * beside it, so an unlabelled `/bots` is the browser rather than a tab that was
- * announced as "Bots" while showing something else. The editor became a modal
- * over the browser and Backtest went to the `backtest_chart` routine, so
- * neither is a screen the user can be on any more.
+ * Read for every `/bots` screen now rather than for a tab of its own: the run
+ * history is the Terminated population's own branch of the tree (FEAT-086), and
+ * it is loaded only while that population is selected — so an absent cache
+ * entry is "the reader is on Running", which is why this contributes nothing
+ * rather than zeroes when there is none.
  */
-const BOTS_TAB_LABELS: Record<string, string> = {
-  runs: "Bot runs",
-  // Retired: Runs absorbed the Archived tab and `Bots.tsx` renders it for the
-  // old query string, so a stale link has to name where the user lands.
-  archived: "Bot runs",
-};
-
-/** `?tab=runs` — the run history, which carries its own denominator (R3). */
 function runsFacts(qc: QueryClient): ViewFacts["onScreen"] {
   const data = fresh<BotRunsResponse>(qc, ["bot-runs"]);
   if (!data) return undefined;
@@ -364,15 +356,23 @@ function runsFacts(qc: QueryClient): ViewFacts["onScreen"] {
     runs.map((r) => ({ name: r.bot_name, value: r.global_pnl_quote ?? 0 })),
     m.pnl,
   );
+  // Named `… run` rather than `best`/`worst`: these are merged into the `/bots`
+  // entry, which already ranks *bots* under those two keys, and a bare `best`
+  // here would silently replace it with an answer to a different question.
+  // Named `… run` rather than `best`/`worst`: these are merged into the `/bots`
+  // entry, which already ranks *bots* under those two keys, and a bare `best`
+  // here would silently replace it with an answer to a different question.
+  //
+  // The per-status breakdown the runs table carried is gone from the block, not
+  // from the screen. Everything here shares one budget with the fleet's facts
+  // *and* with what the reader actually chose (population, scope, filters), and
+  // that last group is the half no cache can reconstruct — so it is the half
+  // that must not be the one truncated away.
   return {
     runs: `${runs.length} of ${data.total ?? runs.length}`,
-    "by status": names(
-      [...statuses.entries()].sort((a, b) => b[1] - a[1]).map(([k, n]) => `${k} ${n}`),
-      4,
-    ),
-    best,
-    worst,
-    "as of": asOf(qc, ["bot-runs"]),
+    "runs stopped": statuses.get("STOPPED"),
+    "best run": best,
+    "worst run": worst,
   };
 }
 
@@ -474,14 +474,14 @@ const ROUTES: {
   },
   {
     pattern: /^\/bots$/,
-    facts: (_p, tab) => ({ label: BOTS_TAB_LABELS[tab] ?? "Bots" }),
-    onScreen: (_p, tab, qc) => {
-      // Two screens, two different tables. The live fleet is only what the
-      // browser shows, so reading it under "Bot runs" would describe a screen
-      // the user is not on — the failure R3 exists to prevent. `?tab=archived`
-      // is the retired tab Runs absorbed, which now covers both.
-      if (tab === "runs" || tab === "archived") return runsFacts(qc);
-
+    // One label, whatever the query string says. `/bots` is the performance
+    // browser and nothing else: the tab bar went in FEAT-084, and the two tabs
+    // that outlived it — Runs and Archived — are the Terminated population that
+    // `Bots.tsx` redirects them into (FEAT-086). It is also the label
+    // `PerfBrowser` contributes under, so the cache's half of this screen and
+    // the reader's half render as one screen instead of two.
+    facts: () => ({ label: "Bots" }),
+    onScreen: (_p, _tab, qc) => {
       const data = fresh<BotsPageResponse>(qc, ["bots"]);
       if (!data) return undefined;
       const m = money(qc);
@@ -508,6 +508,43 @@ const ROUTES: {
         m.pnl,
       );
 
+      // The executors the browser hangs under those controllers. The page holds
+      // the whole bounded walk — live and archived alike — under the key the
+      // retired `/executors` screen used, which is why that key is read here
+      // rather than being orphaned by its deletion (FEAT-072, FEAT-086).
+      const paged = fresh<{ pages: { executors: ExecutorInfo[]; next_cursor: string | null }[] }>(
+        qc,
+        ["executors-infinite"],
+      );
+      const loaded = paged?.pages?.flatMap((p) => p.executors ?? []) ?? [];
+      const activeExecutors = loaded.filter((ex) => isExecutorActive(ex.status));
+      // The walk answers with a cursor, not a count, so the honest total is
+      // "all of them" when it finished and "more than this" when it stopped at
+      // the cap — never a bare number an aggregate could be read off.
+      const more = paged?.pages?.[paged.pages.length - 1]?.next_cursor != null;
+
+      // Ranked by market and type rather than row by row: an executor has no
+      // name, so three top rows come back as the same `SOL-USDC grid_executor`
+      // three times — three slots that say one thing. Grouped, the same bytes
+      // name which market is losing. Kept under its own keys beside the per-bot
+      // ranking above, which answers a different question.
+      const perMarket = new Map<string, { value: number; quote?: string }>();
+      for (const ex of loaded) {
+        const name = `${ex.trading_pair} ${ex.type}`;
+        const row = perMarket.get(name) ?? { value: 0, quote: ex.trading_pair?.split("-")[1] };
+        row.value += ex.pnl ?? 0;
+        perMarket.set(name, row);
+      }
+      // Two apiece rather than three: this entry now carries the fleet's own
+      // ranking beside it, and the rendered block has a budget to stay inside.
+      const markets = extremes(
+        [...perMarket.entries()].map(([name, row]) => ({ name, ...row })),
+        m.pnl,
+        2,
+      );
+
+      // Which population and scope the reader is actually on is the browser's
+      // own contribution (`useViewFacts`), merged under this same label.
       return {
         bots: ratio(running.length, bots.length),
         stopped: names(
@@ -519,8 +556,27 @@ const ROUTES: {
         "total volume": m.volume(data.total_volume),
         best,
         worst,
-        // No `tab` any more: `/bots` is one screen, and which scope of it the
-        // user is looking at the browser itself contributes (`useViewFacts`).
+        "active executors": activeExecutors.length || undefined,
+        // Per-quote conversion is what the KPI strip does; the quotes on one
+        // screen are near-always the same, so summing after conversion here
+        // reproduces it without a second pass over the rows.
+        "active pnl": activeExecutors.length
+          ? m.pnl(
+              activeExecutors.reduce((total, ex) => total + (ex.pnl ?? 0), 0),
+              activeExecutors[0]?.trading_pair?.split("-")[1],
+            )
+          : undefined,
+        "executors by type": loaded.length ? byType(loaded) : undefined,
+        "executors loaded": loaded.length
+          ? more
+            ? `${loaded.length} of more — not all loaded`
+            : `${loaded.length} of ${loaded.length}`
+          : undefined,
+        "best market": markets.best,
+        "worst market": markets.worst,
+        // Only loaded while the Terminated population is selected, so its
+        // absence says the reader is on Running rather than that there are none.
+        ...(runsFacts(qc) ?? {}),
         "as of": asOf(qc, ["bots"]),
       };
     },
@@ -657,59 +713,6 @@ const ROUTES: {
         "your lp value": mine.length ? m.value(value, quote) : undefined,
         "fees earned": mine.length ? m.value(fees, quote) : undefined,
         "as of": asOf(qc, ["dex-pool-by-address"], (key) => key[2] === network && key[3] === address),
-      };
-    },
-  },
-  {
-    pattern: /^\/executors$/,
-    facts: () => ({ label: "Executors" }),
-    onScreen: (_p, _tab, qc) => {
-      const paged = fresh<{ pages: { executors: ExecutorInfo[]; next_cursor: string | null }[] }>(
-        qc,
-        ["executors-infinite"],
-      );
-      if (!paged?.pages) return undefined;
-      const all = paged.pages.flatMap((p) => p.executors ?? []);
-      const active = all.filter((ex) => isExecutorActive(ex.status));
-      const m = money(qc);
-      const quote = active[0]?.trading_pair?.split("-")[1];
-      const sum = (rows: ExecutorInfo[]) =>
-        rows.reduce((total, ex) => total + (ex.pnl ?? 0), 0);
-      // R3's denominator. The page endpoint answers with a cursor, not a count,
-      // so the honest total is "all of them" when the walk finished and "more
-      // than this" when it stopped at the page cap — never a bare `loaded 2000`
-      // an aggregate could be read off.
-      const more = paged.pages[paged.pages.length - 1]?.next_cursor != null;
-      // Ranked by pair and type rather than row by row: an executor has no
-      // name, so three top rows come back as the same `SOL-USDC grid_executor`
-      // three times — three slots that say one thing, and nothing the user
-      // could act on. Grouped, the same bytes name which market is losing.
-      const perGroup = new Map<string, { value: number; quote?: string }>();
-      for (const ex of all) {
-        const name = `${ex.trading_pair} ${ex.type}`;
-        const row = perGroup.get(name) ?? {
-          value: 0,
-          quote: ex.trading_pair?.split("-")[1],
-        };
-        row.value += ex.pnl ?? 0;
-        perGroup.set(name, row);
-      }
-      const { best, worst } = extremes(
-        [...perGroup.entries()].map(([name, row]) => ({ name, ...row })),
-        m.pnl,
-        3,
-      );
-      return {
-        active: active.length,
-        loaded: more ? `${all.length} of more — not all loaded` : `${all.length} of ${all.length}`,
-        "by type": byType(all),
-        // Per-quote conversion is what the KPI strip does; the quotes on one
-        // screen are near-always the same, so summing after conversion here
-        // reproduces it without a second pass over the rows.
-        "active pnl": m.pnl(sum(active), quote),
-        best,
-        worst,
-        "as of": asOf(qc, ["executors-infinite"]),
       };
     },
   },

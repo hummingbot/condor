@@ -167,7 +167,6 @@ describe("describePage", () => {
     ["/trade", "Trading & executors"],
     ["/dex", "Gateway / DEX"],
     ["/dex/solana/PoolAddr", "Gateway / DEX"],
-    ["/executors", "Trading & executors"],
     ["/routines", "Routines & reports"],
     ["/agents/scout", "Agents & chat"],
     ["/agents/scout/strategies/grid", "Agents & chat"],
@@ -185,17 +184,14 @@ describe("describePage", () => {
     "/agents",
     "/archived",
     "/market",
+    "/executors",
     "/executors/new",
     "/executors/new-grid",
   ])("claims no name for %s, which App.tsx redirects", (route) => {
+    // `/executors*` joined this list in FEAT-086: executors are a scope of the
+    // Bots browser, and every path under it is now a `<Navigate>`.
     const page = describePage(route);
-    // `/executors/new*` is covered incidentally by the live `/executors` case;
-    // what must not exist is a branch written *for* the redirected path.
-    if (route.startsWith("/executors/")) {
-      expect(page.page).toBe("Executors");
-    } else {
-      expect(page.page).toBe(route === "/agents" ? 'Agent detail ("")' : route);
-    }
+    expect(page.page).toBe(route === "/agents" ? 'Agent detail ("")' : route);
   });
 
   it("only ever returns an area the issue templates offer", () => {

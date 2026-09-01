@@ -179,9 +179,13 @@ describe("/bots", () => {
     expect(line).toContain("worst mm-sol-2 -$410.00");
   });
 
-  it("describes the tab the user is actually on, not the live fleet", () => {
-    // Four tabs, four tables. Reading the fleet under "Bot runs" would report a
-    // screen the user is not looking at.
+  it("carries the run history when the Terminated population has loaded it", () => {
+    // Runs are a branch of the browser's Terminated tree now (FEAT-086), and
+    // `Bots.tsx` only fetches them while that population is selected — so an
+    // absent cache entry says the reader is on Running rather than that there
+    // are no runs.
+    expect(onScreenLine("/bots")).not.toContain("runs ");
+
     qc.setQueryData(["bot-runs", SRV], {
       total: 312,
       runs: [
@@ -190,32 +194,21 @@ describe("/bots", () => {
         { bot_name: "grid-eth-1", run_status: "RUNNING", global_pnl_quote: -75 },
       ],
     });
-    const runs = onScreenLine("/bots", "?tab=runs");
-    expect(runs).toContain("runs 3 of 312");
-    expect(runs).toContain("by status STOPPED 2, RUNNING 1");
-    expect(runs).toContain("best backpack-mm-3 +$1,220.00");
-    expect(runs).not.toContain("total volume");
-
-    // A stale link to a tab that no longer exists lands on the browser, and
-    // reads the fleet it is showing (FEAT-084).
-    expect(onScreenLine("/bots", "?tab=editor")).toContain("controllers");
+    const line = onScreenLine("/bots");
+    expect(line).toContain("runs 3 of 312");
+    expect(line).toContain("runs stopped 2");
+    expect(line).toContain("best run backpack-mm-3 +$1,220.00");
+    // And the live fleet is still described beside it: one screen, not two.
+    expect(line).toContain("controllers");
   });
 
-  it("reads a stale ?tab=archived link as the Runs tab that absorbed it", () => {
-    // Runs and Archived listed the same stopped bots off two different stores;
-    // Bots.tsx now redirects `?tab=archived` into `runs`, so the fact table has
-    // to describe where the user actually lands, not a tab that no longer exists.
-    qc.setQueryData(["bot-runs", SRV], {
-      total: 2,
-      runs: [
-        { bot_name: "old-mm-1", run_status: "STOPPED", global_pnl_quote: 400 },
-        { bot_name: "old-mm-2", run_status: "STOPPED", global_pnl_quote: 112 },
-      ],
-    });
-    const archived = onScreenLine("/bots", "?tab=archived");
-    expect(archived).toContain("runs 2 of 2");
-    expect(archived).toContain("best old-mm-1 +$400.00");
-    expect(archived).not.toContain("archived bots");
+  it("lands a stale ?tab link on the browser and describes it", () => {
+    // `?tab=runs` and `?tab=archived` were two tables off two stores; both are
+    // the Terminated population now, and both redirect into it. The fact table
+    // has to describe where the user actually lands.
+    for (const tab of ["?tab=runs", "?tab=archived", "?tab=editor"]) {
+      expect(onScreenLine("/bots", tab)).toContain("controllers");
+    }
   });
 
   it("caps the exception list and says how many it left out", () => {
@@ -447,7 +440,21 @@ describe("/dex/:network/:address", () => {
   });
 });
 
-describe("/executors", () => {
+describe("/bots — the executors under the fleet", () => {
+  // The browser hangs every executor the bounded walk loaded under the
+  // controller that owns it, so the key the retired `/executors` screen read is
+  // read here instead of being orphaned by its deletion (FEAT-072, FEAT-086).
+  beforeEach(() => {
+    // The entry describes the browser, and the browser is the fleet with the
+    // executors hung under it — no fleet, no screen.
+    qc.setQueryData(["bots", SRV], {
+      bots: [{ bot_name: "backpack-mm-3", status: "running", num_controllers: 2 }],
+      controllers: [{ bot_name: "backpack-mm-3", global_pnl_quote: 900 }],
+      total_pnl: 900,
+      total_volume: 1_000,
+    });
+  });
+
   function seed(next_cursor: string | null) {
     qc.setQueryData(["executors-infinite", SRV], {
       pageParams: [""],
@@ -467,29 +474,31 @@ describe("/executors", () => {
 
   it("counts what is active across the loaded pages", () => {
     seed(null);
-    const line = onScreenLine("/executors");
-    expect(line).toContain("active 2");
+    const line = onScreenLine("/bots");
+    expect(line).toContain("active executors 2");
     expect(line).toContain("active pnl +$20.00");
-    expect(line).toContain("by type grid_executor 2, position_executor 2");
+    expect(line).toContain("executors by type grid_executor 2, position_executor 2");
   });
 
   it("says whether what is loaded is all of it (R3)", () => {
     seed(null);
-    expect(onScreenLine("/executors")).toContain("loaded 4 of 4");
+    expect(onScreenLine("/bots")).toContain("executors loaded 4 of 4");
     // The page endpoint answers with a cursor, not a count: a walk that stopped
-    // must say so rather than invite an aggregate over the whole history.
+    // must say so rather than invite an aggregate over the whole history. It
+    // bounds the sidebar tree as well as a table now.
     seed("sds:2000");
-    expect(onScreenLine("/executors")).toContain("loaded 4 of more — not all loaded");
+    expect(onScreenLine("/bots")).toContain("executors loaded 4 of more — not all loaded");
   });
 
-  it("names the notable rows by market, not by tied row (R4/R5)", () => {
+  it("names the notable markets by market, not by tied row (R4/R5)", () => {
     seed(null);
-    const line = onScreenLine("/executors");
+    const line = onScreenLine("/bots");
     // The two SOL-USDT grids are one line, summed: an executor has no name, so
     // ranking rows individually would print the same label twice and say
-    // nothing the user could act on.
-    expect(line).toContain("best SOL-USDT grid_executor +$20.00");
-    expect(line).toContain("worst ETH-USDT position_executor -$41.00");
+    // nothing the user could act on. Under its own keys, beside the per-bot
+    // ranking, which answers a different question.
+    expect(line).toContain("best market SOL-USDT grid_executor +$20.00");
+    expect(line).toContain("worst market ETH-USDT position_executor -$41.00");
   });
 
   it("leaves flat rows out of both ends, and keeps each row in its own quote", () => {
@@ -513,41 +522,43 @@ describe("/executors", () => {
     // BRL has no path to the display currency, so it keeps the quote's own
     // symbol and the `⚠` — the same string the screen shows.
     qc.setQueryData(["rates", SRV, "USDT", "BRL"], { BRL: null });
-    const line = onScreenLine("/executors");
-    expect(line).toContain("best BTC-BRL grid +R$337.71");
-    expect(line).toContain("worst SOL-USDT grid -$12.40");
+    const line = onScreenLine("/bots");
+    expect(line).toContain("best market BTC-BRL grid +R$337.71");
+    expect(line).toContain("worst market SOL-USDT grid -$12.40");
     // Nothing that stayed at zero is named at either end.
-    expect(line).not.toContain("+$0.00,");
     expect(line).not.toContain("ETH-USDC");
     expect(line).not.toContain("USDC-USDT");
   });
 
-  it("merges the page's own sort and filters into the same screen", () => {
+  it("merges the browser's own population, grouping and filters into the same screen", () => {
     seed(null);
-    // What `Executors.tsx` contributes through `useViewFacts`: the selection,
-    // which no cache holds. Route entry and page contributor share a label, so
-    // the block is one screen with both halves.
+    // What `PerfBrowser` contributes through `useViewFacts`: which population
+    // and scope the reader chose and what the filters left, none of which any
+    // cache holds. Route entry and page contributor share a label, so the block
+    // is one screen with both halves.
     const block = renderViewBlock(
       [
-        routeFacts("/executors", "", qc)!,
+        routeFacts("/bots", "", qc)!,
         {
-          label: "Executors",
+          label: "Bots",
           onScreen: {
-            sort: "pnl desc",
+            population: "terminated",
+            grouping: "by type",
+            scope: "ctrl:backpack-mm-3:grid_1",
             filters: 'pair ~ "SOL", type grid_executor',
-            showing: 2,
-            "kpi period": "1M",
+            window: "1M",
           },
         },
       ],
-      "/executors",
+      "/bots",
     );
     expect(block.match(/^Screen: /gm)).toHaveLength(1);
-    expect(block).toContain("loaded 4 of 4");
-    expect(block).toContain("sort pnl desc");
+    expect(block).toContain("executors loaded 4 of 4");
+    expect(block).toContain("population terminated");
+    expect(block).toContain("grouping by type");
+    expect(block).toContain("scope ctrl:backpack-mm-3:grid_1");
     expect(block).toContain('filters pair ~ "SOL", type grid_executor');
-    expect(block).toContain("showing 2");
-    expect(block).toContain("kpi period 1M");
+    expect(block).toContain("window 1M");
   });
 });
 
@@ -893,7 +904,6 @@ describe("an empty cache", () => {
       ["/trade", ""],
       ["/dex", ""],
       ["/dex/solana/7qbRF6", ""],
-      ["/executors", ""],
       ["/routines", ""],
       ["/routines", "?tab=reports"],
       ["/agents/orca-lp-expert", ""],
@@ -1168,7 +1178,6 @@ describe("the block's budget", () => {
       ["/bots/42", ""],
       ["/dex", ""],
       ["/dex/solana/7qbRF6", ""],
-      ["/executors", ""],
       ["/routines", ""],
       ["/routines", "?tab=reports"],
       ["/agents/orca-lp-expert", ""],
@@ -1184,22 +1193,24 @@ describe("the block's budget", () => {
     }
   });
 
-  it("keeps /executors inside the cap once the page adds its selection", () => {
+  it("keeps /bots inside the cap once the browser adds its own view", () => {
     seedEverything();
     const block = renderViewBlock(
       [
-        routeFacts("/executors", "", qc)!,
+        routeFacts("/bots", "", qc)!,
         {
-          label: "Executors",
+          label: "Bots",
           onScreen: {
-            sort: "pnl desc",
+            population: "terminated",
+            grouping: "by type",
+            scope: "ctrl:a-rather-long-bot-name-0:a_long_controller_config_id",
             filters: 'pair ~ "LONGPAIR", type a_long_executor_type_0/a_long_executor_type_1, controller 4 selected',
-            showing: 120,
-            "kpi period": "3M",
+            window: "3M",
+            "in scope": 120,
           },
         },
       ],
-      "/executors",
+      "/bots",
     );
     expect(block.length).toBeLessThan(VIEW_BLOCK_MAX_CHARS);
   });
