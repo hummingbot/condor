@@ -500,6 +500,69 @@ describe("aggregatePnlSeries — two bots sharing a controller config id", () =>
   });
 });
 
+/**
+ * The parsing budget (PERF-282).
+ *
+ * `timestamp` is an ISO string, so every read of it through `toMs` is a
+ * `Date.parse`. Read straight off the snapshot it is paid once per *comparison*
+ * in the per-controller sort, once more per row for the timeline, and again on
+ * every (instant × controller) pair of the forward-fill — which on a fleet-sized
+ * history is six figures of parsing, redone each time the `bots` socket mints a
+ * new `controllers` array. The fold decorates each row with its epoch-ms once
+ * instead, so this pins the count at one parse per snapshot.
+ */
+describe("aggregatePnlSeries — parses each timestamp once", () => {
+  it("makes no more Date.parse calls than it has snapshots", () => {
+    const CONTROLLERS = 3;
+    const PER_CONTROLLER = 200;
+
+    // Built before the spy: the fixtures' own timestamps must not be counted.
+    const base = Date.parse("2026-08-27T00:00:00Z");
+    const snapshots: ControllerPerformanceSnapshot[] = [];
+    for (let c = 0; c < CONTROLLERS; c++) {
+      for (let i = 0; i < PER_CONTROLLER; i++) {
+        snapshots.push(
+          snap({
+            controller_id: `ctrl-${c}`,
+            controller_name: `ctrl-${c}`,
+            // Interleaved and out of order, so the sort has real work to do.
+            timestamp: new Date(base + ((i * 7919) % PER_CONTROLLER) * 60_000).toISOString(),
+            realized_pnl_quote: i,
+            volume_traded: i * 10,
+          }),
+        );
+      }
+    }
+    const enabled = new Set(Array.from({ length: CONTROLLERS }, (_, c) => key(`ctrl-${c}`)));
+
+    const parse = vi.spyOn(Date, "parse");
+    try {
+      const points = aggregatePnlSeries(snapshots, enabled, []);
+      expect(points.length).toBeGreaterThan(0);
+      expect(parse).toHaveBeenCalledTimes(snapshots.length);
+    } finally {
+      parse.mockRestore();
+    }
+  });
+
+  it("folds identically however the rows are ordered on the way in", () => {
+    const rows = [
+      snap({ timestamp: at("10:00"), realized_pnl_quote: 1, volume_traded: 10 }),
+      snap({ timestamp: at("10:30"), realized_pnl_quote: 2, volume_traded: 30 }),
+      snap({ controller_id: "ctrl-b", controller_name: "ctrl-b", timestamp: at("10:15"), realized_pnl_quote: 7, volume_traded: 5 }),
+      snap({ controller_id: "ctrl-b", controller_name: "ctrl-b", timestamp: at("10:45"), realized_pnl_quote: 9, volume_traded: 25 }),
+    ];
+    const enabled = new Set([key("ctrl-a"), key("ctrl-b")]);
+
+    const inOrder = aggregatePnlSeries(rows, enabled, []);
+    const shuffled = aggregatePnlSeries([rows[3], rows[0], rows[2], rows[1]], enabled, []);
+
+    expect(shuffled).toEqual(inOrder);
+    expect(inOrder.map((p) => p.time)).toEqual([ms("10:00"), ms("10:15"), ms("10:30"), ms("10:45")]);
+    expect(inOrder.map((p) => p.realized)).toEqual([1, 8, 9, 11]);
+  });
+});
+
 describe("positionQuoteValue", () => {
   it("is zero for no positions", () => {
     expect(positionQuoteValue([])).toBe(0);

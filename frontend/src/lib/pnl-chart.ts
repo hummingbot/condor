@@ -381,6 +381,9 @@ export function zeroGradientOffset([min, max]: [number, number]): number {
  *    which it produced no new snapshot diffs to exactly zero — no bar — which
  *    is the whole point of drawing the flow.
  */
+/** A snapshot paired with its timestamp already resolved to epoch ms (PERF-282). */
+type DatedSnapshot = { ms: number; snap: ControllerPerformanceSnapshot };
+
 export function aggregatePnlSeries(
   snapshots: ControllerPerformanceSnapshot[],
   enabledIds: Set<string>,
@@ -402,20 +405,29 @@ export function aggregatePnlSeries(
     return convertFn(val, quote).value;
   };
 
-  const byCtrl: Record<string, ControllerPerformanceSnapshot[]> = {};
+  // Each row carries the epoch-ms of its own timestamp, parsed here and only
+  // here (PERF-282). `timestamp` is an ISO string, so `toMs` is a `Date.parse`;
+  // read straight off the snapshot it would be paid again on every comparison
+  // of the sort below (~S·log S), again per row for the timeline, and again
+  // once per (instant × controller) in the forward-fill — six figures of
+  // parsing per fold on a large fleet, redone every time the `bots` socket
+  // mints a new `controllers` array.
+  const byCtrl: Record<string, DatedSnapshot[]> = {};
   for (const snap of snapshots) {
     const key = controllerKey(snap);
     if (!key || !enabledIds.has(key)) continue;
-    (byCtrl[key] ??= []).push(snap);
+    (byCtrl[key] ??= []).push({ ms: toMs(snap.timestamp), snap });
   }
 
+  // Sorting on the decorated `ms` keeps the comparator's semantics exactly:
+  // equal instants stay in input order, because Array#sort is stable.
   for (const snaps of Object.values(byCtrl)) {
-    snaps.sort((a, b) => toMs(a.timestamp) - toMs(b.timestamp));
+    snaps.sort((a, b) => a.ms - b.ms);
   }
 
   const timeSet = new Set<number>();
   for (const snaps of Object.values(byCtrl))
-    for (const s of snaps) timeSet.add(toMs(s.timestamp));
+    for (const s of snaps) timeSet.add(s.ms);
   const times = Array.from(timeSet).sort((a, b) => a - b);
   if (times.length === 0) return [];
 
@@ -435,10 +447,10 @@ export function aggregatePnlSeries(
     let realized = 0, unrealized = 0, volume = 0, volumeDelta = 0, position = 0;
     for (const cid of cids) {
       const snaps = byCtrl[cid];
-      while (cursors[cid] < snaps.length - 1 && toMs(snaps[cursors[cid] + 1].timestamp) <= t)
+      while (cursors[cid] < snaps.length - 1 && snaps[cursors[cid] + 1].ms <= t)
         cursors[cid]++;
-      if (toMs(snaps[cursors[cid]].timestamp) <= t) {
-        const s = snaps[cursors[cid]];
+      if (snaps[cursors[cid]].ms <= t) {
+        const s = snaps[cursors[cid]].snap;
         const pair = s.trading_pair || pairByCtrl[cid] || "";
         realized += cv(s.realized_pnl_quote, pair);
         unrealized += cv(s.unrealized_pnl_quote, pair);
