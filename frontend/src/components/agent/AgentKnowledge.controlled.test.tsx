@@ -224,13 +224,13 @@ describe("the rail layout", () => {
 
     expect(tablist().getAttribute("aria-orientation")).toBe("vertical");
     // Eight labelled tabs wrap to three rows in a 400px pane, which is what
-    // the rail avoids — but turning the name on its side costs no width at
-    // all, so the reader is not asked to learn seven glyphs. The name is set
-    // vertically; the count, when there is one, follows it down the column.
+    // the rail avoids — so the reader is not asked to learn seven glyphs. The
+    // name is set flat under the icon, never turned on its side: a rotated
+    // Latin word loses the shape it is recognised by, and costs the column
+    // twice the height a stacked one does.
     for (const t of tabs()) {
-      const label = t.querySelector("[class*=vertical-rl]");
-      expect(label).toBeTruthy();
-      expect(label!.textContent).toContain(t.title.split(" (")[0]);
+      expect(t.querySelector("[class*=vertical-rl]")).toBeNull();
+      expect(t.textContent).toContain(t.title.split(" (")[0]);
       expect(t.title).not.toBe("");
     }
     // The counts survive the turn, and the label is said out loud rather than

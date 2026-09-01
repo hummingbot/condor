@@ -10,10 +10,11 @@
 /**
  * How the sections are offered.
  *
- * `"tabs"` is a horizontal strip, which is right on a page. `"rail"` is a
- * column down the right edge, with the names set vertically, which is the only
- * thing that fits in the chat's 400–700px pane: eight tabs wrap to three rows
- * there, and three rows of chrome above a 400px column is most of the column.
+ * `"tabs"` is a horizontal strip, which is right on a page. `"rail"` is an
+ * 80px column down the right edge, each section a key with its name set flat
+ * under its icon, which is the only thing that fits in the chat's 400–700px
+ * pane: eight tabs wrap to three rows there, and three rows of chrome above a
+ * 400px column is most of the column.
  * On the right because in the chat that edge is against the dock, where every
  * other control that opens something into the pane already lives.
  */

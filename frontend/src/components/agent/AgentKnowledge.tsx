@@ -242,13 +242,20 @@ export function AgentKnowledge({
     // A column down the *right* edge, because eight tabs wrap to three rows in
     // a 400px pane — and because in the chat this rail sits against the dock,
     // where everything else you click to open something already is. Same tabs,
-    // same counts, same order; only turned on their side, which buys the name
-    // back. An icon alone made the reader learn seven glyphs to find "Tools".
+    // same counts, same order, each still saying its name: an icon alone made
+    // the reader learn seven glyphs to find "Tools".
+    //
+    // The names are set flat rather than turned on their side. Sideways text
+    // buys 30px of width and charges the reader for it — a Latin word is
+    // recognised by its shape, and rotating it makes you decode it letter by
+    // letter — and it charges the column too: `STRATEGIES` on its side is 60px
+    // of height per key, so the seven ran the full height of the pane. Upright
+    // at 10px they are ~36px each, and the whole rail is a third of the column.
     <div
       role="tablist"
       aria-orientation="vertical"
       aria-label="Sections"
-      className="flex w-11 shrink-0 flex-col items-center gap-1.5 overflow-y-auto border-l border-[var(--color-border)] px-1 py-2"
+      className="flex w-20 shrink-0 flex-col items-center gap-1 overflow-y-auto border-l border-[var(--color-border)] px-1 py-2"
     >
       {tabs.map((t) => {
         const name =
@@ -271,19 +278,20 @@ export function AgentKnowledge({
             aria-label={name}
             onClick={() => openTab(t.id)}
             title={name}
-            className={`flex w-full shrink-0 flex-col items-center gap-1.5 rounded-md border py-3 transition-colors ${
+            className={`flex w-full shrink-0 flex-col items-center gap-1 rounded-md border px-1 py-2 transition-colors ${
               active
                 ? "border-[var(--color-primary)]/40 bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
                 : "border-[var(--color-border)] bg-[var(--color-surface)] text-[var(--color-text-muted)] hover:border-[var(--color-primary)]/40 hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
             }`}
           >
             {t.icon}
-            {/* Vertical writing turns the flex row on its side too, so the count
-              lands under the name rather than beside it. */}
+            {/* The count rides beside the name on the same line: at 10px the
+              longest section still leaves room for it, and a second line would
+              cost every key height for the benefit of two of them. */}
             <span
               aria-hidden
-              className={`flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.08em] [writing-mode:vertical-rl] ${
-                active ? "" : "font-medium"
+              className={`flex items-baseline gap-1 text-[10px] leading-none ${
+                active ? "font-semibold" : "font-medium"
               }`}
             >
               <span>{t.label}</span>
