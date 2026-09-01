@@ -1699,6 +1699,94 @@ async function fetchControllerPerformanceHistoryAll(
   };
 }
 
+/**
+ * The fleet's history, fetched **one controller at a time** (FEAT-089).
+ *
+ * The route this wraps looks like it takes a fleet and returns a fleet's
+ * history, and it does not: upstream's downsampler buckets by *time only*, so a
+ * request that spans several controllers keeps one row per bucket and silently
+ * drops the rest. Measured against a real 12-controller fleet over one window,
+ * the same query answers with 12 of 12 controllers at `5m` and 11 of 12 at
+ * `1h` — and `samplingIntervalSince` picks `15m` or coarser for any fleet older
+ * than ~3.5 days (PERF-238). So the fleet chart has been quietly missing
+ * controllers on every long-lived fleet, forward-filling whatever it happened
+ * to receive.
+ *
+ * Binding `controller_id` fixes it at the source: each bucket then holds only
+ * that controller's rows, so nothing is dropped at any interval. The same 12
+ * controllers at `1h` come back complete in 912 rows and 1.28 MB — against
+ * ~104k rows for the same span at `5m`, which is what asking for the finest
+ * interval instead would cost.
+ *
+ * `bot_name` is bound too, because a controller id is a *config* id two bots
+ * can share (CORR-241).
+ *
+ * The result is shape-compatible with the single-query walk it replaces —
+ * same `snapshots`, same `interval` — because the shared socket merges live
+ * frames into whatever these queries cached by spreading it. `truncated` is
+ * true if *any* controller's walk was cut short: a fleet series missing one
+ * controller's oldest end is a partial fleet series.
+ */
+export async function fetchControllerPerformanceHistoryByController(
+  server: string,
+  controllers: readonly { bot_name: string; controller_id: string }[],
+  params: ControllerPerformanceHistoryQuery = {},
+  opts: {
+    pageSize?: number;
+    /** Rows per controller. One page covers `HISTORY_POINT_BUDGET` instants. */
+    maxRows?: number;
+    maxPages?: number;
+    signal?: AbortSignal;
+    concurrency?: number;
+  } = {},
+): Promise<ControllerPerformanceHistoryAllResponse> {
+  const { concurrency: requested, ...walkOpts } = opts;
+  const targets = controllers.filter((c) => c.controller_id);
+  if (targets.length === 0) {
+    return {
+      snapshots: [], next_cursor: null, interval: params.interval ?? "5m",
+      pages: 0, truncated: false, outcome: "complete",
+    };
+  }
+
+  const results: ControllerPerformanceHistoryAllResponse[] = [];
+  // Bounded rather than all at once: these are sequential page walks against
+  // one API that is also serving the live fleet, and a 30-controller fleet
+  // opening 30 simultaneous walks is a self-inflicted outage.
+  const concurrency = Math.max(1, requested ?? 4);
+  for (let i = 0; i < targets.length; i += concurrency) {
+    results.push(
+      ...(await Promise.all(
+        targets.slice(i, i + concurrency).map((c) =>
+          fetchControllerPerformanceHistoryAll(
+            server,
+            { ...params, bot_name: c.bot_name, controller_id: c.controller_id },
+            walkOpts,
+          ),
+        ),
+      )),
+    );
+  }
+
+  return {
+    snapshots: results.flatMap((r) => r.snapshots),
+    // Per-controller cursors cannot be merged into one, and nothing resumes
+    // this walk: `refreshControllerHistory` tails by `start_time`, not by
+    // cursor. Saying null would claim the history ran out, so `truncated`
+    // carries that fact instead.
+    next_cursor: null,
+    interval: results[0]?.interval ?? params.interval ?? "5m",
+    server_online: results.find((r) => r.server_online === false)?.server_online,
+    error_hint: results.find((r) => r.error_hint)?.error_hint,
+    pages: results.reduce((sum, r) => sum + r.pages, 0),
+    truncated: results.some((r) => r.truncated),
+    outcome:
+      results.find((r) => r.outcome === "error")?.outcome ??
+      results.find((r) => r.outcome !== "complete")?.outcome ??
+      "complete",
+  };
+}
+
 // ── API functions ──
 
 export const api = {
@@ -1888,6 +1976,13 @@ export const api = {
    * (CORR-237).
    */
   getControllerPerformanceHistoryAll: fetchControllerPerformanceHistoryAll,
+
+  /**
+   * The fleet's history, one controller at a time — the only way to get all of
+   * them at an interval coarser than `5m` (FEAT-089).
+   */
+  getControllerPerformanceHistoryByController:
+    fetchControllerPerformanceHistoryByController,
 
   getBotRuns: (
     server: string,

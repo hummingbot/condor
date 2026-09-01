@@ -39,9 +39,17 @@ function snap(over: Partial<ControllerPerformanceSnapshot>): ControllerPerforman
 }
 
 /** `n` snapshots one minute apart, so a page is a distinguishable block. */
-function page(prefix: string, n: number, botName = "bot-a") {
+function page(prefix: string, n: number, botName = "bot-a", fromMinute = 0) {
   return Array.from({ length: n }, (_, i) =>
-    snap({ bot_name: botName, timestamp: `2026-08-27T00:${String(i).padStart(2, "0")}:00Z`, controller_id: prefix }),
+    snap({
+      bot_name: botName,
+      // `fromMinute` matters for a second page of the *same* controller: the
+      // walk dedupes on `controller + timestamp`, so a page repeating the
+      // previous one's instants is correctly discarded as overlap and would
+      // make a cursor test look like a dropped page.
+      timestamp: `2026-08-27T00:${String(fromMinute + i).padStart(2, "0")}:00Z`,
+      controller_id: prefix,
+    }),
   );
 }
 
@@ -242,5 +250,136 @@ describe("getControllerPerformanceHistoryAll", () => {
     expect(res.server_online).toBe(false);
     expect(res.error_hint).toBe("Connection error");
     expect(res.snapshots).toEqual([]);
+  });
+});
+
+/**
+ * The fleet's history is fetched one controller at a time (FEAT-089).
+ *
+ * The regression these guard is invisible on screen and always has been:
+ * upstream's downsampler buckets by *time only*, so a request spanning several
+ * controllers keeps one row per bucket and drops the rest — 12 of 12
+ * controllers at `5m`, 11 of 12 at `1h`, and `samplingIntervalSince` picks
+ * `15m` or coarser for any fleet older than ~3.5 days. The chart then
+ * forward-filled whatever it received, so the line looked plausible while being
+ * short of trading nobody could see was gone.
+ *
+ * Every assertion below about *which* requests go out is really an assertion
+ * that each bucket contains one controller's rows and therefore loses nothing.
+ */
+describe("getControllerPerformanceHistoryByController", () => {
+  const FLEET = [
+    { bot_name: "bot-a", controller_id: "ctrl-1" },
+    { bot_name: "bot-a", controller_id: "ctrl-2" },
+    { bot_name: "bot-b", controller_id: "ctrl-1" },
+  ];
+
+  it("asks for each controller separately, so a coarse interval loses none", async () => {
+    const { urls } = serve([
+      { snapshots: page("ctrl-1", 2), next_cursor: null, interval: "1h" },
+      { snapshots: page("ctrl-2", 2), next_cursor: null, interval: "1h" },
+      { snapshots: page("ctrl-1", 2, "bot-b"), next_cursor: null, interval: "1h" },
+    ]);
+
+    const res = await api.getControllerPerformanceHistoryByController(
+      SERVER,
+      FLEET,
+      { interval: "1h", start_time: "2026-07-01T00:00:00Z" },
+      { pageSize: 2, maxRows: 100 },
+    );
+
+    expect(urls).toHaveLength(3);
+    expect(res.snapshots).toHaveLength(6);
+    for (let i = 0; i < 3; i++) {
+      expect(query(urls, i).get("controller_id")).toBe(FLEET[i].controller_id);
+      // Bound too, because a controller id is a *config* id two bots can
+      // share (CORR-241) — an unbound one would merge them.
+      expect(query(urls, i).get("bot_name")).toBe(FLEET[i].bot_name);
+    }
+  });
+
+  it("asks every controller at the one interval it was given", async () => {
+    const { urls } = serve([
+      { snapshots: page("ctrl-1", 1), next_cursor: null, interval: "4h" },
+      { snapshots: page("ctrl-2", 1), next_cursor: null, interval: "4h" },
+      { snapshots: page("ctrl-1", 1, "bot-b"), next_cursor: null, interval: "4h" },
+    ]);
+
+    const res = await api.getControllerPerformanceHistoryByController(
+      SERVER, FLEET, { interval: "4h" }, { pageSize: 1, maxRows: 100 },
+    );
+
+    expect(urls.map((_, i) => query(urls, i).get("interval"))).toEqual(["4h", "4h", "4h"]);
+    expect(res.interval).toBe("4h");
+  });
+
+  it("walks each controller's own cursor to the end", async () => {
+    serve([
+      { snapshots: page("ctrl-1", 2), next_cursor: "c1", interval: "1h" },
+      { snapshots: page("ctrl-1", 1, "bot-a", 2), next_cursor: null, interval: "1h" },
+      { snapshots: page("ctrl-2", 1), next_cursor: null, interval: "1h" },
+      { snapshots: page("ctrl-1", 1, "bot-b"), next_cursor: null, interval: "1h" },
+    ]);
+
+    const res = await api.getControllerPerformanceHistoryByController(
+      SERVER, FLEET, { interval: "1h" }, { pageSize: 2, maxRows: 100, concurrency: 1 },
+    );
+
+    expect(res.pages).toBe(4);
+    expect(res.snapshots).toHaveLength(5);
+  });
+
+  // A fleet series missing one controller's oldest end is a partial fleet
+  // series, and the header says so — so one short walk has to be enough to
+  // set it.
+  it("is truncated when any one controller's walk was cut short", async () => {
+    const { urls } = serve([
+      { snapshots: page("ctrl-1", 2), next_cursor: "more", interval: "1h" },
+      { snapshots: page("ctrl-2", 1), next_cursor: null, interval: "1h" },
+      { snapshots: page("ctrl-1", 1, "bot-b"), next_cursor: null, interval: "1h" },
+    ]);
+
+    const res = await api.getControllerPerformanceHistoryByController(
+      SERVER, FLEET, { interval: "1h" }, { pageSize: 2, maxRows: 2, concurrency: 1 },
+    );
+
+    expect(urls).toHaveLength(3);
+    expect(res.truncated).toBe(true);
+    expect(res.outcome).not.toBe("complete");
+  });
+
+  it("reports no cursor, because nothing resumes a fan-out by cursor", async () => {
+    serve([
+      { snapshots: page("ctrl-1", 1), next_cursor: "a", interval: "1h" },
+      { snapshots: page("ctrl-2", 1), next_cursor: "b", interval: "1h" },
+      { snapshots: page("ctrl-1", 1, "bot-b"), next_cursor: "c", interval: "1h" },
+    ]);
+
+    const res = await api.getControllerPerformanceHistoryByController(
+      SERVER, FLEET, { interval: "1h" }, { pageSize: 1, maxRows: 1 },
+    );
+    expect(res.next_cursor).toBeNull();
+  });
+
+  it("issues nothing at all for a fleet with no controllers", async () => {
+    const { urls } = serve([]);
+    const res = await api.getControllerPerformanceHistoryByController(SERVER, [], {
+      interval: "1h",
+    });
+    expect(urls).toHaveLength(0);
+    expect(res.snapshots).toEqual([]);
+    expect(res.truncated).toBe(false);
+  });
+
+  it("skips a controller with no id rather than asking for the whole fleet", async () => {
+    const { urls } = serve([{ snapshots: page("ctrl-1", 1), next_cursor: null, interval: "1h" }]);
+    await api.getControllerPerformanceHistoryByController(
+      SERVER,
+      [{ bot_name: "bot-a", controller_id: "" }, { bot_name: "bot-a", controller_id: "ctrl-1" }],
+      { interval: "1h" },
+      { pageSize: 1, maxRows: 10 },
+    );
+    expect(urls).toHaveLength(1);
+    expect(query(urls, 0).get("controller_id")).toBe("ctrl-1");
   });
 });

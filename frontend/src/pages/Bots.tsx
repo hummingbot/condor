@@ -107,15 +107,36 @@ export function Bots() {
   // actually asked for.
   const perfInterval = useMemo(() => samplingIntervalSince(earliestDeploy), [earliestDeploy]);
 
-  // Fetch the fleet's performance history (all controllers at once).
+  // Deduplicate controllers by bot_name + controller_id (WS updates can cause duplicates)
+  const controllers = useMemo(() => {
+    const raw = data?.controllers ?? [];
+    const seen = new Map<string, ControllerInfo>();
+    for (const ctrl of raw) {
+      seen.set(controllerKey(ctrl), ctrl); // last wins (most recent data)
+    }
+    return Array.from(seen.values());
+  }, [data?.controllers]);
+
+  // Fetch the fleet's performance history — one controller at a time.
   //
-  // Walked page by page rather than requested once: a page is capped at 1000
-  // ROWS and the sampler writes one row per controller per dump, so the single
-  // request this used to make showed 1000/N instants — eight hours for ten
-  // controllers, four for twenty, whatever `start_time` asked for (CORR-237).
-  // The row budget is sized to the fleet for the same reason: the interval was
-  // already chosen so the span fits ~1000 *instants* (PERF-238), and N
-  // controllers turn each of those into up to N rows.
+  // Not "all controllers at once", which is what this used to do and what the
+  // route appears to offer. Upstream's downsampler buckets by *time only*, so a
+  // request spanning several controllers keeps one row per bucket and silently
+  // drops the rest: measured against a real 12-controller fleet over one
+  // window, `5m` answers with 12 of 12 and `1h` with 11 of 12. Since
+  // `samplingIntervalSince` picks `15m` or coarser for any fleet older than
+  // ~3.5 days (PERF-238), the fleet chart has been missing controllers on every
+  // long-lived fleet — forward-filling whatever it happened to receive, so the
+  // line looked plausible and was short of trading nobody could see was gone
+  // (FEAT-089).
+  //
+  // Binding `controller_id` per request leaves only that controller's rows in
+  // each bucket, so nothing is dropped at any interval. Asking for `5m`
+  // instead would also be complete and would cost ~104k rows for a month-old
+  // fleet against 912; the fan-out is the cheap half of that trade.
+  //
+  // Each walk is still paged, for the reason it always was: a page is capped at
+  // 1000 rows and one controller's month at `5m` is 8,640 (CORR-237).
   const { data: perfHistory } = useQuery({
     // Built by the factory, not by hand: the shared socket's prefix-matched
     // live merge (`mergeIntoMatchingQueries`) only finds this entry while the
@@ -133,10 +154,16 @@ export function Bots() {
     // resolution: the key ends with `perfInterval` (PERF-238), so a coarser and
     // a finer series each extend themselves and never each other.
     queryFn: ({ signal, queryKey: key, client }) => {
-      const budget = historyRowBudget(data?.controllers?.length ?? 0);
+      // Per controller now, so the budget is per controller too: one series
+      // over a span whose interval was already chosen to fit
+      // `HISTORY_POINT_BUDGET` instants (PERF-238). `historyRowBudget` sized
+      // the *fleet's* rows for the collapsed shape this replaces, so it is what
+      // the whole fan-out costs rather than what each walk asks for.
+      const budget = historyRowBudget(1);
       const load = (startTime: string | undefined, maxPages?: number) =>
-        api.getControllerPerformanceHistoryAll(
+        api.getControllerPerformanceHistoryByController(
           server!,
+          controllers,
           { interval: perfInterval, start_time: startTime },
           { maxRows: budget, maxPages, signal },
         );
@@ -145,7 +172,7 @@ export function Bots() {
         interval: perfInterval,
         full: () => load(earliestDeploy),
         tail: (from) => load(from, TAIL_MAX_PAGES),
-        maxRows: budget,
+        maxRows: budget * Math.max(1, controllers.length),
       });
     },
     enabled: !!server && (data?.controllers?.length ?? 0) > 0,
@@ -153,16 +180,6 @@ export function Bots() {
     refetchInterval: HISTORY_REFETCH_MS,
     staleTime: 60_000,
   });
-
-  // Deduplicate controllers by bot_name + controller_id (WS updates can cause duplicates)
-  const controllers = useMemo(() => {
-    const raw = data?.controllers ?? [];
-    const seen = new Map<string, ControllerInfo>();
-    for (const ctrl of raw) {
-      seen.set(controllerKey(ctrl), ctrl); // last wins (most recent data)
-    }
-    return Array.from(seen.values());
-  }, [data?.controllers]);
 
   // The order the sidebar draws them in. The table this replaced could sort by
   // any column and defaulted to this one; the sidebar keeps the default, which
