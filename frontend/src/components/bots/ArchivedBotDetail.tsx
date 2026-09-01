@@ -13,6 +13,7 @@ import { useMemo, useState } from "react";
 
 import { ReportFrame } from "@/components/routines/ReportFrame";
 import { useArchivedReport } from "@/hooks/useArchivedReport";
+import { CURRENCY_SYMBOLS, type DisplayCurrency } from "@/hooks/useDisplayCurrency";
 import { useServer } from "@/hooks/useServer";
 import { api } from "@/lib/api";
 import type {
@@ -20,17 +21,22 @@ import type {
   ArchivedControllerRollup,
   ExecutorInfo,
 } from "@/lib/api";
-import { pnlTextClass } from "@/lib/formatters";
+import { formatCurrencyPnl, formatCurrencyVolume, pnlTextClass } from "@/lib/formatters";
 
-function formatUsd(v: number) {
-  if (Math.abs(v) >= 1e6) return `$${(v / 1e6).toFixed(2)}M`;
-  if (Math.abs(v) >= 1e3) return `$${(v / 1e3).toFixed(1)}K`;
-  return `$${v.toFixed(2)}`;
-}
-
-function formatPnl(v: number) {
-  const sign = v >= 0 ? "+" : "";
-  return `${sign}${formatUsd(v)}`;
+/**
+ * The symbol every figure on this page is drawn behind.
+ *
+ * A converted run is in dollars. An unconverted one is *not*, and this page
+ * used to render it behind a hardcoded `$` anyway — contradicting the
+ * `ConversionNote` directly below, which says the figures are in their own
+ * quote currency. So an unconverted run keeps its quote's own symbol, and a
+ * quote the dashboard has no symbol for is labelled by its code rather than
+ * mislabelled as dollars. A run that does not even name its quote has nothing
+ * better to offer than `$`.
+ */
+function runSymbol(perf: ArchivedBotPerformance): string {
+  if (perf.converted || !perf.quote_currency) return "$";
+  return CURRENCY_SYMBOLS[perf.quote_currency as DisplayCurrency] ?? `${perf.quote_currency} `;
 }
 
 /**
@@ -73,7 +79,17 @@ function StatCard({ label, value, className }: { label: string; value: string; c
   );
 }
 
-function PnlByPairBar({ pair, pnl, maxAbs }: { pair: string; pnl: number; maxAbs: number }) {
+function PnlByPairBar({
+  pair,
+  pnl,
+  maxAbs,
+  symbol,
+}: {
+  pair: string;
+  pnl: number;
+  maxAbs: number;
+  symbol: string;
+}) {
   const pct = maxAbs > 0 ? (Math.abs(pnl) / maxAbs) * 100 : 0;
   const isPositive = pnl >= 0;
 
@@ -87,7 +103,7 @@ function PnlByPairBar({ pair, pnl, maxAbs }: { pair: string; pnl: number; maxAbs
         />
       </div>
       <span className={`w-20 text-right font-mono ${pnlTextClass(pnl)}`}>
-        {formatPnl(pnl)}
+        {formatCurrencyPnl(pnl, symbol)}
       </span>
     </div>
   );
@@ -100,7 +116,17 @@ const EXECUTORS_PAGE_SIZE = 50;
 type SortField = "pnl" | "volume" | "timestamp";
 type SortDir = "asc" | "desc";
 
-function ExecutorTable({ server, dbPath, executorCount }: { server: string; dbPath: string; executorCount: number }) {
+function ExecutorTable({
+  server,
+  dbPath,
+  executorCount,
+  symbol,
+}: {
+  server: string;
+  dbPath: string;
+  executorCount: number;
+  symbol: string;
+}) {
   const [page, setPage] = useState(0);
   const [sortField, setSortField] = useState<SortField>("pnl");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
@@ -206,13 +232,13 @@ function ExecutorTable({ server, dbPath, executorCount }: { server: string; dbPa
                       {ex.current_price > 0 ? ex.current_price.toPrecision(6) : "—"}
                     </td>
                     <td className={`px-3 py-1.5 text-right font-mono ${pnlTextClass(ex.pnl)}`}>
-                      {formatPnl(ex.pnl * (ex.usd_rate ?? 1))}
+                      {formatCurrencyPnl(ex.pnl * (ex.usd_rate ?? 1), symbol)}
                     </td>
                     <td className="px-3 py-1.5 text-right font-mono text-amber-400/80">
-                      {formatUsd(ex.cum_fees_quote * (ex.usd_rate ?? 1))}
+                      {formatCurrencyVolume(ex.cum_fees_quote * (ex.usd_rate ?? 1), symbol)}
                     </td>
                     <td className="px-3 py-1.5 text-right font-mono">
-                      {formatUsd(ex.volume * (ex.usd_rate ?? 1))}
+                      {formatCurrencyVolume(ex.volume * (ex.usd_rate ?? 1), symbol)}
                     </td>
                   </tr>
                 );
@@ -288,6 +314,7 @@ function ControllerTable({
   });
 
   const controllers: ArchivedControllerRollup[] = data?.controllers ?? [];
+  const symbol = runSymbol(perf);
 
   // Whether the split adds up to the run's own header. It need not: a run whose
   // headline came from its trade rows is reconstructed from a different source
@@ -349,11 +376,13 @@ function ControllerTable({
                   </td>
                   <td className="px-3 py-1.5">{c.trading_pairs.join(", ") || "—"}</td>
                   <td className={`px-3 py-1.5 text-right font-mono ${pnlTextClass(c.pnl_usd)}`}>
-                    {formatPnl(c.pnl_usd)}
+                    {formatCurrencyPnl(c.pnl_usd, symbol)}
                   </td>
-                  <td className="px-3 py-1.5 text-right font-mono">{formatUsd(c.volume_usd)}</td>
+                  <td className="px-3 py-1.5 text-right font-mono">
+                    {formatCurrencyVolume(c.volume_usd, symbol)}
+                  </td>
                   <td className="px-3 py-1.5 text-right font-mono text-amber-400/80">
-                    {formatUsd(c.fees_usd)}
+                    {formatCurrencyVolume(c.fees_usd, symbol)}
                   </td>
                   <td className="px-3 py-1.5 text-right font-mono">
                     {c.executor_count.toLocaleString()}
@@ -546,6 +575,7 @@ export function ArchivedBotDetail({ dbPath, botName, onBack }: Props) {
     (a, b) => Math.abs(b[1]) - Math.abs(a[1]),
   );
   const maxAbsPnl = pnlPairs.length > 0 ? Math.abs(pnlPairs[0][1]) : 0;
+  const symbol = runSymbol(perf);
 
   return (
     <div className="space-y-4">
@@ -557,15 +587,19 @@ export function ArchivedBotDetail({ dbPath, botName, onBack }: Props) {
         </div>
         <div className={`flex items-center gap-1 text-lg font-bold ${pnlTextClass(perf.total_pnl)}`}>
           {perf.total_pnl >= 0 ? <TrendingUp className="h-5 w-5" /> : <TrendingDown className="h-5 w-5" />}
-          {formatPnl(perf.total_pnl)}
+          {formatCurrencyPnl(perf.total_pnl, symbol)}
         </div>
       </div>
 
       {/* Stats row */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
-        <StatCard label="Total PnL" value={formatPnl(perf.total_pnl)} className={pnlTextClass(perf.total_pnl)} />
-        <StatCard label="Volume" value={formatUsd(perf.total_volume)} />
-        <StatCard label="Fees" value={formatUsd(perf.total_fees)} />
+        <StatCard
+          label="Total PnL"
+          value={formatCurrencyPnl(perf.total_pnl, symbol)}
+          className={pnlTextClass(perf.total_pnl)}
+        />
+        <StatCard label="Volume" value={formatCurrencyVolume(perf.total_volume, symbol)} />
+        <StatCard label="Fees" value={formatCurrencyVolume(perf.total_fees, symbol)} />
         <StatCard
           label={perf.stats_source === "executors" ? "Executors" : "Trades"}
           value={perf.trade_count.toLocaleString()}
@@ -605,7 +639,7 @@ export function ArchivedBotDetail({ dbPath, botName, onBack }: Props) {
           </h3>
           <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3 space-y-2">
             {pnlPairs.map(([pair, pnl]) => (
-              <PnlByPairBar key={pair} pair={pair} pnl={pnl} maxAbs={maxAbsPnl} />
+              <PnlByPairBar key={pair} pair={pair} pnl={pnl} maxAbs={maxAbsPnl} symbol={symbol} />
             ))}
           </div>
         </div>
@@ -617,6 +651,7 @@ export function ArchivedBotDetail({ dbPath, botName, onBack }: Props) {
           server={server}
           dbPath={dbPath}
           executorCount={executorCount}
+          symbol={symbol}
         />
       )}
     </div>
