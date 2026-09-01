@@ -259,19 +259,95 @@ describe("executors cache writes", () => {
     expect(ids(other)).toEqual(["e3"]);
   });
 
-  it("refreshes the first page of the infinite list", () => {
-    queryClient.setQueryData(["executors-infinite", SERVER], {
-      pages: [{ executors: [OTHER], next_cursor: null }],
-      pageParams: [undefined],
+  /**
+   * The infinite list is merged by id, never rewritten by position (CORR-281).
+   *
+   * Its pages 1..n are anchored on the cursor page 0 ended at, so the seam
+   * between them is fixed. The handler used to replace page 0 with
+   * `frame.slice(0, page0.length)`, which slid the window but not the seam:
+   * rows pushed off the tail of page 0 landed in no page at all, and a frame
+   * shorter than page 0 — the ordinary case, since the stream carries the
+   * live in-memory list rather than the paged REST history — truncated it.
+   * The rows did not merely leave the table: the KPI strip reduces over these
+   * very pages flattened, so it reported a history with holes in it.
+   */
+  describe("the infinite list", () => {
+    const KEY = ["executors-infinite", SERVER];
+    const OLDEST = { id: "e4", controller_id: "grid_1", trading_pair: "SOL-USDC" };
+    const ARCHIVED = { id: "e5", controller_id: "grid_1", trading_pair: "BTC-USDT" };
+
+    type Row = { id: string };
+    const cached = () =>
+      queryClient.getQueryData<{ pages: { executors: Row[] }[] }>(KEY);
+    const perPage = () => cached()?.pages.map((p) => p.executors.map((e) => e.id));
+    const flat = () => cached()?.pages.flatMap((p) => p.executors.map((e) => e.id));
+
+    /** Seed the cache the way the walk in `Bots.tsx` fills it: cursor-anchored pages. */
+    const seed = (...pages: Row[][]) =>
+      queryClient.setQueryData(KEY, {
+        pages: pages.map((executors, i) => ({
+          executors,
+          next_cursor: i === pages.length - 1 ? null : `sds-offset:${i + 1}`,
+        })),
+        pageParams: pages.map((_, i) => (i === 0 ? "" : `sds-offset:${i}`)),
+      });
+
+    it("keeps every held row when the frame brings a new one at the head", () => {
+      seed([SOL, OTHER], [OLDEST, ARCHIVED]);
+
+      // A new executor was just created, so the frame leads with it.
+      handleMessage(`executors:${SERVER}`, [BTC, SOL, OTHER]);
+
+      expect(flat()).toEqual(["e1", "e2", "e3", "e4", "e5"]);
+      expect(perPage()).toEqual([["e1", "e2", "e3"], ["e4", "e5"]]);
     });
 
-    handleMessage(`executors:${SERVER}`, [BTC, SOL]);
+    it("does not truncate page 0 to a shorter frame", () => {
+      seed([BTC, SOL, OTHER]);
 
-    expect(
-      queryClient.getQueryData<{ pages: { executors: { id: string }[] }[] }>([
-        "executors-infinite",
-        SERVER,
-      ])?.pages[0].executors.map((e) => e.id),
-    ).toEqual(["e1"]);
+      // The live list is a different, smaller set than the paged history.
+      handleMessage(`executors:${SERVER}`, [{ ...SOL, status: "COMPLETED" }]);
+
+      expect(flat()).toEqual(["e1", "e2", "e3"]);
+      expect(
+        cached()?.pages[0].executors.map((e) => (e as { status?: string }).status),
+      ).toEqual([undefined, "COMPLETED", undefined]);
+    });
+
+    it("refreshes a held row where it already sits, without re-adding it", () => {
+      seed([BTC, SOL], [OLDEST]);
+
+      handleMessage(`executors:${SERVER}`, [{ ...OLDEST, status: "COMPLETED" }]);
+
+      expect(perPage()).toEqual([["e1", "e2"], ["e4"]]);
+      expect(
+        (cached()?.pages[1].executors[0] as { status?: string }).status,
+      ).toBe("COMPLETED");
+    });
+
+    it("leaves no id twice across the pages", () => {
+      // The walk can hand the same active executor out twice: the live list is
+      // prepended in memory, the DB page repeats it lower down.
+      seed([BTC, SOL], [SOL, OLDEST]);
+
+      handleMessage(`executors:${SERVER}`, [BTC, SOL]);
+
+      expect(flat()).toEqual(["e1", "e2", "e4"]);
+    });
+
+    it("leaves the pages alone when the frame carries nothing", () => {
+      seed([BTC, SOL]);
+      const before = cached();
+
+      handleMessage(`executors:${SERVER}`, []);
+
+      expect(cached()).toBe(before);
+    });
+
+    it("does not seed a list nobody has walked yet", () => {
+      handleMessage(`executors:${SERVER}`, [BTC, SOL]);
+
+      expect(cached()).toBeUndefined();
+    });
   });
 });

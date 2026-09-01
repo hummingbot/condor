@@ -117,6 +117,97 @@ function mergeIntoMatchingQueries(
 }
 
 /**
+ * The rows an `executors:<server>` frame carries.
+ *
+ * The stream is untyped on the wire, so only the fields this module reads are
+ * asserted: the `id` the merge keys on, and the two columns the filtered views
+ * narrow by.
+ */
+type ExecutorFrameRow = {
+  id?: string;
+  controller_id?: string;
+  trading_pair?: string;
+};
+
+/** The `["executors-infinite", server]` cache, as the walk in `Bots.tsx` builds it. */
+type ExecutorPages = {
+  pages?: { executors?: ExecutorFrameRow[]; next_cursor?: string | null }[];
+  pageParams?: unknown[];
+};
+
+/**
+ * Fold a live `executors` frame into the cursor-paginated infinite list.
+ *
+ * Pages 1..n of that query are anchored on the cursor page 0 ended at
+ * (`getNextPageParam: lastPage.next_cursor`), so the seam between two pages
+ * never moves once it is drawn. Rewriting page 0 by position — what this used
+ * to do, `frame.slice(0, page0.length)` — therefore slid page 0's window
+ * without sliding the seam: every row the frame pushed past the end of page 0
+ * was then in no page at all. It disappeared from the table and, worse, from
+ * the KPI totals folded over those same flattened pages, until the 60s
+ * fallback poll happened to repair it. A frame *shorter* than page 0
+ * truncated it outright, which the stream does routinely: it broadcasts the
+ * in-memory executor list, a different, generally smaller and differently
+ * ordered set than the REST history the walk paged through.
+ *
+ * So merge by id instead — the same upsert `useMainControllerData` folds its
+ * three sources with. Every held row the frame also carries is refreshed where
+ * it already sits; only ids no page holds are prepended to page 0; nothing is
+ * ever dropped for being absent from the frame, because the frame says what is
+ * live now, not what the history contains. A row the walk handed out twice
+ * (an active executor can be served both from memory and from its DB page) is
+ * collapsed to its first copy, since a duplicate is counted twice by every
+ * total on the screen.
+ */
+function mergeExecutorPages(
+  old: ExecutorPages | undefined,
+  incoming: ExecutorFrameRow[],
+): ExecutorPages | undefined {
+  if (!old?.pages?.length) return old;
+
+  const fresh = new Map<string, ExecutorFrameRow>();
+  for (const ex of incoming) {
+    if (ex?.id) fresh.set(ex.id, ex);
+  }
+
+  const held = new Set<string>();
+  let touched = false;
+  const pages = old.pages.map((page) => {
+    let changed = false;
+    const executors: ExecutorFrameRow[] = [];
+    for (const row of page.executors ?? []) {
+      const id = row?.id;
+      if (!id) {
+        executors.push(row);
+        continue;
+      }
+      if (held.has(id)) {
+        changed = true; // already kept, in this page or an earlier one
+        continue;
+      }
+      held.add(id);
+      const next = fresh.get(id);
+      if (next && next !== row) changed = true;
+      executors.push(next ?? row);
+    }
+    if (!changed) return page;
+    touched = true;
+    return { ...page, executors };
+  });
+
+  // Whatever the pages did not already hold is genuinely new, and belongs at
+  // the head of the newest page.
+  const added = [...fresh.entries()].filter(([id]) => !held.has(id)).map(([, ex]) => ex);
+  if (!added.length) return touched ? { ...old, pages } : old;
+
+  const [first, ...rest] = pages;
+  return {
+    ...old,
+    pages: [{ ...first, executors: [...added, ...(first.executors ?? [])] }, ...rest],
+  };
+}
+
+/**
  * Whether this socket has ever been up, so the first connect is not read as a gap.
  */
 let everConnected = false;
@@ -234,7 +325,7 @@ export function handleMessage(channel: string, data: unknown): void {
   } else if (prefix === "executors") {
     const unfiltered = executorsQuery(server);
     queryClient.setQueryData(unfiltered.queryKey, data);
-    const allExecs = data as { controller_id?: string; trading_pair?: string }[];
+    const allExecs = data as ExecutorFrameRow[];
     if (Array.isArray(allExecs)) {
       // Filtered views of the same list are derived from this one frame. Which
       // narrowings someone is currently watching is recorded nowhere but in the
@@ -254,21 +345,12 @@ export function handleMessage(channel: string, data: unknown): void {
           ),
         );
       }
-    }
-    const execs = data as unknown[];
-    if (Array.isArray(execs)) {
+
+      // The paginated list the browser walks reads the same frame, but it can
+      // only be merged into — see `mergeExecutorPages`.
       queryClient.setQueryData(
         ["executors-infinite", server],
-        (old: { pages?: { executors: unknown[]; next_cursor: string | null }[]; pageParams?: unknown[] } | undefined) => {
-          if (!old?.pages?.length) return old;
-          const firstPage = old.pages[0];
-          const limit = firstPage.executors.length || 50;
-          const nextFirst = {
-            ...firstPage,
-            executors: execs.slice(0, limit),
-          };
-          return { ...old, pages: [nextFirst, ...old.pages.slice(1)] };
-        },
+        (old: ExecutorPages | undefined) => mergeExecutorPages(old, allExecs),
       );
     }
   } else if (prefix === "controller_perf") {
