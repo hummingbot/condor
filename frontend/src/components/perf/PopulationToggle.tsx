@@ -1,7 +1,7 @@
-import { Activity, History, Server, Shapes } from "lucide-react";
+import { Activity, History } from "lucide-react";
 import type { ComponentType } from "react";
 
-import type { GroupBy, Population } from "@/lib/perf-tree";
+import type { Population } from "@/lib/perf-tree";
 
 /** One segment of a two-way control: an icon, a word, and which one is on. */
 function Segment<T extends string>({
@@ -70,42 +70,6 @@ export function PopulationToggle({
         icon={History}
         onSelect={onChange}
         title="Executors that have closed, and the bot runs that have finished"
-      />
-    </div>
-  );
-}
-
-/**
- * What the level between the fleet and its controllers groups on.
- *
- * Only that level changes: controller and executor nodes keep the same
- * identity in both trees, so switching keeps the reader on whatever they had
- * selected (see `resolveScope`).
- */
-export function GroupByToggle({
-  groupBy,
-  onChange,
-}: {
-  groupBy: GroupBy;
-  onChange: (next: GroupBy) => void;
-}) {
-  return (
-    <div className="flex gap-0.5 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-0.5">
-      <Segment
-        value="bot"
-        current={groupBy}
-        label="By bot"
-        icon={Server}
-        onSelect={onChange}
-        title="Group controllers under the bot running them"
-      />
-      <Segment
-        value="type"
-        current={groupBy}
-        label="By type"
-        icon={Shapes}
-        onSelect={onChange}
-        title="Group by what each thing is: a controller's class, an executor's type"
       />
     </div>
   );

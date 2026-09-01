@@ -226,7 +226,7 @@ describe("buildTree", () => {
       leafFromExecutor(executor({ id: "a", status: "active", close_timestamp: 0 }), "alpha"),
       leafFromExecutor(executor({ id: "b", status: "active", close_timestamp: 0 }), "alpha"),
     ];
-    const tree = buildTree(leaves, "bot");
+    const tree = buildTree(leaves);
     const ctrl = node(tree, "ctrl:alpha:pmm_1");
 
     // The controller record is authoritative: it already contains every
@@ -247,18 +247,18 @@ describe("buildTree", () => {
       leafFromExecutor(executor({ id: "a", pnl: 5, volume: 400 })),
       leafFromExecutor(executor({ id: "b", pnl: -2, volume: 100 })),
     ];
-    const tree = buildTree(leaves, "bot");
+    const tree = buildTree(leaves);
     const ctrl = node(tree, `ctrl:${UNATTACHED_BOT}:pmm_1`);
     expect(ctrl.leaves).toHaveLength(2);
     expect(foldLeaves(ctrl.leaves, identity, NOW).net).toBe(3);
   });
 
-  // The `runs` branch is gone (FEAT-089). A finished run is a bot node with the
-  // controllers it ran beneath it, exactly as a live bot is — and the branch's
-  // `rollsUp: false` guard is not needed, because the trading arrives as
-  // controller leaves and the spine rule already stops a controller being
-  // counted alongside its own executors.
-  it("builds a finished run as a bot with its controllers, not a branch beside the fleet", () => {
+  // The `runs` branch is gone (FEAT-089), and so is the bot level that replaced
+  // it: a finished run's controllers sit in the fleet's list exactly as a live
+  // bot's do. The branch's `rollsUp: false` guard is not needed, because the
+  // trading arrives as controller leaves and the spine rule already stops a
+  // controller being counted alongside its own executors.
+  it("builds a finished run as controllers of the fleet, not a branch beside it", () => {
     const leaves = [
       leafFromTerminatedController(
         controller({ bot_name: "gamma", controller_id: "gamma_1", global_pnl_quote: 60 }),
@@ -269,14 +269,14 @@ describe("buildTree", () => {
         botRun(),
       ),
     ];
-    const tree = buildTree(leaves, "bot");
+    const tree = buildTree(leaves);
 
-    expect(tree.children.map((c) => c.id)).toEqual(["bot:gamma"]);
-    const bot = node(tree, "bot:gamma");
-    expect(bot.children.map((c) => c.id)).toEqual(["ctrl:gamma:gamma_1", "ctrl:gamma:gamma_2"]);
-    // The run's own total, folded from its controllers — and it reaches the
-    // fleet, which the `runs` branch deliberately never did.
-    expect(foldLeaves(bot.leaves, identity, NOW).net).toBe(100);
+    expect(tree.children.map((c) => c.id)).toEqual([
+      "ctrl:gamma:gamma_1",
+      "ctrl:gamma:gamma_2",
+    ]);
+    // The run's total reaches the fleet, which the `runs` branch deliberately
+    // never did.
     expect(foldLeaves(tree.leaves, identity, NOW).net).toBe(100);
   });
 
@@ -293,7 +293,7 @@ describe("buildTree", () => {
       leafFromExecutor(executor({ id: "e1", pnl: 25, controller_id: "gamma_1" }), "gamma"),
       leafFromExecutor(executor({ id: "e2", pnl: 35, controller_id: "gamma_1" }), "gamma"),
     ];
-    const tree = buildTree(leaves, "bot");
+    const tree = buildTree(leaves);
     expect(foldLeaves(tree.leaves, identity, NOW).net).toBe(60);
   });
 
@@ -308,12 +308,18 @@ describe("buildTree", () => {
       ),
       leafFromExecutor(executor({ id: "manual", pnl: 5, controller_id: "main" })),
     ];
-    const tree = buildTree(leaves, "bot");
-    expect(tree.children.map((c) => c.id)).toEqual(["bot:gamma", `bot:${UNATTACHED_BOT}`]);
+    const tree = buildTree(leaves);
+    expect(tree.children.map((c) => c.id)).toEqual([
+      "ctrl:gamma:gamma_1",
+      `ctrl:${UNATTACHED_BOT}:main`,
+    ]);
     expect(foldLeaves(tree.leaves, identity, NOW).net).toBe(65);
   });
 
-  it("groups by bot or by class, and keeps controller ids identical in both", () => {
+  // The grouping level is gone: two bots' controllers are siblings in one list,
+  // and which bot a row belongs to is a bubble above the tree rather than a
+  // chevron the reader walks through.
+  it("puts every controller in one list, whichever bot ran it", () => {
     const leaves = [
       leafFromController(controller({ bot_name: "alpha", controller_id: "pmm_1" })),
       leafFromController(
@@ -321,27 +327,18 @@ describe("buildTree", () => {
       ),
     ];
 
-    const byBot = buildTree(leaves, "bot");
-    expect(byBot.children.map((c) => c.id)).toEqual(["bot:alpha", "bot:beta"]);
-
-    const byType = buildTree(leaves, "type");
-    expect(byType.children.map((c) => c.id)).toEqual(["type:pmm_simple", "type:grid_strike"]);
-
-    // The level in between changed; the controller nodes did not, which is what
-    // lets a selection survive the switch.
-    for (const tree of [byBot, byType]) {
-      expect(node(tree, "ctrl:alpha:pmm_1").leaves).toHaveLength(1);
-      expect(node(tree, "ctrl:beta:grid_1").leaves).toHaveLength(1);
-      expect(foldLeaves(tree.leaves, identity, NOW).net).toBe(24);
-    }
+    const tree = buildTree(leaves);
+    expect(tree.children.map((c) => c.id)).toEqual(["ctrl:alpha:pmm_1", "ctrl:beta:grid_1"]);
+    expect(node(tree, "ctrl:alpha:pmm_1").leaves).toHaveLength(1);
+    expect(node(tree, "ctrl:beta:grid_1").leaves).toHaveLength(1);
+    expect(foldLeaves(tree.leaves, identity, NOW).net).toBe(24);
   });
 
-  it("hangs an executor belonging to no controller under its group directly", () => {
+  it("hangs an executor belonging to no controller off the fleet directly", () => {
     const leaves = [leafFromExecutor(executor({ id: "loose", controller_id: "" }))];
-    const tree = buildTree(leaves, "bot");
-    const bot = node(tree, `bot:${UNATTACHED_BOT}`);
-    expect(bot.children.map((c) => c.id)).toEqual(["exec:loose"]);
-    expect(bot.leaves).toHaveLength(1);
+    const tree = buildTree(leaves);
+    expect(tree.children.map((c) => c.id)).toEqual(["exec:loose"]);
+    expect(tree.leaves).toHaveLength(1);
   });
 
   it("attaches a controller leaf to a node its executors opened first", () => {
@@ -349,28 +346,20 @@ describe("buildTree", () => {
       leafFromExecutor(executor({ id: "a", status: "active", close_timestamp: 0 }), "alpha"),
       leafFromController(controller()),
     ];
-    const ctrl = node(buildTree(leaves, "bot"), "ctrl:alpha:pmm_1");
+      const ctrl = node(buildTree(leaves), "ctrl:alpha:pmm_1");
     expect(ctrl.leaves.map((l) => l.kind)).toEqual(["controller"]);
     expect(ctrl.children).toHaveLength(1);
   });
 });
 
 describe("ancestorChain", () => {
-  const tree = buildTree(
-    [
-      leafFromController(controller()),
-      leafFromExecutor(executor({ id: "a", status: "active", close_timestamp: 0 }), "alpha"),
-    ],
-    "bot",
-  );
+  const tree = buildTree([
+    leafFromController(controller()),
+    leafFromExecutor(executor({ id: "a", status: "active", close_timestamp: 0 }), "alpha"),
+  ]);
 
   it("walks from a node up to the fleet", () => {
-    expect(ancestorChain(tree, "exec:a")).toEqual([
-      "exec:a",
-      "ctrl:alpha:pmm_1",
-      "bot:alpha",
-      "all",
-    ]);
+    expect(ancestorChain(tree, "exec:a")).toEqual(["exec:a", "ctrl:alpha:pmm_1", "all"]);
   });
 
   it("is empty for a node that is not in the tree", () => {
@@ -380,64 +369,54 @@ describe("ancestorChain", () => {
   it("names the nearest surviving ancestor after a population switch", () => {
     // The executor is gone from the next tree; its controller is not.
     const chain = ancestorChain(tree, "exec:a");
-    const next = indexTree(buildTree([leafFromController(controller())], "bot"));
+    const next = indexTree(buildTree([leafFromController(controller())]));
     expect(chain.find((id) => next.has(id))).toBe("ctrl:alpha:pmm_1");
   });
 });
 
 describe("resolveScope", () => {
   const running = indexTree(
-    buildTree(
-      [
-        leafFromController(controller()),
-        leafFromExecutor(executor({ id: "a", status: "active", close_timestamp: 0 }), "alpha"),
-      ],
-      "bot",
-    ),
+    buildTree([
+      leafFromController(controller()),
+      leafFromExecutor(executor({ id: "a", status: "active", close_timestamp: 0 }), "alpha"),
+    ]),
   );
 
   it("keeps a scope that is still there", () => {
     expect(resolveScope(running, "exec:a")).toBe("exec:a");
     expect(resolveScope(running, "ctrl:alpha:pmm_1")).toBe("ctrl:alpha:pmm_1");
-    expect(resolveScope(running, "bot:alpha")).toBe("bot:alpha");
+    expect(resolveScope(running, "all")).toBe("all");
   });
 
   it("keeps an executor across a population switch, its id being the same in both", () => {
     // The point of an executor node id saying nothing about where it hangs: the
     // same executor is the same node whether it is live or archived.
-    const terminated = indexTree(buildTree([leafFromExecutor(executor({ id: "a" }))], "bot"));
+    const terminated = indexTree(buildTree([leafFromExecutor(executor({ id: "a" }))]));
     expect(resolveScope(terminated, "exec:a")).toBe("exec:a");
   });
 
-  it("keeps a controller across a grouping switch", () => {
-    const byType = indexTree(buildTree([leafFromController(controller())], "type"));
-    expect(resolveScope(byType, "ctrl:alpha:pmm_1")).toBe("ctrl:alpha:pmm_1");
-  });
-
-  it("falls back to the bot when a controller is gone, and to the fleet when it is not", () => {
+  it("falls back to the fleet when a controller is gone", () => {
     const withoutCtrl = indexTree(
-      buildTree([leafFromController(controller({ controller_id: "other" }))], "bot"),
+      buildTree([leafFromController(controller({ controller_id: "other" }))]),
     );
-    expect(resolveScope(withoutCtrl, "ctrl:alpha:pmm_1")).toBe("bot:alpha");
-
-    const otherBot = indexTree(
-      buildTree([leafFromController(controller({ bot_name: "beta" }))], "bot"),
-    );
-    expect(resolveScope(otherBot, "ctrl:alpha:pmm_1")).toBe("all");
+    expect(resolveScope(withoutCtrl, "ctrl:alpha:pmm_1")).toBe("all");
   });
 
   it("uses a known leaf to re-aim an executor at its controller", () => {
     const leaf = leafFromExecutor(executor({ id: "a" }), "alpha");
-    const withoutExec = indexTree(buildTree([leafFromController(controller())], "bot"));
+    const withoutExec = indexTree(buildTree([leafFromController(controller())]));
     expect(resolveScope(withoutExec, "exec:a", leaf)).toBe("ctrl:alpha:pmm_1");
   });
 
-  it("re-aims a bot scope at the type node holding the same leaf, and back", () => {
+  // A link written before the grouping level was retired names a node no tree
+  // has any more. It has to land on the report it asked for rather than on an
+  // empty screen, and the fleet is the only honest answer: `bot:alpha` meant
+  // "everything alpha did", which the bot bubble now says instead.
+  it("sends a retired group id to the fleet rather than into a controller", () => {
     const leaf = leafFromController(controller());
-    const byType = indexTree(buildTree([leaf], "type"));
-    expect(resolveScope(byType, "bot:alpha", leaf)).toBe("type:pmm_simple");
-    const byBot = indexTree(buildTree([leaf], "bot"));
-    expect(resolveScope(byBot, "type:pmm_simple", leaf)).toBe("bot:alpha");
+    const nodes = indexTree(buildTree([leaf]));
+    expect(resolveScope(nodes, "bot:alpha", leaf)).toBe("all");
+    expect(resolveScope(nodes, "type:pmm_simple", leaf)).toBe("all");
   });
 
 
@@ -447,30 +426,24 @@ describe("resolveScope", () => {
 });
 
 describe("visibleNodeIds", () => {
-  const tree = buildTree(
-    [
-      leafFromController(controller()),
-      leafFromExecutor(executor({ id: "a", status: "active", close_timestamp: 0 }), "alpha"),
-    ],
-    "bot",
-  );
+  const tree = buildTree([
+    leafFromController(controller()),
+    leafFromExecutor(executor({ id: "a", status: "active", close_timestamp: 0 }), "alpha"),
+  ]);
 
   it("lists every row in the order the tree draws them", () => {
-    expect(visibleNodeIds(tree, new Set())).toEqual([
+    expect(visibleNodeIds(tree, new Set(["all", "ctrl:alpha:pmm_1"]))).toEqual([
       "all",
-      "bot:alpha",
       "ctrl:alpha:pmm_1",
       "exec:a",
     ]);
   });
 
-  it("skips what is collapsed, so the arrows walk what is on screen", () => {
-    expect(visibleNodeIds(tree, new Set(["ctrl:alpha:pmm_1"]))).toEqual([
-      "all",
-      "bot:alpha",
-      "ctrl:alpha:pmm_1",
-    ]);
-    expect(visibleNodeIds(tree, new Set(["all"]))).toEqual(["all"]);
+  // Shut is the default, so a fleet of a hundred and nineteen executors opens
+  // as a list of controllers rather than as every executor it has ever run.
+  it("draws only what has been opened, so the arrows walk what is on screen", () => {
+    expect(visibleNodeIds(tree, new Set(["all"]))).toEqual(["all", "ctrl:alpha:pmm_1"]);
+    expect(visibleNodeIds(tree, new Set())).toEqual(["all"]);
   });
 });
 
@@ -498,7 +471,7 @@ describe("foldLeaves", () => {
     expect(whole.closeTotal).toBe(3);
 
     // And the tree's controller node reports exactly that fold.
-    const ctrl = node(buildTree(leaves, "bot"), "ctrl:alpha:pmm_1");
+      const ctrl = node(buildTree(leaves), "ctrl:alpha:pmm_1");
     expect(foldLeaves(ctrl.leaves, identity, NOW)).toEqual(whole);
   });
 

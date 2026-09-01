@@ -293,3 +293,21 @@ export function formatConnectorName(name: string) {
     .replace(/_/g, " ")
     .replace(/\b\w/g, (c) => c.toUpperCase());
 }
+
+/**
+ * A bot name with its doubled deploy stamp collapsed.
+ *
+ * A deployed bot is named `<config>-<YYYYMMDD>-<HHMMSS>`, and the deploy path
+ * appends the stamp to a name that already ends in one — so a real fleet
+ * reports `pmm-fleet-btcbrl-global-20260829-121810-20260829-121810`, which is
+ * 54 characters of which 15 are a verbatim repeat. In a 288px rail that is the
+ * difference between reading which bot a row belongs to and reading
+ * `pmm-fleet-btcbrl-glo…`.
+ *
+ * Only an *immediately repeated* stamp is collapsed, so nothing that tells two
+ * runs apart is thrown away: two deploys of one config differ in the stamp
+ * itself, and both keep it.
+ */
+export function shortBotName(name: string): string {
+  return name.replace(/(-\d{8}-\d{6})\1$/, "$1");
+}

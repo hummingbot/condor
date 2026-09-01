@@ -1,7 +1,7 @@
-import { Activity, ChevronDown, ChevronRight, Circle, Layers, Server, Shapes } from "lucide-react";
+import { Activity, ChevronDown, ChevronRight, Circle, Layers } from "lucide-react";
 import { useMemo } from "react";
 
-import { formatCurrencyPnl, formatCurrencyVolume, pnlColor } from "@/lib/formatters";
+import { formatCurrencyPnl, formatCurrencyVolume, pnlColor, shortBotName } from "@/lib/formatters";
 import type { ConvertQuote, PerfNode } from "@/lib/perf-tree";
 import { foldLeaves } from "@/lib/perf-tree";
 
@@ -36,27 +36,37 @@ export function StatusDot({ status }: { status: string }) {
 function NodeIcon({ node, active }: { node: PerfNode; active: boolean }) {
   const tone = active ? "text-[var(--color-primary)]" : "text-[var(--color-text-muted)]";
   if (node.kind === "fleet") return <Layers className={`h-3.5 w-3.5 shrink-0 ${tone}`} />;
-  if (node.kind === "bot") return <Server className={`h-3 w-3 shrink-0 ${tone}`} />;
-  if (node.kind === "type") return <Shapes className={`h-3 w-3 shrink-0 ${tone}`} />;
   if (node.kind === "executor") return <Activity className={`h-3 w-3 shrink-0 ${tone}`} />;
   // A controller's marker is its state, which is the one thing the icon slot
   // can say that the label beside it cannot.
   return <StatusDot status={node.leaves[0]?.status ?? ""} />;
 }
 
-/** What a row says under its name: how many things, or what and where. */
-function subtitle(node: PerfNode): string {
+/**
+ * What a row says under its name: how many things, or what and where.
+ *
+ * A controller row names its bot when more than one is in scope. It used to
+ * hang under a bot node that said so; with the grouping level retired in favour
+ * of the bot bubbles above the tree, the row has to carry that fact itself or
+ * two identically-configured controllers of two different bots become
+ * indistinguishable.
+ */
+function subtitle(node: PerfNode, showBot: boolean): string {
   const n = node.children.length;
   switch (node.kind) {
-    case "fleet":
-      return `${node.leaves.length} in scope · ${n} group${n !== 1 ? "s" : ""}`;
-    case "bot":
-    case "type":
-      return `${n} ${n === 1 ? "entry" : "entries"}`;
+    case "fleet": {
+      const ctrls = node.children.filter((c) => c.kind === "controller").length;
+      return `${node.leaves.length} in scope · ${ctrls} controller${ctrls !== 1 ? "s" : ""}`;
+    }
     case "controller": {
       const leaf = node.leaves[0];
-      const pair = leaf?.pair ?? "";
-      return n > 0 ? `${pair}${pair ? " · " : ""}${n} executor${n !== 1 ? "s" : ""}` : pair;
+      return [
+        leaf?.pair,
+        showBot && leaf?.bot ? shortBotName(leaf.bot) : "",
+        n > 0 ? `${n} executor${n !== 1 ? "s" : ""}` : "",
+      ]
+        .filter(Boolean)
+        .join(" · ");
     }
     case "executor":
       return [node.leaves[0]?.executorType, node.leaves[0]?.pair].filter(Boolean).join(" · ");
@@ -67,9 +77,11 @@ interface RowProps {
   node: PerfNode;
   depth: number;
   activeId: string;
-  collapsed: Set<string>;
+  /** The nodes whose children are drawn. Everything else is shut. */
+  open: Set<string>;
+  showBot: boolean;
   onSelect: (id: string) => void;
-  onToggleCollapse: (id: string) => void;
+  onToggleOpen: (id: string) => void;
   cv: ConvertQuote;
   currencySymbol: string;
   now: number;
@@ -88,9 +100,10 @@ function ScopeRow({
   node,
   depth,
   activeId,
-  collapsed,
+  open,
+  showBot,
   onSelect,
-  onToggleCollapse,
+  onToggleOpen,
   cv,
   currencySymbol,
   now,
@@ -101,7 +114,7 @@ function ScopeRow({
   // report pane uses — a row and the pane it opens cannot disagree.
   const totals = useMemo(() => foldLeaves(node.leaves, cv, now), [node.leaves, cv, now]);
   const hasChildren = node.children.length > 0;
-  const isCollapsed = collapsed.has(node.id);
+  const isOpen = open.has(node.id);
 
   if (compact) {
     return (
@@ -118,11 +131,11 @@ function ScopeRow({
         >
           <NodeIcon node={node} active={active} />
         </button>
-        {!isCollapsed &&
+        {isOpen &&
           node.children.map((child) => (
             <ScopeRow
               key={child.id}
-              {...{ activeId, collapsed, onSelect, onToggleCollapse, cv, currencySymbol, now, compact }}
+              {...{ activeId, open, showBot, onSelect, onToggleOpen, cv, currencySymbol, now, compact }}
               node={child}
               depth={depth + 1}
             />
@@ -139,12 +152,12 @@ function ScopeRow({
       >
         {hasChildren ? (
           <button
-            onClick={() => onToggleCollapse(node.id)}
+            onClick={() => onToggleOpen(node.id)}
             className="px-1.5 text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
-            title={isCollapsed ? "Expand" : "Collapse"}
-            aria-expanded={!isCollapsed}
+            title={isOpen ? "Collapse" : "Expand"}
+            aria-expanded={isOpen}
           >
-            {isCollapsed ? <ChevronRight className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+            {isOpen ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
           </button>
         ) : (
           <span className="w-[26px] shrink-0" />
@@ -172,7 +185,9 @@ function ScopeRow({
             </span>
           </div>
           <div className="mt-0.5 flex items-center gap-2 pl-4.5 text-[10px] text-[var(--color-text-muted)]">
-            <span className="truncate">{subtitle(node)}</span>
+            <span className="truncate" title={subtitle(node, showBot)}>
+              {subtitle(node, showBot)}
+            </span>
             {/* Volume is what tells two similarly-profitable configs apart at a
                 glance, so it rides beside the PnL. */}
             <span className="ml-auto shrink-0 tabular-nums">
@@ -181,11 +196,11 @@ function ScopeRow({
           </div>
         </button>
       </div>
-      {!isCollapsed &&
+      {isOpen &&
         node.children.map((child) => (
           <ScopeRow
             key={child.id}
-            {...{ activeId, collapsed, onSelect, onToggleCollapse, cv, currencySymbol, now, compact }}
+            {...{ activeId, open, showBot, onSelect, onToggleOpen, cv, currencySymbol, now, compact }}
             node={child}
             depth={depth + 1}
           />
@@ -199,16 +214,19 @@ function ScopeRow({
  * the pane beside it reports.
  *
  * It is a picker over a `PerfNode` tree rather than a list of controllers, so
- * fleet, bot, executor type, controller and executor are all the same row drawn
- * at a different depth — which is the whole reason a bot and an executor can be
- * described by the same strip and the same chart (FEAT-086).
+ * the fleet, a controller and an executor are all the same row drawn at a
+ * different depth — which is the whole reason a controller and an executor can
+ * be described by the same strip and the same chart (FEAT-086). Three levels is
+ * all there is: what a row hangs *under* is a bubble above the tree now, not a
+ * chevron the reader has to walk through.
  */
 export function ScopeTree({
   root,
   activeId,
-  collapsed,
+  open,
+  showBot = true,
   onSelect,
-  onToggleCollapse,
+  onToggleOpen,
   cv,
   currencySymbol,
   now,
@@ -216,9 +234,11 @@ export function ScopeTree({
 }: {
   root: PerfNode;
   activeId: string;
-  collapsed: Set<string>;
+  open: Set<string>;
+  /** Whether a controller row names its bot — pointless when only one is in scope. */
+  showBot?: boolean;
   onSelect: (id: string) => void;
-  onToggleCollapse: (id: string) => void;
+  onToggleOpen: (id: string) => void;
   cv: ConvertQuote;
   currencySymbol: string;
   now: number;
@@ -229,9 +249,10 @@ export function ScopeTree({
       node={root}
       depth={0}
       activeId={activeId}
-      collapsed={collapsed}
+      open={open}
+      showBot={showBot}
       onSelect={onSelect}
-      onToggleCollapse={onToggleCollapse}
+      onToggleOpen={onToggleOpen}
       cv={cv}
       currencySymbol={currencySymbol}
       now={now}

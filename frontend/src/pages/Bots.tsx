@@ -302,7 +302,7 @@ export function Bots() {
   } = useRates(quoteCurrencies);
 
   if (legacyRunsTab) {
-    return <Navigate to="/bots?population=terminated&group=bot" replace />;
+    return <Navigate to="/bots?population=terminated" replace />;
   }
 
   if (!server) {

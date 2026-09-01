@@ -14,7 +14,6 @@ import {
   Save,
   ScrollText,
   Server,
-  Shapes,
   SlidersHorizontal,
   Square,
   TerminalSquare,
@@ -33,9 +32,9 @@ import { PnlEvolutionChart } from "@/components/bots/PnlEvolutionChart";
 import { DetailPanel } from "@/components/perf/ExecutorTable";
 import { ExecutorRows, StopConfirmDialog } from "@/components/perf/ExecutorRows";
 import { useExecutorStop } from "@/components/perf/executorActions";
-import { GroupByToggle, PopulationToggle } from "@/components/perf/PopulationToggle";
+import { BubbleGroup, type BubbleOption } from "@/components/perf/FilterBubbles";
+import { PopulationToggle } from "@/components/perf/PopulationToggle";
 import { ScopeTree, StatusDot } from "@/components/perf/ScopeTree";
-import { MultiSelect } from "@/components/ui/MultiSelect";
 import { ArchivedBotDetail } from "@/components/bots/ArchivedBotDetail";
 import {
   api,
@@ -48,7 +47,14 @@ import {
 } from "@/lib/api";
 import { controllerKey } from "@/lib/controller-identity";
 import { configToYaml, CONTROLLER_HIDDEN_KEYS } from "@/lib/configYaml";
-import { formatCurrencyVolume, formatCurrencyPnl, isExecutorActive, pnlColor, toMs } from "@/lib/formatters";
+import {
+  formatCurrencyVolume,
+  formatCurrencyPnl,
+  isExecutorActive,
+  pnlColor,
+  shortBotName,
+  toMs,
+} from "@/lib/formatters";
 import {
   buildTree,
   collectLeaves,
@@ -58,13 +64,11 @@ import {
   leafFromController,
   leafFromExecutor,
   leafFromTerminatedController,
-  parseGroupBy,
   parsePopulation,
   resolveScope,
   runStatus,
   UNATTACHED_BOT,
   visibleNodeIds,
-  type GroupBy,
   type Population,
   type PerfLeaf,
   type PerfNode,
@@ -118,13 +122,16 @@ function parseSide(raw: string): string {
 // ── Scope (READ: what the browser is currently reporting on) ──
 //
 // The sidebar is a *scope picker*, not a controller list: the same panes
-// describe one controller, one bot's controllers folded together, or the whole
-// fleet. Everything downstream — the header, the KPI row, the chart, the
-// positions table, whether a config editor is meaningful at all — is derived
-// from one node of the tree, so there is no second notion of "what is selected".
+// describe one executor, one controller, or everything the bubbles above the
+// tree have left in scope. Everything downstream — the header, the KPI row, the
+// chart, the positions table, whether a config editor is meaningful at all — is
+// derived from one node of the tree, so there is no second notion of "what is
+// selected".
 //
-// A scope is a `PerfNode` id (`all`, `bot:x`, `ctrl:k`, `exec:id`), which lives
-// in the URL so a scope is linkable and survives a reload (FEAT-084).
+// A scope is a `PerfNode` id (`all`, `ctrl:k`, `exec:id`), which lives in the
+// URL so a scope is linkable and survives a reload (FEAT-084). What used to sit
+// between `all` and `ctrl:` — a `bot:`/`type:` grouping row — is a filter now,
+// so a stale link naming one lands on the fleet (see `fallbackChain`).
 
 const FLEET_SCOPE = "all";
 
@@ -578,7 +585,11 @@ export function PerfBrowser({
   // `openDrawer`). Closed by default: a drawer is a thing you occasionally
   // open, and the chart is the thing you came for.
   const [drawer, setDrawer] = useState<null | "config" | "logs">(null);
-  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
+  // Which rows have their children drawn. An allow-list, not a deny-list: the
+  // tree is flat now, so a fleet of fourteen controllers holding a hundred and
+  // nineteen executors would open on all hundred and nineteen if shut had to be
+  // asked for. The root is the one row that starts open.
+  const [open, setOpen] = useState<Set<string>>(() => new Set([FLEET_SCOPE]));
   const [showDeploy, setShowDeploy] = useState(false);
   // The editor is mounted from the first time it is opened and stays mounted
   // (hidden) after that, so its unsaved buffers survive closing it — the same
@@ -628,11 +639,32 @@ export function PerfBrowser({
     });
   }, []);
 
-  // The filters the executors page carried, now narrowing the whole tree rather
-  // than one table: a pair, a set of types and a set of controllers. Local
-  // state, like they were — they say what the reader is looking for right now,
-  // not where they are, which is what the URL carries.
-  const [filters, setFilters] = useState({ pair: "", types: [] as string[], controllers: [] as string[] });
+  /**
+   * What the reader is looking at, as bubbles above the tree.
+   *
+   * These are the filters the executors page carried, split into the three
+   * questions a reader actually asks — *whose*, *what class of controller*,
+   * *what kind of executor* — and they narrow the whole tree rather than one
+   * table under a total that ignored them. The bot and class of a record used
+   * to be a *level* of the tree instead, chosen by a `By bot / By type` toggle;
+   * as filters they combine (several bots at once, one class across all of
+   * them) and they cost the reader no chevron to walk through.
+   *
+   * There were two type filters' worth of confusion in the one `types` list
+   * this replaces: it matched a controller's class and an executor's type
+   * against the same set, so ticking `pmm_simple` silently dropped every
+   * executor and ticking `position_executor` silently dropped every controller.
+   * Two lists, matched against the two vocabularies, is the fix.
+   *
+   * Local state, like they were — they say what the reader is looking for right
+   * now, not where they are, which is what the URL carries.
+   */
+  const [filters, setFilters] = useState({
+    pair: "",
+    bots: [] as string[],
+    ctrlTypes: [] as string[],
+    execTypes: [] as string[],
+  });
   // How far back a terminated fold reaches. It exists for the terminated
   // population alone: a live controller's runtime is its deploy, not a window
   // the reader picks.
@@ -659,7 +691,6 @@ export function PerfBrowser({
   const [searchParams, setSearchParams] = useSearchParams();
   const scopeId = searchParams.get("scope") || FLEET_SCOPE;
   const population = parsePopulation(searchParams.get("population"));
-  const groupBy = parseGroupBy(searchParams.get("group"));
 
   /** Write one view parameter, dropping it when it is the default. */
   const setParam = useCallback(
@@ -797,65 +828,160 @@ export function PerfBrowser({
         }
       }
 
-      // The filters narrow the leaf set, which means they narrow the *tree*:
-      // the sidebar, the strip, the chart and the rows all describe the same
-      // filtered population rather than a table being filtered under a total
-      // that is not.
-      const pair = filters.pair.trim().toLowerCase();
-      if (!pair && filters.types.length === 0 && filters.controllers.length === 0) return all;
-      return all.filter(
-        (leaf) =>
-          (!pair || leaf.pair.toLowerCase().includes(pair)) &&
-          (filters.types.length === 0 || filters.types.includes(leaf.executorType)) &&
-          (filters.controllers.length === 0 ||
-            (!!leaf.controllerId && filters.controllers.includes(leaf.controllerId))),
-      );
+      return all;
     },
-    [controllers, executors, runs, runByBot, terminatedControllers, botByController, attribute, period, now, filters],
+    [controllers, executors, runByBot, terminatedControllers, botByController, attribute, period, now],
   );
 
-  const leaves = useMemo(() => leavesFor(population), [leavesFor, population]);
+  /**
+   * The class of controller behind each config id, for the two questions the
+   * bubbles ask that a leaf cannot answer alone: which class a *controller* is,
+   * and which class an *executor's* controller was.
+   */
+  const ctrlClassById = useMemo(() => {
+    const classes = new Map<string, string>();
+    for (const c of population === "running" ? controllersProp : terminatedControllers) {
+      const id = c.controller_id || c.controller_name;
+      if (id && c.controller_name) classes.set(id, c.controller_name);
+    }
+    return classes;
+  }, [population, controllersProp, terminatedControllers]);
 
   /**
-   * What the two dropdowns offer.
+   * Narrow a population to what the bubbles asked for.
+   *
+   * The filters narrow the leaf set, which means they narrow the *tree*: the
+   * sidebar, the strip, the chart and the rows all describe the same filtered
+   * population rather than a table being filtered under a total that is not.
+   *
+   * Executor types are the one rule with a twist in it. A controller record
+   * covers every executor it ever ran, of every type, so it cannot be narrowed
+   * to one of them — asking for `grid_executor` and keeping the controller leaf
+   * would report the controller's whole trading under the name of one type of
+   * executor. So picking executor types reports *the executors*: the controller
+   * spine drops out, and each controller row folds the matching executors
+   * beneath it instead (see `buildTree`'s spine rule, which does exactly this
+   * for a controller that has no leaf of its own).
+   */
+  const applyFilters = useCallback(
+    (all: PerfLeaf[]): PerfLeaf[] => {
+      const pair = filters.pair.trim().toLowerCase();
+      const { bots: wantBots, ctrlTypes, execTypes } = filters;
+      if (!pair && !wantBots.length && !ctrlTypes.length && !execTypes.length) return all;
+      return all.filter((leaf) => {
+        if (pair && !leaf.pair.toLowerCase().includes(pair)) return false;
+        if (wantBots.length && !wantBots.includes(leaf.bot)) return false;
+        if (ctrlTypes.length) {
+          const cls =
+            leaf.kind === "controller"
+              ? leaf.executorType
+              : ctrlClassById.get(leaf.controllerId) ?? "";
+          if (!ctrlTypes.includes(cls)) return false;
+        }
+        if (execTypes.length) {
+          if (leaf.kind === "controller") return false;
+          if (!execTypes.includes(leaf.executorType)) return false;
+        }
+        return true;
+      });
+    },
+    [filters, ctrlClassById],
+  );
+
+  /** The population as it stands, and what the bubbles left of it. */
+  const rawLeaves = useMemo(() => leavesFor(population), [leavesFor, population]);
+  const leaves = useMemo(() => applyFilters(rawLeaves), [applyFilters, rawLeaves]);
+
+  /**
+   * What the three bubble groups offer, and how big each bucket is.
    *
    * Derived from the population *before* the filters are applied, so ticking a
-   * type never removes the other types from the list it was ticked in — a
-   * filter that eats its own options cannot be undone without clearing it.
+   * bubble never removes the other bubbles from the row it was ticked in — a
+   * filter that eats its own options cannot be undone without clearing it — and
+   * a count never renumbers itself as a consequence of being ticked.
+   *
+   * Bots are ordered by what started most recently, which on the terminated
+   * side is the order a reader arrives looking for: the run that just finished
+   * is the one they came about. Classes and types are alphabetical, being
+   * vocabularies rather than events.
    */
   const filterOptions = useMemo(() => {
-    const types = new Set<string>();
-    const controllers = new Set<string>();
-    const source =
-      population === "running"
-        ? executors.filter((ex) => isExecutorActive(ex.status))
-        : executors.filter((ex) => !isExecutorActive(ex.status));
-    for (const ex of source) {
-      if (ex.type) types.add(ex.type);
-      if (ex.controller_id) controllers.add(ex.controller_id);
+    const tally = (key: (leaf: PerfLeaf) => string, from: PerfLeaf[]) => {
+      const counts = new Map<string, number>();
+      for (const leaf of from) {
+        const value = key(leaf);
+        if (!value) continue;
+        counts.set(value, (counts.get(value) ?? 0) + 1);
+      }
+      return counts;
+    };
+
+    const latestStart = new Map<string, number>();
+    for (const leaf of rawLeaves) {
+      const at = leaf.startedAt ?? 0;
+      if (at > (latestStart.get(leaf.bot) ?? -1)) latestStart.set(leaf.bot, at);
     }
-    // The controllers of the population, so the dropdown offers the spine of
-    // the tree rather than only what its executor children happen to name.
-    for (const c of population === "running" ? controllersProp : terminatedControllers) {
-      if (c.controller_name) types.add(c.controller_name);
-      const id = c.controller_id || c.controller_name;
-      if (id) controllers.add(id);
-    }
-    return { types: [...types].sort(), controllers: [...controllers].sort() };
-  }, [population, executors, controllersProp, terminatedControllers]);
+    const botCounts = tally((leaf) => leaf.bot, rawLeaves);
+    const bots: BubbleOption[] = [...botCounts]
+      .map(([value, count]) => ({ value, label: shortBotName(value), count }))
+      .sort((a, b) => (latestStart.get(b.value) ?? 0) - (latestStart.get(a.value) ?? 0));
+
+    const alpha = (counts: Map<string, number>): BubbleOption[] =>
+      [...counts]
+        .map(([value, count]) => ({ value, label: value, count }))
+        .sort((a, b) => a.label.localeCompare(b.label));
+
+    return {
+      bots,
+      // A controller's own class, counted over controllers — an executor
+      // inherits its controller's class rather than carrying one, so counting
+      // it here would report the same controller once per executor under it.
+      ctrlTypes: alpha(
+        tally(
+          (leaf) => (leaf.kind === "controller" ? leaf.executorType : ""),
+          rawLeaves,
+        ),
+      ),
+      execTypes: alpha(
+        tally((leaf) => (leaf.kind === "executor" ? leaf.executorType : ""), rawLeaves),
+      ),
+    };
+  }, [rawLeaves]);
 
   const filtersActive =
-    !!filters.pair.trim() || filters.types.length > 0 || filters.controllers.length > 0;
+    !!filters.pair.trim() ||
+    filters.bots.length > 0 ||
+    filters.ctrlTypes.length > 0 ||
+    filters.execTypes.length > 0;
+
+  /**
+   * The one bot every row on screen belongs to, when there is one.
+   *
+   * A bot used to be a node you could select, and selecting it is what put its
+   * name in the header and its actions — stop, logs, open archive, delete run —
+   * beside them. With the bot level retired, narrowing the bubbles to a single
+   * bot *is* that selection: the fleet row folds exactly that bot's records, so
+   * it is that bot's report and gets that bot's buttons.
+   *
+   * Read off the population rather than off the filter, so a bot that is alone
+   * on the server needs no bubble ticked to be recognised as itself.
+   */
+  const soloBot = useMemo(() => {
+    const seen = new Set(leaves.map((leaf) => leaf.bot));
+    return seen.size === 1 ? [...seen][0] : undefined;
+  }, [leaves]);
+  const soloRealBot = soloBot && soloBot !== UNATTACHED_BOT ? soloBot : undefined;
 
   /** What the fleet row is called, which depends on what is under it. */
   const rootLabel = useCallback(
-    (which: Population) => (which === "running" ? "All controllers" : "All closed"),
+    (which: Population, bot?: string) =>
+      bot ? shortBotName(bot) : which === "running" ? "All controllers" : "All closed",
     [],
   );
 
   const tree = useMemo(
-    () => buildTree(leaves, groupBy, rootLabel(population)),
-    [leaves, groupBy, population, rootLabel],
+    () => buildTree(leaves, rootLabel(population, soloRealBot)),
+    [leaves, population, soloRealBot, rootLabel],
   );
   const nodes = useMemo(() => indexTree(tree), [tree]);
 
@@ -868,33 +994,32 @@ export function PerfBrowser({
   const scope = useMemo(() => nodes.get(effectiveScopeId) ?? tree, [nodes, effectiveScopeId, tree]);
 
   /**
-   * Change the population or the grouping, and keep the reader where they were.
+   * Change the population, and keep the reader where they were.
    *
-   * Both switches rebuild the tree, so the node that was selected may not exist
+   * The switch rebuilds the tree, so the node that was selected may not exist
    * in the next one. Rather than resetting to the fleet, the next tree is built
    * *first* and the scope re-aimed against it: kept when it survives, and
    * otherwise moved to the nearest surviving ancestor, with the selected node's
    * own leaf supplying the ancestry an id cannot carry on its own (an executor
    * id deliberately says nothing about where it hangs, so that the same
-   * executor keeps the same id in both populations and both groupings).
+   * executor keeps the same id in both populations).
    *
-   * The three parameters are written in one go, because writing them one at a
-   * time would route through a tree neither the old nor the new view describes.
+   * The population and the scope are written in one go, because writing them
+   * one at a time would route through a tree neither view describes.
    */
   const switchView = useCallback(
-    (next: { population?: Population; group?: GroupBy }) => {
-      const nextPopulation = next.population ?? population;
-      const nextGroup = next.group ?? groupBy;
-      if (nextPopulation === population && nextGroup === groupBy) return;
-      const nextTree = buildTree(leavesFor(nextPopulation), nextGroup, rootLabel(nextPopulation));
+    (nextPopulation: Population) => {
+      if (nextPopulation === population) return;
+      const nextTree = buildTree(
+        applyFilters(leavesFor(nextPopulation)),
+        rootLabel(nextPopulation),
+      );
       const aimed = resolveScope(indexTree(nextTree), effectiveScopeId, scope.leaves[0]);
       setSearchParams(
         (prev) => {
           const params = new URLSearchParams(prev);
           if (nextPopulation === "running") params.delete("population");
           else params.set("population", nextPopulation);
-          if (nextGroup === "bot") params.delete("group");
-          else params.set("group", nextGroup);
           if (aimed === FLEET_SCOPE) params.delete("scope");
           else params.set("scope", aimed);
           return params;
@@ -902,13 +1027,9 @@ export function PerfBrowser({
         { replace: true },
       );
     },
-    [population, groupBy, leavesFor, rootLabel, effectiveScopeId, scope, setSearchParams],
+    [population, leavesFor, applyFilters, rootLabel, effectiveScopeId, scope, setSearchParams],
   );
-  const setPopulation = useCallback(
-    (value: Population) => switchView({ population: value }),
-    [switchView],
-  );
-  const setGroupBy = useCallback((value: GroupBy) => switchView({ group: value }), [switchView]);
+  const setPopulation = switchView;
 
   /**
    * The finished run this scope's chart is about, if any.
@@ -920,9 +1041,9 @@ export function PerfBrowser({
    */
   const scopeRun = useMemo(() => {
     if (population !== "terminated") return undefined;
-    const bot = scope.kind === "bot" ? scope.label : scope.leaves[0]?.bot;
+    const bot = scope.kind === "fleet" ? soloRealBot : scope.leaves[0]?.bot;
     return bot ? runByBot.get(bot) : undefined;
-  }, [population, scope, runByBot]);
+  }, [population, scope, soloRealBot, runByBot]);
 
   /**
    * That run's sampled history, walked once by Condor and cached for ever.
@@ -1011,17 +1132,17 @@ export function PerfBrowser({
   const activeExec =
     scope.kind === "executor" ? (scope.leaves[0]?.source as ExecutorInfo | undefined) : undefined;
   /**
-   * The run a terminated bot scope is reporting on.
+   * The run the terminated fleet row is reporting on.
    *
-   * A finished run *is* a bot node now (FEAT-089) — the `runs` branch it used
-   * to hang under is gone — so the two actions that belonged to a run, opening
-   * its archive and deleting it, belong to the bot scope that folds its
-   * controllers. Undefined for `(unattached)`, which is not a run and has
-   * neither.
+   * A finished run has no node of its own — the `runs` branch it used to hang
+   * under went in FEAT-089, and the bot node that replaced it went with the
+   * grouping level — so the two actions that belong to a run, opening its
+   * archive and deleting it, belong to the fleet row *when that row is exactly
+   * one run*. Undefined for `(unattached)`, which is not a run and has neither.
    */
   const activeRun =
-    population === "terminated" && scope.kind === "bot"
-      ? runByBot.get(scope.label)
+    population === "terminated" && scope.kind === "fleet" && soloRealBot
+      ? runByBot.get(soloRealBot)
       : undefined;
 
   /** The executors under this scope, whatever level it sits at. */
@@ -1057,10 +1178,12 @@ export function PerfBrowser({
     },
   });
 
-  // ── What a bot scope owns: the bot itself, its logs, and stopping it ──
+  // ── What a single-bot scope owns: the bot itself, its logs, and stopping it ──
 
   const activeBot =
-    scope.kind === "bot" ? bots.find((b) => b.bot_name === scope.label) : undefined;
+    scope.kind === "fleet" && soloRealBot
+      ? bots.find((b) => b.bot_name === soloRealBot)
+      : undefined;
   const botStopping = activeBot?.status === "stopping";
 
   // The bot is the mutation's argument rather than something it reads off the
@@ -1115,7 +1238,45 @@ export function PerfBrowser({
 
   // ── Keyboard navigation over the picker, in the order it is drawn ──
 
-  const navItems = useMemo(() => visibleNodeIds(tree, collapsed), [tree, collapsed]);
+  /** The controller the selected row hangs under, when the selection is an executor. */
+  const selectedParent = useMemo(() => {
+    const node = nodes.get(effectiveScopeId);
+    return node?.kind === "executor" ? controllerNodeId(node.leaves[0]) : null;
+  }, [nodes, effectiveScopeId]);
+
+  /**
+   * What is actually drawn open, which is what the reader opened *plus* the
+   * branch holding the selection.
+   *
+   * A controller starts shut, so a `?scope=exec:…` link — or a scope that
+   * survived a filter change by falling back to its controller — would land on
+   * a row inside a branch nobody had opened: highlighted in the panes, invisible
+   * in the picker, and unreachable by the arrow keys, which walk what is drawn.
+   * Derived rather than written back into `open` from an effect, so the state
+   * stays the reader's own record of what they opened.
+   */
+  const openRows = useMemo(
+    () => (selectedParent && !open.has(selectedParent) ? new Set(open).add(selectedParent) : open),
+    [open, selectedParent],
+  );
+
+  const toggleOpen = useCallback(
+    (id: string) => {
+      setOpen((prev) => {
+        const next = new Set(prev);
+        if (next.has(id)) next.delete(id);
+        else next.add(id);
+        return next;
+      });
+      // Shutting the branch that holds the selection takes the selection up
+      // with it. Without this the row would be hidden and re-opened in the same
+      // click by `openRows`, and the chevron would read as broken.
+      if (selectedParent === id && openRows.has(id)) setScope(id);
+    },
+    [selectedParent, openRows, setScope],
+  );
+
+  const navItems = useMemo(() => visibleNodeIds(tree, openRows), [tree, openRows]);
   const navIdx = navItems.indexOf(effectiveScopeId);
 
   const goUp = useCallback(() => {
@@ -1125,15 +1286,6 @@ export function PerfBrowser({
   const goDown = useCallback(() => {
     if (navIdx >= 0 && navIdx < navItems.length - 1) setScope(navItems[navIdx + 1]);
   }, [navIdx, navItems, setScope]);
-
-  const toggleCollapse = useCallback((id: string) => {
-    setCollapsed((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }, []);
 
   // Escape used to close the browser back onto the page behind it. There is no
   // page behind it any more — it *is* `/bots` — so only the arrows are left,
@@ -1358,18 +1510,23 @@ export function PerfBrowser({
    * Tell the chat what is actually on screen (FEAT-059, FEAT-060).
    *
    * Every one of these is a choice the reader made that no cache holds: which
-   * population, how the tree is grouped, which node is selected, what the
-   * filters left in it and how far back the window reaches. Without them the
-   * block invites an answer about the whole fleet derived from a filtered
-   * slice of one population of it.
+   * population, which node is selected, what the bubbles left in it and how far
+   * back the window reaches. Without them the block invites an answer about the
+   * whole fleet derived from a filtered slice of one population of it.
    */
   useViewFacts(() => {
+    /** `bot alpha/beta`, or `bot 7 selected` once a list stops being readable. */
+    const picked = (noun: string, values: string[]) =>
+      values.length === 0
+        ? ""
+        : values.length <= 3
+          ? `${noun} ${values.join("/")}`
+          : `${noun} ${values.length} selected`;
     const chips = [
       filters.pair.trim() ? `pair ~ "${filters.pair.trim()}"` : "",
-      filters.types.length ? `type ${filters.types.join("/")}` : "",
-      filters.controllers.length
-        ? `controller ${filters.controllers.length === 1 ? filters.controllers[0] : `${filters.controllers.length} selected`}`
-        : "",
+      picked("bot", filters.bots),
+      picked("controller type", filters.ctrlTypes),
+      picked("executor type", filters.execTypes),
     ].filter(Boolean);
 
     const subject = activeCtrl
@@ -1379,7 +1536,9 @@ export function PerfBrowser({
         : activeRun
           ? `the finished run of bot ${activeRun.bot_name}`
           : scope.kind === "fleet"
-            ? `all ${plural(scope.leaves.length, scopeNoun)} across ${tree.children.length} groups`
+            ? soloRealBot
+              ? `${plural(scope.leaves.length, scopeNoun)} of bot ${soloRealBot}`
+              : `all ${plural(scope.leaves.length, scopeNoun)} in scope`
             : `${plural(scope.leaves.length, scopeNoun)} under ${scope.kind} "${scope.label}"`;
 
     return {
@@ -1389,7 +1548,6 @@ export function PerfBrowser({
       subject,
       onScreen: {
         population,
-        grouping: groupBy === "bot" ? "by bot" : "by type",
         scope: effectiveScopeId,
         // Said either way round: "none" is a fact about the tree, and leaving
         // it out reads as "filters unknown" rather than "showing everything".
@@ -1476,11 +1634,13 @@ export function PerfBrowser({
           isCompact ? "w-12" : "w-72"
         }`}
       >
-        {/* Header: what is in scope, and how it is arranged.
+        {/* Header: what is in scope, and what has been narrowed out of it.
 
-            Both toggles live above the tree because both describe the tree
-            rather than the report — the panes to the right are the same panes
-            whichever way these are set, which is the point (FEAT-086). */}
+            Everything here describes the *tree* rather than the report — the
+            panes to the right are the same panes whichever way these are set,
+            which is the point (FEAT-086). The bubbles are where the `By bot /
+            By type` toggle used to be, and they do the job it did without
+            spending a level of the tree on it. */}
         <div className="shrink-0 border-b border-[var(--color-border)]">
           <div className="flex items-center justify-between px-3 py-2.5">
             {!isCompact && (
@@ -1496,10 +1656,12 @@ export function PerfBrowser({
               {isCompact ? <ChevronRight className="h-3.5 w-3.5" /> : <ChevronLeft className="h-3.5 w-3.5" />}
             </button>
           </div>
+          {/* Capped and scrollable: three expanded bubble groups over a
+              hundred-run history would otherwise push the tree off a short
+              window, and the tree is the thing the sidebar is for. */}
           {!isCompact && (
-            <div className="flex flex-col gap-1.5 px-2 pb-2">
+            <div className="flex max-h-[45vh] flex-col gap-1.5 overflow-y-auto scrollbar-thin px-2 pb-2">
               <PopulationToggle population={population} onChange={setPopulation} />
-              <GroupByToggle groupBy={groupBy} onChange={setGroupBy} />
 
               {/* The window a terminated fold reaches back over. Offered here
                   and not for the live fleet, whose window is its own deploy —
@@ -1534,41 +1696,61 @@ export function PerfBrowser({
                 placeholder="Filter pair…"
                 className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1 text-[11px] transition-colors hover:border-[var(--color-primary)]/50 focus:border-[var(--color-primary)] focus:outline-none"
               />
-              <div className="flex gap-1 [&>*]:min-w-0 [&_button]:w-full [&_button]:px-2 [&_button]:py-1 [&_button]:text-[11px]">
-                <MultiSelect
-                  options={filterOptions.types}
-                  selected={filters.types}
-                  onChange={(v) => setFilters((f) => ({ ...f, types: v }))}
-                  placeholder="All types"
+
+              {/* One bubble row per question a reader asks of a fleet. Each is
+                  drawn only when it has something to choose between: a single
+                  bot, or a terminated side whose controllers all report the
+                  same (unknown) class, is not a filter. */}
+              {filterOptions.bots.length > 1 && (
+                <BubbleGroup
+                  title="Bots"
+                  hint="Which bots' records are in scope. Narrow to exactly one and the row below becomes that bot, with its own actions."
+                  options={filterOptions.bots}
+                  selected={filters.bots}
+                  onChange={(v) => setFilters((f) => ({ ...f, bots: v }))}
+                  previewCount={6}
                 />
-                <MultiSelect
-                  options={filterOptions.controllers}
-                  selected={filters.controllers}
-                  onChange={(v) => setFilters((f) => ({ ...f, controllers: v }))}
-                  placeholder="All controllers"
+              )}
+              {filterOptions.ctrlTypes.length > 1 && (
+                <BubbleGroup
+                  title="Controller type"
+                  hint="The class each controller is: pmm_simple, grid_strike, and so on."
+                  options={filterOptions.ctrlTypes}
+                  selected={filters.ctrlTypes}
+                  onChange={(v) => setFilters((f) => ({ ...f, ctrlTypes: v }))}
                 />
-              </div>
+              )}
+              {filterOptions.execTypes.length > 1 && (
+                <BubbleGroup
+                  title="Executor type"
+                  hint="Picking one reports the executors themselves: a controller record covers every type it ever ran, so it steps aside and each row folds the matching executors instead."
+                  options={filterOptions.execTypes}
+                  selected={filters.execTypes}
+                  onChange={(v) => setFilters((f) => ({ ...f, execTypes: v }))}
+                />
+              )}
               {filtersActive && (
                 <button
                   type="button"
-                  onClick={() => setFilters({ pair: "", types: [], controllers: [] })}
+                  onClick={() => setFilters({ pair: "", bots: [], ctrlTypes: [], execTypes: [] })}
                   className="self-start text-[10px] text-[var(--color-text-muted)] underline-offset-2 hover:text-[var(--color-text)] hover:underline"
                 >
-                  Clear filters
+                  Clear all filters
                 </button>
               )}
             </div>
           )}
         </div>
 
-        {/* Scope list: fleet → bot → controller */}
+        {/* Scope list: fleet → controller → executor, and nothing else */}
         <div ref={sidebarRef} className="flex-1 overflow-y-auto scrollbar-thin">
           <ScopeTree
             root={tree}
             activeId={effectiveScopeId}
-            collapsed={collapsed}
+            open={openRows}
+            showBot={!soloBot}
             onSelect={setScope}
-            onToggleCollapse={toggleCollapse}
+            onToggleOpen={toggleOpen}
             cv={cv}
             currencySymbol={currencySymbol}
             now={now}
@@ -1666,15 +1848,18 @@ export function PerfBrowser({
                 </div>
               </>
             ) : activeRun ? (
-              // A finished run is a bot node now, so the header a run used to
-              // get under the `runs` branch is the header this bot scope gets:
-              // the same name, the same provenance line, the same status. The
-              // controller count comes from the tree rather than from the run
-              // record, whose `num_controllers` is aggregated off the *live*
-              // fleet and is therefore zero for everything in here.
+              // A finished run has no node of its own, so the header a run used
+              // to get under the `runs` branch is the header the fleet row gets
+              // when the bubbles have narrowed it to that one run: the same
+              // name, the same provenance line, the same status. The controller
+              // count comes from the tree rather than from the run record,
+              // whose `num_controllers` is aggregated off the *live* fleet and
+              // is therefore zero for everything in here.
               <>
                 <div className="truncate">
-                  <h2 className="text-sm font-semibold truncate">{activeRun.bot_name}</h2>
+                  <h2 className="text-sm font-semibold truncate" title={activeRun.bot_name}>
+                    {shortBotName(activeRun.bot_name)}
+                  </h2>
                   <span className="text-[10px] text-[var(--color-text-muted)] block truncate">
                     {[
                       activeRun.account_name,
@@ -1723,29 +1908,29 @@ export function PerfBrowser({
                 </div>
               </>
             ) : (
-              // Every other scope — the fleet, a bot, an executor type, the run
-              // history, or a controller reconstructed out of closed executors.
-              // One header for all of them: what it is, and what it folds.
+              // Every other scope — the whole fleet, one live bot's share of
+              // it, or a controller reconstructed out of closed executors. One
+              // header for all of them: what it is, and what it folds.
               <div className="truncate">
                 <h2 className="text-sm font-semibold truncate flex items-center gap-2">
-                  {scope.kind === "bot" ? (
+                  {soloRealBot && scope.kind === "fleet" ? (
                     <Server className="h-3.5 w-3.5 shrink-0 text-[var(--color-text-muted)]" />
-                  ) : scope.kind === "type" ? (
-                    <Shapes className="h-3.5 w-3.5 shrink-0 text-[var(--color-text-muted)]" />
                   ) : (
                     <Layers className="h-3.5 w-3.5 shrink-0 text-[var(--color-text-muted)]" />
                   )}
-                  <span className="truncate">
-                    {scope.kind === "fleet"
-                      ? population === "running"
-                        ? "All controllers combined"
-                        : "Everything that has finished"
-                      : scope.label}
+                  <span className="truncate" title={soloRealBot ?? scope.label}>
+                    {scope.kind !== "fleet"
+                      ? scope.label
+                      : soloRealBot
+                        ? shortBotName(soloRealBot)
+                        : population === "running"
+                          ? "All controllers combined"
+                          : "Everything that has finished"}
                   </span>
                 </h2>
                 <span className="text-[10px] text-[var(--color-text-muted)] block truncate">
                   {plural(scopedLeaves.length, scopeNoun)} aggregated
-                  {scope.kind === "fleet" && ` · ${plural(tree.children.length, "group")}`}
+                  {filtersActive && " · filtered"}
                 </span>
                 <UnpricedNote leaves={unpricedLeaves} />
               </div>

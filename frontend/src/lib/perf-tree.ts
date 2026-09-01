@@ -18,23 +18,16 @@ import { isExecutorActive, toMs } from "@/lib/formatters";
 /** Which set of records is in scope: what is live, or what has finished. */
 export type Population = "running" | "terminated";
 
-/** How the sidebar tree is built between the fleet and its controllers. */
-export type GroupBy = "bot" | "type";
-
 /**
- * The view lives in the URL, so a population, a grouping and a scope together
- * are a link — and the chat can report what is actually on screen (FEAT-060).
+ * The view lives in the URL, so a population and a scope together are a link —
+ * and the chat can report what is actually on screen (FEAT-060).
  *
- * Both parsers fall back to the default rather than throwing: a hand-edited or
- * stale query parameter should land the reader on the live fleet, which is the
- * page they asked for, not on an error.
+ * Falls back to the default rather than throwing: a hand-edited or stale query
+ * parameter should land the reader on the live fleet, which is the page they
+ * asked for, not on an error.
  */
 export function parsePopulation(raw: string | null): Population {
   return raw === "terminated" ? "terminated" : "running";
-}
-
-export function parseGroupBy(raw: string | null): GroupBy {
-  return raw === "type" ? "type" : "bot";
 }
 
 /**
@@ -49,7 +42,7 @@ export function parseGroupBy(raw: string | null): GroupBy {
  */
 export const UNATTACHED_BOT = "(unattached)";
 
-/** The label a node falls back to when the field it groups on is empty. */
+/** The label a leaf falls back to when the field it is bucketed by is empty. */
 const UNKNOWN_LABEL = "—";
 
 /**
@@ -70,19 +63,21 @@ export interface PerfLeaf {
   kind: "controller" | "executor";
   /** What the sidebar and the row tables call it. */
   label: string;
-  /** Where it hangs under `groupBy: "bot"`. */
+  /** Which bot ran it — the sidebar's bot bubbles filter on this. */
   bot: string;
   /** Which controller it belongs to; `""` for a leaf that belongs to none. */
   controllerId: string;
   /**
-   * Where it hangs under `groupBy: "type"` — the class of thing it is.
+   * The class of thing it is — what the sidebar's type bubbles filter on.
    *
    * A controller's is its controller type (`pmm_simple`, `grid_strike`); an
-   * executor's is its executor type (`position_executor`, `grid_executor`). The
-   * design doc said "executor type" for both, but a controller has no executor
-   * type of its own: it has as many as its executors have, so placing it under
-   * one would mean picking a winner among them (or inventing a `mixed` bucket
-   * that answers nothing). Its own class is the fact it actually carries.
+   * executor's is its executor type (`position_executor`, `grid_executor`).
+   * They are deliberately the *same* field holding two different vocabularies,
+   * because a controller has no executor type of its own: it has as many as its
+   * executors have, so naming one would mean picking a winner among them. Which
+   * vocabulary a value belongs to is told by the leaf's `kind`, which is why the
+   * sidebar offers controller classes and executor types as two separate bubble
+   * groups rather than one list that half the population can never match.
    */
   executorType: string;
   connector: string;
@@ -272,10 +267,10 @@ export function runStatus(r: BotRunInfo): string {
 
 // ── The tree ──
 
-export type NodeKind = "fleet" | "bot" | "type" | "controller" | "executor";
+export type NodeKind = "fleet" | "controller" | "executor";
 
 export interface PerfNode {
-  /** `all` | `bot:x` | `type:y` | `ctrl:k` | `exec:id` */
+  /** `all` | `ctrl:k` | `exec:id` */
   id: string;
   kind: NodeKind;
   label: string;
@@ -313,47 +308,32 @@ function makeNode(id: string, kind: NodeKind, label: string): PerfNode {
 /**
  * Build the scope tree over a population's leaves.
  *
- * The shape is fleet → group → controller → executor, where the group level is
- * the bot or the leaf's own class depending on `groupBy`. **One shape, both
- * populations**: a finished run is a bot node with the controllers it ran
- * beneath it, exactly as a live bot is, which is what lets one sidebar, one
- * fold and one set of panes describe a run whether it is trading or over
- * (FEAT-089).
+ * The shape is fleet → controller → executor, and those are the only three
+ * levels there are. **One shape, both populations**: a finished run's
+ * controllers sit in the list exactly as a live bot's do, which is what lets
+ * one sidebar, one fold and one set of panes describe a controller whether it
+ * is trading or over (FEAT-089).
  *
- * There used to be a second shape beside it — a `runs` branch that folded
- * separately and did not roll up — because a run's totals and the archived
- * executors' totals described overlapping trading that could not be
- * de-duplicated here. That is no longer true, and the reason is the spine rule
- * below rather than anything about runs: a run's trading arrives as controller
- * leaves, a controller node folds its own leaf and not its executor children,
- * so the same trading cannot be counted at both levels. The executors that
- * belong to no run are disjoint from every controller record by construction,
- * so a fleet total that folds both counts nothing twice.
+ * There used to be a grouping level between the fleet and its controllers —
+ * bot, or class of thing — chosen by a `By bot / By type` toggle. It is gone,
+ * and *not* because grouping stopped being useful: a real fleet puts a dozen
+ * controllers under one bot and a hundred finished runs under a period, so
+ * every controller the reader actually wanted sat two chevrons deep behind a
+ * row that told them nothing they did not already know. Bot and class are
+ * **filters** now, drawn as bubbles above this tree, and narrowing the leaf set
+ * narrows the tree — which is the same answer the grouping gave, one click
+ * shallower and combinable (several bots at once, a class across bots).
  *
- * Only the group level depends on `groupBy`. Controller and executor node ids
- * are the same in both trees, which is what lets a selection survive the
- * grouping switch untouched.
+ * An executor whose controller is gone still hangs directly off the fleet,
+ * where it used to hang off an `(unattached)` bot node: it is a real record,
+ * and one the reader goes looking for.
  */
-export function buildTree(leaves: PerfLeaf[], groupBy: GroupBy, rootLabel = "All"): PerfNode {
+export function buildTree(leaves: PerfLeaf[], rootLabel = "All"): PerfNode {
   const fleet = makeNode("all", "fleet", rootLabel);
-  const groups = new Map<string, PerfNode>();
   const controllers = new Map<string, PerfNode>();
 
   // Insertion order is the caller's order, which is the order the sidebar
   // draws — the page sorts its controllers before handing them over.
-  const groupFor = (leaf: PerfLeaf): PerfNode => {
-    const raw = groupBy === "bot" ? leaf.bot : leaf.executorType;
-    const label = raw || UNKNOWN_LABEL;
-    const id = `${groupBy}:${label}`;
-    let node = groups.get(id);
-    if (!node) {
-      node = makeNode(id, groupBy === "bot" ? "bot" : "type", label);
-      groups.set(id, node);
-      fleet.children.push(node);
-    }
-    return node;
-  };
-
   const controllerFor = (leaf: PerfLeaf): PerfNode | null => {
     const id = controllerNodeId(leaf);
     if (!id) return null;
@@ -361,7 +341,7 @@ export function buildTree(leaves: PerfLeaf[], groupBy: GroupBy, rootLabel = "All
     if (!node) {
       node = makeNode(id, "controller", leaf.controllerId);
       controllers.set(id, node);
-      groupFor(leaf).children.push(node);
+      fleet.children.push(node);
     }
     return node;
   };
@@ -379,7 +359,7 @@ export function buildTree(leaves: PerfLeaf[], groupBy: GroupBy, rootLabel = "All
     }
     const node = makeNode(leafNodeId(leaf), "executor", leaf.label);
     node.leaves = [leaf];
-    const parent = controllerFor(leaf) ?? groupFor(leaf);
+    const parent = controllerFor(leaf) ?? fleet;
     parent.children.push(node);
   }
 
@@ -453,12 +433,21 @@ export function ancestorChain(root: PerfNode, id: string): string[] {
   return path.reverse();
 }
 
-/** Every node id in the order the tree draws them, skipping what is collapsed. */
-export function visibleNodeIds(root: PerfNode, collapsed: ReadonlySet<string>): string[] {
+/**
+ * Every node id in the order the tree draws them, skipping what is shut.
+ *
+ * Openness is an allow-list rather than a deny-list, and that is the shape the
+ * flat tree needs: a fleet of fourteen controllers holding a hundred and
+ * nineteen executors would otherwise draw all hundred and nineteen on arrival,
+ * and the reader would have to shut every controller to see the list they came
+ * for. Shut is the default for a node that has never been opened; the caller
+ * seeds the root.
+ */
+export function visibleNodeIds(root: PerfNode, open: ReadonlySet<string>): string[] {
   const ids: string[] = [];
   const walk = (node: PerfNode) => {
     ids.push(node.id);
-    if (collapsed.has(node.id)) return;
+    if (!open.has(node.id)) return;
     node.children.forEach(walk);
   };
   walk(root);
@@ -469,36 +458,30 @@ export function visibleNodeIds(root: PerfNode, collapsed: ReadonlySet<string>): 
  * Where a scope could fall back to, nearest first, without consulting the tree
  * it used to live in.
  *
- * Switching population or grouping rebuilds the tree, and a selection the new
- * one does not contain has to land *somewhere*. Resetting to the fleet throws
- * the reader's place away, and remembering the previous tree's path would mean
- * carrying a copy of the old tree through every render.
+ * Switching population or changing a filter rebuilds the tree, and a selection
+ * the new one does not contain has to land *somewhere*. Resetting to the fleet
+ * throws the reader's place away, and remembering the previous tree's path
+ * would mean carrying a copy of the old tree through every render.
  *
  * Neither is needed, because a node id already says where it hangs: a
- * controller id names its bot, and both group levels are named after the value
- * they group on. The one id that says
- * nothing on its own is an executor's — deliberately, so that the *same*
- * executor keeps the *same* id whether it is live or archived, and whichever
- * way the tree is grouped, which is what lets the common case need no fallback
- * at all. Its leaf is passed in when one is known and supplies the rest.
+ * controller id names its bot and its config. The one id that says nothing on
+ * its own is an executor's — deliberately, so that the *same* executor keeps
+ * the *same* id whether it is live or archived, which is what lets the common
+ * case need no fallback at all. Its leaf is passed in when one is known and
+ * supplies the controller it hung under.
  *
- * Both group levels are offered whatever the current grouping is; only one of
- * them exists in any given tree, and the caller takes the first that does.
- * A candidate is never *deeper* than the scope it replaces — a bot scope that
- * fell through must not land on one of its own controllers, which is a
- * different (and much narrower) report than the one the reader had open.
+ * A candidate is never *deeper* than the scope it replaces — a controller scope
+ * that fell through must not land on one of its own executors, which is a
+ * different (and much narrower) report than the one the reader had open. A
+ * stale `bot:` or `type:` id from a link written before the grouping level was
+ * retired reads as depth-2 here and so falls all the way back to the fleet,
+ * which is the report it named.
  */
 export function fallbackChain(scopeId: string, leaf?: PerfLeaf): string[] {
   const chain = [scopeId];
   if (leaf) {
     const ctrl = controllerNodeId(leaf);
     if (ctrl) chain.push(ctrl);
-    chain.push(`bot:${leaf.bot || UNKNOWN_LABEL}`, `type:${leaf.executorType || UNKNOWN_LABEL}`);
-  } else if (scopeId.startsWith("ctrl:")) {
-    // `ctrl:<bot>:<config id>` — the bot is everything up to the second colon.
-    const rest = scopeId.slice("ctrl:".length);
-    const sep = rest.indexOf(":");
-    if (sep >= 0) chain.push(`bot:${rest.slice(0, sep)}`);
   }
   chain.push("all");
 
@@ -509,13 +492,20 @@ export function fallbackChain(scopeId: string, leaf?: PerfLeaf): string[] {
   );
 }
 
-/** How far down the tree an id sits, read off the id alone. */
+/**
+ * How far down the tree an id sits, read off the id alone.
+ *
+ * An id that names no level of this tree — a retired `bot:`/`type:` group from
+ * a link written before the grouping level went away, or plain nonsense — is
+ * treated as the *shallowest* thing there is, so the only candidate that can
+ * serve it is the fleet. `bot:alpha` meant "everything alpha did", and one of
+ * alpha's controllers is a much narrower report than the one that link asked
+ * for; the bot bubble is where that request lives now.
+ */
 function nodeDepth(id: string): number {
-  if (id === "all") return 0;
-  if (id.startsWith("bot:") || id.startsWith("type:")) return 1;
-  if (id.startsWith("ctrl:")) return 2;
-  // An executor: a leaf, and the deepest thing the tree holds.
-  return 3;
+  if (id.startsWith("ctrl:")) return 1;
+  if (id.startsWith("exec:")) return 2;
+  return 0;
 }
 
 /**

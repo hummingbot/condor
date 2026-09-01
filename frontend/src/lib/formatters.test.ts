@@ -8,6 +8,7 @@ import {
   formatDateTime,
   formatTime,
   roundToPricePrecision,
+  shortBotName,
 } from "./formatters";
 
 // The bug this suite pins (READ-251): the chart Y axes used to carry their own
@@ -270,5 +271,27 @@ describe("roundToPricePrecision", () => {
   it("passes a non-finite price through rather than inventing one", () => {
     expect(roundToPricePrecision(NaN, 2)).toBeNaN();
     expect(roundToPricePrecision(Infinity, 2)).toBe(Infinity);
+  });
+});
+
+describe("shortBotName", () => {
+  it("collapses the deploy stamp the deploy path appends twice", () => {
+    expect(shortBotName("pmm-fleet-btcbrl-global-20260829-121810-20260829-121810")).toBe(
+      "pmm-fleet-btcbrl-global-20260829-121810",
+    );
+  });
+
+  it("keeps a single stamp, which is what tells two runs of one config apart", () => {
+    expect(shortBotName("rebate-mill-usdtbrl-15-20260831-195909")).toBe(
+      "rebate-mill-usdtbrl-15-20260831-195909",
+    );
+    // Two different stamps are two different deploys: neither is a repeat.
+    expect(shortBotName("bot-20260829-121810-20260830-090000")).toBe(
+      "bot-20260829-121810-20260830-090000",
+    );
+  });
+
+  it("leaves a name with no stamp alone", () => {
+    expect(shortBotName("main")).toBe("main");
   });
 });
