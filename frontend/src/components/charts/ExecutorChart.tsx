@@ -57,6 +57,40 @@ function parseSnapshotTs(ts: string): number {
   return Math.floor(d.getTime() / 1000);
 }
 
+/**
+ * Everything the overlay effect below actually draws, as one comparable string.
+ *
+ * The `executors` prop is a fresh array at every call site — `[executor]` minted
+ * on each render of the detail panel, and a new `filtered` array on every 2s
+ * `executors:<server>` frame in `useAgentExecutors` — so `overlays` never keeps
+ * its identity, and an effect keyed on that identity removed and re-added every
+ * line series for a picture that had not changed. Keying on what is drawn
+ * instead makes a rebuild follow the drawing, which is the same fix PERF-190
+ * made to TradeChart's `filteredOverlays` deps.
+ *
+ * Only the fields the effect reads belong here: the box and segment geometry
+ * with their colours, plus `type`/`status` (the segment's line style) and `pnl`
+ * (the multi-executor colour). A *live* executor still churns — the overlay
+ * dates its open end at `Date.now()` — so the win is on closed executors and on
+ * every render that was not an executor update at all.
+ */
+function overlayDrawKey(overlays: ExecutorOverlay[]): string {
+  return overlays
+    .map((o) => {
+      const box = o.gridBox;
+      const seg = o.segment;
+      return [
+        o.executorId,
+        o.type,
+        o.status,
+        o.pnl,
+        box && [box.startTime, box.endTime, box.startPrice, box.endPrice, box.limitPrice ?? "", box.color].join(","),
+        seg && [seg.entryTime, seg.entryPrice, seg.exitTime, seg.exitPrice, seg.color].join(","),
+      ].join("|");
+    })
+    .join(";");
+}
+
 export function ExecutorChart({
   server,
   executors,
@@ -97,6 +131,7 @@ export function ExecutorChart({
   // Compute overlays
   const overlays = useMemo(() => computeMultiOverlays(executors), [executors]);
   overlaysRef.current = overlays;
+  const overlayKey = overlayDrawKey(overlays);
   const timeRange = useMemo(() => getOverlayTimeRange(overlays), [overlays]);
 
   // Determine if any executor is active (for WS subscription)
@@ -412,6 +447,10 @@ export function ExecutorChart({
     const mod = chartModuleRef.current;
     if (!series || !chart || !mod || !chartReady) return;
 
+    // Read through the ref: the effect is keyed on `overlayKey`, so the closed
+    // array it captured may be an older identity carrying the same drawing.
+    const overlays = overlaysRef.current;
+
     // Clean up old segment series and vertical lines
     for (const s of segmentSeriesRef.current) {
       try { chart.removeSeries(s); } catch { /* ok */ }
@@ -530,7 +569,7 @@ export function ExecutorChart({
         chart.timeScale().scrollToPosition(chart.timeScale().scrollPosition(), false);
       }, 50);
     }
-  }, [overlays, chartReady]);
+  }, [overlayKey, chartReady]);
 
   // Position snapshot bubbles along the time axis
   const snapshotPositions = useRef<{ tick: number; x: number }[]>([]);

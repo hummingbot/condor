@@ -394,6 +394,11 @@ export function DetailPanel({
     lockUserSelect: true,
   });
 
+  // One executor, but the chart takes a list. Minting the array inline handed
+  // the chart a new prop on every render — and dragging the divider above renders
+  // on every `mousemove` — so the group it charts is held still here instead.
+  const chartExecutors = useMemo(() => [executor], [executor]);
+
   const sideLabel = executor.side.toUpperCase();
   // The backend normalizes every side to BUY/SELL (normalize_executor_side), so
   // no raw "1"/"TradeType.BUY" fallback is needed here.
@@ -509,7 +514,7 @@ export function DetailPanel({
           {server && executor.connector && executor.trading_pair && (
             <ExecutorChart
               server={server}
-              executors={[executor]}
+              executors={chartExecutors}
               connector={executor.connector}
               tradingPair={executor.trading_pair}
               height={300}
