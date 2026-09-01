@@ -63,6 +63,7 @@ from pathlib import Path
 
 from condor.frontmatter import parse_frontmatter, render_frontmatter
 
+from .mutes import load_mutes
 from .paths import CHAT_SLUG, builtin_skills_root, shared_skills_root
 from .store import _atomic_write, _slugify, _utcnow
 
@@ -94,10 +95,27 @@ class SkillStore:
 
     Every assistant reads **two** roots: its own plus the shared library — see
     the module docstring. Only Condor may write the shared one.
+
+    ``include_muted`` picks the view (FEAT-090). Left ``False`` — the default,
+    and what every injection site takes — a playbook the operator switched off
+    for this agent is not in the index, not in a search hit and not readable, so
+    the mute is real rather than advisory. Passed ``True`` by the operator's
+    panel, which has to render the switch beside the thing it switched off. The
+    write paths ignore it entirely: a muted playbook stays editable, which is
+    what makes muting reversible curation rather than a soft delete.
     """
 
-    def __init__(self, agent_slug: str | None = None):
+    def __init__(self, agent_slug: str | None = None, include_muted: bool = False):
         self.agent_slug = agent_slug
+        # The operator's curation (FEAT-090). ``include_muted=False`` is the
+        # *agent's* view — the default, so a site added tomorrow inherits the
+        # filter instead of having to remember it. The panel that renders the
+        # switches passes ``True``: the one view that must show you the thing
+        # you muted is the one you mute it from.
+        self.include_muted = include_muted
+        # Read once per instance: a store is short-lived (built per call at
+        # every injection site), so this is one stat per prompt, not per skill.
+        self._muted = set() if include_muted else load_mutes(agent_slug)["skills"]
         # The assistant's own skills dir (repo-shipped + runtime-created
         # playbooks) — always writable, and never the whole truth of what this
         # assistant can read; see ``shared_dir``.
@@ -313,8 +331,14 @@ class SkillStore:
         A playbook from the shared library is flagged ``shared: true``, and
         additionally ``inherited: true`` when this assistant cannot write it —
         the signal to shadow it locally rather than attempt an edit that errors.
+        A playbook muted for this agent reads as absent, exactly like one that
+        was never authored — unless this is the operator's view.
         """
         slug = _slugify(name)
+        # The index alone would leave a door open: a muted playbook the agent
+        # still remembers the name of could be read straight back into context.
+        if slug in self._muted:
+            return None
         skill_dir, shared = self._resolve_skill_dir(slug)
         if skill_dir is None:
             return None
@@ -386,7 +410,13 @@ class SkillStore:
         must be a bare name living directly inside the skill folder — any path
         separator or traversal is rejected (see :meth:`_resolve_companion`) so a
         skill can never read outside its own directory.
+
+        Muted like :meth:`read` — and checked here rather than in the shared
+        :meth:`_resolve_companion`, which the write path also runs through: a
+        muted playbook must stay editable, companions included.
         """
+        if _slugify(name) in self._muted:
+            return {"error": f"Skill '{name}' not found"}
         target, error = self._resolve_companion(name, filename)
         if error:
             return error
@@ -484,8 +514,15 @@ class SkillStore:
         A UI can render what the model only ever sees as one index line, and the
         body still costs a deliberate :meth:`read` — a library of forty
         playbooks would otherwise be a megabyte on every page load.
+
+        Each row carries ``muted``: in the agent's view it is always ``False``
+        (a muted playbook is not a row at all), and in the operator's view it is
+        the state its switch renders.
         """
         rows: list[dict] = []
+        # The operator view iterates everything, so the mute set is read here
+        # rather than taken from ``self._muted`` (empty by construction then).
+        muted = load_mutes(self.agent_slug)["skills"] if self.include_muted else set()
         for slug, meta, _body, shared in self._iter_skills():
             ref = meta.get("references_routine") or ""
             rows.append(
@@ -496,6 +533,7 @@ class SkillStore:
                     "when_to_use": meta.get("when_to_use", ""),
                     "shared": shared,
                     "inherited": bool(shared and not self.can_publish),
+                    "muted": slug in muted,
                     "references_routine": ref,
                     "routine_ok": (
                         _routine_exists(ref, self.agent_slug) if ref else True
@@ -541,6 +579,11 @@ class SkillStore:
                 except Exception:
                     continue
                 seen.add(slug)
+                if slug in self._muted:
+                    # Marked seen *before* the skip, so muting an own playbook
+                    # does not un-shadow the shared one of the same slug — the
+                    # operator switched off "this playbook", not "my copy of it".
+                    continue
                 meta.setdefault("name", slug)
                 yield slug, meta, body, shared
 

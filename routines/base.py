@@ -15,6 +15,7 @@ from typing import Any, Awaitable, Callable
 
 from pydantic import BaseModel
 
+from condor.memory.mutes import load_mutes
 from condor.memory.paths import CHAT_SLUG, shared_routines_root
 
 logger = logging.getLogger(__name__)
@@ -366,7 +367,9 @@ def discover_routines_from_path(
 
 
 def assistant_routines(
-    agent_slug: str | None = None, force_reload: bool = False
+    agent_slug: str | None = None,
+    force_reload: bool = False,
+    include_muted: bool = False,
 ) -> dict[str, RoutineInfo]:
     """Every routine an assistant can run: its OWN library over the SHARED one.
 
@@ -382,19 +385,39 @@ def assistant_routines(
     The own library **shadows** a shared routine of the same name: specialising
     is creating a local routine, never forking the shared file. Shared entries
     keep ``source="global"`` — they are the general library, un-prefixed.
+
+    Routines the operator muted for this assistant are subtracted here, for the
+    same reason the filter lives in this one function at all (FEAT-090): every
+    caller that decides what the assistant may run already asks *here*, so one
+    subtraction reaches the prompt section, ``_resolve_routine`` and the skill
+    store's ``references_routine`` validation at once. ``include_muted=True`` is
+    the operator's view — only the brain panel takes it.
+
+    ``discover_routines`` is deliberately not touched, so the human ``/routines``
+    page still lists and runs a muted routine. A mute is about what an assistant
+    is told, never about what a person may do.
     """
     if not agent_slug or agent_slug == CHAT_SLUG:
-        return discover_routines(force_reload=force_reload)
+        found = discover_routines(force_reload=force_reload)
+    else:
+        shared = discover_routines_from_path(
+            shared_routines_root(), agent_slug=None, force_reload=force_reload
+        )
+        own = discover_routines_from_path(
+            assistant_routines_dir(agent_slug),
+            agent_slug=agent_slug,
+            force_reload=force_reload,
+        )
+        found = {**shared, **own}
 
-    shared = discover_routines_from_path(
-        shared_routines_root(), agent_slug=None, force_reload=force_reload
-    )
-    own = discover_routines_from_path(
-        assistant_routines_dir(agent_slug),
-        agent_slug=agent_slug,
-        force_reload=force_reload,
-    )
-    return {**shared, **own}
+    if include_muted:
+        return found
+    muted = load_mutes(agent_slug)["routines"]
+    if not muted:
+        # The overwhelmingly common case, and the chat's dict is the discovery
+        # cache itself: hand back the same object rather than copy it per call.
+        return found
+    return {name: info for name, info in found.items() if name not in muted}
 
 
 def get_routine(name: str) -> RoutineInfo | None:
