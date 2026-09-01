@@ -23,7 +23,14 @@
 
 import { candleStore } from "./candle-store";
 import { controllerKey } from "./controller-identity";
-import { executorsQuery, parseExecutorsKey, queryClient } from "./queryClient";
+import {
+  CONTROLLER_PERF_ROOTS,
+  controllerPerfHistoryAllQuery,
+  controllerPerfHistoryQuery,
+  executorsQuery,
+  parseExecutorsKey,
+  queryClient,
+} from "./queryClient";
 import type {
   BotsPageResponse,
   ControllerInfo,
@@ -86,9 +93,8 @@ function mergeSnapshots(
  * Merge snapshots into every cached performance-history query under `prefix`.
  *
  * The readers of these caches append a time bound and a sampling interval to
- * the key (`["controller-perf-history-all", server, earliestDeploy, interval]`,
- * `["controller-perf-history", server, botName, controllerId, deployedAt, interval]`)
- * that is derived from data this module never sees. `setQueryData` matches by
+ * the key (see `controllerPerfHistoryQuery` for the whole shape) that is
+ * derived from data this module never sees. `setQueryData` matches by
  * exact key hash, so the socket has to discover the live keys rather than
  * reconstruct them. Entries that don't exist yet are left alone — the query's own fetch
  * seeds them, and merging into a missing entry would produce a history with no
@@ -135,17 +141,17 @@ let everConnected = false;
  *
  * The first connect of a socket is skipped: nothing was missed before there was
  * a connection, and the queries are loading their first full walk at that exact
- * moment. Both prefixes are listed because react-query matches key arrays
- * element by element — `"controller-perf-history"` is not a prefix of
- * `"controller-perf-history-all"`.
+ * moment. Both roots are re-checked separately (`CONTROLLER_PERF_ROOTS`)
+ * because react-query matches key arrays element by element.
  */
 function resyncPerformanceHistories(): void {
   if (!everConnected) {
     everConnected = true;
     return;
   }
-  queryClient.invalidateQueries({ queryKey: ["controller-perf-history-all"] });
-  queryClient.invalidateQueries({ queryKey: ["controller-perf-history"] });
+  for (const root of CONTROLLER_PERF_ROOTS) {
+    queryClient.invalidateQueries({ queryKey: [root] });
+  }
 }
 
 /**
@@ -277,7 +283,10 @@ export function handleMessage(channel: string, data: unknown): void {
       // the cache instead, the way the `executors` branch above does. Live
       // frames arrive at the socket's own cadence and are merged whatever the
       // cache's interval: they only add detail at the right-hand edge.
-      mergeIntoMatchingQueries(["controller-perf-history-all", server], incoming.snapshots);
+      mergeIntoMatchingQueries(
+        controllerPerfHistoryAllQuery(server).prefix,
+        incoming.snapshots,
+      );
 
       // Same, per controller. The per-controller cache is scoped to one bot
       // (ControllerPnlChart asks upstream for a single `bot_name`), so the
@@ -296,7 +305,7 @@ export function handleMessage(channel: string, data: unknown): void {
       for (const [key, snaps] of byController) {
         const [botName, cid] = key.split("\u0000");
         mergeIntoMatchingQueries(
-          ["controller-perf-history", server, botName, cid],
+          controllerPerfHistoryQuery(server, { botName, controllerId: cid }).prefix,
           snaps,
         );
       }

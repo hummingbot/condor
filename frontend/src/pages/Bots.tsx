@@ -25,6 +25,7 @@ import {
   refreshControllerHistory,
 } from "@/lib/history-refresh";
 import { samplingIntervalSince } from "@/lib/pnl-chart";
+import { controllerPerfHistoryAllQuery } from "@/lib/queryClient";
 
 const BOTS_WS_CHANNELS = ["bots", "controller_perf"];
 
@@ -116,10 +117,13 @@ export function Bots() {
   // already chosen so the span fits ~1000 *instants* (PERF-238), and N
   // controllers turn each of those into up to N rows.
   const { data: perfHistory } = useQuery({
-    // The interval is part of the key so two resolutions never share a cache
-    // entry, and last in it so the shared socket's prefix-matched live merge
-    // (`mergeIntoMatchingQueries`) still finds this query (PERF-238).
-    queryKey: ["controller-perf-history-all", server, earliestDeploy, perfInterval],
+    // Built by the factory, not by hand: the shared socket's prefix-matched
+    // live merge (`mergeIntoMatchingQueries`) only finds this entry while the
+    // key keeps the shape stated on `controllerPerfHistoryAllQuery` (ARCH-285).
+    queryKey: controllerPerfHistoryAllQuery(server, {
+      start: earliestDeploy,
+      interval: perfInterval,
+    }).queryKey,
     // Full on the first load, a tail on every one after it (PERF-239). The
     // `controller_perf` channel this page subscribes to writes each fleet
     // snapshot straight into this cache entry every 30s, so the old 120s poll

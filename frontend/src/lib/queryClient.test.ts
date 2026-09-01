@@ -17,8 +17,12 @@ import { QueryClient, QueryObserver } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  CONTROLLER_PERF_ROOTS,
+  controllerPerfHistoryAllQuery,
+  controllerPerfHistoryQuery,
   executorsQuery,
   invalidateServerScopedQueries,
+  parseControllerPerfHistoryKey,
   parseExecutorsKey,
 } from "@/lib/queryClient";
 
@@ -236,5 +240,143 @@ describe("executorsQuery / parseExecutorsKey", () => {
     invalidateServerScopedQueries(client, [PREVIOUS, NEXT]);
 
     expect(isInvalidated(key)).toBe(true);
+  });
+});
+
+/**
+ * Pins the controller performance-history key shape (ARCH-285).
+ *
+ * `lib/shared-socket.ts` routes every live `controller_perf` frame into these
+ * entries by a *prefix* of the key, so the shape is a contract between modules
+ * that never call each other. Breaking it does not throw: the charts simply
+ * stop updating, which this repo has already shipped twice (CORR-224,
+ * CORR-241). These tests are what makes a reorder fail loudly instead.
+ */
+describe("controller performance-history keys", () => {
+  const BOT = "epsilon";
+  const CTRL = "pmm_1";
+  const START = "2026-08-01T00:00:00.000Z";
+  const INTERVAL = "1h";
+
+  /** What the socket does: does this prefix still find the entry? */
+  const findAll = (prefix: unknown[]) =>
+    client.getQueryCache().findAll({ queryKey: prefix });
+
+  it("round-trips a per-controller key through its parser", () => {
+    const { queryKey } = controllerPerfHistoryQuery(PREVIOUS, {
+      botName: BOT,
+      controllerId: CTRL,
+      start: START,
+      interval: INTERVAL,
+    });
+
+    expect(parseControllerPerfHistoryKey(queryKey)).toEqual({
+      server: PREVIOUS,
+      botName: BOT,
+      controllerId: CTRL,
+      start: START,
+      interval: INTERVAL,
+    });
+  });
+
+  it("keeps bot_name at index 2, controller_id at index 3 and the interval last", () => {
+    const { queryKey } = controllerPerfHistoryQuery(PREVIOUS, {
+      botName: BOT,
+      controllerId: CTRL,
+      start: START,
+      interval: INTERVAL,
+    });
+
+    // Spelled out positionally on purpose: the socket reads these slots, and a
+    // structural assertion would still pass if two of them swapped.
+    expect(queryKey[2]).toBe(BOT);
+    expect(queryKey[3]).toBe(CTRL);
+    expect(queryKey[queryKey.length - 1]).toBe(INTERVAL);
+  });
+
+  it("builds a prefix that is an element-wise prefix of the full key", () => {
+    const single = controllerPerfHistoryQuery(PREVIOUS, {
+      botName: BOT,
+      controllerId: CTRL,
+      start: START,
+      interval: INTERVAL,
+    });
+    const fleet = controllerPerfHistoryAllQuery(PREVIOUS, {
+      start: START,
+      interval: INTERVAL,
+    });
+
+    expect(single.queryKey.slice(0, single.prefix.length)).toEqual(single.prefix);
+    expect(fleet.queryKey.slice(0, fleet.prefix.length)).toEqual(fleet.prefix);
+  });
+
+  it("is still found by the prefix the socket builds without the window", () => {
+    const single = controllerPerfHistoryQuery(PREVIOUS, {
+      botName: BOT,
+      controllerId: CTRL,
+      start: START,
+      interval: INTERVAL,
+    }).queryKey;
+    const fleet = controllerPerfHistoryAllQuery(PREVIOUS, {
+      start: START,
+      interval: INTERVAL,
+    }).queryKey;
+    client.setQueryData(single, { snapshots: [] });
+    client.setQueryData(fleet, { snapshots: [] });
+
+    // The socket knows the identity but neither the time bound nor the interval.
+    expect(
+      findAll(controllerPerfHistoryQuery(PREVIOUS, { botName: BOT, controllerId: CTRL }).prefix),
+    ).toHaveLength(1);
+    expect(findAll(controllerPerfHistoryAllQuery(PREVIOUS).prefix)).toHaveLength(1);
+  });
+
+  it("does not route one bot's frames into another bot's chart", () => {
+    client.setQueryData(
+      controllerPerfHistoryQuery(PREVIOUS, {
+        botName: "alpha",
+        controllerId: CTRL,
+        start: START,
+        interval: INTERVAL,
+      }).queryKey,
+      { snapshots: [] },
+    );
+
+    expect(
+      findAll(
+        controllerPerfHistoryQuery(PREVIOUS, { botName: "beta", controllerId: CTRL }).prefix,
+      ),
+    ).toHaveLength(0);
+    expect(
+      findAll(controllerPerfHistoryQuery(NEXT, { botName: "alpha", controllerId: CTRL }).prefix),
+    ).toHaveLength(0);
+  });
+
+  it("keeps the two roots apart, since react-query matches element by element", () => {
+    client.setQueryData(
+      controllerPerfHistoryAllQuery(PREVIOUS, { start: START, interval: INTERVAL }).queryKey,
+      { snapshots: [] },
+    );
+
+    expect(CONTROLLER_PERF_ROOTS).toEqual([
+      "controller-perf-history-all",
+      "controller-perf-history",
+    ]);
+    // The fleet entry must not answer to the per-controller root.
+    expect(findAll(["controller-perf-history"])).toHaveLength(0);
+    expect(findAll(["controller-perf-history-all"])).toHaveLength(1);
+  });
+
+  it("rejects keys that are not per-controller history keys", () => {
+    expect(
+      parseControllerPerfHistoryKey(
+        controllerPerfHistoryAllQuery(PREVIOUS, { start: START, interval: INTERVAL }).queryKey,
+      ),
+    ).toBeNull();
+    // The pre-CORR-241 shape, with no bot at index 2.
+    expect(
+      parseControllerPerfHistoryKey(["controller-perf-history", PREVIOUS, CTRL, START, INTERVAL]),
+    ).toBeNull();
+    expect(parseControllerPerfHistoryKey(executorsQuery(PREVIOUS).queryKey)).toBeNull();
   });
 });

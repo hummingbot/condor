@@ -10,6 +10,7 @@ import {
   refreshControllerHistory,
 } from "@/lib/history-refresh";
 import { aggregatePnlSeries, samplingIntervalSince } from "@/lib/pnl-chart";
+import { controllerPerfHistoryQuery } from "@/lib/queryClient";
 import type { ConvertFn } from "@/lib/rates";
 import { PnlEvolutionChart } from "./PnlEvolutionChart";
 
@@ -42,16 +43,16 @@ export function ControllerPnlChart({ server, controllerId, botName, deployedAt, 
   const interval = useMemo(() => samplingIntervalSince(deployedAt), [deployedAt]);
 
   const { data: raw, isLoading } = useQuery({
-    // `bot_name` is part of the key, not just the request: the query asks
-    // upstream for one bot's rows, so two bots running the same controller
-    // config would otherwise share a cache entry — and the socket, which routes
-    // live frames by this key's prefix, would push each bot's snapshots into
-    // the other's chart (CORR-241).
-    // The interval is part of the key so a coarser and a finer series never
-    // share a cache entry (PERF-238). It goes last: the shared socket routes
-    // live frames by *prefix* (`mergeIntoMatchingQueries`), so appending to the
-    // key leaves that routing intact.
-    queryKey: ["controller-perf-history", server, botName, controllerId, deployedAt, interval],
+    // Built by the factory, not by hand: the shared socket routes live frames
+    // into this entry by a prefix of the key, and the ordering that keeps that
+    // working — bot before controller, interval last — is stated once on
+    // `controllerPerfHistoryQuery` (ARCH-285).
+    queryKey: controllerPerfHistoryQuery(server, {
+      botName,
+      controllerId,
+      start: deployedAt,
+      interval,
+    }).queryKey,
     // The first load is walked page by page: a page holds 1000 ROWS, and while
     // one controller is usually one row per instant, the bucketing is not
     // guaranteed to be — so the ceiling on a single request is a ceiling on the
