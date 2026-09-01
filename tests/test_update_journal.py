@@ -19,6 +19,7 @@ import pytest
 from condor import paths
 from condor.updates import components
 from condor.updates import run as run_module
+from utils import updater
 
 
 @pytest.fixture(autouse=True)
@@ -34,6 +35,21 @@ def _no_live_run():
     run_module._task = None
     run_module._relaunch = None
     run_module._observers.clear()
+    components.invalidate()
+
+
+@pytest.fixture
+def _a_sibling_api(monkeypatch, tmp_path):
+    """An install where hummingbot-api is present.
+
+    ``components.keys()`` reports what is *on this host*: a component whose repo
+    directory is missing is not a component at all. A CI checkout has no sibling
+    hummingbot-api, so without this the plan below is a Condor-only plan and the
+    test is really measuring the developer's directory layout.
+    """
+    repo = tmp_path / "hummingbot-api"
+    repo.mkdir()
+    monkeypatch.setattr(updater, "HUMMINGBOT_API_DIR", str(repo))
     components.invalidate()
 
 
@@ -291,7 +307,7 @@ def test_a_second_start_joins_the_run_already_in_flight():
     asyncio.run(go())
 
 
-def test_the_plan_is_laid_out_before_anything_runs():
+def test_the_plan_is_laid_out_before_anything_runs(_a_sibling_api):
     """The confirm screen and the progress screen are the same list."""
     status = components.ComponentStatus(
         key=components.HUMMINGBOT_API,
@@ -319,7 +335,7 @@ def test_the_plan_is_laid_out_before_anything_runs():
     assert "Pulling" in steps[1].label
 
 
-def test_source_mode_builds_instead_of_pulling():
+def test_source_mode_builds_instead_of_pulling(_a_sibling_api):
     status = components.ComponentStatus(
         key=components.HUMMINGBOT_API, name="x", facets={}, mode="source"
     )
