@@ -137,9 +137,7 @@ def test_executors_stored_once_inside_performance_entry():
     _reset_caches()
     client = FakeClient()
 
-    perf = asyncio.run(
-        archived.fetch_archived_run(client, "srv", "db.sqlite")
-    )
+    perf = asyncio.run(archived.fetch_archived_run(client, "srv", "db.sqlite"))
 
     assert not hasattr(archived, "_executors_cache")
     cached = archived.cached_run("srv", "db.sqlite")
@@ -152,12 +150,8 @@ def test_executors_stored_once_inside_performance_entry():
 def test_cached_response_identical_to_fresh():
     """A cached answer matches a fresh fetch of the same db_path exactly."""
     _reset_caches()
-    fresh = asyncio.run(
-        archived.fetch_archived_run(FakeClient(), "srv", "db.sqlite")
-    )
-    cached = asyncio.run(
-        archived.fetch_archived_run(FakeClient(), "srv", "db.sqlite")
-    )
+    fresh = asyncio.run(archived.fetch_archived_run(FakeClient(), "srv", "db.sqlite"))
+    cached = asyncio.run(archived.fetch_archived_run(FakeClient(), "srv", "db.sqlite"))
     assert cached is fresh  # served from cache, no refetch
 
     _reset_caches()
