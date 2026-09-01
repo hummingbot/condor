@@ -203,6 +203,32 @@ class TerminatedControllersResponse(BaseModel):
     error_hint: Optional[str] = None
 
 
+class RunHistoryResponse(BaseModel):
+    """One finished run's sampled PnL curve, per controller (FEAT-089).
+
+    The points are bare arrays rather than objects — ``[t_ms, realized,
+    unrealized, net, volume, pct]`` — because there are up to a thousand of them
+    per controller and the field names would be most of the bytes. The client
+    expands them back into the same snapshot shape the live fleet's chart folds,
+    so one ``aggregatePnlSeries`` draws both populations.
+    """
+
+    controllers: dict[str, list[list[float]]] = {}
+    #: ``controller_id -> {"connector", "trading_pair"}``. Not decoration: a leaf
+    #: with no pair is folded as though its quote were dollars.
+    identities: dict[str, dict[str, str]] = {}
+    interval: str = "5m"
+    #: ``"snapshots"`` | ``"archive"`` | ``"none"``. Which source actually
+    #: answered, so the chart's notice can say what was drawn rather than
+    #: asserting one. ``"none"`` is an answer — a run older than the snapshot
+    #: table's retention floor was never recorded — not an error.
+    source: str = "snapshots"
+    points: int = 0
+    #: True when this came off disk. What proves the second open costs nothing.
+    cached: bool = False
+    detail: Optional[str] = None
+
+
 # ── Controller Performance ──
 
 

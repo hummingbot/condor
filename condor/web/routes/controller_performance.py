@@ -12,7 +12,12 @@ from condor.fetchers.bot_performance import (
     fetch_all_bot_performance,
     fetch_archived_paths,
 )
-from condor.fetchers.run_history import declared_controllers, terminated_controllers
+from condor.fetchers.run_history import (
+    RunHistoryUnavailable,
+    declared_controllers,
+    fetch_run_history,
+    terminated_controllers,
+)
 from condor.web.auth import require_server_access
 from condor.web.models import (
     BotRunInfo,
@@ -20,6 +25,7 @@ from condor.web.models import (
     ControllerPerformanceHistoryResponse,
     ControllerPerformanceLatestResponse,
     ControllerPerformanceSnapshot,
+    RunHistoryResponse,
     TerminatedControllersResponse,
     WebUser,
 )
@@ -420,3 +426,88 @@ async def get_terminated_controllers(
     )
     _terminated_cache[name] = (time.monotonic() + _TERMINATED_TTL_SEC, response)
     return response
+
+
+@router.get(
+    "/servers/{name}/terminated/history",
+    response_model=RunHistoryResponse,
+)
+async def get_run_history(
+    name: str,
+    bot_name: str = Query(...),
+    deployed_at: str = Query(...),
+    user: WebUser = Depends(require_server_access),
+):
+    """One finished run's sampled PnL curve, per controller.
+
+    Awaits the single-flight on a cold cache, exactly as ``/archived/performance``
+    does — a run is walked once however many readers ask for it at once, and
+    every read after that is a file open.
+
+    A run the server has no rows for answers ``source: "none"`` with a reason
+    rather than a 404. The snapshot table has a retention floor, that floor is a
+    property of the deployment rather than of this code, and "we have no record
+    of this run" is a true statement about a run that really happened — which is
+    a better thing to draw than a fabricated single step.
+    """
+    cm = get_config_manager()
+    client = await cm.get_client(name)
+
+    # The run's own deployment names its controllers, which is what makes the
+    # walk per controller — and per controller is a correctness requirement, not
+    # a tuning choice: upstream buckets by time only, so a request spanning
+    # several controllers keeps one row per bucket and silently drops the rest.
+    run = await _find_run(client, bot_name, deployed_at)
+    if run is None:
+        return RunHistoryResponse(
+            source="none",
+            detail=f"No run recorded for {bot_name} at {deployed_at}",
+        )
+
+    try:
+        history = await fetch_run_history(
+            client,
+            name,
+            bot_name=bot_name,
+            deployed_at=run.created_at or deployed_at,
+            stopped_at=run.stopped_at,
+            controller_ids=run.controller_ids,
+        )
+    except RunHistoryUnavailable as e:
+        if e.missing:
+            return RunHistoryResponse(source="none", detail=e.detail)
+        logger.warning(
+            "Run history for %s on '%s' failed: %s", bot_name, name, e.detail
+        )
+        return RunHistoryResponse(source="none", detail=e.detail)
+
+    return RunHistoryResponse(
+        controllers=history.controllers,
+        identities=history.identities,
+        interval=history.interval,
+        source=history.source,
+        points=history.points,
+        cached=history.cached,
+    )
+
+
+async def _find_run(client, bot_name: str, deployed_at: str) -> BotRunInfo | None:
+    """The run this request is about, by name and deploy time.
+
+    Both are needed because a bot name is reused across runs, and asked of the
+    server rather than taken from the query so the controller ids come from the
+    deployment itself rather than from whatever the caller passed.
+    """
+    try:
+        raw = await client.bot_orchestration.get_bot_runs(bot_name=bot_name, limit=50)
+    except Exception:
+        logger.debug("Could not resolve run %s for its history", bot_name)
+        return None
+    runs = [_parse_bot_run(r) for r in _extract_runs_list(raw)]
+    exact = [r for r in runs if r.created_at == deployed_at]
+    if exact:
+        return exact[0]
+    # A caller that rounded the timestamp, or a server that reformatted it: fall
+    # back to the newest run of that name rather than refusing to draw anything.
+    named = sorted(runs, key=lambda r: r.created_at or "", reverse=True)
+    return named[0] if named else None
