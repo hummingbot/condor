@@ -218,12 +218,13 @@ export function TradeChart({
   }, [executorOverlays, minCandleTime, selectedExecutorId]);
 
   // ── REST backfill on pair/interval/lookback change ──
-  const backfillKeyRef = useRef("");
+  // The dependency array below is the whole gate: React re-runs this only when
+  // one of those six changes. A ref remembering the last key would add nothing
+  // in production and would break development, where StrictMode mounts the
+  // effect twice — the first cleanup throws the in-flight fetch away, and a ref
+  // that outlives the remount would make the second pass a no-op, leaving the
+  // chart with no history at all.
   useEffect(() => {
-    const backfillKey = `${server}:${connector}:${pair}:${interval}:${lookbackSeconds}:${poolAddress ?? ""}`;
-    if (backfillKey === backfillKeyRef.current) return;
-    backfillKeyRef.current = backfillKey;
-
     setDuration(lookbackSeconds);
 
     let cancelled = false;
