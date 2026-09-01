@@ -11,7 +11,6 @@ import {
   SelectField,
   SideSelector,
   ValidationMessages,
-  type FieldDispatch,
 } from "./fields";
 import type { ExecutorValidation } from "./types";
 import { usesLimitPrice, type OrderAction, type OrderState } from "./order-config";
@@ -68,7 +67,6 @@ export function OrderConfigPanel({
   baseSymbol,
   quoteSymbol,
 }: Props) {
-  const d = dispatch as FieldDispatch;
   const displayBase = baseSymbol || pair?.split("-")[0] || "base";
   const displayQuote = quoteSymbol || pair?.split("-")[1] || "quote";
   const options = strategies
@@ -80,7 +78,7 @@ export function OrderConfigPanel({
   const allowed = options.some((o) => o.value === state.execution_strategy);
   useEffect(() => {
     if (!allowed) {
-      d({ type: "SET_FIELD", field: "execution_strategy", value: "MARKET" });
+      dispatch({ type: "SET_FIELD", field: "execution_strategy", value: "MARKET" });
     }
   }, [allowed]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -118,7 +116,7 @@ export function OrderConfigPanel({
     <div className="flex flex-col gap-4 overflow-y-auto p-3">
       {/* Direction — Buy/Sell on spot: Long/Short would suggest a perp, and a
           "short" without tokens to sell is not a thing a swap can do. */}
-      <SideSelector side={state.side} dispatch={d} isSpot={isSpot} />
+      <SideSelector side={state.side} dispatch={dispatch} isSpot={isSpot} />
 
       {/* Order Config */}
       <div className="space-y-2.5">
@@ -127,7 +125,7 @@ export function OrderConfigPanel({
           <AmountField
             value={state.amount}
             field="amount"
-            dispatch={d}
+            dispatch={dispatch}
             currentPrice={currentPrice}
             step={0.001}
             baseSymbol={displayBase}
@@ -144,18 +142,18 @@ export function OrderConfigPanel({
           label="Execution Strategy"
           value={state.execution_strategy}
           field="execution_strategy"
-          dispatch={d}
+          dispatch={dispatch}
           options={options}
           // A DEX only swaps at market; a one-option dropdown reads as broken.
           disabled={options.length <= 1}
         />
-        <LeverageField value={state.leverage} field="leverage" dispatch={d} isSpot={isSpot} />
+        <LeverageField value={state.leverage} field="leverage" dispatch={dispatch} isSpot={isSpot} />
         {!isSpot && (
           <SelectField
             label="Position Action"
             value={state.position_action}
             field="position_action"
-            dispatch={d}
+            dispatch={dispatch}
             options={POSITION_ACTION_OPTIONS}
           />
         )}
@@ -168,7 +166,7 @@ export function OrderConfigPanel({
             <SectionHeader>Price</SectionHeader>
             {currentPrice && currentPrice > 0 && (
               <button
-                onClick={() => d({ type: "SET_FIELD", field: "price", value: currentPrice })}
+                onClick={() => dispatch({ type: "SET_FIELD", field: "price", value: currentPrice })}
                 className="flex items-center gap-1 rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-[10px] text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)]"
               >
                 <Sparkles className="h-3 w-3" />
@@ -181,7 +179,7 @@ export function OrderConfigPanel({
             value={state.price}
             field="price"
             activePickField={state.activePickField}
-            dispatch={d}
+            dispatch={dispatch}
             valid={state.price > 0}
           />
         </div>
@@ -195,7 +193,7 @@ export function OrderConfigPanel({
             label="Distance"
             value={state.chaser_distance}
             field="chaser_distance"
-            dispatch={d}
+            dispatch={dispatch}
             step={0.01}
             isPercent
             suffix="%"
@@ -204,7 +202,7 @@ export function OrderConfigPanel({
             label="Refresh Threshold"
             value={state.chaser_refresh_threshold}
             field="chaser_refresh_threshold"
-            dispatch={d}
+            dispatch={dispatch}
             step={0.01}
             isPercent
             suffix="%"

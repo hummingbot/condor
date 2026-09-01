@@ -8,7 +8,7 @@ import {
   Sparkles,
 } from "lucide-react";
 
-import { LeverageField, SelectField, ToggleField, type FieldDispatch } from "@/components/executor/fields";
+import { LeverageField, SelectField, ToggleField } from "@/components/executor/fields";
 import { ORDER_TYPE_OPTIONS } from "@/components/executor/field-options";
 import { autoFillGridPrices, gridConfigErrors, gridPriceFieldValid } from "@/lib/gridExecutor";
 import type { GridState, GridAction } from "@/lib/gridExecutor";
@@ -347,7 +347,7 @@ export function GridConfigPanel({ state, dispatch, currentPrice, isSpot = false,
             )}
           </div>
         )}
-        <LeverageField value={state.leverage} field="leverage" dispatch={dispatch as unknown as FieldDispatch} isSpot={isSpot} />
+        <LeverageField value={state.leverage} field="leverage" dispatch={dispatch} isSpot={isSpot} />
       </div>
 
       {/* ── Take Profit ── */}
@@ -428,14 +428,14 @@ export function GridConfigPanel({ state, dispatch, currentPrice, isSpot = false,
               label="Open Order Type"
               value={state.open_order_type}
               field="open_order_type"
-              dispatch={dispatch as unknown as FieldDispatch}
+              dispatch={dispatch}
               options={ORDER_TYPE_OPTIONS}
             />
             <SelectField
               label="Take Profit Order Type"
               value={state.take_profit_order_type}
               field="take_profit_order_type"
-              dispatch={dispatch as unknown as FieldDispatch}
+              dispatch={dispatch}
               options={ORDER_TYPE_OPTIONS}
             />
           </div>

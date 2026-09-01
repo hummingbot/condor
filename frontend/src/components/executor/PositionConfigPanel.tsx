@@ -11,7 +11,6 @@ import {
   SelectField,
   SideSelector,
   ValidationMessages,
-  type FieldDispatch,
 } from "./fields";
 import { ORDER_TYPE_OPTIONS } from "./field-options";
 import type { ExecutorValidation } from "./types";
@@ -39,12 +38,10 @@ export function PositionConfigPanel({ state, dispatch, validation, currentPrice,
     }
   }, [currentPrice, state.anchored, dispatch]);
 
-  const d = dispatch as FieldDispatch;
-
   return (
     <div className="flex flex-col gap-4 overflow-y-auto p-3">
       {/* Direction */}
-      <SideSelector side={state.side} dispatch={d} />
+      <SideSelector side={state.side} dispatch={dispatch} />
 
       {/* Entry */}
       <div className="space-y-2.5">
@@ -55,10 +52,10 @@ export function PositionConfigPanel({ state, dispatch, validation, currentPrice,
               onClick={() => {
                 const cp = currentPrice!;
                 const entry = state.side === 1 ? cp * 0.999 : cp * 1.001;
-                d({ type: "SET_FIELD", field: "entry_price", value: parseFloat(entry.toPrecision(6)) });
-                d({ type: "SET_FIELD", field: "stop_loss", value: 0.03 });
-                d({ type: "SET_FIELD", field: "take_profit", value: 0.02 });
-                d({ type: "SET_FIELD", field: "open_order_type", value: 2 });
+                dispatch({ type: "SET_FIELD", field: "entry_price", value: parseFloat(entry.toPrecision(6)) });
+                dispatch({ type: "SET_FIELD", field: "stop_loss", value: 0.03 });
+                dispatch({ type: "SET_FIELD", field: "take_profit", value: 0.02 });
+                dispatch({ type: "SET_FIELD", field: "open_order_type", value: 2 });
               }}
               className="flex items-center gap-1 rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-[10px] text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)]"
             >
@@ -72,19 +69,19 @@ export function PositionConfigPanel({ state, dispatch, validation, currentPrice,
           value={state.entry_price}
           field="entry_price"
           activePickField={state.activePickField}
-          dispatch={d}
+          dispatch={dispatch}
           valid={true}
           hint="Leave at 0 for market entry"
         />
         <AmountField
           value={state.amount}
           field="amount"
-          dispatch={d}
+          dispatch={dispatch}
           currentPrice={currentPrice}
           step={0.001}
           pair={pair}
         />
-        <LeverageField value={state.leverage} field="leverage" dispatch={d} isSpot={isSpot} />
+        <LeverageField value={state.leverage} field="leverage" dispatch={dispatch} isSpot={isSpot} />
       </div>
 
       {/* Triple Barrier */}
@@ -94,7 +91,7 @@ export function PositionConfigPanel({ state, dispatch, validation, currentPrice,
           label="Stop Loss"
           value={state.stop_loss}
           field="stop_loss"
-          dispatch={d}
+          dispatch={dispatch}
           step={0.01}
           isPercent
           suffix="%"
@@ -103,7 +100,7 @@ export function PositionConfigPanel({ state, dispatch, validation, currentPrice,
           label="Take Profit"
           value={state.take_profit}
           field="take_profit"
-          dispatch={d}
+          dispatch={dispatch}
           step={0.01}
           isPercent
           suffix="%"
@@ -112,7 +109,7 @@ export function PositionConfigPanel({ state, dispatch, validation, currentPrice,
           label="Time Limit (0 = disabled)"
           value={state.time_limit}
           field="time_limit"
-          dispatch={d}
+          dispatch={dispatch}
           step={60}
           min={0}
           suffix="sec"
@@ -126,7 +123,7 @@ export function PositionConfigPanel({ state, dispatch, validation, currentPrice,
           label="Activation Price"
           value={state.trailing_stop_activation_price}
           field="trailing_stop_activation_price"
-          dispatch={d}
+          dispatch={dispatch}
           step={0.01}
           isPercent
           suffix="%"
@@ -135,7 +132,7 @@ export function PositionConfigPanel({ state, dispatch, validation, currentPrice,
           label="Trailing Delta"
           value={state.trailing_stop_trailing_delta}
           field="trailing_stop_trailing_delta"
-          dispatch={d}
+          dispatch={dispatch}
           step={0.01}
           isPercent
           suffix="%"
@@ -146,13 +143,13 @@ export function PositionConfigPanel({ state, dispatch, validation, currentPrice,
       {/* Advanced */}
       <AdvancedSection
         open={state.showAdvanced}
-        onToggle={() => d({ type: "SET_FIELD", field: "showAdvanced", value: !state.showAdvanced })}
+        onToggle={() => dispatch({ type: "SET_FIELD", field: "showAdvanced", value: !state.showAdvanced })}
       >
-        <NumberField label="Activation Bounds (0 = disabled)" value={state.activation_bounds} field="activation_bounds" dispatch={d} step={0.01} isPercent suffix="%" />
-        <SelectField label="Open Order Type" value={state.open_order_type} field="open_order_type" dispatch={d} options={ORDER_TYPE_OPTIONS} />
-        <SelectField label="Take Profit Order Type" value={state.take_profit_order_type} field="take_profit_order_type" dispatch={d} options={ORDER_TYPE_OPTIONS} />
-        <SelectField label="Stop Loss Order Type" value={state.stop_loss_order_type} field="stop_loss_order_type" dispatch={d} options={ORDER_TYPE_OPTIONS} />
-        <SelectField label="Time Limit Order Type" value={state.time_limit_order_type} field="time_limit_order_type" dispatch={d} options={ORDER_TYPE_OPTIONS} />
+        <NumberField label="Activation Bounds (0 = disabled)" value={state.activation_bounds} field="activation_bounds" dispatch={dispatch} step={0.01} isPercent suffix="%" />
+        <SelectField label="Open Order Type" value={state.open_order_type} field="open_order_type" dispatch={dispatch} options={ORDER_TYPE_OPTIONS} />
+        <SelectField label="Take Profit Order Type" value={state.take_profit_order_type} field="take_profit_order_type" dispatch={dispatch} options={ORDER_TYPE_OPTIONS} />
+        <SelectField label="Stop Loss Order Type" value={state.stop_loss_order_type} field="stop_loss_order_type" dispatch={dispatch} options={ORDER_TYPE_OPTIONS} />
+        <SelectField label="Time Limit Order Type" value={state.time_limit_order_type} field="time_limit_order_type" dispatch={dispatch} options={ORDER_TYPE_OPTIONS} />
       </AdvancedSection>
 
       <ValidationMessages errors={validation.errors} />

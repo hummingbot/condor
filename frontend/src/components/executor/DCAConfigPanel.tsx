@@ -10,7 +10,6 @@ import {
   SelectField,
   SideSelector,
   ValidationMessages,
-  type FieldDispatch,
 } from "./fields";
 import type { ExecutorValidation } from "./types";
 import { dcaBreakEven, levelSlot, type DCAAction, type DCAState } from "./dca-config";
@@ -32,7 +31,6 @@ interface Props {
 }
 
 export function DCAConfigPanel({ state, dispatch, validation, currentPrice, isSpot = false, pair: _pair }: Props) {
-  const d = dispatch as unknown as FieldDispatch;
   const totalQuote = state.amounts_quote.reduce((s, a) => s + a, 0);
 
   const bep = useMemo(
@@ -51,7 +49,7 @@ export function DCAConfigPanel({ state, dispatch, validation, currentPrice, isSp
   return (
     <div className="flex flex-col gap-4 overflow-y-auto p-3">
       {/* Direction */}
-      <SideSelector side={state.side} dispatch={d} />
+      <SideSelector side={state.side} dispatch={dispatch} />
 
       {/* DCA Levels */}
       <div className="space-y-2.5">
@@ -99,7 +97,7 @@ export function DCAConfigPanel({ state, dispatch, validation, currentPrice, isSp
                 value={state.prices[i]}
                 field={levelSlot(i)}
                 activePickField={state.activePickField}
-                dispatch={d}
+                dispatch={dispatch}
                 valid={state.prices[i] > 0}
               />
             </div>
@@ -118,28 +116,28 @@ export function DCAConfigPanel({ state, dispatch, validation, currentPrice, isSp
           {state.amounts_quote.length} levels &middot; Total: ${totalQuote.toFixed(2)}
           {bep > 0 && <> &middot; BEP: <span className="font-mono text-amber-400">{bep.toPrecision(6)}</span></>}
         </p>
-        <LeverageField value={state.leverage} field="leverage" dispatch={d} isSpot={isSpot} />
+        <LeverageField value={state.leverage} field="leverage" dispatch={dispatch} isSpot={isSpot} />
       </div>
 
       {/* Exit Strategy */}
       <div className="space-y-2.5">
         <SectionHeader>Exit Strategy</SectionHeader>
-        <NumberField label="Take Profit" value={state.take_profit} field="take_profit" dispatch={d} step={0.01} isPercent suffix="%" />
-        <NumberField label="Stop Loss" value={state.stop_loss} field="stop_loss" dispatch={d} step={0.01} isPercent suffix="%" />
-        <NumberField label="Time Limit (0 = disabled)" value={state.time_limit} field="time_limit" dispatch={d} step={60} min={0} suffix="sec" />
+        <NumberField label="Take Profit" value={state.take_profit} field="take_profit" dispatch={dispatch} step={0.01} isPercent suffix="%" />
+        <NumberField label="Stop Loss" value={state.stop_loss} field="stop_loss" dispatch={dispatch} step={0.01} isPercent suffix="%" />
+        <NumberField label="Time Limit (0 = disabled)" value={state.time_limit} field="time_limit" dispatch={dispatch} step={60} min={0} suffix="sec" />
       </div>
 
       {/* Mode & Advanced */}
       <AdvancedSection
         open={state.showAdvanced}
-        onToggle={() => d({ type: "SET_FIELD", field: "showAdvanced", value: !state.showAdvanced })}
+        onToggle={() => dispatch({ type: "SET_FIELD", field: "showAdvanced", value: !state.showAdvanced })}
       >
-        <SelectField label="Mode" value={state.mode} field="mode" dispatch={d} options={MODE_OPTIONS} />
-        <NumberField label="Activation Bounds (0 = disabled)" value={state.activation_bounds} field="activation_bounds" dispatch={d} step={0.01} isPercent suffix="%" />
+        <SelectField label="Mode" value={state.mode} field="mode" dispatch={dispatch} options={MODE_OPTIONS} />
+        <NumberField label="Activation Bounds (0 = disabled)" value={state.activation_bounds} field="activation_bounds" dispatch={dispatch} step={0.01} isPercent suffix="%" />
         <div className="space-y-2.5">
           <SectionHeader>Trailing Stop</SectionHeader>
-          <NumberField label="Activation Price" value={state.trailing_stop_activation_price} field="trailing_stop_activation_price" dispatch={d} step={0.01} isPercent suffix="%" />
-          <NumberField label="Trailing Delta" value={state.trailing_stop_trailing_delta} field="trailing_stop_trailing_delta" dispatch={d} step={0.01} isPercent suffix="%" />
+          <NumberField label="Activation Price" value={state.trailing_stop_activation_price} field="trailing_stop_activation_price" dispatch={dispatch} step={0.01} isPercent suffix="%" />
+          <NumberField label="Trailing Delta" value={state.trailing_stop_trailing_delta} field="trailing_stop_trailing_delta" dispatch={dispatch} step={0.01} isPercent suffix="%" />
         </div>
       </AdvancedSection>
 
