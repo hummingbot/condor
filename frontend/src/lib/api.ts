@@ -250,6 +250,79 @@ export interface ControllerPerformanceHistoryResponse {
   error_hint?: string;
 }
 
+/** Which population a performance query is about. */
+export type PerfSubject = "controller" | "executor";
+
+/**
+ * One point of a performance series, for either population (FEAT-087).
+ *
+ * Distinct from `ControllerPerformanceSnapshot`, which is the wire shape of the
+ * older controller-only route: the numbers here are flat rather than nested
+ * under `performance`, and volume is spelled `volume_quote`. The two stay
+ * separate so neither grows a branch for the other's payload.
+ */
+export interface PerformanceSnapshot {
+  timestamp: string;
+  subject: PerfSubject | "";
+  /** `controller_id` for controllers, `executor_id` for executors. */
+  scope_id: string;
+  status: string;
+  /**
+   * True only on a completed executor's final row. It is what makes a closed
+   * executor's series a single query — the terminal row *is* the last point,
+   * so nothing appends a final value after it.
+   */
+  is_terminal: boolean;
+  realized_pnl_quote: number;
+  unrealized_pnl_quote: number;
+  global_pnl_quote: number;
+  global_pnl_pct: number;
+  /** Volume *generated*, in quote — on every executor type, LP included. */
+  volume_quote: number;
+  /**
+   * `null` for controllers, whose `PerformanceReport` has no fees field.
+   * Unknown is not zero: a fees figure must render the two differently.
+   */
+  cum_fees_quote: number | null;
+  bot_name: string | null;
+  controller_id: string | null;
+  executor_id: string | null;
+  executor_type: string | null;
+  account_name: string | null;
+  connector_name: string | null;
+  trading_pair: string | null;
+  /** Set on an executor's terminal row. `POSITION_HOLD` stays *unrealized*. */
+  close_type: string | null;
+}
+
+export interface PerformanceHistoryResponse {
+  snapshots: PerformanceSnapshot[];
+  next_cursor: string | null;
+  interval: string;
+  subject: PerfSubject | "";
+  /**
+   * False when this server has no `/performance/history` at all — an older
+   * API, which is the ordinary case rather than a failure. The client falls
+   * back to its derived series and the chart says why.
+   */
+  supported: boolean;
+  server_online?: boolean;
+  error_hint?: string;
+}
+
+/**
+ * Whether one server serves the shared performance surface.
+ *
+ * `unknown` separates "asked, and it is not there" from "could not ask": a
+ * server that was merely down must not have a fallback pinned to it for the
+ * whole cache TTL after it comes back.
+ */
+export interface PerformanceCapabilityResponse {
+  supported: boolean;
+  unknown: boolean;
+  detail?: string | null;
+}
+
 export interface ExecutorInfo {
   id: string;
   type: string;
@@ -1787,6 +1860,105 @@ export async function fetchControllerPerformanceHistoryByController(
   };
 }
 
+// ── The shared performance surface (FEAT-087) ──
+
+/** Everything `/performance/history` accepts except the two the walk owns. */
+export interface PerformanceHistoryQuery {
+  subject: PerfSubject;
+  bot_name?: string;
+  controller_id?: string;
+  executor_id?: string;
+  executor_type?: string;
+  account_name?: string;
+  connector_name?: string;
+  trading_pair?: string;
+  start_time?: string;
+  end_time?: string;
+  interval?: string;
+}
+
+/** A whole performance history, assembled from however many pages it took. */
+export interface PerformanceHistoryAllResponse extends PerformanceHistoryResponse {
+  pages: number;
+  truncated: boolean;
+  outcome: WalkOutcome;
+}
+
+function fetchPerformanceHistoryPage(
+  server: string,
+  params: PerformanceHistoryQuery & { limit?: number; cursor?: string },
+  init?: RequestInit,
+) {
+  const qs = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null && value !== "") qs.set(key, String(value));
+  }
+  return apiFetch<PerformanceHistoryResponse>(
+    `/api/v1/servers/${encodeURIComponent(server)}/performance/history?${qs.toString()}`,
+    init,
+  );
+}
+
+/**
+ * The whole history a performance query describes, walked page by page.
+ *
+ * The same bounded walk the controller history uses, for the same reasons: one
+ * request answers with at most `limit` rows, the route caps `limit` at 1000,
+ * and dropping `next_cursor` silently collapses the visible window (CORR-237).
+ * The interval is bound once here and every page carries it, so a follow-up
+ * page cannot splice a second resolution into one line.
+ *
+ * **A server without the route ends the walk on the first page**, with
+ * `supported: false` and no rows. That is not an error and not a short page to
+ * retry: the route does not exist, and the caller draws its derived series.
+ */
+export async function fetchPerformanceHistoryAll(
+  server: string,
+  params: PerformanceHistoryQuery,
+  opts: { pageSize?: number; maxRows?: number; maxPages?: number; signal?: AbortSignal } = {},
+): Promise<PerformanceHistoryAllResponse> {
+  let first: PerformanceHistoryResponse | undefined;
+
+  const walk = await collectCursorPages<PerformanceSnapshot>(
+    async ({ limit, cursor }) => {
+      const page = await fetchPerformanceHistoryPage(
+        server,
+        { ...params, limit, cursor },
+        { signal: opts.signal },
+      );
+      first ??= page;
+      // An unsupported route has no next page and never will. Reporting no
+      // cursor ends the walk on this one request rather than on the row cap.
+      return {
+        rows: page.supported === false ? [] : (page.snapshots ?? []),
+        nextCursor: page.supported === false ? null : (page.next_cursor ?? null),
+      };
+    },
+    {
+      pageSize: opts.pageSize,
+      maxRows: opts.maxRows,
+      maxPages: opts.maxPages,
+      signal: opts.signal,
+      // Pages overlap when the newest one is being appended to as it is read.
+      // Keyed on the scope joined to the instant — one row per scope per dump.
+      dedupeKey: (row) => `${row.bot_name ?? ""}:${row.scope_id}:${row.timestamp}`,
+    },
+  );
+
+  return {
+    snapshots: walk.rows,
+    next_cursor: walk.nextCursor,
+    interval: first?.interval ?? params.interval ?? "5m",
+    subject: params.subject,
+    supported: first?.supported ?? true,
+    server_online: first?.server_online,
+    error_hint: first?.error_hint,
+    pages: walk.pages,
+    truncated: walk.truncated,
+    outcome: walk.outcome,
+  };
+}
+
 // ── API functions ──
 
 export const api = {
@@ -1983,6 +2155,21 @@ export const api = {
    */
   getControllerPerformanceHistoryByController:
     fetchControllerPerformanceHistoryByController,
+
+  /**
+   * Whether this server serves `/performance/history` (FEAT-087).
+   *
+   * One request per server, cached server-side with the other per-server data,
+   * so every chart on the page shares one answer and a tree click costs
+   * nothing.
+   */
+  getPerformanceCapability: (server: string) =>
+    apiFetch<PerformanceCapabilityResponse>(
+      `/api/v1/servers/${encodeURIComponent(server)}/performance/capability`,
+    ),
+
+  /** One scope's sampled performance series, for either population (FEAT-087). */
+  getPerformanceHistory: fetchPerformanceHistoryAll,
 
   getBotRuns: (
     server: string,

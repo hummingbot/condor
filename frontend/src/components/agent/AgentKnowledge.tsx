@@ -420,6 +420,13 @@ export function AgentKnowledge({
                 }}
                 onDelete={(card) => setDeleting({ kind: "skill", card })}
                 onCreate={() => setCreating("skill")}
+                onGoToRoutine={(name) => {
+                  if (onOpenRoutine) {
+                    onOpenRoutine(name);
+                  } else {
+                    openTab("routines");
+                  }
+                }}
               />
             )}
             {activeTab === "memories" && (
@@ -519,21 +526,36 @@ function Chip({
   children,
   title,
   tone = "muted",
+  onClick,
 }: {
   children: React.ReactNode;
   title?: string;
   tone?: "muted" | "accent" | "warn";
+  onClick?: () => void;
 }) {
   const tones = {
     muted: "border-[var(--color-border)] text-[var(--color-text-muted)]",
     accent: "border-[var(--color-primary)]/40 text-[var(--color-primary)]",
     warn: "border-amber-500/40 text-amber-400",
   };
+  const cls = `shrink-0 rounded border bg-[var(--color-surface)] px-1.5 py-px text-[10px] ${tones[tone]}`;
+  if (onClick) {
+    return (
+      <button
+        type="button"
+        title={title}
+        onClick={(e) => {
+          e.stopPropagation();
+          onClick();
+        }}
+        className={`${cls} cursor-pointer hover:brightness-125`}
+      >
+        {children}
+      </button>
+    );
+  }
   return (
-    <span
-      title={title}
-      className={`shrink-0 rounded border bg-[var(--color-surface)] px-1.5 py-px text-[10px] ${tones[tone]}`}
-    >
+    <span title={title} className={cls}>
       {children}
     </span>
   );
@@ -969,6 +991,7 @@ function SkillsTab({
   onDelete,
   onCreate,
   onRuled,
+  onGoToRoutine,
 }: {
   brain: AgentBrain;
   slug: string;
@@ -977,6 +1000,7 @@ function SkillsTab({
   onDelete: (skill: SkillCard) => void;
   onCreate: () => void;
   onRuled: () => void;
+  onGoToRoutine?: (name: string) => void;
 }) {
   return (
     <div className="space-y-1.5">
@@ -1023,8 +1047,13 @@ function SkillsTab({
                     tone={s.routine_ok ? "accent" : "warn"}
                     title={
                       s.routine_ok
-                        ? "Runs this routine instead of improvising the flow"
+                        ? "Click to open this routine"
                         : "This playbook points at a routine that no longer exists"
+                    }
+                    onClick={
+                      s.routine_ok && onGoToRoutine
+                        ? () => onGoToRoutine(s.references_routine!)
+                        : undefined
                     }
                   >
                     → {s.references_routine}

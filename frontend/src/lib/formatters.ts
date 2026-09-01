@@ -191,6 +191,28 @@ export function formatAxisTime(ms: number, spanMs: number): string {
   return `${d.toLocaleDateString("en-US", { month: "short" })} '${String(d.getFullYear() % 100).padStart(2, "0")}`;
 }
 
+/**
+ * A runtime measured in hours, shown in the unit it is legible in.
+ *
+ * Hours is the right unit for the tile — it is the divisor of every per-hour
+ * pace beside it, so the reader can check a pace against the total without
+ * converting anything — but only once there is an hour to speak of. A scope six
+ * minutes old reported `0.1h`, which reads as "about nothing" and hides the very
+ * thing it is being asked: a pace divided by a tenth of an hour is an
+ * extrapolation from six minutes, and the reader has to know that to discount
+ * it. Under the hour it is minutes, which is a figure with real digits in it.
+ *
+ * Below a minute it says `<1m` rather than rounding to `0m`, for the same
+ * reason: a runtime that rounds to zero is indistinguishable from no runtime at
+ * all, which is the one thing it is not.
+ */
+export function formatRuntimeHours(hours: number): string {
+  if (!Number.isFinite(hours) || hours <= 0) return "\u2014";
+  if (hours >= 1) return `${hours.toFixed(1)}h`;
+  const mins = Math.round(hours * 60);
+  return mins >= 1 ? `${mins}m` : "<1m";
+}
+
 export function formatAge(timestamp: number): string {
   if (!timestamp) return "\u2014";
   try {

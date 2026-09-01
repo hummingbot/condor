@@ -6,6 +6,7 @@ import {
   formatCompactVolume,
   formatCurrencyVolume,
   formatDateTime,
+  formatRuntimeHours,
   formatTime,
   roundToPricePrecision,
   shortBotName,
@@ -293,5 +294,31 @@ describe("shortBotName", () => {
 
   it("leaves a name with no stamp alone", () => {
     expect(shortBotName("main")).toBe("main");
+  });
+});
+
+describe("formatRuntimeHours", () => {
+  it("says hours once there is an hour to say", () => {
+    expect(formatRuntimeHours(1)).toBe("1.0h");
+    expect(formatRuntimeHours(2.35)).toBe("2.4h");
+    expect(formatRuntimeHours(56.2)).toBe("56.2h");
+  });
+
+  // The tile used to read "0.1h" for a scope six minutes old — a number with no
+  // digits left in it, beside per-hour paces extrapolated from exactly that.
+  it("says minutes under the hour, where hours have run out of digits", () => {
+    expect(formatRuntimeHours(0.1)).toBe("6m");
+    expect(formatRuntimeHours(0.5)).toBe("30m");
+    expect(formatRuntimeHours(59 / 60)).toBe("59m");
+  });
+
+  it("never rounds a real runtime down to nothing", () => {
+    expect(formatRuntimeHours(0.008)).toBe("<1m");
+  });
+
+  it("has no runtime to report for zero or nonsense", () => {
+    expect(formatRuntimeHours(0)).toBe("\u2014");
+    expect(formatRuntimeHours(-3)).toBe("\u2014");
+    expect(formatRuntimeHours(NaN)).toBe("\u2014");
   });
 });

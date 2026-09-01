@@ -50,6 +50,7 @@ import { configToYaml, CONTROLLER_HIDDEN_KEYS } from "@/lib/configYaml";
 import {
   formatCurrencyVolume,
   formatCurrencyPnl,
+  formatRuntimeHours,
   isExecutorActive,
   pnlColor,
   shortBotName,
@@ -71,9 +72,9 @@ import {
   visibleNodeIds,
   type Population,
   type PerfLeaf,
-  type PerfNode,
 } from "@/lib/perf-tree";
-import { aggregatePnlSeries, executorSeries, snapshotsFromRunHistory } from "@/lib/pnl-chart";
+import { resolvePerfSeries, scopeInterval } from "@/lib/perf-history";
+import { aggregatePnlSeries, snapshotsFromRunHistory } from "@/lib/pnl-chart";
 import { buildAttributor, runWindows } from "@/lib/run-attribution";
 import type { ConvertFn } from "@/lib/rates";
 import { useViewFacts } from "@/lib/viewFacts";
@@ -145,6 +146,28 @@ const FLEET_SCOPE = "all";
  */
 const WARM_RUNS = 6;
 const WARM_CONCURRENCY = 2;
+
+/**
+ * How long the shared-performance capability answer stays fresh (FEAT-087).
+ *
+ * It is a property of the API build, so it changes only when the server's image
+ * is rebuilt or pulled — half an hour is generous on both sides: rare enough
+ * that it is one request per session in practice, short enough that an upgrade
+ * either way is picked up without reloading the tab.
+ */
+const PERF_CAPABILITY_STALE_MS = 30 * 60_000;
+
+/**
+ * How long one executor's sampled series stays fresh, and how far it walks.
+ *
+ * The dump cadence upstream is 60s, so re-asking faster than that can only
+ * return the same rows. Two pages is two thousand rows for one executor, which
+ * at any interval on the ladder is far more instants than a chart can draw —
+ * the cap exists so a pathological history cannot turn one selection into an
+ * unbounded sequence of round-trips, not because it is expected to bind.
+ */
+const EXEC_HISTORY_STALE_MS = 60_000;
+const EXEC_HISTORY_MAX_PAGES = 2;
 
 /** Which of the bottom band's two occupants is showing, if either. */
 type BandKey = "positions" | "executors" | null;
@@ -973,6 +996,23 @@ export function PerfBrowser({
   );
   const nodes = useMemo(() => indexTree(tree), [tree]);
 
+  /**
+   * How big the tree is, for the button that selects all of it.
+   *
+   * Counts and not money: the fleet's PnL is what the row this button replaced
+   * used to shout from the top of the list, and it is one click away in the
+   * pane that actually has room to explain it. What the reader needs *here* is
+   * how much they are about to select — and, when a filter has bitten, that the
+   * list under it is shorter than it was.
+   */
+  const scopeCounts = useMemo(
+    () => ({
+      controllers: tree.children.filter((node) => node.kind === "controller").length,
+      executors: collectLeaves(tree, "executor").length,
+    }),
+    [tree],
+  );
+
 
   // A scope whose node has gone — a bot stopped, a config removed — would
   // render an empty screen with no way back, so it re-aims at the nearest
@@ -980,6 +1020,8 @@ export function PerfBrowser({
   // `resolveScope`, which reads that ancestry out of the id itself).
   const effectiveScopeId = useMemo(() => resolveScope(nodes, scopeId), [nodes, scopeId]);
   const scope = useMemo(() => nodes.get(effectiveScopeId) ?? tree, [nodes, effectiveScopeId, tree]);
+  /** Whether the panes are reporting the whole scope — what lights the Select all button. */
+  const atFleet = effectiveScopeId === FLEET_SCOPE;
 
   /**
    * Change the population, and keep the reader where they were.
@@ -1140,18 +1182,77 @@ export function PerfBrowser({
   );
 
   /**
-   * The controller an executor scope hangs under, if any.
+   * The executor this scope is, when it is one — the subject of its own series.
    *
-   * An executor has no series of its own — `controller_performance_snapshots`
-   * samples controllers, and an executor is one mutable row updated in place —
-   * so the chart for one is its parent's, said in those words rather than
-   * passed off as the executor's own curve.
+   * Until FEAT-087 an executor scope had no series and borrowed its parent
+   * controller's, because upstream stored an executor as one mutable row
+   * updated in place. `executor_performance_snapshots` records it over time
+   * now, so the curve under an executor's name is the executor's own or there
+   * is none; a controller's line captioned with an executor's name was the same
+   * picture asserting something false.
    */
-  const parentController = useMemo((): PerfNode | undefined => {
+  const execScopeId = useMemo(() => {
     if (scope.kind !== "executor") return undefined;
-    const parentId = controllerNodeId(scope.leaves[0]);
-    return parentId ? nodes.get(parentId) : undefined;
-  }, [scope, nodes]);
+    const leaf = scope.leaves[0];
+    return leaf?.kind === "executor" ? leaf.id : undefined;
+  }, [scope]);
+
+  /**
+   * The interval this executor's series is asked for.
+   *
+   * The same PERF-238 choice the fleet history makes, sized from the scope's
+   * own span rather than from the fleet's: an executor that ran for four
+   * minutes and one that ran for four days are the same chart width, and the
+   * ladder is what keeps both inside the point budget. Reused rather than
+   * reinvented, because a coarse interval silently drops rows on this route the
+   * same way it does on the controller one.
+   */
+  const execInterval = useMemo(() => {
+    const leaf = scope.kind === "executor" ? scope.leaves[0] : undefined;
+    return scopeInterval(leaf?.startedAt, leaf?.endedAt);
+  }, [scope]);
+
+  /**
+   * Whether this server serves `/performance/history` at all.
+   *
+   * One query per server, not per chart: the answer is a property of the API
+   * build, so it is keyed on the server alone and every scope the reader clicks
+   * through reads the same cache entry. Condor's route caches it again on its
+   * own side, so even a cold browser costs one upstream request.
+   *
+   * `retry: false` because a "no" here is an answer, not a failure to retry.
+   */
+  const { data: perfCapability } = useQuery({
+    queryKey: ["perf-capability", server],
+    queryFn: () => api.getPerformanceCapability(server),
+    enabled: !!server,
+    staleTime: PERF_CAPABILITY_STALE_MS,
+    gcTime: PERF_CAPABILITY_STALE_MS * 2,
+    retry: false,
+  });
+
+  /**
+   * This executor's own sampled series, where the server can serve one.
+   *
+   * Not fetched at all when the probe says the route is absent — the fallback
+   * is drawn instead, and a request that is known to 404 is one nobody should
+   * pay for. A closed executor's series is complete in a single query: its
+   * terminal row *is* the final point, written transactionally at completion,
+   * so nothing has to append a last value afterwards.
+   */
+  const { data: execHistory, isFetching: execHistoryLoading } = useQuery({
+    queryKey: ["perf-history", server, "executor", execScopeId, execInterval],
+    queryFn: () =>
+      api.getPerformanceHistory(
+        server,
+        { subject: "executor", executor_id: execScopeId!, interval: execInterval },
+        { maxPages: EXEC_HISTORY_MAX_PAGES },
+      ),
+    enabled: !!server && !!execScopeId && perfCapability?.supported === true,
+    staleTime: EXEC_HISTORY_STALE_MS,
+    gcTime: 10 * 60_000,
+    retry: false,
+  });
 
   const isKilled = activeCtrl?.config?.manual_kill_switch === true;
   const isStopping = activeCtrl?.status === "stopping";
@@ -1357,16 +1458,18 @@ export function PerfBrowser({
   // ── The aggregated series, folded from the fleet history the page already has ──
 
   /**
-   * The live controllers the chart draws, which is not always the scope's own:
-   * an executor node inherits its parent controller's series (see
-   * `parentController`).
+   * The live controllers the chart draws — the scope's own, always.
+   *
+   * It used to be "the scope's own, or its parent's when the scope is an
+   * executor". That inheritance is gone with FEAT-087: an executor draws its
+   * own recorded series or none.
    */
   const scopedControllers = useMemo(
     () =>
-      (parentController ? parentController.leaves : scopedLeaves)
+      scopedLeaves
         .filter((leaf: PerfLeaf) => leaf.kind === "controller")
         .map((leaf) => leaf.source as ControllerInfo),
-    [parentController, scopedLeaves],
+    [scopedLeaves],
   );
 
   const scopedKeys = useMemo(
@@ -1375,19 +1478,13 @@ export function PerfBrowser({
   );
 
   /**
-   * Where this scope's series comes from — the one place the two populations
-   * genuinely differ.
+   * Where this scope's series comes from.
    *
-   * A live controller, bot or fleet folds the *sampled* history the page
-   * already walked. Anything terminated has no sampled history to fold — an
-   * executor is one mutable row upstream, not a time series — so its series is
-   * built from the outcomes themselves: each close, at its close time, summed
-   * (see `executorSeries`). And a live executor has neither, so it borrows its
-   * parent controller's curve and the card says whose it is.
-   *
-   * All three return the same `PnlChartPoint[]`, so the chart is untouched by
-   * any of it. [[FEAT-087]] replaces the second and third with real snapshots,
-   * and this is the seam it swaps at.
+   * The decision itself lives in `lib/perf-history.ts` — this is the seam
+   * FEAT-086 named and FEAT-087 swapped at. What is computed here is only the
+   * three *candidates*, in the shape that module resolves between: the
+   * upstream sampled rows for an executor scope, the controller-history fold
+   * for everything else, and the closed outcomes as the last resort.
    */
   /**
    * A scope narrower than the run, on a run only its archive remembers.
@@ -1403,7 +1500,8 @@ export function PerfBrowser({
     runHistory?.source === "archive" &&
     (scope.kind === "controller" || scope.kind === "executor");
 
-  const chartData = useMemo(() => {
+  /** The controller-history candidate: what this scope drew before FEAT-087. */
+  const controllerPoints = useMemo(() => {
     // A *live* controller draws its own finer series (see `ControllerPnlChart`).
     // A finished one does not: its curve is already in the run's cached history,
     // over the run's real window rather than deploy-to-now, and folding it here
@@ -1436,13 +1534,41 @@ export function PerfBrowser({
         // ends where the trading ended.
         return aggregatePnlSeries(expanded, keys, [], convert);
       }
-      return executorSeries(scope.leaves, cv);
+      // Nothing sampled: the outcome fold is the fallback, and
+      // `resolvePerfSeries` reaches it because this candidate came back empty.
+      return [];
     }
     return aggregatePnlSeries(snapshots, scopedKeys, scopedControllers, convert);
   }, [
-    activeCtrl, population, scope, cv, snapshots, scopedKeys, scopedControllers,
+    activeCtrl, population, snapshots, scopedKeys, scopedControllers,
     convert, runHistory, scopeRun, archiveOnlyController,
   ]);
+
+  /**
+   * The one place that decides which of the three sources this scope draws.
+   *
+   * The candidates are ordered by strength inside `resolvePerfSeries`, not
+   * here: upstream snapshots, then the controller history, then the closes.
+   * It also reports *why* a fallback was taken, which is the difference
+   * between "this scope has no history" and "this server cannot record one".
+   */
+  const series = useMemo(
+    () =>
+      resolvePerfSeries({
+        snapshots: execHistory?.supported === false ? undefined : execHistory?.snapshots,
+        controllerPoints,
+        // Only the terminated population has closes to fold. A running scope
+        // whose executors have all closed is a contradiction the tree does not
+        // produce, and offering the fold there would draw a "closed outcomes"
+        // curve under a live controller.
+        outcomes: population === "terminated" ? scope.leaves : undefined,
+        supported: perfCapability?.supported,
+        convert,
+        cv,
+      }),
+    [execHistory, controllerPoints, population, scope, perfCapability, convert, cv],
+  );
+  const chartData = series.points;
 
   /**
    * Leaves in scope whose quote currency is unknown, and that traded.
@@ -1556,13 +1682,11 @@ export function PerfBrowser({
   const configId = activeCtrl ? activeCtrl.controller_id || activeCtrl.controller_name : "";
   const chartHeight = Math.max(MIN_CHART_PX, (chartBoxH || 420) - CHART_CHROME_PX);
 
-  // An executor scope borrows its parent's curve, and the card says so in both
-  // places a reader might look: the title names whose series it is, and the
-  // notice says why the executor has none of its own.
-  const inheritedFrom = population === "running" ? parentController?.label : undefined;
-  const chartTitle = inheritedFrom
-    ? `${inheritedFrom} PnL`
-    : scope.kind === "fleet"
+  // The title names the scope, always. It used to name the *parent controller*
+  // for an executor scope, because that was whose curve was drawn; an executor
+  // draws its own now, so there is no one else to name.
+  const chartTitle =
+    scope.kind === "fleet"
       ? population === "terminated"
         ? "Closed PnL"
         : "Fleet PnL"
@@ -1597,15 +1721,44 @@ export function PerfBrowser({
                 "Drawn from each executor's close time and its final PnL, not from sampled history — nothing here is still open, so there is no unrealized series and no position to hold. Each step is what closed in that bucket.",
             };
 
-  const chartNotice =
-    population === "terminated"
-      ? terminatedNotice
-      : inheritedFrom
+  /**
+   * What an executor scope has to say about its own curve (FEAT-087).
+   *
+   * Three states, and the reader cannot tell them apart from the picture:
+   *
+   *  - **drawn from its own snapshots** — nothing to say. The curve is the
+   *    executor's, sampled, and reads like any other.
+   *  - **the server cannot record one** — `/performance/history` is not there.
+   *    That is a property of *their API build*, not of this executor, and
+   *    naming it is the difference between "there is nothing to show" and
+   *    "upgrade and there will be".
+   *  - **the route is there and this executor has no rows** — it closed before
+   *    the table existed, or it lived less than one dump interval. Backfilling
+   *    history for an executor that already closed is deliberately out of
+   *    scope, so the honest answer is that it was never recorded.
+   */
+  const executorNotice =
+    scope.kind !== "executor" || series.source === "snapshots"
+      ? undefined
+      : perfCapability?.supported === false
         ? {
-            label: "parent controller's series",
+            label: "no recorded series",
             detail:
-              "An executor is stored upstream as a single row updated in place, with no sampled history of its own, so the curve below is the controller it belongs to. The numbers above the chart are the executor's own.",
+              "This API does not record executor performance over time, so there is no curve for this executor — only the totals above, which are its own. An API with the shared performance history draws the executor's own sampled series here.",
           }
+        : execHistoryLoading
+          ? undefined
+          : {
+              label: "no recorded series",
+              detail:
+                "The server records executor performance over time, but has none for this one — it closed before the table existed, or it lived less than one snapshot interval. The totals above are its own.",
+            };
+
+  const chartNotice =
+    scope.kind === "executor"
+      ? executorNotice
+      : population === "terminated"
+        ? terminatedNotice
         : truncated
           ? {
               label: "partial history",
@@ -1730,8 +1883,55 @@ export function PerfBrowser({
           )}
         </div>
 
-        {/* Scope list: fleet → controller → executor, and nothing else */}
+        {/* Scope list: controller → executor, and nothing else.
+
+            The fleet is the button above it rather than the first row of it.
+            An "All controllers" card at the top of the list was a total dressed
+            as one of the things it totalled: always first, always the biggest
+            number on the column, and always in the way of the rows the reader
+            opened the sidebar to compare. As a button it costs a line instead
+            of a card, says how much it is about to select, and lights up when
+            it is what the panes are reporting. */}
         <div ref={sidebarRef} className="flex-1 overflow-y-auto scrollbar-thin">
+          <div className="sticky top-0 z-10 border-b border-[var(--color-border)] bg-[var(--color-surface)]">
+            {isCompact ? (
+              <button
+                onClick={() => setScope(FLEET_SCOPE)}
+                {...(atFleet ? { "data-active-scope": true } : {})}
+                aria-pressed={atFleet}
+                title={`Select all — ${plural(scopeCounts.controllers, "controller")}`}
+                className={`flex w-full items-center justify-center py-3 transition-colors ${
+                  atFleet
+                    ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+                    : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
+                }`}
+              >
+                <Layers className="h-3.5 w-3.5" />
+              </button>
+            ) : (
+              <div className="flex items-center gap-1.5 px-2 py-1.5">
+                <span className="truncate text-[10px] tabular-nums text-[var(--color-text-muted)]">
+                  {plural(scopeCounts.controllers, "controller")}
+                  {scopeCounts.executors > 0 && ` · ${plural(scopeCounts.executors, "executor")}`}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setScope(FLEET_SCOPE)}
+                  aria-pressed={atFleet}
+                  {...(atFleet ? { "data-active-scope": true } : {})}
+                  title="Report on everything in scope, combined"
+                  className={`ml-auto flex shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] transition-colors ${
+                    atFleet
+                      ? "border-[var(--color-primary)] bg-[var(--color-primary)]/15 font-semibold text-[var(--color-primary)]"
+                      : "border-[var(--color-border)] text-[var(--color-text-muted)] hover:border-[var(--color-primary)]/50 hover:text-[var(--color-text)]"
+                  }`}
+                >
+                  <Layers className="h-3 w-3 shrink-0" />
+                  Select all
+                </button>
+              </div>
+            )}
+          </div>
           <ScopeTree
             root={tree}
             activeId={effectiveScopeId}
@@ -2244,10 +2444,12 @@ export function PerfBrowser({
                 />
                 <Kpi
                   label="Runtime"
-                  value={totals.hours > 0 ? `${totals.hours.toFixed(1)}h` : "—"}
+                  value={totals.hours > 0 ? formatRuntimeHours(totals.hours) : "—"}
                   // Named in hours, not "2d 9h", because it is the divisor of
                   // every per-hour figure in this row — the reader can check the
-                  // pace against the total without converting anything.
+                  // pace against the total without converting anything. Under
+                  // the hour it is minutes: `0.1h` is not a number anyone can
+                  // check a pace against (see `formatRuntimeHours`).
                   sub={
                     activeCtrl
                       ? activeCtrl.bot_name

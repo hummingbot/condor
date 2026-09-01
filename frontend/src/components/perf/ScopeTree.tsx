@@ -147,7 +147,7 @@ function ScopeRow({
   return (
     <>
       <div
-        className={`${rowClass(active)} flex items-stretch ${depth === 0 ? "" : "border-t border-[var(--color-border)]/30"}`}
+        className={`${rowClass(active)} flex items-stretch border-t border-[var(--color-border)]/30`}
         style={{ paddingLeft: depth === 0 ? 0 : Math.min(depth, 3) * 10 }}
       >
         {hasChildren ? (
@@ -210,15 +210,23 @@ function ScopeRow({
 }
 
 /**
- * The scope picker: one row per node, at every level, reporting the same fold
- * the pane beside it reports.
+ * The scope picker: one row per controller, and one per executor under it.
  *
- * It is a picker over a `PerfNode` tree rather than a list of controllers, so
- * the fleet, a controller and an executor are all the same row drawn at a
- * different depth — which is the whole reason a controller and an executor can
- * be described by the same strip and the same chart (FEAT-086). Three levels is
- * all there is: what a row hangs *under* is a bubble above the tree now, not a
- * chevron the reader has to walk through.
+ * It is a picker over a `PerfNode` tree rather than a list of controllers, so a
+ * controller and an executor are the same row drawn at a different depth —
+ * which is the whole reason the two can be described by the same strip and the
+ * same chart (FEAT-086).
+ *
+ * The **root is not drawn**. It used to be the first row: an "All controllers"
+ * card carrying the fleet's PnL and volume, permanently at the top of the list.
+ * A row is a thing you pick out of a list of comparable things, and the fleet
+ * is not comparable with a controller — it is the sum of them, so it read as a
+ * ranked entry that always won, took the widest slot on the narrowest column,
+ * and pushed the rows the reader actually came to compare down the page. It is
+ * a *button* above the list now (see `PerfBrowser`), which is the affordance it
+ * always was: one click to report on everything, with no card spent on it.
+ * `root.id` is still the scope that button selects and the id the arrow keys
+ * walk to first — only its row is gone.
  */
 export function ScopeTree({
   root,
@@ -244,19 +252,34 @@ export function ScopeTree({
   now: number;
   compact?: boolean;
 }) {
+  // An empty tree is a real answer — every filter ticked off, or a window with
+  // nothing in it — and it has to say so, or the sidebar reads as still loading.
+  if (root.children.length === 0) {
+    return compact ? null : (
+      <p className="px-3 py-4 text-center text-[10px] text-[var(--color-text-muted)]">
+        Nothing in scope.
+      </p>
+    );
+  }
+
   return (
-    <ScopeRow
-      node={root}
-      depth={0}
-      activeId={activeId}
-      open={open}
-      showBot={showBot}
-      onSelect={onSelect}
-      onToggleOpen={onToggleOpen}
-      cv={cv}
-      currencySymbol={currencySymbol}
-      now={now}
-      compact={compact}
-    />
+    <>
+      {root.children.map((child) => (
+        <ScopeRow
+          key={child.id}
+          node={child}
+          depth={0}
+          activeId={activeId}
+          open={open}
+          showBot={showBot}
+          onSelect={onSelect}
+          onToggleOpen={onToggleOpen}
+          cv={cv}
+          currencySymbol={currencySymbol}
+          now={now}
+          compact={compact}
+        />
+      ))}
+    </>
   );
 }
