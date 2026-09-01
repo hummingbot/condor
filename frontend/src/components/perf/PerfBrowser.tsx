@@ -5,6 +5,7 @@ import {
   ChevronRight,
   ChevronUp,
   Database,
+  History,
   Layers,
   Loader2,
   Pause,
@@ -14,6 +15,7 @@ import {
   Save,
   ScrollText,
   Server,
+  Shapes,
   SlidersHorizontal,
   Square,
   TerminalSquare,
@@ -71,6 +73,11 @@ import { aggregatePnlSeries, executorSeries } from "@/lib/pnl-chart";
 import type { ConvertFn } from "@/lib/rates";
 import { POSITIONS_BAND_KEY } from "@/lib/sessionState";
 import { useViewFacts } from "@/lib/viewFacts";
+
+/** `3, "bot"` → `"3 bots"`. Thousands separated, because a fleet's closed set runs to five figures. */
+function plural(count: number, noun: string): string {
+  return `${count.toLocaleString()} ${noun}${count === 1 ? "" : "s"}`;
+}
 
 function parseSide(raw: string): string {
   const dot = raw.lastIndexOf(".");
@@ -1097,6 +1104,14 @@ export function PerfBrowser({
   if (controllers.length === 0) return null;
 
   const configId = activeCtrl ? activeCtrl.controller_id || activeCtrl.controller_name : "";
+  // What this scope folds, in words — a controller while live, a closed
+  // executor once finished, and a run under the branch that holds runs.
+  const scopeNoun =
+    population === "running"
+      ? "controller"
+      : scope.kind === "runs" || scope.kind === "run"
+        ? "finished run"
+        : "closed executor";
   const chartHeight = Math.max(MIN_CHART_PX, (chartBoxH || 420) - CHART_CHROME_PX);
 
   // An executor scope borrows its parent's curve, and the card says so in both
@@ -1374,23 +1389,31 @@ export function PerfBrowser({
                 </div>
               </>
             ) : (
+              // Every other scope — the fleet, a bot, an executor type, the run
+              // history, or a controller reconstructed out of closed executors.
+              // One header for all of them: what it is, and what it folds.
               <div className="truncate">
                 <h2 className="text-sm font-semibold truncate flex items-center gap-2">
                   {scope.kind === "bot" ? (
-                    <>
-                      <Server className="h-3.5 w-3.5 text-[var(--color-text-muted)]" />
-                      {scope.label}
-                    </>
+                    <Server className="h-3.5 w-3.5 shrink-0 text-[var(--color-text-muted)]" />
+                  ) : scope.kind === "type" ? (
+                    <Shapes className="h-3.5 w-3.5 shrink-0 text-[var(--color-text-muted)]" />
+                  ) : scope.kind === "runs" ? (
+                    <History className="h-3.5 w-3.5 shrink-0 text-[var(--color-text-muted)]" />
                   ) : (
-                    <>
-                      <Layers className="h-3.5 w-3.5 text-[var(--color-text-muted)]" />
-                      All controllers combined
-                    </>
+                    <Layers className="h-3.5 w-3.5 shrink-0 text-[var(--color-text-muted)]" />
                   )}
+                  <span className="truncate">
+                    {scope.kind === "fleet"
+                      ? population === "running"
+                        ? "All controllers combined"
+                        : "Everything that has finished"
+                      : scope.label}
+                  </span>
                 </h2>
                 <span className="text-[10px] text-[var(--color-text-muted)] block truncate">
-                  {scopedLeaves.length} controller{scopedLeaves.length !== 1 ? "s" : ""} aggregated
-                  {scope.kind === "fleet" && ` · ${tree.children.length} bot${tree.children.length !== 1 ? "s" : ""}`}
+                  {plural(scopedLeaves.length, scopeNoun)} aggregated
+                  {scope.kind === "fleet" && ` · ${plural(tree.children.length, "group")}`}
                 </span>
               </div>
             )}
@@ -1718,7 +1741,7 @@ export function PerfBrowser({
                   sub={
                     activeCtrl
                       ? activeCtrl.bot_name
-                      : `${totals.bots} bot${totals.bots !== 1 ? "s" : ""}, ${totals.count.toLocaleString()} ${population === "running" ? "controller" : "closed"}${totals.count !== 1 ? "s" : ""}`
+                      : `${plural(totals.bots, "bot")}, ${plural(totals.count, scopeNoun)}`
                   }
                 />
               </div>
