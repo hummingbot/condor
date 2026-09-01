@@ -61,6 +61,7 @@ export function AgentPanel({
   onSelectBrain,
   onSelectServer,
   onOpenRoutine,
+  onAskAgent,
   onClose,
 }: {
   /** Whose panel this is: the session's agent, the rail's pick, else Condor. */
@@ -79,6 +80,12 @@ export function AgentPanel({
   onSelectServer: (serverName: string) => void;
   /** Hand the pane to the routine library, focused on this routine. */
   onOpenRoutine: (routineName: string) => void;
+  /**
+   * Put a request from a brain row to this agent (FEAT-092). Here that is a
+   * message into a fresh conversation, which is the better move the chat has
+   * and the detail page does not: the workspace stays where it is.
+   */
+  onAskAgent: (text: string) => void;
   onClose: () => void;
 }) {
   const [tab, setTab] = useState<KnowledgeTabId>("brain");
@@ -123,6 +130,7 @@ export function AgentPanel({
           tab={tab}
           onTabChange={setTab}
           onOpenRoutine={onOpenRoutine}
+          onAskAgent={onAskAgent}
           onDirtyChange={setDirty}
         />
       </WorkspaceSheet>

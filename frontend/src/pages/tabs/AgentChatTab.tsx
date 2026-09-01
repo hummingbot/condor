@@ -236,12 +236,20 @@ export function AgentChatTab() {
 
   // "Chat" on an agent's detail page arrives as `?agent=<slug>`: focus or start
   // that conversation once, then drop the param so a reload is not a respawn.
+  //
+  // `?ask=` rides beside it when the page's brain panel handed something over
+  // (FEAT-092) — the request is carried in the URL because navigating is the
+  // only channel that page has. It is read under the same guard and stripped in
+  // the same call, so a reload does not send it twice; and it is what makes the
+  // spawn `fresh`, so a bare `?agent=` keeps today's focus-or-start exactly.
   const consumedAgentParam = useRef(false);
   const agentParam = searchParams.get("agent");
+  const askParam = searchParams.get("ask");
   useEffect(() => {
     if (!agentParam || consumedAgentParam.current) return;
     consumedAgentParam.current = true;
-    talkTo(agentParam);
+    if (askParam) talkTo(agentParam, { intent: "fresh", text: askParam });
+    else talkTo(agentParam);
     setSearchParams({}, { replace: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentParam]);
@@ -463,6 +471,13 @@ export function AgentChatTab() {
               // hands it over rather than growing a second one.
               onOpenRoutine={(name) =>
                 setPane({ kind: "routines", focus: { source: name } })
+              }
+              // A revision is its own thread: `fresh`, not `focus`, so the
+              // request does not land under whatever unrelated thing this
+              // agent was last asked. The workspace itself stays put — the
+              // detail page has to navigate for this, the chat does not.
+              onAskAgent={(text) =>
+                talkTo(panelSlug, { intent: "fresh", text })
               }
               onClose={() => setPane(null)}
             />

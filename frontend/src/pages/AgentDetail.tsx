@@ -330,6 +330,15 @@ export function AgentDetail() {
         slug={agent.slug}
         tab={tab}
         onTabChange={setTab}
+        // This page cannot send a message, so it navigates to the workspace
+        // carrying the request — the same `/?agent=` door as "Open chat" above,
+        // with `?ask=` beside it (FEAT-092). The encoding is not optional: an
+        // opener carries backticks, parens and quotes.
+        onAskAgent={(text) =>
+          navigate(
+            `/?agent=${encodeURIComponent(agent.slug)}&ask=${encodeURIComponent(text)}`,
+          )
+        }
         routinesAction={
           <div className="flex shrink-0 items-center gap-1.5">
             <button
