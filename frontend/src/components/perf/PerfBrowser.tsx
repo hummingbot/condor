@@ -59,6 +59,7 @@ import {
   leafFromBotRun,
   leafFromController,
   leafFromExecutor,
+  leafFromTerminatedController,
   parseGroupBy,
   parsePopulation,
   resolveScope,
@@ -139,6 +140,14 @@ interface PerfBrowserProps {
   paging?: ExecutorPaging;
   /** The bot runs the history knows about; only the finished ones are used. */
   runs?: BotRunInfo[];
+  /**
+   * The controllers those finished runs left behind (FEAT-089).
+   *
+   * The same `ControllerInfo` shape the live fleet arrives in, which is what
+   * lets the Terminated tree be fleet → bot → controller → executor, exactly
+   * like the Running one, instead of a flat bucket of closed executors.
+   */
+  terminatedControllers?: ControllerInfo[];
   rateFormatPnl?: (val: number, quote: string) => string;
   rateFormatValue?: (val: number, quote: string) => string;
   rateFormatDetailed?: (val: number, quote: string) => string;
@@ -508,6 +517,7 @@ export function PerfBrowser({
   executors = [],
   paging,
   runs = [],
+  terminatedControllers = [],
   rateFormatPnl,
   rateFormatValue,
   rateFormatDetailed,
@@ -667,6 +677,23 @@ export function PerfBrowser({
   const attribute = useMemo(() => buildAttributor(runWindows(runs)), [runs]);
 
   /**
+   * The run behind each bot name, for the two things a controller record cannot
+   * say: when its bot stopped, and which archive it left.
+   *
+   * A bot name carries its own deploy timestamp, so it is unique per run in
+   * practice; where it is not, the most recent run wins, which is the one the
+   * finished controllers on screen belong to.
+   */
+  const runByBot = useMemo(() => {
+    const latest = new Map<string, BotRunInfo>();
+    for (const run of runs) {
+      const seen = latest.get(run.bot_name);
+      if (!seen || (run.created_at ?? "") > (seen.created_at ?? "")) latest.set(run.bot_name, run);
+    }
+    return latest;
+  }, [runs]);
+
+  /**
    * What is in scope, which is the *only* thing the population toggle changes.
    *
    * Running is the live fleet: every controller, with the executors currently
@@ -717,6 +744,17 @@ export function PerfBrowser({
           if (cutoff && leaf.endedAt !== null && leaf.endedAt < cutoff) continue;
           all.push(leaf);
         }
+        // The controllers those runs left behind. This is the spine of the
+        // terminated tree, exactly as the live controllers are the spine of the
+        // running one: a controller record covers every executor it ever ran,
+        // including the ones that closed long before the bounded executor walk
+        // reaches, so a finished bot reports what it actually did rather than
+        // whatever fraction of its executors is still in the table.
+        for (const ctrl of terminatedControllers) {
+          const leaf = leafFromTerminatedController(ctrl, runByBot.get(ctrl.bot_name));
+          if (cutoff && leaf.endedAt !== null && leaf.endedAt < cutoff) continue;
+          all.push(leaf);
+        }
         // A run still deployed is the live fleet, which the other population
         // already reports; only what has finished belongs here. Read off
         // `is_live` rather than `run_status`, which upstream leaves at
@@ -743,7 +781,7 @@ export function PerfBrowser({
             (!!leaf.controllerId && filters.controllers.includes(leaf.controllerId))),
       );
     },
-    [controllers, executors, runs, botByController, attribute, period, now, filters],
+    [controllers, executors, runs, runByBot, terminatedControllers, botByController, attribute, period, now, filters],
   );
 
   const leaves = useMemo(() => leavesFor(population), [leavesFor, population]);
@@ -766,15 +804,15 @@ export function PerfBrowser({
       if (ex.type) types.add(ex.type);
       if (ex.controller_id) controllers.add(ex.controller_id);
     }
-    if (population === "running") {
-      for (const c of controllersProp) {
-        if (c.controller_name) types.add(c.controller_name);
-        const id = c.controller_id || c.controller_name;
-        if (id) controllers.add(id);
-      }
+    // The controllers of the population, so the dropdown offers the spine of
+    // the tree rather than only what its executor children happen to name.
+    for (const c of population === "running" ? controllersProp : terminatedControllers) {
+      if (c.controller_name) types.add(c.controller_name);
+      const id = c.controller_id || c.controller_name;
+      if (id) controllers.add(id);
     }
     return { types: [...types].sort(), controllers: [...controllers].sort() };
-  }, [population, executors, controllersProp]);
+  }, [population, executors, controllersProp, terminatedControllers]);
 
   const filtersActive =
     !!filters.pair.trim() || filters.types.length > 0 || filters.controllers.length > 0;

@@ -163,6 +163,55 @@ export function leafFromController(c: ControllerInfo): PerfLeaf {
 }
 
 /**
+ * One controller of a run that has finished.
+ *
+ * The same record as a live controller's, read the other way round.
+ * `leafFromController` hardcodes `running: true, endedAt: null`, which is right
+ * for a payload that only ever describes live controllers and wrong for one
+ * that has stopped — and it is not cosmetic: `foldLeaves` measures a scope's
+ * runtime to *now* while anything in it is running, so a terminated fold
+ * inheriting that would grow a runtime for trading that ended last week, and
+ * every per-hour pace on the strip would shrink to match.
+ *
+ * The run supplies the two things the controller record cannot: when it stopped,
+ * and — through `deployed_at` — when it started.
+ *
+ * `executorType` stays unknown rather than borrowed. Upstream reports no
+ * `controller_name` on these rows at all, and the run's `strategy_type` names
+ * the *bot's* strategy (`controller`, `v2_with_controllers`), not the class of
+ * this controller. Grouping by a value that is not the thing being grouped is
+ * worse than saying so.
+ */
+export function leafFromTerminatedController(c: ControllerInfo, run?: BotRunInfo): PerfLeaf {
+  const started = c.deployed_at ? Date.parse(c.deployed_at) : NaN;
+  const stopped = run?.stopped_at ? Date.parse(run.stopped_at) : NaN;
+  return {
+    id: controllerKey(c),
+    kind: "controller",
+    label: c.controller_id || c.controller_name,
+    bot: c.bot_name,
+    controllerId: c.controller_id || c.controller_name,
+    executorType: c.controller_name || UNKNOWN_LABEL,
+    connector: c.connector || "",
+    pair: c.trading_pair || "",
+    realized: c.realized_pnl_quote,
+    unrealized: c.unrealized_pnl_quote,
+    net: c.global_pnl_quote,
+    volume: c.volume_traded,
+    fees: 0,
+    capital: 0,
+    closeTypes: c.close_type_counts || {},
+    positions: c.positions_summary || [],
+    startedAt: Number.isNaN(started) ? null : started,
+    endedAt: Number.isNaN(stopped) ? null : stopped,
+    running: false,
+    status: "stopped",
+    returnPct: c.global_pnl_pct,
+    source: c,
+  };
+}
+
+/**
  * One executor, live or archived.
  *
  * `bot` is passed in because the record does not carry one: the caller matches

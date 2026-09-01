@@ -28,7 +28,10 @@ from condor.web.routes.controller_performance import (
 
 DEPLOYED = {
     "instance_name": "sell-btcbrl-20260901",
-    "controllers_config": ["btcbrl-sell__alloc_5_tp_3bp", "btcbrl-sell__alloc_10_tp_5bp"],
+    "controllers_config": [
+        "btcbrl-sell__alloc_5_tp_3bp",
+        "btcbrl-sell__alloc_10_tp_5bp",
+    ],
     "image": "hummingbot/hummingbot:latest",
 }
 
@@ -101,9 +104,7 @@ def test_the_deploy_blob_itself_is_not_forwarded():
     reads, and forwarding payloads whole is the bloat ``bots.py`` warns about."""
     import json
 
-    run = _parse_bot_run(
-        {"bot_name": "b", "deployment_config": json.dumps(DEPLOYED)}
-    )
+    run = _parse_bot_run({"bot_name": "b", "deployment_config": json.dumps(DEPLOYED)})
     assert "deployment_config" not in run.model_dump()
     assert "image" not in str(run.model_dump())
 

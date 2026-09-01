@@ -184,6 +184,25 @@ class BotRunsResponse(BaseModel):
     total: int = 0
 
 
+class TerminatedControllersResponse(BaseModel):
+    """Every controller of every run that has finished.
+
+    ``ControllerInfo`` rather than ``ControllerPerformanceSnapshot`` on purpose:
+    a snapshot is a point on a chart and deliberately drops ``close_type_counts``
+    (PERF-261), while the close-type strip leads the scope header and needs
+    them. The two populations then hand the browser the same shape, which is
+    what lets one tree, one fold and one set of panes describe both.
+    """
+
+    controllers: list[ControllerInfo] = []
+    #: How many finished runs contributed a controller. The tree's own
+    #: denominator: "12 of 137 runs are on screen" is a different fact from how
+    #: many controllers there are, and only this route can count it.
+    runs_seen: int = 0
+    server_online: bool = True
+    error_hint: Optional[str] = None
+
+
 # ── Controller Performance ──
 
 

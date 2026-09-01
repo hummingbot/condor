@@ -191,6 +191,22 @@ export interface BotRunsResponse {
   total: number;
 }
 
+/**
+ * Every controller of every run that has finished (FEAT-089).
+ *
+ * `ControllerInfo`, the same shape the live fleet arrives in, so one tree, one
+ * fold and one set of panes describe both populations. Not
+ * `ControllerPerformanceSnapshot`: that drops `close_type_counts` on purpose
+ * (PERF-261) and the close-type strip leads the scope header.
+ */
+export interface TerminatedControllersResponse {
+  controllers: ControllerInfo[];
+  /** How many finished runs contributed a controller — the tree's denominator. */
+  runs_seen: number;
+  server_online?: boolean;
+  error_hint?: string;
+}
+
 export interface ControllerPerformanceSnapshot {
   timestamp: string;
   bot_name: string;
@@ -1875,6 +1891,19 @@ export const api = {
       `/api/v1/servers/${encodeURIComponent(server)}/bot-runs${q ? `?${q}` : ""}`,
     );
   },
+
+  /**
+   * The controllers of every finished run.
+   *
+   * One upstream call for the whole terminated population — the latest
+   * snapshot of every controller of every bot the API has ever orchestrated —
+   * joined to the runs and cached warm server-side, so walking the Terminated
+   * tree costs nothing.
+   */
+  getTerminatedControllers: (server: string) =>
+    apiFetch<TerminatedControllersResponse>(
+      `/api/v1/servers/${encodeURIComponent(server)}/terminated/controllers`,
+    ),
 
   deleteBotRun: (server: string, botRunId: number) =>
     apiFetch<{ deleted: boolean }>(

@@ -20,6 +20,7 @@ import {
   leafFromBotRun,
   leafFromController,
   leafFromExecutor,
+  leafFromTerminatedController,
   resolveScope,
   runStatus,
   visibleNodeIds,
@@ -138,6 +139,42 @@ describe("leaf adapters", () => {
   it("declares no capital when the controller declares none", () => {
     expect(leafFromController(controller({ config: {} })).capital).toBe(0);
     expect(leafFromController(controller({ config: { total_amount_quote: 0 } })).capital).toBe(0);
+  });
+
+  // `leafFromController` hardcodes `running: true, endedAt: null`, which is
+  // right for a payload that only describes live controllers. Inheriting it for
+  // a finished one is not cosmetic: `foldLeaves` runs a scope's clock to *now*
+  // while anything in it is running, so the run would grow a runtime for
+  // trading that stopped last week and every per-hour pace would shrink to
+  // match.
+  it("ends a finished controller at its run's stop, and does not call it running", () => {
+    const leaf = leafFromTerminatedController(
+      controller({ deployed_at: new Date(NOW - 10 * HOUR).toISOString() }),
+      botRun({ stopped_at: new Date(NOW - 6 * HOUR).toISOString() }),
+    );
+    expect(leaf.running).toBe(false);
+    expect(leaf.status).toBe("stopped");
+    expect(leaf.startedAt).toBe(NOW - 10 * HOUR);
+    expect(leaf.endedAt).toBe(NOW - 6 * HOUR);
+
+    const fold = foldLeaves([leaf], identity, NOW);
+    expect(fold.hours).toBe(4);
+  });
+
+  it("keeps a finished controller's own pair, so its quote is not folded as dollars", () => {
+    const leaf = leafFromTerminatedController(controller({ trading_pair: "BTC-BRL" }));
+    expect(leaf.pair).toBe("BTC-BRL");
+    expect(leaf.closeTypes).toEqual({ TAKE_PROFIT: 3, STOP_LOSS: 1 });
+  });
+
+  it("has no end when no run says when its bot stopped", () => {
+    expect(leafFromTerminatedController(controller()).endedAt).toBeNull();
+  });
+
+  it("keeps the same id as the live controller it used to be", () => {
+    expect(leafFromTerminatedController(controller()).id).toBe(
+      leafFromController(controller()).id,
+    );
   });
 
   it("banks a closed executor's pnl and leaves a live one's unrealized", () => {

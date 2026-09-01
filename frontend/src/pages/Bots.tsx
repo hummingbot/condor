@@ -239,6 +239,22 @@ export function Bots() {
     refetchInterval: 30_000,
   });
 
+  // The controllers those runs left behind (FEAT-089).
+  //
+  // `controller-performance-latest` is not a live-fleet route: it holds the
+  // final snapshot of every controller of every bot the API has ever
+  // orchestrated, so one call answers for the whole finished population. It is
+  // what gives Terminated real controllers under real bots instead of one
+  // `(unattached)` bucket — and the route serves it warm, so this poll is a
+  // net rather than a cost.
+  const { data: terminatedData } = useQuery({
+    queryKey: ["terminated-controllers", server],
+    queryFn: () => api.getTerminatedControllers(server!),
+    enabled: !!server && population === "terminated",
+    refetchInterval: 60_000,
+    staleTime: 30_000,
+  });
+
   const loadMore = useCallback(() => setMaxPages((p) => p + EXECUTOR_PAGES), []);
   const paging = useMemo(
     () => ({
@@ -360,6 +376,7 @@ export function Bots() {
       executors={executors}
       paging={paging}
       runs={runsData?.runs ?? []}
+      terminatedControllers={terminatedData?.controllers ?? []}
       rateFormatPnl={formatPnlValue}
       rateFormatValue={formatValue}
       rateFormatDetailed={formatValueDetailed}

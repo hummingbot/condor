@@ -12,6 +12,7 @@ from condor.fetchers.bot_performance import (
     fetch_all_bot_performance,
     fetch_archived_paths,
 )
+from condor.fetchers.run_history import declared_controllers, terminated_controllers
 from condor.web.auth import require_server_access
 from condor.web.models import (
     BotRunInfo,
@@ -19,6 +20,7 @@ from condor.web.models import (
     ControllerPerformanceHistoryResponse,
     ControllerPerformanceLatestResponse,
     ControllerPerformanceSnapshot,
+    TerminatedControllersResponse,
     WebUser,
 )
 from condor.web.routes._errors import upstream_error
@@ -328,3 +330,93 @@ async def get_controller_performance_history(
         next_cursor=_next_cursor(result),
         interval=interval,
     )
+
+
+# ── Terminated: the controllers of every run that has finished ──
+
+#: How long a terminated listing stays warm.
+#:
+#: It is one cheap upstream call, and its answer changes only when a bot stops —
+#: which is minutes apart at best. Long enough that clicking around the
+#: Terminated tree costs nothing, short enough that a bot stopped a minute ago
+#: shows up without a reload.
+_TERMINATED_TTL_SEC = 60
+
+#: ``server -> (expires_at, response)``. Bounded by the number of configured
+#: servers, which is why it needs no eviction of its own.
+_terminated_cache: dict[str, tuple[float, TerminatedControllersResponse]] = {}
+
+
+def clear_terminated_cache() -> None:
+    """Drop every warm listing. For tests, and for a config reload."""
+    _terminated_cache.clear()
+
+
+@router.get(
+    "/servers/{name}/terminated/controllers",
+    response_model=TerminatedControllersResponse,
+)
+async def get_terminated_controllers(
+    name: str,
+    limit: int = Query(200, ge=1, le=500),
+    user: WebUser = Depends(require_server_access),
+):
+    """The controllers of every finished run, as the browser reports them.
+
+    ``controller-performance-latest`` is not a live-fleet route, whatever its
+    neighbours imply: it is the final snapshot of every controller of every bot
+    the API has ever orchestrated, and the rows outlive the bot. One call
+    answers for the whole finished population — measured on a real server, 139
+    rows across 86 bots, of which 8 are still deployed — which is why the
+    Terminated tree can have real controllers under real bots for the cost of
+    the listing it was already missing.
+
+    Joined to the runs so each controller knows when its bot was deployed and
+    which run it belongs to, and so the live ones can be excluded: the Running
+    population already reports those out of the live fleet.
+    """
+    import asyncio
+    import time
+
+    cached = _terminated_cache.get(name)
+    if cached is not None and cached[0] > time.monotonic():
+        return cached[1]
+
+    cm = get_config_manager()
+    client = await cm.get_client(name)
+
+    async def _fetch_latest():
+        return await client.bot_orchestration.get_latest_controller_performance()
+
+    async def _fetch_runs():
+        return await client.bot_orchestration.get_bot_runs(limit=limit)
+
+    try:
+        latest, runs_raw = await asyncio.gather(_fetch_latest(), _fetch_runs())
+    except Exception as e:
+        logger.warning("Failed to fetch terminated controllers from '%s': %s", name, e)
+        return TerminatedControllersResponse(
+            server_online=False,
+            error_hint=f"Connection error: {e}",
+        )
+
+    runs = [_parse_bot_run(r) for r in _extract_runs_list(runs_raw)]
+    controllers, runs_seen = terminated_controllers(_extract_snapshots(latest), runs)
+
+    # A run older than the snapshot table's retention floor has rows for none of
+    # its controllers. Its deployment still named them, and a run with no leaf
+    # gets no node and therefore no row — it would read as a run that never
+    # happened rather than one we have no record of. See ``declared_controllers``
+    # for why this tops up nothing and only fills in the empty.
+    covered = {c.bot_name for c in controllers}
+    for run in runs:
+        if run.is_live or run.bot_name in covered or not run.controller_ids:
+            continue
+        controllers.extend(declared_controllers(run))
+        runs_seen += 1
+
+    response = TerminatedControllersResponse(
+        controllers=controllers, runs_seen=runs_seen
+    )
+    _terminated_cache[name] = (time.monotonic() + _TERMINATED_TTL_SEC, response)
+    return response
