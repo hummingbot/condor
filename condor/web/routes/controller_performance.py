@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Optional
+from typing import Annotated, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -515,9 +515,15 @@ async def get_performance_history(
 #: shows up without a reload.
 _TERMINATED_TTL_SEC = 60
 
-#: ``server -> (expires_at, response)``. Bounded by the number of configured
-#: servers, which is why it needs no eviction of its own.
-_terminated_cache: dict[str, tuple[float, TerminatedControllersResponse]] = {}
+#: ``(server, limit) -> (expires_at, response)``. The limit belongs in the key:
+#: it decides how many runs are fetched, and so both ``runs_seen`` and which
+#: forgotten runs get topped up. Keyed by server alone, a listing built for one
+#: page size was served as the answer to another. Bounded by the number of
+#: configured servers times the handful of page sizes anyone asks for, which is
+#: why it needs no eviction of its own.
+_terminated_cache: dict[
+    tuple[str, int], tuple[float, TerminatedControllersResponse]
+] = {}
 
 
 def clear_terminated_cache() -> None:
@@ -531,7 +537,7 @@ def clear_terminated_cache() -> None:
 )
 async def get_terminated_controllers(
     name: str,
-    limit: int = Query(200, ge=1, le=500),
+    limit: Annotated[int, Query(ge=1, le=500)] = 200,
     user: WebUser = Depends(require_server_access),
 ):
     """The controllers of every finished run, as the browser reports them.
@@ -551,7 +557,7 @@ async def get_terminated_controllers(
     import asyncio
     import time
 
-    cached = _terminated_cache.get(name)
+    cached = _terminated_cache.get((name, limit))
     if cached is not None and cached[0] > time.monotonic():
         return cached[1]
 
@@ -597,7 +603,10 @@ async def get_terminated_controllers(
     response = TerminatedControllersResponse(
         controllers=controllers, runs_seen=runs_seen
     )
-    _terminated_cache[name] = (time.monotonic() + _TERMINATED_TTL_SEC, response)
+    _terminated_cache[(name, limit)] = (
+        time.monotonic() + _TERMINATED_TTL_SEC,
+        response,
+    )
     return response
 
 

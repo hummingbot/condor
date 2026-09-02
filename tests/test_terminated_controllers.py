@@ -166,13 +166,15 @@ class FakeClient:
         return self._runs
 
 
-def _route(client, monkeypatch, name="srv"):
+def _route(client, monkeypatch, name="srv", **kwargs):
     class FakeCM:
         async def get_client(self, _name):
             return client
 
     monkeypatch.setattr(cp, "get_config_manager", lambda: FakeCM())
-    return asyncio.run(cp.get_terminated_controllers(name=name, user=object()))
+    return asyncio.run(
+        cp.get_terminated_controllers(name=name, user=object(), **kwargs)
+    )
 
 
 RAW_RUNS = [
@@ -237,6 +239,39 @@ def test_the_listing_is_served_warm_rather_than_refetched(monkeypatch):
     client = FakeClient([snap("gan", "c1")], RAW_RUNS)
     _route(client, monkeypatch)
     _route(client, monkeypatch)
+    assert client.latest_calls == 1
+
+
+def test_a_second_limit_is_not_served_the_first_limit_s_listing(monkeypatch):
+    """``limit`` decides how many runs are fetched, and therefore ``runs_seen``
+    and which forgotten runs get topped up. Keyed by server alone, the warm
+    entry answered for a page size it was never built for (CORR-286)."""
+
+    class LimitAware(FakeClient):
+        def __init__(self):
+            super().__init__([snap("gan", "c1")], RAW_RUNS)
+            self.limits = []
+
+        async def get_bot_runs(self, **kwargs):
+            self.limits.append(kwargs["limit"])
+            return self._runs[: kwargs["limit"]]
+
+    client = LimitAware()
+    narrow = _route(client, monkeypatch, limit=1)
+    wide = _route(client, monkeypatch, limit=3)
+
+    assert client.limits == [1, 3]
+    assert client.latest_calls == 2
+    assert narrow.runs_seen == 1
+    assert wide.runs_seen == 2
+    assert {c.bot_name for c in narrow.controllers} == {"gan"}
+    assert {c.bot_name for c in wide.controllers} == {"gan", "ancient"}
+
+
+def test_one_limit_is_still_served_warm(monkeypatch):
+    client = FakeClient([snap("gan", "c1")], RAW_RUNS)
+    _route(client, monkeypatch, limit=50)
+    _route(client, monkeypatch, limit=50)
     assert client.latest_calls == 1
 
 
