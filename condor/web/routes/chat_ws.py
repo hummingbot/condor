@@ -184,6 +184,16 @@ def _to_ws_message(event: RuntimeEvent, slot_id: str) -> dict | None:
         }
     if event.type == EventType.QUEUED:
         return {"event": "queued", "slot_id": slot_id}
+    if event.type == EventType.RELOADED:
+        # The session behind this slot was rebuilt to pick up a configuration
+        # change (FEAT-093). Part *names* only — the values behind them carry
+        # the MCP servers' env. The dashboard composes the sentence; the same
+        # one is already in the transcript, so a page reload agrees.
+        return {
+            "event": "reload",
+            "slot_id": slot_id,
+            "parts": event.field("parts", []),
+        }
     if event.type == EventType.DONE:
         return {
             "event": "prompt_done",

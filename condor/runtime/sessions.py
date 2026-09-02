@@ -136,6 +136,26 @@ class AgentSession:
     pending_context: str | None = None  # Lazy context: injected on first prompt
     created_at: datetime = field(default_factory=_utcnow)
     last_prompt_at: datetime | None = None
+    # ── What this session was built from, so it can be rebuilt (FEAT-093) ──
+    #
+    # A chat session is the one runtime that holds a client across turns, so it
+    # is the one that can go stale: the model, instructions, tool profile, mute
+    # list and server are handed to the subprocess once, at ``session/new``, and
+    # there is no re-handshake. ``fingerprint`` is the digest of exactly those
+    # inputs (:meth:`~condor.runtime.binding.SessionBinding.fingerprint`),
+    # recomputed per turn and compared here; the three below are what a respawn
+    # needs so the registry can do it without a caller.
+    #
+    # ``spec`` is kept **verbatim**: a refresh changes the configuration and
+    # nothing else, so ``agent_key=""`` stays "" (it means "inherit whoever is
+    # bound" — filling it in reintroduces FEAT-037) and ``lazy_context`` stays
+    # whatever the surface chose. ``permission_callback`` and ``user_data`` are
+    # already held by the client, so remembering them here is the same
+    # references one level up, not a new lifetime.
+    fingerprint: dict[str, str] = field(default_factory=dict)
+    spec: SessionSpec | None = None
+    permission_callback: PermissionCallback | None = None
+    user_data: dict | None = None
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _abort_event: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -516,13 +536,51 @@ async def _get_or_create_session_locked(
         or session
         and session.conversation_id == spec.conversation_id
     )
-    if (
+    # Who is answering, with what tools, memory and server — resolved once here
+    # and handed to ``_spawn_session`` below, so the staleness comparison and
+    # the spawn can never disagree about what the configuration says. Raises
+    # UnknownAgent before anything is destroyed, so a bad slug cannot cost a
+    # caller the session it already had.
+    bound = binding.resolve(spec, user_data, session_key=raw_key)
+    fingerprint = bound.fingerprint()
+    # The third clause of "is the session behind this key still the one this
+    # spec describes" (FEAT-093): the configuration it was built from has moved
+    # on disk since. An empty stored fingerprint means a session this registry
+    # did not build the inputs for, which is nothing to compare against — never
+    # a reason to reload.
+    stale = (
+        [
+            part
+            for part in binding.CONFIG_PARTS
+            if session.fingerprint.get(part) != fingerprint.get(part)
+        ]
+        if session and session.fingerprint
+        else []
+    )
+    reusable = bool(
         session
         and same_model
         and same_conversation
         and session.agent_slug == spec.agent_slug
         and session.client.alive
-    ):
+    )
+    if reusable and not stale:
+        return session
+
+    if reusable and session.is_busy:
+        # Staleness is the *only* thing separating this session from the one
+        # asked for, and a turn is in flight. A background config change did not
+        # ask for the answer in progress to be SIGTERMed, so the swap is
+        # skipped — and deliberately not remembered: the digest is still stale
+        # at the next turn, so the next turn does it. No pending-reload set to
+        # leak, to drop on restart, or to apply to the wrong session. The
+        # deliberate mismatches (a model or identity switch) keep today's
+        # behaviour and replace the busy session, because the user asked for it.
+        log.info(
+            "Session %s is stale (%s) but answering; reloading on the next turn",
+            raw_key,
+            ", ".join(stale),
+        )
         return session
 
     # Destroy old session if exists
@@ -545,7 +603,7 @@ async def _get_or_create_session_locked(
         _pending_creates.setdefault(spec.user_id, set()).add(raw_key)
         try:
             return await _spawn_session(
-                spec, key, raw_key, permission_callback, user_data
+                spec, key, raw_key, permission_callback, user_data, bound, fingerprint
             )
         finally:
             reserved = _pending_creates.get(spec.user_id)
@@ -554,7 +612,9 @@ async def _get_or_create_session_locked(
                 if not reserved:
                     del _pending_creates[spec.user_id]
 
-    return await _spawn_session(spec, key, raw_key, permission_callback, user_data)
+    return await _spawn_session(
+        spec, key, raw_key, permission_callback, user_data, bound, fingerprint
+    )
 
 
 async def _spawn_session(
@@ -563,11 +623,17 @@ async def _spawn_session(
     raw_key: str,
     permission_callback: PermissionCallback | None,
     user_data: dict | None,
+    bound: binding.SessionBinding,
+    fingerprint: dict[str, str],
 ) -> AgentSession:
     """Spawn, contextualize, and register a new session for ``raw_key``.
 
     Runs under the per-key creation lock, with the key's budget slot already
     reserved when the spec names a user.
+
+    ``bound`` and its ``fingerprint`` are resolved by the caller rather than
+    here, so the configuration this session is built from is the very one the
+    reuse predicate compared against (FEAT-093).
     """
     # MCP subprocess env expects a numeric chat id; surfaces without a chat
     # (web, mcp) fall back to the user id. The same pair goes down on argv via
@@ -592,10 +658,10 @@ async def _spawn_session(
         "CONDOR_SESSION_KEY": raw_key,
     }
 
-    # Who is answering: the bound Agent, or Condor when none is named — with
-    # its model, tool allowlist, server pin and memory scope. Raises UnknownAgent
-    # before anything is spawned, so a bad slug cannot orphan a subprocess.
-    bound = binding.resolve(spec, user_data, session_key=raw_key)
+    # Who is answering: the bound Agent, or Condor when none is named — with its
+    # model, tool allowlist, server pin and memory scope. Resolved by the caller
+    # (which needs it to decide whether a live session is still current), and
+    # raising UnknownAgent there — before anything is spawned or destroyed.
     extra_env.update(bound.mcp_env)
     mcp_servers = bound.mcp_servers
     agent_key = bound.agent_key or spec.agent_key
@@ -720,6 +786,13 @@ async def _spawn_session(
             label=bound.label,
             conversation_id=conversation_id,
             pending_context=initial_context or None,
+            fingerprint=fingerprint,
+            # Verbatim, minus the conversation: the id is minted above, and a
+            # spec that carried none must come back to *this* transcript rather
+            # than opening another one on the next refresh.
+            spec=spec.model_copy(update={"conversation_id": conversation_id}),
+            permission_callback=permission_callback,
+            user_data=user_data,
         )
     except Exception:
         # Something failed after start -- stop client to prevent orphan subprocess
@@ -737,6 +810,61 @@ async def _spawn_session(
 def get_session(key: SessionKey) -> AgentSession | None:
     """Get the live session object for a key, or None."""
     return _sessions.get(str(key))
+
+
+async def refresh_if_stale(key: SessionKey) -> list[str]:
+    """Rebuild the session behind ``key`` if its configuration moved. FEAT-093.
+
+    Returns the names of the parts that changed — ``["tools"]``, ``["model",
+    "libraries"]`` — and an empty list when nothing did, which is the normal
+    answer and the cheap one: a resolve and five hashes, no spawn.
+
+    Called once per turn from :func:`condor.runtime.client.prompt`, the one code
+    path every surface takes. That is the moment a change can still matter and
+    the moment no turn is in flight, which is what makes an operator flipping a
+    playbook off in the panel reach the chat they already have open rather than
+    the next one they start.
+
+    The rebuild itself is not implemented here: the stored spec goes back
+    through :func:`get_or_create_session`, whose reuse predicate finds the same
+    mismatch and does the destroy-and-respawn it already knows how to do. One
+    predicate, one destroy path, no second implementation of "swap this
+    session".
+
+    A session with no remembered spec (nothing this registry spawned) or one
+    that is mid-answer is left alone. Neither is remembered as pending: the
+    digest is still stale next turn.
+    """
+    session = _sessions.get(str(key))
+    if session is None or session.spec is None or not session.fingerprint:
+        return []
+    if session.is_busy or not session.client.alive:
+        return []
+
+    try:
+        bound = binding.resolve(session.spec, session.user_data, session_key=str(key))
+        fingerprint = bound.fingerprint()
+    except Exception:  # noqa: BLE001 - a chat must not die on an unreadable config
+        log.warning("Could not re-resolve the binding for %s", key, exc_info=True)
+        return []
+
+    # Part *names* only, here and everywhere downstream: the inputs behind the
+    # ``tools`` digest carry the MCP servers' env, API keys included.
+    stale = [
+        part
+        for part in binding.CONFIG_PARTS
+        if session.fingerprint.get(part) != fingerprint.get(part)
+    ]
+    if not stale:
+        return []
+
+    log.info("Reloading session %s to apply new %s", key, ", ".join(stale))
+    await get_or_create_session(
+        session.spec,
+        permission_callback=session.permission_callback,
+        user_data=session.user_data,
+    )
+    return stale
 
 
 def _remember_detached(session: "AgentSession") -> None:

@@ -220,6 +220,50 @@ async def prompt(
             # rather than a composer that looks broken.
             yield RuntimeEvent.queued(session_key=raw_key)
 
+    # A configuration change reaches the chat that is already open (FEAT-093).
+    # A chat session hands its model, instructions, tool profile, mute list and
+    # server to the subprocess exactly once, at session/new, so an operator who
+    # switches a playbook off in the panel used to have to know to start a new
+    # chat. The staleness is recomputed here instead: the start of a turn is the
+    # one moment that is both safe (nothing in flight) and the last at which the
+    # change can still matter. This is the fourth cross-cutting concern this
+    # funnel has claimed, on the same argument as the first three — it is the
+    # only code path every turn on every surface takes.
+    #
+    # After ``on_busy`` on purpose: ``steer`` has just stopped the turn ahead,
+    # so it lands on a session that can be reloaded, while ``queue`` is still
+    # busy and defers to the turn after this one.
+    try:
+        reloaded = await _local().refresh_if_stale(key)
+    except Exception as exc:  # noqa: BLE001 - surfaced to the caller as an event
+        # The destroy happens before the spawn, as it does for every existing
+        # swap, so a configuration that cannot spawn leaves the key empty. The
+        # turn fails; the durable conversation is untouched and each surface's
+        # existing reattach re-creates on the next message.
+        log.exception("Could not reload session %s for a config change", raw_key)
+        yield RuntimeEvent.error(
+            f"Could not apply the new configuration: {exc}", session_key=raw_key
+        )
+        yield RuntimeEvent.done("error", session_key=raw_key)
+        return
+
+    if reloaded:
+        session = _local().get_session(key)
+        if session is None:
+            yield RuntimeEvent.error(f"No session for {raw_key}", session_key=raw_key)
+            yield RuntimeEvent.done("no_session", session_key=raw_key)
+            return
+        yield RuntimeEvent.reloaded(reloaded, session_key=raw_key)
+        # Recorded *after* the respawn, so the note is not swept into its own
+        # replay, and so a reload that failed leaves no note claiming it
+        # happened. Part names only — never a digest, never what changed.
+        conversations.record_system(
+            session.user_id,
+            session.conversation_id,
+            f"Reloaded to apply configuration changes ({', '.join(reloaded)})",
+            kind="reload",
+        )
+
     # Key material never gets past this line (FEAT-056). It is the same
     # argument the funnel already makes for recording and for ``on_busy``,
     # applied to a third cross-cutting concern: ``clean`` feeds both the

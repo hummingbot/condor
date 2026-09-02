@@ -1727,12 +1727,23 @@ async def set_agent_mute(
     file is untouched. What changes is that this Agent is no longer told it
     exists and can no longer reach it — see :mod:`condor.memory.mutes`.
 
-    It applies from the Agent's **next** tick or next session: a system prompt
-    already built is not rewritten, and adding an invalidation for that would
-    buy a second at the cost of a moving target. The panel says so. For a tool
-    the boundary is harder still — registration happens at MCP subprocess import,
-    off argv — which is why the Tools tab says "the next session this agent
-    starts" rather than "the next tick".
+    It applies from the Agent's next tick, and — since FEAT-093 — from the
+    user's next message in a chat that is already open. A chat session hands its
+    whole configuration to the subprocess once, at ``session/new``, so applying
+    a mute to a live one means rebuilding it; the runtime does that by
+    fingerprinting the resolved binding and comparing it at the start of each
+    turn (:meth:`~condor.runtime.binding.SessionBinding.fingerprint`). Nothing
+    is published from here: this route writes a file, and the read side notices.
+    That is what makes it work across processes — ``manage_agents`` and
+    ``manage_routines`` write the same configuration from the MCP subprocess,
+    which no in-process signal could reach.
+
+    The earlier boundary ("adding an invalidation for that would buy a second at
+    the cost of a moving target") was the right call at the time: the
+    invalidation only became cheap once a content hash made the target stop
+    moving. A *running* delegation still keeps the seat it started with — it is
+    one-shot by construction, and killing it mid-flight to apply a mute is
+    strictly worse.
 
     A tool name is checked against what this Agent's seat actually mounts
     (FEAT-091). The subprocess ignores a name it does not know, so an unchecked

@@ -108,7 +108,6 @@ class TickEngine:
     _last_tick_at: float = field(default=0.0, init=False)
     _last_error: str = field(default="", init=False)
     _last_skill_data: dict[str, Any] = field(default_factory=dict, init=False)
-    _cached_routines_section: str | None = field(default=None, init=False, repr=False)
     _adoption_done: bool = field(default=False, init=False, repr=False)
     _mode_mismatch_noted: bool = field(default=False, init=False, repr=False)
     # Why the loop ended, for the strategy_run telemetry event: "user" unless
@@ -517,14 +516,18 @@ class TickEngine:
             return
 
         # 5. Build prompt (server credentials are injected via env into MCP process)
-        # Cache routine discovery on first tick — routines rarely change mid-session
-        if self._cached_routines_section is None:
-            from .prompts import _build_routines_section
+        # Routine discovery is read fresh each tick, like the skills index right
+        # below it. It used to be cached on the first tick on the grounds that
+        # "routines rarely change mid-session" — FEAT-090 made that false: an
+        # operator switching a routine off for this agent expects it to leave
+        # the loop's prompt, and a loop that has been running for a week would
+        # otherwise never notice. Discovery is a directory walk, once per tick.
+        from .prompts import _build_routines_section
 
-            try:
-                self._cached_routines_section = _build_routines_section(self.strategy)
-            except Exception:
-                self._cached_routines_section = ""
+        try:
+            routines_section = _build_routines_section(self.strategy)
+        except Exception:
+            routines_section = ""
 
         # User memory index (advisory) — read fresh each tick so memory written
         # by the chat or by the agent itself shows up promptly. It's a small file
@@ -587,7 +590,7 @@ class TickEngine:
             risk_state=risk_state.to_dict(),
             tick_number=next_tick,
             agent_id=self.agent_id,
-            cached_routines_section=self._cached_routines_section or None,
+            cached_routines_section=routines_section or None,
             user_memory=user_memory,
             skills_index=skills_index,
             ledger=self.ledger,

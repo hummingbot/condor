@@ -409,9 +409,10 @@ def build_tick_prompt(
         sections.append(f"[AGENT — domain identity & knowledge]\n{agent.instructions}")
     sections.append(f"[STRATEGY INSTRUCTIONS]\n{strategy.instructions}")
 
-    # Available skills (playbooks) + routines, unified under one header. Skills
-    # are read fresh each tick (the agent may create its own mid-session), so
-    # they arrive via skills_index; routine discovery is cached (it's expensive).
+    # Available skills (playbooks) + routines, unified under one header. Both are
+    # read fresh each tick — the agent may create a skill mid-session, and an
+    # operator may switch a routine off for it (FEAT-090) — so they arrive
+    # already built from the caller and are only discovered here as a fallback.
     routines_section = cached_routines_section
     if routines_section is None:
         try:
