@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertCircle, ArrowLeft, FileText, FlaskConical, ScrollText, Trash2, X, Zap } from "lucide-react";
+import { AlertCircle, ArrowLeft, FileText, FlaskConical, Layers, ScrollText, Trash2, X, Zap } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 
@@ -230,6 +230,18 @@ export function StrategyDetail() {
                 </span>
               </button>
             )}
+            {/* The way back into the fleet page (FEAT-096). The link the agent
+                band's *Open session* is the other half of: a strategy's work
+                is a grouping fact about the fleet, and this is where the reader
+                goes to see it beside everything else that is trading. */}
+            <button
+              onClick={() => navigate(`/bots?scope=agent:${encodeURIComponent(`${slug}.${sslug}`)}`)}
+              className="flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] transition-all hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
+              title="See this strategy's bots and executors beside the rest of the fleet"
+            >
+              <Layers className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">View in fleet</span>
+            </button>
             <button
               onClick={() => setShowRoutinesBrowser(true)}
               className="flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] transition-all hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"

@@ -211,6 +211,53 @@ describe("/bots", () => {
     }
   });
 
+  it("says nothing about agents on a fleet that has none", () => {
+    // A server with no agents should not answer "agents 0" — the absence is
+    // the fact, and a zero invites a follow-up about something that is not there.
+    expect(onScreenLine("/bots")).not.toContain("agents ");
+    qc.setQueryData(["fleet-map"], []);
+    expect(onScreenLine("/bots")).not.toContain("agents ");
+  });
+
+  it("names the agents trading on this fleet and which loops are alive", () => {
+    qc.setQueryData(["fleet-map"], [
+      {
+        runKey: "brigado.brl_mm",
+        agentSlug: "brigado",
+        agentName: "Brigado",
+        strategySlug: "brl_mm",
+        strategyName: "BRL MM",
+        namespace: "brigado-brl_mm",
+        declaredBots: [],
+        agentIds: ["brigado.brl_mm_7"],
+        live: {
+          agentId: "brigado.brl_mm_7",
+          sessionNum: 7,
+          status: "running",
+          tickCount: 214,
+          lastTickAt: 1_700_000_000,
+          frequencySec: 60,
+          lastAction: "Spreads held.",
+          lastError: "",
+        },
+      },
+      {
+        runKey: "river.scalper",
+        agentSlug: "river",
+        agentName: "River",
+        strategySlug: "scalper",
+        strategyName: "Scalper",
+        namespace: "river-scalper",
+        declaredBots: [],
+        agentIds: [],
+        live: null,
+      },
+    ]);
+    const line = onScreenLine("/bots");
+    expect(line).toContain("agents brigado / brl_mm, river / scalper");
+    expect(line).toContain("1 looping (brigado / brl_mm running)");
+  });
+
   it("caps the exception list and says how many it left out", () => {
     qc.setQueryData(["bots", SRV], {
       bots: Array.from({ length: 6 }, (_, i) => ({

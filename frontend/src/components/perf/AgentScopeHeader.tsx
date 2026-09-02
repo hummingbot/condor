@@ -43,9 +43,17 @@ function useSeconds(active: boolean): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (!active) return;
-    setNow(Date.now());
-    const id = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(id);
+    const tick = () => setNow(Date.now());
+    // The first read is scheduled rather than taken here: a loop that starts
+    // long after this band mounted would otherwise show one frame of a
+    // countdown measured from mount time, and setting state in an effect body
+    // is what the render-phase rule forbids anyway.
+    const first = setTimeout(tick, 0);
+    const id = setInterval(tick, 1000);
+    return () => {
+      clearTimeout(first);
+      clearInterval(id);
+    };
   }, [active]);
   return now;
 }

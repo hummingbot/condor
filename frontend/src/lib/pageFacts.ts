@@ -32,6 +32,7 @@ import {
   isExecutorActive,
   toMs,
 } from "./formatters";
+import { runKeyLabel, type FleetOwner } from "./agent-attribution";
 import { runStatus } from "./perf-tree";
 import { formatWithRate, type RateTable } from "./rates";
 import type { ViewFacts } from "./viewFacts";
@@ -344,6 +345,24 @@ type Reader = (
  * entry is "the reader is on Running", which is why this contributes nothing
  * rather than zeroes when there is none.
  */
+/**
+ * The agents with trading on this fleet, and which of their loops are alive.
+ *
+ * Read from the `["fleet-map"]` cache the page already polls, so this costs
+ * nothing and is exactly as current as the sidebar. `undefined` when the map is
+ * empty or was never fetched — a server with no agents should say nothing about
+ * agents rather than say "0".
+ */
+function agentFacts(qc: QueryClient): string | undefined {
+  const owners = fresh<FleetOwner[]>(qc, ["fleet-map"]);
+  if (!Array.isArray(owners) || owners.length === 0) return undefined;
+  const live = owners.filter((owner) => owner.live);
+  const named = names(owners.map((owner) => runKeyLabel(owner.runKey)));
+  return live.length > 0
+    ? `${named} · ${live.length} looping (${names(live.map((owner) => `${runKeyLabel(owner.runKey)} ${owner.live?.status}`))})`
+    : `${named} · none looping`;
+}
+
 function runsFacts(qc: QueryClient): ViewFacts["onScreen"] {
   const data = fresh<BotRunsResponse>(qc, ["bot-runs"]);
   if (!data) return undefined;
@@ -577,6 +596,12 @@ const ROUTES: {
           : undefined,
         "best market": markets.best,
         "worst market": markets.worst,
+        // Who on this fleet is an agent's, from the map the browser polls
+        // (FEAT-096). Named rather than counted: "which agents are trading" is
+        // a question about identities, and three names answer it where a
+        // number does not. The reader's own agent *scope* is the browser's half
+        // of this entry (`useViewFacts`), merged under the same label.
+        agents: agentFacts(qc),
         // Only loaded while the Terminated population is selected, so its
         // absence says the reader is on Running rather than that there are none.
         ...(runsFacts(qc) ?? {}),

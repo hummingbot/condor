@@ -88,7 +88,10 @@ import { useViewFacts } from "@/lib/viewFacts";
 import {
   agentOfBot,
   agentOfControllerId,
+  loopFacts,
+  loopStatus,
   ownerOf,
+  ownerTitle,
   type FleetOwner,
 } from "@/lib/agent-attribution";
 import { AgentScopeHeader } from "./AgentScopeHeader";
@@ -1667,11 +1670,13 @@ export function PerfBrowser({
         ? `executor ${activeExec.id} (${activeExec.type}, ${activeExec.trading_pair})`
         : activeRun
           ? `the finished run of bot ${activeRun.bot_name}`
-          : scopeBotName
-            ? `${plural(scope.leaves.length, scopeNoun)} of bot ${scopeBotName}`
-            : scope.kind === "fleet"
-              ? `all ${plural(scope.leaves.length, scopeNoun)} in scope`
-              : `${plural(scope.leaves.length, scopeNoun)} under ${scope.kind} "${scope.label}"`;
+          : scopeAgentKey && scope.kind === "agent"
+            ? `${plural(scope.leaves.length, scopeNoun)} operated by agent ${ownerTitle(owners, scopeAgentKey)}`
+            : scopeBotName
+              ? `${plural(scope.leaves.length, scopeNoun)} of bot ${scopeBotName}`
+              : scope.kind === "fleet"
+                ? `all ${plural(scope.leaves.length, scopeNoun)} in scope`
+                : `${plural(scope.leaves.length, scopeNoun)} under ${scope.kind} "${scope.label}"`;
 
     return {
       // The same label the route entry uses, so the cache's half of this screen
@@ -1681,6 +1686,14 @@ export function PerfBrowser({
       onScreen: {
         population,
         scope: effectiveScopeId,
+        // Named rather than left as a `agent:` id, and with the one fact only
+        // this scope carries: whether the loop behind these numbers is alive.
+        agent: scopeAgentKey
+          ? `${ownerTitle(owners, scopeAgentKey)} (${[
+              loopStatus(activeAgent?.live),
+              ...loopFacts(activeAgent?.live, Date.now()),
+            ].join(", ")})`
+          : undefined,
         // Said either way round: "none" is a fact about the tree, and leaving
         // it out reads as "filters unknown" rather than "showing everything".
         filters: chips.length ? chips.join(", ") : "none",
