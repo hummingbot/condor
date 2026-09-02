@@ -17,7 +17,7 @@
   "src/components/market/PriceTicker.tsx | react-hooks/refs": 3,
   "src/components/market/RecentTrades.tsx | react-hooks/set-state-in-effect": 1,
   "src/components/perf/ExecutorTable.tsx | no-empty": 1,
-  "src/components/perf/PerfBrowser.tsx | react-hooks/set-state-in-effect": 1,
+  "src/components/perf/YamlConfigEditor.tsx | react-hooks/set-state-in-effect": 1,
   "src/components/routines/ReportBrowser.tsx | react-hooks/set-state-in-effect": 4,
   "src/components/routines/RoutineConfigForm.tsx | react-hooks/set-state-in-effect": 1,
   "src/components/routines/RoutineHooksPanel.tsx | react-hooks/set-state-in-effect": 1,

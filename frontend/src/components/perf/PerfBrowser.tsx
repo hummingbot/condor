@@ -10,8 +10,6 @@ import {
   Pause,
   Play,
   Rocket,
-  RotateCcw,
-  Save,
   ScrollText,
   Server,
   SlidersHorizontal,
@@ -21,9 +19,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useSearchParams } from "react-router-dom";
-import yamlLib from "js-yaml";
 
-import { CodeEditor } from "@/components/editor/CodeEditor";
 import { EditorModal } from "@/components/editor/EditorModal";
 import { ControllerPnlChart } from "@/components/bots/ControllerPnlChart";
 import { DeployBotDialog } from "@/components/bots/DeployBotDialog";
@@ -34,7 +30,9 @@ import { ExecutorRows, StopConfirmDialog } from "@/components/perf/ExecutorRows"
 import { useExecutorStop } from "@/components/perf/executorActions";
 import { BubbleGroup, type BubbleOption } from "@/components/perf/FilterBubbles";
 import { PopulationToggle } from "@/components/perf/PopulationToggle";
+import { PositionsTable } from "@/components/perf/PositionsTable";
 import { ScopeTree, StatusDot } from "@/components/perf/ScopeTree";
+import { YamlConfigEditor } from "@/components/perf/YamlConfigEditor";
 import { ArchivedBotDetail } from "@/components/bots/ArchivedBotDetail";
 import {
   api,
@@ -46,7 +44,6 @@ import {
   type ExecutorInfo,
 } from "@/lib/api";
 import { controllerKey } from "@/lib/controller-identity";
-import { configToYaml, CONTROLLER_HIDDEN_KEYS } from "@/lib/configYaml";
 import {
   formatCurrencyVolume,
   formatCurrencyPnl,
@@ -74,6 +71,8 @@ import {
   type PerfLeaf,
 } from "@/lib/perf-tree";
 import { resolvePerfSeries, scopeInterval } from "@/lib/perf-history";
+import { chartNotice } from "@/lib/perf-notices";
+import { buildPositionRows, parseSide, type PositionRow } from "@/lib/perf-positions";
 import { aggregatePnlSeries, snapshotsFromRunHistory } from "@/lib/pnl-chart";
 import { buildAttributor, runWindows } from "@/lib/run-attribution";
 import type { ConvertFn } from "@/lib/rates";
@@ -114,10 +113,6 @@ function UnpricedNote({ leaves }: { leaves: PerfLeaf[] }) {
   );
 }
 
-function parseSide(raw: string): string {
-  const dot = raw.lastIndexOf(".");
-  return dot >= 0 ? raw.slice(dot + 1) : raw;
-}
 
 // ── Scope (READ: what the browser is currently reporting on) ──
 //
@@ -297,145 +292,6 @@ function useMeasuredHeight<T extends HTMLElement>() {
   return [ref, height] as const;
 }
 
-// ── YAML Config Editor ──
-
-function YamlConfigEditor({
-  config,
-  server,
-  configId,
-  botName,
-  onSaved,
-  onCollapse,
-}: {
-  config: Record<string, unknown>;
-  server: string;
-  configId: string;
-  botName: string;
-  onSaved: () => void;
-  onCollapse: () => void;
-}) {
-  // Memoize the dump so typing / local-state renders don't re-run yaml.dump, and
-  // so WS-tick churn of the `config` object identity that yields the SAME content
-  // produces an identical string (compared by value) below.
-  const originalYaml = useMemo(
-    () =>
-      configToYaml(config, {
-        hiddenKeys: CONTROLLER_HIDDEN_KEYS,
-        stripUnderscore: true,
-        sortKeys: true,
-      }),
-    [config],
-  );
-  const [yamlContent, setYamlContent] = useState(originalYaml);
-  const [parseError, setParseError] = useState<string | null>(null);
-
-  // Sync when config content actually changes (save / controller switch). Keyed
-  // on the string value, not the `config` object: a tick that re-creates `config`
-  // with unchanged content leaves `originalYaml` equal, so unsaved edits survive.
-  useEffect(() => {
-    setYamlContent(originalYaml);
-    setParseError(null);
-  }, [originalYaml]);
-
-  const isDirty = yamlContent !== originalYaml;
-
-  const handleChange = useCallback((value: string) => {
-    setYamlContent(value);
-    try {
-      yamlLib.load(value);
-      setParseError(null);
-    } catch (e) {
-      setParseError((e as Error).message?.split("\n")[0] || "Invalid YAML");
-    }
-  }, []);
-
-  const saveMutation = useMutation({
-    mutationFn: () => {
-      const parsed = yamlLib.load(yamlContent) as Record<string, unknown>;
-      if (!parsed || typeof parsed !== "object") {
-        throw new Error("YAML must be a mapping");
-      }
-      return api.updateBotControllerConfig(server, botName, configId, parsed);
-    },
-    onSuccess: () => {
-      onSaved();
-    },
-  });
-
-  return (
-    <div className="flex flex-col h-full">
-      {/* Header with save */}
-      <div className="flex items-center justify-between px-4 py-2 border-b border-[var(--color-border)]/50">
-        <div className="flex items-center gap-2 min-w-0">
-          <button
-            onClick={onCollapse}
-            className="rounded p-0.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-            title="Hide config"
-          >
-            <ChevronRight className="h-3.5 w-3.5" />
-          </button>
-          <h3 className="text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
-            Config
-          </h3>
-          {isDirty && (
-            <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-yellow)]" title="Unsaved changes" />
-          )}
-        </div>
-        <div className="flex items-center gap-1.5">
-          {isDirty && (
-            <button
-              onClick={() => { setYamlContent(originalYaml); setParseError(null); }}
-              className="flex items-center gap-1 text-[10px] text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition-colors"
-            >
-              <RotateCcw className="h-3 w-3" />
-              Reset
-            </button>
-          )}
-          <button
-            onClick={() => saveMutation.mutate()}
-            disabled={!isDirty || !!parseError || saveMutation.isPending}
-            className="flex items-center gap-1 rounded px-2.5 py-1 text-[10px] font-semibold transition-colors disabled:opacity-30 bg-[var(--color-primary)] text-white hover:bg-[var(--color-primary)]/80 disabled:hover:bg-[var(--color-primary)]"
-          >
-            {saveMutation.isPending ? (
-              <Loader2 className="h-3 w-3 animate-spin" />
-            ) : (
-              <Save className="h-3 w-3" />
-            )}
-            Save
-          </button>
-        </div>
-      </div>
-
-      {parseError && (
-        <div className="px-4 py-1.5 text-[10px] text-[var(--color-red)] bg-[var(--color-red)]/5 truncate" title={parseError}>
-          {parseError}
-        </div>
-      )}
-      {saveMutation.isError && (
-        <div className="px-4 py-1.5 text-[10px] text-[var(--color-red)] bg-[var(--color-red)]/5">
-          {(saveMutation.error as Error).message}
-        </div>
-      )}
-      {saveMutation.isSuccess && !isDirty && (
-        <div className="px-4 py-1.5 text-[10px] text-[var(--color-green)] bg-[var(--color-green)]/5">
-          Config saved successfully
-        </div>
-      )}
-
-      {/* YAML editor */}
-      <div className="flex-1 min-h-0">
-        <CodeEditor
-          value={yamlContent}
-          onChange={handleChange}
-          language="yaml"
-          height="100%"
-          className="border-0 rounded-none"
-        />
-      </div>
-    </div>
-  );
-}
-
 // ── KPI row ──
 
 /**
@@ -460,89 +316,6 @@ function Kpi({ label, value, sub, color }: { label: string; value: string; sub?:
         {sub ?? ""}
       </div>
     </div>
-  );
-}
-
-// ── Positions table ──
-
-/** The keys the table has its own column for; anything else is an extra. */
-const POSITION_PRIMARY_KEYS = new Set([
-  "connector_name",
-  "connector",
-  "trading_pair",
-  "side",
-  "realized_pnl_quote",
-  "unrealized_pnl_quote",
-  "volume_traded_quote",
-  "volume_traded",
-  "amount",
-  "breakeven_price",
-]);
-
-interface PositionRow {
-  id: string;
-  ctrlLabel: string;
-  pair: string;
-  connector: string;
-  side: string;
-  amount: number | null;
-  breakeven: number | null;
-  /** Amount x breakeven, in display currency: what the inventory is worth.
-      Unsigned — the Side column already says which way it points. */
-  notional: number | null;
-  realized: number;
-  unrealized: number;
-  volume: number;
-  extras: [string, unknown][];
-}
-
-function num(v: unknown): number | null {
-  const n = Number(v);
-  return v === undefined || v === null || Number.isNaN(n) ? null : n;
-}
-
-/** Prices and amounts vary over many orders of magnitude; trim rather than pad. */
-function formatAmount(v: number | null): string {
-  if (v === null) return "—";
-  if (v === 0) return "0";
-  const abs = Math.abs(v);
-  const digits = abs >= 1000 ? 2 : abs >= 1 ? 4 : 8;
-  return v.toFixed(digits).replace(/\.?0+$/, "");
-}
-
-/**
- * The quote value of an open position, in display currency.
- *
- * `positions_summary` carries no mark price, so the breakeven is the price we
- * have — this is the cost basis of the inventory, not its mark-to-market
- * value; the two differ by exactly the Unrealized column beside it. Same
- * convention as `positionQuoteValue` in lib/pnl-chart, which is what the
- * chart's position series is built from, so the two agree.
- */
-function positionNotional(
-  pos: Record<string, unknown>,
-  pair: string,
-  cv: (val: number, pair: string) => number,
-): number | null {
-  const amount = num(pos.amount);
-  const price = num(pos.breakeven_price);
-  if (amount === null || price === null) return null;
-  return cv(Math.abs(amount * price), pair);
-}
-
-function SideTag({ side }: { side: string }) {
-  if (!side) return <span className="text-[var(--color-text-muted)]">—</span>;
-  const buy = side.toLowerCase() === "buy";
-  return (
-    <span
-      className="rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase"
-      style={{
-        color: buy ? "var(--color-green)" : "var(--color-red)",
-        background: buy ? "rgba(34,197,94,0.1)" : "rgba(239,68,68,0.1)",
-      }}
-    >
-      {side}
-    </span>
   );
 }
 
@@ -1240,7 +1013,11 @@ export function PerfBrowser({
    * terminal row *is* the final point, written transactionally at completion,
    * so nothing has to append a last value afterwards.
    */
-  const { data: execHistory, isFetching: execHistoryLoading } = useQuery({
+  const {
+    data: execHistory,
+    isFetching: execHistoryLoading,
+    isError: execHistoryError,
+  } = useQuery({
     queryKey: ["perf-history", server, "executor", execScopeId, execInterval],
     queryFn: () =>
       api.getPerformanceHistory(
@@ -1422,38 +1199,10 @@ export function PerfBrowser({
   const perHour = (total: number, fmt: (v: number, symbol?: string) => string) =>
     totals.hours > 0 ? `${fmt(total / totals.hours, currencySymbol)}/hr` : undefined;
 
-  const positionRows = useMemo<PositionRow[]>(() => {
-    const rows: PositionRow[] = [];
-    for (const leaf of scopedLeaves) {
-      leaf.positions.forEach((pos, i) => {
-        const pair = String(pos.trading_pair || leaf.pair || "");
-        rows.push({
-          id: `${leaf.id}#${i}`,
-          ctrlLabel: leaf.label,
-          pair,
-          connector: String(pos.connector_name || pos.connector || leaf.connector || ""),
-          side: parseSide(String(pos.side || "")),
-          amount: num(pos.amount),
-          breakeven: num(pos.breakeven_price),
-          notional: positionNotional(pos, pair, cv),
-          realized: cv(Number(pos.realized_pnl_quote || 0), pair),
-          unrealized: cv(Number(pos.unrealized_pnl_quote || 0), pair),
-          volume: cv(Number(pos.volume_traded_quote || pos.volume_traded || 0), pair),
-          extras: Object.entries(pos).filter(([k]) => !POSITION_PRIMARY_KEYS.has(k)),
-        });
-      });
-    }
-    return rows;
-  }, [scopedLeaves, cv]);
-
-  /** Extra per-position fields, as columns, so the table stays one grid. */
-  const extraColumns = useMemo(() => {
-    const seen: string[] = [];
-    for (const row of positionRows) {
-      for (const [k] of row.extras) if (!seen.includes(k)) seen.push(k);
-    }
-    return seen;
-  }, [positionRows]);
+  const positionRows = useMemo<PositionRow[]>(
+    () => buildPositionRows(scopedLeaves, cv),
+    [scopedLeaves, cv],
+  );
 
   // ── The aggregated series, folded from the fleet history the page already has ──
 
@@ -1691,81 +1440,19 @@ export function PerfBrowser({
         ? "Closed PnL"
         : "Fleet PnL"
       : `${scope.label} PnL`;
-  // What the terminated chart is actually drawn from, said rather than assumed.
-  //
-  // It used to claim "closed outcomes" unconditionally, which was true when
-  // that was the only thing it could draw. There are three sources now and the
-  // reader has no other way to tell them apart: a run's own sampled history
-  // reads exactly like a live one, and a fallback that looked identical while
-  // meaning something weaker would be the worst of the three.
-  const terminatedNotice =
-    population !== "terminated"
-      ? undefined
-      : runHistory && runHistory.points > 0
-        ? runHistory.source === "archive"
-          ? {
-              label: "from the archived database",
-              detail:
-                "The server kept no performance snapshots this far back, so this curve is rebuilt from the run's archived trade table. It is trade-exact and has no unrealized series, because a closed trade has nothing left unrealized.",
-            }
-          : undefined
-        : runHistory?.source === "none"
-          ? {
-              label: "no recorded history",
-              detail:
-                `The server has no stored history for this run${runHistory.detail ? ` — ${runHistory.detail}` : ""}. Its snapshot table only reaches so far back, and this run started before that. The steps below are what its executors closed, at the times they closed.`,
-            }
-          : {
-              label: "closed outcomes",
-              detail:
-                "Drawn from each executor's close time and its final PnL, not from sampled history — nothing here is still open, so there is no unrealized series and no position to hold. Each step is what closed in that bucket.",
-            };
-
-  /**
-   * What an executor scope has to say about its own curve (FEAT-087).
-   *
-   * Three states, and the reader cannot tell them apart from the picture:
-   *
-   *  - **drawn from its own snapshots** — nothing to say. The curve is the
-   *    executor's, sampled, and reads like any other.
-   *  - **the server cannot record one** — `/performance/history` is not there.
-   *    That is a property of *their API build*, not of this executor, and
-   *    naming it is the difference between "there is nothing to show" and
-   *    "upgrade and there will be".
-   *  - **the route is there and this executor has no rows** — it closed before
-   *    the table existed, or it lived less than one dump interval. Backfilling
-   *    history for an executor that already closed is deliberately out of
-   *    scope, so the honest answer is that it was never recorded.
-   */
-  const executorNotice =
-    scope.kind !== "executor" || series.source === "snapshots"
-      ? undefined
-      : perfCapability?.supported === false
-        ? {
-            label: "no recorded series",
-            detail:
-              "This API does not record executor performance over time, so there is no curve for this executor — only the totals above, which are its own. An API with the shared performance history draws the executor's own sampled series here.",
-          }
-        : execHistoryLoading
-          ? undefined
-          : {
-              label: "no recorded series",
-              detail:
-                "The server records executor performance over time, but has none for this one — it closed before the table existed, or it lived less than one snapshot interval. The totals above are its own.",
-            };
-
-  const chartNotice =
-    scope.kind === "executor"
-      ? executorNotice
-      : population === "terminated"
-        ? terminatedNotice
-        : truncated
-          ? {
-              label: "partial history",
-              detail:
-                "This fleet has more stored history than one chart may load at once, so the series starts later than the earliest deploy.",
-            }
-          : undefined;
+  // Where the curve came from, said rather than assumed. The selection is pure
+  // over these seven facts, so it lives in lib/perf-notices.ts where a test can
+  // reach it (ARCH-300); what stays here is only the reading of the facts.
+  const notice = chartNotice({
+    scopeKind: scope.kind,
+    population,
+    runHistory,
+    seriesSource: series.source,
+    capabilitySupported: perfCapability?.supported,
+    execHistoryLoading,
+    execHistoryError,
+    truncated,
+  });
 
   return (
     <div className="flex h-full min-h-0 bg-[var(--color-bg)]">
@@ -2537,7 +2224,7 @@ export function PerfBrowser({
                     pnlHeight={Math.round(chartHeight * 0.65)}
                     volumeHeight={chartHeight - Math.round(chartHeight * 0.65)}
                     currencySymbol={currencySymbol}
-                    notice={chartNotice}
+                    notice={notice}
                   />
                 ) : runHistoryLoading ? (
                   // The first open of a cold run pays one walk. Behind the same
@@ -2617,76 +2304,13 @@ export function PerfBrowser({
                 )}
 
                 {band === "positions" && positionRows.length > 0 && (
-                  <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin border-t border-[var(--color-border)]/60">
-                    <div className="overflow-x-auto">
-                      <table className="w-full text-[11px]">
-                        <thead>
-                          <tr className="border-y border-[var(--color-border)]/60 bg-[var(--color-bg)] text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">
-                            {!activeCtrl && <th className="px-3 py-1.5 text-left font-medium">Controller</th>}
-                            <th className="px-3 py-1.5 text-left font-medium">Connector</th>
-                            <th className="px-3 py-1.5 text-left font-medium">Pair</th>
-                            <th className="px-3 py-1.5 text-left font-medium">Side</th>
-                            <th className="px-3 py-1.5 text-right font-medium">Amount</th>
-                            <th className="px-3 py-1.5 text-right font-medium">Breakeven</th>
-                            <th className="px-3 py-1.5 text-right font-medium" title="Amount x breakeven price">
-                              Notional
-                            </th>
-                            {extraColumns.map((k) => (
-                              <th key={k} className="px-3 py-1.5 text-right font-medium">{k}</th>
-                            ))}
-                            <th className="px-3 py-1.5 text-right font-medium">Realized</th>
-                            <th className="px-3 py-1.5 text-right font-medium">Unrealized</th>
-                            <th className="px-3 py-1.5 text-right font-medium">Volume</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {positionRows.map((row) => {
-                            const extras = Object.fromEntries(row.extras);
-                            return (
-                              <tr key={row.id} className="border-b border-[var(--color-border)]/30 last:border-0">
-                                {!activeCtrl && (
-                                  <td className="px-3 py-1.5 max-w-[220px] truncate" title={row.ctrlLabel}>
-                                    {row.ctrlLabel}
-                                  </td>
-                                )}
-                                <td className="px-3 py-1.5 text-[var(--color-text-muted)]">{row.connector || "—"}</td>
-                                <td className="px-3 py-1.5 font-medium">{row.pair || "—"}</td>
-                                <td className="px-3 py-1.5"><SideTag side={row.side} /></td>
-                                <td className="px-3 py-1.5 text-right tabular-nums">{formatAmount(row.amount)}</td>
-                                <td className="px-3 py-1.5 text-right tabular-nums">{formatAmount(row.breakeven)}</td>
-                                <td className="px-3 py-1.5 text-right tabular-nums">
-                                  {row.notional === null
-                                    ? "—"
-                                    : formatCurrencyVolume(row.notional, currencySymbol)}
-                                </td>
-                                {extraColumns.map((k) => {
-                                  const val = extras[k];
-                                  return (
-                                    <td key={k} className="px-3 py-1.5 text-right tabular-nums text-[var(--color-text-muted)]">
-                                      {val === undefined || val === null
-                                        ? "—"
-                                        : typeof val === "number"
-                                          ? formatAmount(val)
-                                          : parseSide(String(val))}
-                                    </td>
-                                  );
-                                })}
-                                <td className="px-3 py-1.5 text-right tabular-nums font-medium" style={{ color: pnlColor(row.realized) }}>
-                                  {formatCurrencyPnl(row.realized, currencySymbol)}
-                                </td>
-                                <td className="px-3 py-1.5 text-right tabular-nums font-medium" style={{ color: pnlColor(row.unrealized) }}>
-                                  {formatCurrencyPnl(row.unrealized, currencySymbol)}
-                                </td>
-                                <td className="px-3 py-1.5 text-right tabular-nums">
-                                  {formatCurrencyVolume(row.volume, currencySymbol)}
-                                </td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
+                  <PositionsTable
+                    rows={positionRows}
+                    currencySymbol={currencySymbol}
+                    // Every row would repeat the controller's name when the
+                    // scope already is one controller.
+                    showController={!activeCtrl}
+                  />
                 )}
               </div>
             )}
