@@ -122,20 +122,25 @@ def test_strategy_id_is_gone_from_the_routine_and_skill_signatures():
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def _committed_playbooks() -> list[Path]:
-    """The AGENT.md / strategy.md files git actually tracks.
+def _tracked(*patterns: str) -> list[Path]:
+    """The files git actually tracks under ``patterns``.
 
     Deliberately ``git ls-files`` and not a filesystem glob: some agent
-    directories are locally excluded, and their playbooks are nobody's contract.
+    directories are locally excluded, and their markdown is nobody's contract.
     """
     listed = subprocess.run(
-        ["git", "ls-files", "agents/*/AGENT.md", "agents/*/strategies/*/strategy.md"],
+        ["git", "ls-files", *patterns],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
         check=True,
     )
     return [REPO_ROOT / line for line in listed.stdout.split()]
+
+
+def _committed_playbooks() -> list[Path]:
+    """The AGENT.md / strategy.md files git actually tracks."""
+    return _tracked("agents/*/AGENT.md", "agents/*/strategies/*/strategy.md")
 
 
 def _manage_routines_calls(text: str) -> list[str]:
@@ -275,3 +280,81 @@ def test_set_state_carries_its_payload_outside_config(monkeypatch):
     method, path, body = calls[0]
     assert (method, path) == ("POST", "/agents/mm/strategies/grid_abc123/state")
     assert body == {"key": "cursor", "value": 42, "expires_in": None, "clear": False}
+
+
+# ── a routed skill names only tools that exist (CORR-306) ────────────────────
+
+
+def _committed_condor_skills() -> list[Path]:
+    """The playbooks the interactive Condor seat owns and routes work through."""
+    return _tracked("agents/condor/skills/*/SKILL.md")
+
+
+def _every_registered_tool() -> set[str]:
+    """Both MCP servers' full surface — what a skill is allowed to name."""
+    from mcp_servers.hummingbot_api import server as hb_server
+
+    return _registered() | {
+        tool.name for tool in asyncio.run(hb_server.mcp.list_tools())
+    }
+
+
+def _called_names(text: str) -> set[str]:
+    """Every ``name(`` call shape in a playbook, fenced blocks included.
+
+    These docs are prose plus tool-call snippets; a lowercase identifier written
+    as a call is a tool the model is being told to invoke.
+    """
+    return set(re.findall(r"\b([a-z_][a-z0-9_]*)\(", text))
+
+
+def test_the_agent_builder_skill_calls_only_registered_tools():
+    """CORR-306: the routing rule sends every agent-building request here.
+
+    A skill naming a dead TOOL fails harder than READ-290's dead *parameter*:
+    FastMCP silently drops an unknown kwarg, but an unknown tool name is an
+    error at the host. The skill was migrated to ``manage_agents`` /
+    ``manage_strategies`` for create/list/start, while its edit-and-repair
+    paragraph still said ``update_agent`` / ``delete_agent`` / ``get_agent`` /
+    ``delete_strategy`` — funnel-era ACTION names that are not tools. So the
+    Step 2 "the persona is off, fix the AGENT.md" path blew up at exactly the
+    moment it was repairing a broken agent.
+    """
+    skill = REPO_ROOT / "agents/condor/skills/agent_builder/SKILL.md"
+    called = _called_names(skill.read_text(encoding="utf-8"))
+    assert called, "parsed no calls out of agent_builder — did the file move?"
+
+    phantom = called - _every_registered_tool()
+    assert not phantom, (
+        f"agent_builder/SKILL.md tells Condor to call tool(s) no server "
+        f"registers: {sorted(phantom)}"
+    )
+
+
+def test_no_condor_skill_names_a_funnel_era_action_as_a_tool():
+    """FEAT-068 split ``manage_trading_agent`` into three tools; its action
+    vocabulary survives only as ``action=`` strings, never as callables.
+
+    ``_ACTION_OWNER`` is that vocabulary, so the guard tracks the split itself
+    rather than a hand-copied deny-list that would rot the same way the skill
+    did. Bare mentions count too: prose saying "``delete_agent`` refuses while
+    the agent owns strategies" reads as a tool name even without parentheses.
+    """
+    from mcp_servers.condor.tools.trading_agent import _ACTION_OWNER
+
+    dead = set(_ACTION_OWNER) - _every_registered_tool()
+    assert dead, "the compatibility map named no dead actions — did it move?"
+
+    skills = _committed_condor_skills()
+    assert skills, "found no committed condor skills — the guard would pass vacuously"
+
+    pattern = re.compile(r"`[^`]*\b(" + "|".join(sorted(dead)) + r")\b[^`]*`")
+    offenders = [
+        f"{path.relative_to(REPO_ROOT)}: {match.group(0)}"
+        for path in skills
+        for match in pattern.finditer(path.read_text(encoding="utf-8"))
+    ]
+    assert not offenders, (
+        "these are actions on manage_agents/manage_strategies/control_agent, "
+        "not tools: " + "; ".join(offenders)
+    )

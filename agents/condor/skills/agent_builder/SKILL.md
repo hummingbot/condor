@@ -108,7 +108,8 @@ The **AGENT.md body (`instructions`)** is the brain — write it as the agent's 
 prompt, kept tight: **who it is** (its domain + what it explicitly does NOT handle),
 **what it knows** (durable domain knowledge), and **how it answers** (lead with the
 recommendation, key: value not prose). You can keep it short now and enrich it later with
-`update_agent`. Note it owns scoped memory (`manage_memory`) and skills (`manage_skill`).
+`manage_agents(action="update")`. Note it owns scoped memory (`manage_memory`) and skills
+(`manage_skill`).
 
 `manage_agents(action="create")` returns `agent_slug` — use it for everything after.
 
@@ -124,7 +125,8 @@ consult(agent="<agent_slug>", task="…a real question in its specialty…", con
 ```
 
 Show the answer. This proves the agent runs end-to-end. If the persona or answer is off,
-fix the AGENT.md with `update_agent(agent_slug=…, instructions=…)` and consult again.
+fix the AGENT.md with `manage_agents(action="update", agent_slug=…, instructions=…)` and
+consult again.
 
 When the consult looks good, **stop and tell the user the agent already works as a
 consultable expert** — and that the next way to make it sharper is to give it routines so
@@ -265,9 +267,10 @@ A new agent also reads the **shared** library (`agents/_shared/skills/`) from bi
 gets `routine_cookbook` and friends for free — write only what is specific to its domain,
 and target it explicitly with `manage_skill(..., agent="<slug>")`.
 
-**Editing & deleting:** read the current brain with `get_agent(agent_slug=…)`, edit with
-`update_agent(agent_slug=…, instructions=…)`. `delete_agent` refuses while the agent still
-owns strategies — delete those first (`delete_strategy`).
+**Editing & deleting:** read the current brain with `manage_agents(action="get",
+agent_slug=…)`, edit with `manage_agents(action="update", agent_slug=…, instructions=…)`.
+`manage_agents(action="delete", agent_slug=…)` refuses while the agent still owns
+strategies — delete those first (`manage_strategies(action="delete", strategy_id=…)`).
 
 ## Rules
 - **Minimal first.** Create the agent from just role + purpose; never open with a config
