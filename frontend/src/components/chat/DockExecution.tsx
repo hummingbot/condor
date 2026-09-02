@@ -1,13 +1,19 @@
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { ArrowRight } from "lucide-react";
-import { useMemo } from "react";
+import { Fragment, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { useCondorWebSocket } from "@/hooks/useWebSocket";
 import { useRates } from "@/hooks/useRates";
 import { api, type ControllerInfo } from "@/lib/api";
 import { controllerKey } from "@/lib/controller-identity";
-import { formatCurrencyPnl, isExecutorActive, pnlColor } from "@/lib/formatters";
+import {
+  formatCompactVolume,
+  formatCurrencyPnl,
+  formatRuntimeHours,
+  isExecutorActive,
+  pnlColor,
+} from "@/lib/formatters";
 import {
   UNATTACHED_BOT,
   controllerNodeId,
@@ -16,8 +22,41 @@ import {
 } from "@/lib/perf-tree";
 import { executorsQuery } from "@/lib/queryClient";
 
-/** How many controllers fit before the panel stops being a glance. */
-const MAX_ROWS = 6;
+/**
+ * The columns, left to right — the header row and every body row read from it.
+ *
+ * One list rather than two parallel ones, because a table whose `<th>`s and
+ * `<td>`s are written out separately drifts the moment a column is inserted in
+ * the middle, and the failure is silent: every number is still rendered, one
+ * heading to the left of what it means.
+ *
+ * `num` is what is right-aligned and tabular; the label column is not. `hint`
+ * is the `title`, because a five-character heading has to be able to say what
+ * it is somewhere.
+ */
+const COLUMNS: {
+  key: string;
+  label: string;
+  hint: string;
+  num: boolean;
+  /** Fixed px, or `undefined` for the one column that absorbs the slack. */
+  width?: number;
+}[] = [
+  { key: "controller", label: "Controller", hint: "Config id — click for its scope in /bots", num: false },
+  { key: "pair", label: "Pair", hint: "The market it trades", num: false, width: 76 },
+  { key: "exec", label: "Exec", hint: "Live executors it is running now", num: true, width: 38 },
+  { key: "up", label: "Up", hint: "Time since it was deployed", num: true, width: 46 },
+  { key: "vol", label: "Vol", hint: "Volume traded", num: true, width: 58 },
+  { key: "realized", label: "Real.", hint: "Realized PnL", num: true, width: 68 },
+  { key: "unrealized", label: "Unreal.", hint: "Unrealized PnL on open positions", num: true, width: 68 },
+  { key: "net", label: "Net", hint: "The controller's own total — not realized + unrealized", num: true, width: 70 },
+];
+
+/** The width every column but the first is worth, plus a floor for the first. */
+const FIXED_PX = COLUMNS.reduce((sum, c) => sum + (c.width ?? 0), 0);
+/** Below this the controller column stops being readable and the table scrolls. */
+const MIN_LABEL_PX = 120;
+export const TABLE_MIN_PX = FIXED_PX + MIN_LABEL_PX;
 
 /** The quote a controller's PnL is denominated in — its pair's, as elsewhere. */
 function quoteOf(pair: string): string {
@@ -114,17 +153,23 @@ export function DockExecution({ server }: { server: string }) {
   }, [live, executors]);
 
   /**
-   * The rows, capped and then grouped under the bot that deployed them.
+   * The rows, grouped under the bot that deployed them.
    *
    * Grouped rather than flat because a bot name is the long half of a
    * controller's identity — real ones run to sixty characters — and repeating
-   * it on every row in a 320px column truncates away the config id, which is
-   * the only half that tells two rows apart. Capped *before* grouping so the
-   * limit counts controllers, which is what the reader is scanning.
+   * it on every row truncates away the config id, which is the only half that
+   * tells two rows apart. A group header spanning the table costs one line per
+   * bot and gives every controller row its full width back.
+   *
+   * Uncapped. The list used to stop at six with a "+N more" line under it,
+   * which was the right trade for a two-line-per-row list in a floating panel
+   * and is the wrong one for a table in a column the reader sized themselves:
+   * the whole point of a table is that row seven costs nothing to scan, and the
+   * pane scrolls.
    */
   const groups = useMemo(() => {
     const out: { bot: string; leaves: PerfLeaf[] }[] = [];
-    for (const leaf of live.slice(0, MAX_ROWS)) {
+    for (const leaf of live) {
       const last = out[out.length - 1];
       if (last && last.bot === leaf.bot) last.leaves.push(leaf);
       else out.push({ bot: leaf.bot, leaves: [leaf] });
@@ -193,63 +238,136 @@ export function DockExecution({ server }: { server: string }) {
         </span>
       </div>
 
-      <ul className="px-1">
-        {groups.map((group) => (
-          <li key={group.bot}>
-            {/* The bot, once per group: its whole branch in the browser, and
-                the level the executors under it are counted at. */}
-            <button
-              type="button"
-              onClick={() => navigate(`/bots?scope=bot:${group.bot}`)}
-              title={`Everything ${group.bot} is running`}
-              data-bot-group
-              className="flex w-full items-baseline gap-2 rounded px-2 pt-1 text-left text-[10px] uppercase tracking-wider text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-            >
-              <span className="min-w-0 flex-1 truncate">{group.bot}</span>
-            </button>
-            <ul>
-              {group.leaves.map((leaf) => {
-                const count = byController.get(leaf.id) ?? 0;
-                const net = convert(leaf.net, quoteOf(leaf.pair)).value;
-                return (
-                  <li key={leaf.id} className="pb-0.5">
+      {/* A table, not a list of cards. Every controller answers the same eight
+          questions, and eight answers per row only stay comparable when they
+          are in eight columns: the two-line row this replaces put volume and
+          PnL on different lines at different widths, so "which of these is
+          losing money" was read by scrolling rather than by looking down a
+          column. It fits whatever width the panel was dragged to and only
+          scrolls sideways below `TABLE_MIN_PX`, where the controller name would
+          otherwise be squeezed out of legibility. */}
+      <div className="min-w-0 overflow-x-auto">
+        <table
+          className="w-full table-fixed border-collapse text-[11px]"
+          style={{ minWidth: TABLE_MIN_PX }}
+        >
+          {/* Fixed layout, so the table is exactly as wide as the column it is
+              in and the controller name absorbs whatever is left. Letting the
+              browser size from content instead pushed Net off the right edge on
+              a fleet whose bot names run to sixty characters — the widest cell
+              won the negotiation and the most important number lost it. */}
+          <colgroup>
+            {COLUMNS.map((col) => (
+              <col key={col.key} style={col.width ? { width: col.width } : undefined} />
+            ))}
+          </colgroup>
+          <thead>
+            <tr className="text-[9px] uppercase tracking-wider text-[var(--color-text-muted)]">
+              {COLUMNS.map((col) => (
+                <th
+                  key={col.key}
+                  scope="col"
+                  title={col.hint}
+                  className={`px-1.5 pb-1 font-medium ${
+                    col.num ? "text-right" : "text-left"
+                  } ${col.key === "controller" ? "pl-3" : ""} ${
+                    col.key === "net" ? "pr-3" : ""
+                  }`}
+                >
+                  {col.label}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {groups.map((group) => (
+              <Fragment key={group.bot}>
+                {/* The bot, once per group: its whole branch in the browser,
+                    and the level the executors under it are counted at. */}
+                <tr>
+                  <td colSpan={COLUMNS.length} className="p-0">
                     <button
                       type="button"
-                      onClick={() => navigate(`/bots?scope=${controllerNodeId(leaf)}`)}
-                      title={`${leaf.label} on ${leaf.bot}`}
-                      data-controller-row
-                      className="flex w-full flex-col gap-0 rounded px-2 py-0.5 text-left transition-colors hover:bg-[var(--color-surface-hover)]"
+                      onClick={() => navigate(`/bots?scope=bot:${group.bot}`)}
+                      title={`Everything ${group.bot} is running`}
+                      data-bot-group
+                      className="flex w-full items-baseline gap-2 px-3 pt-1.5 text-left text-[10px] uppercase tracking-wider text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
                     >
-                      <span className="flex w-full items-baseline gap-2 text-[11px]">
-                        <span className="min-w-0 flex-1 truncate">
-                          {leaf.label}
-                        </span>
-                        <span
-                          className="shrink-0 font-mono tabular-nums"
-                          style={{ color: pnlColor(net) }}
-                        >
-                          {formatCurrencyPnl(net, currencySymbol)}
-                        </span>
-                      </span>
-                      <span className="flex w-full items-baseline gap-2 text-[10px] text-[var(--color-text-muted)]">
-                        <span className="min-w-0 flex-1 truncate">
-                          ↳ {count} executor{count === 1 ? "" : "s"}
-                        </span>
-                        <span className="shrink-0 truncate">{leaf.pair}</span>
-                      </span>
+                      <span className="min-w-0 flex-1 truncate">{group.bot}</span>
                     </button>
-                  </li>
-                );
-              })}
-            </ul>
-          </li>
-        ))}
-        {live.length > MAX_ROWS && (
-          <li className="px-2 py-0.5 text-[10px] text-[var(--color-text-muted)]">
-            +{live.length - MAX_ROWS} more
-          </li>
-        )}
-      </ul>
+                  </td>
+                </tr>
+                {group.leaves.map((leaf) => {
+                  const quote = quoteOf(leaf.pair);
+                  const money = (val: number) => convert(val, quote).value;
+                  const net = money(leaf.net);
+                  const realized = money(leaf.realized);
+                  const unrealized = money(leaf.unrealized);
+                  const uptime = leaf.startedAt
+                    ? (Date.now() - leaf.startedAt) / 3_600_000
+                    : NaN;
+                  const scope = controllerNodeId(leaf);
+                  return (
+                    <tr
+                      key={leaf.id}
+                      data-controller-row
+                      role="button"
+                      tabIndex={0}
+                      title={`${leaf.label} on ${leaf.bot}`}
+                      onClick={() => navigate(`/bots?scope=${scope}`)}
+                      onKeyDown={(e) => {
+                        if (e.key !== "Enter" && e.key !== " ") return;
+                        e.preventDefault();
+                        navigate(`/bots?scope=${scope}`);
+                      }}
+                      className="cursor-pointer transition-colors hover:bg-[var(--color-surface-hover)]"
+                    >
+                      {/* The column that absorbs the slack, and the only one
+                          allowed to truncate: two rows under the same bot are
+                          told apart by nothing else, so it gets every pixel the
+                          numbers do not need — and the row's `title` says it in
+                          full when even that is not enough. */}
+                      <td className="truncate py-0.5 pl-3 pr-1.5">
+                        {leaf.label}
+                      </td>
+                      <td className="whitespace-nowrap px-1.5 py-0.5 text-[var(--color-text-muted)]">
+                        {leaf.pair}
+                      </td>
+                      <td className="px-1.5 py-0.5 text-right font-mono tabular-nums">
+                        {byController.get(leaf.id) ?? 0}
+                      </td>
+                      <td className="whitespace-nowrap px-1.5 py-0.5 text-right font-mono tabular-nums text-[var(--color-text-muted)]">
+                        {formatRuntimeHours(uptime)}
+                      </td>
+                      <td className="whitespace-nowrap px-1.5 py-0.5 text-right font-mono tabular-nums text-[var(--color-text-muted)]">
+                        {formatCompactVolume(money(leaf.volume), currencySymbol)}
+                      </td>
+                      <td
+                        className="whitespace-nowrap px-1.5 py-0.5 text-right font-mono tabular-nums"
+                        style={{ color: pnlColor(realized) }}
+                      >
+                        {formatCurrencyPnl(realized, currencySymbol)}
+                      </td>
+                      <td
+                        className="whitespace-nowrap px-1.5 py-0.5 text-right font-mono tabular-nums"
+                        style={{ color: pnlColor(unrealized) }}
+                      >
+                        {formatCurrencyPnl(unrealized, currencySymbol)}
+                      </td>
+                      <td
+                        className="whitespace-nowrap py-0.5 pl-1.5 pr-3 text-right font-mono font-medium tabular-nums"
+                        style={{ color: pnlColor(net) }}
+                      >
+                        {formatCurrencyPnl(net, currencySymbol)}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </Fragment>
+            ))}
+          </tbody>
+        </table>
+      </div>
 
       {unattached > 0 && (
         <button

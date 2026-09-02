@@ -132,7 +132,7 @@ const rows = () => [...container.querySelectorAll("[data-controller-row]")];
 /** The bot group headers, one per bot with anything live under it. */
 const botHeaders = () => [...container.querySelectorAll("[data-bot-group]")];
 const rowFor = (title: string) =>
-  container.querySelector<HTMLButtonElement>(`button[title="${title}"]`)!;
+  container.querySelector<HTMLElement>(`[title="${title}"]`)!;
 const counts = () =>
   container.querySelector('[data-testid="execution-counts"]')!.textContent ?? "";
 const text = () => container.textContent ?? "";
@@ -227,7 +227,8 @@ describe("the execution panel", () => {
     expect(text()).toContain("(unattached)");
     expect(text()).toContain("1 executor");
     // Counted where it belongs: the controller keeps only the one that is its.
-    expect(rows()[0].textContent).toContain("1 executor");
+    // The count is a cell in the Exec column now, not a phrase in the row.
+    expect(rows()[0].querySelectorAll("td")[2].textContent).toBe("1");
     expect(counts()).toContain("2 executors");
 
     await click(container.querySelector<HTMLButtonElement>(
