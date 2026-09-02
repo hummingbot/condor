@@ -273,6 +273,21 @@ def _build_instructions() -> str:
     else:
         base = _chat_base()
     sections = [base]
+
+    # The house rules, shared with every loop tick (FEAT-095). Directly under the
+    # seat's framing and above the indexes, because they govern how the indexes
+    # below are used. Built once at import like the rest of this text, so an edit
+    # to core_rules.md reaches this surface on the next server start (ticks get it
+    # immediately).
+    try:
+        from condor.agents.prompts import core_rules_section
+
+        core_rules = core_rules_section(slug or None)
+        if core_rules:
+            sections.append(core_rules)
+    except Exception:
+        pass  # Advisory — never block server startup on the rulebook.
+
     try:
         from condor.memory import SkillStore
 

@@ -8,12 +8,16 @@ pre-computed core data, and journal context (learnings + recent decisions).
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
+from condor.frontmatter import parse_frontmatter
 from condor.runtime.state import MAX_STATE_VALUE_CHARS
 
 from .agent import Agent
 from .strategy import Strategy
+
+log = logging.getLogger(__name__)
 
 # The [LOOP STATE] block is re-rendered on every tick, so it is bounded like
 # the canvas that sits beside it in the same prompt (canvas.MAX_SECTION_CHARS).
@@ -316,6 +320,55 @@ def _build_controller_mode_section(bot_name: str, ledger: Any | None) -> str:
     return "\n".join(lines)
 
 
+# Behavioural rules shared by every agent and every surface (FEAT-095). They
+# live on disk rather than in a constant here for the same reason ``shutdown.md``
+# and ``reflect.md`` do: the operator writes a rule once and it reaches all the
+# agents without a deploy.
+CORE_RULES_FILENAME = "core_rules.md"
+
+# The label the rules arrive under, identical at both surfaces so an agent reads
+# the same block whether it is ticking or answering a chat.
+CORE_RULES_HEADER = "[CORE RULES — apply to every session]"
+
+
+def load_core_rules(agent_slug: str | None = None) -> str:
+    """The shared behavioural rules for this agent: its own, else the default.
+
+    Resolved exactly like :func:`condor.agents.reflection.load_policy` —
+    ``agents/<slug>/core_rules.md`` then ``agents/_defaults/core_rules.md``, both
+    hanging off :func:`condor.paths.agents_root` so tests and a relocated install
+    land where their data actually is. A falsy slug reads only the default, which
+    is what the chat seat wants.
+
+    Read on every call, never cached: editing the file is meant to be visible on
+    the next tick. Returns ``""`` when nothing is on disk or the file is
+    unreadable — a missing rulebook must never be what breaks a tick.
+    """
+    from condor.memory.paths import assistant_home
+
+    home = assistant_home(agent_slug)
+    for path in (
+        home / CORE_RULES_FILENAME,
+        home.parent / "_defaults" / CORE_RULES_FILENAME,
+    ):
+        try:
+            if not path.is_file():
+                continue
+            _, body = parse_frontmatter(path.read_text(encoding="utf-8"))
+            body = body.strip()
+            if body:
+                return body
+        except Exception:  # noqa: BLE001 - an unreadable rulebook is not a crash
+            log.warning("Could not read %s", path, exc_info=True)
+    return ""
+
+
+def core_rules_section(agent_slug: str | None = None) -> str:
+    """:func:`load_core_rules` under its header, or ``""`` when there are none."""
+    rules = load_core_rules(agent_slug)
+    return f"{CORE_RULES_HEADER}\n{rules}" if rules else ""
+
+
 def build_tick_prompt(
     agent: Agent,
     strategy: Strategy,
@@ -372,6 +425,13 @@ def build_tick_prompt(
         JOURNAL_SECTION_EXPERIMENT if is_experiment else JOURNAL_SECTION_LIVE
     )
     sections: list[str] = [base_prompt, journal_section, BASE_PROMPT_COMMON]
+
+    # Shared behavioural rules, above the agent's own identity: an agent does not
+    # get to override the house rules, but the mode-specific base prompt still
+    # frames them (FEAT-095).
+    core_rules = core_rules_section(getattr(agent, "slug", "") or None)
+    if core_rules:
+        sections.append(core_rules)
 
     # Tool preload is ACP-specific (ToolSearch); pydantic-ai auto-discovers MCP tools
     if not use_pydantic_ai:
