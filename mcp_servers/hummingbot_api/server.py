@@ -11,6 +11,9 @@ from typing import Any, Literal
 
 from mcp.server.fastmcp import FastMCP
 
+from mcp_servers._profiles import make_resolver
+from mcp_servers._profiles import register_tools as _register_tools
+from mcp_servers._profiles import resolve_profiles
 from mcp_servers.hummingbot_api.formatters import (
     format_active_bots_as_table,
     format_amm_result,
@@ -2202,27 +2205,14 @@ async def explore_geckoterminal(
 # the functions provably in step.
 
 
-def _resolve(name: str):
-    """The tool function ``name`` refers to — or a loud failure at import.
-
-    A name in ``profiles.PROFILE_TOOLS`` with nothing behind it is a rename that
-    only landed on one side. Failing the import is the whole point: the quiet
-    alternative is a seat that mounts one tool fewer than its table claims.
-    """
-    fn = globals().get(name)
-    if not callable(fn):
-        raise RuntimeError(
-            f"profiles.py names a tool this module does not define: {name!r}"
-        )
-    return fn
-
+#: The tool function a name in ``profiles.PROFILE_TOOLS`` refers to, looked up
+#: in *this* module — or a loud failure at import (ARCH-289: the mechanics are
+#: shared with the condor server, the namespace is not).
+_resolve = make_resolver(globals())
 
 #: profile name → the tools it registers, resolved from ``profiles.PROFILE_TOOLS``
 #: (which carries the prose on what each ring is for).
-TOOL_PROFILES: dict[str, tuple] = {
-    profile: tuple(_resolve(name) for name in names)
-    for profile, names in PROFILE_TOOLS.items()
-}
+TOOL_PROFILES: dict[str, tuple] = resolve_profiles(globals(), PROFILE_TOOLS)
 
 
 def register_tools(
@@ -2232,29 +2222,11 @@ def register_tools(
 ) -> None:
     """Register this profile's tools on ``server``, minus the muted ones.
 
-    Raises on an unknown profile rather than degrading to ``full``: the only
-    spawner that passes the flag is ``condor.runtime.toolsets``, so a name that
-    does not resolve is a bug there, and silently widening a seat is the one
-    failure mode this feature exists to prevent.
-
-    ``muted`` is the operator's per-agent curation (FEAT-091), arriving on argv
-    as ``--mute-tools``. It only ever subtracts — ``mute ⊆ profile``, always —
-    and a name this profile never mounts is ignored rather than refused: seats
-    mount different rings, so "off here, never mounted there" is an ordinary
-    difference between seats and not a mistake to report.
+    This server's rings and its own default; the rules — unknown profile raises
+    rather than widening to ``full``, ``muted`` only ever subtracts — live once,
+    in ``mcp_servers/_profiles.py``.
     """
-    try:
-        tools = TOOL_PROFILES[profile]
-    except KeyError:
-        raise ValueError(
-            f"Unknown tool profile {profile!r}; expected one of "
-            f"{sorted(TOOL_PROFILES)}"
-        ) from None
-    switched_off = set(muted)
-    for fn in tools:
-        if fn.__name__ in switched_off:
-            continue
-        server.tool()(fn)
+    _register_tools(server, TOOL_PROFILES, profile, muted)
 
 
 # Registration happens at import, not in ``_run()``: ``mcp`` is a module-level

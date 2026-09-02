@@ -110,6 +110,32 @@ def test_the_leaf_modules_do_not_wake_a_server():
     assert done.returncode == 0, done.stderr
 
 
+def test_the_shared_profile_helpers_are_a_leaf_too():
+    """ARCH-289 moved the mechanics both servers share into
+    ``mcp_servers/_profiles.py``. It annotates ``FastMCP`` but must not import
+    it, and must never reach for a ``server`` module: anything it drags in, both
+    servers drag in at import, and the leafness of the name tables above is only
+    worth as much as the module they are resolved by."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    probe = (
+        "import sys\n"
+        "import mcp_servers._profiles\n"
+        "assert 'mcp_servers.condor.server' not in sys.modules\n"
+        "assert 'mcp_servers.hummingbot_api.server' not in sys.modules\n"
+        "assert not [m for m in sys.modules if m.startswith('mcp.')]\n"
+    )
+    done = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=str(Path(__file__).resolve().parent.parent),
+        capture_output=True,
+        text=True,
+    )
+    assert done.returncode == 0, done.stderr
+
+
 # ── 2. the subtraction ──
 
 
