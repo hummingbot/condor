@@ -5,8 +5,8 @@ import { api } from "@/lib/api";
 /**
  * A venue's trading rules — the pair list and the price/amount increments.
  *
- * Shares its query key with the market browser's own rules query, so the trade
- * page and the browser hit one cached request per venue.
+ * Both the trade page and the market browser ask through this hook, so one
+ * cached request per venue serves both.
  *
  * @param enabled Pass false for venues with no rules endpoint, where the
  *   request would only 502.

@@ -1,10 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
 import { ArrowDown, ArrowUp, Loader2, Search, Star, X } from "lucide-react";
 
 import { formatConnectorName } from "@/lib/formatters";
 import { useEscapeKey } from "@/hooks/useEscapeKey";
-import { api, type Ticker } from "@/lib/api";
+import type { Ticker } from "@/lib/api";
 import { formatCompactVolume, formatPrice } from "@/lib/formatters";
 import {
   changeColumnLabel,
@@ -13,6 +12,7 @@ import {
 } from "@/lib/marketChange";
 import { useMarketFavorites } from "@/lib/marketFavorites";
 import { useTickers } from "./useTickers";
+import { useTradingRules } from "./useTradingRules";
 import { VenueRail } from "./VenueRail";
 
 export interface MarketPick {
@@ -106,12 +106,7 @@ export function MarketBrowser({
   const { toggle, isFavorite } = useMarketFavorites(server);
 
   // Only offer pairs the venue actually accepts orders for.
-  const { data: rulesData } = useQuery({
-    queryKey: ["trading-rules", server, venue],
-    queryFn: () => api.getTradingRules(server, venue),
-    enabled: !!server && !!venue,
-    staleTime: 5 * 60 * 1000,
-  });
+  const rulesData = useTradingRules(server, venue);
 
   const tradablePairs = useMemo(() => {
     const rules = rulesData?.rules ?? [];
