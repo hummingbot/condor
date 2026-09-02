@@ -1,5 +1,6 @@
 """Fetch connector information from Hummingbot API."""
 
+import asyncio
 import logging
 from typing import Dict, List
 
@@ -100,6 +101,23 @@ async def fetch_available_cex_connectors(
         return []
 
 
+def _degraded(result, message):
+    """Split one gathered source into ``(value, error)``, logging a failure.
+
+    ``asyncio.gather(return_exceptions=True)`` hands failures back as values, so the
+    unpacking has to redo what an ``except Exception`` block did for free -- above
+    all *not* swallowing a ``CancelledError``, which is a ``BaseException`` and not
+    an ``Exception``. Returning it as a venue-less degradation would turn a
+    cancelled request into a cached "this server has no venues".
+    """
+    if isinstance(result, BaseException):
+        if not isinstance(result, Exception):
+            raise result
+        logger.error(message, result, exc_info=result)
+        return None, result
+    return result, None
+
+
 async def fetch_venues(
     client, account_name: str = "master_account", strict: bool = False, **_kw
 ) -> List[Dict]:
@@ -156,20 +174,27 @@ async def fetch_venues(
         client, account_name=account_name, strict=strict
     )
 
-    degraded_error = None
-    networks: List[str] = []
-    try:
-        networks = await _chartable_gateway_networks(client)
-    except Exception as e:
-        degraded_error = e
-        logger.error("Error fetching gateway networks: %s", e, exc_info=True)
-
-    candles: List[str] = []
-    try:
-        candles = await fetch_candle_connectors(client) or []
-    except Exception as e:
-        degraded_error = degraded_error or e
-        logger.error("Error fetching candle connectors: %s", e, exc_info=True)
+    # Independent round-trips: neither reads the other's answer and each degrades on
+    # its own, so the list should cost max(gateway, candles) rather than their sum.
+    # ``return_exceptions`` is what keeps that equivalent to the two serial
+    # try/excepts this replaced: both sources are always attempted, and one failing
+    # neither cancels the other nor empties the dropdown.
+    networks_result, candles_result = await asyncio.gather(
+        _chartable_gateway_networks(client),
+        fetch_candle_connectors(client),
+        return_exceptions=True,
+    )
+    networks_value, gateway_error = _degraded(
+        networks_result, "Error fetching gateway networks: %s"
+    )
+    candles_value, candles_error = _degraded(
+        candles_result, "Error fetching candle connectors: %s"
+    )
+    # Gateway first, the precedence the serial ``degraded_error or e`` merge had.
+    degraded_error = gateway_error or candles_error
+    networks: List[str] = networks_value or []
+    # None is a real answer from the candle endpoint, not a failure.
+    candles: List[str] = candles_value or []
 
     credentialed = set(connectors)
     gateway = set(networks)

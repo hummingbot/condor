@@ -29,6 +29,7 @@ Condor cannot chart, or the user picks one and gets an empty chart.
 """
 
 import asyncio
+import time
 
 import pytest
 
@@ -48,6 +49,8 @@ class FakeClient:
         available=None,
         candles=None,
         candles_error=None,
+        gateway_delay=0.0,
+        candle_delay=0.0,
     ):
         self.gateway_calls = 0
         self.candle_calls = 0
@@ -65,6 +68,12 @@ class FakeClient:
         # None is a real answer the API can give; the fetcher must tolerate it.
         self._candles = candles
         self._candles_error = candles_error
+        # Per-source latency, so a test can tell max() from sum().
+        self._gateway_delay = gateway_delay
+        self._candle_delay = candle_delay
+        # Per-source latency, so a test can tell max() from sum().
+        self._gateway_delay = gateway_delay
+        self._candle_delay = candle_delay
 
     class _Gateway:
         def __init__(self, outer):
@@ -72,6 +81,8 @@ class FakeClient:
 
         async def list_networks(self):
             self._outer.gateway_calls += 1
+            if self._outer._gateway_delay:
+                await asyncio.sleep(self._outer._gateway_delay)
             if self._outer._networks_error is not None:
                 raise self._outer._networks_error
             return self._outer._networks
@@ -100,6 +111,8 @@ class FakeClient:
 
         async def get_available_candle_connectors(self):
             self._outer.candle_calls += 1
+            if self._outer._candle_delay:
+                await asyncio.sleep(self._outer._candle_delay)
             if self._outer._candles_error is not None:
                 raise self._outer._candles_error
             if self._outer._candles is None:
@@ -459,6 +472,96 @@ def test_rejects_an_unsafe_account_name():
 
     with pytest.raises(IdentifierError):
         asyncio.run(fetch_venues(FakeClient(), account_name="../etc"))
+
+
+# ── PERF-300: the gateway and candle sources are gathered, not queued ─────
+#
+# They are independent round-trips -- neither reads the other's answer -- so the
+# cold VENUES fetch that GET /servers/{name}/market/venues awaits in-request should
+# cost max(gateway, candles), not their sum. The error semantics of the two serial
+# try/excepts this replaced are the whole risk, and are pinned below: both sources
+# always run, one failing never cancels the other, the gateway error keeps
+# precedence, and a CancelledError is still not a degradation.
+
+
+def test_the_gateway_and_candle_sources_are_awaited_concurrently():
+    delay = 0.2
+    client = FakeClient(
+        credentials=["binance"],
+        available=["binance"],
+        networks={"networks": ["solana-mainnet-beta"]},
+        candles=["binance"],
+        gateway_delay=delay,
+        candle_delay=delay,
+    )
+    started = time.monotonic()
+    venues = _by_name(asyncio.run(fetch_venues(client)))
+    elapsed = time.monotonic() - started
+
+    assert sorted(venues) == ["binance", "solana-mainnet-beta"]
+    # Serially this is 2*delay; concurrently it is one delay plus scheduling.
+    assert elapsed < delay * 1.5
+
+
+def test_a_gateway_failure_does_not_cancel_the_candle_source():
+    """``return_exceptions``: a dead sibling must not take the other source down."""
+    client = FakeClient(
+        credentials=[],
+        available=[],
+        networks_error=RuntimeError("gateway down"),
+        candles=["binance"],
+    )
+    venues = _by_name(asyncio.run(fetch_venues(client, strict=True)))
+
+    assert client.candle_calls == 1
+    assert sorted(venues) == ["binance"]
+    assert venues["binance"]["hummingbot_market_data"] is True
+    assert venues["binance"]["credentialed"] is False
+
+
+def test_a_candle_failure_does_not_cancel_the_gateway_source():
+    client = FakeClient(
+        credentials=[],
+        available=[],
+        networks={"networks": ["solana-mainnet-beta"]},
+        candles_error=RuntimeError("candles down"),
+    )
+    venues = _by_name(asyncio.run(fetch_venues(client, strict=True)))
+
+    assert client.gateway_calls == 1
+    assert sorted(venues) == ["solana-mainnet-beta"]
+
+
+def test_both_sources_failing_reraises_the_gateway_error_under_strict(caplog):
+    """Gateway keeps the precedence the serial ``degraded_error or e`` merge had."""
+    client = FakeClient(
+        credentials=[],
+        available=[],
+        networks_error=RuntimeError("gateway down"),
+        candles_error=RuntimeError("candles down"),
+    )
+    with caplog.at_level("ERROR"):
+        with pytest.raises(RuntimeError, match="gateway down"):
+            asyncio.run(fetch_venues(client, strict=True))
+
+    # Both failures are still reported, not just the one that surfaced.
+    assert "gateway networks" in caplog.text
+    assert "candle connectors" in caplog.text
+
+
+def test_a_cancellation_is_reraised_rather_than_degraded():
+    """``except Exception`` never swallowed a ``CancelledError``; nor may the unpack.
+
+    Degrading it would report a cancelled request as a venue-less server, which
+    under non-strict is cached as "there is nothing here".
+    """
+    client = FakeClient(
+        credentials=["binance"],
+        available=["binance"],
+        networks_error=asyncio.CancelledError(),
+    )
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(fetch_venues(client))
 
 
 # ── The REST route ────────────────────────────────────────────────────────────
