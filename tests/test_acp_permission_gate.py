@@ -524,3 +524,67 @@ def test_control_agent_with_unreadable_arguments_fails_closed():
     for raw in (None, "not json", ["start"], {}, {"action": 7}):
         call = normalize_tool_call(_acp_request(CONTROL, raw))
         assert is_dangerous_tool_call(call), f"{raw!r} slipped past the gate"
+
+
+# ---------------------------------------------------------------------------
+# A summary that raises must not become a silent "no" (CORR-294)
+# ---------------------------------------------------------------------------
+
+
+def test_a_dca_with_string_amounts_reaches_a_human():
+    """The regression: rawInput reaches the summary before pydantic coerces it.
+
+    ``amounts_quote: list[float]`` accepts ["100", "100"], so this is a valid
+    create — but summing the raw strings raised inside the callback, the ACP
+    client turned that into a cancellation, and the human never saw the prompt.
+    """
+    channel = _CapturingChannel(answer=True)
+    result = _drive_acp(
+        _acp_request(
+            "mcp__mcp-hummingbot__create_dca_executor",
+            {
+                "controller_id": "c",
+                "connector_name": "binance",
+                "trading_pair": "SOL-USDC",
+                "amounts_quote": ["100", "100"],
+            },
+        ),
+        channel,
+    )
+
+    assert len(channel.delivered) == 1, "the create was denied with no confirmation"
+    assert channel.delivered[0].summary == (
+        "Create dca executor on SOL-USDC for 200 quote over 2 levels"
+    )
+    assert result["outcome"] == {"outcome": "selected", "optionId": "allow"}
+
+
+def test_a_summary_that_raises_still_raises_a_confirmation(monkeypatch):
+    """Belt and braces: no future formatting bug may deny a call unseen.
+
+    The prompt has to degrade to something a human can refuse, and it must not
+    describe a call it could not read — so it names the tool and says plainly
+    that the arguments could not be summarized.
+    """
+
+    def _boom(tool_call):
+        raise TypeError("summary bug")
+
+    monkeypatch.setattr(confirmations_module.danger, "format_tool_summary", _boom)
+
+    channel = _CapturingChannel(answer=False)
+    result = _drive_acp(
+        _acp_request(
+            "mcp__mcp-hummingbot__create_dca_executor",
+            {"trading_pair": "SOL-USDC", "amounts_quote": [100, 100]},
+        ),
+        channel,
+    )
+
+    assert len(channel.delivered) == 1, "a summary bug swallowed the confirmation"
+    summary = channel.delivered[0].summary
+    assert "arguments could not be summarized" in summary
+    assert "mcp__mcp-hummingbot__create_dca_executor" in summary
+    # It must never invent the shape of a call it failed to render.
+    assert "SOL-USDC" not in summary
+    assert result["outcome"]["outcome"] == "cancelled"

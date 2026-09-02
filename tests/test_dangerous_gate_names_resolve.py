@@ -357,6 +357,163 @@ def test_control_reads_and_brakes_are_not_gated():
         ), f"control_agent({action}) needlessly gated"
 
 
+def test_a_dca_ladder_of_numeric_strings_still_states_its_size():
+    """The MCP schema says list[float], but the summary sees the raw wire value.
+
+    pydantic coerces ["100", "100"] happily, so the call is valid — but that
+    coercion happens inside the MCP server, long after the confirmation is
+    rendered. Summing the raw list raised, and a raise inside the permission
+    callback is a silent cancellation of a funds call nobody ever saw.
+    """
+    from handlers.agents.confirmation import format_tool_summary
+
+    summary = format_tool_summary(
+        {
+            "tool": "mcp__mcp-hummingbot__create_dca_executor",
+            "input": {"trading_pair": "SOL-USDC", "amounts_quote": ["100", "100"]},
+        }
+    )
+    assert summary == "Create dca executor on SOL-USDC for 200 quote over 2 levels"
+
+    # The "$100" quote-denominated form risk._quote_amount already accepts.
+    dollars = format_tool_summary(
+        {
+            "tool": "create_dca_executor",
+            "input": {"trading_pair": "SOL-USDC", "amounts_quote": ["$50", 50.0]},
+        }
+    )
+    assert dollars == "Create dca executor on SOL-USDC for 100 quote over 2 levels"
+
+
+def test_an_unreadable_dca_rung_drops_the_total_instead_of_raising():
+    """A rung we cannot parse means we cannot state the size — so we don't.
+
+    The depth is still true and still rendered; the total is omitted rather than
+    partially summed, because a summary that understates what is being approved
+    is worse than one that says less.
+    """
+    from handlers.agents.confirmation import format_tool_summary
+
+    for amounts in ([100, None], ["abc", 1], [{"amount": 1}], ["nan", 1], [1, "inf"]):
+        summary = format_tool_summary(
+            {
+                "tool": "create_dca_executor",
+                "input": {"trading_pair": "SOL-USDC", "amounts_quote": amounts},
+            }
+        )
+        assert "Create dca executor on SOL-USDC" in summary, amounts
+        assert f"over {len(amounts)} levels" in summary, amounts
+        assert "quote" not in summary, f"{amounts!r} rendered a total it cannot know"
+
+
+def test_every_other_summarized_number_survives_arriving_as_a_string():
+    """Amounts are not the only figure a model can send quoted.
+
+    Prices, levels, spreads and percentages ride the same uncoerced wire, so the
+    whole summary path is pinned against string-typed numerics at once.
+    """
+    from handlers.agents.confirmation import format_tool_summary
+
+    for call, expected in (
+        (
+            {
+                "tool": "create_grid_executor",
+                "input": {"trading_pair": "SOL-USDT", "total_amount_quote": "500"},
+            },
+            "Create grid executor on SOL-USDT for 500 quote",
+        ),
+        (
+            {
+                "tool": "create_position_executor",
+                "input": {"trading_pair": "BTC-USDT", "amount": "0.01"},
+            },
+            "Create position executor on BTC-USDT of 0.01",
+        ),
+        (
+            {
+                "tool": "create_lp_executor",
+                "input": {
+                    "trading_pair": "SOL-USDC",
+                    "base_amount": "1.5",
+                    "quote_amount": "25",
+                },
+            },
+            "Create lp executor on SOL-USDC with 1.5 base / 25 quote",
+        ),
+        (
+            {
+                "tool": "place_order",
+                "input": {
+                    "trade_type": "BUY",
+                    "trading_pair": "SOL-USDC",
+                    "amount": "1",
+                    "order_type": "LIMIT",
+                    "price": "100",
+                    "connector_name": "binance",
+                },
+            },
+            "BUY 1 SOL-USDC (LIMIT) @ 100 on binance",
+        ),
+        (
+            {
+                "tool": "execute_swap",
+                "input": {"trading_pair": "SOL-USDC", "side": "BUY", "amount": "1.25"},
+            },
+            "Swap BUY 1.25 SOL-USDC",
+        ),
+        (
+            {
+                "tool": "manage_clmm",
+                "input": {
+                    "action": "open",
+                    "connector": "meteora",
+                    "pool_address": "poolpoolpool",
+                    "lower_price": "180.5",
+                    "upper_price": "220",
+                },
+            },
+            "over 180.5-220",
+        ),
+        (
+            {
+                "tool": "manage_amm",
+                "input": {
+                    "action": "add_liquidity",
+                    "connector": "raydium",
+                    "base_token_amount": "2",
+                    "quote_token_amount": "400",
+                },
+            },
+            "Add 2 base / 400 quote",
+        ),
+        (
+            {
+                "tool": "manage_clmm",
+                "input": {
+                    "action": "remove_liquidity",
+                    "connector": "meteora",
+                    "percentage_to_remove": "50",
+                },
+            },
+            "Remove 50% from",
+        ),
+        (
+            {
+                "tool": "mcp__condor__control_agent",
+                "input": {
+                    "action": "start",
+                    "strategy_id": "acme.momentum",
+                    "config": {"total_amount_quote": "500"},
+                },
+            },
+            "sized 500 quote",
+        ),
+    ):
+        summary = format_tool_summary(call)
+        assert expected in summary, f"{call['tool']} rendered {summary!r}"
+        assert summary != call["tool"]
+
+
 def test_control_agent_fails_closed_on_an_unreadable_action():
     """SEC-093: a call we cannot classify is a call that goes to a human."""
     for bad in ({}, {"action": None}, {"action": 7}, {"action": ""}, "not json", None):

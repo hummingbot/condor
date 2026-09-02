@@ -15,6 +15,7 @@ never grow an import edge back into the runtime or the handlers.
 from __future__ import annotations
 
 import json
+import math
 from typing import Any
 
 #: Every executor-creating tool, by name. The typed split (FEAT-062) gave each
@@ -186,6 +187,36 @@ def _short_address(value: Any) -> str:
     return f"{value[:8]}..." if len(value) > 8 else value
 
 
+def _quote_ladder_total(values: list[Any]) -> str | None:
+    """The sum of a DCA ladder's quote amounts, or ``None`` if a rung is unreadable.
+
+    The summary reads *wire* arguments: ``normalize_tool_call`` hands the raw
+    ``rawInput`` through and the MCP server's pydantic coercion of
+    ``amounts_quote: list[float]`` happens later, so a perfectly valid call can
+    arrive as ``["100", "100"]``. Summing that raw raises inside the permission
+    callback, and an exception there is turned into a *cancellation* by the ACP
+    client — the human never sees the prompt and a legitimate create is denied
+    (CORR-294). So each rung is parsed the tolerant way ``risk._quote_amount``
+    already parses one, and anything that will not parse returns ``None`` so the
+    caller can drop the total rather than invent or misstate one.
+    """
+    total = 0.0
+    for value in values:
+        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+            return None
+        if isinstance(value, str):
+            value = value.strip().removeprefix("$")
+        try:
+            total += float(value)
+        except (TypeError, ValueError):
+            return None
+    if not math.isfinite(total):
+        return None
+    # Integral ladders keep their bare form ("100", not "100.0"): the figure a
+    # human approves should read the way the model wrote it.
+    return str(int(total)) if total.is_integer() else str(total)
+
+
 def _executor_amount(tool_name: str, input_data: dict[str, Any]) -> str:
     """The size of a pending executor create, for the confirmation line.
 
@@ -199,7 +230,13 @@ def _executor_amount(tool_name: str, input_data: dict[str, Any]) -> str:
     if tool_name == "create_dca_executor":
         amounts = input_data.get("amounts_quote")
         if isinstance(amounts, list) and amounts:
-            return f" for {sum(amounts)} quote over {len(amounts)} levels"
+            total = _quote_ladder_total(amounts)
+            if total is None:
+                # A rung we cannot read means we cannot state the size. Say what
+                # is certain — the ladder's depth — instead of a partial total
+                # that would understate what the human is approving.
+                return f" over {len(amounts)} levels"
+            return f" for {total} quote over {len(amounts)} levels"
         return ""
     if tool_name == "create_lp_executor":
         base = input_data.get("base_amount") or 0
