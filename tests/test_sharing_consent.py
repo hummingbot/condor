@@ -18,7 +18,7 @@ import pytest
 
 from condor.runtime import conversations
 from condor.runtime.conversations import TurnEntry
-from condor.sharing import consent, outbox, share, wire
+from condor.sharing import consent, outbox, scrub, share, wire
 
 
 @pytest.fixture
@@ -973,6 +973,154 @@ def test_an_oversized_transcript_is_cut_from_the_middle_and_marked():
     markers = [t for t in bounded if t.kind == wire.OMITTED_KIND]
     assert len(markers) == 1 and "omitted" in markers[0].text
     assert wire._size(bounded) <= wire.MAX_SHARE_BYTES
+
+
+# ── Bounding pays only for what it ships (PERF-284) ──────────────────────
+
+_KNOWN = [("beetlejuice-server", "known_server")]
+_SECRET = "pepper"
+
+
+def _scrubbed(turns: list[TurnEntry]) -> list[TurnEntry]:
+    return scrub.scrub(turns, secret=_SECRET, known=_KNOWN)[0]
+
+
+def _bulk(n: int, chars: int) -> list[TurnEntry]:
+    """``n`` turns carrying real redactable values, so the eager and the lazy
+    path have pseudonym-length differences to disagree about if they can."""
+    return [
+        TurnEntry(
+            role="user",
+            text=f"{i} on beetlejuice-server, ask ops@example.invalid: " + "x" * chars,
+        )
+        for i in range(n)
+    ]
+
+
+def _sized_to(total: int) -> list[TurnEntry]:
+    """A transcript whose *scrubbed* wire size is exactly ``total`` bytes."""
+    chars = 2_000
+    per = wire._size(_scrubbed(_bulk(1, chars)))
+    turns = _bulk(max(3, total // per - 5), chars)
+    deficit = total - wire._size(_scrubbed(turns))
+    assert deficit > 0
+    # ``model_copy`` rather than a fresh entry: a new ``ts`` is a new float
+    # whose JSON repr can be a byte shorter, which is exactly the size this
+    # helper is trying to hit.
+    turns[-1] = turns[-1].model_copy(update={"text": turns[-1].text + "x" * deficit})
+    assert wire._size(_scrubbed(turns)) == total  # the padding scrubs 1:1
+    return turns
+
+
+def _wire(turns: list[TurnEntry]) -> list[dict]:
+    """Turns as they go on the wire, with the omission marker's clock stopped.
+
+    The marker is minted inside :func:`wire.bound`, so its ``ts`` is the moment
+    of the build and differs between any two builds — that predates PERF-284 and
+    is not what these comparisons are about. Every other byte must match.
+    """
+    out = []
+    for turn in turns:
+        payload = turn.model_dump(mode="json")
+        if payload.get("kind") == wire.OMITTED_KIND:
+            payload["ts"] = 0
+        out.append(payload)
+    return out
+
+
+def test_bounding_scrubs_and_serialises_only_the_turns_it_ships():
+    """Acceptance criterion: a 5 MB transcript of which 1.5 MB ships is not
+    scrubbed and sized whole. Redaction is ~50 substring and regex passes over
+    every string in a turn, and the old ``bound`` was handed the entire scrubbed
+    archive and then serialised all of it *twice* — once to test the cap and
+    once to build the size table."""
+    turns = [TurnEntry(role="user", text=f"{i} " + "x" * 40_000) for i in range(120)]
+    seen = {"dump": 0, "scrub": 0}
+    real_dump = TurnEntry.model_dump
+
+    def counted(self, *args, **kwargs):
+        seen["dump"] += 1
+        return real_dump(self, *args, **kwargs)
+
+    def scrub_one(turn: TurnEntry) -> TurnEntry:
+        seen["scrub"] += 1
+        return turn
+
+    TurnEntry.model_dump = counted
+    try:
+        bounded, truncated = wire.bound(turns, scrub_one=scrub_one)
+    finally:
+        del TurnEntry.model_dump
+
+    assert truncated
+    shipped = [t for t in bounded if t.kind != wire.OMITTED_KIND]
+    assert 0 < len(shipped) < len(turns)
+
+    # The shipped turns, plus at most two: the turn that overflowed the budget,
+    # and the one that proved the remainder would not fit under the cap either.
+    assert seen["scrub"] <= len(shipped) + 2
+    # Each of those serialised exactly once, plus the marker's reservation. The
+    # old bound spent 2 * len(turns) + 1 here, whatever it shipped.
+    assert seen["dump"] <= len(shipped) + 3
+    assert seen["dump"] <= len(turns)
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "two_turns",
+        "well_under",
+        "exactly_the_budget",
+        "exactly_the_cap",
+        "one_over",
+        "twice_the_cap",
+    ],
+)
+def test_a_lazily_scrubbed_bound_ships_what_an_eager_one_would(label):
+    """The bytes on the wire must not move. Every regime the cap has — including
+    the transcript that fits ``MAX_SHARE_BYTES`` but not the marker's
+    reservation, which is sent whole — bounds to the same turns whether the
+    scrubbing happened before ``bound`` or inside it."""
+    marker = wire._turn_bytes(wire._omitted_marker(1000))
+    cases = {
+        "two_turns": lambda: _bulk(2, 100),
+        "well_under": lambda: _sized_to(wire.MAX_SHARE_BYTES // 3),
+        "exactly_the_budget": lambda: _sized_to(wire.MAX_SHARE_BYTES - marker),
+        "exactly_the_cap": lambda: _sized_to(wire.MAX_SHARE_BYTES),
+        "one_over": lambda: _sized_to(wire.MAX_SHARE_BYTES + 1),
+        "twice_the_cap": lambda: _bulk(120, 40_000),
+    }
+    turns = cases[label]()
+
+    eager, eager_truncated = wire.bound(_scrubbed(turns))
+    lazy_scrubber = scrub.scrubber(secret=_SECRET, known=_KNOWN)
+    lazy, lazy_truncated = wire.bound(turns, scrub_one=lazy_scrubber.turn)
+
+    assert lazy_truncated == eager_truncated
+    assert _wire(lazy) == _wire(eager)
+
+
+def test_an_oversized_conversation_previews_the_bytes_it_submits(chat):
+    """Acceptance criterion: the lazy build keeps preview and submit identical.
+    ``counts`` now describes the turns that ship rather than the whole archive,
+    and both verbs read it from the same build."""
+    for i in range(120):
+        conversations.append_turn(
+            4242, chat.id, TurnEntry(role="assistant", text=f"{i} " + "x" * 40_000)
+        )
+
+    previewed = share.preview(4242, chat.id)
+    share.submit(4242, chat.id)
+    body = outbox.pending()[0]["body"]
+
+    assert previewed.truncated is True
+    assert previewed.turns_omitted > 0
+    sent = [dict(t) for t in body["turns"]]
+    for payload in sent:
+        if payload.get("kind") == wire.OMITTED_KIND:
+            payload["ts"] = 0
+    assert sent == _wire(previewed.turns)
+    assert body["redaction"]["counts"] == previewed.counts
 
 
 def _always(result: bool):

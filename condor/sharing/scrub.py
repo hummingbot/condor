@@ -565,6 +565,26 @@ def install_values(user_id: int | str | None = None) -> list[tuple[str, str]]:
     return values
 
 
+def scrubber(
+    *,
+    secret: str,
+    user_id: int | str | None = None,
+    known: list[tuple[str, str]] | None = None,
+) -> Scrubber:
+    """One share's :class:`Scrubber`, with the install's table already built.
+
+    The factory exists so a caller that scrubs turn by turn — :func:`bound`,
+    which redacts only the turns it admits — builds the known-value table the
+    same way :func:`scrub` does, rather than reassembling it at the call site.
+    Read ``counts`` off the returned object once the last turn has gone through.
+
+    ``known`` is injectable so a test can state the install's values instead of
+    inheriting the developer's; production passes ``user_id`` and lets
+    :func:`install_values` build it.
+    """
+    return Scrubber(secret, known if known is not None else install_values(user_id))
+
+
 def scrub(
     turns: list[TurnEntry],
     *,
@@ -572,12 +592,6 @@ def scrub(
     user_id: int | str | None = None,
     known: list[tuple[str, str]] | None = None,
 ) -> tuple[list[TurnEntry], dict[str, int]]:
-    """``(scrubbed turns, counts)`` — the whole of what a share is allowed to be.
-
-    ``known`` is injectable so a test can state the install's values instead of
-    inheriting the developer's; production passes ``user_id`` and lets
-    :func:`install_values` build it.
-    """
-    table = known if known is not None else install_values(user_id)
-    scrubber = Scrubber(secret, table)
-    return [scrubber.turn(turn) for turn in turns], scrubber.counts
+    """``(scrubbed turns, counts)`` — the whole of what a share is allowed to be."""
+    one = scrubber(secret=secret, user_id=user_id, known=known)
+    return [one.turn(turn) for turn in turns], one.counts

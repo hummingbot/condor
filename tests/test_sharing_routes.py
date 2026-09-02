@@ -144,15 +144,19 @@ def test_a_slow_scrub_does_not_stop_the_rest_of_the_install(chat, monkeypatch):
     release = threading.Event()
     order: list[str] = []
     freed: list[bool] = []
-    real_scrub = scrub_module.scrub
+    real_scrubber = scrub_module.scrubber
 
-    def slow_scrub(*args, **kwargs):
+    def slow_scrubber(*args, **kwargs):
         started.set()
         freed.append(release.wait(5))
         order.append("first")
-        return real_scrub(*args, **kwargs)
+        return real_scrubber(*args, **kwargs)
 
-    monkeypatch.setattr(scrub_module, "scrub", slow_scrub)
+    # The build's redaction seam: since PERF-284 it is the per-share
+    # ``Scrubber`` that ``wire.bound`` calls turn by turn, not a whole-transcript
+    # ``scrub``. What is being gated is unchanged — the slow part of a build must
+    # not run on the loop.
+    monkeypatch.setattr(scrub_module, "scrubber", slow_scrubber)
 
     async def drive():
         first = asyncio.create_task(routes.preview_share(chat.id, user=OWNER))

@@ -92,6 +92,13 @@ def _build(user_id: int, conv_id: str) -> tuple[ScrubbedShare, object]:
     preview honest: the pseudonyms in the dialog are salted with the same
     ``share_secret`` the sent payload will use, so the user is looking at the
     real bytes and not a rehearsal of them.
+
+    Scrubbing is handed to :func:`wire.bound` rather than run over the whole
+    read: the archive is moved, never deleted, so a long-lived conversation can
+    be many times the 1.5 MB a share may carry, and there is no point redacting
+    turns the cap is about to drop. ``counts`` therefore describes the turns
+    that ship — which is what the dialog's "N wallets were replaced" claims
+    about the bytes in front of the user — rather than the whole transcript.
     """
     meta = _meta(user_id, conv_id)
     consent.ensure_identity()
@@ -99,10 +106,9 @@ def _build(user_id: int, conv_id: str) -> tuple[ScrubbedShare, object]:
     turns = conversations.read_transcript(
         user_id, conv_id, limit=0, include_archive=True
     )
-    scrubbed, counts = scrub.scrub(
-        turns, secret=consent.share_secret(), user_id=user_id
-    )
-    bounded, truncated = wire.bound(scrubbed)
+    scrubber = scrub.scrubber(secret=consent.share_secret(), user_id=user_id)
+    bounded, truncated = wire.bound(turns, scrub_one=scrubber.turn)
+    counts = scrubber.counts
 
     return (
         ScrubbedShare(
@@ -114,9 +120,7 @@ def _build(user_id: int, conv_id: str) -> tuple[ScrubbedShare, object]:
             turns=bounded,
             counts=counts,
             truncated=truncated,
-            turns_omitted=max(
-                0, len(scrubbed) - len(bounded) + (1 if truncated else 0)
-            ),
+            turns_omitted=max(0, len(turns) - len(bounded) + (1 if truncated else 0)),
             revision=meta.share_revision,
             shared=bool(meta.share_id),
             share_id=meta.share_id,
