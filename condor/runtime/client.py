@@ -306,13 +306,23 @@ async def prompt(
 async def prompt_once(key: SessionKey, text: str) -> str:
     """Send a prompt and wait for the whole reply.
 
-    For turns the user never sees streamed — injecting mode context, asking the
-    agent to summarize itself for /compact. Raises KeyError when the session is
-    gone, since every caller here has just checked that it exists.
+    For turns the user never sees streamed — asking the agent to summarize
+    itself for /compact, and re-injecting that summary into the fresh session.
+    Raises KeyError when the session is gone, since every caller here has just
+    checked that it exists.
+
+    Redacted for the same reason ``prompt`` is (FEAT-056), and not because the
+    text is usually a template: /compact's custom instructions are a *user's*
+    words, wrapped in a template and sent from here, so without this line the
+    funnel had a second door — Telegram deleted the message carrying a pasted
+    phrase and told the user "it was not sent to the agent" while this call
+    sent it. ``findings`` are dropped on purpose: the surface that took the
+    text already scanned its own copy and owns the notice.
     """
     session = _local().get_session(key)
     if session is None:
         raise KeyError(f"No session for {key}")
+    text, _ = secrets.redact(text)
     return await session.client.prompt(text)
 
 

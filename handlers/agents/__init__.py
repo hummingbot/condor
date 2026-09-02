@@ -2068,9 +2068,12 @@ async def agent_voice_handler(
 
 # ── Pasted key material (FEAT-056) ───────────────────────────────────────
 #
-# The safety property is not here: ``runtime.prompt`` redacts the certain
-# shapes on the one funnel every surface crosses, so this handler could do
-# nothing and a pasted phrase would still never reach the model or the disk.
+# The safety property is not here: the runtime redacts the certain shapes on
+# every way into a session — ``runtime.prompt`` for a streamed turn and
+# ``runtime.prompt_once`` for the unstreamed ones /compact sends — so this
+# handler could do nothing and a pasted phrase would still never reach the
+# model or the disk. The custom-compact branch below is why the second of
+# those matters: it hands this same text to the agent wrapped in a template.
 # What lives here is the half only Telegram can do — deleting the message that
 # carried it, and saying why the text the user is looking at just changed.
 
