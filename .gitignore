@@ -222,6 +222,10 @@ frontend/.claude/
 # during frontend debugging sessions. Pure session artifacts.
 .playwright-mcp/
 
+# Screenshots dropped at the repo root by a debugging session. The dashboard's
+# own images live under frontend/; nothing at the root is ever referenced.
+/*.png
+
 # Working notes on Gateway defects, edited by more than one session at a time.
 # Tracking it made every `git add -A` sweep whichever session was mid-edit into the other
 # one's commit — which is how 1529d04 came to carry a message describing work it does not
