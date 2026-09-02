@@ -97,7 +97,7 @@ your wider levels.
   `clearinghouseState {"dex":"xyz"}` (shows only per-dex position margin, $0 when flat).
 - **Trading hours:** many xyz markets close off-hours (empty book). Scanner filters them;
   re-check the live book before deploying.
-- **Data:** candles via `get_candles`; live book via Hyperliquid `l2Book`
+- **Data:** candles via `run_code` (`client.market_data.get_candles_last_days`); live book via Hyperliquid `l2Book`
   `{"type":"l2Book","coin":"xyz:DRAM"}` — **lowercase prefix + UPPERCASE token**, no `-USD`
   (both `XYZ:...` and `xyz:dram` return null).
 

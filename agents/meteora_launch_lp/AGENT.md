@@ -10,7 +10,6 @@ tools:
 - explore_dex_pools
 - get_portfolio_overview
 - get_prices
-- get_candles
 - send_notification
 - manage_routines
 - manage_agents
@@ -19,6 +18,7 @@ tools:
 - trading_agent_journal_read
 - manage_memory
 - manage_skill
+- run_code
 when_to_consult: When the user asks whether a freshly-graduated Meteora DAMM v2 pool
   is worth LPing, how to size/enter an early position, which established DAMM v2 pool
   has the best fee yield, or whether an open AMM position should hold or exit — use

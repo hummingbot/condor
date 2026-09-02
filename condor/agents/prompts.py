@@ -181,7 +181,11 @@ def _build_tool_preload(
     """
     tools = [
         "mcp__mcp-hummingbot__get_prices",
-        "mcp__mcp-hummingbot__get_candles",
+        # The candle, order book and funding readers are not mounted any more
+        # (ARCH-308): market data a tick computes on is read as structured rows
+        # with ``client.market_data.*`` inside run_code, so run_code is what a
+        # tick has to arrive holding.
+        "mcp__condor__run_code",
     ]
     if is_controller_mode:
         # Read-only bot/controller queries stay available in dry-run; the

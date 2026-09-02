@@ -16,7 +16,6 @@ tools:
 - list_positions_held
 - get_portfolio_overview
 - get_prices
-- get_candles
 - search_history
 - manage_agents
 - manage_strategies
@@ -29,6 +28,7 @@ tools:
 - manage_skill
 - trading_agent_journal_read
 - trading_agent_journal_write
+- run_code
 when_to_consult: When the user wants a directional read on where capital is flowing in crypto markets, or wants to deploy the Smart-Money Flow trading agent (flow positioning on Derive perps).
 server_required: false
 created_by: 5587715073

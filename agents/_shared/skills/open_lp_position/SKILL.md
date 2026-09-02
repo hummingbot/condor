@@ -68,8 +68,9 @@ a match to how long the user wants to be left alone.
 
 Anchor it on realised movement rather than a guess:
 
-```
-get_candles(connector_name="binance", trading_pair="SOL-USDT", interval="1h", days=7)
+```python
+# run_code — candles come back as rows, not a table
+df = await client.market_data.get_candles_last_days("binance", "SOL-USDT", days=7, interval="1h")
 ```
 
 Take the recent high/low. Then:

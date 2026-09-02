@@ -5,7 +5,6 @@ description: On-ledger market making specialist for the XRPL CLOB — reference 
 agent_key: claude-acp:sonnet
 tools:
 - get_prices
-- get_order_book
 - get_portfolio_overview
 - explore_geckoterminal
 - create_order_executor
@@ -21,6 +20,7 @@ tools:
 - trading_agent_journal_read
 - manage_skill
 - send_notification
+- run_code
 when_to_consult: When the user asks about quoting on the XRP Ledger DEX — whether a
   spread is viable, how XRPL reserves and trustlines constrain order sizing, why an
   offer is not getting filled, or whether the AMM is undercutting their quotes. Use
@@ -42,7 +42,7 @@ pathfinding flow; price off a CEX reference, never the ledger mid alone.
    ceiling = AMM trading fee. The `xrpl_mm_quote_planner` routine computes both — trust it.
 3. **Size against free balance.** Reserves lock XRP (1 base + 0.2 per open offer). Issued
    assets need a trustline; verify issuer transfer fee is 0% before sizing.
-4. **No XRPL candles.** `get_candles(connector_name="xrpl", ...)` fails. Use
+4. **No XRPL candles.** `client.market_data.get_candles("xrpl", ...)` fails. Use
    `explore_geckoterminal(network="xrpl")` for OHLCV; connector is book + balances only.
 5. **LIMIT / LIMIT_MAKER only for quoting.** Lean inventory via asymmetric spreads — never
    MARKET rebalance. Never `place_order`; executors or controllers only.

@@ -57,8 +57,6 @@ from .gateway import (
 
 # Market data formatters
 from .market_data import (
-    format_candles_as_table,
-    format_order_book_as_table,
     format_prices_as_table,
 )
 
@@ -101,8 +99,6 @@ __all__ = [
     "format_positions_as_table",
     # Market data formatters
     "format_prices_as_table",
-    "format_candles_as_table",
-    "format_order_book_as_table",
     # Bot formatters
     "format_bot_logs_as_table",
     "format_active_bots_as_table",

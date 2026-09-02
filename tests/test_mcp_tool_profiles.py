@@ -29,9 +29,6 @@ HB_TRADING = {
     "set_account_position_mode_and_leverage",
     "search_history",
     "get_prices",
-    "get_candles",
-    "get_funding_rate",
-    "get_order_book",
     "manage_controllers",
     "manage_bots",
     "create_position_executor",
@@ -143,6 +140,17 @@ def test_every_tool_the_module_defines_lands_in_some_profile(module):
 )
 def test_a_tick_cannot_reach_the_operator_surface(forbidden):
     assert forbidden not in _registered(hb_server, "tick")
+
+
+@pytest.mark.parametrize(
+    "forbidden", ["get_candles", "get_funding_rate", "get_order_book"]
+)
+def test_no_seat_can_reach_a_raw_market_data_reader(forbidden):
+    """ARCH-308: they returned a rendered table, so every number taken from one
+    had to be fetched again through ``run_code`` to be computed on. No ring
+    names them — not even ``full``, the chat's own seat — which is what makes
+    ``client.market_data.*`` the only path rather than the advised one."""
+    assert forbidden not in _registered(hb_server, "full")
 
 
 @pytest.mark.parametrize(

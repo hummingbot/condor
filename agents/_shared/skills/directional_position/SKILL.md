@@ -51,7 +51,8 @@ Work the other way round:
 1. **Find the price that would prove the view wrong** — under the range low, back inside
    the broken level, whatever the trade is actually predicting. Use candles if you need
    the pair's typical swing:
-   `get_candles(connector_name=..., trading_pair=..., interval="1h", days=7)`.
+   `run_code`: `await client.market_data.get_candles_last_days(connector, pair, days=7,
+   interval="1h")`.
 2. **That distance is the stop**, expressed as a fraction of entry.
 3. **Size so that distance costs an acceptable amount.** The stop sets the risk per unit;
    the amount sets how many units. Adjust the amount, never the stop.
@@ -86,7 +87,8 @@ before the position is closed by the exchange rather than by your stop.
 
 On a perp, check the position mode and leverage are what you think before sizing —
 `set_account_position_mode_and_leverage`. On a pair with meaningful funding, price the
-carry over the intended hold: `get_funding_rate(...)`. A 2% target and a funding cost
+carry over the intended hold — `run_code`:
+`await client.market_data.get_funding_info(connector, pair)`. A 2% target and a funding cost
 that eats 1% of it is a different trade than it looked.
 
 ## 5. Choose the entry and the order types

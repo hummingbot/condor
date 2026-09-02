@@ -24,9 +24,6 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "set_account_position_mode_and_leverage": "Set position mode and leverage",
     "search_history": "Search historical trades, orders and funding",
     "get_prices": "Latest price for one or more pairs",
-    "get_candles": "OHLCV candles for a pair",
-    "get_funding_rate": "Current perpetual funding rate",
-    "get_order_book": "Order book snapshot or a depth query",
     "manage_controllers": "Controller templates and saved configs (design-time)",
     "manage_bots": "Deploy, monitor and control controller-based bots",
     "create_position_executor": "Open a directional position with SL/TP — spends funds",
@@ -59,14 +56,21 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
 #: The trading surface: everything an autonomous tick needs to read a market,
 #: size a position, run it and report on it. This is the whole surface minus the
 #: two rings below.
+#:
+#: No raw candle, order book or funding-rate reader is in it (ARCH-308). Those
+#: three returned a rendered table — a string a model can read and cannot compute
+#: on — so reaching for one bought a number that then had to be re-fetched through
+#: ``run_code`` to be averaged, charted or compared across venues. The structured
+#: equivalents are one ``run_code`` snippet away (``client.market_data.*``, which
+#: returns dicts and takes an ``asyncio.gather`` across venues), and a tool absent
+#: from the list is the only form of that advice a model cannot skip. ``get_prices``
+#: stays: a single quote, read once and not computed on, is the one case the text
+#: answers completely.
 TRADING_TOOLS: tuple[str, ...] = (
     "get_portfolio_overview",
     "set_account_position_mode_and_leverage",
     "search_history",
     "get_prices",
-    "get_candles",
-    "get_funding_rate",
-    "get_order_book",
     "manage_controllers",
     "manage_bots",
     "create_position_executor",

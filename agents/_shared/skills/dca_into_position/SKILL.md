@@ -25,7 +25,10 @@ Every level is relative to something. Anchor on spot unless the user named a lev
 
 ```
 get_prices(connector_name="binance_perpetual", trading_pairs=["BTC-USDT"])
-get_candles(connector_name="binance_perpetual", trading_pair="BTC-USDT", interval="4h", days=30)
+```
+```python
+# run_code — candles come back as rows, not a table
+df = await client.market_data.get_candles_last_days("binance_perpetual", "BTC-USDT", days=30, interval="4h")
 ```
 
 The candles matter more here than for most tools: they tell you how far this pair

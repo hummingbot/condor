@@ -163,7 +163,7 @@ def test_a_mute_for_a_tool_this_seat_never_mounts_is_a_no_op(module, profiles):
     assert _registered(module, "tick", ["explore_geckoterminal_but_wrong"]) == tick
     # …including a real name that belongs to the *other* server, since both are
     # handed the same list.
-    assert _registered(condor_server, "tick", ["get_candles"]) == _registered(
+    assert _registered(condor_server, "tick", ["get_prices"]) == _registered(
         condor_server, "tick"
     )
 
@@ -188,7 +188,7 @@ def test_seat_tools_describes_both_servers(tmp_path):
     by_name = {row["name"]: row for row in rows}
 
     assert by_name["consult"]["server"] == "condor"
-    assert by_name["get_candles"]["server"] == "hummingbot"
+    assert by_name["get_prices"]["server"] == "hummingbot"
     assert by_name["consult"]["description"]
     assert all(row["muted"] is False for row in rows)
     # An attended specialist is the ``agent`` ring on both servers.
@@ -200,14 +200,14 @@ def test_seat_tools_describes_both_servers(tmp_path):
 def test_seat_tools_narrows_for_a_tick(tmp_path):
     tick = {row["name"] for row in seat_tools("perps", tick=True)}
     assert "manage_agents" not in tick and "manage_clmm" not in tick
-    assert "get_candles" in tick and "consult" in tick
+    assert "get_prices" in tick and "consult" in tick
 
 
 def test_seat_tools_marks_what_the_operator_switched_off(tmp_path):
     set_muted("perps", "tool", "manage_clmm", True)
     rows = {row["name"]: row for row in seat_tools("perps")}
     assert rows["manage_clmm"]["muted"] is True
-    assert rows["get_candles"]["muted"] is False
+    assert rows["get_prices"]["muted"] is False
     # Rendered, not filtered — a switch you cannot see is one you cannot undo.
     assert "manage_clmm" in rows
 
@@ -331,8 +331,8 @@ def test_the_brain_lists_the_real_mounted_surface(web_env):
     assert set(by_name) == set(condor_profiles.PROFILE_TOOLS["agent"]) | set(
         hummingbot_profiles.PROFILE_TOOLS["agent"]
     )
-    assert by_name["get_candles"]["server"] == "hummingbot"
-    assert by_name["get_candles"]["description"]
+    assert by_name["get_prices"]["server"] == "hummingbot"
+    assert by_name["get_prices"]["description"]
     assert all(t["muted"] is False for t in tools)
     # This Agent's AGENT.md names no allowlist, so nothing is allowlisted and the
     # panel still says the allowlist is empty — two different statements.
@@ -344,13 +344,13 @@ def test_the_allowlist_stays_visible_beside_the_mute(web_env):
 
     store = AgentStore()
     agent = store.get("brigado")
-    agent.tools = ["get_candles"]
+    agent.tools = ["get_prices"]
     store.update(agent)
 
     brain = _client().get("/agents/brigado/brain").json()
     by_name = {t["name"]: t for t in brain["tools"]}
-    assert by_name["get_candles"]["allowlisted"] is True
-    assert by_name["get_prices"]["allowlisted"] is False
+    assert by_name["get_prices"]["allowlisted"] is True
+    assert by_name["get_portfolio_overview"]["allowlisted"] is False
     assert brain["tools_unrestricted"] is False
     # …and it is still the whole mounted surface, not the allowlist.
     assert len(brain["tools"]) > 1

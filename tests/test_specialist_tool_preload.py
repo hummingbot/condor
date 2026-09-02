@@ -128,15 +128,15 @@ def test_the_preload_is_exactly_what_the_seat_mounts():
 @pytest.mark.parametrize(
     "tool",
     [
-        # The thirteen the hand-copied tuple omitted. Named one by one because
-        # the equality above would still pass if both sides lost a tool together.
+        # The thirteen the hand-copied tuple omitted, minus the two raw market
+        # data readers no ring mounts any more (ARCH-308). Named one by one
+        # because the equality above would still pass if both sides lost a tool
+        # together.
         "mcp__mcp-hummingbot__manage_clmm",
         "mcp__mcp-hummingbot__quote_swap",
         "mcp__mcp-hummingbot__execute_swap",
         "mcp__mcp-hummingbot__get_swap_status",
         "mcp__mcp-hummingbot__search_swaps",
-        "mcp__mcp-hummingbot__get_funding_rate",
-        "mcp__mcp-hummingbot__get_order_book",
         "mcp__mcp-hummingbot__get_performance_report",
         "mcp__mcp-hummingbot__list_orphaned_positions",
         "mcp__mcp-hummingbot__resolve_orphaned_position",

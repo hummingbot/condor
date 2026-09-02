@@ -16,7 +16,6 @@ tools:
 - resolve_orphaned_position
 - get_portfolio_overview
 - get_prices
-- get_candles
 - search_history
 - manage_routines
 - manage_agents
@@ -25,6 +24,7 @@ tools:
 - trading_agent_journal_read
 - manage_memory
 - manage_skill
+- run_code
 when_to_consult: When the user asks which Solana memecoin pools to LP now, how to rank
   by fee yield (fees/TVL), what range/side/size fits a given base_pct, or whether an
   open LP slot should hold or exit — use consult. To run the LP strategy autonomously

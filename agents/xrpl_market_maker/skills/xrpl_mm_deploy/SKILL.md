@@ -87,8 +87,9 @@ One LIMIT/LIMIT_MAKER level per side first; confirm on-ledger before laddering.
 
 ## Phase 4 — Verify
 
-```
-get_order_book(connector_name="xrpl", trading_pair="<pair>")
+```python
+# run_code
+ob = await client.market_data.get_order_book("xrpl", "<pair>")
 ```
 
 Offer must be visible at the expected price.

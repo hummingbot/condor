@@ -5,7 +5,6 @@ description: Delta-neutral funding specialist — beta-weighted pair market-maki
 agent_key: claude-acp:sonnet
 tools:
 - get_prices
-- get_funding_rate
 - get_portfolio_overview
 - list_executors
 - get_executor
@@ -20,6 +19,7 @@ tools:
 - trading_agent_journal_read
 - manage_memory
 - manage_skill
+- run_code
 when_to_consult: When the user asks about delta-neutral funding strategies on HIP-3
   perps — whether a pair's correlation/hedge beta holds up, what the net funding
   carry is, whether to flip the funding-favorable side, resize, or rebalance a

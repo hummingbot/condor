@@ -24,8 +24,9 @@ walking into that.
 
 Do this before anything else. A grid in a trend is a slow loss with extra steps.
 
-```
-get_candles(connector_name="binance", trading_pair="SOL-USDT", interval="1h", days=3)
+```python
+# run_code — candles come back as rows, not a table
+df = await client.market_data.get_candles_last_days("binance", "SOL-USDT", days=3, interval="1h")
 ```
 
 Read the series, don't just take the min and max:
@@ -75,7 +76,7 @@ on something that moves 15% a day is a grid that stops on the first hour.
 Use this when the user mentions "the recent range", volatility, or wants the grid fitted
 to data rather than to a percentage.
 
-1. `get_candles(interval="1h", days=3, ...)`
+1. `get_candles_last_days(..., days=3, interval="1h")` in `run_code`
 2. Take the high and the low of that window.
 3. **LONG:** `start_price = low`, `end_price = high`, `limit_price = low * 0.995`
 4. **SHORT:** `start_price = low`, `end_price = high`, `limit_price = high * 1.005`

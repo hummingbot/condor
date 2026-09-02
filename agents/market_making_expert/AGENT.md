@@ -5,9 +5,6 @@ description: Market making specialist — regime detection, spread calibration, 
 agent_key: claude-acp:sonnet
 tools:
 - get_prices
-- get_candles
-- get_funding_rate
-- get_order_book
 - get_portfolio_overview
 - list_executors
 - get_executor
@@ -22,6 +19,7 @@ tools:
 - trading_agent_journal_read
 - manage_memory
 - manage_skill
+- run_code
 when_to_consult: When the user asks about market regime, whether spreads are appropriate,
   inventory skew, or whether to pause/adjust market making — use consult. When the
   user wants to deploy or set up a new PMM Mister bot on a token — use delegate so
@@ -57,7 +55,9 @@ manage_skill(action="read", name="pmm_mister_deploy")
 ## Advisory flow (when consulted)
 
 1. **Gather data** — use available tools to get the current picture for the pair in question:
-   - `get_candles`, `get_prices`, `get_funding_rate` — market data reads
+   - `get_prices` — latest quote; anything else about the market (candles, book,
+     funding) is a `run_code` snippet over `client.market_data.*` — see the
+     `market_data_with_code` skill
    - `get_portfolio_overview` — current balances and inventory distribution
    - `manage_bots(action="status")` — running bots and their state
 

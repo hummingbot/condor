@@ -30,7 +30,7 @@ Answer from what the guide actually says — not from what you remember.
 
 ## Candles — When the Connector Has No Feed
 
-`get_candles(connector_name=...)` first asks the API which connectors have a candle feed, and **raises** if yours is not one of them:
+`client.market_data.get_candles*(...)` — inside `run_code`, the only way candles are read — first asks the API which connectors have a candle feed, and **raises** if yours is not one of them:
 
 ```
 ValueError: Connector 'xrpl' does not support candle data.
@@ -46,7 +46,8 @@ This is a **hard capability gap, not a transient error**. Retrying, changing the
 Losing candles does **not** mean losing the venue. These remain live and correct:
 
 - `get_prices(trading_pairs=[...])` — current price
-- `get_order_book(...)` — depth, `price_for_volume` / `volume_for_price` slippage queries
+- `client.market_data.get_order_book(...)` — depth, and the `price_for_volume` /
+  `volume_for_price` slippage queries beside it
 - `explore_dex_pools` — pool discovery, TVL, fees, APR (CLMM connectors)
 - Trading itself: quoting, swaps, LP and executor deployment
 
