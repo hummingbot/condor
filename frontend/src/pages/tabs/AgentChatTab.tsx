@@ -500,6 +500,17 @@ export function AgentChatTab() {
             />
           )}
 
+          {/* The desk this conversation trades on, inboard of the dock that
+              is about the conversation itself (FEAT-094): its rail and its
+              panels come before "this conversation" in the row, so opening a
+              balance no longer covers the tasks. The chat's own server,
+              falling back to the ambient selection — a session pinned to one
+              server must not show another's balance under a chat about it, and
+              the dock's bar names the one it is reading. */}
+          <AccountDock
+            server={activeSlot?.info.server_name || server || null}
+          />
+
           <ContextDock
             delegations={delegationData?.delegations ?? []}
             conversationId={activeSlot?.info.conversation_id || ""}
@@ -521,15 +532,6 @@ export function AgentChatTab() {
             onLibraryChange={(focus) =>
               setPane(focus ? { kind: "routines", focus } : null)
             }
-          />
-
-          {/* The desk this conversation trades on, outboard of the dock that
-              is about the conversation itself (FEAT-094). The chat's own
-              server, falling back to the ambient selection: a session pinned
-              to one server must not show another's balance under a chat about
-              it, and each panel names the one it is reading. */}
-          <AccountDock
-            server={activeSlot?.info.server_name || server || null}
           />
         </div>
       </div>

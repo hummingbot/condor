@@ -118,7 +118,7 @@ export const DOCK_WIDTH_KEY = "condor.dock.width";
 
 /**
  * Which account-dock panels are open, as a JSON array of panel ids — the
- * Portfolio and Execution panels that float over the context dock (FEAT-094).
+ * Portfolio and Execution panels beside the context dock (FEAT-094).
  *
  * KEPT, beside the `DOCK_OPEN_KEY` above it and for the same reason: which
  * disclosures a reader has open is a fact about this window, and the balances
@@ -126,6 +126,16 @@ export const DOCK_WIDTH_KEY = "condor.dock.width";
  * ids name panels, never a server, a balance or a position.
  */
 export const ACCOUNT_DOCK_KEY = "condor.dock.account";
+
+/**
+ * How wide the reader dragged that column, in CSS pixels.
+ *
+ * KEPT, for the same reason `DOCK_WIDTH_KEY` is: it says how this window is
+ * divided, and nothing about what is in it. Its own key rather than a shared
+ * one, because the two columns answer different questions and a reader who
+ * wants a wide executor table does not thereby want a wide task list.
+ */
+export const ACCOUNT_DOCK_WIDTH_KEY = "condor.dock.account.width";
 
 /**
  * Where the reader put the split between the transcript and the workspace

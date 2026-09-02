@@ -3,9 +3,9 @@
  *
  * What is pinned here is the part of the design that is not visible in a
  * screenshot: that a tab nobody opened costs *nothing* — no portfolio walk, no
- * bots call, no executors call, no socket channel — and that opening one panel
- * does not open the other, does not narrow the transcript, and survives a
- * reload.
+ * bots call, no executors call, no socket channel — that opening one panel does
+ * not open the other, and that both the panels and the width they were dragged
+ * to survive a reload.
  *
  * The panels' own contents are tested in DockExecution.test.tsx; here they are
  * stubbed, because the question is the shell.
@@ -21,7 +21,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { ACCOUNT_DOCK_KEY } from "@/lib/sessionState";
+import { ACCOUNT_DOCK_KEY, ACCOUNT_DOCK_WIDTH_KEY } from "@/lib/sessionState";
 
 /** Every call the two panels can make; none of them may fire while closed. */
 const getPortfolio = vi.fn();
@@ -101,8 +101,9 @@ async function click(el: HTMLElement) {
 
 const tab = (label: string) =>
   container.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)!;
-/** The floating column, which exists only while something is open. */
-const column = () => container.querySelector<HTMLElement>("div.absolute");
+/** The panel column, which exists only while something is open. */
+const column = () =>
+  container.querySelector<HTMLElement>('[data-testid="account-dock"]');
 const sectionHeaders = () =>
   [...(column()?.querySelectorAll("button[title]") ?? [])].map(
     (b) => b.textContent ?? "",
@@ -137,8 +138,8 @@ describe("the account dock", () => {
   it("costs nothing with both tabs off", async () => {
     await render();
 
-    // The rail is all there is: no column, no query, no channel. This is the
-    // whole reason the panels float instead of living in the context dock.
+    // The rail is all there is: no column, no query, no channel. A closed
+    // section unmounts its body, and that is the whole of the `enabled` gate.
     expect(column()).toBeNull();
     expect(getPortfolio).not.toHaveBeenCalled();
     expect(getPortfolioHistory).not.toHaveBeenCalled();
@@ -169,24 +170,55 @@ describe("the account dock", () => {
     expect(open).toHaveLength(2);
   });
 
-  it("floats over the dock rather than taking a column from it", async () => {
+  it("takes a column in flow rather than floating over the dock", async () => {
     await render();
     await click(tab("Portfolio"));
 
-    // `absolute` is the load-bearing word: a column in flow would be spent out
-    // of the transcript's floor and the context dock's.
+    // The load-bearing assertion of the revision: nothing positions this out of
+    // the row, so the context dock beside it stays visible and readable while a
+    // balance is open. A float here is what made the two docks exclusive.
     const panel = column()!;
-    expect(panel.className).toContain("absolute");
-    expect(panel.className).toContain("z-40");
-    // Outboard of its own rail, so the two never overlap.
-    expect(panel.className).toContain("right-10");
+    expect(panel.className).not.toContain("absolute");
+    expect(panel.className).not.toContain("z-40");
+    expect(panel.className).toContain("shrink-0");
+
+    // And it comes *before* the rail in the row, so the panels open away from
+    // their own controls rather than under them.
+    const rail = tab("Portfolio").closest("aside")!;
+    expect(panel.compareDocumentPosition(rail)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
   });
 
-  it("names the server each panel is reading", async () => {
+  it("names the server the panels are reading, once", async () => {
     await render();
     await click(tab("Portfolio"));
 
-    expect(sectionHeaders().join(" ")).toContain("brigado_2");
+    // In the dock's own bar rather than on every section header — the width
+    // that bought is what the tables inside spend.
+    expect(column()!.textContent).toContain("brigado_2");
+    expect(sectionHeaders().join(" ")).not.toContain("brigado_2");
+  });
+
+  it("remembers the width the seam was dragged to", async () => {
+    await render();
+    await click(tab("Portfolio"));
+
+    const seam = container.querySelector<HTMLElement>(
+      '[aria-label="Resize account panels"]',
+    )!;
+    // The keyboard path, which is the same `onWidth` the drag calls.
+    await act(async () => {
+      seam.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true }),
+      );
+    });
+
+    // Stored rounded, applied exact — the same split the context dock's width
+    // has, so what comes back on the next mount is what is on screen now.
+    const stored = Number(localStorage.getItem(ACCOUNT_DOCK_WIDTH_KEY));
+    expect(stored).toBeGreaterThan(0);
+    expect(Math.round(parseFloat(column()!.style.width))).toBe(stored);
   });
 
   it("survives a reload, and nothing else", async () => {
