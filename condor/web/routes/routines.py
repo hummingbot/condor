@@ -246,7 +246,11 @@ async def run_routine_v2(
         )
     except ValueError as e:
         raise HTTPException(404, str(e))
-    return {"instance_id": instance_id}
+    # The *bounded* value, not the requested one: a caller told "resume" when
+    # the depth-1 bound already forced "notify" would end its turn waiting for
+    # a wake that is never coming (CORR-287). Mirrors what
+    # ``set_instance_on_complete`` already reports.
+    return {"instance_id": instance_id, "on_complete": on_complete}
 
 
 @router.post("/start")

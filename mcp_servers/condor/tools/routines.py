@@ -276,8 +276,14 @@ async def _poll_until_done(instance_id: str) -> dict | None:
 
 async def _submit_oneshot(
     name: str, config: dict | None, target: str | None, on_complete: str = "notify"
-) -> tuple[str | None, dict | None]:
-    """Resolve, validate and start a one-shot run. Returns (instance_id, error).
+) -> tuple[str | None, str, dict | None]:
+    """Resolve, validate and start a one-shot run.
+
+    Returns ``(instance_id, effective_on_complete, error)``. The middle value is
+    what the *route* decided, which is not always what was asked for: a run
+    submitted from inside a wake turn is downgraded to ``notify`` by the depth-1
+    bound. Callers must phrase their instruction from that, not from the
+    request, or they promise a wake nobody will send (CORR-287).
 
     Resolution and config validation stay here — this is the code that knows
     about the agent ``target`` and agent-local dirs, and a bad config field must fail
@@ -292,21 +298,26 @@ async def _submit_oneshot(
     """
     routine, agent = _resolve_with_owner(name, target)
     if not routine:
-        return None, {"error": f"Routine '{name}' not found"}
+        return None, on_complete, {"error": f"Routine '{name}' not found"}
 
     if routine.is_continuous:
-        return None, {
-            "error": f"Routine '{name}' is continuous — use action='start' to run "
-            "it in the background, and action='stop' with its instance_id to end it."
-        }
+        return (
+            None,
+            on_complete,
+            {
+                "error": f"Routine '{name}' is continuous — use action='start' to run "
+                "it in the background, and action='stop' with its instance_id to "
+                "end it."
+            },
+        )
 
     try:
         routine.config_class(**(config or {}))
     except Exception as e:
-        return None, {"error": f"Invalid config: {e}"}
+        return None, on_complete, {"error": f"Invalid config: {e}"}
 
     if not settings.active_server:
-        return None, {"error": _NO_SERVER}
+        return None, on_complete, {"error": _NO_SERVER}
 
     try:
         started = await call_main_api(
@@ -323,12 +334,19 @@ async def _submit_oneshot(
             ),
         )
     except APIError as e:
-        return None, {"error": f"Routine '{name}' could not be run: {e}"}
+        return None, on_complete, {"error": f"Routine '{name}' could not be run: {e}"}
 
     instance_id = started.get("instance_id") if isinstance(started, dict) else None
     if not instance_id:
-        return None, {"error": f"Routine '{name}' did not start: {started}"}
-    return instance_id, None
+        return (
+            None,
+            on_complete,
+            {"error": f"Routine '{name}' did not start: {started}"},
+        )
+    # A route that does not report the field is an older build (or a test fake):
+    # fall back to what was asked for rather than inventing a downgrade.
+    effective = started.get("on_complete") or on_complete
+    return instance_id, effective, None
 
 
 async def _hand_off(name: str, instance_id: str) -> dict:
@@ -342,6 +360,12 @@ async def _hand_off(name: str, instance_id: str) -> dict:
 
     Best-effort by construction. If the hand-off cannot be arranged the caller
     still gets a usable instruction, just the slower one.
+
+    ``applied`` alone is not enough to promise a wake: the route holds a depth-1
+    bound and answers ``applied: true`` with ``on_complete: "notify"`` when this
+    conversation is already inside a wake turn. Telling the model to end its turn
+    on that answer strands the run — nobody is woken and nobody is polling
+    (CORR-287) — so the promise is made only when the route says ``resume``.
     """
     try:
         handoff = await call_main_api(
@@ -352,7 +376,8 @@ async def _hand_off(name: str, instance_id: str) -> dict:
     except APIError:
         handoff = None
 
-    if isinstance(handoff, dict) and handoff.get("applied"):
+    applied = isinstance(handoff, dict) and handoff.get("applied")
+    if applied and handoff.get("on_complete", "resume") == "resume":
         return {
             "started": True,
             "instance_id": instance_id,
@@ -362,6 +387,22 @@ async def _hand_off(name: str, instance_id: str) -> dict:
                 "off to the background. Do NOT poll it and do NOT wait: you will "
                 "be given its result automatically when it finishes. Tell the "
                 "user it is running and END YOUR TURN."
+            ),
+        }
+
+    if applied:
+        # Handed off, but downgraded: the run keeps going and its outcome still
+        # lands in the transcript — it just will not wake anyone.
+        return {
+            "started": True,
+            "instance_id": instance_id,
+            "routine": name,
+            "note": (
+                f"'{name}' outlived the {int(_RUN_BUDGET)}s wait and is still "
+                "running in the background. It will NOT wake you — this turn was "
+                "itself started by a wake, and a run may not chain another. Tell "
+                "the user it is running; if they ask later, read it with "
+                f"action='get_instance', name='{instance_id}'."
             ),
         }
 
@@ -400,7 +441,7 @@ async def run_routine(
     name: str, config: dict | None, target: str | None = None
 ) -> dict:
     """Run a one-shot routine in the main process and wait for its result."""
-    instance_id, error = await _submit_oneshot(name, config, target)
+    instance_id, _on_complete, error = await _submit_oneshot(name, config, target)
     if error:
         return error
 
@@ -437,24 +478,39 @@ async def run_async_routine(
     act on a background run was to keep asking whether it was done, which spends
     a turn per check and still misses the answer, because the completion note
     was passive and woke nobody.
+
+    ``resume`` is what we *ask* for; the route decides. A submission made from
+    inside a wake turn is bounded back down to ``notify``, and the note below is
+    written from what came back rather than from what was requested — the same
+    way ``get_instance`` reads the stored value (CORR-287).
     """
-    instance_id, error = await _submit_oneshot(
+    instance_id, on_complete, error = await _submit_oneshot(
         name, config, target, on_complete="resume"
     )
     if error:
         return error
 
+    if on_complete == "resume":
+        note = (
+            "Running in the background. Do NOT poll it and do NOT wait: you "
+            "will be given its result automatically when it finishes. Tell the "
+            "user it is running and END YOUR TURN. Only if the user asks about "
+            f"it later, read it with action='get_instance', name='{instance_id}'."
+        )
+    else:
+        note = (
+            "Running in the background. It will NOT wake you — this turn was "
+            "itself started by a wake, and a run may not chain another. Do NOT "
+            "poll it: tell the user it is running, and if they ask later read "
+            f"it with action='get_instance', name='{instance_id}'."
+        )
+
     return {
         "started": True,
         "instance_id": instance_id,
         "routine": name,
-        "note": (
-            "Running in the background. Do NOT poll it and do NOT wait: you "
-            "will be given its result automatically when it finishes. Tell the "
-            "user it is running and END YOUR TURN. Only if the user asks about "
-            "it later, read it with action='get_instance', "
-            f"name='{instance_id}'."
-        ),
+        "on_complete": on_complete,
+        "note": note,
     }
 
 

@@ -421,8 +421,9 @@ def test_a_blocking_run_reads_its_own_result(api, monkeypatch):
 class _StuckAPI:
     """A run that never leaves ``running`` — what the blocking budget is for."""
 
-    def __init__(self, applied: bool = True):
+    def __init__(self, applied: bool = True, on_complete: str = "resume"):
         self.applied = applied
+        self.on_complete = on_complete
         self.handed_off: dict | None = None
 
     async def __call__(self, method, path, body=None):
@@ -430,7 +431,13 @@ class _StuckAPI:
             return {"instance_id": "inst-1"}
         if method == "POST" and path.endswith("/on_complete"):
             self.handed_off = body or {}
-            return {"applied": self.applied, "status": "running"}
+            # The route answers with the *bounded* value, which is not always
+            # the one that was asked for.
+            return {
+                "applied": self.applied,
+                "status": "running",
+                "on_complete": self.on_complete,
+            }
         return {"instance_id": "inst-1", "status": "running"}
 
 
@@ -466,6 +473,92 @@ def test_a_hand_off_that_could_not_be_arranged_says_how_to_read_it(monkeypatch):
 
     assert "get_instance" in out["error"]
     assert out["instance_id"] == "inst-1"
+
+
+# ── CORR-287: the note reports what the route did, not what was asked for ──
+
+
+def test_a_hand_off_the_route_downgraded_does_not_promise_a_wake(monkeypatch):
+    """``applied`` is true and yet nobody will be woken: say so, and say how to
+    read it instead. Promising the wake here strands the run — the agent ends
+    its turn and no turn ever comes back."""
+    api = _StuckAPI(applied=True, on_complete="notify")
+
+    out = _run_with_no_patience(monkeypatch, api)
+
+    assert out["started"] is True
+    assert out["instance_id"] == "inst-1"
+    assert "END YOUR TURN" not in out["note"]
+    assert "get_instance" in out["note"]
+
+
+class _DowngradingAPI:
+    """A ``/routines/run`` that answers with the bounded ``on_complete``."""
+
+    def __init__(self, on_complete: str = "notify"):
+        self.on_complete = on_complete
+        self.posted: dict = {}
+
+    async def __call__(self, method, path, body=None):
+        if method == "POST" and path == "/routines/run":
+            self.posted = body or {}
+            return {"instance_id": "inst-1", "on_complete": self.on_complete}
+        return {"instance_id": "inst-1", "status": "running"}
+
+
+def test_run_async_does_not_promise_a_wake_the_route_refused(monkeypatch):
+    """It still asks for ``resume``; it just does not lie about the answer."""
+    _stub_routine(monkeypatch, continuous=False)
+    api = _DowngradingAPI()
+    monkeypatch.setattr(mcp_routines, "call_main_api", api)
+    monkeypatch.setattr(mcp_routines.settings, "active_server", "srv")
+    monkeypatch.setattr(mcp_routines.settings, "session_key", "web:7:slot-1")
+
+    out = asyncio.run(mcp_routines.run_async_routine("probe", {}))
+
+    assert api.posted["on_complete"] == "resume"
+    assert out["on_complete"] == "notify"
+    assert "END YOUR TURN" not in out["note"]
+    assert "get_instance" in out["note"]
+
+
+class _FakeStore:
+    async def execute(self, **kwargs):
+        self.kwargs = kwargs
+        return "inst-1"
+
+
+def _run_v2(monkeypatch, *, waking: bool) -> dict:
+    """Drive ``POST /routines/run`` with the wake bound on or off."""
+    from condor.runtime import wake
+    from condor.web import models
+    from condor.web.routes import routines as routes
+
+    monkeypatch.setattr(routes, "check_server_access", lambda *a, **kw: None)
+    monkeypatch.setattr(routes, "get_routine_store", lambda: _FakeStore())
+
+    async def _conv(session_key: str) -> str:
+        return "conv-1"
+
+    monkeypatch.setattr(routes.client, "conversation_for_session", _conv)
+    monkeypatch.setattr(wake, "is_waking", lambda conv: waking)
+
+    body = routes.RunRequestV2(
+        routine_name="probe",
+        server_name="srv",
+        session_key="web:7:slot-1",
+        on_complete="resume",
+    )
+    user = models.WebUser(id=7, username="u", first_name="U", role="user")
+    return asyncio.run(routes.run_routine_v2(body, user))
+
+
+def test_the_run_route_reports_the_on_complete_it_actually_applied(monkeypatch):
+    """The MCP side phrases its instruction from this field, so it must be the
+    bounded value — otherwise the caller is told it will be woken by a run the
+    route already downgraded to a passive note."""
+    assert _run_v2(monkeypatch, waking=False)["on_complete"] == "resume"
+    assert _run_v2(monkeypatch, waking=True)["on_complete"] == "notify"
 
 
 # ── The route: the same depth-1 bound the delegate route holds ──
