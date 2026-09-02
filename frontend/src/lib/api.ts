@@ -342,9 +342,25 @@ export interface ExecutorInfo {
   close_timestamp: number;
   custom_info: Record<string, unknown>;
   config: Record<string, unknown>;
+}
+
+/**
+ * An executor row from an *archived* run (backend `NormalizedExecutor`).
+ *
+ * Only the archived reader resolves a USD rate per row, so only the archived
+ * type carries one. Declaring `usd_rate` on the shared `ExecutorInfo` promised
+ * a field the live `/executors` route and the WS frames never send (backend
+ * `ExecutorInfo` has no such field), which invited a live surface to write
+ * `ex.usd_rate ?? 1` and report a BRL or EUR figure behind a `$`.
+ *
+ * Required, not optional: the backend defaults it to 1.0 and
+ * `QuoteRates.for_pair` falls back to 1.0 for an unresolvable quote, so an
+ * archived row always arrives with a number.
+ */
+export interface ArchivedExecutor extends ExecutorInfo {
   /** USD value of one unit of this market's quote. `pnl`, `volume` and
    *  `cum_fees_quote` are quote-denominated; multiply by this to show USD. */
-  usd_rate?: number;
+  usd_rate: number;
 }
 
 /** Executor totals for a period, aggregated server-side over the full history.
@@ -1265,7 +1281,7 @@ export interface ArchivedBotPerformance {
   cumulative_pnl: PnlPoint[];
   trading_pairs: string[];
   exchanges: string[];
-  executors: ExecutorInfo[];
+  executors: ArchivedExecutor[];
   primary_connector: string;
   primary_trading_pair: string;
   executor_count: number;
@@ -1280,7 +1296,7 @@ export interface ArchivedBotPerformance {
 }
 
 export interface PaginatedExecutors {
-  executors: ExecutorInfo[];
+  executors: ArchivedExecutor[];
   total: number;
   offset: number;
   limit: number;

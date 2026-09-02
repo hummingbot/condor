@@ -22,14 +22,15 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ServerContext } from "@/hooks/useServer";
-import type { ArchivedBotPerformance } from "@/lib/api";
+import type { ArchivedBotPerformance, ArchivedExecutor } from "@/lib/api";
 
 const getArchivedBotPerformance = vi.fn();
+const getArchivedExecutors = vi.fn();
 
 vi.mock("@/lib/api", () => ({
   api: {
     getArchivedBotPerformance: (...a: unknown[]) => getArchivedBotPerformance(...a),
-    getArchivedExecutors: () => Promise.resolve({ executors: [], total: 0, offset: 0, limit: 50 }),
+    getArchivedExecutors: (...a: unknown[]) => getArchivedExecutors(...a),
     getArchivedControllers: () => Promise.resolve({ controllers: [] }),
   },
 }));
@@ -85,6 +86,39 @@ function perfOf(over: Partial<ArchivedBotPerformance> = {}): ArchivedBotPerforma
   };
 }
 
+/**
+ * One archived executor row (backend `NormalizedExecutor`).
+ *
+ * `usd_rate` is required, not optional: the archived routes always send it —
+ * Pydantic defaults the field to 1.0 and `QuoteRates.for_pair` falls back to
+ * 1.0 for a quote with no path to USD. The live `ExecutorInfo` has no such
+ * field at all, so a live row cannot stand in here. That split is the point.
+ */
+function execOf(over: Partial<ArchivedExecutor> = {}): ArchivedExecutor {
+  return {
+    id: "abcdef0123456789",
+    type: "position_executor",
+    connector: "binance",
+    trading_pair: "BTC-BRL",
+    side: "BUY",
+    status: "TERMINATED",
+    close_type: "TAKE_PROFIT",
+    pnl: 0,
+    volume: 0,
+    timestamp: 1_700_000_000,
+    controller_id: "main",
+    cum_fees_quote: 0,
+    net_pnl_pct: 0,
+    entry_price: 0,
+    current_price: 0,
+    close_timestamp: 1_700_000_100,
+    custom_info: {},
+    config: {},
+    usd_rate: 1,
+    ...over,
+  };
+}
+
 let container: HTMLDivElement;
 let root: Root;
 
@@ -94,6 +128,8 @@ beforeEach(() => {
   document.body.appendChild(container);
   root = createRoot(container);
   getArchivedBotPerformance.mockReset();
+  getArchivedExecutors.mockReset();
+  getArchivedExecutors.mockResolvedValue({ executors: [], total: 0, offset: 0, limit: 50 });
 });
 
 afterEach(async () => {
@@ -101,8 +137,14 @@ afterEach(async () => {
   container.remove();
 });
 
-async function render(perf: ArchivedBotPerformance) {
+async function render(perf: ArchivedBotPerformance, executors: ArchivedExecutor[] = []) {
   getArchivedBotPerformance.mockResolvedValue(perf);
+  getArchivedExecutors.mockResolvedValue({
+    executors,
+    total: executors.length,
+    offset: 0,
+    limit: 50,
+  });
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   await act(async () => {
     root.render(
@@ -180,5 +222,43 @@ describe("an archived run that could not be converted to USD", () => {
   it("still says dollars when the run was converted", async () => {
     await render(perfOf({ total_pnl: -410, quote_currency: "BRL", converted: true }));
     expect(totalPnl()).toBe("-$410.00");
+  });
+});
+
+/** The executor table's only row, cell by cell. */
+function executorCells(): string[] {
+  const row = container.querySelector("tbody tr");
+  return [...(row?.querySelectorAll("td") ?? [])].map((td) => td.textContent?.trim() ?? "");
+}
+
+/**
+ * ARCH-311: `usd_rate` lives on the archived row type only.
+ *
+ * These rows used to be typed `ExecutorInfo` — the *live* wire model, which
+ * carries no rate — so the page had to read `ex.usd_rate ?? 1` and no test
+ * pinned what the rate does. The fallback is gone; these cases pin that the
+ * per-row rate is still what turns a quote figure into a dollar one.
+ */
+describe("an archived executor row's money columns", () => {
+  it("restates a non-dollar quote at the row's own usd_rate", async () => {
+    await render(
+      perfOf({
+        executor_count: 1,
+        quote_currency: "BRL",
+        usd_rates: { BRL: 0.18 },
+        converted: true,
+      }),
+      [execOf({ pnl: 1000, cum_fees_quote: 50, volume: 20_000, usd_rate: 0.18 })],
+    );
+    // Unscaled these read +$1,000.00 / $50.00 / $20.0K — the whole BRL/USD
+    // rate of overstatement the per-row rate exists to remove.
+    expect(executorCells().slice(-3)).toEqual(["+$180.00", "$9.00", "$3.6K"]);
+  });
+
+  it("leaves a dollar-quoted run alone at the backend's default rate of 1", async () => {
+    await render(perfOf({ executor_count: 1, quote_currency: "USDC", usd_rates: { USDC: 1 } }), [
+      execOf({ trading_pair: "SOL-USDC", pnl: 1000, cum_fees_quote: 50, volume: 20_000 }),
+    ]);
+    expect(executorCells().slice(-3)).toEqual(["+$1,000.00", "$50.00", "$20.0K"]);
   });
 });

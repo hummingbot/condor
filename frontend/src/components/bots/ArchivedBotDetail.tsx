@@ -19,7 +19,7 @@ import { api } from "@/lib/api";
 import type {
   ArchivedBotPerformance,
   ArchivedControllerRollup,
-  ExecutorInfo,
+  ArchivedExecutor,
 } from "@/lib/api";
 import { formatCurrencyPnl, formatCurrencyVolume, pnlTextClass } from "@/lib/formatters";
 
@@ -150,8 +150,7 @@ function ExecutorTable({
     arr.sort((a, b) => {
       // Money columns sort on their USD value: across markets with different
       // quotes, raw quote figures are not comparable to each other.
-      const scale = (ex: ExecutorInfo) =>
-        sortField === "timestamp" ? 1 : ex.usd_rate ?? 1;
+      const scale = (ex: ArchivedExecutor) => (sortField === "timestamp" ? 1 : ex.usd_rate);
       const av = (a[sortField] as number) * scale(a);
       const bv = (b[sortField] as number) * scale(b);
       return sortDir === "desc" ? bv - av : av - bv;
@@ -232,13 +231,13 @@ function ExecutorTable({
                       {ex.current_price > 0 ? ex.current_price.toPrecision(6) : "—"}
                     </td>
                     <td className={`px-3 py-1.5 text-right font-mono ${pnlTextClass(ex.pnl)}`}>
-                      {formatCurrencyPnl(ex.pnl * (ex.usd_rate ?? 1), symbol)}
+                      {formatCurrencyPnl(ex.pnl * ex.usd_rate, symbol)}
                     </td>
                     <td className="px-3 py-1.5 text-right font-mono text-amber-400/80">
-                      {formatCurrencyVolume(ex.cum_fees_quote * (ex.usd_rate ?? 1), symbol)}
+                      {formatCurrencyVolume(ex.cum_fees_quote * ex.usd_rate, symbol)}
                     </td>
                     <td className="px-3 py-1.5 text-right font-mono">
-                      {formatCurrencyVolume(ex.volume * (ex.usd_rate ?? 1), symbol)}
+                      {formatCurrencyVolume(ex.volume * ex.usd_rate, symbol)}
                     </td>
                   </tr>
                 );
