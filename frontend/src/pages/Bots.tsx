@@ -339,6 +339,13 @@ export function Bots() {
   // fleet header that carries Deploy is part of the browser — so the empty
   // state has to carry the one action that gets out of it.
   //
+  // Only for the *live* fleet, though. An empty fleet is exactly the state in
+  // which the Terminated population is worth reading — the run history, the
+  // closed executors and the archive drill-in all live there, and their queries
+  // above have already fetched them — so answering "No bots running" for
+  // `?population=terminated` strands the reader on the one screen that still
+  // has something to say (CORR-297).
+  //
   // "No controllers" and "no bots" are not the same thing, and saying the first
   // as the second is how a broker outage reads as an empty fleet. A controller
   // is reported over the server's MQTT broker; the bot list is not (Docker
@@ -347,7 +354,7 @@ export function Bots() {
   // screen where the bot is missing, rather than leaving it to be found in the
   // API's logs.
   const silentBots = data?.bots ?? [];
-  if (controllers.length === 0) {
+  if (population === "running" && controllers.length === 0) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3 text-[var(--color-text-muted)]">
         <Bot className="h-10 w-10" />

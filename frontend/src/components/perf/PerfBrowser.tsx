@@ -1485,8 +1485,6 @@ export function PerfBrowser({
     };
   });
 
-  if (controllers.length === 0) return null;
-
   const configId = activeCtrl ? activeCtrl.controller_id || activeCtrl.controller_name : "";
   const chartHeight = Math.max(MIN_CHART_PX, (chartBoxH || 420) - CHART_CHROME_PX);
   const execChartHeight = Math.max(MIN_CHART_PX, (chartBoxH || 420) - EXEC_CHART_CHROME_PX);
