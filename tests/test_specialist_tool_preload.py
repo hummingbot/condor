@@ -88,11 +88,81 @@ def test_bound_pydantic_ai_specialist_stays_clean(platform):
     assert "ToolSearch" not in bound_agent_context(bound, 1, platform)
 
 
-def test_both_chat_branches_share_one_list():
-    """Defined twice, the two branches drift and only one seat notices."""
+def _mounted_by_the_chat_seat() -> set[str]:
+    """The ACP names of the ``agent`` ring, read from the leaf profile tables.
+
+    The tables are the definition site — ``server.py`` resolves every name in
+    them against its own functions at import and raises if one does not — so
+    this is the set the seat provably mounts, not a second opinion about it.
+    """
+    from mcp_servers.condor import profiles as condor_profiles
+    from mcp_servers.hummingbot_api import profiles as hummingbot_profiles
+
+    return {
+        f"mcp__{server}__{name}"
+        for server, module in (
+            ("condor", condor_profiles),
+            ("mcp-hummingbot", hummingbot_profiles),
+        )
+        for name in module.PROFILE_TOOLS["agent"]
+    }
+
+
+def test_the_preload_is_exactly_what_the_seat_mounts():
+    """The guard ARCH-292 exists for: a hand-kept copy of this list drifts.
+
+    Twice now it has. The pre-ARCH-190 list still named five tools the servers
+    had removed; the tuple that replaced it was missing thirteen it mounted.
+    Equality in both directions is what makes the third rot impossible: a tool
+    added to the ``agent`` ring and not preloaded fails here, and so does a name
+    preloaded for a tool no ring mounts any more.
+    """
+    from condor.runtime.context import _chat_mcp_tools
+
+    preloaded = _chat_mcp_tools()
+
+    assert set(preloaded) == _mounted_by_the_chat_seat()
+    assert len(preloaded) == len(set(preloaded)), "a name is preloaded twice"
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [
+        # The thirteen the hand-copied tuple omitted. Named one by one because
+        # the equality above would still pass if both sides lost a tool together.
+        "mcp__mcp-hummingbot__manage_clmm",
+        "mcp__mcp-hummingbot__quote_swap",
+        "mcp__mcp-hummingbot__execute_swap",
+        "mcp__mcp-hummingbot__get_swap_status",
+        "mcp__mcp-hummingbot__search_swaps",
+        "mcp__mcp-hummingbot__get_funding_rate",
+        "mcp__mcp-hummingbot__get_order_book",
+        "mcp__mcp-hummingbot__get_performance_report",
+        "mcp__mcp-hummingbot__list_orphaned_positions",
+        "mcp__mcp-hummingbot__resolve_orphaned_position",
+        "mcp__mcp-hummingbot__list_positions_held",
+        "mcp__mcp-hummingbot__clear_position_held",
+        "mcp__mcp-hummingbot__executor_defaults",
+    ],
+)
+def test_the_preload_names_the_tools_the_shared_playbooks_call(tool):
+    """``recover_orphaned_position``, inherited by every agent, calls
+    ``list_orphaned_positions`` and ``manage_clmm``. A specialist that cannot
+    see them has to guess that a keyword search would find them."""
+    assert tool in chat_tool_preload(ACP_KEY)
+
+
+def test_no_literal_tool_list_survives_in_context():
+    """Derivation is the fix; a literal creeping back is the regression.
+
+    The old assertion here pinned the list to *one* copy, which is why a single
+    copy could sit thirteen names short and stay green. This pins that the file
+    states no tool name at all — the profile tables do.
+    """
     from pathlib import Path
 
     from condor.runtime import context as ctx
 
     source = Path(ctx.__file__).read_text()
-    assert source.count("mcp__condor__control_agent") == 1
+    assert "mcp__condor__" not in source
+    assert "mcp__mcp-hummingbot__" not in source

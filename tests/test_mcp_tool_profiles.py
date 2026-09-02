@@ -166,6 +166,39 @@ def test_the_split_dangerous_tools_stay_with_the_seat_that_trades():
     assert {"quote_swap", "get_swap_status", "search_swaps"} <= tick
 
 
+@pytest.mark.parametrize("is_dry_run", [True, False])
+@pytest.mark.parametrize("is_experiment", [True, False])
+@pytest.mark.parametrize("is_controller_mode", [True, False])
+def test_the_tick_preload_only_names_tools_a_tick_mounts(
+    is_dry_run, is_experiment, is_controller_mode
+):
+    """The tick keeps its own preload list, and it stays hand-written on purpose
+    — it is *narrower* than the ring (dry-run withholds the create/stop names so
+    the agent does not spend a tick reaching for one), so it cannot be derived
+    the way the chat seat's list now is (ARCH-292).
+
+    What can be pinned is the direction: every name it preloads must be a tool
+    the tick profile actually registers. It holds today; this is the guard that
+    keeps it holding, since a tick preloading an unmounted name would burn the
+    tick discovering that it cannot call it.
+    """
+    from condor.agents.prompts import _build_tool_preload
+
+    line = _build_tool_preload(
+        is_dry_run=is_dry_run,
+        is_experiment=is_experiment,
+        is_controller_mode=is_controller_mode,
+    )
+    names = re.search(r'select:([^"]+)"', line).group(1).split(",")
+    mounted = {f"mcp__condor__{n}" for n in _registered(condor_server, "tick")} | {
+        f"mcp__mcp-hummingbot__{n}" for n in _registered(hb_server, "tick")
+    }
+
+    assert names, "the tick preload named nothing at all"
+    for name in names:
+        assert name in mounted, f"the tick preloads {name!r}, which it cannot call"
+
+
 def test_the_manage_trading_agent_funnel_is_in_no_profile():
     """FEAT-068 split it; no ring may resurrect the name."""
     for name in CONDOR_PROFILES:

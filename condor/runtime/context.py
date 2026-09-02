@@ -100,55 +100,66 @@ def platform_formatting(platform: str = "telegram") -> str:
     return _WEB_FORMATTING if platform == "web" else _TELEGRAM_FORMATTING
 
 
-# Every MCP tool an attended chat seat has mounted (the ``agent`` profile in
-# ``mcp_servers/condor/server.py``). Under ACP these are *deferred*: the session
-# only ever sees the names it has been told about, so a tool missing from this
-# list is a tool that seat can never discover. The tick seat keeps its own,
-# deliberately narrower list in ``condor/agents/prompts.py`` — a tick must not be
-# able to start or stop the loop it is running inside. Do not unify them.
-_CHAT_MCP_TOOLS = (
-    "mcp__mcp-hummingbot__get_prices",
-    "mcp__mcp-hummingbot__get_candles",
-    "mcp__mcp-hummingbot__get_portfolio_overview",
-    "mcp__mcp-hummingbot__list_executors",
-    "mcp__mcp-hummingbot__get_executor",
-    "mcp__mcp-hummingbot__stop_executor",
-    "mcp__mcp-hummingbot__create_position_executor",
-    "mcp__mcp-hummingbot__create_grid_executor",
-    "mcp__mcp-hummingbot__create_dca_executor",
-    "mcp__mcp-hummingbot__create_order_executor",
-    "mcp__mcp-hummingbot__create_lp_executor",
-    "mcp__mcp-hummingbot__manage_bots",
-    "mcp__mcp-hummingbot__manage_controllers",
-    "mcp__mcp-hummingbot__explore_dex_pools",
-    "mcp__mcp-hummingbot__explore_geckoterminal",
-    "mcp__mcp-hummingbot__manage_amm",
-    "mcp__mcp-hummingbot__search_history",
-    "mcp__mcp-hummingbot__set_account_position_mode_and_leverage",
-    "mcp__condor__manage_routines",
-    "mcp__condor__manage_servers",
-    "mcp__condor__manage_agents",
-    "mcp__condor__manage_strategies",
-    "mcp__condor__control_agent",
-    "mcp__condor__get_available_models",
-    "mcp__condor__consult",
-    "mcp__condor__delegate",
-    "mcp__condor__run_code",
-    "mcp__condor__trading_agent_journal_read",
-    "mcp__condor__trading_agent_journal_write",
-    "mcp__condor__send_notification",
-    "mcp__condor__manage_memory",
-    "mcp__condor__manage_skill",
-)
+#: The ring the preload names. Attended chat seats mount ``agent`` (a bound
+#: specialist) or ``full`` (the coordinator) — see :func:`toolsets.seat_profile`
+#: — and ``agent`` is the common subset. What ``full`` adds on top is the admin
+#: ring, which is the *server owner's* and which this very prompt goes on to
+#: forbid ("do NOT call configure_server"), so naming it here would advertise
+#: three tools most seats are downgraded out of anyway (SEC-252).
+_CHAT_PRELOAD_PROFILE = "agent"
+
+#: ``(MCP server name, the leaf module that says which tools it mounts)``.
+#: The prefix is the ACP naming convention, ``mcp__<server>__<tool>``; the server
+#: names are the ones :mod:`condor.runtime.toolsets` spawns each subprocess under.
+_CHAT_MCP_SERVERS = ("condor", "mcp-hummingbot")
+
+
+def _chat_mcp_tools() -> tuple[str, ...]:
+    """Every MCP tool an attended chat seat has mounted, as ACP tool names.
+
+    Derived, never restated. Under ACP these tools arrive *deferred*: a session
+    sees only the names it has been told about, so a tool missing from this line
+    is one that seat is unlikely to ever reach for — a keyword ``ToolSearch``
+    could still surface it, but only if the model thinks to run one, and the
+    whole point of the preload is that it does not have to. A hand-kept copy of
+    the list therefore fails quietly and in the expensive direction, which is
+    exactly how the previous two copies rotted: the pre-ARCH-190 list in
+    ``handlers/agents/_shared.py`` still named five tools the servers had already
+    removed, and the tuple this function replaced was missing thirteen it
+    mounted, ``manage_clmm`` and ``list_orphaned_positions`` among them — both
+    called by the ``recover_orphaned_position`` playbook every agent inherits.
+
+    Names come from ``mcp_servers.*.profiles`` for the same reason
+    :func:`toolsets.seat_tools` reads them there: those are leaf string modules,
+    the definition site of each ring, and importing a ``server.py`` to ask would
+    parse argv and build a ``FastMCP`` singleton as a side effect. The import is
+    function-local to keep that dependency off ``context``'s import path.
+
+    The tick seat keeps its own, deliberately narrower list in
+    ``condor/agents/prompts.py`` — a tick must not be able to start or stop the
+    loop it is running inside. Do not unify them.
+    """
+    from mcp_servers.condor import profiles as condor_profiles
+    from mcp_servers.hummingbot_api import profiles as hummingbot_profiles
+
+    return tuple(
+        f"mcp__{server}__{name}"
+        for server, module in zip(
+            _CHAT_MCP_SERVERS, (condor_profiles, hummingbot_profiles)
+        )
+        for name in module.PROFILE_TOOLS[_CHAT_PRELOAD_PROFILE]
+    )
 
 
 def chat_tool_preload(agent_key: str | None) -> str:
     """The ToolSearch preload line for a chat seat, or ``""`` when it needs none.
 
     ACP seats (Claude Code and friends) get MCP tools deferred: they must
-    ``ToolSearch`` a name before they can call it, so anything not named here is
-    invisible to them no matter that it is mounted and authorized. Pydantic-ai
-    seats auto-discover their toolset and must never receive the line.
+    ``ToolSearch`` a name before they can call it. A keyword search can still
+    find a name this line omits, so the preload is not the only route to a
+    mounted tool — what it buys is the round trips, and the far likelier failure
+    that the model never thinks to search at all. Pydantic-ai seats auto-discover
+    their toolset and must never receive the line.
 
     Public because both chat branches need it: the coordinator's
     :func:`build_initial_context` and the specialist's ``bound_agent_context``,
@@ -161,7 +172,7 @@ def chat_tool_preload(agent_key: str | None) -> str:
     return (
         "IMPORTANT: At the very start of the session (before your first response), "
         "load ALL MCP tools in a single ToolSearch call:\n"
-        f'ToolSearch(query="select:{",".join(_CHAT_MCP_TOOLS)}")\n'
+        f'ToolSearch(query="select:{",".join(_chat_mcp_tools())}")\n'
         "This avoids repeated ToolSearch calls that waste context tokens. "
         "Do this silently without telling the user."
     )
