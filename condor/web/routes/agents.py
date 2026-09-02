@@ -2604,7 +2604,7 @@ async def set_strategy_state(
         return {"cleared": clear_state(namespace, req.key)}
     try:
         set_state(namespace, req.key, req.value, expires_in=req.expires_in)
-    except TypeError as exc:
+    except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"ok": True}
 

@@ -44,6 +44,13 @@ STATE_FILENAME = "state.json"
 # immediately; the file is a restart cushion, not the source of truth.
 WRITE_DEBOUNCE_S = 1.0
 
+# A state value is a cursor, not a payload. Every live key is re-rendered into
+# the tick prompt on every tick (condor.agents.prompts.build_tick_prompt), so a
+# blob written once is paid forever: this is a cost control, not a nicety. A
+# few KB is generous for an id, a deadline or a small dict; anything larger
+# belongs in memory or is re-fetched from the API.
+MAX_STATE_VALUE_CHARS = 2000
+
 # namespace -> {key: {"value": ..., "expires_at": float | None}}
 _cache: dict[str, dict[str, dict]] = {}
 _last_write: dict[str, float] = {}
@@ -129,17 +136,27 @@ def set_state(
     """Store a JSON-serializable value under ``namespace``.
 
     Rejects non-serializable values loudly rather than at flush time, when the
-    caller is long gone and the traceback says nothing useful.
+    caller is long gone and the traceback says nothing useful. Oversize values
+    are rejected the same way and for the same reason: the writer is here now
+    and can pick a smaller value, whereas the tick that pays for it is not.
     """
     _validate(namespace)
     try:
-        json.dumps(value)
+        encoded = json.dumps(value)
     except (TypeError, ValueError) as exc:
         raise TypeError(
             f"State values must be JSON-serializable; {type(value).__name__} "
             f"is not (key={key!r}). Convert it first — e.g. a datetime to an "
             f"ISO string or a timestamp."
         ) from exc
+
+    if len(encoded) > MAX_STATE_VALUE_CHARS:
+        raise ValueError(
+            f"State values are capped at {MAX_STATE_VALUE_CHARS} chars; "
+            f"key={key!r} serializes to {len(encoded)}. State is a cursor, not "
+            f"a payload — it is re-read into every tick prompt. Store an id or "
+            f"a small summary, or put it in memory."
+        )
 
     _entries(namespace)[key] = {
         "value": value,

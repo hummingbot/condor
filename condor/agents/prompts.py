@@ -10,8 +10,27 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from condor.runtime.state import MAX_STATE_VALUE_CHARS
+
 from .agent import Agent
 from .strategy import Strategy
+
+# The [LOOP STATE] block is re-rendered on every tick, so it is bounded like
+# the canvas that sits beside it in the same prompt (canvas.MAX_SECTION_CHARS).
+# set_state is the primary bound; these are the backstop for a state file
+# written before that cap existed or edited by hand. Roughly three full-size
+# values, ~1.5k tokens of input.
+MAX_STATE_SECTION_CHARS = 3 * MAX_STATE_VALUE_CHARS
+
+# What a clipped value says about itself, so a truncated blob is never mistaken
+# for the whole value (consult._clip uses the same marker).
+TRUNCATION_MARKER = "… (truncated)"
+
+
+def _clip(text: str, limit: int) -> str:
+    """``text`` cut to ``limit`` chars, saying so whenever it had to cut."""
+    return text if len(text) <= limit else text[:limit] + TRUNCATION_MARKER
+
 
 # Two live base prompts, one per execution surface. A session either spawns
 # standalone executors or steers a bot's controllers (see _build_controller_mode_section);
@@ -476,8 +495,8 @@ def build_tick_prompt(
             rendered = (
                 value if isinstance(value, str) else json.dumps(value, default=str)
             )
-            state_lines.append(f"{key}: {rendered}")
-        sections.append("\n".join(state_lines))
+            state_lines.append(f"{key}: {_clip(rendered, MAX_STATE_VALUE_CHARS)}")
+        sections.append(_clip("\n".join(state_lines), MAX_STATE_SECTION_CHARS))
 
     # Core skill data (pre-computed)
     for name, data_summary in core_data.items():

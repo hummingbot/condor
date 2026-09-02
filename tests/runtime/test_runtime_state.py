@@ -12,8 +12,10 @@ import time
 
 import pytest
 
+from condor.agents.prompts import MAX_STATE_SECTION_CHARS, TRUNCATION_MARKER
 from condor.runtime import state as state_module
 from condor.runtime.state import (
+    MAX_STATE_VALUE_CHARS,
     BoundState,
     NamespaceError,
     cleanup_orphans,
@@ -242,6 +244,43 @@ def test_an_empty_namespace_renders_no_section(state_root):
     assert "[LOOP STATE" not in _tick_prompt(loop_state=BoundState(NS).list())
     assert "[LOOP STATE" not in _tick_prompt(loop_state={})
     assert "[LOOP STATE" not in _tick_prompt()  # engine passing nothing at all
+
+
+def test_an_oversize_value_is_refused_at_write_time(state_root):
+    """A 50 kB blob never enters the store, so no tick ever pays for it."""
+    blob = "x" * 50_000
+
+    with pytest.raises(ValueError) as exc:
+        set_state(NS, "candles", blob)
+
+    assert str(MAX_STATE_VALUE_CHARS) in str(exc.value)
+    assert "candles" in str(exc.value)
+    assert list_state(NS) == {}
+    # A value just inside the cap is still ordinary state.
+    set_state(NS, "cursor", "x" * (MAX_STATE_VALUE_CHARS - 2))
+    assert len(get_state(NS, "cursor")) == MAX_STATE_VALUE_CHARS - 2
+
+
+def test_an_oversize_value_renders_truncated_and_says_so(state_root):
+    """A file written before the cap existed cannot blow up the tick prompt."""
+    # Bypass set_state the way a hand-edited state.json would.
+    prompt = _tick_prompt(loop_state={"candles": "x" * 50_000})
+
+    assert "[LOOP STATE" in prompt
+    assert TRUNCATION_MARKER in prompt
+    assert "x" * (MAX_STATE_VALUE_CHARS + 1) not in prompt
+    assert "x" * MAX_STATE_VALUE_CHARS in prompt
+
+
+def test_the_loop_state_section_is_bounded_as_a_whole(state_root):
+    """Many legal-sized values still cannot add up to an unbounded section."""
+    loop_state = {f"k{i:02d}": "x" * (MAX_STATE_VALUE_CHARS - 10) for i in range(50)}
+
+    prompt = _tick_prompt(loop_state=loop_state)
+
+    section = next(s for s in prompt.split("\n\n") if s.startswith("[LOOP STATE"))
+    assert section.endswith(TRUNCATION_MARKER)
+    assert len(section) <= MAX_STATE_SECTION_CHARS + len(TRUNCATION_MARKER)
 
 
 def test_the_tick_feeds_the_prompt_from_its_own_bound_state():
