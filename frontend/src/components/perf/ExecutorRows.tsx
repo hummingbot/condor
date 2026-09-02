@@ -9,6 +9,7 @@ import {
 import { exportExecutorsCsv, type ExecutorStop } from "@/components/perf/executorActions";
 import { useEscapeKey } from "@/hooks/useEscapeKey";
 import { type ExecutorInfo } from "@/lib/api";
+import { stopKeepCopy } from "@/lib/executorStopCopy";
 import { isExecutorActive } from "@/lib/formatters";
 
 /**
@@ -17,19 +18,31 @@ import { isExecutorActive } from "@/lib/formatters";
  * Keeping the position leaves the exposure on the exchange with nothing
  * managing it; closing it does not. Neither is recoverable by looking at the
  * result afterwards, so the dialog asks rather than defaulting quietly.
+ *
+ * What the choice *means* depends on what is selected — an LP executor closes
+ * its pool position either way — so the wording comes from `stopKeepCopy`
+ * rather than being stated once and hoped over. `executors` is the list the
+ * ids are resolved against; without it the dialog falls back to the non-LP
+ * wording it has always used.
  */
 export function StopConfirmDialog({
   ids,
+  executors = [],
   onConfirm,
   onCancel,
 }: {
   ids: string[];
+  executors?: ExecutorInfo[];
   onConfirm: (ids: string[], keepPosition: boolean) => void;
   onCancel: () => void;
 }) {
   useEscapeKey(true, onCancel);
   const [keepPosition, setKeepPosition] = useState(false);
   const count = ids.length;
+  const copy = useMemo(
+    () => stopKeepCopy(executors.filter((ex) => ids.includes(ex.id))),
+    [executors, ids],
+  );
 
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
@@ -59,12 +72,10 @@ export function StopConfirmDialog({
               onChange={(e) => setKeepPosition(e.target.checked)}
               className="h-4 w-4 rounded border-[var(--color-border)] accent-[var(--color-primary)]"
             />
-            <span className="text-sm">Keep position open</span>
+            <span className="text-sm">{copy.label}</span>
           </label>
           <p className="text-[10px] text-[var(--color-text-muted)] -mt-2 ml-6">
-            {keepPosition
-              ? "The executor will stop but the position will remain open on the exchange."
-              : "The executor will stop and close any open position."}
+            {keepPosition ? copy.checked : copy.unchecked}
           </p>
 
           <div className="flex items-center gap-2 justify-end">

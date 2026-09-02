@@ -2397,6 +2397,7 @@ export function PerfBrowser({
       {stop.pendingIds && (
         <StopConfirmDialog
           ids={stop.pendingIds}
+          executors={scopedExecutors}
           onConfirm={stop.confirm}
           onCancel={stop.cancel}
         />

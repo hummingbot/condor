@@ -16,6 +16,7 @@ import {
   pnlTextClass,
   isExecutorActive,
 } from "@/lib/formatters";
+import { stopKeepCopy } from "@/lib/executorStopCopy";
 import { executorsQuery } from "@/lib/queryClient";
 
 interface TradeBottomPaneProps {
@@ -272,6 +273,14 @@ export function TradeBottomPane({
 
   // Balances for the active connector (shared ["portfolio", server] query)
   const balances = usePairBalances(server, connector, baseToken, quoteToken);
+
+  // What "keep position" means depends on the executor being stopped: this pane
+  // is also the DEX pool workspace's, where the rows are lp executors whose pool
+  // position is closed on-chain whichever way the box is ticked.
+  const stopCopy = useMemo(
+    () => stopKeepCopy(executors.filter((ex) => ex.id === confirmStopId)),
+    [executors, confirmStopId],
+  );
 
   const stopMutation = useMutation({
     mutationFn: ({ id, keep }: { id: string; keep: boolean }) => {
@@ -718,12 +727,10 @@ export function TradeBottomPane({
                 onChange={(e) => setKeepPosition(e.target.checked)}
                 className="h-4 w-4 rounded border-[var(--color-border)] accent-[var(--color-primary)]"
               />
-              <span className="text-xs text-[var(--color-text)]">Keep position open</span>
+              <span className="text-xs text-[var(--color-text)]">{stopCopy.label}</span>
             </label>
             <p className="mt-1 ml-6 text-[11px] text-[var(--color-text-muted)]">
-              {keepPosition
-                ? "The executor stops but the position stays open on the exchange."
-                : "The executor stops and closes any open position."}
+              {keepPosition ? stopCopy.checked : stopCopy.unchecked}
             </p>
             <div className="mt-3 flex justify-end gap-2">
               <button
