@@ -5,9 +5,8 @@ import os
 import sys
 from functools import partial
 from pathlib import Path
-from urllib.parse import urlparse
 
-from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import BotCommand, CopyTextButton, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import NetworkError
 from telegram.ext import (
     Application,
@@ -75,29 +74,23 @@ async def web_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     token = create_login_token(user.id, user.username or "", user.first_name or "")
 
     url = f"{WEB_URL}/login?token={token}"
-    _hostname = urlparse(WEB_URL).hostname or ""
-    is_localhost = (
-        "localhost" in WEB_URL or "127.0.0.1" in WEB_URL or "." not in _hostname
-    )
 
-    if is_localhost:
-        await update.message.reply_text(
-            f"🌐 *Web Dashboard*\n\n"
-            f"Open this link in your browser:\n`{url}`\n\n"
-            f"_Link valid for 5 minutes\\._",
-            parse_mode="MarkdownV2",
-        )
-    else:
-        keyboard = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("🌐 Open Dashboard", url=url)]]
-        )
-        await update.message.reply_text(
-            "🌐 *Web Dashboard*\n\n"
-            "Tap the button below to open the dashboard\\.\n"
-            "_Link valid for 5 minutes\\._",
-            reply_markup=keyboard,
-            parse_mode="MarkdownV2",
-        )
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("🌐 Open Dashboard", url=url),
+                InlineKeyboardButton("📋 Copy Link", copy_text=CopyTextButton(text=url)),
+            ],
+        ]
+    )
+    await update.message.reply_text(
+        "🌐 *Web Dashboard*\n\n"
+        "Tap the button below, to open the dashboard or copy the link:\n"
+        f"`{url}`\n\n"
+        "_Link valid for 5 minutes\\._",
+        reply_markup=keyboard,
+        parse_mode="MarkdownV2",
+    )
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
