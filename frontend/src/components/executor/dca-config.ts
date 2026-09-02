@@ -72,12 +72,15 @@ const PERSISTED_FIELDS: (keyof DCAState)[] = [
   "mode", "activation_bounds",
 ];
 
-function loadSavedDefaults(): DCAState {
+export function loadSavedDefaults(): DCAState {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return DCA_DEFAULTS;
     const saved = JSON.parse(raw);
-    const merged = { ...DCA_DEFAULTS };
+    // `prices` is not persisted, so the shallow copy would hand back the
+    // constant's own array — and the resize below would push/pop DCA_DEFAULTS
+    // itself, leaving every later load with more prices than amounts.
+    const merged = { ...DCA_DEFAULTS, prices: [...DCA_DEFAULTS.prices] };
     for (const key of PERSISTED_FIELDS) {
       if (key in saved && saved[key] !== undefined) {
         (merged as Record<string, unknown>)[key] = saved[key];
