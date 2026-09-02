@@ -9,6 +9,7 @@
  */
 
 import { queryClient } from "@/lib/queryClient";
+import { DISPLAY_CURRENCY_KEY, THEME_KEY } from "@/lib/sessionState";
 import { socketStatus } from "@/lib/shared-socket";
 
 /**
@@ -117,8 +118,8 @@ export function failingRequests(limit = 5): string[] {
 
 /** Preferences that change what the page renders — and so what "wrong" means. */
 export function displayPrefs(): string {
-  const theme = localStorage.getItem("condor_theme") ?? "system";
-  const currency = localStorage.getItem("condor_display_currency") ?? "USDT";
+  const theme = localStorage.getItem(THEME_KEY) ?? "system";
+  const currency = localStorage.getItem(DISPLAY_CURRENCY_KEY) ?? "USDT";
   return `theme ${theme} · currency ${currency}`;
 }
 

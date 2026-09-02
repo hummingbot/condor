@@ -50,6 +50,7 @@ import { api } from "@/lib/api";
 import { candleStore } from "@/lib/candle-store";
 import { connectorCapabilities, orderBookVenues } from "@/lib/connector-capabilities";
 import { executorsQuery } from "@/lib/queryClient";
+import { BROWSE_HINT_KEY } from "@/lib/sessionState";
 import { isChartLineSlot } from "@/components/executor/types";
 import type { ChartPriceMapping, ExecutorType, PickSlot } from "@/components/executor/types";
 import {
@@ -84,15 +85,6 @@ const TYPE_LABELS: Record<ExecutorType, string> = {
   dca: "DCA Executor",
   lp: "LP Executor",
 };
-
-/**
- * Remembers that the `/` shortcut has been taught on this browser.
- *
- * A device preference, not session state: it says how far this browser has been
- * onboarded, never what the user was trading, so it survives a logout — see the
- * KEPT list in lib/sessionState.ts.
- */
-const BROWSE_HINT_KEY = "condor.market.browse-hint";
 
 // ── Page ──
 

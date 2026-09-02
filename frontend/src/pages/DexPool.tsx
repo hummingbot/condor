@@ -38,14 +38,13 @@ import { api, type DexTokenConflict } from "@/lib/api";
 import { connectorCapabilities } from "@/lib/connector-capabilities";
 import { LOOKBACK_OPTIONS } from "@/lib/gridExecutor";
 import { executorsQuery } from "@/lib/queryClient";
+import { DEX_DEPTH_COLLAPSED_KEY } from "@/lib/sessionState";
 
 type Tab = "order" | "lp";
 
 // Only the fine intervals: 1h/4h/1d candles read as duplicates of the 1h/1d
 // lookback buttons sitting next to them.
 const DEX_INTERVALS = ["1m", "5m", "15m"];
-
-const DEPTH_KEY = "condor.dex.depth-collapsed";
 
 /**
  * One pool, and everything you can do in it.
@@ -88,7 +87,7 @@ export function DexPool() {
   const [priceAxis, setPriceAxis] = useState<ChartPriceAxis | null>(null);
   const [depthCollapsed, setDepthCollapsed] = useState(() => {
     try {
-      return localStorage.getItem(DEPTH_KEY) === "1";
+      return localStorage.getItem(DEX_DEPTH_COLLAPSED_KEY) === "1";
     } catch {
       return false;
     }
@@ -96,7 +95,7 @@ export function DexPool() {
 
   useEffect(() => {
     try {
-      localStorage.setItem(DEPTH_KEY, depthCollapsed ? "1" : "0");
+      localStorage.setItem(DEX_DEPTH_COLLAPSED_KEY, depthCollapsed ? "1" : "0");
     } catch {
       /* private mode; the column just forgets */
     }

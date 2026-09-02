@@ -18,6 +18,7 @@ import {
 } from "@/lib/formatters";
 import { stopKeepCopy } from "@/lib/executorStopCopy";
 import { executorsQuery } from "@/lib/queryClient";
+import { TRADE_BOTTOM_PANE_KEY } from "@/lib/sessionState";
 
 interface TradeBottomPaneProps {
   executors: ExecutorInfo[];
@@ -37,8 +38,6 @@ interface TradeBottomPaneProps {
   selectedExecutorId?: string | null;
   onExecutorSelect?: (executor: ExecutorInfo | null) => void;
 }
-
-const STORAGE_KEY = "condor_trade_bottom_pane";
 
 const STRATEGY_LABELS: Record<string, string> = {
   LIMIT: "Limit",
@@ -251,7 +250,7 @@ export function TradeBottomPane({
   const queryClient = useQueryClient();
   const containerRef = useRef<HTMLDivElement>(null);
   const [expanded, setExpanded] = useState(() => {
-    try { return localStorage.getItem(STORAGE_KEY) !== "0"; } catch { return true; }
+    try { return localStorage.getItem(TRADE_BOTTOM_PANE_KEY) !== "0"; } catch { return true; }
   });
   const [tab, setTab] = useState<"executors" | "positions">("executors");
   const [stoppingIds, setStoppingIds] = useState<Set<string>>(new Set());
@@ -262,7 +261,7 @@ export function TradeBottomPane({
   const [hoveredExecutor, setHoveredExecutor] = useState<{ executor: ExecutorInfo; rect: DOMRect } | null>(null);
 
   useEffect(() => {
-    try { localStorage.setItem(STORAGE_KEY, expanded ? "1" : "0"); } catch { /* ok */ }
+    try { localStorage.setItem(TRADE_BOTTOM_PANE_KEY, expanded ? "1" : "0"); } catch { /* ok */ }
   }, [expanded]);
 
   // Extract base/quote tokens from pair (e.g. "BTC-USDT" -> ["BTC", "USDT"]),

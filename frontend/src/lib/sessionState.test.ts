@@ -14,12 +14,22 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
 import {
+  BROWSE_HINT_KEY,
+  BUBBLE_OPEN_KEY,
   CHAT_RAIL_OPEN_KEY,
   clearSessionState,
+  DEX_DEPTH_COLLAPSED_KEY,
+  DEX_NETWORK_KEY,
+  DISPLAY_CURRENCY_KEY,
+  DOCK_OPEN_KEY,
   DOCK_WIDTH_KEY,
   PANE_FRAC_KEY,
   PANE_FRAC_TUNE_KEY,
   PNL_HIDDEN_SERIES_KEY,
+  ROUTINES_VIEW_MODE_KEY,
+  SHEET_ZEN_KEY,
+  THEME_KEY,
+  TRADE_BOTTOM_PANE_KEY,
 } from "@/lib/sessionState";
 
 /** Everything the outgoing user typed or picked. */
@@ -34,21 +44,26 @@ const SESSION = [
   "condor_dex_favorites",
 ];
 
-/** How this device renders the app — none of it names the outgoing user. */
+/**
+ * How this device renders the app — none of it names the outgoing user.
+ *
+ * Every entry is named through the module rather than spelled as a literal, so
+ * a key that only ever appeared at its writer cannot slip past this list
+ * (ARCH-291); `sessionState.keys.test.ts` is what stops one being written that
+ * way in the first place.
+ */
 const DEVICE = [
-  "condor_theme",
-  "condor_display_currency",
-  "condor.dock.open",
-  "condor_bubble_open",
-  "condor_sheet_zen",
-  "condor_trade_bottom_pane",
-  "routines_view_mode",
-  "condor.dex.network",
-  "condor.dex.depth-collapsed",
+  THEME_KEY,
+  DISPLAY_CURRENCY_KEY,
+  DOCK_OPEN_KEY,
+  BUBBLE_OPEN_KEY,
+  SHEET_ZEN_KEY,
+  TRADE_BOTTOM_PANE_KEY,
+  ROUTINES_VIEW_MODE_KEY,
+  DEX_NETWORK_KEY,
+  DEX_DEPTH_COLLAPSED_KEY,
+  BROWSE_HINT_KEY,
   PNL_HIDDEN_SERIES_KEY,
-  // The workspace's geometry: how wide each column was dragged and whether it
-  // is a column at all. Named through the module, not as literals, so a key
-  // that only ever appeared at its writer cannot slip past this list (ARCH-291).
   DOCK_WIDTH_KEY,
   PANE_FRAC_KEY,
   PANE_FRAC_TUNE_KEY,

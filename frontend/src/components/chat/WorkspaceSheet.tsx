@@ -5,12 +5,11 @@ import { createPortal } from "react-dom";
 import { WORKSPACE_BAR } from "@/components/chat/workspaceBar";
 import { useWorkspacePane, type PaneProfile } from "@/hooks/useWorkspacePane";
 import { useEscapeKey } from "@/hooks/useEscapeKey";
+import { SHEET_ZEN_KEY } from "@/lib/sessionState";
 
 /** Remembers the last zen choice, so a reader who wants the whole window keeps it. */
-const ZEN_KEY = "condor_sheet_zen";
-
 function readZen(fallback: boolean): boolean {
-  const stored = localStorage.getItem(ZEN_KEY);
+  const stored = localStorage.getItem(SHEET_ZEN_KEY);
   return stored === null ? fallback : stored === "1";
 }
 
@@ -142,7 +141,7 @@ export function WorkspaceSheet({
       )
         return;
       setZen((z) => {
-        if (!canSplit) localStorage.setItem(ZEN_KEY, z ? "0" : "1");
+        if (!canSplit) localStorage.setItem(SHEET_ZEN_KEY, z ? "0" : "1");
         return !z;
       });
       e.preventDefault();
@@ -153,7 +152,7 @@ export function WorkspaceSheet({
 
   const toggleZen = () =>
     setZen((z) => {
-      if (!canSplit) localStorage.setItem(ZEN_KEY, z ? "0" : "1");
+      if (!canSplit) localStorage.setItem(SHEET_ZEN_KEY, z ? "0" : "1");
       return !z;
     });
 

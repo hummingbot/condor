@@ -22,11 +22,10 @@ import { useServer } from "@/hooks/useServer";
 import { api } from "@/lib/api";
 import { formatRelativeTime, toMs } from "@/lib/formatters";
 import { formatInterval } from "@/lib/routineUtils";
+import { ROUTINES_VIEW_MODE_KEY } from "@/lib/sessionState";
 
 type SourceTypeFilter = "all" | "routine" | "agent" | string;
 type ViewMode = "grid" | "table";
-
-const VIEW_STORAGE_KEY = "routines_view_mode";
 
 /**
  * How many run chips the strip shows before it folds.
@@ -48,13 +47,13 @@ export function Routines() {
   const [sourceTypeFilter, setSourceTypeFilter] = useState<SourceTypeFilter>(agentParam || "all");
   const [search, setSearch] = useState("");
   const [view, setView] = useState<ViewMode>(
-    () => (localStorage.getItem(VIEW_STORAGE_KEY) as ViewMode) || "grid",
+    () => (localStorage.getItem(ROUTINES_VIEW_MODE_KEY) as ViewMode) || "grid",
   );
 
   const setViewMode = useCallback((mode: ViewMode) => {
     setView(mode);
     try {
-      localStorage.setItem(VIEW_STORAGE_KEY, mode);
+      localStorage.setItem(ROUTINES_VIEW_MODE_KEY, mode);
     } catch {
       // storage unavailable
     }

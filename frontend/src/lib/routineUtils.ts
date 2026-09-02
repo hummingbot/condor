@@ -1,9 +1,8 @@
 import type { QueryClient } from "@tanstack/react-query";
 import type { RoutineInfo } from "@/lib/api";
+import { ROUTINE_CONFIG_KEY_PREFIX } from "@/lib/sessionState";
 
 // ── Config persistence ──
-
-export const ROUTINE_CONFIG_KEY_PREFIX = "routine_config:";
 
 export function loadSavedConfig(
   routineName: string,

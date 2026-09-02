@@ -1,5 +1,7 @@
 import { useCallback, useSyncExternalStore } from "react";
 
+import { DISPLAY_CURRENCY_KEY } from "@/lib/sessionState";
+
 export type DisplayCurrency = "USDT" | "BTC" | "BRL" | "EUR";
 
 export const CURRENCY_OPTIONS: DisplayCurrency[] = ["USDT", "BTC", "BRL", "EUR"];
@@ -11,10 +13,8 @@ export const CURRENCY_SYMBOLS: Record<DisplayCurrency, string> = {
   EUR: "\u20AC",
 };
 
-const STORAGE_KEY = "condor_display_currency";
-
 function getStoredCurrency(): DisplayCurrency {
-  const stored = localStorage.getItem(STORAGE_KEY);
+  const stored = localStorage.getItem(DISPLAY_CURRENCY_KEY);
   if (stored && CURRENCY_OPTIONS.includes(stored as DisplayCurrency)) {
     return stored as DisplayCurrency;
   }
@@ -38,7 +38,7 @@ export function useDisplayCurrency() {
 
   const setCurrency = useCallback((c: DisplayCurrency) => {
     currentCurrency = c;
-    localStorage.setItem(STORAGE_KEY, c);
+    localStorage.setItem(DISPLAY_CURRENCY_KEY, c);
     listeners.forEach((l) => l());
   }, []);
 

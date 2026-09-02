@@ -20,9 +20,8 @@ import { WORKSPACE_BAR } from "@/components/chat/workspaceBar";
 import { useResizeDrag } from "@/hooks/useResizeDrag";
 import { api, type Delegation } from "@/lib/api";
 import { inScope, resolveRoutine, type RoutineScope } from "@/lib/routineUtils";
-import { DOCK_WIDTH_KEY } from "@/lib/sessionState";
+import { DOCK_OPEN_KEY, DOCK_WIDTH_KEY } from "@/lib/sessionState";
 
-const OPEN_KEY = "condor.dock.open";
 /** Where the dock stops being a column and starts overlaying (Tailwind `xl`). */
 const WIDE = "(min-width: 1280px)";
 
@@ -43,7 +42,7 @@ function readWidth(): number {
 function defaultOpen(): boolean {
   return (
     window.matchMedia(WIDE).matches &&
-    localStorage.getItem(OPEN_KEY) !== "false"
+    localStorage.getItem(DOCK_OPEN_KEY) !== "false"
   );
 }
 
@@ -118,7 +117,7 @@ export function ContextDock({
   /** The reader's own toggle, and the only thing written down. */
   const toggle = (next: boolean) => {
     setOpen(next);
-    localStorage.setItem(OPEN_KEY, String(next));
+    localStorage.setItem(DOCK_OPEN_KEY, String(next));
   };
 
   useEffect(() => {

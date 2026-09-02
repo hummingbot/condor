@@ -24,9 +24,8 @@ import {
 } from "@/lib/agentSlug";
 import { api, CHAT_SLUG } from "@/lib/api";
 import { routeFacts } from "@/lib/pageFacts";
+import { BUBBLE_OPEN_KEY } from "@/lib/sessionState";
 import { collectViewFacts, renderViewBlock } from "@/lib/viewFacts";
-
-const OPEN_KEY = "condor_bubble_open";
 
 /**
  * A quick chat over whatever page the user is on (FEAT-059).
@@ -52,7 +51,7 @@ export function ChatBubble() {
 
   const [open, setOpen] = useState<boolean>(() => {
     try {
-      return localStorage.getItem(OPEN_KEY) === "1";
+      return localStorage.getItem(BUBBLE_OPEN_KEY) === "1";
     } catch {
       return false;
     }
@@ -126,7 +125,7 @@ export function ChatBubble() {
       setSeen((m) => (m[slug] === msgCount ? m : { ...m, [slug]: msgCount }));
     }
     try {
-      localStorage.setItem(OPEN_KEY, next ? "1" : "0");
+      localStorage.setItem(BUBBLE_OPEN_KEY, next ? "1" : "0");
     } catch {
       /* a browser that blocks storage still gets a working bubble */
     }
