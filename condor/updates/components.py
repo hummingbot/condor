@@ -418,6 +418,26 @@ async def running_executor_count() -> int | None:
 # ── Preflight ──
 
 
+def _incoming_unknown(component: Component, branch: str, because: str) -> Block:
+    """The block for "we could not work out what this update would bring in".
+
+    Distinct from ``dirty-conflict``, which names files: this one names no
+    paths because the point is that the path list does not exist. Cancel is the
+    only resolution -- there is nothing here for the admin to discard or stash,
+    only a comparison to retry once the checkout or the network is healthy.
+    """
+    return Block(
+        component=component.key,
+        code="incoming-unknown",
+        message=(
+            f"Could not compare this checkout against origin/{branch} "
+            f"({because}), so there is no telling whether the incoming commits "
+            "would overwrite local work. Refusing to fast-forward blind."
+        ),
+        resolutions=["cancel"],
+    )
+
+
 async def repo_blocks(component: Component) -> list[Block]:
     """What would stop ``git merge --ff-only`` in this checkout.
 
@@ -440,13 +460,18 @@ async def repo_blocks(component: Component) -> list[Block]:
             )
         ]
 
+    branch = await updater.get_current_branch(component.repo_dir)
+
     # Fetch first, always. The incoming set is only meaningful against an
     # ``origin/`` that is current, and this runs immediately before the
     # fast-forward that would act on it -- judging the blockers from a stale
-    # ref is how local work gets clobbered by commits nobody had seen yet.
-    await updater.fetch(component.repo_dir)
+    # ref is how local work gets clobbered by commits nobody had seen yet. So a
+    # fetch that failed is not a detail to shrug off: it is the whole basis of
+    # the comparison below, gone.
+    fetched, _ = await updater.fetch(component.repo_dir)
+    if not fetched:
+        return [_incoming_unknown(component, branch, "the remote is unreachable")]
 
-    branch = await updater.get_current_branch(component.repo_dir)
     ahead, dirty, incoming = await asyncio.gather(
         updater.ahead_count(component.repo_dir, branch),
         updater.dirty_state(component.repo_dir),
@@ -466,6 +491,12 @@ async def repo_blocks(component: Component) -> list[Block]:
                 resolutions=["cancel"],
             )
         ]
+
+    # None is not "nothing incoming" -- it is "the diff did not resolve", and
+    # the two must not land in the same branch. Falling through here with an
+    # empty set would report zero blockers for an update nobody can vouch for.
+    if incoming is None:
+        return [_incoming_unknown(component, branch, f"origin/{branch} is unreadable")]
 
     incoming_set = set(incoming)
     if not incoming_set:

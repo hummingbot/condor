@@ -234,23 +234,31 @@ async def dirty_state(repo_dir: str = CONDOR_DIR) -> DirtyState:
     )
 
 
-async def incoming_paths(repo_dir: str = CONDOR_DIR, branch: str = "") -> list[str]:
+async def incoming_paths(
+    repo_dir: str = CONDOR_DIR, branch: str = ""
+) -> list[str] | None:
     """Files the pending fast-forward would write, ``HEAD..origin/<branch>``.
 
     This is the half of the question that matters. "Is the tree clean" blocks
     forever on a checkout that is also a runtime working directory; "would the
     incoming commits clobber something local" is answerable, and is almost
     always no.
+
+    ``None`` means the question could not be answered -- no remote ref, a
+    shallow clone, a broken checkout -- and is emphatically *not* the empty
+    list. The empty list says "this update brings in nothing that could clash";
+    ``None`` says "nobody knows what it brings in", and a caller that reads the
+    second as the first waves through precisely the update it was asked to
+    gate. Same convention as
+    :func:`condor.updates.components.running_executor_count`.
     """
     branch = branch or await get_current_branch(repo_dir)
     rc, out = await _run_git(
         "diff", "--name-only", f"HEAD..origin/{branch}", repo_dir=repo_dir
     )
     if rc != 0:
-        # Unresolvable diff (no remote ref, shallow clone): treat every dirty
-        # path as potentially conflicting rather than waving the update through.
         logger.warning("Could not diff HEAD..origin/%s in %s", branch, repo_dir)
-        return []
+        return None
     return list(_lines(out))
 
 

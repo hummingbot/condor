@@ -1,6 +1,6 @@
 """What blocks an update, and what an update is actually measuring.
 
-Two defects are pinned here. The first: ``/update`` used to refuse whenever
+Three defects are pinned here. The first: ``/update`` used to refuse whenever
 ``git status --porcelain`` printed anything, which includes untracked files. The
 hummingbot-api checkout is bind-mounted into its own container, so it re-dirties
 itself by running — that guard blocked forever, by construction. The question is
@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from condor.updates import components
+from utils import updater
 from utils.updater import DirtyState
 
 
@@ -28,12 +29,23 @@ def _component(key=components.HUMMINGBOT_API, repo_dir="/tmp/repo"):
     )
 
 
-def _blocks(*, dirty: DirtyState, incoming: list[str], ahead: int = 0, is_repo=True):
-    """Run the blocker policy against a synthetic working tree."""
+def _blocks(
+    *,
+    dirty: DirtyState,
+    incoming: list[str] | None,
+    ahead: int = 0,
+    is_repo=True,
+    fetched=True,
+):
+    """Run the blocker policy against a synthetic working tree.
+
+    ``incoming=None`` stands for a diff that did not resolve, ``fetched=False``
+    for a remote that could not be reached -- neither is an empty diff.
+    """
     with patch.multiple(
         "utils.updater",
         is_git_repo=AsyncMock(return_value=is_repo),
-        fetch=AsyncMock(return_value=(True, "")),
+        fetch=AsyncMock(return_value=(fetched, "" if fetched else "no such remote")),
         get_current_branch=AsyncMock(return_value="main"),
         ahead_count=AsyncMock(return_value=ahead),
         dirty_state=AsyncMock(return_value=dirty),
@@ -139,6 +151,57 @@ def test_nothing_incoming_means_nothing_can_conflict():
         incoming=[],
     )
     assert blocks == []
+
+
+# ---------------------------------------------------------------------------
+# An unanswered question is not an answer of "no"
+# ---------------------------------------------------------------------------
+
+
+def test_an_empty_diff_and_an_unresolvable_one_do_not_land_in_the_same_place():
+    """The defect, pinned as a contrast: [] cleared the update, and so did failure.
+
+    ``incoming_paths`` used to return ``[]`` for a diff that never ran, which
+    ``repo_blocks`` read as "nothing is coming in" and therefore "nothing is in
+    the way" — a failure that green-lit the very fast-forward it was asked to
+    gate. Same dirty tree, two different states, two different verdicts.
+    """
+    dirty = DirtyState(modified=("environment.yml",))
+
+    assert _blocks(dirty=dirty, incoming=[]) == []
+
+    blocks = _blocks(dirty=dirty, incoming=None)
+    assert [b.code for b in blocks] == ["incoming-unknown"]
+    assert blocks[0].resolutions == ["cancel"]
+    assert blocks[0].paths == []
+    assert "origin/main" in blocks[0].message
+
+
+def test_a_fetch_that_failed_blocks_rather_than_judging_from_a_stale_ref():
+    """No fetch, no basis: the incoming set below it would be about yesterday."""
+    blocks = _blocks(dirty=DirtyState(), incoming=[], fetched=False)
+    assert [b.code for b in blocks] == ["incoming-unknown"]
+    assert blocks[0].resolutions == ["cancel"]
+
+
+def test_an_unresolvable_diff_blocks_even_on_a_pristine_tree():
+    """Nothing dirty to clobber today, but nobody checked what lands tomorrow."""
+    blocks = _blocks(dirty=DirtyState(), incoming=None)
+    assert [b.code for b in blocks] == ["incoming-unknown"]
+
+
+def test_incoming_paths_returns_none_when_the_diff_fails():
+    """The primitive's half of the contract: rc != 0 is None, never []."""
+    with patch.object(
+        updater, "_run_git", AsyncMock(return_value=(128, ""))
+    ) as run_git:
+        assert asyncio.run(updater.incoming_paths("/tmp/repo", "main")) is None
+    assert run_git.await_args.args == ("diff", "--name-only", "HEAD..origin/main")
+
+
+def test_incoming_paths_returns_an_empty_list_when_the_diff_is_empty():
+    with patch.object(updater, "_run_git", AsyncMock(return_value=(0, "\n"))):
+        assert asyncio.run(updater.incoming_paths("/tmp/repo", "main")) == []
 
 
 def test_the_real_hummingbot_api_tree_blocks_on_at_most_environment_yml():
