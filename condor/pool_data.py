@@ -1239,7 +1239,7 @@ async def fetch_ohlcv(
             # request was open, and merging into a detached object would throw
             # the answer away.
             series = _get_series(series_key)
-            series.merge(rows, req_limit, req_before)
+            series.merge(rows, req_limit, req_before, timeframe_seconds(timeframe))
 
         served = series.slice(end, limit)
         if not served:
@@ -1361,25 +1361,33 @@ class _CandleSeries:
 
     Coverage is tracked rather than inferred, for the same reason — a gap in the
     middle is indistinguishable from missing data unless we remember what we
-    actually asked for:
+    actually asked for. It is a single *interval*, not a ceiling, because a
+    request can land anywhere: the distant-jump below reaches a closed window ten
+    days back in one call, and a live poll only ever buys the newest page, so the
+    two together would otherwise look like one contiguous stretch with an
+    unfetched week in the middle.
 
-    * ``covered_to`` — the newest timestamp this series is known *complete* up to.
-      A fetch returns every candle upstream has before its ``before_timestamp``,
-      so that bound becomes fact: a later window ending at or before it is
-      answered from memory, forever, no matter how stale the series is.
+    * ``covered_from`` / ``covered_to`` — the span this series is known
+      *complete* over. A fetch returns every candle upstream has between the
+      oldest row it answered with and its ``before_timestamp``, so those bounds
+      become fact: a later window inside them is answered from memory, forever,
+      no matter how stale the series is. A fetch that lands clear of the interval
+      *replaces* it rather than widening it — one honest block beats two blocks
+      pretending to be one.
     * ``exhausted`` — upstream returned fewer rows than the maximum asked for, so
-      there is no more history behind ``oldest``. Without this a chart of a pool
-      younger than its window would re-ask for the same missing history on every
-      single render.
+      there is no more history behind ``oldest``: the covered interval reaches
+      down forever. Without this a chart of a pool younger than its window would
+      re-ask for the same missing history on every single render.
     * ``tail_fetched_at`` — when the *live* edge (``before_timestamp=None``) was
       last refreshed. Only a historical fetch leaves this untouched, so a series
       built from a closed window never poses as a fresh live one.
     """
 
-    __slots__ = ("rows", "covered_to", "exhausted", "tail_fetched_at")
+    __slots__ = ("rows", "covered_from", "covered_to", "exhausted", "tail_fetched_at")
 
     def __init__(self) -> None:
         self.rows: Dict[float, List] = {}
+        self.covered_from: float = math.inf
         self.covered_to: float = 0.0
         self.exhausted: bool = False
         self.tail_fetched_at: float = 0.0
@@ -1392,8 +1400,11 @@ class _CandleSeries:
     def newest(self) -> Optional[float]:
         return max(self.rows) if self.rows else None
 
-    def merge(self, fetched: List, requested: int, before: Optional[int]) -> None:
+    def merge(
+        self, fetched: List, requested: int, before: Optional[int], tf_seconds: float
+    ) -> None:
         """Fold an upstream answer in, and record what it proves about the edges."""
+        block: Dict[float, List] = {}
         kept = 0
         for row in fetched:
             if not isinstance(row, (list, tuple)) or len(row) < 6:
@@ -1402,32 +1413,62 @@ class _CandleSeries:
                 ts = float(row[0])
             except (TypeError, ValueError):
                 continue
-            self.rows[ts] = list(row)
+            block[ts] = list(row)
             kept += 1
 
         # Upstream answers with the newest `requested` candles before `before`,
-        # so a short answer means it has nothing older left to give.
-        if kept < requested:
-            self.exhausted = True
-        # Everything up to the request's ceiling is now known — including the
-        # buckets that came back empty, which is what lets a gappy pool be served
-        # from memory instead of re-asked forever.
+        # so a short answer means it has nothing older left to give: this block
+        # reaches all the way down.
+        short = kept < requested
+        # Everything between the block's floor and the request's ceiling is now
+        # known — including the buckets that came back empty, which is what lets
+        # a gappy pool be served from memory instead of re-asked forever.
         ceiling = float(before) if before else time.time()
-        self.covered_to = max(self.covered_to, ceiling)
+        floor = -math.inf if short else (min(block) if block else ceiling)
+
+        # A block clear of what we already hold leaves an unfetched gap between
+        # the two, and a series that claimed the gap would answer a window inside
+        # it with rows from the wrong period. Keep the new block alone instead —
+        # the same one request any cold read costs. (An answer with no usable
+        # rows proves nothing worth throwing a warm series away for.)
+        disjoint = (
+            bool(self.rows)
+            and bool(block)
+            and (
+                floor > self.covered_to + tf_seconds
+                or ceiling < self.covered_from - tf_seconds
+            )
+        )
+        if disjoint:
+            self.rows = block
+            self.covered_from = floor
+            self.covered_to = ceiling
+            self.exhausted = short
+            # The rows just dropped included whatever live edge we held, so the
+            # series is no longer a fresh one until a live fetch says so below.
+            self.tail_fetched_at = 0.0
+        else:
+            self.rows.update(block)
+            self.covered_from = min(self.covered_from, floor)
+            self.covered_to = max(self.covered_to, ceiling)
+            if short:
+                self.exhausted = True
         if not before:
             self.tail_fetched_at = time.time()
 
-        # Trim oldest-first: the live edge is what every caller shares.
+        # Trim oldest-first: the live edge is what every caller shares. The rows
+        # dropped are no longer covered, so the floor rises with them.
         if len(self.rows) > _SERIES_MAX_ROWS:
             for ts in sorted(self.rows)[: len(self.rows) - _SERIES_MAX_ROWS]:
                 del self.rows[ts]
+            self.covered_from = min(self.rows)
             self.exhausted = False
 
     def serves(self, oldest_wanted: float, end: float, use_cache: bool) -> bool:
         """Whether this series can answer ``[oldest_wanted, end]`` on its own."""
         if not self.rows:
             return False
-        deep_enough = self.exhausted or self.oldest <= oldest_wanted
+        deep_enough = self.exhausted or self.covered_from <= oldest_wanted
         if not deep_enough:
             return False
         # A window that has already closed is immutable — age is irrelevant.

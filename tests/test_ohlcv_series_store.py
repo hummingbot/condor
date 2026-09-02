@@ -260,3 +260,91 @@ def test_a_distant_closed_window_lands_in_one_request(monkeypatch):
     assert len(rows) == 300
     assert len(calls) == 2, "one request for the tail, one for the distant window"
     assert calls[1][1] == far, "which goes straight to the window, not paging down"
+
+
+# ── two blocks with a gap between them are not one covered stretch ──
+
+
+def _assert_window(rows, end, limit):
+    """Every row lies inside the window that was actually asked for."""
+    assert len(rows) == limit
+    oldest_wanted = end - limit * MINUTE
+    stray = [r[0] for r in rows if not oldest_wanted <= r[0] <= end]
+    assert not stray, f"rows from outside the requested window: {stray[:3]}"
+
+
+def test_a_window_between_two_fetched_blocks_is_not_served_from_either(monkeypatch):
+    """Last month's executor, then the live chart — a week sits unfetched between.
+
+    The distant jump and the live poll each buy one page, so the series holds two
+    blocks with a gap. A window inside that gap has never been fetched and must
+    not be answered with the tail of the older block.
+    """
+    gecko = _Gecko(total=20000)
+    far = int(gecko.now - 10 * 86400)
+    gap = int(gecko.now - 3 * 86400)
+
+    async def scenario():
+        monkeypatch.setattr(pool_data, "gecko_call", gecko)
+        await pool_data.fetch_ohlcv(
+            POOL, NET, timeframe="1m", limit=300, before_timestamp=far
+        )
+        await pool_data.fetch_ohlcv(POOL, NET, timeframe="1m", limit=500)
+        rows, _ = await pool_data.fetch_ohlcv(
+            POOL, NET, timeframe="1m", limit=100, before_timestamp=gap
+        )
+        return rows, gecko.calls
+
+    rows, calls = run(scenario())
+    assert len(calls) == 3, "the gap was never fetched; it has to cost a request"
+    assert calls[2][1] == gap, "and the request goes straight to the missing window"
+    _assert_window(rows, gap, 100)
+
+
+def test_the_gap_holds_in_the_other_order_too(monkeypatch):
+    """The same two blocks, live chart first — the gap is just as unfetched."""
+    gecko = _Gecko(total=20000)
+    far = int(gecko.now - 10 * 86400)
+    gap = int(gecko.now - 3 * 86400)
+
+    async def scenario():
+        monkeypatch.setattr(pool_data, "gecko_call", gecko)
+        await pool_data.fetch_ohlcv(POOL, NET, timeframe="1m", limit=500)
+        await pool_data.fetch_ohlcv(
+            POOL, NET, timeframe="1m", limit=300, before_timestamp=far
+        )
+        rows, _ = await pool_data.fetch_ohlcv(
+            POOL, NET, timeframe="1m", limit=100, before_timestamp=gap
+        )
+        return rows, gecko.calls
+
+    rows, calls = run(scenario())
+    assert len(calls) == 3, "the gap was never fetched; it has to cost a request"
+    assert calls[2][1] == gap, "and the request goes straight to the missing window"
+    _assert_window(rows, gap, 100)
+
+
+def test_a_contiguous_walk_back_still_costs_one_request_per_page(monkeypatch):
+    """The other half of the rule: no gap, so nothing is re-bought or thrown away.
+
+    Two pages walked back-to-back abut, so they stay one block — and a window in
+    the middle of that block is free, and drawn from the right period.
+    """
+    gecko = _Gecko(total=6000)
+    inside = int(gecko.now - 1500 * MINUTE)
+
+    async def scenario():
+        monkeypatch.setattr(pool_data, "gecko_call", gecko)
+        await pool_data.fetch_ohlcv(POOL, NET, timeframe="1m", limit=900)
+        # Past the first page: one more request, walking back from the oldest row.
+        await pool_data.fetch_ohlcv(POOL, NET, timeframe="1m", limit=1000)
+        # A window well inside the two pages: already fetched, so already answered.
+        rows, _ = await pool_data.fetch_ohlcv(
+            POOL, NET, timeframe="1m", limit=400, before_timestamp=inside
+        )
+        return rows, gecko.calls
+
+    rows, calls = run(scenario())
+    assert len(calls) == 2, f"one request per page and not one more: {calls}"
+    assert calls[0][1] is None and calls[1][1] is not None, "the second walks back"
+    _assert_window(rows, inside, 400)
