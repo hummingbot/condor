@@ -21,6 +21,7 @@ import asyncio
 import logging
 import time
 from collections import OrderedDict
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -440,6 +441,38 @@ class SnapshotSummary(BaseModel):
     tick: int
     timestamp: str = ""
     file: str = ""
+
+
+# ── The fleet map (FEAT-096) ──
+# The wire shape of condor.agents.fleet_map's dataclasses; see that module for
+# what each field is and why the map is cheap enough for the bots page to poll.
+
+
+class LiveLoopModel(BaseModel):
+    agent_id: str
+    session_num: int = 0
+    status: str = ""
+    tick_count: int = 0
+    last_tick_at: float = 0.0
+    frequency_sec: int = 60
+    last_action: str = ""
+    last_error: str = ""
+
+
+class FleetOwnerModel(BaseModel):
+    run_key: str
+    agent_slug: str
+    agent_name: str
+    strategy_slug: str
+    strategy_name: str
+    namespace: str
+    declared_bots: list[str] = []
+    agent_ids: list[str] = []
+    live: LiveLoopModel | None = None
+
+
+class FleetMapResponse(BaseModel):
+    owners: list[FleetOwnerModel] = []
 
 
 class CreateAgentRequest(BaseModel):
@@ -1044,6 +1077,28 @@ def _visible_record(task_id: str, user: WebUser) -> dict:
     if not _can_see_delegation(record, user):
         raise HTTPException(status_code=403, detail="Not your delegation")
     return record
+
+
+@router.get("/fleet-map", response_model=FleetMapResponse)
+async def get_fleet_map(user: WebUser = Depends(get_current_user)):
+    """Who owns which trading, and what their loop is doing (FEAT-096).
+
+    The join key the ``/bots`` browser groups by: one row per
+    ``(agent, strategy)``, carrying the namespace that proves bot ownership, the
+    agent ids that tag standalone executors, and the live loop's state.
+
+    Deliberately *not* part of ``GET /agents``, which fans out a performance
+    fetch per session of every strategy and is the most expensive read in the
+    app. This one makes **no Hummingbot API call at all** — a memoised directory
+    walk plus the in-memory loop registry — so the bots page can poll it.
+
+    A literal path, and so registered before the ``/{slug}`` catch-all above.
+    """
+    from condor.agents.fleet_map import build_fleet_map
+
+    return FleetMapResponse(
+        owners=[FleetOwnerModel(**asdict(owner)) for owner in build_fleet_map()]
+    )
 
 
 @router.get("/delegations")
