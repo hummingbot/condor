@@ -16,6 +16,7 @@ import {
   Square,
   TerminalSquare,
   Trash2,
+  X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useSearchParams } from "react-router-dom";
@@ -55,10 +56,12 @@ import {
   toMs,
 } from "@/lib/formatters";
 import {
+  ancestorChain,
+  botOfNodeId,
   buildTree,
   collectLeaves,
   controllerClassOf,
-  controllerNodeId,
+  countNodes,
   foldLeaves,
   indexTree,
   leafFromController,
@@ -69,6 +72,7 @@ import {
   runStatus,
   UNATTACHED_BOT,
   visibleNodeIds,
+  type PerfNode,
   type Population,
   type PerfLeaf,
 } from "@/lib/perf-tree";
@@ -395,6 +399,10 @@ export function PerfBrowser({
   // nineteen executors would open on all hundred and nineteen if shut had to be
   // asked for. The root is the one row that starts open.
   const [open, setOpen] = useState<Set<string>>(() => new Set([FLEET_SCOPE]));
+  // The other half of the same record: which branches the reader has *closed*.
+  // Needed only because bot rows are drawn open by default (see `openRows`), so
+  // absence from `open` cannot mean shut for them.
+  const [shut, setShut] = useState<Set<string>>(() => new Set());
   const [showDeploy, setShowDeploy] = useState(false);
   // The editor is mounted from the first time it is opened and stays mounted
   // (hidden) after that, so its unsaved buffers survive closing it — the same
@@ -798,9 +806,20 @@ export function PerfBrowser({
     [],
   );
 
+  /**
+   * Whether the tree spends a level on the bot.
+   *
+   * Only when there is more than one to tell apart: a fleet running a single
+   * bot would put every controller behind a chevron to say what the header
+   * already says. With two or more, the level is what gives Stop somewhere
+   * obvious to live — before it, the reader had to narrow the bubbles down to
+   * one bot before the fleet row became that bot and grew the button.
+   */
+  const groupByBot = !soloBot;
+
   const tree = useMemo(
-    () => buildTree(leaves, rootLabel(population, soloRealBot)),
-    [leaves, population, soloRealBot, rootLabel],
+    () => buildTree(leaves, rootLabel(population, soloRealBot), { groupByBot }),
+    [leaves, population, soloRealBot, rootLabel, groupByBot],
   );
   const nodes = useMemo(() => indexTree(tree), [tree]);
 
@@ -815,7 +834,10 @@ export function PerfBrowser({
    */
   const scopeCounts = useMemo(
     () => ({
-      controllers: tree.children.filter((node) => node.kind === "controller").length,
+      // Counted over the whole tree rather than the fleet's own children: with
+      // the bot level on, every controller is a grandchild.
+      bots: countNodes(tree, "bot"),
+      controllers: countNodes(tree, "controller"),
       executors: collectLeaves(tree, "executor").length,
     }),
     [tree],
@@ -828,6 +850,16 @@ export function PerfBrowser({
   // `resolveScope`, which reads that ancestry out of the id itself).
   const effectiveScopeId = useMemo(() => resolveScope(nodes, scopeId), [nodes, scopeId]);
   const scope = useMemo(() => nodes.get(effectiveScopeId) ?? tree, [nodes, effectiveScopeId, tree]);
+
+  /**
+   * The one bot this scope is about, whichever way it got there.
+   *
+   * A bot row selects it outright; a fleet row narrowed to one bot by the
+   * bubbles still *is* that bot's report, and keeps the actions it had before
+   * the row came back (a single-bot fleet draws no bot level at all).
+   */
+  const scopeBotName =
+    scope.kind === "bot" ? botOfNodeId(scope.id) : scope.kind === "fleet" ? soloRealBot : undefined;
   /** Whether the panes are reporting the whole scope — what lights the Select all button. */
   const atFleet = effectiveScopeId === FLEET_SCOPE;
 
@@ -998,9 +1030,7 @@ export function PerfBrowser({
    * one run*. Undefined for `(unattached)`, which is not a run and has neither.
    */
   const activeRun =
-    population === "terminated" && scope.kind === "fleet" && soloRealBot
-      ? runByBot.get(soloRealBot)
-      : undefined;
+    population === "terminated" && scopeBotName ? runByBot.get(scopeBotName) : undefined;
 
   /** The executors under this scope, whatever level it sits at. */
   const scopedExecutors = useMemo(
@@ -1100,10 +1130,7 @@ export function PerfBrowser({
 
   // ── What a single-bot scope owns: the bot itself, its logs, and stopping it ──
 
-  const activeBot =
-    scope.kind === "fleet" && soloRealBot
-      ? bots.find((b) => b.bot_name === soloRealBot)
-      : undefined;
+  const activeBot = scopeBotName ? bots.find((b) => b.bot_name === scopeBotName) : undefined;
   const botStopping = activeBot?.status === "stopping";
 
   // The bot is the mutation's argument rather than something it reads off the
@@ -1123,6 +1150,75 @@ export function PerfBrowser({
     stopBotMutation.isError && stopBotMutation.variables === activeBot?.bot_name;
 
   const stopArmed = !!activeBot && confirmStopBot === activeBot.bot_name;
+
+  /**
+   * The Stop button a bot row carries, beside its name in the sidebar.
+   *
+   * This is the whole point of the bot level. Stopping used to be reachable
+   * only from the report header, and only once the bubbles had narrowed the
+   * fleet to a single bot — a filter interaction standing in for "stop that
+   * one", which nobody found. The row is where the reader already is, so the
+   * button is there too, and it arms the same `confirmStopBot` the header does:
+   * a bot armed from either place is armed in both, and confirming from either
+   * posts once.
+   *
+   * Drawn only for a bot the fleet still reports as live. A terminated row's
+   * deployment is gone, and a Stop that could only ever 404 is worse than none.
+   */
+  const renderBotAction = useCallback(
+    (node: PerfNode) => {
+      if (node.kind !== "bot") return null;
+      const botName = botOfNodeId(node.id);
+      const bot = botName ? bots.find((b) => b.bot_name === botName) : undefined;
+      if (!bot) return null;
+
+      const pending = stopBotMutation.isPending && stopBotMutation.variables === bot.bot_name;
+      if (bot.status === "stopping" || pending) {
+        return (
+          <span
+            className="h-3.5 w-3.5 animate-spin rounded-full border-[1.5px] border-[var(--color-yellow)] border-t-transparent"
+            title="Stopping…"
+          />
+        );
+      }
+
+      if (confirmStopBot === bot.bot_name) {
+        return (
+          <span className="flex items-center gap-0.5">
+            <button
+              type="button"
+              onClick={() => stopBotMutation.mutate(bot.bot_name)}
+              className="rounded bg-[var(--color-red)] px-1.5 py-0.5 text-[9px] font-semibold text-white transition-opacity hover:opacity-90"
+              title={`Stop ${bot.bot_name} — this cancels its orders and shuts the container down`}
+            >
+              Stop
+            </button>
+            <button
+              type="button"
+              onClick={() => setConfirmStopBot(null)}
+              className="rounded p-0.5 text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-text)]"
+              title="Cancel"
+            >
+              <X className="h-3 w-3" />
+            </button>
+          </span>
+        );
+      }
+
+      return (
+        <button
+          type="button"
+          onClick={() => setConfirmStopBot(bot.bot_name)}
+          className="rounded p-1 text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-red)]/10 hover:text-[var(--color-red)]"
+          title={`Stop ${bot.bot_name}`}
+          aria-label={`Stop ${bot.bot_name}`}
+        >
+          <Square className="h-3 w-3" />
+        </button>
+      );
+    },
+    [bots, confirmStopBot, stopBotMutation],
+  );
 
   // Deleting a finished run: irreversible, and the only door to it now that the
   // runs table is gone, so it keeps the table's arm-then-confirm.
@@ -1163,15 +1259,15 @@ export function PerfBrowser({
 
   // ── Keyboard navigation over the picker, in the order it is drawn ──
 
-  /** The controller the selected row hangs under, when the selection is an executor. */
-  const selectedParent = useMemo(() => {
-    const node = nodes.get(effectiveScopeId);
-    return node?.kind === "executor" ? controllerNodeId(node.leaves[0]) : null;
-  }, [nodes, effectiveScopeId]);
+  /** Every branch the selected row hangs inside, nearest first. */
+  const selectedAncestors = useMemo(
+    () => ancestorChain(tree, effectiveScopeId).slice(1),
+    [tree, effectiveScopeId],
+  );
 
   /**
-   * What is actually drawn open, which is what the reader opened *plus* the
-   * branch holding the selection.
+   * What is actually drawn open: the reader's own record, plus the branches
+   * holding the selection, plus the bot rows they have not shut.
    *
    * A controller starts shut, so a `?scope=exec:…` link — or a scope that
    * survived a filter change by falling back to its controller — would land on
@@ -1179,26 +1275,43 @@ export function PerfBrowser({
    * in the picker, and unreachable by the arrow keys, which walk what is drawn.
    * Derived rather than written back into `open` from an effect, so the state
    * stays the reader's own record of what they opened.
+   *
+   * Bot rows are the one level that starts *open*, and `shut` is what records
+   * closing one. Shut-by-default would mean the level cost the reader a click
+   * per bot before they saw a single controller — the exact charge that retired
+   * the old grouping level (see `buildTree`). The Stop button is on the bot row
+   * either way, so folding a bot away loses nothing but its controllers.
    */
-  const openRows = useMemo(
-    () => (selectedParent && !open.has(selectedParent) ? new Set(open).add(selectedParent) : open),
-    [open, selectedParent],
-  );
+  const openRows = useMemo(() => {
+    const drawn = new Set(open);
+    for (const node of nodes.values()) {
+      if (node.kind === "bot" && !shut.has(node.id)) drawn.add(node.id);
+    }
+    for (const id of selectedAncestors) drawn.add(id);
+    return drawn;
+  }, [open, shut, nodes, selectedAncestors]);
 
   const toggleOpen = useCallback(
     (id: string) => {
+      const isOpen = openRows.has(id);
       setOpen((prev) => {
         const next = new Set(prev);
-        if (next.has(id)) next.delete(id);
+        if (isOpen) next.delete(id);
         else next.add(id);
+        return next;
+      });
+      setShut((prev) => {
+        const next = new Set(prev);
+        if (isOpen) next.add(id);
+        else next.delete(id);
         return next;
       });
       // Shutting the branch that holds the selection takes the selection up
       // with it. Without this the row would be hidden and re-opened in the same
       // click by `openRows`, and the chevron would read as broken.
-      if (selectedParent === id && openRows.has(id)) setScope(id);
+      if (isOpen && selectedAncestors.includes(id)) setScope(id);
     },
-    [selectedParent, openRows, setScope],
+    [openRows, selectedAncestors, setScope],
   );
 
   const navItems = useMemo(() => visibleNodeIds(tree, openRows), [tree, openRows]);
@@ -1457,11 +1570,11 @@ export function PerfBrowser({
         ? `executor ${activeExec.id} (${activeExec.type}, ${activeExec.trading_pair})`
         : activeRun
           ? `the finished run of bot ${activeRun.bot_name}`
-          : scope.kind === "fleet"
-            ? soloRealBot
-              ? `${plural(scope.leaves.length, scopeNoun)} of bot ${soloRealBot}`
-              : `all ${plural(scope.leaves.length, scopeNoun)} in scope`
-            : `${plural(scope.leaves.length, scopeNoun)} under ${scope.kind} "${scope.label}"`;
+          : scopeBotName
+            ? `${plural(scope.leaves.length, scopeNoun)} of bot ${scopeBotName}`
+            : scope.kind === "fleet"
+              ? `all ${plural(scope.leaves.length, scopeNoun)} in scope`
+              : `${plural(scope.leaves.length, scopeNoun)} under ${scope.kind} "${scope.label}"`;
 
     return {
       // The same label the route entry uses, so the cache's half of this screen
@@ -1497,7 +1610,7 @@ export function PerfBrowser({
       ? population === "terminated"
         ? "Closed PnL"
         : "Fleet PnL"
-      : `${scope.label} PnL`;
+      : `${scope.kind === "bot" ? shortBotName(scope.label) : scope.label} PnL`;
   // Where the curve came from, said rather than assumed. The selection is pure
   // over these facts, so it lives in lib/perf-notices.ts where a test can
   // reach it (ARCH-300); what stays here is only the reading of the facts.
@@ -1663,6 +1776,7 @@ export function PerfBrowser({
             ) : (
               <div className="flex items-center gap-1.5 px-2 py-1.5">
                 <span className="truncate text-[10px] tabular-nums text-[var(--color-text-muted)]">
+                  {scopeCounts.bots > 0 && `${plural(scopeCounts.bots, "bot")} · `}
                   {plural(scopeCounts.controllers, "controller")}
                   {scopeCounts.executors > 0 && ` · ${plural(scopeCounts.executors, "executor")}`}
                 </span>
@@ -1688,13 +1802,14 @@ export function PerfBrowser({
             root={tree}
             activeId={effectiveScopeId}
             open={openRows}
-            showBot={!soloBot}
+            showBot={!soloBot && !groupByBot}
             onSelect={setScope}
             onToggleOpen={toggleOpen}
             cv={cv}
             currencySymbol={currencySymbol}
             now={now}
             compact={isCompact}
+            renderAction={isCompact ? undefined : renderBotAction}
           />
         </div>
 
@@ -1853,16 +1968,16 @@ export function PerfBrowser({
               // header for all of them: what it is, and what it folds.
               <div className="truncate">
                 <h2 className="text-sm font-semibold truncate flex items-center gap-2">
-                  {soloRealBot && scope.kind === "fleet" ? (
+                  {scopeBotName ? (
                     <Server className="h-3.5 w-3.5 shrink-0 text-[var(--color-text-muted)]" />
                   ) : (
                     <Layers className="h-3.5 w-3.5 shrink-0 text-[var(--color-text-muted)]" />
                   )}
-                  <span className="truncate" title={soloRealBot ?? scope.label}>
-                    {scope.kind !== "fleet"
-                      ? scope.label
-                      : soloRealBot
-                        ? shortBotName(soloRealBot)
+                  <span className="truncate" title={scopeBotName ?? scope.label}>
+                    {scopeBotName
+                      ? shortBotName(scopeBotName)
+                      : scope.kind !== "fleet"
+                        ? scope.label
                         : population === "running"
                           ? "All controllers combined"
                           : "Everything that has finished"}

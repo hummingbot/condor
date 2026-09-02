@@ -14,9 +14,12 @@ import type { BotRunInfo, ControllerInfo, ExecutorInfo } from "./api";
 import {
   UNATTACHED_BOT,
   ancestorChain,
+  botNodeId,
+  botOfNodeId,
   buildTree,
   controllerClassOf,
   controllerNodeId,
+  countNodes,
   foldLeaves,
   indexTree,
   leafFromController,
@@ -368,6 +371,118 @@ describe("buildTree", () => {
       const ctrl = node(buildTree(leaves), "ctrl:alpha:pmm_1");
     expect(ctrl.leaves.map((l) => l.kind)).toEqual(["controller"]);
     expect(ctrl.children).toHaveLength(1);
+  });
+});
+
+describe("buildTree, grouping by bot", () => {
+  const twoBots = () => [
+    leafFromController(controller({ bot_name: "alpha", controller_id: "pmm_1" })),
+    leafFromController(controller({ bot_name: "alpha", controller_id: "pmm_2" })),
+    leafFromController(
+      controller({ bot_name: "beta", controller_id: "grid_1", controller_name: "grid_strike" }),
+    ),
+  ];
+
+  it("puts each bot's controllers under a row of its own", () => {
+    const tree = buildTree(twoBots(), "All", { groupByBot: true });
+
+    expect(tree.children.map((c) => c.id)).toEqual(["bot:alpha", "bot:beta"]);
+    expect(node(tree, "bot:alpha").children.map((c) => c.id)).toEqual([
+      "ctrl:alpha:pmm_1",
+      "ctrl:alpha:pmm_2",
+    ]);
+    expect(node(tree, "bot:beta").children.map((c) => c.id)).toEqual(["ctrl:beta:grid_1"]);
+  });
+
+  // The Stop button on the row posts this, so it must be the name the API
+  // knows rather than the shortened one the sidebar draws.
+  it("labels a bot row with the bot's full name", () => {
+    const tree = buildTree(
+      [leafFromController(controller({ bot_name: "hummingbot-alpha-1" }))],
+      "All",
+      { groupByBot: true },
+    );
+    expect(node(tree, "bot:hummingbot-alpha-1").label).toBe("hummingbot-alpha-1");
+    expect(botOfNodeId("bot:hummingbot-alpha-1")).toBe("hummingbot-alpha-1");
+    expect(botOfNodeId("ctrl:hummingbot-alpha-1:pmm_1")).toBe("hummingbot-alpha-1");
+    expect(botOfNodeId("exec:abc")).toBeNull();
+  });
+
+  // The level must not become a second place the same trading is counted: a
+  // bot node carries no leaf of its own, so it folds its controllers' spines.
+  it("folds a bot out of its controllers, once each", () => {
+    const tree = buildTree(twoBots(), "All", { groupByBot: true });
+    expect(foldLeaves(node(tree, "bot:alpha").leaves, identity, NOW).net).toBe(24);
+    expect(foldLeaves(tree.leaves, identity, NOW).net).toBe(36);
+  });
+
+  // A hand-opened position belongs to no deployment, so there is no bot to
+  // stop and no row to hang it under.
+  it("leaves an executor that belongs to no controller off the fleet directly", () => {
+    const leaf = leafFromExecutor(executor({ id: "manual", controller_id: "main" }));
+    expect(botNodeId(leaf)).toBeNull();
+    const tree = buildTree(
+      [leafFromController(controller()), leaf],
+      "All",
+      { groupByBot: true },
+    );
+    expect(tree.children.map((c) => c.id)).toEqual(["bot:alpha", "exec:manual"]);
+  });
+
+  it("counts controllers wherever they sit, flat or grouped", () => {
+    expect(countNodes(buildTree(twoBots()), "controller")).toBe(3);
+    expect(countNodes(buildTree(twoBots(), "All", { groupByBot: true }), "controller")).toBe(3);
+    expect(countNodes(buildTree(twoBots(), "All", { groupByBot: true }), "bot")).toBe(2);
+    expect(countNodes(buildTree(twoBots()), "bot")).toBe(0);
+  });
+
+  it("walks bot rows before their controllers, and hides shut ones", () => {
+    const tree = buildTree(twoBots(), "All", { groupByBot: true });
+    expect(visibleNodeIds(tree, new Set(["all"]))).toEqual(["all", "bot:alpha", "bot:beta"]);
+    expect(visibleNodeIds(tree, new Set(["all", "bot:alpha"]))).toEqual([
+      "all",
+      "bot:alpha",
+      "ctrl:alpha:pmm_1",
+      "ctrl:alpha:pmm_2",
+      "bot:beta",
+    ]);
+  });
+
+  // A filter that removes a controller should leave the reader on the bot that
+  // ran it, not all the way back on the fleet.
+  it("falls back from a lost controller to its bot when the tree has one", () => {
+    const grouped = indexTree(
+      buildTree(
+        [leafFromController(controller({ controller_id: "other" }))],
+        "All",
+        { groupByBot: true },
+      ),
+    );
+    expect(resolveScope(grouped, "ctrl:alpha:pmm_1")).toBe("bot:alpha");
+
+    // ...and all the way back when it does not, which is the flat tree's answer.
+    const flat = indexTree(buildTree([leafFromController(controller({ controller_id: "other" }))]));
+    expect(resolveScope(flat, "ctrl:alpha:pmm_1")).toBe("all");
+  });
+
+  // A bot scope is shallower than a controller, so it must never fall *into*
+  // one of its own controllers — that is a much narrower report.
+  it("never resolves a bot scope down into one of its controllers", () => {
+    const other = indexTree(
+      buildTree([leafFromController(controller({ bot_name: "beta" }))], "All", {
+        groupByBot: true,
+      }),
+    );
+    expect(resolveScope(other, "bot:alpha")).toBe("all");
+  });
+
+  it("walks a controller up through its bot to the fleet", () => {
+    const tree = buildTree(twoBots(), "All", { groupByBot: true });
+    expect(ancestorChain(tree, "ctrl:alpha:pmm_2")).toEqual([
+      "ctrl:alpha:pmm_2",
+      "bot:alpha",
+      "all",
+    ]);
   });
 });
 

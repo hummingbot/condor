@@ -314,10 +314,10 @@ export function controllerClassOf(leaf: PerfLeaf, classById: Map<string, string>
 
 // ── The tree ──
 
-export type NodeKind = "fleet" | "controller" | "executor";
+export type NodeKind = "fleet" | "bot" | "controller" | "executor";
 
 export interface PerfNode {
-  /** `all` | `ctrl:k` | `exec:id` */
+  /** `all` | `bot:name` | `ctrl:k` | `exec:id` */
   id: string;
   kind: NodeKind;
   label: string;
@@ -348,6 +348,33 @@ export function controllerNodeId(leaf: PerfLeaf): string | null {
   return `ctrl:${leaf.bot}:${leaf.controllerId}`;
 }
 
+/**
+ * The node id of the bot a leaf hangs under, or `null` for a leaf that hangs
+ * under none.
+ *
+ * "None" is exactly the leaf that belongs to no controller either — a position
+ * opened by hand from `/trade`, filed under its own controller id as its bot
+ * (see {@link leafFromExecutor}). There is no deployment behind it to stop, so
+ * grouping it under a bot row would offer a Stop button for a bot that does not
+ * exist; it hangs off the fleet, as it did before the level came back.
+ */
+export function botNodeId(leaf: PerfLeaf): string | null {
+  return controllerNodeId(leaf) === null ? null : `bot:${leaf.bot}`;
+}
+
+/**
+ * The bot a `bot:` or `ctrl:` node id names, read off the id alone.
+ *
+ * The sidebar's Stop button needs the bot's *full* name — the row shows a
+ * shortened one — and the row has only its node id by then. `null` for any
+ * other id, which is what keeps the button off rows that are not a bot's.
+ */
+export function botOfNodeId(id: string): string | null {
+  if (id.startsWith("bot:")) return id.slice(4) || null;
+  if (id.startsWith("ctrl:")) return id.split(":")[1] || null;
+  return null;
+}
+
 function makeNode(id: string, kind: NodeKind, label: string): PerfNode {
   return { id, kind, label, leaves: [], children: [] };
 }
@@ -361,23 +388,48 @@ function makeNode(id: string, kind: NodeKind, label: string): PerfNode {
  * one sidebar, one fold and one set of panes describe a controller whether it
  * is trading or over (FEAT-089).
  *
- * There used to be a grouping level between the fleet and its controllers —
- * bot, or class of thing — chosen by a `By bot / By type` toggle. It is gone,
- * and *not* because grouping stopped being useful: a real fleet puts a dozen
- * controllers under one bot and a hundred finished runs under a period, so
- * every controller the reader actually wanted sat two chevrons deep behind a
- * row that told them nothing they did not already know. Bot and class are
- * **filters** now, drawn as bubbles above this tree, and narrowing the leaf set
- * narrows the tree — which is the same answer the grouping gave, one click
- * shallower and combinable (several bots at once, a class across bots).
+ * The class-of-thing grouping is gone for good — it is a bubble above the tree,
+ * combinable and one click shallower than a chevron ever was. **Bot is not**:
+ * `groupByBot` puts it back as a level, because a bot is the thing you *act*
+ * on. Stopping is a per-bot verb with no per-controller equivalent, and a flat
+ * list gives it nowhere to live: the reader had to narrow the bubbles down to
+ * one bot before the fleet row became that bot and grew a Stop button, which is
+ * a filter interaction standing in for a selection. A bot row is that selection
+ * said directly, and it carries the button.
  *
- * An executor whose controller is gone still hangs directly off the fleet,
- * where it used to hang off an `(unattached)` bot node: it is a real record,
- * and one the reader goes looking for.
+ * It is a level the caller asks for rather than one that is always there: a
+ * fleet running a single bot would spend a chevron saying so. `PerfBrowser`
+ * turns it on exactly when more than one bot is in scope.
+ *
+ * An executor whose controller is gone still hangs directly off the fleet, at
+ * either setting: it belongs to no deployment, so there is no bot row for it to
+ * sit under (see {@link botNodeId}).
  */
-export function buildTree(leaves: PerfLeaf[], rootLabel = "All"): PerfNode {
+export function buildTree(
+  leaves: PerfLeaf[],
+  rootLabel = "All",
+  { groupByBot = false }: { groupByBot?: boolean } = {},
+): PerfNode {
   const fleet = makeNode("all", "fleet", rootLabel);
+  const bots = new Map<string, PerfNode>();
   const controllers = new Map<string, PerfNode>();
+
+  // Insertion order again: the first controller of a bot is what puts the bot
+  // in the list, so bots come out in the order the caller sorted controllers.
+  const botFor = (leaf: PerfLeaf): PerfNode | null => {
+    if (!groupByBot) return null;
+    const id = botNodeId(leaf);
+    if (!id) return null;
+    let node = bots.get(id);
+    if (!node) {
+      // The raw name: shortening it is the sidebar's job, and the
+      // Stop button needs the name the API knows.
+      node = makeNode(id, "bot", leaf.bot);
+      bots.set(id, node);
+      fleet.children.push(node);
+    }
+    return node;
+  };
 
   // Insertion order is the caller's order, which is the order the sidebar
   // draws — the page sorts its controllers before handing them over.
@@ -388,7 +440,7 @@ export function buildTree(leaves: PerfLeaf[], rootLabel = "All"): PerfNode {
     if (!node) {
       node = makeNode(id, "controller", leaf.controllerId);
       controllers.set(id, node);
-      fleet.children.push(node);
+      (botFor(leaf) ?? fleet).children.push(node);
     }
     return node;
   };
@@ -445,6 +497,23 @@ export function collectLeaves(node: PerfNode, kind: PerfLeaf["kind"]): PerfLeaf[
   };
   walk(node);
   return found;
+}
+
+/**
+ * How many nodes of one kind the tree holds, at whatever depth they sit.
+ *
+ * The sidebar's "N controllers" used to count the fleet's own children, which
+ * was the same number only while the tree was flat: with `groupByBot` on, every
+ * controller is a grandchild and that count read zero.
+ */
+export function countNodes(root: PerfNode, kind: NodeKind): number {
+  let n = 0;
+  const walk = (node: PerfNode) => {
+    if (node.kind === kind) n += 1;
+    node.children.forEach(walk);
+  };
+  walk(root);
+  return n;
 }
 
 /** Every node of a tree, keyed by id — the sidebar's and the scope's index. */
@@ -520,9 +589,9 @@ export function visibleNodeIds(root: PerfNode, open: ReadonlySet<string>): strin
  * A candidate is never *deeper* than the scope it replaces — a controller scope
  * that fell through must not land on one of its own executors, which is a
  * different (and much narrower) report than the one the reader had open. A
- * stale `bot:` or `type:` id from a link written before the grouping level was
- * retired reads as depth-2 here and so falls all the way back to the fleet,
- * which is the report it named.
+ * stale `type:` id from a link written before the class grouping was retired
+ * reads as depth-0 here and so falls all the way back to the fleet, which is
+ * the report it named.
  */
 export function fallbackChain(scopeId: string, leaf?: PerfLeaf): string[] {
   const chain = [scopeId];
@@ -530,6 +599,13 @@ export function fallbackChain(scopeId: string, leaf?: PerfLeaf): string[] {
     const ctrl = controllerNodeId(leaf);
     if (ctrl) chain.push(ctrl);
   }
+  // The bot level is optional (see `buildTree`), so this candidate is often not
+  // in the tree at all — `resolveScope` simply walks past it to the fleet. When
+  // it *is* there it is the right landing place: a controller that a filter
+  // removed leaves the reader on the bot that ran it rather than on the whole
+  // fleet. Read off the id, so it serves a `ctrl:` scope with no leaf to hand.
+  const bot = botOfNodeId(scopeId) ?? (leaf ? botNodeId(leaf)?.slice(4) : undefined);
+  if (bot) chain.push(`bot:${bot}`);
   chain.push("all");
 
   const depth = nodeDepth(scopeId);
@@ -542,16 +618,18 @@ export function fallbackChain(scopeId: string, leaf?: PerfLeaf): string[] {
 /**
  * How far down the tree an id sits, read off the id alone.
  *
- * An id that names no level of this tree — a retired `bot:`/`type:` group from
- * a link written before the grouping level went away, or plain nonsense — is
- * treated as the *shallowest* thing there is, so the only candidate that can
- * serve it is the fleet. `bot:alpha` meant "everything alpha did", and one of
- * alpha's controllers is a much narrower report than the one that link asked
- * for; the bot bubble is where that request lives now.
+ * An id that names no level of this tree — a retired `type:` group from a link
+ * written before the class grouping went away, or plain nonsense — is treated
+ * as the *shallowest* thing there is, so the only candidate that can serve it
+ * is the fleet. A stale `bot:` id is *not* nonsense any more: it is depth 1
+ * again, and lands on the bot when the tree groups by bot and on the fleet when
+ * it does not — either way a report about that bot, never one of its
+ * controllers, which would be much narrower than the link asked for.
  */
 function nodeDepth(id: string): number {
-  if (id.startsWith("ctrl:")) return 1;
-  if (id.startsWith("exec:")) return 2;
+  if (id.startsWith("bot:")) return 1;
+  if (id.startsWith("ctrl:")) return 2;
+  if (id.startsWith("exec:")) return 3;
   return 0;
 }
 

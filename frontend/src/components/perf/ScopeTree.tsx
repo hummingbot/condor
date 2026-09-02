@@ -1,5 +1,5 @@
-import { Activity, ChevronDown, ChevronRight, Circle, Layers } from "lucide-react";
-import { useMemo } from "react";
+import { Activity, ChevronDown, ChevronRight, Circle, Layers, Server } from "lucide-react";
+import { useMemo, type ReactNode } from "react";
 
 import { formatCurrencyPnl, formatCurrencyVolume, pnlColor, shortBotName } from "@/lib/formatters";
 import type { ConvertQuote, PerfNode } from "@/lib/perf-tree";
@@ -36,6 +36,7 @@ export function StatusDot({ status }: { status: string }) {
 function NodeIcon({ node, active }: { node: PerfNode; active: boolean }) {
   const tone = active ? "text-[var(--color-primary)]" : "text-[var(--color-text-muted)]";
   if (node.kind === "fleet") return <Layers className={`h-3.5 w-3.5 shrink-0 ${tone}`} />;
+  if (node.kind === "bot") return <Server className={`h-3.5 w-3.5 shrink-0 ${tone}`} />;
   if (node.kind === "executor") return <Activity className={`h-3 w-3 shrink-0 ${tone}`} />;
   // A controller's marker is its state, which is the one thing the icon slot
   // can say that the label beside it cannot.
@@ -58,6 +59,8 @@ function subtitle(node: PerfNode, showBot: boolean): string {
       const ctrls = node.children.filter((c) => c.kind === "controller").length;
       return `${node.leaves.length} in scope · ${ctrls} controller${ctrls !== 1 ? "s" : ""}`;
     }
+    case "bot":
+      return `${n} controller${n !== 1 ? "s" : ""}`;
     case "controller": {
       const leaf = node.leaves[0];
       return [
@@ -86,6 +89,18 @@ interface RowProps {
   currencySymbol: string;
   now: number;
   compact: boolean;
+  renderAction?: (node: PerfNode) => ReactNode;
+}
+
+/**
+ * What the row calls itself.
+ *
+ * A bot node carries its *full* name — that is the name the API takes, and the
+ * Stop button on the row posts it — so the shortening a 288px column needs
+ * happens here rather than in the tree.
+ */
+function rowLabel(node: PerfNode): string {
+  return node.kind === "bot" ? shortBotName(node.label) : node.label;
 }
 
 function rowClass(active: boolean) {
@@ -108,6 +123,7 @@ function ScopeRow({
   currencySymbol,
   now,
   compact,
+  renderAction,
 }: RowProps) {
   const active = node.id === activeId;
   // Each row shows what its own subtree adds up to, through the same fold the
@@ -115,6 +131,7 @@ function ScopeRow({
   const totals = useMemo(() => foldLeaves(node.leaves, cv, now), [node.leaves, cv, now]);
   const hasChildren = node.children.length > 0;
   const isOpen = open.has(node.id);
+  const action = renderAction?.(node);
 
   if (compact) {
     return (
@@ -135,7 +152,7 @@ function ScopeRow({
           node.children.map((child) => (
             <ScopeRow
               key={child.id}
-              {...{ activeId, open, showBot, onSelect, onToggleOpen, cv, currencySymbol, now, compact }}
+              {...{ activeId, open, showBot, onSelect, onToggleOpen, cv, currencySymbol, now, compact, renderAction }}
               node={child}
               depth={depth + 1}
             />
@@ -165,17 +182,19 @@ function ScopeRow({
         <button
           onClick={() => onSelect(node.id)}
           {...(active ? { "data-active-scope": true } : {})}
-          className="min-w-0 flex-1 py-2 pr-3 text-left"
+          className={`min-w-0 flex-1 py-2 text-left ${action ? "pr-1" : "pr-3"}`}
         >
           <div className="flex items-center gap-1.5">
             <NodeIcon node={node} active={active} />
             <span
               className={`truncate text-[11px] ${
-                active ? "font-semibold text-[var(--color-text)]" : "font-medium text-[var(--color-text-muted)]"
+                active || node.kind === "bot"
+                  ? "font-semibold text-[var(--color-text)]"
+                  : "font-medium text-[var(--color-text-muted)]"
               }`}
               title={node.label}
             >
-              {node.label}
+              {rowLabel(node)}
             </span>
             <span
               className="ml-auto shrink-0 tabular-nums text-[11px] font-semibold"
@@ -195,12 +214,16 @@ function ScopeRow({
             </span>
           </div>
         </button>
+        {/* The row's own verb, outside the button that selects it: stopping a
+            bot and reporting on it are two different intents, and one click
+            must not be able to mean either. */}
+        {action && <div className="flex shrink-0 items-center pr-1.5">{action}</div>}
       </div>
       {isOpen &&
         node.children.map((child) => (
           <ScopeRow
             key={child.id}
-            {...{ activeId, open, showBot, onSelect, onToggleOpen, cv, currencySymbol, now, compact }}
+            {...{ activeId, open, showBot, onSelect, onToggleOpen, cv, currencySymbol, now, compact, renderAction }}
             node={child}
             depth={depth + 1}
           />
@@ -210,7 +233,8 @@ function ScopeRow({
 }
 
 /**
- * The scope picker: one row per controller, and one per executor under it.
+ * The scope picker: a row per bot when the tree groups by one, a row per
+ * controller, and one per executor under that.
  *
  * It is a picker over a `PerfNode` tree rather than a list of controllers, so a
  * controller and an executor are the same row drawn at a different depth —
@@ -239,6 +263,7 @@ export function ScopeTree({
   currencySymbol,
   now,
   compact = false,
+  renderAction,
 }: {
   root: PerfNode;
   activeId: string;
@@ -251,6 +276,15 @@ export function ScopeTree({
   currencySymbol: string;
   now: number;
   compact?: boolean;
+  /**
+   * The verb a row carries beside its name, if any — today, Stop on a bot row.
+   *
+   * A render prop rather than a `onStopBot` callback: what a bot row's button
+   * says depends on that bot's state (armed, stopping, failed), and that state
+   * belongs to the browser that owns the mutation, not to a picker whose job is
+   * to draw a tree.
+   */
+  renderAction?: (node: PerfNode) => ReactNode;
 }) {
   // An empty tree is a real answer — every filter ticked off, or a window with
   // nothing in it — and it has to say so, or the sidebar reads as still loading.
@@ -278,6 +312,7 @@ export function ScopeTree({
           currencySymbol={currencySymbol}
           now={now}
           compact={compact}
+          renderAction={renderAction}
         />
       ))}
     </>
