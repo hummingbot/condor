@@ -237,6 +237,33 @@ describe("the execution panel", () => {
     expect(navigate).toHaveBeenLastCalledWith("/bots?population=running");
   });
 
+  it("clips a long bot name in the middle, and keeps both of its ends", async () => {
+    const bot =
+      "pmm-fleet-btcbrl-global-20260829-121810-20260829-121810-rollback-20260902-071331";
+    getBots.mockResolvedValue({
+      controllers: [controller({ bot_name: bot })],
+      bots: [],
+      total_pnl: 0,
+      total_volume: 0,
+    });
+
+    await render();
+
+    const header = botHeaders()[0] as HTMLElement;
+    const shown = header.textContent!.trim();
+    // Short enough that the header can never be the widest line in the panel,
+    // which is what had it reading as a title over the column headings.
+    expect(shown.length).toBeLessThanOrEqual(34);
+    // The config it runs, and the stamp that tells this deploy from the next —
+    // a right-hand ellipsis would have kept only the first.
+    expect(shown.startsWith("pmm-fleet-btcbrl")).toBe(true);
+    expect(shown.endsWith("20260902-071331")).toBe(true);
+    // The whole name is still one hover away, and still the link's subject.
+    expect(header.getAttribute("title")).toBe(`Everything ${bot} is running`);
+    await click(header);
+    expect(navigate).toHaveBeenLastCalledWith(`/bots?scope=bot:${bot}`);
+  });
+
   it("says the fleet is empty rather than drawing an empty table", async () => {
     getBots.mockResolvedValue({
       controllers: [],

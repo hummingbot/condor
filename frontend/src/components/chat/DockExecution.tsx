@@ -13,6 +13,7 @@ import {
   formatRuntimeHours,
   isExecutorActive,
   pnlColor,
+  shortBotName,
 } from "@/lib/formatters";
 import {
   UNATTACHED_BOT,
@@ -61,6 +62,36 @@ export const TABLE_MIN_PX = FIXED_PX + MIN_LABEL_PX;
 /** The quote a controller's PnL is denominated in — its pair's, as elsewhere. */
 function quoteOf(pair: string): string {
   return pair.split("-")[1] || "USDT";
+}
+
+/**
+ * How many characters of a bot name a group header keeps.
+ *
+ * A deploy name is a config id with stamps bolted onto it, and a rolled-back
+ * fleet reaches ninety-odd characters — at 10px that is a header line running
+ * the full width of the panel, which reads as a heading *of* the table rather
+ * than a row inside it and collides with the column titles above it. A cap
+ * that is short of the narrowest useful panel width means the header can never
+ * be the widest thing on screen, whatever the fleet is called.
+ */
+const BOT_NAME_MAX = 34;
+
+/**
+ * The name with its middle taken out, never its end.
+ *
+ * Both ends carry identity: the head is the config the fleet runs, the tail is
+ * the deploy stamp that tells two runs of it apart. A plain right-hand ellipsis
+ * — which is what CSS truncation gives — throws the tail away and renders two
+ * simultaneous deploys of one config as the same header twice, so the cut is
+ * taken out of the middle, where the bytes are a repeated date. The button's
+ * `title` still carries the whole name.
+ */
+function clipBotName(name: string): string {
+  const short = shortBotName(name);
+  if (short.length <= BOT_NAME_MAX) return short;
+  const head = Math.ceil((BOT_NAME_MAX - 1) / 2);
+  const tail = BOT_NAME_MAX - 1 - head;
+  return `${short.slice(0, head)}…${short.slice(short.length - tail)}`;
 }
 
 /**
@@ -293,7 +324,9 @@ export function DockExecution({ server }: { server: string }) {
                       data-bot-group
                       className="flex w-full items-baseline gap-2 px-3 pt-1.5 text-left text-[10px] uppercase tracking-wider text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
                     >
-                      <span className="min-w-0 flex-1 truncate">{group.bot}</span>
+                      <span className="min-w-0 flex-1 truncate">
+                        {clipBotName(group.bot)}
+                      </span>
                     </button>
                   </td>
                 </tr>
