@@ -292,6 +292,13 @@ export function AgentChatTab() {
     },
     [talkTo],
   );
+  // The tab strip's `+`: always a *second* conversation, never a jump to one
+  // that already exists — "new chat" is the whole of what the button says, and
+  // focusing an existing tab is what the tabs beside it are for.
+  const newChat = useCallback(
+    (slug: string, agent: AgentSummary | null) => onTalk(slug, agent, true),
+    [onTalk],
+  );
   const closeRail = useCallback(() => setRailOpen(false), []);
 
   const boundAgent = activeSlot?.info.agent_slug
@@ -380,6 +387,11 @@ export function AgentChatTab() {
                 // The session ends; the transcript stays on the server, so the
                 // conversation is still in the rail and clicking it respawns it.
                 onClose={(slotId) => chat.destroySession(slotId)}
+                // The strip's own `+`: another conversation, with whoever you
+                // pick — the rail is where that used to be, and the rail is a
+                // column most readers keep collapsed.
+                agents={agents}
+                onNew={newChat}
                 className="min-w-0 flex-1"
               />
               {/* What the conversation is talking to, opened from the chrome

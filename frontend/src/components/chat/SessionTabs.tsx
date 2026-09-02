@@ -1,6 +1,18 @@
-import { AlertTriangle, Bot, Loader2, X, Zap } from "lucide-react";
+import {
+  AlertTriangle,
+  Bot,
+  Loader2,
+  MessageSquare,
+  Plus,
+  X,
+  Zap,
+} from "lucide-react";
+import { useState } from "react";
 
+import { deriveAgentStatus } from "@/components/agent/agentStatus";
+import { AnchoredMenu } from "@/components/ui/AnchoredMenu";
 import type { ChatSlot } from "@/hooks/useChatSocket";
+import { CHAT_SLUG, type AgentSummary } from "@/lib/api";
 
 /**
  * The live sessions, as tabs.
@@ -28,6 +40,13 @@ import type { ChatSlot } from "@/hooks/useChatSocket";
  * the bar's own bottom border, the way a tab strip is supposed to sit. The
  * active tab already names who is answering, so a second stacked bar would say
  * the same thing twice and cost the transcript ~36 px on every screen.
+ *
+ * A `+` closes the strip, the way a browser's tab bar ends in one: pick who to
+ * talk to and a fresh conversation opens as another tab. Starting a second
+ * chat was reachable only from the rail's own per-agent `+` before, which is a
+ * column most readers keep collapsed — so the gesture the tab strip is *about*
+ * lived somewhere you had to go looking for. It sits outside the scroller, so
+ * it stays reachable once enough tabs are open to push the last one off.
  */
 export function SessionTabs({
   slots,
@@ -36,6 +55,8 @@ export function SessionTabs({
   permissionRequests,
   onSelect,
   onClose,
+  agents = [],
+  onNew,
   className = "",
 }: {
   slots: ChatSlot[];
@@ -45,8 +66,14 @@ export function SessionTabs({
   permissionRequests: Record<string, unknown>;
   onSelect: (slotId: string) => void;
   onClose: (slotId: string) => void;
+  /** Who a new chat can be started with, for the trailing `+`. */
+  agents?: AgentSummary[];
+  /** Start a fresh conversation — `""` is Condor, which is bound by nobody. */
+  onNew?: (slug: string, agent: AgentSummary | null) => void;
   className?: string;
 }) {
+  // The `+` is the only chrome here before the first session exists, and the
+  // hero below already offers that choice — so an empty strip stays empty.
   if (slots.length === 0) return null;
 
   // Two chats with the same agent render identically otherwise, which makes a
@@ -61,31 +88,37 @@ export function SessionTabs({
 
   return (
     <div
-      className={`flex items-stretch gap-1 self-stretch overflow-x-auto ${className}`}
+      className={`flex min-w-0 items-stretch gap-1 self-stretch ${className}`}
     >
-      {slots.map((slot) => {
-        const key = groupKey(slot);
-        const ordinal = (seen.get(key) || 0) + 1;
-        seen.set(key, ordinal);
-        const suffix =
-          (groupSizes.get(key) || 0) > 1 && ordinal > 1 ? ` #${ordinal}` : "";
+      {/* The scroller holds only the tabs: the `+` after it must not scroll
+          away with them, or the one control that is not about a session you
+          already have would be the first thing a busy strip hides. */}
+      <div className="flex min-w-0 flex-1 items-stretch gap-1 self-stretch overflow-x-auto">
+        {slots.map((slot) => {
+          const key = groupKey(slot);
+          const ordinal = (seen.get(key) || 0) + 1;
+          seen.set(key, ordinal);
+          const suffix =
+            (groupSizes.get(key) || 0) > 1 && ordinal > 1 ? ` #${ordinal}` : "";
 
-        return (
-          <SessionTab
-            key={slot.info.slot_id}
-            slot={slot}
-            suffix={suffix}
-            isActive={slot.info.slot_id === activeSlotId}
-            isStreaming={isSlotStreaming(slot.info.slot_id)}
-            // A confirmation is only answerable from the conversation that
-            // raised it, so the tab is where a request in a background chat
-            // becomes visible at all.
-            needsApproval={Boolean(permissionRequests[slot.info.slot_id])}
-            onClick={() => onSelect(slot.info.slot_id)}
-            onClose={() => onClose(slot.info.slot_id)}
-          />
-        );
-      })}
+          return (
+            <SessionTab
+              key={slot.info.slot_id}
+              slot={slot}
+              suffix={suffix}
+              isActive={slot.info.slot_id === activeSlotId}
+              isStreaming={isSlotStreaming(slot.info.slot_id)}
+              // A confirmation is only answerable from the conversation that
+              // raised it, so the tab is where a request in a background chat
+              // becomes visible at all.
+              needsApproval={Boolean(permissionRequests[slot.info.slot_id])}
+              onClick={() => onSelect(slot.info.slot_id)}
+              onClose={() => onClose(slot.info.slot_id)}
+            />
+          );
+        })}
+      </div>
+      {onNew && <NewChatTab agents={agents} onNew={onNew} />}
     </div>
   );
 }
@@ -124,6 +157,128 @@ function DetachedDot() {
     <span className="relative flex h-1.5 w-1.5 shrink-0">
       <span className="relative h-1.5 w-1.5 rounded-full border border-[var(--color-text-muted)]" />
     </span>
+  );
+}
+
+// ── New chat ──
+
+/**
+ * Open another conversation, and choose who with.
+ *
+ * The strip's own `+`. It is a picker rather than a plain "new chat" because
+ * the question a second tab always raises is *with whom* — answering it with
+ * "whoever the last tab was bound to" is the assumption that made the rail's
+ * per-row `+` the only honest way to start a chat with someone else. Condor
+ * sits at the head, apart from the specialists, because you get it by binding
+ * nobody: `""` is the slug everywhere else here too.
+ *
+ * The panel is portalled (`AnchoredMenu`) for the same reason the rail's live
+ * strip is — this bar sits inside the workspace's `overflow-hidden` column,
+ * which would clip an absolutely-positioned menu at the bar's own border.
+ */
+function NewChatTab({
+  agents,
+  onNew,
+}: {
+  agents: AgentSummary[];
+  onNew: (slug: string, agent: AgentSummary | null) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  // State, not a ref: the portalled panel only gets coordinates once a render
+  // has handed it the resolved trigger element.
+  const [anchor, setAnchor] = useState<HTMLElement | null>(null);
+
+  const condor = agents.find((a) => a.slug === CHAT_SLUG);
+  const specialists = agents.filter((a) => a.slug !== CHAT_SLUG);
+
+  const pick = (slug: string, agent: AgentSummary | null) => {
+    setOpen(false);
+    onNew(slug, agent);
+  };
+
+  return (
+    <>
+      <button
+        ref={setAnchor}
+        onClick={() => setOpen((v) => !v)}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label="New chat"
+        title="New chat"
+        className={`flex shrink-0 items-center self-center rounded p-1 transition-colors ${
+          open
+            ? "bg-[var(--color-surface-hover)] text-[var(--color-text)]"
+            : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+        }`}
+      >
+        <Plus className="h-3.5 w-3.5" />
+      </button>
+
+      <AnchoredMenu
+        anchor={anchor}
+        open={open}
+        onClose={() => setOpen(false)}
+        align="left"
+        maxHeight={320}
+        role="menu"
+        className="flex w-[236px] flex-col py-0.5"
+      >
+        <div className="px-2.5 pb-1 pt-1.5 text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
+          New chat with
+        </div>
+        <NewChatOption
+          label={condor?.name || "Condor"}
+          hint={condor?.description || "General trading assistant"}
+          icon={<MessageSquare className="h-3 w-3 shrink-0" />}
+          onClick={() => pick("", null)}
+        />
+        {specialists.map((agent) => (
+          <NewChatOption
+            key={agent.slug}
+            label={agent.name}
+            hint={agent.description || agent.name}
+            icon={
+              <Bot className="h-3 w-3 shrink-0 text-[var(--color-accent)]" />
+            }
+            live={deriveAgentStatus(agent) === "running"}
+            onClick={() => pick(agent.slug, agent)}
+          />
+        ))}
+      </AnchoredMenu>
+    </>
+  );
+}
+
+function NewChatOption({
+  label,
+  hint,
+  icon,
+  live,
+  onClick,
+}: {
+  label: string;
+  hint: string;
+  icon: React.ReactNode;
+  /** This agent's loop is running — the same dot the rail shows for it. */
+  live?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      role="menuitem"
+      onClick={onClick}
+      title={hint}
+      className="flex items-center gap-2 px-2.5 py-1.5 text-left text-xs text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]"
+    >
+      {icon}
+      <span className="min-w-0 flex-1 truncate">{label}</span>
+      {live && (
+        <span
+          className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400"
+          title="Loop running"
+        />
+      )}
+    </button>
   );
 }
 
