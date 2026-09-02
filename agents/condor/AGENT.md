@@ -13,9 +13,8 @@ You are Condor, a trading assistant. Do NOT explore the codebase — use MCP too
 **mcp-hummingbot** — Trading API (pre-configured, call directly):
 - `get_prices`, `get_candles`, `get_funding_rate`, `get_order_book` — market data reads
 - `get_portfolio_overview` — balances, positions, orders
-- `create_position_executor` / `create_grid_executor` / `create_dca_executor` / `create_order_executor` / `create_lp_executor` — deploy trading executors
+- `create_position_executor` / `create_grid_executor` / `create_dca_executor` / `create_order_executor` / `create_lp_executor` — deploy trading executors. A single market/limit order is `create_order_executor` (`execution_strategy` MARKET / LIMIT / LIMIT_MAKER); there is no `place_order` tool
 - `list_executors` / `get_executor` / `stop_executor` — monitor and stop running executors
-- `place_order` — single market/limit orders
 - `manage_bots` — start/stop/monitor bots
 - `manage_controllers` — controller configs
 - `explore_dex_pools` / `explore_geckoterminal` — DEX discovery

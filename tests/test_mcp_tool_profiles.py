@@ -8,6 +8,7 @@ than quietly widening the seat that trades with real capital.
 """
 
 import asyncio
+import re
 
 import pytest
 from mcp.server.fastmcp import FastMCP
@@ -342,3 +343,68 @@ def test_a_seat_with_no_server_never_reaches_the_admin_ring(monkeypatch):
     the condor seat is unchanged (`agent` and `full` register the same set)."""
     profiles = _session_profiles(monkeypatch, None)
     assert "mcp-hummingbot" not in profiles
+
+
+# ── the identity doc names only tools that exist (READ-307) ──────────────────
+
+
+def _agent_md_tool_names() -> set[str]:
+    """Every tool ``agents/condor/AGENT.md`` presents as callable.
+
+    The "## MCP Tools" section is a bullet per tool family, each written as
+    ``- `name` / `name` — what it does``. Only the head of the bullet, before
+    the em dash, names tools; the prose after it mentions actions
+    (``manage_servers`` → ``list``), skills (``routine_cookbook``) and agent
+    slugs (``executor_manager``) in backticks too, and none of those are tools.
+    """
+    from pathlib import Path
+
+    text = (
+        Path(__file__).resolve().parents[1] / "agents" / "condor" / "AGENT.md"
+    ).read_text()
+    section = text.split("## MCP Tools", 1)[1].split("\n## ", 1)[0]
+    names: set[str] = set()
+    for line in section.splitlines():
+        if line.startswith("- "):
+            names.update(re.findall(r"`([a-z_][a-z0-9_]*)`", line.split("—", 1)[0]))
+    return names
+
+
+def test_the_chat_identity_doc_names_only_tools_its_seat_mounts():
+    """READ-307: a phantom tool in the identity prompt is a guaranteed failure.
+
+    AGENT.md *is* the chat's system prompt, so a name listed here under "call
+    directly" is a name the model will call. It advertised ``place_order`` — a
+    tool no server registers and that ``condor.runtime.danger`` blocks by name —
+    so every plain "buy me some SOL" spent a turn on an unknown tool. Nothing
+    else pinned the list, so the prose drifted from the registry silently; this
+    reconciles the two.
+    """
+    from condor.runtime.toolsets import seat_profile
+
+    profile = seat_profile(CHAT_SLUG, tick=False)
+    mounted = _registered(hb_server, profile) | _registered(condor_server, profile)
+
+    advertised = _agent_md_tool_names()
+    assert advertised, "the MCP Tools section parsed to nothing — did it move?"
+
+    phantom = advertised - mounted
+    assert not phantom, (
+        f"agents/condor/AGENT.md advertises tool(s) no seat registers: "
+        f"{sorted(phantom)}"
+    )
+
+
+def test_the_chat_identity_doc_does_not_resurrect_place_order():
+    """The one name to keep out: the prompts, the gate and the risk engine all
+    forbid it, so it may only appear as the negative it is worded as today."""
+    from pathlib import Path
+
+    text = (
+        Path(__file__).resolve().parents[1] / "agents" / "condor" / "AGENT.md"
+    ).read_text()
+    for line in text.splitlines():
+        if "place_order" in line:
+            assert (
+                "no `place_order`" in line
+            ), f"AGENT.md presents place_order as usable: {line!r}"
