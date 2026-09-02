@@ -372,3 +372,74 @@ def test_a_controller_that_named_its_own_pair_is_left_alone(tmp_path, monkeypatc
         assert got[0].trading_pair == "BTC-BRL"
     finally:
         reset_run_history_store()
+
+
+# ── Deleting a run ──
+
+
+class DeletingClient(FakeClient):
+    def __init__(self):
+        super().__init__([snap("gan", "c1")], RAW_RUNS)
+        self.deleted = []
+
+    async def delete_bot_run(self, bot_run_id):
+        self.deleted.append(bot_run_id)
+        return {"ok": True}
+
+
+def _delete(client, monkeypatch, name="srv", bot_run_id=7):
+    class FakeCM:
+        async def get_client(self, _name):
+            return client
+
+    monkeypatch.setattr(cp, "get_config_manager", lambda: FakeCM())
+    return asyncio.run(
+        cp.delete_bot_run(name=name, bot_run_id=bot_run_id, user=object())
+    )
+
+
+def test_deleting_a_run_does_not_leave_its_controllers_in_the_warm_listing(
+    monkeypatch,
+):
+    """The listing is what draws the Terminated tree. Served warm for another
+    60s after a delete, it hands the browser back the very bot, controllers and
+    KPIs the delete just removed — a delete that reads as a no-op (CORR-298)."""
+    client = DeletingClient()
+    _route(client, monkeypatch)
+    assert client.latest_calls == 1
+
+    out = _delete(client, monkeypatch)
+    assert out["deleted"] is True
+    assert client.deleted == [7]
+
+    _route(client, monkeypatch)
+    assert client.latest_calls == 2
+
+
+def test_the_delete_drops_every_page_size_not_just_one(monkeypatch):
+    """The cache is keyed ``(server, limit)`` and every entry holds its own copy
+    of the run, so evicting one page size would leave the others naming it."""
+    client = DeletingClient()
+    _route(client, monkeypatch, limit=50)
+    _route(client, monkeypatch, limit=200)
+    assert client.latest_calls == 2
+
+    _delete(client, monkeypatch)
+
+    assert [k for k in cp._terminated_cache if k[0] == "srv"] == []
+
+
+def test_a_delete_on_one_server_leaves_another_server_warm(monkeypatch):
+    """This delete says nothing about any other server's runs; clearing the
+    whole cache would make each of them pay for it."""
+    client = DeletingClient()
+    _route(client, monkeypatch, name="a")
+    _route(client, monkeypatch, name="b")
+    assert client.latest_calls == 2
+
+    _delete(client, monkeypatch, name="a")
+
+    _route(client, monkeypatch, name="b")
+    assert client.latest_calls == 2
+    _route(client, monkeypatch, name="a")
+    assert client.latest_calls == 3

@@ -237,6 +237,14 @@ async def delete_bot_run(
         logger.exception("Failed to delete bot run %d from '%s'", bot_run_id, name)
         raise upstream_error("Failed to delete bot run", e)
 
+    # The run is gone upstream, but the Terminated listing this server was
+    # serving warm still names it, and a browser refetching straight after the
+    # delete would be handed back the very rows it just removed (CORR-298).
+    # Every page size is dropped, not just the one someone happened to ask for:
+    # the cache is keyed ``(server, limit)`` and each entry has its own copy of
+    # the run.  Other servers keep theirs — this delete says nothing about them.
+    drop_terminated_cache(name)
+
     return {"deleted": True, "bot_run_id": bot_run_id, "result": result}
 
 
@@ -529,6 +537,17 @@ _terminated_cache: dict[
 def clear_terminated_cache() -> None:
     """Drop every warm listing. For tests, and for a config reload."""
     _terminated_cache.clear()
+
+
+def drop_terminated_cache(name: str) -> None:
+    """Drop one server's warm listings, at every page size.
+
+    For the events that make the listing wrong rather than merely old — a run
+    deleted — where clearing the whole cache would punish every other server
+    for it.
+    """
+    for key in [k for k in _terminated_cache if k[0] == name]:
+        del _terminated_cache[key]
 
 
 @router.get(

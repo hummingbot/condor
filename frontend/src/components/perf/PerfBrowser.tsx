@@ -75,6 +75,7 @@ import { chartNotice } from "@/lib/perf-notices";
 import { buildPositionRows, parseSide, type PositionRow } from "@/lib/perf-positions";
 import { aggregatePnlSeries, snapshotsFromRunHistory } from "@/lib/pnl-chart";
 import { buildAttributor, runWindows } from "@/lib/run-attribution";
+import { dropDeletedRunQueries } from "@/lib/run-deletion";
 import type { ConvertFn } from "@/lib/rates";
 import { useViewFacts } from "@/lib/viewFacts";
 
@@ -1091,8 +1092,13 @@ export function PerfBrowser({
   // runs table is gone, so it keeps the table's arm-then-confirm.
   const deleteRunMutation = useMutation({
     mutationFn: (botRunId: number) => api.deleteBotRun(server, botRunId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["bot-runs", server] });
+    onSuccess: (_result, botRunId) => {
+      // The runs query is not the only cache that still believes in this run:
+      // the Terminated tree is drawn from the controllers listing, which would
+      // keep the deleted run's bot, controllers and KPIs on screen for up to a
+      // poll interval (CORR-298).
+      const botName = runs.find((r) => r.bot_run_id === botRunId)?.bot_name;
+      dropDeletedRunQueries(queryClient, server, botName);
       setConfirmDeleteRun(null);
     },
   });
