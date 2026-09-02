@@ -166,6 +166,13 @@ export function AgentKnowledge({
     queryClient.invalidateQueries({ queryKey: ["agent-brain", slug] });
     // The agent page polls a different key for the same AGENT.md.
     queryClient.invalidateQueries({ queryKey: ["agent", slug] });
+    // A body lives under its own key, and keys match element by element — so
+    // "agent-brain" never reaches "agent-brain-body". Without this the reader
+    // stays mounted across a save and renders the text from before it, and
+    // Edit re-opens on that stale text and overwrites the save. The prefix
+    // covers every kind and name; a delete has already unmounted its reader
+    // and a create has no body query open, so both only mark cache stale.
+    queryClient.invalidateQueries({ queryKey: ["agent-brain-body", slug] });
   }, [queryClient, slug]);
 
   const deleteMut = useMutation({
