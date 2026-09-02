@@ -11,7 +11,6 @@ import asyncio
 import logging
 from typing import Any, Literal
 
-from condor.fetchers.portfolio import dedupe_unified_accounts
 from mcp_servers.hummingbot_api.exceptions import ToolError
 from mcp_servers.hummingbot_api.formatters import format_portfolio_as_table
 from mcp_servers.hummingbot_api.hummingbot_client import HummingbotClient
@@ -74,6 +73,16 @@ async def get_portfolio_overview(
 
             async def get_balances():
                 try:
+                    # Imported here, not at module scope: condor.fetchers.portfolio
+                    # pulls in condor.fetchers.connectors -> condor.pool_data (and
+                    # its geckoterminal/orca/dotenv chain), and this MCP server is
+                    # also run standalone (see settings.py). Same lazy-import
+                    # precedent as tools/geckoterminal.py.
+                    from condor.fetchers.portfolio import (
+                        UNIFIED_ACCOUNT_NOTE,
+                        dedupe_unified_accounts,
+                    )
+
                     state = await client.portfolio.get_state(
                         account_names=account_names,
                         connector_names=connector_names,
@@ -81,11 +90,20 @@ async def get_portfolio_overview(
                     )
                     # Hyperliquid unified accounts report the same collateral on
                     # both the spot and perp connectors; summing raw double-counts it.
-                    state, _ = dedupe_unified_accounts(state)
-                    return state
+                    # Dropping the perp copy can leave that connector with no rows
+                    # at all, so carry the note the dedupe hands back and say why —
+                    # the same sentence the dashboard shows (condor/web/routes/
+                    # portfolio.py). Without it a reader sees a perp connector with
+                    # no collateral and concludes there is no margin.
+                    state, unified = dedupe_unified_accounts(state)
+                    notes = [
+                        f"{connector} ({account}): {UNIFIED_ACCOUNT_NOTE}"
+                        for account, connector in sorted(unified)
+                    ]
+                    return state, notes
                 except Exception as e:
                     logger.warning(f"Failed to get balances: {str(e)}")
-                    return None
+                    return None, []
 
             tasks.append(get_balances())
             task_names.append("balances")
@@ -222,9 +240,8 @@ async def get_portfolio_overview(
         # ============================================
         # SECTION 1: Token Balances
         # ============================================
-        if include_balances and data.get("balances"):
-            balances_data = data["balances"]
-
+        balances_data, unified_notes = data.get("balances") or (None, [])
+        if include_balances and balances_data:
             # Calculate total value from balances
             balance_value = 0.0
             if balances_data and isinstance(balances_data, dict):
@@ -247,6 +264,11 @@ async def get_portfolio_overview(
                 if balances_data
                 else "No balances found"
             )
+            if unified_notes:
+                # One line per connector whose duplicated collateral was dropped,
+                # under the table: the rows it would have shown are gone, and this
+                # is the only place the reader is told where that money went.
+                balances_table = "\n\n".join([balances_table, *unified_notes])
 
             sections.append(
                 {
@@ -256,7 +278,7 @@ async def get_portfolio_overview(
                     "emoji": "💰",
                 }
             )
-        elif include_balances and not data.get("balances"):
+        elif include_balances and not balances_data:
             sections.append(
                 {
                     "title": "Token Balances",

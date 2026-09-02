@@ -14,6 +14,10 @@ surfaces agree on the total, the standard (non-unified) account is untouched
 everywhere, and the SDS-cached payload the route reads is never mutated.
 """
 
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 
 from condor.fetchers.portfolio import (
@@ -279,15 +283,18 @@ def test_formatter_total_matches_the_deduped_payload():
 # -------------------------------------------------------------- surface: mcp ---
 
 
-async def _mcp_total(state):
-    result = await get_portfolio_overview(
+async def _mcp_overview(state):
+    return await get_portfolio_overview(
         client=_FakeClient(state),
         include_balances=True,
         include_perp_positions=False,
         include_lp_positions=False,
         include_active_orders=False,
     )
-    return result["total_balance_value"]
+
+
+async def _mcp_total(state):
+    return (await _mcp_overview(state))["total_balance_value"]
 
 
 @pytest.mark.asyncio
@@ -298,6 +305,54 @@ async def test_mcp_overview_counts_unified_collateral_once():
 @pytest.mark.asyncio
 async def test_mcp_overview_leaves_a_standard_account_alone():
     assert await _mcp_total(STANDARD) == pytest.approx(STANDARD_TOTAL)
+
+
+@pytest.mark.asyncio
+async def test_mcp_overview_explains_the_deduped_connector():
+    """The note is what stops the model re-adding the collateral it cannot see.
+
+    The dedupe strips every stable row from ``hyperliquid_perpetual``, so on a
+    flat-collateral unified account that connector leaves the table entirely.
+    An agent told to size perps from this output would read "no margin" — the
+    note, the same sentence the dashboard renders, is the explanation.
+    """
+    result = await _mcp_overview(UNIFIED)
+    balances = next(s for s in result["sections"] if s["title"] == "Token Balances")
+
+    assert UNIFIED_ACCOUNT_NOTE in balances["content"]
+    assert "hyperliquid_perpetual (master)" in balances["content"]
+    assert UNIFIED_ACCOUNT_NOTE in result["formatted_output"]
+    # And the note explains the total rather than changing it.
+    assert result["total_balance_value"] == pytest.approx(UNIFIED_TOTAL)
+
+
+@pytest.mark.asyncio
+async def test_mcp_overview_says_nothing_about_a_standard_account():
+    result = await _mcp_overview(STANDARD)
+
+    assert UNIFIED_ACCOUNT_NOTE not in result["formatted_output"]
+
+
+def test_mcp_portfolio_tool_does_not_drag_in_pool_data():
+    """The hummingbot MCP server is also run standalone (see its settings.py).
+
+    ``condor.fetchers.portfolio`` reaches ``condor.pool_data`` and its
+    geckoterminal/orca/dotenv chain, so the dedupe helper is imported lazily
+    inside the tool. A fresh interpreter proves it: importing this test module
+    alone would not, since it imports the helper eagerly at the top.
+    """
+    probe = (
+        "import sys; import mcp_servers.hummingbot_api.tools.portfolio as m; "
+        "assert 'condor.pool_data' not in sys.modules, sorted("
+        "k for k in sys.modules if k.startswith('condor'))"
+    )
+    subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=Path(__file__).resolve().parents[1],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
 
 # ------------------------------------------------------ the three agree ------
