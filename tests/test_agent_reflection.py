@@ -5,8 +5,10 @@ and it writes into their memory without anyone reading the answer first. So the
 tests that matter are the ones that pin the guards rather than the happy path:
 that a conversation is attempted **once** whatever happened, that a garbage
 answer writes nothing at all, that the caps are enforced in Python rather than
-requested in the prompt, and that the run builds **no MCP servers** — which is
-what makes "this pass cannot use tools" a property instead of an intention.
+requested in the prompt, and that the run builds **no MCP servers and denies
+every tool request** — which is what makes "this pass cannot use tools" a
+property instead of an intention, for an ACP model with native tools of its own
+as much as for a pydantic-ai one.
 
 Every run here is against a stub client. Nothing in this file starts a
 subprocess or talks to a model.
@@ -25,6 +27,7 @@ from condor.agents import reflection, starters
 from condor.agents.agent import AgentStore
 from condor.memory import MemoryStore, SkillStore, proposals
 from condor.runtime import conversations
+from condor.runtime.confirmations import CANCELLED
 from condor.runtime.conversations import TurnEntry
 
 USER = 4242
@@ -204,12 +207,26 @@ async def test_a_good_answer_writes_a_memory_and_merges_an_intent(env, stub):
 
 
 @pytest.mark.asyncio
-async def test_the_run_builds_no_mcp_servers(env, stub):
+async def test_the_run_builds_no_mcp_servers_and_denies_every_tool(env, stub):
+    """``mcp_servers=None`` is only half of it (SEC-291).
+
+    It removes Condor's tools; an ACP subprocess still arrives with its own
+    Bash/Read/Write rooted at the project directory, and with no callback
+    ACPClient auto-approves them. So the callback is asserted the way the
+    subprocess would meet it: awaited with a tool call and an allow option.
+    """
     await reflection.reflect(USER, _conversation())
 
     assert stub.built["mcp_servers"] is None
-    assert "permission_callback" not in stub.built
     assert stub.built["agent_key"] == "claude-code"
+
+    deny = stub.built["permission_callback"]
+    outcome = await deny(
+        {"title": "Write", "rawInput": {"file_path": "agents/lp/skills/x/SKILL.md"}},
+        [{"kind": "allow_once", "optionId": "yes"}],
+    )
+    assert outcome == CANCELLED
+    assert outcome == {"outcome": {"outcome": "cancelled"}}
 
 
 @pytest.mark.asyncio
@@ -359,15 +376,17 @@ async def test_a_proposed_playbook_is_filed_and_names_its_conversation(env, stub
 async def test_the_model_cannot_write_a_playbook_only_offer_one(env, stub):
     """The central guarantee: the pass has no tools, so the library is untouched.
 
-    Asserted against the client the pass actually built rather than against the
-    prompt it was given, because "propose, don't write" being an *instruction*
-    is precisely what this feature exists not to rely on.
+    Asserted against the client the pass actually built — no MCP servers *and* a
+    callback that denies whatever the model asks for itself — rather than
+    against the prompt it was given, because "propose, don't write" being an
+    *instruction* is precisely what this feature exists not to rely on.
     """
     stub.answer = PROPOSES
 
     await reflection.reflect(USER, _conversation())
 
     assert stub.built["mcp_servers"] is None
+    assert await stub.built["permission_callback"]({}, []) == CANCELLED
     assert SkillStore(SLUG).catalog() == []
     assert SkillStore(SLUG).list_index() == ""
     # It is on disk, but nowhere the agent reads.

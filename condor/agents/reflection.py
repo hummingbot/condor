@@ -21,12 +21,17 @@ no rate limit and no forward-only rule, because nothing here goes anywhere.
 ``CONDOR_REFLECTION=off`` is the operator's switch, and it is read in
 :func:`eligible` so the sweep goes quiet rather than half-running.
 
-**The pass is tool-less.** ``build_llm_client(..., mcp_servers=None)`` — no MCP
-subprocess, no permission callback, no toolset. That is load-bearing twice
-over: its whole input is a transcript already on disk, so tools would buy
-nothing; and it makes "memories are written, playbooks are only proposed" a
-structural property of the run rather than an instruction a model has to be
-trusted to follow.
+**The pass runs with no MCP servers and every tool request denied.**
+``build_llm_client(..., mcp_servers=None, permission_callback=_deny)`` — no MCP
+subprocess, no toolset, and a callback that answers every permission request
+with :data:`~condor.runtime.confirmations.CANCELLED`. Both halves are needed:
+``mcp_servers=None`` only removes *Condor's* tools, and an ACP model
+(``claude-code``, ``gemini``, ``codex``) keeps its own native Bash/Read/Write
+rooted at the project directory, which without a callback ACPClient
+auto-approves. That is load-bearing twice over: its whole input is a transcript
+already on disk, so tools would buy nothing; and it makes "memories are
+written, playbooks are only proposed" a structural property of the run rather
+than an instruction a model has to be trusted to follow.
 
 **A conversation is attempted exactly once.** Every failure path — no agent, no
 model, an empty transcript, an answer that will not parse, an LLM that raises —
@@ -240,8 +245,9 @@ def _rows(data: dict, key: str, limit: int) -> list[dict]:
 def _file_proposal(data: dict, meta: ConversationMeta) -> bool:
     """File the answer's playbook, if it offered one. True when one was filed.
 
-    The model **cannot** write a skill — the run is tool-less, so there is no
-    ``manage_skill`` for it to call — and this is the whole of what it can do
+    The model **cannot** write a skill — the run carries no MCP servers, so
+    there is no ``manage_skill`` for it to call, and every tool request an ACP
+    model makes on its own is denied — and this is the whole of what it can do
     instead: hand the runtime four fields, which land in ``proposals/`` for a
     human to accept or discard (FEAT-074). Guarded like the memories beside it:
     a missing, mistyped or half-filled proposal is dropped, never fatal to the
@@ -317,11 +323,22 @@ async def reflect(user_id: int, meta: ConversationMeta) -> bool:
             SkillStore(meta.agent_slug or None).list_index(),
         )
 
+        from condor.runtime.confirmations import CANCELLED
         from condor.runtime.llm_client import build_llm_client
 
-        # Tool-less on purpose: no MCP servers, no permission callback, no
-        # allowlist to enforce. See the module docstring.
-        client = build_llm_client(model_key, mcp_servers=None, user_id=user_id)
+        async def _deny(tool_call: dict, options: list[dict]) -> dict:
+            """Refuse every tool request, whoever asked and for whatever."""
+            return CANCELLED
+
+        # Tool-less on purpose, and enforced on both halves: no MCP servers, and
+        # a callback that cancels the native tools an ACP subprocess brings of
+        # its own (which are otherwise auto-approved). See the module docstring.
+        client = build_llm_client(
+            model_key,
+            mcp_servers=None,
+            permission_callback=_deny,
+            user_id=user_id,
+        )
         await client.start()
         answer = await client.prompt(prompt)
 
