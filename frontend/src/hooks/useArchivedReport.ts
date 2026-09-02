@@ -75,7 +75,14 @@ export function useArchivedReport(
     },
   });
 
-  const run = useCallback(() => chart.mutate(), [chart]);
+  // Depend on `mutate`, not on the object `useMutation` returns: that object is
+  // spread fresh on every render, while `mutate` is memoized on the observer.
+  // Depending on the wrapper would rebuild this callback — and so the
+  // `chart`/`regenerate` handed to callers — on every single render. The
+  // arg-less wrapper stays, so a button's click event is never forwarded as the
+  // mutation's variables.
+  const { mutate } = chart;
+  const run = useCallback(() => mutate(), [mutate]);
 
   // A failed run keeps the story, and its own words: "no such database" is
   // advice, where a blank panel would just invite the same failure again.

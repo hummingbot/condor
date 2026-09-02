@@ -13,7 +13,7 @@
  */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, useEffect } from "react";
+import { act, useEffect, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -204,5 +204,53 @@ describe("charting", () => {
 
     expect(hook.error).toBe("no such database");
     expect(hook.reportId).toBeNull();
+  });
+});
+
+describe("the handles it hands back", () => {
+  it("keeps chart and regenerate stable across a re-render that changes nothing", async () => {
+    // `useMutation` spreads a fresh result object on every render, so a
+    // callback memoized against that object is memoized against nothing. The
+    // buttons wired to `chart`/`regenerate` deserve one identity for the life
+    // of the panel, not a new one per render.
+    const seen: Array<[Hook["chart"], Hook["regenerate"]]> = [];
+    let rerender = () => {};
+
+    function StableProbe() {
+      const [, setTick] = useState(0);
+      const value = useArchivedReport(SERVER, DB, "");
+      useEffect(() => {
+        rerender = () => setTick((n) => n + 1);
+        seen.push([value.chart, value.regenerate]);
+      });
+      return null;
+    }
+
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={client}>
+          <StableProbe />
+        </QueryClientProvider>,
+      );
+    });
+    await flush();
+
+    const rendersBefore = seen.length;
+    await act(async () => {
+      rerender();
+    });
+    await flush();
+
+    // The re-render really happened...
+    expect(seen.length).toBeGreaterThan(rendersBefore);
+    // ...and every render, before and after it, handed back the same handle.
+    const [first] = seen;
+    for (const [chart, regenerate] of seen) {
+      expect(chart).toBe(first[0]);
+      expect(regenerate).toBe(first[0]);
+    }
   });
 });
