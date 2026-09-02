@@ -577,6 +577,7 @@ def test_update_notice_does_not_tell_the_dashboard_to_type_update(
 
     monkeypatch.setattr(update_handler.updates, "check", fake_check)
     monkeypatch.setattr("utils.config.ADMIN_USER_ID", str(USER_A))
+    monkeypatch.setattr(update_handler, "_last_notice", None)
 
     sent: list[str] = []
 
@@ -598,3 +599,75 @@ def test_update_notice_does_not_tell_the_dashboard_to_type_update(
     assert "/update" not in item.text
     assert "main @ 73e5400 → main @ 81b2821" in item.text
     assert item.link == "/settings?tab=updates"
+
+
+def test_pending_update_is_announced_once_not_once_per_hour(
+    store, known_users, monkeypatch
+):
+    """An update the admin defers must not file a fresh bell entry every hour."""
+    from condor.updates import components as components_mod
+    from handlers.admin import update as update_handler
+
+    def _stale(available: str):
+        return components_mod.ComponentStatus(
+            key="condor",
+            name="Condor",
+            facets={
+                "repo": components_mod.Facet(
+                    kind="repo",
+                    current="main @ 73e5400",
+                    available=available,
+                    behind=3,
+                    up_to_date=False,
+                )
+            },
+            up_to_date=False,
+        )
+
+    pending = [_stale("main @ 81b2821")]
+
+    async def fake_check(*, force=False):
+        return list(pending)
+
+    monkeypatch.setattr(update_handler.updates, "check", fake_check)
+    monkeypatch.setattr("utils.config.ADMIN_USER_ID", str(USER_A))
+    monkeypatch.setattr(update_handler, "_last_notice", None)
+
+    sent: list[str] = []
+
+    class _Bot:
+        async def send_message(self, **kw):
+            sent.append(kw["text"])
+            return {"ok": True}
+
+    monkeypatch.setattr("condor.agents.delegate.resolve_bot", lambda b=None: _Bot())
+
+    class _Ctx:
+        bot = _Bot()
+
+    # Two consecutive hourly checks over the same pending update: one notice.
+    asyncio.run(update_handler._periodic_update_check(_Ctx()))
+    asyncio.run(update_handler._periodic_update_check(_Ctx()))
+
+    assert len(list_for(USER_A)) == 1
+    assert len(sent) == 1
+
+    # A genuinely newer version is a different update, so it rings again.
+    pending[:] = [_stale("main @ 9c0dd41")]
+    asyncio.run(update_handler._periodic_update_check(_Ctx()))
+
+    items = list_for(USER_A)
+    assert len(items) == 2
+    assert "main @ 9c0dd41" in items[0].text
+    assert len(sent) == 2
+
+    # Catching up clears the memory, so falling behind again rings once more --
+    # even on a version that was already announced before.
+    pending[:] = []
+    asyncio.run(update_handler._periodic_update_check(_Ctx()))
+    assert len(list_for(USER_A)) == 2
+
+    pending[:] = [_stale("main @ 9c0dd41")]
+    asyncio.run(update_handler._periodic_update_check(_Ctx()))
+    assert len(list_for(USER_A)) == 3
+    assert len(sent) == 3

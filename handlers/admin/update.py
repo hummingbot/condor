@@ -412,9 +412,21 @@ async def _do_restart(query) -> None:
 # The hourly notice
 # ---------------------------------------------------------------------------
 
+# What the last notice said, so the same pending update is announced once and
+# not once per check. announce() files a bell entry on every call, so without
+# this an admin who defers an update -- or a checkout that is permanently
+# behind origin -- accrues a fresh unread entry every UPDATE_CHECK_INTERVAL
+# until the update notices evict every real notification from the bell. The
+# identity is the rendered lines: component, current and available. A newer
+# available version, or a component that falls behind again, changes them and
+# rings again; only a repeat of the very same update stays silent.
+_last_notice: tuple[str, ...] | None = None
+
 
 async def _periodic_update_check(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Periodic job that checks for updates and notifies admin."""
+    global _last_notice
+
     from condor import notifications
     from utils.config import ADMIN_USER_ID
 
@@ -423,6 +435,7 @@ async def _periodic_update_check(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     stale = [s for s in await updates.check() if not s.up_to_date]
     if not stale:
+        _last_notice = None
         return
 
     lines = []
@@ -439,7 +452,13 @@ async def _periodic_update_check(context: ContextTypes.DEFAULT_TYPE) -> None:
                 lines.append(f"{status.name}: {facet.current} → {facet.available}")
 
     if not lines:
+        _last_notice = None
         return
+
+    signature = tuple(lines)
+    if signature == _last_notice:
+        return
+    _last_notice = signature
 
     body = "Updates available\n\n" + "\n".join(lines)
 
