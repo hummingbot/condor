@@ -102,9 +102,15 @@ class RunHistoryEntry:
     controllers: dict[str, dict[str, str]] = field(default_factory=dict)
     #: Total points across every controller.
     points: int = 0
-    #: The interval the series was downsampled *to*, which is not the interval
-    #: it was fetched at: the walk is always fine-grained per controller and the
-    #: thinning happens here.
+    #: The upstream sampling interval the rows were actually **fetched** at —
+    #: provenance, not shape. It is ``pick_interval`` of the run's span (the
+    #: per-controller walk deliberately goes coarse for a long run; see the
+    #: note in :mod:`condor.fetchers.run_history`), or ``5m`` when the run
+    #: declared no controller ids and the walk had no id to bind.
+    #:
+    #: It is *not* the spacing of the points below it: those are thinned to
+    #: ``HISTORY_POINT_BUDGET`` by time bucket, which lands on no rung of the
+    #: ladder and is independent of what was asked for.
     interval: str = "5m"
     built_at: float = 0.0
     #: ``"snapshots"`` | ``"archive"`` | ``"none"`` — which source the curve

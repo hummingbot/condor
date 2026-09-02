@@ -397,6 +397,8 @@ class RunHistory:
     #: ``controller_id -> {"connector", "trading_pair"}``. What the *fold* needs:
     #: a leaf with no pair converts as though its quote were dollars.
     identities: dict[str, dict[str, str]]
+    #: The interval the rows were fetched at, not the spacing of the points —
+    #: see :class:`~condor.run_history_store.RunHistoryEntry`.
     interval: str
     #: Which source answered — never assumed, always discovered per run.
     source: str
@@ -500,8 +502,18 @@ async def _build(
         # controllers come back. The interval collapse (see the module note)
         # applies to this path and cannot be avoided — there is no id to bind —
         # so it asks at the finest rung and accepts the cost.
+        #
+        # Bound to a name rather than passed as a literal because the interval
+        # is also *recorded*: this path asks finer than ``pick_interval`` chose
+        # for the span, and an entry that claims the coarser rung is a lie
+        # frozen into a cache that is never rewritten.
+        walked_interval = "5m"
         rows = await _walk(
-            client, bot_name=bot_name, controller_id=None, interval="5m", window=window
+            client,
+            bot_name=bot_name,
+            controller_id=None,
+            interval=walked_interval,
+            window=window,
         )
         ids = sorted(
             {str(r.get("controller_id") or "") for r in rows if isinstance(r, dict)}
@@ -514,6 +526,7 @@ async def _build(
             for cid in ids
         }
     else:
+        walked_interval = interval
         semaphore = asyncio.Semaphore(_WALK_CONCURRENCY)
 
         async def _one(controller_id: str) -> tuple[str, list[dict]]:
@@ -555,7 +568,7 @@ async def _build(
     history = RunHistory(
         controllers=controllers,
         identities=identities,
-        interval=interval,
+        interval=walked_interval,
         source=source,
         points=total,
     )
@@ -573,7 +586,7 @@ async def _build(
                 stopped_at=stopped_at or "",
                 controllers=identities,
                 points=total,
-                interval=interval,
+                interval=walked_interval,
                 source=source,
             ),
             controllers,

@@ -149,6 +149,42 @@ def test_a_run_that_declared_nothing_is_asked_at_the_finest_interval():
     assert {c["interval"] for c in client.calls} == {"5m"}
 
 
+def test_a_run_that_declared_nothing_records_the_interval_it_actually_asked_for():
+    """``interval`` is provenance, so it must be what was walked, not what the
+    ladder would have chosen. This 90h run picks ``15m`` for its span but asks
+    at ``5m`` because it has no id to bind, and the entry is immutable: a lie
+    written here is never corrected."""
+    client = FakeClient(TWO)
+    history = asyncio.run(_fetch(client, controller_ids=()))
+
+    assert rh.pick_interval(90 * 3_600_000) == "15m"  # what the span alone says
+    assert {c["interval"] for c in client.calls} == {"5m"}
+    assert history.interval == "5m"
+
+    entry = RunHistoryStore().list_entries()[0]
+    assert entry.interval == "5m"
+
+
+def test_a_declared_run_records_the_coarse_interval_it_was_walked_at():
+    """The other side of the same rule: when the walk does go coarse, that is
+    what is recorded — the fix must not simply hard-code the finest rung."""
+    client = FakeClient(TWO)
+    history = asyncio.run(
+        rh.fetch_run_history(
+            client,
+            "brigado",
+            bot_name="gan",
+            deployed_at=iso(-24 * 60),
+            stopped_at=iso(-1),
+            controller_ids=["c1"],
+        )
+    )
+
+    asked = {c["interval"] for c in client.calls}
+    assert asked == {history.interval}
+    assert history.interval != "5m"
+
+
 def test_the_window_is_the_run_s_own_life_widened_by_a_bucket():
     """A run's first dump lands after its deploy row is written and its last
     after the stop; a window clipped to the run's own timestamps drops both."""
