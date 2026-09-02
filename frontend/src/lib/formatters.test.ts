@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   formatAxisCurrency,
@@ -6,6 +6,7 @@ import {
   formatCompactVolume,
   formatCurrencyVolume,
   formatDateTime,
+  formatRelativeTime,
   formatRuntimeHours,
   formatTime,
   roundToPricePrecision,
@@ -320,5 +321,73 @@ describe("formatRuntimeHours", () => {
     expect(formatRuntimeHours(0)).toBe("\u2014");
     expect(formatRuntimeHours(-3)).toBe("\u2014");
     expect(formatRuntimeHours(NaN)).toBe("\u2014");
+  });
+});
+
+// ARCH-304 folded the admin tab's own `timeAgo` into this one, so "last seen"
+// and the audit log now read in the same units as RoutineTable and the
+// notification bell. Nothing pinned this ladder before the merge; the cases
+// below are the ones the deleted copy answered differently, and they are the
+// ones a caller has to get right.
+describe("formatRelativeTime", () => {
+  const NOW = 1_772_600_000_000; // fixed clock — the ladder is relative to it
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const secondsAgo = (n: number) => NOW / 1000 - n;
+
+  it("walks seconds to minutes to hours to days, in the dashboard's short units", () => {
+    expect(formatRelativeTime(secondsAgo(12))).toBe("12s ago");
+    expect(formatRelativeTime(secondsAgo(59))).toBe("59s ago");
+    expect(formatRelativeTime(secondsAgo(60))).toBe("1m ago");
+    expect(formatRelativeTime(secondsAgo(3599))).toBe("59m ago");
+    expect(formatRelativeTime(secondsAgo(3600))).toBe("1h ago");
+    expect(formatRelativeTime(secondsAgo(86_399))).toBe("23h ago");
+    expect(formatRelativeTime(secondsAgo(86_400))).toBe("1d ago");
+  });
+
+  // The deleted copy climbed on to "2 months ago" / "1 year ago". This one does
+  // not: a year-old timestamp is 365 days old, and stays in days.
+  it("stops at days rather than rounding a year into one word", () => {
+    expect(formatRelativeTime(secondsAgo(86_400 * 60))).toBe("60d ago");
+    expect(formatRelativeTime(secondsAgo(86_400 * 365))).toBe("365d ago");
+  });
+
+  it("takes milliseconds as readily as seconds", () => {
+    expect(formatRelativeTime(NOW - 7_200_000)).toBe("2h ago");
+    expect(formatRelativeTime(new Date(NOW - 7_200_000))).toBe("2h ago");
+    expect(formatRelativeTime(new Date(NOW - 7_200_000).toISOString())).toBe("2h ago");
+  });
+
+  it("falls back for a timestamp that is absent or unparseable", () => {
+    expect(formatRelativeTime(null, "never")).toBe("never");
+    expect(formatRelativeTime(undefined, "never")).toBe("never");
+    expect(formatRelativeTime("", "never")).toBe("never");
+    expect(formatRelativeTime("not a date", "never")).toBe("never");
+    expect(formatRelativeTime(null)).toBe("");
+  });
+
+  // The trap ARCH-304 had to route around: the admin API sends `last_seen = 0`
+  // for a person who has never been seen, and 0 is a real epoch here, not a
+  // missing value. Callers coerce it themselves (`person.last_seen || null`),
+  // which is why this function may keep reading 0 as 1970.
+  it("treats 0 as an epoch, not as 'missing' — the caller must coerce it", () => {
+    const person = { last_seen: 0 };
+
+    expect(formatRelativeTime(person.last_seen, "never")).toMatch(/^\d+d ago$/);
+    expect(formatRelativeTime(person.last_seen || null, "never")).toBe("never");
+  });
+
+  // Known cosmetic difference from the deleted `timeAgo`, which said "just now"
+  // for anything under a minute, a clock skewed into the future included.
+  it("counts a future timestamp backwards rather than clamping it", () => {
+    expect(formatRelativeTime(secondsAgo(-3))).toBe("-3s ago");
   });
 });

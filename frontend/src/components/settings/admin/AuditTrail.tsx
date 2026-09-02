@@ -3,8 +3,7 @@ import { ChevronDown, ChevronRight, Loader2 } from "lucide-react";
 import { useState } from "react";
 
 import { ADMIN_AUDIT_KEY, type AuditEntry, adminApi } from "@/lib/admin-api";
-
-import { timeAgo } from "./identity";
+import { formatRelativeTime } from "@/lib/formatters";
 
 /**
  * The audit log, read in the panel that writes it (FEAT-088).
@@ -97,7 +96,7 @@ export function AuditTrail() {
                     {describe(entry)}
                   </span>
                   <span className="ml-auto shrink-0 text-[var(--color-text-muted)]">
-                    {timeAgo(entry.timestamp)}
+                    {formatRelativeTime(entry.timestamp || null, "—")}
                   </span>
                 </li>
               ))}

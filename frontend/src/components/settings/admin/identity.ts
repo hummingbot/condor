@@ -50,26 +50,6 @@ export function initials(p: Named): string {
   return letters.join("").toUpperCase() || "??";
 }
 
-/** "2 days ago" — coarse on purpose; `last_seen` is only recorded every 5 min. */
-export function timeAgo(epochSeconds: number): string {
-  if (!epochSeconds) return "never";
-  const seconds = Date.now() / 1000 - epochSeconds;
-  if (seconds < 60) return "just now";
-  const units: [number, string][] = [
-    [60, "minute"],
-    [3600, "hour"],
-    [86400, "day"],
-    [2592000, "month"],
-    [31536000, "year"],
-  ];
-  let chosen = units[0];
-  for (const unit of units) {
-    if (seconds >= unit[0]) chosen = unit;
-  }
-  const value = Math.floor(seconds / chosen[0]);
-  return `${value} ${chosen[1]}${value === 1 ? "" : "s"} ago`;
-}
-
 /** "1 Mar 2026", for the dates that are a fact rather than a duration. */
 export function formatDate(epochSeconds: number): string {
   if (!epochSeconds) return "";

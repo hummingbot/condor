@@ -131,6 +131,31 @@ describe("a person who is not approved yet", () => {
   });
 });
 
+describe("when the person was last seen", () => {
+  // The admin API sends `last_seen = 0` for a person who has never opened the
+  // bot, and 0 is a real epoch, not a blank. Before ARCH-304 the panel had its
+  // own formatter that read 0 as "never"; it now shares `formatRelativeTime`
+  // with the rest of the dashboard, which does not — so the panel coerces.
+  it("says 'never' for a person the bot has never seen", () => {
+    render({ ...BASE, role: "user", last_seen: 0 });
+
+    expect(container.textContent).toContain("last seen never");
+    expect(container.textContent).not.toContain("d ago");
+  });
+
+  it("reads in the same short units as the rest of the dashboard", () => {
+    render({ ...BASE, role: "user", last_seen: Date.now() / 1000 - 7200 });
+
+    expect(container.textContent).toContain("last seen 2h ago");
+  });
+
+  it("has no last seen at all for an id with no user record", () => {
+    render({ ...BASE, known: false, last_seen: 0 });
+
+    expect(container.textContent).not.toContain("last seen");
+  });
+});
+
 describe("a person who has just been approved", () => {
   const approved: AdminPerson = { ...BASE, role: "user", approved_at: 1772509999 };
 

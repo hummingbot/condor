@@ -1,8 +1,9 @@
 import { AlertTriangle, Loader2 } from "lucide-react";
 
 import type { AdminPerson, RoleTarget } from "@/lib/admin-api";
+import { formatRelativeTime } from "@/lib/formatters";
 
-import { formatDate, timeAgo } from "./identity";
+import { formatDate } from "./identity";
 import { ServerAccessGrid } from "./ServerAccessGrid";
 
 /**
@@ -62,7 +63,9 @@ export function PersonDetail({
           ? `Requested ${formatDate(person.created_at)}`
           : "No registration on record"}
         {person.approved_at ? ` · approved ${formatDate(person.approved_at)}` : ""}
-        {person.known ? ` · last seen ${timeAgo(person.last_seen)}` : ""}
+        {person.known
+          ? ` · last seen ${formatRelativeTime(person.last_seen || null, "never")}`
+          : ""}
       </p>
 
       {!person.known && (
