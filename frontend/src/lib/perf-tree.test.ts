@@ -13,6 +13,8 @@ import { describe, expect, it } from "vitest";
 import type { BotRunInfo, ControllerInfo, ExecutorInfo } from "./api";
 import {
   UNATTACHED_BOT,
+  agentNodeId,
+  agentOfNodeId,
   ancestorChain,
   botNodeId,
   botOfNodeId,
@@ -483,6 +485,169 @@ describe("buildTree, grouping by bot", () => {
       "bot:alpha",
       "all",
     ]);
+  });
+});
+
+/**
+ * The agent level (FEAT-096).
+ *
+ * The fold is untouched by it — an agent node carries no leaf of its own, so it
+ * folds its children's spines exactly as a bot node does — and the two ways an
+ * agent's work reaches the fleet page land in the two different places the
+ * structure has for them: a bot it deployed nests under it, and a standalone
+ * executor it created, which has no controller and therefore no bot, hangs off
+ * it directly instead of off the fleet root under a raw session id.
+ */
+describe("buildTree, grouping by agent", () => {
+  const RUN_KEY = "brigado.brl_mm";
+
+  /** A bot-mode agent's two controllers, plus a bot nobody owns. */
+  const mixedFleet = () => [
+    leafFromController(
+      controller({ bot_name: "brigado-brl_mm-btc", controller_id: "pmm_1" }),
+      RUN_KEY,
+    ),
+    leafFromController(
+      controller({ bot_name: "brigado-brl_mm-btc", controller_id: "pmm_2" }),
+      RUN_KEY,
+    ),
+    leafFromController(controller({ bot_name: "hand-rolled", controller_id: "grid_1" })),
+  ];
+
+  it("nests an agent's bots under it and leaves an unowned bot on the fleet", () => {
+    const tree = buildTree(mixedFleet(), "All", { groupByBot: true, groupByAgent: true });
+
+    expect(tree.children.map((c) => c.id)).toEqual([`agent:${RUN_KEY}`, "bot:hand-rolled"]);
+    expect(node(tree, `agent:${RUN_KEY}`).children.map((c) => c.id)).toEqual([
+      "bot:brigado-brl_mm-btc",
+    ]);
+    expect(node(tree, "bot:brigado-brl_mm-btc").children.map((c) => c.id)).toEqual([
+      "ctrl:brigado-brl_mm-btc:pmm_1",
+      "ctrl:brigado-brl_mm-btc:pmm_2",
+    ]);
+  });
+
+  // The executor-mode half of the same requirement. This row is the one the
+  // page could not explain before: it used to hang off the fleet root under the
+  // literal string `brigado.brl_mm_7`, as if a session id were a bot name.
+  it("hangs a standalone executor off its agent, not off the fleet", () => {
+    const standalone = leafFromExecutor(
+      executor({ id: "ex_1", controller_id: `${RUN_KEY}_7` }),
+      UNATTACHED_BOT,
+      RUN_KEY,
+    );
+    expect(botNodeId(standalone)).toBeNull();
+    expect(agentNodeId(standalone)).toBe(`agent:${RUN_KEY}`);
+
+    const tree = buildTree([standalone], "All", { groupByBot: true, groupByAgent: true });
+    expect(tree.children.map((c) => c.id)).toEqual([`agent:${RUN_KEY}`]);
+    expect(node(tree, `agent:${RUN_KEY}`).children.map((c) => c.id)).toEqual(["exec:ex_1"]);
+  });
+
+  it("keeps an executor that belongs to nobody on the fleet root", () => {
+    const manual = leafFromExecutor(executor({ id: "manual", controller_id: "main" }));
+    expect(agentNodeId(manual)).toBeNull();
+    const tree = buildTree([manual], "All", { groupByBot: true, groupByAgent: true });
+    expect(tree.children.map((c) => c.id)).toEqual(["exec:manual"]);
+  });
+
+  // The level must not become a second place the same trading is counted.
+  it("folds an agent out of its children's spines, once each", () => {
+    const tree = buildTree(mixedFleet(), "All", { groupByBot: true, groupByAgent: true });
+    // Two controllers at 12 apiece; the third belongs to no agent.
+    expect(foldLeaves(node(tree, `agent:${RUN_KEY}`).leaves, identity, NOW).net).toBe(24);
+    expect(foldLeaves(tree.leaves, identity, NOW).net).toBe(36);
+  });
+
+  // A controller's own leaf already covers every executor it ever ran, so the
+  // settle rule must not let the agent level double-count them.
+  it("still lets a controller's leaf cover its executors", () => {
+    const ctrl = leafFromController(
+      controller({ bot_name: "brigado-brl_mm-btc", controller_id: "pmm_1" }),
+      RUN_KEY,
+    );
+    const child = leafFromExecutor(
+      executor({ id: "ex_1", controller_id: "pmm_1" }),
+      "brigado-brl_mm-btc",
+      RUN_KEY,
+    );
+    const tree = buildTree([ctrl, child], "All", { groupByBot: true, groupByAgent: true });
+    expect(node(tree, `agent:${RUN_KEY}`).leaves.map((l) => l.id)).toEqual([ctrl.id]);
+    expect(foldLeaves(node(tree, `agent:${RUN_KEY}`).leaves, identity, NOW).net).toBe(12);
+  });
+
+  it("changes nothing at all when the level is off", () => {
+    const off = buildTree(mixedFleet(), "All", { groupByBot: true });
+    expect(off.children.map((c) => c.id)).toEqual(["bot:brigado-brl_mm-btc", "bot:hand-rolled"]);
+    expect(countNodes(off, "agent")).toBe(0);
+    expect(foldLeaves(off.leaves, identity, NOW).net).toBe(36);
+  });
+
+  it("nests controllers under the agent directly when the bot level is off", () => {
+    const tree = buildTree(mixedFleet(), "All", { groupByAgent: true });
+    expect(node(tree, `agent:${RUN_KEY}`).children.map((c) => c.id)).toEqual([
+      "ctrl:brigado-brl_mm-btc:pmm_1",
+      "ctrl:brigado-brl_mm-btc:pmm_2",
+    ]);
+  });
+
+  it("counts agent rows and walks them before their bots", () => {
+    const tree = buildTree(mixedFleet(), "All", { groupByBot: true, groupByAgent: true });
+    expect(countNodes(tree, "agent")).toBe(1);
+    expect(visibleNodeIds(tree, new Set(["all"]))).toEqual([
+      "all",
+      `agent:${RUN_KEY}`,
+      "bot:hand-rolled",
+    ]);
+    expect(ancestorChain(tree, "ctrl:brigado-brl_mm-btc:pmm_1")).toEqual([
+      "ctrl:brigado-brl_mm-btc:pmm_1",
+      "bot:brigado-brl_mm-btc",
+      `agent:${RUN_KEY}`,
+      "all",
+    ]);
+  });
+
+  it("reads the run key back off an agent node id", () => {
+    expect(agentOfNodeId(`agent:${RUN_KEY}`)).toBe(RUN_KEY);
+    expect(agentOfNodeId("bot:alpha")).toBeNull();
+    expect(agentOfNodeId("all")).toBeNull();
+  });
+
+  // A filter that removes the bot should leave the reader on the agent that
+  // operates it, not all the way back on the fleet.
+  it("falls back from a lost controller to its agent when the bot is gone too", () => {
+    const lost = mixedFleet()[0];
+    const tree = indexTree(
+      buildTree(
+        [leafFromController(controller({ bot_name: "brigado-brl_mm-eth" }), RUN_KEY)],
+        "All",
+        { groupByBot: true, groupByAgent: true },
+      ),
+    );
+    expect(resolveScope(tree, "ctrl:brigado-brl_mm-btc:pmm_1", lost)).toBe(`agent:${RUN_KEY}`);
+  });
+
+  // An agent scope is shallower than a bot, so it must never fall *into* one of
+  // its own bots — that is a much narrower report than the link asked for.
+  it("never resolves an agent scope down into one of its bots", () => {
+    const other = indexTree(
+      buildTree([leafFromController(controller({ bot_name: "beta" }))], "All", {
+        groupByBot: true,
+        groupByAgent: true,
+      }),
+    );
+    expect(resolveScope(other, `agent:${RUN_KEY}`)).toBe("all");
+  });
+
+  // The ids in existing links are the product; only their parent changed.
+  it("leaves the ctrl: and exec: id grammars alone", () => {
+    const tree = indexTree(
+      buildTree(mixedFleet(), "All", { groupByBot: true, groupByAgent: true }),
+    );
+    expect(resolveScope(tree, "ctrl:brigado-brl_mm-btc:pmm_1")).toBe(
+      "ctrl:brigado-brl_mm-btc:pmm_1",
+    );
+    expect(resolveScope(tree, "ctrl:hand-rolled:grid_1")).toBe("ctrl:hand-rolled:grid_1");
   });
 });
 

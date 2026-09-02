@@ -1,9 +1,11 @@
-import { Activity, ChevronDown, ChevronRight, Circle, Layers, Server } from "lucide-react";
+import { Activity, Bot, ChevronDown, ChevronRight, Circle, Layers, Server } from "lucide-react";
 import { useMemo, type ReactNode } from "react";
 
+import { runKeyLabel } from "@/lib/agent-attribution";
+import { agentColor } from "@/lib/agentColor";
 import { formatCurrencyPnl, formatCurrencyVolume, pnlColor, shortBotName } from "@/lib/formatters";
 import type { ConvertQuote, PerfNode } from "@/lib/perf-tree";
-import { foldLeaves } from "@/lib/perf-tree";
+import { agentOfNodeId, foldLeaves } from "@/lib/perf-tree";
 
 /**
  * The status marker, at one size for every row.
@@ -36,6 +38,18 @@ export function StatusDot({ status }: { status: string }) {
 function NodeIcon({ node, active }: { node: PerfNode; active: boolean }) {
   const tone = active ? "text-[var(--color-primary)]" : "text-[var(--color-text-muted)]";
   if (node.kind === "fleet") return <Layers className={`h-3.5 w-3.5 shrink-0 ${tone}`} />;
+  // An agent keeps its own colour here, not the row's tone: it is the same
+  // identity palette the chat gutter gives it (`agentColor`, four CVD-validated
+  // series vars), so the agent you are reading on `/bots` is the colour you
+  // already know it by.
+  if (node.kind === "agent") {
+    return (
+      <Bot
+        className="h-3.5 w-3.5 shrink-0"
+        style={{ color: agentColor(agentOfNodeId(node.id) ?? node.label) }}
+      />
+    );
+  }
   if (node.kind === "bot") return <Server className={`h-3.5 w-3.5 shrink-0 ${tone}`} />;
   if (node.kind === "executor") return <Activity className={`h-3 w-3 shrink-0 ${tone}`} />;
   // A controller's marker is its state, which is the one thing the icon slot
@@ -58,6 +72,16 @@ function subtitle(node: PerfNode, showBot: boolean): string {
     case "fleet": {
       const ctrls = node.children.filter((c) => c.kind === "controller").length;
       return `${node.leaves.length} in scope · ${ctrls} controller${ctrls !== 1 ? "s" : ""}`;
+    }
+    // Counted by kind rather than as one total, because that *is* the fact the
+    // row exists to state: an agent operates bots and creates loose executors,
+    // and which of the two it is doing is the shape of its strategy.
+    case "agent": {
+      const counted = (["bot", "controller", "executor"] as const)
+        .map((kind) => [kind, node.children.filter((c) => c.kind === kind).length] as const)
+        .filter(([, count]) => count > 0)
+        .map(([kind, count]) => `${count} ${kind}${count !== 1 ? "s" : ""}`);
+      return counted.join(" · ") || "nothing in scope";
     }
     case "bot":
       return `${n} controller${n !== 1 ? "s" : ""}`;
@@ -100,7 +124,12 @@ interface RowProps {
  * happens here rather than in the tree.
  */
 function rowLabel(node: PerfNode): string {
-  return node.kind === "bot" ? shortBotName(node.label) : node.label;
+  if (node.kind === "bot") return shortBotName(node.label);
+  // An agent row's label is its run key, which is its id — said out loud as
+  // `agent / strategy`, the same two slugs the bot names beneath it are built
+  // from, so the column can be matched by eye.
+  if (node.kind === "agent") return runKeyLabel(node.label);
+  return node.label;
 }
 
 function rowClass(active: boolean) {
@@ -188,7 +217,7 @@ function ScopeRow({
             <NodeIcon node={node} active={active} />
             <span
               className={`truncate text-[11px] ${
-                active || node.kind === "bot"
+                active || node.kind === "bot" || node.kind === "agent"
                   ? "font-semibold text-[var(--color-text)]"
                   : "font-medium text-[var(--color-text-muted)]"
               }`}

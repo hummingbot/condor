@@ -149,7 +149,7 @@ export function DockExecution({ server }: { server: string }) {
     const seen = new Map<string, ControllerInfo>();
     for (const c of bots?.controllers ?? []) seen.set(controllerKey(c), c);
     return [...seen.values()]
-      .map(leafFromController)
+      .map((c) => leafFromController(c))
       .filter((leaf) => leaf.status !== "stopped")
       .sort((a, b) => a.bot.localeCompare(b.bot) || a.label.localeCompare(b.label));
   }, [bots]);

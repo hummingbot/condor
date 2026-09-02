@@ -13,8 +13,9 @@ import {
   agentOfBot,
   agentOfControllerId,
   inNamespace,
-  ownerLabel,
   ownerOf,
+  ownerTitle,
+  runKeyLabel,
   stripDeploySuffix,
   type FleetOwner,
 } from "./agent-attribution";
@@ -125,18 +126,24 @@ describe("standalone executors", () => {
 describe("labels", () => {
   const owners = [owner()];
 
-  it("name the agent and the strategy as they are written", () => {
-    expect(ownerLabel(owners, "brigado.brl_mm")).toBe("Brigado / BRL MM");
+  it("say the run key out loud, in slugs, with no map needed", () => {
+    // The slug form is what the bot names beneath an agent row are built from,
+    // so it is the one a reader can match by eye down the column.
+    expect(runKeyLabel("brigado.brl_mm")).toBe("brigado / brl_mm");
+    expect(runKeyLabel("nonsense")).toBe("nonsense");
   });
 
-  it("fall back to the run key's own halves for an owner that is gone", () => {
-    expect(ownerLabel(owners, "ghost.strategy")).toBe("ghost / strategy");
-    expect(ownerLabel(owners, "nonsense")).toBe("nonsense");
+  it("spell the same subject out in display names for the tooltip", () => {
+    expect(ownerTitle(owners, "brigado.brl_mm")).toBe("Brigado / BRL MM");
+  });
+
+  it("fall back to the label for an owner the map no longer holds", () => {
+    expect(ownerTitle(owners, "ghost.strategy")).toBe("ghost / strategy");
   });
 
   it("fall back to slugs when the map carries no names", () => {
     const bare = [owner({ agentName: "", strategyName: "" })];
-    expect(ownerLabel(bare, "brigado.brl_mm")).toBe("brigado / brl_mm");
+    expect(ownerTitle(bare, "brigado.brl_mm")).toBe("brigado / brl_mm");
   });
 
   it("find the owner behind a run key", () => {

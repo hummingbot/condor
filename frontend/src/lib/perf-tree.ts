@@ -74,6 +74,20 @@ export interface PerfLeaf {
   label: string;
   /** Which bot ran it — the sidebar's bot bubbles filter on this. */
   bot: string;
+  /**
+   * The run key of the `(agent, strategy)` that owns it, or `""` for none.
+   *
+   * The sibling of `bot`, and filled in the same way and for the same reason:
+   * **the caller fills it in, because the record does not carry one.** Neither
+   * a `ControllerInfo` nor an `ExecutorInfo` names an agent — ownership is a
+   * fact about the bot's *name* (its namespace) or about the session id an
+   * executor was tagged with, so it is a join the page does and hands over
+   * (`lib/agent-attribution`, FEAT-096).
+   *
+   * `""` is not an error: most fleets have no agent in them at all, and a bot
+   * outside every namespace is honestly nobody's.
+   */
+  agent: string;
   /** Which controller it belongs to; `""` for a leaf that belongs to none. */
   controllerId: string;
   /**
@@ -127,7 +141,7 @@ function finiteOr(value: unknown, fallback: number): number {
 }
 
 /** A live controller, as the browser reports it. */
-export function leafFromController(c: ControllerInfo): PerfLeaf {
+export function leafFromController(c: ControllerInfo, agent: string = ""): PerfLeaf {
   const capital = finiteOr(c.config?.total_amount_quote, 0);
   const started = c.deployed_at ? Date.parse(c.deployed_at) : NaN;
   // The kill switch is what actually stops a controller; `status` in this
@@ -144,6 +158,7 @@ export function leafFromController(c: ControllerInfo): PerfLeaf {
     kind: "controller",
     label: c.controller_id || c.controller_name,
     bot: c.bot_name,
+    agent,
     controllerId: c.controller_id || c.controller_name,
     executorType: c.controller_name || UNKNOWN_LABEL,
     connector: c.connector || "",
@@ -186,7 +201,11 @@ export function leafFromController(c: ControllerInfo): PerfLeaf {
  * this controller. Grouping by a value that is not the thing being grouped is
  * worse than saying so.
  */
-export function leafFromTerminatedController(c: ControllerInfo, run?: BotRunInfo): PerfLeaf {
+export function leafFromTerminatedController(
+  c: ControllerInfo,
+  run?: BotRunInfo,
+  agent: string = "",
+): PerfLeaf {
   const started = c.deployed_at ? Date.parse(c.deployed_at) : NaN;
   const stopped = run?.stopped_at ? Date.parse(run.stopped_at) : NaN;
   return {
@@ -194,6 +213,7 @@ export function leafFromTerminatedController(c: ControllerInfo, run?: BotRunInfo
     kind: "controller",
     label: c.controller_id || c.controller_name,
     bot: c.bot_name,
+    agent,
     controllerId: c.controller_id || c.controller_name,
     executorType: c.controller_name || UNKNOWN_LABEL,
     connector: c.connector || "",
@@ -235,7 +255,11 @@ export function leafFromTerminatedController(c: ControllerInfo, run?: BotRunInfo
  * column is what lets a controller scope and an executor scope be read side by
  * side without one of them lying about which half of its total is banked.
  */
-export function leafFromExecutor(e: ExecutorInfo, bot: string = UNATTACHED_BOT): PerfLeaf {
+export function leafFromExecutor(
+  e: ExecutorInfo,
+  bot: string = UNATTACHED_BOT,
+  agent: string = "",
+): PerfLeaf {
   const running = isExecutorActive(e.status);
   const closedAt = e.close_timestamp > 0 ? toMs(e.close_timestamp) : null;
   const attached = !!bot && bot !== UNATTACHED_BOT;
@@ -244,6 +268,7 @@ export function leafFromExecutor(e: ExecutorInfo, bot: string = UNATTACHED_BOT):
     kind: "executor",
     label: e.id,
     bot: attached ? bot : e.controller_id || UNATTACHED_BOT,
+    agent,
     controllerId: attached ? e.controller_id || "" : "",
     executorType: e.type || UNKNOWN_LABEL,
     connector: e.connector || "",
@@ -314,10 +339,10 @@ export function controllerClassOf(leaf: PerfLeaf, classById: Map<string, string>
 
 // ── The tree ──
 
-export type NodeKind = "fleet" | "bot" | "controller" | "executor";
+export type NodeKind = "fleet" | "agent" | "bot" | "controller" | "executor";
 
 export interface PerfNode {
-  /** `all` | `bot:name` | `ctrl:k` | `exec:id` */
+  /** `all` | `agent:runKey` | `bot:name` | `ctrl:k` | `exec:id` */
   id: string;
   kind: NodeKind;
   label: string;
@@ -375,6 +400,22 @@ export function botOfNodeId(id: string): string | null {
   return null;
 }
 
+/**
+ * The node id of the agent a leaf hangs under, or `null` for a leaf nobody owns.
+ *
+ * The run key is the whole id: it is already unique across the fleet, it is
+ * what the URL carries (`?scope=agent:brigado.brl_mm`), and it is what
+ * `StrategyDetail`'s *View in fleet* link is built from.
+ */
+export function agentNodeId(leaf: PerfLeaf): string | null {
+  return leaf.agent ? `agent:${leaf.agent}` : null;
+}
+
+/** The run key an `agent:` node id names, or `null` for any other id. */
+export function agentOfNodeId(id: string): string | null {
+  return id.startsWith("agent:") ? id.slice(6) || null : null;
+}
+
 function makeNode(id: string, kind: NodeKind, label: string): PerfNode {
   return { id, kind, label, leaves: [], children: [] };
 }
@@ -401,18 +442,46 @@ function makeNode(id: string, kind: NodeKind, label: string): PerfNode {
  * fleet running a single bot would spend a chevron saying so. `PerfBrowser`
  * turns it on exactly when more than one bot is in scope.
  *
- * An executor whose controller is gone still hangs directly off the fleet, at
- * either setting: it belongs to no deployment, so there is no bot row for it to
- * sit under (see {@link botNodeId}).
+ * **Agent is the same kind of level, one higher** (FEAT-096): one row per
+ * `(agent, strategy)`, folding everything that strategy operates. It is what
+ * makes "an agent is driving these four controllers and that loose executor" a
+ * thing the fleet page can say, and it is expressed structurally rather than
+ * as a caption — a bot the agent deployed nests under it, and a standalone
+ * executor it created, which has no controller and therefore no bot, hangs off
+ * the agent directly instead of off the fleet.
+ *
+ * An executor whose controller is gone *and* whose agent is unknown still
+ * hangs directly off the fleet, at every setting: it belongs to no deployment
+ * and to nobody, so there is no row above it that would say anything (see
+ * {@link botNodeId}).
  */
 export function buildTree(
   leaves: PerfLeaf[],
   rootLabel = "All",
-  { groupByBot = false }: { groupByBot?: boolean } = {},
+  { groupByBot = false, groupByAgent = false }: { groupByBot?: boolean; groupByAgent?: boolean } = {},
 ): PerfNode {
   const fleet = makeNode("all", "fleet", rootLabel);
+  const agents = new Map<string, PerfNode>();
   const bots = new Map<string, PerfNode>();
   const controllers = new Map<string, PerfNode>();
+
+  // Insertion order once more: the first record an agent owns is what puts it
+  // in the list, so agents come out in the order the caller sorted its records.
+  const agentFor = (leaf: PerfLeaf): PerfNode | null => {
+    if (!groupByAgent) return null;
+    const id = agentNodeId(leaf);
+    if (!id) return null;
+    let node = agents.get(id);
+    if (!node) {
+      // The run key, which is both the id and what the row says out loud
+      // (`lib/agent-attribution`'s `runKeyLabel` splits it for display) — so a
+      // row can be labelled without the fleet map in hand.
+      node = makeNode(id, "agent", leaf.agent);
+      agents.set(id, node);
+      fleet.children.push(node);
+    }
+    return node;
+  };
 
   // Insertion order again: the first controller of a bot is what puts the bot
   // in the list, so bots come out in the order the caller sorted controllers.
@@ -426,7 +495,7 @@ export function buildTree(
       // Stop button needs the name the API knows.
       node = makeNode(id, "bot", leaf.bot);
       bots.set(id, node);
-      fleet.children.push(node);
+      (agentFor(leaf) ?? fleet).children.push(node);
     }
     return node;
   };
@@ -440,7 +509,7 @@ export function buildTree(
     if (!node) {
       node = makeNode(id, "controller", leaf.controllerId);
       controllers.set(id, node);
-      (botFor(leaf) ?? fleet).children.push(node);
+      (botFor(leaf) ?? agentFor(leaf) ?? fleet).children.push(node);
     }
     return node;
   };
@@ -458,7 +527,10 @@ export function buildTree(
     }
     const node = makeNode(leafNodeId(leaf), "executor", leaf.label);
     node.leaves = [leaf];
-    const parent = controllerFor(leaf) ?? fleet;
+    // A standalone executor an agent created has no controller and no bot, and
+    // this is where it stops being a mystery row on the fleet root: it hangs
+    // off the agent whose session tagged it.
+    const parent = controllerFor(leaf) ?? agentFor(leaf) ?? fleet;
     parent.children.push(node);
   }
 
@@ -606,6 +678,13 @@ export function fallbackChain(scopeId: string, leaf?: PerfLeaf): string[] {
   // fleet. Read off the id, so it serves a `ctrl:` scope with no leaf to hand.
   const bot = botOfNodeId(scopeId) ?? (leaf ? botNodeId(leaf)?.slice(4) : undefined);
   if (bot) chain.push(`bot:${bot}`);
+  // And the agent above it, same rule: a bot row that a filter removed leaves
+  // the reader on the agent that operates it rather than on the whole fleet.
+  // Only a leaf can supply it — a `bot:`/`ctrl:` id names a bot, and a bot's
+  // name does not say who owns it without the fleet map, which this pure
+  // function does not have. An `agent:` scope answers for itself.
+  const agent = agentOfNodeId(scopeId) ?? leaf?.agent;
+  if (agent) chain.push(`agent:${agent}`);
   chain.push("all");
 
   const depth = nodeDepth(scopeId);
@@ -621,15 +700,22 @@ export function fallbackChain(scopeId: string, leaf?: PerfLeaf): string[] {
  * An id that names no level of this tree — a retired `type:` group from a link
  * written before the class grouping went away, or plain nonsense — is treated
  * as the *shallowest* thing there is, so the only candidate that can serve it
- * is the fleet. A stale `bot:` id is *not* nonsense any more: it is depth 1
+ * is the fleet. A stale `bot:` id is *not* nonsense any more: it is a level
  * again, and lands on the bot when the tree groups by bot and on the fleet when
  * it does not — either way a report about that bot, never one of its
  * controllers, which would be much narrower than the link asked for.
+ *
+ * These are *relative* depths, and only the ordering is load-bearing: the rule
+ * they serve is "a candidate is never deeper than the scope it replaces". The
+ * agent level (FEAT-096) pushed every number below it down by one; the `ctrl:`
+ * and `exec:` id *grammars* are untouched, so links written before it still
+ * resolve exactly as they did.
  */
 function nodeDepth(id: string): number {
-  if (id.startsWith("bot:")) return 1;
-  if (id.startsWith("ctrl:")) return 2;
-  if (id.startsWith("exec:")) return 3;
+  if (id.startsWith("agent:")) return 1;
+  if (id.startsWith("bot:")) return 2;
+  if (id.startsWith("ctrl:")) return 3;
+  if (id.startsWith("exec:")) return 4;
   return 0;
 }
 

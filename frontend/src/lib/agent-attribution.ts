@@ -129,18 +129,31 @@ export function ownerOf(owners: FleetOwner[], runKey: string): FleetOwner | unde
 }
 
 /**
- * What a run key is called on screen: `"Brigado / BRL MM"`.
+ * What a run key is called on screen: `"brigado.brl_mm"` → `"brigado / brl_mm"`.
  *
- * The display names, which is why the map carries them beside the slugs — the
- * slugs are the *id*, and an id is what the URL wants, not what a row wants.
- * Falls back to the run key's own halves for an owner the map no longer holds,
- * so a stale deep link still names something.
+ * The **slugs**, not the display names, and deliberately: the rows beneath an
+ * agent are bot names built out of exactly these two slugs
+ * (`brigado-brl_mm-btc-20260731-101500`), so the slug form is the one a reader
+ * can match by eye down the column. It is also the id in the URL, so the row
+ * and the link it copies say the same thing.
+ *
+ * Pure over the key, which is what lets the scope tree label an agent row
+ * without the fleet map in hand: the node id already carries the answer.
  */
-export function ownerLabel(owners: FleetOwner[], runKey: string): string {
-  const owner = ownerOf(owners, runKey);
-  if (owner) {
-    return `${owner.agentName || owner.agentSlug} / ${owner.strategyName || owner.strategySlug}`;
-  }
+export function runKeyLabel(runKey: string): string {
   const dot = runKey.indexOf(".");
   return dot < 0 ? runKey : `${runKey.slice(0, dot)} / ${runKey.slice(dot + 1)}`;
+}
+
+/**
+ * The same subject spelled out: `"Brigado / BRL MM"`.
+ *
+ * What the map's display names are for — the tooltip on a label that is an id.
+ * Falls back to the label itself for an owner the map no longer holds, so a
+ * stale deep link still names something rather than nothing.
+ */
+export function ownerTitle(owners: FleetOwner[], runKey: string): string {
+  const owner = ownerOf(owners, runKey);
+  if (!owner) return runKeyLabel(runKey);
+  return `${owner.agentName || owner.agentSlug} / ${owner.strategyName || owner.strategySlug}`;
 }
