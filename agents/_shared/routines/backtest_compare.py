@@ -2,6 +2,7 @@
 
 CATEGORY = "Bot Analysis"
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
@@ -199,7 +200,7 @@ def _build_curve(result: dict) -> list[tuple[float, float]]:
     return _downsample(points)
 
 
-def _load_run(store, task_id: str) -> Run | None:
+async def _load_run(store, task_id: str) -> Run | None:
     """Load one completed backtest, or None if it is unusable.
 
     Everything the ranked table needs — the identity, the window and all 21
@@ -218,7 +219,10 @@ def _load_run(store, task_id: str) -> Run | None:
     curve: list[tuple[float, float]] = []
     if summary.get("has_payload", True):
         try:
-            task = store.get_result(task_id)
+            # gunzip + parse of a payload that runs to 137 MB. Off the loop, and
+            # one run at a time: a comparison opens up to MAX_RUNS of them and
+            # decompressing them concurrently would trade a stall for the memory.
+            task = await asyncio.to_thread(store.get_result, task_id)
         except (OSError, json.JSONDecodeError):
             logger.warning("Failed to read backtest %s", task_id, exc_info=True)
             task = None
@@ -447,9 +451,11 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> RoutineResu
                 )
         requested = _latest_ids(store, count, server)
 
-    runs = [
-        run_ for run_ in (_load_run(store, tid) for tid in requested[:MAX_RUNS]) if run_
-    ]
+    runs: list[Run] = []
+    for tid in requested[:MAX_RUNS]:
+        run_ = await _load_run(store, tid)
+        if run_:
+            runs.append(run_)
 
     if len(runs) < MIN_RUNS:
         return RoutineResult(text=_no_runs_message(store, requested, errors))

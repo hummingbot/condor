@@ -9,6 +9,7 @@ record rather than a phantom.
 
 from __future__ import annotations
 
+import asyncio
 import gzip
 import json
 import time
@@ -335,7 +336,7 @@ def test_compare_ranks_a_run_whose_payload_was_pruned(store):
     store._unlink_payload("gone")
     store._index["gone"]["has_payload"] = False
 
-    runs = [compare._load_run(store, tid) for tid in ("kept", "gone")]
+    runs = [asyncio.run(compare._load_run(store, tid)) for tid in ("kept", "gone")]
     assert all(r is not None for r in runs)
     assert [r.metrics["net_pnl_quote"] for r in runs] == [5.0, 9.0]
     assert runs[0].curve, "the kept run still draws"
@@ -352,7 +353,7 @@ def test_compare_reads_a_metric_without_opening_a_payload(store, monkeypatch):
         raise AssertionError("ranking must not open a payload")
 
     monkeypatch.setattr(store, "_read_payload", boom)
-    run = compare._load_run(store, "kept")
+    run = asyncio.run(compare._load_run(store, "kept"))
     assert run.metrics["net_pnl_quote"] == 12.5
     assert compare._latest_ids(store, 3, "local") == ["kept"]
 
@@ -376,7 +377,7 @@ def test_chart_says_expired_rather_than_not_found(store, monkeypatch):
     store._unlink_payload("8e44f514")
     store._index["8e44f514"]["has_payload"] = False
 
-    message = _chart._load_saved_task("8e44")
+    message = asyncio.run(_chart._load_saved_task("8e44"))
     assert isinstance(message, str)
     assert "expired" in message
     assert "No saved backtest" not in message
@@ -384,7 +385,7 @@ def test_chart_says_expired_rather_than_not_found(store, monkeypatch):
 
     store.save_result("local", "aaaa1111", _envelope())
     assert _chart._is_saved("aaaa") is True
-    assert _chart._load_saved_task("zzzz").startswith("No saved backtest")
+    assert asyncio.run(_chart._load_saved_task("zzzz")).startswith("No saved backtest")
 
 
 def test_an_iso_timestamp_is_a_real_clock(store):

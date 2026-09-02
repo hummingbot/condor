@@ -2,6 +2,7 @@
 
 CATEGORY = "Bot Analysis"
 
+import asyncio
 import io
 import logging
 from datetime import datetime, timezone
@@ -140,7 +141,7 @@ def _is_saved(task_id: str) -> bool:
     return isinstance(resolved, str) and store.has_payload(resolved)
 
 
-def _load_saved_task(task_id: str) -> tuple[dict, "Config"] | str:
+async def _load_saved_task(task_id: str) -> tuple[dict, "Config"] | str:
     """Load a stored backtest result, or return an error message.
 
     The returned Config mirrors the parameters the saved run was executed with,
@@ -158,7 +159,9 @@ def _load_saved_task(task_id: str) -> tuple[dict, "Config"] | str:
         return f"'{task_id}' is ambiguous: {', '.join(resolved)}"
     task_id = resolved
 
-    task = store.get_result(task_id)
+    # gunzip + parse of a payload that runs to 137 MB, so it goes to a thread:
+    # a routine runs on the loop that also polls Telegram and serves the dashboard.
+    task = await asyncio.to_thread(store.get_result, task_id)
     if task is None:
         # The run is real and its metrics are still in the index; only the
         # candles are gone. Saying "no saved backtest" here would be a lie.
@@ -1276,7 +1279,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> RoutineResu
             client = await get_client(chat_id, context=context, server=server)
             if client:
                 await fetch_and_save(client, server, task_id)
-        loaded = _load_saved_task(task_id)
+        loaded = await _load_saved_task(task_id)
         if isinstance(loaded, str):
             return RoutineResult(text=loaded)
         result, config = loaded

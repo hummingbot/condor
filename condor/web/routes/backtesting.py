@@ -8,6 +8,7 @@ makes no call to the Hummingbot API at all: a run is submitted through
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -121,7 +122,9 @@ async def get_archived_backtest(
     summary = _archived_or_404(task_id, user)
     store = get_backtest_store()
 
-    payload = store.get_result(task_id)
+    # gunzip + parse of a payload that runs to 137 MB: off the loop, or this
+    # one chart open stalls the Telegram poller and every other request with it.
+    payload = await asyncio.to_thread(store.get_result, task_id)
     if payload is None:
         # Not "not found": the run is real and its metrics are right here. The
         # UI has to be able to say "chart expired" rather than deny the run.

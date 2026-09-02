@@ -268,7 +268,7 @@ def test_a_stored_run_re_renders_with_its_original_parameters(routine):
     """task_id= must reproduce the run, not the form defaults."""
     routine(_completed("task-1"))
 
-    loaded = bc._load_saved_task("task-1")
+    loaded = asyncio.run(bc._load_saved_task("task-1"))
     assert not isinstance(loaded, str), loaded
     payload, restored = loaded
 
@@ -290,7 +290,7 @@ def test_backtest_compare_picks_up_routine_runs(store, routine):
     latest = cmp._latest_ids(store, 2, SERVER)
     assert set(latest) == {"task-1", "task-2"}
 
-    runs = [cmp._load_run(store, tid) for tid in latest]
+    runs = [asyncio.run(cmp._load_run(store, tid)) for tid in latest]
     assert all(r is not None for r in runs)
     assert {r.metrics["net_pnl_quote"] for r in runs} == {12.5}
 

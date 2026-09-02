@@ -184,9 +184,11 @@ def test_the_routine_asks_the_server_for_a_task_it_has_never_stored(monkeypatch)
     monkeypatch.setattr(bc, "fetch_and_save", fake_fetch_and_save)
     monkeypatch.setattr(bc, "_render", fake_render)
     monkeypatch.setattr(bc, "_server_name", lambda chat_id, context: "srv")
-    monkeypatch.setattr(
-        bc, "_load_saved_task", lambda tid: (stored[tid]["result"], bc.Config())
-    )
+
+    async def fake_load_saved_task(tid):
+        return stored[tid]["result"], bc.Config()
+
+    monkeypatch.setattr(bc, "_load_saved_task", fake_load_saved_task)
 
     out = asyncio.run(bc.run(bc.Config(task_id="t-1"), SimpleNamespace(_chat_id=1)))
 
@@ -207,9 +209,11 @@ def test_a_task_already_in_the_store_never_touches_the_server(monkeypatch):
     monkeypatch.setattr(bc, "get_client", boom)
     monkeypatch.setattr(bc, "fetch_and_save", boom)
     monkeypatch.setattr(bc, "_render", fake_render)
-    monkeypatch.setattr(
-        bc, "_load_saved_task", lambda tid: (COMPLETED["result"], bc.Config())
-    )
+
+    async def fake_load_saved_task(tid):
+        return COMPLETED["result"], bc.Config()
+
+    monkeypatch.setattr(bc, "_load_saved_task", fake_load_saved_task)
 
     out = asyncio.run(bc.run(bc.Config(task_id="t-1"), SimpleNamespace(_chat_id=1)))
     assert out == COMPLETED["result"]

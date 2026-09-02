@@ -163,7 +163,7 @@ async def run_and_save(
     if isinstance(result, dict) and result.get("error"):
         raise BacktestError(f"Backtest {task_id} failed: {result['error']}")
 
-    _save(server, task_id, task)
+    await _save(server, task_id, task)
     return task_id, task
 
 
@@ -353,16 +353,25 @@ async def fetch_and_save(client, server: str, task_id: str) -> dict | None:
         return None
 
     task = normalize_backtest_task(task)
-    _save(server, task_id, task)
+    await _save(server, task_id, task)
     return task
 
 
-def _save(server: str, task_id: str, task: dict) -> None:
-    """Persist the envelope. A store failure must never lose the backtest itself."""
+async def _save(server: str, task_id: str, task: dict) -> None:
+    """Persist the envelope. A store failure must never lose the backtest itself.
+
+    The write is ``json.dumps`` plus gzip level 6 over the whole envelope, which
+    the store's own ``migrate`` docstring measures at seconds per file (payloads
+    run to 137 MB). This coroutine shares its loop with the Telegram poller and
+    every dashboard request, so the compression goes to a thread — the same
+    treatment ``migrate_backtest_archive`` already gets in ``main.py``. The
+    store is resolved on the loop first so only the bound method crosses over.
+    """
     from condor.backtest_store import get_backtest_store
 
     try:
-        get_backtest_store().save_result(server or "", task_id, task)
+        store = get_backtest_store()
+        await asyncio.to_thread(store.save_result, server or "", task_id, task)
     except Exception:
         logger.warning(
             "Failed to save backtest %s to the store", task_id, exc_info=True
