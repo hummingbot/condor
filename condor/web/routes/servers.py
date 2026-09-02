@@ -36,8 +36,15 @@ async def _resolve_online(sds: ServerDataService, name: str) -> bool:
     return status.get("status") == "online" if isinstance(status, dict) else False
 
 
-@router.get("/servers", response_model=list[ServerInfo])
-async def list_servers(user: WebUser = Depends(get_current_user)):
+async def server_rows(user: WebUser) -> list[ServerInfo]:
+    """Build this user's server listing — the one copy of it.
+
+    Both ``GET /servers`` and ``GET /settings/servers`` render the same rows from
+    the same config-manager reads, and the two hand-written copies had already
+    drifted: the settings one resolved status unguarded, so a single server whose
+    fetch raised turned the whole list into a 500 (ARCH-285). One function means
+    the next field added to ``ServerInfo`` cannot be forgotten in half the app.
+    """
     cm = get_config_manager()
     accessible = cm.list_accessible_servers(user.id)
     sds = get_server_data_service()
@@ -72,6 +79,11 @@ async def list_servers(user: WebUser = Depends(get_current_user)):
         )
 
     return sorted(results, key=lambda s: (not s.online, s.name))
+
+
+@router.get("/servers", response_model=list[ServerInfo])
+async def list_servers(user: WebUser = Depends(get_current_user)):
+    return await server_rows(user)
 
 
 @router.get("/servers/{name}/status")
