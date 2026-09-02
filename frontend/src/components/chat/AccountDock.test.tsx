@@ -26,7 +26,6 @@ import { ACCOUNT_DOCK_KEY, ACCOUNT_DOCK_WIDTH_KEY } from "@/lib/sessionState";
 /** Every call the two panels can make; none of them may fire while closed. */
 const getPortfolio = vi.fn();
 const getPortfolioHistory = vi.fn();
-const getConsolidatedPositions = vi.fn();
 const getBots = vi.fn();
 const getExecutors = vi.fn();
 
@@ -34,7 +33,6 @@ vi.mock("@/lib/api", () => ({
   api: {
     getPortfolio: (...a: unknown[]) => getPortfolio(...a),
     getPortfolioHistory: (...a: unknown[]) => getPortfolioHistory(...a),
-    getConsolidatedPositions: (...a: unknown[]) => getConsolidatedPositions(...a),
     getBots: (...a: unknown[]) => getBots(...a),
     getExecutors: (...a: unknown[]) => getExecutors(...a),
     getRates: () => Promise.resolve({ rates: {} }),
@@ -120,7 +118,6 @@ beforeEach(() => {
   subscribed.clear();
   getPortfolio.mockResolvedValue({ server: "brigado_2", connectors: [], total_usd: 0 });
   getPortfolioHistory.mockResolvedValue({ server: "brigado_2", points: [], interval: "1h" });
-  getConsolidatedPositions.mockResolvedValue({ executor_positions: [], bot_positions: [] });
   getBots.mockResolvedValue({ controllers: [], bots: [], total_pnl: 0, total_volume: 0 });
   getExecutors.mockResolvedValue([]);
   container = document.createElement("div");
@@ -143,7 +140,6 @@ describe("the account dock", () => {
     expect(column()).toBeNull();
     expect(getPortfolio).not.toHaveBeenCalled();
     expect(getPortfolioHistory).not.toHaveBeenCalled();
-    expect(getConsolidatedPositions).not.toHaveBeenCalled();
     expect(getBots).not.toHaveBeenCalled();
     expect(getExecutors).not.toHaveBeenCalled();
     expect([...subscribed]).toEqual([]);

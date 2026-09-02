@@ -4,7 +4,7 @@ import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { useRates } from "@/hooks/useRates";
-import { api, type ConsolidatedPosition } from "@/lib/api";
+import { api } from "@/lib/api";
 import {
   formatConnectorName,
   formatCurrency,
@@ -22,8 +22,14 @@ import {
  */
 const DAY_RANGE = "1D";
 
-/** How many holds fit before the panel stops being a glance — the largest. */
-const MAX_POSITIONS = 3;
+/**
+ * The quote the totals are already in, asked for on its own behalf.
+ *
+ * Every figure this panel prints is a USD aggregate run through `convert`, so
+ * USDT is the one rate it needs — and asking for it explicitly is what keeps a
+ * BRL or EUR reader from being shown dollar totals under their own symbol.
+ */
+const TOTAL_QUOTES = ["USDT"];
 
 /**
  * How many lines of the breakdown get a name, a colour and a segment; the rest
@@ -85,31 +91,28 @@ function toSlices(entries: Omit<Slice, "color">[]): Slice[] {
   ];
 }
 
-/** The quote a hold's numbers are denominated in — its pair's, as elsewhere. */
-function quoteOf(pair: string): string {
-  return pair.split("-")[1] || "USDT";
-}
-
-/** LONG/SHORT as the API named it; an empty side is not guessed at. */
-function sideLabel(side: string): string {
-  return (side ?? "").split(".").pop()!.toUpperCase();
-}
-
 /**
  * What you own on the server this conversation trades on.
  *
- * A reader of `/portfolio`'s caches, never their owner: the same three query
+ * A reader of `/portfolio`'s caches, never their owner: the same two query
  * keys that page uses, so a user with it warm pays nothing to open this, and
  * deliberately *not* the forced `getPortfolio(server, true)` warm-up it runs on
  * mount — that call walks every connector, and a panel is not the place to make
  * the server do it.
  *
  * Mounted only while the section is open (see `DockSection`), which is the
- * whole of the `enabled` gate: closed, this file's three queries do not exist.
+ * whole of the `enabled` gate: closed, this file's queries do not exist.
  *
  * No time series. The questions a panel beside a chat answers are "how much do
  * I have", "is it up or down" and "what is it in" — the shape of the *day* is
  * what the page is for, and it is one click away in the footer.
+ *
+ * **No open positions either.** They were here, three of them, under the
+ * breakdown; they are gone because this panel answers what the desk *is worth*
+ * and a position is what the desk is *doing* — which is the other panel's
+ * subject, at controller granularity, with the executor counts and the PnL
+ * split that make a hold mean something. Two half-answers to "what am I in"
+ * in one column is worse than one whole answer in each.
  */
 export function DockPortfolio({ server }: { server: string }) {
   const navigate = useNavigate();
@@ -128,29 +131,7 @@ export function DockPortfolio({ server }: { server: string }) {
     refetchInterval: 60_000,
   });
 
-  const { data: positionsData } = useQuery({
-    queryKey: ["consolidated-positions", server],
-    queryFn: () => api.getConsolidatedPositions(server),
-    refetchInterval: 30_000,
-    placeholderData: keepPreviousData,
-  });
-
-  const holds = useMemo<ConsolidatedPosition[]>(
-    () => [
-      ...(positionsData?.executor_positions ?? []),
-      ...(positionsData?.bot_positions ?? []),
-    ],
-    [positionsData],
-  );
-
-  // A hold's PnL is in its pair's quote, so the rates it needs are the pairs' —
-  // `useRates` dedupes and skips stablecoin pairs, so on a USDT desk this asks
-  // for nothing the page has not already asked for.
-  const quotes = useMemo(
-    () => holds.map((h) => quoteOf(h.trading_pair)),
-    [holds],
-  );
-  const { convert, currencySymbol } = useRates(quotes);
+  const { convert, currencySymbol } = useRates(TOTAL_QUOTES);
   const fromUsd = (val: number) => convert(val, "USDT").value;
 
   const connectors = useMemo(
@@ -233,29 +214,6 @@ export function DockPortfolio({ server }: { server: string }) {
     const last = points[points.length - 1].total_usd;
     return { abs: last - first, pct: first > 0 ? ((last - first) / first) * 100 : null };
   }, [history]);
-
-  // Biggest first, and comparable across pairs only once every notional is in
-  // one currency — the rule the positions tab sorts by.
-  const biggest = useMemo(
-    () =>
-      [...holds]
-        .sort(
-          (a, b) =>
-            Math.abs(convert(b.notional_value ?? 0, quoteOf(b.trading_pair)).value) -
-            Math.abs(convert(a.notional_value ?? 0, quoteOf(a.trading_pair)).value),
-        )
-        .slice(0, MAX_POSITIONS),
-    [holds, convert],
-  );
-
-  const unrealised = useMemo(
-    () =>
-      holds.reduce(
-        (sum, h) => sum + convert(h.unrealized_pnl ?? 0, quoteOf(h.trading_pair)).value,
-        0,
-      ),
-    [holds, convert],
-  );
 
   const footer = (
     <button
@@ -394,53 +352,6 @@ export function DockPortfolio({ server }: { server: string }) {
           </li>
         ))}
       </ul>
-
-      {holds.length > 0 && (
-        <>
-          <div className="flex items-baseline gap-2 border-t border-[var(--color-border)] px-3 pb-0.5 pt-1.5 text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">
-            <span className="min-w-0 flex-1 truncate">
-              Positions · {holds.length}
-            </span>
-            <span
-              className="shrink-0 font-mono tabular-nums"
-              style={{ color: pnlColor(unrealised) }}
-            >
-              {formatCurrencyPnl(unrealised, currencySymbol)}
-            </span>
-          </div>
-          <ul className="px-1 pb-1">
-            {biggest.map((pos, i) => {
-              const quote = quoteOf(pos.trading_pair);
-              const pnl = pos.unrealized_pnl ?? 0;
-              const side = sideLabel(pos.position_side);
-              return (
-                <li key={`${pos.connector_name}-${pos.trading_pair}-${side}-${i}`}>
-                  <button
-                    type="button"
-                    onClick={() => navigate("/portfolio?tab=positions")}
-                    className="flex w-full items-baseline gap-2 rounded px-2 py-0.5 text-left text-[11px] transition-colors hover:bg-[var(--color-surface-hover)]"
-                  >
-                    <span className="min-w-0 flex-1 truncate">
-                      {pos.trading_pair}
-                    </span>
-                    {side && (
-                      <span className="shrink-0 text-[10px] text-[var(--color-text-muted)]">
-                        {side}
-                      </span>
-                    )}
-                    <span
-                      className="shrink-0 font-mono tabular-nums"
-                      style={{ color: pnlColor(pnl) }}
-                    >
-                      {formatCurrencyPnl(convert(pnl, quote).value, currencySymbol)}
-                    </span>
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
-        </>
-      )}
 
       {footer}
     </div>
