@@ -298,7 +298,9 @@ async def set_preference(
             raise HTTPException(status_code=403, detail=SHARING_DISABLED)
         consent.set_user_state(user.id, state)
     elif consent.user_state(user.id) == consent.ALWAYS:
-        sweep.withdraw(user.id, state)
+        # Off the loop: the withdrawal rewrites the share queue, which means
+        # parsing every transcript still in it (PERF-280).
+        await asyncio.to_thread(sweep.withdraw, user.id, state)
     else:
         consent.set_user_state(user.id, state)
 
@@ -350,5 +352,7 @@ async def set_sharing_settings(
                 "and overrides this setting"
             ),
         )
-    consent.set_install_allows(body.enabled)
+    # Off the loop like the withdrawal above: turning the switch off purges the
+    # queue, and a purge parses every queued transcript (PERF-280).
+    await asyncio.to_thread(consent.set_install_allows, body.enabled)
     return await get_sharing_settings(user)

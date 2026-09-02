@@ -35,6 +35,7 @@ variable redirects it. Whether anything is sent at all is decided by
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -559,21 +560,37 @@ async def flush() -> tuple[int, int]:
     is still queued afterwards, in order. Losing one of those would usually cost
     a share; once, it cost the only copy of a delete token (CORR-232).
 
-    The "still queued" number it returns comes from :func:`count` rather than
-    from ``len(_read())``. This coroutine runs on the loop that also polls
-    Telegram, and rebuilding every queued transcript into dicts merely to take
-    a length of it blocked that loop for tens of milliseconds on a full queue —
-    the same mistake the HTTP surface was making next door (PERF-235).
+    **Nothing that touches the file runs on the loop.** This coroutine is a PTB
+    job on the loop that also polls Telegram and serves the dashboard, and every
+    read here walks up to ``MAX_QUEUED_SHARES`` whole transcripts:
+    :func:`_ensure_ids` and :func:`_rewrite` parse every one of them, and
+    :func:`count` reads every line even though it parses none. PERF-235 only
+    swapped two ``len(_read())`` counts for :func:`count`; the parsed
+    read-modify-writes stayed inline and were the expensive half. They all go
+    through ``asyncio.to_thread`` now, the convention the HTTP surface next door
+    already follows (PERF-280).
+
+    The hop is only ever taken with the lock released. ``_QUEUE_LOCK`` is a
+    ``threading.RLock`` and the helpers take it themselves in the worker, so
+    nothing new is shared across the hop — but the flag guarding an overlapping
+    flush is in-memory and is still read and set on the loop, because the lock
+    is never held across an await (CORR-232).
+
+    One thread hop per step, sequentially, never gathered: the queue is up to
+    ``MAX_QUEUED_SHARES`` × ``MAX_SHARE_BYTES`` of transcript and overlapping
+    reads of it would trade a stall for the memory.
     """
     global _flushing
     with _QUEUE_LOCK:
-        if _flushing:
-            # A flush already in flight owns these records; posting them from
-            # here too would duplicate the share, or the revocation.
-            return 0, count()
-        _flushing = True
+        stand_down = _flushing
+        if not stand_down:
+            _flushing = True
+    if stand_down:
+        # A flush already in flight owns these records; posting them from here
+        # too would duplicate the share, or the revocation.
+        return 0, await asyncio.to_thread(count)
     try:
-        records = _ensure_ids()
+        records = await asyncio.to_thread(_ensure_ids)
         if not records:
             return 0, 0
 
@@ -597,7 +614,9 @@ async def flush() -> tuple[int, int]:
         if vetoed:
             log.info("Sharing is off; dropped %d queued share(s) unsent", len(vetoed))
         retired = delivered | vetoed
-        _rewrite(lambda queued: [r for r in queued if r.get("id") not in retired])
-        return len(delivered), count()
+        await asyncio.to_thread(
+            _rewrite, lambda queued: [r for r in queued if r.get("id") not in retired]
+        )
+        return len(delivered), await asyncio.to_thread(count)
     finally:
         _flushing = False
