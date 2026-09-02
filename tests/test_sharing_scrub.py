@@ -40,6 +40,7 @@ KNOWN = [
 SOL_ADDR = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 EVM_ADDR = "0x71C7656EC7ab88b098defB751B7401B5f6d8976F"
 TX_HASH = "0x" + "9f" * 32
+BARE_HEX64 = TX_HASH[2:]
 ANTHROPIC_KEY = "sk-ant-api03-QQzzAAbbCCdd1122334455"
 SEED = "legal winner thank year wave sausage worth useful legal winner thank yellow"
 
@@ -60,6 +61,9 @@ def _scrub(text: str) -> tuple[str, dict[str, int]]:
         (f"send it to {SOL_ADDR} now", "sol_addr"),
         (f"the contract is {EVM_ADDR}", "evm_addr"),
         (f"filled in tx {TX_HASH}", "hex64"),
+        # The bare form was always replaced, but by the generic last net, so it
+        # was counted as "secret". It is a hex64 and is now counted as one.
+        (f"my key is {BARE_HEX64}", "hex64"),
         (f"export ANTHROPIC_API_KEY={ANTHROPIC_KEY}", "api_key"),
         (f"my phrase: {SEED}", "seed_phrase"),
         ("mail me at alice@example.org", "email"),
@@ -71,7 +75,14 @@ def _scrub(text: str) -> tuple[str, dict[str, int]]:
 def test_a_structural_secret_is_replaced_and_counted(raw, category):
     out, counts = _scrub(raw)
     assert counts[category] == 1
-    for value in (SOL_ADDR, EVM_ADDR, TX_HASH, ANTHROPIC_KEY, "alice@example.org"):
+    for value in (
+        SOL_ADDR,
+        EVM_ADDR,
+        TX_HASH,
+        BARE_HEX64,
+        ANTHROPIC_KEY,
+        "alice@example.org",
+    ):
         if value in raw:
             assert value not in out
     assert scrub._TAGS[category] in out
@@ -237,6 +248,7 @@ def test_a_known_value_beats_the_pattern_that_would_also_match_it():
         "hummingbot-v2-pmm-solusdc",  # a bot name
         "1250.00",  # a quantity
         "binance_perpetual",  # a connector
+        f"order-{BARE_HEX64}-1",  # 64 hex, but inside an identifier
     ],
 )
 def test_a_thing_that_only_looks_like_a_secret_survives(survivor):

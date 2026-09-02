@@ -14,7 +14,7 @@ Shape                            Also is                             Verdict
 ===============================  ==================================  ==========
 BIP-39 phrase, 12–24 words       nothing                             redact
 ``[174,47,…]``, 64 ints 0–255    nothing                             redact
-``0x`` + 64 hex                  an EVM **transaction hash**         warn only
+64 hex, ``0x`` optional          a tx hash, a sha256 digest          warn only
 base58, 87–88 chars              a Solana **transaction signature**  warn only
 ===============================  ==================================  ==========
 
@@ -22,6 +22,21 @@ A 64-byte value is not distinguishable from key material by any test that does
 not already know the answer. Redacting the bottom two by default would break
 "check this tx", which is routine here, on every use — so they are reported as
 ``certain=False`` and the surfaces warn about them once instead of eating them.
+
+The ``0x`` on the hex row is optional, and that is the deliberate half of the
+trade-off rather than a slip. MetaMask's "Show private key" — and every EVM
+wallet export that follows it — hands the user 64 bare hex characters, so
+requiring the prefix meant the single most common way a private key gets pasted
+was the one shape this module never saw. Dropping the prefix does widen the net:
+a Bitcoin txid, a block hash and any sha256 digest are bare 64-hex too, and
+those are ordinary things to paste here. It is affordable because of where this
+row already sits — ``certain=False`` means nothing is ever eaten, a surface
+warns at most once per conversation per kind and only if the user left the
+notice on, and at egress the value was already being replaced by the scrubber's
+generic last-net pattern, so the only thing that changes there is that it is
+counted as what it is. The alternative — asking for a nearby "private key"
+keyword — was rejected: it is context the scrubber cannot see when it imports
+this shape, and it fails on exactly the paste that is only the key.
 Stated plainly, and deliberately: **an EVM private key pasted into free text
 reaches the model and the transcript.** The bot warns; it does not prevent.
 
@@ -65,8 +80,12 @@ log = logging.getLogger(__name__)
 _NOT_ID_BEFORE = r"(?<![A-Za-z0-9_\-])"
 _NOT_ID_AFTER = r"(?![A-Za-z0-9_\-])"
 
-#: ``0x`` + 64 hex. An EVM private key, and equally an EVM transaction hash.
-HEX64_RE = re.compile(_NOT_ID_BEFORE + r"0x[0-9a-fA-F]{64}" + _NOT_ID_AFTER)
+#: 64 hex, ``0x`` optional. An EVM private key — and equally a transaction
+#: hash, a Bitcoin txid or a sha256 digest. The prefix is optional because a
+#: wallet export writes the bare form; see the table above for why that widening
+#: is affordable on a warn-only row. The prefix is consumed greedily, so the
+#: ``0x`` form is one finding of 66 characters and never two.
+HEX64_RE = re.compile(_NOT_ID_BEFORE + r"(?:0x)?[0-9a-fA-F]{64}" + _NOT_ID_AFTER)
 
 # Base58 excludes 0, O, I and l on purpose — that is what makes a run of this
 # alphabet an encoded key rather than a word. The 87–88 bound is exact: a

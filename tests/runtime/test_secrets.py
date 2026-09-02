@@ -28,6 +28,9 @@ SEED_24 = (
 )
 KEYPAIR = "[" + ",".join(str((i * 7) % 256) for i in range(64)) + "]"
 TX_HASH = "0x" + "9f" * 32
+# The same 64 hex without the prefix: what MetaMask's "Show private key" gives
+# you, and equally what a Bitcoin txid or a sha256 digest looks like.
+BARE_HEX64 = TX_HASH[2:]
 SOL_SIG = (
     "5wHu1qwD4kLwYqLNGjaKfHUDNCLLDFFPGz1cUKb1t8HBxXpJhVFq"
     "1PbwzTV1RxRuFuvLWqJwHtDsL1s9jUn9Xg1H"
@@ -118,6 +121,7 @@ def test_the_marker_names_the_kind():
     "raw, kind",
     [
         (f"did {TX_HASH} land?", secrets.EVM_HEX64),
+        (f"my key is {BARE_HEX64}", secrets.EVM_HEX64),
         (f"check {SOL_SIG} on solscan", secrets.SOLANA_B58),
     ],
 )
@@ -129,6 +133,15 @@ def test_an_ambiguous_shape_is_reported_but_never_redacted(raw, kind):
     assert [f.kind for f in findings] == [kind]
     assert findings[0].certain is False
     assert clean == raw
+
+
+def test_the_prefixed_hex64_is_one_finding_and_not_two():
+    """``(?:0x)?`` is greedy, so the ``0x`` form is claimed whole. Were it not,
+    the bare 64 hex inside it would be reported as a second, overlapping
+    finding and every tx hash would warn twice."""
+    raw = f"did {TX_HASH} land?"
+    (finding,) = secrets.scan(raw)
+    assert raw[finding.start : finding.end] == TX_HASH
 
 
 # ── The false-positive corpus ────────────────────────────────────────────
@@ -146,6 +159,11 @@ def test_an_ambiguous_shape_is_reported_but_never_redacted(raw, kind):
             "i will always cover the bridge and act toward the market with useful ideas",
         ),
         ("a number", "pnl was 1234.56 today, up 4.2%"),
+        # The boundary the optional ``0x`` had to keep: widening the prefix must
+        # not widen the length or the delimiter guard with it.
+        ("bare 40-hex address", f"the contract is {EVM_ADDR[2:]}"),
+        ("hex inside an identifier", f"order-{BARE_HEX64}-1"),
+        ("a 65-hex run", f"blob {BARE_HEX64}a end"),
         ("empty", ""),
     ],
 )
