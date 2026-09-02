@@ -80,23 +80,38 @@ function altArrow(el: HTMLElement, key: string, altKey = true) {
  * jsdom implements neither DragEvent nor DataTransfer, so the three events the
  * strip listens for are dispatched by hand with a stub attached.
  */
-function drag(from: HTMLElement, to: HTMLElement) {
-  const dataTransfer = {
+function transfer() {
+  return {
     effectAllowed: "",
     dropEffect: "",
     setData: () => {},
     getData: () => "",
   };
+}
+
+/** One drag event, returned so a test can ask whether it was defaulted. */
+function dragEvent(el: HTMLElement, type: string, dataTransfer: object): Event {
+  const e = new Event(type, { bubbles: true, cancelable: true });
+  Object.defineProperty(e, "dataTransfer", { value: dataTransfer });
+  el.dispatchEvent(e);
+  return e;
+}
+
+function drag(from: HTMLElement, to: HTMLElement) {
+  const dataTransfer = transfer();
   for (const [el, type] of [
     [from, "dragstart"],
     [to, "dragover"],
     [to, "drop"],
     [from, "dragend"],
   ] as const) {
-    const e = new Event(type, { bubbles: true, cancelable: true });
-    Object.defineProperty(e, "dataTransfer", { value: dataTransfer });
-    el.dispatchEvent(e);
+    dragEvent(el, type, dataTransfer);
   }
+}
+
+/** The chips currently wearing a drop marker. */
+function markers(): number {
+  return container.querySelectorAll(".border-l-2, .border-r-2").length;
 }
 
 beforeEach(() => {
@@ -346,6 +361,41 @@ describe("FavoritesStrip", () => {
     await act(async () => altArrow(chips()[1], "ArrowRight"));
     await act(async () => altArrow(chips()[2], "ArrowLeft"));
 
+    expect(pairs()).toEqual(["BTC-BRL", "BTC-USDT", "SOL-USDC", "ETH-USDT"]);
+    expect(stored()).toEqual(INTERLEAVED);
+  });
+
+  it("does not drag a chip across the group boundary", async () => {
+    seed(INTERLEAVED);
+    await render("alpha", "binance");
+
+    const dataTransfer = transfer();
+    // Over a chip in its own group first, so there is a marker to go stale.
+    await act(async () => {
+      dragEvent(chipRow(1), "dragstart", dataTransfer);
+      dragEvent(chipRow(0), "dragover", dataTransfer);
+    });
+    expect(markers()).toBe(1);
+
+    // Over an off-venue chip: no marker promising a landing the store cannot
+    // hold, and the event left undefaulted so the browser shows no-drop.
+    let over: Event | undefined;
+    await act(async () => {
+      over = dragEvent(chipRow(2), "dragover", dataTransfer);
+    });
+    expect(over?.defaultPrevented).toBe(false);
+    expect(markers()).toBe(0);
+
+    // And dropping there moves nothing — not on screen, not on disk.
+    await act(async () => {
+      dragEvent(chipRow(2), "drop", dataTransfer);
+      dragEvent(chipRow(1), "dragend", dataTransfer);
+    });
+    expect(pairs()).toEqual(["BTC-BRL", "BTC-USDT", "SOL-USDC", "ETH-USDT"]);
+    expect(stored()).toEqual(INTERLEAVED);
+
+    // The same line the other way: an off-venue chip onto an on-venue one.
+    await act(async () => drag(chipRow(3), chipRow(0)));
     expect(pairs()).toEqual(["BTC-BRL", "BTC-USDT", "SOL-USDC", "ETH-USDT"]);
     expect(stored()).toEqual(INTERLEAVED);
   });

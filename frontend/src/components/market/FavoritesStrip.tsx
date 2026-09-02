@@ -89,6 +89,14 @@ export function FavoritesStrip({
   const boundary = chips.findIndex(({ fav }) => fav.connector !== connector);
   const dragFromPos = chips.findIndex(({ index }) => index === dragFrom);
 
+  // Whether two stars sit in the same half of the strip. The groups come from
+  // the venue on screen, so a slot in the other group is a position the store
+  // cannot hold — the chip would spring back the moment it re-grouped. Both the
+  // keyboard and the mouse stop at that line, over indices into `favorites`.
+  const sameGroup = (a: number, b: number) =>
+    (favorites[a].connector === connector) ===
+    (favorites[b].connector === connector);
+
   const endDrag = () => {
     dragFromRef.current = null;
     setDragFrom(null);
@@ -105,12 +113,8 @@ export function FavoritesStrip({
     if (step === null) return;
     const from = chips[pos];
     const to = chips[pos + step];
-    // Stop at the group boundary: the groups come from the venue on screen, so
-    // "past the boundary" is a position the store cannot hold — the chip would
-    // spring back the moment it re-grouped.
     if (!to) return;
-    const onVenue = (c: Chip) => c.fav.connector === connector;
-    if (onVenue(from) !== onVenue(to)) return;
+    if (!sameGroup(from.index, to.index)) return;
     e.preventDefault();
     reorder(from.index, to.index);
     // The chips are keyed by market, so the moved one keeps its DOM node and
@@ -161,7 +165,16 @@ export function FavoritesStrip({
                 e.dataTransfer.setData("text/plain", f.pair);
               }}
               onDragOver={(e) => {
-                if (dragFromRef.current === null) return;
+                const from = dragFromRef.current;
+                if (from === null) return;
+                // Over the other group: leave the event undefaulted so the
+                // browser shows no-drop, and clear the marker rather than let
+                // the one on the last valid target linger, promising a landing
+                // the store cannot hold.
+                if (!sameGroup(from, i)) {
+                  setDragOver(null);
+                  return;
+                }
                 e.preventDefault();
                 e.dataTransfer.dropEffect = "move";
                 setDragOver(i);
@@ -169,7 +182,7 @@ export function FavoritesStrip({
               onDrop={(e) => {
                 e.preventDefault();
                 const from = dragFromRef.current;
-                if (from !== null) reorder(from, i);
+                if (from !== null && sameGroup(from, i)) reorder(from, i);
                 endDrag();
               }}
               onDragEnd={endDrag}
