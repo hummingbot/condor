@@ -647,9 +647,15 @@ export function snapshotsFromRunHistory(
     const identity = history.identities?.[controllerId];
     for (const [t, realized, unrealized, net, volume, pct] of points) {
       out.push({
-        // `aggregatePnlSeries` parses this back with `toMs`, which takes an ISO
-        // string or an epoch — the number is passed through as-is, so this
-        // costs no round trip through the formatter.
+        // Not free, and deliberately so. `ControllerPerformanceSnapshot`
+        // mirrors the Pydantic model the live socket sends, where `timestamp`
+        // is a string (api.ts), and minting a *genuine* snapshot is the whole
+        // point of this function — it is what lets a terminated run reuse the
+        // live fold unchanged. So the epoch is formatted to ISO here and parsed
+        // back by `toMs` in `aggregatePnlSeries` (PERF-282): a lossless round
+        // trip costing ~0.5µs per point, paid once per fold over at most a
+        // thousand points per controller. Widening the wire type to dodge it
+        // would make every consumer accept a shape the server never sends.
         timestamp: new Date(t).toISOString(),
         bot_name: botName,
         controller_id: controllerId,
