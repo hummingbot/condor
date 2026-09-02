@@ -145,6 +145,7 @@ async function renderPanel(over: Partial<PanelProps> = {}) {
             onSelectBrain={(sel) => (picked.model = sel.agentKey)}
             onSelectServer={(name) => (picked.server = name)}
             onOpenRoutine={() => {}}
+            onAskAgent={() => {}}
             onClose={() => (closed += 1)}
             {...over}
           />
