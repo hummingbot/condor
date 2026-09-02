@@ -1,11 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import {
-  ChevronDown,
-  ChevronRight,
-  PanelRightClose,
-  Radio,
-  Zap,
-} from "lucide-react";
+import { PanelRightClose, Radio, Zap } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import {
@@ -14,6 +8,7 @@ import {
   conversationInstances,
   type LibraryFocus,
 } from "@/components/chat/DockRoutines";
+import { DockSection } from "@/components/chat/DockSection";
 import { DockTasks } from "@/components/chat/DockTasks";
 import type { RoutineRunContext } from "@/components/routines/ReportBrowser";
 import { WORKSPACE_BAR } from "@/components/chat/workspaceBar";
@@ -406,68 +401,5 @@ function DockResizeHandle({
         isDragging ? "bg-[var(--color-primary)]/30" : ""
       }`}
     />
-  );
-}
-
-/**
- * One pane of the dock.
- *
- * Open, it takes a fixed share of the column — `flex-1 basis-0`, so two open
- * panes are half and half no matter what is in them. Sizing from content
- * instead (`flex-auto`) looks tidier on a quiet conversation and is unusable on
- * a busy one: every task that starts or routine that finishes moves the divider,
- * so the row you were reading slides out from under the cursor. A boundary that
- * never moves is worth more than one that is always optimally placed.
- *
- * The body owns the scrollbar, so the header never leaves the viewport whatever
- * the list does.
- *
- * Closed, it is just the header bar — the deliberate way to give the other pane
- * the whole column.
- */
-function DockSection({
-  icon,
-  label,
-  hint,
-  count,
-  open,
-  onToggle,
-  children,
-}: {
-  icon: React.ReactNode;
-  label: string;
-  /** What this section is, for the reader who has to tell it from the other. */
-  hint: string;
-  count?: number;
-  open: boolean;
-  onToggle: () => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <div
-      className={`flex flex-col border-b border-[var(--color-border)] ${
-        open ? "min-h-[72px] flex-1 basis-0 overflow-hidden" : "shrink-0"
-      }`}
-    >
-      <button
-        onClick={onToggle}
-        title={hint}
-        className="flex w-full shrink-0 items-center gap-1.5 px-3 py-1.5 text-left text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-text)]"
-      >
-        {open ? (
-          <ChevronDown className="h-3 w-3 shrink-0" />
-        ) : (
-          <ChevronRight className="h-3 w-3 shrink-0" />
-        )}
-        {icon}
-        <span className="min-w-0 flex-1 truncate">{label}</span>
-        {count !== undefined && (
-          <span className="shrink-0 text-emerald-400">{count}</span>
-        )}
-      </button>
-      {open && (
-        <div className="min-h-0 flex-1 overflow-y-auto pb-1">{children}</div>
-      )}
-    </div>
   );
 }
