@@ -632,6 +632,27 @@ export function PerfBrowser({
   }, [population, controllersProp, terminatedControllers]);
 
   /**
+   * What the type bubbles class a leaf as.
+   *
+   * A controller is its own class. An executor under a controller inherits that
+   * controller's class rather than carrying one. An executor under no controller
+   * — a hand-opened position, filed under its controller id as its bot — has
+   * nothing to inherit, so its own executor type stands in: that *is* the class
+   * of thing it is, and without it the executor could not be picked by type at
+   * all, since the executor-type group only appears once there are two types
+   * to choose between.
+   */
+  const classOf = useCallback(
+    (leaf: PerfLeaf): string =>
+      leaf.kind === "controller"
+        ? leaf.executorType
+        : leaf.controllerId
+          ? ctrlClassById.get(leaf.controllerId) ?? ""
+          : leaf.executorType,
+    [ctrlClassById],
+  );
+
+  /**
    * Narrow a population to what the bubbles asked for.
    *
    * The filters narrow the leaf set, which means they narrow the *tree*: the
@@ -655,13 +676,7 @@ export function PerfBrowser({
       return all.filter((leaf) => {
         if (pair && !leaf.pair.toLowerCase().includes(pair)) return false;
         if (wantBots.length && !wantBots.includes(leaf.bot)) return false;
-        if (ctrlTypes.length) {
-          const cls =
-            leaf.kind === "controller"
-              ? leaf.executorType
-              : ctrlClassById.get(leaf.controllerId) ?? "";
-          if (!ctrlTypes.includes(cls)) return false;
-        }
+        if (ctrlTypes.length && !ctrlTypes.includes(classOf(leaf))) return false;
         if (execTypes.length) {
           if (leaf.kind === "controller") return false;
           if (!execTypes.includes(leaf.executorType)) return false;
@@ -669,7 +684,7 @@ export function PerfBrowser({
         return true;
       });
     },
-    [filters, ctrlClassById],
+    [filters, classOf],
   );
 
   /** The population as it stands, and what the bubbles left of it. */
@@ -720,9 +735,11 @@ export function PerfBrowser({
       // A controller's own class, counted over controllers — an executor
       // inherits its controller's class rather than carrying one, so counting
       // it here would report the same controller once per executor under it.
+      // An executor with no controller has nothing to inherit and is counted
+      // as itself (see `classOf`).
       ctrlTypes: alpha(
         tally(
-          (leaf) => (leaf.kind === "controller" ? leaf.executorType : ""),
+          (leaf) => (leaf.kind === "controller" || !leaf.controllerId ? classOf(leaf) : ""),
           rawLeaves,
         ),
       ),
@@ -730,7 +747,7 @@ export function PerfBrowser({
         tally((leaf) => (leaf.kind === "executor" ? leaf.executorType : ""), rawLeaves),
       ),
     };
-  }, [rawLeaves]);
+  }, [rawLeaves, classOf]);
 
   const filtersActive =
     !!filters.pair.trim() ||
@@ -1388,7 +1405,7 @@ export function PerfBrowser({
     const chips = [
       filters.pair.trim() ? `pair ~ "${filters.pair.trim()}"` : "",
       picked("bot", filters.bots),
-      picked("controller type", filters.ctrlTypes),
+      picked("type", filters.ctrlTypes),
       picked("executor type", filters.execTypes),
     ].filter(Boolean);
 
@@ -1541,8 +1558,8 @@ export function PerfBrowser({
               )}
               {filterOptions.ctrlTypes.length > 1 && (
                 <BubbleGroup
-                  title="Controller type"
-                  hint="The class each controller is: pmm_simple, grid_strike, and so on."
+                  title="Type"
+                  hint="The class each controller is — pmm_simple, grid_strike, and so on — and, for an executor that runs under no controller, the kind of executor it is."
                   options={filterOptions.ctrlTypes}
                   selected={filters.ctrlTypes}
                   onChange={(v) => setFilters((f) => ({ ...f, ctrlTypes: v }))}

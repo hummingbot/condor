@@ -15,6 +15,7 @@ import {
   UNATTACHED_BOT,
   ancestorChain,
   buildTree,
+  controllerNodeId,
   foldLeaves,
   indexTree,
   leafFromController,
@@ -191,8 +192,9 @@ describe("leaf adapters", () => {
     expect(live.closeTypes).toEqual({});
   });
 
-  it("gives an executor with no known bot one of its own", () => {
-    expect(leafFromExecutor(executor()).bot).toBe(UNATTACHED_BOT);
+  it("gives an executor with no known bot the controller id it carries, or one of its own", () => {
+    expect(leafFromExecutor(executor()).bot).toBe("pmm_1");
+    expect(leafFromExecutor(executor({ controller_id: "" })).bot).toBe(UNATTACHED_BOT);
     expect(leafFromExecutor(executor(), "alpha").bot).toBe("alpha");
   });
 
@@ -242,13 +244,14 @@ describe("buildTree", () => {
   });
 
   it("folds a controller with no record of its own out of its executors", () => {
-    // The terminated population: archived executors and no live controller.
+    // The terminated population: archived executors of a run that is over,
+    // attributed to their bot by its run window, and no live controller.
     const leaves = [
-      leafFromExecutor(executor({ id: "a", pnl: 5, volume: 400 })),
-      leafFromExecutor(executor({ id: "b", pnl: -2, volume: 100 })),
+      leafFromExecutor(executor({ id: "a", pnl: 5, volume: 400 }), "alpha"),
+      leafFromExecutor(executor({ id: "b", pnl: -2, volume: 100 }), "alpha"),
     ];
     const tree = buildTree(leaves);
-    const ctrl = node(tree, `ctrl:${UNATTACHED_BOT}:pmm_1`);
+    const ctrl = node(tree, "ctrl:alpha:pmm_1");
     expect(ctrl.leaves).toHaveLength(2);
     expect(foldLeaves(ctrl.leaves, identity, NOW).net).toBe(3);
   });
@@ -309,11 +312,26 @@ describe("buildTree", () => {
       leafFromExecutor(executor({ id: "manual", pnl: 5, controller_id: "main" })),
     ];
     const tree = buildTree(leaves);
-    expect(tree.children.map((c) => c.id)).toEqual([
-      "ctrl:gamma:gamma_1",
-      `ctrl:${UNATTACHED_BOT}:main`,
-    ]);
+    expect(tree.children.map((c) => c.id)).toEqual(["ctrl:gamma:gamma_1", "exec:manual"]);
     expect(foldLeaves(tree.leaves, identity, NOW).net).toBe(65);
+  });
+
+  // The id a hand-opened executor carries names the executor, not a controller:
+  // there is nothing behind `main` for a controller row to stand for, so the
+  // id is promoted to the bot the executor is filed under and the row goes.
+  it("files an executor nobody claims under its controller id, off the fleet directly", () => {
+    const leaf = leafFromExecutor(executor({ id: "manual", controller_id: "main" }));
+    expect(leaf.bot).toBe("main");
+    expect(leaf.controllerId).toBe("");
+    expect(controllerNodeId(leaf)).toBeNull();
+    expect(buildTree([leaf]).children.map((c) => c.id)).toEqual(["exec:manual"]);
+  });
+
+  it("keeps an executor's controller when a bot claims it", () => {
+    const leaf = leafFromExecutor(executor({ id: "e", controller_id: "pmm_1" }), "alpha");
+    expect(leaf.bot).toBe("alpha");
+    expect(leaf.controllerId).toBe("pmm_1");
+    expect(controllerNodeId(leaf)).toBe("ctrl:alpha:pmm_1");
   });
 
   // The grouping level is gone: two bots' controllers are siblings in one list,

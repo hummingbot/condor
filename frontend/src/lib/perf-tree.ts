@@ -31,14 +31,16 @@ export function parsePopulation(raw: string | null): Population {
 }
 
 /**
- * The bot a leaf hangs under when its own record does not name one.
+ * The bot a leaf hangs under when nothing at all names one.
  *
  * `ExecutorInfo` carries a `controller_id` but no bot (see `condor/web/models.py`),
  * so an executor is attributed to a bot only by matching that id against a live
- * controller. The ones that do not match are real and are exactly the rows you
- * go looking for — an executor left behind by a controller that is gone, a
- * position opened by hand from `/trade` — so they get a bot node of their own
- * rather than being dropped on the floor.
+ * controller or a run window. The ones that do not match are real and are
+ * exactly the rows you go looking for — an executor left behind by a controller
+ * that is gone, a position opened by hand from `/trade` — so they are kept
+ * rather than dropped on the floor, filed under the controller id they carry
+ * (`main`, for a hand-opened one) as if that were their bot. This label is
+ * what remains for an executor that carries no controller id either.
  */
 export const UNATTACHED_BOT = "(unattached)";
 
@@ -211,7 +213,14 @@ export function leafFromTerminatedController(c: ControllerInfo, run?: BotRunInfo
  *
  * `bot` is passed in because the record does not carry one: the caller matches
  * `controller_id` against the live fleet and hands over what it found, or
- * `UNATTACHED_BOT` when nothing matched.
+ * `UNATTACHED_BOT` when nothing matched. An executor nobody claims is then
+ * filed under its own `controller_id` as its bot, and under no controller: the
+ * id is the one name the record carries, and it names the executor rather than
+ * a controller — `main` is Condor's default for a position opened by hand, and
+ * there is no controller behind it for a row of the tree to stand for. So the
+ * bot bubbles offer `main`, and the executor hangs off the fleet directly
+ * instead of under a controller row that told the reader nothing the row
+ * beneath it did not.
  *
  * An executor reports a single `pnl` and no split. While it is open that figure
  * is unrealised — the position is still on the book — and once it has closed it
@@ -222,12 +231,13 @@ export function leafFromTerminatedController(c: ControllerInfo, run?: BotRunInfo
 export function leafFromExecutor(e: ExecutorInfo, bot: string = UNATTACHED_BOT): PerfLeaf {
   const running = isExecutorActive(e.status);
   const closedAt = e.close_timestamp > 0 ? toMs(e.close_timestamp) : null;
+  const attached = !!bot && bot !== UNATTACHED_BOT;
   return {
     id: e.id,
     kind: "executor",
     label: e.id,
-    bot: bot || UNATTACHED_BOT,
-    controllerId: e.controller_id || "",
+    bot: attached ? bot : e.controller_id || UNATTACHED_BOT,
+    controllerId: attached ? e.controller_id || "" : "",
     executorType: e.type || UNKNOWN_LABEL,
     connector: e.connector || "",
     pair: e.trading_pair || "",
