@@ -1,3 +1,4 @@
+import type { FleetOwner } from "@/lib/agent-attribution";
 import { controllerKey } from "@/lib/controller-identity";
 import { collectCursorPages, type WalkOutcome } from "@/lib/history-pagination";
 
@@ -761,6 +762,35 @@ export interface StrategySummary {
  * to lift it out or offer the same identity twice.
  */
 export const CHAT_SLUG = "condor";
+
+/**
+ * The fleet map's wire shape (`GET /agents/fleet-map`, FEAT-096).
+ *
+ * Snake-cased, like every other payload in this file. `getFleetMap` is the one
+ * call that maps rather than returning the wire type: the rule it feeds
+ * (`lib/agent-attribution`) is pure domain logic with no HTTP in it, so it
+ * speaks the app's casing and the translation happens once, here.
+ */
+interface FleetOwnerWire {
+  run_key: string;
+  agent_slug: string;
+  agent_name: string;
+  strategy_slug: string;
+  strategy_name: string;
+  namespace: string;
+  declared_bots: string[];
+  agent_ids: string[];
+  live: {
+    agent_id: string;
+    session_num: number;
+    status: string;
+    tick_count: number;
+    last_tick_at: number;
+    frequency_sec: number;
+    last_action: string;
+    last_error: string;
+  } | null;
+}
 
 export interface AgentSummary {
   slug: string;
@@ -2606,6 +2636,39 @@ export const api = {
   // ── Agents (identity + brain) ──
 
   getAgents: () => apiFetch<AgentSummary[]>("/api/v1/agents"),
+
+  /**
+   * Who owns which trading, and what their loop is doing (FEAT-096).
+   *
+   * Deliberately not `getAgents`, which fans out a performance fetch per
+   * session of every strategy and is the most expensive read in the app. This
+   * one makes no Hummingbot call at all, which is what lets `/bots` poll it.
+   */
+  getFleetMap: async (): Promise<FleetOwner[]> => {
+    const data = await apiFetch<{ owners: FleetOwnerWire[] }>("/api/v1/agents/fleet-map");
+    return (data.owners ?? []).map((owner) => ({
+      runKey: owner.run_key,
+      agentSlug: owner.agent_slug,
+      agentName: owner.agent_name,
+      strategySlug: owner.strategy_slug,
+      strategyName: owner.strategy_name,
+      namespace: owner.namespace,
+      declaredBots: owner.declared_bots ?? [],
+      agentIds: owner.agent_ids ?? [],
+      live: owner.live
+        ? {
+            agentId: owner.live.agent_id,
+            sessionNum: owner.live.session_num,
+            status: owner.live.status,
+            tickCount: owner.live.tick_count,
+            lastTickAt: owner.live.last_tick_at,
+            frequencySec: owner.live.frequency_sec,
+            lastAction: owner.live.last_action,
+            lastError: owner.live.last_error,
+          }
+        : null,
+    }));
+  },
 
   getAgent: (slug: string) =>
     apiFetch<AgentDetail>(`/api/v1/agents/${encodeURIComponent(slug)}`),

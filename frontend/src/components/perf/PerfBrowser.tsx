@@ -84,6 +84,11 @@ import { buildAttributor, runWindows } from "@/lib/run-attribution";
 import { dropDeletedRunQueries } from "@/lib/run-deletion";
 import type { ConvertFn } from "@/lib/rates";
 import { useViewFacts } from "@/lib/viewFacts";
+import {
+  agentOfBot,
+  agentOfControllerId,
+  type FleetOwner,
+} from "@/lib/agent-attribution";
 
 /** `3, "bot"` → `"3 bots"`. Thousands separated, because a fleet's closed set runs to five figures. */
 function plural(count: number, noun: string): string {
@@ -136,6 +141,9 @@ function UnpricedNote({ leaves }: { leaves: PerfLeaf[] }) {
 // so a stale link naming one lands on the fleet (see `fallbackChain`).
 
 const FLEET_SCOPE = "all";
+
+/** Held still, so an absent fleet map is not a new array on every render. */
+const EMPTY_OWNERS: FleetOwner[] = [];
 
 /**
  * How many finished runs are warmed when the reader switches to Terminated,
@@ -219,6 +227,14 @@ interface PerfBrowserProps {
    * like the Running one, instead of a flat bucket of closed executors.
    */
   terminatedControllers?: ControllerInfo[];
+  /**
+   * Who owns which of this trading (FEAT-096) — the fleet map, as fetched.
+   *
+   * Empty is the honest default and the whole degradation story: no agents on
+   * the server, or a map that failed to load, both mean every leaf is
+   * unattributed, the agent level collapses, and the page is what it was.
+   */
+  owners?: FleetOwner[];
   rateFormatPnl?: (val: number, quote: string) => string;
   rateFormatValue?: (val: number, quote: string) => string;
   rateFormatDetailed?: (val: number, quote: string) => string;
@@ -374,6 +390,7 @@ export function PerfBrowser({
   paging,
   runs = [],
   terminatedControllers = [],
+  owners = EMPTY_OWNERS,
   rateFormatPnl,
   rateFormatValue,
   rateFormatDetailed,
@@ -607,6 +624,18 @@ export function PerfBrowser({
       const all: PerfLeaf[] = [];
       const botOf = (ex: ExecutorInfo) => botByController.get(ex.controller_id) ?? UNATTACHED_BOT;
       /**
+       * The `(agent, strategy)` a record belongs to, by the two links the
+       * runtime actually enforces — the bot's namespace, and the session id a
+       * standalone executor is tagged with (`lib/agent-attribution`, FEAT-096).
+       *
+       * Bot name first: a controller is attributed through its bot, and an
+       * executor working under one inherits that answer, so the `controller_id`
+       * fallback is left to the executor nobody claims — which is exactly the
+       * agent-created one, whose `controller_id` *is* its session's agent id.
+       */
+      const agentOf = (bot: string, controllerId: string) =>
+        agentOfBot(owners, bot) || agentOfControllerId(owners, controllerId);
+      /**
        * The bot a *closed* executor hung under, by the run that opened it.
        *
        * Asked at the executor's own start time, which is the instant the
@@ -623,9 +652,11 @@ export function PerfBrowser({
         return owner ?? botByController.get(ex.controller_id) ?? UNATTACHED_BOT;
       };
       if (which === "running") {
-        for (const c of controllers) all.push(leafFromController(c));
+        for (const c of controllers) all.push(leafFromController(c, agentOf(c.bot_name, "")));
         for (const ex of executors) {
-          if (isExecutorActive(ex.status)) all.push(leafFromExecutor(ex, botOf(ex)));
+          if (!isExecutorActive(ex.status)) continue;
+          const bot = botOf(ex);
+          all.push(leafFromExecutor(ex, bot, agentOf(bot, ex.controller_id)));
         }
       } else {
         // The window applies to what has finished, and is measured from each
@@ -636,7 +667,8 @@ export function PerfBrowser({
         for (const ex of executors) {
           if (isExecutorActive(ex.status)) continue;
           const started = ex.timestamp > 0 ? toMs(ex.timestamp) : null;
-          const leaf = leafFromExecutor(ex, closedBotOf(ex, started));
+          const bot = closedBotOf(ex, started);
+          const leaf = leafFromExecutor(ex, bot, agentOf(bot, ex.controller_id));
           if (cutoff && leaf.endedAt !== null && leaf.endedAt < cutoff) continue;
           all.push(leaf);
         }
@@ -647,7 +679,11 @@ export function PerfBrowser({
         // reaches, so a finished bot reports what it actually did rather than
         // whatever fraction of its executors is still in the table.
         for (const ctrl of terminatedControllers) {
-          const leaf = leafFromTerminatedController(ctrl, runByBot.get(ctrl.bot_name));
+          const leaf = leafFromTerminatedController(
+            ctrl,
+            runByBot.get(ctrl.bot_name),
+            agentOf(ctrl.bot_name, ""),
+          );
           if (cutoff && leaf.endedAt !== null && leaf.endedAt < cutoff) continue;
           all.push(leaf);
         }
@@ -655,7 +691,17 @@ export function PerfBrowser({
 
       return all;
     },
-    [controllers, executors, runByBot, terminatedControllers, botByController, attribute, period, now],
+    [
+      controllers,
+      executors,
+      runByBot,
+      terminatedControllers,
+      botByController,
+      attribute,
+      owners,
+      period,
+      now,
+    ],
   );
 
   /**
@@ -804,9 +850,32 @@ export function PerfBrowser({
    */
   const groupByBot = !soloBot;
 
+  /**
+   * The one agent every row on screen belongs to, when there is one.
+   *
+   * The same shape as `soloBot` and for the same reason: when everything in
+   * scope has a single owner there is no level left to pick, so the fleet row
+   * *is* that agent's report — header band included.
+   */
+  const soloAgent = useMemo(() => {
+    const seen = new Set(leaves.map((leaf) => leaf.agent));
+    return seen.size === 1 ? [...seen][0] : undefined;
+  }, [leaves]);
+
+  /**
+   * Whether the tree spends a level on the agent.
+   *
+   * The same rule as `groupByBot`, counting "no owner" as an owner: the level
+   * exists to tell owners apart, so a fleet that is entirely one agent's — or
+   * entirely nobody's, which is most fleets — spends no chevron saying so. A
+   * server with no agents at all therefore draws exactly the tree it drew
+   * before this feature.
+   */
+  const groupByAgent = !soloAgent;
+
   const tree = useMemo(
-    () => buildTree(leaves, rootLabel(population, soloRealBot), { groupByBot }),
-    [leaves, population, soloRealBot, rootLabel, groupByBot],
+    () => buildTree(leaves, rootLabel(population, soloRealBot), { groupByBot, groupByAgent }),
+    [leaves, population, soloRealBot, rootLabel, groupByBot, groupByAgent],
   );
   const nodes = useMemo(() => indexTree(tree), [tree]);
 
@@ -867,10 +936,15 @@ export function PerfBrowser({
   const switchView = useCallback(
     (nextPopulation: Population) => {
       if (nextPopulation === population) return;
-      const nextTree = buildTree(
-        applyFilters(leavesFor(nextPopulation)),
-        rootLabel(nextPopulation),
-      );
+      // Built with the levels the *next* tree will actually have, not with none:
+      // a re-aim resolves an id against this tree, so a level it is missing is
+      // a candidate that silently cannot be landed on. Both are derived from
+      // the next population's own leaves by the same rules as above.
+      const nextLeaves = applyFilters(leavesFor(nextPopulation));
+      const nextTree = buildTree(nextLeaves, rootLabel(nextPopulation), {
+        groupByBot: new Set(nextLeaves.map((leaf) => leaf.bot)).size !== 1,
+        groupByAgent: new Set(nextLeaves.map((leaf) => leaf.agent)).size !== 1,
+      });
       const aimed = resolveScope(indexTree(nextTree), effectiveScopeId, scope.leaves[0]);
       setSearchParams(
         (prev) => {

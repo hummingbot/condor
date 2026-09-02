@@ -36,6 +36,9 @@ vi.mock("@/lib/api", () => {
     getBotRuns: (...a) => getBotRuns(...a),
     getTerminatedControllers: (...a) => getTerminatedControllers(...a),
     getExecutorsPage: (...a) => getExecutorsPage(...a),
+    // A list, not the proxy's `{}`: the fleet map is a `FleetOwner[]` and the
+    // page iterates it. No agents is the case this file is about anyway.
+    getFleetMap: () => Promise.resolve([]),
   };
   return {
     api: new Proxy(named, {

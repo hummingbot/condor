@@ -16,6 +16,7 @@ import {
   type ControllerPerformanceHistoryAllResponse,
   type ExecutorInfo,
 } from "@/lib/api";
+import type { FleetOwner } from "@/lib/agent-attribution";
 import { parsePopulation } from "@/lib/perf-tree";
 import { controllerKey } from "@/lib/controller-identity";
 import { historyRowBudget } from "@/lib/history-pagination";
@@ -39,6 +40,9 @@ const BOTS_WS_CHANNELS = ["bots", "controller_perf"];
  */
 const EXECUTOR_PAGE_SIZE = 500;
 const EXECUTOR_PAGES = 4;
+
+/** Held still, so a failed or pending fleet map is not a new prop every render. */
+const EMPTY_OWNERS: FleetOwner[] = [];
 
 /**
  * `/bots` is the controller browser (FEAT-084).
@@ -82,6 +86,28 @@ export function Bots() {
     queryFn: () => api.getBots(server!),
     enabled: !!server,
     refetchInterval: 30000, // Slower polling since WS handles real-time updates
+  });
+
+  /**
+   * Who owns which of this trading (FEAT-096).
+   *
+   * Its own query rather than a slice of `getAgents`, which fans out a
+   * performance fetch per session of every strategy — this one makes no
+   * Hummingbot call at all, which is what makes a five-second poll sane. Polled
+   * rather than socket-driven because half of what it carries is a *countdown*
+   * (time to the loop's next tick), which no event announces.
+   *
+   * Not server-scoped: an agent owns its namespace wherever its bots run, and
+   * the map is what proves ownership rather than what reports trading.
+   *
+   * On failure the page simply has no agents in it — `owners` is `[]`, every
+   * leaf is unattributed, the level collapses, and `/bots` is byte-identical to
+   * what it was before this feature.
+   */
+  const { data: owners } = useQuery({
+    queryKey: ["fleet-map"],
+    queryFn: () => api.getFleetMap(),
+    refetchInterval: 5000,
   });
 
   // Compute earliest deploy time from active bots for filtering perf history
@@ -401,6 +427,7 @@ export function Bots() {
       paging={paging}
       runs={runsData?.runs ?? []}
       terminatedControllers={terminatedData?.controllers ?? []}
+      owners={owners ?? EMPTY_OWNERS}
       rateFormatPnl={formatPnlValue}
       rateFormatValue={formatValue}
       rateFormatDetailed={formatValueDetailed}
