@@ -207,6 +207,31 @@ def test_the_tick_preload_only_names_tools_a_tick_mounts(
         assert name in mounted, f"the tick preloads {name!r}, which it cannot call"
 
 
+@pytest.mark.parametrize("is_dry_run", [True, False])
+@pytest.mark.parametrize("is_experiment", [True, False])
+@pytest.mark.parametrize("is_controller_mode", [True, False])
+def test_the_tick_preload_always_carries_a_way_to_read_a_market(
+    is_dry_run, is_experiment, is_controller_mode
+):
+    """The other direction, which the test above cannot see (ARCH-308).
+
+    Since no ring mounts a candle, order book or funding reader any more, the
+    only way a tick reads a market it can compute on is ``run_code`` over
+    ``client.market_data.*``. Drop that one name from the preload and every
+    assertion above still passes while the tick goes blind past a single price
+    — so the name is pinned here rather than left to whoever edits the list
+    next.
+    """
+    from condor.agents.prompts import _build_tool_preload
+
+    line = _build_tool_preload(
+        is_dry_run=is_dry_run,
+        is_experiment=is_experiment,
+        is_controller_mode=is_controller_mode,
+    )
+    assert "mcp__condor__run_code" in line
+
+
 def test_the_manage_trading_agent_funnel_is_in_no_profile():
     """FEAT-068 split it; no ring may resurrect the name."""
     for name in CONDOR_PROFILES:

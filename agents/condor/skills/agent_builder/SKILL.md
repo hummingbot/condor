@@ -261,7 +261,13 @@ it into a questionnaire — it's the easiest thing to change later.
 
 **Agent tools, memory & skills:** `tools` on the AGENT.md is a tool-name allowlist
 enforced on pydantic-ai consults and loops (empty = unrestricted; not enforceable on ACP
-keys). An agent keeps its own domain memory (`manage_memory`) and reusable playbooks
+keys). **A non-empty allowlist must include `run_code`** if the agent reads a market at
+all: there is no candle, order book or funding tool to name any more (ARCH-308), so
+`get_prices` plus `run_code` over `client.market_data.*` is the whole market data
+surface. An allowlist that names neither leaves the agent able to trade a market it
+cannot look at.
+
+An agent keeps its own domain memory (`manage_memory`) and reusable playbooks
 (`manage_skill`/`agents/{slug}/skills/`) — the agent OWNS skills; it is not itself a skill.
 A new agent also reads the **shared** library (`agents/_shared/skills/`) from birth, so it
 gets `routine_cookbook` and friends for free — write only what is specific to its domain,
