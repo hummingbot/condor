@@ -11,6 +11,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
+import { AccountDock } from "@/components/chat/AccountDock";
 import { AgentPanel } from "@/components/chat/AgentPanel";
 import {
   BrainPicker,
@@ -520,6 +521,15 @@ export function AgentChatTab() {
             onLibraryChange={(focus) =>
               setPane(focus ? { kind: "routines", focus } : null)
             }
+          />
+
+          {/* The desk this conversation trades on, outboard of the dock that
+              is about the conversation itself (FEAT-094). The chat's own
+              server, falling back to the ambient selection: a session pinned
+              to one server must not show another's balance under a chat about
+              it, and each panel names the one it is reading. */}
+          <AccountDock
+            server={activeSlot?.info.server_name || server || null}
           />
         </div>
       </div>

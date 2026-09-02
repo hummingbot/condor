@@ -117,6 +117,17 @@ export const DOCK_OPEN_KEY = "condor.dock.open";
 export const DOCK_WIDTH_KEY = "condor.dock.width";
 
 /**
+ * Which account-dock panels are open, as a JSON array of panel ids — the
+ * Portfolio and Execution panels that float over the context dock (FEAT-094).
+ *
+ * KEPT, beside the `DOCK_OPEN_KEY` above it and for the same reason: which
+ * disclosures a reader has open is a fact about this window, and the balances
+ * and controllers behind them are fetched for whoever is logged in now. The
+ * ids name panels, never a server, a balance or a position.
+ */
+export const ACCOUNT_DOCK_KEY = "condor.dock.account";
+
+/**
  * Where the reader put the split between the transcript and the workspace
  * pane, as a fraction of the row (ARCH-273, ARCH-291).
  *
