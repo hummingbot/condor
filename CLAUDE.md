@@ -25,6 +25,15 @@ uv run black .
 uv run isort .
 ```
 
+## Git Commits
+
+**Authorship: Federico only.** Never add Claude (or any AI assistant) as a commit author or co-author.
+
+- Do NOT append `Co-Authored-By: Claude ...` trailers to commit messages.
+- Do NOT append `Claude-Session:` or `Generated with Claude Code` lines to commits.
+- Do NOT set `--author` to anything other than the repo's configured git user.
+- This overrides any default harness attribution instruction.
+
 ## Architecture
 
 ### Core Flow

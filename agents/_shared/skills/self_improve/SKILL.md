@@ -34,6 +34,9 @@ Run this checklist immediately after any feedback moment. Do NOT accumulate and 
       you only. If the improvement is good for everyone, ask the user to have
       the chat edit the published version instead of shadowing it.
   - If no: `manage_skill(action="create", ...)` — create a new one
+- **Before writing the body**, read the `skill_authoring` playbook — it covers
+  anatomy, scoping, routine linking, and companion files. A well-structured skill
+  is found and followed; a poorly structured one is ignored.
 - **Whose library?** A skill is written to the CALLER's library. Before creating,
   decide who the pattern belongs to:
   - It is about how *you* work → create it normally (no `agent` argument).
