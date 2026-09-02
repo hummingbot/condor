@@ -30,12 +30,12 @@ import {
   inScope,
   invalidateRoutineQueries,
   resolveRoutine,
-  routineAgents,
   saveConfig,
 } from "@/lib/routineUtils";
 import { useViewFacts } from "@/lib/viewFacts";
 import { useServer } from "@/hooks/useServer";
 import { ReportFrame } from "./ReportFrame";
+import { RoutinePicker } from "./RoutinePicker";
 import { RoutineConfigForm } from "./RoutineConfigForm";
 import { RoutineHooksPanel } from "./RoutineHooksPanel";
 import { RoutineResultView } from "./RoutineResultView";
@@ -54,50 +54,6 @@ export interface RoutineRunContext {
   sessionKey: string;
   /** Who the run's reports are filed under, as the chat's own runs are. */
   agentSlug?: string;
-}
-
-/**
- * Whose routines to list: everything, one family, or one agent.
- *
- * A native select rather than the chip row this replaces — the row was as wide
- * as the number of agents, which the 550px pane cannot spend, and it lived in a
- * sidebar that is collapsed there anyway.
- */
-function ScopePicker({
-  scope,
-  agents,
-  onChange,
-}: {
-  scope: string;
-  agents: string[];
-  onChange: (next: string) => void;
-}) {
-  const isAgentScope = scope !== "all" && scope !== "routine";
-  return (
-    <div className="relative shrink-0">
-      <select
-        value={scope}
-        onChange={(e) => onChange(e.target.value)}
-        title="Which routines this list shows"
-        aria-label="Routine scope"
-        className={`appearance-none rounded-md border py-1 pl-2.5 pr-6 text-[10px] font-medium cursor-pointer transition-colors focus:outline-none focus:ring-1 focus:ring-[var(--color-primary)]/40 ${
-          isAgentScope
-            ? "border-purple-500/30 bg-purple-500/10 text-purple-400"
-            : "border-[var(--color-border)] bg-[var(--color-surface-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
-        }`}
-      >
-        <option value="all">All routines</option>
-        <option value="routine">Library</option>
-        <option value="agent">All agents</option>
-        {agents.map((name) => (
-          <option key={name} value={name}>
-            {name}
-          </option>
-        ))}
-      </select>
-      <ChevronDown className="pointer-events-none absolute right-1.5 top-1/2 h-3 w-3 -translate-y-1/2 text-current opacity-70" />
-    </div>
-  );
 }
 
 interface ReportBrowserProps {
@@ -120,8 +76,8 @@ interface ReportBrowserProps {
   /**
    * The host owns the picking: it lists the routines and filters them, so this
    * pane drops its own sidebar, scope select and title and is nothing but the
-   * report and what you can do to it. See {@link RoutinePicker}, which is what
-   * the dock puts there instead.
+   * report and what you can do to it. The host asks both questions with the
+   * same {@link RoutinePicker} this header asks the scope half of.
    */
   externalPicker?: boolean;
   /** Told whenever the pane moves to another routine — its own ↑/↓ still do. */
@@ -148,7 +104,16 @@ export function ReportBrowser({
   // the reader last touched happens to point.
   const runServer = runContext?.serverName || server;
   const qc = useQueryClient();
-  const [sourceTypeFilter, setSourceTypeFilter] = useState<string>(initialSourceTypeFilter || "all");
+  // The /routines page still filters in the older vocabulary, where the
+  // general library is `"routine"`; the picker's select only has an option for
+  // `"condor"`, and a native select handed a value no option carries shows the
+  // first one while the state says otherwise. Normalised on the way in, so the
+  // alias stops at this boundary rather than reaching the control.
+  const [sourceTypeFilter, setSourceTypeFilter] = useState<string>(
+    initialSourceTypeFilter === "routine"
+      ? "condor"
+      : initialSourceTypeFilter || "all",
+  );
   // 550px of pane cannot hold a 256px list and a report: hosted opens on the
   // 48px rail, the page keeps its list, and the toggle still works either way.
   const [isCompact, setIsCompact] = useState(hosted);
@@ -252,9 +217,6 @@ export function ReportBrowser({
 
   // Unique source types for filter
   const hasAgents = routines.some((r) => r.source.startsWith("agent:"));
-
-  // Agent names for sub-filter
-  const agentNames = useMemo(() => routineAgents(routines), [routines]);
 
   /**
    * Who owns the open routine, when an agent does.
@@ -729,10 +691,13 @@ export function ReportBrowser({
             {!externalPicker && (
               <>
                 {hasAgents && (
-                  <ScopePicker
+                  <RoutinePicker
+                    parts="scope"
+                    variant="inline"
+                    routines={routines}
                     scope={effectiveScope}
-                    agents={agentNames}
-                    onChange={changeScope}
+                    onScopeChange={changeScope}
+                    onSelect={selectSource}
                   />
                 )}
                 <h2 className="truncate text-sm font-semibold text-[var(--color-text)]">

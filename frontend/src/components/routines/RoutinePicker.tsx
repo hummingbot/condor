@@ -26,7 +26,9 @@ import {
  * The scope used to be asked in the dock instead, one column away, which is a
  * filter that goes off screen whenever that column or its Routines section is
  * folded — and `parts` is what is left of that split, for a surface that wants
- * only one of the two.
+ * only one of the two. The report browser's own header is that surface: it
+ * names the routine itself and asks only the scope here, rather than keeping a
+ * second select with a second option list to drift from this one.
  *
  * ↑/↓ step through the list, from the closed trigger's keyboard or from the
  * `arrows` buttons beside it; the routine changes under you, as it did in the
@@ -185,6 +187,12 @@ export function RoutinePicker({
       >
         <option value="all">{formatScope("all")}</option>
         <option value="condor">{formatScope("condor")}</option>
+        {/* The other half of the split: everything an agent owns, whoever it
+            is. Only the report browser used to ask for it, from a select of
+            its own. */}
+        {agents.length > 0 && (
+          <option value="agent">{formatScope("agent")}</option>
+        )}
         {agents.map((slug) => (
           <option key={slug} value={slug}>
             {formatScope(slug)}
