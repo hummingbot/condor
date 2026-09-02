@@ -444,13 +444,19 @@ export function PerfBrowser({
   /**
    * What the reader is looking at, as bubbles above the tree.
    *
-   * These are the filters the executors page carried, split into the three
-   * questions a reader actually asks — *whose*, *what class of controller*,
-   * *what kind of executor* — and they narrow the whole tree rather than one
-   * table under a total that ignored them. The bot and class of a record used
-   * to be a *level* of the tree instead, chosen by a `By bot / By type` toggle;
-   * as filters they combine (several bots at once, one class across all of
-   * them) and they cost the reader no chevron to walk through.
+   * These are the filters the executors page carried, split into the questions
+   * a reader actually asks of a fleet — *what pair*, *what class of
+   * controller*, *what kind of executor* — and they narrow the whole tree
+   * rather than one table under a total that ignored them. A record's class
+   * used to be a *level* of the tree instead, chosen by a `By bot / By type`
+   * toggle; as a filter it combines with the others (one class across every
+   * bot) and it costs the reader no chevron to walk through.
+   *
+   * *Whose* is not among them: the tree draws a row per bot, and that row
+   * carries the actions a bubble never could. A bubble row over the same axis
+   * was a second picker stacked above the first, offering deploy-stamped names
+   * too long to read — 86 of them on the terminated side — above rows that said
+   * the same thing (ARCH-316).
    *
    * There were two type filters' worth of confusion in the one `types` list
    * this replaces: it matched a controller's class and an executor's type
@@ -463,7 +469,6 @@ export function PerfBrowser({
    */
   const [filters, setFilters] = useState({
     pair: "",
-    bots: [] as string[],
     ctrlTypes: [] as string[],
     execTypes: [] as string[],
   });
@@ -701,11 +706,10 @@ export function PerfBrowser({
   const applyFilters = useCallback(
     (all: PerfLeaf[]): PerfLeaf[] => {
       const pair = filters.pair.trim().toLowerCase();
-      const { bots: wantBots, ctrlTypes, execTypes } = filters;
-      if (!pair && !wantBots.length && !ctrlTypes.length && !execTypes.length) return all;
+      const { ctrlTypes, execTypes } = filters;
+      if (!pair && !ctrlTypes.length && !execTypes.length) return all;
       return all.filter((leaf) => {
         if (pair && !leaf.pair.toLowerCase().includes(pair)) return false;
-        if (wantBots.length && !wantBots.includes(leaf.bot)) return false;
         if (ctrlTypes.length && !ctrlTypes.includes(classOf(leaf))) return false;
         if (execTypes.length) {
           if (leaf.kind === "controller") return false;
@@ -722,17 +726,14 @@ export function PerfBrowser({
   const leaves = useMemo(() => applyFilters(rawLeaves), [applyFilters, rawLeaves]);
 
   /**
-   * What the three bubble groups offer, and how big each bucket is.
+   * What the bubble groups offer, and how big each bucket is.
    *
    * Derived from the population *before* the filters are applied, so ticking a
    * bubble never removes the other bubbles from the row it was ticked in — a
    * filter that eats its own options cannot be undone without clearing it — and
    * a count never renumbers itself as a consequence of being ticked.
    *
-   * Bots are ordered by what started most recently, which on the terminated
-   * side is the order a reader arrives looking for: the run that just finished
-   * is the one they came about. Classes and types are alphabetical, being
-   * vocabularies rather than events.
+   * Both are alphabetical, being vocabularies rather than events.
    */
   const filterOptions = useMemo(() => {
     const tally = (key: (leaf: PerfLeaf) => string, from: PerfLeaf[]) => {
@@ -745,23 +746,12 @@ export function PerfBrowser({
       return counts;
     };
 
-    const latestStart = new Map<string, number>();
-    for (const leaf of rawLeaves) {
-      const at = leaf.startedAt ?? 0;
-      if (at > (latestStart.get(leaf.bot) ?? -1)) latestStart.set(leaf.bot, at);
-    }
-    const botCounts = tally((leaf) => leaf.bot, rawLeaves);
-    const bots: BubbleOption[] = [...botCounts]
-      .map(([value, count]) => ({ value, label: shortBotName(value), count }))
-      .sort((a, b) => (latestStart.get(b.value) ?? 0) - (latestStart.get(a.value) ?? 0));
-
     const alpha = (counts: Map<string, number>): BubbleOption[] =>
       [...counts]
         .map(([value, count]) => ({ value, label: value, count }))
         .sort((a, b) => a.label.localeCompare(b.label));
 
     return {
-      bots,
       // A controller's own class, counted over controllers — an executor
       // inherits its controller's class rather than carrying one, so counting
       // it here would report the same controller once per executor under it.
@@ -776,22 +766,19 @@ export function PerfBrowser({
   }, [rawLeaves, classOf]);
 
   const filtersActive =
-    !!filters.pair.trim() ||
-    filters.bots.length > 0 ||
-    filters.ctrlTypes.length > 0 ||
-    filters.execTypes.length > 0;
+    !!filters.pair.trim() || filters.ctrlTypes.length > 0 || filters.execTypes.length > 0;
 
   /**
    * The one bot every row on screen belongs to, when there is one.
    *
-   * A bot used to be a node you could select, and selecting it is what put its
-   * name in the header and its actions — stop, logs, open archive, delete run —
-   * beside them. With the bot level retired, narrowing the bubbles to a single
-   * bot *is* that selection: the fleet row folds exactly that bot's records, so
-   * it is that bot's report and gets that bot's buttons.
+   * A bot is a node you can select, and selecting it is what puts its name in
+   * the header and its actions — stop, logs, open archive, delete run — beside
+   * them. When the population narrows to a single bot there is no level left to
+   * pick: the fleet row folds exactly that bot's records, so it is that bot's
+   * report and gets that bot's buttons.
    *
-   * Read off the population rather than off the filter, so a bot that is alone
-   * on the server needs no bubble ticked to be recognised as itself.
+   * Read off the *filtered* leaves, so typing a pair that only one bot trades
+   * collapses the bot level the same way a one-bot server does.
    */
   const soloBot = useMemo(() => {
     const seen = new Set(leaves.map((leaf) => leaf.bot));
@@ -1550,7 +1537,7 @@ export function PerfBrowser({
    * whole fleet derived from a filtered slice of one population of it.
    */
   useViewFacts(() => {
-    /** `bot alpha/beta`, or `bot 7 selected` once a list stops being readable. */
+    /** `executor type a/b`, or `… 7 selected` once a list stops being readable. */
     const picked = (noun: string, values: string[]) =>
       values.length === 0
         ? ""
@@ -1559,7 +1546,6 @@ export function PerfBrowser({
           : `${noun} ${values.length} selected`;
     const chips = [
       filters.pair.trim() ? `pair ~ "${filters.pair.trim()}"` : "",
-      picked("bot", filters.bots),
       picked("controller type", filters.ctrlTypes),
       picked("executor type", filters.execTypes),
     ].filter(Boolean);
@@ -1701,19 +1687,11 @@ export function PerfBrowser({
               />
 
               {/* One bubble row per question a reader asks of a fleet. Each is
-                  drawn only when it has something to choose between: a single
-                  bot, or a terminated side whose controllers all report the
-                  same (unknown) class, is not a filter. */}
-              {filterOptions.bots.length > 1 && (
-                <BubbleGroup
-                  title="Bots"
-                  hint="Which bots' records are in scope. Narrow to exactly one and the row below becomes that bot, with its own actions."
-                  options={filterOptions.bots}
-                  selected={filters.bots}
-                  onChange={(v) => setFilters((f) => ({ ...f, bots: v }))}
-                  previewCount={6}
-                />
-              )}
+                  drawn only when it has something to choose between: a
+                  terminated side whose controllers all report the same
+                  (unknown) class is not a filter. *Which bot* is missing on
+                  purpose — the tree below draws a row per bot, and that row can
+                  be acted on (ARCH-316). */}
               {filterOptions.ctrlTypes.length > 1 && (
                 <BubbleGroup
                   // "Controller type" rather than "Type": the row under it is
@@ -1738,7 +1716,7 @@ export function PerfBrowser({
               {filtersActive && (
                 <button
                   type="button"
-                  onClick={() => setFilters({ pair: "", bots: [], ctrlTypes: [], execTypes: [] })}
+                  onClick={() => setFilters({ pair: "", ctrlTypes: [], execTypes: [] })}
                   className="self-start text-[10px] text-[var(--color-text-muted)] underline-offset-2 hover:text-[var(--color-text)] hover:underline"
                 >
                   Clear all filters
