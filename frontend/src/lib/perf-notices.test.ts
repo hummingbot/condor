@@ -101,14 +101,29 @@ describe("chartNotice — an executor scope", () => {
     expect(notice?.detail).toContain("has none for this one");
   });
 
-  // Pinned, not endorsed: a failed fetch is currently reported exactly like an
-  // empty one, which asserts something about the executor that the failure
-  // does not establish. Correcting it is a separate change, and this row is
-  // what makes that change visible instead of silent.
-  it("currently reports a FAILED fetch the same way as an empty one", () => {
+  // The correction CORR-299 asked for: a request that failed establishes
+  // nothing about the executor, so it must not be reported as absence.
+  it("names a rejected fetch as a failure, not as an absence", () => {
     const errored = at({ ...executor, seriesSource: "none", execHistoryError: true });
-    expect(errored).toEqual(at({ ...executor, seriesSource: "none" }));
-    expect(errored?.detail).toContain("has none for this one");
+    expect(errored?.label).toBe("history unavailable");
+    expect(errored?.detail).not.toContain("has none for this one");
+  });
+
+  it("names an unreachable upstream, which arrives in band as a 200", () => {
+    const notice = at({
+      ...executor,
+      seriesSource: "none",
+      execHistoryServerOnline: false,
+      execHistoryErrorHint: "Connection error: timed out",
+    });
+    expect(notice?.label).toBe("history unavailable");
+    expect(notice?.detail).toContain("Connection error: timed out");
+  });
+
+  it("says nothing while the capability probe is still unanswered", () => {
+    expect(
+      at({ ...executor, seriesSource: "none", capabilitySupported: undefined }),
+    ).toBeUndefined();
   });
 
   it("prefers the capability answer over an error", () => {

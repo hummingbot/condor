@@ -37,16 +37,18 @@ export interface ChartNoticeInput {
   capabilitySupported?: boolean;
   /** The executor's own history query is in flight. */
   execHistoryLoading: boolean;
-  /**
-   * That query failed.
-   *
-   * Read today only to make the case visible: an errored fetch lands on the
-   * same "the server has none for this one" notice an empty one does, which is
-   * a misreport tracked as its own finding. Naming it as an input is what lets
-   * a test pin the current answer, so that correcting it shows up as a
-   * deliberate change rather than a silent one.
-   */
+  /** That query rejected outright — a 4xx, or Condor itself failing. */
   execHistoryError: boolean;
+  /**
+   * Whether the upstream API answered at all.
+   *
+   * `/performance/history` reports an unreachable upstream in band — a 200
+   * carrying `server_online: false` and no rows — so a transport failure is
+   * indistinguishable from an empty table unless this is read.
+   */
+  execHistoryServerOnline?: boolean;
+  /** The server's own words for why, when the request failed. */
+  execHistoryErrorHint?: string;
   /** The fleet history stops short of the earliest deploy. */
   truncated: boolean;
 }
@@ -57,6 +59,20 @@ const NO_EXECUTOR_SERIES: PerfNotice = {
   detail:
     "The server records executor performance over time, but has none for this one — it closed before the table existed, or it lived less than one snapshot interval. The totals above are its own.",
 };
+
+/**
+ * Said instead of absence, when the request for the series did not come back
+ * (CORR-299).
+ *
+ * A fetch that failed establishes nothing about the executor, so reporting it
+ * as "the server has none for this one" asserts a fact nobody checked — and it
+ * is the one wording that stops the reader from retrying. Naming the failure
+ * keeps the chart honest about which of the two it is.
+ */
+const historyUnavailable = (hint?: string): PerfNotice => ({
+  label: "history unavailable",
+  detail: `The request for this executor's recorded series failed${hint ? ` — ${hint}` : ""}, so whether the server has one is unknown. The fallback is drawn below; the totals above are its own.`,
+});
 
 /**
  * What the terminated chart is actually drawn from.
@@ -107,6 +123,11 @@ export function terminatedNotice({
  *    the table existed, or it lived less than one dump interval. Backfilling
  *    history for an executor that already closed is deliberately out of
  *    scope, so the honest answer is that it was never recorded.
+ *
+ * The fourth state is not an answer at all: nothing came back. Absence is a
+ * claim about the executor and a failed request cannot support it, so the
+ * unknown ones — the probe still in flight, the fetch that failed — either say
+ * nothing or say that it failed (CORR-299).
  */
 export function executorNotice({
   scopeKind,
@@ -114,9 +135,17 @@ export function executorNotice({
   capabilitySupported,
   execHistoryLoading,
   execHistoryError,
+  execHistoryServerOnline,
+  execHistoryErrorHint,
 }: Pick<
   ChartNoticeInput,
-  "scopeKind" | "seriesSource" | "capabilitySupported" | "execHistoryLoading" | "execHistoryError"
+  | "scopeKind"
+  | "seriesSource"
+  | "capabilitySupported"
+  | "execHistoryLoading"
+  | "execHistoryError"
+  | "execHistoryServerOnline"
+  | "execHistoryErrorHint"
 >): PerfNotice | undefined {
   if (scopeKind !== "executor" || seriesSource === "snapshots") return undefined;
   if (capabilitySupported === false) {
@@ -126,11 +155,16 @@ export function executorNotice({
         "This API does not record executor performance over time, so there is no curve for this executor — only the totals above, which are its own. An API with the shared performance history draws the executor's own sampled series here.",
     };
   }
-  if (execHistoryLoading) return undefined;
-  // A failed fetch is reported exactly like an empty one today. Wrong, and
-  // tracked separately; spelled out here so the misreport is a pinned answer
-  // rather than an accident of the query exposing only `isFetching`.
-  if (execHistoryError) return NO_EXECUTOR_SERIES;
+  // The probe has not answered yet, so the history query is still disabled and
+  // `execHistoryLoading` is false: nothing is known about this executor, and
+  // the absence copy below would be a guess dressed as a finding.
+  if (capabilitySupported === undefined || execHistoryLoading) return undefined;
+  // An unreachable upstream arrives in band as a 200 with `server_online:
+  // false`; a 4xx or a Condor-side fault rejects the query instead. Neither
+  // one looked at the executor's rows.
+  if (execHistoryServerOnline === false || execHistoryError) {
+    return historyUnavailable(execHistoryErrorHint);
+  }
   return NO_EXECUTOR_SERIES;
 }
 

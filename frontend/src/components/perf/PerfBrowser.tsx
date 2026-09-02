@@ -1458,8 +1458,10 @@ export function PerfBrowser({
         : "Fleet PnL"
       : `${scope.label} PnL`;
   // Where the curve came from, said rather than assumed. The selection is pure
-  // over these seven facts, so it lives in lib/perf-notices.ts where a test can
+  // over these facts, so it lives in lib/perf-notices.ts where a test can
   // reach it (ARCH-300); what stays here is only the reading of the facts.
+  // `server_online` travels with the response because Condor's route reports an
+  // unreachable upstream in band rather than as an HTTP error (CORR-299).
   const notice = chartNotice({
     scopeKind: scope.kind,
     population,
@@ -1468,6 +1470,8 @@ export function PerfBrowser({
     capabilitySupported: perfCapability?.supported,
     execHistoryLoading,
     execHistoryError,
+    execHistoryServerOnline: execHistory?.server_online,
+    execHistoryErrorHint: execHistory?.error_hint,
     truncated,
   });
 
