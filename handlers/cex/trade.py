@@ -546,8 +546,8 @@ async def show_trade_menu(
     quote_data: dict = None,
 ) -> None:
     """Display the unified trade menu with balances and data"""
-    from condor.preferences import get_active_server
     from config_manager import get_config_manager
+    from handlers.bots._shared import resolve_accessible_server_or_none
 
     params = context.user_data.get("trade_params", {})
     connector = params.get("connector", "binance_perpetual")
@@ -557,31 +557,10 @@ async def show_trade_menu(
 
     # Get current server name and status - with proper access control
     cm = get_config_manager()
-    user_id = context.user_data.get("_user_id")
 
-    # Only use servers the user has access to
-    if user_id:
-        accessible_servers = cm.get_accessible_servers(user_id)
-        all_servers = cm.list_servers()
-        enabled_accessible = [
-            s for s in accessible_servers if all_servers.get(s, {}).get("enabled", True)
-        ]
-    else:
-        logger.warning(
-            "show_trade_menu called without user_id - cannot verify server access"
-        )
-        all_servers = cm.list_servers()
-        enabled_accessible = [
-            name for name, cfg in all_servers.items() if cfg.get("enabled", True)
-        ]
-
-    preferred = get_active_server(context.user_data)
-    # Only use preferred if user has access to it
-    server_name = (
-        preferred
-        if preferred and preferred in enabled_accessible
-        else (enabled_accessible[0] if enabled_accessible else None)
-    )
+    # Only use servers the user has access to; the menu renders serverless
+    # rather than raising when there is nothing this user may reach.
+    server_name = resolve_accessible_server_or_none(context.user_data)
     server_status = "online"
     if server_name:
         try:
@@ -1157,35 +1136,15 @@ async def handle_trade_set_connector(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
     """Show available CEX connectors and DEX networks for selection"""
-    from condor.preferences import get_active_server
-    from config_manager import get_config_manager
+    from handlers.bots._shared import resolve_accessible_server_or_none
 
     chat_id = update.effective_chat.id
     keyboard = []
 
-    # Get server name for cache keying - with proper access control
-    cm = get_config_manager()
-    user_id = context.user_data.get("_user_id")
-
-    # Only use servers the user has access to
-    if user_id:
-        accessible_servers = cm.get_accessible_servers(user_id)
-        all_servers = cm.list_servers()
-        enabled_accessible = [
-            s for s in accessible_servers if all_servers.get(s, {}).get("enabled", True)
-        ]
-    else:
-        all_servers = cm.list_servers()
-        enabled_accessible = [
-            name for name, cfg in all_servers.items() if cfg.get("enabled", True)
-        ]
-
-    preferred = get_active_server(context.user_data)
-    server_name = (
-        preferred
-        if preferred and preferred in enabled_accessible
-        else (enabled_accessible[0] if enabled_accessible else "default")
-    )
+    # Get server name for cache keying - with proper access control. Only a
+    # cache-key component, so the historical "default" literal is kept for the
+    # no-accessible-server case rather than poisoning keys with None.
+    server_name = resolve_accessible_server_or_none(context.user_data) or "default"
 
     try:
         client = await get_client(chat_id, context=context)

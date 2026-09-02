@@ -11,6 +11,7 @@ from telegram.ext import CallbackQueryHandler, ContextTypes
 from condor.fetchers.portfolio import dedupe_unified_accounts
 from condor.preferences import get_all_enabled_networks
 from handlers import is_gateway_network
+from handlers.bots._shared import NO_ACCESSIBLE_SERVERS, resolve_accessible_server
 from handlers.config import clear_config_state
 from utils.auth import hummingbot_api_required, restricted
 from utils.telegram_formatters import (
@@ -164,10 +165,10 @@ def build_connector_detail_keyboard() -> InlineKeyboardMarkup:
 # ============================================
 # SERVER RESOLUTION (access-checked)
 # ============================================
-
-NO_ACCESSIBLE_SERVERS = (
-    "No accessible API servers available. Ask an admin to share a server with you."
-)
+# The resolution itself lives in handlers/bots/_shared.py so /portfolio, /bots
+# and /trade cannot drift apart on access control. NO_ACCESSIBLE_SERVERS is
+# re-exported here (imported above) because the portfolio error paths speak
+# that wording.
 
 
 def _resolve_server_for_user(context: ContextTypes.DEFAULT_TYPE) -> str:
@@ -176,39 +177,14 @@ def _resolve_server_for_user(context: ContextTypes.DEFAULT_TYPE) -> str:
     Both /portfolio and its refresh callback used to choose from *every* enabled
     server on the install and fall back to the first one, which handed a user
     with no shared server (or a stale ``active_server`` preference) somebody
-    else's balance sheet. Candidates are now only the servers the caller can
-    actually reach, exactly as ``handlers/bots/_shared.get_bots_client`` does.
+    else's balance sheet. The resolution now lives in one place shared with
+    ``get_bots_client`` and the trade menu; this stays as the portfolio-shaped
+    entry point (it takes a ``context``, not a ``user_data`` dict).
 
     Raises:
         ValueError: when the user has no enabled server they can access.
     """
-    from condor.preferences import get_active_server
-    from config_manager import get_config_manager
-
-    cm = get_config_manager()
-    user_id = context.user_data.get("_user_id")
-
-    if user_id is None:
-        # Every entry point is decorated @restricted, which stamps _user_id
-        # before the handler body runs. Without it there is no access list to
-        # check against, so refuse rather than serve an arbitrary server.
-        logger.warning("Portfolio server resolution without _user_id - refusing")
-        raise ValueError(NO_ACCESSIBLE_SERVERS)
-
-    accessible = set(cm.get_accessible_servers(user_id))
-    enabled_accessible = [
-        name
-        for name, cfg in cm.list_servers().items()
-        if cfg.get("enabled", True) and name in accessible
-    ]
-
-    if not enabled_accessible:
-        raise ValueError(NO_ACCESSIBLE_SERVERS)
-
-    preferred = get_active_server(context.user_data)
-    if preferred and preferred in enabled_accessible:
-        return preferred
-    return enabled_accessible[0]
+    return resolve_accessible_server(context.user_data)
 
 
 @restricted

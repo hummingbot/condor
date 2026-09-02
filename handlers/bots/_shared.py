@@ -58,6 +58,78 @@ GRID_STRIKE_FIELDS = {
 
 
 # ============================================
+# SERVER RESOLUTION (access-checked)
+# ============================================
+
+NO_ACCESSIBLE_SERVERS = (
+    "No accessible API servers available. Ask an admin to share a server with you."
+)
+
+
+def resolve_accessible_server(user_data: Optional[Dict]) -> str:
+    """Pick the server a user's request may be served from.
+
+    The single seam for "which server does this user get?": candidates are the
+    servers the caller can actually reach (``get_accessible_servers``), narrowed
+    to the ones that are both configured and enabled, and the caller's stored
+    ``active_server`` preference wins only when it is one of them. This is
+    access-control logic -- CORR-246 was a real cross-user data leak caused by
+    picking from *every* enabled server -- so it lives in exactly one place and
+    fails closed.
+
+    Args:
+        user_data: context.user_data dict, carrying ``_user_id`` and preferences
+
+    Returns:
+        The name of an enabled server the user may use.
+
+    Raises:
+        ValueError: when the user has no enabled server they can access, or when
+            ``_user_id`` is missing so no access list can be checked at all.
+    """
+    from config_manager import get_config_manager
+
+    cm = get_config_manager()
+    user_id = user_data.get("_user_id") if user_data else None
+
+    if not user_id:
+        # Every entry point is decorated @restricted, which stamps _user_id
+        # before the handler body runs. Without it there is no access list to
+        # check against, so refuse rather than serve an arbitrary server.
+        logger.warning("Server resolution without _user_id - refusing")
+        raise ValueError(NO_ACCESSIBLE_SERVERS)
+
+    accessible = set(cm.get_accessible_servers(user_id))
+    enabled_accessible = [
+        name
+        for name, cfg in cm.list_servers().items()
+        if cfg.get("enabled", True) and name in accessible
+    ]
+
+    if not enabled_accessible:
+        raise ValueError(NO_ACCESSIBLE_SERVERS)
+
+    from condor.preferences import get_active_server
+
+    preferred = get_active_server(user_data)
+    if preferred and preferred in enabled_accessible:
+        return preferred
+    return enabled_accessible[0]
+
+
+def resolve_accessible_server_or_none(user_data: Optional[Dict]) -> Optional[str]:
+    """``resolve_accessible_server`` for callers that render a "no server" state.
+
+    Same resolution, but returns ``None`` instead of raising so a menu can draw
+    itself (offline/empty) rather than blowing up in the user's face.
+    """
+    try:
+        return resolve_accessible_server(user_data)
+    except ValueError:
+        return None
+
+
+# ============================================
 # SERVER CLIENT HELPER
 # ============================================
 
@@ -79,52 +151,9 @@ async def get_bots_client(
     """
     from config_manager import get_config_manager
 
-    cm = get_config_manager()
-
-    # Get user_id from user_data for access control
-    user_id = user_data.get("_user_id") if user_data else None
-
-    # Get servers the user has access to (not all servers)
-    if user_id:
-        accessible_servers = cm.get_accessible_servers(user_id)
-        # Filter to only enabled servers
-        all_servers = cm.list_servers()
-        enabled_accessible = [
-            s for s in accessible_servers if all_servers.get(s, {}).get("enabled", True)
-        ]
-    else:
-        # Fallback for legacy calls without user_data - use all enabled servers
-        # This should not happen in normal operation
-        logger.warning(
-            "get_bots_client called without user_data - cannot verify server access"
-        )
-        all_servers = cm.list_servers()
-        enabled_accessible = [
-            name for name, cfg in all_servers.items() if cfg.get("enabled", True)
-        ]
-
-    if not enabled_accessible:
-        raise ValueError(
-            "No accessible API servers available. Please configure server access."
-        )
-
-    # Use user's preferred server if valid
-    preferred = None
-    if user_data:
-        from condor.preferences import get_active_server
-
-        preferred = get_active_server(user_data)
-
-    # Only use preferred server if user has access to it
-    if preferred and preferred in enabled_accessible:
-        server_name = preferred
-    elif enabled_accessible:
-        server_name = enabled_accessible[0]
-    else:
-        raise ValueError("No accessible API servers available")
-
-    logger.info(f"Bots using server: {server_name} (user_id: {user_id})")
-    client = await cm.get_client(server_name)
+    server_name = resolve_accessible_server(user_data)
+    logger.info(f"Bots using server: {server_name}")
+    client = await get_config_manager().get_client(server_name)
     return client, server_name
 
 
