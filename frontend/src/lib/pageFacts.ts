@@ -365,9 +365,6 @@ function runsFacts(qc: QueryClient): ViewFacts["onScreen"] {
   // Named `… run` rather than `best`/`worst`: these are merged into the `/bots`
   // entry, which already ranks *bots* under those two keys, and a bare `best`
   // here would silently replace it with an answer to a different question.
-  // Named `… run` rather than `best`/`worst`: these are merged into the `/bots`
-  // entry, which already ranks *bots* under those two keys, and a bare `best`
-  // here would silently replace it with an answer to a different question.
   //
   // The per-status breakdown the runs table carried is gone from the block, not
   // from the screen. Everything here shares one budget with the fleet's facts
