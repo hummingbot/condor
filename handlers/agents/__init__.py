@@ -2022,6 +2022,21 @@ async def _do_compact_from_message(
     )
 
 
+def _voice_display(text: str) -> str:
+    """What a transcription is allowed to look like on screen.
+
+    The raw transcript still flows on: ``_handle_pasted_secrets`` needs it to
+    detect the phrase and delete the voice message, and ``runtime.prompt``
+    redacts itself before the model or the disk sees anything. But nothing the
+    bot *renders* may carry a spoken recovery phrase — otherwise the notice
+    ("I removed a recovery phrase ... and deleted the message") is a lie while
+    the phrase is still legible in the bot's own message, first as the
+    transcription edit and then as the prefix the streamer keeps at the head of
+    every edit through the final answer (SEC-281).
+    """
+    return secrets.redact(text)[0]
+
+
 async def agent_voice_handler(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
@@ -2082,7 +2097,7 @@ async def agent_voice_handler(
     # Show the transcribed text
     from utils.telegram_formatters import escape_markdown_v2
 
-    escaped = escape_markdown_v2(text)
+    escaped = escape_markdown_v2(_voice_display(text))
     await status_msg.edit_text(
         f"🎙 _{escaped}_\n\nThinking\\.\\.\\.", parse_mode="MarkdownV2"
     )
@@ -2324,7 +2339,7 @@ async def agent_message_handler(
     # Keep the spoken question at the head of the streamed answer: the streamer
     # edits the very placeholder that was showing the transcript, so without the
     # prefix the user's words would be overwritten by the reply.
-    prefix = f"🎙 {voice_transcription}" if voice_transcription else ""
+    prefix = f"🎙 {_voice_display(voice_transcription)}" if voice_transcription else ""
 
     # Send or reuse placeholder message
     if voice_placeholder:

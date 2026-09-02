@@ -164,3 +164,163 @@ def test_the_settings_toggle_flips_the_preference(start_on):
     assert secret_notices_enabled(user_data) is start_on
     set_secret_notices(user_data, not start_on)
     assert secret_notices_enabled(user_data) is (not start_on)
+
+
+# ── A spoken phrase (SEC-281) ────────────────────────────────────────────
+#
+# The voice path renders the transcription twice in the bot's *own* message:
+# once as the "🎙 ..." status edit, then as the prefix the streamer keeps at the
+# head of every edit through the final answer. Deleting the user's audio and
+# announcing it while the phrase is still legible there is the bug these pin.
+
+
+def _voice_update():
+    """A private voice message that records its replies and its deletion."""
+    update = SimpleNamespace(
+        effective_chat=SimpleNamespace(id=4242, type="private"),
+        effective_user=SimpleNamespace(id=7),
+        deleted=[],
+        edits=[],
+    )
+
+    async def download_as_bytearray():
+        return bytearray(b"ogg")
+
+    async def get_file():
+        return SimpleNamespace(download_as_bytearray=download_as_bytearray)
+
+    async def edit_text(text, **kwargs):
+        update.edits.append(text)
+
+    status_msg = SimpleNamespace(message_id=99, edit_text=edit_text)
+
+    async def reply_text(text, **kwargs):
+        return status_msg
+
+    async def delete():
+        update.deleted.append(True)
+
+    update.message = SimpleNamespace(
+        text=None,
+        voice=SimpleNamespace(get_file=get_file),
+        reply_text=reply_text,
+        delete=delete,
+    )
+    return update
+
+
+def _approved(monkeypatch):
+    """Make the auth check pass for both handlers."""
+    import config_manager
+    from config_manager import UserRole
+
+    monkeypatch.setattr(
+        config_manager,
+        "get_config_manager",
+        lambda: SimpleNamespace(get_user_role=lambda user_id: UserRole.USER),
+    )
+
+
+def _transcribing(monkeypatch, text):
+    """Stub the whisper call so the handler runs offline."""
+    import utils.transcribe
+
+    async def transcribe_voice(data, language=None, model_size="base"):
+        return text
+
+    monkeypatch.setattr(utils.transcribe, "transcribe_voice", transcribe_voice)
+
+
+def _run_voice(monkeypatch, spoken):
+    """Drive agent_voice_handler up to the hand-off, stubbed at the edges."""
+    import handlers.agents as agents
+
+    _approved(monkeypatch)
+    _transcribing(monkeypatch, spoken)
+
+    async def get_session(chat_id):
+        return SimpleNamespace(alive=True)
+
+    async def handed_off(update, context):
+        return None
+
+    monkeypatch.setattr(agents, "get_session", get_session)
+    monkeypatch.setattr(agents, "agent_message_handler", handed_off)
+
+    update = _voice_update()
+    context = _context()
+    asyncio.run(agents.agent_voice_handler(update, context))
+    return SimpleNamespace(edits=update.edits, context=context)
+
+
+def _run_streamed_answer(monkeypatch, spoken, answer="All set."):
+    """Drive agent_message_handler on a voice hand-off with a real streamer."""
+    import handlers.agents as agents
+    from condor.runtime.events import EventType, RuntimeEvent
+
+    _approved(monkeypatch)
+
+    async def get_session(chat_id):
+        return SimpleNamespace(alive=True)
+
+    monkeypatch.setattr(agents, "get_session", get_session)
+
+    async def prompt(key, request, on_busy="queue"):
+        yield RuntimeEvent(type=EventType.TEXT, data={"text": answer})
+        yield RuntimeEvent(type=EventType.DONE, data={"stop_reason": "end_turn"})
+
+    monkeypatch.setattr(agents.runtime, "prompt", prompt)
+
+    update = _voice_update()
+    context = _context()
+    edited: list = []
+
+    async def edit_message_text(chat_id, message_id, text, **kwargs):
+        edited.append(text)
+
+    context.bot.edit_message_text = edit_message_text
+    context.chat_data["_voice_transcription"] = spoken
+    context.chat_data["_voice_placeholder"] = SimpleNamespace(message_id=99)
+
+    asyncio.run(agents.agent_message_handler(update, context))
+    return SimpleNamespace(edited=edited, context=context)
+
+
+def test_a_spoken_phrase_is_redacted_before_it_is_shown(monkeypatch):
+    from utils.telegram_formatters import escape_markdown_v2
+
+    out = _run_voice(monkeypatch, SEED)
+    assert out.edits, "the handler must show the transcription"
+    # The status edit is MarkdownV2, so the marker arrives escaped.
+    assert escape_markdown_v2("[redacted: mnemonic]") in out.edits[-1]
+    assert "sausage" not in out.edits[-1]
+
+
+def test_the_raw_transcript_still_reaches_the_funnel(monkeypatch):
+    """Redaction is a rendering rule, not a detection one: _handle_pasted_secrets
+    still has to see the phrase to delete the voice message, and runtime.prompt
+    redacts itself on the way to the model."""
+    out = _run_voice(monkeypatch, SEED)
+    assert out.context.chat_data["_voice_transcription"] == SEED
+
+
+def test_an_ordinary_transcription_is_shown_as_spoken(monkeypatch):
+    out = _run_voice(monkeypatch, "how is SOL-USDC doing?")
+    assert "how is SOL\\-USDC doing?" in out.edits[-1]
+    assert "redacted" not in out.edits[-1]
+
+
+def test_the_streamed_answer_never_carries_the_phrase(monkeypatch):
+    out = _run_streamed_answer(monkeypatch, SEED)
+    assert out.edited, "the streamer must have written the placeholder"
+    final = out.edited[-1]
+    assert "[redacted: mnemonic]" in final
+    assert "sausage" not in final
+    assert not any("sausage" in text for text in out.edited)
+    # The audio really was deleted, which is what the notice claims.
+    assert out.context.sent and "/gateway" in out.context.sent[0].text
+
+
+def test_an_ordinary_transcription_stays_at_the_head_of_the_answer(monkeypatch):
+    out = _run_streamed_answer(monkeypatch, "how is SOL-USDC doing?")
+    assert "🎙 how is SOL-USDC doing?" in out.edited[-1]
