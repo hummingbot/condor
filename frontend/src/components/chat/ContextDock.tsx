@@ -8,11 +8,11 @@ import {
   conversationInstances,
   type LibraryFocus,
 } from "@/components/chat/DockRoutines";
+import { DockResizeHandle } from "@/components/chat/DockResizeHandle";
 import { DockSection } from "@/components/chat/DockSection";
 import { DockTasks } from "@/components/chat/DockTasks";
 import type { RoutineRunContext } from "@/components/routines/ReportBrowser";
 import { WORKSPACE_BAR } from "@/components/chat/workspaceBar";
-import { useResizeDrag } from "@/hooks/useResizeDrag";
 import { api, type Delegation } from "@/lib/api";
 import { inScope, resolveRoutine, type RoutineScope } from "@/lib/routineUtils";
 import { DOCK_OPEN_KEY, DOCK_WIDTH_KEY } from "@/lib/sessionState";
@@ -288,7 +288,14 @@ export function ContextDock({
         }}
         className="absolute inset-y-0 right-0 z-30 flex shrink-0 border-l border-[var(--color-border)] bg-[var(--color-bg)] xl:relative xl:z-auto"
       >
-        <DockResizeHandle width={width} onWidth={setWidth} />
+        <DockResizeHandle
+          width={width}
+          onWidth={setWidth}
+          min={MIN_WIDTH}
+          max={() => Math.max(MIN_WIDTH, window.innerWidth - MIN_CHAT_PX)}
+          reset={DEFAULT_WIDTH}
+          label="Resize dock"
+        />
         <div className="flex min-w-0 flex-1 flex-col overflow-y-auto">
           <div className={`${WORKSPACE_BAR} gap-2 px-3`}>
             <span className="min-w-0 flex-1 truncate text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
@@ -345,61 +352,5 @@ export function ContextDock({
       </aside>
       {librarySheet}
     </>
-  );
-}
-
-/**
- * The seam between the conversation and the dock, and the way to move it.
- *
- * Three columns of chrome share one window, and how much of it this one is
- * worth depends on what the reader is doing: watching a routine's rows wants
- * room, typing wants the transcript. So it is theirs to set, and remembered —
- * the width is per-browser, like the collapse beside it.
- *
- * Dragging left grows the dock, which is the direction a right-anchored panel's
- * edge moves; the arrows do the same, so the handle is reachable without a
- * pointer. Double-click puts it back.
- */
-function DockResizeHandle({
-  width,
-  onWidth,
-}: {
-  width: number;
-  onWidth: (next: number) => void;
-}) {
-  const { onMouseDown, isDragging } = useResizeDrag({
-    axis: "x",
-    value: width,
-    onChange: onWidth,
-    min: MIN_WIDTH,
-    max: () => Math.max(MIN_WIDTH, window.innerWidth - MIN_CHAT_PX),
-    direction: "inverted",
-    cursor: "col-resize",
-    lockUserSelect: true,
-  });
-
-  const onKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === "ArrowLeft") onWidth(width + 16);
-    else if (e.key === "ArrowRight") onWidth(Math.max(MIN_WIDTH, width - 16));
-    else return;
-    e.preventDefault();
-  };
-
-  return (
-    <div
-      role="separator"
-      aria-orientation="vertical"
-      aria-label="Resize dock"
-      aria-valuenow={Math.round(width)}
-      aria-valuemin={MIN_WIDTH}
-      tabIndex={0}
-      onMouseDown={onMouseDown}
-      onKeyDown={onKeyDown}
-      onDoubleClick={() => onWidth(DEFAULT_WIDTH)}
-      title="Drag to resize — double-click to reset"
-      className={`-ml-1 w-1.5 shrink-0 cursor-col-resize transition-colors hover:bg-[var(--color-primary)]/30 focus:outline-none focus-visible:bg-[var(--color-primary)]/30 ${
-        isDragging ? "bg-[var(--color-primary)]/30" : ""
-      }`}
-    />
   );
 }
