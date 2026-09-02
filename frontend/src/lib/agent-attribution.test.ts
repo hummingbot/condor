@@ -12,12 +12,16 @@ import { describe, expect, it } from "vitest";
 import {
   agentOfBot,
   agentOfControllerId,
+  countdown,
   inNamespace,
+  loopFacts,
+  loopStatus,
   ownerOf,
   ownerTitle,
   runKeyLabel,
   stripDeploySuffix,
   type FleetOwner,
+  type LiveLoop,
 } from "./agent-attribution";
 
 function owner(over: Partial<FleetOwner> = {}): FleetOwner {
@@ -162,5 +166,72 @@ describe("the primitives the rule is built from", () => {
   it("says no when either side is empty", () => {
     expect(inNamespace("", "brigado-brl_mm")).toBe(false);
     expect(inNamespace("brigado-brl_mm", "")).toBe(false);
+  });
+});
+
+
+/**
+ * What the header band says the loop is doing.
+ *
+ * The band's job is to answer "is this thing even alive", so the cases that
+ * matter are the ones where the honest answer is not a countdown: no loop at
+ * all, a paused one, one that has not ticked yet, and one whose tick is running
+ * long — where a raw subtraction would print a negative number and read as a
+ * bug in the page rather than as a slow tick.
+ */
+describe("the loop's state", () => {
+  const NOW_S = 1_700_000_000;
+  const NOW = NOW_S * 1000;
+
+  function loop(over: Partial<LiveLoop> = {}): LiveLoop {
+    return {
+      agentId: "brigado.brl_mm_7",
+      sessionNum: 7,
+      status: "running",
+      tickCount: 214,
+      lastTickAt: NOW_S - 22,
+      frequencySec: 60,
+      lastAction: "Spreads held.",
+      lastError: "",
+      ...over,
+    };
+  }
+
+  it("reads no loop at all as idle, with nothing to say about ticks", () => {
+    expect(loopStatus(null)).toBe("idle");
+    expect(loopFacts(null, NOW)).toEqual([]);
+  });
+
+  it("counts down to the next tick", () => {
+    expect(loopFacts(loop(), NOW)).toEqual(["session 7", "tick 214", "next tick 38s"]);
+  });
+
+  it("says a long tick is overdue rather than printing a negative", () => {
+    expect(loopFacts(loop({ lastTickAt: NOW_S - 75 }), NOW)).toEqual([
+      "session 7",
+      "tick 214",
+      "tick overdue by 15s",
+    ]);
+  });
+
+  it("offers no countdown for a loop that has not ticked yet", () => {
+    expect(loopFacts(loop({ lastTickAt: 0, tickCount: 0 }), NOW)).toEqual([
+      "session 7",
+      "tick 0",
+      "first tick pending",
+    ]);
+  });
+
+  it("names a paused loop without pretending it is about to tick", () => {
+    const paused = loop({ status: "paused" });
+    expect(loopStatus(paused)).toBe("paused");
+    expect(loopFacts(paused, NOW)).toEqual(["session 7", "tick 214"]);
+  });
+
+  it("reads at every scale", () => {
+    expect(countdown(38)).toBe("38s");
+    expect(countdown(125)).toBe("2m 05s");
+    expect(countdown(3860)).toBe("1h 04m");
+    expect(countdown(-5)).toBe("0s");
   });
 });

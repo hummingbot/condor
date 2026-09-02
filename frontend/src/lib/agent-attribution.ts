@@ -157,3 +157,44 @@ export function ownerTitle(owners: FleetOwner[], runKey: string): string {
   if (!owner) return runKeyLabel(runKey);
   return `${owner.agentName || owner.agentSlug} / ${owner.strategyName || owner.strategySlug}`;
 }
+
+
+// ── What the loop is doing ──
+
+/** `38s`, `2m 05s`, `1h 04m` — the shape that reads at a glance at every scale. */
+export function countdown(seconds: number): string {
+  const s = Math.max(0, Math.floor(seconds));
+  if (s >= 3600) {
+    return `${Math.floor(s / 3600)}h ${String(Math.floor((s % 3600) / 60)).padStart(2, "0")}m`;
+  }
+  if (s >= 60) return `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`;
+  return `${s}s`;
+}
+
+/** The word the status dot and the header read: a loop, or the absence of one. */
+export function loopStatus(live: LiveLoop | null | undefined): string {
+  return live?.status || "idle";
+}
+
+/**
+ * The header band's middle line: session, tick, and when the next one is due.
+ *
+ * Pure over the loop and the clock so the two judgement calls in it are
+ * testable rather than only observable. They are: a loop that has not ticked
+ * yet has no countdown to show (its `lastTickAt` is 0, and 0 + frequency is
+ * 1970), and a tick that is running long is reported as **overdue** — the
+ * negative number it would otherwise print reads as a bug in the page rather
+ * than as the real state of a slow tick.
+ */
+export function loopFacts(live: LiveLoop | null | undefined, nowMs: number): string[] {
+  if (!live) return [];
+  const facts = [`session ${live.sessionNum}`, `tick ${live.tickCount}`];
+  if (live.status !== "running") return facts;
+  if (live.lastTickAt <= 0) {
+    facts.push("first tick pending");
+    return facts;
+  }
+  const dueIn = live.lastTickAt + live.frequencySec - nowMs / 1000;
+  facts.push(dueIn > 0 ? `next tick ${countdown(dueIn)}` : `tick overdue by ${countdown(-dueIn)}`);
+  return facts;
+}

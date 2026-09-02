@@ -57,6 +57,7 @@ import {
 } from "@/lib/formatters";
 import {
   ancestorChain,
+  agentOfNodeId,
   botOfNodeId,
   buildTree,
   collectLeaves,
@@ -87,8 +88,10 @@ import { useViewFacts } from "@/lib/viewFacts";
 import {
   agentOfBot,
   agentOfControllerId,
+  ownerOf,
   type FleetOwner,
 } from "@/lib/agent-attribution";
+import { AgentScopeHeader } from "./AgentScopeHeader";
 
 /** `3, "bot"` → `"3 bots"`. Thousands separated, because a fleet's closed set runs to five figures. */
 function plural(count: number, noun: string): string {
@@ -916,6 +919,40 @@ export function PerfBrowser({
    */
   const scopeBotName =
     scope.kind === "bot" ? botOfNodeId(scope.id) : scope.kind === "fleet" ? soloRealBot : undefined;
+
+  /**
+   * The one agent this scope is about, whichever way it got there.
+   *
+   * An agent row selects it outright; a fleet row that the bubbles (or a
+   * one-agent server) have narrowed to a single owner still *is* that agent's
+   * report, and gets the same band — the same reasoning as `scopeBotName`.
+   */
+  const scopeAgentKey =
+    scope.kind === "agent"
+      ? agentOfNodeId(scope.id)
+      : scope.kind === "fleet"
+        ? soloAgent || undefined
+        : undefined;
+  const activeAgent = useMemo(
+    () => (scopeAgentKey ? ownerOf(owners, scopeAgentKey) : undefined),
+    [owners, scopeAgentKey],
+  );
+  /**
+   * The declared legacy bases actually folded into this scope.
+   *
+   * Only these, not every name the strategy declares: the note is about what
+   * the numbers on screen include, so a base that is not in scope has nothing
+   * to warn about.
+   */
+  const scopeLegacyBots = useMemo(() => {
+    const declared = activeAgent?.declaredBots ?? [];
+    if (declared.length === 0) return [];
+    const inScope = new Set(collectLeaves(scope, "controller").map((leaf) => leaf.bot));
+    for (const leaf of collectLeaves(scope, "executor")) inScope.add(leaf.bot);
+    return declared.filter((base) =>
+      [...inScope].some((bot) => bot === base || bot.startsWith(`${base}-`)),
+    );
+  }, [activeAgent, scope]);
   /** Whether the panes are reporting the whole scope — what lights the Select all button. */
   const atFleet = effectiveScopeId === FLEET_SCOPE;
 
@@ -2014,6 +2051,22 @@ export function PerfBrowser({
                   </span>
                 </div>
               </>
+            ) : scopeAgentKey ? (
+              // An agent scope: the same report every other scope gets, plus
+              // the one thing only this scope can say — whether the loop that
+              // produced these numbers is still alive, and what it last said.
+              <AgentScopeHeader
+                runKey={scopeAgentKey}
+                owner={activeAgent}
+                legacyBots={scopeLegacyBots}
+                botName={scopeBotName ?? undefined}
+              >
+                <span className="block truncate text-[10px] text-[var(--color-text-muted)]">
+                  {plural(scopedLeaves.length, scopeNoun)} aggregated
+                  {filtersActive && " · filtered"}
+                </span>
+                <UnpricedNote leaves={unpricedLeaves} />
+              </AgentScopeHeader>
             ) : (
               // Every other scope — the whole fleet, one live bot's share of
               // it, or a controller reconstructed out of closed executors. One

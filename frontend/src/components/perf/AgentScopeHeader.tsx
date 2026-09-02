@@ -1,0 +1,178 @@
+import { Bot, ExternalLink, Server } from "lucide-react";
+import { useEffect, useState, type ReactNode } from "react";
+import { useNavigate } from "react-router-dom";
+
+import { agentColor } from "@/lib/agentColor";
+import { loopFacts, loopStatus, runKeyLabel, type FleetOwner } from "@/lib/agent-attribution";
+import { shortBotName } from "@/lib/formatters";
+
+import { StatusDot } from "./ScopeTree";
+
+/**
+ * What the agent driving this scope is doing right now (FEAT-096).
+ *
+ * The one thing an agent scope reports that no other scope can: the numbers
+ * beside it are the same fold every scope gets, and this says whether the loop
+ * that produced them is still alive.
+ *
+ * It lives in the header block and **not** in the KPI grid, whose fixed tile set
+ * is deliberate: a conditional tile resizes the chart as the reader walks the
+ * tree, and `CHART_CHROME_PX` is measured against that layout. The header is
+ * already variable-height and already holds four mutually exclusive per-scope
+ * subjects; this is the fifth.
+ *
+ * What it can and cannot say is worth being precise about. An agent's *actions*
+ * leave no structured record — a deploy writes only into `owned_bots.json`, an
+ * executor create writes nothing local, and the stops write nothing at all — so
+ * the line under the status is the agent's own last **words** (the journal's
+ * `Last action:`), never a verified account of what it did. A structured
+ * per-tick action log is the sequel; this band is built on facts that exist.
+ */
+
+/**
+ * A second-resolution clock, alive only while there is a countdown to run.
+ *
+ * The browser's own clock ticks once a minute (every per-hour pace is derived
+ * from it, and a `Date.now()` read during render is what makes
+ * `useSyncExternalStore` re-render forever). A "next tick in 38s" quantised to
+ * that would sit on 38 for a minute and then jump, which is worse than not
+ * showing it — so the one place that needs seconds keeps its own interval, and
+ * stops it the moment the loop is not running.
+ */
+function useSeconds(active: boolean): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) return;
+    setNow(Date.now());
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [active]);
+  return now;
+}
+
+interface AgentScopeHeaderProps {
+  /** The run key of the scope. Named even when the map no longer holds it. */
+  runKey: string;
+  owner?: FleetOwner;
+  /**
+   * The declared legacy bases actually present in this scope.
+   *
+   * An agent scope folds its bots' *whole* records. Where the strategy deployed
+   * every base it owns that is exactly the strategy's own rollup; for a legacy
+   * base declared into the namespace it is a superset, and the agent page's
+   * session-sliced figure will differ. Saying so is the mitigation — the client
+   * has no history to slice with, and inventing one here would be worse.
+   */
+  legacyBots?: string[];
+  /**
+   * The single bot this scope also happens to be, when there is one.
+   *
+   * A fleet the bubbles have narrowed to one agent *and* one bot is both
+   * subjects at once, and dropping the bot name for the agent's would lose the
+   * more specific of the two — so it rides along as a chip rather than
+   * displacing anything.
+   */
+  botName?: string;
+  /** What the generic header would have said underneath: what this scope folds. */
+  children?: ReactNode;
+}
+
+export function AgentScopeHeader({
+  runKey,
+  owner,
+  legacyBots = [],
+  botName,
+  children,
+}: AgentScopeHeaderProps) {
+  const navigate = useNavigate();
+  const live = owner?.live ?? null;
+  const status = loopStatus(live);
+  const running = status === "running";
+  const now = useSeconds(running);
+  // The reading of the loop is pure and lives in lib/ where a test can reach it
+  // (the ARCH-300 split); what stays here is the clock and the markup.
+  const facts = loopFacts(live, now);
+
+  const openSession = () => {
+    if (!owner) return;
+    navigate(`/agents/${owner.agentSlug}/strategies/${owner.strategySlug}`, {
+      state: { openReviewer: true, sessionNum: live?.sessionNum },
+    });
+  };
+
+  return (
+    <div className="min-w-0">
+      <h2 className="flex items-center gap-2 text-sm font-semibold">
+        <Bot className="h-3.5 w-3.5 shrink-0" style={{ color: agentColor(runKey) }} />
+        <span
+          className="truncate"
+          title={
+            owner
+              ? `${owner.agentName || owner.agentSlug} / ${owner.strategyName || owner.strategySlug}`
+              : runKey
+          }
+        >
+          {runKeyLabel(runKey)}
+        </span>
+        {botName && (
+          <span
+            className="flex shrink-0 items-center gap-1 rounded bg-[var(--color-surface)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-text-muted)] border border-[var(--color-border)]/50"
+            title={botName}
+          >
+            <Server className="h-2.5 w-2.5" />
+            {shortBotName(botName)}
+          </span>
+        )}
+        <span className="flex shrink-0 items-center gap-1.5 font-normal">
+          <StatusDot status={status} />
+          <span className="text-xs capitalize text-[var(--color-text-muted)]">{status}</span>
+        </span>
+        {facts.length > 0 && (
+          <span className="shrink-0 text-[10px] tabular-nums text-[var(--color-text-muted)]">
+            {facts.join(" · ")}
+          </span>
+        )}
+        {owner && (
+          <button
+            type="button"
+            onClick={openSession}
+            className="flex shrink-0 items-center gap-1 rounded border border-[var(--color-border)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-text-muted)] transition-colors hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
+            title={
+              live
+                ? `Open session ${live.sessionNum} of ${owner.strategySlug}`
+                : `Open ${owner.strategySlug}`
+            }
+          >
+            Open session
+            <ExternalLink className="h-2.5 w-2.5" />
+          </button>
+        )}
+      </h2>
+      {/* What the agent last *said*. Truncated with the whole of it in `title`,
+          the same idiom the unpriced note uses — a one-line summary that hides
+          its own tail is worse than one that admits to having one. */}
+      {live?.lastAction && (
+        <span
+          className="block truncate text-[10px] text-[var(--color-text-muted)] italic"
+          title={live.lastAction}
+        >
+          “{live.lastAction}”
+        </span>
+      )}
+      {live?.lastError && (
+        <span className="block truncate text-[10px] text-amber-500/90" title={live.lastError}>
+          Last tick errored: {live.lastError}
+        </span>
+      )}
+      {legacyBots.length > 0 && (
+        <span
+          className="block truncate text-[10px] text-amber-500/90"
+          title={`These were configured before this strategy's namespace existed, so this scope folds their whole record: ${legacyBots.join(", ")}`}
+        >
+          includes trading from before this strategy adopted {legacyBots.join(", ")}
+        </span>
+      )}
+      {children}
+    </div>
+  );
+}
