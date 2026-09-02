@@ -8,12 +8,24 @@ key the paid host refuses (a free Demo key, a typo, a lapsed plan) falls back to
 keyless instead of taking the whole DEX surface down with it.
 """
 
+import ast
 import asyncio
+import importlib.util
+import sys
+from pathlib import Path
 
 import httpx
 import pytest
 
 from condor import pool_data
+
+_FLOW_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "agents"
+    / "smart_money_flow"
+    / "routines"
+    / "onchain_flow.py"
+)
 
 
 def run(coro):
@@ -164,7 +176,7 @@ def test_the_key_is_not_retried_once_rejected(monkeypatch):
     run(pool_data.gecko_call("api_request", "GET", "networks"))
     run(pool_data.gecko_call("api_request", "GET", "networks"))
     assert client.calls == 2  # no extra probe of the paid host
-    base_url, headers = pool_data._gecko_access()
+    base_url, headers = pool_data.coingecko_access()
     assert base_url == pool_data._GECKO_PUBLIC_URL
     assert headers == {}
 
@@ -225,3 +237,83 @@ def test_the_client_gets_the_timeout_it_asks_for():
     """httpx defaults to 5s, which a slow chain listing exceeds outright."""
     timeout = pool_data._gecko_client().client.timeout
     assert timeout.read == pool_data._GECKO_TIMEOUT
+
+
+# ── The market surface, shared with the smart_money_flow routine ──
+
+
+def _onchain_flow():
+    """Import ``agents/smart_money_flow/routines/onchain_flow.py`` from its file.
+
+    An agent routine lives outside any package, exactly like the shared ones
+    ``tests.conftest.load_shared_routine`` loads, so it has no dotted import path
+    and production loads it this same way.
+    """
+    name = "smart_money_flow_routine_onchain_flow"
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(name, _FLOW_PATH)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_without_a_key_the_market_surface_is_the_public_host():
+    """Keyless is the default on both surfaces, and sends no auth header."""
+    assert pool_data.coingecko_access("market") == (
+        "https://api.coingecko.com/api/v3",
+        {},
+    )
+
+
+def test_a_key_routes_the_market_surface_to_the_pro_host(monkeypatch):
+    """One key configures both surfaces: /onchain pool data and market data."""
+    with_key(monkeypatch)
+    base_url, headers = pool_data.coingecko_access("market")
+    assert base_url == "https://pro-api.coingecko.com/api/v3"
+    assert headers["x-cg-pro-api-key"] == "CG-secret"
+
+
+def test_a_rejected_key_stops_being_sent_to_the_market_surface_too(monkeypatch):
+    """The fallback is the module's, so every surface falls back together."""
+    with_key(monkeypatch)
+    pool_data._note_key_rejected()
+    assert pool_data.coingecko_access("market") == (
+        "https://api.coingecko.com/api/v3",
+        {},
+    )
+
+
+def test_an_unknown_surface_is_a_programming_error():
+    """A typo must not silently resolve to the pool-data host."""
+    with pytest.raises(ValueError):
+        pool_data.coingecko_access("markets")
+
+
+def test_the_flow_routine_takes_its_hosts_from_pool_data(monkeypatch):
+    """ARCH-305: the routine must not keep its own copy of the plan branch.
+
+    It used to import the private ``_gecko_key`` and re-derive the
+    analyst/public split, which drifts silently the next time this module
+    changes how the key is sent. Asserting agreement under *both* plans fails if
+    either side grows a branch of its own.
+    """
+    flow = _onchain_flow()
+    assert flow._cg() == pool_data.coingecko_access("market")
+    with_key(monkeypatch)
+    assert flow._cg() == pool_data.coingecko_access("market")
+    assert flow._cg()[0] == "https://pro-api.coingecko.com/api/v3"
+
+
+def test_the_flow_routine_imports_nothing_private_from_pool_data():
+    """A routine bound to an underscore name breaks on the next rename here."""
+    tree = ast.parse(_FLOW_PATH.read_text())
+    private = [
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module == "condor.pool_data"
+        for alias in node.names
+        if alias.name.startswith("_")
+    ]
+    assert private == []

@@ -34,8 +34,8 @@ CATEGORY = "Analysis"
 # An Analyst key is optional here and only makes these three fetches dependable:
 # keyless /api/v3 throttles hard and answers 429, which this routine degrades past
 # silently — so a tick quietly loses the regime read rather than failing.
-CG_PUBLIC = "https://api.coingecko.com/api/v3"
-CG_ANALYST = "https://pro-api.coingecko.com/api/v3"
+# The hosts themselves live in ``pool_data`` (see ``_cg`` below), which owns the
+# plan resolution for every CoinGecko surface.
 XRPL_NODES = [
     "https://xrplcluster.com/",
     "https://s1.ripple.com:51234",
@@ -81,16 +81,15 @@ class Config(BaseModel):
 def _cg() -> "tuple[str, dict[str, str]]":
     """The CoinGecko base URL and auth headers for the configured plan.
 
-    Shares ``pool_data``'s plan resolution so one key configures both surfaces —
-    including its fallback, so a key the paid host rejected stops being sent here
-    too. Not its URLs, though: those address the ``/onchain`` endpoints, and these
-    three fetches are the ordinary market endpoints one level up.
+    Defers to ``pool_data`` so one key configures both surfaces — including its
+    fallback, so a key the paid host rejected stops being sent here too, and so
+    any later change to *how* the key is sent lands here without being mirrored by
+    hand. The ``"market"`` surface is the ordinary market endpoints these three
+    fetches use, one level up from the ``/onchain`` ones the pool browser reads.
     """
-    from condor.pool_data import _gecko_key, gecko_plan
+    from condor.pool_data import coingecko_access
 
-    if gecko_plan() == "analyst":
-        return CG_ANALYST, {"x-cg-pro-api-key": _gecko_key()}
-    return CG_PUBLIC, {}
+    return coingecko_access("market")
 
 
 async def _get_json(

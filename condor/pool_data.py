@@ -270,6 +270,20 @@ def candles_needed(start: Optional[float], end: Optional[float], timeframe: str)
 _GECKO_PUBLIC_URL = "https://api.geckoterminal.com/api/v2"
 _GECKO_ANALYST_URL = "https://pro-api.coingecko.com/api/v3/onchain"
 
+# The same key also unlocks CoinGecko's ordinary *market* endpoints (/global,
+# /coins/markets, /search/trending) — one level up from the /onchain mirror above,
+# and the surface an agent routine reads for cross-market context. The plan and the
+# auth header are identical there; only the host pair differs, so a surface is a
+# row in this table rather than a second copy of the analyst/public branch.
+_GECKO_SURFACE_URLS: Dict[str, Tuple[str, str]] = {
+    # surface: (keyless host, Analyst host)
+    "onchain": (_GECKO_PUBLIC_URL, _GECKO_ANALYST_URL),
+    "market": (
+        "https://api.coingecko.com/api/v3",
+        "https://pro-api.coingecko.com/api/v3",
+    ),
+}
+
 # Per-minute budget by plan, each held under the published ceiling so a burst
 # straddling the window boundary still lands inside it, and so a Telegram handler
 # racing the dashboard has headroom: 25 under the public ~30, 400 under Analyst's
@@ -301,19 +315,30 @@ def gecko_plan() -> str:
     return "public"
 
 
-def _gecko_access() -> Tuple[str, Dict[str, str]]:
-    """``(base_url, extra headers)`` for the plan in use.
+def coingecko_access(surface: str = "onchain") -> Tuple[str, Dict[str, str]]:
+    """``(base_url, extra headers)`` for the plan in use, on one CoinGecko surface.
+
+    The single place that decides how the configured key is sent, so callers
+    outside this module — an agent routine reading the market endpoints, say —
+    inherit the plan resolution *and* its fallback (a key the paid host rejected
+    stops being sent everywhere at once) instead of re-deriving the branch and
+    drifting from it. ``surface`` selects only the host pair: ``"onchain"`` for
+    GeckoTerminal's pool data, ``"market"`` for CoinGecko's market endpoints.
 
     The public tier returns no headers at all so the library keeps its own
     versioned ``Accept``, which is a GeckoTerminal-specific pin and means nothing
     to the CoinGecko host.
     """
+    try:
+        public_url, analyst_url = _GECKO_SURFACE_URLS[surface]
+    except KeyError:
+        raise ValueError(f"unknown CoinGecko surface: {surface!r}") from None
     if gecko_plan() == "analyst":
-        return _GECKO_ANALYST_URL, {
+        return analyst_url, {
             "Accept": "application/json",
             "x-cg-pro-api-key": _gecko_key(),
         }
-    return _GECKO_PUBLIC_URL, {}
+    return public_url, {}
 
 
 def _is_key_rejected(exc: BaseException) -> bool:
@@ -361,7 +386,7 @@ def _gecko_client() -> GeckoTerminalAsyncClient:
     global _gecko_client_instance
     if _gecko_client_instance is None:
         client = GeckoTerminalAsyncClient()
-        base_url, headers = _gecko_access()
+        base_url, headers = coingecko_access("onchain")
         # Set on the *instance*, not the class: `base_url` and `headers` are class
         # attributes on GeckoTerminalClientBase, so assigning to the class would
         # reconfigure the library for anything else importing it in-process.
