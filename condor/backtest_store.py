@@ -256,14 +256,19 @@ class BacktestStore:
             except OSError:
                 mtime = time.time()
             if cutoff is not None and _ordering_key(summary, mtime) < cutoff:
-                path.unlink(missing_ok=True)
                 summary["has_payload"] = False
             else:
                 self._write_payload(task_id, task)
-                path.unlink(missing_ok=True)
+            # Persist the summary *before* dropping the legacy file: the summary
+            # is the half that has to outlive everything, and the legacy file is
+            # the only thing a resumed migration can re-derive it from. A crash
+            # after this write leaves a redundant ``.json`` the next pass
+            # re-parses idempotently; a crash before it would lose the run's
+            # metrics for good.
             with self._lock:
                 self._index[task_id] = summary
                 self._persist_index()
+            path.unlink(missing_ok=True)
             converted += 1
 
         # A v1 entry with no file on disk can never be described -- the parse
