@@ -1117,16 +1117,20 @@ async def list_delegation_history(
         if kind in ("", KIND_DELEGATE)
         else {}
     )
-    records = [
-        r
-        for r in list_history(
-            user_id=_delegation_scope(user),
-            agent_slug=agent,
-            kind=kind or None,
-            limit=limit,
-        )
-        if r["task_id"] not in live
-    ]
+    # In a worker thread, not on the loop (PERF-293): the on-disk half of this
+    # list is a directory walk that reads a ``status.json`` per recorded run, up
+    # to retention's caps, and this loop is also uvicorn's and the Telegram
+    # poller's. Same reason and same shape as the sharing routes (PERF-235); the
+    # live registry above and the code-run index below are in-memory reads and
+    # stay inline.
+    history = await asyncio.to_thread(
+        list_history,
+        user_id=_delegation_scope(user),
+        agent_slug=agent,
+        kind=kind or None,
+        limit=limit,
+    )
+    records = [r for r in history if r["task_id"] not in live]
     records.extend(live.values())
 
     # The third source (FEAT-061). It lives in its own store, keyed by an

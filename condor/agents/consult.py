@@ -117,6 +117,18 @@ async def run_consult(
     nothing at all. Every write is best-effort and swallowed inside
     :func:`~condor.agents.run_records.record_run`: bookkeeping must never be why
     a consult failed, and a failing consult must still raise to its caller.
+
+    **Which thread each write runs on is part of the contract** (PERF-293). The
+    start write is sub-millisecond -- one small merge, no retention -- and must
+    land before the engine starts, so it stays inline. A *terminal* write also
+    prunes, and pruning reads a status file per record this owner has; on a
+    store at its caps that is tens of milliseconds of blocking IO, and this
+    coroutine is awaited on the loop uvicorn and the Telegram poller share. So
+    the terminal writes go through ``asyncio.to_thread``, exactly as
+    ``condor.sharing.sweep`` and the sharing routes do (PERF-235):
+    :func:`~condor.agents.run_records.record_run` never awaits and
+    ``write_status`` takes only its per-file thread lock, so it is safe to call
+    from a worker. The latency is still the consult's; the blocking never was.
     """
     permission_cb = _build_consult_permission_cb(slug, user_id, chat_id)
 
@@ -151,13 +163,22 @@ async def run_consult(
         # The caller disconnected or the MCP timeout fired. A record left saying
         # "running" would read as interrupted on the next boot and as live until
         # then; stopped is what actually happened.
+        #
+        # This one stays *synchronous*, unlike its two siblings below. A
+        # cancelled task cannot reliably await anything -- a fresh
+        # ``to_thread`` here would be cancelled at the next suspension point and
+        # the run would keep its "running" record -- and it is also the write
+        # closest to the start write, so offloading it is the one ordering the
+        # per-file lock cannot save us from. It is a single small merge and,
+        # since ``stopped`` is terminal, it does prune; that cost is paid on the
+        # rare cancelled consult rather than on every one.
         record_run(state="stopped", **stamp)
         raise
     except Exception as exc:
-        record_run(state="error", error=str(exc), **stamp)
+        await asyncio.to_thread(record_run, state="error", error=str(exc), **stamp)
         raise
 
-    record_run(state="done", result=_clip(answer), **stamp)
+    await asyncio.to_thread(record_run, state="done", result=_clip(answer), **stamp)
     return answer
 
 

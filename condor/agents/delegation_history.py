@@ -455,7 +455,11 @@ def terminal_record_dirs(
     from condor.runtime.registry_file import read_status
 
     try:
-        children = paths.delegations_dir(user_id).iterdir()
+        # Materialised inside the guard on purpose: ``iterdir`` is a generator,
+        # so a missing (or unreadable) directory raises on the first *step*, not
+        # on the call -- the guard was catching nothing and the walk raised
+        # through its caller.
+        children = list(paths.delegations_dir(user_id).iterdir())
     except (OSError, paths.UnsafeIdError):
         return []
 

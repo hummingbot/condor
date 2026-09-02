@@ -334,6 +334,23 @@ def _is_live_delegation(task_id: str) -> bool:
     return dt._task is not None and not dt._task.done()
 
 
+def _record_dir_count(user_id: int | str) -> int:
+    """How many record directories this owner has, without reading any of them.
+
+    An upper bound on the eviction candidates of any single kind, which is all
+    :func:`prune_delegation_records` needs to skip the walk. Unreadable (or an
+    unsafe id) counts as zero, which lands on the same answer the walk itself
+    gives there: nothing to evict.
+    """
+    from condor import paths
+
+    try:
+        with os.scandir(paths.delegations_dir(user_id)) as entries:
+            return sum(1 for entry in entries if entry.is_dir())
+    except (OSError, paths.UnsafeIdError):
+        return 0
+
+
 def prune_delegation_records(user_id: int | str, kind: str | None = None) -> int:
     """Evict this owner's oldest terminal records of ``kind`` past its cap.
 
@@ -369,6 +386,20 @@ def prune_delegation_records(user_id: int | str, kind: str | None = None) -> int
 
     cap = max_records_for(kind)
     if cap <= 0:  # retention off: keep everything
+        return 0
+
+    # The cheap "is there anything to evict at all" (PERF-293). Every candidate
+    # is one of this owner's record directories, so a directory *count* at or
+    # under the cap rules an eviction out without opening a single status file.
+    # Worth a syscall because of who pays: this runs at the end of every
+    # consult -- the plentiful kind -- and the walk it guards reads one
+    # ``status.json`` per record of *either* kind (``kind`` is only knowable
+    # after parsing), up to both caps together. A store below the cap, which is
+    # every install for most of its life, now pays one ``scandir`` instead of
+    # hundreds of reads. At the cap the walk is inherent and stays: "evict the
+    # oldest" cannot be answered without ordering the records, and the only way
+    # around it would be a second index of the same directory to keep in sync.
+    if _record_dir_count(user_id) <= cap:
         return 0
 
     candidates = [
