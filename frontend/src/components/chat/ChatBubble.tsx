@@ -300,12 +300,27 @@ function adoptableSlot(
 /**
  * What is being shared before the user asks: the route label on its face, the
  * full block — exactly what will ride the next message — as its tooltip.
+ *
+ * The block is built on hover, not on render (PERF-296). Inline, it re-ran
+ * every registered `useViewFacts` getter — the route table's react-query cache
+ * scan plus each page's own formatting of its figures — on every render the
+ * chat store causes, which with the panel open is a chunk of every streaming
+ * slot and every notification frame, all for a string nobody is looking at.
+ * `viewFacts` designs those getters to be called at send time and free while
+ * idle; this call site was the exception. Recomputing on each `mouseenter`
+ * keeps the "true of this moment" guarantee — the native tooltip delay
+ * comfortably outlasts a state re-render, so what appears includes facts that
+ * changed since the chip mounted. A `span` is not focusable, so there is no
+ * keyboard path to mirror; the value stays in the DOM between hovers so a
+ * second hover has something to show while the fresh one lands.
  */
 function ContextChip({ label }: { label: string }) {
+  const [title, setTitle] = useState<string>();
   return (
     <span
       className="flex min-w-0 shrink items-center gap-1 rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-0.5 text-[10px] text-[var(--color-text-muted)]"
-      title={renderViewBlock(collectViewFacts())}
+      title={title}
+      onMouseEnter={() => setTitle(renderViewBlock(collectViewFacts()))}
     >
       <Eye className="h-2.5 w-2.5 shrink-0" />
       <span className="truncate">{label}</span>
