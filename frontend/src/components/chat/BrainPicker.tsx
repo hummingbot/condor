@@ -145,16 +145,38 @@ export function BrainMenuBody({
             stated, never a silent side effect. */}
         {boundAgent &&
           sectionHeader(`Model — also becomes ${boundAgent.name}'s default`, true)}
-        {directAgents.map((a) => (
-          <button
-            key={a.key}
-            onClick={() => pick({ agentKey: a.key })}
-            className={rowClass(a.key === effectiveKey)}
-          >
-            <span className="truncate">{a.label}</span>
-            {defaultTag(a.key)}
-          </button>
-        ))}
+        {directAgents.map((a) => {
+          // `ready === false` is the backend saying this machine cannot run it
+          // — no Ollama server, a bridge that was never installed. An absent
+          // field means it could not probe, which must read as "offer it".
+          const blocked = a.ready === false;
+          return (
+            <button
+              key={a.key}
+              onClick={() => pick({ agentKey: a.key })}
+              disabled={blocked}
+              title={blocked ? a.detail : undefined}
+              className={
+                blocked
+                  ? "flex w-full flex-col items-start gap-0.5 px-2.5 py-1.5 text-left text-xs text-[var(--color-text-muted)] opacity-60"
+                  : rowClass(a.key === effectiveKey)
+              }
+            >
+              <span className="flex w-full items-center gap-1.5">
+                <span className="truncate">{a.label}</span>
+                {defaultTag(a.key)}
+              </span>
+              {/* The fix, on the row it belongs to: the alternative is picking
+                  it, losing the session, and reading the same sentence in a
+                  banner afterwards. */}
+              {blocked && a.detail && (
+                <span className="w-full truncate text-[10px]" title={a.detail}>
+                  {a.detail}
+                </span>
+              )}
+            </button>
+          );
+        })}
         {hasOpenRouter && (
           <button
             onClick={() => {

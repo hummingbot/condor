@@ -269,7 +269,9 @@ def _picked_model_label(sentinel_key: str, current_llm: str) -> str | None:
 
 
 def _settings_keyboard(
-    current_llm: str, secret_notices: bool = True
+    current_llm: str,
+    secret_notices: bool = True,
+    readiness_states: dict | None = None,
 ) -> InlineKeyboardMarkup:
     """Build LLM picker keyboard.
 
@@ -277,9 +279,18 @@ def _settings_keyboard(
     picked a model through a sentinel row (agent_llm like "openrouter:<slug>"
     or "custom@venice:<model-id>"), that sentinel row matches and shows the pick.
 
+    ``readiness_states`` (provider base → Readiness, from
+    :func:`condor.llm.readiness.probe_all`) marks the rows this machine cannot
+    run today with a ⚠️. They stay pickable on purpose, unlike the dashboard's:
+    choosing here only sets a preference, and someone about to run
+    ``ollama serve`` is entitled to pick it first. Omitted = nothing was probed,
+    which marks nothing.
+
     The last row is the key-shape warning switch (FEAT-056), which is here
     because a preference with no way back on is not a preference.
     """
+    from condor.llm.readiness import base_of
+
     keyboard = []
     for key, info in AGENT_OPTIONS.items():
         label = info["label"]
@@ -290,6 +301,9 @@ def _settings_keyboard(
             label = picked
         elif key == current_llm:
             label = f"• {label}"
+        state = (readiness_states or {}).get(base_of(key))
+        if state is not None and not state.usable:
+            label = f"⚠️ {label}"
         keyboard.append(
             [InlineKeyboardButton(label, callback_data=f"agent:set_llm:{key}")]
         )
