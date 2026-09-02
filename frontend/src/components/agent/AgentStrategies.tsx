@@ -19,8 +19,14 @@ import { api, type StrategySummary } from "@/lib/api";
  *
  * It reads `["agent", slug]` rather than the brain's `StrategyCard` list: the
  * grid shows PnL, sessions and live instances, which only the detail endpoint
- * carries. The agent page polls that same key, so react-query serves both from
- * one request.
+ * carries. That endpoint is not cheap — it prices every session's executors
+ * through the Hummingbot API — so the poll is conditional (PERF-305): an idle
+ * agent is read once and a live one keeps the 5s cadence, because "running" is
+ * exactly when a card's PnL and instances can still change. The agent page
+ * polls the same key unconditionally and react-query takes the shortest
+ * interval among observers, so page behaviour is unchanged; it is the chat's
+ * agent panel, where nothing else observes the key, that used to pay 5s of
+ * Hummingbot round-trips for an agent with no loop running.
  *
  * Opening a strategy still *navigates*, deliberately: starting a loop with real
  * money belongs on the page that owns its config, risk limits and confirmation,
@@ -45,7 +51,9 @@ export function AgentStrategies({
     queryKey: ["agent", slug],
     queryFn: () => api.getAgent(slug),
     enabled: !!slug,
-    refetchInterval: 5000,
+    // Only a live loop can change these cards; an idle agent is read once.
+    refetchInterval: (q) =>
+      q.state.data?.strategies.some((s) => s.status === "running") ? 5000 : false,
   });
 
   /** Both catalogues count strategies, so both are re-read after a change. */
