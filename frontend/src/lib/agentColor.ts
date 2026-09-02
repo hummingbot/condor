@@ -57,19 +57,34 @@ const SWITCHED_TO = /^Switched to (.+)$/;
 /**
  * The speaker of each message, in order.
  *
- * Walked forwards from `initial`, because a handover names who is taking over
- * and not who is being taken over from: the run of turns *after* each switch is
- * attributable, and the run before the first one is only knowable from the
- * conversation's current binding. With no handover in the transcript — every
- * conversation but a handful — `initial` is right for all of it.
+ * A turn that says who took it is believed: `agentSlug` is stamped by the
+ * backend (and, live, at the moment the bubble opens), so it survives a
+ * handover that the conversation's binding does not. That matters because
+ * `initial` is the binding *now* — after a handover it names the agent that
+ * took over, so seeding the whole transcript from it credited every earlier
+ * answer to the newcomer and collapsed a two-counterpart chat to one name and
+ * one gutter colour.
+ *
+ * The forward walk from `initial` is the fallback, for the turns that carry no
+ * attribution: a user line, a divider, and any assistant turn recorded before
+ * the backend stamped one. It walks forwards because a handover names who is
+ * taking over and not who is being taken over from.
+ *
+ * `resolve` turns a stamped slug into a display name — `""` is the default
+ * agent, an unknown slug is its own best name. Without one the caller has no
+ * roster to resolve against, so a default-agent turn falls back to `initial`.
  */
-export function speakerNames(messages: ChatMessage[], initial: string): string[] {
+export function speakerNames(
+  messages: ChatMessage[],
+  initial: string,
+  resolve: (slug: string) => string = (slug) => slug || initial,
+): string[] {
   let speaker = initial;
   return messages.map((msg) => {
     if (msg.role === "system" && msg.kind === "switch") {
       const match = SWITCHED_TO.exec(msg.text);
       if (match) speaker = match[1];
     }
-    return speaker;
+    return msg.agentSlug === undefined ? speaker : resolve(msg.agentSlug);
   });
 }

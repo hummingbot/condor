@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef } from "react";
 import { AlertTriangle, Bot, Brain, Loader2, MessageSquare, X } from "lucide-react";
 
 import type { ChatSlot } from "@/hooks/useChatSocket";
-import type { ChatAgentOption } from "@/lib/api";
+import { CHAT_SLUG, type AgentSummary, type ChatAgentOption } from "@/lib/api";
 import { speakerNames } from "@/lib/agentColor";
 import { ChatInput } from "./ChatInput";
 import { ChatMessageView } from "./ChatMessage";
@@ -46,6 +46,7 @@ export function ChatThread({
   emptyState,
   starters = [],
   boundAgent,
+  roster,
   columnClassName = "",
   autoFocus = false,
 }: {
@@ -83,26 +84,57 @@ export function ChatThread({
    * so "Condor / General trading assistant" would name the wrong counterpart.
    */
   boundAgent?: { name: string; description?: string };
+  /**
+   * The domain-Agent roster, used only to put a name to a turn's stamped slug.
+   *
+   * Deliberately not `agents`, which is the *brain* roster — model options
+   * keyed by `agent_key` — and cannot resolve an Agent slug at all. Optional:
+   * without it a turn still resolves to the conversation's own binding or to
+   * its slug, which is a worse label but never a wrong one.
+   */
+  roster?: AgentSummary[];
   /** Reading column for the messages, e.g. `mx-auto w-full max-w-3xl`. */
   columnClassName?: string;
   autoFocus?: boolean;
 }) {
   /**
+   * A stamped slug's display name.
+   *
+   * `""` is the default agent — Condor under whatever name the roster gives
+   * it. A slug the roster does not know still names itself rather than
+   * borrowing the current binding's name, which is the whole failure this
+   * replaces; the binding is only allowed to answer for its own slug.
+   */
+  const resolveSpeaker = useCallback(
+    (slug: string) => {
+      const match = roster?.find((a) => a.slug === (slug || CHAT_SLUG));
+      if (match) return match.name;
+      if (!slug) return "Condor";
+      if (slug === slot?.info.agent_slug)
+        return boundAgent?.name || slot?.info.label || slug;
+      return slug;
+    },
+    [roster, slot?.info.agent_slug, slot?.info.label, boundAgent?.name],
+  );
+
+  /**
    * Who is answering at each point of the transcript.
    *
-   * Resolved here rather than in the message: a turn does not record its
-   * author — the conversation's binding does, and a handover moves it midway
-   * — so the walk needs the whole list. The name is also the key the gutter
-   * colour is hashed from, which is what makes a transcript with two
-   * counterparts in it scannable at a glance.
+   * Resolved here rather than in the message because a turn that carries no
+   * attribution — a user line, a divider, anything recorded before the backend
+   * stamped one — is only placeable by walking the handovers around it, and
+   * that needs the whole list. Turns that do carry it answer for themselves.
+   * The name is also the key the gutter colour is hashed from, which is what
+   * makes a transcript with two counterparts in it scannable at a glance.
    */
   const speakers = useMemo(
     () =>
       speakerNames(
         slot?.messages ?? [],
         boundAgent?.name || slot?.info.label || "Assistant",
+        resolveSpeaker,
       ),
-    [slot?.messages, slot?.info.label, boundAgent?.name],
+    [slot?.messages, slot?.info.label, boundAgent?.name, resolveSpeaker],
   );
 
   const messagesEndRef = useRef<HTMLDivElement>(null);

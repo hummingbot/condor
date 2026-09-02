@@ -413,6 +413,10 @@ export function AgentChatTab() {
                 chat.activeSlotId && chat.abortPrompt(chat.activeSlotId)
               }
               boundAgent={boundAgent}
+              // The domain roster, so a turn stamped with a slug can be named
+              // by whoever actually took it — `modelOptions` above is the brain
+              // list and cannot answer that.
+              roster={agents}
               // The hero's openers, again — a session that spawned but was never
               // written in is as empty as no session at all.
               starters={slotStarters}

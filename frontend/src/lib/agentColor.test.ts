@@ -59,6 +59,60 @@ describe("speakerNames", () => {
     expect(speakerNames(messages, "Condor")).toEqual(["Condor", "Brigado", "Brigado"]);
   });
 
+  it("keeps a pre-handover turn on its own agent when the binding has moved on", () => {
+    // The shape the app actually renders. `initial` is the conversation's
+    // *current* binding, and after a handover that is the agent who took over
+    // — so seeding the walk from it credited the earlier answer to Brigado and
+    // collapsed the transcript to one name and one gutter colour.
+    const messages = [
+      msg({ role: "assistant", text: "before", agentSlug: "" }),
+      msg({ role: "system", kind: "switch", text: "Switched to Brigado" }),
+      msg({ role: "assistant", text: "after", agentSlug: "brigado" }),
+    ];
+    const resolve = (slug: string) => (slug === "brigado" ? "Brigado" : "Condor");
+    expect(speakerNames(messages, "Brigado", resolve)).toEqual([
+      "Condor",
+      "Brigado",
+      "Brigado",
+    ]);
+  });
+
+  it("believes the turn over the divider, in either direction", () => {
+    // A handover back: the divider says Condor took over, and the turn under
+    // it says so too. What is being pinned is that the stamp wins even when it
+    // disagrees with the walk — the walk is the fallback, not the truth.
+    const messages = [
+      msg({ role: "assistant", text: "brigado's", agentSlug: "brigado" }),
+      msg({ role: "system", kind: "switch", text: "Switched to Condor" }),
+      msg({ role: "assistant", text: "condor's", agentSlug: "" }),
+    ];
+    const resolve = (slug: string) => (slug === "brigado" ? "Brigado" : "Condor");
+    expect(speakerNames(messages, "Condor", resolve)).toEqual([
+      "Brigado",
+      "Condor",
+      "Condor",
+    ]);
+  });
+
+  it("falls back to the walk for the turns that carry no stamp", () => {
+    // A transcript written before attribution existed, next to one that was:
+    // the unstamped turn is placed by the divider around it, the stamped one
+    // by itself. Both halves have to work in the same list.
+    const messages = [
+      msg({ role: "assistant", text: "legacy" }),
+      msg({ role: "system", kind: "switch", text: "Switched to Brigado" }),
+      msg({ role: "user", text: "and now?" }),
+      msg({ role: "assistant", text: "modern", agentSlug: "brigado" }),
+    ];
+    const resolve = (slug: string) => (slug === "brigado" ? "Brigado" : "Condor");
+    expect(speakerNames(messages, "Condor", resolve)).toEqual([
+      "Condor",
+      "Brigado",
+      "Brigado",
+      "Brigado",
+    ]);
+  });
+
   it("ignores a system line that is not a handover", () => {
     const messages = [
       msg({ role: "system", kind: "switch", text: "Now using server brigado" }),

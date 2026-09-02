@@ -228,6 +228,9 @@ export function ChatBubble() {
             ? { name: boundSummary.name, description: boundSummary.description }
             : undefined
         }
+        // Names a turn's stamped slug; `modelOptions` is the brain list and
+        // holds no slugs at all.
+        roster={agents}
         columnClassName=""
         autoFocus
         starters={starters}

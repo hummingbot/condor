@@ -1549,9 +1549,26 @@ export interface ConversationTurn {
   text: string;
   thought: string;
   tool_calls: { id?: string; title?: string; status?: string }[];
-  /** System entries only: "switch" | "error". */
+  /** System entries only: "switch" | "error" | "delegation" | "resume" |
+   *  "notification". Same union as the backend's `TurnEntry.kind`. */
   kind: string;
   ts: number;
+  /**
+   * Who produced this turn — the backend's `TurnEntry` attribution, mirrored
+   * here rather than dropped.
+   *
+   * It lives on the turn because the conversation's meta is last-write-wins: a
+   * chat that hands over mid-way would otherwise credit its whole history to
+   * whoever answered last, which is exactly what the transcript used to do.
+   * `agent_key` is the model, `agent_slug` the bound Agent with `""` meaning
+   * the default one, Condor. Both empty is a turn written before attribution
+   * existed — unattributed, not "Condor". Optional because a stored line older
+   * than the field parses without it.
+   */
+  agent_key?: string;
+  agent_slug?: string;
+  /** Assistant turns: how the stream ended; "" or absent = never reported. */
+  stop_reason?: string;
 }
 
 export interface ConversationDetail {

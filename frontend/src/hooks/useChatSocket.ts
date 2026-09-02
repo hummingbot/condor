@@ -83,6 +83,17 @@ export interface ChatMessage {
    * before this was carried.
    */
   ts?: number;
+  /**
+   * Who produced this turn, as the backend stamps it — three states:
+   * `undefined` is unattributed (a user line, a divider, or an assistant turn
+   * recorded before attribution existed), `""` is the default agent, Condor,
+   * and a slug is a bound Agent.
+   *
+   * Carried per turn rather than read off the conversation's binding because
+   * the binding is last-write-wins: after a handover it names the agent that
+   * took *over*, so every earlier answer was being credited to it.
+   */
+  agentSlug?: string;
 }
 
 /**
@@ -189,10 +200,16 @@ function streamTarget(msgs: ChatMessage[]): number {
  * A pure function of the list it is handed: the bubble a fragment continues is
  * the one the list itself marks as open, so nothing outside React has to
  * remember which bubble that was between two commits.
+ *
+ * `agentSlug` is stamped onto a bubble the moment it is opened, which is the
+ * only moment it is knowable: the slot's binding is right *now*, and a later
+ * handover rewrites it. Stamping at fold time is what makes a live transcript
+ * agree with the reloaded one, where the backend supplies the same field.
  */
 function foldIntoStream(
   msgs: ChatMessage[],
   patch: (m: ChatMessage) => ChatMessage,
+  agentSlug?: string,
 ): ChatMessage[] {
   const out = [...msgs];
   const idx = streamTarget(out);
@@ -205,6 +222,7 @@ function foldIntoStream(
         toolCalls: [],
         open: true,
         ts: nowTs(),
+        agentSlug,
       }),
     );
   } else {
@@ -290,6 +308,12 @@ function turnsToMessages(turns: ConversationTurn[]): ChatMessage[] {
       thought: turn.thought || undefined,
       kind: turn.kind || undefined,
       ts: turn.ts,
+      // A slug names the bound Agent. An empty slug with a model behind it is
+      // a stamped turn from the default agent, Condor — distinct from both
+      // fields being empty, which is a line written before the backend
+      // attributed turns at all and is left unattributed so the divider walk
+      // still gets to answer for it.
+      agentSlug: turn.agent_slug || (turn.agent_key ? "" : undefined),
     });
   });
   return messages;
@@ -513,13 +537,20 @@ export function useChatSocket() {
         if (!buf && !ends) return s;
         let messages = s.messages;
         if (buf) {
-          messages = foldIntoStream(messages, (m) => ({
-            ...m,
-            text: m.text + buf.text,
-            // Left alone when nothing was buffered, so a bubble with no
-            // reasoning keeps `thought` undefined rather than gaining "".
-            thought: buf.thought ? (m.thought || "") + buf.thought : m.thought,
-          }));
+          messages = foldIntoStream(
+            messages,
+            (m) => ({
+              ...m,
+              text: m.text + buf.text,
+              // Left alone when nothing was buffered, so a bubble with no
+              // reasoning keeps `thought` undefined rather than gaining "".
+              thought: buf.thought ? (m.thought || "") + buf.thought : m.thought,
+            }),
+            // "" is the default agent, not "unknown": a slot with no binding is
+            // Condor answering, and saying so is what keeps the turn out of the
+            // divider walk that would later re-credit it.
+            s.info.agent_slug ?? "",
+          );
         }
         if (ends) messages = closeStream(messages);
         return messages === s.messages ? s : { ...s, messages };
@@ -563,7 +594,10 @@ export function useChatSocket() {
       setSlots((prev) =>
         prev.map((s) =>
           s.info.slot_id === slotId
-            ? { ...s, messages: foldIntoStream(s.messages, patch) }
+            ? {
+                ...s,
+                messages: foldIntoStream(s.messages, patch, s.info.agent_slug ?? ""),
+              }
             : s,
         ),
       );
