@@ -13,6 +13,15 @@ source: chat
 
 ## Market Data — `client.market_data.*` inside `run_code`
 
+### First-call rule (read before writing any snippet)
+
+**If the call you need is documented below — write the complete, final snippet on the first `run_code` call.**
+- The schemas here are verified. Do NOT write a diagnostic probe before the real code.
+- Probing is only for undocumented calls or unexpected runtime shapes. For every case covered in this playbook, trust the schema and ship the full analysis immediately.
+- Multi-venue requests: include all venues, all math, and the formatted output in the first call. Never defer to "let me check the structure first".
+
+---
+
 ### When to use what
 
 | Request | Tool | ~ms |
@@ -214,6 +223,6 @@ print(df[["timestamp", "close", "vwap"]].tail(5).to_string(index=False))
 ---
 
 ### Tips
-- If unsure what a call returns: `r = await ...; print(type(r), list(r.keys()) if isinstance(r, dict) else r[:2])` — one diagnostic line beats five guessing calls.
+- **Probe only for undocumented calls.** Every schema above is verified — use it directly. Only probe (`r = await ...; print(type(r), list(r.keys()) if isinstance(r, dict) else r[:2])`) when the call is NOT covered by this playbook.
 - Chart time series with a ` ```chart ` fence; persist with `ReportBuilder`.
 - Same snippet 3× → promote to a routine via `delegate(...)`.
