@@ -11,6 +11,7 @@ record in one store.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from dataclasses import dataclass
@@ -311,6 +312,14 @@ async def get_task(client, task_id: str) -> Any:
     goes to the same authenticated session directly, carrying
     :data:`TASK_READ_TIMEOUT`. A client that does not expose its session (the
     test doubles, a future client shape) falls back to the router.
+
+    The body is read and then decoded in a worker thread rather than through
+    ``response.json()``: aiohttp awaits the read and *then* runs ``json.loads``
+    inline, and the one response worth this deadline is the completed one --
+    ~125 MB of JSON, ~0.8 s of pure CPU. This coroutine shares its loop with the
+    Telegram poller, every WebSocket and every dashboard request, and ``run_many``
+    can land four of these at once, so that decode is a freeze of the whole
+    process. ``json.loads`` takes bytes directly, so nothing decodes twice.
     """
     router = getattr(client, "backtesting", None)
     session = getattr(router, "session", None)
@@ -326,7 +335,11 @@ async def get_task(client, task_id: str) -> Any:
                 f"Backtest {task_id} could not be read: "
                 f"HTTP {response.status} {detail}".strip()
             )
-        return await response.json()
+        body = await response.read()
+
+    # Outside the ``async with``: the body is already buffered, so the connection
+    # goes back to the pool while the parse runs instead of being held for it.
+    return await asyncio.to_thread(json.loads, body)
 
 
 async def fetch_and_save(client, server: str, task_id: str) -> dict | None:

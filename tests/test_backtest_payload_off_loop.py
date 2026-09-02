@@ -1,4 +1,4 @@
-"""PERF-297: the gzip and the gunzip of a backtest payload never run on the loop.
+"""PERF-297/303: no part of a backtest payload is compressed or parsed on the loop.
 
 A payload runs to 137 MB and the store's own ``migrate`` docstring measures
 ~2.5 s to compress one and ~0.7 s to parse it back. Condor has exactly one
@@ -6,10 +6,16 @@ event loop: it polls Telegram, serves every dashboard request and runs every
 routine. So each of these seconds was a freeze of the whole process, once per
 completed backtest and once per chart opened.
 
-What is pinned here is not "it is fast" -- it is *which thread* the compression
-and the decompression happen on. Every path that writes or reads a payload from
-a coroutine must hand it to a worker thread, so the recorded thread is never the
-one running the loop.
+The payload arrives over the wire before it is ever stored, and that first read
+costs the same kind of second: ``response.json()`` awaits the body and *then*
+runs ``json.loads`` inline on the loop. PERF-303 moved that decode across too,
+so the whole completed-backtest path -- parse in, dumps + gzip out, gunzip +
+parse back -- is off the loop end to end.
+
+What is pinned here is not "it is fast" -- it is *which thread* the compression,
+the decompression and the parse happen on. Every path that writes, reads or
+decodes a payload from a coroutine must hand it to a worker thread, so the
+recorded thread is never the one running the loop.
 
 Sync tests driving coroutines with ``asyncio.run``: ``pytest-asyncio`` is a dev
 dependency but is not installed in this venv.
@@ -18,6 +24,7 @@ dependency but is not installed in this venv.
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 import time
 from types import SimpleNamespace
@@ -208,3 +215,115 @@ def test_the_compare_routine_gunzips_off_the_loop(store, threads):
 
     assert all(r is not None for r in runs)
     assert _off_loop(threads.read)
+
+
+# ── the wire path ─────────────────────────────────────────────────────────────
+#
+# ``get_task`` is what actually receives the 137 MB envelope, and it is polled in
+# a loop until the run finishes -- the poll that finally succeeds is the one
+# carrying the whole result. These doubles deliberately expose no ``.json()``:
+# aiohttp's version of it parses inline, so reaching for it again is the
+# regression, and it fails here with an AttributeError rather than quietly
+# moving the freeze back onto the loop.
+
+
+class _WireResponse:
+    def __init__(self, body: bytes):
+        self._body = body
+        self.status = 200
+        self.ok = True
+
+    async def read(self) -> bytes:
+        return self._body
+
+    async def text(self) -> str:
+        return ""
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class _WireSession:
+    def __init__(self, body: bytes):
+        self._body = body
+
+    def get(self, url, timeout=None):
+        return _WireResponse(self._body)
+
+
+def _wire_client(body: bytes):
+    return SimpleNamespace(
+        backtesting=SimpleNamespace(
+            session=_WireSession(body), base_url="http://api:8000"
+        )
+    )
+
+
+def _big_body() -> bytes:
+    """A few MB of real JSON -- the shape that costs ~0.8 s at production size."""
+    envelope = _envelope("t-1")
+    envelope["result"]["processed_data"] = {
+        "close": {str(i): i * 1.000001 for i in range(120_000)}
+    }
+    body = json.dumps(envelope).encode("utf-8")
+    assert len(body) > 2_000_000, len(body)
+    return body
+
+
+def test_get_task_parses_the_wire_payload_off_the_loop(monkeypatch):
+    """The decode of the completed response is CPU, and it is not the loop's."""
+    seen: list[threading.Thread] = []
+
+    def spy_loads(raw):
+        seen.append(threading.current_thread())
+        return json.loads(raw)
+
+    monkeypatch.setattr(core, "json", SimpleNamespace(loads=spy_loads))
+
+    task = asyncio.run(core.get_task(_wire_client(_big_body()), "t-1"))
+
+    assert task["task_id"] == "t-1"
+    assert task["status"] == "completed"
+    assert _off_loop(seen), "json.loads of the response ran on the event loop"
+
+
+def test_the_loop_keeps_ticking_while_the_wire_payload_is_parsed(monkeypatch):
+    """Thread identity, proven by liveness instead of by introspection.
+
+    The parse blocks until a coroutine on the loop releases it. If the parse ran
+    on the loop -- as ``response.json()`` does -- that coroutine could never run
+    and the wait would expire, which is exactly the freeze being pinned.
+    """
+    started, released = threading.Event(), threading.Event()
+
+    def gated_loads(raw):
+        started.set()
+        assert released.wait(timeout=5), "the loop was frozen for the parse"
+        return json.loads(raw)
+
+    monkeypatch.setattr(core, "json", SimpleNamespace(loads=gated_loads))
+
+    async def heartbeat() -> int:
+        while not started.is_set():
+            await asyncio.sleep(0.005)
+        # Every tick below happens strictly between the parse starting and the
+        # parse being allowed to finish -- i.e. the loop is alive mid-parse.
+        ticks = 0
+        for _ in range(3):
+            await asyncio.sleep(0.005)
+            ticks += 1
+        released.set()
+        return ticks
+
+    async def main():
+        return await asyncio.gather(
+            core.get_task(_wire_client(_big_body()), "t-1"), heartbeat()
+        )
+
+    task, ticks = asyncio.run(main())
+
+    assert task["task_id"] == "t-1"
+    assert ticks == 3

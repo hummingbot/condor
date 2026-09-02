@@ -15,6 +15,7 @@ dependency but is not installed in this venv.
 """
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 import condor.backtesting as core
@@ -40,8 +41,9 @@ class _Response:
         self.ok = status < 400
         self._text = text
 
-    async def json(self):
-        return self._payload
+    async def read(self):
+        """The real read: bytes off the wire, parsed by the caller off-loop."""
+        return json.dumps(self._payload).encode("utf-8")
 
     async def text(self):
         return self._text
