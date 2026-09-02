@@ -135,9 +135,14 @@ const agentBadge = () =>
     .querySelector("h2")
     ?.parentElement?.querySelector<HTMLElement>("span.uppercase")
     ?.textContent?.trim() ?? null;
-/** What the scope select is showing. */
+/** What the scope select is showing — the collapsed rail's fallback control. */
 const scopeSelect = () =>
   container.querySelector<HTMLSelectElement>('select[aria-label="Routine scope"]');
+/** Which of the sidebar's scope bubbles is lit, expanded (FEAT-091). */
+const scopeBubble = () =>
+  container
+    .querySelector('[data-scope][aria-pressed="true"]')
+    ?.getAttribute("data-scope") ?? null;
 
 async function press(key: string, on: EventTarget) {
   await act(async () => {
@@ -291,7 +296,10 @@ describe("ReportBrowser header, for an agent-owned routine", () => {
       initialSourceTypeFilter: "brigado",
     });
 
-    expect(scopeSelect()?.value).toBe("brigado");
+    // Expanded, the bubbles beside the list are the scope control; the
+    // header's select is what the collapsed rail falls back to.
+    expect(scopeSelect()).toBeNull();
+    expect(scopeBubble()).toBe("brigado");
     expect(agentBadge()).toBeNull();
   });
 
@@ -313,7 +321,7 @@ describe("ReportBrowser header, for an agent-owned routine", () => {
       initialSourceTypeFilter: "scout",
     });
 
-    expect(scopeSelect()?.value).toBe("all");
+    expect(scopeBubble()).toBe("all");
     expect(agentBadge()).toBe("brigado");
   });
 

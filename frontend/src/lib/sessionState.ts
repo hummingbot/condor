@@ -174,15 +174,6 @@ export const BUBBLE_OPEN_KEY = "condor_bubble_open";
 export const TRADE_BOTTOM_PANE_KEY = "condor_trade_bottom_pane";
 
 /**
- * Grid or table on `/routines` (pages/Routines).
- *
- * KEPT: a view mode says how this browser likes lists rendered, not what was
- * in them. Named without a `condor` prefix for historical reasons — which is
- * exactly why it has to be declared here to be found.
- */
-export const ROUTINES_VIEW_MODE_KEY = "routines_view_mode";
-
-/**
  * The chain last browsed on `/dex` (pages/Dex).
  *
  * KEPT: it saves re-picking a chain on every visit and names a public network,

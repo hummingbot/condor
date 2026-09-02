@@ -18,7 +18,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { RoutineInfo } from "@/lib/api";
@@ -74,6 +74,15 @@ const LIBRARY = [
 let container: HTMLDivElement;
 let root: Root;
 let picked: string[];
+let closes: number;
+/** Where the router is, so the door out to the page can be checked. */
+let here: string;
+
+function LocationProbe() {
+  const loc = useLocation();
+  here = loc.pathname + loc.search;
+  return null;
+}
 
 /**
  * @param split whether there is a workspace pane to sit beside — false is a
@@ -83,27 +92,32 @@ let picked: string[];
 async function render({
   split = true,
   source = "brigado/bot_report",
+  reportId,
 }: {
   split?: boolean;
   source?: string;
+  reportId?: string;
 } = {}) {
   wide = split;
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   await act(async () => {
     root.render(
       <MemoryRouter>
+        <LocationProbe />
         <QueryClientProvider client={qc}>
           <WorkspacePaneProvider>
             <WorkspacePaneOutlet />
             <RoutineLibrarySheet
-              library={{ source }}
+              library={{ source, reportId }}
               instances={[]}
               routines={LIBRARY}
               scope="brigado"
               onScopeChange={() => {}}
               onSelectRoutine={(name) => picked.push(name)}
               agentName="Brigado"
-              onClose={() => {}}
+              onClose={() => {
+                closes += 1;
+              }}
             />
           </WorkspacePaneProvider>
         </QueryClientProvider>
@@ -136,6 +150,8 @@ beforeEach(() => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   localStorage.clear();
   picked = [];
+  closes = 0;
+  here = "";
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -196,5 +212,60 @@ describe("the library sheet's nav bar", () => {
     await render({ split: false });
 
     expect(scopeSelect()).toBeTruthy();
+  });
+});
+
+/**
+ * The pane's full-screen version is the page, not a taller sheet (FEAT-091).
+ *
+ * `/routines` is the same browser with the sidebar, the cards and the runs
+ * strip the pane has no room for, so maximizing hands the reader over to it
+ * rather than blanking the conversation with a viewport-sized sheet — and hands
+ * over what they were reading with them.
+ */
+describe("maximizing the library pane", () => {
+  const maximize = () =>
+    document.querySelector<HTMLButtonElement>(
+      'button[title="Full screen, on its own page (f)"]',
+    );
+
+  it("goes to the library's own page, on the routine that was open", async () => {
+    await render();
+
+    await click(maximize()!);
+
+    expect(here).toBe("/routines?agent=brigado&routine=brigado%2Fbot_report");
+    // What the pane held is on screen now; leaving it open behind the page
+    // would be two copies of one thing again.
+    expect(closes).toBe(1);
+  });
+
+  it("opens the page on the same report, not the routine's newest", async () => {
+    await render({ reportId: "r-42" });
+
+    await click(maximize()!);
+
+    expect(here).toContain("report=r-42");
+  });
+
+  it("answers `f` the same way", async () => {
+    await render();
+
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "f" }));
+    });
+
+    expect(here).toBe("/routines?agent=brigado&routine=brigado%2Fbot_report");
+  });
+
+  it("still zens where there is no pane, and keeps that reversible", async () => {
+    // Below `xl` the sheet opens full screen already, so the button is the way
+    // back rather than a second door out.
+    await render({ split: false });
+
+    expect(maximize()).toBeNull();
+    expect(
+      document.querySelector('button[title="Exit full screen (f)"]'),
+    ).toBeTruthy();
   });
 });

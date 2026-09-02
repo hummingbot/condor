@@ -11,6 +11,7 @@ import {
   Sun,
   Swords,
   Wallet,
+  Zap,
 } from "lucide-react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 
@@ -34,10 +35,11 @@ import { ServerSelector } from "./ServerSelector";
 /**
  * The main nav.
  *
- * Routines left it in FEAT-077: the library now opens beside the conversation
- * that wants it, from the dock's Routines header. `/routines` is still the
- * full-width page — reachable from that pane, from an agent's Routines tab and
- * by URL — it is just no longer the first door.
+ * Routines left it in FEAT-077 and came back in FEAT-091: the library still
+ * opens beside the conversation that wants it and from an agent's own page, but
+ * plenty of work starts at the library rather than at a chat, and for that the
+ * nav was the only door. `/routines` is now the same full-screen browser those
+ * two surfaces open, at full width.
  *
  * Executors left it in FEAT-086, for a different reason: they are not a
  * separate thing to look at. A controller is a bag of executors, so both are
@@ -50,6 +52,7 @@ const NAV_ITEMS = [
   { to: "/trade", icon: Swords, label: "Trade" },
   { to: "/dex", icon: Droplets, label: "DEX" },
   { to: "/bots", icon: Bot, label: "Bots" },
+  { to: "/routines", icon: Zap, label: "Routines" },
   { to: "/settings", icon: Settings, label: "Settings" },
 ] as const;
 
@@ -59,11 +62,12 @@ const NAV_ITEMS = [
  *
  * `/bots` joined the chat workspace when the controller browser became the page
  * (FEAT-084): a scope sidebar and a report column, both screen-tall, have
- * nothing to do with `main`'s 24px. Kept separate from `isChatWorkspace`, which
+ * nothing to do with `main`'s 24px. `/routines` is the same shape, for the same
+ * reason (FEAT-091). Kept separate from `isChatWorkspace`, which
  * still means *the chat* specifically — the keys-overlay exemption is about the
  * conversation, not about padding.
  */
-const FULL_BLEED_ROUTES = ["/", "/bots"];
+const FULL_BLEED_ROUTES = ["/", "/bots", "/routines"];
 
 /**
  * The shell owns the chat state.

@@ -5,7 +5,6 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
-  ChevronUp,
   Clock,
   Download,
   Loader2,
@@ -36,6 +35,10 @@ import { useViewFacts } from "@/lib/viewFacts";
 import { useServer } from "@/hooks/useServer";
 import { ReportFrame } from "./ReportFrame";
 import { RoutinePicker } from "./RoutinePicker";
+import {
+  RoutineLibrarySidebar,
+  type RoutineReportInfo,
+} from "./RoutineLibrarySidebar";
 import { RoutineConfigForm } from "./RoutineConfigForm";
 import { RoutineHooksPanel } from "./RoutineHooksPanel";
 import { RoutineResultView } from "./RoutineResultView";
@@ -67,12 +70,19 @@ interface ReportBrowserProps {
   initialInstanceId?: string;
   initialSourceTypeFilter?: string;
   instances: RoutineInstance[];
-  onClose: () => void;
+  /** Absent on the `/routines` page: a nav destination has nothing to close. */
+  onClose?: () => void;
   /**
    * Rendered inside the workspace pane: fill the container instead of the
    * viewport, and leave the window's keys and the Close button to the host.
    */
   hosted?: boolean;
+  /**
+   * Rendered as the `/routines` page: fill the shell's main area rather than
+   * the viewport, keep the window's keys — the page *is* the screen — and drop
+   * the Close button, since there is nothing behind it to go back to.
+   */
+  page?: boolean;
   /**
    * The host owns the picking: it lists the routines and filters them, so this
    * pane drops its own sidebar, scope select and title and is nothing but the
@@ -94,6 +104,7 @@ export function ReportBrowser({
   initialSourceTypeFilter,
   onClose,
   hosted = false,
+  page = false,
   externalPicker = false,
   onSourceChange,
   runContext,
@@ -117,6 +128,9 @@ export function ReportBrowser({
   // 550px of pane cannot hold a 256px list and a report: hosted opens on the
   // 48px rail, the page keeps its list, and the toggle still works either way.
   const [isCompact, setIsCompact] = useState(hosted);
+  // Typed into the sidebar's own box, which only the expanded list has — the
+  // rail and the host-picked pane never narrow the list this way.
+  const [search, setSearch] = useState("");
   const [showConfigPanel, setShowConfigPanel] = useState(false);
   const [showNotifyPanel, setShowNotifyPanel] = useState(false);
   const [showSourceModal, setShowSourceModal] = useState(false);
@@ -190,11 +204,50 @@ export function ReportBrowser({
       ? "all"
       : sourceTypeFilter;
 
-  // Filter routines by source type
-  const filteredRoutines = useMemo(
-    () => inScope(routines, effectiveScope),
-    [routines, effectiveScope],
-  );
+  /**
+   * The list, as the sidebar renders it: the picked scope, narrowed by the
+   * search box.
+   *
+   * One list, not two — ↑/↓ and Run All act on exactly what is on screen. A
+   * search that hid rows from the list while the arrows still walked them
+   * would be a filter the keyboard disagrees with.
+   */
+  const filteredRoutines = useMemo(() => {
+    const scoped = inScope(routines, effectiveScope);
+    const q = search.trim().toLowerCase();
+    if (!q) return scoped;
+    return scoped.filter(
+      (r) =>
+        r.name.toLowerCase().includes(q) ||
+        r.description.toLowerCase().includes(q) ||
+        r.category.toLowerCase().includes(q),
+    );
+  }, [routines, effectiveScope, search]);
+
+  /**
+   * What each routine's latest report says, for the card that names it.
+   *
+   * Fetched only where the cards are: the dock hands its own picker the list,
+   * so nothing there reads this.
+   */
+  const { data: reportGroups = [] } = useQuery({
+    queryKey: ["reports-grouped"],
+    queryFn: api.getReportsGrouped,
+    enabled: !externalPicker,
+    refetchInterval: 30_000,
+  });
+  const reportInfo = useMemo(() => {
+    const map = new Map<string, RoutineReportInfo>();
+    for (const g of reportGroups) {
+      map.set(g.source_name, {
+        title: g.latest_report.title,
+        created_at: g.latest_report.created_at,
+        count: g.total_count,
+        tags: g.all_tags,
+      });
+    }
+    return map;
+  }, [reportGroups]);
 
   // Set initial source once routines load if not set — pick from filtered list
   useEffect(() => {
@@ -483,7 +536,7 @@ export function ReportBrowser({
         if (showSourceModal) setShowSourceModal(false);
         else if (showConfigPanel) setShowConfigPanel(false);
         else if (showNotifyPanel) setShowNotifyPanel(false);
-        else if (!hosted) onClose();
+        else if (!hosted && onClose) onClose();
         else return;
         e.preventDefault();
       }
@@ -533,142 +586,34 @@ export function ReportBrowser({
       className={
         hosted
           ? "flex min-h-0 w-full flex-1 overflow-hidden outline-none"
-          : "fixed inset-0 z-50 flex bg-[var(--color-bg)]"
+          : page
+            ? "flex h-full min-h-0 w-full overflow-hidden outline-none"
+            : "fixed inset-0 z-50 flex bg-[var(--color-bg)]"
       }
       tabIndex={hosted ? -1 : undefined}
       onKeyDown={hosted ? handleKey : undefined}
     >
-      {/* Left sidebar: routine list — dropped when the host lists the
-          routines itself (the dock's picker), which is what gives the
-          report the whole pane. */}
+      {/* The library's left column — dropped when the host lists the routines
+          itself (the dock's picker), which is what gives the report the whole
+          pane. */}
       {!externalPicker && (
-        <div
-          className={`flex flex-col border-r border-[var(--color-border)] bg-[var(--color-surface)] transition-all ${
-            isCompact ? "w-12" : "w-64"
-          }`}
-        >
-          {/* Sidebar header */}
-          <div className="flex items-center justify-between border-b border-[var(--color-border)] px-3 py-2.5">
-            {!isCompact && (
-              <span className="text-xs font-bold uppercase tracking-wider text-[var(--color-text-muted)]">
-                Routines
-              </span>
-            )}
-            <button
-              onClick={() => setIsCompact(!isCompact)}
-              className="rounded p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
-            >
-              {isCompact ? <ChevronRight className="h-3.5 w-3.5" /> : <ChevronLeft className="h-3.5 w-3.5" />}
-            </button>
-          </div>
-
-          {/* Routine list */}
-          <div ref={sidebarRef} className="flex-1 overflow-y-auto scrollbar-thin">
-            {filteredRoutines.map((r) => {
-              const isActive = r.name === activeSource;
-              const hasActiveInstance = instances.some(
-                (i) => i.routine_name === r.name && (i.status === "running" || i.status === "scheduled"),
-              );
-              const isRoutineAgent = r.source.startsWith("agent:");
-              const displayName = r.name.replace(/_/g, " ");
-
-              if (isCompact) {
-                return (
-                  <button
-                    key={r.name}
-                    onClick={() => selectSource(r.name)}
-                    {...(isActive ? { "data-active-source": true } : {})}
-                    className={`flex w-full items-center justify-center py-3 transition-colors ${
-                      isActive
-                        ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
-                        : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
-                    }`}
-                    title={displayName}
-                  >
-                    {isRoutineAgent ? (
-                      <Brain className="h-4 w-4 text-purple-400" />
-                    ) : hasActiveInstance ? (
-                      <span className="h-2.5 w-2.5 rounded-full bg-emerald-400 shadow-[0_0_6px_theme(colors.emerald.400)]" />
-                    ) : (
-                      <span className="text-[10px] font-bold uppercase leading-none">
-                        {displayName.slice(0, 2)}
-                      </span>
-                    )}
-                  </button>
-                );
-              }
-
-              return (
-                <button
-                  key={r.name}
-                  onClick={() => selectSource(r.name)}
-                  {...(isActive ? { "data-active-source": true } : {})}
-                  className={`w-full px-3 py-2.5 text-left transition-all ${
-                    isActive
-                      ? "bg-[var(--color-primary)]/5 border-l-2 border-l-[var(--color-primary)]"
-                      : "border-l-2 border-l-transparent hover:bg-[var(--color-surface-hover)]"
-                  }`}
-                >
-                  <div className="flex items-center justify-between gap-1">
-                    <span className={`truncate text-xs font-medium ${isActive ? "text-[var(--color-text)]" : "text-[var(--color-text-muted)]"}`}>
-                      {displayName}
-                    </span>
-                    <div className="flex items-center gap-1 shrink-0">
-                      {hasActiveInstance && (
-                        <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 shadow-[0_0_4px_theme(colors.emerald.400)]" />
-                      )}
-                      {r.report_count > 0 && (
-                        <span className="text-[9px] text-[var(--color-text-muted)]/60">
-                          {r.report_count}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                  <div className="mt-0.5 flex items-center gap-1.5">
-                    {isRoutineAgent && (
-                      <span className="flex items-center gap-0.5 rounded bg-purple-500/10 px-1 py-0.5 text-[8px] font-bold uppercase text-purple-400">
-                        <Brain className="h-2 w-2" />
-                        agent
-                      </span>
-                    )}
-                    <span className="text-[9px] text-[var(--color-text-muted)]/50 truncate">
-                      {r.description}
-                    </span>
-                  </div>
-                </button>
-              );
-            })}
-          </div>
-
-          {/* Navigation hint */}
-          {!isCompact && (
-            <div className="border-t border-[var(--color-border)] px-3 py-2 text-[10px] text-[var(--color-text-muted)]/60">
-              <span className="flex items-center gap-1.5">
-                <span className="flex items-center gap-0.5">
-                  <kbd className="inline-flex h-4 min-w-[16px] items-center justify-center rounded border border-[var(--color-border)] bg-[var(--color-surface-hover)] px-0.5 text-[8px] font-medium">
-                    <ChevronUp className="h-2.5 w-2.5" />
-                  </kbd>
-                  <kbd className="inline-flex h-4 min-w-[16px] items-center justify-center rounded border border-[var(--color-border)] bg-[var(--color-surface-hover)] px-0.5 text-[8px] font-medium">
-                    <ChevronDown className="h-2.5 w-2.5" />
-                  </kbd>
-                  <span className="ml-0.5">source</span>
-                </span>
-                <span className="flex items-center gap-0.5">
-                  <kbd className="inline-flex h-4 min-w-[16px] items-center justify-center rounded border border-[var(--color-border)] bg-[var(--color-surface-hover)] px-0.5 text-[8px] font-medium">
-                    <ChevronLeft className="h-2.5 w-2.5" />
-                  </kbd>
-                  <kbd className="inline-flex h-4 min-w-[16px] items-center justify-center rounded border border-[var(--color-border)] bg-[var(--color-surface-hover)] px-0.5 text-[8px] font-medium">
-                    <ChevronRight className="h-2.5 w-2.5" />
-                  </kbd>
-                  <span className="ml-0.5">report</span>
-                </span>
-                <kbd className="inline-flex h-4 items-center justify-center rounded border border-[var(--color-border)] bg-[var(--color-surface-hover)] px-1 text-[8px] font-medium">
-                  esc
-                </kbd>
-              </span>
-            </div>
-          )}
-        </div>
+        <RoutineLibrarySidebar
+          routines={routines}
+          listed={filteredRoutines}
+          instances={instances}
+          activeSource={activeSource}
+          onSelect={selectSource}
+          scope={effectiveScope}
+          onScopeChange={changeScope}
+          search={search}
+          onSearchChange={setSearch}
+          compact={isCompact}
+          onToggleCompact={() => setIsCompact((v) => !v)}
+          onStopInstance={(id) => stopMutation.mutate(id)}
+          stopping={stopMutation.isPending}
+          listRef={sidebarRef}
+          reportInfo={reportInfo}
+        />
       )}
 
       {/* Main content */}
@@ -690,7 +635,7 @@ export function ReportBrowser({
                 controls need. */}
             {!externalPicker && (
               <>
-                {hasAgents && (
+                {hasAgents && isCompact && (
                   <RoutinePicker
                     parts="scope"
                     variant="inline"
@@ -909,8 +854,9 @@ export function ReportBrowser({
                 </button>
               )
             )}
-            {/* Close — the sheet's header has one when hosted */}
-            {!hosted && (
+            {/* Close — the sheet's header has one when hosted, and the page
+                is a nav destination rather than something you dismiss. */}
+            {!hosted && !page && onClose && (
               <button
                 onClick={onClose}
                 className="ml-1 rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"

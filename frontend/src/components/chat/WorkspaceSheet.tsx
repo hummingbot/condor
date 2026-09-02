@@ -38,6 +38,7 @@ export function WorkspaceSheet({
   bleed = false,
   defaultZen = false,
   fullscreen = true,
+  onFullscreen,
   paneProfile = "read",
   children,
 }: {
@@ -83,6 +84,16 @@ export function WorkspaceSheet({
    * only outcome is losing the chat. The pane is the room it needs.
    */
   fullscreen?: boolean;
+  /**
+   * Where "full screen" actually goes, for content that has a page of its own.
+   *
+   * The routine library is the same browser at `/routines`, with the sidebar
+   * and the runs strip the pane has no room for — so maximizing it is a door,
+   * not a bigger sheet: given this, the bar's Maximize and the `f` key call it
+   * instead of taking over the viewport. Zen stays the gesture for content
+   * that exists nowhere else.
+   */
+  onFullscreen?: () => void;
   /**
    * How much of the row this sheet wants when it opens in the pane.
    *
@@ -140,6 +151,13 @@ export function WorkspaceSheet({
         (e.target instanceof HTMLElement && e.target.isContentEditable)
       )
         return;
+      // Out to the page, where there is one — but only on the way *out*: zen
+      // still has to be reversible from the keyboard that entered it.
+      if (onFullscreen && !zen) {
+        onFullscreen();
+        e.preventDefault();
+        return;
+      }
       setZen((z) => {
         if (!canSplit) localStorage.setItem(SHEET_ZEN_KEY, z ? "0" : "1");
         return !z;
@@ -148,7 +166,7 @@ export function WorkspaceSheet({
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [canSplit, fullscreen]);
+  }, [canSplit, fullscreen, onFullscreen, zen]);
 
   const toggleZen = () =>
     setZen((z) => {
@@ -187,14 +205,16 @@ export function WorkspaceSheet({
           {typeof actions === "function" ? actions({ zen }) : actions}
           {fullscreen && (
             <button
-              onClick={toggleZen}
+              onClick={onFullscreen && !zen ? onFullscreen : toggleZen}
               className="rounded p-1 text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
               title={
                 zen
                   ? canSplit
                     ? "Back beside the chat (f)"
                     : "Exit full screen (f)"
-                  : "Full screen (f)"
+                  : onFullscreen
+                    ? "Full screen, on its own page (f)"
+                    : "Full screen (f)"
               }
             >
               {zen ? (

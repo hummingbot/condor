@@ -325,8 +325,8 @@ describe("formatRuntimeHours", () => {
 });
 
 // ARCH-304 folded the admin tab's own `timeAgo` into this one, so "last seen"
-// and the audit log now read in the same units as RoutineTable and the
-// notification bell. Nothing pinned this ladder before the merge; the cases
+// and the audit log now read in the same units as the routine library and
+// the notification bell. Nothing pinned this ladder before the merge; the cases
 // below are the ones the deleted copy answered differently, and they are the
 // ones a caller has to get right.
 describe("formatRelativeTime", () => {

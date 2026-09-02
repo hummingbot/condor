@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { useNavigate } from "react-router-dom";
 
 import { WorkspaceSheet } from "@/components/chat/WorkspaceSheet";
 import {
@@ -304,6 +305,30 @@ export function RoutineLibrarySheet({
   runContext?: RoutineRunContext;
   onClose: () => void;
 }) {
+  const navigate = useNavigate();
+
+  /**
+   * Maximizing takes the reader to `/routines`, on the routine they are
+   * reading.
+   *
+   * The full-screen version of this pane is not a taller sheet — it is the
+   * page, which is the same browser with the sidebar, the cards and the runs
+   * strip there is no room for beside a conversation. Everything the pane was
+   * focused on goes with them, so the page opens on the same report rather than
+   * on the routine's newest; the pane closes behind them, since what it held is
+   * now on screen.
+   */
+  const openFullPage = () => {
+    const params = new URLSearchParams();
+    if (scope && scope !== "all") params.set("agent", scope);
+    if (library.source) params.set("routine", library.source);
+    if (library.reportId) params.set("report", library.reportId);
+    if (library.instanceId) params.set("run", library.instanceId);
+    const query = params.toString();
+    onClose();
+    navigate(`/routines${query ? `?${query}` : ""}`);
+  };
+
   return (
     <WorkspaceSheet
       // The bar names what is open with the control that changes it, so this
@@ -335,6 +360,7 @@ export function RoutineLibrarySheet({
       }
       onClose={onClose}
       bleed
+      onFullscreen={openFullPage}
       // Below `xl` there is no pane, so this is today's full-screen browser.
       defaultZen
     >
