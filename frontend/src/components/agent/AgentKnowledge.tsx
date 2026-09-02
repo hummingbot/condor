@@ -877,7 +877,8 @@ function SkillsTab({
         <p className="text-[11px] text-[var(--color-text-muted)]">
           Playbooks the agent reads before hand-rolling a known flow. Click one
           to read it exactly as the agent does. Switch one off and it leaves
-          this agent's context — from its next tick or next session.
+          this agent's context — from its next tick, or from your next message
+          in a chat that is already open.
         </p>
         <AddButton onClick={onCreate} label="New playbook" />
       </div>
@@ -1057,9 +1058,9 @@ function ToolsTab({
   return (
     <div className="space-y-1.5">
       <p className="text-[11px] text-[var(--color-text-muted)]">
-        Every tool this agent's seat mounts. Switch one off and the next session
-        never registers it — the model is not told it exists. Changes apply to
-        the next session this agent starts.
+        Every tool this agent's seat mounts. Switch one off and the model is no
+        longer told it exists — from the next tick, or from your next message in
+        an open chat.
       </p>
       <p className="text-[11px] text-[var(--color-text-muted)]">
         {brain.tools_unrestricted
@@ -1136,8 +1137,8 @@ function RoutinesTab({
         <p className="text-[11px] text-[var(--color-text-muted)]">
           Scripts this agent can run on demand or on a schedule. Its own library
           first, then the shared one every agent reads. Switching one off takes
-          it out of this agent from its next tick or session — /routines still
-          lists and runs it.
+          it out of this agent from its next tick, or from your next message in
+          a chat that is already open — /routines still lists and runs it.
         </p>
         {action}
       </div>

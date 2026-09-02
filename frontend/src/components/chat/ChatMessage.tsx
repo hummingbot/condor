@@ -9,6 +9,7 @@ import {
   CornerDownLeft,
   CornerDownRight,
   Loader2,
+  RotateCw,
   ShieldAlert,
   Square,
   Zap,
@@ -209,6 +210,7 @@ const NOTE_KINDS: Record<string, { label: string; Icon: typeof Zap }> = {
   resume: { label: "Resumed", Icon: CornerDownLeft },
   notification: { label: "Notified", Icon: Bell },
   routine: { label: "Routine", Icon: Zap },
+  reload: { label: "Reloaded", Icon: RotateCw },
 };
 
 export const ChatMessageView = memo(function ChatMessageView({

@@ -90,6 +90,10 @@ describe("out-of-band notes", () => {
     ["resume", "Resumed"],
     ["notification", "Notified"],
     ["routine", "Routine"],
+    // The session was rebuilt mid-chat to pick up a configuration change
+    // (FEAT-093). It is a quiet note, not a handover divider: the counterpart
+    // did not change, only what it was told.
+    ["reload", "Reloaded"],
   ];
 
   for (const [kind, label] of kinds) {

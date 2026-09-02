@@ -1229,6 +1229,41 @@ export function useChatSocket() {
           break;
         }
 
+        case "reload": {
+          // The agent's configuration changed while this chat was open — a
+          // playbook or tool switched off in the brain panel, its model or
+          // instructions edited — so the session was rebuilt before answering
+          // this message (FEAT-093). Saying so is the point: a reload costs the
+          // scrollback older than the replay budget, and the reader should know
+          // why the counterpart suddenly has less of the conversation.
+          // The backend records the same sentence in the transcript, so a page
+          // reload agrees with what is on screen.
+          if (!slotId) break;
+          flushChunks(slotId);
+          const parts = (data.parts as string[]) || [];
+          setSlots((prev) =>
+            prev.map((s) =>
+              s.info.slot_id === slotId
+                ? {
+                    ...s,
+                    messages: [
+                      ...s.messages,
+                      {
+                        id: nextMsgId(),
+                        role: "system" as const,
+                        text: `Reloaded to apply configuration changes (${parts.join(", ")})`,
+                        kind: "reload",
+                        toolCalls: [],
+                        ts: nowTs(),
+                      },
+                    ],
+                  }
+                : s,
+            ),
+          );
+          break;
+        }
+
         case "system_note": {
           // Something finished in the background and wrote a note into the
           // transcript — a routine's outcome, most often. The note is already

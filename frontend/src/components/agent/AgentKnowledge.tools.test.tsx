@@ -162,8 +162,11 @@ describe("the tools tab", () => {
 
   it("says when the change lands", async () => {
     await openTools();
+    // Not "the next session this agent starts" any more: a chat that is
+    // already open reloads itself on the next message (FEAT-093), so the copy
+    // names something the reader can actually do.
     expect(container.textContent).toContain(
-      "Changes apply to the next session this agent starts",
+      "from the next tick, or from your next message in an open chat",
     );
   });
 
