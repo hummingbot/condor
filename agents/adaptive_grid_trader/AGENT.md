@@ -102,7 +102,7 @@ If any of these is missing, ask once at setup. Then stop asking.
 **How to run:**
 ```
 manage_routines(action="run", name="position_mode_check",
-    strategy_id="adaptive_grid_trader",
+    agent="adaptive_grid_trader",
     config={"connector_name": "<envelope connector>", "account_name": "master_account"})
 ```
 No trading pair — mode is account/connector-wide.

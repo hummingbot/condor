@@ -68,7 +68,7 @@ the tick and notify the user.
 ### Step 1: Run the pair monitor routine (the analysis brain)
 ```
 manage_routines(action="run", name="hip3_dn_pair_monitor",
-  strategy_id="delta_neutral_funding_agent.hip_3_delta_neutral_funding_mm",
+  agent="delta_neutral_funding_agent",
   config={"leg_a": <leg_a>, "leg_b": <leg_b>, "configured_hedge_beta": <configured_hedge_beta>,
           "total_amount_quote": <total_amount_quote>, "net_delta_band_pct": <net_delta_band_pct>,
           "min_corr": <min_corr>})

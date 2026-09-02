@@ -10,6 +10,9 @@ surface is pinned here.
 """
 
 import asyncio
+import re
+import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -114,6 +117,63 @@ def test_strategy_id_is_gone_from_the_routine_and_skill_signatures():
 
     for fn in (server.manage_routines, server.manage_skill):
         assert "strategy_id" not in inspect.signature(fn).parameters
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _committed_playbooks() -> list[Path]:
+    """The AGENT.md / strategy.md files git actually tracks.
+
+    Deliberately ``git ls-files`` and not a filesystem glob: some agent
+    directories are locally excluded, and their playbooks are nobody's contract.
+    """
+    listed = subprocess.run(
+        ["git", "ls-files", "agents/*/AGENT.md", "agents/*/strategies/*/strategy.md"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return [REPO_ROOT / line for line in listed.stdout.split()]
+
+
+def _manage_routines_calls(text: str) -> list[str]:
+    """Every ``manage_routines(...)`` argument list in a playbook."""
+    calls = []
+    for match in re.finditer(r"manage_routines\(", text):
+        start = match.end() - 1
+        depth = 0
+        for i in range(start, len(text)):
+            if text[i] == "(":
+                depth += 1
+            elif text[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    calls.append(text[start : i + 1])
+                    break
+        else:  # unbalanced — an abbreviated snippet; scan what there is
+            calls.append(text[start:])
+    return calls
+
+
+def test_no_committed_playbook_targets_a_routine_by_strategy_id():
+    """Routines are per-agent: playbooks must say ``agent=``, never the dead alias.
+
+    FastMCP's argument model has no ``extra="forbid"``, so a stray
+    ``strategy_id=`` is dropped in silence — the owning agent's own tick still
+    resolves via CONDOR_AGENT_SLUG while every other seat gets 'routine not
+    found'. Nothing but this guard notices the drift.
+    """
+    playbooks = _committed_playbooks()
+    assert playbooks, "found no committed playbooks — the guard would pass vacuously"
+    offenders = [
+        f"{path.relative_to(REPO_ROOT)}: {call}"
+        for path in playbooks
+        for call in _manage_routines_calls(path.read_text(encoding="utf-8"))
+        if "strategy_id" in call
+    ]
+    assert not offenders, "manage_routines takes agent=<slug>: " + "; ".join(offenders)
 
 
 # ── FEAT-068: the three families, and the routing help between them ──

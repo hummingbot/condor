@@ -44,7 +44,7 @@ The `hip3_market_scanner` routine does the full deterministic scan + ranking of 
 every `reselect_every_ticks` ticks (default 30), and whenever you are flat and need a market:
 ```
 manage_routines(action="run", name="hip3_market_scanner",
-  strategy_id="market_making_expert.hip_3_mm_operator",
+  agent="market_making_expert",
   config={"issuer": <issuer>, "min_spread_bps": <min_spread_bps>,
           "max_daily_drift_pct": <max_daily_drift_pct>, "top_n": 5})
 ```

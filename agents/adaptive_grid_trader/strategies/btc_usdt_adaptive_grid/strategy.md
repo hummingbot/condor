@@ -119,14 +119,14 @@ A grid that reaches meaningful unrealized profit should lock it in rather than r
 ### 1. Baseline (if missing or >24h)
 ```
 manage_routines(action="run", name="baseline_7d",
-  strategy_id="adaptive_grid_trader.btc_usdt_adaptive_grid",
+  agent="adaptive_grid_trader",
   config={"trading_pair":"BTC-USDT","connector_name":"bitget_perpetual"})
 ```
 
 ### 2. Hourly MTF
 ```
 manage_routines(action="run", name="hourly_mtf_check",
-  strategy_id="adaptive_grid_trader.btc_usdt_adaptive_grid",
+  agent="adaptive_grid_trader",
   config={"trading_pair":"BTC-USDT","connector_name":"bitget_perpetual",
           "lifetime_hours":8.0,"baseline_atr":<from_1>})
 ```
@@ -154,7 +154,7 @@ If step 3 shows **active orders on BTC-USDT** but **no running executor owns the
 ### 3b. Account menu (first entry / flat re-entry)
 ```
 manage_routines(action="run", name="position_mode_check",
-  strategy_id="adaptive_grid_trader",
+  agent="adaptive_grid_trader",
   config={"connector_name":"bitget_perpetual","account_name":"master_account"})
 ```
 Branch only on **`mode: HEDGE|ONEWAY`** + **`two_sided_allowed`**.
