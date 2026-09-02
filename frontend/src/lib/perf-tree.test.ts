@@ -15,6 +15,7 @@ import {
   UNATTACHED_BOT,
   ancestorChain,
   buildTree,
+  controllerClassOf,
   controllerNodeId,
   foldLeaves,
   indexTree,
@@ -601,5 +602,47 @@ describe("foldLeaves", () => {
     expect(fold).toMatchObject({ net: 0, volume: 0, count: 0, closed: 0, hours: 0, closeTotal: 0 });
     expect(fold.winRate).toBeUndefined();
     expect(fold.returnPct).toBeUndefined();
+  });
+});
+
+/**
+ * What the sidebar's "Controller type" row may offer.
+ *
+ * The row is built by tallying this over the population and dropping empty
+ * keys, so "belongs to no class" and "is not offered as a class" are the same
+ * fact — which is what stops the row repeating the executor-type row below it,
+ * and what stops it offering a bubble for every record whose class upstream
+ * never reported.
+ */
+describe("controllerClassOf", () => {
+  const classes = new Map([["pmm_1", "pmm_simple"]]);
+
+  it("classes a controller as itself", () => {
+    const leaf = leafFromController(controller({ controller_name: "grid_strike" }));
+    expect(controllerClassOf(leaf, classes)).toBe("grid_strike");
+  });
+
+  it("classes an executor by the controller that ran it, never by its own type", () => {
+    const leaf = leafFromExecutor(executor({ type: "grid_executor", controller_id: "pmm_1" }), "alpha");
+    expect(controllerClassOf(leaf, classes)).toBe("pmm_simple");
+  });
+
+  it("gives a controller-less executor no class, so it cannot repeat the executor-type row", () => {
+    const leaf = leafFromExecutor(executor({ type: "grid_executor", controller_id: "" }));
+    expect(controllerClassOf(leaf, classes)).toBe("");
+  });
+
+  it("gives an executor whose controller has no reported class no class either", () => {
+    const leaf = leafFromExecutor(executor({ controller_id: "unknown_ctrl" }), "alpha");
+    expect(controllerClassOf(leaf, classes)).toBe("");
+  });
+
+  it("never offers the unknown dash as a class, however a terminated record arrives", () => {
+    const leaf = leafFromTerminatedController(
+      { ...controller({ controller_name: "" }), status: "stopped" },
+      botRun({ bot_name: "alpha" }),
+    );
+    expect(leaf.executorType).toBe("—");
+    expect(controllerClassOf(leaf, classes)).toBe("");
   });
 });

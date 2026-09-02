@@ -44,8 +44,15 @@ export function parsePopulation(raw: string | null): Population {
  */
 export const UNATTACHED_BOT = "(unattached)";
 
-/** The label a leaf falls back to when the field it is bucketed by is empty. */
-const UNKNOWN_LABEL = "—";
+/**
+ * The label a leaf falls back to when the field it is bucketed by is empty.
+ *
+ * Exported so a caller can tell "we know this is a `pmm_simple`" from "we have
+ * no name for this at all": it reads as a name in a row's caption, but it is
+ * the absence of one, and a filter that offered it as a class would offer a
+ * bucket nobody chose to be in.
+ */
+export const UNKNOWN_LABEL = "—";
 
 /**
  * Anything the browser can report on, in one vocabulary.
@@ -273,6 +280,36 @@ export function runStatus(r: BotRunInfo): string {
   if (r.is_live) return "running";
   if (r.stopped_at) return "stopped";
   return (r.run_status || "").toLowerCase();
+}
+
+/**
+ * The controller class a leaf belongs to, or `""` when it belongs to none.
+ *
+ * The one rule behind the browser's "Controller type" filter, and it is
+ * narrower than it looks. A controller is its own class. An executor *inherits*
+ * the class of the controller that ran it — it carries none of its own, so
+ * `classById` (config id → `controller_name`) is what answers for it. Anything
+ * else has no class at all:
+ *
+ * - a controller-less executor (a position opened by hand from `/trade`, filed
+ *   under its own controller id as its bot) has nothing to inherit. Standing
+ *   its *executor* type in as a class put `grid` and `order` in the controller
+ *   row and in the executor-type row at once, counted identically, so the
+ *   sidebar asked one question twice;
+ * - a controller whose class upstream never reported carries
+ *   {@link UNKNOWN_LABEL}, which is a dash where a name would go rather than a
+ *   name. Offering it as a class made a bubble that narrowed to "the records we
+ *   know nothing about" — on a real server, all 139 finished controllers, since
+ *   `controller-performance` reports no class on a finished run at all.
+ *
+ * Returning `""` for both is what keeps them out of the options *and* out of
+ * the counts, since the tally that builds the bubbles skips empty keys.
+ */
+export function controllerClassOf(leaf: PerfLeaf, classById: Map<string, string>): string {
+  if (leaf.kind === "controller") {
+    return leaf.executorType === UNKNOWN_LABEL ? "" : leaf.executorType;
+  }
+  return leaf.controllerId ? classById.get(leaf.controllerId) ?? "" : "";
 }
 
 // ── The tree ──

@@ -25,6 +25,7 @@ import { ControllerPnlChart } from "@/components/bots/ControllerPnlChart";
 import { DeployBotDialog } from "@/components/bots/DeployBotDialog";
 import { LogsSection } from "@/components/bots/LogsSection";
 import { PnlEvolutionChart } from "@/components/bots/PnlEvolutionChart";
+import { ExecutorChart } from "@/components/charts/ExecutorChart";
 import { DetailPanel } from "@/components/perf/ExecutorTable";
 import { ExecutorRows, StopConfirmDialog } from "@/components/perf/ExecutorRows";
 import { useExecutorStop } from "@/components/perf/executorActions";
@@ -56,6 +57,7 @@ import {
 import {
   buildTree,
   collectLeaves,
+  controllerClassOf,
   controllerNodeId,
   foldLeaves,
   indexTree,
@@ -277,6 +279,13 @@ function clockSnapshot() {
 const CHART_CHROME_PX = 152;
 const MIN_CHART_PX = 220;
 
+/**
+ * The same subtraction for `ExecutorChart`, whose chrome is one 30px header bar
+ * and a border — it draws no title, no legend and no range buttons of its own,
+ * so charging it the PnL chart's allowance would waste a fifth of the box.
+ */
+const EXEC_CHART_CHROME_PX = 34;
+
 function useMeasuredHeight<T extends HTMLElement>() {
   const ref = useRef<T | null>(null);
   const [height, setHeight] = useState(0);
@@ -467,6 +476,24 @@ export function PerfBrowser({
   // and not a boolean: the sidebar can move on while the prompt is up.
   const [confirmDeleteRun, setConfirmDeleteRun] = useState<string | null>(null);
 
+  /**
+   * Which chart a single-executor scope draws: its price, or its PnL.
+   *
+   * Price by default, because it is the picture that made the executors page
+   * worth clicking a row on — candles with the executor's own entry, exit,
+   * barriers and grid levels drawn over them, which is the only view that says
+   * *why* the number in the tiles is what it is. Its PnL curve is kept a click
+   * away rather than dropped: an executor records its own series since
+   * FEAT-087, and for one that ran for days that curve is a real picture. For
+   * the many that opened and closed inside a minute it is a flat line at zero
+   * with a y-axis invented around it, which is what a fresh reader used to land
+   * on.
+   *
+   * Held across scope changes on purpose: a reader comparing two executors is
+   * comparing the same view of both.
+   */
+  const [execChart, setExecChart] = useState<"price" | "pnl">("price");
+
   const now = useSyncExternalStore(subscribeToClock, clockSnapshot, clockSnapshot);
 
   // The scope lives in the URL, so `?scope=ctrl:<bot>:<config id>` is a link to
@@ -633,23 +660,17 @@ export function PerfBrowser({
   }, [population, controllersProp, terminatedControllers]);
 
   /**
-   * What the type bubbles class a leaf as.
+   * What the type bubbles class a leaf as — a **controller** class, only ever.
    *
-   * A controller is its own class. An executor under a controller inherits that
-   * controller's class rather than carrying one. An executor under no controller
-   * — a hand-opened position, filed under its controller id as its bot — has
-   * nothing to inherit, so its own executor type stands in: that *is* the class
-   * of thing it is, and without it the executor could not be picked by type at
-   * all, since the executor-type group only appears once there are two types
-   * to choose between.
+   * The rule itself is `controllerClassOf`, in lib/perf-tree.ts where a test
+   * can reach it (the ARCH-300 split); this is the map it reads bound to it.
+   * A row with nothing real to choose between is not drawn at all, which is
+   * what the terminated side now gets: `controller-performance` reports no
+   * class on a finished run, so there is no class to pick by, and the
+   * executor-type row below is the one that still works.
    */
   const classOf = useCallback(
-    (leaf: PerfLeaf): string =>
-      leaf.kind === "controller"
-        ? leaf.executorType
-        : leaf.controllerId
-          ? ctrlClassById.get(leaf.controllerId) ?? ""
-          : leaf.executorType,
+    (leaf: PerfLeaf): string => controllerClassOf(leaf, ctrlClassById),
     [ctrlClassById],
   );
 
@@ -736,14 +757,10 @@ export function PerfBrowser({
       // A controller's own class, counted over controllers — an executor
       // inherits its controller's class rather than carrying one, so counting
       // it here would report the same controller once per executor under it.
-      // An executor with no controller has nothing to inherit and is counted
-      // as itself (see `classOf`).
-      ctrlTypes: alpha(
-        tally(
-          (leaf) => (leaf.kind === "controller" || !leaf.controllerId ? classOf(leaf) : ""),
-          rawLeaves,
-        ),
-      ),
+      // A controller with no class contributes nothing (see `classOf`), which
+      // is what leaves this row empty, and therefore undrawn, on a terminated
+      // side whose classes upstream never reported.
+      ctrlTypes: alpha(tally((leaf) => (leaf.kind === "controller" ? classOf(leaf) : ""), rawLeaves)),
       execTypes: alpha(
         tally((leaf) => (leaf.kind === "executor" ? leaf.executorType : ""), rawLeaves),
       ),
@@ -952,6 +969,25 @@ export function PerfBrowser({
   const liveCtrl = population === "running" ? activeCtrl : undefined;
   const activeExec =
     scope.kind === "executor" ? (scope.leaves[0]?.source as ExecutorInfo | undefined) : undefined;
+
+  /**
+   * The one executor as `ExecutorChart` takes it: a list, held still.
+   *
+   * The chart keys its overlay rebuild off what is drawn rather than off array
+   * identity, but its candle query and its layout effects still see the prop —
+   * and this component re-renders on every clock tick and every WS frame, so a
+   * `[activeExec]` minted inline would hand it a new group each time.
+   */
+  const execChartGroup = useMemo(() => (activeExec ? [activeExec] : []), [activeExec]);
+  /**
+   * Whether the price view can be drawn at all.
+   *
+   * Candles are fetched by connector and pair, so an executor carrying neither
+   * — an archived row that kept only its id and its PnL — has no price chart to
+   * offer, and the toggle that would offer it is not drawn either.
+   */
+  const execHasPrice = !!activeExec?.connector && !!activeExec?.trading_pair;
+
   /**
    * The run the terminated fleet row is reporting on.
    *
@@ -1411,7 +1447,7 @@ export function PerfBrowser({
     const chips = [
       filters.pair.trim() ? `pair ~ "${filters.pair.trim()}"` : "",
       picked("bot", filters.bots),
-      picked("type", filters.ctrlTypes),
+      picked("controller type", filters.ctrlTypes),
       picked("executor type", filters.execTypes),
     ].filter(Boolean);
 
@@ -1453,6 +1489,7 @@ export function PerfBrowser({
 
   const configId = activeCtrl ? activeCtrl.controller_id || activeCtrl.controller_name : "";
   const chartHeight = Math.max(MIN_CHART_PX, (chartBoxH || 420) - CHART_CHROME_PX);
+  const execChartHeight = Math.max(MIN_CHART_PX, (chartBoxH || 420) - EXEC_CHART_CHROME_PX);
 
   // The title names the scope, always. It used to name the *parent controller*
   // for an executor scope, because that was whose curve was drawn; an executor
@@ -1568,8 +1605,11 @@ export function PerfBrowser({
               )}
               {filterOptions.ctrlTypes.length > 1 && (
                 <BubbleGroup
-                  title="Type"
-                  hint="The class each controller is — pmm_simple, grid_strike, and so on — and, for an executor that runs under no controller, the kind of executor it is."
+                  // "Controller type" rather than "Type": the row under it is
+                  // "Executor type", and two rows of bubbles that look alike
+                  // need their names to say which is which.
+                  title="Controller type"
+                  hint="The class each controller is — pmm_simple, grid_strike, and so on. Executors are narrowed by the class of the controller that ran them; to pick them by what they are, use Executor type."
                   options={filterOptions.ctrlTypes}
                   selected={filters.ctrlTypes}
                   onChange={(v) => setFilters((f) => ({ ...f, ctrlTypes: v }))}
@@ -1992,6 +2032,33 @@ export function PerfBrowser({
               </span>
             )}
 
+            {/* Which picture this executor is telling its story with. Drawn
+                only where there is a choice: no candles, no toggle. */}
+            {activeExec && execHasPrice && (
+              <div className="flex shrink-0 items-center gap-0.5 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-0.5">
+                {(["price", "pnl"] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => setExecChart(mode)}
+                    aria-pressed={execChart === mode}
+                    title={
+                      mode === "price"
+                        ? "Candles, with this executor's entry, exit and levels drawn over them"
+                        : "This executor's own PnL over time"
+                    }
+                    className={`rounded px-2 py-1 text-[10px] font-medium transition-colors ${
+                      execChart === mode
+                        ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+                        : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+                    }`}
+                  >
+                    {mode === "price" ? "Price" : "PnL"}
+                  </button>
+                ))}
+              </div>
+            )}
+
             {activeExec && isExecutorActive(activeExec.status) && (
               <button
                 onClick={() => stop.request([activeExec.id])}
@@ -2079,7 +2146,14 @@ export function PerfBrowser({
                   fact worth having: a terminated scope holds no unrealized PnL,
                   and a live one has not won or lost anything yet — which is
                   different from those numbers being unavailable. */}
-              <div className="grid grid-cols-4 lg:grid-cols-8 gap-4">
+              {/* Reflowed by the *pane's* width, not the window's. `lg:` is a
+                  viewport breakpoint, so on a wide screen these stayed eight
+                  across however narrow the pane got — and opening the executor
+                  detail column takes ~480px off it, at which point eight
+                  columns of a hundred-odd pixels each printed
+                  "REALIZEDUNREALIZED" over one another. `auto-fit` asks the
+                  column the tiles are actually in. */}
+              <div className="grid grid-cols-[repeat(auto-fit,minmax(104px,1fr))] gap-4">
                 <Kpi
                   label="Net PnL"
                   value={formatCurrencyPnl(totals.net, currencySymbol)}
@@ -2229,7 +2303,26 @@ export function PerfBrowser({
               style={{ minHeight: MIN_CHART_PX + CHART_CHROME_PX }}
             >
               <div className="absolute inset-0">
-                {activeCtrl && population === "running" ? (
+                {activeExec && execHasPrice && execChart === "price" ? (
+                  /* One executor selected, drawn the way the executors page
+                     drew it: the pair's candles with this executor's entry,
+                     exit, barriers and — for a grid — its levels laid over
+                     them. The aggregate panes below are right for a fold of
+                     many records and say almost nothing about a single one,
+                     whose whole story is where it opened and where it closed.
+
+                     Keyed by executor id so switching between two of them
+                     remounts rather than re-pointing a chart that keeps the
+                     previous one's visible range. */
+                  <ExecutorChart
+                    key={activeExec.id}
+                    server={server}
+                    executors={execChartGroup}
+                    connector={activeExec.connector}
+                    tradingPair={activeExec.trading_pair}
+                    height={execChartHeight}
+                  />
+                ) : activeCtrl && population === "running" ? (
                   <ControllerPnlChart
                     // Keyed by bot + config id: two bots can be running this very
                     // config, and a key that did not tell them apart would keep the
