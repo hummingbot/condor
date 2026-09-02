@@ -232,6 +232,10 @@ describe("a slot the backend reaped", () => {
       "my favourite pair is SOL-USDC",
       "what was it?",
     ]);
+    // A `session_started` is a live subprocess by definition, and the reattach
+    // path emits it with no `alive` key — so the slot has to be marked alive
+    // here, or the tab's dot stays detached until the next roster (CORR-295).
+    expect(slot()!.info.alive).toBe(true);
   });
 
   it("still lets go of a slot the backend has stopped listing", async () => {

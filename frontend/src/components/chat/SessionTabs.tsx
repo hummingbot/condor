@@ -13,12 +13,15 @@ import type { ChatSlot } from "@/hooks/useChatSocket";
  * end a session at all.
  *
  * Every tab carries a status marker in a fixed slot at its head: a green dot
- * while the session is live and idle, a spinner in its place while it answers.
+ * while the session is live and idle, a spinner in its place while it answers,
+ * a hollow dot when the backend reports no subprocess behind the slot.
  * That is the rail's own vocabulary — the green dot on a conversation row —
  * brought up here, because the strip used to read as a row of plain labels and
  * gave no hint that each one is a process that is alive right now. The dots
  * carry that on their own; a "N live" count chip beside them only restated
- * what the row already shows.
+ * what the row already shows. The hollow dot exists because the green one was
+ * being shown for a slot the roster had already reported as reaped, which made
+ * the tab's only status affordance lie about the one thing it reports.
  *
  * It renders inside the header row rather than above it, and fills it: the
  * tabs stretch to the bar's full height so the active one's underline lands on
@@ -93,7 +96,7 @@ function groupKey(slot: ChatSlot): string {
 }
 
 /**
- * A session is alive.
+ * A session is alive: a subprocess is behind the slot right now.
  *
  * `--color-green` rather than a literal `green-500`, so the colour-blind theme
  * — where green is redefined as blue — still gets a hue it can separate from
@@ -103,6 +106,23 @@ function LiveDot() {
   return (
     <span className="relative flex h-1.5 w-1.5 shrink-0">
       <span className="relative h-1.5 w-1.5 rounded-full bg-[var(--color-green)]" />
+    </span>
+  );
+}
+
+/**
+ * The conversation is intact, but nothing is running behind it.
+ *
+ * An idle detach, an eviction, a subprocess that died — the tab stays and its
+ * transcript still hydrates, so this is not the absence of a session but a
+ * session that has to be reattached, which the next message does on its way
+ * through. Hollow rather than a second hue: it reads as "the dot, unlit" at
+ * the same size and on the same tokens, and costs the palette nothing.
+ */
+function DetachedDot() {
+  return (
+    <span className="relative flex h-1.5 w-1.5 shrink-0">
+      <span className="relative h-1.5 w-1.5 rounded-full border border-[var(--color-text-muted)]" />
     </span>
   );
 }
@@ -135,6 +155,14 @@ function SessionTab({
   const agentShort = slot.info.label || slot.info.agent_slug || "Condor";
   const TabIcon = slot.info.agent_slug ? Bot : Zap;
   const busy = isStreaming || slot.pending;
+  // Strictly `=== false`: a roster from a backend older than `alive` omits the
+  // key entirely, and an unknown state has to keep reading as it did before.
+  const detached = slot.info.alive === false;
+  const status = busy
+    ? "Answering"
+    : detached
+      ? "Detached — reattaches on your next message"
+      : "Session live";
   // The server is not on the tab, and nothing else in this row carries it any
   // more, so the tooltip is where that fact stays reachable without a click.
   const title = slot.info.server_name
@@ -158,14 +186,16 @@ function SessionTab({
     >
       {/* One marker, in a fixed-width slot so the label does not jump when a
           steady dot becomes a spinner: green while the session is live and
-          idle, spinning while it is answering. */}
+          idle, spinning while it is answering, hollow while it is detached. */}
       <span
         className="flex h-3 w-3 shrink-0 items-center justify-center"
-        title={busy ? "Answering" : "Session live"}
-        aria-label={busy ? "Answering" : "Session live"}
+        title={status}
+        aria-label={status}
       >
         {busy ? (
           <Loader2 className="h-3 w-3 animate-spin text-[var(--color-primary)]" />
+        ) : detached ? (
+          <DetachedDot />
         ) : (
           <LiveDot />
         )}

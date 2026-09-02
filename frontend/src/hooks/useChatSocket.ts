@@ -995,6 +995,11 @@ export function useChatSocket() {
             server_pinned: Boolean(data.server_pinned),
             agent_slug: (data.agent_slug as string) || "",
             label: (data.label as string) || undefined,
+            // A `session_started` is a live subprocess by definition — the
+            // reattach path emits it without an `alive` key, so stating it here
+            // is what returns a detached tab's dot to green rather than leaving
+            // that to the "older backend" undefined fallback.
+            alive: true,
           };
           // The optimistic tab this session belongs to: a new chat is found by
           // the ref it was opened under, a resume by the conversation itself.
