@@ -332,6 +332,17 @@ class ToolCallUpdate:
     status: str | None = None
     title: str | None = None
     output: str | None = None
+    #: Arguments, when the adapter supplies them late (FEAT-102).
+    #:
+    #: ``claude-agent-acp`` (0.21+) emits a tool call **twice**: once at
+    #: ``content_block_start``, while the input JSON is still streaming and
+    #: ``chunk.input`` is often ``{}`` (its own source says "sometimes input is
+    #: empty object"), and again as a ``tool_call_update`` once the full
+    #: assistant message has arrived — that second one carries the complete
+    #: ``rawInput``. Without a field to land in, every argument of every
+    #: ACP-bridged call was dropped, which is why the action log read
+    #: "(arguments could not be read)" for a tick that deployed a live fleet.
+    input: dict | None = None
 
 
 @dataclass
@@ -358,8 +369,14 @@ def fold_tool_call_event(
     so the create/patch semantics can't drift (ARCH-063). A :class:`ToolCallEvent`
     creates an entry (returned so the caller can append it to its own list) or
     patches ``status``/``name``/``input`` in place; a :class:`ToolCallUpdate`
-    patches ``status``/``name``/``output``. Returns the newly created entry, or
-    ``None`` when the event patched an existing (or unknown) one.
+    patches ``status``/``name``/``output``/``input``. Returns the newly created
+    entry, or ``None`` when the event patched an existing (or unknown) one.
+
+    Both branches guard ``input`` with a plain truthiness test, and that is the
+    load-bearing part: the adapter announces a call with empty arguments and
+    supplies the real ones on a later update, so a later event must be able to
+    *fill* the field — but an update that carries no arguments must never erase
+    the ones an earlier event already supplied.
     """
     if isinstance(event, ToolCallEvent):
         tc = tc_map.get(event.tool_call_id)
@@ -388,6 +405,8 @@ def fold_tool_call_event(
                 tc["name"] = event.title
             if event.output:
                 tc["output"] = event.output
+            if event.input:
+                tc["input"] = event.input
     return None
 
 
@@ -1007,6 +1026,12 @@ class ACPClient:
                     status=update.get("status"),
                     title=update.get("title"),
                     output=update.get("output"),
+                    # Same seam as the ``tool_call`` branch above: the wire
+                    # spells arguments ``rawInput`` and every consumer reads
+                    # ``input`` (SEC-093). The ACP schema allows ``rawInput`` on
+                    # an update ("Update the raw input") and claude-agent-acp is
+                    # where a call's arguments actually become complete.
+                    input=normalize_tool_call(update)["input"],
                 )
             )
 
