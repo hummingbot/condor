@@ -11,6 +11,7 @@
 // as an argument for the same reason the components pass it down: the display
 // currency is a preference, and a fold that reached for it would be untestable.
 
+import type { Provenance } from "@/lib/agent-attribution";
 import type { BotRunInfo, ControllerInfo, ExecutorInfo } from "@/lib/api";
 import { controllerKey } from "@/lib/controller-identity";
 import { isExecutorActive, toMs } from "@/lib/formatters";
@@ -88,6 +89,17 @@ export interface PerfLeaf {
    * outside every namespace is honestly nobody's.
    */
   agent: string;
+  /**
+   * *How* `agent` was arrived at (FEAT-106), and `"none"` when it was not.
+   *
+   * Additive beside `agent`, never folded into it: a namespace answer is a
+   * proof (the tick's permission callback refused everything else) and a deed
+   * answer is a report (a record that could be stale). Nothing that reads
+   * `agent` needs to change, and the two surfaces that earn this — the row's
+   * provenance marker and the split of the old `Unattributed` bucket — read it
+   * instead of guessing from the run key.
+   */
+  how: Provenance;
   /** Which controller it belongs to; `""` for a leaf that belongs to none. */
   controllerId: string;
   /**
@@ -141,7 +153,11 @@ function finiteOr(value: unknown, fallback: number): number {
 }
 
 /** A live controller, as the browser reports it. */
-export function leafFromController(c: ControllerInfo, agent: string = ""): PerfLeaf {
+export function leafFromController(
+  c: ControllerInfo,
+  agent: string = "",
+  how: Provenance = "none",
+): PerfLeaf {
   const capital = finiteOr(c.config?.total_amount_quote, 0);
   const started = c.deployed_at ? Date.parse(c.deployed_at) : NaN;
   // The kill switch is what actually stops a controller; `status` in this
@@ -159,6 +175,7 @@ export function leafFromController(c: ControllerInfo, agent: string = ""): PerfL
     label: c.controller_id || c.controller_name,
     bot: c.bot_name,
     agent,
+    how,
     controllerId: c.controller_id || c.controller_name,
     // The specific class when it's known, else the coarse bucket
     // (`generic` / `directional_trading` / `market_making`) a terminated
@@ -209,6 +226,7 @@ export function leafFromTerminatedController(
   c: ControllerInfo,
   run?: BotRunInfo,
   agent: string = "",
+  how: Provenance = "none",
 ): PerfLeaf {
   const started = c.deployed_at ? Date.parse(c.deployed_at) : NaN;
   const stopped = run?.stopped_at ? Date.parse(run.stopped_at) : NaN;
@@ -218,6 +236,7 @@ export function leafFromTerminatedController(
     label: c.controller_id || c.controller_name,
     bot: c.bot_name,
     agent,
+    how,
     controllerId: c.controller_id || c.controller_name,
     // The specific class when it's known, else the coarse bucket
     // (`generic` / `directional_trading` / `market_making`) a terminated
@@ -267,6 +286,7 @@ export function leafFromExecutor(
   e: ExecutorInfo,
   bot: string = UNATTACHED_BOT,
   agent: string = "",
+  how: Provenance = "none",
 ): PerfLeaf {
   const running = isExecutorActive(e.status);
   const closedAt = e.close_timestamp > 0 ? toMs(e.close_timestamp) : null;
@@ -277,6 +297,7 @@ export function leafFromExecutor(
     label: e.id,
     bot: attached ? bot : e.controller_id || UNATTACHED_BOT,
     agent,
+    how,
     controllerId: attached ? e.controller_id || "" : "",
     executorType: e.type || UNKNOWN_LABEL,
     connector: e.connector || "",

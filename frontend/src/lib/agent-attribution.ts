@@ -123,18 +123,9 @@ export function inNamespace(name: string, ns: string): boolean {
  * family, and crediting only the base would strand its instances.
  */
 export function agentOfBot(owners: FleetOwner[], botName: string): string {
-  const name = stripDeploySuffix((botName || "").trim());
-  if (!name) return "";
-  const byLength = [...owners].sort((a, b) => b.namespace.length - a.namespace.length);
-  for (const owner of byLength) {
-    if (inNamespace(name, owner.namespace)) return owner.runKey;
-  }
-  for (const owner of byLength) {
-    if (owner.declaredBots.some((declared) => inNamespace(name, declared))) {
-      return owner.runKey;
-    }
-  }
-  return "";
+  // The name-only half of `attributionOf` below, which owns the rule: passing no
+  // deed index leaves exactly the two enforced rules, which is what this asks.
+  return attributionOf(owners, null, botName).runKey;
 }
 
 /**
@@ -153,6 +144,121 @@ export function agentOfControllerId(owners: FleetOwner[], controllerId: string):
     if (owner.agentIds.includes(id)) return owner.runKey;
   }
   return "";
+}
+
+// ── Whose trading is this, when no name proves it (FEAT-106) ──
+
+/**
+ * One record Condor wrote down about something it did (FEAT-105/106).
+ *
+ * The wire shape of `condor.agents.deed_index.OwnerRef`. `at` is epoch
+ * **seconds**, like every other timestamp the fleet map ships.
+ */
+export interface DeedRef {
+  /** `"condor.chat"`, `"brigado.delegation"`, `"directional_trader.ema_trend_loop"`. */
+  runKey: string;
+  /** The conversation id, the delegation task id, `"ui"`, or `"s3"`. */
+  runId: string;
+  at: number;
+}
+
+/**
+ * Everything `GET /agents/fleet-map` answers with: the rules, and the records.
+ *
+ * One object rather than two calls because they are one snapshot — an owner
+ * list and a deed index taken a poll apart could disagree about what is on
+ * disk, and the join below reads both.
+ */
+export interface FleetMap {
+  owners: FleetOwner[];
+  deeds: DeedIndex;
+}
+
+/** What Condor's own logs can attribute, and how far back they reach. */
+export interface DeedIndex {
+  /** Bot **base** names (no deploy suffix) → the run that made it. */
+  bots: Record<string, DeedRef>;
+  /**
+   * Epoch **seconds** before which Condor did not record everything it did, or
+   * `0` when it never has.
+   *
+   * The one timestamp that splits the old `Unattributed` bucket in two: a
+   * record older than this predates the ledger and cannot be judged; a record
+   * newer than it, with no deed, was made by something that is not Condor.
+   */
+  since: number;
+}
+
+/**
+ * *How* a record was attributed, which is not a detail.
+ *
+ * `namespace` and `declared` are **proofs**: the tick's permission callback
+ * refused everything else, so they cannot be wrong. `deed` is a **report**: it
+ * says what was recorded, and a record can be stale (a bot destroyed and its
+ * name reused). A reader deciding whether to stop a bot deserves to know which
+ * of the two they are looking at, which is why this rides beside the run key
+ * rather than being folded into it.
+ */
+export type Provenance = "namespace" | "declared" | "deed" | "none";
+
+/** A run key and the kind of evidence behind it. `""` exactly when `how` is `none`. */
+export interface Attribution {
+  runKey: string;
+  how: Provenance;
+}
+
+const UNOWNED: Attribution = { runKey: "", how: "none" };
+
+/** What a deed-attributed row says about itself when you ask it. */
+export const DEED_TITLE = "attributed by a recorded deed, not by name";
+
+/**
+ * The run that owns this record, and how we know — namespace, declared, deed.
+ *
+ * **The order is the whole rule.** Both enforced rules are tried before the
+ * index, because an enforced answer must never lose to an observed one: an
+ * agent's namespace still wins over any stray record naming the same bot. The
+ * `controllerId` fallback sits between them and the deeds for the same reason —
+ * a standalone executor's `agent_id` tag is enforced too (`risk.py`).
+ *
+ * The deed lookup is last and cheapest: one object lookup on a base name.
+ */
+export function attributionOf(
+  owners: FleetOwner[],
+  deeds: DeedIndex | null | undefined,
+  botName: string,
+  controllerId: string = "",
+): Attribution {
+  const name = stripDeploySuffix((botName || "").trim());
+  if (name) {
+    const byLength = [...owners].sort((a, b) => b.namespace.length - a.namespace.length);
+    for (const owner of byLength) {
+      if (inNamespace(name, owner.namespace)) return { runKey: owner.runKey, how: "namespace" };
+    }
+    for (const owner of byLength) {
+      if (owner.declaredBots.some((declared) => inNamespace(name, declared))) {
+        return { runKey: owner.runKey, how: "declared" };
+      }
+    }
+  }
+  const tagged = agentOfControllerId(owners, controllerId);
+  if (tagged) return { runKey: tagged, how: "namespace" };
+  const deed = name ? deeds?.bots?.[name] : undefined;
+  return deed ? { runKey: deed.runKey, how: "deed" } : UNOWNED;
+}
+
+/**
+ * What an agent row reports about its own evidence: `deed` only when every leaf
+ * under it agrees, so a mixed row never claims to be softer than it is.
+ *
+ * Structurally typed over `how` rather than over `PerfLeaf`, to keep this module
+ * free of the tree it feeds (the ARCH-300 split, and the reason every rule here
+ * is reachable from a test).
+ */
+export function provenanceOf(leaves: readonly { how?: Provenance }[]): Provenance {
+  if (leaves.length === 0) return "none";
+  const first = leaves[0].how ?? "none";
+  return leaves.every((leaf) => (leaf.how ?? "none") === first) ? first : "namespace";
 }
 
 /** The owner a run key names, or `undefined` when the map does not know it. */

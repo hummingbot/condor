@@ -1,4 +1,9 @@
-import type { AgentActionRow, FleetOwner } from "@/lib/agent-attribution";
+import type {
+  AgentActionRow,
+  DeedIndex,
+  FleetMap,
+  FleetOwner,
+} from "@/lib/agent-attribution";
 import { controllerKey } from "@/lib/controller-identity";
 import { collectCursorPages, type WalkOutcome } from "@/lib/history-pagination";
 
@@ -806,6 +811,18 @@ interface FleetOwnerWire {
     last_did: AgentActionRow | null;
     last_error: string;
   } | null;
+}
+
+/**
+ * The deed index's wire shape (FEAT-106), snake-cased like everything else here.
+ *
+ * Absent from an older backend, and the mapper below reads that as an empty
+ * index — which attributes nothing and judges nothing, exactly as the page
+ * behaved before this field existed.
+ */
+interface DeedIndexWire {
+  bots?: Record<string, { run_key: string; run_id?: string; at?: number }>;
+  since?: number;
 }
 
 export interface AgentSummary {
@@ -2753,9 +2770,11 @@ export const api = {
    * session of every strategy and is the most expensive read in the app. This
    * one makes no Hummingbot call at all, which is what lets `/bots` poll it.
    */
-  getFleetMap: async (): Promise<FleetOwner[]> => {
-    const data = await apiFetch<{ owners: FleetOwnerWire[] }>("/api/v1/agents/fleet-map");
-    return (data.owners ?? []).map((owner) => ({
+  getFleetMap: async (): Promise<FleetMap> => {
+    const data = await apiFetch<{ owners: FleetOwnerWire[]; deeds?: DeedIndexWire }>(
+      "/api/v1/agents/fleet-map",
+    );
+    const owners: FleetOwner[] = (data.owners ?? []).map((owner) => ({
       runKey: owner.run_key,
       agentSlug: owner.agent_slug,
       agentName: owner.agent_name,
@@ -2778,6 +2797,11 @@ export const api = {
           }
         : null,
     }));
+    const deeds: DeedIndex = { bots: {}, since: data.deeds?.since ?? 0 };
+    for (const [name, ref] of Object.entries(data.deeds?.bots ?? {})) {
+      deeds.bots[name] = { runKey: ref.run_key, runId: ref.run_id ?? "", at: ref.at ?? 0 };
+    }
+    return { owners, deeds };
   },
 
   getAgent: (slug: string) =>

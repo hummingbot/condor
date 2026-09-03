@@ -1,17 +1,21 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  agentBucket,
   agentOptions,
+  BEFORE_LEDGER,
+  BEFORE_LEDGER_LABEL,
   inRun,
   matchesAgents,
+  OUTSIDE,
+  OUTSIDE_LABEL,
   parseRunParam,
   runChipLabel,
   runOwner,
   runParam,
   runRecords,
-  UNATTRIBUTED,
-  UNATTRIBUTED_LABEL,
 } from "./agentFilter";
+import type { DeedIndex } from "@/lib/agent-attribution";
 import type { DeploymentRow } from "@/lib/api";
 import type { PerfLeaf } from "@/lib/perf-tree";
 
@@ -22,6 +26,7 @@ function leaf(over: Partial<PerfLeaf> = {}): PerfLeaf {
     label: "ctrl-1",
     bot: "brigado-brl_mm-20260807-022130",
     agent: "brigado.brl_mm",
+    how: "namespace",
     controllerId: "ctrl-1",
     executorType: "pmm_simple",
     connector: "binance",
@@ -42,6 +47,9 @@ function leaf(over: Partial<PerfLeaf> = {}): PerfLeaf {
     ...over,
   };
 }
+
+/** An install whose log became complete at epoch second 1000. */
+const LEDGER: DeedIndex = { bots: {}, since: 1_000 };
 
 function row(over: Partial<DeploymentRow> = {}): DeploymentRow {
   return {
@@ -72,18 +80,23 @@ describe("agentOptions", () => {
     ]);
   });
 
-  it("buckets the leaves nobody owns under Unattributed, last", () => {
-    const options = agentOptions([
-      leaf({ agent: "" }),
-      leaf({ agent: "" }),
-      leaf({ agent: "brigado.brl_mm" }),
-    ]);
-    expect(options.map((o) => o.value)).toEqual(["brigado.brl_mm", UNATTRIBUTED]);
-    expect(options[1]).toEqual({ value: UNATTRIBUTED, label: UNATTRIBUTED_LABEL, count: 2 });
+  it("splits what nobody owns into two buckets, both after the named ones", () => {
+    const options = agentOptions(
+      [
+        leaf({ agent: "", how: "none", startedAt: 2_000_000 }),
+        leaf({ agent: "", how: "none", startedAt: 500 }),
+        leaf({ agent: "", how: "none", startedAt: 900 }),
+        leaf({ agent: "brigado.brl_mm" }),
+      ],
+      LEDGER,
+    );
+    expect(options.map((o) => o.value)).toEqual(["brigado.brl_mm", OUTSIDE, BEFORE_LEDGER]);
+    expect(options[1]).toEqual({ value: OUTSIDE, label: OUTSIDE_LABEL, count: 1 });
+    expect(options[2]).toEqual({ value: BEFORE_LEDGER, label: BEFORE_LEDGER_LABEL, count: 2 });
   });
 
-  it("draws no Unattributed bubble when everything is attributed", () => {
-    const options = agentOptions([leaf({ agent: "brigado.brl_mm" })]);
+  it("draws neither unowned bubble when everything is attributed", () => {
+    const options = agentOptions([leaf({ agent: "brigado.brl_mm" })], LEDGER);
     expect(options.map((o) => o.value)).toEqual(["brigado.brl_mm"]);
   });
 
@@ -103,9 +116,31 @@ describe("matchesAgents", () => {
     expect(matchesAgents(leaf({ agent: "alpha.scalper" }), ["brigado.brl_mm"])).toBe(false);
   });
 
-  it("makes Unattributed a real choice, not an omission", () => {
-    expect(matchesAgents(leaf({ agent: "" }), [UNATTRIBUTED])).toBe(true);
-    expect(matchesAgents(leaf({ agent: "brigado.brl_mm" }), [UNATTRIBUTED])).toBe(false);
+  it("makes each unowned bucket a real choice, not an omission", () => {
+    const outside = leaf({ agent: "", how: "none", startedAt: 2_000_000 });
+    const older = leaf({ agent: "", how: "none", startedAt: 500 });
+    expect(matchesAgents(outside, [OUTSIDE], LEDGER)).toBe(true);
+    expect(matchesAgents(older, [OUTSIDE], LEDGER)).toBe(false);
+    expect(matchesAgents(older, [BEFORE_LEDGER], LEDGER)).toBe(true);
+    expect(matchesAgents(leaf({ agent: "brigado.brl_mm" }), [BEFORE_LEDGER], LEDGER)).toBe(false);
+  });
+});
+
+describe("agentBucket", () => {
+  it("keeps an owned leaf under its own run, whatever the ledger says", () => {
+    expect(agentBucket(leaf({ agent: "brigado.brl_mm" }), LEDGER)).toBe("brigado.brl_mm");
+  });
+
+  it("calls a record made after the log was complete what it is", () => {
+    expect(agentBucket(leaf({ agent: "", startedAt: 1_000_001 }), LEDGER)).toBe(OUTSIDE);
+  });
+
+  it("refuses to accuse a record it cannot judge", () => {
+    // Older than the cut, no start time at all, and an install whose log has
+    // never been complete: three ways to know nothing, one honest answer.
+    expect(agentBucket(leaf({ agent: "", startedAt: 999 }), LEDGER)).toBe(BEFORE_LEDGER);
+    expect(agentBucket(leaf({ agent: "", startedAt: null }), LEDGER)).toBe(BEFORE_LEDGER);
+    expect(agentBucket(leaf({ agent: "", startedAt: 9_000_000 }), null)).toBe(BEFORE_LEDGER);
   });
 });
 

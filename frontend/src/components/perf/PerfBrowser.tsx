@@ -31,6 +31,7 @@ import { DetailPanel } from "@/components/perf/ExecutorTable";
 import { ExecutorRows, StopConfirmDialog } from "@/components/perf/ExecutorRows";
 import { useExecutorStop } from "@/components/perf/executorActions";
 import {
+  agentBucketLabel,
   agentOptions,
   inRun,
   matchesAgents,
@@ -38,8 +39,6 @@ import {
   runChipLabel,
   runOwner,
   runRecords,
-  UNATTRIBUTED,
-  UNATTRIBUTED_LABEL,
 } from "@/components/perf/agentFilter";
 import { BubbleGroup, type BubbleOption } from "@/components/perf/FilterBubbles";
 import { PopulationToggle } from "@/components/perf/PopulationToggle";
@@ -100,13 +99,12 @@ import { dropDeletedRunQueries } from "@/lib/run-deletion";
 import type { ConvertFn } from "@/lib/rates";
 import { useViewFacts } from "@/lib/viewFacts";
 import {
-  agentOfBot,
-  agentOfControllerId,
+  attributionOf,
   loopFacts,
   loopStatus,
   ownerOf,
   ownerTitle,
-  runKeyLabel,
+  type DeedIndex,
   type FleetOwner,
 } from "@/lib/agent-attribution";
 import { AgentScopeHeader } from "./AgentScopeHeader";
@@ -277,6 +275,15 @@ interface PerfBrowserProps {
    * unattributed, the agent level collapses, and the page is what it was.
    */
   owners?: FleetOwner[];
+  /**
+   * What Condor recorded itself doing (FEAT-106) — the descriptive half.
+   *
+   * `null` is the honest default and degrades the same way `owners` does: no
+   * deeds means nothing is attributed by record, and every unowned leaf reads
+   * *Before the ledger*, which is what an install with no log can truthfully
+   * say about itself.
+   */
+  deeds?: DeedIndex | null;
   rateFormatPnl?: (val: number, quote: string) => string;
   rateFormatValue?: (val: number, quote: string) => string;
   rateFormatDetailed?: (val: number, quote: string) => string;
@@ -433,6 +440,7 @@ export function PerfBrowser({
   runs = [],
   terminatedControllers = [],
   owners = EMPTY_OWNERS,
+  deeds = null,
   rateFormatPnl,
   rateFormatValue,
   rateFormatDetailed,
@@ -726,9 +734,10 @@ export function PerfBrowser({
       const all: PerfLeaf[] = [];
       const botOf = (ex: ExecutorInfo) => botByController.get(ex.controller_id) ?? UNATTACHED_BOT;
       /**
-       * The `(agent, strategy)` a record belongs to, by the two links the
-       * runtime actually enforces — the bot's namespace, and the session id a
-       * standalone executor is tagged with (`lib/agent-attribution`, FEAT-096).
+       * The run a record belongs to **and how we know**: the two links the
+       * runtime enforces — the bot's namespace, and the session id a standalone
+       * executor is tagged with — then, only if neither answers, the record
+       * Condor kept of its own deeds (`lib/agent-attribution`, FEAT-096/106).
        *
        * Bot name first: a controller is attributed through its bot, and an
        * executor working under one inherits that answer, so the `controller_id`
@@ -736,7 +745,7 @@ export function PerfBrowser({
        * agent-created one, whose `controller_id` *is* its session's agent id.
        */
       const agentOf = (bot: string, controllerId: string) =>
-        agentOfBot(owners, bot) || agentOfControllerId(owners, controllerId);
+        attributionOf(owners, deeds, bot, controllerId);
       /**
        * The bot a *closed* executor hung under, by the run that opened it.
        *
@@ -754,11 +763,15 @@ export function PerfBrowser({
         return owner ?? botByController.get(ex.controller_id) ?? UNATTACHED_BOT;
       };
       if (which === "running") {
-        for (const c of controllers) all.push(leafFromController(c, agentOf(c.bot_name, "")));
+        for (const c of controllers) {
+          const att = agentOf(c.bot_name, "");
+          all.push(leafFromController(c, att.runKey, att.how));
+        }
         for (const ex of executors) {
           if (!isExecutorActive(ex.status)) continue;
           const bot = botOf(ex);
-          all.push(leafFromExecutor(ex, bot, agentOf(bot, ex.controller_id)));
+          const att = agentOf(bot, ex.controller_id);
+          all.push(leafFromExecutor(ex, bot, att.runKey, att.how));
         }
       } else {
         // The window applies to what has finished, and is measured from each
@@ -770,7 +783,8 @@ export function PerfBrowser({
           if (isExecutorActive(ex.status)) continue;
           const started = ex.timestamp > 0 ? toMs(ex.timestamp) : null;
           const bot = closedBotOf(ex, started);
-          const leaf = leafFromExecutor(ex, bot, agentOf(bot, ex.controller_id));
+          const att = agentOf(bot, ex.controller_id);
+          const leaf = leafFromExecutor(ex, bot, att.runKey, att.how);
           if (cutoff && leaf.endedAt !== null && leaf.endedAt < cutoff) continue;
           all.push(leaf);
         }
@@ -781,10 +795,12 @@ export function PerfBrowser({
         // reaches, so a finished bot reports what it actually did rather than
         // whatever fraction of its executors is still in the table.
         for (const ctrl of terminatedControllers) {
+          const att = agentOf(ctrl.bot_name, "");
           const leaf = leafFromTerminatedController(
             ctrl,
             runByBot.get(ctrl.bot_name),
-            agentOf(ctrl.bot_name, ""),
+            att.runKey,
+            att.how,
           );
           if (cutoff && leaf.endedAt !== null && leaf.endedAt < cutoff) continue;
           all.push(leaf);
@@ -801,6 +817,7 @@ export function PerfBrowser({
       botByController,
       attribute,
       owners,
+      deeds,
       period,
       now,
     ],
@@ -868,7 +885,7 @@ export function PerfBrowser({
       return all.filter((leaf) => {
         if (!matchesGrain(leaf, grain)) return false;
         if (pair && !leaf.pair.toLowerCase().includes(pair)) return false;
-        if (!matchesAgents(leaf, agents)) return false;
+        if (!matchesAgents(leaf, agents, deeds)) return false;
         // The run is a URL parameter rather than a bubble, but it narrows the
         // same population by the same rule, so it belongs in the same pass.
         if (!inRun(leaf, runFilter)) return false;
@@ -885,7 +902,7 @@ export function PerfBrowser({
         return true;
       });
     },
-    [filters, classOf, runFilter, grain],
+    [filters, classOf, runFilter, grain, deeds],
   );
 
   /** The population as it stands, and what the bubbles left of it. */
@@ -932,9 +949,9 @@ export function PerfBrowser({
       // Every leaf, controller and executor alike: the question is "whose is
       // this", and a leaf's owner is a fact about it rather than about its
       // class, so there is no double-counting to avoid here.
-      agents: agentOptions(rawLeaves),
+      agents: agentOptions(rawLeaves, deeds),
     };
-  }, [rawLeaves, classOf]);
+  }, [rawLeaves, classOf, deeds]);
 
   const filtersActive =
     !!filters.pair.trim() ||
@@ -1804,9 +1821,7 @@ export function PerfBrowser({
       // reader ticked rather than the run keys underneath them.
       picked(
         "agent",
-        filters.agents.map((value) =>
-          value === UNATTRIBUTED ? UNATTRIBUTED_LABEL.toLowerCase() : runKeyLabel(value),
-        ),
+        filters.agents.map((value) => agentBucketLabel(value).toLowerCase()),
       ),
       // The run is a filter like any other, and one the reader did not tick —
       // it arrived in a link — so it is the one that most needs saying.

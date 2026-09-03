@@ -1,7 +1,7 @@
 import { Activity, Bot, ChevronDown, ChevronRight, Circle, Layers, Server } from "lucide-react";
 import { useMemo, type ReactNode } from "react";
 
-import { runKeyLabel } from "@/lib/agent-attribution";
+import { DEED_TITLE, provenanceOf, runKeyLabel } from "@/lib/agent-attribution";
 import { agentColor } from "@/lib/agentColor";
 import { formatCurrencyPnl, formatCurrencyVolume, pnlColor, shortBotName } from "@/lib/formatters";
 import type { ConvertQuote, PerfNode } from "@/lib/perf-tree";
@@ -182,6 +182,9 @@ function ScopeRow({
   // Each row shows what its own subtree adds up to, through the same fold the
   // report pane uses — a row and the pane it opens cannot disagree.
   const totals = useMemo(() => foldLeaves(node.leaves, cv, now), [node.leaves, cv, now]);
+  // Only an agent row makes a claim about *who*, so only an agent row qualifies
+  // it. Every leaf under it has to agree, or the row would understate itself.
+  const byDeed = node.kind === "agent" && provenanceOf(node.leaves) === "deed";
   const hasChildren = node.children.length > 0;
   const isOpen = open.has(node.id);
   const action = renderAction?.(node);
@@ -249,6 +252,19 @@ function ScopeRow({
             >
               {rowLabel(node)}
             </span>
+            {/* A namespace answer is a proof and a deed answer is a report, and
+                a reader about to stop a bot deserves to know which one they are
+                looking at (FEAT-106). Subtle on purpose: it qualifies the row,
+                it does not compete with it. */}
+            {byDeed && (
+              <span
+                className="shrink-0 text-[10px] leading-none text-[var(--color-text-muted)]"
+                title={DEED_TITLE}
+                aria-label={DEED_TITLE}
+              >
+                °
+              </span>
+            )}
             <span
               className="ml-auto shrink-0 tabular-nums text-[11px] font-semibold"
               style={{ color: pnlColor(totals.net) }}

@@ -100,11 +100,11 @@ export function Bots() {
    * Not server-scoped: an agent owns its namespace wherever its bots run, and
    * the map is what proves ownership rather than what reports trading.
    *
-   * On failure the page simply has no agents in it — `owners` is `[]`, every
-   * leaf is unattributed, the level collapses, and `/bots` is byte-identical to
-   * what it was before this feature.
+   * On failure the page simply has no agents in it — `owners` is `[]` and the
+   * deed index is empty, every leaf is unattributed, the level collapses, and
+   * `/bots` is byte-identical to what it was before this feature.
    */
-  const { data: owners } = useQuery({
+  const { data: fleet } = useQuery({
     queryKey: ["fleet-map"],
     queryFn: () => api.getFleetMap(),
     refetchInterval: 5000,
@@ -427,7 +427,8 @@ export function Bots() {
       paging={paging}
       runs={runsData?.runs ?? []}
       terminatedControllers={terminatedData?.controllers ?? []}
-      owners={owners ?? EMPTY_OWNERS}
+      owners={fleet?.owners ?? EMPTY_OWNERS}
+      deeds={fleet?.deeds ?? null}
       rateFormatPnl={formatPnlValue}
       rateFormatValue={formatValue}
       rateFormatDetailed={formatValueDetailed}

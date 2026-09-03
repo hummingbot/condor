@@ -17,55 +17,105 @@
 
 import type { BubbleOption } from "@/components/perf/FilterBubbles";
 import type { DeploymentRow } from "@/lib/api";
-import { inNamespace, runKeyLabel, stripDeploySuffix } from "@/lib/agent-attribution";
+import {
+  inNamespace,
+  runKeyLabel,
+  stripDeploySuffix,
+  type DeedIndex,
+} from "@/lib/agent-attribution";
 import type { PerfLeaf } from "@/lib/perf-tree";
 
 /**
- * The bubble value that means "owned by no agent".
+ * The two bubble values for a leaf no run owns (FEAT-106).
  *
  * `PerfLeaf.agent` is `""` for a leaf nobody owns, and `""` cannot be a bubble
  * value: an empty selection is how every group on this page says *everything*,
  * so an option carrying `""` would be indistinguishable from not being ticked.
- * The leading space keeps it out of the run-key namespace for good — a run key
- * is `{agentSlug}.{strategySlug}` and neither slug can begin with one.
+ * The leading space keeps them out of the run-key namespace for good — a run
+ * key is `{agentSlug}.{strategySlug}` and neither slug can begin with one.
+ *
+ * There used to be one of these, called `Unattributed`, and it was doing the
+ * work of two unrelated facts: *something outside Condor made this*, and
+ * *Condor made things before it wrote them down and this may be one of them*.
+ * The first is a real and useful category; the second is a number that visibly
+ * drains to zero as the ledger fills. Folded together they were just a mystery.
  */
-export const UNATTRIBUTED = " none";
-
-/** What the Unattributed bubble is called, spelled the way the question is asked. */
-export const UNATTRIBUTED_LABEL = "Unattributed";
+export const OUTSIDE = " outside";
+export const OUTSIDE_LABEL = "Outside Condor";
+export const BEFORE_LEDGER = " pre";
+export const BEFORE_LEDGER_LABEL = "Before the ledger";
 
 /**
- * One bubble per attributed `(agent, strategy)`, plus Unattributed.
+ * Which bucket an unowned leaf falls in: the cut is one timestamp.
+ *
+ * `deeds.since` is the earliest deed Condor recorded through the doors that
+ * record *everything* (FEAT-105). A record older than that predates the ledger
+ * and cannot be judged; a record newer than it, with no deed, was made by
+ * something that is not Condor. That is an inference from a fact, not a
+ * time-window guess — the guess this page has refused in writing since
+ * FEAT-101.
+ *
+ * Two ways to end up unjudgeable, and both read *Before the ledger*: an install
+ * whose log has never been complete (`since` is 0), and a record that does not
+ * say when it started. Never accusing something of being outside Condor on
+ * missing evidence is the conservative direction, and the right one.
+ */
+export function agentBucket(leaf: PerfLeaf, deeds: DeedIndex | null | undefined): string {
+  if (leaf.agent) return leaf.agent;
+  const since = deeds?.since ?? 0;
+  if (since <= 0 || leaf.startedAt === null) return BEFORE_LEDGER;
+  // `since` is epoch seconds (the wire's convention); a leaf's is epoch ms.
+  return leaf.startedAt >= since * 1000 ? OUTSIDE : BEFORE_LEDGER;
+}
+
+/** What a bucket value is called on screen, run keys included. */
+export function agentBucketLabel(value: string): string {
+  if (value === OUTSIDE) return OUTSIDE_LABEL;
+  if (value === BEFORE_LEDGER) return BEFORE_LEDGER_LABEL;
+  return runKeyLabel(value);
+}
+
+/**
+ * One bubble per attributed run, plus the two unowned buckets.
  *
  * Counted over whatever population it is handed — the caller passes the
  * *unfiltered* leaves, like the type groups beside it, so a bubble never
  * renumbers itself as a consequence of being ticked.
  *
- * Unattributed sorts last rather than alphabetically: it is the bucket for
- * everything the fleet map could not credit, not one more owner, and on a real
- * server it is usually the biggest. Naming it after the named ones keeps the
- * agents readable as a list.
+ * The unowned buckets sort last rather than alphabetically: they are what the
+ * fleet could not credit, not two more owners, and on a real server they are
+ * usually the biggest. Naming them after the named runs keeps the runs readable
+ * as a list. Between themselves, *Outside Condor* comes first: it is the one
+ * that is a standing fact, and *Before the ledger* is the one that drains.
  */
-export function agentOptions(leaves: readonly PerfLeaf[]): BubbleOption[] {
+export function agentOptions(
+  leaves: readonly PerfLeaf[],
+  deeds: DeedIndex | null | undefined = null,
+): BubbleOption[] {
   const counts = new Map<string, number>();
   for (const leaf of leaves) {
-    const value = leaf.agent || UNATTRIBUTED;
+    const value = agentBucket(leaf, deeds);
     counts.set(value, (counts.get(value) ?? 0) + 1);
   }
+  const unowned = new Set<string>([OUTSIDE, BEFORE_LEDGER]);
   const named = [...counts]
-    .filter(([value]) => value !== UNATTRIBUTED)
+    .filter(([value]) => !unowned.has(value))
     .map(([value, count]) => ({ value, label: runKeyLabel(value), count }))
     .sort((a, b) => a.label.localeCompare(b.label));
-  const none = counts.get(UNATTRIBUTED);
-  return none === undefined
-    ? named
-    : [...named, { value: UNATTRIBUTED, label: UNATTRIBUTED_LABEL, count: none }];
+  const tail = [OUTSIDE, BEFORE_LEDGER]
+    .filter((value) => counts.has(value))
+    .map((value) => ({ value, label: agentBucketLabel(value), count: counts.get(value)! }));
+  return [...named, ...tail];
 }
 
 /** Whether a leaf survives the agent bubbles. An empty selection filters nothing. */
-export function matchesAgents(leaf: PerfLeaf, agents: readonly string[]): boolean {
+export function matchesAgents(
+  leaf: PerfLeaf,
+  agents: readonly string[],
+  deeds: DeedIndex | null | undefined = null,
+): boolean {
   if (agents.length === 0) return true;
-  return agents.includes(leaf.agent || UNATTRIBUTED);
+  return agents.includes(agentBucket(leaf, deeds));
 }
 
 /**
