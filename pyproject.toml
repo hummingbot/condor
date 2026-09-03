@@ -25,6 +25,7 @@ dependencies = [
     "beautifulsoup4>=4.14.3",
     "markdown>=3.10.2",
     "bleach>=6.4.0",
+    "yfinance>=1.7.0",
 ]
 
 [dependency-groups]
