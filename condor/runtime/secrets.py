@@ -40,6 +40,17 @@ this shape, and it fails on exactly the paste that is only the key.
 Stated plainly, and deliberately: **an EVM private key pasted into free text
 reaches the model and the transcript.** The bot warns; it does not prevent.
 
+**This module only ever sees text.** A key that arrives as a *picture* — the
+screenshot of a wallet export, of a terminal, of a dashboard panel — reaches the
+model and the transcript with nothing here looking at it, because nothing here
+can: an attached image travels beside the text and never through
+:func:`redact` (FEAT-098). Stated here rather than left for a user to discover,
+since this is where the guarantee is written down. It is accepted, not solved —
+OCR-ing every upload to feed a regex is disproportionate to the risk and would
+put a second, worse guesser in the ingress path — and the boundary is worth
+knowing when reading the promise above: **the bot warns about what you type; it
+sees nothing of what you paste as an image.**
+
 **A Finding never carries the value.** It carries offsets, so a finding can be
 logged, counted and put in telemetry without becoming the leak it exists to
 prevent. A caller that needs the bytes slices ``text[start:end]`` itself, and
