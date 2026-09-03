@@ -51,6 +51,11 @@ function NodeIcon({ node, active }: { node: PerfNode; active: boolean }) {
     );
   }
   if (node.kind === "bot") return <Server className={`h-3.5 w-3.5 shrink-0 ${tone}`} />;
+  // A bucket of executors nobody claims wears the executor's own glyph at the
+  // parent size: it holds executors and nothing else, and the honest thing for
+  // it to say is which. `Layers` would read as a second fleet, and `Server` as
+  // a bot — which is exactly what it is not.
+  if (node.kind === "group") return <Activity className={`h-3.5 w-3.5 shrink-0 ${tone}`} />;
   if (node.kind === "executor") return <Activity className={`h-3 w-3 shrink-0 ${tone}`} />;
   // A controller's marker is its state, which is the one thing the icon slot
   // can say that the label beside it cannot.
@@ -85,6 +90,11 @@ function subtitle(node: PerfNode, showBot: boolean): string {
     }
     case "bot":
       return `${n} controller${n !== 1 ? "s" : ""}`;
+    // Counted in executors, because that is all a group ever holds: it exists
+    // precisely for the leaves no controller claims, so the bot row's wording
+    // would name a level that is not there.
+    case "group":
+      return `${n} executor${n !== 1 ? "s" : ""}`;
     case "controller": {
       const leaf = node.leaves[0];
       return [
@@ -124,7 +134,11 @@ interface RowProps {
  * happens here rather than in the tree.
  */
 function rowLabel(node: PerfNode): string {
-  if (node.kind === "bot") return shortBotName(node.label);
+  // A group's label is the controller id its executors carry, which is `main`
+  // for a hand-opened position but a bot-shaped name for one a stopped
+  // deployment left behind — so it gets the same shortening, which is a no-op
+  // for everything that is not one.
+  if (node.kind === "bot" || node.kind === "group") return shortBotName(node.label);
   // An agent row's label is its run key, which is its id — said out loud as
   // `agent / strategy`, the same two slugs the bot names beneath it are built
   // from, so the column can be matched by eye.

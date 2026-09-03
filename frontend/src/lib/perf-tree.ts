@@ -339,10 +339,10 @@ export function controllerClassOf(leaf: PerfLeaf, classById: Map<string, string>
 
 // ── The tree ──
 
-export type NodeKind = "fleet" | "agent" | "bot" | "controller" | "executor";
+export type NodeKind = "fleet" | "agent" | "bot" | "controller" | "executor" | "group";
 
 export interface PerfNode {
-  /** `all` | `agent:runKey` | `bot:name` | `ctrl:k` | `exec:id` */
+  /** `all` | `agent:runKey` | `bot:name` | `grp:name` | `ctrl:k` | `exec:id` */
   id: string;
   kind: NodeKind;
   label: string;
@@ -380,11 +380,34 @@ export function controllerNodeId(leaf: PerfLeaf): string | null {
  * "None" is exactly the leaf that belongs to no controller either — a position
  * opened by hand from `/trade`, filed under its own controller id as its bot
  * (see {@link leafFromExecutor}). There is no deployment behind it to stop, so
- * grouping it under a bot row would offer a Stop button for a bot that does not
- * exist; it hangs off the fleet, as it did before the level came back.
+ * it is not a bot's, and this keeps returning `null` for it: the contract is
+ * "the bot a leaf hangs under", and `fallbackChain` reads it as one. What such
+ * a leaf hangs under instead is a bucket — see {@link groupNodeId}.
  */
 export function botNodeId(leaf: PerfLeaf): string | null {
   return controllerNodeId(leaf) === null ? null : `bot:${leaf.bot}`;
+}
+
+/**
+ * The node id of the bucket a leaf that belongs to no controller hangs under,
+ * or `null` for every leaf that does belong to one.
+ *
+ * These are the hand-opened positions, and on the terminated side of a real
+ * server there are dozens of them: 42 bare executor ids drawn at depth 0, ahead
+ * of the 85 bot rows the reader came for, with no chevron to fold them away
+ * because a row with no children has none. They are not anonymous, though —
+ * each is filed under the controller id it carries as its bot (`main`, for one
+ * opened from `/trade`), which is the key this returns.
+ *
+ * A `grp:` prefix of its own rather than `bot:` is what keeps the bucket from
+ * *becoming* a bot: `botOfNodeId` matches `bot:` and `ctrl:` only, so the
+ * sidebar's Stop button and the header's run actions cannot reach a deployment
+ * that does not exist, by construction rather than by a check someone has to
+ * remember. `countNodes(tree, "bot")` stays honest for the same reason — the
+ * `Select all` line would otherwise report 86 bots for a fleet running 85.
+ */
+export function groupNodeId(leaf: PerfLeaf): string | null {
+  return controllerNodeId(leaf) === null ? `grp:${leaf.bot}` : null;
 }
 
 /**
@@ -450,10 +473,16 @@ function makeNode(id: string, kind: NodeKind, label: string): PerfNode {
  * executor it created, which has no controller and therefore no bot, hangs off
  * the agent directly instead of off the fleet.
  *
- * An executor whose controller is gone *and* whose agent is unknown still
- * hangs directly off the fleet, at every setting: it belongs to no deployment
- * and to nobody, so there is no row above it that would say anything (see
- * {@link botNodeId}).
+ * An executor whose controller is gone *and* whose agent is unknown belongs to
+ * no deployment and to nobody, but it is not nameless: it hangs under a
+ * **group** row named for the controller id it carries (see
+ * {@link groupNodeId}), so the dozens of hand-opened positions on a real
+ * server's terminated side are one collapsible row rather than dozens of bare
+ * ids drawn at the same indentation as a bot. It is a level rather than a bot
+ * because there is no deployment behind it to stop, and a kind of its own
+ * because the counts that say "N bots" must keep meaning it. The group level
+ * follows `groupByBot`, so the flat tree still hangs those executors off the
+ * fleet directly.
  */
 export function buildTree(
   leaves: PerfLeaf[],
@@ -463,6 +492,7 @@ export function buildTree(
   const fleet = makeNode("all", "fleet", rootLabel);
   const agents = new Map<string, PerfNode>();
   const bots = new Map<string, PerfNode>();
+  const groups = new Map<string, PerfNode>();
   const controllers = new Map<string, PerfNode>();
 
   // Insertion order once more: the first record an agent owns is what puts it
@@ -500,6 +530,31 @@ export function buildTree(
     return node;
   };
 
+  // The bucket for the executors nobody claims, built exactly as `botFor` is:
+  // memoised, created the first time one is seen, and pushed onto the fleet in
+  // that order — so it lands wherever its first executor was, which on the
+  // terminated side is still ahead of the bot rows. That is one collapsible row
+  // rather than 42, which was the whole complaint; sorting the fleet's children
+  // is a separate question.
+  //
+  // Off when `groupByBot` is off, for the same reason the bot level is: a fleet
+  // running a single bot would spend a chevron saying so, and the flat tree
+  // keeps the shape its tests already pin.
+  const groupFor = (leaf: PerfLeaf): PerfNode | null => {
+    if (!groupByBot) return null;
+    const id = groupNodeId(leaf);
+    if (!id) return null;
+    let node = groups.get(id);
+    if (!node) {
+      // The controller id the executor carries, said out loud — `main`, for a
+      // position opened by hand. It is the one name the record has.
+      node = makeNode(id, "group", leaf.bot);
+      groups.set(id, node);
+      fleet.children.push(node);
+    }
+    return node;
+  };
+
   // Insertion order is the caller's order, which is the order the sidebar
   // draws — the page sorts its controllers before handing them over.
   const controllerFor = (leaf: PerfLeaf): PerfNode | null => {
@@ -529,8 +584,10 @@ export function buildTree(
     node.leaves = [leaf];
     // A standalone executor an agent created has no controller and no bot, and
     // this is where it stops being a mystery row on the fleet root: it hangs
-    // off the agent whose session tagged it.
-    const parent = controllerFor(leaf) ?? agentFor(leaf) ?? fleet;
+    // off the agent whose session tagged it. The agent is asked before the
+    // bucket because it is the better answer — an owner, not a filing key — and
+    // an executor it owns is never left over for the bucket to hold.
+    const parent = controllerFor(leaf) ?? agentFor(leaf) ?? groupFor(leaf) ?? fleet;
     parent.children.push(node);
   }
 
@@ -678,6 +735,13 @@ export function fallbackChain(scopeId: string, leaf?: PerfLeaf): string[] {
   // fleet. Read off the id, so it serves a `ctrl:` scope with no leaf to hand.
   const bot = botOfNodeId(scopeId) ?? (leaf ? botNodeId(leaf)?.slice(4) : undefined);
   if (bot) chain.push(`bot:${bot}`);
+  // The bucket the leaf hangs in when no controller claims it, which is that
+  // same candidate one level up: without it an executor row a filter removed
+  // falls all the way back to the fleet rather than to the group it was sitting
+  // in. Only a leaf can supply it, since a group is not an ancestry an executor
+  // id spells out; a group scope answers for itself as the head of the chain.
+  const group = leaf ? groupNodeId(leaf) : null;
+  if (group) chain.push(group);
   // And the agent above it, same rule: a bot row that a filter removed leaves
   // the reader on the agent that operates it rather than on the whole fleet.
   // Only a leaf can supply it — a `bot:`/`ctrl:` id names a bot, and a bot's
@@ -713,6 +777,9 @@ export function fallbackChain(scopeId: string, leaf?: PerfLeaf): string[] {
  */
 function nodeDepth(id: string): number {
   if (id.startsWith("agent:")) return 1;
+  // A child of the fleet, like an agent row — and never an ancestor of a
+  // controller, since the leaves it holds belong to none.
+  if (id.startsWith("grp:")) return 1;
   if (id.startsWith("bot:")) return 2;
   if (id.startsWith("ctrl:")) return 3;
   if (id.startsWith("exec:")) return 4;

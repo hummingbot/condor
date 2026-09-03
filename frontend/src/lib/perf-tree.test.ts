@@ -23,6 +23,7 @@ import {
   controllerNodeId,
   countNodes,
   foldLeaves,
+  groupNodeId,
   indexTree,
   leafFromController,
   leafFromExecutor,
@@ -418,17 +419,112 @@ describe("buildTree, grouping by bot", () => {
     expect(foldLeaves(tree.leaves, identity, NOW).net).toBe(36);
   });
 
-  // A hand-opened position belongs to no deployment, so there is no bot to
-  // stop and no row to hang it under.
-  it("leaves an executor that belongs to no controller off the fleet directly", () => {
+  // A hand-opened position belongs to no deployment, so there is still no bot
+  // to stop — which is why it gets a `grp:` row and not a `bot:` one, rather
+  // than why it used to get no row at all. That reason is spent: the bucket is
+  // a kind of its own, and no code path offers a bot's actions to it.
+  it("gathers the executors that belong to no controller under one group row", () => {
     const leaf = leafFromExecutor(executor({ id: "manual", controller_id: "main" }));
+    const other = leafFromExecutor(executor({ id: "manual_2", controller_id: "main" }));
     expect(botNodeId(leaf)).toBeNull();
+    expect(groupNodeId(leaf)).toBe("grp:main");
     const tree = buildTree(
-      [leafFromController(controller()), leaf],
+      [leafFromController(controller()), leaf, other],
       "All",
       { groupByBot: true },
     );
-    expect(tree.children.map((c) => c.id)).toEqual(["bot:alpha", "exec:manual"]);
+    expect(tree.children.map((c) => c.id)).toEqual(["bot:alpha", "grp:main"]);
+    const group = node(tree, "grp:main");
+    expect(group.kind).toBe("group");
+    expect(group.label).toBe("main");
+    expect(group.children.map((c) => c.id)).toEqual(["exec:manual", "exec:manual_2"]);
+  });
+
+  // The bucket must not become a second place the same trading is counted: it
+  // carries no leaf of its own, so it folds its executors' spines, once each.
+  it("folds a group out of its executors and leaves the fleet total alone", () => {
+    const loose = [
+      leafFromExecutor(executor({ id: "manual", pnl: 5, controller_id: "main" })),
+      leafFromExecutor(executor({ id: "manual_2", pnl: 7, controller_id: "main" })),
+    ];
+    const leaves = [leafFromController(controller()), ...loose];
+    const grouped = buildTree(leaves, "All", { groupByBot: true });
+    expect(foldLeaves(node(grouped, "grp:main").leaves, identity, NOW).net).toBe(12);
+    // The same leaves, grouped and flat, add up to the same fleet.
+    expect(foldLeaves(grouped.leaves, identity, NOW).net).toBe(
+      foldLeaves(buildTree(leaves).leaves, identity, NOW).net,
+    );
+  });
+
+  // The whole reason for a prefix of its own: `Select all` reads this, and a
+  // bucket counted as a bot would report one bot more than the fleet runs.
+  it("keeps a group out of the bot count and off the bot actions", () => {
+    const tree = buildTree(
+      [
+        leafFromController(controller()),
+        leafFromExecutor(executor({ id: "manual", controller_id: "main" })),
+      ],
+      "All",
+      { groupByBot: true },
+    );
+    expect(countNodes(tree, "bot")).toBe(1);
+    expect(countNodes(tree, "group")).toBe(1);
+    // What the sidebar's Stop button and the header's run actions ask, and the
+    // answer that keeps both off the row.
+    expect(botOfNodeId("grp:main")).toBeNull();
+  });
+
+  // Keyboard navigation walks what is drawn, so a shut bucket must hide its
+  // executors — that is the collapse the 42 flat rows never had.
+  it("walks a group row before its executors and hides them when it is shut", () => {
+    const tree = buildTree(
+      [
+        leafFromController(controller()),
+        leafFromExecutor(executor({ id: "manual", controller_id: "main" })),
+      ],
+      "All",
+      { groupByBot: true },
+    );
+    expect(visibleNodeIds(tree, new Set(["all"]))).toEqual(["all", "bot:alpha", "grp:main"]);
+    expect(visibleNodeIds(tree, new Set(["all", "grp:main"]))).toEqual([
+      "all",
+      "bot:alpha",
+      "grp:main",
+      "exec:manual",
+    ]);
+  });
+
+  // An executor row a filter removed lands on the bucket it was sitting in
+  // rather than all the way back on the fleet.
+  it("falls back from a lost executor to its group when the tree has one", () => {
+    const leaf = leafFromExecutor(executor({ id: "manual", controller_id: "main" }));
+    const grouped = indexTree(
+      buildTree(
+        [leafFromExecutor(executor({ id: "other", controller_id: "main" }))],
+        "All",
+        { groupByBot: true },
+      ),
+    );
+    expect(resolveScope(grouped, "exec:manual", leaf)).toBe("grp:main");
+
+    // ...and all the way back when the tree draws no group level at all.
+    const flat = indexTree(
+      buildTree([leafFromExecutor(executor({ id: "other", controller_id: "main" }))]),
+    );
+    expect(resolveScope(flat, "exec:manual", leaf)).toBe("all");
+  });
+
+  // A group is shallower than the executors it holds, so it must never fall
+  // *into* one of them — a single position is a much narrower report.
+  it("never resolves a group scope down into one of its executors", () => {
+    const other = indexTree(
+      buildTree(
+        [leafFromExecutor(executor({ id: "other", controller_id: "hand" }))],
+        "All",
+        { groupByBot: true },
+      ),
+    );
+    expect(resolveScope(other, "grp:main")).toBe("all");
   });
 
   it("counts controllers wherever they sit, flat or grouped", () => {
@@ -544,11 +640,15 @@ describe("buildTree, grouping by agent", () => {
     expect(node(tree, `agent:${RUN_KEY}`).children.map((c) => c.id)).toEqual(["exec:ex_1"]);
   });
 
-  it("keeps an executor that belongs to nobody on the fleet root", () => {
+  // Nobody's executor gets the bucket rather than the fleet root, and the agent
+  // is still asked first: an owner is a better answer than a filing key, so an
+  // executor an agent created never reaches the bucket to begin with.
+  it("puts an executor that belongs to nobody in the group, not under an agent", () => {
     const manual = leafFromExecutor(executor({ id: "manual", controller_id: "main" }));
     expect(agentNodeId(manual)).toBeNull();
     const tree = buildTree([manual], "All", { groupByBot: true, groupByAgent: true });
-    expect(tree.children.map((c) => c.id)).toEqual(["exec:manual"]);
+    expect(tree.children.map((c) => c.id)).toEqual(["grp:main"]);
+    expect(node(tree, "grp:main").children.map((c) => c.id)).toEqual(["exec:manual"]);
   });
 
   // The level must not become a second place the same trading is counted.
