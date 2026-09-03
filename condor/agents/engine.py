@@ -681,6 +681,19 @@ class TickEngine:
                 tool_calls, tick=self.journal.tick_count + 1, at=time.time()
             )
 
+            # And what it took ownership of (FEAT-102). Derived from the same
+            # folded list, so a deploy that is logged is a deploy that is owned.
+            # The risk gate already claims a deploy on its way *in*
+            # (``condor.agents.risk``), but only when the permission callback
+            # fires and only if it could read the arguments; this claims it on
+            # the way out, from the call that actually completed. ``note_deploy``
+            # is idempotent and never downgrades an adopted bot, so the two
+            # claims cost nothing — and the gate's earlier ``since`` is the
+            # correct attribution window, which is why it stays.
+            if self.ledger is not None:
+                for bot_name in actions_mod.deployed_bot_names(tool_calls):
+                    self.ledger.note_deploy(bot_name)
+
             # Sessions: full journal tracking. Every journal.md update of this
             # tick goes into one batch, so the file is rewritten once instead of
             # three-to-five times (PERF-136).
@@ -784,6 +797,17 @@ class TickEngine:
         inherited: set[str] = set()
         if not self.ledger.enforced and self.session_dir is not None:
             inherited = prior_session_bases(self.session_dir.parent)
+
+        # A third source, as conservative as the other two: the bases this
+        # session's *own* action log records deploying (FEAT-102). Reading back
+        # what we wrote is a record, not a guess, and it is what lets a restart
+        # — or a session whose first ticks predate this feature — recover its
+        # fleet on the next tick instead of never.
+        recorded = {
+            strip_deploy_suffix(name)
+            for name in actions_mod.recorded_deploy_names(self.session_dir)
+        }
+        inherited |= {base for base in recorded if base}
 
         now = time.time()
         for instance_name in all_perf:

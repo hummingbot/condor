@@ -348,6 +348,8 @@ def test_a_live_loop_reports_what_it_last_did(monkeypatch, tmp_path):
         "summary": "Create grid executor on SOL-USDC for 100 quote",
         "ok": True,
         "error": "",
+        # Only a deploy has a bot name worth joining on (FEAT-102).
+        "subject": "",
     }
     # The words are still the words. Two statements, not one.
     assert owner.live.last_action == "Spreads held."

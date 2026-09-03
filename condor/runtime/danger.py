@@ -170,6 +170,13 @@ READ_ONLY_LIQUIDITY_ACTIONS = {
     "quote_liquidity",
 }
 READ_ONLY_CONTROL_ACTIONS = {"list", "list_agents", "get_state"}
+#: `manage_controllers`' writes and reads. The tool is outside the *gate*
+#: entirely and stays there (it writes controller templates and saved configs,
+#: never a running bot), but a fleet is *built* out of these calls: the twelve
+#: that assembled `pmm-king-btcbrl-20260903-181000`, six of them rejected, left
+#: no trace at all. Recording them is the log's question, not the gate's.
+MUTATING_CONTROLLER_ACTIONS = {"upsert", "delete"}
+READ_ONLY_CONTROLLER_ACTIONS = {"list", "describe"}
 #: `manage_gateway_config` is recorded on its *action*, not its resource type:
 #: what it edits is what the gate weighs, and whether it edited at all is what
 #: the log weighs.
@@ -426,6 +433,35 @@ def is_mutating_tool_call(tool_call: dict[str, Any]) -> bool:
     }
 
 
+def is_recordable_tool_call(tool_call: dict[str, Any]) -> bool:
+    """Should the action log keep a row for this call? (FEAT-102)
+
+    :func:`is_mutating_tool_call` plus the writes that reach neither predicate
+    because the *gate* deliberately ignores their tool. Defined as
+    ``is_mutating_tool_call(...) or <explicit extras>`` on purpose: two
+    functions answering nearly the same question will drift, and this shape
+    makes the gate's set structurally a subset that cannot fall behind.
+
+    Its one extra today is ``manage_controllers``. The gate excludes that tool
+    entirely and should keep excluding it — widening the gate would put a new
+    confirmation prompt in front of a running fleet — but a bot's controllers
+    are *written* by exactly these calls, so a log that drops them cannot say
+    how a fleet was built or which of its config writes were rejected.
+
+    Fails open the same way its siblings do: an action this module has not heard
+    of is recorded rather than dropped.
+    """
+    if is_mutating_tool_call(tool_call):
+        return True
+
+    if tool_call_name(tool_call) == "manage_controllers":
+        return _is_mutating_action(
+            tool_call, MUTATING_CONTROLLER_ACTIONS, READ_ONLY_CONTROLLER_ACTIONS
+        )
+
+    return False
+
+
 def format_tool_summary(tool_call: dict[str, Any]) -> str:
     """Format a tool call into a human-readable summary for the confirmation message."""
     # The bare name, or an ACP call (``mcp__mcp-hummingbot__manage_bots``) would
@@ -541,6 +577,21 @@ def format_tool_summary(tool_call: dict[str, Any]) -> str:
             quote = input_data.get("quote_token", "?")
             return f"Create {kind} pool {base}-{quote} on {connector}"
         return f"{kind}: {action}"
+
+    if tool_name == "manage_controllers":
+        # Never gated, so this line is written for the log rather than for a
+        # human deciding (FEAT-102). It still has to name what was written: a
+        # tick that builds a fleet makes a dozen of these, and "manage_controllers"
+        # twelve times over says nothing about which config failed.
+        action = input_data.get("action", "?")
+        target = input_data.get("target") or "controller"
+        name = (
+            input_data.get("config_name")
+            or input_data.get("controller_name")
+            or input_data.get("controller_type")
+            or "?"
+        )
+        return f"Controller {target}: {action} '{name}'"
 
     # Generic fallback
     return tool_name

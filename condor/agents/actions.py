@@ -42,7 +42,7 @@ from typing import Any
 
 from condor.runtime.danger import (
     format_tool_summary,
-    is_mutating_tool_call,
+    is_recordable_tool_call,
     tool_call_input,
     tool_call_name,
 )
@@ -75,6 +75,9 @@ _DISPATCH_TOOLS = frozenset(
         "manage_amm",
         "control_agent",
         "manage_gateway_config",
+        # Never gated, but a fleet is assembled out of these: without the action
+        # a rejected `upsert` and a routine `list` share one verb (FEAT-102).
+        "manage_controllers",
     }
 )
 
@@ -101,6 +104,12 @@ class AgentAction:
     ok: bool
     #: Clipped output when not ok, else ``""``.
     error: str = ""
+    #: What the call acted on, when the thing has a name worth joining on
+    #: (FEAT-102). Today that is a deploy's bot name and nothing else: the
+    #: ownership ledger recovers a stranded session by reading it back, and the
+    #: Lab's ledger can name a bot without joining anything. Empty for every
+    #: other verb — a row is not the place to restate the summary.
+    subject: str = ""
 
 
 def _as_gate_call(tool_call: dict[str, Any]) -> dict[str, Any]:
@@ -132,6 +141,48 @@ def _verb(tool: str, call: dict[str, Any]) -> str:
     return f"{tool}:{action}" if isinstance(action, str) and action else tool
 
 
+#: The verb whose subject is a bot name. One entry, named rather than inlined,
+#: so the two places that ask "was this a deploy?" cannot disagree.
+_DEPLOY_VERB = "manage_bots:deploy"
+
+
+def _deployed_name(verb: str, call: dict[str, Any]) -> str:
+    """The bot name a deploy names, or ``""`` for anything that is not one."""
+    if verb != _DEPLOY_VERB:
+        return ""
+    args = tool_call_input(call)
+    name = args.get("bot_name") if isinstance(args, dict) else None
+    return name.strip() if isinstance(name, str) else ""
+
+
+def deployed_bot_names(tool_calls: list[dict[str, Any]]) -> list[str]:
+    """Bot names this tick actually deployed, in stream order.
+
+    A ``manage_bots`` call with action "deploy" that reached "completed". Pure,
+    so the claim is testable without an engine — and derived from the same
+    folded list the action log is, so a deploy that is logged is a deploy that
+    is owned.
+
+    This is what lets a session whose bots fall outside its namespace record any
+    ownership at all. The namespace rule claims nothing when a strategy runs
+    with ``bot_name: ''``, and on a first session there is no prior lineage to
+    inherit from, so before this the ledger stayed empty and every money surface
+    downstream of it reported ``$0.00`` while the fleet traded.
+    """
+    names: list[str] = []
+    for tool_call in tool_calls:
+        try:
+            if str(tool_call.get("status") or "") != "completed":
+                continue
+            call = _as_gate_call(tool_call)
+            name = _deployed_name(_verb(tool_call_name(call), call), call)
+            if name and name not in names:
+                names.append(name)
+        except Exception:  # noqa: BLE001 - one odd call must not lose the rest
+            log.debug("actions: skipping an unreadable tool call", exc_info=True)
+    return names
+
+
 def _error_text(tool_call: dict[str, Any], status: str) -> str:
     """Why a call is not a success, in as few characters as say it."""
     output = tool_call.get("output")
@@ -156,20 +207,22 @@ def actions_from_tool_calls(
     for tool_call in tool_calls:
         try:
             call = _as_gate_call(tool_call)
-            if not is_mutating_tool_call(call):
+            if not is_recordable_tool_call(call):
                 continue
             status = str(tool_call.get("status") or "")
             ok = status == "completed"
             tool = tool_call_name(call)
+            verb = _verb(tool, call)
             actions.append(
                 AgentAction(
                     tick=tick,
                     at=at,
                     tool=tool,
-                    verb=_verb(tool, call),
+                    verb=verb,
                     summary=format_tool_summary(call),
                     ok=ok,
                     error="" if ok else _error_text(tool_call, status),
+                    subject=_deployed_name(verb, call),
                 )
             )
         except Exception:  # noqa: BLE001 - one odd call must not lose the rest
@@ -245,6 +298,9 @@ def _parse(line: str) -> AgentAction | None:
             summary=str(data.get("summary", "") or ""),
             ok=bool(data.get("ok", False)),
             error=str(data.get("error", "") or ""),
+            # Named key with a default, like every sibling: a row written
+            # before FEAT-102 has no `subject` and parses unchanged.
+            subject=str(data.get("subject", "") or ""),
         )
     except (TypeError, ValueError):
         return None
@@ -266,6 +322,26 @@ def read_actions(session_dir: Path | None, *, limit: int = 100) -> list[AgentAct
         return []
     rows = [row for row in (_parse(line) for line in lines[-limit:]) if row]
     return rows
+
+
+def recorded_deploy_names(session_dir: Path | None) -> list[str]:
+    """Bot names this session's own action log records deploying (FEAT-102).
+
+    Reading back the record the session itself wrote is not a heuristic — it is
+    its own signed statement of what it did — which is what makes this a safe
+    third source for :meth:`TickEngine._adopt_running_bots` where guessing from
+    the live fleet is not. Without it a session that deployed before its ledger
+    could name the bot, or that restarted, never recovers its fleet at all.
+
+    The whole live file rather than the last hundred rows: a deploy happens on
+    the tick that builds the fleet and nowhere after it, so a busy session would
+    push it out of a short tail within the hour.
+    """
+    return [
+        row.subject
+        for row in read_actions(session_dir, limit=MAX_ACTION_LINES)
+        if row.verb == _DEPLOY_VERB and row.ok and row.subject
+    ]
 
 
 def latest_action(session_dir: Path | None) -> AgentAction | None:

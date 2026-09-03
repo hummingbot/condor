@@ -473,3 +473,251 @@ def test_a_run_with_no_log_at_all_has_no_ticks_to_credit():
 def test_a_create_of_another_kind_is_not_the_explanation():
     rows = [_did("create_grid_executor", 5, 1000.0)]
     assert tick_for(rows, "bot", 1060.0) is None
+
+
+# ── The controller writes a fleet is built from (FEAT-102) ──
+
+
+def test_a_failed_controller_write_is_recorded_with_its_error():
+    """The twelve calls that build a fleet were invisible; six of them failed.
+
+    ``manage_controllers`` is outside the confirmation gate on purpose, so the
+    log's own predicate is what has to pick it up.
+    """
+    calls = [
+        folded(
+            "mcp__mcp-hummingbot__manage_controllers",
+            status="failed",
+            action="upsert",
+            target="config",
+            config_name="king-btcbrl-1",
+        )
+    ]
+    calls[0]["output"] = "400: field required: total_amount_quote"
+
+    (action,) = actions_from_tool_calls(calls, tick=1, at=1.0)
+
+    assert action.verb == "manage_controllers:upsert"
+    assert action.ok is False
+    assert action.error == "400: field required: total_amount_quote"
+    assert action.summary == "Controller config: upsert 'king-btcbrl-1'"
+
+
+def test_a_controller_read_is_still_not_recorded():
+    calls = [
+        folded("manage_controllers", action="list"),
+        folded("manage_controllers", action="describe", controller_name="pmm_simple"),
+    ]
+    assert actions_from_tool_calls(calls, tick=1, at=1.0) == []
+
+
+def test_the_controller_predicate_fails_open_on_an_unreadable_action():
+    """The log's rule everywhere: an action it cannot read is recorded."""
+    from condor.runtime.danger import is_recordable_tool_call
+
+    assert is_recordable_tool_call({"tool": "manage_controllers", "input": None})
+    assert is_recordable_tool_call({"tool": "manage_controllers", "input": {}})
+    assert is_recordable_tool_call(
+        {"tool": "manage_controllers", "input": {"action": "something_new"}}
+    )
+
+
+def test_the_log_records_everything_the_gate_does_and_more():
+    """The two predicates cannot drift: the gate's set is a strict subset."""
+    from condor.runtime.danger import is_mutating_tool_call, is_recordable_tool_call
+
+    for call in (
+        {"tool": "place_order", "input": {"trading_pair": "SOL-USDC"}},
+        {"tool": "manage_bots", "input": {"action": "deploy", "bot_name": "b"}},
+        {"tool": "manage_bots", "input": {"action": "status"}},
+        {"tool": "manage_controllers", "input": {"action": "upsert"}},
+        {"tool": "manage_controllers", "input": {"action": "list"}},
+        {"tool": "get_prices", "input": {"trading_pair": "SOL-USDC"}},
+    ):
+        if is_mutating_tool_call(call):
+            assert is_recordable_tool_call(call), call
+
+
+def test_the_confirmation_gate_is_untouched_by_the_log_growing():
+    """Criterion: no new confirmation prompt reaches a running agent.
+
+    ``manage_controllers`` becoming recordable must not make it gated — a
+    widened gate would stop a live fleet on every config write.
+    """
+    from condor.runtime.danger import DANGEROUS_TOOLS, is_dangerous_tool_call
+
+    assert "manage_controllers" not in DANGEROUS_TOOLS
+    for action in ("list", "describe", "upsert", "delete", "something_new"):
+        call = {"tool": "manage_controllers", "input": {"action": action}}
+        assert is_dangerous_tool_call(call) is False, action
+    assert (
+        is_dangerous_tool_call({"tool": "manage_controllers", "input": None}) is False
+    )
+
+
+def test_the_controller_action_sets_match_the_registered_tool():
+    """Every action literal the tool accepts is classified, or the fail-open
+    rule would silently record a read."""
+    from condor.runtime.danger import (
+        MUTATING_CONTROLLER_ACTIONS,
+        READ_ONLY_CONTROLLER_ACTIONS,
+    )
+    from mcp_servers.hummingbot_api.server import manage_controllers
+
+    literals = set(manage_controllers.__annotations__["action"].__args__)
+    assert MUTATING_CONTROLLER_ACTIONS | READ_ONLY_CONTROLLER_ACTIONS == literals
+    assert not (MUTATING_CONTROLLER_ACTIONS & READ_ONLY_CONTROLLER_ACTIONS)
+
+
+# ── The deploy a tick is owed (FEAT-102) ──
+
+
+def test_a_completed_deploy_names_the_bot_it_deployed():
+    from condor.agents.actions import deployed_bot_names
+
+    calls = [
+        folded("manage_bots", action="status"),
+        folded(
+            "mcp__mcp-hummingbot__manage_bots",
+            action="deploy",
+            bot_name="pmm-king-btcbrl-20260903-181000",
+        ),
+    ]
+    assert deployed_bot_names(calls) == ["pmm-king-btcbrl-20260903-181000"]
+
+
+def test_a_deploy_that_did_not_complete_is_not_owned():
+    from condor.agents.actions import deployed_bot_names
+
+    for status in ("failed", "pending", "cancelled"):
+        calls = [folded("manage_bots", status=status, action="deploy", bot_name="b1")]
+        assert deployed_bot_names(calls) == [], status
+
+
+def test_nothing_but_a_deploy_claims_a_bot():
+    from condor.agents.actions import deployed_bot_names
+
+    calls = [
+        folded("manage_bots", action="stop_bot", bot_name="b1"),
+        folded("manage_controllers", action="upsert", config_name="c1"),
+        folded("manage_bots", action="deploy"),  # no name to claim
+    ]
+    assert deployed_bot_names(calls) == []
+
+
+def test_the_deploy_row_carries_the_bot_name_as_its_subject():
+    calls = [
+        folded("manage_bots", action="deploy", bot_name="pmm-king-btcbrl-1"),
+        folded("stop_executor", executor_id="a1b2c3d4e5f6"),
+    ]
+    deploy, stop = actions_from_tool_calls(calls, tick=1, at=1.0)
+
+    assert deploy.subject == "pmm-king-btcbrl-1"
+    assert stop.subject == "", "only a deploy has a subject worth joining on"
+
+
+def test_a_row_written_before_this_feature_still_parses(tmp_path):
+    """Wire compatibility, both directions."""
+    old_row = {
+        "tick": 3,
+        "at": 1.0,
+        "tool": "manage_bots",
+        "verb": "manage_bots:deploy",
+        "summary": "Deploy bot 'b1'",
+        "ok": True,
+        "error": "",
+    }
+    (tmp_path / ACTIONS_FILENAME).write_text(json.dumps(old_row) + "\n")
+
+    (row,) = read_actions(tmp_path)
+    assert row.verb == "manage_bots:deploy"
+    assert row.subject == "", "a missing subject defaults, it does not raise"
+
+
+def test_a_tick_that_deploys_outside_its_namespace_still_records_an_owner(tmp_path):
+    """The whole point: ``bot_name: ''`` means ``enforced=False``, and on a
+    first session there is no lineage to inherit — so before this the ledger
+    stayed empty and every money surface below it read $0.00."""
+    from condor.agents.actions import deployed_bot_names
+    from condor.agents.ownership import BotLedger
+
+    ledger = BotLedger(
+        "brigado-pmm_king_btc_brl_fleet_operator", tmp_path, enforced=False
+    )
+    calls = [
+        folded(
+            "mcp__mcp-hummingbot__manage_bots",
+            action="deploy",
+            bot_name="pmm-king-btcbrl-20260903-181000",
+        )
+    ]
+
+    for name in deployed_bot_names(calls):
+        ledger.note_deploy(name)
+
+    # The ledger keys on the *base*: the deploy suffix is what distinguishes
+    # one deployment of a fleet from the next, and attribution follows the name.
+    assert ledger.bases() == ["pmm-king-btcbrl"]
+    assert (tmp_path / "owned_bots.json").exists()
+    assert ledger.owned()[0].origin == "deployed"
+
+
+def test_a_second_claim_of_the_same_deploy_costs_nothing(tmp_path):
+    """The risk gate claims on the way in, the stream on the way out."""
+    from condor.agents.ownership import BotLedger
+
+    ledger = BotLedger("ns", tmp_path, enforced=False)
+    ledger.note_deploy("bot-1", now=100.0)
+    ledger.note_deploy("bot-1", now=200.0)
+
+    assert ledger.bases() == ["bot-1"]
+    assert ledger.owned()[0].since == 100.0, "the earlier window is the right one"
+
+
+# ── Recovering a session that already deployed (FEAT-102) ──
+
+
+def test_a_session_recovers_the_deploys_its_own_log_records(tmp_path):
+    from condor.agents.actions import recorded_deploy_names
+
+    append_actions(
+        tmp_path,
+        [
+            AgentAction(
+                tick=1,
+                at=1.0,
+                tool="manage_bots",
+                verb="manage_bots:deploy",
+                summary="Deploy bot 'pmm-king-btcbrl-20260903-181000'",
+                ok=True,
+                subject="pmm-king-btcbrl-20260903-181000",
+            ),
+            AgentAction(
+                tick=1,
+                at=1.0,
+                tool="manage_bots",
+                verb="manage_bots:deploy",
+                summary="Deploy bot 'failed-one'",
+                ok=False,
+                error="400",
+                subject="failed-one",
+            ),
+            AgentAction(
+                tick=1,
+                at=1.0,
+                tool="stop_executor",
+                verb="stop_executor",
+                summary="Stop executor a1",
+                ok=True,
+            ),
+        ],
+    )
+
+    assert recorded_deploy_names(tmp_path) == ["pmm-king-btcbrl-20260903-181000"]
+
+
+def test_a_session_with_no_log_recovers_nothing(tmp_path):
+    from condor.agents.actions import recorded_deploy_names
+
+    assert recorded_deploy_names(tmp_path) == []
+    assert recorded_deploy_names(None) == []

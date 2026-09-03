@@ -432,6 +432,79 @@ def test_engine_adopts_a_live_bot_in_its_namespace(tmp_path, monkeypatch):
     assert engine._adoption_done
 
 
+def test_engine_recovers_a_fleet_from_its_own_action_log(tmp_path, monkeypatch):
+    """FEAT-102: a session whose bots fall outside its namespace, restarted.
+
+    ``bot_name: ''`` means the namespace rule claims nothing, and on a first
+    session there is no prior lineage to inherit — so the fleet it deployed was
+    adopted by nobody and every money surface below the ledger read $0.00. The
+    session's own action log is a record, not a guess, so it is a safe third
+    source.
+    """
+    from condor.agents.actions import AgentAction, append_actions
+    from condor.fetchers import bot_performance
+
+    engine = _engine(tmp_path, monkeypatch, {"bot_name": ""})
+    assert not engine.ledger.enforced
+    assert not (engine.session_dir / "owned_bots.json").exists()
+
+    append_actions(
+        engine.session_dir,
+        [
+            AgentAction(
+                tick=1,
+                at=1.0,
+                tool="manage_bots",
+                verb="manage_bots:deploy",
+                summary="Deploy bot 'pmm-king-btcbrl-20260903-181000'",
+                ok=True,
+                subject="pmm-king-btcbrl-20260903-181000",
+            )
+        ],
+    )
+
+    async def _fake_perf(client):
+        return {
+            "pmm-king-btcbrl-20260903-181000": {"bot_name": "pmm-king-btcbrl"},
+            "someone-elses-bot-20260731-101500": {"bot_name": "someone-elses-bot"},
+        }
+
+    monkeypatch.setattr(bot_performance, "fetch_all_bot_performance", _fake_perf)
+    asyncio.run(engine._adopt_running_bots(object()))
+
+    assert engine.ledger.bases() == ["pmm-king-btcbrl"]
+    assert (engine.session_dir / "owned_bots.json").exists()
+
+
+def test_engine_adopts_nothing_from_a_log_with_no_deploys(tmp_path, monkeypatch):
+    """The third source stays as conservative as the other two."""
+    from condor.agents.actions import AgentAction, append_actions
+    from condor.fetchers import bot_performance
+
+    engine = _engine(tmp_path, monkeypatch, {"bot_name": ""})
+    append_actions(
+        engine.session_dir,
+        [
+            AgentAction(
+                tick=1,
+                at=1.0,
+                tool="stop_executor",
+                verb="stop_executor",
+                summary="Stop executor a1",
+                ok=True,
+            )
+        ],
+    )
+
+    async def _fake_perf(client):
+        return {"someone-elses-bot-20260731-101500": {"bot_name": "someone-elses-bot"}}
+
+    monkeypatch.setattr(bot_performance, "fetch_all_bot_performance", _fake_perf)
+    asyncio.run(engine._adopt_running_bots(object()))
+
+    assert engine.ledger.bases() == []
+
+
 def test_engine_adoption_failure_is_non_fatal_and_retried(tmp_path, monkeypatch):
     from condor.fetchers import bot_performance
 
