@@ -758,12 +758,23 @@ export function SnapshotBody({ parsed }: { parsed: ParsedSnapshot }) {
         <SystemPromptCard prompt={parsed.systemPrompt} charCount={parsed.systemPromptLength} />
       )}
 
-      {/* Agent Response */}
+      {/* Agent Response.
+          Through the chat's own markdown renderer (FEAT-103), not printed as
+          plain text. What the model writes here *is* markdown — the parser's
+          own comment two files over says so — so `**bold**` and `| tables |`
+          were reaching the reader as literal characters, and streamed chunks
+          read glued together. It is the text the whole workspace exists to
+          surface, and `chat-markdown` is already the house style for it. */}
       {parsed.agentResponse && (
         <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-5">
           <h4 className="mb-3 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">Agent Response</h4>
-          <div className="whitespace-pre-wrap text-sm leading-relaxed text-[var(--color-text)]">
-            {parsed.agentResponse}
+          <div
+            data-agent-response
+            className="chat-markdown text-sm leading-relaxed text-[var(--color-text)]"
+          >
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+              {parsed.agentResponse}
+            </ReactMarkdown>
           </div>
         </div>
       )}
