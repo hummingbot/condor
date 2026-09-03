@@ -106,7 +106,13 @@ class _MarketData:
         self.price = price
 
     async def get_prices(self, connector_name, trading_pairs):
-        return {"prices": {trading_pairs: self.price} if self.price else {}}
+        # The real client accepts either a bare pair or a list and wraps
+        # the bare one before it posts; mirror that so this stub answers
+        # the same way for both spellings.
+        pairs = (
+            [trading_pairs] if isinstance(trading_pairs, str) else list(trading_pairs)
+        )
+        return {"prices": {pairs[0]: self.price} if self.price else {}}
 
 
 class _PriceClient:
