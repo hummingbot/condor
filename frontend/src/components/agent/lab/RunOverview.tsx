@@ -12,6 +12,7 @@ import {
   SnapshotBody,
 } from "@/components/agent/AgentSessionContent";
 import { SessionActions } from "@/components/agent/SessionActions";
+import { DeploymentLedger } from "@/components/agent/lab/DeploymentLedger";
 import { hasPricedMoney } from "@/components/agent/lab/runs";
 import { ReportViewer } from "@/components/routines/ReportViewer";
 import { api } from "@/lib/api";
@@ -117,6 +118,9 @@ export function RunOverview({
           </div>
         )
       )}
+      {/* What the run put into the world (FEAT-100) — read from the same
+          response the strip above folds, so the two can never disagree. */}
+      <DeploymentLedger rows={perfData?.deployments ?? []} />
       {journal && (
         <SessionOverview
           journal={journal}

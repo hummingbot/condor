@@ -911,6 +911,41 @@ export interface AgentControllerRow {
   close_type_counts: Record<string, number>;
 }
 
+/**
+ * One thing a run put into the world (FEAT-100).
+ *
+ * The wire shape of `condor.web.routes.agents.DeploymentRow`, mapped straight
+ * through. A bot the run deployed, a controller one of those bots ran, or a
+ * standalone executor it created — the three kinds together answer "what did
+ * this run actually do out there", which used to require leaving the agent for
+ * the fleet browser and reading the strategy's whole lifetime instead.
+ */
+export interface DeploymentRow {
+  kind: "bot" | "controller" | "executor";
+  /** The base name, the controller id, or `"grid SOL-USDC"`. */
+  label: string;
+  /** Origin for a bot, connector·pair for a controller, connector otherwise. */
+  detail: string;
+  /**
+   * The tick whose creating call most likely produced this, or `null`.
+   *
+   * The actions log records a call's arguments and never its result, so there
+   * is no id to join on and the tick is matched on time. `null` is the honest
+   * answer — no log, a stale window, or a bot adopted rather than deployed —
+   * and is rendered as `—`, never as a guess.
+   */
+  created_tick: number | null;
+  started_at: number;
+  /** When the run stopped owning it; `null` while it still does. */
+  ended_at: number | null;
+  /** Read off ownership, never off a performance snapshot's `status`. */
+  live: boolean;
+  pnl: number;
+  volume: number;
+  /** The fleet address this row links to: `bot:` / `ctrl:` / `exec:`. */
+  scope: string;
+}
+
 export interface SessionCanvas {
   sections: Record<string, string>;
   section_titles: Record<string, string>;
@@ -2997,6 +3032,9 @@ export const api = {
       // from the bots' own history, not from the journal's per-tick snapshots,
       // which only record what the aggregator believed at the time.
       pnl_series?: { timestamp: string; pnl: number; volume: number }[];
+      /** What this run put into the world (FEAT-100). Empty for a run that
+       *  deployed nothing, and for a session whose server is unreachable. */
+      deployments?: DeploymentRow[];
     }>(
       `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/sessions/${sessionNum}/executors`,
     ),
