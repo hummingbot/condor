@@ -576,8 +576,36 @@ class FleetOwnerModel(BaseModel):
     live: LiveLoopModel | None = None
 
 
+class DeedRefModel(BaseModel):
+    """The run a record was traced back to by a deed Condor recorded (FEAT-106)."""
+
+    run_key: str
+    run_id: str = ""
+    at: float = 0.0
+
+
+class DeedIndexModel(BaseModel):
+    """What Condor's own logs can attribute, and how far back they reach.
+
+    The wire shape of ``condor.agents.deed_index.DeedIndex``. Matched **after**
+    the two enforced rules on ``FleetOwnerModel``: a namespace is a proof and a
+    deed is a report, and an enforced answer must never lose to an observed one.
+    """
+
+    #: Bot base name → the run that made it.
+    bots: dict[str, DeedRefModel] = {}
+    #: Epoch seconds before which Condor did not record everything it did, or
+    #: ``0.0`` when it never has. The one timestamp that separates "made outside
+    #: Condor" from "made before the ledger existed".
+    since: float = 0.0
+
+
 class FleetMapResponse(BaseModel):
     owners: list[FleetOwnerModel] = []
+    #: Additive: a client that ignores this field behaves exactly as it did
+    #: before FEAT-106, because the pseudo-runs appended to ``owners`` carry an
+    #: empty namespace and so match nothing by name.
+    deeds: DeedIndexModel = Field(default_factory=DeedIndexModel)
 
 
 class CreateAgentRequest(BaseModel):
@@ -1259,10 +1287,18 @@ async def get_fleet_map(user: WebUser = Depends(get_current_user)):
 
     A literal path, and so registered before the ``/{slug}`` catch-all above.
     """
+    from condor.agents.deed_index import build_deed_index
     from condor.agents.fleet_map import build_fleet_map
 
+    index = build_deed_index()
     return FleetMapResponse(
-        owners=[FleetOwnerModel(**asdict(owner)) for owner in build_fleet_map()]
+        owners=[FleetOwnerModel(**asdict(owner)) for owner in build_fleet_map()],
+        deeds=DeedIndexModel(
+            bots={
+                name: DeedRefModel(**asdict(ref)) for name, ref in index.bots.items()
+            },
+            since=index.since,
+        ),
     )
 
 

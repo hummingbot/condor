@@ -156,6 +156,29 @@ def read_owned(session_dir: Path | None) -> list[OwnedBot]:
     return sorted(_parse_bots(data).values(), key=lambda b: (b.since, b.base))
 
 
+def read_ledger_namespace(session_dir: Path | None) -> str:
+    """The scope a ledger recorded for itself, or ``""``.
+
+    ``owned_bots.json`` stores the namespace it was constructed with, and for a
+    run with no strategy behind it (a chat, a delegation, the dashboard) that
+    string is the *only* place the acting agent is written down: the directory
+    is named after a conversation, not after who was bound to it. FEAT-106's
+    index reads it back to answer "``condor.chat`` or ``brigado.chat``?".
+
+    Read rather than reconstructed by opening a :class:`BotLedger`, because a
+    reader has no business instantiating the writer — and because ``_load``
+    would happily create the object for a file that does not exist.
+    """
+    if session_dir is None:
+        return ""
+    path = Path(session_dir) / LEDGER_FILENAME
+    try:
+        data = json.loads(path.read_text()) or {}
+    except Exception:
+        return ""
+    return str(data.get("namespace", "") or "")
+
+
 def prior_session_bases(sessions_root: Path | None) -> set[str]:
     """Every base any session under ``sessions_root`` recorded owning.
 

@@ -21,11 +21,20 @@ attribution needs no new trading-API call — only the rule and the names:
 Why the rule stays here rather than being re-derived in TypeScript: it is
 enforced here, and ``declared_bots`` is not derivable from any name at all.
 
+Those two rules are *prescriptive* and apply to loops only, so everything a
+human asked Condor to do fell outside both. FEAT-106 adds the **descriptive**
+half beside them: :mod:`condor.agents.deed_index` reads back what Condor
+recorded itself doing, and the pseudo-runs it names (``condor.chat``,
+``brigado.delegation``, ``condor.ui``) join the ``owners`` list as ordinary
+entries — with an **empty namespace**, so the prescriptive matcher above can
+never claim a bot for one. A deed is matched last and marked as observed.
+
 **No Hummingbot API call anywhere in this module.** The registry half is a
-directory walk (memoised, see :data:`REGISTRY_TTL`); the live half is
-:class:`~condor.runtime.loops.LoopSupervisor`'s in-memory engines plus one small
-journal read per *live* engine, never cached — that read is the band's
-freshness, and the whole point of the endpoint being separate from ``GET
+directory walk (memoised, see :data:`REGISTRY_TTL`); the deed index rides in
+that same half and is a walk of the same kind, memoised for the same minute; the
+live half is :class:`~condor.runtime.loops.LoopSupervisor`'s in-memory engines
+plus one small journal read per *live* engine, never cached — that read is the
+band's freshness, and the whole point of the endpoint being separate from ``GET
 /agents`` (which fans out a performance fetch per session of every strategy).
 """
 
@@ -100,9 +109,17 @@ _registry_cache: tuple[float, list[FleetOwner]] | None = None
 
 
 def reset_fleet_map_cache() -> None:
-    """Drop the memoised registry — for tests and for a strategy just created."""
+    """Drop the memoised registry — for tests and for a strategy just created.
+
+    The deed index goes with it: it is the other half of the same memoised walk,
+    and a caller dropping one and not the other would get a map whose owners and
+    whose deeds disagree about what is on disk.
+    """
     global _registry_cache
+    from condor.agents.deed_index import reset_deed_index_cache
+
     _registry_cache = None
+    reset_deed_index_cache()
 
 
 def _build_registry() -> list[FleetOwner]:
@@ -137,7 +154,44 @@ def _build_registry() -> list[FleetOwner]:
                 agent_ids=ids,
             )
         )
+    owners.extend(_pseudo_owners({owner.run_key for owner in owners}, agents))
     return owners
+
+
+def _pseudo_owners(known: set[str], agents: dict[str, Any]) -> list[FleetOwner]:
+    """One owner per run the deed index can attribute to but no strategy names.
+
+    A chat, a delegation and the dashboard are runs without a strategy, so they
+    never appear in :class:`~condor.agents.strategy.StrategyStore`. They are
+    given ordinary :class:`FleetOwner` rows anyway, because a run key is the
+    scope-tree node id, the ``?scope=agent:`` value and the filter bubble's
+    value — every consumer joins on one already, and none of them has to learn a
+    new shape for these.
+
+    **The namespace is empty and that is the load-bearing part.** These owners
+    are attributed by an observed record, never by a name, so the prescriptive
+    matcher must not be able to claim a bot for one: ``in_namespace`` refuses an
+    empty namespace, in Python and in TypeScript alike.
+    """
+    from condor.agents.deed_index import PSEUDO_STRATEGY_NAMES, build_deed_index
+
+    out: list[FleetOwner] = []
+    for run_key in build_deed_index().run_keys():
+        if run_key in known:
+            continue
+        agent_slug, _, strategy_slug = run_key.partition(".")
+        agent = agents.get(agent_slug)
+        out.append(
+            FleetOwner(
+                run_key=run_key,
+                agent_slug=agent_slug,
+                agent_name=agent.name if agent else agent_slug,
+                strategy_slug=strategy_slug,
+                strategy_name=PSEUDO_STRATEGY_NAMES.get(strategy_slug, strategy_slug),
+                namespace="",
+            )
+        )
+    return out
 
 
 def _registry(now: float) -> list[FleetOwner]:
