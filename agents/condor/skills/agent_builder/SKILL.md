@@ -160,6 +160,37 @@ it, and consult it again to confirm it now reasons over that data. Repeat for ea
 routine the agent needs. **Stop here unless the user wants the agent to act on its own on
 a loop.**
 
+## ⚠️ Background delegation limits — ALWAYS respect these
+
+Background delegate sessions have a **hard wall of 900 seconds (15 minutes)**. A task
+that exceeds this is cut off mid-work, losing whatever was not yet committed.
+
+### Sizing rule — one routine per delegation
+The safe budget for a background routine-building task is **one routine + one round of
+testing**. Building two or three routines in a single delegation will reliably hit the
+wall during the test phase of the last routine.
+
+**Always split large routine work across multiple sequential delegations**, one routine
+each:
+```
+# WRONG — will time out:
+delegate(task="Build routines A, B, and C for agent X")
+
+# RIGHT — three tasks, triggered one after the other:
+delegate(task="Build routine A for agent X. Test it with input Y. Report back.")
+# (wait for completion, verify, then:)
+delegate(task="Build routine B for agent X. Test it with input Y. Report back.")
+```
+
+If you are the background worker and you realize mid-task that you have been given too
+much work, **stop, commit what you have**, and instruct the user (via the task result) to
+trigger a follow-up delegation for the remaining items rather than racing the clock.
+
+### Timeout is currently fixed at 900s for `delegate`
+The `control_agent(action="start")` path exposes `tick_timeout_sec` in its config and
+can be raised. The `delegate` shortcut does not yet expose this — it runs at the
+system default. Until that is surfaced, the only mitigation is task sizing.
+
 ## Step 4 — (Optional) Give its loop a dedicated playbook
 
 Only if the user wants the agent to act autonomously. The agent can already loop without
@@ -290,6 +321,9 @@ strategies — delete those first (`manage_strategies(action="delete", strategy_
   helpfully-filled server pin fails on someone else's install, long after creation
   reported success.
 - Create the AGENT.md FIRST — routines and strategies require an existing agent_slug.
+- **One routine per background delegation.** Never bundle 2+ routines in one `delegate`
+  call — always split and sequence them. If handed too much work as the background
+  worker, commit what you have and instruct the user to trigger a follow-up.
 - One routine per analysis task; run it and show the output before moving on.
 - A loop doesn't have to trade — it can report or watch. Always include risk limits when
   it can trade, and dry-run before going live.
