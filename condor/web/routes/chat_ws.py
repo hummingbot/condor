@@ -16,9 +16,20 @@ from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
 from condor.llm.openrouter_models import fetch_models
 from condor.llm.options import DEFAULT_AGENT
 from condor.notifications import Notification, register_push_sink
-from condor.runtime import WEB, EventType, PromptRequest, SessionKey, SessionSpec
+from condor.runtime import (
+    WEB,
+    EventType,
+    PromptImage,
+    PromptRequest,
+    SessionKey,
+    SessionSpec,
+    attachments,
+)
 from condor.runtime import client as runtime
-from condor.runtime import conversations, secrets
+from condor.runtime import (
+    conversations,
+    secrets,
+)
 from condor.runtime.binding import remember_model_choice
 from condor.runtime.confirmations import (
     PendingConfirmation,
@@ -781,6 +792,22 @@ async def _notify_secret_shapes(
         )
 
 
+def _resolve_attachments(
+    user_id: int, conv_id: str, attachment_ids: list[str]
+) -> list[PromptImage]:
+    """Ids off the wire to the bytes behind them, or refuse the whole turn.
+
+    All-or-nothing: a turn whose picture cannot be found is not quietly answered
+    without it. The user asked about something the agent would not be looking at,
+    and an answer to the wrong question is worse than an error.
+    """
+    images = []
+    for att_id in attachment_ids:
+        data, mime = attachments.load(user_id, conv_id, att_id)
+        images.append(PromptImage(data=data, mime=mime, id=att_id))
+    return images
+
+
 async def _handle_send_message(
     ws: WebSocket,
     user_id: int,
@@ -792,7 +819,17 @@ async def _handle_send_message(
     # text to the funnel, which prepends it to this one prompt and never
     # records it — the transcript keeps only the user's words.
     view_context = str(msg.get("view_context") or "")[:VIEW_CONTEXT_MAX_CHARS]
-    if not text:
+    # Ids only, never bytes (FEAT-098). The frame stays small on purpose: uvicorn
+    # runs without ``ws_max_size``, so the websockets default of 16 MiB applies
+    # and an oversize frame *closes the socket* rather than failing the message —
+    # one pasted screenshot would drop the user's whole chat connection mid-answer
+    # with no error that names a cause. The bytes went out over HTTP already.
+    attachment_ids = [str(value) for value in (msg.get("attachments") or []) if value][
+        : attachments.MAX_PER_TURN
+    ]
+    # An image with no words is a complete message. This used to be the one
+    # refusal in the way of that.
+    if not text and not attachment_ids:
         await _send(ws, {"event": "error", "message": "Empty message"})
         return
     if not slot_id:
@@ -888,11 +925,31 @@ async def _handle_send_message(
         if task:
             _active_prompt_tasks[task_key] = task
 
+        # Resolved here, against the conversation the live session is actually
+        # attached to — which the reattach above may have just decided. The path
+        # is per-user, so a frame naming someone else's attachment resolves to
+        # nothing under the caller's own tree: the ownership check is the lookup
+        # itself, not a rule beside it.
+        try:
+            images = _resolve_attachments(
+                user_id, info.conversation_id or slot_id, attachment_ids
+            )
+        except attachments.NotFoundError:
+            await _send(
+                ws,
+                {
+                    "event": "error",
+                    "slot_id": slot_id,
+                    "message": "That image is no longer available. Attach it again.",
+                },
+            )
+            return
+
         # Busy is no longer a refusal: the composer stays live and sending is
         # how the user redirects an answer that is heading the wrong way.
         stream = runtime.prompt(
             session_key,
-            PromptRequest(text=text, view_context=view_context),
+            PromptRequest(text=text, images=images, view_context=view_context),
             on_busy="steer",
         )
 
