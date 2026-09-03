@@ -14,11 +14,13 @@ from condor.agents.actions import (
     ACTIONS_ARCHIVE_FILENAME,
     ACTIONS_FILENAME,
     MAX_ACTION_LINES,
+    TICK_JOIN_WINDOW,
     AgentAction,
     actions_from_tool_calls,
     append_actions,
     latest_action,
     read_actions,
+    tick_for,
 )
 
 
@@ -419,3 +421,55 @@ def test_the_actions_route_is_not_shadowed_by_the_slug_catch_all():
             assert route.endpoint.__name__ == "list_session_actions"
             return
     raise AssertionError("no route matched the actions path")
+
+
+# ── The tick a record came from (FEAT-100) ──
+
+
+def _did(verb, tick, at, ok=True):
+    return AgentAction(
+        tick=tick, at=at, tool=verb.split(":")[0], verb=verb, summary="", ok=ok
+    )
+
+
+def test_a_create_explains_the_record_that_followed_it():
+    rows = [
+        _did("manage_bots:deploy", 3, 1000.0),
+        _did("create_grid_executor", 5, 2000.0),
+    ]
+    assert tick_for(rows, "bot", 1060.0) == 3
+    assert tick_for(rows, "executor", 2060.0) == 5
+
+
+def test_the_nearest_preceding_create_wins():
+    rows = [
+        _did("manage_bots:deploy", 3, 1000.0),
+        _did("manage_bots:deploy", 9, 1500.0),
+    ]
+    assert tick_for(rows, "bot", 1600.0) == 9
+
+
+def test_a_create_after_the_record_never_explains_it():
+    """A deploy on tick 9 cannot be why a bot started an hour earlier."""
+    rows = [_did("manage_bots:deploy", 9, 5000.0)]
+    assert tick_for(rows, "bot", 1000.0) is None
+
+
+def test_outside_the_window_is_blank_rather_than_a_nearest_match():
+    rows = [_did("manage_bots:deploy", 3, 1000.0)]
+    assert tick_for(rows, "bot", 1000.0 + TICK_JOIN_WINDOW + 1) is None
+
+
+def test_a_failed_call_created_nothing():
+    rows = [_did("manage_bots:deploy", 3, 1000.0, ok=False)]
+    assert tick_for(rows, "bot", 1060.0) is None
+
+
+def test_a_run_with_no_log_at_all_has_no_ticks_to_credit():
+    """Every session on disk when this shipped is this case."""
+    assert tick_for([], "bot", 1060.0) is None
+
+
+def test_a_create_of_another_kind_is_not_the_explanation():
+    rows = [_did("create_grid_executor", 5, 1000.0)]
+    assert tick_for(rows, "bot", 1060.0) is None

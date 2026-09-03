@@ -288,3 +288,64 @@ def latest_action(session_dir: Path | None) -> AgentAction | None:
         if row is not None:
             return row
     return None
+
+
+# ── The tick a record came from (FEAT-100) ──
+
+# Which verbs create which kind of thing. The log records arguments only — never
+# a tool's result — so a created bot's instance name and a created executor's id
+# are not in it. The join is therefore on *time*: a record that started at ``at``
+# most likely came from the nearest preceding call that creates that kind of
+# thing. That is a heuristic, and the ledger labels it as one by leaving the cell
+# blank rather than guessing when nothing matches.
+CREATE_VERBS: dict[str, frozenset[str]] = {
+    "bot": frozenset({"manage_bots:deploy"}),
+    "executor": frozenset(
+        {
+            "create_grid_executor",
+            "create_position_executor",
+            "create_dca_executor",
+            "create_lp_executor",
+            "create_order_executor",
+        }
+    ),
+}
+
+# How far back a create may sit from the record it produced. A deploy is slow and
+# a tick is typically 30–60 minutes, so a nearest-preceding match inside fifteen
+# minutes is safe in practice; two creates of the same kind inside one tick both
+# credit that tick, which is correct. If this proves noisy the honest fix is
+# recording result ids in the log, not a cleverer heuristic here.
+TICK_JOIN_WINDOW = 900.0
+
+
+def tick_for(
+    rows: list[AgentAction],
+    kind: str,
+    at: float,
+    window: float = TICK_JOIN_WINDOW,
+) -> int | None:
+    """The tick whose creating call most likely produced a record starting at ``at``.
+
+    The nearest **preceding** successful call of the right kind, inside
+    ``window`` seconds. ``None`` for everything else — no log at all, a stale
+    window, a bot adopted rather than deployed — because a fabricated tick number
+    would be worse than a blank cell.
+
+    Pure: no HTTP and no filesystem in the signature, so the whole rule is
+    reachable from a test.
+    """
+    verbs = CREATE_VERBS.get(kind)
+    if not verbs or at <= 0 or window <= 0:
+        return None
+    best: AgentAction | None = None
+    for row in rows:
+        # A call that failed created nothing, so it can never explain a record.
+        if not row.ok or row.verb not in verbs:
+            continue
+        delta = at - row.at
+        if delta < 0 or delta > window:
+            continue
+        if best is None or row.at >= best.at:
+            best = row
+    return best.tick if best is not None else None
