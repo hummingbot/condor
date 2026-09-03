@@ -1010,8 +1010,12 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
             HB_API_PORT="8000"
             HB_API_PROTOCOL="http"
             msg_ok "Tailscale connected — server URL: http://$ts_hostname:8000"
-            # On a VPS (SERVER_IP set), point the web dashboard at the Tailscale IP so the /web link works remotely
-            if [ -n "${SERVER_IP:-}" ] && [ -n "${ts_condor_ip:-}" ]; then
+            # Tailscale on: the dashboard binds this node's tailnet address, so
+            # that is the URL /web must hand out -- on a VPS or a laptop alike.
+            # This used to also require SERVER_IP, which is only ever prompted
+            # in the non-Tailscale branch, so the rewrite never ran and WEB_URL
+            # stayed at localhost:8088 while the installer advertised it.
+            if [ -n "${ts_condor_ip:-}" ]; then
                 if grep -q "^WEB_URL=" "$ENV_FILE"; then
                     sed -i.bak "s|^WEB_URL=.*|WEB_URL=http://$ts_condor_ip:8088|" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
                 else
@@ -1098,8 +1102,12 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
             ts_condor_ip=$(tailscale ip -4 2>/dev/null | head -1)
             TS_DEPLOY=true
             msg_ok "Tailscale connected — this machine (and its dashboard) is reachable on your tailnet"
-            # On a VPS (SERVER_IP set), point the web dashboard at the Tailscale IP so the /web link works remotely
-            if [ -n "${SERVER_IP:-}" ] && [ -n "${ts_condor_ip:-}" ]; then
+            # Tailscale on: the dashboard binds this node's tailnet address, so
+            # that is the URL /web must hand out -- on a VPS or a laptop alike.
+            # This used to also require SERVER_IP, which is only ever prompted
+            # in the non-Tailscale branch, so the rewrite never ran and WEB_URL
+            # stayed at localhost:8088 while the installer advertised it.
+            if [ -n "${ts_condor_ip:-}" ]; then
                 if grep -q "^WEB_URL=" "$ENV_FILE"; then
                     sed -i.bak "s|^WEB_URL=.*|WEB_URL=http://$ts_condor_ip:8088|" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
                 else
@@ -1419,7 +1427,7 @@ echo -e "    hummingbot-api URL:  http://${ts_hb_hostname}:8000  ${CYAN}(own tai
 else
 echo -e "    hummingbot-api:      http://localhost:8000  ${CYAN}(local — no tailnet node needed)${RESET}"
 fi
-if [ -n "${ts_condor_ip:-}" ] && [ -n "${SERVER_IP:-}" ]; then
+if [ -n "${ts_condor_ip:-}" ]; then
 echo -e "    Web dashboard URL:   http://${ts_condor_ip}:8088  ${CYAN}(Tailscale only)${RESET}"
 else
 echo -e "    Web dashboard URL:   http://localhost:8088"
@@ -1429,7 +1437,7 @@ elif [[ "${use_tailscale_remote:-}" =~ ^[Yy]$ ]]; then
 echo ""
 echo -e "  ${BOLD}Tailscale:${RESET}"
 echo -e "    hummingbot-api URL:  http://${ts_hostname:-hummingbot-api}:8000"
-if [ -n "${ts_condor_ip:-}" ] && [ -n "${SERVER_IP:-}" ]; then
+if [ -n "${ts_condor_ip:-}" ]; then
 echo -e "    Web dashboard URL:   http://${ts_condor_ip}:8088  ${CYAN}(Tailscale only)${RESET}"
 else
 echo -e "    Web dashboard URL:   http://localhost:8088"
