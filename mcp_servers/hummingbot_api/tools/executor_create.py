@@ -25,6 +25,7 @@ import logging
 from typing import Any
 
 from mcp_servers.hummingbot_api.executor_preferences import executor_preferences
+from mcp_servers.hummingbot_api.hummingbot_client import trading_rules_cache
 
 logger = logging.getLogger("hummingbot-mcp")
 
@@ -78,6 +79,181 @@ def _triple_barrier(
     return barrier
 
 
+def _amount(value: Any) -> float | None:
+    """Read a config amount as a positive float, or ``None`` if it is not one.
+
+    ``order_executor`` types its amount as a string and a saved default can carry
+    anything; a value that will not parse is one this check has nothing to say
+    about, not one to refuse.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def _usd(value: float) -> str:
+    return f"${value:,.2f}"
+
+
+def _rule(rules: dict[str, Any], *names: str) -> float | None:
+    for name in names:
+        value = _amount(rules.get(name))
+        if value is not None:
+            return value
+    return None
+
+
+async def _current_price(
+    client: Any, connector_name: str, trading_pair: str
+) -> float | None:
+    """Last price for the pair, or ``None`` — a price we cannot read blocks nothing."""
+    market_data = getattr(client, "market_data", None)
+    if market_data is None:
+        return None
+    try:
+        result = await market_data.get_prices(
+            connector_name=connector_name, trading_pairs=[trading_pair]
+        )
+    except Exception as exc:
+        logger.warning(
+            "No price for %s %s, skipping the notional check: %s",
+            connector_name,
+            trading_pair,
+            exc,
+        )
+        return None
+    prices = result.get("prices") if isinstance(result, dict) else None
+    if not isinstance(prices, dict):
+        return None
+    if trading_pair in prices:
+        return _amount(prices[trading_pair])
+    return _amount(next(iter(prices.values()), None)) if len(prices) == 1 else None
+
+
+async def _base_amount_violation(
+    client: Any,
+    *,
+    connector: str,
+    pair: str,
+    config: dict[str, Any],
+    min_order_size: float | None,
+    min_notional: float | None,
+) -> str | None:
+    """Check a base-denominated amount (position, order) against both minimums."""
+    amount = _amount(config.get("amount"))
+    if amount is None:
+        return None
+
+    if min_order_size is not None and amount < min_order_size:
+        return (
+            f"Order size {amount:g} is below {connector}'s minimum of "
+            f"{min_order_size:g} for {pair}. Increase amount to at least "
+            f"{min_order_size:g} (amount is in the BASE currency)."
+        )
+
+    if min_notional is None:
+        return None
+    price = _amount(config.get("entry_price")) or _amount(config.get("price"))
+    if price is None:
+        price = await _current_price(client, connector, pair)
+    if price is None:
+        return None
+    notional = amount * price
+    if notional >= min_notional:
+        return None
+    base = pair.split("-")[0]
+    return (
+        f"Order notional {_usd(notional)} is below {connector}'s minimum of "
+        f"{_usd(min_notional)} for {pair}. Increase the amount to at least "
+        f"{min_notional / price:.8g} {base} at a price of {price:g}."
+    )
+
+
+async def _trading_rule_violation(
+    client: Any, executor_type: str, config: dict[str, Any]
+) -> str | None:
+    """Name the venue rule this config breaks, or ``None`` to let it through.
+
+    The point is WHERE this runs: before the POST, so the caller is told the
+    minimum it missed instead of reading a backend stack trace — or, worse,
+    watching an executor sit there never filling. It refuses only on a rule the
+    venue actually stated; anything unknown (no rules endpoint, no price, an
+    unparseable amount) passes, because a rules outage must not stop trading.
+    """
+    connector = config.get("connector_name")
+    pair = config.get("trading_pair")
+    if not isinstance(connector, str) or not isinstance(pair, str):
+        return None
+
+    rules = await trading_rules_cache.get(client, connector, pair)
+    if not rules:
+        return None
+    min_order_size = _rule(rules, "min_order_size")
+    min_notional = _rule(rules, "min_notional_size", "min_notional")
+
+    if executor_type in ("position_executor", "order_executor"):
+        return await _base_amount_violation(
+            client,
+            connector=connector,
+            pair=pair,
+            config=config,
+            min_order_size=min_order_size,
+            min_notional=min_notional,
+        )
+
+    if min_notional is None:
+        # Every remaining type is funded in quote, so min_order_size — a base
+        # amount — says nothing about it without a price.
+        return None
+
+    if executor_type == "grid_executor":
+        per_level = _amount(config.get("min_order_amount_quote"))
+        if per_level is not None and per_level < min_notional:
+            return (
+                f"Grid min_order_amount_quote {_usd(per_level)} is below "
+                f"{connector}'s minimum order notional of {_usd(min_notional)} for "
+                f"{pair}. Raise min_order_amount_quote to at least "
+                f"{_usd(min_notional)}."
+            )
+        total = _amount(config.get("total_amount_quote"))
+        if total is not None and total < min_notional:
+            return (
+                f"Grid total_amount_quote {_usd(total)} is below {connector}'s "
+                f"minimum order notional of {_usd(min_notional)} for {pair} — not "
+                f"one level could be placed. Fund the grid with at least "
+                f"{_usd(min_notional)}."
+            )
+        return None
+
+    if executor_type == "dca_executor":
+        levels = config.get("amounts_quote")
+        if not isinstance(levels, (list, tuple)):
+            return None
+        for index, level in enumerate(levels, start=1):
+            value = _amount(level)
+            if value is not None and value < min_notional:
+                return (
+                    f"DCA level {index} of {len(levels)} is {_usd(value)}, below "
+                    f"{connector}'s minimum order notional of {_usd(min_notional)} "
+                    f"for {pair}. Raise that level to at least {_usd(min_notional)}."
+                )
+        return None
+
+    if executor_type == "lp_executor":
+        quote_amount = _amount(config.get("quote_amount"))
+        if quote_amount is not None and quote_amount < min_notional:
+            return (
+                f"LP quote_amount {_usd(quote_amount)} is below {connector}'s "
+                f"minimum order notional of {_usd(min_notional)} for {pair}. Fund "
+                f"the position with at least {_usd(min_notional)}."
+            )
+    return None
+
+
 async def create_executor(
     client: Any,
     executor_type: str,
@@ -111,6 +287,18 @@ async def create_executor(
         account,
         merged_config.get("trading_pair"),
     )
+
+    violation = await _trading_rule_violation(client, executor_type, merged_config)
+    if violation:
+        # Refused here, not by the backend: below a venue minimum the API answers
+        # with an opaque error or accepts an order that never fills.
+        logger.info("create_%s refused by a trading rule: %s", executor_type, violation)
+        return {
+            "action": "create",
+            "executor_type": executor_type,
+            "error": violation,
+            "formatted_output": f"Error creating {executor_type}: {violation}",
+        }
 
     try:
         result = await client.executors.create_executor(
