@@ -60,6 +60,7 @@ vi.mock("@/lib/api", () => ({
 let host: HTMLDivElement;
 let root: Root;
 let path = "";
+let search = "";
 
 /**
  * Reports whatever route the router is on, so navigation is observable.
@@ -69,10 +70,11 @@ let path = "";
  * same one that makes a component safe to re-render twice.
  */
 function Probe() {
-  const { pathname } = useLocation();
+  const { pathname, search: query } = useLocation();
   useEffect(() => {
     path = pathname;
-  }, [pathname]);
+    search = query;
+  }, [pathname, query]);
   return null;
 }
 
@@ -118,6 +120,7 @@ beforeEach(() => {
   document.body.appendChild(host);
   root = createRoot(host);
   path = "";
+  search = "";
 });
 
 afterEach(() => {
@@ -138,9 +141,10 @@ it("hands the strategy to a host that has somewhere to put it", async () => {
   expect(path).toBe("/");
 });
 
-// A page navigates to the *Lab* since FEAT-099: a card summarises what a loop
-// has been doing, and its runs are what it has been doing. The workbench — where
-// you operate it — is one click further, from the Lab's own header.
+// A page navigates to the agent workspace's *runs* view since FEAT-103 (the
+// Lab, before it was folded in): a card summarises what a loop has been doing,
+// and its runs are what it has been doing. The workbench — where you operate it
+// — is one click further, on the workspace's own spine.
 it("still navigates when the host is a page", async () => {
   await renderList(undefined);
 
@@ -148,7 +152,8 @@ it("still navigates when the host is a page", async () => {
     card().click();
   });
 
-  expect(path).toBe("/agents/brigado/runs");
+  expect(path).toBe("/agents/brigado");
+  expect(search).toBe("?view=runs&strategy=brl_mm");
 });
 
 it("counts dry runs on the card, which book no PnL to be seen by", async () => {

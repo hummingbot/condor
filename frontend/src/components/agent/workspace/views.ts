@@ -151,3 +151,38 @@ export function pickRun(
   }
   return scoped[0] ?? null;
 }
+
+// ── The retired addresses ──
+
+/**
+ * Where `/agents/:slug/runs` goes now.
+ *
+ * A redirect and not a deletion: the Lab's address is in notification payloads,
+ * in the chat's route facts and in whatever anyone has bookmarked. The whole
+ * query string travels with it, which costs nothing because the Lab's grammar
+ * (`?strategy=&run=&tick=`) is a subset of the workspace's — that is what made
+ * the merge possible at all.
+ */
+export function runsRedirect(slug: string, search: string): string {
+  const params = new URLSearchParams(search);
+  params.set("view", "runs");
+  return `/agents/${encodeURIComponent(slug)}?${params}`;
+}
+
+/**
+ * Where `/agents/:slug/strategies/:sslug` goes now.
+ *
+ * The strategy stops being a path segment and becomes the scope it always was,
+ * so the same address lands on the workbench with that strategy selected — and
+ * the loop bar above it can then move the scope without another navigation.
+ */
+export function strategyRedirect(
+  slug: string,
+  sslug: string,
+  search: string,
+): string {
+  const params = new URLSearchParams(search);
+  params.set("view", "playbook");
+  params.set("strategy", sslug);
+  return `/agents/${encodeURIComponent(slug)}?${params}`;
+}

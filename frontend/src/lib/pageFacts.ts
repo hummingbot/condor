@@ -100,19 +100,22 @@ export function routeFacts(
   if (pathname === "/") return null;
 
   const params = new URLSearchParams(search);
-  const tab = params.get("tab") || "";
+  // `?view=` is the agent workspace's spelling of the same idea (FEAT-103):
+  // one route whose section is a query parameter. Read here rather than in the
+  // one entry that uses it, so a route never has to parse a search string.
+  const tab = params.get("view") || params.get("tab") || "";
 
   for (const { pattern, facts, subject, onScreen } of ROUTES) {
     const m = pathname.match(pattern);
     if (!m) continue;
     const parts = m.slice(1).map(decode);
-    const base = facts(parts, tab);
+    const base = facts(parts, tab, params);
     if (!qc || (!onScreen && !subject)) return base;
     // A half-loaded cache must leave the block partial, never empty and never
     // thrown: the user asking mid-load still deserves the label and subject.
     try {
-      const named = subject?.(parts, tab, qc);
-      const shown = onScreen && prune(onScreen(parts, tab, qc));
+      const named = subject?.(parts, tab, qc, params);
+      const shown = onScreen && prune(onScreen(parts, tab, qc, params));
       return {
         ...base,
         ...(named ? { subject: named } : {}),
@@ -330,12 +333,143 @@ function byType(rows: { type: string }[], cap = 2): string | undefined {
   );
 }
 
+/**
+ * What each `?view=` is called, for the one route that has nine of them.
+ *
+ * Absent from the table means the workspace's own name: `now` is the default
+ * view and every Knowledge section is still "the agent", read one way or
+ * another. The four that get their own label are the ones a reader would not
+ * recognise under it.
+ */
+const VIEW_LABELS: Record<string, string> = {
+  runs: "Agent runs",
+  tick: "Agent tick",
+  playbook: "Strategy playbook",
+  money: "Strategy performance",
+  fleet: "Agent fleet",
+};
+
+/** The views the run index is actually on screen for. */
+const RUN_VIEWS = new Set(["runs", "tick", "fleet"]);
+
+/** The agent itself: who it is, what is looping, and what that has made. */
+function agentIdentityFacts(
+  agent: AgentDetail,
+  slug: string,
+  qc: QueryClient,
+): NonNullable<ViewFacts["onScreen"]> {
+  const m = money(qc);
+  const strategies = agent.strategies ?? [];
+  const live = strategies.filter((s) => s.instances.length > 0);
+  const sum = (of: (s: StrategySummary) => number) =>
+    strategies.length > 0 ? strategies.reduce((n, s) => n + (of(s) || 0), 0) : undefined;
+  // Only loaded once the knowledge sections have been opened, so absent is the
+  // normal case and `prune` drops it rather than reporting zero libraries.
+  const brain = fresh<AgentBrain>(qc, ["agent-brain"], (key) => key[1] === slug);
+  return {
+    agent: agent.name,
+    model: agent.agent_key || undefined,
+    strategies: ratio(live.length, strategies.length),
+    running: names(
+      live.map((s) => `${s.name} (tick ${s.instances[0]?.tick_count ?? 0})`),
+    ),
+    "daily pnl": m.pnl(sum((s) => s.daily_pnl)),
+    "total pnl": m.pnl(sum((s) => s.total_pnl)),
+    "open positions": sum((s) => s.open_positions),
+    skills: brain?.skills?.length,
+    memories: brain?.memories?.length,
+    server: agent.server_name || undefined,
+    "as of": asOf(qc, ["agent"], (key) => key[1] === slug),
+  };
+}
+
+/**
+ * The strategy in scope, when `?strategy=` names one.
+ *
+ * Spread over the agent's own numbers on purpose: with a scope selected, the
+ * money on screen is this strategy's, and reporting the agent's total beside it
+ * under the same key would be the block contradicting the page.
+ */
+function strategyScopeFacts(
+  slug: string,
+  sslug: string,
+  agent: AgentDetail | undefined,
+  qc: QueryClient,
+): NonNullable<ViewFacts["onScreen"]> | undefined {
+  const detail = fresh<StrategyDetail>(
+    qc,
+    ["strategy"],
+    (key) => key[1] === slug && key[2] === sslug,
+  );
+  const summary: StrategySummary | undefined = (agent?.strategies ?? []).find(
+    (s) => s.slug === sslug,
+  );
+  if (!detail && !summary) return undefined;
+  const m = money(qc);
+  const instances = detail?.instances ?? summary?.instances ?? [];
+  const live = instances[0];
+  return {
+    strategy: detail?.name || summary?.name,
+    status: detail?.status || summary?.status,
+    running: live
+      ? `session ${live.session_num}, tick ${live.tick_count} (${live.execution_mode})`
+      : "no live instance",
+    model: live?.agent_key,
+    "daily pnl": m.pnl(summary?.daily_pnl ?? live?.daily_pnl),
+    "total pnl": m.pnl(summary?.total_pnl ?? live?.total_pnl),
+    "open positions": summary?.open_positions ?? live?.open_count,
+    sessions: detail?.sessions?.length,
+    experiments: detail?.experiments?.length,
+    "as of": asOf(qc, ["strategy"], (key) => key[1] === slug && key[2] === sslug),
+  };
+}
+
+/**
+ * The runs, for the views that show them.
+ *
+ * Scoped to `?strategy=` when there is one, because that is what the rail is
+ * filtered to. No money here on purpose: the run index is priced by nothing,
+ * and reporting a zero it never computed is the defect the runs view exists to
+ * remove.
+ */
+function agentRunsFacts(
+  slug: string,
+  sslug: string | null,
+  qc: QueryClient,
+): NonNullable<ViewFacts["onScreen"]> | undefined {
+  const all = fresh<AgentRunRow[]>(qc, ["agent-runs"], (key) => key[1] === slug);
+  if (!all) return undefined;
+  const runs = sslug ? all.filter((r) => r.strategy_slug === sslug) : all;
+  const sessions = runs.filter((r) => r.kind === "session");
+  const dryRuns = runs.filter((r) => r.kind === "experiment");
+  const live = runs.filter((r) => r.status === "running" || r.status === "paused");
+  const failed = runs.filter((r) => r.error);
+  const newest = runs[0];
+  return {
+    runs: runs.length,
+    sessions: sessions.length,
+    "dry runs": dryRuns.length || undefined,
+    // R1: the count orients, the names make the follow-up answerable.
+    live: names(live.map((r) => `${runLabel(r)} ${r.strategy_name} (tick ${r.tick_count})`)),
+    failed: names(failed.map((r) => `${runLabel(r)} ${r.strategy_name}`)),
+    newest: newest
+      ? `${runLabel(newest)} ${newest.strategy_name}, ${newest.tick_count} ticks${
+          newest.started_at ? `, started ${formatAge(newest.started_at)} ago` : ""
+        }`
+      : undefined,
+    "total ticks": runs.reduce((n, r) => n + r.tick_count, 0) || undefined,
+    "as of": asOf(qc, ["agent-runs"], (key) => key[1] === slug),
+  };
+}
+
 // ── The table ──
 
 type Reader = (
   parts: string[],
   tab: string,
   qc: QueryClient,
+  /** The rest of the query string, for a route whose scope lives in one. */
+  params: URLSearchParams,
 ) => ViewFacts["onScreen"];
 
 /**
@@ -402,9 +536,14 @@ function runsFacts(qc: QueryClient): ViewFacts["onScreen"] {
 
 const ROUTES: {
   pattern: RegExp;
-  facts: (parts: string[], tab: string) => ViewFacts;
+  facts: (parts: string[], tab: string, params: URLSearchParams) => ViewFacts;
   /** A subject only the cache can name — R5 wants `"backpack-mm-3"`, not `42`. */
-  subject?: (parts: string[], tab: string, qc: QueryClient) => string | undefined;
+  subject?: (
+    parts: string[],
+    tab: string,
+    qc: QueryClient,
+    params: URLSearchParams,
+  ) => string | undefined;
   onScreen?: Reader;
 }[] = [
   {
@@ -786,48 +925,34 @@ const ROUTES: {
     },
   },
   {
-    // The Lab (FEAT-099). Registered before the strategy entry for the same
-    // reason the routes are ordered: the table is walked in order.
-    pattern: /^\/agents\/([^/]+)\/runs$/,
-    facts: ([slug]) => ({
-      label: "Agent runs",
-      subject: `the runs of agent "${slug}"`,
-    }),
-    onScreen: ([slug], _tab, qc) => {
-      const runs = fresh<AgentRunRow[]>(qc, ["agent-runs"], (key) => key[1] === slug);
-      if (!runs) return undefined;
-      const sessions = runs.filter((r) => r.kind === "session");
-      const dryRuns = runs.filter((r) => r.kind === "experiment");
-      const live = runs.filter((r) => r.status === "running" || r.status === "paused");
-      const failed = runs.filter((r) => r.error);
-      const newest = runs[0];
+    /**
+     * The agent workspace — one route, and `?view=` says which of its nine
+     * sections is on screen (FEAT-103).
+     *
+     * This is three entries folded into one. `/agents/:slug/runs` (the Lab) and
+     * `/agents/:slug/strategies/:sslug` (the strategy page) both redirect here
+     * now, so a block written for either pattern would never be reached — and,
+     * worse, without the fold the chat would describe every one of the nine
+     * views as the same page.
+     *
+     * What is read follows what is shown: the agent always, the strategy when
+     * one is in scope, the runs when the reader is looking at them. A page that
+     * reports facts nobody can see on it is padding, and R-do-not-pad is the
+     * rule over all of them.
+     */
+    pattern: /^\/agents\/([^/]+)$/,
+    facts: ([slug], view, params) => {
+      const sslug = params.get("strategy");
       return {
-        runs: runs.length,
-        sessions: sessions.length,
-        "dry runs": dryRuns.length || undefined,
-        // R1: the count orients, the names make the follow-up answerable.
-        live: names(live.map((r) => `${runLabel(r)} ${r.strategy_name} (tick ${r.tick_count})`)),
-        failed: names(failed.map((r) => `${runLabel(r)} ${r.strategy_name}`)),
-        newest: newest
-          ? `${runLabel(newest)} ${newest.strategy_name}, ${newest.tick_count} ticks${
-              newest.started_at ? `, started ${formatAge(newest.started_at)} ago` : ""
-            }`
-          : undefined,
-        "total ticks": runs.reduce((n, r) => n + r.tick_count, 0) || undefined,
-        // No money here on purpose: the runs index is priced by nothing, and
-        // reporting a zero it never computed is the defect the page exists to
-        // remove.
-        "as of": asOf(qc, ["agent-runs"], (key) => key[1] === slug),
+        label: VIEW_LABELS[view] ?? "Agent workspace",
+        subject: sslug
+          ? `strategy "${sslug}" of agent "${slug}"`
+          : `agent "${slug}"`,
       };
     },
-  },
-  {
-    pattern: /^\/agents\/([^/]+)\/strategies\/([^/]+)$/,
-    facts: ([slug, sslug]) => ({
-      label: "Strategy detail",
-      subject: `strategy "${sslug}" of agent "${slug}"`,
-    }),
-    subject: ([slug, sslug], _tab, qc) => {
+    subject: ([slug], _view, qc, params) => {
+      const sslug = params.get("strategy");
+      if (!sslug) return undefined;
       const detail = fresh<StrategyDetail>(
         qc,
         ["strategy"],
@@ -837,68 +962,14 @@ const ROUTES: {
         ? `strategy "${detail.name}" of agent "${slug}"`
         : undefined;
     },
-    onScreen: ([slug, sslug], _tab, qc) => {
-      const detail = fresh<StrategyDetail>(
-        qc,
-        ["strategy"],
-        (key) => key[1] === slug && key[2] === sslug,
-      );
-      // The detail payload carries the history and the live engines; the
-      // agent's own listing carries the PNL totals the strategy card shows.
+    onScreen: ([slug], view, qc, params) => {
       const agent = fresh<AgentDetail>(qc, ["agent"], (key) => key[1] === slug);
-      const summary: StrategySummary | undefined = (agent?.strategies ?? []).find(
-        (s) => s.slug === sslug,
-      );
-      if (!detail && !summary) return undefined;
-      const m = money(qc);
-      const instances = detail?.instances ?? summary?.instances ?? [];
-      const live = instances[0];
-      return {
-        status: detail?.status || summary?.status,
-        running: live
-          ? `session ${live.session_num}, tick ${live.tick_count} (${live.execution_mode})`
-          : "no live instance",
-        model: live?.agent_key,
-        "daily pnl": m.pnl(summary?.daily_pnl ?? live?.daily_pnl),
-        "total pnl": m.pnl(summary?.total_pnl ?? live?.total_pnl),
-        "open positions": summary?.open_positions ?? live?.open_count,
-        sessions: detail?.sessions?.length,
-        experiments: detail?.experiments?.length,
-        "as of": asOf(qc, ["strategy"], (key) => key[1] === slug && key[2] === sslug),
-      };
-    },
-  },
-  {
-    pattern: /^\/agents\/([^/]+)$/,
-    facts: ([slug]) => ({ label: "Agent page", subject: `agent "${slug}"` }),
-    onScreen: ([slug], _tab, qc) => {
-      const agent = fresh<AgentDetail>(qc, ["agent"], (key) => key[1] === slug);
-      if (!agent) return undefined;
-      const m = money(qc);
-      const strategies = agent.strategies ?? [];
-      const live = strategies.filter((s) => s.instances.length > 0);
-      const sum = (of: (s: StrategySummary) => number) =>
-        strategies.length > 0 ? strategies.reduce((n, s) => n + (of(s) || 0), 0) : undefined;
-      // Only loaded once the knowledge panel has been opened, so absent is the
-      // normal case and `prune` drops it rather than reporting zero libraries.
-      const brain = fresh<AgentBrain>(qc, ["agent-brain"], (key) => key[1] === slug);
-      return {
-        agent: agent.name,
-        model: agent.agent_key || undefined,
-        strategies: ratio(live.length, strategies.length),
-        running: names(
-          live.map(
-            (s) => `${s.name} (tick ${s.instances[0]?.tick_count ?? 0})`,
-          ),
-        ),
-        "daily pnl": m.pnl(sum((s) => s.daily_pnl)),
-        "total pnl": m.pnl(sum((s) => s.total_pnl)),
-        "open positions": sum((s) => s.open_positions),
-        skills: brain?.skills?.length,
-        memories: brain?.memories?.length,
-        server: agent.server_name || undefined,
-        "as of": asOf(qc, ["agent"], (key) => key[1] === slug),
-      };
+      const sslug = params.get("strategy");
+      const base = agent ? agentIdentityFacts(agent, slug, qc) : undefined;
+      const scoped = sslug ? strategyScopeFacts(slug, sslug, agent, qc) : undefined;
+      const runs = RUN_VIEWS.has(view) ? agentRunsFacts(slug, sslug, qc) : undefined;
+      if (!base && !scoped && !runs) return undefined;
+      return { ...base, ...scoped, ...runs };
     },
   },
   // R9: nothing is read off this page. The wire is guarded by `secrets.redact`,

@@ -60,7 +60,11 @@ export function StrategySheet({
       // Full screen is the page, not a bigger sheet: the strategy has a URL,
       // and a reader who wants the whole window wants the thing they can link
       // to and come back to.
-      onFullscreen={() => navigate(`/agents/${slug}/strategies/${sslug}`)}
+      onFullscreen={() =>
+        navigate(
+          `/agents/${slug}?view=playbook&strategy=${encodeURIComponent(sslug)}`,
+        )
+      }
       onClose={onClose}
     >
       <StrategyWorkbench slug={slug} sslug={sslug} dense onDeleted={onClose} />

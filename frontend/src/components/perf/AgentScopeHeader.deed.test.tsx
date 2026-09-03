@@ -149,7 +149,7 @@ describe("the deed line", () => {
     });
 
     expect(navigate).toHaveBeenCalledWith(
-      "/agents/brigado/runs?strategy=brl_mm&run=s7&tick=212",
+      "/agents/brigado?view=tick&strategy=brl_mm&run=s7&tick=212",
     );
   });
 
@@ -162,6 +162,8 @@ describe("the deed line", () => {
         .click();
     });
 
-    expect(navigate).toHaveBeenCalledWith("/agents/brigado/runs?strategy=brl_mm&run=s7");
+    expect(navigate).toHaveBeenCalledWith(
+      "/agents/brigado?view=runs&strategy=brl_mm&run=s7",
+    );
   });
 });

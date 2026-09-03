@@ -87,15 +87,18 @@ export function AgentStrategies({
    *
    * On a page that door is the Lab (FEAT-099): a card is a summary of what a
    * loop has been *doing*, and the runs are what it has been doing. The
-   * workbench is one click further, from the Lab's own header — it is where you
-   * operate a strategy, not where you read it.
+   * workbench is one click further, on the workspace's own spine — it is where
+   * you operate a strategy, not where you read it.
    *
-   * The chat's pane still opens the workbench in the pane, because the Lab is a
-   * page: three panes do not fit a 640px column.
+   * The chat's pane still opens the workbench in the pane: three panes do not
+   * fit a 640px column.
    */
   function openStrategy(strategySlug: string) {
     if (onOpenStrategy) onOpenStrategy(strategySlug);
-    else navigate(`/agents/${slug}/runs?strategy=${encodeURIComponent(strategySlug)}`);
+    else
+      navigate(
+        `/agents/${slug}?view=runs&strategy=${encodeURIComponent(strategySlug)}`,
+      );
   }
 
   /**
@@ -106,7 +109,10 @@ export function AgentStrategies({
    */
   function openNewStrategy(strategySlug: string) {
     if (onOpenStrategy) onOpenStrategy(strategySlug);
-    else navigate(`/agents/${slug}/strategies/${strategySlug}`);
+    else
+      navigate(
+        `/agents/${slug}?view=playbook&strategy=${encodeURIComponent(strategySlug)}`,
+      );
   }
 
   const deleteMut = useMutation({

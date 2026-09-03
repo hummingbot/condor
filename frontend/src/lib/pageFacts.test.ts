@@ -52,11 +52,15 @@ describe("routeFacts", () => {
       subject: "pool 7qbRF6 on solana",
     });
     expect(routeFacts("/agents/orca-lp-expert", "")).toEqual({
-      label: "Agent page",
+      label: "Agent workspace",
       subject: 'agent "orca-lp-expert"',
     });
-    expect(routeFacts("/agents/orca-lp-expert/strategies/sol-lp", "")).toEqual({
-      label: "Strategy detail",
+    // One route with nine views (FEAT-103): the strategy is a scope in the
+    // query string, and the label follows the view rather than the path.
+    expect(
+      routeFacts("/agents/orca-lp-expert", "?view=playbook&strategy=sol-lp"),
+    ).toEqual({
+      label: "Strategy playbook",
       subject: 'strategy "sol-lp" of agent "orca-lp-expert"',
     });
   });

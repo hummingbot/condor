@@ -27,6 +27,15 @@ import { renderViewBlock, VIEW_BLOCK_MAX_CHARS } from "./viewFacts";
 
 const SRV = "main";
 
+/**
+ * The strategy page's address after FEAT-103 folded it into the workspace.
+ *
+ * `/agents/:slug/strategies/:sslug` still resolves — it redirects — but the
+ * block is read off the URL the reader ends up on, which is this one.
+ */
+const SCOPED_PATH = "/agents/orca-lp-expert";
+const SCOPED_SEARCH = "?view=playbook&strategy=sol-lp";
+
 let qc: QueryClient;
 beforeEach(() => {
   qc = new QueryClient();
@@ -716,7 +725,7 @@ describe("/agents/:slug", () => {
   });
 });
 
-describe("/agents/:slug/strategies/:sslug", () => {
+describe("/agents/:slug?strategy= — the workspace scoped to one", () => {
   beforeEach(() => {
     qc.setQueryData(["strategy", "orca-lp-expert", "sol-lp"], {
       slug: "sol-lp",
@@ -756,7 +765,7 @@ describe("/agents/:slug/strategies/:sslug", () => {
   });
 
   it("is no longer label-only", () => {
-    const line = onScreenLine("/agents/orca-lp-expert/strategies/sol-lp");
+    const line = onScreenLine(SCOPED_PATH, SCOPED_SEARCH);
     expect(line).toContain("status active");
     expect(line).toContain("running session 2, tick 314 (loop)");
     expect(line).toContain("model claude-fable-5");
@@ -776,13 +785,13 @@ describe("/agents/:slug/strategies/:sslug", () => {
       experiments: [],
       instances: [],
     });
-    expect(onScreenLine("/agents/orca-lp-expert/strategies/sol-lp")).toContain(
+    expect(onScreenLine(SCOPED_PATH, SCOPED_SEARCH)).toContain(
       "running no live instance",
     );
   });
 
   it("names the strategy in the subject once it is cached", () => {
-    expect(routeFacts("/agents/orca-lp-expert/strategies/sol-lp", "", qc)?.subject).toBe(
+    expect(routeFacts(SCOPED_PATH, SCOPED_SEARCH, qc)?.subject).toBe(
       'strategy "SOL range keeper" of agent "orca-lp-expert"',
     );
   });
@@ -955,7 +964,8 @@ describe("an empty cache", () => {
       ["/routines", ""],
       ["/routines", "?tab=reports"],
       ["/agents/orca-lp-expert", ""],
-      ["/agents/orca-lp-expert/strategies/sol-lp", ""],
+      ["/agents/orca-lp-expert", "?view=playbook&strategy=sol-lp"],
+      ["/agents/orca-lp-expert", "?view=runs"],
       ["/settings", ""],
     ] as const) {
       const facts = routeFacts(path, search, qc);
@@ -1229,7 +1239,8 @@ describe("the block's budget", () => {
       ["/routines", ""],
       ["/routines", "?tab=reports"],
       ["/agents/orca-lp-expert", ""],
-      ["/agents/orca-lp-expert/strategies/strategy-0", ""],
+      ["/agents/orca-lp-expert", "?view=playbook&strategy=strategy-0"],
+      ["/agents/orca-lp-expert", "?view=runs&strategy=strategy-0"],
     ] as const) {
       const facts = routeFacts(path, search, qc)!;
       expect(facts, path + search).not.toBeNull();

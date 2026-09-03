@@ -47,21 +47,29 @@ import { groupExecutorsByMarket } from "@/lib/executor-overlays";
  * Run *analysis* is not here any more (FEAT-099). The session reviewer was an
  * overlay with no URL of its own, so the one surface where you read what a loop
  * actually did could not be linked, bookmarked or shared. It lives at
- * `/agents/:slug/runs` now, and the split is clean: **the workbench operates a
- * strategy, the Lab reads its runs.** What stays here is what this component is
- * good at — identity, start/stop/pause, live executor charts, playbook and
- * learnings, delete — plus a Runs band that is the door to the other half.
+ * `/agents/:slug?view=runs` now, and the split is clean: **the workbench
+ * operates a strategy, the workspace reads its runs.** What stays here is what
+ * this component is good at — identity, start/stop/pause, live executor charts,
+ * playbook and learnings, delete.
+ *
+ * `showRuns` is off in the agent workspace and on in the chat's pane
+ * (FEAT-103). The band is a door to the runs, and in the workspace the spine
+ * already has one three inches to the left; in a pane beside a conversation
+ * there is no spine, so the band is still the only way in.
  */
 export function StrategyWorkbench({
   slug,
   sslug,
   dense = false,
+  showRuns = true,
   onDeleted,
 }: {
   slug: string;
   sslug: string;
   /** Half a workspace row rather than a page: one column, tighter grids. */
   dense?: boolean;
+  /** The Runs band — off for a host whose own navigation already has one. */
+  showRuns?: boolean;
   /** The host's move after a delete — pop the pane, or navigate the page. */
   onDeleted: () => void;
 }) {
@@ -172,12 +180,17 @@ export function StrategyWorkbench({
     [liveExecutors, serverName],
   );
 
-  /** Where a run — or one tick of it — is read: the Lab, at a real URL. */
+  /**
+   * Where a run — or one tick of it — is read: the agent workspace, at a real
+   * URL. The Lab's own address redirects here, so this could keep pointing at
+   * it; it names the destination instead, because a link through a redirect is
+   * a link that shows the reader the wrong URL for a frame.
+   */
   const labUrl = useCallback(
     (params: Record<string, string | number> = {}) => {
-      const query = new URLSearchParams({ strategy: sslug });
+      const query = new URLSearchParams({ view: "runs", strategy: sslug });
       for (const [k, v] of Object.entries(params)) query.set(k, String(v));
-      return `/agents/${encodeURIComponent(slug)}/runs?${query}`;
+      return `/agents/${encodeURIComponent(slug)}?${query}`;
     },
     [slug, sslug],
   );
@@ -185,7 +198,7 @@ export function StrategyWorkbench({
   /** A beat on the pulse strip is an address: land on that tick's snapshot. */
   const handleOpenTick = useCallback(
     (sessionNum: number, tick: number) => {
-      navigate(labUrl({ run: `s${sessionNum}`, tick }));
+      navigate(labUrl({ view: "tick", run: `s${sessionNum}`, tick }));
     },
     [navigate, labUrl],
   );
@@ -362,11 +375,13 @@ export function StrategyWorkbench({
         </div>
       )}
 
-      {/* The way into the Lab. The sessions table that used to sit here was
+      {/* The way into the runs. The sessions table that used to sit here was
           nine columns, seven of them $0.00, and none of them a tick count. */}
-      <div className="mb-6">
-        <RunsBand slug={slug} sslug={sslug} labUrl={labUrl} />
-      </div>
+      {showRuns && (
+        <div className="mb-6">
+          <RunsBand slug={slug} sslug={sslug} labUrl={labUrl} />
+        </div>
+      )}
 
       {/* Performance Panel — strategy-level money, which is what it always was */}
       <div className={`mb-8 grid grid-cols-1 gap-6 ${dense ? "" : "lg:grid-cols-2"}`}>

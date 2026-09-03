@@ -19,7 +19,9 @@ import {
   parseWorkspace,
   pickRun,
   pickStrategy,
+  runsRedirect,
   spineSectionFor,
+  strategyRedirect,
 } from "./views";
 
 function run(over: Partial<AgentRunRow> = {}): AgentRunRow {
@@ -190,5 +192,35 @@ describe("the run in scope", () => {
 
   it("is null for a scope with no runs", () => {
     expect(pickRun(runs, "nothing_here", null)).toBeNull();
+  });
+});
+
+describe("the retired addresses still resolve", () => {
+  it("sends the Lab's URL to the runs view with its query string intact", () => {
+    expect(runsRedirect("brigado", "?strategy=brl_mm&run=s3&tick=7")).toBe(
+      "/agents/brigado?strategy=brl_mm&run=s3&tick=7&view=runs",
+    );
+    // And a bare one still lands somewhere.
+    expect(runsRedirect("brigado", "")).toBe("/agents/brigado?view=runs");
+  });
+
+  it("sends the strategy page's URL to the playbook, scoped to it", () => {
+    expect(strategyRedirect("brigado", "brl_mm", "")).toBe(
+      "/agents/brigado?view=playbook&strategy=brl_mm",
+    );
+  });
+
+  it("round-trips: what the redirect writes is what the parser reads", () => {
+    const there = runsRedirect("brigado", "?strategy=brl_mm&run=s3&tick=7");
+    expect(parseWorkspace(there.slice(there.indexOf("?")))).toEqual({
+      view: "runs",
+      strategy: "brl_mm",
+      run: { kind: "session", number: 3 },
+      tick: 7,
+    });
+  });
+
+  it("escapes a slug that needs it", () => {
+    expect(runsRedirect("my agent", "")).toBe("/agents/my%20agent?view=runs");
   });
 });

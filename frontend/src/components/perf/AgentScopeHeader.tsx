@@ -88,10 +88,13 @@ export function AgentScopeHeader({
   // demonstration of it.
   const openSession = (snapshotTick?: number) => {
     if (!owner) return;
-    const params = new URLSearchParams({ strategy: owner.strategySlug });
+    const params = new URLSearchParams({
+      view: snapshotTick ? "tick" : "runs",
+      strategy: owner.strategySlug,
+    });
     if (live?.sessionNum) params.set("run", `s${live.sessionNum}`);
     if (snapshotTick) params.set("tick", String(snapshotTick));
-    navigate(`/agents/${owner.agentSlug}/runs?${params}`);
+    navigate(`/agents/${owner.agentSlug}?${params}`);
   };
 
   const did = live?.lastDid ?? null;

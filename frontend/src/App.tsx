@@ -6,8 +6,11 @@ import { AppShell } from "@/components/layout/AppShell";
 import { ServerContext } from "@/hooks/useServer";
 import { AuthContext, SERVER_KEY, useAuth, useAuthState } from "@/lib/auth";
 import { invalidateServerScopedQueries, queryClient } from "@/lib/queryClient";
-import { AgentLab } from "@/pages/AgentLab";
-import { AgentWorkspace } from "@/pages/AgentWorkspace";
+import {
+  AgentRunsRedirect,
+  AgentStrategyRedirect,
+  AgentWorkspace,
+} from "@/pages/AgentWorkspace";
 import { Agents } from "@/pages/Agents";
 import { BotDetail } from "@/pages/BotDetail";
 import { Bots } from "@/pages/Bots";
@@ -18,7 +21,6 @@ import { Login } from "@/pages/Login";
 import { Portfolio } from "@/pages/Portfolio";
 import { Routines } from "@/pages/Routines";
 import { Settings } from "@/pages/Settings";
-import { StrategyDetail } from "@/pages/StrategyDetail";
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated } = useAuth();
@@ -104,10 +106,15 @@ export default function App() {
                 {/* One agent, one screen: every section, run and tick is a query
                     parameter on this route (FEAT-103). */}
                 <Route path="/agents/:slug" element={<AgentWorkspace />} />
-                {/* The Lab: every run of every strategy, and every tick of a
-                    run, with all of it in the URL (FEAT-099). */}
-                <Route path="/agents/:slug/runs" element={<AgentLab />} />
-                <Route path="/agents/:slug/strategies/:sslug" element={<StrategyDetail />} />
+                {/* The Lab and the strategy page are views of the workspace
+                    now (FEAT-103). Redirects rather than deletions: both are in
+                    notification payloads and in bookmarks, and both carry a
+                    query string that has to arrive intact. */}
+                <Route path="/agents/:slug/runs" element={<AgentRunsRedirect />} />
+                <Route
+                  path="/agents/:slug/strategies/:sslug"
+                  element={<AgentStrategyRedirect />}
+                />
                 <Route path="/settings" element={<Settings />} />
                 <Route path="/market" element={<Navigate to="/trade" replace />} />
               </Route>

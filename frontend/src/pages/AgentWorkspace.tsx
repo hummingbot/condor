@@ -1,11 +1,21 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertCircle, ArrowLeft, ExternalLink, ScrollText } from "lucide-react";
+import { AlertCircle, ArrowLeft, ExternalLink, Layers, ScrollText } from "lucide-react";
 import { useCallback, useMemo, useState } from "react";
-import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import {
+  Link,
+  Navigate,
+  useLocation,
+  useNavigate,
+  useParams,
+  useSearchParams,
+} from "react-router-dom";
 
 import { AgentKnowledge } from "@/components/agent/AgentKnowledge";
 import { PerformancePanel } from "@/components/agent/AgentOverviewTab";
 import { SnapshotDetail } from "@/components/agent/AgentSessionContent";
+import { DeploymentLedger } from "@/components/agent/lab/DeploymentLedger";
+import { ExperimentDetail, RunOverview } from "@/components/agent/lab/RunOverview";
+import { RunRail } from "@/components/agent/lab/RunRail";
 import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
 import { StrategyWorkbench } from "@/components/agent/StrategyWorkbench";
 import { isKnowledgeTab } from "@/components/agent/knowledgeTabs";
@@ -16,11 +26,13 @@ import {
   parseWorkspace,
   pickRun,
   pickStrategy,
+  runsRedirect,
   spineSectionFor,
+  strategyRedirect,
   type WorkspaceViewId,
 } from "@/components/agent/workspace/views";
 import { ReportBrowser } from "@/components/routines/ReportBrowser";
-import { api } from "@/lib/api";
+import { api, type AgentRunRow } from "@/lib/api";
 
 /**
  * One agent, one screen, one route (FEAT-103).
@@ -279,15 +291,40 @@ export function AgentWorkspace() {
         Pick a beat on the spine above to read the tick it wrote.
       </p>
     )
-  ) : view === "playbook" || view === "now" ? (
-    /* Step 1 of FEAT-103: Now is the workbench until it has a body of its own. */
+  ) : view === "fleet" ? (
+    <FleetView
+      slug={agent.slug}
+      sslug={sslug}
+      run={selectedRun}
+    />
+  ) : view === "runs" ? (
+    <RunsView
+      slug={agent.slug}
+      runs={runs}
+      strategyFilter={url.strategy}
+      onStrategyFilter={(next) =>
+        setParams({ strategy: next, run: null, tick: null })
+      }
+      selected={selectedRun}
+      onSelectRun={(run) =>
+        setParams({ strategy: run.strategy_slug, run: run.run_id, tick: null })
+      }
+      tick={url.tick}
+      onSelectTick={(next) => selectTick(next, "runs")}
+      serverName={(strategy?.config?.server_name as string) || ""}
+      controllerIds={instance ? [instance.agent_id] : undefined}
+    />
+  ) : (
+    /* Step 1 of FEAT-103: Now is the workbench until it has a body of its own.
+       The Runs band comes off both — the spine's Runs entry is the door now,
+       and a band that duplicates it inside the body is the second door this
+       feature exists to remove. */
     <StrategyWorkbench
       slug={agent.slug}
       sslug={sslug}
+      showRuns={false}
       onDeleted={() => setParams({ view: "strategies", strategy: null })}
     />
-  ) : (
-    <LabPointer slug={agent.slug} sslug={sslug} runId={selectedRun?.run_id} />
   );
 
   return (
@@ -317,7 +354,13 @@ export function AgentWorkspace() {
 
       <div className="flex min-h-0 flex-1">
         <WorkspaceSpine current={spineSectionFor(view)} onSelect={selectView} />
-        <div className="min-w-0 flex-1 overflow-y-auto p-4">{body}</div>
+        <div
+          className={`min-w-0 flex-1 ${
+            view === "runs" ? "flex min-h-0" : "overflow-y-auto p-4"
+          }`}
+        >
+          {body}
+        </div>
       </div>
 
       {showRoutinesBrowser && (
@@ -345,31 +388,149 @@ export function AgentWorkspace() {
 }
 
 /**
- * Where the run views live until they move in here.
+ * Every run of every strategy, and every tick of one — the Lab's whole job.
  *
- * Step 1 ships the shell over today's bodies and deletes nothing, so Runs, Tick
- * and Fleet still point at the Lab. Step 2 promotes the tick spine and step 3
- * takes the Lab's whole job, at which point this goes.
+ * The rail and the overview are the Lab's own bodies, imported unchanged: what
+ * the Lab was, minus the page around it. Its header is gone because the loop bar
+ * above already says which run this is and whether it is still going, which the
+ * Lab could not — it had no agent name in it at all.
  */
-function LabPointer({
+function RunsView({
+  slug,
+  runs,
+  strategyFilter,
+  onStrategyFilter,
+  selected,
+  onSelectRun,
+  tick,
+  onSelectTick,
+  serverName,
+  controllerIds,
+}: {
+  slug: string;
+  runs: AgentRunRow[];
+  strategyFilter: string | null;
+  onStrategyFilter: (sslug: string | null) => void;
+  selected: AgentRunRow | null;
+  onSelectRun: (run: AgentRunRow) => void;
+  tick: number | null;
+  onSelectTick: (tick: number | null) => void;
+  serverName: string;
+  controllerIds?: string[];
+}) {
+  return (
+    <>
+      <RunRail
+        runs={runs}
+        strategyFilter={strategyFilter}
+        onStrategyFilter={onStrategyFilter}
+        selectedKey={
+          selected ? `${selected.strategy_slug}:${selected.run_id}` : null
+        }
+        onSelectRun={onSelectRun}
+        isLoading={false}
+      />
+      <div className="min-h-0 flex-1 overflow-y-auto p-4">
+        {!selected ? (
+          <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">
+            This agent has no runs yet.
+          </p>
+        ) : selected.kind === "experiment" ? (
+          <ExperimentDetail
+            slug={slug}
+            sslug={selected.strategy_slug}
+            number={selected.number}
+          />
+        ) : tick !== null ? (
+          /* A `?tick=` on the runs view is the Lab's own address, and the
+             redirect from `/agents/:slug/runs` lands on it with its query
+             string intact — so it has to read the tick, not the overview. */
+          <SnapshotDetail
+            slug={slug}
+            sslug={selected.strategy_slug}
+            sessionNum={selected.number}
+            tick={tick}
+          />
+        ) : (
+          <RunOverview
+            slug={slug}
+            sslug={selected.strategy_slug}
+            sessionNum={selected.number}
+            serverName={serverName}
+            controllerIds={controllerIds}
+            isLiveSession={
+              selected.status === "running" || selected.status === "paused"
+            }
+            onSelectTick={onSelectTick}
+          />
+        )}
+      </div>
+    </>
+  );
+}
+
+/**
+ * What this run put into the world, and the door to the rest of the fleet.
+ *
+ * `DeploymentLedger` (FEAT-100) reads the same `strategy-session-executors`
+ * response the run overview folds, so this view costs no query of its own — and
+ * the two can never disagree about what was deployed.
+ */
+function FleetView({
   slug,
   sslug,
-  runId,
+  run,
 }: {
   slug: string;
   sslug: string;
-  runId?: string;
+  run: AgentRunRow | null;
 }) {
-  const query = new URLSearchParams({ strategy: sslug });
-  if (runId) query.set("run", runId);
+  const sessionNum = run && run.kind === "session" ? run.number : 0;
+  const { data } = useQuery({
+    queryKey: ["strategy-session-executors", slug, sslug, sessionNum],
+    queryFn: () => api.getStrategySessionExecutors(slug, sslug, sessionNum),
+    enabled: sessionNum > 0,
+    refetchInterval: 10000,
+  });
+
   return (
-    <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">
+    <div className="space-y-4">
+      <DeploymentLedger
+        rows={data?.deployments ?? []}
+        runKey={`${slug}.${sslug}`}
+        sessionNum={sessionNum || undefined}
+      />
+      {/* The gesture the strategy page used to make — this agent's whole
+          history, beside everything else that is trading (FEAT-096). */}
       <Link
-        to={`/agents/${encodeURIComponent(slug)}/runs?${query}`}
-        className="inline-flex items-center gap-1 text-[var(--color-primary)] hover:underline"
+        to={`/bots?scope=agent:${encodeURIComponent(`${slug}.${sslug}`)}`}
+        className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] transition-all hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
       >
-        Read this agent's runs in the Lab <ExternalLink className="h-3 w-3" />
+        <Layers className="h-3.5 w-3.5" /> See this strategy beside the rest of
+        the fleet
       </Link>
-    </p>
+    </div>
   );
+}
+
+/**
+ * `/agents/:slug/runs` — the Lab's address, kept resolving.
+ *
+ * A redirect and not a deletion: it is in notification payloads, in the chat's
+ * route facts and in whatever anyone has bookmarked. The query string travels
+ * with it, so `?strategy=&run=&tick=` lands on exactly the run and the tick it
+ * always did — the Lab's grammar is a subset of the workspace's, which is what
+ * made the merge possible at all.
+ */
+export function AgentRunsRedirect() {
+  const { slug = "" } = useParams<{ slug: string }>();
+  const { search } = useLocation();
+  return <Navigate to={runsRedirect(slug, search)} replace />;
+}
+
+/** `/agents/:slug/strategies/:sslug` — the strategy page's address, likewise. */
+export function AgentStrategyRedirect() {
+  const { slug = "", sslug = "" } = useParams<{ slug: string; sslug: string }>();
+  const { search } = useLocation();
+  return <Navigate to={strategyRedirect(slug, sslug, search)} replace />;
 }
