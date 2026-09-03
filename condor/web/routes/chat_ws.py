@@ -39,6 +39,18 @@ router = APIRouter(tags=["chat"])
 # Connection-scoped, not session state, so this stays local to the WS layer.
 _active_prompt_tasks: dict[str, asyncio.Task] = {}
 
+# Turns that outlived the socket which started them. A page reload drops the WS
+# mid-answer, and cancelling the turn there is what truncated the reply and
+# threw away work the agent had already done: the recorder's ``finally`` wrote
+# the half-written answer, honestly, but the turn was over. Now the task keeps
+# running and its events are addressed to whatever tabs the user has open, so
+# the reloaded page picks the answer back up (``_send_turn``).
+#
+# Module-level because asyncio holds only a weak reference to a running task: a
+# task kept alive solely by the closing connection's local set would be
+# garbage-collected mid-turn, which is the very bug this removes.
+_orphaned_turns: set[asyncio.Task] = set()
+
 # Spawns still in flight, keyed like _active_prompt_tasks. Subprocess start plus
 # the ACP handshake takes seconds, and the dashboard now lets the user type
 # through it: a message that arrives mid-spawn waits here instead of reading the
@@ -230,6 +242,27 @@ async def _send(ws: WebSocket, event: dict) -> None:
         pass
 
 
+async def _send_turn(ws: WebSocket, user_id: int, event: dict) -> None:
+    """Send one turn event to the tab that asked, or to the tabs still open.
+
+    While the asking socket is attached this is ``_send`` — one tab asked, one
+    tab is answered. Once it is gone (a reload, a closed tab) the turn is not
+    cancelled any more, so its events are addressed the way a woken turn's are
+    (``_WakeSink``): broadcast to every socket this user has open, routed by
+    ``slot_id``. With no tab open it is a no-op and the turn still finishes and
+    is recorded, which is what the next page load reads.
+    """
+    attached = _attached_sockets.get(user_id)
+    if attached is None or ws in attached:
+        # Either this socket is the live one, or nothing is registered for the
+        # user at all (no connection loop is managing them) — both mean "send
+        # where you were told". A dead socket swallows it; the turn goes on.
+        await _send(ws, event)
+        return
+    for other in list(attached):
+        await _send(other, event)
+
+
 class WebSocketChannel:
     """Renders a pending confirmation as a `permission_request` event.
 
@@ -392,11 +425,18 @@ async def chat_websocket(ws: WebSocket, token: str | None = Query(default=None))
 
     # Background tasks so long-running operations don't block the receive loop
     bg_tasks: set[asyncio.Task] = set()
+    # The subset of those that are a *turn*. A turn is the one piece of work
+    # here that belongs to the conversation rather than to this connection, so
+    # it is the one thing a disconnect must not cancel.
+    turn_tasks: set[asyncio.Task] = set()
 
-    def _spawn(coro):
+    def _spawn(coro, *, is_turn: bool = False):
         task = asyncio.create_task(coro)
         bg_tasks.add(task)
         task.add_done_callback(bg_tasks.discard)
+        if is_turn:
+            turn_tasks.add(task)
+            task.add_done_callback(turn_tasks.discard)
 
     try:
         while True:
@@ -414,7 +454,7 @@ async def chat_websocket(ws: WebSocket, token: str | None = Query(default=None))
             elif action == "resume_conversation":
                 _spawn(_handle_resume_conversation(ws, user_id, msg))
             elif action == "send_message":
-                _spawn(_handle_send_message(ws, user_id, msg))
+                _spawn(_handle_send_message(ws, user_id, msg), is_turn=True)
             elif action == "destroy_session":
                 _spawn(_handle_destroy_session(ws, user_id, msg))
             elif action == "list_sessions":
@@ -441,11 +481,23 @@ async def chat_websocket(ws: WebSocket, token: str | None = Query(default=None))
                 # Dropped rather than left empty: an entry that outlives the
                 # last tab would read as "someone is watching" forever.
                 _attached_sockets.pop(user_id, None)
-        # Cancel any in-flight background tasks on disconnect
-        for task in bg_tasks:
+        # Cancel this connection's in-flight work on disconnect — except a
+        # turn, which outlives the tab that asked for it. Cancelling one is
+        # what made a page reload truncate the agent's answer mid-sentence and
+        # abandon the work behind it; the turn now runs to its end, records a
+        # whole turn, and streams into whatever tabs are still open. Stop still
+        # reaches it from the next socket: ``_active_prompt_tasks`` is keyed by
+        # user and slot, not by connection.
+        cancelled = []
+        for task in list(bg_tasks):
+            if task in turn_tasks and not task.done():
+                _orphaned_turns.add(task)
+                task.add_done_callback(_orphaned_turns.discard)
+                continue
             task.cancel()
-        if bg_tasks:
-            await asyncio.gather(*bg_tasks, return_exceptions=True)
+            cancelled.append(task)
+        if cancelled:
+            await asyncio.gather(*cancelled, return_exceptions=True)
 
 
 async def _handle_start_session(
@@ -847,12 +899,14 @@ async def _handle_send_message(
         if info.is_busy:
             # Said before the stream starts, so the partial answer on screen is
             # marked interrupted instead of being left looking finished.
-            await _send(ws, {"event": "prompt_interrupted", "slot_id": slot_id})
+            await _send_turn(
+                ws, user_id, {"event": "prompt_interrupted", "slot_id": slot_id}
+            )
             # One pull, still under the gate: in the steer path the runtime
             # stops the turn ahead and *then* yields QUEUED, so this is bounded
             # by TIMEOUTS.prompt_cancel and is exactly the window a third
             # message must not race through.
-            await _pump_one(ws, stream, slot_id)
+            await _pump_one(ws, user_id, stream, slot_id)
 
         gate.release()
         gate_held = False
@@ -860,23 +914,33 @@ async def _handle_send_message(
         async for event in stream:
             message = _to_ws_message(event, slot_id)
             if message:
-                await _send(ws, message)
+                await _send_turn(ws, user_id, message)
     except asyncio.CancelledError:
-        await _send(
-            ws, {"event": "prompt_done", "slot_id": slot_id, "stop_reason": "cancelled"}
+        await _send_turn(
+            ws,
+            user_id,
+            {"event": "prompt_done", "slot_id": slot_id, "stop_reason": "cancelled"},
         )
     except RuntimeError as e:
-        await _send(ws, {"event": "error", "slot_id": slot_id, "message": str(e)})
-        await _send(
-            ws, {"event": "prompt_done", "slot_id": slot_id, "stop_reason": "error"}
+        await _send_turn(
+            ws, user_id, {"event": "error", "slot_id": slot_id, "message": str(e)}
+        )
+        await _send_turn(
+            ws,
+            user_id,
+            {"event": "prompt_done", "slot_id": slot_id, "stop_reason": "error"},
         )
     except Exception:
         log.exception("Error streaming prompt for user %d", user_id)
-        await _send(
-            ws, {"event": "error", "slot_id": slot_id, "message": "Stream error"}
+        await _send_turn(
+            ws,
+            user_id,
+            {"event": "error", "slot_id": slot_id, "message": "Stream error"},
         )
-        await _send(
-            ws, {"event": "prompt_done", "slot_id": slot_id, "stop_reason": "error"}
+        await _send_turn(
+            ws,
+            user_id,
+            {"event": "prompt_done", "slot_id": slot_id, "stop_reason": "error"},
         )
     finally:
         if gate_held:
@@ -888,7 +952,7 @@ async def _handle_send_message(
             _active_prompt_tasks.pop(task_key, None)
 
 
-async def _pump_one(ws: WebSocket, stream, slot_id: str) -> None:
+async def _pump_one(ws: WebSocket, user_id: int, stream, slot_id: str) -> None:
     """Forward exactly one event from a prompt stream, if it has one."""
     try:
         event = await stream.__anext__()
@@ -896,7 +960,7 @@ async def _pump_one(ws: WebSocket, stream, slot_id: str) -> None:
         return
     message = _to_ws_message(event, slot_id)
     if message:
-        await _send(ws, message)
+        await _send_turn(ws, user_id, message)
 
 
 async def _handle_abort_prompt(ws: WebSocket, user_id: int, msg: dict) -> None:
