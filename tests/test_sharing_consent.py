@@ -1128,3 +1128,80 @@ def _always(result: bool):
         return result
 
     return _post
+
+
+# ── An undeliverable record must not wedge the queue (CORR-2xx) ──────────
+
+
+@pytest.mark.asyncio
+async def test_a_record_with_an_undialable_url_is_dropped_not_retried(chat, caplog):
+    """Acceptance criterion: a URL no HTTP client can dial is terminal.
+
+    ``aiohttp`` raises for it and the exception handler in ``post`` cannot tell
+    that apart from a transport failure, so the record stayed queued forever —
+    and because ``flush`` preserves order, so did every record behind it. That
+    is how a live install ended up with twenty-six records left by a test run
+    at the head of its queue and fifty genuine shares that never left the box.
+    """
+    record = outbox.enqueue(outbox.OP_SHARE, "u", {"n": 1})
+
+    caplog.set_level(logging.DEBUG)
+    assert await outbox.post(record) is True
+    assert [r for r in caplog.records if "cannot dial" in r.getMessage()]
+
+
+@pytest.mark.asyncio
+async def test_a_flush_drains_past_a_record_that_can_never_be_posted(chat, monkeypatch):
+    """The whole point of the guard: the good records behind it get delivered."""
+    outbox.enqueue(outbox.OP_SHARE, "u", {"n": 1})
+    outbox.enqueue(outbox.OP_SHARE, "https://collector.invalid/x", {"n": 2})
+
+    posted: list[str] = []
+    real_post = outbox.post
+
+    async def post(record):
+        if not outbox._dialable(record.get("url") or ""):
+            return await real_post(record)
+        posted.append(record["url"])
+        return True
+
+    monkeypatch.setattr(outbox, "post", post)
+    # Two retired: the good one delivered, the undialable one dropped — the
+    # same accounting a collector-refused share already gets.
+    assert await outbox.flush() == (2, 0)
+    assert posted == ["https://collector.invalid/x"]
+    assert outbox.pending() == []
+
+
+@pytest.mark.asyncio
+async def test_a_queue_stalled_for_days_says_so_above_debug(chat, monkeypatch, caplog):
+    """Acceptance criterion: a wedged queue is not a debug line.
+
+    The age cap eventually retires a stuck share, but a queued unshare is
+    exempt from it, so nothing but reading the file ever surfaced a queue that
+    had delivered nothing since yesterday.
+    """
+    record = _unshare(7)
+    record["queued_at"] = time.time() - 2 * outbox.STALL_WARN_AFTER_S
+    outbox._write([record])
+
+    monkeypatch.setattr(outbox, "post", _always(False))
+    caplog.set_level(logging.DEBUG)
+    assert await outbox.flush() == (0, 1)
+
+    stalled = [r for r in caplog.records if "has not delivered" in r.getMessage()]
+    assert stalled and stalled[0].levelno >= logging.WARNING
+
+
+@pytest.mark.asyncio
+async def test_a_brief_stall_is_not_reported_as_a_wedged_queue(
+    chat, monkeypatch, caplog
+):
+    """A blip between two five-minute flushes is an outage, not news."""
+    _unshare(7)
+
+    monkeypatch.setattr(outbox, "post", _always(False))
+    caplog.set_level(logging.DEBUG)
+    await outbox.flush()
+
+    assert not [r for r in caplog.records if "has not delivered" in r.getMessage()]

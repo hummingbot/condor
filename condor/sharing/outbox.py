@@ -424,6 +424,24 @@ def purge_user_shares(user_id: int | str, *, kind: str) -> int:
     return dropped
 
 
+def _dialable(url: str) -> bool:
+    """Is this a URL an HTTP client can actually send a request to?
+
+    Deliberately a shape check and not an allow-list of the collector: the
+    question here is "can this be attempted", not "should it be". A record
+    aimed somewhere unexpected is still a record ``post`` should try and let
+    the answer decide, but one that is not an absolute http(s) URL with a host
+    can only ever raise, and :func:`flush` must not mistake that for an outage.
+    """
+    try:
+        from urllib.parse import urlsplit
+
+        parts = urlsplit(url)
+    except ValueError:
+        return False
+    return parts.scheme in ("http", "https") and bool(parts.netloc)
+
+
 async def _collector_refused(response) -> bool:
     """Did the collector refuse this, or did something in front of it?
 
@@ -453,9 +471,27 @@ async def post(record: dict) -> bool:
     at the head of the queue. It is reported as delivered so the queue drains,
     and the refusal is logged. 5xx, transport failures, and a 4xx from anything
     that is not the collector stay queued.
+
+    A record whose ``url`` is not one an HTTP client can even dial is terminal
+    for the same reason, and it is the only failure here that no outage can
+    turn into a success. ``aiohttp`` raises for it, the exception handler at the
+    bottom is indistinguishable from a transport failure, and :func:`flush`
+    preserves order — so one such record stops *every* record behind it,
+    forever, at ``log.debug``. That is not hypothetical: a test run that escaped
+    its tmpdir put twenty-six records with ``"url": "u"`` at the head of a live
+    queue, and the fifty genuine shares queued behind them over the next eight
+    days never left the box while the UI told the user each one had been shared.
     """
     url = record.get("url") or ""
     if not url:
+        return True
+    if not _dialable(url):
+        log.error(
+            "Sharing cannot dial %r for a queued %s; dropping it so the queue "
+            "behind it can drain",
+            url[:200],
+            record.get("op") or "?",
+        )
         return True
     try:
         import aiohttp
@@ -539,6 +575,38 @@ def _share_vetoed() -> bool:
     return not consent.env_allows() or not consent.install_allows()
 
 
+# How long the head of the queue may fail before a stall stops being an outage
+# and starts being a bug worth an operator's attention. A blip between two
+# five-minute flushes is not news; nothing having left the box since yesterday
+# is, and used to be visible only as ``log.debug``.
+STALL_WARN_AFTER_S = 6 * 3600
+
+
+def _warn_if_stuck(record: dict, behind: int) -> None:
+    """Say so when the record that stalled the flush has been stalling it for days.
+
+    :func:`flush` preserves order, so a record that never posts holds back every
+    record behind it — which is the right behaviour for an outage and a silent
+    failure for anything else. The queue's own age cap eventually retires a
+    stuck *share*, but a queued unshare is exempt from it and would wait
+    forever, so the only thing that ever surfaced a wedged queue was somebody
+    reading the file.
+    """
+    try:
+        waiting = time.time() - float(record.get("queued_at") or 0)
+    except (TypeError, ValueError):
+        return
+    if waiting < STALL_WARN_AFTER_S:
+        return
+    log.warning(
+        "Sharing has not delivered a %s queued %.1fh ago; %d record(s) are "
+        "waiting behind it",
+        record.get("op") or "?",
+        waiting / 3600,
+        behind,
+    )
+
+
 async def flush() -> tuple[int, int]:
     """Try every queued request in order. Returns ``(delivered, still queued)``.
 
@@ -597,7 +665,7 @@ async def flush() -> tuple[int, int]:
         delivered: set[str] = set()
         vetoed: set[str] = set()
         stalled = False
-        for record in records:
+        for i, record in enumerate(records):
             if record.get("op") == OP_SHARE and _share_vetoed():
                 # Checked ahead of the stall: a share this install is forbidden
                 # to send should not survive because something ahead of it in
@@ -610,6 +678,7 @@ async def flush() -> tuple[int, int]:
                 delivered.add(record["id"])
             else:
                 stalled = True
+                _warn_if_stuck(record, len(records) - i - 1)
 
         if vetoed:
             log.info("Sharing is off; dropped %d queued share(s) unsent", len(vetoed))
