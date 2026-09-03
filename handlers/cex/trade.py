@@ -14,6 +14,7 @@ import logging
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
+from condor.fetchers.market_data import fetch_current_price
 from condor.preferences import (
     get_all_enabled_networks,
     get_clob_account,
@@ -795,10 +796,7 @@ async def _fetch_trade_data_background(
 
     async def fetch_price_safe():
         try:
-            prices = await client.market_data.get_prices(
-                connector_name=connector, trading_pairs=trading_pair
-            )
-            price = prices["prices"].get(trading_pair)
+            price = await fetch_current_price(client, connector, trading_pair)
             if price:
                 context.user_data["current_market_price"] = price
                 if server:
@@ -847,10 +845,12 @@ async def _fetch_trade_data_background(
 
             # If amount is in USD, convert to base token volume
             if "$" in str(amount):
-                prices = await client.market_data.get_prices(
-                    connector_name=connector, trading_pairs=trading_pair
+                current_price = (
+                    await fetch_current_price(
+                        client, connector, trading_pair, strict=True
+                    )
+                    or 1
                 )
-                current_price = prices["prices"].get(trading_pair, 1)
                 volume = volume / current_price
 
             # Fetch BUY and SELL quotes
@@ -882,10 +882,9 @@ async def _fetch_trade_data_background(
             # Fallback to mid price if quotes failed
             if buy_price is None and sell_price is None:
                 try:
-                    prices = await client.market_data.get_prices(
-                        connector_name=connector, trading_pairs=trading_pair
+                    mid_price = await fetch_current_price(
+                        client, connector, trading_pair
                     )
-                    mid_price = prices["prices"].get(trading_pair)
                     if mid_price:
                         buy_price = mid_price * 1.0005
                         sell_price = mid_price * 0.9995
@@ -1002,10 +1001,10 @@ async def handle_trade_get_quote(
 
         # If amount is in USD, we need to convert to base token volume
         if "$" in str(amount):
-            prices = await client.market_data.get_prices(
-                connector_name=connector, trading_pairs=trading_pair
+            current_price = (
+                await fetch_current_price(client, connector, trading_pair, strict=True)
+                or 1
             )
-            current_price = prices["prices"].get(trading_pair, 1)
             volume = volume / current_price
 
         # Fetch BUY and SELL quotes in parallel
@@ -1042,10 +1041,7 @@ async def handle_trade_get_quote(
         if buy_price is None and sell_price is None:
             logger.info("get_price_for_volume failed, trying get_prices fallback")
             try:
-                prices = await client.market_data.get_prices(
-                    connector_name=connector, trading_pairs=trading_pair
-                )
-                mid_price = prices["prices"].get(trading_pair)
+                mid_price = await fetch_current_price(client, connector, trading_pair)
                 if mid_price:
                     buy_price = mid_price * 1.0005
                     sell_price = mid_price * 0.9995
@@ -1494,10 +1490,9 @@ async def handle_trade_execute(
         is_quote_amount = "$" in str(amount)
         if is_quote_amount:
             usd_value = float(str(amount).replace("$", ""))
-            prices = await client.market_data.get_prices(
-                connector_name=connector, trading_pairs=trading_pair
+            current_price = await fetch_current_price(
+                client, connector, trading_pair, strict=True
             )
-            current_price = prices["prices"][trading_pair]
             amount_float = usd_value / current_price
         else:
             amount_float = float(amount)
@@ -1731,10 +1726,9 @@ async def process_trade(
         is_quote_amount = "$" in str(amount)
         if is_quote_amount:
             usd_value = float(str(amount).replace("$", ""))
-            prices = await client.market_data.get_prices(
-                connector_name=connector, trading_pairs=trading_pair
+            current_price = await fetch_current_price(
+                client, connector, trading_pair, strict=True
             )
-            current_price = prices["prices"][trading_pair]
             amount_float = usd_value / current_price
         else:
             amount_float = float(amount)
