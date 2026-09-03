@@ -186,3 +186,116 @@ export function strategyRedirect(
   params.set("strategy", sslug);
   return `/agents/${encodeURIComponent(slug)}?${params}`;
 }
+
+// ── Alerts ──
+
+/**
+ * Something on this screen that wants a person.
+ *
+ * Derived, never fetched: every one of the three rules below reads data the
+ * workspace already has on screen for other reasons, which is what lets Now
+ * lead with a problem instead of with a spinner.
+ */
+export interface WorkspaceAlert {
+  kind: "failed" | "unledgered" | "overdue";
+  /** One sentence, in the reader's terms. */
+  text: string;
+  /** The tick to open, when the alert is about one. */
+  tick?: number;
+}
+
+/** Whether a journal entry claims the agent put something into the world. */
+const DEPLOY_WORDS = /\bdeploy(?:ed|ing|ment|ments|s)?\b/i;
+
+/**
+ * Did this run's own narrative say it deployed something?
+ *
+ * The second alert compares what the agent *said* against what the ledger
+ * *recorded*, so this reads the words rather than the deeds — that is the whole
+ * point of the comparison.
+ */
+export function journalNamesDeploy(
+  decisions: readonly { action: string; reasoning: string }[],
+): boolean {
+  return decisions.some(
+    (d) => DEPLOY_WORDS.test(d.action) || DEPLOY_WORDS.test(d.reasoning),
+  );
+}
+
+/**
+ * What Now leads with.
+ *
+ * Three rules, in the order a reader would want them:
+ *
+ * 1. **A deed came back not ok.** Only knowable since [[FEAT-102]], which gave
+ *    the action log its arguments back and started recording controller writes
+ *    with `ok: false` — before it, a tick that assembled a six-controller fleet
+ *    and had six of its writes rejected left two indistinguishable rows.
+ * 2. **It says it deployed and the ledger is empty.** Either the ownership
+ *    claim failed or the narrative is wrong, and both are worth a person.
+ * 3. **The tick is late.** The rule `LoopPulse` already draws in amber, said
+ *    once more where somebody reading anything else will see it.
+ *
+ * `nowSec` is a parameter and not a `Date.now()` inside, for the reason every
+ * clock in this codebase is: an alert that appears on its own is not testable,
+ * and a render-phase read of a moving value is what the compiler forbids.
+ */
+export function alertsFor(input: {
+  /** This run's deeds, from `actions.jsonl`. */
+  actions: readonly { tick: number; ok: boolean; summary: string }[];
+  /** How many rows the deployment ledger has for this run. */
+  deployments: number;
+  /** Whether the run's journal claims a deploy — {@link journalNamesDeploy}. */
+  journalNamesDeploy: boolean;
+  /** The live engine, or `null` when nothing is looping. */
+  loop: {
+    status: string;
+    last_tick_at: number;
+    frequency_sec: number;
+  } | null;
+  nowSec: number;
+}): WorkspaceAlert[] {
+  const alerts: WorkspaceAlert[] = [];
+
+  // The newest failure, not every one: a run that failed forty times has one
+  // problem, and forty rows is a wall rather than an alert.
+  const failed = input.actions.filter((a) => !a.ok);
+  const newest = failed[failed.length - 1];
+  if (newest) {
+    alerts.push({
+      kind: "failed",
+      tick: newest.tick,
+      text:
+        failed.length === 1
+          ? `An action failed on tick ${newest.tick}: ${newest.summary}`
+          : `${failed.length} actions failed, the last on tick ${newest.tick}: ${newest.summary}`,
+    });
+  }
+
+  if (input.journalNamesDeploy && input.deployments === 0) {
+    alerts.push({
+      kind: "unledgered",
+      text:
+        "This run says it deployed something, but nothing is in its ledger — " +
+        "either the deploy did not land or the run does not own what it made.",
+    });
+  }
+
+  const loop = input.loop;
+  if (
+    loop &&
+    loop.status === "running" &&
+    loop.last_tick_at > 0 &&
+    loop.frequency_sec > 0
+  ) {
+    const late = input.nowSec - (loop.last_tick_at + loop.frequency_sec);
+    if (late > 0) {
+      alerts.push({
+        kind: "overdue",
+        text: `The next tick is ${Math.floor(late)}s overdue.`,
+      });
+    }
+  }
+
+  return alerts;
+}

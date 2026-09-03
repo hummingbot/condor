@@ -14,6 +14,8 @@ import { KNOWLEDGE_TABS } from "@/components/agent/knowledgeTabs";
 import type { AgentRunRow, StrategySummary } from "@/lib/api";
 import {
   DEFAULT_VIEW,
+  alertsFor,
+  journalNamesDeploy,
   WORKSPACE_VIEWS,
   isWorkspaceView,
   parseWorkspace,
@@ -222,5 +224,94 @@ describe("the retired addresses still resolve", () => {
 
   it("escapes a slug that needs it", () => {
     expect(runsRedirect("my agent", "")).toBe("/agents/my%20agent?view=runs");
+  });
+});
+
+describe("what Now leads with", () => {
+  const healthy = {
+    actions: [{ tick: 4, ok: true, summary: "Create grid executor on SOL-USDC" }],
+    deployments: 1,
+    journalNamesDeploy: true,
+    loop: { status: "running", last_tick_at: 1_000, frequency_sec: 60 },
+    nowSec: 1_030,
+  };
+
+  it("raises nothing on a healthy live run", () => {
+    // The rule that matters most: a loop doing its job must be silent, or the
+    // count on the spine stops meaning anything.
+    expect(alertsFor(healthy)).toEqual([]);
+  });
+
+  it("raises a failed action, and names the tick to open", () => {
+    // Only knowable since FEAT-102 gave the action log its arguments back and
+    // started recording controller writes with ok: false.
+    const alerts = alertsFor({
+      ...healthy,
+      actions: [
+        { tick: 3, ok: true, summary: "Deploy bot" },
+        { tick: 4, ok: false, summary: "Upsert controller pmm_1" },
+      ],
+    });
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].kind).toBe("failed");
+    expect(alerts[0].tick).toBe(4);
+    expect(alerts[0].text).toContain("Upsert controller pmm_1");
+  });
+
+  it("names the newest failure and counts the rest, rather than listing forty", () => {
+    const alerts = alertsFor({
+      ...healthy,
+      actions: [
+        { tick: 2, ok: false, summary: "first" },
+        { tick: 9, ok: false, summary: "last" },
+      ],
+    });
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].text).toContain("2 actions failed");
+    expect(alerts[0].tick).toBe(9);
+  });
+
+  it("raises a deploy the ledger never recorded", () => {
+    const alerts = alertsFor({ ...healthy, deployments: 0 });
+    expect(alerts.map((a) => a.kind)).toEqual(["unledgered"]);
+  });
+
+  it("says nothing about an empty ledger when nothing claimed a deploy", () => {
+    // Most runs deploy nothing, and for a research run that is the true answer
+    // rather than a problem.
+    expect(
+      alertsFor({ ...healthy, deployments: 0, journalNamesDeploy: false }),
+    ).toEqual([]);
+  });
+
+  it("raises an overdue tick", () => {
+    const alerts = alertsFor({ ...healthy, nowSec: 1_090 });
+    expect(alerts.map((a) => a.kind)).toEqual(["overdue"]);
+    expect(alerts[0].text).toContain("30s overdue");
+  });
+
+  it("does not call a stopped loop overdue", () => {
+    // A loop nobody started is not late; it is off, which the loop bar says.
+    expect(
+      alertsFor({
+        ...healthy,
+        nowSec: 900_000,
+        loop: { status: "stopped", last_tick_at: 1_000, frequency_sec: 60 },
+      }),
+    ).toEqual([]);
+    expect(alertsFor({ ...healthy, nowSec: 900_000, loop: null })).toEqual([]);
+  });
+
+  it("reads a deploy claim out of the agent's own words", () => {
+    expect(
+      journalNamesDeploy([{ action: "Deployed six controllers", reasoning: "" }]),
+    ).toBe(true);
+    expect(
+      journalNamesDeploy([{ action: "Held", reasoning: "waiting to deploy later" }]),
+    ).toBe(true);
+    expect(journalNamesDeploy([{ action: "Held", reasoning: "spread too thin" }])).toBe(
+      false,
+    );
+    expect(journalNamesDeploy([])).toBe(false);
   });
 });

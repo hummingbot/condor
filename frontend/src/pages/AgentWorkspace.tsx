@@ -20,6 +20,8 @@ import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
 import { StrategyWorkbench } from "@/components/agent/StrategyWorkbench";
 import { isKnowledgeTab } from "@/components/agent/knowledgeTabs";
 import { LoopBar } from "@/components/agent/workspace/LoopBar";
+import { NowView } from "@/components/agent/workspace/NowView";
+import { useWorkspaceAlerts } from "@/components/agent/workspace/useWorkspaceAlerts";
 import { WorkspaceHeader } from "@/components/agent/workspace/WorkspaceHeader";
 import { WorkspaceSpine } from "@/components/agent/workspace/WorkspaceSpine";
 import {
@@ -176,6 +178,17 @@ export function AgentWorkspace() {
     [instances, runAgentId],
   );
 
+  // What this run wants a person for. Read at the page level rather than inside
+  // Now, because the spine carries the count on every view — an alert you have
+  // to open a section to discover is not one — and the three queries behind it
+  // are the tick spine's and the run overview's own, so they cost one round.
+  const { alerts, decisions, deployments, sessionNum } = useWorkspaceAlerts({
+    slug,
+    sslug,
+    run: selectedRun,
+    instance,
+  });
+
   const { data: routineInstances = [] } = useQuery({
     queryKey: ["routine-instances"],
     queryFn: api.getRoutineInstances,
@@ -314,9 +327,19 @@ export function AgentWorkspace() {
       serverName={(strategy?.config?.server_name as string) || ""}
       controllerIds={instance ? [instance.agent_id] : undefined}
     />
+  ) : view === "now" ? (
+    <NowView
+      slug={agent.slug}
+      sslug={sslug}
+      sessionNum={sessionNum}
+      alerts={alerts}
+      decisions={decisions}
+      deployments={deployments}
+      instance={instance}
+      onOpenTick={(next) => selectTick(next, "now")}
+    />
   ) : (
-    /* Step 1 of FEAT-103: Now is the workbench until it has a body of its own.
-       The Runs band comes off both — the spine's Runs entry is the door now,
+    /* The Runs band comes off here — the spine's Runs entry is the door now,
        and a band that duplicates it inside the body is the second door this
        feature exists to remove. */
     <StrategyWorkbench
@@ -353,7 +376,11 @@ export function AgentWorkspace() {
       />
 
       <div className="flex min-h-0 flex-1">
-        <WorkspaceSpine current={spineSectionFor(view)} onSelect={selectView} />
+        <WorkspaceSpine
+          current={spineSectionFor(view)}
+          onSelect={selectView}
+          alertCount={alerts.length}
+        />
         <div
           className={`min-w-0 flex-1 ${
             view === "runs" ? "flex min-h-0" : "overflow-y-auto p-4"
