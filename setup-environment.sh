@@ -862,7 +862,30 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
     else
     msg_info "Condor connects to Hummingbot Backend API for trading."
     echo ""
-    prompt_visible "Configure and launch local Hummingbot API with Docker? [Y/n]" "Y" "deploy_hb"
+    # An install that exists on disk is protected even when it is not running.
+    # The api_health_check above only sees a *live* API on :8000, so a stopped
+    # stack used to fall straight through to the deploy branch, which
+    # overwrote .env -- replacing generated broker credentials with weak ones
+    # while the broker's own bootstrap file (and its mnesia volume) kept the
+    # old password. That mismatch is not repairable by re-running setup; it
+    # needs `make emqx-auth-reset`. So the default flips to "n" here, and the
+    # existing .env becomes read-only input.
+    hb_api_preexisting=false
+    if [ -f "$HB_API_DIR/.env" ]; then
+        hb_api_preexisting=true
+        msg_ok "Existing hummingbot-api install detected at $HB_API_DIR"
+        msg_info "Its .env (API and broker credentials) will be left untouched."
+        # "Restart", not "reconfigure": .env stays untouched either way -- this
+        # only decides whether Condor brings the stack up via `make deploy`.
+        prompt_visible "Restart its Docker stack now? [y/N]" "N" "redeploy_hb"
+        if [[ "${redeploy_hb:-}" =~ ^[Yy]$ ]]; then
+            deploy_hb="y"
+        else
+            deploy_hb="n"
+        fi
+    else
+        prompt_visible "Configure and launch local Hummingbot API with Docker? [Y/n]" "Y" "deploy_hb"
+    fi
     fi
 
     if [[ "${deploy_hb:-}" =~ ^[Nn]$ ]]; then
@@ -871,6 +894,26 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
         fi
         msg_ok "Skipped Hummingbot API deployment"
         echo ""
+        if [ "${hb_api_preexisting:-false}" = true ]; then
+            # Co-located install we chose not to touch: its credentials are
+            # already on disk, so asking the user to retype them invites a
+            # typo and a 401. localhost, not the tailnet name -- Condor is on
+            # this machine, so MagicDNS would be a longer route to the same
+            # port and one more thing that can be down.
+            hb_username=$(grep -m1 "^USERNAME=" "$HB_API_DIR/.env" 2>/dev/null | cut -d= -f2-)
+            hb_password=$(grep -m1 "^PASSWORD=" "$HB_API_DIR/.env" 2>/dev/null | cut -d= -f2-)
+            HB_API_PROTOCOL="http"
+            HB_API_HOST="localhost"
+            HB_API_PORT="8000"
+            if [ -n "${hb_username:-}" ] && [ -n "${hb_password:-}" ]; then
+                msg_ok "Read API credentials from $HB_API_DIR/.env"
+            else
+                msg_warn "Could not read USERNAME/PASSWORD from $HB_API_DIR/.env"
+                prompt_required_visible "API admin username" "hb_username" "Username cannot be empty"
+                prompt_required_secret "API admin password" "hb_password" "Password cannot be empty"
+            fi
+            hb_api_configured=true
+        else
         msg_info "Enter the Hummingbot API connection details."
         if [[ "${use_tailscale_early:-}" =~ ^[Yy]$ ]]; then
             # Tailscale: host is resolved via MagicDNS after joining the tailnet — no URL needed
@@ -895,9 +938,16 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
         fi
         prompt_required_visible "API admin username" "hb_username" "Username cannot be empty"
         prompt_required_secret "API admin password" "hb_password" "Password cannot be empty"
+        fi
 
         # ── Tailscale option for external API ──────────────
+        # Skipped for a co-located pre-existing install: HB_API_HOST is already
+        # localhost, and this block would rewrite it to a MagicDNS name that
+        # points back at this same machine by a longer path.
         use_tailscale_remote="${use_tailscale_early:-N}"
+        if [ "${hb_api_preexisting:-false}" = true ]; then
+            use_tailscale_remote="N"
+        fi
         if [[ "${use_tailscale_remote:-}" =~ ^[Yy]$ ]]; then
             if command_exists tailscale && tailscale status >/dev/null 2>&1; then
                 msg_ok "Tailscale already connected on this machine"
@@ -1047,125 +1097,75 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
             fi
         fi
 
-        # Generate hummingbot-api .env
+        # Configure hummingbot-api by running ITS OWN setup, not by writing its
+        # .env from here.
+        #
+        # Condor used to hand-write that file. Two authors meant two schemas:
+        # this side shipped BROKER_PASSWORD=password (the well-known default
+        # hummingbot-api's setup.sh deliberately stopped shipping), omitted
+        # BROKER_DASHBOARD_PASSWORD so compose fell back to another well-known
+        # default, and wrote API_BIND_HOST -- a key nothing on that side reads,
+        # since docker-compose.yml wants API_BIND. Delegating removes the drift
+        # by construction: .env has exactly one author. Everything setup.sh
+        # generates -- both broker passwords especially -- stays generated
+        # there, so nothing Condor passes can weaken them.
         if [ -d "$HB_API_DIR" ]; then
-            hb_api_abs_path="$(cd "$HB_API_DIR" 2>/dev/null && pwd)"
-            cat > "$HB_API_DIR/.env" << HBEOF
-USERNAME=${hb_username}
-PASSWORD=${hb_password}
-CONFIG_PASSWORD=${hb_config_password}
-DEBUG_MODE=false
-BROKER_HOST=localhost
-BROKER_PORT=1883
-BROKER_USERNAME=admin
-BROKER_PASSWORD=password
-DATABASE_URL=postgresql+asyncpg://hbot:hummingbot-api@localhost:5432/hummingbot_api
-GATEWAY_URL=http://localhost:15888
-GATEWAY_PASSPHRASE=${hb_config_password}
-BOTS_PATH=${hb_api_abs_path}
-TAILSCALE_ENABLED=${HB_OWN_TAILNET_NODE}
-TAILSCALE_AUTH_KEY=${ts_auth_key}
-TAILSCALE_HOSTNAME=${ts_hb_hostname}
-# Condor is co-located on this machine and always reaches the API over
-# localhost, tailnet node or not -- so port 8000 never needs to sit on every
-# interface here. See docker-compose.yml / docker-compose.tailscale.yml.
-API_BIND_HOST=127.0.0.1
-HBEOF
-            # Holds the API password, the config password and (when set) a
-            # Tailscale auth key -- not a world-readable file.
+            if [ -f "$HB_API_DIR/.env" ]; then
+                msg_ok "hummingbot-api .env already exists — leaving it untouched"
+            elif [ -x "$HB_API_DIR/setup.sh" ] || [ -f "$HB_API_DIR/setup.sh" ]; then
+                msg_info "Running hummingbot-api's own setup (non-interactive)..."
+                if (cd "$HB_API_DIR" && chmod +x setup.sh 2>/dev/null; \
+                    HBAPI_NONINTERACTIVE=1 \
+                    HBAPI_SKIP_DEPS=1 \
+                    HBAPI_USERNAME="$hb_username" \
+                    HBAPI_PASSWORD="$hb_password" \
+                    HBAPI_CONFIG_PASSWORD="$hb_config_password" \
+                    TAILSCALE_ENABLED="$HB_OWN_TAILNET_NODE" \
+                    TAILSCALE_AUTH_KEY="$ts_auth_key" \
+                    TAILSCALE_HOSTNAME="$ts_hb_hostname" \
+                    ./setup.sh); then
+                    msg_ok "Hummingbot API configured by its own setup.sh"
+                else
+                    msg_error "hummingbot-api setup.sh failed — see the output above"
+                    msg_info "Run it yourself: cd $HB_API_DIR && ./setup.sh"
+                fi
+            else
+                msg_error "No setup.sh found in $HB_API_DIR — cannot configure the API"
+                msg_info "Update that checkout, then run: cd $HB_API_DIR && ./setup.sh"
+            fi
+            # setup.sh already chmods this; harmless belt-and-braces if an
+            # older checkout did not.
             chmod 600 "$HB_API_DIR/.env" 2>/dev/null || true
-            msg_ok "Hummingbot API .env configured"
 
-            # Generate docker-compose.tailscale.yml if hummingbot-api is getting
-            # its own tailnet node. TS_SERVE_CONFIG is load-bearing, not
-            # cosmetic: API_BIND_HOST above always binds port 8000 to
-            # 127.0.0.1, so without this forward the sidecar would join the
-            # tailnet with nothing behind it -- reachable from nowhere at all.
-            if [ "$HB_OWN_TAILNET_NODE" = true ] && [ ! -f "$HB_API_DIR/docker-compose.tailscale.yml" ]; then
-                cat > "$HB_API_DIR/docker-compose.tailscale.yml" << 'TSEOF'
-services:
-  tailscale:
-    image: tailscale/tailscale:latest
-    container_name: hummingbot-tailscale
-    network_mode: host
-    environment:
-      - TS_AUTHKEY=${TAILSCALE_AUTH_KEY}
-      - TS_STATE_DIR=/var/lib/tailscale
-      - TS_USERSPACE=false
-      - TS_HOSTNAME=${TAILSCALE_HOSTNAME:-hummingbot-api}
-      - TS_SERVE_CONFIG=/config/tailscale-serve.json
-    volumes:
-      - tailscale_state:/var/lib/tailscale
-      - /dev/net/tun:/dev/net/tun
-      - ./tailscale-serve.json:/config/tailscale-serve.json:ro
-    cap_add:
-      - NET_ADMIN
-      - NET_RAW
-    restart: unless-stopped
-volumes:
-  tailscale_state:
-TSEOF
-                cat > "$HB_API_DIR/tailscale-serve.json" << 'TSSEOF'
-{
-  "TCP": {
-    "8000": {
-      "TCPForward": "127.0.0.1:8000"
-    }
-  }
-}
-TSSEOF
-                msg_ok "docker-compose.tailscale.yml created"
-            fi
-
-            # Patch hummingbot-api Makefile so future 'make deploy' stays Tailscale-aware
-            if [ "$HB_OWN_TAILNET_NODE" = true ] && [ -f "$HB_API_DIR/Makefile" ]; then
-                python3 - "$HB_API_DIR/Makefile" << 'PYEOF'
-import sys
-with open(sys.argv[1]) as f:
-    content = f.read()
-old = "# Deploy with Docker\ndeploy: $(SETUP_SENTINEL)\n\tdocker compose up -d"
-new = (
-    "# Deploy with Docker (Tailscale-aware: reads TAILSCALE_ENABLED from .env)\n"
-    "deploy: $(SETUP_SENTINEL)\n"
-    "\t@set -a; [ -f .env ] && . ./.env; set +a; \\\n"
-    "\tif [ \"$${TAILSCALE_ENABLED:-false}\" = \"true\" ]; then \\\n"
-    "\t\techo \"[INFO] Deploying with Tailscale sidecar...\"; \\\n"
-    "\t\tdocker compose -f docker-compose.yml -f docker-compose.tailscale.yml up -d; \\\n"
-    "\telse \\\n"
-    "\t\tdocker compose up -d; \\\n"
-    "\tfi"
-)
-content = content.replace(old, new)
-content = content.replace(
-    ".PHONY: setup run run-https deploy stop install uninstall build install-pre-commit generate-certs show-certs",
-    ".PHONY: setup run run-https deploy stop install uninstall build install-pre-commit generate-certs show-certs tailscale-status"
-)
-if "tailscale-status" not in content:
-    content += (
-        "\n# Show Tailscale connection status\n"
-        "tailscale-status:\n"
-        "\t@if command -v tailscale >/dev/null 2>&1; then \\\n"
-        "\t\ttailscale status; \\\n"
-        "\telse \\\n"
-        "\t\techo \"Tailscale is not installed or not on PATH.\"; \\\n"
-        "\tfi\n"
-    )
-with open(sys.argv[1], "w") as f:
-    f.write(content)
-PYEOF
-                msg_ok "Hummingbot API Makefile patched for Tailscale-aware deploy"
-            fi
+            # The Tailscale overlay and the Tailscale-aware deploy target are
+            # hummingbot-api's own, checked into that repo. Condor used to
+            # generate the overlay and string-patch the Makefile to add both;
+            # against current main all three of those patch replacements match
+            # nothing and silently no-op, while still reporting success. Owning
+            # one copy upstream is the fix -- there is nothing to inject here.
 
             # Deploy if Docker is available
             if [ "$docker_available" = true ] && [ -f "$HB_API_DIR/docker-compose.yml" ]; then
                 msg_info "Starting Hummingbot API stack..."
-                if [ "$HB_OWN_TAILNET_NODE" = true ] && [ -f "$HB_API_DIR/docker-compose.tailscale.yml" ]; then
-                    _compose_cmd="docker compose -f docker-compose.yml -f docker-compose.tailscale.yml up -d"
-                    msg_info "Using Tailscale sidecar overlay..."
-                else
-                    _compose_cmd="docker compose up -d"
+                # `make deploy`, not a raw `docker compose up -d`.
+                #
+                # deploy depends on emqx-auth, which generates
+                # .emqx/auth-bootstrap.csv from the broker credentials in .env.
+                # Skipping it did not merely miss a nicety: the bind-mount
+                # source stayed absent, Docker created it as a root-owned
+                # DIRECTORY, EMQX logged boostrap_authn_built_in_database_failed
+                # and came up with authentication enabled and zero accounts --
+                # so every MQTT connection was refused while the API's HTTP
+                # health check still passed and this installer reported
+                # success. The Makefile also picks the Tailscale overlay itself
+                # from TAILSCALE_ENABLED, so the compose-file juggling that
+                # used to live here is upstream's job now.
+                _deploy_cmd="make deploy"
+                if ! command_exists make; then
+                    msg_warn "make not found — falling back to docker compose"
+                    _deploy_cmd="docker compose up -d"
                 fi
-                if (cd "$HB_API_DIR" && eval "$_compose_cmd" 2>/dev/null); then
+                if (cd "$HB_API_DIR" && eval "$_deploy_cmd"); then
                     msg_ok "Hummingbot API stack started"
 
                     # Wait for API to be healthy
