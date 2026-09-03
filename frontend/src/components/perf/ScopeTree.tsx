@@ -5,7 +5,7 @@ import { runKeyLabel } from "@/lib/agent-attribution";
 import { agentColor } from "@/lib/agentColor";
 import { formatCurrencyPnl, formatCurrencyVolume, pnlColor, shortBotName } from "@/lib/formatters";
 import type { ConvertQuote, PerfNode } from "@/lib/perf-tree";
-import { agentOfNodeId, foldLeaves } from "@/lib/perf-tree";
+import { agentOfNodeId, foldLeaves, TOP_LEVEL_KINDS } from "@/lib/perf-tree";
 
 /**
  * The status marker, at one size for every row.
@@ -231,7 +231,7 @@ function ScopeRow({
             <NodeIcon node={node} active={active} />
             <span
               className={`truncate text-[11px] ${
-                active || node.kind === "bot" || node.kind === "agent"
+                active || TOP_LEVEL_KINDS.has(node.kind)
                   ? "font-semibold text-[var(--color-text)]"
                   : "font-medium text-[var(--color-text-muted)]"
               }`}

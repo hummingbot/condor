@@ -372,6 +372,24 @@ export function matchesGrain(leaf: PerfLeaf, grain: Grain): boolean {
 
 export type NodeKind = "fleet" | "agent" | "bot" | "controller" | "executor" | "group";
 
+/**
+ * The kinds that name a *run* rather than a part of one: an agent, a bot, and
+ * the bucket of executors no controller claims. These are the fleet's own
+ * children — the rows a reader compares against each other — as against a
+ * `controller` or an `executor`, which are always a detail *of* one of them.
+ *
+ * It lives here, two lines under {@link NodeKind}, so that adding a kind and
+ * deciding whether it is one of these is a single edit in a single place. It is
+ * deliberately *not* derived from `nodeDepth`: that function reads an id's
+ * ancestry (a `bot:` sits at 2, under the `agent:` that may operate it), which
+ * is a different question from the one asked here.
+ */
+export const TOP_LEVEL_KINDS: ReadonlySet<NodeKind> = new Set<NodeKind>([
+  "agent",
+  "bot",
+  "group",
+]);
+
 export interface PerfNode {
   /** `all` | `agent:runKey` | `bot:name` | `grp:name` | `ctrl:k` | `exec:id` */
   id: string;
