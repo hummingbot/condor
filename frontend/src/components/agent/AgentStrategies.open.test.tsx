@@ -138,6 +138,9 @@ it("hands the strategy to a host that has somewhere to put it", async () => {
   expect(path).toBe("/");
 });
 
+// A page navigates to the *Lab* since FEAT-099: a card summarises what a loop
+// has been doing, and its runs are what it has been doing. The workbench — where
+// you operate it — is one click further, from the Lab's own header.
 it("still navigates when the host is a page", async () => {
   await renderList(undefined);
 
@@ -145,11 +148,12 @@ it("still navigates when the host is a page", async () => {
     card().click();
   });
 
-  expect(path).toBe("/agents/brigado/strategies/brl_mm");
+  expect(path).toBe("/agents/brigado/runs");
 });
 
 it("counts dry runs on the card, which book no PnL to be seen by", async () => {
   await renderList(() => {});
-  // The only trace a dry run leaves on a summary — every money column is 0.
-  expect(card().textContent).toContain("+2");
+  // The only trace a dry run leaves on a summary — every money column is 0 —
+  // so it is a chip of its own rather than a superscript on the session count.
+  expect(card().textContent).toContain("2 dry");
 });

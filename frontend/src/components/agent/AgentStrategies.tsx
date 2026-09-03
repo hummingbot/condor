@@ -78,12 +78,33 @@ export function AgentStrategies({
     mutationFn: () => api.createDefaultStrategy(slug),
     onSuccess: (strategy) => {
       refresh();
-      openStrategy(strategy.slug);
+      openNewStrategy(strategy.slug);
     },
   });
 
-  /** One door, wherever this is hosted. */
+  /**
+   * One door, wherever this is hosted.
+   *
+   * On a page that door is the Lab (FEAT-099): a card is a summary of what a
+   * loop has been *doing*, and the runs are what it has been doing. The
+   * workbench is one click further, from the Lab's own header — it is where you
+   * operate a strategy, not where you read it.
+   *
+   * The chat's pane still opens the workbench in the pane, because the Lab is a
+   * page: three panes do not fit a 640px column.
+   */
   function openStrategy(strategySlug: string) {
+    if (onOpenStrategy) onOpenStrategy(strategySlug);
+    else navigate(`/agents/${slug}/runs?strategy=${encodeURIComponent(strategySlug)}`);
+  }
+
+  /**
+   * A strategy that has just been created has no runs to read.
+   *
+   * It needs a playbook and a Start, which is the workbench — so creation lands
+   * there rather than on an empty rail.
+   */
+  function openNewStrategy(strategySlug: string) {
     if (onOpenStrategy) onOpenStrategy(strategySlug);
     else navigate(`/agents/${slug}/strategies/${strategySlug}`);
   }
@@ -170,7 +191,7 @@ export function AgentStrategies({
       <CreateStrategyDialog
         agentSlug={slug}
         open={showCreate}
-        onCreated={openStrategy}
+        onCreated={openNewStrategy}
         onClose={() => setShowCreate(false)}
       />
 
