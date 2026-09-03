@@ -4,6 +4,7 @@ import { runLabel } from "@/components/agent/lab/runs";
 import { poolLabel } from "@/components/dex/format";
 import { readLpPosition } from "@/components/dex/lp-position";
 import { getDisplayCurrency } from "@/hooks/useDisplayCurrency";
+import { homeView } from "@/lib/homeView";
 import type {
   AgentBrain,
   AgentDetail,
@@ -95,9 +96,11 @@ export function routeFacts(
   search: string,
   qc?: QueryClient,
 ): ViewFacts | null {
-  // The workspace already *is* the chat; telling the agent "the user is
-  // looking at a chat with you" is noise.
-  if (pathname === "/") return null;
+  // The chat view of the home already *is* the chat; telling the agent "the
+  // user is looking at a chat with you" is noise. Its other view is not
+  // (FEAT-104) — the fleet overview is a page *about* the agents, so it falls
+  // through to the `^/$` entry below and describes itself like any other.
+  if (pathname === "/" && homeView(search) === "chat") return null;
 
   const params = new URLSearchParams(search);
   // `?view=` is the agent workspace's spelling of the same idea (FEAT-103):
@@ -546,6 +549,16 @@ const ROUTES: {
   ) => string | undefined;
   onScreen?: Reader;
 }[] = [
+  {
+    /**
+     * The fleet overview — the home's other view (FEAT-104).
+     *
+     * Only ever reached with `?view=fleet`: the chat view returns above,
+     * before this table is walked.
+     */
+    pattern: /^\/$/,
+    facts: () => ({ label: "Fleet overview" }),
+  },
   {
     pattern: /^\/portfolio$/,
     facts: () => ({ label: "Portfolio" }),

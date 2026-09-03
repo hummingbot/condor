@@ -23,6 +23,7 @@ import {
   normalizeAgentSlug,
 } from "@/lib/agentSlug";
 import { api, CHAT_SLUG } from "@/lib/api";
+import { homeView } from "@/lib/homeView";
 import { routeFacts } from "@/lib/pageFacts";
 import { BUBBLE_OPEN_KEY } from "@/lib/sessionState";
 import { collectViewFacts, renderViewBlock } from "@/lib/viewFacts";
@@ -39,9 +40,14 @@ import { collectViewFacts, renderViewBlock } from "@/lib/viewFacts";
  * message is actually sent, and the send carries the page context of that
  * moment.
  *
- * Hidden on `/` — the workspace *is* the chat there. That rule carries a
- * second job: `ChatInput` binds ⌘M on `window`, so exactly one composer may
- * be mounted at a time, and hiding here is what guarantees it.
+ * Hidden on the chat view of `/` — the workspace *is* the chat there. That rule
+ * carries a second job: `ChatInput` binds ⌘M on `window`, so exactly one
+ * composer may be mounted at a time, and hiding here is what guarantees it.
+ *
+ * Which is why the rule reads the *view* and not the pathname since FEAT-104:
+ * `/?view=fleet` mounts the fleet overview, which has no composer in it, so the
+ * bubble belongs there like it does on every other page — and hiding it would
+ * leave the home with no way to ask anything at all.
  */
 export function ChatBubble() {
   const chat = useChat();
@@ -112,9 +118,9 @@ export function ChatBubble() {
   // /portfolio who never opens the bubble pays nothing for it.
   const starters = useStarters(slug, bubbleStarters(facts?.label), open);
 
-  // Hooks above, bail-out below: `/agents/:slug` keeps the bubble, `/` alone
-  // loses it.
-  if (pathname === "/") return null;
+  // Hooks above, bail-out below: `/agents/:slug` keeps the bubble, and so does
+  // the fleet overview; the chat view of `/` is the only surface that loses it.
+  if (pathname === "/" && homeView(search) === "chat") return null;
 
   const toggle = (next: boolean) => {
     setOpen(next);

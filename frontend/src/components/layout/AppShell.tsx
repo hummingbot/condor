@@ -26,6 +26,7 @@ import { useCredentials } from "@/hooks/useCredentials";
 import { usePrefetchData } from "@/hooks/usePrefetchData";
 import { useServer } from "@/hooks/useServer";
 import { useTheme } from "@/hooks/useTheme";
+import { FULL_BLEED_HOME_VIEWS, homePath, homeView } from "@/lib/homeView";
 import { routeFacts } from "@/lib/pageFacts";
 import { useViewFacts } from "@/lib/viewFacts";
 import { CurrencySelector } from "./CurrencySelector";
@@ -66,8 +67,13 @@ const NAV_ITEMS = [
  * reason (FEAT-091). Kept separate from `isChatWorkspace`, which
  * still means *the chat* specifically — the keys-overlay exemption is about the
  * conversation, not about padding.
+ *
+ * `/` left this list in FEAT-104. It is not one route with one body any more:
+ * it mounts a conversation and a fleet overview, and which of them is on screen
+ * is a query parameter — so the answer comes from `FULL_BLEED_HOME_VIEWS`,
+ * which happens to be *both* of them, rather than from the pathname.
  */
-const FULL_BLEED_ROUTES = ["/", "/bots", "/routines"];
+const FULL_BLEED_ROUTES = ["/bots", "/routines"];
 
 /**
  * Full-bleed routes that carry a parameter, so an exact match cannot find them.
@@ -106,13 +112,20 @@ function AppShellBody() {
   const { hasKeys, isLoading: keysLoading } = useCredentials();
   const [reportOpen, setReportOpen] = useState(false);
 
-  // The chat workspace takes the full height and owns its own scrolling, so
-  // the shell drops `main`'s padding for it. It lives at `/` — the entry point
-  // — while `/agents/:slug` is an ordinary padded page, deliberately not
-  // matched here.
-  const isChatWorkspace = pathname === "/";
+  // Which of the home's two views is on screen, or `null` off the home route
+  // (FEAT-104). The three special cases below used to be three readings of the
+  // pathname; `/` now mounts a conversation *and* a fleet overview, so they are
+  // three readings of the view — which is what lets step 3 flip the default in
+  // one revertible commit without touching this file.
+  const homeVersion = pathname === "/" ? homeView(search) : null;
+
+  // The chat takes the full height and owns its own scrolling, so the shell
+  // drops `main`'s padding for it. `/agents/:slug` is an ordinary padded page,
+  // deliberately not matched here.
+  const isChatWorkspace = homeVersion === "chat";
 
   const isFullBleed =
+    (homeVersion !== null && FULL_BLEED_HOME_VIEWS.includes(homeVersion)) ||
     FULL_BLEED_ROUTES.includes(pathname) ||
     FULL_BLEED_PATTERNS.some((re) => re.test(pathname));
 
@@ -126,11 +139,16 @@ function AppShellBody() {
 
   // ⌘K used to toggle the overlay panel. It now goes to the chat, so the
   // reflex still lands somewhere sensible instead of silently doing nothing.
+  //
+  // Asked for by view rather than spelled as a path (FEAT-104): today the chat
+  // is what a bare `/` means and this resolves to exactly that, and when step 3
+  // makes the overview the default it resolves to `/?view=chat` with no edit
+  // here. The reflex is a keystroke to a *conversation*, whatever the home is.
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === "k") {
         e.preventDefault();
-        navigate("/");
+        navigate(homePath("chat"));
       }
     };
     window.addEventListener("keydown", onKeyDown);

@@ -31,6 +31,14 @@ declare global {
 describe("routeFacts", () => {
   it("says nothing on the chat workspace", () => {
     expect(routeFacts("/", "")).toBeNull();
+    expect(routeFacts("/", "?view=chat")).toBeNull();
+    // `?agent=` and `?ask=` are the chat's own parameters (FEAT-092) and must
+    // not be mistaken for a view.
+    expect(routeFacts("/", "?agent=brigado&ask=status")).toBeNull();
+  });
+
+  it("describes the home's other view, which is a page about the agents", () => {
+    expect(routeFacts("/", "?view=fleet")?.label).toBe("Fleet overview");
   });
 
   it("labels every plain page", () => {
