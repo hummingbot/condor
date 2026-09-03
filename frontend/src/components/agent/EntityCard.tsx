@@ -1,7 +1,9 @@
-import { ChevronRight, Trash2, type LucideIcon } from "lucide-react";
+import { ChevronRight, FlaskConical, Repeat, Trash2, type LucideIcon } from "lucide-react";
 
 import { deriveAgentStatus } from "@/components/agent/agentStatus";
 import { StatusBadge } from "@/components/agent/StatusBadge";
+import { useSeconds } from "@/hooks/useSeconds";
+import { countdown } from "@/lib/agent-attribution";
 import type { RunningInstance } from "@/lib/api";
 import { formatCurrencyPnl, pnlTextClass } from "@/lib/formatters";
 
@@ -20,6 +22,16 @@ interface EntitySummary {
   status: string;
   instances?: RunningInstance[];
   session_count: number;
+  /**
+   * Dry runs and single ticks — every `experiment_N.md` on disk.
+   *
+   * The payload has carried this from the start and the card dropped it, so an
+   * agent whose only history was a dry run read as an agent that had never run
+   * at all. A dry run books no PnL by definition, which is exactly why the
+   * count has to be said: it is the only trace the run leaves on a summary.
+   */
+  experiment_count?: number;
+  tick_count?: number;
   daily_pnl?: number;
   total_pnl?: number;
   open_positions?: number;
@@ -45,6 +57,11 @@ export function EntityCard({
   const dayPnlColor = pnlTextClass(dayPnl);
   const status = deriveAgentStatus(entity);
   const isLive = status === "running";
+  // The loop the card is a summary of. A card that says "running" and nothing
+  // about the beat is the thing this whole pass is about; one line is what the
+  // grid has room for, and the panel behind the click has the rest.
+  const live = entity.instances?.find((i) => i.status === "running") ?? null;
+  const now = useSeconds(isLive);
 
   return (
     <button
@@ -92,6 +109,8 @@ export function EntityCard({
           </p>
         )}
 
+        {live && <LiveLoopLine instance={live} now={now} />}
+
         <div className="grid grid-cols-4 gap-2 border-t border-[var(--color-border)]/50 pt-3">
           <div>
             <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Total PnL</span>
@@ -111,7 +130,21 @@ export function EntityCard({
           </div>
           <div>
             <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Sessions</span>
-            <span className="text-sm font-mono text-[var(--color-text)]">{entity.session_count}</span>
+            <span className="text-sm font-mono text-[var(--color-text)]">
+              {entity.session_count}
+              {/* Dry runs ride in the same tile rather than claiming a fifth
+                  column: they are the same question — how much has this run —
+                  answered for the runs that were never allowed to trade. */}
+              {!!entity.experiment_count && (
+                <span
+                  className="ml-1.5 text-xs text-amber-400"
+                  title={`${entity.experiment_count} dry run${entity.experiment_count === 1 ? "" : "s"} / single ticks`}
+                >
+                  +{entity.experiment_count}
+                  <FlaskConical className="ml-0.5 inline h-2.5 w-2.5" />
+                </span>
+              )}
+            </span>
           </div>
         </div>
       </div>
@@ -121,5 +154,57 @@ export function EntityCard({
         <ChevronRight className="h-3.5 w-3.5" />
       </div>
     </button>
+  );
+}
+
+/**
+ * The beat, on one line, for a card.
+ *
+ * The card's job is to be scanned in a grid, so this says the three things that
+ * change minute to minute — which tick, when the next one is due, what the last
+ * one did — and leaves the strip, the narration and the error to `LoopPulse`
+ * in the panel the card opens. An overdue tick is named as overdue rather than
+ * printed as a negative countdown, the same call the pulse and the fleet band
+ * both make.
+ */
+function LiveLoopLine({
+  instance,
+  now,
+}: {
+  instance: RunningInstance;
+  now: number;
+}) {
+  const dueIn =
+    instance.last_tick_at > 0
+      ? instance.last_tick_at + instance.frequency_sec - now / 1000
+      : null;
+  const did = instance.last_did;
+
+  return (
+    <div className="mb-3 flex flex-col gap-0.5 rounded-md border border-emerald-500/15 bg-emerald-500/[0.04] px-2 py-1.5">
+      <div className="flex items-center gap-2 text-[11px] tabular-nums text-[var(--color-text-muted)]">
+        <Repeat className="h-3 w-3 shrink-0 animate-pulse text-emerald-400" />
+        <span className="font-mono">tick {instance.tick_count}</span>
+        <span className="opacity-40">·</span>
+        <span className="font-mono">every {countdown(instance.frequency_sec)}</span>
+        <span className="opacity-40">·</span>
+        <span className="font-mono">
+          {dueIn === null
+            ? "first tick pending"
+            : dueIn > 0
+              ? `next in ${countdown(dueIn)}`
+              : `overdue ${countdown(-dueIn)}`}
+        </span>
+      </div>
+      {did && (
+        <span
+          className={`truncate text-[11px] ${did.ok ? "text-[var(--color-text-muted)]" : "text-amber-500"}`}
+          title={did.summary}
+        >
+          #{did.tick} {did.summary}
+          {!did.ok && " — failed"}
+        </span>
+      )}
+    </div>
   );
 }

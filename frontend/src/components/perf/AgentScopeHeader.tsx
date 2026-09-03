@@ -1,10 +1,11 @@
 import { Bot, ExternalLink, Server, Zap } from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
+import { type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { agentColor } from "@/lib/agentColor";
 import { loopFacts, loopStatus, runKeyLabel, type FleetOwner } from "@/lib/agent-attribution";
 import { shortBotName } from "@/lib/formatters";
+import { useSeconds } from "@/hooks/useSeconds";
 
 import { StatusDot } from "./ScopeTree";
 
@@ -32,35 +33,6 @@ import { StatusDot } from "./ScopeTree";
  * A session that ran before the log existed has no deed — nothing is
  * backfilled — and reads exactly as it did before: the words line alone.
  */
-
-/**
- * A second-resolution clock, alive only while there is a countdown to run.
- *
- * The browser's own clock ticks once a minute (every per-hour pace is derived
- * from it, and a `Date.now()` read during render is what makes
- * `useSyncExternalStore` re-render forever). A "next tick in 38s" quantised to
- * that would sit on 38 for a minute and then jump, which is worse than not
- * showing it — so the one place that needs seconds keeps its own interval, and
- * stops it the moment the loop is not running.
- */
-function useSeconds(active: boolean): number {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (!active) return;
-    const tick = () => setNow(Date.now());
-    // The first read is scheduled rather than taken here: a loop that starts
-    // long after this band mounted would otherwise show one frame of a
-    // countdown measured from mount time, and setting state in an effect body
-    // is what the render-phase rule forbids anyway.
-    const first = setTimeout(tick, 0);
-    const id = setInterval(tick, 1000);
-    return () => {
-      clearTimeout(first);
-      clearInterval(id);
-    };
-  }, [active]);
-  return now;
-}
 
 interface AgentScopeHeaderProps {
   /** The run key of the scope. Named even when the map no longer holds it. */

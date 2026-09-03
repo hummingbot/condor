@@ -159,10 +159,17 @@ export function InstanceCard({ instance }: { instance: import("@/lib/api").Runni
 export function PerformancePanel({
   slug,
   sslug,
+  dense = false,
   onSessionClick,
 }: {
   slug: string;
   sslug: string;
+  /**
+   * Half a workspace row rather than a page. A prop, not a media query: the
+   * window is wide in both cases, and `lg:grid-cols-8` in a 640px column is
+   * eight stat tiles four characters wide.
+   */
+  dense?: boolean;
   onSessionClick?: (sessionNum: number, kind?: "session" | "experiment") => void;
 }) {
   const { data } = useQuery({
@@ -173,6 +180,10 @@ export function PerformancePanel({
   const totals = data?.totals || {};
   const allRows = data?.sessions || [];
   const sessions = allRows.filter((s) => s.kind === "session");
+  // A dry run books nothing by construction — that is what makes it a dry run —
+  // so it is counted and listed but never folded into the totals below, which
+  // are about money that moved.
+  const experiments = allRows.filter((s) => s.kind === "experiment");
   const totalPnl = Number(totals.total_pnl ?? 0);
   const realized = Number(totals.realized_pnl ?? 0);
   const unrealized = Number(totals.unrealized_pnl ?? 0);
@@ -200,13 +211,13 @@ export function PerformancePanel({
   const pnlData = useMemo(() => sessionsToDataPoints(sessions), [sessions]);
 
   return (
-    <div className="space-y-4 lg:col-span-2">
+    <div className={`space-y-4 ${dense ? "" : "lg:col-span-2"}`}>
       {/* Stat grid */}
       <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
         <h3 className="mb-3 flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
           <Zap className="h-3.5 w-3.5" /> Performance
         </h3>
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-4 lg:grid-cols-8">
+        <div className={`grid gap-4 ${dense ? "grid-cols-2 sm:grid-cols-4" : "grid-cols-2 sm:grid-cols-4 lg:grid-cols-8"}`}>
           <div>
             <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Total PnL</span>
             <span className={`text-lg font-mono font-semibold ${pnlClass}`}>
@@ -265,10 +276,10 @@ export function PerformancePanel({
       <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
         <h3 className="mb-3 flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
           <Clock className="h-3.5 w-3.5" /> Sessions ({sessions.length})
-          {allRows.filter((s) => s.kind === "experiment").length > 0 && (
+          {experiments.length > 0 && (
             <span className="ml-1 flex items-center gap-1 rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-400">
               <FlaskConical className="h-2.5 w-2.5" />
-              {allRows.filter((s) => s.kind === "experiment").length} experiments
+              {experiments.length} dry run{experiments.length === 1 ? "" : "s"}
             </span>
           )}
         </h3>
@@ -307,16 +318,27 @@ export function PerformancePanel({
                         <td className="px-2 py-1.5 text-[var(--color-text)]">{s.session_num}</td>
                         <td className="px-2 py-1.5">
                           {isExperiment ? (
+                            // Which kind of experiment, not just "exp": a
+                            // simulation and a single real tick both land in
+                            // dry_runs/ and only one of them can lose money.
                             <span className="inline-flex items-center gap-0.5 rounded bg-amber-500/10 px-1.5 py-0.5 text-[9px] font-bold uppercase text-amber-400">
                               <FlaskConical className="h-2.5 w-2.5" />
-                              exp
+                              {s.execution_mode === "run_once"
+                                ? "once"
+                                : s.execution_mode === "dry_run"
+                                  ? "dry"
+                                  : "exp"}
                             </span>
                           ) : (
                             <span className="text-[var(--color-text-muted)]">{s.kind}</span>
                           )}
                         </td>
-                        <td className={`px-2 py-1.5 ${s.status === "running" ? "text-emerald-400" : "text-[var(--color-text-muted)]"}`}>
-                          {s.status || "—"}
+                        <td className={`px-2 py-1.5 ${s.status === "running" ? "text-emerald-400" : s.error ? "text-[var(--color-red)]" : "text-[var(--color-text-muted)]"}`}>
+                          {/* A dry run has no backend status to report — it
+                              never registered anything to have one. What it
+                              does have is whether the tick itself failed, and
+                              that is the fact worth the column. */}
+                          {s.error ? "errored" : s.status || "—"}
                         </td>
                         <td className={`px-2 py-1.5 text-right ${pnlCol}`}>
                           {formatCurrencyPnl(s.total_pnl)}
