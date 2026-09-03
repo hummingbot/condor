@@ -69,7 +69,9 @@ export function ChatThread({
   onResolvePermission: (requestId: string, approved: boolean) => void;
   switchError?: string | null;
   onDismissSwitchError?: () => void;
-  onSend: (text: string) => void;
+  /** `files` only when the user attached something; the starters below call
+   *  this with words alone and are untouched by it existing (FEAT-098). */
+  onSend: (text: string, files?: File[]) => void;
   onAbort: () => void;
   /** Rendered instead of a transcript when there is no slot. */
   emptyState?: React.ReactNode;

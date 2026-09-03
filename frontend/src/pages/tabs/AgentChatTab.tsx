@@ -478,8 +478,9 @@ export function AgentChatTab() {
               onResolvePermission={chat.resolvePermission}
               switchError={switchError}
               onDismissSwitchError={dismissSwitchError}
-              onSend={(text) =>
-                activeSlot && chat.sendMessage(activeSlot.info.slot_id, text)
+              onSend={(text, files) =>
+                activeSlot &&
+                chat.sendMessage(activeSlot.info.slot_id, text, files)
               }
               onAbort={() =>
                 chat.activeSlotId && chat.abortPrompt(chat.activeSlotId)

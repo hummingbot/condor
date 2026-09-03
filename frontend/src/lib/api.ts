@@ -1616,6 +1616,23 @@ export interface ConversationTurn {
   agent_slug?: string;
   /** Assistant turns: how the stream ended; "" or absent = never reported. */
   stop_reason?: string;
+  /**
+   * User turns: what was handed over with the words (FEAT-098).
+   *
+   * The reference and never the payload — an id under this conversation's own
+   * `attachments/` directory, its type and its size. The bytes come from the
+   * bearer-guarded GET beside it, which is why they are fetched into an object
+   * URL rather than pointed at by an `<img src>`. Absent on every turn recorded
+   * before this existed, and on every turn that carried nothing.
+   */
+  attachments?: ConversationAttachment[];
+}
+
+/** One stored image on a turn. No filename: none is ever recorded. */
+export interface ConversationAttachment {
+  id: string;
+  mime: string;
+  bytes: number;
 }
 
 export interface ConversationDetail {
@@ -3493,6 +3510,38 @@ export const api = {
         body: JSON.stringify({ title }),
       },
     ),
+
+  /**
+   * Store one image against a conversation; the id goes on the send frame.
+   *
+   * Called at *send* time, not at paste time (FEAT-098): the composer holds the
+   * browser's own `File` objects and previews them with `createObjectURL`, so
+   * nothing is written to disk for a message that is never sent and there is no
+   * orphan to sweep. `authFetch` because the body is `FormData` — forcing
+   * `Content-Type: application/json` on it would be wrong.
+   */
+  uploadAttachment: async (
+    conversationId: string,
+    file: File,
+  ): Promise<ConversationAttachment> => {
+    const body = new FormData();
+    body.append("file", file);
+    const res = await authFetch(
+      `/api/v1/conversations/${encodeURIComponent(conversationId)}/attachments`,
+      { method: "POST", body },
+    );
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}));
+      throw new Error(detail.detail || `Upload failed: ${res.status}`);
+    }
+    return res.json();
+  },
+
+  /** Where the bytes of a stored attachment live. Bearer-guarded, so this is a
+   *  URL for `useAuthedImage` to fetch, never one for an `<img src>`. */
+  attachmentUrl: (conversationId: string, attachmentId: string) =>
+    `/api/v1/conversations/${encodeURIComponent(conversationId)}/attachments/` +
+    encodeURIComponent(attachmentId),
 
   /** The only way to lose a transcript. Killing a session no longer does.
    *  A shared conversation is unshared on the way out — otherwise "delete"

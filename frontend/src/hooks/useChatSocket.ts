@@ -94,6 +94,25 @@ export interface ChatMessage {
    * took *over*, so every earlier answer was being credited to it.
    */
   agentSlug?: string;
+  /**
+   * What was handed over with this turn (FEAT-098).
+   *
+   * Two provenances, one shape: a bubble the composer just appended carries
+   * local object URLs (`local: true`), because the browser already has the bytes
+   * it read from the clipboard; a bubble hydrated from the transcript carries
+   * the bearer-guarded route, which `useAuthedImage` fetches. The distinction
+   * is on the item rather than on the message so the two can never be confused
+   * for one another by a renderer that only sees a URL.
+   */
+  attachments?: ChatAttachment[];
+}
+
+/** One picture on a turn, as the transcript renders it. */
+export interface ChatAttachment {
+  url: string;
+  mime: string;
+  /** The URL is already an object URL for bytes in this tab; do not fetch it. */
+  local?: boolean;
 }
 
 /**
@@ -285,7 +304,10 @@ function nextClientRef(): string {
 // died with the subprocess, and invisible to Telegram. The backend now records
 // every turn (FEAT-015), so the transcript is fetched, never mirrored.
 
-function turnsToMessages(turns: ConversationTurn[]): ChatMessage[] {
+function turnsToMessages(
+  turns: ConversationTurn[],
+  conversationId: string,
+): ChatMessage[] {
   const messages: ChatMessage[] = [];
   turns.forEach((turn, i) => {
     const toolCalls: ToolCall[] = (turn.tool_calls || []).map((tc) => ({
@@ -293,9 +315,17 @@ function turnsToMessages(turns: ConversationTurn[]): ChatMessage[] {
       title: String(tc.title ?? ""),
       status: String(tc.status ?? "completed"),
     }));
+    // The picture is what makes the user's own bubble survive a reload: without
+    // it the model would remember the image while the bubble that sent it lost
+    // it, an asymmetry that reads as a bug.
+    const attachments: ChatAttachment[] = (turn.attachments || []).map((a) => ({
+      url: api.attachmentUrl(conversationId, a.id),
+      mime: a.mime,
+    }));
     // A turn with no text and no tools is an artifact of a prompt that died
-    // before producing anything; rendering it as an empty bubble is noise.
-    if (!turn.text && toolCalls.length === 0) return;
+    // before producing anything; rendering it as an empty bubble is noise —
+    // unless it carried a picture, which *is* the message.
+    if (!turn.text && toolCalls.length === 0 && attachments.length === 0) return;
     // A handover reads the same after a reload as it did live: the backend
     // records it as a system turn, so there is one source for the divider.
     const role =
@@ -314,6 +344,7 @@ function turnsToMessages(turns: ConversationTurn[]): ChatMessage[] {
       // attributed turns at all and is left unattributed so the divider walk
       // still gets to answer for it.
       agentSlug: turn.agent_slug || (turn.agent_key ? "" : undefined),
+      attachments: attachments.length ? attachments : undefined,
     });
   });
   return messages;
@@ -388,7 +419,15 @@ export function useChatSocket() {
   // carries the page context captured at *queue* time, not at flush time: the
   // block is true of the moment the user asked, and a spawn can land after
   // they have navigated away.
-  const outbox = useRef<Record<string, { text: string; view: string }[]>>({});
+  //
+  // Attachments ride along as the browser's own `File`s and are uploaded at
+  // flush, not at queue time (FEAT-098). That is what makes the hero composer
+  // work without a staging area: the POST writes *inside* the conversation
+  // directory, and the conversation directory is created by the spawn this
+  // queue is waiting for.
+  const outbox = useRef<
+    Record<string, { text: string; view: string; files?: File[] }[]>
+  >({});
   // A tab opened optimistically is renamed on session_started: the client_ref
   // it was started under becomes the backend's slot id. The workspace follows
   // the rename through `activeSlotId`, which this hook rewrites itself — but a
@@ -621,6 +660,61 @@ export function useChatSocket() {
     if (unsent.current.length < MAX_UNSENT) unsent.current.push(msg);
   }, []);
 
+  /**
+   * Upload whatever was attached, then send the frame that names it.
+   *
+   * The order is the design (FEAT-098): a file is only ever written to disk for
+   * a message that is actually going out, so there is nothing to sweep and no
+   * retention job to own. The cost is that Send is not instantaneous for a large
+   * image — which is not felt, because the user's bubble with its thumbnail was
+   * appended optimistically before this ran, and only the agent's first token
+   * waits on the POST.
+   *
+   * A failed upload does not send a maimed frame. The turn is refused with a
+   * note the user can read, on the same argument the backend's resolution makes:
+   * an answer to the wrong question is worse than an error.
+   */
+  const uploadAndSend = useCallback(
+    async (
+      slotId: string,
+      conversationId: string,
+      text: string,
+      view: string,
+      files?: File[],
+    ) => {
+      let ids: string[] = [];
+      if (files?.length) {
+        try {
+          const stored = await Promise.all(
+            files.map((file) => api.uploadAttachment(conversationId, file)),
+          );
+          ids = stored.map((a) => a.id);
+        } catch (e) {
+          updateSlotMessages(slotId, (msgs) => [
+            ...msgs,
+            {
+              id: nextMsgId(),
+              role: "system" as const,
+              kind: "error",
+              text: e instanceof Error ? e.message : "Could not attach that image",
+              toolCalls: [],
+              ts: nowTs(),
+            },
+          ]);
+          return;
+        }
+      }
+      send({
+        action: "send_message",
+        slot_id: slotId,
+        text,
+        view_context: view,
+        ...(ids.length ? { attachments: ids } : {}),
+      });
+    },
+    [send, updateSlotMessages],
+  );
+
   // Drop the current socket without letting its asynchronous `onclose` speak
   // for a connection we already decided to abandon.
   const closeSocket = useCallback(() => {
@@ -740,7 +834,7 @@ export function useChatSocket() {
         : null;
       try {
         const detail = await api.getConversation(conversationId);
-        const restored = turnsToMessages(detail.turns);
+        const restored = turnsToMessages(detail.turns, conversationId);
         // An empty transcript never wipes the screen: on a resync that would
         // trade a missed note for a lost conversation.
         if (restored.length === 0) return;
@@ -1065,13 +1159,15 @@ export function useChatSocket() {
           // order. The bubbles are already on screen; only the wire lagged.
           const queued = outbox.current[tabId] || [];
           delete outbox.current[tabId];
-          for (const { text, view } of queued) {
-            send({
-              action: "send_message",
-              slot_id: newSlot.slot_id,
-              text,
-              view_context: view,
-            });
+          if (queued.length) {
+            const convId = newSlot.conversation_id || newSlot.slot_id;
+            // Sequential, not `forEach`: an upload is an await, and racing two
+            // of them would let the second message overtake the first.
+            void (async () => {
+              for (const { text, view, files } of queued) {
+                await uploadAndSend(newSlot.slot_id, convId, text, view, files);
+              }
+            })();
           }
 
           // A resumed conversation arrives with a transcript; a brand new one
@@ -1437,13 +1533,13 @@ export function useChatSocket() {
       hydrateSlot,
       prewarmLatest,
       queryClient,
-      send,
       stopStreaming,
+      uploadAndSend,
     ],
   );
 
   const sendMessage = useCallback(
-    (slotId: string, text: string) => {
+    (slotId: string, text: string, files?: File[]) => {
       const id = nextMsgId();
       // Anything still buffered was said before this question and has to be
       // committed above it — once the user's bubble is last, the tail would
@@ -1455,9 +1551,24 @@ export function useChatSocket() {
       // into a bubble sitting above this message, reading as an answer given
       // before it was asked.
       flushChunks(slotId);
+      // Previewed from the bytes the browser already has — the object URL costs
+      // no round trip, and putting the bubble on screen before the upload is
+      // what makes a deferred upload invisible to the user.
+      const previews: ChatAttachment[] = (files || []).map((file) => ({
+        url: URL.createObjectURL(file),
+        mime: file.type,
+        local: true,
+      }));
       updateSlotMessages(slotId, (msgs) => [
         ...settleToolCalls(msgs),
-        { id, role: "user" as const, text, toolCalls: [], ts: nowTs() },
+        {
+          id,
+          role: "user" as const,
+          text,
+          toolCalls: [],
+          ts: nowTs(),
+          attachments: previews.length ? previews : undefined,
+        },
       ]);
 
       // What the user is looking at while asking, rendered here so it is true
@@ -1470,13 +1581,24 @@ export function useChatSocket() {
       // so the message waits here rather than being sent into the void.
       const slot = slotsRef.current.find((s) => s.info.slot_id === slotId);
       if (slot?.pending) {
-        (outbox.current[slotId] ||= []).push({ text, view });
+        // The `File`s wait here with the words. Uploading now would write into a
+        // conversation directory the spawn has not created yet.
+        (outbox.current[slotId] ||= []).push({ text, view, files });
         return;
       }
 
-      send({ action: "send_message", slot_id: slotId, text, view_context: view });
+      // For a web slot the slot id *is* the conversation id; `conversation_id`
+      // is read first all the same, because that is the field that stays true
+      // if the two ever diverge.
+      void uploadAndSend(
+        slotId,
+        slot?.info.conversation_id || slotId,
+        text,
+        view,
+        files,
+      );
     },
-    [flushChunks, send, updateSlotMessages],
+    [flushChunks, updateSlotMessages, uploadAndSend],
   );
 
   /**

@@ -14,7 +14,11 @@ import {
   Square,
   Zap,
 } from "lucide-react";
-import type { ChatMessage as ChatMessageType } from "@/hooks/useChatSocket";
+import type {
+  ChatAttachment,
+  ChatMessage as ChatMessageType,
+} from "@/hooks/useChatSocket";
+import { useAuthedImage } from "@/hooks/useAuthedImage";
 import { agentColor } from "@/lib/agentColor";
 import { copyText } from "@/lib/clipboard";
 import { ChartBlock } from "./ChartBlock";
@@ -213,6 +217,33 @@ const NOTE_KINDS: Record<string, { label: string; Icon: typeof Zap }> = {
   reload: { label: "Reloaded", Icon: RotateCw },
 };
 
+/**
+ * One picture the user handed over, in the bubble that sent it.
+ *
+ * A locally previewed attachment is already an object URL for bytes in this tab
+ * and is rendered straight; a hydrated one names a bearer-guarded route, which
+ * has to be *fetched* — an `<img src>` cannot carry an `Authorization` header.
+ * A picture that cannot be read shows its frame and nothing else, rather than a
+ * broken-image glyph.
+ */
+function Attachment({ attachment }: { attachment: ChatAttachment }) {
+  const fetched = useAuthedImage(attachment.local ? null : attachment.url);
+  const src = attachment.local ? attachment.url : fetched;
+  return (
+    <div className="overflow-hidden rounded-lg border border-[var(--on-primary)]/20 bg-black/10">
+      {src ? (
+        <img
+          src={src}
+          alt="Attached image"
+          className="max-h-64 w-auto max-w-full object-contain"
+        />
+      ) : (
+        <div className="h-24 w-32" />
+      )}
+    </div>
+  );
+}
+
 export const ChatMessageView = memo(function ChatMessageView({
   message,
   live = false,
@@ -316,7 +347,20 @@ export const ChatMessageView = memo(function ChatMessageView({
           <TurnActions ts={message.ts} text={message.text} />
         </div>
         <div className="max-w-[70%] rounded-2xl rounded-tr-sm bg-[var(--color-primary)] px-3.5 py-2 text-sm text-[var(--on-primary)]">
-          <p className="whitespace-pre-wrap">{message.text}</p>
+          {message.attachments && message.attachments.length > 0 && (
+            <div
+              className={`flex flex-wrap justify-end gap-1.5 ${message.text ? "mb-2" : ""}`}
+            >
+              {message.attachments.map((attachment) => (
+                <Attachment key={attachment.url} attachment={attachment} />
+              ))}
+            </div>
+          )}
+          {/* An image with no words is a complete message, so the paragraph is
+              only drawn when there are words. */}
+          {message.text && (
+            <p className="whitespace-pre-wrap">{message.text}</p>
+          )}
         </div>
       </div>
     );
