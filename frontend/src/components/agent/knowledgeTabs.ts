@@ -17,8 +17,13 @@
  * 400px column is most of the column.
  * On the right because in the chat that edge is against the dock, where every
  * other control that opens something into the pane already lives.
+ *
+ * `"bare"` is neither: the bodies with no chrome at all, for a host that
+ * already draws the navigation. The agent workspace does — its spine carries
+ * these seven sections beside the loop's own views (FEAT-103) — and a panel
+ * that drew a second strip inside that would be two navigations for one thing.
  */
-export type KnowledgeLayout = "tabs" | "rail";
+export type KnowledgeLayout = "tabs" | "rail" | "bare";
 
 /** The sections, in the order every host shows them. */
 export const KNOWLEDGE_TABS = [

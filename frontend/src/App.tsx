@@ -6,8 +6,8 @@ import { AppShell } from "@/components/layout/AppShell";
 import { ServerContext } from "@/hooks/useServer";
 import { AuthContext, SERVER_KEY, useAuth, useAuthState } from "@/lib/auth";
 import { invalidateServerScopedQueries, queryClient } from "@/lib/queryClient";
-import { AgentDetail } from "@/pages/AgentDetail";
 import { AgentLab } from "@/pages/AgentLab";
+import { AgentWorkspace } from "@/pages/AgentWorkspace";
 import { Agents } from "@/pages/Agents";
 import { BotDetail } from "@/pages/BotDetail";
 import { Bots } from "@/pages/Bots";
@@ -101,7 +101,9 @@ export default function App() {
                 <Route path="/routines" element={<Routines />} />
                 <Route path="/reports" element={<Navigate to="/routines?tab=reports" replace />} />
                 <Route path="/agents" element={<Navigate to="/" replace />} />
-                <Route path="/agents/:slug" element={<AgentDetail />} />
+                {/* One agent, one screen: every section, run and tick is a query
+                    parameter on this route (FEAT-103). */}
+                <Route path="/agents/:slug" element={<AgentWorkspace />} />
                 {/* The Lab: every run of every strategy, and every tick of a
                     run, with all of it in the URL (FEAT-099). */}
                 <Route path="/agents/:slug/runs" element={<AgentLab />} />

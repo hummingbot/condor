@@ -328,6 +328,7 @@ export function AgentKnowledge({
   ];
 
   const rail = layout === "rail";
+  const bare = layout === "bare";
 
   /** Every section change also leaves whatever drill-down or editor was open. */
   const openTab = (id: KnowledgeTabId) => {
@@ -336,7 +337,8 @@ export function AgentKnowledge({
     leaveEditor();
   };
 
-  const nav = rail ? (
+  // A host that draws its own navigation gets none of ours (FEAT-103).
+  const nav = bare ? null : rail ? (
     // A column down the *right* edge, because eight tabs wrap to three rows in
     // a 400px pane — and because in the chat this rail sits against the dock,
     // where everything else you click to open something already is. Same tabs,
@@ -622,6 +624,7 @@ export function AgentKnowledge({
   // The rail is beside its body and both scroll independently, so a long
   // AGENT.md never scrolls the sections out of reach. The strip is above it,
   // where the page's own scroll is the only one.
+  if (bare) return <div>{body}</div>;
   return rail ? (
     <div className="flex min-h-0 flex-1 overflow-hidden">
       <div className="min-w-0 flex-1 overflow-y-auto px-3 py-2">{body}</div>

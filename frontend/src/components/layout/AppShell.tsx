@@ -72,12 +72,15 @@ const FULL_BLEED_ROUTES = ["/", "/bots", "/routines"];
 /**
  * Full-bleed routes that carry a parameter, so an exact match cannot find them.
  *
- * The Lab (`/agents/:slug/runs`, FEAT-099) is the first: a rail, a tick spine
- * and a body, all screen-tall, under a slug the shell cannot enumerate. Kept as
- * a separate pattern list rather than turned into a `startsWith` over the array
- * above, because `/` is in that array and prefixes everything.
+ * The Lab (`/agents/:slug/runs`, FEAT-099) was the first: a rail, a tick spine
+ * and a body, all screen-tall, under a slug the shell cannot enumerate. The
+ * agent workspace is the same shape and now hosts the Lab's job as one of its
+ * views (FEAT-103) — a header, a loop bar, a spine and a body, each scrolling
+ * on its own. Kept as a separate pattern list rather than turned into a
+ * `startsWith` over the array above, because `/` is in that array and prefixes
+ * everything.
  */
-const FULL_BLEED_PATTERNS = [/^\/agents\/[^/]+\/runs$/];
+const FULL_BLEED_PATTERNS = [/^\/agents\/[^/]+\/runs$/, /^\/agents\/[^/]+$/];
 
 /**
  * The shell owns the chat state.
