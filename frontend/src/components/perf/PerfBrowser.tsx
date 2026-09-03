@@ -71,9 +71,11 @@ import {
   autoOpenIds,
   botOfNodeId,
   buildTree,
+  clampScope,
   collectLeaves,
   controllerClassOf,
   countNodes,
+  emptyScopeNode,
   foldLeaves,
   indexTree,
   leafFromController,
@@ -104,10 +106,24 @@ import {
   loopStatus,
   ownerOf,
   ownerTitle,
+  runKeyLabel,
   type DeedIndex,
   type FleetOwner,
 } from "@/lib/agent-attribution";
 import { AgentScopeHeader } from "./AgentScopeHeader";
+
+/**
+ * What an empty root row is called, read off its id alone (FEAT-108).
+ *
+ * Only reached when the root has no node in the tree — an agent that has
+ * deployed nothing — so there is no label from `buildTree` to borrow and the id
+ * is the only name there is.
+ */
+function rootScopeLabel(id: string): string {
+  const agent = agentOfNodeId(id);
+  if (agent) return runKeyLabel(agent);
+  return botOfNodeId(id) ?? id;
+}
 
 /** `3, "bot"` → `"3 bots"`. Thousands separated, because a fleet's closed set runs to five figures. */
 function plural(count: number, noun: string): string {
@@ -287,6 +303,44 @@ interface PerfBrowserProps {
   rateFormatPnl?: (val: number, quote: string) => string;
   rateFormatValue?: (val: number, quote: string) => string;
   rateFormatDetailed?: (val: number, quote: string) => string;
+  /**
+   * The scope this browser may never rise above (FEAT-108).
+   *
+   * `"all"` — the whole fleet — for `/bots`, which is what makes the page the
+   * unrooted case of the same component. The agent workspace roots it at
+   * `agent:{runKey}`, and that root is a **floor**: it is the scope an absent
+   * parameter means, the scope `Select all` selects, the node the sidebar is
+   * drawn from, and the clamp every other scope is resolved against
+   * (`clampScope`). A default would be escapable in four different ways; a
+   * floor is not escapable at all.
+   *
+   * The *tree* is still built over every leaf. The fold at the root is the
+   * root's, but the filter bubbles still count the whole population, because
+   * "this agent's $64 out of the fleet's $210" is a sentence only a browser
+   * that still knows the fleet's number can say.
+   */
+  rootScope?: string;
+  /**
+   * Which query parameter carries the scope. `"scope"` for `/bots`.
+   *
+   * A host whose URL already means something else by `?scope=` says so instead
+   * of the two grammars fighting over one key — and because the page's key never
+   * changes, every `/bots?scope=` link, notification payload and bookmark keeps
+   * working with no redirect.
+   */
+  param?: string;
+  /**
+   * The run to narrow to, when the host is the one that knows it (FEAT-108).
+   *
+   * `undefined` leaves the browser reading `?run=` itself, which is what
+   * `/bots` does and what the Lab's *see this in the fleet* link writes. The
+   * workspace passes it instead: there `?run=` is the loop bar's selection and
+   * has a default that is not in the URL at all, so a browser reading the URL
+   * would see no run exactly when one is selected.
+   */
+  run?: number | null;
+  /** What the run chip's × does when the host owns the run. */
+  onClearRun?: () => void;
 }
 
 /**
@@ -444,6 +498,10 @@ export function PerfBrowser({
   rateFormatPnl,
   rateFormatValue,
   rateFormatDetailed,
+  rootScope = FLEET_SCOPE,
+  param = "scope",
+  run: runProp,
+  onClearRun,
 }: PerfBrowserProps) {
   const controllers = controllersProp;
   const cv = useCallback(
@@ -465,7 +523,9 @@ export function PerfBrowser({
   // tree is flat now, so a fleet of fourteen controllers holding a hundred and
   // nineteen executors would open on all hundred and nineteen if shut had to be
   // asked for. The root is the one row that starts open.
-  const [open, setOpen] = useState<Set<string>>(() => new Set([FLEET_SCOPE]));
+  // The root is the one row that starts open — whichever row that is: a rooted
+  // browser's first row is its root, not the fleet's (FEAT-108).
+  const [open, setOpen] = useState<Set<string>>(() => new Set([FLEET_SCOPE, rootScope]));
   // The other half of the same record: which branches the reader has *closed*.
   // Needed only because bot (and agent) rows are drawn open by default (see
   // `openRows`, `AUTO_OPEN_KINDS`), so absence from `open` cannot mean shut for
@@ -607,7 +667,10 @@ export function PerfBrowser({
   // arrow keys walk the sidebar, and every step of that walk in the history
   // stack would make Back useless.
   const [searchParams, setSearchParams] = useSearchParams();
-  const scopeId = searchParams.get("scope") || FLEET_SCOPE;
+  // `param` is `"scope"` for `/bots` and something else for a host whose URL
+  // already means something by that word; an absent parameter means the root,
+  // which is the fleet for the page and the agent for the workspace (FEAT-108).
+  const scopeId = searchParams.get(param) || rootScope;
   const population = parsePopulation(searchParams.get("population"));
 
   /** Write one view parameter, dropping it when it is the default. */
@@ -626,8 +689,8 @@ export function PerfBrowser({
     [setSearchParams],
   );
   const setScope = useCallback(
-    (next: string) => setParam("scope", next, FLEET_SCOPE),
-    [setParam],
+    (next: string) => setParam(param, next, rootScope),
+    [setParam, param, rootScope],
   );
   // `switchView` is declared after the tree it needs; both setters below it.
 
@@ -649,8 +712,15 @@ export function PerfBrowser({
    * run overview populates — so arriving from the Lab is a cache hit rather
    * than a second request for an answer already in hand.
    */
-  const runNum = parseRunParam(searchParams.get("run"));
-  const owner = useMemo(() => runOwner(scopeId), [scopeId]);
+  const urlRun = parseRunParam(searchParams.get("run"));
+  const runNum = runProp === undefined ? urlRun : runProp;
+  // The scope's owner, or — once the reader has drilled into a controller of
+  // theirs — the root's. Without the second half the run chip would vanish the
+  // moment you opened one of the run's own controllers.
+  const owner = useMemo(
+    () => runOwner(scopeId) ?? runOwner(rootScope),
+    [scopeId, rootScope],
+  );
   const runQueryOn = runNum !== null && owner !== null;
   const { data: runLedger } = useQuery({
     queryKey: ["strategy-session-executors", owner?.slug ?? "", owner?.sslug ?? "", runNum ?? 0],
@@ -663,7 +733,10 @@ export function PerfBrowser({
     () => (runQueryOn ? runRecords(runLedger?.deployments) : null),
     [runQueryOn, runLedger],
   );
-  const clearRun = useCallback(() => setParam("run", "", ""), [setParam]);
+  const clearRun = useCallback(
+    () => (onClearRun ? onClearRun() : setParam("run", "", "")),
+    [onClearRun, setParam],
+  );
 
   // ── The tree the whole page is derived from ──
 
@@ -1003,8 +1076,12 @@ export function PerfBrowser({
    * already says. With two or more, the level is what gives Stop somewhere
    * obvious to live — before it, the reader had to narrow the bubbles down to
    * one bot before the fleet row became that bot and grew the button.
+   *
+   * Except when the browser is *rooted* at a bot: a floor has to be a row for
+   * the tree to be drawn from it, so a root always buys its own level even when
+   * there is nothing to tell it apart from (FEAT-108).
    */
-  const groupByBot = !soloBot;
+  const groupByBot = !soloBot || rootScope.startsWith("bot:");
 
   /**
    * The one agent every row on screen belongs to, when there is one.
@@ -1026,14 +1103,55 @@ export function PerfBrowser({
    * entirely nobody's, which is most fleets — spends no chevron saying so. A
    * server with no agents at all therefore draws exactly the tree it drew
    * before this feature.
+   *
+   * And, as above, a root always buys its own level: the workspace roots the
+   * browser at one agent, and on a fleet that is entirely that agent's the
+   * level would otherwise collapse and leave the floor with no node to be.
    */
-  const groupByAgent = !soloAgent;
+  const groupByAgent = !soloAgent || rootScope.startsWith("agent:");
 
   const tree = useMemo(
     () => buildTree(leaves, rootLabel(population, soloRealBot), { groupByBot, groupByAgent }),
     [leaves, population, soloRealBot, rootLabel, groupByBot, groupByAgent],
   );
   const nodes = useMemo(() => indexTree(tree), [tree]);
+
+  // A scope whose node has gone — a bot stopped, a config removed — would
+  // render an empty screen with no way back, so it re-aims at the nearest
+  // ancestor that survived rather than resetting to the fleet (see
+  // `resolveScope`, which reads that ancestry out of the id itself).
+  //
+  // Then the floor: a scope outside `rootScope`'s subtree resolves to
+  // `rootScope` (FEAT-108). Both rules land in one place because they are one
+  // question — which node this scope really means — and a rooted browser has to
+  // answer it after the fallback rather than before, since a fallback is one of
+  // the ways a scope can end up outside the root.
+  const effectiveScopeId = useMemo(
+    () => clampScope(tree, resolveScope(nodes, scopeId), rootScope),
+    [tree, nodes, scopeId, rootScope],
+  );
+
+  /**
+   * The node the sidebar is drawn from, which is the floor itself.
+   *
+   * `tree` for `/bots`, and the agent's row in the workspace — so no click in
+   * the picker can reach a row outside the root, and the keyboard walk
+   * (`visibleNodeIds`) cannot either.
+   *
+   * A root with no node is an agent that has deployed nothing, or one whose
+   * last leaf a bubble just removed. It reports an *empty* scope and never the
+   * fleet: falling back to the tree here would undo the clamp above through the
+   * back door.
+   */
+  const rootNode = useMemo(() => {
+    if (rootScope === FLEET_SCOPE) return tree;
+    return nodes.get(rootScope) ?? emptyScopeNode(rootScope, rootScopeLabel(rootScope));
+  }, [rootScope, nodes, tree]);
+
+  const scope = useMemo(
+    () => nodes.get(effectiveScopeId) ?? rootNode,
+    [nodes, effectiveScopeId, rootNode],
+  );
 
   /**
    * How big the tree is, for the button that selects all of it.
@@ -1046,22 +1164,14 @@ export function PerfBrowser({
    */
   const scopeCounts = useMemo(
     () => ({
-      // Counted over the whole tree rather than the fleet's own children: with
-      // the bot level on, every controller is a grandchild.
-      bots: countNodes(tree, "bot"),
-      controllers: countNodes(tree, "controller"),
-      executors: collectLeaves(tree, "executor").length,
+      // Counted over the whole (rooted) tree rather than the root's own
+      // children: with the bot level on, every controller is a grandchild.
+      bots: countNodes(rootNode, "bot"),
+      controllers: countNodes(rootNode, "controller"),
+      executors: collectLeaves(rootNode, "executor").length,
     }),
-    [tree],
+    [rootNode],
   );
-
-
-  // A scope whose node has gone — a bot stopped, a config removed — would
-  // render an empty screen with no way back, so it re-aims at the nearest
-  // ancestor that survived rather than resetting to the fleet (see
-  // `resolveScope`, which reads that ancestry out of the id itself).
-  const effectiveScopeId = useMemo(() => resolveScope(nodes, scopeId), [nodes, scopeId]);
-  const scope = useMemo(() => nodes.get(effectiveScopeId) ?? tree, [nodes, effectiveScopeId, tree]);
 
   /**
    * The one bot this scope is about, whichever way it got there.
@@ -1106,8 +1216,12 @@ export function PerfBrowser({
       [...inScope].some((bot) => bot === base || bot.startsWith(`${base}-`)),
     );
   }, [activeAgent, scope]);
-  /** Whether the panes are reporting the whole scope — what lights the Select all button. */
-  const atFleet = effectiveScopeId === FLEET_SCOPE;
+  /**
+   * Whether the panes are reporting the whole scope — what lights the Select
+   * all button. The *root's* whole scope, which is the fleet's on `/bots` and
+   * the agent's in the workspace (FEAT-108).
+   */
+  const atRoot = effectiveScopeId === rootScope;
 
   /**
    * Change the population, and keep the reader where they were.
@@ -1135,20 +1249,34 @@ export function PerfBrowser({
         groupByBot: new Set(nextLeaves.map((leaf) => leaf.bot)).size !== 1,
         groupByAgent: new Set(nextLeaves.map((leaf) => leaf.agent)).size !== 1,
       });
-      const aimed = resolveScope(indexTree(nextTree), effectiveScopeId, scope.leaves[0]);
+      const aimed = clampScope(
+        nextTree,
+        resolveScope(indexTree(nextTree), effectiveScopeId, scope.leaves[0]),
+        rootScope,
+      );
       setSearchParams(
         (prev) => {
           const params = new URLSearchParams(prev);
           if (nextPopulation === "running") params.delete("population");
           else params.set("population", nextPopulation);
-          if (aimed === FLEET_SCOPE) params.delete("scope");
-          else params.set("scope", aimed);
+          if (aimed === rootScope) params.delete(param);
+          else params.set(param, aimed);
           return params;
         },
         { replace: true },
       );
     },
-    [population, leavesFor, applyFilters, rootLabel, effectiveScopeId, scope, setSearchParams],
+    [
+      population,
+      leavesFor,
+      applyFilters,
+      rootLabel,
+      effectiveScopeId,
+      scope,
+      setSearchParams,
+      param,
+      rootScope,
+    ],
   );
   const setPopulation = switchView;
 
@@ -1512,8 +1640,8 @@ export function PerfBrowser({
 
   /** Every branch the selected row hangs inside, nearest first. */
   const selectedAncestors = useMemo(
-    () => ancestorChain(tree, effectiveScopeId).slice(1),
-    [tree, effectiveScopeId],
+    () => ancestorChain(rootNode, effectiveScopeId).slice(1),
+    [rootNode, effectiveScopeId],
   );
 
   /**
@@ -1568,7 +1696,7 @@ export function PerfBrowser({
     [openRows, selectedAncestors, setScope],
   );
 
-  const navItems = useMemo(() => visibleNodeIds(tree, openRows), [tree, openRows]);
+  const navItems = useMemo(() => visibleNodeIds(rootNode, openRows), [rootNode, openRows]);
   const navIdx = navItems.indexOf(effectiveScopeId);
 
   const goUp = useCallback(() => {
@@ -2073,12 +2201,12 @@ export function PerfBrowser({
           <div className="sticky top-0 z-10 border-b border-[var(--color-border)] bg-[var(--color-surface)]">
             {isCompact ? (
               <button
-                onClick={() => setScope(FLEET_SCOPE)}
-                {...(atFleet ? { "data-active-scope": true } : {})}
-                aria-pressed={atFleet}
+                onClick={() => setScope(rootScope)}
+                {...(atRoot ? { "data-active-scope": true } : {})}
+                aria-pressed={atRoot}
                 title={`Select all — ${plural(scopeCounts.controllers, "controller")}`}
                 className={`flex w-full items-center justify-center py-3 transition-colors ${
-                  atFleet
+                  atRoot
                     ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
                     : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
                 }`}
@@ -2094,12 +2222,12 @@ export function PerfBrowser({
                 </span>
                 <button
                   type="button"
-                  onClick={() => setScope(FLEET_SCOPE)}
-                  aria-pressed={atFleet}
-                  {...(atFleet ? { "data-active-scope": true } : {})}
+                  onClick={() => setScope(rootScope)}
+                  aria-pressed={atRoot}
+                  {...(atRoot ? { "data-active-scope": true } : {})}
                   title="Report on everything in scope, combined"
                   className={`ml-auto flex shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] transition-colors ${
-                    atFleet
+                    atRoot
                       ? "border-[var(--color-primary)] bg-[var(--color-primary)]/15 font-semibold text-[var(--color-primary)]"
                       : "border-[var(--color-border)] text-[var(--color-text-muted)] hover:border-[var(--color-primary)]/50 hover:text-[var(--color-text)]"
                   }`}
@@ -2111,7 +2239,7 @@ export function PerfBrowser({
             )}
           </div>
           <ScopeTree
-            root={tree}
+            root={rootNode}
             activeId={effectiveScopeId}
             open={openRows}
             showBot={!soloBot && !groupByBot}

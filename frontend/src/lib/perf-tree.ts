@@ -941,6 +941,64 @@ export function resolveScope(
   return fallbackChain(scopeId, leaf).find((id) => nodes.has(id)) ?? "all";
 }
 
+/**
+ * The scope a browser with a **floor** actually lands on (FEAT-108).
+ *
+ * A host can root the browser at something narrower than the fleet — the agent
+ * workspace roots it at the one agent whose screen it is — and that root is a
+ * *floor*, not a default. A default would be escapable: one click on a sibling
+ * row, one stale link, one filter that removed the root's last leaf, and the
+ * workspace would be reporting another agent's money under this agent's name.
+ *
+ * So the rule is a clamp, and it lives here beside `resolveScope` because it is
+ * the same job — deciding which node a requested scope really means — asked
+ * from the other end: `resolveScope` walks *up* until it finds something that
+ * exists, and this walks up until it finds the root, landing on the root when
+ * it never does.
+ *
+ * Containment is read off the **tree**, not off the id grammar, deliberately.
+ * `fallbackChain` infers ancestry from an id's prefix, which encodes one
+ * nesting order; a tree that is grouped some other way would make that
+ * inference a lie, and a lie here is an escape. `ancestorChain` asks the tree
+ * that was actually built, so the clamp holds under any grouping.
+ *
+ * `rootScope` of `"all"` — the whole fleet, which is what `/bots` roots at —
+ * clamps nothing, and costs no walk.
+ */
+export function clampScope(root: PerfNode, scopeId: string, rootScope: string): string {
+  if (!rootScope || rootScope === "all" || scopeId === rootScope) return scopeId;
+  return ancestorChain(root, scopeId).includes(rootScope) ? scopeId : rootScope;
+}
+
+/**
+ * A stand-in for a root whose node is not in the tree.
+ *
+ * A rooted browser whose root has nothing in it — an agent that has deployed
+ * nothing yet, or whose last leaf a filter just removed — must report *nothing*,
+ * and the one thing it must never do is fall back to the fleet: that is the
+ * escape {@link clampScope} exists to prevent, arriving through the back door.
+ * An empty node of the right kind reports an empty scope, which is the truth.
+ */
+export function emptyScopeNode(id: string, label: string): PerfNode {
+  return { id, kind: kindOfNodeId(id), label, leaves: [], children: [] };
+}
+
+/**
+ * The kind of node an id names, read off the id alone.
+ *
+ * The inverse of the `id` grammar `buildTree` writes. Only used where a node
+ * has to be conjured without a tree to look it up in ({@link emptyScopeNode}).
+ */
+function kindOfNodeId(id: string): NodeKind {
+  if (id.startsWith("agent:")) return "agent";
+  if (id.startsWith("bot:")) return "bot";
+  if (id.startsWith("grp:")) return "group";
+  if (id.startsWith("ctrl:")) return "controller";
+  if (id.startsWith("exec:")) return "executor";
+  if (id === "orphans") return "orphans";
+  return "fleet";
+}
+
 // ── The fold ──
 
 /** What a scope adds up to, in display currency. */
