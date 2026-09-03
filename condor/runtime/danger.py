@@ -120,6 +120,62 @@ DANGEROUS_CONTROL_ACTIONS = {"start", "start_agent"}
 DANGEROUS_CONFIG_RESOURCES: set[str] = set()
 
 
+# ── What changed the world (FEAT-097) ──
+#
+# The sets above answer "should a human approve this". The log asks a different
+# question — "did this change anything" — and the two deliberately differ:
+# `manage_gateway_config` is gated on an intentionally empty resource set, and
+# the brakes (`stop`, `pause`, `resume`, `shutdown`) are ungated on purpose. A
+# log built on the confirmation predicate would therefore be silent about every
+# config edit and every brake, which is the exact silence the log exists to end.
+#
+# So: a sibling predicate over the *same* sets, so the two read side by side and
+# a newly gated action cannot become an unrecorded one (pinned by a test).
+# Everything gated is recorded; a few recorded things are deliberately ungated.
+
+#: Mutating actions of the dispatch tools. Identical to their confirmation sets
+#: where the confirmation set is already "everything that writes".
+MUTATING_BOT_ACTIONS = DANGEROUS_BOT_ACTIONS
+MUTATING_CLMM_ACTIONS = DANGEROUS_CLMM_ACTIONS
+MUTATING_AMM_ACTIONS = DANGEROUS_AMM_ACTIONS
+
+#: `control_agent`'s writes, including the brakes the gate lets through. The
+#: legacy `*_agent` spellings are accepted by the tool's own `_resolve_action`,
+#: so the log has to know both or a `stop_agent` goes unrecorded.
+MUTATING_CONTROL_ACTIONS = {
+    "start",
+    "start_agent",
+    "stop",
+    "stop_agent",
+    "pause",
+    "pause_agent",
+    "resume",
+    "resume_agent",
+    "shutdown",
+    "shutdown_agent",
+    "set_state",
+}
+
+# The reads of each dispatch tool, named explicitly. They are what keeps the
+# fail-open rule below from recording a `manage_bots(action="status")`: an
+# action in neither set is one this module has not heard of, and *that* is what
+# gets recorded.
+READ_ONLY_BOT_ACTIONS = {"status", "logs", "get_config"}
+#: The liquidity tools' reads, shared because they overlap and because this is
+#: the same set ``test_dangerous_gate_names_resolve`` holds the gate to.
+READ_ONLY_LIQUIDITY_ACTIONS = {
+    "pool_info",
+    "position_info",
+    "positions_owned",
+    "quote_liquidity",
+}
+READ_ONLY_CONTROL_ACTIONS = {"list", "list_agents", "get_state"}
+#: `manage_gateway_config` is recorded on its *action*, not its resource type:
+#: what it edits is what the gate weighs, and whether it edited at all is what
+#: the log weighs.
+READ_ONLY_CONFIG_ACTIONS = {"list", "get"}
+
+
 def tool_call_name(tool_call: dict[str, Any]) -> str:
     """The bare tool name, with any MCP prefix stripped.
 
@@ -291,6 +347,83 @@ def is_dangerous_tool_call(tool_call: dict[str, Any]) -> bool:
         return _has_dangerous_action(tool_call, DANGEROUS_BOT_ACTIONS)
 
     return False
+
+
+def _is_mutating_action(
+    tool_call: dict[str, Any], mutating: set[str], read_only: set[str]
+) -> bool:
+    """Whether an action-gated tool call selects an action that writes.
+
+    The fail-open twin of :func:`_has_dangerous_action`: an action in neither
+    set — a new one, or one this module has not heard of — is treated as a
+    write, and so are unreadable arguments. A missing row is invisible; a
+    spurious one is a line a reader can see and a maintainer can fix.
+    """
+    input_data = tool_call_input(tool_call)
+    if input_data is None:
+        return True
+    action = input_data.get("action")
+    if not isinstance(action, str) or not action:
+        return True
+    if action in mutating:
+        return True
+    return action not in read_only
+
+
+def is_mutating_tool_call(tool_call: dict[str, Any]) -> bool:
+    """Did this call change something? The log's question, not the gate's.
+
+    Unlike :func:`is_dangerous_tool_call` this fails **open**: an action this
+    module has not heard of is recorded rather than dropped. Every call the gate
+    accepts, this accepts too — the sets are shared and a test pins the
+    inclusion — plus the config edits and the brakes the gate deliberately lets
+    through ungated.
+
+    Only the tools this module already knows are classified. A genuinely new
+    mutating tool that reaches neither predicate is unrecorded *and* unconfirmed,
+    which is one exposure and not two.
+    """
+    tool_name = tool_call_name(tool_call)
+
+    if tool_name == "manage_clmm":
+        return _is_mutating_action(
+            tool_call, MUTATING_CLMM_ACTIONS, READ_ONLY_LIQUIDITY_ACTIONS
+        )
+
+    if tool_name == "manage_amm":
+        return _is_mutating_action(
+            tool_call, MUTATING_AMM_ACTIONS, READ_ONLY_LIQUIDITY_ACTIONS
+        )
+
+    if tool_name == "manage_bots":
+        return _is_mutating_action(
+            tool_call, MUTATING_BOT_ACTIONS, READ_ONLY_BOT_ACTIONS
+        )
+
+    if tool_name == "control_agent":
+        return _is_mutating_action(
+            tool_call, MUTATING_CONTROL_ACTIONS, READ_ONLY_CONTROL_ACTIONS
+        )
+
+    if tool_name == "manage_gateway_config":
+        # Recorded unless it is one of the two reads. The resource type is read
+        # only to stay a superset of the gate, which fails closed on a missing
+        # one: a call neither of us can parse is recorded rather than dropped.
+        input_data = tool_call_input(tool_call)
+        if input_data is None:
+            return True
+        resource = input_data.get("resource_type")
+        if not isinstance(resource, str) or not resource:
+            return True
+        return _is_mutating_action(tool_call, set(), READ_ONLY_CONFIG_ACTIONS)
+
+    # Gated by name, and every one of them writes: an order, a signature, an
+    # executor create, an executor stop.
+    return tool_name in CREATE_EXECUTOR_TOOLS or tool_name in {
+        "place_order",
+        "execute_swap",
+        "stop_executor",
+    }
 
 
 def format_tool_summary(tool_call: dict[str, Any]) -> str:

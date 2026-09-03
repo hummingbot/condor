@@ -31,6 +31,7 @@ from condor.runtime.registry_file import LoopState
 from condor.runtime.timeouts import resolve_tick_timeout
 from condor.telemetry import taps as telemetry_taps
 
+from . import actions as actions_mod
 from .agent import Agent
 from .journal import JournalManager, next_experiment_number, next_session_number
 from .prompts import build_tick_prompt
@@ -668,12 +669,25 @@ class TickEngine:
                 len(response_text),
             )
         else:
+            # What the tick actually *did*, as opposed to what it said (FEAT-097).
+            # Derived here rather than at stream time because the outcome of a
+            # call is only known once its terminal update has folded in, and a
+            # log whose whole purpose is "what it did" must not record intent.
+            # The tick number is the one ``record_tick`` is about to assign
+            # (it increments and returns the counter), needed here because the
+            # same call wants the action *count* for journal.md's Ticks line —
+            # which has read ``actions=0`` on every tick ever written.
+            tick_actions = actions_mod.actions_from_tool_calls(
+                tool_calls, tick=self.journal.tick_count + 1, at=time.time()
+            )
+
             # Sessions: full journal tracking. Every journal.md update of this
             # tick goes into one batch, so the file is rewritten once instead of
             # three-to-five times (PERF-136).
             with self.journal.batch():
                 tick_num = self.journal.record_tick(
                     response_summary=response_text[:500],
+                    actions=len(tick_actions),
                 )
 
                 self._journal_ownership_violations(tick_num)
@@ -713,6 +727,7 @@ class TickEngine:
                 risk_state=risk_state.to_dict(),
                 duration=tick_duration,
             )
+            actions_mod.append_actions(self.session_dir, tick_actions)
 
             # Live session report (FEAT-036). Deterministic render over data we
             # already hold — no tokens. The guard is load-bearing: a charting or

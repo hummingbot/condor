@@ -15,6 +15,7 @@ either side fails here instead of in production.
 import inspect
 import typing
 
+from condor.runtime.danger import is_mutating_tool_call
 from handlers.agents._shared import (
     CREATE_EXECUTOR_TOOLS,
     DANGEROUS_AMM_ACTIONS,
@@ -556,3 +557,121 @@ def test_the_tick_seat_cannot_reach_control_agent():
     from mcp_servers.condor import server as condor_server
 
     assert condor_server.control_agent not in condor_server.TOOL_PROFILES["tick"]
+
+
+# ---------------------------------------------------------------------------
+# The log's predicate: what changed the world (FEAT-097)
+# ---------------------------------------------------------------------------
+#
+# ``is_mutating_tool_call`` asks a different question than the gate over the
+# same sets. These pin the two places it must differ (the ungated brakes, the
+# ungated config edits), the fail-open rule, and — the load-bearing one — that
+# it is a superset of the gate, so a newly gated action can never become an
+# unrecorded one.
+
+
+def _call(tool: str, **args) -> dict:
+    return {"tool": tool, "input": args}
+
+
+def test_a_create_and_a_stop_are_recorded():
+    for tool in CREATE_EXECUTOR_TOOLS:
+        assert is_mutating_tool_call(_call(tool, trading_pair="SOL-USDC"))
+    assert is_mutating_tool_call(_call("stop_executor", executor_id="abc"))
+    assert is_mutating_tool_call(_call("place_order", trading_pair="SOL-USDC"))
+    assert is_mutating_tool_call(_call("execute_swap", trading_pair="SOL-USDC"))
+
+
+def test_a_bot_deploy_is_recorded_and_a_bot_status_is_not():
+    assert is_mutating_tool_call(_call("manage_bots", action="deploy", bot_name="b"))
+    assert not is_mutating_tool_call(
+        _call("manage_bots", action="status", bot_name="b")
+    )
+    assert not is_mutating_tool_call(_call("manage_bots", action="logs", bot_name="b"))
+
+
+def test_the_ungated_brakes_are_recorded():
+    """The gate lets a stop through; the log must still say it happened."""
+    for action in ("stop", "pause", "resume", "shutdown", "stop_agent"):
+        call = _call("control_agent", action=action, agent_id="a.b_1")
+        assert not is_dangerous_tool_call(call), f"{action} became gated"
+        assert is_mutating_tool_call(call), f"{action} went unrecorded"
+    assert not is_mutating_tool_call(_call("control_agent", action="list"))
+    assert not is_mutating_tool_call(_call("control_agent", action="get_state"))
+
+
+def test_an_ungated_config_edit_is_recorded():
+    """``DANGEROUS_CONFIG_RESOURCES`` is empty on purpose; the log is not."""
+    for action in ("add", "delete", "update", "save"):
+        call = _call("manage_gateway_config", action=action, resource_type="tokens")
+        assert not is_dangerous_tool_call(call)
+        assert is_mutating_tool_call(call)
+    for action in ("list", "get"):
+        assert not is_mutating_tool_call(
+            _call("manage_gateway_config", action=action, resource_type="tokens")
+        )
+
+
+def test_the_log_fails_open_where_the_gate_fails_closed():
+    """An action nobody has heard of is recorded, not dropped."""
+    assert is_mutating_tool_call({"tool": "manage_bots", "input": None})
+    assert is_mutating_tool_call({"tool": "manage_bots", "input": "not json"})
+    assert is_mutating_tool_call(_call("manage_bots", bot_name="b"))
+    # A dispatch tool that grew an action neither set names.
+    assert is_mutating_tool_call(_call("manage_bots", action="teleport"))
+    assert is_mutating_tool_call(_call("manage_clmm", action="rebalance"))
+    assert is_mutating_tool_call(_call("control_agent", action="reincarnate"))
+    assert is_mutating_tool_call(_call("manage_gateway_config", action="mutate"))
+
+
+def test_a_read_only_tool_is_not_recorded():
+    for tool in ("get_prices", "list_executors", "quote_swap", "manage_controllers"):
+        assert not is_mutating_tool_call(_call(tool, action="list"))
+
+
+def _every_plausible_call() -> list[dict]:
+    """One call per (tool, action/resource) the registry accepts, plus the junk.
+
+    Built from the tools themselves rather than a hand-written list, so an
+    action added to a gated tool lands in the subset assertion below on its own.
+    """
+    calls: list[dict] = []
+    for tool in ("manage_bots", "manage_clmm", "manage_amm", "manage_gateway_config"):
+        for action in _action_literals(tool):
+            calls.append(_call(tool, action=action, resource_type="tokens"))
+            calls.append(_call(tool, action=action))
+    for resource in _action_literals("manage_gateway_config"):
+        calls.append(_call("manage_gateway_config", resource_type=resource))
+    for action in _control_actions():
+        calls.append(_call("control_agent", action=action, agent_id="a.b_1"))
+    for tool in sorted(DANGEROUS_TOOLS | {"manage_bots"}):
+        calls.append(_call(tool))
+        calls.append({"tool": tool, "input": None})
+        calls.append({"tool": tool, "input": {"action": None}})
+        calls.append({"tool": f"mcp__mcp-hummingbot__{tool}", "input": {}})
+    return calls
+
+
+def test_everything_the_gate_stops_the_log_records():
+    """``dangerous ⊆ mutating``, over every call either predicate can see.
+
+    The whole risk of having two predicates over one set of tools is drift. A
+    call that needs a human and leaves no trace is the drift that matters: the
+    band would confidently show the *previous* deed while a human was approving
+    a new one.
+    """
+    for call in _every_plausible_call():
+        if is_dangerous_tool_call(call):
+            assert is_mutating_tool_call(call), f"gated but unrecorded: {call}"
+
+
+def test_every_liquidity_moving_action_is_recorded():
+    """The log twin of :func:`test_every_liquidity_moving_action_is_gated`."""
+    read_only = {"pool_info", "position_info", "positions_owned", "quote_liquidity"}
+    for tool in ("manage_clmm", "manage_amm", "manage_bots"):
+        for action in (
+            _action_literals(tool) - read_only - {"status", "logs", "get_config"}
+        ):
+            assert is_mutating_tool_call(
+                _call(tool, action=action)
+            ), f"{tool}:{action} writes but is not recorded"
