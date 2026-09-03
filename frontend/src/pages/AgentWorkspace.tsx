@@ -5,9 +5,11 @@ import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom"
 
 import { AgentKnowledge } from "@/components/agent/AgentKnowledge";
 import { PerformancePanel } from "@/components/agent/AgentOverviewTab";
+import { SnapshotDetail } from "@/components/agent/AgentSessionContent";
 import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
 import { StrategyWorkbench } from "@/components/agent/StrategyWorkbench";
 import { isKnowledgeTab } from "@/components/agent/knowledgeTabs";
+import { LoopBar } from "@/components/agent/workspace/LoopBar";
 import { WorkspaceHeader } from "@/components/agent/workspace/WorkspaceHeader";
 import { WorkspaceSpine } from "@/components/agent/workspace/WorkspaceSpine";
 import {
@@ -90,6 +92,23 @@ export function AgentWorkspace() {
     [setParams],
   );
 
+  /**
+   * A beat is a selection, not a destination.
+   *
+   * Clicking one sets `?tick=` and swaps the body to that tick without touching
+   * the route — which is the whole argument for the query-parameter grammar.
+   * Clearing it puts back the run it belongs to, so the spine's `Run` button is
+   * the way up from a tick to its overview.
+   */
+  const selectTick = useCallback(
+    (tick: number | null, from: WorkspaceViewId) =>
+      setParams({
+        tick,
+        view: tick === null ? (from === "tick" ? "runs" : from) : "tick",
+      }),
+    [setParams],
+  );
+
   // One `["agent", slug]` and one `["agent-runs", slug]` for the whole screen.
   // The header, the loop bar and the body all want them; react-query dedupes
   // the keys, which is the only reason three regions polling at 5s is one poll.
@@ -124,12 +143,26 @@ export function AgentWorkspace() {
     [runs, sslug, url.run],
   );
 
+  const scopedRuns = useMemo(
+    () => (sslug ? runs.filter((r) => r.strategy_slug === sslug) : runs),
+    [runs, sslug],
+  );
+
   const { data: strategy = null } = useQuery({
     queryKey: ["strategy", slug, sslug],
     queryFn: () => api.getStrategy(slug, sslug!),
     enabled: !!slug && !!sslug,
     refetchInterval: 5000,
   });
+
+  // The live engine behind the selected run, for the cadence and the countdown
+  // — the two facts a run row deliberately does not carry.
+  const instances = strategy?.instances;
+  const runAgentId = selectedRun?.agent_id;
+  const instance = useMemo(
+    () => instances?.find((i) => i.agent_id === runAgentId) ?? null,
+    [instances, runAgentId],
+  );
 
   const { data: routineInstances = [] } = useQuery({
     queryKey: ["routine-instances"],
@@ -230,6 +263,22 @@ export function AgentWorkspace() {
     </p>
   ) : view === "money" ? (
     <PerformancePanel slug={agent.slug} sslug={sslug} />
+  ) : view === "tick" ? (
+    /* One tick of one run, the same body the Lab renders — reached by clicking
+       a beat on the spine above, which is why this view has no picker of its
+       own. A dry run is a single tick in one file and has no beats. */
+    selectedRun && selectedRun.kind === "session" && url.tick !== null ? (
+      <SnapshotDetail
+        slug={agent.slug}
+        sslug={sslug}
+        sessionNum={selectedRun.number}
+        tick={url.tick}
+      />
+    ) : (
+      <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">
+        Pick a beat on the spine above to read the tick it wrote.
+      </p>
+    )
   ) : view === "playbook" || view === "now" ? (
     /* Step 1 of FEAT-103: Now is the workbench until it has a body of its own. */
     <StrategyWorkbench
@@ -249,6 +298,21 @@ export function AgentWorkspace() {
         isRunning={isRunning}
         onAskAgent={() => askAgent()}
         onDelete={() => setShowDeleteConfirm(true)}
+      />
+
+      <LoopBar
+        slug={agent.slug}
+        strategies={agent.strategies ?? []}
+        sslug={sslug}
+        onSelectStrategy={(next) =>
+          setParams({ strategy: next, run: null, tick: null })
+        }
+        runs={scopedRuns}
+        run={selectedRun}
+        onSelectRun={(runId) => setParams({ run: runId, tick: null })}
+        instance={instance}
+        tick={url.tick}
+        onSelectTick={(next) => selectTick(next, view)}
       />
 
       <div className="flex min-h-0 flex-1">
