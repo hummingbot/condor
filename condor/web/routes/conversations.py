@@ -17,9 +17,11 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi.responses import Response
 from pydantic import BaseModel
 
+from condor.runtime import attachments
 from condor.runtime import client as runtime
 from condor.runtime import conversations
 from condor.runtime.conversations import ConversationIdError, ConversationMeta
@@ -152,3 +154,73 @@ async def delete_conversation(
         "sessions_destroyed": detached,
         "unshared": unshared,
     }
+
+
+# ── Attachments ──
+#
+# Beside the transcript because that is what they belong to: the ownership rule
+# (``_owner``) and the "does this conversation exist" check are already here, and
+# the store writes *inside* the conversation directory, so the two resources have
+# exactly the same lifetime. See :mod:`condor.runtime.attachments`.
+
+
+@router.post("/{conversation_id}/attachments")
+async def upload_attachment(
+    conversation_id: str,
+    file: UploadFile = File(...),
+    user_id: int | None = None,
+    user: WebUser = Depends(get_current_user),
+):
+    """Store one image against a conversation and return the id to send with it.
+
+    Modelled on ``/api/v1/transcribe``: multipart, a size cap, a bearer-guarded
+    dependency, driven from the frontend by ``authFetch`` with a ``FormData``
+    body. The upload happens at *send* time, not at paste time, so a file is only
+    ever written for a message that is actually going out and there is nothing to
+    sweep (FEAT-098).
+
+    The client's ``content_type`` is not consulted: the store sniffs the bytes.
+    """
+    owner_id = _owner(user, user_id)
+    _meta_or_404(owner_id, conversation_id)
+
+    data = await file.read()
+    try:
+        stored = attachments.save(owner_id, conversation_id, data)
+    except attachments.TooLargeError as exc:
+        raise HTTPException(status_code=413, detail=str(exc))
+    except attachments.UnsupportedTypeError as exc:
+        raise HTTPException(status_code=415, detail=str(exc))
+    except attachments.NoConversationError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    return {"id": stored.id, "mime": stored.mime, "bytes": stored.bytes}
+
+
+@router.get("/{conversation_id}/attachments/{attachment_id}")
+async def get_attachment(
+    conversation_id: str,
+    attachment_id: str,
+    user_id: int | None = None,
+    user: WebUser = Depends(get_current_user),
+):
+    """The stored bytes, as their own media type.
+
+    Guarded by ``get_current_user`` like everything else here, which is an
+    ``HTTPBearer`` — so this is *fetched* and turned into an object URL by the
+    frontend's ``useAuthedImage``, never pointed at by a bare ``<img src>``,
+    which has no way to carry the header.
+    """
+    owner_id = _owner(user, user_id)
+    _meta_or_404(owner_id, conversation_id)
+    try:
+        data, mime = attachments.load(owner_id, conversation_id, attachment_id)
+    except attachments.NotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    # Private by construction (a per-user path behind a bearer token), and the
+    # bytes never change under an id, so the browser may keep it for the session.
+    return Response(
+        content=data,
+        media_type=mime,
+        headers={"Cache-Control": "private, max-age=3600"},
+    )
