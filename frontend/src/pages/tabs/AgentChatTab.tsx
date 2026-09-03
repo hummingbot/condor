@@ -23,6 +23,12 @@ import { ChatRail } from "@/components/chat/ChatRail";
 import { ChatThread } from "@/components/chat/ChatThread";
 import { ContextDock } from "@/components/chat/ContextDock";
 import { useContextPanels } from "@/components/chat/contextPanels";
+import {
+  PANEL_PARAM,
+  readPane,
+  writePane,
+  type PaneView,
+} from "@/components/chat/paneUrl";
 import type { LibraryFocus } from "@/components/chat/DockRoutines";
 import { SessionTabs } from "@/components/chat/SessionTabs";
 import { StrategySheet } from "@/components/chat/StrategySheet";
@@ -83,39 +89,6 @@ const AGENT_STARTERS: Starter[] = [
 type TalkIntent = "focus" | "fresh";
 
 /**
- * What is in the workspace pane, if anything.
- *
- * One union rather than three booleans, because the pane is one column:
- * opening the agent panel puts the routine library away and vice versa, and
- * that is the shape of the state rather than a rule three components have to
- * remember (FEAT-081). The library's focus used to live inside `ContextDock`,
- * which could not know about a second occupant.
- *
- * `desk` joined it when the account panels stopped being a column of their own
- * — see `AccountDock`. The three big surfaces of this workspace are the agent,
- * the portfolio and the execution table, and they are exactly the three nobody
- * reads at the same time; making them one union is what stopped the row from
- * asking for more width than a laptop has. Which *sections* the desk is
- * showing is `useAccountPanels`', not this: this only says the desk is on.
- */
-type PaneView =
-  | { kind: "agent" }
-  | { kind: "desk" }
-  | { kind: "routines"; focus: LibraryFocus }
-  /**
-   * One of the agent's loops, opened from its card in the agent panel.
-   *
-   * A member of the same union rather than a sheet stacked on the panel: there
-   * is one pane, and two sheets portalled into it stack with no way to tell
-   * which scrollbar belongs to what (see `WorkspaceSheet`'s `taken`). So the
-   * strategy *replaces* the panel and closing it puts the panel back — the same
-   * hand-over the routine library already does, and the reason it carries the
-   * agent slug it was opened from.
-   */
-  | { kind: "strategy"; agentSlug: string; strategySlug: string }
-  | null;
-
-/**
  * The chat workspace — what `/` opens on.
  *
  * A rail of who you can talk to and what you already said, a conversation
@@ -150,17 +123,41 @@ export function AgentChatTab() {
    */
   const [pendingAgentKey, setPendingAgentKey] = useState<string | null>(null);
   /**
-   * What is in the pane, restored for the one occupant that has a memory.
+   * What is in the pane — read from `?panel=`, so Escape and browser Back both
+   * close it and a panel can be sent to someone (FEAT-103).
    *
-   * The desk is a workspace fixture — you leave a balance up the way you leave
-   * a dock open — while the agent panel and the routine library are things you
-   * go and open. So the desk comes back and the other two do not, which is the
-   * behaviour the desk had as a column of its own and the reason the sections
-   * are recorded at all.
+   * The routine library's focus rides beside it rather than in the URL: it
+   * changes several times a minute while somebody browses reports, and a
+   * parameter per click is a history stack nobody can press Back through. See
+   * `paneUrl.ts`.
    */
-  const [pane, setPane] = useState<PaneView>(() =>
-    deskWasOpen() ? { kind: "desk" } : null,
-  );
+  const [libraryFocus, setLibraryFocus] = useState<LibraryFocus>({});
+  const pane: PaneView = readPane(searchParams, libraryFocus);
+
+  const openPane = (next: PaneView) => {
+    if (next?.kind === "routines") setLibraryFocus(next.focus);
+    setSearchParams(writePane(searchParams, next));
+  };
+
+  /**
+   * The desk is the one occupant with a memory.
+   *
+   * It is a workspace fixture — you leave a balance up the way you leave a dock
+   * open — while the agent panel and the routine library are things you go and
+   * open. So it comes back on a bare `/`, once, as a `replace` rather than a
+   * history entry: restoring a preference is not a step anybody navigated.
+   */
+  const restoredDesk = useRef(false);
+  useEffect(() => {
+    if (restoredDesk.current) return;
+    restoredDesk.current = true;
+    if (!searchParams.get(PANEL_PARAM) && deskWasOpen()) {
+      setSearchParams(writePane(searchParams, { kind: "desk" }), {
+        replace: true,
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Same keys and intervals the fleet tab uses, so react-query dedupes rather
   // than polling `/agents` twice.
@@ -287,7 +284,12 @@ export function AgentChatTab() {
     consumedAgentParam.current = true;
     if (askParam) talkTo(agentParam, { intent: "fresh", text: askParam });
     else talkTo(agentParam);
-    setSearchParams({}, { replace: true });
+    // Only the two it consumed: `?panel=` is the pane's state now, and
+    // clearing the whole query string would close whatever was open.
+    const rest = new URLSearchParams(searchParams);
+    rest.delete("agent");
+    rest.delete("ask");
+    setSearchParams(rest, { replace: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentParam]);
 
@@ -388,7 +390,7 @@ export function AgentChatTab() {
   const account = useAccountPanels({
     server: dockServer,
     open: pane?.kind === "desk",
-    onOpenChange: (open) => setPane(open ? { kind: "desk" } : null),
+    onOpenChange: (open) => openPane(open ? { kind: "desk" } : null),
   });
   const context = useContextPanels({
     delegations: delegationData?.delegations ?? [],
@@ -565,13 +567,13 @@ export function AgentChatTab() {
               // The pane's routine house is the one FEAT-077 built; the panel
               // hands it over rather than growing a second one.
               onOpenRoutine={(name) =>
-                setPane({ kind: "routines", focus: { source: name } })
+                openPane({ kind: "routines", focus: { source: name } })
               }
               // The strategy takes the pane and hands it back on close. Not a
               // navigation: the conversation that named this loop is the
               // reason you are looking at it.
               onOpenStrategy={(strategySlug) =>
-                setPane({ kind: "strategy", agentSlug: panelSlug, strategySlug })
+                openPane({ kind: "strategy", agentSlug: panelSlug, strategySlug })
               }
               // A revision is its own thread: `fresh`, not `focus`, so the
               // request does not land under whatever unrelated thing this
@@ -580,7 +582,7 @@ export function AgentChatTab() {
               onAskAgent={(text) =>
                 talkTo(panelSlug, { intent: "fresh", text })
               }
-              onClose={() => setPane(null)}
+              onClose={() => openPane(null)}
             />
           )}
 
@@ -594,7 +596,7 @@ export function AgentChatTab() {
               key={`${pane.agentSlug}/${pane.strategySlug}`}
               slug={pane.agentSlug}
               sslug={pane.strategySlug}
-              onClose={() => setPane({ kind: "agent" })}
+              onClose={() => openPane({ kind: "agent" })}
             />
           )}
 
@@ -636,7 +638,7 @@ export function AgentChatTab() {
             }
             library={pane?.kind === "routines" ? pane.focus : null}
             onLibraryChange={(focus) =>
-              setPane(focus ? { kind: "routines", focus } : null)
+              openPane(focus ? { kind: "routines", focus } : null)
             }
           />
         </div>
@@ -687,8 +689,8 @@ export function AgentChatTab() {
                   // while it is on screen.
                   active: pane?.kind === "agent" || pane?.kind === "strategy",
                   onToggle: () =>
-                    setPane((p) =>
-                      p?.kind === "agent" || p?.kind === "strategy"
+                    openPane(
+                      pane?.kind === "agent" || pane?.kind === "strategy"
                         ? null
                         : { kind: "agent" },
                     ),

@@ -71,7 +71,7 @@ import { formatRoutineName } from "@/lib/routineUtils";
  */
 export function AgentKnowledge({
   slug,
-  layout = "tabs",
+  layout = "rail",
   tab,
   onTabChange,
   routinesAction,
@@ -413,40 +413,7 @@ export function AgentKnowledge({
         );
       })}
     </div>
-  ) : (
-    /* Tabs stay put while a drill-down is open: leaving a playbook is one
-       click on the section you came from, not a hunt for a back button. */
-    <div
-      role="tablist"
-      aria-label="Sections"
-      className="-mt-1 mb-4 flex flex-wrap items-center gap-1 border-b border-[var(--color-border)] pb-2"
-    >
-      {tabs.map((t) => (
-        <button
-          key={t.id}
-          role="tab"
-          aria-selected={activeTab === t.id}
-          onClick={() => openTab(t.id)}
-          className={`flex items-center gap-1.5 rounded px-2.5 py-1.5 text-xs transition-colors ${
-            activeTab === t.id
-              ? "bg-[var(--color-surface-hover)] font-medium text-[var(--color-text)]"
-              : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
-          }`}
-        >
-          {t.icon}
-          {t.label}
-          {(t.countLabel || (t.count !== undefined && t.count > 0)) && (
-            <span
-              title={t.countTitle}
-              className="text-[10px] text-[var(--color-text-muted)]"
-            >
-              {t.countLabel ?? t.count}
-            </span>
-          )}
-        </button>
-      ))}
-    </div>
-  );
+  ) : null;
 
   const body = (
     <>
@@ -622,19 +589,15 @@ export function AgentKnowledge({
   );
 
   // The rail is beside its body and both scroll independently, so a long
-  // AGENT.md never scrolls the sections out of reach. The strip is above it,
-  // where the page's own scroll is the only one.
-  if (bare) return <div>{body}</div>;
+  // AGENT.md never scrolls the sections out of reach. A bare host draws its own
+  // navigation and gets the bodies alone.
   return rail ? (
     <div className="flex min-h-0 flex-1 overflow-hidden">
       <div className="min-w-0 flex-1 overflow-y-auto px-3 py-2">{body}</div>
       {nav}
     </div>
   ) : (
-    <div>
-      {nav}
-      {body}
-    </div>
+    <div>{body}</div>
   );
 }
 
