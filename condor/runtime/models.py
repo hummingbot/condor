@@ -101,12 +101,42 @@ class SessionInfo(BaseModel):
     )
 
 
+class PromptImage(BaseModel):
+    """One picture given to the model alongside a turn's text.
+
+    The naming is the boundary: the route and the transcript say *attachment*
+    (what a user handed over), the prompt says *image* (what a model is given),
+    and the mime allowlist in :mod:`condor.runtime.attachments` is the line
+    between the two — the one place a second kind of attachment would later have
+    to be taught.
+
+    ``id`` is the stored attachment this came from, so the funnel can record what
+    was attached without a second field the caller has to keep in step with this
+    one. Empty for an image that was never stored (nothing does that today; it is
+    what a surface handing over bytes it holds in memory would look like), and
+    such an image is simply not written to the transcript.
+    """
+
+    data: bytes
+    mime: str
+    id: str = Field(
+        default="",
+        description="The attachment it was loaded from; '' = not stored.",
+    )
+
+
 class PromptRequest(BaseModel):
     """One user turn sent to a session."""
 
     text: str
-    image_b64: str | None = None
-    image_mime: str | None = None
+    images: list[PromptImage] = Field(
+        default_factory=list,
+        description=(
+            "Pictures to send beside the text. They travel *beside* it and never "
+            "inside it: ``text`` stays a str all the way down the funnel, where "
+            "pending_context and the view block are prepended by string surgery."
+        ),
+    )
     user_kind: str = Field(
         default="",
         description="Set when the turn was NOT typed by the user: the opening "

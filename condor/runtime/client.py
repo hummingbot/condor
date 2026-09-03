@@ -195,8 +195,10 @@ async def prompt(
     *queues*. It defaults to ``reject`` — the pre-FEAT-030 behaviour — so
     delegations, strategy ticks and every other caller are untouched.
 
-    ``req.image_b64``/``req.image_mime`` are accepted but not yet forwarded:
-    the underlying ACP and Pydantic AI clients are text-only today.
+    ``req.images`` travel beside the text to whichever client is behind the
+    session, which turns them into that protocol's own content blocks. They are
+    resolved to bytes by the caller — the funnel never sees an attachment id —
+    and are recorded on the user turn as ``{id, mime, bytes}``, no payload.
     """
     raw_key = str(key)
     session = _local().get_session(key)
@@ -264,6 +266,20 @@ async def prompt(
             kind="reload",
         )
 
+    # An agent that says it does not take pictures is told so here, before the
+    # prompt is built, rather than by a mid-turn protocol rejection the user
+    # cannot read. ACP answers this at the handshake; the pydantic-ai client has
+    # nothing equivalent to introspect and defaults to True, forwarding
+    # optimistically so the provider's own error is what surfaces (FEAT-098).
+    if req.images and not getattr(session.client, "accepts_images", True):
+        yield RuntimeEvent.error(
+            f"{session.label} cannot read images. "
+            "Switch the model, or describe what is in the picture.",
+            session_key=raw_key,
+        )
+        yield RuntimeEvent.done("error", session_key=raw_key)
+        return
+
     # Key material never gets past this line (FEAT-056). It is the same
     # argument the funnel already makes for recording and for ``on_busy``,
     # applied to a third cross-cutting concern: ``clean`` feeds both the
@@ -304,7 +320,9 @@ async def prompt(
     tool_kinds: dict[str, int] = {}
     outcome = "aborted"
     try:
-        async for event in session.prompt_stream(wire, lock_timeout=lock_timeout):
+        async for event in session.prompt_stream(
+            wire, images=req.images or None, lock_timeout=lock_timeout
+        ):
             runtime_event = RuntimeEvent.from_acp(event, session_key=raw_key)
             if runtime_event.type is EventType.TOOL_CALL:
                 # The ACP `kind` ("read", "execute", …), never the `title`: a

@@ -875,13 +875,22 @@ class PydanticAIClient:
         """
         self._abort_requested = True
 
-    async def prompt_stream(self, text: str) -> AsyncIterator[ACPEvent]:
+    async def prompt_stream(
+        self, text: str, *, images: list | None = None
+    ) -> AsyncIterator[ACPEvent]:
         """Send a prompt and yield ACPEvents as they arrive.
 
         Uses pydantic-ai's streaming run with MCP tools.
         Tool calls go through the permission callback for risk checking.
         MCP servers are already running (started in start()), so we
         call iter() directly without run_mcp_servers().
+
+        ``images`` become ``BinaryContent`` parts ahead of the text, the same
+        order the ACP path uses. Forwarded optimistically: unlike ACP there is
+        nothing here to introspect for a vision capability, and guessing from a
+        hardcoded list of model ids is a maintenance burden that would go stale
+        faster than the providers ship. A model that cannot see says so in its
+        own error, which reaches the user as the turn's error (FEAT-098).
         """
         assert self._agent is not None, "Client not started"
 
@@ -906,8 +915,20 @@ class PydanticAIClient:
                 # event the dashboard already received.
                 blocked_ids: set[str] = set()
 
+                user_prompt: Any = text
+                if images:
+                    from pydantic_ai.messages import BinaryContent
+
+                    user_prompt = [
+                        *(
+                            BinaryContent(data=image.data, media_type=image.mime)
+                            for image in images
+                        ),
+                        text,
+                    ]
+
                 async with self._agent.iter(
-                    text, message_history=self._message_history
+                    user_prompt, message_history=self._message_history
                 ) as run:
                     async for node in run:
                         if self._abort_requested:

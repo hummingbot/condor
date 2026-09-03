@@ -178,7 +178,13 @@ class AgentSession:
             conversation_id=self.conversation_id,
         )
 
-    async def prompt_stream(self, text: str, *, lock_timeout: float | None = None):
+    async def prompt_stream(
+        self,
+        text: str,
+        *,
+        images: list | None = None,
+        lock_timeout: float | None = None,
+    ):
         """Stream a prompt, managing the busy flag and lock.
 
         The lock *is* the queue: ``asyncio.Lock`` is FIFO, so several prompts
@@ -186,6 +192,13 @@ class AgentSession:
         lock-acquisition timeout to avoid waiting forever when a previous
         prompt is stuck, and an overall wall-clock timeout
         (PROMPT_OVERALL_TIMEOUT) to kill runaway prompts.
+
+        ``images`` travels *beside* the text and never inside it, which is why
+        ``text`` is still a plain ``str`` here: the pending-context prepend below
+        and the view block further up are both string surgery, and either would
+        have to learn a content-block format the moment a picture could be in
+        there. A turn with no images calls the client exactly as it always did
+        (FEAT-098).
 
         ``lock_timeout`` defaults to PROMPT_LOCK_TIMEOUT, which guards against a
         *stuck* prompt. A caller that is deliberately waiting its turn passes a
@@ -222,7 +235,16 @@ class AgentSession:
         try:
             loop = asyncio.get_event_loop()
             deadline = loop.time() + PROMPT_OVERALL_TIMEOUT
-            async for event in self.client.prompt_stream(text):
+            # Passed only when there is something to pass, so the text-only
+            # call is byte-for-byte the one this line has always made — and a
+            # client that never learned the keyword (a test double, a future
+            # backend) keeps working until the day it is handed a picture.
+            stream = (
+                self.client.prompt_stream(text, images=images)
+                if images
+                else self.client.prompt_stream(text)
+            )
+            async for event in stream:
                 # Check if abort was requested between events
                 if self._abort_event.is_set():
                     yield PromptDone(stop_reason="cancelled")

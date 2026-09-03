@@ -7,6 +7,7 @@ streaming via session/update notifications.
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import logging
@@ -423,6 +424,9 @@ class ACPClient:
         self._process: asyncio.subprocess.Process | None = None
         self._peer = JSONRPCPeer()
         self._session_id: str | None = None
+        # Answered by the handshake in :meth:`start`. False until then, so a
+        # client that never got that far is never handed a picture.
+        self.accepts_images = False
         self._read_task: asyncio.Task | None = None
         self._stderr_task: asyncio.Task | None = None
         self._event_queue: asyncio.Queue[ACPEvent | None] = asyncio.Queue()
@@ -493,7 +497,7 @@ class ACPClient:
         self._stderr_task = asyncio.create_task(self._drain_stderr())
 
         try:
-            await self._peer.send_request(
+            handshake = await self._peer.send_request(
                 "initialize",
                 {
                     "protocolVersion": 1,
@@ -514,6 +518,17 @@ class ACPClient:
 
         self._session_id = result["sessionId"]
         log.info("ACP session started: %s (cmd=%s)", self._session_id, self.command)
+
+        # The agent's own statement of whether it will take a picture. This
+        # response used to be thrown away wholesale, which meant a turn carrying
+        # an image could only find out by being rejected mid-protocol, in words
+        # the user cannot read. Absent is False: an agent that does not say it
+        # accepts images is not asked to (FEAT-098).
+        self.accepts_images = bool(
+            ((handshake or {}).get("agentCapabilities") or {})
+            .get("promptCapabilities", {})
+            .get("image")
+        )
 
         # Select the requested model over the ACP protocol. The claude-agent-acp
         # bridge does NOT honor ANTHROPIC_MODEL — it defaults to Claude Code's
@@ -839,8 +854,15 @@ class ACPClient:
                 chunks.append(event.text)
         return "".join(chunks)
 
-    async def prompt_stream(self, text: str) -> AsyncIterator[ACPEvent]:
-        """Send a prompt and yield ACP events as they arrive."""
+    async def prompt_stream(
+        self, text: str, *, images: list | None = None
+    ) -> AsyncIterator[ACPEvent]:
+        """Send a prompt and yield ACP events as they arrive.
+
+        ``images`` become ``image`` content blocks *before* the text block,
+        which is the order providers document for a prompt that asks about a
+        picture — the question reads against something already in view.
+        """
         assert self._process and self._session_id
 
         # No second turn until the previous one has actually ended at the
@@ -863,7 +885,17 @@ class ACPClient:
             "method": "session/prompt",
             "params": {
                 "sessionId": self._session_id,
-                "prompt": [{"type": "text", "text": text}],
+                "prompt": [
+                    *(
+                        {
+                            "type": "image",
+                            "data": base64.b64encode(image.data).decode("ascii"),
+                            "mimeType": image.mime,
+                        }
+                        for image in images or ()
+                    ),
+                    {"type": "text", "text": text},
+                ],
             },
             "id": req_id,
         }
