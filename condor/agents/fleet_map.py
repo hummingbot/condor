@@ -152,12 +152,16 @@ def _registry(now: float) -> list[FleetOwner]:
 # ── The live half: in-memory engines, never cached ──
 
 
-def _last_action(journal: Any) -> str:
+def read_last_action(journal: Any) -> str:
     """The ``Last action:`` line of the journal's Summary, or ``""``.
 
     One small file read per live engine (the journal caches its own text), and
     the reason the live half is not memoised: the band's job is to say what the
     loop is doing *now*.
+
+    Public because it has a second caller: the strategy view's `RunningInstance`
+    reports the same pulse the fleet band does, and a loop must not be able to
+    say two different things about itself on two screens.
     """
     if journal is None:
         return ""
@@ -168,7 +172,7 @@ def _last_action(journal: Any) -> str:
     return match.group(1).strip() if match else ""
 
 
-def _last_did(engine: Any) -> dict | None:
+def read_last_did(engine: Any) -> dict | None:
     """The last mutating tool call of this engine's session, or ``None``.
 
     One tail read of ``actions.jsonl`` per *live* engine — strictly cheaper than
@@ -223,8 +227,8 @@ def _live_owners() -> dict[str, tuple[FleetOwner, LiveLoop]]:
                     tick_count=int(getattr(journal, "tick_count", 0) or 0),
                     last_tick_at=float(getattr(engine, "_last_tick_at", 0.0) or 0.0),
                     frequency_sec=int(config.get("frequency_sec", 60) or 60),
-                    last_action=_last_action(journal),
-                    last_did=_last_did(engine),
+                    last_action=read_last_action(journal),
+                    last_did=read_last_did(engine),
                     last_error=str(getattr(engine, "_last_error", "") or ""),
                 ),
             )

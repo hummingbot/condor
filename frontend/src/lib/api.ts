@@ -735,6 +735,18 @@ export interface RunningInstance {
   tick_timeout_sec: number;
   execution_mode: "dry_run" | "run_once" | "loop";
   risk_limits: Record<string, unknown>;
+  // ── The loop's pulse ──
+  // The engine has always computed these; the wire model dropped them, so a
+  // strategy view could say "running" and nothing about when it last ran.
+  /** Unix seconds the current tick started. 0 before the first one. */
+  last_tick_at: number;
+  /** 0 = unbounded; otherwise the tick this session stops at. */
+  max_ticks: number;
+  /** What the loop last *said* — the journal's `Last action:` line. */
+  last_action: string;
+  /** What the loop last *did* — one mutating tool call, or null. */
+  last_did: AgentActionRow | null;
+  last_error: string;
 }
 
 export interface StrategySummary {
@@ -840,6 +852,10 @@ export interface AgentPerformance {
   agent_id: string;
   session_num: number;
   kind: "session" | "experiment";
+  /** For an experiment: `dry_run` or `run_once`. Empty for a session. */
+  execution_mode?: string;
+  /** An experiment whose snapshot recorded an error. */
+  error?: boolean;
   status: string;
   realized_pnl: number;
   unrealized_pnl: number;

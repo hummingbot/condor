@@ -132,6 +132,21 @@ class RunningInstance(BaseModel):
     tick_timeout_sec: int = 600
     execution_mode: str = "loop"
     risk_limits: dict[str, Any] = {}
+    # ── The loop's pulse ──
+    # The engine has computed all of this since it was written; the model just
+    # never carried it, so every strategy view could say a loop was "running"
+    # and nothing about when it last ran, what it did, or whether it failed.
+    # Same four fields the fleet band already shows (``LiveLoopModel``), so the
+    # two surfaces describe one loop in one vocabulary.
+    #: Unix seconds the current tick started, 0 before the first one.
+    last_tick_at: float = 0.0
+    #: 0 = unbounded; otherwise the tick this session stops at.
+    max_ticks: int = 0
+    #: What the loop last *said* — the journal's `Last action:` line.
+    last_action: str = ""
+    #: What the loop last *did* — one ``AgentAction`` row, or null.
+    last_did: dict[str, Any] | None = None
+    last_error: str = ""
 
 
 class StrategySummary(BaseModel):
@@ -176,6 +191,12 @@ class AgentPerformanceModel(BaseModel):
     agent_id: str
     session_num: int = 0
     kind: str = "session"  # session | experiment
+    #: For an experiment, which kind: ``dry_run`` or ``run_once``. Empty for a
+    #: session, whose mode is always ``loop``. A reader has to be able to tell a
+    #: simulation apart from a single real tick — both land in ``dry_runs/``.
+    execution_mode: str = ""
+    #: An experiment whose snapshot recorded an error (parsed off disk).
+    error: bool = False
     status: str = ""
     realized_pnl: float = 0.0
     unrealized_pnl: float = 0.0
@@ -734,6 +755,14 @@ async def _compute_strategy_performance(
     ids = enumerate_agent_ids(run_key, strategy_dir)
     client, _server = await _get_client_for_strategy(strategy_dir, default_config)
 
+    # An experiment's identity is on disk, not in the backend: a dry run
+    # simulates and so books nothing, which is why it used to be dropped twice
+    # over — once by a `trade_count == 0` filter that is the *definition* of a
+    # dry run, and again whenever there was no client to price anything with.
+    # Its mode and its error flag come from the snapshot file, so the row can be
+    # built with or without a backend.
+    exp_meta = {e["number"]: e for e in list_experiments(strategy_dir)}
+
     # Per-session executor fetches stay bot-free (bot_names=None below) so closed
     # sessions can be frozen; bot-mode PnL is distributed per session afterward by
     # apply_bot_mode_pnl from the controller history, which handles both fixed and
@@ -799,13 +828,21 @@ async def _compute_strategy_performance(
                 and perf.open_count == 0
             ):
                 _closed_perf_put(agent_id, perf)
-            if kind == "experiment" and perf.trade_count == 0:
-                continue
             sessions.append(
                 AgentPerformanceModel(
                     agent_id=agent_id,
                     session_num=num,
                     kind=kind,
+                    execution_mode=(
+                        exp_meta.get(num, {}).get("execution_mode", "")
+                        if kind == "experiment"
+                        else ""
+                    ),
+                    error=(
+                        bool(exp_meta.get(num, {}).get("error"))
+                        if kind == "experiment"
+                        else False
+                    ),
                     realized_pnl=perf.realized_pnl,
                     unrealized_pnl=perf.unrealized_pnl,
                     total_pnl=perf.total_pnl,
@@ -818,6 +855,25 @@ async def _compute_strategy_performance(
                     executors=perf.executors,
                 )
             )
+
+    # Every experiment on disk gets a row, whatever the backend could tell us
+    # about it. The block above only runs `if client and ids`, and inside it a
+    # fetch can still come back empty — so without this a dry run vanishes from
+    # the sessions table on exactly the setup where it is most useful: no server
+    # configured, nothing traded, just a simulated tick to read.
+    priced = {s.session_num for s in sessions if s.kind == "experiment"}
+    for num, meta in sorted(exp_meta.items(), reverse=True):
+        if num in priced:
+            continue
+        sessions.append(
+            AgentPerformanceModel(
+                agent_id=f"{run_key}_e{num}",
+                session_num=num,
+                kind="experiment",
+                execution_mode=meta.get("execution_mode", ""),
+                error=bool(meta.get("error")),
+            )
+        )
 
     real_sessions = [s for s in sessions if s.kind == "session"]
 
@@ -845,6 +901,12 @@ async def _compute_strategy_performance(
 
 
 def _instance_from_engine(engine, perf_by_id: dict) -> RunningInstance:
+    # The same two reads the fleet band makes per live engine — a cached
+    # summary read and a tail of actions.jsonl — reused rather than re-derived,
+    # so "what the loop last did" cannot mean two different things in two
+    # places. Both swallow their own errors and return empty.
+    from condor.agents.fleet_map import read_last_action, read_last_did
+
     info = engine.get_info()
     p = perf_by_id.get(info["agent_id"])
     return RunningInstance(
@@ -869,6 +931,11 @@ def _instance_from_engine(engine, perf_by_id: dict) -> RunningInstance:
         agent_key=info.get("agent_key", ""),
         execution_mode=info.get("execution_mode", "loop"),
         risk_limits=info.get("risk_limits", {}),
+        last_tick_at=float(info.get("last_tick_at", 0.0) or 0.0),
+        max_ticks=int(info.get("max_ticks", 0) or 0),
+        last_action=read_last_action(getattr(engine, "journal", None)),
+        last_did=read_last_did(engine),
+        last_error=info.get("last_error", "") or "",
     )
 
 
