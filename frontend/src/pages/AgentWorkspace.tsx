@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertCircle, ArrowLeft, ExternalLink, Layers, ScrollText } from "lucide-react";
+import { AlertCircle, ArrowLeft, ExternalLink, ScrollText } from "lucide-react";
 import { useCallback, useMemo, useState } from "react";
 import {
   Link,
@@ -13,12 +13,12 @@ import {
 import { AgentKnowledge } from "@/components/agent/AgentKnowledge";
 import { PerformancePanel } from "@/components/agent/AgentOverviewTab";
 import { SnapshotDetail } from "@/components/agent/AgentSessionContent";
-import { DeploymentLedger } from "@/components/agent/lab/DeploymentLedger";
 import { ExperimentDetail, RunOverview } from "@/components/agent/lab/RunOverview";
 import { RunRail } from "@/components/agent/lab/RunRail";
 import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
 import { StrategyWorkbench } from "@/components/agent/StrategyWorkbench";
 import { isKnowledgeTab } from "@/components/agent/knowledgeTabs";
+import { AgentFleet } from "@/components/agent/workspace/AgentFleet";
 import { LoopBar } from "@/components/agent/workspace/LoopBar";
 import { NowView } from "@/components/agent/workspace/NowView";
 import { useWorkspaceAlerts } from "@/components/agent/workspace/useWorkspaceAlerts";
@@ -249,6 +249,13 @@ export function AgentWorkspace() {
 
   const isRunning = (agent.strategies || []).some((st) => st.status === "running");
   const view = url.view;
+  // Where this agent's work actually happens: the strategy's own configured
+  // server, else the agent's pin. `/bots` reads the ambient server and the
+  // fleet map deliberately does not, so a rooted fleet has to read the agent's
+  // (FEAT-108) — otherwise an agent trading on another server has a Fleet view
+  // that cannot fetch its own bots.
+  const strategyServer =
+    (strategy?.config?.server_name as string) || agent.server_name || "";
 
   const body = isKnowledgeTab(view) ? (
     /* Keyed on the section so a playbook left open in Skills does not follow
@@ -305,9 +312,10 @@ export function AgentWorkspace() {
       </p>
     )
   ) : view === "fleet" ? (
-    <FleetView
+    <AgentFleet
       slug={agent.slug}
       sslug={sslug}
+      serverName={strategyServer}
       run={selectedRun}
     />
   ) : view === "runs" ? (
@@ -324,7 +332,7 @@ export function AgentWorkspace() {
       }
       tick={url.tick}
       onSelectTick={(next) => selectTick(next, "runs")}
-      serverName={(strategy?.config?.server_name as string) || ""}
+      serverName={strategyServer}
       controllerIds={instance ? [instance.agent_id] : undefined}
     />
   ) : view === "now" ? (
@@ -383,7 +391,7 @@ export function AgentWorkspace() {
         />
         <div
           className={`min-w-0 flex-1 ${
-            view === "runs" ? "flex min-h-0" : "overflow-y-auto p-4"
+            view === "runs" || view === "fleet" ? "flex min-h-0" : "overflow-y-auto p-4"
           }`}
         >
           {body}
@@ -493,50 +501,6 @@ function RunsView({
         )}
       </div>
     </>
-  );
-}
-
-/**
- * What this run put into the world, and the door to the rest of the fleet.
- *
- * `DeploymentLedger` (FEAT-100) reads the same `strategy-session-executors`
- * response the run overview folds, so this view costs no query of its own — and
- * the two can never disagree about what was deployed.
- */
-function FleetView({
-  slug,
-  sslug,
-  run,
-}: {
-  slug: string;
-  sslug: string;
-  run: AgentRunRow | null;
-}) {
-  const sessionNum = run && run.kind === "session" ? run.number : 0;
-  const { data } = useQuery({
-    queryKey: ["strategy-session-executors", slug, sslug, sessionNum],
-    queryFn: () => api.getStrategySessionExecutors(slug, sslug, sessionNum),
-    enabled: sessionNum > 0,
-    refetchInterval: 10000,
-  });
-
-  return (
-    <div className="space-y-4">
-      <DeploymentLedger
-        rows={data?.deployments ?? []}
-        runKey={`${slug}.${sslug}`}
-        sessionNum={sessionNum || undefined}
-      />
-      {/* The gesture the strategy page used to make — this agent's whole
-          history, beside everything else that is trading (FEAT-096). */}
-      <Link
-        to={`/bots?scope=agent:${encodeURIComponent(`${slug}.${sslug}`)}`}
-        className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] transition-all hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
-      >
-        <Layers className="h-3.5 w-3.5" /> See this strategy beside the rest of
-        the fleet
-      </Link>
-    </div>
   );
 }
 
