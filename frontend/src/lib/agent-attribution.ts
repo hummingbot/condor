@@ -16,6 +16,30 @@
 // Nothing here fetches or renders (the ARCH-300 split), so every rule below is
 // reachable from a test.
 
+/**
+ * One mutating tool call an agent made, as the page reports it (FEAT-097).
+ *
+ * The wire shape of `condor.agents.actions.AgentAction`, mapped straight
+ * through: every field is one word, so there is no camelCase pass to get wrong.
+ * The `summary` is rendered in Python by the confirmation prompt's own
+ * renderer, which is why nothing here interprets a tool's arguments.
+ */
+export interface AgentActionRow {
+  /** Joins to `snapshot_{tick}.md` — the tick this deed happened on. */
+  tick: number;
+  /** Epoch **seconds**. */
+  at: number;
+  /** `"create_lp_executor"`, MCP prefix stripped. */
+  tool: string;
+  /** `"create_lp_executor"` or `"manage_bots:deploy"` — the queryable key. */
+  verb: string;
+  /** The human line: `Create grid executor on SOL-USDC ($100)`. */
+  summary: string;
+  ok: boolean;
+  /** Clipped failure text when `!ok`, else `""`. */
+  error: string;
+}
+
 /** The tick loop currently driving a strategy, or `null` when none is. */
 export interface LiveLoop {
   agentId: string;
@@ -28,6 +52,14 @@ export interface LiveLoop {
   frequencySec: number;
   /** What the agent last *said* — the journal's `Last action:` line. */
   lastAction: string;
+  /**
+   * What the agent last **did**, or `null` when it has done nothing.
+   *
+   * The deed and the words are two statements, not one: `lastAction` is the
+   * model's own narration, this is a record of a tool call that ran. A session
+   * that predates the log reads `null` — nothing is backfilled.
+   */
+  lastDid: AgentActionRow | null;
   lastError: string;
 }
 

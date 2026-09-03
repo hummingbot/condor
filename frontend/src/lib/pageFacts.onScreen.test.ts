@@ -238,6 +238,7 @@ describe("/bots", () => {
           lastTickAt: 1_700_000_000,
           frequencySec: 60,
           lastAction: "Spreads held.",
+          lastDid: null,
           lastError: "",
         },
       },

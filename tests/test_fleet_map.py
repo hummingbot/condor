@@ -71,6 +71,7 @@ def _fake_engine(agent_slug, agent_name, sslug, sname, **over):
         config=over.get("config", {"frequency_sec": 90}),
         _last_tick_at=over.get("last_tick_at", 1_700_000_000.0),
         _last_error=over.get("last_error", ""),
+        session_dir=over.get("session_dir"),
     )
     return engine
 
@@ -289,3 +290,113 @@ def test_fleet_map_is_not_shadowed_by_the_slug_catch_all():
             assert route.endpoint.__name__ == "get_fleet_map"
             return
     raise AssertionError("no route matched /agents/fleet-map")
+
+
+# ── The deed (FEAT-097) ──
+#
+# ``last_action`` is what the agent *said*; ``last_did`` is what it did. The
+# band shows them as two separate statements, so the map must not conflate
+# them — and a session with no log must read exactly as it did before.
+
+
+def _acted(session_dir, **over):
+    """Write one action to a session's log and hand back its directory."""
+    from condor.agents.actions import actions_from_tool_calls, append_actions
+
+    session_dir.mkdir(parents=True, exist_ok=True)
+    call = {
+        "id": "tc1",
+        "name": over.get("tool", "create_grid_executor"),
+        "status": over.get("status", "completed"),
+        "input": over.get(
+            "input", {"trading_pair": "SOL-USDC", "total_amount_quote": 100}
+        ),
+    }
+    append_actions(
+        session_dir,
+        actions_from_tool_calls([call], tick=over.get("tick", 212), at=1.0),
+    )
+    return session_dir
+
+
+def test_a_live_loop_reports_what_it_last_did(monkeypatch, tmp_path):
+    _roots(monkeypatch, tmp_path)
+    _write_agent(tmp_path, "brigado", "Brigado")
+    _write_strategy(tmp_path, "brigado", "brl_mm", "BRL MM")
+    session_dir = _acted(tmp_path / "sessions" / "session_7")
+    _supervisor(
+        monkeypatch,
+        [
+            _fake_engine(
+                "brigado",
+                "Brigado",
+                "brl_mm",
+                "BRL MM",
+                session_num=7,
+                session_dir=session_dir,
+                summary_text="Last action: Spreads held.",
+            )
+        ],
+    )
+
+    (owner,) = build_fleet_map()
+    assert owner.live.last_did == {
+        "tick": 212,
+        "at": 1.0,
+        "tool": "create_grid_executor",
+        "verb": "create_grid_executor",
+        "summary": "Create grid executor on SOL-USDC for 100 quote",
+        "ok": True,
+        "error": "",
+    }
+    # The words are still the words. Two statements, not one.
+    assert owner.live.last_action == "Spreads held."
+
+
+def test_the_newest_deed_wins(monkeypatch, tmp_path):
+    _roots(monkeypatch, tmp_path)
+    _write_agent(tmp_path, "brigado", "Brigado")
+    _write_strategy(tmp_path, "brigado", "brl_mm", "BRL MM")
+    session_dir = tmp_path / "sessions" / "session_7"
+    _acted(session_dir, tick=1)
+    _acted(session_dir, tick=2, tool="stop_executor", input={"executor_id": "abcdef"})
+    _supervisor(
+        monkeypatch,
+        [_fake_engine("brigado", "B", "brl_mm", "M", session_dir=session_dir)],
+    )
+
+    (owner,) = build_fleet_map()
+    assert owner.live.last_did["tick"] == 2
+    assert owner.live.last_did["tool"] == "stop_executor"
+
+
+def test_a_session_with_no_log_reads_exactly_as_before(monkeypatch, tmp_path):
+    """Nothing is backfilled: an existing session shows only the words line."""
+    _roots(monkeypatch, tmp_path)
+    _write_agent(tmp_path, "brigado", "Brigado")
+    _write_strategy(tmp_path, "brigado", "brl_mm", "BRL MM")
+    empty = tmp_path / "sessions" / "session_7"
+    empty.mkdir(parents=True)
+    _supervisor(
+        monkeypatch,
+        [_fake_engine("brigado", "B", "brl_mm", "M", session_dir=empty)],
+    )
+
+    (owner,) = build_fleet_map()
+    assert owner.live.last_did is None
+
+
+def test_an_unreadable_log_does_not_lose_the_loop(monkeypatch, tmp_path):
+    _roots(monkeypatch, tmp_path)
+    _write_agent(tmp_path, "brigado", "Brigado")
+    _write_strategy(tmp_path, "brigado", "brl_mm", "BRL MM")
+    session_dir = tmp_path / "sessions" / "session_7"
+    (session_dir / "actions.jsonl").mkdir(parents=True)
+    _supervisor(
+        monkeypatch,
+        [_fake_engine("brigado", "B", "brl_mm", "M", session_dir=session_dir)],
+    )
+
+    (owner,) = build_fleet_map()
+    assert owner.live is not None
+    assert owner.live.last_did is None

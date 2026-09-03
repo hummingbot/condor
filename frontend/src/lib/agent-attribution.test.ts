@@ -192,6 +192,7 @@ describe("the loop's state", () => {
       lastTickAt: NOW_S - 22,
       frequencySec: 60,
       lastAction: "Spreads held.",
+      lastDid: null,
       lastError: "",
       ...over,
     };

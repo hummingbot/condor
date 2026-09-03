@@ -443,6 +443,22 @@ class SnapshotSummary(BaseModel):
     file: str = ""
 
 
+class ActionModel(BaseModel):
+    """One mutating tool call a session made (FEAT-097).
+
+    The wire shape of ``condor.agents.actions.AgentAction``; see that module for
+    why the record stores a rendered summary rather than a tool's result.
+    """
+
+    tick: int
+    at: float = 0.0
+    tool: str = ""
+    verb: str = ""
+    summary: str = ""
+    ok: bool = False
+    error: str = ""
+
+
 # ── The fleet map (FEAT-096) ──
 # The wire shape of condor.agents.fleet_map's dataclasses; see that module for
 # what each field is and why the map is cheap enough for the bots page to poll.
@@ -456,6 +472,9 @@ class LiveLoopModel(BaseModel):
     last_tick_at: float = 0.0
     frequency_sec: int = 60
     last_action: str = ""
+    #: What the loop last *did* — one ``AgentAction`` row, or null. See
+    #: ``condor.agents.actions``; the band shows it above ``last_action``.
+    last_did: dict[str, Any] | None = None
     last_error: str = ""
 
 
@@ -2764,6 +2783,37 @@ async def get_session_report(
     reports, _total = list_reports(source_type="routine", search=run_key, limit=100)
     matched = [r for r in reports if r.get("source_name", "") == source]
     return {"report": ReportSummary(**matched[0]).model_dump() if matched else None}
+
+
+@router.get("/{slug}/strategies/{sslug}/sessions/{session_num}/actions")
+async def list_session_actions(
+    slug: str,
+    sslug: str,
+    session_num: int,
+    limit: int = 100,
+    user: WebUser = Depends(get_current_user),
+):
+    """What this session actually **did**, oldest-last (FEAT-097).
+
+    One tail read of ``sessions/session_{N}/actions.jsonl`` — **no Hummingbot
+    API call** — so the reviewer's Actions block costs nothing to open. A
+    session that never acted, or one that ran before the log existed, answers
+    ``{"actions": []}`` rather than 404: having done nothing is a normal state,
+    not an error the caller should have to distinguish from a missing session.
+
+    A literal *last* segment, so the ``GET /{slug}`` catch-all does not shadow
+    it — only first segments are at risk there.
+    """
+    strategy = _get_strategy(slug, sslug)
+    session_dir = find_session_dir(strategy.dir, session_num)
+    if not session_dir:
+        raise HTTPException(status_code=404, detail=f"Session {session_num} not found")
+
+    from condor.agents.actions import read_actions
+
+    limit = max(1, min(limit, 1000))
+    rows = read_actions(session_dir, limit=limit)
+    return {"actions": [ActionModel(**asdict(row)).model_dump() for row in rows]}
 
 
 @router.get("/{slug}/strategies/{sslug}/sessions/{session_num}/snapshots")

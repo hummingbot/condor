@@ -64,9 +64,13 @@ class LiveLoop:
     last_tick_at: float
     frequency_sec: int
     #: The ``Last action:`` line of the journal's Summary — what the agent last
-    #: *said*, which is not the same as what it last did (see the feature's
-    #: notes: an agent's actions leave no structured record yet).
+    #: *said*. Kept under its own name and meaning; what it last *did* is the
+    #: separate field below, and the band shows the two as separate statements.
     last_action: str = ""
+    #: What the loop last **did**: ``asdict`` of the session's most recent
+    #: :class:`~condor.agents.actions.AgentAction`, or ``None`` for a session
+    #: that has not acted (or predates the log — nothing is backfilled).
+    last_did: dict | None = None
     last_error: str = ""
 
 
@@ -164,6 +168,24 @@ def _last_action(journal: Any) -> str:
     return match.group(1).strip() if match else ""
 
 
+def _last_did(engine: Any) -> dict | None:
+    """The last mutating tool call of this engine's session, or ``None``.
+
+    One tail read of ``actions.jsonl`` per *live* engine — strictly cheaper than
+    the ``read_summary()`` above it — and uncached for the same reason: the
+    band's job is to say what the loop is doing now.
+    """
+    from dataclasses import asdict
+
+    from condor.agents.actions import latest_action
+
+    try:
+        action = latest_action(getattr(engine, "session_dir", None))
+    except Exception:
+        return None
+    return asdict(action) if action is not None else None
+
+
 def _live_owners() -> dict[str, tuple[FleetOwner, LiveLoop]]:
     """Every registered engine, keyed by run key, newest session winning.
 
@@ -202,6 +224,7 @@ def _live_owners() -> dict[str, tuple[FleetOwner, LiveLoop]]:
                     last_tick_at=float(getattr(engine, "_last_tick_at", 0.0) or 0.0),
                     frequency_sec=int(config.get("frequency_sec", 60) or 60),
                     last_action=_last_action(journal),
+                    last_did=_last_did(engine),
                     last_error=str(getattr(engine, "_last_error", "") or ""),
                 ),
             )

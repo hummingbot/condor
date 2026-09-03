@@ -1,4 +1,4 @@
-import type { FleetOwner } from "@/lib/agent-attribution";
+import type { AgentActionRow, FleetOwner } from "@/lib/agent-attribution";
 import { controllerKey } from "@/lib/controller-identity";
 import { collectCursorPages, type WalkOutcome } from "@/lib/history-pagination";
 
@@ -788,6 +788,7 @@ interface FleetOwnerWire {
     last_tick_at: number;
     frequency_sec: number;
     last_action: string;
+    last_did: AgentActionRow | null;
     last_error: string;
   } | null;
 }
@@ -2664,6 +2665,7 @@ export const api = {
             lastTickAt: owner.live.last_tick_at,
             frequencySec: owner.live.frequency_sec,
             lastAction: owner.live.last_action,
+            lastDid: owner.live.last_did ?? null,
             lastError: owner.live.last_error,
           }
         : null,
@@ -2972,6 +2974,17 @@ export const api = {
   getSessionSnapshots: (slug: string, sslug: string, sessionNum: number) =>
     apiFetch<{ snapshots: SnapshotSummary[] }>(
       `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/sessions/${sessionNum}/snapshots`,
+    ),
+
+  /**
+   * What this session actually *did*, oldest-first (FEAT-097).
+   *
+   * Structured rows, so nothing downstream runs a regex over markdown to find
+   * out. Makes no Hummingbot call — it is one tail read of a JSONL sidecar.
+   */
+  getSessionActions: (slug: string, sslug: string, sessionNum: number, limit?: number) =>
+    apiFetch<{ actions: AgentActionRow[] }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/sessions/${sessionNum}/actions${limit ? `?limit=${limit}` : ""}`,
     ),
 
   getSessionCanvas: (slug: string, sslug: string, sessionNum: number) =>

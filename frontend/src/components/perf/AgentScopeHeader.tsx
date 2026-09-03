@@ -1,4 +1,4 @@
-import { Bot, ExternalLink, Server } from "lucide-react";
+import { Bot, ExternalLink, Server, Zap } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 
@@ -21,12 +21,16 @@ import { StatusDot } from "./ScopeTree";
  * already variable-height and already holds four mutually exclusive per-scope
  * subjects; this is the fifth.
  *
- * What it can and cannot say is worth being precise about. An agent's *actions*
- * leave no structured record — a deploy writes only into `owned_bots.json`, an
- * executor create writes nothing local, and the stops write nothing at all — so
- * the line under the status is the agent's own last **words** (the journal's
- * `Last action:`), never a verified account of what it did. A structured
- * per-tick action log is the sequel; this band is built on facts that exist.
+ * What it says is now two statements, not one (FEAT-097). The **deed** line is
+ * a fact: the agent's last mutating tool call, read from the session's
+ * `actions.jsonl` — the tool ran, and the row says whether it succeeded. The
+ * **words** line under it is the agent's own narration (the journal's
+ * `Last action:`, which is `response_text[:100]`), and it is the only thing
+ * this band could say before the log existed. Keeping them apart is the point:
+ * one is what happened, the other is what the model wrote about it.
+ *
+ * A session that ran before the log existed has no deed — nothing is
+ * backfilled — and reads exactly as it did before: the words line alone.
  */
 
 /**
@@ -101,12 +105,16 @@ export function AgentScopeHeader({
   // (the ARCH-300 split); what stays here is the clock and the markup.
   const facts = loopFacts(live, now);
 
-  const openSession = () => {
+  // `snapshotTick` lands the reviewer on that tick's full snapshot, collapsing
+  // the main page → agent → session → snapshot walk a tick needs otherwise.
+  const openSession = (snapshotTick?: number) => {
     if (!owner) return;
     navigate(`/agents/${owner.agentSlug}/strategies/${owner.strategySlug}`, {
-      state: { openReviewer: true, sessionNum: live?.sessionNum },
+      state: { openReviewer: true, sessionNum: live?.sessionNum, snapshotTick },
     });
   };
+
+  const did = live?.lastDid ?? null;
 
   return (
     <div className="min-w-0">
@@ -143,7 +151,7 @@ export function AgentScopeHeader({
         {owner && (
           <button
             type="button"
-            onClick={openSession}
+            onClick={() => openSession()}
             className="flex shrink-0 items-center gap-1 rounded border border-[var(--color-border)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-text-muted)] transition-colors hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
             title={
               live
@@ -156,6 +164,31 @@ export function AgentScopeHeader({
           </button>
         )}
       </h2>
+      {/* What the agent last *did* — a tool call that ran, not a paraphrase.
+          Above the words because the deed is the fact and the narration is the
+          commentary on it. Clicking lands on that tick's snapshot. */}
+      {did && (
+        <button
+          type="button"
+          onClick={() => openSession(did.tick)}
+          disabled={!owner}
+          title={
+            owner
+              ? `Open tick #${did.tick}${did.error ? ` — ${did.error}` : ""}`
+              : did.summary
+          }
+          className={`flex max-w-full items-center gap-1 truncate text-left text-[10px] ${
+            did.ok ? "text-[var(--color-text-muted)]" : "text-amber-500/90"
+          } ${owner ? "hover:text-[var(--color-primary)]" : "cursor-default"}`}
+        >
+          <Zap className="h-2.5 w-2.5 shrink-0" />
+          <span className="shrink-0 font-mono tabular-nums">#{did.tick}</span>
+          <span className="truncate">
+            {did.summary}
+            {!did.ok && ` — failed${did.error ? `: ${did.error}` : ""}`}
+          </span>
+        </button>
+      )}
       {/* What the agent last *said*. Truncated with the whole of it in `title`,
           the same idiom the unpriced note uses — a one-line summary that hides
           its own tail is worse than one that admits to having one. */}
