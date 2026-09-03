@@ -160,7 +160,10 @@ export function RailButton({
           </span>
         )}
       </span>
-      <span className="w-full truncate text-center text-[9px] font-medium leading-none tracking-wide">
+      {/* `leading-tight`, not `leading-none`: `truncate` hides the overflow of
+          this box, and a line box exactly as tall as the font size clips off
+          whatever hangs below the baseline — the "g" of Agent, in practice. */}
+      <span className="w-full truncate text-center text-[9px] font-medium leading-tight tracking-wide">
         {label}
       </span>
     </button>

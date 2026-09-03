@@ -14,6 +14,19 @@ interface ChatInputProps {
   autoFocus?: boolean;
   /** Who the user is writing to. Defaults to Condor, the chat assistant. */
   placeholder?: string;
+  /**
+   * Controls for *this* conversation, at the left edge of the box, before the
+   * field. The composer is the one piece of chrome that unambiguously belongs
+   * to the chat on screen, so an action on the chat itself — sharing it — reads
+   * here and nowhere else; the bar above the transcript is about which session
+   * you are in, not what to do with it.
+   *
+   * Rendered inside the box rather than beside it so it sits on the same
+   * baseline as the mic and Send. Nothing is rendered when the surface has
+   * nothing to put here (the hero's composer, the bubble's), and the box is
+   * then exactly what it was.
+   */
+  leading?: React.ReactNode;
 }
 
 type RecordingState = "idle" | "recording" | "transcribing";
@@ -25,6 +38,7 @@ export function ChatInput({
   onAbort,
   autoFocus,
   placeholder = "Ask Condor...",
+  leading,
 }: ChatInputProps) {
   const [value, setValue] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -233,6 +247,8 @@ export function ChatInput({
             : "border-[var(--color-border)]"
         }`}
       >
+        {leading}
+
         {isRecording ? (
           // Recording UI
           <div className="flex flex-1 items-center gap-3 rounded-lg border border-red-500/40 bg-red-500/5 px-3 py-2">

@@ -6,7 +6,7 @@ import { ShareConversation } from "@/components/chat/ShareConversation";
 import { api } from "@/lib/api";
 
 /**
- * Share *this* conversation, from the bar above it.
+ * Share *this* conversation, from the composer it is written in.
  *
  * The gesture already existed, in the rail: a `Share2` on the conversation row,
  * inside a `group-hover:opacity-100` cluster beside Rename and Delete. That is
@@ -17,10 +17,18 @@ import { api } from "@/lib/api";
  * was there at all; nothing on screen said so until the pointer was on top of
  * it.
  *
- * So the open conversation gets a button that is simply *visible*, in the one
- * bar that is always above it. It opens the same dialog the rail opens — one
- * consent surface, one preview of what would be sent — and it is only the
- * affordance that is duplicated, not the flow.
+ * So the open conversation gets a button that is simply *visible*. It sits at
+ * the left edge of the composer, on the same baseline as the mic and Send,
+ * rather than in the bar above the transcript: that bar is about *which*
+ * session you are in — the tab strip, the rail toggle — so a share icon landed
+ * there read as "share something about the workspace", and the one target it
+ * actually acts on, the chat below it, was the one thing the bar never named.
+ * In the composer it is unambiguous, because everything else in that box acts
+ * on this conversation too.
+ *
+ * It opens the same dialog the rail opens — one consent surface, one preview of
+ * what would be sent — and it is only the affordance that is duplicated, not
+ * the flow.
  *
  * It reads the rail's own `["conversations"]` query rather than taking the
  * share state as a prop: the two are then the same fact from the same cache,
@@ -45,9 +53,9 @@ export function ShareChatButton({
   });
 
   // A brand new session has no row on the server yet, so there is nothing to
-  // preview and nothing to send. The button stays out of the bar rather than
-  // sitting there disabled: an empty chat is the one state where sharing is
-  // not a thing you could have wanted.
+  // preview and nothing to send. The button stays out of the composer rather
+  // than sitting there disabled: an empty chat is the one state where sharing
+  // is not a thing you could have wanted.
   if (!conversationId) return null;
 
   const meta = conversations.find((c) => c.id === conversationId);
@@ -59,7 +67,10 @@ export function ShareChatButton({
     <>
       <button
         onClick={() => setOpen(true)}
-        className={`shrink-0 rounded p-1 hover:bg-[var(--color-surface-hover)] ${
+        // Sized like the mic and Send it shares the box with — same 36px
+        // square, same radius — so the composer reads as one row of controls
+        // and not as a button that wandered in from somewhere else.
+        className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg transition-colors hover:bg-[var(--color-surface-hover)] ${
           shared
             ? "text-[var(--color-primary)]"
             : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"

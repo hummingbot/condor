@@ -49,6 +49,7 @@ export function ChatThread({
   roster,
   columnClassName = "",
   autoFocus = false,
+  composerLeading,
 }: {
   /** The conversation on screen, or null when there is none yet. */
   slot: ChatSlot | null;
@@ -96,6 +97,13 @@ export function ChatThread({
   /** Reading column for the messages, e.g. `mx-auto w-full max-w-3xl`. */
   columnClassName?: string;
   autoFocus?: boolean;
+  /**
+   * Controls the surface wants at the left edge of the composer, acting on
+   * this conversation — sharing it, today. Passed straight through to
+   * `ChatInput`: the thread does not own the gesture, it only owns the one box
+   * that is unmistakably about the chat on screen.
+   */
+  composerLeading?: React.ReactNode;
 }) {
   /**
    * A stamped slug's display name.
@@ -343,6 +351,7 @@ export function ChatThread({
             // not a chat with Condor, and the placeholder was the last place
             // the UI still said otherwise (FEAT-025).
             placeholder={`Ask ${(slot.info.agent_slug && slot.info.label) || "Condor"}...`}
+            leading={composerLeading}
           />
         </div>
       )}

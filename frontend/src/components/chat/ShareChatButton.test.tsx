@@ -4,9 +4,10 @@
  * The gesture existed only on the rail's conversation row, under a
  * `group-hover` cluster in a column most readers keep collapsed — so sharing
  * the chat you are reading had nothing on screen until the pointer was already
- * on top of the right row. These cases pin what the bar's button promises: it
- * is rendered without a hover, it says which of the two states it is in, and it
- * stays out of the bar entirely when there is nothing to share yet.
+ * on top of the right row. These cases pin what the composer's button
+ * promises: it is rendered without a hover, it says which of the two states it
+ * is in, and it stays out of the composer entirely when there is nothing to
+ * share yet.
  *
  * Needs a DOM, so this file overrides vitest's default `node` environment.
  *
@@ -99,7 +100,7 @@ describe("ShareChatButton", () => {
     const button = container.querySelector("button");
     expect(button).not.toBeNull();
     // The rail's copy lives inside an `opacity-0 group-hover:opacity-100`
-    // cluster. This one is in the bar precisely because it must not.
+    // cluster. This one is in the composer precisely because it must not.
     expect(button?.className).not.toContain("opacity-0");
     expect(button?.getAttribute("title")).toContain("Share this chat");
   });
