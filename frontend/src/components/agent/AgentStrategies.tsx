@@ -28,17 +28,27 @@ import { api, type StrategySummary } from "@/lib/api";
  * agent panel, where nothing else observes the key, that used to pay 5s of
  * Hummingbot round-trips for an agent with no loop running.
  *
- * Opening a strategy still *navigates*, deliberately: starting a loop with real
- * money belongs on the page that owns its config, risk limits and confirmation,
- * not in a 400px column beside a chat.
+ * Opening a strategy hands it to `onOpenStrategy` when the host has somewhere
+ * to put it — the chat's workspace pane does, and opens the same workbench the
+ * page renders. Without one (the agent's own page) it navigates as before. It
+ * used to always navigate, on the theory that starting a loop with real money
+ * belonged on a page of its own; but the guard on that is the start dialog and
+ * its confirmation, not the width of the window, and the cost was losing the
+ * conversation that named the strategy in the first place.
  */
 export function AgentStrategies({
   slug,
   dense = false,
+  onOpenStrategy,
 }: {
   slug: string;
   /** One column: the pane is 400–700px, where three cards are three slivers. */
   dense?: boolean;
+  /**
+   * Open this strategy in the host's own surface instead of navigating away.
+   * Absent = the host is a page, and a page navigates.
+   */
+  onOpenStrategy?: (strategySlug: string) => void;
 }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -68,9 +78,15 @@ export function AgentStrategies({
     mutationFn: () => api.createDefaultStrategy(slug),
     onSuccess: (strategy) => {
       refresh();
-      navigate(`/agents/${slug}/strategies/${strategy.slug}`);
+      openStrategy(strategy.slug);
     },
   });
+
+  /** One door, wherever this is hosted. */
+  function openStrategy(strategySlug: string) {
+    if (onOpenStrategy) onOpenStrategy(strategySlug);
+    else navigate(`/agents/${slug}/strategies/${strategySlug}`);
+  }
 
   const deleteMut = useMutation({
     mutationFn: () => api.deleteStrategy(slug, deleteStrategy!.slug),
@@ -143,9 +159,7 @@ export function AgentStrategies({
                 entity={strategy}
                 icon={Repeat}
                 deleteLabel="Delete strategy"
-                onClick={() =>
-                  navigate(`/agents/${slug}/strategies/${strategy.slug}`)
-                }
+                onClick={() => openStrategy(strategy.slug)}
                 onDelete={() => setDeleteStrategy(strategy)}
               />
             ))}
@@ -156,6 +170,7 @@ export function AgentStrategies({
       <CreateStrategyDialog
         agentSlug={slug}
         open={showCreate}
+        onCreated={openStrategy}
         onClose={() => setShowCreate(false)}
       />
 
@@ -183,14 +198,16 @@ export function AgentStrategies({
 function CreateStrategyDialog({
   agentSlug,
   open,
+  onCreated,
   onClose,
 }: {
   agentSlug: string;
   open: boolean;
+  /** Land on the new strategy the same way opening an existing one lands. */
+  onCreated: (strategySlug: string) => void;
   onClose: () => void;
 }) {
   const queryClient = useQueryClient();
-  const navigate = useNavigate();
   useEscapeKey(open, onClose);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
@@ -207,7 +224,7 @@ function CreateStrategyDialog({
       setName("");
       setDescription("");
       setDefaultContext("");
-      navigate(`/agents/${agentSlug}/strategies/${strategy.slug}`);
+      onCreated(strategy.slug);
     },
   });
 

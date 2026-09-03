@@ -45,8 +45,14 @@ import type {
  * from ever having to be good enough.
  *
  * A routine row hands the pane to the routine library rather than growing a
- * second one, and a strategy still navigates to the page that owns starting it
- * with real money.
+ * second one, and a strategy row does the same with its workbench — the very
+ * component the strategy page renders, so the pane is not a preview of the
+ * page. That last one used to be the exception: a strategy navigated, "to the
+ * page that owns starting it with real money". But the guard on starting a loop
+ * is its own dialog, not the width of the window, and the exception cost you
+ * the conversation every time the agent named a strategy you wanted to look at.
+ * The page keeps its URL and is one click away through the sheet's full-screen
+ * control.
  */
 export function AgentPanel({
   slug,
@@ -61,6 +67,7 @@ export function AgentPanel({
   onSelectBrain,
   onSelectServer,
   onOpenRoutine,
+  onOpenStrategy,
   onAskAgent,
   onClose,
 }: {
@@ -80,6 +87,8 @@ export function AgentPanel({
   onSelectServer: (serverName: string) => void;
   /** Hand the pane to the routine library, focused on this routine. */
   onOpenRoutine: (routineName: string) => void;
+  /** Hand the pane to this strategy's workbench, the same one its page hosts. */
+  onOpenStrategy: (strategySlug: string) => void;
   /**
    * Put a request from a brain row to this agent (FEAT-092). Here that is a
    * message into a fresh conversation, which is the better move the chat has
@@ -130,6 +139,7 @@ export function AgentPanel({
           tab={tab}
           onTabChange={setTab}
           onOpenRoutine={onOpenRoutine}
+          onOpenStrategy={onOpenStrategy}
           onAskAgent={onAskAgent}
           onDirtyChange={setDirty}
         />

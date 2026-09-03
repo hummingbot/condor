@@ -25,6 +25,7 @@ import { ContextDock } from "@/components/chat/ContextDock";
 import { useContextPanels } from "@/components/chat/contextPanels";
 import type { LibraryFocus } from "@/components/chat/DockRoutines";
 import { SessionTabs } from "@/components/chat/SessionTabs";
+import { StrategySheet } from "@/components/chat/StrategySheet";
 import { ShareChatButton } from "@/components/chat/ShareChatButton";
 import { WorkspaceRail } from "@/components/chat/WorkspaceRail";
 import {
@@ -101,6 +102,17 @@ type PaneView =
   | { kind: "agent" }
   | { kind: "desk" }
   | { kind: "routines"; focus: LibraryFocus }
+  /**
+   * One of the agent's loops, opened from its card in the agent panel.
+   *
+   * A member of the same union rather than a sheet stacked on the panel: there
+   * is one pane, and two sheets portalled into it stack with no way to tell
+   * which scrollbar belongs to what (see `WorkspaceSheet`'s `taken`). So the
+   * strategy *replaces* the panel and closing it puts the panel back — the same
+   * hand-over the routine library already does, and the reason it carries the
+   * agent slug it was opened from.
+   */
+  | { kind: "strategy"; agentSlug: string; strategySlug: string }
   | null;
 
 /**
@@ -554,6 +566,12 @@ export function AgentChatTab() {
               onOpenRoutine={(name) =>
                 setPane({ kind: "routines", focus: { source: name } })
               }
+              // The strategy takes the pane and hands it back on close. Not a
+              // navigation: the conversation that named this loop is the
+              // reason you are looking at it.
+              onOpenStrategy={(strategySlug) =>
+                setPane({ kind: "strategy", agentSlug: panelSlug, strategySlug })
+              }
               // A revision is its own thread: `fresh`, not `focus`, so the
               // request does not land under whatever unrelated thing this
               // agent was last asked. The workspace itself stays put — the
@@ -562,6 +580,20 @@ export function AgentChatTab() {
                 talkTo(panelSlug, { intent: "fresh", text })
               }
               onClose={() => setPane(null)}
+            />
+          )}
+
+          {/* One of the agent's loops, in the pane the panel just vacated.
+              Closing returns to the panel it was opened from rather than to an
+              empty row: the card you clicked is still the thing you were
+              reading, and a pane that empties itself makes you re-open two
+              things to get back. */}
+          {pane?.kind === "strategy" && (
+            <StrategySheet
+              key={`${pane.agentSlug}/${pane.strategySlug}`}
+              slug={pane.agentSlug}
+              sslug={pane.strategySlug}
+              onClose={() => setPane({ kind: "agent" })}
             />
           )}
 
@@ -649,10 +681,15 @@ export function AgentChatTab() {
                   label: "Agent",
                   Icon: Bot,
                   hint: `Tune ${panelAgent?.name || "Condor"} — read and change what this agent is`,
-                  active: pane?.kind === "agent",
+                  // A strategy opened from the panel is still the agent's
+                  // subject, and the tile that opened it must not read as off
+                  // while it is on screen.
+                  active: pane?.kind === "agent" || pane?.kind === "strategy",
                   onToggle: () =>
                     setPane((p) =>
-                      p?.kind === "agent" ? null : { kind: "agent" },
+                      p?.kind === "agent" || p?.kind === "strategy"
+                        ? null
+                        : { kind: "agent" },
                     ),
                 },
               ],

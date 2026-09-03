@@ -76,6 +76,7 @@ export function AgentKnowledge({
   onTabChange,
   routinesAction,
   onOpenRoutine,
+  onOpenStrategy,
   onAskAgent,
   onDirtyChange,
 }: {
@@ -98,6 +99,12 @@ export function AgentKnowledge({
    * this panel growing a second one. Absent, a row is a plain list entry.
    */
   onOpenRoutine?: (routineName: string) => void;
+  /**
+   * Where a strategy card goes. Same bargain as `onOpenRoutine`: given, the
+   * host opens it in its own surface — the chat's pane shows the same
+   * workbench the page does — and absent, the card navigates to the page.
+   */
+  onOpenStrategy?: (strategySlug: string) => void;
   /**
    * Put a request to this agent, in its own words (FEAT-092).
    *
@@ -551,7 +558,11 @@ export function AgentKnowledge({
               />
             )}
             {activeTab === "strategies" && (
-              <AgentStrategies slug={slug} dense={rail} />
+              <AgentStrategies
+                slug={slug}
+                dense={rail}
+                onOpenStrategy={onOpenStrategy}
+              />
             )}
             {activeTab === "routines" && (
               <RoutinesTab
