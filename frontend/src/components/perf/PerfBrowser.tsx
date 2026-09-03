@@ -94,10 +94,14 @@ import {
 } from "@/lib/perf-tree";
 import {
   collapseGrouping,
+  DEFAULT_GROUPING,
+  formatGrouping,
   groupingForRoot,
   parseGrouping,
   rootAxis,
+  type GroupAxis,
 } from "@/lib/perf-grouping";
+import { GroupByPicker } from "@/components/perf/GroupByPicker";
 import { resolvePerfSeries, scopeInterval } from "@/lib/perf-history";
 import { chartNotice } from "@/lib/perf-notices";
 import { buildPositionRows, parseSide, type PositionRow } from "@/lib/perf-positions";
@@ -698,6 +702,14 @@ export function PerfBrowser({
     (next: string) => setParam(param, next, rootScope),
     [setParam, param, rootScope],
   );
+  // Not namespaced by `param`, for the reason `?population=` is not: the
+  // workspace's grammar spends `?view=`, `?strategy=`, `?run=` and `?tick=`,
+  // and none of them is a grouping, so there is nothing to collide with.
+  const setGrouping = useCallback(
+    (axes: readonly GroupAxis[]) =>
+      setParam("groupBy", formatGrouping(axes), formatGrouping(DEFAULT_GROUPING)),
+    [setParam],
+  );
   // `switchView` is declared after the tree it needs; both setters below it.
 
   /**
@@ -1103,9 +1115,10 @@ export function PerfBrowser({
    * Read off the *filtered* leaves, so typing a pair that only one bot trades
    * collapses the bot level the same way a one-bot server does.
    */
+  const urlGrouping = useMemo(() => parseGrouping(searchParams.get("groupBy")), [searchParams]);
   const askedGrouping = useMemo(
-    () => groupingForRoot(parseGrouping(searchParams.get("groupBy")), rootScope),
-    [searchParams, rootScope],
+    () => groupingForRoot(urlGrouping, rootScope),
+    [urlGrouping, rootScope],
   );
   const floorAxis = useMemo(() => rootAxis(rootScope), [rootScope]);
   const grouping = useMemo(
@@ -2083,6 +2096,12 @@ export function PerfBrowser({
           {!isCompact && (
             <div className="flex max-h-[45vh] flex-col gap-1.5 overflow-y-auto scrollbar-thin px-2 pb-2">
               <PopulationToggle population={population} onChange={setPopulation} />
+
+              {/* Which question the tree is answering: owner, bot, pair or
+                  class. Beside the population toggle rather than among the
+                  bubbles, because it says what is being *compared* — the
+                  bubbles say which of it to keep (FEAT-107). */}
+              <GroupByPicker grouping={urlGrouping} onChange={setGrouping} />
 
               {/* Which granularity of record the tree draws (ARCH-317). One of
                   the panel's questions rather than one of its filters — the
