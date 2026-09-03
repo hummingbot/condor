@@ -54,7 +54,7 @@ const tree = () =>
       leafFromController(controller("beta", "grid_1")),
     ],
     "All",
-    { groupByBot: true },
+    { grouping: ["bot"] },
   );
 
 let container: HTMLDivElement;

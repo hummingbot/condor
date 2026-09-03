@@ -87,7 +87,7 @@ const tree = () =>
       leafFromExecutor(looseExecutor("exec-b")),
     ],
     "All",
-    { groupByBot: true },
+    { grouping: ["bot"] },
   );
 
 let container: HTMLDivElement;

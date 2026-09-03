@@ -1,7 +1,8 @@
 import { Activity, Bot, ChevronDown, ChevronRight, Circle, Layers, Server } from "lucide-react";
 import { useMemo, type ReactNode } from "react";
 
-import { DEED_TITLE, provenanceOf, runKeyLabel } from "@/lib/agent-attribution";
+import { agentBucketLabel } from "@/components/perf/agentFilter";
+import { DEED_TITLE, provenanceOf } from "@/lib/agent-attribution";
 import { agentColor } from "@/lib/agentColor";
 import { formatCurrencyPnl, formatCurrencyVolume, pnlColor, shortBotName } from "@/lib/formatters";
 import type { ConvertQuote, PerfNode } from "@/lib/perf-tree";
@@ -51,6 +52,11 @@ function NodeIcon({ node, active }: { node: PerfNode; active: boolean }) {
     );
   }
   if (node.kind === "bot") return <Server className={`h-3.5 w-3.5 shrink-0 ${tone}`} />;
+  // A pair row and a class row are headings over a mixture, not a thing that
+  // runs: `Layers` says "a total of what is under here", which is what they are.
+  if (node.kind === "pair" || node.kind === "ctrlType") {
+    return <Layers className={`h-3.5 w-3.5 shrink-0 ${tone}`} />;
+  }
   // The "Unattached" row and the per-controller-id buckets beneath it wear the
   // executor's own glyph at the parent size: both hold executors and nothing
   // else, and the honest thing for either to say is which. `Layers` would read
@@ -83,11 +89,18 @@ function subtitle(node: PerfNode, showBot: boolean): string {
     // Counted by kind rather than as one total, because that *is* the fact the
     // row exists to state: an agent operates bots and creates loose executors,
     // and which of the two it is doing is the shape of its strategy.
-    case "agent": {
+    case "agent":
+    // A pair row and a class row hold the same mixture and are read the same
+    // way: what is under this heading, counted by what kind of thing it is.
+    case "pair":
+    case "ctrlType": {
       const counted = (["bot", "controller", "executor"] as const)
         .map((kind) => [kind, node.children.filter((c) => c.kind === kind).length] as const)
         .filter(([, count]) => count > 0)
         .map(([kind, count]) => `${count} ${kind}${count !== 1 ? "s" : ""}`);
+      // The unattached bucket is one row however many ids it gathers, so it is
+      // named rather than counted — "1 orphanss" is not a thing to say.
+      if (node.children.some((c) => c.kind === "orphans")) counted.push("unattached");
       return counted.join(" · ") || "nothing in scope";
     }
     case "bot":
@@ -151,8 +164,10 @@ function rowLabel(node: PerfNode): string {
   if (node.kind === "orphans") return node.label;
   // An agent row's label is its run key, which is its id — said out loud as
   // `agent / strategy`, the same two slugs the bot names beneath it are built
-  // from, so the column can be matched by eye.
-  if (node.kind === "agent") return runKeyLabel(node.label);
+  // from, so the column can be matched by eye. The two rows that are *not* a
+  // run — everything the fleet map could not credit, split in two by FEAT-106 —
+  // say what they are instead, which is what `agentBucketLabel` is for.
+  if (node.kind === "agent") return agentBucketLabel(node.label);
   return node.label;
 }
 

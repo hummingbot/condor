@@ -92,6 +92,12 @@ import {
   type Population,
   type PerfLeaf,
 } from "@/lib/perf-tree";
+import {
+  collapseGrouping,
+  groupingForRoot,
+  parseGrouping,
+  rootAxis,
+} from "@/lib/perf-grouping";
 import { resolvePerfSeries, scopeInterval } from "@/lib/perf-history";
 import { chartNotice } from "@/lib/perf-notices";
 import { buildPositionRows, parseSide, type PositionRow } from "@/lib/perf-positions";
@@ -1069,21 +1075,6 @@ export function PerfBrowser({
   );
 
   /**
-   * Whether the tree spends a level on the bot.
-   *
-   * Only when there is more than one to tell apart: a fleet running a single
-   * bot would put every controller behind a chevron to say what the header
-   * already says. With two or more, the level is what gives Stop somewhere
-   * obvious to live — before it, the reader had to narrow the bubbles down to
-   * one bot before the fleet row became that bot and grew the button.
-   *
-   * Except when the browser is *rooted* at a bot: a floor has to be a row for
-   * the tree to be drawn from it, so a root always buys its own level even when
-   * there is nothing to tell it apart from (FEAT-108).
-   */
-  const groupByBot = !soloBot || rootScope.startsWith("bot:");
-
-  /**
    * The one agent every row on screen belongs to, when there is one.
    *
    * The same shape as `soloBot` and for the same reason: when everything in
@@ -1096,23 +1087,36 @@ export function PerfBrowser({
   }, [leaves]);
 
   /**
-   * Whether the tree spends a level on the agent.
+   * The nesting the tree is actually built with (FEAT-107).
    *
-   * The same rule as `groupByBot`, counting "no owner" as an owner: the level
-   * exists to tell owners apart, so a fleet that is entirely one agent's — or
-   * entirely nobody's, which is most fleets — spends no chevron saying so. A
-   * server with no agents at all therefore draws exactly the tree it drew
-   * before this feature.
+   * Three rules, in the order they are applied and for three different reasons:
    *
-   * And, as above, a root always buys its own level: the workspace roots the
-   * browser at one agent, and on a fleet that is entirely that agent's the
-   * level would otherwise collapse and leave the floor with no node to be.
+   * 1. **The reader's**, out of `?groupBy=` — owner first by default, which is
+   *    the axis this page is organised around.
+   * 2. **The root's**, which overrides it: a rooted browser always draws the
+   *    level its floor lives on, and draws it outermost, or the floor has no
+   *    node to be and the workspace reports an empty fleet (FEAT-108).
+   * 3. **The population's**: an axis that tells nothing in scope apart is
+   *    dropped, because a fleet running a single bot would spend a chevron
+   *    saying so — except the root's own, which is never dropped.
+   *
+   * Read off the *filtered* leaves, so typing a pair that only one bot trades
+   * collapses the bot level the same way a one-bot server does.
    */
-  const groupByAgent = !soloAgent || rootScope.startsWith("agent:");
+  const askedGrouping = useMemo(
+    () => groupingForRoot(parseGrouping(searchParams.get("groupBy")), rootScope),
+    [searchParams, rootScope],
+  );
+  const floorAxis = useMemo(() => rootAxis(rootScope), [rootScope]);
+  const grouping = useMemo(
+    () => collapseGrouping(askedGrouping, leaves, deeds, floorAxis),
+    [askedGrouping, leaves, deeds, floorAxis],
+  );
+  const groupByBot = grouping.includes("bot");
 
   const tree = useMemo(
-    () => buildTree(leaves, rootLabel(population, soloRealBot), { groupByBot, groupByAgent }),
-    [leaves, population, soloRealBot, rootLabel, groupByBot, groupByAgent],
+    () => buildTree(leaves, rootLabel(population, soloRealBot), { grouping, deeds }),
+    [leaves, population, soloRealBot, rootLabel, grouping, deeds],
   );
   const nodes = useMemo(() => indexTree(tree), [tree]);
 
@@ -1127,8 +1131,8 @@ export function PerfBrowser({
   // answer it after the fallback rather than before, since a fallback is one of
   // the ways a scope can end up outside the root.
   const effectiveScopeId = useMemo(
-    () => clampScope(tree, resolveScope(nodes, scopeId), rootScope),
-    [tree, nodes, scopeId, rootScope],
+    () => clampScope(tree, resolveScope(nodes, scopeId, undefined, { grouping, deeds }), rootScope),
+    [tree, nodes, scopeId, rootScope, grouping, deeds],
   );
 
   /**
@@ -1245,13 +1249,17 @@ export function PerfBrowser({
       // a candidate that silently cannot be landed on. Both are derived from
       // the next population's own leaves by the same rules as above.
       const nextLeaves = applyFilters(leavesFor(nextPopulation));
+      const nextGrouping = collapseGrouping(askedGrouping, nextLeaves, deeds, floorAxis);
       const nextTree = buildTree(nextLeaves, rootLabel(nextPopulation), {
-        groupByBot: new Set(nextLeaves.map((leaf) => leaf.bot)).size !== 1,
-        groupByAgent: new Set(nextLeaves.map((leaf) => leaf.agent)).size !== 1,
+        grouping: nextGrouping,
+        deeds,
       });
       const aimed = clampScope(
         nextTree,
-        resolveScope(indexTree(nextTree), effectiveScopeId, scope.leaves[0]),
+        resolveScope(indexTree(nextTree), effectiveScopeId, scope.leaves[0], {
+          grouping: nextGrouping,
+          deeds,
+        }),
         rootScope,
       );
       setSearchParams(
@@ -1271,6 +1279,9 @@ export function PerfBrowser({
       leavesFor,
       applyFilters,
       rootLabel,
+      askedGrouping,
+      floorAxis,
+      deeds,
       effectiveScopeId,
       scope,
       setSearchParams,

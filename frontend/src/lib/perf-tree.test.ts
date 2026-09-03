@@ -10,6 +10,8 @@
 
 import { describe, expect, it } from "vitest";
 
+import { BEFORE_LEDGER, OUTSIDE } from "@/components/perf/agentFilter";
+import type { DeedIndex } from "@/lib/agent-attribution";
 import type { BotRunInfo, ControllerInfo, ExecutorInfo } from "./api";
 import {
   AUTO_OPEN_KINDS,
@@ -35,6 +37,7 @@ import {
   runStatus,
   visibleNodeIds,
   type Grain,
+  type GroupAxis,
   type PerfLeaf,
   type PerfNode,
 } from "./perf-tree";
@@ -392,7 +395,7 @@ describe("buildTree, grouping by bot", () => {
   ];
 
   it("puts each bot's controllers under a row of its own", () => {
-    const tree = buildTree(twoBots(), "All", { groupByBot: true });
+    const tree = buildTree(twoBots(), "All", { grouping: ["bot"] });
 
     expect(tree.children.map((c) => c.id)).toEqual(["bot:alpha", "bot:beta"]);
     expect(node(tree, "bot:alpha").children.map((c) => c.id)).toEqual([
@@ -408,7 +411,7 @@ describe("buildTree, grouping by bot", () => {
     const tree = buildTree(
       [leafFromController(controller({ bot_name: "hummingbot-alpha-1" }))],
       "All",
-      { groupByBot: true },
+      { grouping: ["bot"] },
     );
     expect(node(tree, "bot:hummingbot-alpha-1").label).toBe("hummingbot-alpha-1");
     expect(botOfNodeId("bot:hummingbot-alpha-1")).toBe("hummingbot-alpha-1");
@@ -419,7 +422,7 @@ describe("buildTree, grouping by bot", () => {
   // The level must not become a second place the same trading is counted: a
   // bot node carries no leaf of its own, so it folds its controllers' spines.
   it("folds a bot out of its controllers, once each", () => {
-    const tree = buildTree(twoBots(), "All", { groupByBot: true });
+    const tree = buildTree(twoBots(), "All", { grouping: ["bot"] });
     expect(foldLeaves(node(tree, "bot:alpha").leaves, identity, NOW).net).toBe(24);
     expect(foldLeaves(tree.leaves, identity, NOW).net).toBe(36);
   });
@@ -436,7 +439,7 @@ describe("buildTree, grouping by bot", () => {
     const tree = buildTree(
       [leafFromController(controller()), leaf, other],
       "All",
-      { groupByBot: true },
+      { grouping: ["bot"] },
     );
     // The bucket itself nests under the fleet's one "Unattached" row rather
     // than sitting beside the bots directly (see the next describe block).
@@ -456,7 +459,7 @@ describe("buildTree, grouping by bot", () => {
       leafFromExecutor(executor({ id: "manual_2", pnl: 7, controller_id: "main" })),
     ];
     const leaves = [leafFromController(controller()), ...loose];
-    const grouped = buildTree(leaves, "All", { groupByBot: true });
+    const grouped = buildTree(leaves, "All", { grouping: ["bot"] });
     expect(foldLeaves(node(grouped, "grp:main").leaves, identity, NOW).net).toBe(12);
     // The same leaves, grouped and flat, add up to the same fleet.
     expect(foldLeaves(grouped.leaves, identity, NOW).net).toBe(
@@ -473,7 +476,7 @@ describe("buildTree, grouping by bot", () => {
         leafFromExecutor(executor({ id: "manual", controller_id: "main" })),
       ],
       "All",
-      { groupByBot: true },
+      { grouping: ["bot"] },
     );
     expect(countNodes(tree, "bot")).toBe(1);
     expect(countNodes(tree, "group")).toBe(1);
@@ -493,7 +496,7 @@ describe("buildTree, grouping by bot", () => {
         leafFromExecutor(executor({ id: "manual", controller_id: "main" })),
       ],
       "All",
-      { groupByBot: true },
+      { grouping: ["bot"] },
     );
     expect(visibleNodeIds(tree, new Set(["all"]))).toEqual(["all", "bot:alpha", "orphans"]);
     expect(visibleNodeIds(tree, new Set(["all", "orphans"]))).toEqual([
@@ -512,23 +515,26 @@ describe("buildTree, grouping by bot", () => {
   });
 
   // An executor row a filter removed lands on the bucket it was sitting in
-  // rather than all the way back on the fleet.
+  // rather than all the way back on the fleet. The chain is read in the same
+  // order the tree was built in — a fallback that assumed a nesting the tree
+  // does not have would name candidates that are not in it (FEAT-107).
   it("falls back from a lost executor to its group when the tree has one", () => {
     const leaf = leafFromExecutor(executor({ id: "manual", controller_id: "main" }));
+    const grouping = ["bot"] as const;
     const grouped = indexTree(
       buildTree(
         [leafFromExecutor(executor({ id: "other", controller_id: "main" }))],
         "All",
-        { groupByBot: true },
+        { grouping },
       ),
     );
-    expect(resolveScope(grouped, "exec:manual", leaf)).toBe("grp:main");
+    expect(resolveScope(grouped, "exec:manual", leaf, { grouping })).toBe("grp:main");
 
     // ...and all the way back when the tree draws no group level at all.
     const flat = indexTree(
       buildTree([leafFromExecutor(executor({ id: "other", controller_id: "main" }))]),
     );
-    expect(resolveScope(flat, "exec:manual", leaf)).toBe("all");
+    expect(resolveScope(flat, "exec:manual", leaf, { grouping: [] })).toBe("all");
   });
 
   // A group is shallower than the executors it holds, so it must never fall
@@ -538,7 +544,7 @@ describe("buildTree, grouping by bot", () => {
       buildTree(
         [leafFromExecutor(executor({ id: "other", controller_id: "hand" }))],
         "All",
-        { groupByBot: true },
+        { grouping: ["bot"] },
       ),
     );
     expect(resolveScope(other, "grp:main")).toBe("all");
@@ -546,13 +552,13 @@ describe("buildTree, grouping by bot", () => {
 
   it("counts controllers wherever they sit, flat or grouped", () => {
     expect(countNodes(buildTree(twoBots()), "controller")).toBe(3);
-    expect(countNodes(buildTree(twoBots(), "All", { groupByBot: true }), "controller")).toBe(3);
-    expect(countNodes(buildTree(twoBots(), "All", { groupByBot: true }), "bot")).toBe(2);
+    expect(countNodes(buildTree(twoBots(), "All", { grouping: ["bot"] }), "controller")).toBe(3);
+    expect(countNodes(buildTree(twoBots(), "All", { grouping: ["bot"] }), "bot")).toBe(2);
     expect(countNodes(buildTree(twoBots()), "bot")).toBe(0);
   });
 
   it("walks bot rows before their controllers, and hides shut ones", () => {
-    const tree = buildTree(twoBots(), "All", { groupByBot: true });
+    const tree = buildTree(twoBots(), "All", { grouping: ["bot"] });
     expect(visibleNodeIds(tree, new Set(["all"]))).toEqual(["all", "bot:alpha", "bot:beta"]);
     expect(visibleNodeIds(tree, new Set(["all", "bot:alpha"]))).toEqual([
       "all",
@@ -570,7 +576,7 @@ describe("buildTree, grouping by bot", () => {
       buildTree(
         [leafFromController(controller({ controller_id: "other" }))],
         "All",
-        { groupByBot: true },
+        { grouping: ["bot"] },
       ),
     );
     expect(resolveScope(grouped, "ctrl:alpha:pmm_1")).toBe("bot:alpha");
@@ -584,15 +590,13 @@ describe("buildTree, grouping by bot", () => {
   // one of its own controllers — that is a much narrower report.
   it("never resolves a bot scope down into one of its controllers", () => {
     const other = indexTree(
-      buildTree([leafFromController(controller({ bot_name: "beta" }))], "All", {
-        groupByBot: true,
-      }),
+      buildTree([leafFromController(controller({ bot_name: "beta" }))], "All", { grouping: ["bot"] }),
     );
     expect(resolveScope(other, "bot:alpha")).toBe("all");
   });
 
   it("walks a controller up through its bot to the fleet", () => {
-    const tree = buildTree(twoBots(), "All", { groupByBot: true });
+    const tree = buildTree(twoBots(), "All", { grouping: ["bot"] });
     expect(ancestorChain(tree, "ctrl:alpha:pmm_2")).toEqual([
       "ctrl:alpha:pmm_2",
       "bot:alpha",
@@ -627,10 +631,21 @@ describe("buildTree, grouping by agent", () => {
     leafFromController(controller({ bot_name: "hand-rolled", controller_id: "grid_1" })),
   ];
 
-  it("nests an agent's bots under it and leaves an unowned bot on the fleet", () => {
-    const tree = buildTree(mixedFleet(), "All", { groupByBot: true, groupByAgent: true });
+  // The unowned bot gets an owner row too, and that is FEAT-107's whole point:
+  // FEAT-106 split "nobody" into two answers a reader can act on, so ownership
+  // can be the spine of the page rather than a level that only some records
+  // reach. The bucket sorts *after* the named run — it is what the fleet map
+  // could not credit, not one more owner.
+  it("nests an agent's bots under it and an unowned bot under its bucket", () => {
+    const tree = buildTree(mixedFleet(), "All", { grouping: ["agent", "bot"] });
 
-    expect(tree.children.map((c) => c.id)).toEqual([`agent:${RUN_KEY}`, "bot:hand-rolled"]);
+    expect(tree.children.map((c) => c.id)).toEqual([
+      `agent:${RUN_KEY}`,
+      `agent:${BEFORE_LEDGER}`,
+    ]);
+    expect(node(tree, `agent:${BEFORE_LEDGER}`).children.map((c) => c.id)).toEqual([
+      "bot:hand-rolled",
+    ]);
     expect(node(tree, `agent:${RUN_KEY}`).children.map((c) => c.id)).toEqual([
       "bot:brigado-brl_mm-btc",
     ]);
@@ -652,7 +667,7 @@ describe("buildTree, grouping by agent", () => {
     expect(botNodeId(standalone)).toBeNull();
     expect(agentNodeId(standalone)).toBe(`agent:${RUN_KEY}`);
 
-    const tree = buildTree([standalone], "All", { groupByBot: true, groupByAgent: true });
+    const tree = buildTree([standalone], "All", { grouping: ["agent", "bot"] });
     expect(tree.children.map((c) => c.id)).toEqual([`agent:${RUN_KEY}`]);
     expect(node(tree, `agent:${RUN_KEY}`).children.map((c) => c.id)).toEqual(["exec:ex_1"]);
   });
@@ -660,18 +675,26 @@ describe("buildTree, grouping by agent", () => {
   // Nobody's executor gets the bucket rather than the fleet root, and the agent
   // is still asked first: an owner is a better answer than a filing key, so an
   // executor an agent created never reaches the bucket to begin with.
-  it("puts an executor that belongs to nobody in the group, not under an agent", () => {
+  // An executor nobody claims still gets the bucket rather than a bare row, and
+  // the bucket now sits *inside* the owner row that says nobody claimed it —
+  // ARCH-318's gathering is not spent, it is one level deeper. A real owner is
+  // still the better answer and skips the bucket entirely (the case above).
+  it("puts an executor that belongs to nobody in the group, inside its owner bucket", () => {
     const manual = leafFromExecutor(executor({ id: "manual", controller_id: "main" }));
     expect(agentNodeId(manual)).toBeNull();
-    const tree = buildTree([manual], "All", { groupByBot: true, groupByAgent: true });
-    expect(tree.children.map((c) => c.id)).toEqual(["orphans"]);
-    expect(node(tree, "orphans").children.map((c) => c.id)).toEqual(["grp:main"]);
-    expect(node(tree, "grp:main").children.map((c) => c.id)).toEqual(["exec:manual"]);
+    const tree = buildTree([manual], "All", { grouping: ["agent", "bot"] });
+    const bucket = `agent:${BEFORE_LEDGER}`;
+    expect(tree.children.map((c) => c.id)).toEqual([bucket]);
+    expect(node(tree, bucket).children.map((c) => c.id)).toEqual([`${bucket}>orphans`]);
+    expect(node(tree, `${bucket}>orphans`).children.map((c) => c.id)).toEqual([
+      `${bucket}>grp:main`,
+    ]);
+    expect(node(tree, `${bucket}>grp:main`).children.map((c) => c.id)).toEqual(["exec:manual"]);
   });
 
   // The level must not become a second place the same trading is counted.
   it("folds an agent out of its children's spines, once each", () => {
-    const tree = buildTree(mixedFleet(), "All", { groupByBot: true, groupByAgent: true });
+    const tree = buildTree(mixedFleet(), "All", { grouping: ["agent", "bot"] });
     // Two controllers at 12 apiece; the third belongs to no agent.
     expect(foldLeaves(node(tree, `agent:${RUN_KEY}`).leaves, identity, NOW).net).toBe(24);
     expect(foldLeaves(tree.leaves, identity, NOW).net).toBe(36);
@@ -689,20 +712,20 @@ describe("buildTree, grouping by agent", () => {
       "brigado-brl_mm-btc",
       RUN_KEY,
     );
-    const tree = buildTree([ctrl, child], "All", { groupByBot: true, groupByAgent: true });
+    const tree = buildTree([ctrl, child], "All", { grouping: ["agent", "bot"] });
     expect(node(tree, `agent:${RUN_KEY}`).leaves.map((l) => l.id)).toEqual([ctrl.id]);
     expect(foldLeaves(node(tree, `agent:${RUN_KEY}`).leaves, identity, NOW).net).toBe(12);
   });
 
   it("changes nothing at all when the level is off", () => {
-    const off = buildTree(mixedFleet(), "All", { groupByBot: true });
+    const off = buildTree(mixedFleet(), "All", { grouping: ["bot"] });
     expect(off.children.map((c) => c.id)).toEqual(["bot:brigado-brl_mm-btc", "bot:hand-rolled"]);
     expect(countNodes(off, "agent")).toBe(0);
     expect(foldLeaves(off.leaves, identity, NOW).net).toBe(36);
   });
 
   it("nests controllers under the agent directly when the bot level is off", () => {
-    const tree = buildTree(mixedFleet(), "All", { groupByAgent: true });
+    const tree = buildTree(mixedFleet(), "All", { grouping: ["agent"] });
     expect(node(tree, `agent:${RUN_KEY}`).children.map((c) => c.id)).toEqual([
       "ctrl:brigado-brl_mm-btc:pmm_1",
       "ctrl:brigado-brl_mm-btc:pmm_2",
@@ -710,12 +733,13 @@ describe("buildTree, grouping by agent", () => {
   });
 
   it("counts agent rows and walks them before their bots", () => {
-    const tree = buildTree(mixedFleet(), "All", { groupByBot: true, groupByAgent: true });
-    expect(countNodes(tree, "agent")).toBe(1);
+    const tree = buildTree(mixedFleet(), "All", { grouping: ["agent", "bot"] });
+    // The named run and the bucket the unowned bot fell into: both are rows.
+    expect(countNodes(tree, "agent")).toBe(2);
     expect(visibleNodeIds(tree, new Set(["all"]))).toEqual([
       "all",
       `agent:${RUN_KEY}`,
-      "bot:hand-rolled",
+      `agent:${BEFORE_LEDGER}`,
     ]);
     expect(ancestorChain(tree, "ctrl:brigado-brl_mm-btc:pmm_1")).toEqual([
       "ctrl:brigado-brl_mm-btc:pmm_1",
@@ -739,7 +763,7 @@ describe("buildTree, grouping by agent", () => {
       buildTree(
         [leafFromController(controller({ bot_name: "brigado-brl_mm-eth" }), RUN_KEY)],
         "All",
-        { groupByBot: true, groupByAgent: true },
+        { grouping: ["agent", "bot"] },
       ),
     );
     expect(resolveScope(tree, "ctrl:brigado-brl_mm-btc:pmm_1", lost)).toBe(`agent:${RUN_KEY}`);
@@ -749,10 +773,7 @@ describe("buildTree, grouping by agent", () => {
   // its own bots — that is a much narrower report than the link asked for.
   it("never resolves an agent scope down into one of its bots", () => {
     const other = indexTree(
-      buildTree([leafFromController(controller({ bot_name: "beta" }))], "All", {
-        groupByBot: true,
-        groupByAgent: true,
-      }),
+      buildTree([leafFromController(controller({ bot_name: "beta" }))], "All", { grouping: ["agent", "bot"] }),
     );
     expect(resolveScope(other, `agent:${RUN_KEY}`)).toBe("all");
   });
@@ -760,12 +781,174 @@ describe("buildTree, grouping by agent", () => {
   // The ids in existing links are the product; only their parent changed.
   it("leaves the ctrl: and exec: id grammars alone", () => {
     const tree = indexTree(
-      buildTree(mixedFleet(), "All", { groupByBot: true, groupByAgent: true }),
+      buildTree(mixedFleet(), "All", { grouping: ["agent", "bot"] }),
     );
     expect(resolveScope(tree, "ctrl:brigado-brl_mm-btc:pmm_1")).toBe(
       "ctrl:brigado-brl_mm-btc:pmm_1",
     );
     expect(resolveScope(tree, "ctrl:hand-rolled:grid_1")).toBe("ctrl:hand-rolled:grid_1");
+  });
+});
+
+describe("buildTree, grouping by pair and by class (FEAT-107)", () => {
+  const BRIGADO = "brigado.brl_mm";
+
+  /** Two owners, two pairs, two classes — every axis has something to say. */
+  const fleet = (): PerfLeaf[] => [
+    leafFromController(
+      controller({ bot_name: "brigado-brl_mm-sol", controller_id: "pmm_1" }),
+      BRIGADO,
+    ),
+    leafFromController(
+      controller({
+        bot_name: "brigado-brl_mm-btc",
+        controller_id: "grid_1",
+        controller_name: "grid_strike",
+        trading_pair: "BTC-USDT",
+      }),
+      BRIGADO,
+    ),
+    leafFromController(
+      controller({ bot_name: "hand-rolled", controller_id: "pmm_2", trading_pair: "BTC-USDT" }),
+    ),
+  ];
+
+  it("puts each pair's records under a row of its own", () => {
+    const tree = buildTree(fleet(), "All", { grouping: ["pair"] });
+    expect(tree.children.map((c) => c.id)).toEqual(["pair:SOL-USDC", "pair:BTC-USDT"]);
+    expect(node(tree, "pair:BTC-USDT").children.map((c) => c.id)).toEqual([
+      "ctrl:brigado-brl_mm-btc:grid_1",
+      "ctrl:hand-rolled:pmm_2",
+    ]);
+  });
+
+  it("puts each controller class under a row of its own", () => {
+    const tree = buildTree(fleet(), "All", { grouping: ["ctrlType"] });
+    expect(tree.children.map((c) => c.id)).toEqual(["class:pmm_simple", "class:grid_strike"]);
+    expect(node(tree, "class:pmm_simple").children.map((c) => c.id)).toEqual([
+      "ctrl:brigado-brl_mm-sol:pmm_1",
+      "ctrl:hand-rolled:pmm_2",
+    ]);
+  });
+
+  // The whole point of the fold being one function: the nesting is a reading
+  // order, and a reading order cannot change what anything adds up to.
+  it("reports the same fleet total under every nesting", () => {
+    const groupings: GroupAxis[][] = [[], ["agent", "bot"], ["bot"], ["pair"], ["ctrlType"]];
+    const totals = groupings.map(
+      (grouping) => foldLeaves(buildTree(fleet(), "All", { grouping }).leaves, identity, NOW).net,
+    );
+    expect(new Set(totals).size).toBe(1);
+    expect(totals[0]).toBe(36);
+  });
+
+  // A pair is not unique the way a bot is — SOL-USDC is traded by everyone — so
+  // a nested pair row carries its parent in its id. Without that, two owners'
+  // SOL-USDC rows are one node filed under whichever record was read first,
+  // which is one agent's money drawn inside another agent's subtree.
+  it("keeps two owners' rows for the same pair apart", () => {
+    const leaves = [
+      leafFromController(controller({ bot_name: "brigado-brl_mm-sol" }), BRIGADO),
+      leafFromController(
+        controller({ bot_name: "vega-mom-sol", controller_id: "v1" }),
+        "vega.mom",
+      ),
+    ];
+    const tree = buildTree(leaves, "All", { grouping: ["agent", "pair"] });
+    expect(node(tree, `agent:${BRIGADO}`).children.map((c) => c.id)).toEqual([
+      `agent:${BRIGADO}>pair:SOL-USDC`,
+    ]);
+    expect(node(tree, "agent:vega.mom").children.map((c) => c.id)).toEqual([
+      "agent:vega.mom>pair:SOL-USDC",
+    ]);
+    // Each holds only its own, which is what the qualified id buys.
+    expect(
+      node(tree, `agent:${BRIGADO}>pair:SOL-USDC`).leaves.map((leaf) => leaf.agent),
+    ).toEqual([BRIGADO]);
+  });
+
+  // An executor carries no class of its own, so under `ctrlType` it can say
+  // nothing about where its controller's row hangs — and the controller's own
+  // record must decide, whichever of the two came off the wire first.
+  it("places a controller's row from its own record, not from an executor read first", () => {
+    const ctrl = leafFromController(controller({ controller_id: "pmm_1" }));
+    const child = leafFromExecutor(executor({ id: "ex_1", controller_id: "pmm_1" }), "alpha");
+    const executorFirst = buildTree([child, ctrl], "All", { grouping: ["ctrlType"] });
+    const controllerFirst = buildTree([ctrl, child], "All", { grouping: ["ctrlType"] });
+    for (const tree of [executorFirst, controllerFirst]) {
+      expect(tree.children.map((c) => c.id)).toEqual(["class:pmm_simple"]);
+      expect(node(tree, "class:pmm_simple").children.map((c) => c.id)).toEqual([
+        "ctrl:alpha:pmm_1",
+      ]);
+    }
+  });
+
+  // A dash is the absence of a class rather than one, so it buys no row — the
+  // same rule `controllerClassOf` states for the filter bubbles.
+  it("skips the level for a controller whose class was never reported", () => {
+    const unknown = leafFromController(
+      controller({ controller_name: "", controller_type: "", controller_id: "x1" }),
+    );
+    const tree = buildTree([unknown, ...fleet()], "All", { grouping: ["ctrlType"] });
+    expect(tree.children.map((c) => c.id)).toEqual([
+      "ctrl:alpha:x1",
+      "class:pmm_simple",
+      "class:grid_strike",
+    ]);
+  });
+
+  // A link written under one reading, opened under another: the level it names
+  // is not in this tree, so it degrades to the report that contains it rather
+  // than erroring or emptying the page.
+  it("degrades a scope naming a level this nesting does not have", () => {
+    const byPair = indexTree(buildTree(fleet(), "All", { grouping: ["pair"] }));
+    const grouping: GroupAxis[] = ["pair"];
+    expect(resolveScope(byPair, "bot:hand-rolled", undefined, { grouping })).toBe("all");
+    expect(resolveScope(byPair, `agent:${BRIGADO}`, undefined, { grouping })).toBe("all");
+    // ...and one it does have still lands on itself.
+    expect(resolveScope(byPair, "pair:BTC-USDT", undefined, { grouping })).toBe("pair:BTC-USDT");
+  });
+});
+
+describe("buildTree, the owner rows (FEAT-107)", () => {
+  const BRIGADO = "brigado.brl_mm";
+  const deeds: DeedIndex = { bots: {}, since: (NOW - 5 * HOUR) / 1000 };
+
+  it("draws the two unowned buckets as rows, after the runs that were credited", () => {
+    const leaves = [
+      // Older than the ledger reaches: unjudgeable, not accused.
+      leafFromController(
+        controller({ controller_id: "old", deployed_at: new Date(NOW - 9 * HOUR).toISOString() }),
+      ),
+      // Inside the ledger's reach with no deed behind it: not Condor's.
+      leafFromController(
+        controller({
+          bot_name: "stranger",
+          controller_id: "new",
+          deployed_at: new Date(NOW - HOUR).toISOString(),
+        }),
+      ),
+      leafFromController(
+        controller({ bot_name: "brigado-brl_mm-sol", controller_id: "b1" }),
+        BRIGADO,
+      ),
+    ];
+    const tree = buildTree(leaves, "All", { grouping: ["agent"], deeds });
+    expect(tree.children.map((c) => c.id)).toEqual([
+      `agent:${BRIGADO}`,
+      `agent:${OUTSIDE}`,
+      `agent:${BEFORE_LEDGER}`,
+    ]);
+    expect(node(tree, `agent:${OUTSIDE}`).children.map((c) => c.id)).toEqual(["ctrl:stranger:new"]);
+    // Ordinary rows with ordinary folds: nothing is left out of the fleet.
+    expect(foldLeaves(tree.leaves, identity, NOW).net).toBe(36);
+  });
+
+  it("counts the buckets as owners for the collapse rule", () => {
+    const oneBucket = [leafFromController(controller())];
+    expect(buildTree(oneBucket, "All", { grouping: [], deeds }).children.map((c) => c.id)).toEqual([
+      "ctrl:alpha:pmm_1",
+    ]);
   });
 });
 
@@ -876,7 +1059,7 @@ describe("autoOpenIds", () => {
     const tree = buildTree(
       [leafFromController(controller({ bot_name: "brigado-brl_mm-btc" }), RUN_KEY)],
       "All",
-      { groupByBot: true, groupByAgent: true },
+      { grouping: ["agent", "bot"] },
     );
     const nodes = indexTree(tree);
 
@@ -895,29 +1078,28 @@ describe("autoOpenIds", () => {
   });
 
   it("keeps opening a bot parented directly by the fleet, exactly as before", () => {
-    const tree = buildTree([leafFromController(controller({ bot_name: "hand-rolled" }))], "All", {
-      groupByBot: true,
-    });
+    const tree = buildTree([leafFromController(controller({ bot_name: "hand-rolled" }))], "All", { grouping: ["bot"] });
     expect(autoOpenIds(indexTree(tree), new Set())).toEqual(new Set(["bot:hand-rolled"]));
   });
 
   it("leaves the unattached row and its group shut — ARCH-318, not an oversight", () => {
     const manual = leafFromExecutor(executor({ id: "manual", controller_id: "main" }));
-    const tree = buildTree([manual], "All", { groupByBot: true, groupByAgent: true });
-    expect(node(tree, "grp:main").kind).toBe("group");
-    expect(node(tree, "orphans").kind).toBe("orphans");
+    const tree = buildTree([manual], "All", { grouping: ["agent", "bot"] });
+    const bucket = `agent:${BEFORE_LEDGER}`;
+    expect(node(tree, `${bucket}>grp:main`).kind).toBe("group");
+    expect(node(tree, `${bucket}>orphans`).kind).toBe("orphans");
     expect(AUTO_OPEN_KINDS.has("group")).toBe(false);
     expect(AUTO_OPEN_KINDS.has("orphans")).toBe(false);
     const drawn = autoOpenIds(indexTree(tree), new Set());
-    expect(drawn).not.toContain("grp:main");
-    expect(drawn).not.toContain("orphans");
+    expect(drawn).not.toContain(`${bucket}>grp:main`);
+    expect(drawn).not.toContain(`${bucket}>orphans`);
   });
 
   it("still honours a row the reader has shut by hand", () => {
     const tree = buildTree(
       [leafFromController(controller({ bot_name: "brigado-brl_mm-btc" }), RUN_KEY)],
       "All",
-      { groupByBot: true, groupByAgent: true },
+      { grouping: ["agent", "bot"] },
     );
     const nodes = indexTree(tree);
     expect(autoOpenIds(nodes, new Set([`agent:${RUN_KEY}`]))).toEqual(
@@ -1133,7 +1315,7 @@ describe("matchesGrain, and the trees it builds", () => {
   ];
 
   const at = (grain: Grain) =>
-    buildTree(fleet().filter((leaf) => matchesGrain(leaf, grain)), "All", { groupByBot: true });
+    buildTree(fleet().filter((leaf) => matchesGrain(leaf, grain)), "All", { grouping: ["bot"] });
 
   const netOf = (tree: PerfNode, id: string) =>
     foldLeaves(node(tree, id).leaves, identity, NOW).net;

@@ -11,7 +11,8 @@
 // as an argument for the same reason the components pass it down: the display
 // currency is a preference, and a fold that reached for it would be untestable.
 
-import type { Provenance } from "@/lib/agent-attribution";
+import { agentBucket, BEFORE_LEDGER, OUTSIDE } from "@/components/perf/agentFilter";
+import type { DeedIndex, Provenance } from "@/lib/agent-attribution";
 import type { BotRunInfo, ControllerInfo, ExecutorInfo } from "@/lib/api";
 import { controllerKey } from "@/lib/controller-identity";
 import { isExecutorActive, toMs } from "@/lib/formatters";
@@ -403,10 +404,172 @@ export type NodeKind =
   | "fleet"
   | "agent"
   | "bot"
+  | "pair"
+  | "ctrlType"
   | "orphans"
   | "controller"
   | "executor"
   | "group";
+
+// ── The axes a fleet can be read along (FEAT-107) ──
+//
+// The tree used to hardcode one nesting — fleet → agent → bot → controller →
+// executor — and offer the caller two booleans for whether the middle two were
+// drawn. Ownership being the spine is a *reading order*, not a law of the
+// records: *"how is SOL-USDC doing across the whole fleet"* is a real question
+// that the ownership order actively obstructs. So the order is a list the
+// caller hands over, and everything that used to infer structure from an id
+// prefix is handed that same list instead.
+//
+// Controller → executor is not on it, and is not an axis: that is the shape of
+// the records themselves, not a way of reading them.
+
+/**
+ * One level the caller can ask the tree to spend a row on.
+ *
+ * The vocabulary lives here, beside {@link keyFor} and the id grammar it
+ * writes, rather than in `lib/perf-grouping` with the URL and the presets: the
+ * tree cannot be built without it, and a module that the tree imports must not
+ * import the tree back.
+ */
+export type GroupAxis = "agent" | "bot" | "pair" | "ctrlType";
+
+/** Owner first, then the bot that ran it — what `/bots` opens on. */
+export const DEFAULT_GROUPING: readonly GroupAxis[] = ["agent", "bot"];
+
+/** The id prefix each axis writes, and the only place the two are joined. */
+export const AXIS_PREFIX: Record<GroupAxis, string> = {
+  agent: "agent:",
+  bot: "bot:",
+  pair: "pair:",
+  ctrlType: "class:",
+};
+
+/** The node kind each axis draws. Named after the axis, so neither can drift. */
+export const AXIS_KIND: Record<GroupAxis, NodeKind> = {
+  agent: "agent",
+  bot: "bot",
+  pair: "pair",
+  ctrlType: "ctrlType",
+};
+
+/**
+ * Whether an axis's key is unique across the whole tree on its own.
+ *
+ * A bot belongs to exactly one owner and an agent is itself, so `bot:alpha`
+ * names one row wherever it is nested and every link ever written to one keeps
+ * working. A **pair is not** — SOL-USDC is traded by everyone — and neither is
+ * a controller class, so a nested `pair:` row has to carry its parent in its id
+ * or two owners' SOL-USDC rows become one node, filed under whichever owner's
+ * record happened to be read first. That is not a cosmetic collision: it is a
+ * row of one agent's money drawn inside another agent's subtree, which is the
+ * escape {@link clampScope} exists to prevent, arriving through the id grammar.
+ */
+const AXIS_UNIQUE: Record<GroupAxis, boolean> = {
+  agent: true,
+  bot: true,
+  pair: false,
+  ctrlType: false,
+};
+
+/**
+ * The separator between a nested row's parent and its own name.
+ *
+ * Chosen because no run key, bot name, trading pair or controller class can
+ * contain it, and because a reader who sees one in a URL can tell what it means.
+ */
+const NEST = ">";
+
+/** The last segment of a node id: the part that names the node itself. */
+function bareId(id: string): string {
+  const cut = id.lastIndexOf(NEST);
+  return cut < 0 ? id : id.slice(cut + 1);
+}
+
+/** The axis an id names, or `null` for an id that names no grouping level. */
+export function axisOfNodeId(id: string): GroupAxis | null {
+  const bare = bareId(id);
+  for (const axis of Object.keys(AXIS_PREFIX) as GroupAxis[]) {
+    if (bare.startsWith(AXIS_PREFIX[axis])) return axis;
+  }
+  return null;
+}
+
+/**
+ * The key a leaf is filed under on one axis, or `""` when it skips that level.
+ *
+ * The one place a leaf is bucketed, so adding an axis is one case here and one
+ * entry in the three records above. `""` means *skip*, which is what keeps
+ * today's behaviour for the leaves that carry no bot: a position opened by hand
+ * from `/trade` belongs to no deployment, so a bot level has nothing to say
+ * about it and simply does not draw it a row.
+ *
+ * **Ownership is the one axis with a join behind it.** A leaf carries a run key
+ * or nothing, and `agentBucket` (FEAT-106) is what turns *nothing* into one of
+ * two answers a reader can act on — *Outside Condor* and *Before the ledger* —
+ * rather than an absence. So the agent axis never returns `""`: every record
+ * has an owner row, which is the whole point of reading the fleet by owner.
+ */
+export function keyFor(leaf: PerfLeaf, axis: GroupAxis, deeds?: DeedIndex | null): string {
+  switch (axis) {
+    case "agent":
+      return agentBucket(leaf, deeds);
+    // The same condition `botNodeId` reads, said in the leaf's own terms: a
+    // leaf that belongs to no controller hangs under no bot either.
+    case "bot":
+      return leaf.controllerId ? leaf.bot : "";
+    case "pair":
+      return leaf.pair;
+    // A controller is its own class; an executor inherits its controller's by
+    // nesting under it, and carries none of its own to be filed by — the
+    // vocabularies are different and `controllerClassOf` exists to keep them
+    // apart. A controller whose class upstream never reported carries the dash,
+    // which is the absence of a name rather than one, so it skips the level.
+    case "ctrlType":
+      return leaf.kind === "controller" && leaf.executorType !== UNKNOWN_LABEL
+        ? leaf.executorType
+        : "";
+  }
+}
+
+/**
+ * The bare node id a leaf's key on one axis writes, or `null` for a skipped
+ * level. Nested rows are qualified by their parent — see {@link AXIS_UNIQUE}.
+ */
+export function axisNodeId(
+  leaf: PerfLeaf,
+  axis: GroupAxis,
+  deeds?: DeedIndex | null,
+  parentId = "",
+): string | null {
+  const key = keyFor(leaf, axis, deeds);
+  if (!key) return null;
+  const bare = `${AXIS_PREFIX[axis]}${key}`;
+  return AXIS_UNIQUE[axis] || !parentId ? bare : `${parentId}${NEST}${bare}`;
+}
+
+/**
+ * Every grouping row a leaf hangs inside, outermost first.
+ *
+ * The ancestry an id used to spell out on its own, computed from the leaf and
+ * the order instead — which is what a reorderable nesting costs and what
+ * {@link fallbackChain} spends it on.
+ */
+export function axisChain(
+  leaf: PerfLeaf,
+  grouping: readonly GroupAxis[],
+  deeds?: DeedIndex | null,
+): string[] {
+  const ids: string[] = [];
+  let parentId = "";
+  for (const axis of grouping) {
+    const id = axisNodeId(leaf, axis, deeds, parentId);
+    if (!id) continue;
+    ids.push(id);
+    parentId = id;
+  }
+  return ids;
+}
 
 /**
  * The kinds that name a *run* rather than a part of one: an agent, a bot, and
@@ -419,15 +582,22 @@ export type NodeKind =
  * child of `orphans` rather than of the fleet (see `buildTree`'s `groupFor`),
  * so `orphans` is the one that needs the fleet-child treatment this set gives.
  *
+ * Every grouping axis is here (FEAT-107), for the reason `agent` and `bot`
+ * already were: whichever order the reader picked, the outermost level is the
+ * list of rows they are comparing, and a `pair:` row under `?groupBy=pair` is
+ * doing exactly the job a `bot:` row does under the default.
+ *
  * It lives here, two lines under {@link NodeKind}, so that adding a kind and
  * deciding whether it is one of these is a single edit in a single place. It is
- * deliberately *not* derived from `nodeDepth`: that function reads an id's
- * ancestry (a `bot:` sits at 2, under the `agent:` that may operate it), which
- * is a different question from the one asked here.
+ * deliberately *not* derived from `nodeDepth`: that function reads a level's
+ * place in the grouping the caller asked for, which is a different question
+ * from the one asked here.
  */
 export const TOP_LEVEL_KINDS: ReadonlySet<NodeKind> = new Set<NodeKind>([
   "agent",
   "bot",
+  "pair",
+  "ctrlType",
   "orphans",
 ]);
 
@@ -445,6 +615,14 @@ export const TOP_LEVEL_KINDS: ReadonlySet<NodeKind> = new Set<NodeKind>([
  * `agentFor(leaf) ?? fleet`) must still be reachable without a click, or the
  * agent-operated fleets — the ones with the most structure — are exactly the
  * ones where "bots are visible on arrival" silently stops being true.
+ *
+ * `pair` and `ctrlType` are deliberately **not** here, and that is the split
+ * this set exists to keep: they are fleet children like the two above (see
+ * {@link TOP_LEVEL_KINDS}) and they still do not default open. A bot row is
+ * opened to reach the controllers *under* it, which is what the reader came
+ * for; a pair row **is** what the reader came for — *"how is SOL-USDC doing
+ * across the fleet"* is answered by the row itself, and opening all of them on
+ * arrival would draw the flat list the grouping was chosen to replace.
  */
 export const AUTO_OPEN_KINDS: ReadonlySet<NodeKind> = new Set<NodeKind>(["agent", "bot"]);
 
@@ -581,7 +759,7 @@ function makeNode(id: string, kind: NodeKind, label: string): PerfNode {
  *
  * The class-of-thing grouping is gone for good — it is a bubble above the tree,
  * combinable and one click shallower than a chevron ever was. **Bot is not**:
- * `groupByBot` puts it back as a level, because a bot is the thing you *act*
+ * a `"bot"` axis puts it back as a level, because a bot is the thing you *act*
  * on. Stopping is a per-bot verb with no per-controller equivalent, and a flat
  * list gives it nowhere to live: the reader had to narrow the bubbles down to
  * one bot before the fleet row became that bot and grew a Stop button, which is
@@ -600,6 +778,14 @@ function makeNode(id: string, kind: NodeKind, label: string): PerfNode {
  * executor it created, which has no controller and therefore no bot, hangs off
  * the agent directly instead of off the fleet.
  *
+ * **The order of those levels is the caller's too** (FEAT-107): `grouping` is
+ * a list of {@link GroupAxis}, applied outermost first, and *"which levels"*
+ * and *"in what order"* are now one question with one answer. `["agent",
+ * "bot"]` is the fleet read by owner; `["pair"]` is the same leaves read by
+ * what they trade. Every level follows the same three rules — a leaf whose
+ * {@link keyFor} is `""` skips it, a level with one key in it is the caller's
+ * to leave out, and no level ever changes what anything folds to.
+ *
  * An executor whose controller is gone *and* whose agent is unknown belongs to
  * no deployment and to nobody, but it is not nameless: it hangs under a
  * **group** row named for the controller id it carries (see
@@ -608,95 +794,102 @@ function makeNode(id: string, kind: NodeKind, label: string): PerfNode {
  * rows at the same indentation as a bot. They are gathered a second time,
  * under one **orphans** row (`"Unattached"`), so the terminated side of a real
  * server draws one collapsible row instead of dozens ahead of the bots the
- * reader came for. Both levels follow `groupByBot`, so the flat tree still
- * hangs those executors off the fleet directly.
+ * reader came for. Both rows exist only when the tree has levels at all, so
+ * the flat tree still hangs those executors off the fleet directly.
  */
 export function buildTree(
   leaves: PerfLeaf[],
   rootLabel = "All",
-  { groupByBot = false, groupByAgent = false }: { groupByBot?: boolean; groupByAgent?: boolean } = {},
+  {
+    grouping = [],
+    deeds = null,
+  }: { grouping?: readonly GroupAxis[]; deeds?: DeedIndex | null } = {},
 ): PerfNode {
   const fleet = makeNode("all", "fleet", rootLabel);
-  const agents = new Map<string, PerfNode>();
-  const bots = new Map<string, PerfNode>();
+  const levels = new Map<string, PerfNode>();
   const groups = new Map<string, PerfNode>();
   const controllers = new Map<string, PerfNode>();
-  let orphans: PerfNode | null = null;
+  const orphansOf = new Map<string, PerfNode>();
 
-  // Insertion order once more: the first record an agent owns is what puts it
-  // in the list, so agents come out in the order the caller sorted its records.
-  const agentFor = (leaf: PerfLeaf): PerfNode | null => {
-    if (!groupByAgent) return null;
-    const id = agentNodeId(leaf);
-    if (!id) return null;
-    let node = agents.get(id);
-    if (!node) {
-      // The run key, which is both the id and what the row says out loud
-      // (`lib/agent-attribution`'s `runKeyLabel` splits it for display) — so a
-      // row can be labelled without the fleet map in hand.
-      node = makeNode(id, "agent", leaf.agent);
-      agents.set(id, node);
-      fleet.children.push(node);
-    }
-    return node;
-  };
+  /**
+   * The controller record that decides where a controller's row hangs.
+   *
+   * Its executors may be read first, and they know less than it does: an
+   * executor carries no class of its own to be grouped by, and under
+   * `?groupBy=ctrlType` the row's parent would then depend on which record
+   * happened to come off the wire first. The controller's own leaf answers for
+   * the row whenever the population has one.
+   */
+  const anchors = new Map<string, PerfLeaf>();
+  for (const leaf of leaves) {
+    if (leaf.kind !== "controller") continue;
+    const id = controllerNodeId(leaf);
+    if (id && !anchors.has(id)) anchors.set(id, leaf);
+  }
 
-  // Insertion order again: the first controller of a bot is what puts the bot
-  // in the list, so bots come out in the order the caller sorted controllers.
-  const botFor = (leaf: PerfLeaf): PerfNode | null => {
-    if (!groupByBot) return null;
-    const id = botNodeId(leaf);
-    if (!id) return null;
-    let node = bots.get(id);
-    if (!node) {
-      // The raw name: shortening it is the sidebar's job, and the
-      // Stop button needs the name the API knows.
-      node = makeNode(id, "bot", leaf.bot);
-      bots.set(id, node);
-      (agentFor(leaf) ?? fleet).children.push(node);
+  // Insertion order throughout: the first record filed under a key is what puts
+  // that row in the list, so rows come out in the order the caller sorted its
+  // records — the page sorts its controllers before handing them over.
+  const levelFor = (leaf: PerfLeaf): PerfNode => {
+    let parent = fleet;
+    for (const axis of grouping) {
+      const id = axisNodeId(leaf, axis, deeds, parent === fleet ? "" : parent.id);
+      if (!id) continue;
+      let node = levels.get(id);
+      if (!node) {
+        // The key itself, which is both the id's tail and what the row says out
+        // loud — the sidebar formats it (a run key is split for display, a bot
+        // name shortened), so a row can be labelled with nothing else in hand.
+        node = makeNode(id, AXIS_KIND[axis], keyFor(leaf, axis, deeds));
+        levels.set(id, node);
+        parent.children.push(node);
+      }
+      parent = node;
     }
-    return node;
+    return parent;
   };
 
   // The one row every executor nobody claims hangs under, created the first
-  // time one is seen and pushed onto the fleet exactly once — so a terminated
+  // time one is seen and pushed onto its level exactly once — so a terminated
   // side with 42 dead controller ids draws one collapsible "Unattached" row
   // ahead of the bots, not 42.
   //
-  // Off when `groupByBot` is off, for the same reason the bot level is: a fleet
-  // running a single bot would spend a chevron saying so, and the flat tree
-  // keeps the shape its tests already pin.
-  const orphansNode = (): PerfNode | null => {
-    if (!groupByBot) return null;
-    if (!orphans) {
-      orphans = makeNode("orphans", "orphans", "Unattached");
-      fleet.children.push(orphans);
+  // Absent from a tree with no levels at all, for the same reason a bot level
+  // is: a chevron that tells the reader nothing, and the flat tree keeps the
+  // shape its tests already pin.
+  const orphansNode = (under: PerfNode): PerfNode | null => {
+    if (grouping.length === 0) return null;
+    let node = orphansOf.get(under.id);
+    if (!node) {
+      node = makeNode(under === fleet ? "orphans" : `${under.id}${NEST}orphans`, "orphans", "Unattached");
+      orphansOf.set(under.id, node);
+      under.children.push(node);
     }
-    return orphans;
+    return node;
   };
 
-  // The bucket for one dead controller id's executors, built exactly as
-  // `botFor` is: memoised, created the first time one is seen, and pushed onto
-  // `orphansNode()` in that order rather than onto the fleet directly — the
-  // per-id split is still worth keeping once the reader opens "Unattached",
-  // it just should not cost a row of its own before they do.
-  const groupFor = (leaf: PerfLeaf): PerfNode | null => {
-    if (!groupByBot) return null;
-    const id = groupNodeId(leaf);
-    if (!id) return null;
+  // The bucket for one dead controller id's executors: memoised, created the
+  // first time one is seen, and pushed onto `orphansNode()` rather than onto
+  // the level directly — the per-id split is still worth keeping once the
+  // reader opens "Unattached", it just should not cost a row of its own before
+  // they do.
+  const groupFor = (leaf: PerfLeaf, under: PerfNode): PerfNode | null => {
+    const bucket = orphansNode(under);
+    if (!bucket) return null;
+    const bare = groupNodeId(leaf);
+    if (!bare) return null;
+    const id = under === fleet ? bare : `${under.id}${NEST}${bare}`;
     let node = groups.get(id);
     if (!node) {
       // The controller id the executor carries, said out loud — `main`, for a
       // position opened by hand. It is the one name the record has.
       node = makeNode(id, "group", leaf.bot);
       groups.set(id, node);
-      orphansNode()?.children.push(node);
+      bucket.children.push(node);
     }
     return node;
   };
 
-  // Insertion order is the caller's order, which is the order the sidebar
-  // draws — the page sorts its controllers before handing them over.
   const controllerFor = (leaf: PerfLeaf): PerfNode | null => {
     const id = controllerNodeId(leaf);
     if (!id) return null;
@@ -704,7 +897,7 @@ export function buildTree(
     if (!node) {
       node = makeNode(id, "controller", leaf.controllerId);
       controllers.set(id, node);
-      (botFor(leaf) ?? agentFor(leaf) ?? fleet).children.push(node);
+      levelFor(anchors.get(id) ?? leaf).children.push(node);
     }
     return node;
   };
@@ -724,10 +917,16 @@ export function buildTree(
     node.leaves = [leaf];
     // A standalone executor an agent created has no controller and no bot, and
     // this is where it stops being a mystery row on the fleet root: it hangs
-    // off the agent whose session tagged it. The agent is asked before the
-    // bucket because it is the better answer — an owner, not a filing key — and
-    // an executor it owns is never left over for the bucket to hold.
-    const parent = controllerFor(leaf) ?? agentFor(leaf) ?? groupFor(leaf) ?? fleet;
+    // off the agent whose session tagged it. An owner is a better answer than a
+    // filing key, so an executor whose owner the tree actually drew a row for
+    // is never left over for the bucket to hold — while one that nobody owns
+    // is gathered under "Unattached" inside whatever level it landed in.
+    let parent = controllerFor(leaf);
+    if (!parent) {
+      const under = levelFor(leaf);
+      const owned = !!leaf.agent && grouping.includes("agent");
+      parent = (owned ? null : groupFor(leaf, under)) ?? under;
+    }
     parent.children.push(node);
   }
 
@@ -740,7 +939,36 @@ export function buildTree(
   };
   settle(fleet);
 
+  sinkUnowned(fleet);
   return fleet;
+}
+
+/**
+ * Push the two unowned buckets to the end of every list of owner rows.
+ *
+ * The reason `agentFilter` already gives for the bubbles: they are *"the bucket
+ * for everything the fleet map could not credit, not one more owner"*, and on a
+ * real server they are usually the biggest. Naming them after the named runs
+ * keeps the runs readable as a list. Insertion order decides everything else in
+ * this tree, and deliberately — this is the one exception, because the order
+ * records arrive in has nothing to say about which of them is an answer.
+ *
+ * Between themselves they take the order the bubbles give them, and for the
+ * same reason: *Outside Condor* is a standing fact, *Before the ledger* is the
+ * one that drains to zero as the log fills.
+ */
+const UNOWNED_ORDER = [OUTSIDE, BEFORE_LEDGER];
+
+function sinkUnowned(node: PerfNode): void {
+  const rank = (child: PerfNode) =>
+    child.kind === "agent" ? UNOWNED_ORDER.indexOf(bareId(child.id).slice(6)) : -1;
+  if (node.children.some((child) => rank(child) >= 0)) {
+    node.children = [
+      ...node.children.filter((child) => rank(child) < 0),
+      ...node.children.filter((child) => rank(child) >= 0).sort((a, b) => rank(a) - rank(b)),
+    ];
+  }
+  node.children.forEach(sinkUnowned);
 }
 
 /**
@@ -772,7 +1000,7 @@ export function collectLeaves(node: PerfNode, kind: PerfLeaf["kind"]): PerfLeaf[
  * How many nodes of one kind the tree holds, at whatever depth they sit.
  *
  * The sidebar's "N controllers" used to count the fleet's own children, which
- * was the same number only while the tree was flat: with `groupByBot` on, every
+ * was the same number only while the tree was flat: with a bot level on, every
  * controller is a grandchild and that count read zero.
  */
 export function countNodes(root: PerfNode, kind: NodeKind): number {
@@ -862,68 +1090,85 @@ export function visibleNodeIds(root: PerfNode, open: ReadonlySet<string>): strin
  * reads as depth-0 here and so falls all the way back to the fleet, which is
  * the report it named.
  */
-export function fallbackChain(scopeId: string, leaf?: PerfLeaf): string[] {
+export function fallbackChain(
+  scopeId: string,
+  leaf?: PerfLeaf,
+  { grouping = DEFAULT_GROUPING, deeds = null }: ScopeOpts = {},
+): string[] {
   const chain = [scopeId];
   if (leaf) {
     const ctrl = controllerNodeId(leaf);
     if (ctrl) chain.push(ctrl);
   }
-  // The bot level is optional (see `buildTree`), so this candidate is often not
-  // in the tree at all — `resolveScope` simply walks past it to the fleet. When
-  // it *is* there it is the right landing place: a controller that a filter
-  // removed leaves the reader on the bot that ran it rather than on the whole
-  // fleet. Read off the id, so it serves a `ctrl:` scope with no leaf to hand.
-  const bot = botOfNodeId(scopeId) ?? (leaf ? botNodeId(leaf)?.slice(4) : undefined);
+  // The grouping rows the leaf sits inside, innermost first — the ancestry the
+  // id used to spell out on its own. A level the caller left out is simply not
+  // in the tree, so `resolveScope` walks past its candidate to the next one:
+  // a controller that a filter removed leaves the reader on the bot that ran
+  // it, or on the owner above that, rather than on the whole fleet.
+  const levels = leaf ? axisChain(leaf, grouping, deeds).reverse() : [];
+  // The bucket the leaf hangs in when no controller claims it, which sits just
+  // inside those rows: without it an executor row a filter removed falls all
+  // the way back to the fleet rather than to the group it was sitting in. Only
+  // a leaf can supply it, since a group is not an ancestry an executor id
+  // spells out; a group scope answers for itself as the head of the chain.
+  const bare = leaf ? groupNodeId(leaf) : null;
+  if (bare) {
+    const under = levels[0] ?? "";
+    chain.push(under ? `${under}${NEST}${bare}` : bare);
+  }
+  // Read off the id as well as off the leaf, so a `ctrl:` scope with no leaf to
+  // hand still knows the bot it named. An `agent:` scope answers for itself.
+  const bot = botOfNodeId(scopeId);
   if (bot) chain.push(`bot:${bot}`);
-  // The bucket the leaf hangs in when no controller claims it, which is that
-  // same candidate one level up: without it an executor row a filter removed
-  // falls all the way back to the fleet rather than to the group it was sitting
-  // in. Only a leaf can supply it, since a group is not an ancestry an executor
-  // id spells out; a group scope answers for itself as the head of the chain.
-  const group = leaf ? groupNodeId(leaf) : null;
-  if (group) chain.push(group);
-  // And the agent above it, same rule: a bot row that a filter removed leaves
-  // the reader on the agent that operates it rather than on the whole fleet.
-  // Only a leaf can supply it — a `bot:`/`ctrl:` id names a bot, and a bot's
-  // name does not say who owns it without the fleet map, which this pure
-  // function does not have. An `agent:` scope answers for itself.
-  const agent = agentOfNodeId(scopeId) ?? leaf?.agent;
-  if (agent) chain.push(`agent:${agent}`);
-  chain.push("all");
+  chain.push(...levels, "all");
 
-  const depth = nodeDepth(scopeId);
+  const depth = nodeDepth(scopeId, grouping);
   const seen = new Set<string>();
   return chain.filter(
-    (id) => nodeDepth(id) <= depth && !seen.has(id) && (seen.add(id), true),
+    (id) => nodeDepth(id, grouping) <= depth && !seen.has(id) && (seen.add(id), true),
   );
 }
 
 /**
- * How far down the tree an id sits, read off the id alone.
+ * How far down the tree an id sits, read off the id and the order that built it.
  *
- * An id that names no level of this tree — a retired `type:` group from a link
- * written before the class grouping went away, or plain nonsense — is treated
- * as the *shallowest* thing there is, so the only candidate that can serve it
- * is the fleet. A stale `bot:` id is *not* nonsense any more: it is a level
- * again, and lands on the bot when the tree groups by bot and on the fleet when
- * it does not — either way a report about that bot, never one of its
- * controllers, which would be much narrower than the link asked for.
+ * This is what a reorderable nesting actually costs. The depths used to be
+ * constants — *"an `agent:` sits at 1"* — because there was one nesting and an
+ * id prefix therefore named a level; with the order in the caller's hands an
+ * `agent:` row sits wherever the caller put it, and inferring otherwise would
+ * be a lie in the one function whose answers must never be.
+ *
+ * An id that names no level of *this* grouping — a `bot:` from a link written
+ * under `?groupBy=pair`, a retired `type:` group from before the class grouping
+ * went away, or plain nonsense — is treated as the *shallowest* thing there is,
+ * so the only candidate that can serve it is the fleet. That is the right
+ * answer rather than a giving-up: the link named a level this reading of the
+ * fleet does not have, and the report that contains it is the whole fleet.
  *
  * These are *relative* depths, and only the ordering is load-bearing: the rule
  * they serve is "a candidate is never deeper than the scope it replaces". The
- * agent level (FEAT-096) pushed every number below it down by one; the `ctrl:`
- * and `exec:` id *grammars* are untouched, so links written before it still
- * resolve exactly as they did.
+ * `ctrl:` and `exec:` id *grammars* are untouched, so links written before any
+ * of this still resolve exactly as they did.
  */
-function nodeDepth(id: string): number {
-  if (id.startsWith("agent:")) return 1;
-  // A child of the fleet, like an agent row — and never an ancestor of a
-  // controller, since the leaves it holds belong to none.
-  if (id.startsWith("grp:")) return 1;
-  if (id.startsWith("bot:")) return 2;
-  if (id.startsWith("ctrl:")) return 3;
-  if (id.startsWith("exec:")) return 4;
+function nodeDepth(id: string, grouping: readonly GroupAxis[]): number {
+  const axis = axisOfNodeId(id);
+  if (axis) {
+    const at = grouping.indexOf(axis);
+    return at < 0 ? 0 : at + 1;
+  }
+  // The unattached rows sit just inside the last grouping level and just
+  // outside a controller, which is where a lost executor has to be able to land.
+  const bare = bareId(id);
+  if (bare === "orphans" || bare.startsWith("grp:")) return grouping.length + 1;
+  if (bare.startsWith("ctrl:")) return grouping.length + 1;
+  if (bare.startsWith("exec:")) return grouping.length + 2;
   return 0;
+}
+
+/** How a scope is read: the order the tree was built in, and the ledger behind it. */
+export interface ScopeOpts {
+  grouping?: readonly GroupAxis[];
+  deeds?: DeedIndex | null;
 }
 
 /**
@@ -937,8 +1182,9 @@ export function resolveScope(
   nodes: ReadonlyMap<string, PerfNode>,
   scopeId: string,
   leaf?: PerfLeaf,
+  opts: ScopeOpts = {},
 ): string {
-  return fallbackChain(scopeId, leaf).find((id) => nodes.has(id)) ?? "all";
+  return fallbackChain(scopeId, leaf, opts).find((id) => nodes.has(id)) ?? "all";
 }
 
 /**
@@ -990,12 +1236,13 @@ export function emptyScopeNode(id: string, label: string): PerfNode {
  * has to be conjured without a tree to look it up in ({@link emptyScopeNode}).
  */
 function kindOfNodeId(id: string): NodeKind {
-  if (id.startsWith("agent:")) return "agent";
-  if (id.startsWith("bot:")) return "bot";
-  if (id.startsWith("grp:")) return "group";
-  if (id.startsWith("ctrl:")) return "controller";
-  if (id.startsWith("exec:")) return "executor";
-  if (id === "orphans") return "orphans";
+  const axis = axisOfNodeId(id);
+  if (axis) return AXIS_KIND[axis];
+  const bare = bareId(id);
+  if (bare.startsWith("grp:")) return "group";
+  if (bare.startsWith("ctrl:")) return "controller";
+  if (bare.startsWith("exec:")) return "executor";
+  if (bare === "orphans") return "orphans";
   return "fleet";
 }
 

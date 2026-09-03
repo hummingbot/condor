@@ -59,7 +59,7 @@ const tree = buildTree(
     ),
   ],
   "All",
-  { groupByBot: true, groupByAgent: true },
+  { grouping: ["agent", "bot"] },
 );
 const nodes = indexTree(tree);
 
@@ -123,7 +123,7 @@ describe("clampScope", () => {
         ),
       ],
       "All",
-      { groupByBot: false, groupByAgent: false },
+      { grouping: [] },
     );
     // `bot:` sits under `agent:` by the id grammar, but this tree has neither
     // level, so the controller is not inside the agent — and the clamp says so.

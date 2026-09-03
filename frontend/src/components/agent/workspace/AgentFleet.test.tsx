@@ -250,6 +250,23 @@ describe("AgentFleet", () => {
     expect(text()).not.toContain("vega-momentum-eth");
   });
 
+  // The rule FEAT-108 left for FEAT-107: whatever order the reader picks, the
+  // browser draws the level its root lives on. A grouping with no owner level
+  // would leave the floor no node to be, and a rooted host would silently
+  // report an empty fleet.
+  it("keeps the agent's own level whatever the grouping asks for", async () => {
+    for (const groupBy of ["pair", "ctrlType", "bot", "none"]) {
+      await render(`&groupBy=${groupBy}`);
+
+      expect(text(), `empty fleet under ?groupBy=${groupBy}`).toContain("brigado-brl_mm-btc");
+      expect(text(), `escaped the root under ?groupBy=${groupBy}`).not.toContain(
+        "vega-momentum-eth",
+      );
+      await act(async () => root.unmount());
+      root = createRoot(container);
+    }
+  });
+
   it("says how much of the fleet it is leaving out", async () => {
     await render();
 
