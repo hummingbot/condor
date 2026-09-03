@@ -663,6 +663,69 @@ describe("/routines", () => {
   });
 });
 
+describe("/ — the fleet overview", () => {
+  beforeEach(() => {
+    qc.setQueryData(["agents"], [
+      {
+        slug: "brigado",
+        name: "Brigado",
+        status: "running",
+        agent_key: "claude-fable-5",
+        session_count: 4,
+        total_pnl: 64.12,
+        total_volume: 2_549_843,
+        open_positions: 2,
+        strategies: [
+          {
+            slug: "brl_mm",
+            name: "BRL MM",
+            session_count: 4,
+            instances: [
+              {
+                agent_id: "brigado.brl_mm_4",
+                status: "running",
+                tick_count: 412,
+                last_tick_at: 1_000,
+                frequency_sec: 60,
+                last_action: "",
+                last_did: null,
+                server_name: SRV,
+              },
+            ],
+          },
+        ],
+      },
+      {
+        slug: "quiet",
+        name: "Quiet",
+        status: "idle",
+        session_count: 1,
+        total_pnl: 0,
+        total_volume: 0,
+        open_positions: 0,
+        strategies: [{ slug: "s", name: "S", session_count: 1, instances: [] }],
+      },
+    ]);
+  });
+
+  it("says what is looping and what has actually been attributed", () => {
+    const line = onScreenLine("/", "?view=fleet");
+    expect(line).toContain("agents 1 running / 2");
+    expect(line).toContain("Brigado tick 412");
+    expect(line).toContain("attributed net +$64.12");
+  });
+
+  it("counts the agents with nothing attributed rather than summing a zero", () => {
+    // A dash on the row must not become a `$0.00` in the block: the two are
+    // different statements and only one of them is true.
+    expect(onScreenLine("/", "?view=fleet")).toContain("unattributed 1");
+  });
+
+  it("contributes nothing at all on the chat view", () => {
+    expect(routeFacts("/", "", qc)).toBeNull();
+  });
+});
+
 describe("/agents/:slug", () => {
   beforeEach(() => {
     qc.setQueryData(["agent", "orca-lp-expert"], {

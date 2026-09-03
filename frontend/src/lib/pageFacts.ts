@@ -1,6 +1,7 @@
 import type { QueryClient } from "@tanstack/react-query";
 
 import { runLabel } from "@/components/agent/lab/runs";
+import { fleetRows } from "@/components/agent/workspace/fleet";
 import { poolLabel } from "@/components/dex/format";
 import { readLpPosition } from "@/components/dex/lp-position";
 import { getDisplayCurrency } from "@/hooks/useDisplayCurrency";
@@ -9,6 +10,7 @@ import type {
   AgentBrain,
   AgentDetail,
   AgentRunRow,
+  AgentSummary,
   BotDetail,
   BotRunsResponse,
   BotsPageResponse,
@@ -555,9 +557,42 @@ const ROUTES: {
      *
      * Only ever reached with `?view=fleet`: the chat view returns above,
      * before this table is walked.
+     *
+     * Read through `fleetRows`, the page's own rule, rather than by summing
+     * the payload again here — including its dash: an agent with nothing
+     * attributed is *counted* as unattributed instead of being folded into the
+     * net as a zero, which is the same honesty the row prints.
      */
     pattern: /^\/$/,
     facts: () => ({ label: "Fleet overview" }),
+    onScreen: (_parts, _view, qc) => {
+      const agents = fresh<AgentSummary[]>(qc, ["agents"]);
+      if (!Array.isArray(agents) || agents.length === 0) return undefined;
+      const m = money(qc);
+      const rows = fleetRows(agents, Date.now() / 1000);
+      const looping = rows.filter((row) => row.live?.status === "running");
+      const attributed = rows.filter((row) => row.net !== null);
+      const net = attributed.reduce((sum, row) => sum + (row.net ?? 0), 0);
+      const { best, worst } = extremes(
+        attributed.map((row) => ({ name: row.name, value: row.net ?? 0 })),
+        m.pnl,
+      );
+      const wants = rows.filter((row) => row.alerts.length > 0);
+      return {
+        agents: ratio(looping.length, rows.length),
+        looping: names(
+          looping.map((row) => `${row.name} tick ${row.live?.tick_count ?? 0}`),
+        ),
+        "attributed net": attributed.length > 0 ? m.pnl(net) : undefined,
+        unattributed: rows.length - attributed.length || undefined,
+        best,
+        worst,
+        // R4, and the reason a reader opened this page at all.
+        "wants a person":
+          names(wants.map((row) => `${row.name}: ${row.alerts[0].text}`), 2) ||
+          undefined,
+      };
+    },
   },
   {
     pattern: /^\/portfolio$/,
