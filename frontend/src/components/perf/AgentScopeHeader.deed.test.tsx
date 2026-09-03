@@ -139,19 +139,21 @@ describe("the deed line", () => {
     expect(container.textContent).toContain("insufficient balance");
   });
 
-  it("opens the session on the tick the deed happened on", async () => {
+  // The address is a URL, not `location.state` (FEAT-099): a tick nobody can
+  // copy out of the address bar is a tick nobody can send to anyone.
+  it("opens the tick the deed happened on, at a linkable URL", async () => {
     await render(owner({ lastDid: did({ tick: 212 }) }));
 
     await act(async () => {
       deed()!.click();
     });
 
-    expect(navigate).toHaveBeenCalledWith("/agents/brigado/strategies/brl_mm", {
-      state: { openReviewer: true, sessionNum: 7, snapshotTick: 212 },
-    });
+    expect(navigate).toHaveBeenCalledWith(
+      "/agents/brigado/runs?strategy=brl_mm&run=s7&tick=212",
+    );
   });
 
-  it("still opens the session plainly from the Open session button", async () => {
+  it("still opens the run plainly from the Open session button", async () => {
     await render(owner({ lastDid: did() }));
 
     await act(async () => {
@@ -160,8 +162,6 @@ describe("the deed line", () => {
         .click();
     });
 
-    expect(navigate).toHaveBeenCalledWith("/agents/brigado/strategies/brl_mm", {
-      state: { openReviewer: true, sessionNum: 7, snapshotTick: undefined },
-    });
+    expect(navigate).toHaveBeenCalledWith("/agents/brigado/runs?strategy=brl_mm&run=s7");
   });
 });

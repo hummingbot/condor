@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertCircle, FileText, FlaskConical, Layers, ScrollText, Trash2, X, Zap } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
+import { AlertCircle, ChevronRight, FileText, FlaskConical, Layers, Repeat, ScrollText, Trash2, X, Zap } from "lucide-react";
+import { useCallback, useMemo, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
 
 import { AgentControls } from "@/components/agent/AgentControls";
 import { AgentMarketStrip } from "@/components/agent/AgentMarketStrip";
@@ -12,13 +12,13 @@ import {
 } from "@/components/agent/AgentOverviewTab";
 import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
 import { LoopPulse } from "@/components/agent/LoopPulse";
-import { SessionReviewer } from "@/components/agent/SessionReviewer";
+import { isLiveRun, runFacts, runLabel } from "@/components/agent/lab/runs";
 import { DiscardChangesDialog } from "@/components/editor/EditorDialogs";
 import { ReportBrowser } from "@/components/routines/ReportBrowser";
 import { ExecutorChart } from "@/components/charts/ExecutorChart";
 import { useAgentExecutors } from "@/hooks/useAgentExecutors";
 import { useEscapeKey } from "@/hooks/useEscapeKey";
-import { api } from "@/lib/api";
+import { api, type AgentRunRow } from "@/lib/api";
 import { groupExecutorsByMarket } from "@/lib/executor-overlays";
 
 /**
@@ -37,11 +37,19 @@ import { groupExecutorsByMarket } from "@/lib/executor-overlays";
  * is wide in both cases, so `lg:` is true in a 640px column and an eight-across
  * stat grid lands there as eight slivers.
  *
- * The reviewer, the playbook editor, the routine browser and the delete
- * confirmation all stay overlays here, above whichever host is on screen. They
- * are modal work — you are reading one session, or editing one file — and an
- * overlay inside a pane that is itself beside a chat is still the smallest
- * thing that can hold them.
+ * The playbook editor, the routine browser and the delete confirmation stay
+ * overlays here, above whichever host is on screen. They are modal work — you
+ * are editing one file, or confirming one destruction — and an overlay inside a
+ * pane that is itself beside a chat is still the smallest thing that can hold
+ * them.
+ *
+ * Run *analysis* is not here any more (FEAT-099). The session reviewer was an
+ * overlay with no URL of its own, so the one surface where you read what a loop
+ * actually did could not be linked, bookmarked or shared. It lives at
+ * `/agents/:slug/runs` now, and the split is clean: **the workbench operates a
+ * strategy, the Lab reads its runs.** What stays here is what this component is
+ * good at — identity, start/stop/pause, live executor charts, playbook and
+ * learnings, delete — plus a Runs band that is the door to the other half.
  */
 export function StrategyWorkbench({
   slug,
@@ -58,11 +66,6 @@ export function StrategyWorkbench({
 }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const [reviewerSessionNum, setReviewerSessionNum] = useState<number | null>(null);
-  // A tick to open the reviewer straight onto, when the caller had one (the
-  // fleet band's deed line, and the loop pulse's beats, both carry one).
-  const [reviewerSnapshotTick, setReviewerSnapshotTick] = useState<number | null>(null);
-  const [reviewerKind, setReviewerKind] = useState<"session" | "experiment">("session");
   const [showStrategyModal, setShowStrategyModal] = useState(false);
   const [showRoutinesBrowser, setShowRoutinesBrowser] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -168,30 +171,23 @@ export function StrategyWorkbench({
     [liveExecutors, serverName],
   );
 
-  // Session/experiment click -> open reviewer
-  const handleSessionClick = useCallback((sessionNum: number, kind?: "session" | "experiment") => {
-    setReviewerSessionNum(sessionNum);
-    setReviewerSnapshotTick(null);
-    setReviewerKind(kind || "session");
-  }, []);
+  /** Where a run — or one tick of it — is read: the Lab, at a real URL. */
+  const labUrl = useCallback(
+    (params: Record<string, string | number> = {}) => {
+      const query = new URLSearchParams({ strategy: sslug });
+      for (const [k, v] of Object.entries(params)) query.set(k, String(v));
+      return `/agents/${encodeURIComponent(slug)}/runs?${query}`;
+    },
+    [slug, sslug],
+  );
 
   /** A beat on the pulse strip is an address: land on that tick's snapshot. */
-  const handleOpenTick = useCallback((sessionNum: number, tick: number) => {
-    setReviewerSessionNum(sessionNum);
-    setReviewerSnapshotTick(tick);
-    setReviewerKind("session");
-  }, []);
-
-  /** Deep-linked from elsewhere (the fleet band's `openReviewer` state). */
-  const openReviewerAt = useCallback(
-    (sessionNum: number | null, snapshotTick: number | null) => {
-      setReviewerSessionNum(sessionNum);
-      setReviewerSnapshotTick(snapshotTick);
-      setReviewerKind("session");
+  const handleOpenTick = useCallback(
+    (sessionNum: number, tick: number) => {
+      navigate(labUrl({ run: `s${sessionNum}`, tick }));
     },
-    [],
+    [navigate, labUrl],
   );
-  useDeepLinkedReviewer(openReviewerAt);
 
   if (error && !strategy) {
     return (
@@ -215,9 +211,6 @@ export function StrategyWorkbench({
     );
   }
 
-  const reviewerOpen = reviewerSessionNum !== null;
-  const resolvedReviewerSession =
-    reviewerSessionNum ?? (strategy.sessions.length > 0 ? strategy.sessions[0].number : 0);
   const liveInstance = instances.find((i) => i.status === "running") ?? instances[0] ?? null;
 
   const actionClass =
@@ -250,21 +243,6 @@ export function StrategyWorkbench({
             <FileText className="h-3.5 w-3.5" />
             <span className={labelClass}>Playbook</span>
           </button>
-          {strategy.experiments.length > 0 && (
-            <button
-              onClick={() =>
-                handleSessionClick(
-                  Math.max(...strategy.experiments.map((e) => e.number)),
-                  "experiment",
-                )
-              }
-              className={actionClass}
-              title="Dry-run & run-once snapshots"
-            >
-              <FlaskConical className="h-3.5 w-3.5" />
-              <span className={labelClass}>Dry runs ({strategy.experiments.length})</span>
-            </button>
-          )}
           {/* The way back into the fleet page (FEAT-096). The link the agent
               band's *Open session* is the other half of: a strategy's work
               is a grouping fact about the fleet, and this is where the reader
@@ -325,18 +303,13 @@ export function StrategyWorkbench({
             strategy whose whole history is one dry run used to read as one
             that had never run. */}
         {strategy.experiments.length > 0 && (
-          <button
-            onClick={() =>
-              handleSessionClick(
-                Math.max(...strategy.experiments.map((e) => e.number)),
-                "experiment",
-              )
-            }
+          <Link
+            to={labUrl({ run: `e${Math.max(...strategy.experiments.map((e) => e.number))}` })}
             className="flex items-center gap-1 rounded border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-amber-400 transition-colors hover:bg-amber-500/20"
           >
             <FlaskConical className="h-3 w-3" />
             {strategy.experiments.length} dry run{strategy.experiments.length !== 1 ? "s" : ""}
-          </button>
+          </Link>
         )}
         <span className="rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1 font-mono">
           {strategy.slug}
@@ -388,14 +361,15 @@ export function StrategyWorkbench({
         </div>
       )}
 
-      {/* Performance Panel + Sessions table */}
+      {/* The way into the Lab. The sessions table that used to sit here was
+          nine columns, seven of them $0.00, and none of them a tick count. */}
+      <div className="mb-6">
+        <RunsBand slug={slug} sslug={sslug} labUrl={labUrl} />
+      </div>
+
+      {/* Performance Panel — strategy-level money, which is what it always was */}
       <div className={`mb-8 grid grid-cols-1 gap-6 ${dense ? "" : "lg:grid-cols-2"}`}>
-        <PerformancePanel
-          slug={slug}
-          sslug={sslug}
-          dense={dense}
-          onSessionClick={handleSessionClick}
-        />
+        <PerformancePanel slug={slug} sslug={sslug} dense={dense} />
       </div>
 
       {/* Playbook & Learnings Modal (near full-screen) */}
@@ -483,52 +457,88 @@ export function StrategyWorkbench({
         cannot be undone.
       </ConfirmDialog>
 
-      {/* Session Reviewer Overlay */}
-      {reviewerOpen && (strategy.sessions.length > 0 || strategy.experiments.length > 0) && (
-        <SessionReviewer
-          slug={slug}
-          sslug={sslug}
-          agentName={`${slug} / ${strategy.name}`}
-          sessions={strategy.sessions}
-          experiments={strategy.experiments}
-          initialSessionNum={resolvedReviewerSession}
-          initialKind={reviewerKind}
-          initialSnapshotTick={reviewerSnapshotTick}
-          serverName={serverName}
-          controllerIds={controllerIds}
-          onClose={() => {
-            setReviewerSessionNum(null);
-            setReviewerSnapshotTick(null);
-          }}
-        />
-      )}
     </div>
   );
 }
 
 /**
- * Honour a `location.state` deep link into the reviewer, once.
+ * The five newest runs, and a door to the rest.
  *
- * The fleet band navigates here with `{ openReviewer, sessionNum, snapshotTick }`
- * so a deed on that page lands on the tick that produced it. The state is
- * cleared on arrival: a reload, or a later back-navigation, must not re-open a
- * reviewer the reader has since closed.
+ * The workbench is hosted twice — as a page and as the chat's workspace pane —
+ * and taking run analysis out of it must not leave either host with no way into
+ * a session. This is that way, and it links *out* to the Lab: the one deliberate
+ * exception to `AgentPanel`'s "no door out", justified because a three-pane lab
+ * does not fit a 640px column.
  *
- * Both hosts are inside the router — the pane lives on the `/` route — so the
- * pane simply never carries this state and the effect never fires there.
+ * Reads the same `["agent-runs", slug]` query the Lab does, so opening one from
+ * here costs no second fetch.
  */
-function useDeepLinkedReviewer(
-  open: (sessionNum: number | null, snapshotTick: number | null) => void,
-) {
-  const navigate = useNavigate();
-  const location = useLocation();
-  useEffect(() => {
-    const state = location.state as
-      | { openReviewer?: boolean; sessionNum?: number; snapshotTick?: number }
-      | null;
-    if (state?.openReviewer) {
-      open(state.sessionNum ?? null, state.snapshotTick ?? null);
-      navigate(location.pathname + location.search, { replace: true, state: null });
-    }
-  }, [location.state, location.pathname, location.search, navigate, open]);
+function RunsBand({
+  slug,
+  sslug,
+  labUrl,
+}: {
+  slug: string;
+  sslug: string;
+  labUrl: (params?: Record<string, string | number>) => string;
+}) {
+  const { data: runs = [] } = useQuery({
+    queryKey: ["agent-runs", slug],
+    queryFn: () => api.getAgentRuns(slug),
+    enabled: !!slug,
+    refetchInterval: 5000,
+  });
+
+  const mine = useMemo(
+    () => runs.filter((r) => r.strategy_slug === sslug).slice(0, 5),
+    [runs, sslug],
+  );
+  const nowSec = Date.now() / 1000;
+
+  return (
+    <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
+      <div className="mb-3 flex items-center justify-between">
+        <h3 className="flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
+          <Repeat className="h-3.5 w-3.5" /> Runs
+        </h3>
+        <Link
+          to={labUrl()}
+          className="flex items-center gap-0.5 text-[11px] font-medium text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-primary)]"
+        >
+          All runs
+          <ChevronRight className="h-3 w-3" />
+        </Link>
+      </div>
+      {mine.length === 0 ? (
+        <p className="text-xs text-[var(--color-text-muted)]">No runs yet.</p>
+      ) : (
+        <div className="space-y-1">
+          {mine.map((run: AgentRunRow) => (
+            <Link
+              key={run.run_id}
+              to={labUrl({ run: run.run_id })}
+              className="flex items-center gap-2 rounded-md px-2 py-1.5 text-xs transition-colors hover:bg-[var(--color-surface-hover)]"
+            >
+              <span
+                className={`h-2 w-2 shrink-0 rounded-full ${
+                  isLiveRun(run)
+                    ? "bg-emerald-400"
+                    : run.error
+                      ? "bg-[var(--color-red)]"
+                      : "border border-[var(--color-text-muted)]/50"
+                }`}
+              />
+              <span className="font-mono font-bold text-[var(--color-text)]">
+                {runLabel(run)}
+              </span>
+              <span className="text-[var(--color-text-muted)]">{run.status}</span>
+              <span className="ml-auto font-mono text-[10px] text-[var(--color-text-muted)]">
+                {runFacts(run, nowSec)}
+              </span>
+            </Link>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }

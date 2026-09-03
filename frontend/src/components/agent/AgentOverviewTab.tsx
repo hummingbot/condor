@@ -1,11 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  ChevronRight,
-  Clock,
-  FlaskConical,
-  Save,
-  Zap,
-} from "lucide-react";
+import { Save, Zap } from "lucide-react";
 import { useCallback, useMemo, useState } from "react";
 
 import { AgentPnlChart, sessionsToDataPoints } from "@/components/agent/AgentPnlChart";
@@ -160,7 +154,6 @@ export function PerformancePanel({
   slug,
   sslug,
   dense = false,
-  onSessionClick,
 }: {
   slug: string;
   sslug: string;
@@ -170,7 +163,6 @@ export function PerformancePanel({
    * eight stat tiles four characters wide.
    */
   dense?: boolean;
-  onSessionClick?: (sessionNum: number, kind?: "session" | "experiment") => void;
 }) {
   const { data } = useQuery({
     queryKey: ["strategy-performance", slug, sslug],
@@ -178,12 +170,11 @@ export function PerformancePanel({
     refetchInterval: 10000,
   });
   const totals = data?.totals || {};
-  const allRows = data?.sessions || [];
-  const sessions = allRows.filter((s) => s.kind === "session");
   // A dry run books nothing by construction — that is what makes it a dry run —
-  // so it is counted and listed but never folded into the totals below, which
-  // are about money that moved.
-  const experiments = allRows.filter((s) => s.kind === "experiment");
+  // so it is never folded into the totals below, which are about money that
+  // moved. The runs themselves are listed in the Lab (FEAT-099); what stays
+  // here is the strategy-level view: the KPI strip and the equity curve.
+  const sessions = (data?.sessions || []).filter((s) => s.kind === "session");
   const totalPnl = Number(totals.total_pnl ?? 0);
   const realized = Number(totals.realized_pnl ?? 0);
   const unrealized = Number(totals.unrealized_pnl ?? 0);
@@ -272,99 +263,6 @@ export function PerformancePanel({
         <AgentPnlChart data={pnlData} height={180} title="PnL Equity Curve" />
       )}
 
-      {/* Sessions & Experiments table */}
-      <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
-        <h3 className="mb-3 flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
-          <Clock className="h-3.5 w-3.5" /> Sessions ({sessions.length})
-          {experiments.length > 0 && (
-            <span className="ml-1 flex items-center gap-1 rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-400">
-              <FlaskConical className="h-2.5 w-2.5" />
-              {experiments.length} dry run{experiments.length === 1 ? "" : "s"}
-            </span>
-          )}
-        </h3>
-        {allRows.length === 0 ? (
-          <p className="text-xs text-[var(--color-text-muted)]">No sessions yet.</p>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs">
-              <thead>
-                <tr className="text-left text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">
-                  <th className="px-2 py-1">#</th>
-                  <th className="px-2 py-1">Kind</th>
-                  <th className="px-2 py-1">Status</th>
-                  <th className="px-2 py-1 text-right">Total PnL</th>
-                  <th className="px-2 py-1 text-right">Realized</th>
-                  <th className="px-2 py-1 text-right">Unrealized</th>
-                  <th className="px-2 py-1 text-right">Volume</th>
-                  <th className="px-2 py-1 text-right">Trades</th>
-                  <th className="px-2 py-1 text-right">Open</th>
-                  {onSessionClick && <th className="px-2 py-1 w-6" />}
-                </tr>
-              </thead>
-              <tbody>
-                {allRows
-                  .slice()
-                  .sort((a, b) => (b.kind === a.kind ? b.session_num - a.session_num : a.kind === "experiment" ? 1 : -1))
-                  .map((s) => {
-                    const pnlCol = pnlTextClass(s.total_pnl);
-                    const isExperiment = s.kind === "experiment";
-                    return (
-                      <tr
-                        key={s.agent_id}
-                        onClick={() => onSessionClick?.(s.session_num, s.kind)}
-                        className={`border-t border-[var(--color-border)]/40 font-mono ${onSessionClick ? "cursor-pointer transition-colors hover:bg-[var(--color-surface-hover)]" : ""}`}
-                      >
-                        <td className="px-2 py-1.5 text-[var(--color-text)]">{s.session_num}</td>
-                        <td className="px-2 py-1.5">
-                          {isExperiment ? (
-                            // Which kind of experiment, not just "exp": a
-                            // simulation and a single real tick both land in
-                            // dry_runs/ and only one of them can lose money.
-                            <span className="inline-flex items-center gap-0.5 rounded bg-amber-500/10 px-1.5 py-0.5 text-[9px] font-bold uppercase text-amber-400">
-                              <FlaskConical className="h-2.5 w-2.5" />
-                              {s.execution_mode === "run_once"
-                                ? "once"
-                                : s.execution_mode === "dry_run"
-                                  ? "dry"
-                                  : "exp"}
-                            </span>
-                          ) : (
-                            <span className="text-[var(--color-text-muted)]">{s.kind}</span>
-                          )}
-                        </td>
-                        <td className={`px-2 py-1.5 ${s.status === "running" ? "text-emerald-400" : s.error ? "text-[var(--color-red)]" : "text-[var(--color-text-muted)]"}`}>
-                          {/* A dry run has no backend status to report — it
-                              never registered anything to have one. What it
-                              does have is whether the tick itself failed, and
-                              that is the fact worth the column. */}
-                          {s.error ? "errored" : s.status || "—"}
-                        </td>
-                        <td className={`px-2 py-1.5 text-right ${pnlCol}`}>
-                          {formatCurrencyPnl(s.total_pnl)}
-                        </td>
-                        <td className="px-2 py-1.5 text-right text-[var(--color-text-muted)]">{formatCurrencyPnl(s.realized_pnl)}</td>
-                        <td className="px-2 py-1.5 text-right text-[var(--color-text-muted)]">{formatCurrencyPnl(s.unrealized_pnl)}</td>
-                        <td className="px-2 py-1.5 text-right text-[var(--color-text-muted)]">
-                          {formatCurrencyVolume(s.volume)}
-                        </td>
-                        <td className="px-2 py-1.5 text-right text-[var(--color-text-muted)]">
-                          {s.trade_count === 0 && s.volume > 0 ? "—" : s.trade_count}
-                        </td>
-                        <td className="px-2 py-1.5 text-right text-[var(--color-text-muted)]">{s.open_count}</td>
-                        {onSessionClick && (
-                          <td className="px-2 py-1.5 text-[var(--color-text-muted)]">
-                            <ChevronRight className="h-3.5 w-3.5" />
-                          </td>
-                        )}
-                      </tr>
-                    );
-                  })}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
     </div>
   );
 }

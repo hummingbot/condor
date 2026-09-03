@@ -77,13 +77,21 @@ export function AgentScopeHeader({
   // (the ARCH-300 split); what stays here is the clock and the markup.
   const facts = loopFacts(live, now);
 
-  // `snapshotTick` lands the reviewer on that tick's full snapshot, collapsing
-  // the main page → agent → session → snapshot walk a tick needs otherwise.
+  // `snapshotTick` lands on that tick's full snapshot, collapsing the main page
+  // → agent → session → snapshot walk a tick needs otherwise.
+  //
+  // A plain URL since FEAT-099. It used to be `location.state` carrying
+  // `{ openReviewer, sessionNum, snapshotTick }`, because the reviewer was an
+  // overlay with nowhere to put that state — which meant the tick this line
+  // names could not be copied, bookmarked or sent to anyone. Putting the state
+  // in the URL is the whole point of the Lab, so this is the shortest possible
+  // demonstration of it.
   const openSession = (snapshotTick?: number) => {
     if (!owner) return;
-    navigate(`/agents/${owner.agentSlug}/strategies/${owner.strategySlug}`, {
-      state: { openReviewer: true, sessionNum: live?.sessionNum, snapshotTick },
-    });
+    const params = new URLSearchParams({ strategy: owner.strategySlug });
+    if (live?.sessionNum) params.set("run", `s${live.sessionNum}`);
+    if (snapshotTick) params.set("tick", String(snapshotTick));
+    navigate(`/agents/${owner.agentSlug}/runs?${params}`);
   };
 
   const did = live?.lastDid ?? null;
