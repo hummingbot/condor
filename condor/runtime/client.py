@@ -313,6 +313,16 @@ async def prompt(
         # (a background task waking the chat), so the opening line is recorded
         # as a system note rather than as the user's words.
         user_kind=req.user_kind,
+        # The reference, never the payload: an id under this conversation's
+        # own attachments/ directory, its type and its size. That is what lets
+        # a reload put the picture back in the user's bubble — and what makes a
+        # share of this conversation carry an inert reference no corpus can
+        # resolve, which needed no special case in condor/sharing.
+        attachments=[
+            {"id": image.id, "mime": image.mime, "bytes": len(image.data)}
+            for image in req.images
+            if image.id
+        ],
     )
     # Turn shape for telemetry (FEAT-023): counts and categories only. Nothing
     # about what was asked, answered, or which file a tool touched.

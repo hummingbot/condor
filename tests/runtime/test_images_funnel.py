@@ -21,6 +21,7 @@ import base64
 
 import pytest
 
+from condor import paths
 from condor.acp.client import PromptDone, TextChunk
 from condor.runtime import PromptRequest, SessionKey
 from condor.runtime import client as runtime
@@ -240,3 +241,66 @@ def test_the_pydantic_ai_prompt_is_a_list_with_the_image_first():
 
     assert seen[0] == [BinaryContent(data=PNG, media_type="image/png"), "read this"]
     assert seen[1] == "and this?", "a text-only turn stays a bare string"
+
+
+def test_the_user_turn_records_the_reference_and_never_the_payload(registry):
+    """What a reload reads back: an id, a type and a size. No bytes, no name."""
+    from condor.runtime import conversations
+
+    key = SessionKey.telegram(USER)
+
+    async def scenario():
+        info = await runtime.create_session(
+            session_module.SessionSpec(
+                key=str(key), agent_key="claude-code", chat_id=USER, user_id=USER
+            )
+        )
+        async for _ in runtime.prompt(
+            key,
+            PromptRequest(
+                text="what is wrong here?",
+                images=[PromptImage(data=PNG, mime="image/png", id="9f8e7d.png")],
+            ),
+        ):
+            pass
+        await runtime.destroy(key)
+        return info.conversation_id
+
+    conv_id = asyncio.run(scenario())
+    conversations.flush_all()
+
+    turns = conversations.read_transcript(USER, conv_id)
+    (user_turn,) = [turn for turn in turns if turn.role == "user"]
+    assert user_turn.attachments == [
+        {"id": "9f8e7d.png", "mime": "image/png", "bytes": len(PNG)}
+    ]
+
+    written = (paths.conversation_dir(USER, conv_id) / "transcript.jsonl").read_bytes()
+    assert PNG not in written, "the transcript records the reference, not the picture"
+
+
+def test_a_text_only_turn_records_no_attachments(registry):
+    """The default reads as "not recorded", which is the growth contract."""
+    from condor.runtime import conversations
+
+    key = SessionKey.telegram(USER)
+
+    async def scenario():
+        info = await runtime.create_session(
+            session_module.SessionSpec(
+                key=str(key), agent_key="claude-code", chat_id=USER, user_id=USER
+            )
+        )
+        async for _ in runtime.prompt(key, PromptRequest(text="hello")):
+            pass
+        await runtime.destroy(key)
+        return info.conversation_id
+
+    conv_id = asyncio.run(scenario())
+    conversations.flush_all()
+    (user_turn,) = [
+        turn
+        for turn in conversations.read_transcript(USER, conv_id)
+        if turn.role == "user"
+    ]
+    assert user_turn.attachments == []

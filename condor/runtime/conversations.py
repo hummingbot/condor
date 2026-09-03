@@ -372,6 +372,15 @@ class TurnEntry(BaseModel):
     stop_reason: str = Field(
         default="", description="Assistant turns: how the stream ended; '' = unknown."
     )
+    attachments: list[dict] = Field(
+        default_factory=list,
+        description=(
+            "User turns: what was handed over with the words. Per element "
+            "{id, mime, bytes} — an id under this conversation's attachments/ "
+            "directory, its type, and its size. Never the payload and never a "
+            "filename."
+        ),
+    )
 
 
 # ── Paths ──
@@ -876,6 +885,7 @@ class Recorder:
         agent_key: str = "",
         agent_slug: str = "",
         user_kind: str = "",
+        attachments: list[dict] | None = None,
     ):
         self.enabled = bool(conv_id) and user_id is not None
         self.user_id = user_id
@@ -890,6 +900,12 @@ class Recorder:
         # records an unattributed turn instead of failing to record at all.
         self._agent_key = agent_key
         self._agent_slug = agent_slug
+        # What was handed over with the words (FEAT-098). Beside ``user_text``
+        # because it belongs to the same turn and is written by the same append:
+        # the bytes are already on disk under the conversation, so this is the
+        # reference that lets a reload put the picture back in the user's own
+        # bubble instead of only the model remembering it.
+        self._attachments = list(attachments or [])
         self._text: list[str] = []
         self._thought: list[str] = []
         self._tools: dict[str, dict] = {}
@@ -964,7 +980,11 @@ class Recorder:
             opening = (
                 TurnEntry(role="system", text=self._user_text, kind=self._user_kind)
                 if self._user_kind
-                else TurnEntry(role="user", text=self._user_text)
+                else TurnEntry(
+                    role="user",
+                    text=self._user_text,
+                    attachments=self._attachments,
+                )
             )
             append_turn(self.user_id, self.conv_id, opening)
             text = "".join(self._text)

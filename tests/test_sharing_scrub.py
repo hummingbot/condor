@@ -427,6 +427,7 @@ def test_the_current_fields_land_in_the_bucket_they_should():
     assert scrub.TURN_FIELDS["thought"] == scrub.TEXT
     assert scrub.TURN_FIELDS["stop_reason"] == scrub.TEXT
     assert scrub.TURN_FIELDS["tool_calls"] == scrub.PAYLOAD
+    assert scrub.TURN_FIELDS["attachments"] == scrub.PAYLOAD
     assert scrub.TURN_FIELDS["ts"] == scrub.SCALAR
 
 
@@ -536,3 +537,34 @@ def test_sharing_never_imports_the_telemetry_taxonomy():
             if any(name.startswith("condor.telemetry.schema") for name in names):
                 offenders.append(f"{path.name}:{node.lineno}")
     assert offenders == []
+
+
+def test_a_shared_attachment_is_an_inert_reference():
+    """What a share carries when the turn had a picture on it (FEAT-098).
+
+    The reference and nothing else: no bytes, no filename, and no path a corpus
+    could resolve — the file lives under the *sharer's* conversation directory,
+    behind a bearer token, and the id names nothing outside it. That outcome is
+    the design's, not a special case: ``attachments`` classifies as ``PAYLOAD``,
+    so the walk covers it the day it exists.
+    """
+    turns, _ = scrub.scrub(
+        [
+            TurnEntry(
+                role="user",
+                text="what is wrong here?",
+                attachments=[{"id": "9f8e7d.png", "mime": "image/png", "bytes": 20481}],
+            )
+        ],
+        secret=SECRET,
+        known=KNOWN,
+    )
+    (attachment,) = turns[0].attachments
+    assert attachment == {"id": "9f8e7d.png", "mime": "image/png", "bytes": 20481}
+
+    payload = json.dumps([turn.model_dump(mode="json") for turn in turns])
+    assert "/conversations/" not in payload, "no path the corpus could dial"
+    assert "users/" not in payload
+    assert ".condor" not in payload
+    # Nothing that could be a filename the user did not consider giving.
+    assert "Screenshot" not in payload
