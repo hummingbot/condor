@@ -262,6 +262,166 @@ def list_session_snapshots(session_dir: Path) -> list[dict[str, Any]]:
     return []
 
 
+# ── The runs index (FEAT-099) ──
+#
+# One row per *run* — a session or a dry run — for the Lab's rail. Disk only:
+# no ``get_client``, no performance fan-out, nothing that could reach the
+# Hummingbot API, which is what licenses the rail's 5s poll (the ``fleet-map``
+# precedent). Money is deliberately absent; a run's PnL is looked up in the run
+# overview, where the strategy's ``/performance`` query is already loaded.
+
+# The journal is the only expensive read on this path: ``count_journal_ticks``
+# pulls a whole ``journal.md``, once per session, on every poll. Memoised on
+# (mtime, size) — the same idiom as the two caches above, and safe for the same
+# reason: a journal only ever grows, so a changed file re-parses.
+#
+# Only the *count* is cached. A run's status and end time come from a small
+# ``status.json`` read every time, because a live run's are exactly the fields
+# that change between two polls.
+_journal_ticks_cache: dict[Path, tuple[float, int, int]] = {}
+
+
+def _journal_tick_count(journal_path: Path) -> int:
+    try:
+        st = journal_path.stat()
+    except OSError:
+        return 0
+    cached = _journal_ticks_cache.get(journal_path)
+    if cached is not None and cached[0] == st.st_mtime and cached[1] == st.st_size:
+        return cached[2]
+    count = count_journal_ticks(journal_path)
+    _journal_ticks_cache[journal_path] = (st.st_mtime, st.st_size, count)
+    return count
+
+
+def _created_at(path: Path) -> float | None:
+    """Creation time as a float, or ``None`` when the file is not there.
+
+    ``list_sessions`` already sorts on ``journal.md``'s ctime, so runs sort on
+    the same fact rather than on a second definition of when a run began. It is
+    the file's creation and not the first tick's timestamp — close enough to
+    order a rail and to say "2h ago", never close enough to call a trade's start.
+    """
+    try:
+        return os.path.getctime(path)
+    except OSError:
+        return None
+
+
+def _snapshot_count(session_dir: Path) -> int:
+    for dirname in _SNAPSHOT_DIRNAMES:
+        snap_dir = session_dir / dirname
+        if snap_dir.is_dir():
+            return len(list(snap_dir.glob("*.md")))
+    return 0
+
+
+def _session_run(session_dir: Path, num: int, run_key: str) -> dict[str, Any]:
+    """One session, as a run row."""
+    from condor.agents.actions import ACTIONS_FILENAME
+    from condor.runtime.registry_file import LIVE_STATES, is_stale, read_status
+
+    status = read_status(session_dir) or {}
+    # A live state stamped by a boot that is not ours belongs to a process that
+    # died without recording an end — FEAT-012's distinction, and the only
+    # honest label for it.
+    state = status.get("state") or "idle"
+    if is_stale(status):
+        state = "interrupted"
+    live = state in LIVE_STATES
+    ended = status.get("updated_at")
+
+    return {
+        "run_id": f"s{num}",
+        "kind": "session",
+        "number": num,
+        "agent_id": status.get("agent_id") or f"{run_key}_{num}",
+        "status": state,
+        "execution_mode": "",
+        "tick_count": _journal_tick_count(session_dir / "journal.md"),
+        "snapshot_count": _snapshot_count(session_dir),
+        "started_at": _created_at(session_dir / "journal.md"),
+        # A run still going has no end. Otherwise the last heartbeat is the
+        # closest recorded thing to one.
+        "ended_at": (
+            None if live or not isinstance(ended, (int, float)) else float(ended)
+        ),
+        "error": state == "error",
+        # The spine colours a tick with no deeds differently depending on this:
+        # a run that recorded nothing did nothing, a run written before the log
+        # existed recorded nothing about what it did. Nothing is backfilled, so
+        # the distinction is the file's presence and only that.
+        "has_actions_log": (session_dir / ACTIONS_FILENAME).is_file(),
+    }
+
+
+def _experiment_run(path: Path, info: dict[str, Any], run_key: str) -> dict[str, Any]:
+    """One dry run / single tick, as a run row.
+
+    A single tick has no journal, no snapshot directory and no status file: it
+    is one file that was written once. So its whole lifecycle is that file's
+    timestamps, and its only recorded outcome is whether the tick itself failed.
+    """
+    num = int(info["number"])
+    try:
+        ended: float | None = path.stat().st_mtime
+    except OSError:
+        ended = None
+    return {
+        "run_id": f"e{num}",
+        "kind": "experiment",
+        "number": num,
+        "agent_id": f"{run_key}_e{num}",
+        # Finished the moment it was written; "errored" when the tick's model
+        # call failed, which `_parse_experiment_file` already reads off the file.
+        "status": "error" if info.get("error") else "stopped",
+        "execution_mode": info.get("execution_mode", ""),
+        "tick_count": 1,
+        "snapshot_count": 1,
+        "started_at": _created_at(path),
+        "ended_at": ended,
+        "error": bool(info.get("error")),
+        "has_actions_log": False,
+    }
+
+
+def list_runs(strategy_dir: Path, run_key: str) -> list[dict[str, Any]]:
+    """Every run of one strategy — sessions and experiments — newest first.
+
+    ``run_id`` is the rail's ``?run=`` value: ``s3`` for ``session_3``, ``e1``
+    for ``experiment_1.md``. Unique within a strategy, which is all the URL
+    needs, since the strategy is a separate parameter.
+    """
+    runs: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for dirname in SESSION_DIRNAMES:
+        sessions_dir = strategy_dir / dirname
+        if not sessions_dir.is_dir():
+            continue
+        for d in sorted(sessions_dir.iterdir()):
+            if not d.is_dir() or not d.name.startswith("session_"):
+                continue
+            try:
+                num = int(d.name.split("_", 1)[1])
+            except (ValueError, IndexError):
+                continue
+            # A legacy `trading_sessions/` layout beside the current one must
+            # not list session 1 twice; the current name is checked first.
+            if num in seen:
+                continue
+            seen.add(num)
+            runs.append(_session_run(d, num, run_key))
+
+    for info in list_experiments(strategy_dir):
+        path = find_experiment_file(strategy_dir, int(info["number"]))
+        if path is None:
+            continue
+        runs.append(_experiment_run(path, info, run_key))
+
+    runs.sort(key=lambda r: (r["started_at"] or 0.0, r["number"]), reverse=True)
+    return runs
+
+
 def enumerate_agent_ids(run_key: str, strategy_dir: Path) -> list[tuple[str, int, str]]:
     """Return (agent_id, session_num, kind) for every session and experiment on disk."""
     ids: list[tuple[str, int, str]] = []

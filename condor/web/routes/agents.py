@@ -464,6 +464,39 @@ class SnapshotSummary(BaseModel):
     file: str = ""
 
 
+class RunRow(BaseModel):
+    """One run of one strategy, as the Lab's rail reads it (FEAT-099).
+
+    The wire shape of :func:`condor.agents.sessions_index.list_runs`, plus the
+    two fields only the route knows: which strategy the run belongs to. There
+    is deliberately **no money here** — see the route below.
+    """
+
+    #: ``s3`` | ``e1`` — the ``?run=`` value, unique within a strategy.
+    run_id: str
+    kind: str
+    number: int
+    agent_id: str = ""
+    status: str = ""
+    execution_mode: str = ""
+    tick_count: int = 0
+    snapshot_count: int = 0
+    #: ``journal.md``'s ctime. The file's creation, not the first tick.
+    started_at: float | None = None
+    #: The last recorded heartbeat, or ``None`` while the run is still live.
+    ended_at: float | None = None
+    error: bool = False
+    #: Whether ``actions.jsonl`` exists at all. A run written before FEAT-097
+    #: has none, and its ticks must not be coloured "did nothing".
+    has_actions_log: bool = False
+    strategy_slug: str = ""
+    strategy_name: str = ""
+
+
+class RunsResponse(BaseModel):
+    runs: list[RunRow] = []
+
+
 class ActionModel(BaseModel):
     """One mutating tool call a session made (FEAT-097).
 
@@ -2763,6 +2796,49 @@ async def set_strategy_state(
     except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"ok": True}
+
+
+# ── Runs ──
+
+
+@router.get("/{slug}/runs", response_model=RunsResponse)
+async def list_agent_runs(slug: str, user: WebUser = Depends(get_current_user)):
+    """Every run this agent has ever had, across all its strategies (FEAT-099).
+
+    The unit of a loop agent is the **run** — ``sessions/session_N/`` or
+    ``dry_runs/experiment_M.md`` — and a run is a sequence of ticks. This is the
+    index the Lab's rail is built from, so it answers with tick counts and
+    durations rather than with money.
+
+    Deliberately **disk only** — no ``get_client``, no
+    ``_compute_strategy_performance``, no Hummingbot request of any kind — which
+    is exactly what licenses a 5s poll, the same bargain ``fleet-map`` makes.
+    Money is the opposite shape: it fans a backend fetch out per session id, and
+    putting it here would either make the rail slow or make it lie. A run's PnL
+    is read in the run overview, from the strategy's ``/performance`` query.
+
+    A strategy whose directory cannot be read contributes no rows rather than
+    failing the whole response: one unreadable playbook must not cost the reader
+    every other run the agent has.
+    """
+    from condor.agents.sessions_index import list_runs
+
+    _get_agent(slug)
+    rows: list[RunRow] = []
+    for strategy in _strategy_store().list(slug):
+        try:
+            runs = list_runs(strategy.dir, _runkey(slug, strategy.slug))
+        except Exception:
+            log.debug(
+                "Could not index runs for %s/%s", slug, strategy.slug, exc_info=True
+            )
+            continue
+        rows.extend(
+            RunRow(**run, strategy_slug=strategy.slug, strategy_name=strategy.name)
+            for run in runs
+        )
+    rows.sort(key=lambda r: (r.started_at or 0.0, r.number), reverse=True)
+    return RunsResponse(runs=rows)
 
 
 # ── Sessions ──
