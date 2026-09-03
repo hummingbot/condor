@@ -223,12 +223,14 @@ const NOTE_KINDS: Record<string, { label: string; Icon: typeof Zap }> = {
  * A locally previewed attachment is already an object URL for bytes in this tab
  * and is rendered straight; a hydrated one names a bearer-guarded route, which
  * has to be *fetched* — an `<img src>` cannot carry an `Authorization` header.
- * A picture that cannot be read shows its frame and nothing else, rather than a
- * broken-image glyph.
+ * While those bytes are on the way there is a placeholder to stand in for them;
+ * a picture that cannot be read leaves nothing behind at all, rather than a
+ * broken-image glyph or an empty frame that never fills.
  */
 function Attachment({ attachment }: { attachment: ChatAttachment }) {
   const fetched = useAuthedImage(attachment.local ? null : attachment.url);
-  const src = attachment.local ? attachment.url : fetched;
+  const src = attachment.local ? attachment.url : fetched.src;
+  if (fetched.status === "error") return null;
   return (
     <div className="overflow-hidden rounded-lg border border-[var(--on-primary)]/20 bg-black/10">
       {src ? (
@@ -238,7 +240,7 @@ function Attachment({ attachment }: { attachment: ChatAttachment }) {
           className="max-h-64 w-auto max-w-full object-contain"
         />
       ) : (
-        <div className="h-24 w-32" />
+        <div className="h-24 w-32 animate-pulse bg-[var(--on-primary)]/10" />
       )}
     </div>
   );
