@@ -88,10 +88,9 @@ function subtitle(node: PerfNode, showBot: boolean): string {
     }
     // Counted by kind rather than as one total, because that *is* the fact the
     // row exists to state: an agent operates bots and creates loose executors,
-    // and which of the two it is doing is the shape of its strategy.
+    // and which of the two it is doing is the shape of its strategy. A pair row
+    // and a class row hold the same mixture and are read the same way.
     case "agent":
-    // A pair row and a class row hold the same mixture and are read the same
-    // way: what is under this heading, counted by what kind of thing it is.
     case "pair":
     case "ctrlType": {
       const counted = (["bot", "controller", "executor"] as const)
