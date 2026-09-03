@@ -13,12 +13,28 @@ source: chat
 
 ## Market Data — `client.market_data.*` inside `run_code`
 
-### First-call rule (read before writing any snippet)
+### ⚠️ STOP — self-audit before any tool call
 
-**If the call you need is documented below — write the complete, final snippet on the first `run_code` call.**
-- The schemas here are verified. Do NOT write a diagnostic probe before the real code.
-- Probing is only for undocumented calls or unexpected runtime shapes. For every case covered in this playbook, trust the schema and ship the full analysis immediately.
-- Multi-venue requests: include all venues, all math, and the formatted output in the first call. Never defer to "let me check the structure first".
+If you are reading this because a market data request just came in, do this check NOW:
+
+1. **Did you call `manage_skill(action="read", name="market_data_with_code")` before writing any code?**
+   - NO → You are here now. Good. Read the schemas below; write the COMPLETE snippet on the NEXT call.
+   - YES → Proceed. The schema you need is already in your context.
+
+2. **Is your call covered by the API reference below?** (order book, funding, candles, tickers, prices)
+   - YES → Use the documented schema directly. Do NOT call `catalog()`, `dir(client)`, `inspect.signature`, or send a raw debug probe first. Those calls are wasted — the schemas here are verified.
+   - NO → A single raw probe is acceptable ONLY for calls not listed here.
+
+**The cost of skipping this read: 5+ extra discovery calls that the playbook already answers.**
+
+---
+
+### First-call rule
+
+**Write the complete, final snippet on the first `run_code` call.**
+- Multi-venue requests: all venues, all math, formatted output — in ONE call.
+- Never defer to "let me check the structure first" for any call documented below.
+- `asyncio.gather(..., return_exceptions=True)` + `isinstance(r, Exception)` per result — never catch and swallow silently.
 
 ---
 
@@ -34,8 +50,6 @@ source: chat
 | All tickers for a connector | `run_code` → `get_tickers` | 300 |
 | Multi-venue anything with math | `run_code` + `asyncio.gather` | ~500 |
 | DEX candles | GeckoTerminal — DEX connectors don't serve OHLCV | varies |
-
-Multi-venue: always `asyncio.gather(..., return_exceptions=True)`, always `isinstance(r, Exception)` per result — never catch and swallow silently.
 
 ---
 
@@ -223,6 +237,6 @@ print(df[["timestamp", "close", "vwap"]].tail(5).to_string(index=False))
 ---
 
 ### Tips
-- **Probe only for undocumented calls.** Every schema above is verified — use it directly. Only probe (`r = await ...; print(type(r), list(r.keys()) if isinstance(r, dict) else r[:2])`) when the call is NOT covered by this playbook.
+- **Probe only for undocumented calls.** Every schema above is verified — use it directly.
 - Chart time series with a ` ```chart ` fence; persist with `ReportBuilder`.
 - Same snippet 3× → promote to a routine via `delegate(...)`.
