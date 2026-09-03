@@ -77,9 +77,13 @@ export function RunOverview({
   });
   const report = reportData?.report ?? null;
 
+  // Hoisted rather than reached through in the dependency list: the compiler
+  // infers the whole `journalData` as the dependency and refuses to preserve a
+  // memo whose declared dependency is narrower than what it inferred.
+  const journalContent = journalData?.content;
   const journal = useMemo<ParsedJournal | null>(
-    () => (journalData?.content ? parseJournal(journalData.content) : null),
-    [journalData?.content],
+    () => (journalContent ? parseJournal(journalContent) : null),
+    [journalContent],
   );
 
   // A bot's controllers tag their executors with their own config id, never
@@ -216,9 +220,10 @@ export function ExperimentDetail({
     enabled: number > 0,
   });
 
+  const content = data?.content;
   const parsed = useMemo<ParsedSnapshot | null>(
-    () => (data?.content ? parseSnapshot(data.content) : null),
-    [data?.content],
+    () => (content ? parseSnapshot(content) : null),
+    [content],
   );
 
   if (isLoading || !parsed) {

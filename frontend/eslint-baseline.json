@@ -1,10 +1,7 @@
 {
-  "src/components/agent/AgentOverviewTab.tsx | react-hooks/preserve-manual-memoization": 1,
   "src/components/agent/AgentPnlChart.tsx | react-refresh/only-export-components": 2,
   "src/components/agent/AgentSessionContent.tsx | react-hooks/preserve-manual-memoization": 1,
-  "src/components/agent/SessionReviewer.tsx | react-hooks/preserve-manual-memoization": 2,
   "src/components/bots/DeployBotDialog.tsx | react-refresh/only-export-components": 3,
-  "src/components/chat/ChatInput.tsx | react-hooks/immutability": 1,
   "src/components/chat/ChatThread.tsx | react-refresh/only-export-components": 1,
   "src/components/chat/DockRoutines.tsx | react-refresh/only-export-components": 1,
   "src/components/editor/EditorDialogs.tsx | react-hooks/set-state-in-render": 2,
@@ -27,7 +24,5 @@
   "src/hooks/useChat.tsx | react-refresh/only-export-components": 2,
   "src/pages/BotDetail.tsx | react-hooks/refs": 2,
   "src/pages/CreateExecutor.tsx | react-hooks/set-state-in-effect": 1,
-  "src/pages/Login.tsx | react-hooks/set-state-in-effect": 1,
-  "src/pages/StrategyDetail.tsx | react-hooks/preserve-manual-memoization": 1,
-  "src/pages/StrategyDetail.tsx | react-hooks/set-state-in-effect": 1
+  "src/pages/Login.tsx | react-hooks/set-state-in-effect": 1
 }

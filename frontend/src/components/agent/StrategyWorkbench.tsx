@@ -18,6 +18,7 @@ import { ReportBrowser } from "@/components/routines/ReportBrowser";
 import { ExecutorChart } from "@/components/charts/ExecutorChart";
 import { useAgentExecutors } from "@/hooks/useAgentExecutors";
 import { useEscapeKey } from "@/hooks/useEscapeKey";
+import { useSeconds } from "@/hooks/useSeconds";
 import { api, type AgentRunRow } from "@/lib/api";
 import { groupExecutorsByMarket } from "@/lib/executor-overlays";
 
@@ -493,7 +494,11 @@ function RunsBand({
     () => runs.filter((r) => r.strategy_slug === sslug).slice(0, 5),
     [runs, sslug],
   );
-  const nowSec = Date.now() / 1000;
+  // One clock for the band, alive only while a run is — the same rule `RunRail`
+  // follows over the same list. A bare `Date.now()` here is a render-phase read
+  // of a moving value, which is both impure and, on a band that only re-renders
+  // when the 5s query settles, a duration that lurches rather than counts.
+  const nowSec = useSeconds(mine.some(isLiveRun)) / 1000;
 
   return (
     <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">

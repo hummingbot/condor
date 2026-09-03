@@ -16,7 +16,7 @@
  */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act } from "react";
+import { act, useEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -80,7 +80,14 @@ let here: string;
 
 function LocationProbe() {
   const loc = useLocation();
-  here = loc.pathname + loc.search;
+  const at = loc.pathname + loc.search;
+  // Recorded from an effect rather than during render: writing a module
+  // variable while rendering is a side effect the purity rules forbid. Every
+  // render here happens inside `act`, so the effect has flushed by the time a
+  // test reads `here`.
+  useEffect(() => {
+    here = at;
+  }, [at]);
   return null;
 }
 

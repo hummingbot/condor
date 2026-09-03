@@ -62,9 +62,13 @@ export function TickSpine({
     enabled: sessionNum > 0,
   });
 
+  // Hoisted for the same reason `RunOverview` hoists it: the compiler infers
+  // `journalData` as the dependency and will not preserve a memo that declares
+  // a narrower one.
+  const journalContent = journalData?.content;
   const ticks = useMemo(
-    () => (journalData?.content ? parseJournal(journalData.content).ticks : []),
-    [journalData?.content],
+    () => (journalContent ? parseJournal(journalContent).ticks : []),
+    [journalContent],
   );
   const byTick = useMemo(
     () => actionsByTick(actionsData?.actions ?? []),
