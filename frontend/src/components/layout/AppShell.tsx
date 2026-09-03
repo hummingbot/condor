@@ -70,6 +70,16 @@ const NAV_ITEMS = [
 const FULL_BLEED_ROUTES = ["/", "/bots", "/routines"];
 
 /**
+ * Full-bleed routes that carry a parameter, so an exact match cannot find them.
+ *
+ * The Lab (`/agents/:slug/runs`, FEAT-099) is the first: a rail, a tick spine
+ * and a body, all screen-tall, under a slug the shell cannot enumerate. Kept as
+ * a separate pattern list rather than turned into a `startsWith` over the array
+ * above, because `/` is in that array and prefixes everything.
+ */
+const FULL_BLEED_PATTERNS = [/^\/agents\/[^/]+\/runs$/];
+
+/**
  * The shell owns the chat state.
  *
  * There used to be two surfaces rendering a conversation — an overlay panel
@@ -99,7 +109,9 @@ function AppShellBody() {
   // matched here.
   const isChatWorkspace = pathname === "/";
 
-  const isFullBleed = FULL_BLEED_ROUTES.includes(pathname);
+  const isFullBleed =
+    FULL_BLEED_ROUTES.includes(pathname) ||
+    FULL_BLEED_PATTERNS.some((re) => re.test(pathname));
 
   // The chat is the landing page and needs no exchange keys, so the blocking
   // overlay would otherwise be the first thing every unconfigured user hits —

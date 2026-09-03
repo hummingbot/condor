@@ -701,61 +701,14 @@ export function SessionExecutors({
   );
 }
 
-// ── Session Snapshots ──
-
-export function SessionSnapshots({ slug, sslug, sessionNum, initialTick }: { slug: string; sslug: string; sessionNum: number; initialTick?: number | null }) {
-  const [selectedTick, setSelectedTick] = useState<number>(initialTick ?? 0);
-
-  const { data: snapshotsData } = useQuery({
-    queryKey: ["strategy", slug, sslug, "session", sessionNum, "snapshots"],
-    queryFn: () => api.getSessionSnapshots(slug, sslug, sessionNum),
-  });
-
-  const snapshots = snapshotsData?.snapshots || [];
-
-  if (snapshots.length === 0) {
-    return <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">No snapshots yet.</p>;
-  }
-
-  return (
-    <div className="flex flex-col gap-4 lg:flex-row">
-      {/* Snapshot list */}
-      <div className="w-full shrink-0 lg:w-72">
-        <div className="max-h-[600px] space-y-1 overflow-y-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-2">
-          {snapshots.map((snap) => (
-            <button
-              key={snap.tick}
-              onClick={() => setSelectedTick(snap.tick)}
-              className={`flex w-full items-center justify-between rounded-md px-3 py-2 text-left transition-colors ${
-                selectedTick === snap.tick
-                  ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
-                  : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
-              }`}
-            >
-              <div className="flex items-center gap-2">
-                <span className="font-mono text-xs font-bold">#{snap.tick}</span>
-                <span className="text-[10px]">{snap.timestamp}</span>
-              </div>
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Snapshot detail */}
-      <div className="min-w-0 flex-1">
-        {selectedTick > 0 ? (
-          <SnapshotDetail slug={slug} sslug={sslug} sessionNum={sessionNum} tick={selectedTick} />
-        ) : (
-          <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">Select a snapshot to view details.</p>
-        )}
-      </div>
-    </div>
-  );
-}
-
 // ── Snapshot Detail ──
+//
+// One tick: what it saw, what it decided, what it called. This used to be
+// private behind `SessionSnapshots`, a picker column plus this detail, reachable
+// only three clicks deep inside an overlay with no URL. The Lab's tick spine is
+// that picker, so the pair is gone and this is exported (FEAT-099).
 
-function SnapshotDetail({ slug, sslug, sessionNum, tick }: { slug: string; sslug: string; sessionNum: number; tick: number }) {
+export function SnapshotDetail({ slug, sslug, sessionNum, tick }: { slug: string; sslug: string; sessionNum: number; tick: number }) {
   // Same options the marker previews use, so a tick already previewed renders
   // straight from cache — no second request, no spinner.
   const { data, isLoading } = useQuery({
@@ -780,6 +733,18 @@ function SnapshotDetail({ slug, sslug, sessionNum, tick }: { slug: string; sslug
     return <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">Select a snapshot to view details.</p>;
   }
 
+  return <SnapshotBody parsed={parsed} />;
+}
+
+/**
+ * The rendering half of a snapshot, over an already-parsed one.
+ *
+ * Split out because a dry run is the *same document* under another name: an
+ * `experiment_N.md` is one tick, parsed by the same `parseSnapshot`, and the
+ * Lab renders it here rather than keeping a second copy of this layout the way
+ * `SessionReviewer` did.
+ */
+export function SnapshotBody({ parsed }: { parsed: ParsedSnapshot }) {
   return (
     <div className="space-y-4">
       {/* Header */}

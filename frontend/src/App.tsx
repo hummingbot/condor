@@ -7,6 +7,7 @@ import { ServerContext } from "@/hooks/useServer";
 import { AuthContext, SERVER_KEY, useAuth, useAuthState } from "@/lib/auth";
 import { invalidateServerScopedQueries, queryClient } from "@/lib/queryClient";
 import { AgentDetail } from "@/pages/AgentDetail";
+import { AgentLab } from "@/pages/AgentLab";
 import { Agents } from "@/pages/Agents";
 import { BotDetail } from "@/pages/BotDetail";
 import { Bots } from "@/pages/Bots";
@@ -101,6 +102,9 @@ export default function App() {
                 <Route path="/reports" element={<Navigate to="/routines?tab=reports" replace />} />
                 <Route path="/agents" element={<Navigate to="/" replace />} />
                 <Route path="/agents/:slug" element={<AgentDetail />} />
+                {/* The Lab: every run of every strategy, and every tick of a
+                    run, with all of it in the URL (FEAT-099). */}
+                <Route path="/agents/:slug/runs" element={<AgentLab />} />
                 <Route path="/agents/:slug/strategies/:sslug" element={<StrategyDetail />} />
                 <Route path="/settings" element={<Settings />} />
                 <Route path="/market" element={<Navigate to="/trade" replace />} />

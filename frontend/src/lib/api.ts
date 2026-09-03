@@ -1213,6 +1213,43 @@ export interface SnapshotSummary {
   file: string;
 }
 
+/**
+ * One run of one strategy — a session or a dry run (FEAT-099).
+ *
+ * The unit the Lab is keyed on. Snake-cased like every other payload here, and
+ * deliberately carrying **no money**: pricing a run is a per-session backend
+ * fan-out, and putting it on a rail that polls every five seconds would either
+ * make the rail slow or make it lie. A run's PnL is read in the run overview,
+ * from the strategy's `/performance` query.
+ */
+export interface AgentRunRow {
+  /** `s3` | `e1` — the `?run=` value, unique within a strategy. */
+  run_id: string;
+  kind: "session" | "experiment";
+  number: number;
+  agent_id: string;
+  /** `running|paused|stopped|interrupted|idle|error`. */
+  status: string;
+  /** `dry_run` | `run_once` for an experiment; empty for a session. */
+  execution_mode: string;
+  tick_count: number;
+  snapshot_count: number;
+  /** Epoch **seconds** — `journal.md`'s ctime, not the first tick's time. */
+  started_at: number | null;
+  /** Epoch **seconds**, or null while the run is still live. */
+  ended_at: number | null;
+  error: boolean;
+  /**
+   * Whether `actions.jsonl` exists for this run at all.
+   *
+   * A run written before FEAT-097 has none, and nothing is backfilled — so its
+   * ticks must read as *unrecorded*, never as ticks that did nothing.
+   */
+  has_actions_log: boolean;
+  strategy_slug: string;
+  strategy_name: string;
+}
+
 // ── Routines ──
 
 export interface RoutineFieldInfo {
@@ -2998,6 +3035,20 @@ export const api = {
       `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/learnings`,
       { method: "PUT", body: JSON.stringify({ content }) },
     ),
+
+  /**
+   * Every run this agent ever had, across its strategies, newest first
+   * (FEAT-099).
+   *
+   * The rail's whole query. Like `getFleetMap`, it makes no Hummingbot call —
+   * which is what lets the Lab poll it.
+   */
+  getAgentRuns: async (slug: string): Promise<AgentRunRow[]> => {
+    const data = await apiFetch<{ runs: AgentRunRow[] }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/runs`,
+    );
+    return data.runs ?? [];
+  },
 
   getSessionJournal: (slug: string, sslug: string, sessionNum: number) =>
     apiFetch<{ content: string }>(

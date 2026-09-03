@@ -1,11 +1,13 @@
 import type { QueryClient } from "@tanstack/react-query";
 
+import { runLabel } from "@/components/agent/lab/runs";
 import { poolLabel } from "@/components/dex/format";
 import { readLpPosition } from "@/components/dex/lp-position";
 import { getDisplayCurrency } from "@/hooks/useDisplayCurrency";
 import type {
   AgentBrain,
   AgentDetail,
+  AgentRunRow,
   BotDetail,
   BotRunsResponse,
   BotsPageResponse,
@@ -781,6 +783,42 @@ const ROUTES: {
               : undefined,
             "as of": asOf(qc, ["routine-instances"]),
           };
+    },
+  },
+  {
+    // The Lab (FEAT-099). Registered before the strategy entry for the same
+    // reason the routes are ordered: the table is walked in order.
+    pattern: /^\/agents\/([^/]+)\/runs$/,
+    facts: ([slug]) => ({
+      label: "Agent runs",
+      subject: `the runs of agent "${slug}"`,
+    }),
+    onScreen: ([slug], _tab, qc) => {
+      const runs = fresh<AgentRunRow[]>(qc, ["agent-runs"], (key) => key[1] === slug);
+      if (!runs) return undefined;
+      const sessions = runs.filter((r) => r.kind === "session");
+      const dryRuns = runs.filter((r) => r.kind === "experiment");
+      const live = runs.filter((r) => r.status === "running" || r.status === "paused");
+      const failed = runs.filter((r) => r.error);
+      const newest = runs[0];
+      return {
+        runs: runs.length,
+        sessions: sessions.length,
+        "dry runs": dryRuns.length || undefined,
+        // R1: the count orients, the names make the follow-up answerable.
+        live: names(live.map((r) => `${runLabel(r)} ${r.strategy_name} (tick ${r.tick_count})`)),
+        failed: names(failed.map((r) => `${runLabel(r)} ${r.strategy_name}`)),
+        newest: newest
+          ? `${runLabel(newest)} ${newest.strategy_name}, ${newest.tick_count} ticks${
+              newest.started_at ? `, started ${formatAge(newest.started_at)} ago` : ""
+            }`
+          : undefined,
+        "total ticks": runs.reduce((n, r) => n + r.tick_count, 0) || undefined,
+        // No money here on purpose: the runs index is priced by nothing, and
+        // reporting a zero it never computed is the defect the page exists to
+        // remove.
+        "as of": asOf(qc, ["agent-runs"], (key) => key[1] === slug),
+      };
     },
   },
   {
