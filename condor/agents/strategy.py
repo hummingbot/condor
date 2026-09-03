@@ -154,6 +154,17 @@ class StrategyStore:
         default_trading_context: str = "",
         created_by: int = 0,
     ) -> Strategy:
+        # The pseudo-strategies a chat, a delegation and the dashboard record
+        # their deeds under are ordinary run keys (FEAT-105), so a real strategy
+        # taking one of those slugs would make ``brigado.chat`` mean two things
+        # and every joined surface would report them as one run.
+        from condor.agents.deeds import RESERVED_STRATEGY_SLUGS
+
+        if slugify(name) in RESERVED_STRATEGY_SLUGS:
+            raise ValueError(
+                f"'{name}' is reserved: {', '.join(sorted(RESERVED_STRATEGY_SLUGS))} "
+                "name Condor's own non-loop runs. Pick another name."
+            )
         strategy = Strategy(
             agent_slug=agent_slug,
             name=name,

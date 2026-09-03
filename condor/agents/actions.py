@@ -142,13 +142,15 @@ def _verb(tool: str, call: dict[str, Any]) -> str:
 
 
 #: The verb whose subject is a bot name. One entry, named rather than inlined,
-#: so the two places that ask "was this a deploy?" cannot disagree.
-_DEPLOY_VERB = "manage_bots:deploy"
+#: so the places that ask "was this a deploy?" cannot disagree — and public
+#: because a deed recorded outside a tick (:mod:`condor.agents.deeds`) has to
+#: spell the same verb or the two doors would not join.
+DEPLOY_VERB = "manage_bots:deploy"
 
 
 def _deployed_name(verb: str, call: dict[str, Any]) -> str:
     """The bot name a deploy names, or ``""`` for anything that is not one."""
-    if verb != _DEPLOY_VERB:
+    if verb != DEPLOY_VERB:
         return ""
     args = tool_call_input(call)
     name = args.get("bot_name") if isinstance(args, dict) else None
@@ -340,7 +342,7 @@ def recorded_deploy_names(session_dir: Path | None) -> list[str]:
     return [
         row.subject
         for row in read_actions(session_dir, limit=MAX_ACTION_LINES)
-        if row.verb == _DEPLOY_VERB and row.ok and row.subject
+        if row.verb == DEPLOY_VERB and row.ok and row.subject
     ]
 
 

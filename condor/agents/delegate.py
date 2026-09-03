@@ -58,6 +58,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from condor.agents import deeds
 from condor.agents.run_records import (
     KIND_CONSULT,
     KIND_DELEGATE,
@@ -188,6 +189,10 @@ class DelegateTask:
     # Chronological session transcript: thoughts, tool calls, and text chunks as
     # they streamed from the agent. Populated live by the runner's event sink.
     events: list[dict] = field(default_factory=list, repr=False)
+    # The run's tool calls, folded by id, as the action log reads them. Fed by
+    # the event sink and drained once at completion into this delegation's own
+    # ``actions.jsonl`` (FEAT-105).
+    tool_calls: dict[str, dict] = field(default_factory=dict, repr=False)
     _task: asyncio.Task | None = field(default=None, repr=False)
 
     def to_dict(self) -> dict:
@@ -446,7 +451,11 @@ def _make_event_sink(dt: DelegateTask):
     )
 
     tl = dt.events
-    tc_map: dict[str, dict] = {}
+    # The same map the sink folds into, kept on the task so completion can write
+    # the run's deeds from it (FEAT-105). Not a second copy: ``tl`` holds the
+    # rendered timeline entries, this holds the folded calls in the shape the
+    # action log reads.
+    tc_map: dict[str, dict] = dt.tool_calls
 
     def append(entry: dict) -> None:
         tl.append(entry)
@@ -513,6 +522,15 @@ async def _run(dt: DelegateTask, bot, timeout_s: int) -> None:
         dt.error = str(e)
         log.exception("Delegation %s failed", dt.task_id)
     finally:
+        # What the run did to the world, beside the transcript of it saying so
+        # (FEAT-105). First, and outside every other guard: a delegation that
+        # deployed a bot must be on record as its owner even if persisting the
+        # transcript or notifying the user then fails. Writes nothing when the
+        # run mutated nothing.
+        deeds.record_deeds(
+            deeds.for_delegation(dt.user_id, dt.task_id, dt.agent_slug),
+            list(dt.tool_calls.values()),
+        )
         try:
             _persist_transcript(dt)
         except Exception:

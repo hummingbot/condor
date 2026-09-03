@@ -13,7 +13,8 @@ two apart) and the line between them is *who writes and when*:
     <repo>/.condor/                    # or $CONDOR_RUNTIME_ROOT
     ├── users/{user_id}/               # the runtime store: one conversation's
     │   ├── conversations/{conv_id}/   # worth of thinking, written turn by turn
-    │   └── delegations/{task_id}/     # by a live session
+    │   ├── delegations/{task_id}/     # by a live session
+    │   └── ui/                        # ...and what they did to the world by hand
     ├── state/{namespace}/
     └── telemetry/
 
@@ -107,6 +108,7 @@ LEGACY_RUNTIME_ROOT = _PROJECT_ROOT / "condor" / ".runtime"
 USERS_DIRNAME = "users"
 CONVERSATIONS_DIRNAME = "conversations"
 DELEGATIONS_DIRNAME = "delegations"
+UI_DIRNAME = "ui"
 
 # Every id here becomes a directory name, so none of them may escape one.
 _SAFE_ID = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -252,6 +254,18 @@ def delegations_dir(user_id: int | str) -> Path:
 
 def delegation_dir(user_id: int | str, task_id: str) -> Path:
     return delegations_dir(user_id) / safe_id(task_id)
+
+
+def ui_dir(user_id: int | str) -> Path:
+    """What this person did to the world straight from the dashboard (FEAT-105).
+
+    The fourth door's record, and the only one of the four with no id of its own
+    to hang off: a Deploy pressed on ``/bots`` belongs to no conversation and no
+    task, so its deeds accumulate per *person*. That is also what identifies the
+    actor on a shared install — the acting user is the first segment of the path
+    rather than a field in a row, which is a claim a route cannot forget to make.
+    """
+    return user_dir(user_id) / UI_DIRNAME
 
 
 def state_dir(namespace: str) -> Path:

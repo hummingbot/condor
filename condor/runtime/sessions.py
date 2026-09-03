@@ -18,7 +18,9 @@ from datetime import datetime, timezone
 from telegram import Bot
 
 from condor.acp import ACPClient, PermissionCallback, PromptDone
+from condor.acp.client import ToolCallEvent, ToolCallUpdate, fold_tool_call_event
 from condor.acp.pydantic_ai_client import PydanticAIClient
+from condor.agents import deeds
 from condor.agents.agent import identity_header as agent_identity_header
 from condor.runtime import binding, conversations
 from condor.runtime.confirmations import get_registry as get_confirmation_registry
@@ -232,6 +234,10 @@ class AgentSession:
 
         self.is_busy = True
         self.last_prompt_at = _utcnow()
+        # What this turn did to the world, folded as it streams. Turn-local: a
+        # deed belongs to the turn that made it, and a session that lives for a
+        # day must not accumulate one map of everything it ever touched.
+        tc_map: dict[str, dict] = {}
         try:
             loop = asyncio.get_event_loop()
             deadline = loop.time() + PROMPT_OVERALL_TIMEOUT
@@ -249,6 +255,12 @@ class AgentSession:
                 if self._abort_event.is_set():
                     yield PromptDone(stop_reason="cancelled")
                     break
+                if isinstance(event, (ToolCallEvent, ToolCallUpdate)):
+                    # Folded as it passes, never stored anywhere else: this is
+                    # the same reduction the tick engine and the delegate worker
+                    # run, so a chat's record of what it did has exactly the
+                    # shape a loop's does (FEAT-105).
+                    fold_tool_call_event(tc_map, event)
                 yield event
                 if isinstance(event, PromptDone):
                     break
@@ -278,6 +290,18 @@ class AgentSession:
         finally:
             self.is_busy = False
             self._lock.release()
+            # In ``finally`` rather than on ``PromptDone``: a turn that was
+            # cancelled or timed out still deployed whatever it deployed before
+            # it stopped, and a record that only survives the happy path is
+            # exactly the record you cannot trust. ``record_deeds`` writes
+            # nothing — and creates nothing — when the turn mutated nothing,
+            # which is the common case.
+            deeds.record_deeds(
+                deeds.for_conversation(
+                    self.user_id, self.conversation_id, self.agent_slug
+                ),
+                list(tc_map.values()),
+            )
 
     async def abort(self) -> None:
         """Abort the current in-flight prompt, at the agent.
