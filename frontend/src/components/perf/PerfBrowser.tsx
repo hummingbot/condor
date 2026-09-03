@@ -30,6 +30,17 @@ import { ExecutorChart } from "@/components/charts/ExecutorChart";
 import { DetailPanel } from "@/components/perf/ExecutorTable";
 import { ExecutorRows, StopConfirmDialog } from "@/components/perf/ExecutorRows";
 import { useExecutorStop } from "@/components/perf/executorActions";
+import {
+  agentOptions,
+  inRun,
+  matchesAgents,
+  parseRunParam,
+  runChipLabel,
+  runOwner,
+  runRecords,
+  UNATTRIBUTED,
+  UNATTRIBUTED_LABEL,
+} from "@/components/perf/agentFilter";
 import { BubbleGroup, type BubbleOption } from "@/components/perf/FilterBubbles";
 import { PopulationToggle } from "@/components/perf/PopulationToggle";
 import { PositionsTable } from "@/components/perf/PositionsTable";
@@ -92,6 +103,7 @@ import {
   loopStatus,
   ownerOf,
   ownerTitle,
+  runKeyLabel,
   type FleetOwner,
 } from "@/lib/agent-attribution";
 import { AgentScopeHeader } from "./AgentScopeHeader";
@@ -475,11 +487,18 @@ export function PerfBrowser({
    * toggle; as a filter it combines with the others (one class across every
    * bot) and it costs the reader no chevron to walk through.
    *
-   * *Whose* is not among them: the tree draws a row per bot, and that row
+   * *Which bot* is not among them: the tree draws a row per bot, and that row
    * carries the actions a bubble never could. A bubble row over the same axis
    * was a second picker stacked above the first, offering deploy-stamped names
    * too long to read — 86 of them on the terminated side — above rows that said
    * the same thing (ARCH-316).
+   *
+   * *Which agent* is, and for the opposite reason (FEAT-101): the tree grows an
+   * agent level only where a leaf carries an owner, so on a fleet whose bots
+   * are outside every strategy's namespace there is no agent row anywhere and
+   * nothing says which of this trading is an agent's — or that none of it is.
+   * A filter over the flat population works at every scope, in both
+   * populations, and offers the half a tree level cannot: **Unattributed**.
    *
    * There were two type filters' worth of confusion in the one `types` list
    * this replaces: it matched a controller's class and an executor's type
@@ -494,6 +513,7 @@ export function PerfBrowser({
     pair: "",
     ctrlTypes: [] as string[],
     execTypes: [] as string[],
+    agents: [] as string[],
   });
   // How far back a terminated fold reaches. It exists for the terminated
   // population alone: a live controller's runtime is its deploy, not a window
@@ -560,6 +580,40 @@ export function PerfBrowser({
     [setParam],
   );
   // `switchView` is declared after the tree it needs; both setters below it.
+
+  /**
+   * One run's slice of an agent's trading (FEAT-101).
+   *
+   * `?scope=agent:{runKey}&run=s3` is what *see this in the fleet* sends from
+   * the Lab: the reader was reading run 3, and the fleet should open on run 3
+   * rather than on the strategy's whole lifetime.
+   *
+   * It **filters, it does not re-scope**. The scope stays the agent's, so the
+   * header band, the fold and the fallback chain are all the ones that were
+   * already there and `resolveScope` never learns the word "run"; the run only
+   * removes leaves. A `run` naming records that live on another server
+   * therefore degrades to an empty scope whose band still says whose it is.
+   *
+   * The owner comes out of the scope id, which is why the parameter stays the
+   * bare `s3`, and the ledger is read through the *same* query key the Lab's
+   * run overview populates — so arriving from the Lab is a cache hit rather
+   * than a second request for an answer already in hand.
+   */
+  const runNum = parseRunParam(searchParams.get("run"));
+  const owner = useMemo(() => runOwner(scopeId), [scopeId]);
+  const runQueryOn = runNum !== null && owner !== null;
+  const { data: runLedger } = useQuery({
+    queryKey: ["strategy-session-executors", owner?.slug ?? "", owner?.sslug ?? "", runNum ?? 0],
+    queryFn: () => api.getStrategySessionExecutors(owner!.slug, owner!.sslug, runNum!),
+    enabled: runQueryOn,
+  });
+  // `null` until the ledger lands: a page waiting on the fetch reports its
+  // whole scope rather than blinking through an empty one.
+  const runFilter = useMemo(
+    () => (runQueryOn ? runRecords(runLedger?.deployments) : null),
+    [runQueryOn, runLedger],
+  );
+  const clearRun = useCallback(() => setParam("run", "", ""), [setParam]);
 
   // ── The tree the whole page is derived from ──
 
@@ -758,10 +812,16 @@ export function PerfBrowser({
   const applyFilters = useCallback(
     (all: PerfLeaf[]): PerfLeaf[] => {
       const pair = filters.pair.trim().toLowerCase();
-      const { ctrlTypes, execTypes } = filters;
-      if (!pair && !ctrlTypes.length && !execTypes.length) return all;
+      const { ctrlTypes, execTypes, agents } = filters;
+      if (!pair && !ctrlTypes.length && !execTypes.length && !agents.length && !runFilter) {
+        return all;
+      }
       return all.filter((leaf) => {
         if (pair && !leaf.pair.toLowerCase().includes(pair)) return false;
+        if (!matchesAgents(leaf, agents)) return false;
+        // The run is a URL parameter rather than a bubble, but it narrows the
+        // same population by the same rule, so it belongs in the same pass.
+        if (!inRun(leaf, runFilter)) return false;
         if (ctrlTypes.length && !ctrlTypes.includes(classOf(leaf))) return false;
         if (execTypes.length) {
           if (leaf.kind === "controller") return false;
@@ -770,7 +830,7 @@ export function PerfBrowser({
         return true;
       });
     },
-    [filters, classOf],
+    [filters, classOf, runFilter],
   );
 
   /** The population as it stands, and what the bubbles left of it. */
@@ -814,11 +874,18 @@ export function PerfBrowser({
       execTypes: alpha(
         tally((leaf) => (leaf.kind === "executor" ? leaf.executorType : ""), rawLeaves),
       ),
+      // Every leaf, controller and executor alike: the question is "whose is
+      // this", and a leaf's owner is a fact about it rather than about its
+      // class, so there is no double-counting to avoid here.
+      agents: agentOptions(rawLeaves),
     };
   }, [rawLeaves, classOf]);
 
   const filtersActive =
-    !!filters.pair.trim() || filters.ctrlTypes.length > 0 || filters.execTypes.length > 0;
+    !!filters.pair.trim() ||
+    filters.ctrlTypes.length > 0 ||
+    filters.execTypes.length > 0 ||
+    filters.agents.length > 0;
 
   /**
    * The one bot every row on screen belongs to, when there is one.
@@ -1662,6 +1729,17 @@ export function PerfBrowser({
       filters.pair.trim() ? `pair ~ "${filters.pair.trim()}"` : "",
       picked("controller type", filters.ctrlTypes),
       picked("executor type", filters.execTypes),
+      // Named the way the bubbles are, so the chat reads the same words the
+      // reader ticked rather than the run keys underneath them.
+      picked(
+        "agent",
+        filters.agents.map((value) =>
+          value === UNATTRIBUTED ? UNATTRIBUTED_LABEL.toLowerCase() : runKeyLabel(value),
+        ),
+      ),
+      // The run is a filter like any other, and one the reader did not tick —
+      // it arrived in a link — so it is the one that most needs saying.
+      runNum !== null ? runChipLabel(runNum) : "",
     ].filter(Boolean);
 
     const subject = activeCtrl
@@ -1837,10 +1915,23 @@ export function PerfBrowser({
                   onChange={(v) => setFilters((f) => ({ ...f, execTypes: v }))}
                 />
               )}
+              {/* Whose this trading is. Third rather than first: the two above
+                  it are about *what* a record is, which is what a reader
+                  narrows by most days, and this one answers a question the
+                  tree already answers wherever it has grown an agent level. */}
+              {filterOptions.agents.length > 1 && (
+                <BubbleGroup
+                  title="Agent"
+                  hint="Which agent's strategy owns each record — by the bot's namespace, or by the session an executor was tagged with. Unattributed is everything the fleet map credits to nobody, which on most servers is nearly all of it."
+                  options={filterOptions.agents}
+                  selected={filters.agents}
+                  onChange={(v) => setFilters((f) => ({ ...f, agents: v }))}
+                />
+              )}
               {filtersActive && (
                 <button
                   type="button"
-                  onClick={() => setFilters({ pair: "", ctrlTypes: [], execTypes: [] })}
+                  onClick={() => setFilters({ pair: "", ctrlTypes: [], execTypes: [], agents: [] })}
                   className="self-start text-[10px] text-[var(--color-text-muted)] underline-offset-2 hover:text-[var(--color-text)] hover:underline"
                 >
                   Clear all filters
@@ -2110,6 +2201,30 @@ export function PerfBrowser({
             )}
           </div>
           <div className="flex items-center gap-1.5">
+            {/* The run this scope is narrowed to, and the way back out of it.
+                A filter that cannot be seen is a filter that cannot be undone,
+                which is the rule the bubbles beside the tree were built on —
+                and this one arrived in a link rather than being ticked. */}
+            {runNum !== null && (
+              <span
+                className="flex shrink-0 items-center gap-1 rounded-full border border-[var(--color-primary)]/40 bg-[var(--color-primary)]/10 px-2 py-0.5 text-[10px] font-medium text-[var(--color-primary)]"
+                title={
+                  owner
+                    ? `Only the bots, controllers and executors run ${runNum} deployed`
+                    : `A run narrows an agent scope; this scope is not one, so nothing is filtered`
+                }
+              >
+                {runChipLabel(runNum)}
+                <button
+                  type="button"
+                  onClick={clearRun}
+                  aria-label="Clear the run filter"
+                  className="transition-opacity hover:opacity-70"
+                >
+                  <X className="h-2.5 w-2.5" />
+                </button>
+              </span>
+            )}
             <div className="flex items-center border border-[var(--color-border)] rounded overflow-hidden mr-1">
               <button
                 onClick={goUp}

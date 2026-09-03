@@ -120,7 +120,11 @@ export function RunOverview({
       )}
       {/* What the run put into the world (FEAT-100) — read from the same
           response the strip above folds, so the two can never disagree. */}
-      <DeploymentLedger rows={perfData?.deployments ?? []} />
+      <DeploymentLedger
+        rows={perfData?.deployments ?? []}
+        runKey={`${slug}.${sslug}`}
+        sessionNum={sessionNum}
+      />
       {journal && (
         <SessionOverview
           journal={journal}

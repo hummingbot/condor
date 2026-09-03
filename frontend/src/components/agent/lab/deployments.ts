@@ -11,6 +11,7 @@
 // thing this side must not get wrong: an unknown tick is a dash, never a zero
 // and never a guess.
 
+import { runParam } from "@/components/perf/agentFilter";
 import type { DeploymentRow } from "@/lib/api";
 
 /**
@@ -68,6 +69,25 @@ export function formatTick(tick: number | null): string {
  * strategy page's one gesture did and which folds the strategy's whole history
  * instead of the run you were reading.
  */
-export function fleetHref(row: Pick<DeploymentRow, "scope">): string | null {
-  return row.scope ? `/bots?scope=${encodeURIComponent(row.scope)}` : null;
+export function fleetHref(
+  row: Pick<DeploymentRow, "scope">,
+  sessionNum?: number | null,
+): string | null {
+  if (!row.scope) return null;
+  const run = sessionNum ? `&run=${runParam(sessionNum)}` : "";
+  return `/bots?scope=${encodeURIComponent(row.scope)}${run}`;
+}
+
+/**
+ * *See this run in the fleet* — the agent's scope, narrowed to this run.
+ *
+ * The row links above address one record each and need no narrowing; this is
+ * the gesture the ledger as a whole makes, and it is the one that used to fold
+ * the strategy's **whole history**. `&run=` rides along on both so that
+ * stepping up from a bot row to the agent row keeps the run the reader came in
+ * with (FEAT-101).
+ */
+export function runFleetHref(runKey: string, sessionNum: number): string | null {
+  if (!runKey || !sessionNum) return null;
+  return `/bots?scope=${encodeURIComponent(`agent:${runKey}`)}&run=${runParam(sessionNum)}`;
 }

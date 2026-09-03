@@ -6,6 +6,7 @@ import {
   kindIcon,
   liveLabel,
   orderDeployments,
+  runFleetHref,
 } from "./deployments";
 import type { DeploymentRow } from "@/lib/api";
 
@@ -94,5 +95,27 @@ describe("fleetHref", () => {
 
   it("offers no link for a row with no address", () => {
     expect(fleetHref(row({ scope: "" }))).toBeNull();
+  });
+
+  it("carries the run along, so stepping up to the agent keeps it (FEAT-101)", () => {
+    expect(fleetHref(row({ scope: "bot:ag-st-1" }), 3)).toBe(
+      "/bots?scope=bot%3Aag-st-1&run=s3",
+    );
+  });
+
+  it("leaves the link alone when there is no run to carry", () => {
+    expect(fleetHref(row({ scope: "bot:ag-st-1" }), null)).toBe("/bots?scope=bot%3Aag-st-1");
+    expect(fleetHref(row({ scope: "bot:ag-st-1" }), 0)).toBe("/bots?scope=bot%3Aag-st-1");
+  });
+});
+
+describe("runFleetHref", () => {
+  it("opens the agent's scope narrowed to this run, not the strategy's lifetime", () => {
+    expect(runFleetHref("ag.st", 3)).toBe("/bots?scope=agent%3Aag.st&run=s3");
+  });
+
+  it("offers nothing without an owner or without a run", () => {
+    expect(runFleetHref("", 3)).toBeNull();
+    expect(runFleetHref("ag.st", 0)).toBeNull();
   });
 });

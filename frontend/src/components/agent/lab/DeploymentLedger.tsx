@@ -8,6 +8,7 @@ import {
   kindIcon,
   liveLabel,
   orderDeployments,
+  runFleetHref,
 } from "@/components/agent/lab/deployments";
 import type { DeploymentRow } from "@/lib/api";
 import {
@@ -33,14 +34,37 @@ import {
  * A run that deployed nothing says so. For a research or a consulting run that
  * is the true and useful answer, not an error and not an empty table frame.
  */
-export function DeploymentLedger({ rows }: { rows: DeploymentRow[] }) {
+export function DeploymentLedger({
+  rows,
+  runKey,
+  sessionNum,
+}: {
+  rows: DeploymentRow[];
+  /** `{agentSlug}.{strategySlug}` — the fleet's own address for this run's owner. */
+  runKey?: string;
+  /** Which run this is, so every link out of here lands on it (FEAT-101). */
+  sessionNum?: number;
+}) {
   const ordered = useMemo(() => orderDeployments(rows), [rows]);
+  const runHref = runKey && sessionNum ? runFleetHref(runKey, sessionNum) : null;
 
   return (
     <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
       <h3 className="mb-3 flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
         <Package className="h-3.5 w-3.5" /> Deployed
         {ordered.length > 0 && ` (${ordered.length})`}
+        {runHref && ordered.length > 0 && (
+          // The gesture the strategy page used to make, now aimed at the run
+          // the reader is actually reading rather than at the strategy's
+          // whole lifetime.
+          <Link
+            to={runHref}
+            className="ml-auto inline-flex items-center gap-1 text-[10px] font-medium normal-case tracking-normal text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-primary)]"
+          >
+            See this run in the fleet
+            <ExternalLink className="h-3 w-3" />
+          </Link>
+        )}
       </h3>
       {ordered.length === 0 ? (
         <p className="text-[11px] text-[var(--color-text-muted)]">
@@ -62,7 +86,11 @@ export function DeploymentLedger({ rows }: { rows: DeploymentRow[] }) {
             </thead>
             <tbody>
               {ordered.map((row, i) => (
-                <LedgerRow key={`${row.kind}-${row.label}-${i}`} row={row} />
+                <LedgerRow
+                  key={`${row.kind}-${row.label}-${i}`}
+                  row={row}
+                  sessionNum={sessionNum}
+                />
               ))}
             </tbody>
           </table>
@@ -72,8 +100,8 @@ export function DeploymentLedger({ rows }: { rows: DeploymentRow[] }) {
   );
 }
 
-function LedgerRow({ row }: { row: DeploymentRow }) {
-  const href = fleetHref(row);
+function LedgerRow({ row, sessionNum }: { row: DeploymentRow; sessionNum?: number }) {
+  const href = fleetHref(row, sessionNum);
   return (
     <tr className="border-t border-[var(--color-border)]/25">
       <td className="px-2 py-1.5">
