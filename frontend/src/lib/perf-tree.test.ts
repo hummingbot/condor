@@ -12,10 +12,12 @@ import { describe, expect, it } from "vitest";
 
 import type { BotRunInfo, ControllerInfo, ExecutorInfo } from "./api";
 import {
+  AUTO_OPEN_KINDS,
   UNATTACHED_BOT,
   agentNodeId,
   agentOfNodeId,
   ancestorChain,
+  autoOpenIds,
   botNodeId,
   botOfNodeId,
   buildTree,
@@ -845,6 +847,64 @@ describe("visibleNodeIds", () => {
   it("draws only what has been opened, so the arrows walk what is on screen", () => {
     expect(visibleNodeIds(tree, new Set(["all"]))).toEqual(["all", "ctrl:alpha:pmm_1"]);
     expect(visibleNodeIds(tree, new Set())).toEqual(["all"]);
+  });
+});
+
+// CORR-322: a bot nested under an agent row used to be marked open by
+// `openRows`'s hardcoded `kind === "bot"` loop and drawn nowhere, because
+// `visibleNodeIds` stops descending at the shut `agent:` row above it. These
+// pin `autoOpenIds` — the extracted, named version of that loop — against the
+// tree shape that actually breaks: a bot the agent operates.
+describe("autoOpenIds", () => {
+  const RUN_KEY = "brigado.brl_mm";
+
+  it("opens an agent row far enough to reveal the bot nested under it, on first render", () => {
+    const tree = buildTree(
+      [leafFromController(controller({ bot_name: "brigado-brl_mm-btc" }), RUN_KEY)],
+      "All",
+      { groupByBot: true, groupByAgent: true },
+    );
+    const nodes = indexTree(tree);
+
+    // Nothing selected, nothing hand-shut: the reader's very first render.
+    const drawn = autoOpenIds(nodes, new Set());
+    expect(drawn).toEqual(new Set([`agent:${RUN_KEY}`, "bot:brigado-brl_mm-btc"]));
+
+    // What the reader actually sees: root open plus what the default opens.
+    const open = new Set(["all", ...drawn]);
+    expect(visibleNodeIds(tree, open)).toEqual([
+      "all",
+      `agent:${RUN_KEY}`,
+      "bot:brigado-brl_mm-btc",
+      "ctrl:brigado-brl_mm-btc:pmm_1",
+    ]);
+  });
+
+  it("keeps opening a bot parented directly by the fleet, exactly as before", () => {
+    const tree = buildTree([leafFromController(controller({ bot_name: "hand-rolled" }))], "All", {
+      groupByBot: true,
+    });
+    expect(autoOpenIds(indexTree(tree), new Set())).toEqual(new Set(["bot:hand-rolled"]));
+  });
+
+  it("leaves a group row shut — ARCH-318, not an oversight", () => {
+    const manual = leafFromExecutor(executor({ id: "manual", controller_id: "main" }));
+    const tree = buildTree([manual], "All", { groupByBot: true, groupByAgent: true });
+    expect(node(tree, "grp:main").kind).toBe("group");
+    expect(AUTO_OPEN_KINDS.has("group")).toBe(false);
+    expect(autoOpenIds(indexTree(tree), new Set())).not.toContain("grp:main");
+  });
+
+  it("still honours a row the reader has shut by hand", () => {
+    const tree = buildTree(
+      [leafFromController(controller({ bot_name: "brigado-brl_mm-btc" }), RUN_KEY)],
+      "All",
+      { groupByBot: true, groupByAgent: true },
+    );
+    const nodes = indexTree(tree);
+    expect(autoOpenIds(nodes, new Set([`agent:${RUN_KEY}`]))).toEqual(
+      new Set(["bot:brigado-brl_mm-btc"]),
+    );
   });
 });
 

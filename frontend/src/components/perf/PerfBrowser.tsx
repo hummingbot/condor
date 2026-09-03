@@ -69,6 +69,7 @@ import {
 import {
   ancestorChain,
   agentOfNodeId,
+  autoOpenIds,
   botOfNodeId,
   buildTree,
   collectLeaves,
@@ -458,8 +459,9 @@ export function PerfBrowser({
   // asked for. The root is the one row that starts open.
   const [open, setOpen] = useState<Set<string>>(() => new Set([FLEET_SCOPE]));
   // The other half of the same record: which branches the reader has *closed*.
-  // Needed only because bot rows are drawn open by default (see `openRows`), so
-  // absence from `open` cannot mean shut for them.
+  // Needed only because bot (and agent) rows are drawn open by default (see
+  // `openRows`, `AUTO_OPEN_KINDS`), so absence from `open` cannot mean shut for
+  // them.
   const [shut, setShut] = useState<Set<string>>(() => new Set());
   const [showDeploy, setShowDeploy] = useState(false);
   // The editor is mounted from the first time it is opened and stays mounted
@@ -1499,7 +1501,7 @@ export function PerfBrowser({
 
   /**
    * What is actually drawn open: the reader's own record, plus the branches
-   * holding the selection, plus the bot rows they have not shut.
+   * holding the selection, plus the `AUTO_OPEN_KINDS` rows they have not shut.
    *
    * A controller starts shut, so a `?scope=exec:…` link — or a scope that
    * survived a filter change by falling back to its controller — would land on
@@ -1508,17 +1510,20 @@ export function PerfBrowser({
    * Derived rather than written back into `open` from an effect, so the state
    * stays the reader's own record of what they opened.
    *
-   * Bot rows are the one level that starts *open*, and `shut` is what records
-   * closing one. Shut-by-default would mean the level cost the reader a click
-   * per bot before they saw a single controller — the exact charge that retired
-   * the old grouping level (see `buildTree`). The Stop button is on the bot row
-   * either way, so folding a bot away loses nothing but its controllers.
+   * Bot (and agent) rows are the levels that start *open*, and `shut` is what
+   * records closing one. Shut-by-default would mean the level cost the reader a
+   * click per bot before they saw a single controller — the exact charge that
+   * retired the old grouping level (see `buildTree`). The Stop button is on the
+   * bot row either way, so folding a bot away loses nothing but its
+   * controllers. Agent is in the set for the same reason: a bot nested under an
+   * agent row (`agentFor(leaf) ?? fleet`) is otherwise marked open by
+   * `autoOpenIds` and drawn nowhere, because `visibleNodeIds` stops descending
+   * at the shut agent above it (CORR-322). `group` deliberately stays out — see
+   * `AUTO_OPEN_KINDS`.
    */
   const openRows = useMemo(() => {
     const drawn = new Set(open);
-    for (const node of nodes.values()) {
-      if (node.kind === "bot" && !shut.has(node.id)) drawn.add(node.id);
-    }
+    for (const id of autoOpenIds(nodes, shut)) drawn.add(id);
     for (const id of selectedAncestors) drawn.add(id);
     return drawn;
   }, [open, shut, nodes, selectedAncestors]);

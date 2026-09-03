@@ -390,6 +390,42 @@ export const TOP_LEVEL_KINDS: ReadonlySet<NodeKind> = new Set<NodeKind>([
   "group",
 ]);
 
+/**
+ * Which of the fleet's own children `openRows` (in `PerfBrowser`) draws open
+ * on arrival, before the reader has clicked a chevron.
+ *
+ * Deliberately not `TOP_LEVEL_KINDS`, and not derived from it: that set asks
+ * "which kinds are the fleet's own children"; this one asks "which of those
+ * default open", and the two answers differ by exactly `group`. ARCH-318
+ * created the `grp:` row *because* the bucket of unclaimed executors, drawn
+ * open at depth 0, buried the bot rows the reader came for — auto-opening it
+ * here would reinstate that. `agent` belongs, though, for the same reason
+ * `bot` always has: a bot nested under an agent row (`buildTree` parents it
+ * `agentFor(leaf) ?? fleet`) must still be reachable without a click, or the
+ * agent-operated fleets — the ones with the most structure — are exactly the
+ * ones where "bots are visible on arrival" silently stops being true.
+ */
+export const AUTO_OPEN_KINDS: ReadonlySet<NodeKind> = new Set<NodeKind>(["agent", "bot"]);
+
+/**
+ * The ids `openRows` folds into what is drawn without being asked: every row
+ * of an `AUTO_OPEN_KINDS` kind the reader has not shut.
+ *
+ * A plain function of the index and `shut` rather than a walk of its own, so
+ * the one loop `PerfBrowser` used to hardcode to `kind === "bot"` reads —
+ * and is tested — as what it now means: open by default unless closed.
+ */
+export function autoOpenIds(
+  nodes: ReadonlyMap<string, PerfNode>,
+  shut: ReadonlySet<string>,
+): Set<string> {
+  const ids = new Set<string>();
+  for (const node of nodes.values()) {
+    if (AUTO_OPEN_KINDS.has(node.kind) && !shut.has(node.id)) ids.add(node.id);
+  }
+  return ids;
+}
+
 export interface PerfNode {
   /** `all` | `agent:runKey` | `bot:name` | `grp:name` | `ctrl:k` | `exec:id` */
   id: string;
