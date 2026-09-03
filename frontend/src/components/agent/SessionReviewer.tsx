@@ -8,7 +8,7 @@ import {
   ChevronRight,
   FlaskConical,
   LayoutList,
-  X,
+  PanelRightClose,
   Zap,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -424,7 +424,7 @@ export function SessionReviewer({
               className="ml-1 rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
               title="Close (Esc)"
             >
-              <X className="h-4 w-4" />
+              <PanelRightClose className="h-3.5 w-3.5" />
             </button>
           </div>
         </div>

@@ -1,28 +1,31 @@
-import { useQuery } from "@tanstack/react-query";
 import { PanelRightClose, Radio, Zap } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
 import {
   DockRoutines,
   RoutineLibrarySheet,
-  conversationInstances,
   type LibraryFocus,
 } from "@/components/chat/DockRoutines";
 import { DockResizeHandle } from "@/components/chat/DockResizeHandle";
 import { DockSection } from "@/components/chat/DockSection";
 import { DockTasks } from "@/components/chat/DockTasks";
+import type { ContextPanels } from "@/components/chat/contextPanels";
 import type { RoutineRunContext } from "@/components/routines/ReportBrowser";
 import { WORKSPACE_BAR } from "@/components/chat/workspaceBar";
-import { api, type Delegation } from "@/lib/api";
+import type { Delegation } from "@/lib/api";
 import { inScope, resolveRoutine, type RoutineScope } from "@/lib/routineUtils";
-import { DOCK_OPEN_KEY, DOCK_WIDTH_KEY } from "@/lib/sessionState";
-
-/** Where the dock stops being a column and starts overlaying (Tailwind `xl`). */
-const WIDE = "(min-width: 1280px)";
+import { DOCK_WIDTH_KEY } from "@/lib/sessionState";
 
 const DEFAULT_WIDTH = 300;
 /** Narrower than this and the rows are ellipses; the column stops being readable. */
 const MIN_WIDTH = 220;
+/**
+ * The floor a squeeze may take it to, as opposed to a drag — see the same pair
+ * in `AccountDock`. The reader may not choose a width the rows cannot be read
+ * at; the layout may borrow a little of it when the row is over-full, rather
+ * than pushing the workspace rail off the window as it used to.
+ */
+const SQUEEZE_WIDTH = 200;
 /** The transcript keeps at least this much, whatever the dock is dragged to. */
 const MIN_CHAT_PX = 420;
 
@@ -31,14 +34,6 @@ function readWidth(): number {
   return Number.isFinite(stored) && stored >= MIN_WIDTH
     ? stored
     : DEFAULT_WIDTH;
-}
-
-/** The dock's default: a column when there is room for one, an icon rail when not. */
-function defaultOpen(): boolean {
-  return (
-    window.matchMedia(WIDE).matches &&
-    localStorage.getItem(DOCK_OPEN_KEY) !== "false"
-  );
 }
 
 /**
@@ -57,7 +52,7 @@ function defaultOpen(): boolean {
  * for a report you only wanted to read, and badly for everything else: the runs
  * that are the doors into the library went off screen at the exact moment the
  * library came up, so opening a second routine meant first putting the column
- * back. The column is the reader's to collapse; nothing else touches it.
+ * back. The column is the reader's to close; nothing else touches it.
  *
  * The two sections are panes, not a stack: each scrolls inside itself, so an
  * expanded Tasks can never push Routines off the bottom. Both headers stay on
@@ -65,8 +60,20 @@ function defaultOpen(): boolean {
  * to watch while you type. The column keeps a scrollbar of its own only as the
  * escape hatch for a window too short to honour both panes' floors; clipping
  * a header there would be the very failure the panes exist to prevent.
+ *
+ * ## Which panes are open is not this component's to hold
+ *
+ * It lives in `useContextPanels`, because the tiles that open them sit on the
+ * workspace rail with the agent's and the desk's — the same split
+ * `useAccountPanels` makes for the same reason. This used to draw a second
+ * 40 px strip of its own whenever it was collapsed, immediately beside that
+ * rail: two strips of the same button, and a border between them that told the
+ * reader nothing about why one word was on the left of it and another on the
+ * right. Closed, this now renders no column and no strip — only the library
+ * sheet, which is the pane's, not the column's.
  */
 export function ContextDock({
+  panels,
   delegations,
   conversationId,
   agentSlug,
@@ -75,6 +82,8 @@ export function ContextDock({
   library,
   onLibraryChange,
 }: {
+  /** Which panes are open, and the lists behind them ({@link ContextPanels}). */
+  panels: ContextPanels;
   /** The shared `["delegations"]` result — the dock adds no poll of its own. */
   delegations: Delegation[];
   conversationId: string;
@@ -96,28 +105,13 @@ export function ContextDock({
   library: LibraryFocus | null;
   onLibraryChange: (focus: LibraryFocus | null) => void;
 }) {
-  const [open, setOpen] = useState(defaultOpen);
-  const [tasksOpen, setTasksOpen] = useState(true);
-  // Expanded like Tasks: a collapsed section is a section nobody finds, and
-  // "where do I watch this?" was the question both of them exist to answer.
-  // The extra poll it costs is one endpoint on a page that is already open.
-  const [routinesOpen, setRoutinesOpen] = useState(true);
+  const { shown, toggle, closeAll, instances, routines } = panels;
   const setLibrary = onLibraryChange;
   // Whose routines the picker lists — the agent on the other end of this
   // conversation, since those are the ones it can run.
   const [scope, setScope] = useState<RoutineScope>(agentSlug || "all");
   const [scopeAgent, setScopeAgent] = useState(agentSlug);
   const [width, setWidth] = useState(readWidth);
-
-  /** The reader's own toggle, and the only thing written down. */
-  const toggle = (next: boolean) => {
-    setOpen(next);
-    localStorage.setItem(DOCK_OPEN_KEY, String(next));
-  };
-
-  useEffect(() => {
-    localStorage.setItem(DOCK_WIDTH_KEY, String(Math.round(width)));
-  }, [width]);
 
   /**
    * Whose routines, re-asked for whoever is now answering.
@@ -137,34 +131,6 @@ export function ContextDock({
     setScopeAgent(agentSlug);
     setScope(agentSlug || "all");
   }
-
-  // Crossing the breakpoint re-derives the default: a narrow window must not
-  // wake up with an overlay parked on top of the transcript.
-  useEffect(() => {
-    const mq = window.matchMedia(WIDE);
-    const onChange = () => setOpen(defaultOpen());
-    mq.addEventListener("change", onChange);
-    return () => mq.removeEventListener("change", onChange);
-  }, []);
-
-  const { data: instances = [] } = useQuery({
-    queryKey: ["routine-instances"],
-    queryFn: api.getRoutineInstances,
-    // Polled whenever the dock is open, not only while the section is: a
-    // collapsed Routines still has to be able to say "one is running". The
-    // library pane reads the same list, and it can be up while the column is
-    // not, so it keeps the poll alive on its own.
-    enabled: open || !!library,
-    refetchInterval: 5000,
-  });
-
-  // The library itself, for the picker. Shares react-query's cache with the
-  // report browser, so the pane it opens costs no second fetch.
-  const { data: routines = [] } = useQuery({
-    queryKey: ["routines"],
-    queryFn: api.getRoutines,
-    enabled: open || !!library,
-  });
 
   /**
    * The scope actually listed.
@@ -206,16 +172,6 @@ export function ContextDock({
     }
   };
 
-  const mineRunning = delegations.filter(
-    (d) => d.conversation_id === conversationId && d.status === "running",
-  ).length;
-  // Counted the same way the list is built, so the badge and the rows agree.
-  const routinesRunning = conversationInstances(
-    instances,
-    agentSlug,
-    conversationId,
-  ).filter((i) => i.status === "running").length;
-
   const librarySheet = library && (
     <RoutineLibrarySheet
       library={library}
@@ -234,122 +190,83 @@ export function ContextDock({
    * The sheet is a sibling of the column, not a child of it.
    *
    * It portals its body into the pane either way, but where it sits in *this*
-   * tree decides whether it survives: nested in the `aside`, the two branches
-   * below put it at different indices, so collapsing the column unmounted it —
-   * which released the pane, which gave the column back, which mounted it
-   * again. Held here it keeps its identity, and the report inside it keeps its
-   * scroll, through a collapse of the column beside it.
+   * tree decides whether it survives: nested in the `aside`, closing the column
+   * unmounted it — which released the pane, which gave the column back, which
+   * mounted it again. Held beside the `aside` at a fixed index — which is why
+   * the column is a `&&` inside the fragment rather than an early return, since
+   * an early return would move the sheet to index 0 and remount it for the same
+   * reason — it keeps its identity, and the report inside it keeps its scroll,
+   * through a close of the column beside it.
    */
-  if (!open) {
-    return (
-      <>
-        <aside className="flex w-10 shrink-0 flex-col items-center gap-3 border-l border-[var(--color-border)] bg-[var(--color-bg)] py-2">
-          <button
-            onClick={() => toggle(true)}
-            className="flex flex-col items-center gap-0.5 rounded p-1 text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-            title="Show what this conversation is doing"
-          >
-            <Radio
-              className={`h-4 w-4 ${mineRunning > 0 ? "text-emerald-400" : ""}`}
-            />
-            {mineRunning > 0 && (
-              <span className="text-[9px] font-bold text-emerald-400">
-                {mineRunning}
-              </span>
-            )}
-          </button>
-          <button
-            onClick={() => {
-              toggle(true);
-              setRoutinesOpen(true);
-            }}
-            className="rounded p-1 text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-            title="Show routines"
-          >
-            <Zap className="h-4 w-4" />
-          </button>
-        </aside>
-        {librarySheet}
-      </>
-    );
-  }
-
   return (
     <>
-      <aside
-        style={{
-          width,
-          minWidth: MIN_WIDTH,
-          // The floor the transcript keeps, held in CSS as well as in the drag:
-          // a window that shrinks under the dock must not squeeze the chat away,
-          // and clamping here leaves the width the reader chose on record for
-          // when the room comes back.
-          maxWidth: `calc(100vw - ${MIN_CHAT_PX}px)`,
-        }}
-        className="absolute inset-y-0 right-0 z-30 flex shrink-0 border-l border-[var(--color-border)] bg-[var(--color-bg)] xl:relative xl:z-auto"
-      >
-        <DockResizeHandle
-          width={width}
-          onWidth={setWidth}
-          min={MIN_WIDTH}
-          max={() => Math.max(MIN_WIDTH, window.innerWidth - MIN_CHAT_PX)}
-          reset={DEFAULT_WIDTH}
-          label="Resize dock"
-        />
-        <div className="flex min-w-0 flex-1 flex-col overflow-y-auto">
-          <div className={`${WORKSPACE_BAR} gap-2 px-3`}>
-            <span className="min-w-0 flex-1 truncate text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
-              This conversation
-            </span>
-            <button
-              onClick={() => toggle(false)}
-              className="rounded p-1 text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-              title="Collapse"
+      {shown.length > 0 && (
+        <aside
+          data-testid="context-dock"
+          style={{
+            width,
+            minWidth: SQUEEZE_WIDTH,
+            // The floor the transcript keeps, held in CSS as well as in the drag:
+            // a window that shrinks under the dock must not squeeze the chat away,
+            // and clamping here leaves the width the reader chose on record for
+            // when the room comes back.
+            maxWidth: `calc(100vw - ${MIN_CHAT_PX}px)`,
+          }}
+          className="absolute inset-y-0 right-0 z-30 flex border-l border-[var(--color-border)] bg-[var(--color-bg)] xl:relative xl:z-auto"
+        >
+          <DockResizeHandle
+            width={width}
+            onWidth={setWidth}
+            min={MIN_WIDTH}
+            max={() => Math.max(MIN_WIDTH, window.innerWidth - MIN_CHAT_PX)}
+            reset={DEFAULT_WIDTH}
+            label="Resize dock"
+          />
+          <div className="flex min-w-0 flex-1 flex-col overflow-y-auto">
+            <div className={`${WORKSPACE_BAR} gap-2 px-3`}>
+              <span className="min-w-0 flex-1 truncate text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
+                This conversation
+              </span>
+              <button
+                onClick={closeAll}
+                className="rounded p-1 text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+                title="Close"
+              >
+                <PanelRightClose className="h-3.5 w-3.5" />
+              </button>
+            </div>
+
+            <DockSection
+              icon={<Radio className="h-3 w-3 shrink-0" />}
+              label="Tasks"
+              hint="Work handed to other agents from this conversation"
+              open={shown.includes("tasks")}
+              onToggle={() => toggle("tasks")}
             >
-              <PanelRightClose className="h-3.5 w-3.5" />
-            </button>
+              <DockTasks
+                delegations={delegations}
+                conversationId={conversationId}
+                agentSlug={agentSlug}
+              />
+            </DockSection>
+
+            <DockSection
+              icon={<Zap className="h-3 w-3 shrink-0" />}
+              label="Routines"
+              hint="Scripts this agent runs, on demand or on a schedule"
+              open={shown.includes("routines")}
+              onToggle={() => toggle("routines")}
+            >
+              <DockRoutines
+                instances={instances}
+                agentSlug={agentSlug}
+                conversationId={conversationId}
+                onLibraryChange={openFocus}
+              />
+            </DockSection>
           </div>
-
-          <DockSection
-            icon={
-              <Radio
-                className={`h-3 w-3 shrink-0 ${mineRunning > 0 ? "text-emerald-400" : ""}`}
-              />
-            }
-            label="Tasks"
-            hint="Work handed to other agents from this conversation"
-            count={mineRunning || undefined}
-            open={tasksOpen}
-            onToggle={() => setTasksOpen((v) => !v)}
-          >
-            <DockTasks
-              delegations={delegations}
-              conversationId={conversationId}
-              agentSlug={agentSlug}
-            />
-          </DockSection>
-
-          <DockSection
-            icon={
-              <Zap
-                className={`h-3 w-3 shrink-0 ${routinesRunning > 0 ? "text-emerald-400" : ""}`}
-              />
-            }
-            label="Routines"
-            hint="Scripts this agent runs, on demand or on a schedule"
-            count={routinesRunning || undefined}
-            open={routinesOpen}
-            onToggle={() => setRoutinesOpen((v) => !v)}
-          >
-            <DockRoutines
-              instances={instances}
-              agentSlug={agentSlug}
-              conversationId={conversationId}
-              onLibraryChange={openFocus}
-            />
-          </DockSection>
-        </div>
-      </aside>
+        </aside>
+      )}
       {librarySheet}
     </>
   );

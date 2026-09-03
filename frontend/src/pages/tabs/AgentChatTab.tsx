@@ -12,6 +12,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { AccountDock } from "@/components/chat/AccountDock";
+import { deskWasOpen, useAccountPanels } from "@/components/chat/accountPanels";
 import { AgentPanel } from "@/components/chat/AgentPanel";
 import {
   BrainPicker,
@@ -21,9 +22,11 @@ import { ChatInput } from "@/components/chat/ChatInput";
 import { ChatRail } from "@/components/chat/ChatRail";
 import { ChatThread } from "@/components/chat/ChatThread";
 import { ContextDock } from "@/components/chat/ContextDock";
+import { useContextPanels } from "@/components/chat/contextPanels";
 import type { LibraryFocus } from "@/components/chat/DockRoutines";
 import { SessionTabs } from "@/components/chat/SessionTabs";
-import { TuneAgentButton } from "@/components/chat/TuneAgent";
+import { ShareChatButton } from "@/components/chat/ShareChatButton";
+import { WorkspaceRail } from "@/components/chat/WorkspaceRail";
 import {
   WorkspacePaneOutlet,
   WorkspacePaneProvider,
@@ -81,14 +84,24 @@ type TalkIntent = "focus" | "fresh";
 /**
  * What is in the workspace pane, if anything.
  *
- * One union rather than two booleans, because the pane is one column: opening
- * the agent panel puts the routine library away and vice versa, and that is
- * the shape of the state rather than a rule two components have to remember
- * (FEAT-081). The library's focus used to live inside `ContextDock`, which
- * could not know about a second occupant.
+ * One union rather than three booleans, because the pane is one column:
+ * opening the agent panel puts the routine library away and vice versa, and
+ * that is the shape of the state rather than a rule three components have to
+ * remember (FEAT-081). The library's focus used to live inside `ContextDock`,
+ * which could not know about a second occupant.
+ *
+ * `desk` joined it when the account panels stopped being a column of their own
+ * — see `AccountDock`. The three big surfaces of this workspace are the agent,
+ * the portfolio and the execution table, and they are exactly the three nobody
+ * reads at the same time; making them one union is what stopped the row from
+ * asking for more width than a laptop has. Which *sections* the desk is
+ * showing is `useAccountPanels`', not this: this only says the desk is on.
  */
 type PaneView =
-  { kind: "agent" } | { kind: "routines"; focus: LibraryFocus } | null;
+  | { kind: "agent" }
+  | { kind: "desk" }
+  | { kind: "routines"; focus: LibraryFocus }
+  | null;
 
 /**
  * The chat workspace — what `/` opens on.
@@ -124,7 +137,18 @@ export function AgentChatTab() {
    * `null` means "never touched it", which is what falls back to `defaultAgent`.
    */
   const [pendingAgentKey, setPendingAgentKey] = useState<string | null>(null);
-  const [pane, setPane] = useState<PaneView>(null);
+  /**
+   * What is in the pane, restored for the one occupant that has a memory.
+   *
+   * The desk is a workspace fixture — you leave a balance up the way you leave
+   * a dock open — while the agent panel and the routine library are things you
+   * go and open. So the desk comes back and the other two do not, which is the
+   * behaviour the desk had as a column of its own and the reason the sections
+   * are recorded at all.
+   */
+  const [pane, setPane] = useState<PaneView>(() =>
+    deskWasOpen() ? { kind: "desk" } : null,
+  );
 
   // Same keys and intervals the fleet tab uses, so react-query dedupes rather
   // than polling `/agents` twice.
@@ -318,7 +342,7 @@ export function AgentChatTab() {
   );
 
   /**
-   * Whose agent panel the header button opens, and what to call them.
+   * Whose agent panel the rail opens, and what to call them.
    *
    * Both read off the slug, never off `boundAgent`/`pendingAgent` in their own
    * order: an unbound Condor conversation leaves `boundAgent` undefined while a
@@ -332,6 +356,34 @@ export function AgentChatTab() {
   const runningTasks = (delegationData?.delegations ?? []).filter(
     (d) => d.status === "running",
   ).length;
+
+  /**
+   * The desk the account panels read.
+   *
+   * The chat's own server, falling back to the ambient selection: a session
+   * pinned to one server must not show another's balance under a chat about it.
+   */
+  const dockServer = activeSlot?.info.server_name || server || null;
+  // Which panels are open lives here rather than in the docks, because the
+  // tiles that open them sit on one workspace rail with the agent's. Both docks
+  // answer the same way (`useAccountPanels` / `useContextPanels`), so all five
+  // tiles behave identically: a click opens or closes the named panel, and a
+  // dock with nothing open is not a column at all.
+  //
+  // The desk's tiles reach through to the pane, which is what makes them
+  // exclusive with the agent's without either component knowing about the
+  // other: whoever asks for the pane gets it, and the last occupant is gone.
+  const account = useAccountPanels({
+    server: dockServer,
+    open: pane?.kind === "desk",
+    onOpenChange: (open) => setPane(open ? { kind: "desk" } : null),
+  });
+  const context = useContextPanels({
+    delegations: delegationData?.delegations ?? [],
+    conversationId: activeSlot?.info.conversation_id || "",
+    agentSlug: activeSlot?.info.agent_slug || "",
+    libraryOpen: pane?.kind === "routines",
+  });
 
   return (
     <WorkspacePaneProvider>
@@ -352,8 +404,16 @@ export function AgentChatTab() {
 
         {/* ── Conversation, and what it set in motion ──
             `relative` so the dock overlays the transcript below `xl` rather than
-            escaping to the page, the mirror of what the rail does below `md`. */}
-        <div className="relative flex min-w-0 flex-1">
+            escaping to the page, the mirror of what the rail does below `md`.
+
+            `overflow-hidden` because this row is the one place in the workspace
+            that can be asked for more width than the window has: five columns,
+            each with a floor under which it stops being readable, and no
+            arithmetic that makes them all fit at 1280. Whatever cannot fit is
+            clipped here rather than spilling past the window — which is what
+            used to carry the rail off the right edge (see below). Menus inside
+            portal to the body, so nothing that has to escape is clipped by it. */}
+        <div className="relative flex min-w-0 flex-1 overflow-hidden">
           {/* The transcript's floor is the other half of the pane's: past `xl`
               the pane can be dragged wider, but never far enough to squeeze the
               conversation out of readability. `xl` is the same 1280 at which the
@@ -395,17 +455,15 @@ export function AgentChatTab() {
                 onNew={newChat}
                 className="min-w-0 flex-1"
               />
-              {/* What the conversation is talking to, opened from the chrome
-                  that belongs to the conversation as a whole. It sat in the
-                  dock for a release, which put it in the column about work
-                  rather than about who does it. */}
-              <TuneAgentButton
-                name={panelAgent?.name || "Condor"}
-                open={pane?.kind === "agent"}
-                onOpen={() =>
-                  setPane((p) =>
-                    p?.kind === "agent" ? null : { kind: "agent" },
-                  )
+              {/* Share the chat that is open. The rail has the same gesture per
+                  row, but only under a hover on a column most readers keep
+                  collapsed — so the case that actually comes up, sharing what
+                  you are reading, had nothing visible on screen. */}
+              <ShareChatButton
+                conversationId={
+                  activeSlot
+                    ? activeSlot.info.conversation_id || activeSlot.info.slot_id
+                    : null
                 }
               />
             </div>
@@ -500,18 +558,26 @@ export function AgentChatTab() {
             />
           )}
 
-          {/* The desk this conversation trades on, inboard of the dock that
-              is about the conversation itself (FEAT-094): its rail and its
-              panels come before "this conversation" in the row, so opening a
-              balance no longer covers the tasks. The chat's own server,
-              falling back to the ambient selection — a session pinned to one
-              server must not show another's balance under a chat about it, and
-              the dock's bar names the one it is reading. */}
+          {/* The desk this conversation trades on — the pane's other big
+              occupant (FEAT-094, revised): a sheet like the agent panel above,
+              at the same split, so the two cannot be on screen together and
+              neither has to shrink for the other. It renders nothing unless
+              `pane` is the desk, because `account.shown` is empty unless it is;
+              there is no second condition to keep in step.
+
+              The chat's own server, falling back to the ambient selection — a
+              session pinned to one server must not show another's balance under
+              a chat about it, and the panel's bar names the one it is
+              reading. */}
           <AccountDock
-            server={activeSlot?.info.server_name || server || null}
+            server={dockServer}
+            shown={account.shown}
+            onToggle={account.toggle}
+            onClose={account.close}
           />
 
           <ContextDock
+            panels={context}
             delegations={delegationData?.delegations ?? []}
             conversationId={activeSlot?.info.conversation_id || ""}
             agentSlug={activeSlot?.info.agent_slug || ""}
@@ -534,6 +600,60 @@ export function AgentChatTab() {
             }
           />
         </div>
+
+        {/* Everything that opens beside the conversation, in one strip on the
+            far edge — the agent, then the desk it trades, then this
+            conversation. It used to be two strips: this one, and a second the
+            context dock drew for itself whenever it was collapsed, sitting
+            flush against it. Two identical 40 px rails with a border between
+            them reads as one control group that has been cut in half for no
+            stated reason, which is exactly what it was.
+
+            The agent leads it: what you are talking to is the first thing you
+            change about a conversation, and it lived alone in the top bar as
+            a lozenge competing with the tabs for the same row. Below it, ruled
+            off, the desk's two tiles and then the conversation's two — three
+            groups because they follow three different selectors, and a rule
+            rather than a caption because in a 64 px strip the words cost more
+            than the separation they were explaining (see `WorkspaceRail`).
+
+            ## Why it is outside the row it belongs to
+
+            It is a sibling of the workspace, not the last column in it. Inside,
+            it was the last item of a flex row whose other columns all carry
+            floors they refuse to shrink past — chat 360, pane 400, the dock its
+            own — and the sum of those floors was larger than a laptop window
+            back when the desk was a fourth column too. Flexbox does not report that: it lays the row out
+            past the right edge and the last child is simply not on screen. So
+            opening the desk and the agent together took the rail away, and with
+            it every control for closing what had covered it — a state a reader
+            can enter and cannot leave. Out here the rail's 64 px come off the
+            top of the row's budget instead, so it is on screen at every width
+            and whatever is short is short inside the row, where a scrollbar or
+            a squeeze is recoverable. It is also why the dock's overlay below
+            `xl` no longer covers it: the overlay is anchored to the row. */}
+        <WorkspaceRail
+          groups={[
+            {
+              id: "agent",
+              items: [
+                {
+                  id: "agent",
+                  label: "Agent",
+                  Icon: Bot,
+                  hint: `Tune ${panelAgent?.name || "Condor"} — read and change what this agent is`,
+                  active: pane?.kind === "agent",
+                  onToggle: () =>
+                    setPane((p) =>
+                      p?.kind === "agent" ? null : { kind: "agent" },
+                    ),
+                },
+              ],
+            },
+            { id: "desk", items: account.railItems },
+            { id: "conversation", items: context.railItems },
+          ]}
+        />
       </div>
     </WorkspacePaneProvider>
   );

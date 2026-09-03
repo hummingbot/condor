@@ -3,9 +3,10 @@
  *
  * What is pinned here is the part of the design that is not visible in a
  * screenshot: that a tab nobody opened costs *nothing* — no portfolio walk, no
- * bots call, no executors call, no socket channel — that opening one panel does
- * not open the other, and that both the panels and the width they were dragged
- * to survive a reload.
+ * bots call, no executors call, no socket channel — that opening one section
+ * does not open the other, that the sections survive a reload, and that the
+ * whole desk lives in the *workspace pane* rather than in a column of its own,
+ * which is what makes it exclusive with the agent panel.
  *
  * The panels' own contents are tested in DockExecution.test.tsx; here they are
  * stubbed, because the question is the shell.
@@ -15,13 +16,17 @@
  * @vitest-environment jsdom
  */
 
-import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
-import { act } from "react";
+import {
+  QueryClient,
+  QueryClientProvider,
+  useQuery,
+} from "@tanstack/react-query";
+import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { ACCOUNT_DOCK_KEY, ACCOUNT_DOCK_WIDTH_KEY } from "@/lib/sessionState";
+import { ACCOUNT_DOCK_KEY } from "@/lib/sessionState";
 
 /** Every call the two panels can make; none of them may fire while closed. */
 const getPortfolio = vi.fn();
@@ -48,7 +53,23 @@ vi.mock("@/hooks/useWebSocket", () => ({
   },
 }));
 
+/** jsdom answers every query `false`; the pane turns on width. */
+window.matchMedia = ((media: string) => ({
+  matches: true,
+  media,
+  onchange: null,
+  addEventListener: () => {},
+  removeEventListener: () => {},
+  addListener: () => {},
+  removeListener: () => {},
+  dispatchEvent: () => false,
+})) as unknown as typeof window.matchMedia;
+
 const { AccountDock } = await import("./AccountDock");
+const { deskWasOpen, useAccountPanels } = await import("./accountPanels");
+const { WorkspaceRail } = await import("./WorkspaceRail");
+const { WorkspacePaneOutlet, WorkspacePaneProvider } =
+  await import("./WorkspacePane");
 const { api } = await import("@/lib/api");
 
 /**
@@ -75,13 +96,51 @@ let container: HTMLDivElement;
 let root: Root;
 let qc: QueryClient;
 
+/**
+ * The desk as the page composes it: the pane it opens in, and its two words on
+ * the rail.
+ *
+ * The rail is shared with the agent's entry and so is built by the page rather
+ * than by the desk (`useAccountPanels`) — but the pair is one feature, and a
+ * test that rendered only the panel could not click anything. The pane is here
+ * for the same reason: the panel is a sheet now, and a sheet with nowhere to
+ * portal into is not the thing the reader sees.
+ *
+ * `open` is the page's, standing in for the `PaneView` union in `AgentChatTab`
+ * — which is exactly the point being pinned: the desk does not decide whether
+ * it is on screen, the pane does, and that is what makes it exclusive with the
+ * agent panel without either one knowing about the other.
+ */
+function Desk({ server }: { server: string | null }) {
+  const [open, setOpen] = useState(deskWasOpen);
+  const account = useAccountPanels({ server, open, onOpenChange: setOpen });
+  return (
+    <WorkspacePaneProvider>
+      <div className="flex">
+        <div className="flex-1" />
+        <WorkspacePaneOutlet />
+        <WorkspaceRail groups={[{ id: "desk", items: account.railItems }]} />
+      </div>
+      <AccountDock
+        server={server}
+        shown={account.shown}
+        onToggle={account.toggle}
+        onClose={account.close}
+      />
+      {/* The agent panel, reduced to the only thing it does to the desk: take
+          the pane. The union in `AgentChatTab` is what makes this one line. */}
+      <button data-testid="open-agent" onClick={() => setOpen(false)} />
+    </WorkspacePaneProvider>
+  );
+}
+
 async function render(server: string | null = "brigado_2", warm = false) {
   await act(async () => {
     root.render(
       <MemoryRouter>
         <QueryClientProvider client={qc}>
           {warm && server && <PortfolioPageQuery server={server} />}
-          <AccountDock server={server} />
+          <Desk server={server} />
         </QueryClientProvider>
       </MemoryRouter>,
     );
@@ -99,9 +158,14 @@ async function click(el: HTMLElement) {
 
 const tab = (label: string) =>
   container.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)!;
-/** The panel column, which exists only while something is open. */
+/** The panel body, which exists only while something is open. */
 const column = () =>
   container.querySelector<HTMLElement>('[data-testid="account-dock"]');
+/** Where a split sheet portals to: the pane, not a column of the desk's own. */
+const paneHost = () =>
+  container.querySelector<HTMLElement>('aside[aria-label="Workspace pane"]');
+/** The whole sheet — its bar included, which is where the server is named. */
+const sheet = () => (column() ? paneHost() : null);
 const sectionHeaders = () =>
   [...(column()?.querySelectorAll("button[title]") ?? [])].map(
     (b) => b.textContent ?? "",
@@ -116,9 +180,22 @@ beforeEach(() => {
   });
   localStorage.clear();
   subscribed.clear();
-  getPortfolio.mockResolvedValue({ server: "brigado_2", connectors: [], total_usd: 0 });
-  getPortfolioHistory.mockResolvedValue({ server: "brigado_2", points: [], interval: "1h" });
-  getBots.mockResolvedValue({ controllers: [], bots: [], total_pnl: 0, total_volume: 0 });
+  getPortfolio.mockResolvedValue({
+    server: "brigado_2",
+    connectors: [],
+    total_usd: 0,
+  });
+  getPortfolioHistory.mockResolvedValue({
+    server: "brigado_2",
+    points: [],
+    interval: "1h",
+  });
+  getBots.mockResolvedValue({
+    controllers: [],
+    bots: [],
+    total_pnl: 0,
+    total_volume: 0,
+  });
   getExecutors.mockResolvedValue([]);
   container = document.createElement("div");
   document.body.appendChild(container);
@@ -166,55 +243,92 @@ describe("the account dock", () => {
     expect(open).toHaveLength(2);
   });
 
-  it("takes a column in flow rather than floating over the dock", async () => {
+  it("opens in the workspace pane, not in a column of its own", async () => {
     await render();
     await click(tab("Portfolio"));
 
-    // The load-bearing assertion of the revision: nothing positions this out of
-    // the row, so the context dock beside it stays visible and readable while a
-    // balance is open. A float here is what made the two docks exclusive.
-    const panel = column()!;
-    expect(panel.className).not.toContain("absolute");
-    expect(panel.className).not.toContain("z-40");
-    expect(panel.className).toContain("shrink-0");
+    // The load-bearing assertion of the second revision: the desk is a sheet in
+    // the one pane, which is what makes it exclusive with the agent panel by
+    // construction rather than by a rule somebody has to remember — and what
+    // stopped the row asking for a fifth column it could not pay for.
+    const host = paneHost()!;
+    expect(host.contains(column()!)).toBe(true);
+    // Nothing floats: a desk drawn over the dock beside it is what the first
+    // revision got wrong, and the pane is in flow.
+    expect(host.className).not.toContain("absolute");
 
-    // And it comes *before* the rail in the row, so the panels open away from
-    // their own controls rather than under them.
+    // And the pane comes *before* the rail in the row, so the panel opens away
+    // from its own controls rather than under them — the rail is the far edge.
     const rail = tab("Portfolio").closest("aside")!;
-    expect(panel.compareDocumentPosition(rail)).toBe(
+    expect(host.compareDocumentPosition(rail)).toBe(
       Node.DOCUMENT_POSITION_FOLLOWING,
     );
+  });
+
+  it("gives the pane back when the last section is closed", async () => {
+    await render();
+    await click(tab("Portfolio"));
+    expect(paneHost()!.className).not.toContain("hidden");
+
+    await click(tab("Portfolio"));
+    // No empty panel with two collapsed headers in it, and the pane is free
+    // for whatever the reader opens next.
+    expect(column()).toBeNull();
+    expect(paneHost()!.className).toContain("hidden");
+  });
+
+  it("comes back on the desk the agent panel took it from", async () => {
+    await render();
+    await click(tab("Portfolio"));
+    await click(tab("Execution"));
+
+    // Something else claims the pane. The desk is off screen and its tiles say
+    // so — nothing is open to be pressed about.
+    await click(
+      container.querySelector<HTMLElement>("[data-testid=open-agent]")!,
+    );
+    expect(column()).toBeNull();
+    expect(tab("Portfolio").getAttribute("aria-pressed")).toBe("false");
+
+    // Either tile brings back both, because both is where it was left. A click
+    // on an unpressed tile can only mean "show me this" — it must never quietly
+    // turn a section off on the way in.
+    await click(tab("Execution"));
+    expect(tab("Portfolio").getAttribute("aria-pressed")).toBe("true");
+    expect(tab("Execution").getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("forgets the desk when the panel's own Close says so", async () => {
+    await render();
+    await click(tab("Portfolio"));
+
+    // Unlike losing the pane, this is the reader saying they are done — and it
+    // is the fact a reload reads, so a close that kept the sections would be a
+    // close that undid itself on the next mount.
+    await click(sheet()!.querySelector<HTMLElement>("button[title='Close']")!);
+    expect(column()).toBeNull();
+    expect(localStorage.getItem(ACCOUNT_DOCK_KEY)).toBe("[]");
   });
 
   it("names the server the panels are reading, once", async () => {
     await render();
     await click(tab("Portfolio"));
 
-    // In the dock's own bar rather than on every section header — the width
+    // In the panel's own bar rather than on every section header — the width
     // that bought is what the tables inside spend.
-    expect(column()!.textContent).toContain("brigado_2");
+    expect(sheet()!.textContent).toContain("brigado_2");
     expect(sectionHeaders().join(" ")).not.toContain("brigado_2");
   });
 
-  it("remembers the width the seam was dragged to", async () => {
+  it("closes with the edge's own glyph, not a modal's X", async () => {
     await render();
     await click(tab("Portfolio"));
 
-    const seam = container.querySelector<HTMLElement>(
-      '[aria-label="Resize account panels"]',
-    )!;
-    // The keyboard path, which is the same `onWidth` the drag calls.
-    await act(async () => {
-      seam.dispatchEvent(
-        new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true }),
-      );
-    });
-
-    // Stored rounded, applied exact — the same split the context dock's width
-    // has, so what comes back on the next mount is what is on screen now.
-    const stored = Number(localStorage.getItem(ACCOUNT_DOCK_WIDTH_KEY));
-    expect(stored).toBeGreaterThan(0);
-    expect(Math.round(parseFloat(column()!.style.width))).toBe(stored);
+    // Every bar along the right edge closes the same way — the dock's, the
+    // desk's, the agent panel's. An X here read as "discard" beside three
+    // chevrons that read as "fold away".
+    const close = sheet()!.querySelector<HTMLElement>("button[title='Close']")!;
+    expect(close.querySelector("svg.lucide-panel-right-close")).not.toBeNull();
   });
 
   it("survives a reload, and nothing else", async () => {
@@ -225,12 +339,15 @@ describe("the account dock", () => {
       "execution",
     ]);
 
-    // A fresh mount of the same browser comes back where it was left.
+    // A fresh mount of the same browser comes back where it was left — the
+    // panel up, on the section it was showing. The recorded sections are what
+    // says the desk was open; there is no second flag to keep in step.
     await act(() => root.unmount());
     root = createRoot(container);
     await render();
     expect(tab("Execution").getAttribute("aria-pressed")).toBe("true");
     expect(tab("Portfolio").getAttribute("aria-pressed")).toBe("false");
+    expect(paneHost()!.contains(column()!)).toBe(true);
   });
 
   it("reads /portfolio's cache rather than walking the connectors again", async () => {
@@ -251,7 +368,9 @@ describe("the account dock", () => {
 
     expect(tab("Portfolio").disabled).toBe(true);
     expect(tab("Execution").disabled).toBe(true);
-    expect(tab("Portfolio").title).toBe("Select a server to see your portfolio");
+    expect(tab("Portfolio").title).toBe(
+      "Select a server to see your portfolio",
+    );
     expect(column()).toBeNull();
   });
 

@@ -47,6 +47,13 @@ import { CHAT_SLUG, type AgentSummary } from "@/lib/api";
  * column most readers keep collapsed — so the gesture the tab strip is *about*
  * lived somewhere you had to go looking for. It sits outside the scroller, so
  * it stays reachable once enough tabs are open to push the last one off.
+ *
+ * It sits *against the last tab*, not at the far end of the bar. The scroller
+ * takes its width from the tabs in it rather than filling the row, so with one
+ * conversation open the `+` is an inch from it instead of stranded beside the
+ * next control along — which is where a browser puts it, and where the hand
+ * that just closed a tab already is. It still stops growing at the width the
+ * row has, so a busy strip scrolls under a `+` that never moves.
  */
 export function SessionTabs({
   slots,
@@ -92,8 +99,11 @@ export function SessionTabs({
     >
       {/* The scroller holds only the tabs: the `+` after it must not scroll
           away with them, or the one control that is not about a session you
-          already have would be the first thing a busy strip hides. */}
-      <div className="flex min-w-0 flex-1 items-stretch gap-1 self-stretch overflow-x-auto">
+          already have would be the first thing a busy strip hides. It is
+          `shrink` and not `flex-1` — sized by the tabs, capped by the row — so
+          the `+` rides against the last tab rather than at the far end of a
+          bar the tabs do not fill. */}
+      <div className="flex min-w-0 shrink items-stretch gap-1 self-stretch overflow-x-auto">
         {slots.map((slot) => {
           const key = groupKey(slot);
           const ordinal = (seen.get(key) || 0) + 1;

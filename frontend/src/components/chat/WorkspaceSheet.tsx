@@ -1,4 +1,4 @@
-import { Maximize2, Minimize2, X } from "lucide-react";
+import { Maximize2, Minimize2, PanelRightClose, X } from "lucide-react";
 import { useEffect, useId, useState } from "react";
 import { createPortal } from "react-dom";
 
@@ -224,12 +224,27 @@ export function WorkspaceSheet({
               )}
             </button>
           )}
+          {/* One close glyph for the whole right edge.
+              In the pane this sheet is a column beside the conversation, sitting
+              in the row with the account and context docks, whose bars have
+              always closed with `PanelRightClose` — so a reader looking along
+              that row met an X on the agent panel and a chevron-into-a-wall on
+              everything else, two glyphs for one verb at the same altitude. The
+              chevron is also the more honest of the two here: the panel does not
+              go away, it folds back into the edge the rail tile reopens it from.
+              Off the pane it is a modal floating over a page, and a modal closes
+              with an X — that is not the same control and should not borrow the
+              same picture. */}
           <button
             onClick={onClose}
             className="rounded p-1 text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
             title={split ? "Close" : "Close (Esc)"}
           >
-            <X className="h-4 w-4" />
+            {split ? (
+              <PanelRightClose className="h-4 w-4" />
+            ) : (
+              <X className="h-4 w-4" />
+            )}
           </button>
         </div>
       </div>

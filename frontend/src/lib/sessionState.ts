@@ -98,44 +98,47 @@ export const DISPLAY_CURRENCY_KEY = "condor_display_currency";
 export const PNL_HIDDEN_SERIES_KEY = "condor.pnl.hidden-series";
 
 /**
- * Whether the context dock is a column at all (components/chat/ContextDock).
+ * Which context-dock panes are open, as a JSON array of pane ids — Tasks and
+ * Routines, the same shape `ACCOUNT_DOCK_KEY` holds for the desk panels.
  *
- * KEPT beside the width below: a disclosure that is open or shut is a fact
- * about this window, and the rows inside it are re-fetched under whoever is
- * logged in now.
+ * Replaces a boolean (`condor.dock.open`), which could only say whether the
+ * column existed: once both docks' entries share one rail, a tile has to be
+ * able to say which *pane* it opens, and "the column is up" is no longer an
+ * answer to that. That key is gone rather than migrated — see `readOpen` in
+ * components/chat/contextPanels for why inheriting its answer read as the panes
+ * having stopped opening by default. A value left behind in an old browser is
+ * never read again.
+ *
+ * KEPT, for the reason the keys around it are: which disclosures this window
+ * has open says nothing about what is inside them.
  */
-export const DOCK_OPEN_KEY = "condor.dock.open";
+export const DOCK_PANES_KEY = "condor.dock.panes";
 
 /**
  * How many pixels wide the reader dragged the context dock (ARCH-291).
  *
- * KEPT, beside the `DOCK_OPEN_KEY` that decides whether the column is there
- * at all: a column's width is a fact about this window, not about the
+ * KEPT, beside the `DOCK_PANES_KEY` that decides which panes are in it: a
+ * column's width is a fact about this window, not about the
  * conversation that happened to be open in it, and the rows inside it are
  * re-fetched under whoever is logged in now.
  */
 export const DOCK_WIDTH_KEY = "condor.dock.width";
 
 /**
- * Which account-dock panels are open, as a JSON array of panel ids — the
- * Portfolio and Execution panels beside the context dock (FEAT-094).
+ * Which desk sections are open, as a JSON array of panel ids — Portfolio and
+ * Execution, in the workspace pane (FEAT-094).
  *
- * KEPT, beside the `DOCK_OPEN_KEY` above it and for the same reason: which
+ * It is also what says the desk was *up*: a desk with no section open is not a
+ * desk, so the workspace restores the panel from this rather than recording a
+ * second flag that could disagree with it. The width key beside it went away
+ * with the column it measured — the pane's own split is the reader's now.
+ *
+ * KEPT, beside the `DOCK_PANES_KEY` above it and for the same reason: which
  * disclosures a reader has open is a fact about this window, and the balances
  * and controllers behind them are fetched for whoever is logged in now. The
  * ids name panels, never a server, a balance or a position.
  */
 export const ACCOUNT_DOCK_KEY = "condor.dock.account";
-
-/**
- * How wide the reader dragged that column, in CSS pixels.
- *
- * KEPT, for the same reason `DOCK_WIDTH_KEY` is: it says how this window is
- * divided, and nothing about what is in it. Its own key rather than a shared
- * one, because the two columns answer different questions and a reader who
- * wants a wide executor table does not thereby want a wide task list.
- */
-export const ACCOUNT_DOCK_WIDTH_KEY = "condor.dock.account.width";
 
 /**
  * Where the reader put the split between the transcript and the workspace

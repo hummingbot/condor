@@ -68,6 +68,7 @@ window.matchMedia = ((media: string) => ({
 })) as unknown as typeof window.matchMedia;
 
 const { ContextDock } = await import("./ContextDock");
+const { useContextPanels } = await import("./contextPanels");
 
 declare global {
   var IS_REACT_ACT_ENVIRONMENT: boolean;
@@ -127,10 +128,20 @@ let qc: QueryClient;
  */
 function Workspace({ agentSlug }: { agentSlug: string }) {
   const [library, setLibrary] = useState<LibraryFocus | null>(null);
+  // Which panes are open is the page's, not the dock's: the tiles that open
+  // them are two of the five on the one workspace rail. The harness holds it
+  // exactly as `AgentChatTab` does.
+  const panels = useContextPanels({
+    delegations: [],
+    conversationId: CONVERSATION,
+    agentSlug,
+    libraryOpen: !!library,
+  });
   return (
     <WorkspacePaneProvider>
       <WorkspacePaneOutlet />
       <ContextDock
+        panels={panels}
         delegations={[]}
         conversationId={CONVERSATION}
         agentSlug={agentSlug}
@@ -172,8 +183,11 @@ const reportRow = () =>
   [...container.querySelectorAll("button")].find((b) =>
     b.textContent?.includes("Beta Check"),
   )!;
-const byTitle = (title: string) =>
-  container.querySelector<HTMLButtonElement>(`button[title="${title}"]`)!;
+/** The dock's own column, and the button that puts it away. */
+const dockColumn = () =>
+  container.querySelector<HTMLElement>('[data-testid="context-dock"]');
+const closeDock = () =>
+  dockColumn()!.querySelector<HTMLButtonElement>('button[title="Close"]')!;
 /** Which routine the library is on — the sheet's own nav bar carries this. */
 const trigger = () =>
   container.querySelector<HTMLButtonElement>('button[aria-label="Routine"]')!;
@@ -268,7 +282,7 @@ describe("the dock's routine library", () => {
 
   it("leaves the column where the reader put it", async () => {
     await render();
-    expect(byTitle("Collapse")).toBeTruthy();
+    expect(dockColumn()).toBeTruthy();
 
     await click(runRow());
 
@@ -276,21 +290,23 @@ describe("the dock's routine library", () => {
     // moment it opens means putting the column back to read a second routine.
     // The column is the reader's; nothing else touches it.
     expect(pane().contains(library())).toBe(true);
-    expect(byTitle("Collapse")).toBeTruthy();
+    expect(dockColumn()).toBeTruthy();
 
-    await click(byTitle("Close"));
+    await click(
+      pane().querySelector<HTMLButtonElement>('button[title="Close"]')!,
+    );
 
     expect(library()).toBeNull();
-    expect(byTitle("Collapse")).toBeTruthy();
+    expect(dockColumn()).toBeTruthy();
   });
 
   it("outlives the column it was opened from", async () => {
     await render();
 
     await click(runRow());
-    await click(byTitle("Collapse"));
+    await click(closeDock());
 
-    // Collapsing the column is not a close: the sheet is a sibling of the
+    // Closing the column is not closing the sheet: it is a sibling of the
     // `aside`, not a child, so what the reader was reading stays mounted in
     // the pane rather than being torn down and rebuilt.
     expect(pane().contains(library())).toBe(true);
