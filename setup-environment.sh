@@ -305,6 +305,29 @@ PYEOF
     return 1
 }
 
+# Does anything already own this host's tailnet interface?
+#
+# Prints: sidecar | native | none. Mirrors hummingbot-api's tailnet-state.sh --
+# duplicated deliberately, because Condor installs on machines where that
+# checkout does not exist.
+#
+# Detects the RESOURCE, not the sibling product: the most common conflict is a
+# VPS already running Tailscale for the admin's own SSH access, which no
+# "is hummingbot-api here?" check would ever see. Two kernel-mode tailscaled
+# in one network namespace is fatal and silent -- the loser dies with
+# tstun.New("tailscale0"): device or resource busy while its container keeps
+# reporting "running".
+tailnet_state() {
+    if command_exists docker &&
+       docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'hummingbot-tailscale'; then
+        echo sidecar; return
+    fi
+    if pgrep -x tailscaled >/dev/null 2>&1; then echo native; return; fi
+    if ip link show tailscale0 >/dev/null 2>&1; then echo native; return; fi
+    if command_exists tailscale && tailscale status >/dev/null 2>&1; then echo native; return; fi
+    echo none
+}
+
 # On WSL2, systemd doesn't manage tailscaled — we must start the daemon manually
 # before calling `tailscale up`, otherwise the call silently fails.
 tailscale_up() {
@@ -1026,8 +1049,16 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
         HB_OWN_TAILNET_NODE=false
         ts_auth_key=""
         ts_hb_hostname="hummingbot-api"
+        HB_TAILSCALE_MODE=none
         use_tailscale="${use_tailscale_early:-N}"
+        _ts_state="$(tailnet_state)"
         if [[ "${use_tailscale:-}" =~ ^[Yy]$ ]]; then
+          # Already on the tailnet: no key needed to reuse this machine's own
+          # node. Asking for one would demand a credential for a join we are
+          # about to skip.
+          if [ "$_ts_state" != none ]; then
+            msg_ok "Tailscale already active on this machine ($_ts_state) — no auth key needed"
+          else
             echo ""
             echo -e "  ${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
             echo -e "  ${CYAN}  How to get a Tailscale auth key:${RESET}"
@@ -1049,10 +1080,21 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
                 fi
                 break
             done
-            msg_info "Installing Tailscale on this machine..."
-            curl -fsSL https://tailscale.com/install.sh | sh
-            msg_info "Connecting to Tailscale network..."
-            tailscale_up --authkey="$ts_auth_key" --hostname="condor" --accept-dns=true
+          fi
+            # Only join the tailnet if nothing here has already. This branch
+            # used to install and `tailscale up` unconditionally: a smoke test
+            # with a daemon already running produced output byte-identical to
+            # one without, because nothing ever looked. The remote-API branch
+            # above has always checked; this one never did.
+            if [ "$_ts_state" = none ]; then
+                msg_info "Installing Tailscale on this machine..."
+                curl -fsSL https://tailscale.com/install.sh | sh
+                msg_info "Connecting to Tailscale network..."
+                tailscale_up --authkey="$ts_auth_key" --hostname="condor" --accept-dns=true
+            else
+                msg_ok "Tailscale already active on this machine ($_ts_state) — reusing it"
+                msg_info "Not joining the tailnet a second time: one machine, one node."
+            fi
             ts_condor_ip=$(tailscale ip -4 2>/dev/null | head -1)
             TS_DEPLOY=true
             msg_ok "Tailscale connected — this machine (and its dashboard) is reachable on your tailnet"
@@ -1071,8 +1113,36 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
             msg_info "localhost — it doesn't need a tailnet node of its own for that."
             prompt_visible "Also give hummingbot-api its own Tailscale node, so other devices (e.g. an MCP client on another machine) can reach it directly? [y/N]" "N" "hb_tailscale_choice"
             if [[ "${hb_tailscale_choice:-}" =~ ^[Yy]$ ]]; then
+                # A second node is safe now: this machine already runs a
+                # kernel-mode daemon, so hummingbot-api's `make deploy` starts
+                # its sidecar in userspace mode. Netstack claims no TUN device
+                # and no host routes, so both coexist -- verified on a live
+                # tailnet, serving a loopback-bound port to another node with a
+                # single tailscale0 between them. Before that, answering yes
+                # here produced a sidecar that died on startup and a container
+                # that still reported "running".
                 HB_OWN_TAILNET_NODE=true
+                HB_TAILSCALE_MODE=sidecar
+                if [ -z "${ts_auth_key:-}" ]; then
+                    msg_info "A separate node needs its own auth key (this machine's node is already registered)."
+                    while true; do
+                        prompt_visible "Tailscale auth key for hummingbot-api (tskey-auth-...)" "" "ts_auth_key"
+                        if [ -z "${ts_auth_key:-}" ]; then
+                            msg_warn "Auth key cannot be empty"; continue
+                        fi
+                        if [[ ! "$ts_auth_key" =~ ^tskey-auth- ]]; then
+                            msg_warn "Auth key must start with 'tskey-auth-'"; continue
+                        fi
+                        break
+                    done
+                fi
                 msg_ok "hummingbot-api will join the tailnet as '$ts_hb_hostname' — reachable at http://$ts_hb_hostname:8000"
+            else
+                # One machine, one node: port 8000 is served on the node this
+                # host already has, so nothing new registers and nothing
+                # contends for tailscale0.
+                HB_TAILSCALE_MODE=host
+                msg_ok "hummingbot-api will be served on this machine's existing tailnet node"
             fi
         fi
 
@@ -1120,7 +1190,8 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
                     HBAPI_USERNAME="$hb_username" \
                     HBAPI_PASSWORD="$hb_password" \
                     HBAPI_CONFIG_PASSWORD="$hb_config_password" \
-                    TAILSCALE_ENABLED="$HB_OWN_TAILNET_NODE" \
+                    TAILSCALE_ENABLED="$([ "$HB_TAILSCALE_MODE" = none ] && echo false || echo true)" \
+                    TAILSCALE_MODE="$HB_TAILSCALE_MODE" \
                     TAILSCALE_AUTH_KEY="$ts_auth_key" \
                     TAILSCALE_HOSTNAME="$ts_hb_hostname" \
                     ./setup.sh); then
