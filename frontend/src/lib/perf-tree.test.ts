@@ -23,6 +23,7 @@ import {
   controllerNodeId,
   countNodes,
   foldLeaves,
+  matchesGrain,
   groupNodeId,
   indexTree,
   leafFromController,
@@ -31,6 +32,7 @@ import {
   resolveScope,
   runStatus,
   visibleNodeIds,
+  type Grain,
   type PerfLeaf,
   type PerfNode,
 } from "./perf-tree";
@@ -1024,5 +1026,103 @@ describe("controllerClassOf", () => {
     );
     expect(leaf.executorType).toBe("—");
     expect(controllerClassOf(leaf, classes)).toBe("");
+  });
+});
+
+/**
+ * The granularity switch (ARCH-317), which is one predicate over `leaf.kind`
+ * and then `buildTree`'s spine rule.
+ *
+ * Both non-default modes are a way to report a number nobody earned, which is
+ * what these pin: `Controllers` must leave every controller's own total exactly
+ * where `Both` had it (a controller's spine is its own record, so dropping its
+ * children cannot change it), and `Executors` must fold each controller row out
+ * of the executors under it *once* — never the controller record and its
+ * executors added together.
+ */
+describe("matchesGrain, and the trees it builds", () => {
+  /**
+   * A fleet with all three things in it: a controller with executors under it,
+   * and two hand-opened positions that belong to no controller at all — which
+   * is the `grp:` bucket the level before this one introduced.
+   */
+  const fleet = (): PerfLeaf[] => [
+    leafFromController(controller({ bot_name: "alpha", controller_id: "pmm_1" })),
+    leafFromExecutor(executor({ id: "e1", pnl: 3, controller_id: "pmm_1" }), "alpha"),
+    leafFromExecutor(executor({ id: "e2", pnl: 4, controller_id: "pmm_1" }), "alpha"),
+    leafFromExecutor(executor({ id: "manual", pnl: 5, controller_id: "main" })),
+    leafFromExecutor(executor({ id: "manual_2", pnl: 7, controller_id: "main" })),
+  ];
+
+  const at = (grain: Grain) =>
+    buildTree(fleet().filter((leaf) => matchesGrain(leaf, grain)), "All", { groupByBot: true });
+
+  const netOf = (tree: PerfNode, id: string) =>
+    foldLeaves(node(tree, id).leaves, identity, NOW).net;
+
+  it("keeps every leaf at the default, which is the tree as it was", () => {
+    expect(fleet().every((leaf) => matchesGrain(leaf, "both"))).toBe(true);
+  });
+
+  it("draws no executor row anywhere in controllers mode", () => {
+    const tree = at("controllers");
+    expect(countNodes(tree, "executor")).toBe(0);
+    expect(node(tree, "ctrl:alpha:pmm_1").children).toEqual([]);
+  });
+
+  // The point of the mode: a controller's spine is its own record, so hiding
+  // the executors underneath it must not move a single number.
+  it("reports the same controller totals in controllers mode as in both", () => {
+    expect(netOf(at("controllers"), "ctrl:alpha:pmm_1")).toBe(
+      netOf(at("both"), "ctrl:alpha:pmm_1"),
+    );
+    expect(netOf(at("controllers"), "bot:alpha")).toBe(netOf(at("both"), "bot:alpha"));
+  });
+
+  // The bucket exists only to hold executors, so a mode with no executors in it
+  // must not leave the row standing as an empty husk — and it does not, because
+  // nothing builds a node the leaves never ask for.
+  it("leaves no empty group row behind in controllers mode", () => {
+    const tree = at("controllers");
+    expect(countNodes(tree, "group")).toBe(0);
+    expect(tree.children.map((c) => c.id)).toEqual(["bot:alpha"]);
+    expect(indexTree(tree).has("grp:main")).toBe(false);
+  });
+
+  it("draws no controller record in executors mode, only rows folded from executors", () => {
+    const tree = at("executors");
+    // The controller row survives — as a fold of its executors, which is
+    // exactly what the executor-type filter has always produced.
+    const ctrl = node(tree, "ctrl:alpha:pmm_1");
+    expect(ctrl.leaves.every((leaf) => leaf.kind === "executor")).toBe(true);
+    expect(ctrl.children.map((c) => c.id)).toEqual(["exec:e1", "exec:e2"]);
+    expect(foldLeaves(ctrl.leaves, identity, NOW).net).toBe(7);
+  });
+
+  // The bucket is untouched by the mode: the rows in it were executors already.
+  it("keeps the group row and its executors in executors mode", () => {
+    const tree = at("executors");
+    const group = node(tree, "grp:main");
+    expect(group.children.map((c) => c.id)).toEqual(["exec:manual", "exec:manual_2"]);
+    expect(foldLeaves(group.leaves, identity, NOW).net).toBe(12);
+  });
+
+  // No double counting, said as the sum: the fleet total is the executor leaves
+  // and nothing else, so the controller record cannot have been added on top.
+  it("folds the fleet out of the executor leaves alone in executors mode", () => {
+    const tree = at("executors");
+    expect(tree.leaves.every((leaf) => leaf.kind === "executor")).toBe(true);
+    expect(tree.leaves.length).toBe(4);
+    expect(foldLeaves(tree.leaves, identity, NOW).net).toBe(3 + 4 + 5 + 7);
+  });
+
+  // ...and the same on the other side: the fleet is the controller record and
+  // nothing else, never the controller's executors counted alongside it.
+  it("folds the fleet out of the controller leaves alone in controllers mode", () => {
+    const tree = at("controllers");
+    expect(tree.leaves.every((leaf) => leaf.kind === "controller")).toBe(true);
+    expect(foldLeaves(tree.leaves, identity, NOW).net).toBe(
+      foldLeaves([leafFromController(controller())], identity, NOW).net,
+    );
   });
 });

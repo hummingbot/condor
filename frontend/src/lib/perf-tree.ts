@@ -337,6 +337,37 @@ export function controllerClassOf(leaf: PerfLeaf, classById: Map<string, string>
   return leaf.controllerId ? classById.get(leaf.controllerId) ?? "" : "";
 }
 
+/**
+ * Which granularity of record a reader is reporting on (ARCH-317).
+ *
+ * The two populations differ on this more than on anything else: a terminated
+ * fold mixes finished controllers with the executors that belong to no run, and
+ * a running one hangs live executors under every controller. `both` is the
+ * tree as it has always been.
+ */
+export type Grain = "both" | "controllers" | "executors";
+
+/**
+ * Whether a leaf belongs in a tree drawn at this granularity.
+ *
+ * One predicate over `leaf.kind`, and the whole of the feature: `buildTree`'s
+ * spine rule — a node folds its own leaf when it has one and its children's
+ * when it does not — does the rest. Dropping every executor leaves each
+ * controller row reporting its own record, unchanged, with no children under
+ * it; dropping every controller leaves each controller row folding the
+ * executors that survived, which is exactly the "step aside" the executor-type
+ * filter has always relied on.
+ *
+ * It lives here rather than beside the panel for the reason `controllerClassOf`
+ * does (the ARCH-300 split): it is a rule about a leaf, and a test can reach it
+ * without mounting a browser.
+ */
+export function matchesGrain(leaf: PerfLeaf, grain: Grain): boolean {
+  if (grain === "controllers") return leaf.kind !== "executor";
+  if (grain === "executors") return leaf.kind !== "controller";
+  return true;
+}
+
 // ── The tree ──
 
 export type NodeKind = "fleet" | "agent" | "bot" | "controller" | "executor" | "group";

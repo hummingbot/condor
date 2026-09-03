@@ -79,11 +79,13 @@ import {
   leafFromController,
   leafFromExecutor,
   leafFromTerminatedController,
+  matchesGrain,
   parsePopulation,
   resolveScope,
   runStatus,
   UNATTACHED_BOT,
   visibleNodeIds,
+  type Grain,
   type PerfNode,
   type Population,
   type PerfLeaf,
@@ -209,6 +211,27 @@ type BandKey = "positions" | "executors" | null;
  */
 const PERIODS = { "1W": 7, "1M": 30, "3M": 90, All: 0 } as const;
 type PeriodKey = keyof typeof PERIODS;
+
+/**
+ * The granularities the tree can be drawn at, and what each strip segment says.
+ *
+ * A strip rather than a bubble row: the bubble groups are multi-select, and
+ * these three are one answer — the same shape the period strip below it has,
+ * for the same reason.
+ */
+const GRAINS: ReadonlyArray<{ key: Grain; label: string; hint: string }> = [
+  { key: "both", label: "Both", hint: "Every record: controllers, with the executors under them." },
+  {
+    key: "controllers",
+    label: "Controllers",
+    hint: "Controller records only — each row reports its own numbers, with no executors under it.",
+  },
+  {
+    key: "executors",
+    label: "Executors",
+    hint: "Executors only — a controller row folds the executors that ran under it, and reports nothing of its own.",
+  },
+];
 
 // ── Types ──
 
@@ -520,6 +543,23 @@ export function PerfBrowser({
   // the reader picks.
   const [period, setPeriod] = useState<PeriodKey>("3M");
 
+  /**
+   * Which granularity of record the tree reports (ARCH-317).
+   *
+   * Beside `period` and `population` rather than inside `filters`, because it
+   * is a *view* of the population and not a narrowing of it: it says which
+   * class of record the reader is comparing, the way the toggle above it says
+   * which population. That is also why it stays out of `filtersActive` and out
+   * of `Clear all filters` — clearing what you searched for must not silently
+   * change the granularity underneath you.
+   *
+   * Half of it existed already, as a side effect: ticking an executor type
+   * makes the controller spine step aside so each row folds its matching
+   * executors. That was the only way to ask for executors, it needed a type
+   * named, and there was no way at all to ask for controllers alone.
+   */
+  const [grain, setGrain] = useState<Grain>("both");
+
   // Stopping and the detail panel belong to whichever executor is in reach,
   // which is now any scope rather than one page (FEAT-086).
   const stop = useExecutorStop(server);
@@ -808,29 +848,42 @@ export function PerfBrowser({
    * spine drops out, and each controller row folds the matching executors
    * beneath it instead (see `buildTree`'s spine rule, which does exactly this
    * for a controller that has no leaf of its own).
+   *
+   * The granularity is that same rule said out loud, and it runs first: it is
+   * what the reader is looking at, so a narrowing that no longer has anything
+   * to narrow is skipped rather than allowed to empty the tree.
    */
   const applyFilters = useCallback(
     (all: PerfLeaf[]): PerfLeaf[] => {
       const pair = filters.pair.trim().toLowerCase();
       const { ctrlTypes, execTypes, agents } = filters;
-      if (!pair && !ctrlTypes.length && !execTypes.length && !agents.length && !runFilter) {
+      if (
+        grain === "both" &&
+        !pair && !ctrlTypes.length && !execTypes.length && !agents.length && !runFilter
+      ) {
         return all;
       }
       return all.filter((leaf) => {
+        if (!matchesGrain(leaf, grain)) return false;
         if (pair && !leaf.pair.toLowerCase().includes(pair)) return false;
         if (!matchesAgents(leaf, agents)) return false;
         // The run is a URL parameter rather than a bubble, but it narrows the
         // same population by the same rule, so it belongs in the same pass.
         if (!inRun(leaf, runFilter)) return false;
         if (ctrlTypes.length && !ctrlTypes.includes(classOf(leaf))) return false;
-        if (execTypes.length) {
+        // Ignored in `controllers` mode, where its row is not drawn either:
+        // there are no executors left for it to pick between, and applying a
+        // tick the reader made in another mode would leave the tree empty
+        // rather than showing them the controllers they just asked for. The
+        // ticks are kept, not cleared, so going back to `Both` restores them.
+        if (execTypes.length && grain !== "controllers") {
           if (leaf.kind === "controller") return false;
           if (!execTypes.includes(leaf.executorType)) return false;
         }
         return true;
       });
     },
-    [filters, classOf, runFilter],
+    [filters, classOf, runFilter, grain],
   );
 
   /** The population as it stands, and what the bubbles left of it. */
@@ -905,11 +958,22 @@ export function PerfBrowser({
   }, [leaves]);
   const soloRealBot = soloBot && soloBot !== UNATTACHED_BOT ? soloBot : undefined;
 
-  /** What the fleet row is called, which depends on what is under it. */
+  /**
+   * What the fleet row is called, which depends on what is under it.
+   *
+   * "All controllers" over a tree of executors is a total labelled as the thing
+   * it is not, so the granularity has a say: in `executors` mode there is no
+   * controller record anywhere in the fold, and the row says so.
+   */
   const rootLabel = useCallback(
-    (which: Population, bot?: string) =>
-      bot ? shortBotName(bot) : which === "running" ? "All controllers" : "All closed",
-    [],
+    (which: Population, bot?: string) => {
+      if (bot) return shortBotName(bot);
+      if (grain === "executors") {
+        return which === "running" ? "All executors" : "All closed executors";
+      }
+      return which === "running" ? "All controllers" : "All closed";
+    },
+    [grain],
   );
 
   /**
@@ -1702,7 +1766,9 @@ export function PerfBrowser({
    */
   const scopeNoun =
     population === "running"
-      ? "controller"
+      ? grain === "executors"
+        ? "executor"
+        : "controller"
       : !scopedLeaves.some((leaf) => leaf.kind === "executor")
         ? "finished controller"
         : scopedLeaves.some((leaf) => leaf.kind === "controller")
@@ -1763,6 +1829,11 @@ export function PerfBrowser({
       subject,
       onScreen: {
         population,
+        // Which class of record these numbers are, beside which population they
+        // came from: a fold of executors and a fold of the controllers that ran
+        // them are two different reports, and the block that invites an answer
+        // about "the fleet" has to say which one it is quoting.
+        granularity: grain,
         scope: effectiveScopeId,
         // Named rather than left as a `agent:` id, and with the one fact only
         // this scope carries: whether the loop behind these numbers is alive.
@@ -1854,6 +1925,30 @@ export function PerfBrowser({
             <div className="flex max-h-[45vh] flex-col gap-1.5 overflow-y-auto scrollbar-thin px-2 pb-2">
               <PopulationToggle population={population} onChange={setPopulation} />
 
+              {/* Which granularity of record the tree draws (ARCH-317). One of
+                  the panel's questions rather than one of its filters — the
+                  population says *whose* records, the bubbles say *what class*,
+                  and this says which *kind of thing* is being compared. A strip
+                  and not a bubble row because the three are one answer. */}
+              <div className="flex gap-0.5 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-0.5">
+                {GRAINS.map(({ key, label, hint }) => (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => setGrain(key)}
+                    aria-pressed={grain === key}
+                    title={hint}
+                    className={`flex-1 rounded px-1 py-1 text-[10px] font-medium transition-colors ${
+                      grain === key
+                        ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+                        : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+
               {/* The window a terminated fold reaches back over. Offered here
                   and not for the live fleet, whose window is its own deploy —
                   cutting a live fold at a week would report a PnL that its
@@ -1906,7 +2001,11 @@ export function PerfBrowser({
                   onChange={(v) => setFilters((f) => ({ ...f, ctrlTypes: v }))}
                 />
               )}
-              {filterOptions.execTypes.length > 1 && (
+              {/* Not drawn in `Controllers` mode: there are no executors in the
+                  tree to pick between. `Controller type` stays in all three —
+                  it classes an executor by the controller that ran it, so it
+                  narrows whatever is on screen. */}
+              {grain !== "controllers" && filterOptions.execTypes.length > 1 && (
                 <BubbleGroup
                   title="Executor type"
                   hint="Picking one reports the executors themselves: a controller record covers every type it ever ran, so it steps aside and each row folds the matching executors instead."
