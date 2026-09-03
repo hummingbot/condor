@@ -354,6 +354,7 @@ async def delegate(
     task: str = "",
     task_id: str = "",
     on_complete: str = "notify",
+    timeout_sec: int = 0,
 ) -> dict:
     """Delegate a one-off task to a background agent instance.
 
@@ -401,11 +402,21 @@ async def delegate(
             you intend to do something with the result yourself ("research X,
             then draft the summary"). With "resume" you must end your turn after
             starting the task: you will be woken with the answer.
+        timeout_sec: Wall-clock budget for the whole background task, in seconds
+            (for start). Omit it (0) for the default of 900s. Raise it when you
+            KNOW the job is long — several routines to build, a research sweep,
+            a multi-step backtest — because a task that outlives its budget is
+            cut off mid-run and loses whatever it had not finished. The ceiling
+            is 1800s: an agent session has its own ~31-minute hard stop, so
+            asking for more only delays the same cut-off. For work bigger than
+            that, split it across delegations.
 
     Returns:
         Action-specific result dict.
     """
-    return await delegate_tool.delegate(action, agent, task, task_id, on_complete)
+    return await delegate_tool.delegate(
+        action, agent, task, task_id, on_complete, timeout_sec
+    )
 
 
 @handle_errors("send notification")

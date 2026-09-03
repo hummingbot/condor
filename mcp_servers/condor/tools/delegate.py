@@ -14,6 +14,13 @@ from mcp_servers.condor.settings import settings
 # which deliberately talks to the main process over HTTP and never imports it.
 ON_COMPLETE_CHOICES = ("notify", "resume")
 
+# The default wall-clock budget for a background task, stated here only so the
+# tool can tell the caller what it is getting when it asks for nothing. The
+# route owns the real default and the upper bound (ARCH-310); this subprocess
+# never imports the main process, so a mismatch is caught by a test rather than
+# by an import.
+DEFAULT_TIMEOUT_SEC = 900
+
 # How the user tracks a delegation, per surface. The two surfaces have genuinely
 # different UIs for this, and the hint is quoted back to the user verbatim, so a
 # dashboard-only install was being told to run a command it does not have
@@ -54,6 +61,7 @@ async def delegate(
     task: str = "",
     task_id: str = "",
     on_complete: str = "notify",
+    timeout_sec: int = 0,
 ) -> dict:
     """Dispatch a delegate action (start | list | get | stop)."""
     action = (action or "").lower()
@@ -103,19 +111,27 @@ async def delegate(
                     f"got '{on_complete}'"
                 )
             }
+        body = {
+            "task": task,
+            "chat_id": settings.chat_id,
+            "user_id": settings.user_id,
+            "server_name": settings.active_server or None,
+            # Provenance: the route resolves this to the conversation that
+            # asked for the work, so the chat can watch what it started.
+            "session_key": settings.session_key,
+            "on_complete": on_complete,
+        }
+        # Only sent when the caller actually asked for a budget: omitting the
+        # key leaves the route's default in one place instead of pinning a copy
+        # of it into every request this subprocess makes (ARCH-310). The bounds
+        # are the route's to enforce -- it answers a bad one with a 400 whose
+        # detail says the limit, which reaches the model as an error.
+        if timeout_sec:
+            body["timeout_s"] = int(timeout_sec)
         result = await call_main_api(
             "POST",
             f"/agents/{agent}/delegate",
-            {
-                "task": task,
-                "chat_id": settings.chat_id,
-                "user_id": settings.user_id,
-                "server_name": settings.active_server or None,
-                # Provenance: the route resolves this to the conversation that
-                # asked for the work, so the chat can watch what it started.
-                "session_key": settings.session_key,
-                "on_complete": on_complete,
-            },
+            body,
         )
         # Spell out how the user tracks this so the model never INVENTS a status
         # command, and name the surface they are actually on: there is no "/task"

@@ -704,12 +704,26 @@ class StartStrategyRequest(BaseModel):
     user_id: int | None = None  # Accepted for compat but ignored (see handler)
 
 
+# ── The delegation budget (ARCH-310) ──
+#
+# ``timeout_s`` is the wall-clock ceiling ``start_delegation`` puts around the
+# whole background run. 900s stays the DEFAULT -- a reasonable guard against a
+# runaway unattended session -- but a caller who knows the job is longer (a
+# multi-step build, a research sweep) can raise it instead of having the work
+# silently cut in half. The bounds are not decoration: 0 or a negative would
+# make ``asyncio.wait_for`` kill the worker before its first tool call, and an
+# ACP prompt has its own ~31-minute hard ceiling, so a budget beyond that buys
+# nothing but a longer wait for the same cut-off.
+DEFAULT_DELEGATE_TIMEOUT_S = 900  # in sync with delegate.DEFAULT_TIMEOUT_S (pinned)
+MAX_DELEGATE_TIMEOUT_S = 1800
+
+
 class DelegateRequest(BaseModel):
     task: str
     chat_id: int = 0  # Telegram chat for the completion notification
     user_id: int | None = None  # Accepted for compat but ignored (see handler)
     server_name: str | None = None
-    timeout_s: int = 900
+    timeout_s: int = DEFAULT_DELEGATE_TIMEOUT_S
     # Canonical key of the session asking for the work (posted by the condor MCP
     # server from CONDOR_SESSION_KEY). Resolved to a conversation id below.
     session_key: str = ""
@@ -2111,6 +2125,9 @@ async def delegate_agent(
     Returns immediately with a ``task_id``; the agent runs unattended (ACP
     auto-approve) until done, then notifies the user. The async sibling of
     ``/consult``.
+
+    ``timeout_s`` is the whole run's wall-clock budget: the default 900s, or
+    whatever the caller asked for within the bounds above (ARCH-310).
     """
     from condor.agents.delegate import ON_COMPLETE_CHOICES, start_delegation
     from condor.runtime import wake
@@ -2123,6 +2140,14 @@ async def delegate_agent(
         raise HTTPException(
             status_code=400,
             detail=f"on_complete must be one of {list(ON_COMPLETE_CHOICES)}",
+        )
+    if not 1 <= req.timeout_s <= MAX_DELEGATE_TIMEOUT_S:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"timeout_s must be between 1 and {MAX_DELEGATE_TIMEOUT_S} "
+                f"seconds (default {DEFAULT_DELEGATE_TIMEOUT_S})"
+            ),
         )
 
     # Same server-scope gate as consult: a delegate binds the agent's MCP toolset
