@@ -59,6 +59,7 @@ const SERVER = "brigado_2";
 function controller(over: Partial<ControllerInfo> = {}): ControllerInfo {
   return {
     controller_name: "pmm_dynamic",
+    controller_type: "",
     controller_id: "pmm_v2",
     bot_name: "backpack-mm-3",
     status: "running",

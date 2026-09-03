@@ -114,6 +114,9 @@ export interface BotDetail {
 
 export interface ControllerInfo {
   controller_name: string;
+  /** The coarse bucket upstream sorts every controller into, when the specific
+   *  class (`controller_name`) could not be recovered — see `controllerClassOf`. */
+  controller_type: string;
   controller_id: string;
   bot_name: string;
   status: string;

@@ -22,7 +22,12 @@ import asyncio
 
 import pytest
 
-from condor.fetchers.run_history import declared_controllers, terminated_controllers
+from condor.fetchers.run_history import (
+    clear_controller_class_cache,
+    declared_controllers,
+    fill_classes_from_config,
+    terminated_controllers,
+)
 from condor.web.models import BotRunInfo
 from condor.web.routes import controller_performance as cp
 
@@ -30,8 +35,10 @@ from condor.web.routes import controller_performance as cp
 @pytest.fixture(autouse=True)
 def _no_cache_bleed():
     cp.clear_terminated_cache()
+    clear_controller_class_cache()
     yield
     cp.clear_terminated_cache()
+    clear_controller_class_cache()
 
 
 def run(
@@ -138,6 +145,97 @@ def test_runs_seen_counts_runs_not_controllers():
     assert seen == 1
 
 
+# ── Recovering a class from the controller's stored config ──
+
+
+class ConfigClient:
+    """A fake ``client.controllers`` with a canned config per id."""
+
+    def __init__(self, configs: dict[str, dict]):
+        self._configs = configs
+        self.calls: list[str] = []
+        self.controllers = self
+
+    async def get_controller_config(self, config_id: str):
+        self.calls.append(config_id)
+        if config_id not in self._configs:
+            raise Exception("404: config not found")
+        return self._configs[config_id]
+
+
+def test_fills_in_the_name_and_type_the_config_still_has():
+    got, _ = terminated_controllers([snap("gan", "c1")], [run("gan")])
+    client = ConfigClient(
+        {"c1": {"controller_name": "grid_strike", "controller_type": "generic"}}
+    )
+    filled = asyncio.run(fill_classes_from_config(client, got, "srv"))
+    assert filled == 1
+    assert got[0].controller_name == "grid_strike"
+    assert got[0].controller_type == "generic"
+
+
+def test_falls_back_to_the_coarse_type_when_the_config_names_no_class():
+    got, _ = terminated_controllers([snap("gan", "c1")], [run("gan")])
+    client = ConfigClient(
+        {"c1": {"controller_name": "", "controller_type": "market_making"}}
+    )
+    asyncio.run(fill_classes_from_config(client, got, "srv"))
+    assert got[0].controller_name == ""
+    assert got[0].controller_type == "market_making"
+
+
+def test_a_config_that_is_gone_leaves_the_controller_classless():
+    """The common case: most dead controller ids belong to configs long deleted."""
+    got, _ = terminated_controllers([snap("gan", "c1")], [run("gan")])
+    client = ConfigClient({})
+    filled = asyncio.run(fill_classes_from_config(client, got, "srv"))
+    assert filled == 0
+    assert got[0].controller_name == ""
+    assert got[0].controller_type == ""
+
+
+def test_never_asks_twice_for_the_same_controller_id():
+    client = ConfigClient(
+        {"c1": {"controller_name": "grid_strike", "controller_type": ""}}
+    )
+    first, _ = terminated_controllers([snap("gan", "c1")], [run("gan")])
+    asyncio.run(fill_classes_from_config(client, first, "srv"))
+    second, _ = terminated_controllers([snap("gan2", "c1")], [run("gan2")])
+    asyncio.run(fill_classes_from_config(client, second, "srv"))
+    assert client.calls == ["c1"]
+    assert second[0].controller_name == "grid_strike"
+
+
+def test_a_controller_with_a_name_already_is_never_asked_about():
+    """`controller_name` only ever arrives empty from this route today, but the
+    skip must hold regardless — asking about a controller that already answered
+    the question would be a wasted round trip on every request."""
+    got = [_c for _c in terminated_controllers([snap("gan", "c1")], [run("gan")])[0]]
+    got[0].controller_name = "already_known"
+    client = ConfigClient(
+        {"c1": {"controller_name": "grid_strike", "controller_type": ""}}
+    )
+    filled = asyncio.run(fill_classes_from_config(client, got, "srv"))
+    assert filled == 0
+    assert client.calls == []
+    assert got[0].controller_name == "already_known"
+
+
+def test_two_servers_do_not_share_one_controller_id_s_class():
+    client_a = ConfigClient(
+        {"c1": {"controller_name": "grid_strike", "controller_type": ""}}
+    )
+    client_b = ConfigClient(
+        {"c1": {"controller_name": "pmm_simple", "controller_type": ""}}
+    )
+    got_a, _ = terminated_controllers([snap("gan", "c1")], [run("gan")])
+    got_b, _ = terminated_controllers([snap("gan", "c1")], [run("gan")])
+    asyncio.run(fill_classes_from_config(client_a, got_a, "a"))
+    asyncio.run(fill_classes_from_config(client_b, got_b, "b"))
+    assert got_a[0].controller_name == "grid_strike"
+    assert got_b[0].controller_name == "pmm_simple"
+
+
 # ── A run older than the snapshot table ──
 
 
@@ -214,6 +312,27 @@ def test_the_route_reports_finished_controllers_and_never_live_ones(monkeypatch)
 
     assert {c.bot_name for c in out.controllers} == {"gan", "ancient"}
     assert out.runs_seen == 2
+
+
+def test_the_route_recovers_a_class_from_the_controller_s_stored_config(monkeypatch):
+    class WithConfigs(FakeClient):
+        def __init__(self, latest, runs, configs):
+            super().__init__(latest, runs)
+            self.controllers = ConfigClient(configs)
+
+    client = WithConfigs(
+        [snap("gan", "c1")],
+        RAW_RUNS,
+        {"c1": {"controller_name": "grid_strike", "controller_type": "generic"}},
+    )
+    out = _route(client, monkeypatch)
+
+    gan = [c for c in out.controllers if c.bot_name == "gan"][0]
+    assert gan.controller_name == "grid_strike"
+    assert gan.controller_type == "generic"
+    # "ancient" declared "old_1" with no snapshot at all; its config is long gone.
+    ancient = [c for c in out.controllers if c.bot_name == "ancient"][0]
+    assert ancient.controller_name == ""
 
 
 def test_the_route_fills_in_a_run_the_snapshot_table_forgot(monkeypatch):

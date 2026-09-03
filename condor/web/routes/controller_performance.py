@@ -25,6 +25,7 @@ from condor.fetchers.run_history import (
     RunHistoryUnavailable,
     declared_controllers,
     fetch_run_history,
+    fill_classes_from_config,
     fill_pairs_from_cache,
     terminated_controllers,
 )
@@ -618,6 +619,13 @@ async def get_terminated_controllers(
             continue
         controllers.extend(declared_controllers(run))
         runs_seen += 1
+
+    # None of the above carries a `controller_name` — `controller-performance`
+    # reports none on a finished run, and a run past the retention floor
+    # declares its controllers with nothing at all. The config a controller was
+    # deployed from often still does, so this is the "Controller type" bubble's
+    # one real source on the terminated side (see `fill_classes_from_config`).
+    await fill_classes_from_config(client, controllers, name)
 
     response = TerminatedControllersResponse(
         controllers=controllers, runs_seen=runs_seen

@@ -16,6 +16,7 @@
  */
 
 import { act } from "react";
+import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -392,6 +393,29 @@ describe("Only one sheet can be in the pane", () => {
     expect(outlet()!.contains(delegation())).toBe(true);
     expect(outlet()!.contains(report())).toBe(false);
     expect(outlet()!.children).toHaveLength(1);
+  });
+
+  /**
+   * The agent panel opening a strategy: the holder unmounts and the claimant
+   * mounts in one commit, and the claimant reads `taken` during that render —
+   * before the holder has released.
+   *
+   * `flushSync` is the browser's own vantage point. It commits and runs layout
+   * effects, including whatever they re-render synchronously, and stops short of
+   * the passive effects — so the DOM it leaves behind is the frame the reader
+   * actually sees. Released passively, the claimant was painted once as the
+   * full-screen overlay it falls back to when the pane is taken, and replaced by
+   * the docked pane a frame later; that flash is the bug this pins.
+   */
+  it("hands over in one frame, with no overlay in between", async () => {
+    await render({ sheet: true, second: false });
+    expect(outlet()!.contains(report())).toBe(true);
+
+    globalThis.IS_REACT_ACT_ENVIRONMENT = false;
+    flushSync(() => root.render(<Workspace sheet={false} second />));
+
+    expect(overlay()).toBeNull();
+    expect(outlet()!.contains(delegation())).toBe(true);
   });
 
   it("hands the pane on once the sheet holding it closes", async () => {

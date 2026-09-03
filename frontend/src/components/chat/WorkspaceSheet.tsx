@@ -1,5 +1,5 @@
 import { Maximize2, Minimize2, PanelRightClose, X } from "lucide-react";
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { WORKSPACE_BAR } from "@/components/chat/workspaceBar";
@@ -126,8 +126,17 @@ export function WorkspaceSheet({
 
   // Hold the pane open for as long as this sheet is in it, so the outlet takes
   // width exactly while something occupies it.
+  //
+  // Layout, not passive: one sheet handing the pane to another — the agent
+  // panel opening a strategy — unmounts the holder and mounts the claimant in
+  // one commit, and `taken` above is read during that render, before the
+  // outgoing sheet has released. As a passive effect the release landed after
+  // the browser had already painted, so the incoming sheet was painted once as
+  // the full-screen overlay it falls back to when the pane is taken, then
+  // replaced by the docked pane on the next frame. Running before paint, every
+  // one of those commits settles in the same frame and only the pane is seen.
   const claim = pane?.claim;
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!split || !claim) return;
     return claim(token, paneProfile);
   }, [split, claim, token, paneProfile]);

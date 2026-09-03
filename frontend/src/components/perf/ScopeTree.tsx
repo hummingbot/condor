@@ -51,11 +51,13 @@ function NodeIcon({ node, active }: { node: PerfNode; active: boolean }) {
     );
   }
   if (node.kind === "bot") return <Server className={`h-3.5 w-3.5 shrink-0 ${tone}`} />;
-  // A bucket of executors nobody claims wears the executor's own glyph at the
-  // parent size: it holds executors and nothing else, and the honest thing for
-  // it to say is which. `Layers` would read as a second fleet, and `Server` as
-  // a bot — which is exactly what it is not.
-  if (node.kind === "group") return <Activity className={`h-3.5 w-3.5 shrink-0 ${tone}`} />;
+  // The "Unattached" row and the per-controller-id buckets beneath it wear the
+  // executor's own glyph at the parent size: both hold executors and nothing
+  // else, and the honest thing for either to say is which. `Layers` would read
+  // as a second fleet, and `Server` as a bot — which is exactly what neither is.
+  if (node.kind === "orphans" || node.kind === "group") {
+    return <Activity className={`h-3.5 w-3.5 shrink-0 ${tone}`} />;
+  }
   if (node.kind === "executor") return <Activity className={`h-3 w-3 shrink-0 ${tone}`} />;
   // A controller's marker is its state, which is the one thing the icon slot
   // can say that the label beside it cannot.
@@ -90,6 +92,11 @@ function subtitle(node: PerfNode, showBot: boolean): string {
     }
     case "bot":
       return `${n} controller${n !== 1 ? "s" : ""}`;
+    // Counted by dead controller id rather than by executor: that is the
+    // number a reader who opens this row is actually choosing between, and it
+    // is usually far smaller than the executor count folded beneath it.
+    case "orphans":
+      return `${n} controller${n !== 1 ? "s" : ""} left no record`;
     // Counted in executors, because that is all a group ever holds: it exists
     // precisely for the leaves no controller claims, so the bot row's wording
     // would name a level that is not there.
@@ -139,6 +146,9 @@ function rowLabel(node: PerfNode): string {
   // deployment left behind — so it gets the same shortening, which is a no-op
   // for everything that is not one.
   if (node.kind === "bot" || node.kind === "group") return shortBotName(node.label);
+  // The one "Unattached" row is a fixed label, not a name pulled off a record —
+  // shortening it would be a no-op at best and a mangled label at worst.
+  if (node.kind === "orphans") return node.label;
   // An agent row's label is its run key, which is its id — said out loud as
   // `agent / strategy`, the same two slugs the bot names beneath it are built
   // from, so the column can be matched by eye.

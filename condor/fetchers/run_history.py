@@ -184,6 +184,103 @@ def fill_pairs_from_cache(
     return filled
 
 
+#: ``(server, controller_id) -> (controller_name, controller_type)``, cached for
+#: the process lifetime rather than with a TTL: a terminated controller's config
+#: is either still there and immutable, or gone for good, and a config that is
+#: gone does not come back.
+_CLASS_CACHE: dict[tuple[str, str], tuple[str, str]] = {}
+
+#: How many config lookups run at once. The same shape as ``_WALK_CONCURRENCY``
+#: below and for the same reason: these are sequential requests against the one
+#: API that also serves the live fleet, and a terminated listing can carry a
+#: hundred or more controller ids the first time it is ever asked for classes.
+_CLASS_LOOKUP_CONCURRENCY = 4
+
+
+def clear_controller_class_cache() -> None:
+    """Drop every cached class lookup. For tests only."""
+    _CLASS_CACHE.clear()
+
+
+async def _resolve_controller_class(
+    client: Any, server: str, controller_id: str
+) -> tuple[str, str]:
+    """One controller's class, straight off its stored config, or ``("", "")``.
+
+    ``controller-performance`` reports no ``controller_name`` on a finished run
+    at all (see :func:`terminated_controllers`), but the config a controller was
+    deployed from — fetched the same way ``GET .../controllers/configs/{id}``
+    does — still carries both ``controller_name`` (the specific class, e.g.
+    ``grid_strike``) and ``controller_type`` (one of the three coarse buckets
+    upstream sorts every controller into: ``generic``, ``directional_trading``,
+    ``market_making``).
+
+    Most of the ids this is asked about belong to bots that are long gone, so a
+    lookup failing — a 404 for a deleted config, a timeout — is the *expected*
+    outcome rather than a fault, and is cached exactly like a hit: the config is
+    not coming back, so there is no reason to ask again.
+    """
+    key = (server, controller_id)
+    cached = _CLASS_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    result: dict | None = None
+    try:
+        raw = await client.controllers.get_controller_config(controller_id)
+        result = raw if isinstance(raw, dict) else None
+    except Exception:
+        logger.debug(
+            "No config left for controller '%s' on '%s'", controller_id, server
+        )
+
+    resolved = (
+        (
+            str(result.get("controller_name") or ""),
+            str(result.get("controller_type") or ""),
+        )
+        if result
+        else ("", "")
+    )
+    _CLASS_CACHE[key] = resolved
+    return resolved
+
+
+async def fill_classes_from_config(
+    client: Any, controllers: list[ControllerInfo], server: str
+) -> int:
+    """Give a classless controller the name and type its stored config still knows.
+
+    ``terminated_controllers`` and ``declared_controllers`` both hand back a
+    controller with no ``controller_name`` — upstream's history rows do not
+    carry one, and a run past the snapshot table's retention floor declares its
+    controllers with nothing at all. This is the same enrichment
+    ``fill_pairs_from_cache`` does for the pair, one call later: bounded,
+    best-effort, and skipped entirely for anything that already has a name.
+
+    Returns how many controllers ended up with a name or a type, for the
+    caller's log.
+    """
+    targets = [c for c in controllers if not c.controller_name]
+    if not targets:
+        return 0
+
+    semaphore = asyncio.Semaphore(_CLASS_LOOKUP_CONCURRENCY)
+
+    async def _one(controller: ControllerInfo) -> None:
+        async with semaphore:
+            name, ctype = await _resolve_controller_class(
+                client, server, controller.controller_id
+            )
+        if name:
+            controller.controller_name = name
+        if ctype:
+            controller.controller_type = ctype
+
+    await asyncio.gather(*(_one(c) for c in targets))
+    return sum(1 for c in targets if c.controller_name or c.controller_type)
+
+
 def declared_controllers(run: BotRunInfo) -> list[ControllerInfo]:
     """The controllers a run declared, for a run that left no snapshot at all.
 

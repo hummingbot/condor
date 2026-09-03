@@ -48,6 +48,7 @@ const NOW = Date.parse("2026-09-01T12:00:00Z");
 function controller(over: Partial<ControllerInfo> = {}): ControllerInfo {
   return {
     controller_name: "pmm_simple",
+    controller_type: "",
     controller_id: "pmm_1",
     bot_name: "alpha",
     status: "running",
@@ -437,7 +438,10 @@ describe("buildTree, grouping by bot", () => {
       "All",
       { groupByBot: true },
     );
-    expect(tree.children.map((c) => c.id)).toEqual(["bot:alpha", "grp:main"]);
+    // The bucket itself nests under the fleet's one "Unattached" row rather
+    // than sitting beside the bots directly (see the next describe block).
+    expect(tree.children.map((c) => c.id)).toEqual(["bot:alpha", "orphans"]);
+    expect(node(tree, "orphans").children.map((c) => c.id)).toEqual(["grp:main"]);
     const group = node(tree, "grp:main");
     expect(group.kind).toBe("group");
     expect(group.label).toBe("main");
@@ -479,8 +483,10 @@ describe("buildTree, grouping by bot", () => {
   });
 
   // Keyboard navigation walks what is drawn, so a shut bucket must hide its
-  // executors — that is the collapse the 42 flat rows never had.
-  it("walks a group row before its executors and hides them when it is shut", () => {
+  // executors — that is the collapse the 42 flat rows never had. Two shut
+  // levels now, not one: the "Unattached" row hides every dead controller id,
+  // and each of those still hides its own executors until opened in turn.
+  it("walks the unattached row and its buckets before their executors, hiding what is shut", () => {
     const tree = buildTree(
       [
         leafFromController(controller()),
@@ -489,10 +495,17 @@ describe("buildTree, grouping by bot", () => {
       "All",
       { groupByBot: true },
     );
-    expect(visibleNodeIds(tree, new Set(["all"]))).toEqual(["all", "bot:alpha", "grp:main"]);
-    expect(visibleNodeIds(tree, new Set(["all", "grp:main"]))).toEqual([
+    expect(visibleNodeIds(tree, new Set(["all"]))).toEqual(["all", "bot:alpha", "orphans"]);
+    expect(visibleNodeIds(tree, new Set(["all", "orphans"]))).toEqual([
       "all",
       "bot:alpha",
+      "orphans",
+      "grp:main",
+    ]);
+    expect(visibleNodeIds(tree, new Set(["all", "orphans", "grp:main"]))).toEqual([
+      "all",
+      "bot:alpha",
+      "orphans",
       "grp:main",
       "exec:manual",
     ]);
@@ -651,7 +664,8 @@ describe("buildTree, grouping by agent", () => {
     const manual = leafFromExecutor(executor({ id: "manual", controller_id: "main" }));
     expect(agentNodeId(manual)).toBeNull();
     const tree = buildTree([manual], "All", { groupByBot: true, groupByAgent: true });
-    expect(tree.children.map((c) => c.id)).toEqual(["grp:main"]);
+    expect(tree.children.map((c) => c.id)).toEqual(["orphans"]);
+    expect(node(tree, "orphans").children.map((c) => c.id)).toEqual(["grp:main"]);
     expect(node(tree, "grp:main").children.map((c) => c.id)).toEqual(["exec:manual"]);
   });
 
@@ -887,12 +901,16 @@ describe("autoOpenIds", () => {
     expect(autoOpenIds(indexTree(tree), new Set())).toEqual(new Set(["bot:hand-rolled"]));
   });
 
-  it("leaves a group row shut — ARCH-318, not an oversight", () => {
+  it("leaves the unattached row and its group shut — ARCH-318, not an oversight", () => {
     const manual = leafFromExecutor(executor({ id: "manual", controller_id: "main" }));
     const tree = buildTree([manual], "All", { groupByBot: true, groupByAgent: true });
     expect(node(tree, "grp:main").kind).toBe("group");
+    expect(node(tree, "orphans").kind).toBe("orphans");
     expect(AUTO_OPEN_KINDS.has("group")).toBe(false);
-    expect(autoOpenIds(indexTree(tree), new Set())).not.toContain("grp:main");
+    expect(AUTO_OPEN_KINDS.has("orphans")).toBe(false);
+    const drawn = autoOpenIds(indexTree(tree), new Set());
+    expect(drawn).not.toContain("grp:main");
+    expect(drawn).not.toContain("orphans");
   });
 
   it("still honours a row the reader has shut by hand", () => {

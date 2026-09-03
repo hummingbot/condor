@@ -1,16 +1,20 @@
 /**
  * Which rows of the scope picker are drawn emphasised, and which recede.
  *
- * A row that names a run — an agent, a bot, the bucket of executors no
- * controller claims — is a thing the reader compares against its siblings, and
- * draws semibold in full-contrast text. A controller or an executor is a detail
- * *of* one of those, and draws medium-weight muted.
+ * A row that names a run — an agent, a bot, the one row gathering every
+ * executor no controller claims — is a thing the reader compares against its
+ * siblings, and draws semibold in full-contrast text. A controller or an
+ * executor is a detail *of* one of those, and draws medium-weight muted — and
+ * so, now, is the per-dead-controller-id bucket nested under the gathering
+ * row: it is a detail of *that* row, the same way a controller is a detail of
+ * a bot.
  *
- * The group row is why this file exists: it arrived after the predicate was
- * written and was left out of it, so the one row summarising the most leaves
- * was the one that receded (READ-321). The predicate reads
- * `TOP_LEVEL_KINDS` now, and these cases pin both halves of it — the next kind
- * added is either in that set or it is not, and one of these two tests says so.
+ * The gathering row is why this file exists: an earlier shape arrived after
+ * the predicate was written and was left out of it, so the one row
+ * summarising the most leaves was the one that receded (READ-321). The
+ * predicate reads `TOP_LEVEL_KINDS` now, and these cases pin both halves of
+ * it — the next kind added is either in that set or it is not, and one of
+ * these two tests says so.
  *
  * Needs a DOM, so this file overrides vitest's default `node` environment.
  *
@@ -32,6 +36,7 @@ declare global {
 const controller = (bot: string, id: string): ControllerInfo =>
   ({
     controller_name: "pmm_simple",
+    controller_type: "",
     controller_id: id,
     bot_name: bot,
     status: "running",
@@ -48,7 +53,10 @@ const controller = (bot: string, id: string): ControllerInfo =>
     config: {},
   }) as ControllerInfo;
 
-/** An executor opened by hand: no bot behind it, so it lands in a `grp:` row. */
+/**
+ * An executor opened by hand: no bot behind it, so it lands in a `grp:` row
+ * nested under the fleet's single "Unattached" row.
+ */
 const looseExecutor = (id: string): ExecutorInfo =>
   ({
     id,
@@ -102,7 +110,7 @@ function draw() {
         // Nothing selected: `active` would emphasise a row on its own and hide
         // the very difference these cases are about.
         activeId="all"
-        open={new Set(["all", "bot:hummingbot-alpha-1", "grp:main"])}
+        open={new Set(["all", "bot:hummingbot-alpha-1", "orphans", "grp:main"])}
         onSelect={() => {}}
         onToggleOpen={() => {}}
         cv={(v) => v}
@@ -127,14 +135,17 @@ afterEach(() => {
 });
 
 describe("ScopeTree row emphasis", () => {
-  it("draws the unclaimed-executor group with the same weight and colour as a bot", () => {
-    expect(nameClass("main")).toBe(nameClass("hummingbot-alpha-1"));
-    expect(nameClass("main")).toContain("font-semibold");
-    expect(nameClass("main")).toContain("text-[var(--color-text)]");
+  it("draws the unattached-executors row with the same weight and colour as a bot", () => {
+    expect(nameClass("Unattached")).toBe(nameClass("hummingbot-alpha-1"));
+    expect(nameClass("Unattached")).toContain("font-semibold");
+    expect(nameClass("Unattached")).toContain("text-[var(--color-text)]");
   });
 
   it("still lets the rows nested under them recede", () => {
-    for (const nested of ["pmm_1", "exec-a"]) {
+    // "main" is now a detail *of* the "Unattached" row — one dead controller
+    // id among the several it may gather — rather than a fleet child in its
+    // own right, so it recedes exactly as a controller under a bot does.
+    for (const nested of ["main", "pmm_1", "exec-a"]) {
       expect(nameClass(nested)).toContain("font-medium");
       expect(nameClass(nested)).toContain("text-[var(--color-text-muted)]");
       expect(nameClass(nested)).not.toBe(nameClass("hummingbot-alpha-1"));

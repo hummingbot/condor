@@ -104,6 +104,11 @@ class BotDetailResponse(BaseModel):
 
 class ControllerInfo(BaseModel):
     controller_name: str
+    #: The coarse bucket upstream sorts every controller into (``generic``,
+    #: ``directional_trading``, ``market_making``) — a fallback class for a
+    #: terminated controller whose config lookup could not recover the specific
+    #: one (see ``fill_classes_from_config``).
+    controller_type: str = ""
     controller_id: str = ""
     bot_name: str
     status: str = "unknown"

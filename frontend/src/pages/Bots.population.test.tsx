@@ -84,6 +84,7 @@ const HOUR_AGO = new Date(Date.now() - 3_600_000).toISOString();
 function terminatedControllerOf(over: Partial<ControllerInfo> = {}): ControllerInfo {
   return {
     controller_name: "grid_strike",
+    controller_type: "",
     controller_id: "grid-alpha",
     bot_name: "mm-sol-1",
     status: "stopped",

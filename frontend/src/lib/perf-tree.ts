@@ -160,7 +160,11 @@ export function leafFromController(c: ControllerInfo, agent: string = ""): PerfL
     bot: c.bot_name,
     agent,
     controllerId: c.controller_id || c.controller_name,
-    executorType: c.controller_name || UNKNOWN_LABEL,
+    // The specific class when it's known, else the coarse bucket
+    // (`generic` / `directional_trading` / `market_making`) a terminated
+    // controller's config lookup could still recover, else the dash: see
+    // `fill_classes_from_config` and `controllerClassOf`.
+    executorType: c.controller_name || c.controller_type || UNKNOWN_LABEL,
     connector: c.connector || "",
     pair: c.trading_pair || "",
     realized: c.realized_pnl_quote,
@@ -215,7 +219,11 @@ export function leafFromTerminatedController(
     bot: c.bot_name,
     agent,
     controllerId: c.controller_id || c.controller_name,
-    executorType: c.controller_name || UNKNOWN_LABEL,
+    // The specific class when it's known, else the coarse bucket
+    // (`generic` / `directional_trading` / `market_making`) a terminated
+    // controller's config lookup could still recover, else the dash: see
+    // `fill_classes_from_config` and `controllerClassOf`.
+    executorType: c.controller_name || c.controller_type || UNKNOWN_LABEL,
     connector: c.connector || "",
     pair: c.trading_pair || "",
     realized: c.realized_pnl_quote,
@@ -370,13 +378,25 @@ export function matchesGrain(leaf: PerfLeaf, grain: Grain): boolean {
 
 // ── The tree ──
 
-export type NodeKind = "fleet" | "agent" | "bot" | "controller" | "executor" | "group";
+export type NodeKind =
+  | "fleet"
+  | "agent"
+  | "bot"
+  | "orphans"
+  | "controller"
+  | "executor"
+  | "group";
 
 /**
  * The kinds that name a *run* rather than a part of one: an agent, a bot, and
- * the bucket of executors no controller claims. These are the fleet's own
- * children — the rows a reader compares against each other — as against a
- * `controller` or an `executor`, which are always a detail *of* one of them.
+ * the one bucket that holds every executor no controller claims. These are the
+ * fleet's own children — the rows a reader compares against each other — as
+ * against a `controller` or an `executor`, which are always a detail *of* one
+ * of them.
+ *
+ * `group` is deliberately not here any more: a `group` node is now always a
+ * child of `orphans` rather than of the fleet (see `buildTree`'s `groupFor`),
+ * so `orphans` is the one that needs the fleet-child treatment this set gives.
  *
  * It lives here, two lines under {@link NodeKind}, so that adding a kind and
  * deciding whether it is one of these is a single edit in a single place. It is
@@ -387,7 +407,7 @@ export type NodeKind = "fleet" | "agent" | "bot" | "controller" | "executor" | "
 export const TOP_LEVEL_KINDS: ReadonlySet<NodeKind> = new Set<NodeKind>([
   "agent",
   "bot",
-  "group",
+  "orphans",
 ]);
 
 /**
@@ -478,11 +498,12 @@ export function botNodeId(leaf: PerfLeaf): string | null {
  * or `null` for every leaf that does belong to one.
  *
  * These are the hand-opened positions, and on the terminated side of a real
- * server there are dozens of them: 42 bare executor ids drawn at depth 0, ahead
- * of the 85 bot rows the reader came for, with no chevron to fold them away
- * because a row with no children has none. They are not anonymous, though —
- * each is filed under the controller id it carries as its bot (`main`, for one
- * opened from `/trade`), which is the key this returns.
+ * server there are dozens of them, each under a different dead controller id.
+ * They are not anonymous, though — each is filed under the controller id it
+ * carries as its bot (`main`, for one opened from `/trade`), which is the key
+ * this returns. `buildTree` nests every such bucket under one "Unattached" row
+ * rather than drawing each at depth 0, so the count of them stays legible
+ * instead of burying the bot rows the reader came for.
  *
  * A `grp:` prefix of its own rather than `bot:` is what keeps the bucket from
  * *becoming* a bot: `botOfNodeId` matches `bot:` and `ctrl:` only, so the
@@ -561,13 +582,13 @@ function makeNode(id: string, kind: NodeKind, label: string): PerfNode {
  * An executor whose controller is gone *and* whose agent is unknown belongs to
  * no deployment and to nobody, but it is not nameless: it hangs under a
  * **group** row named for the controller id it carries (see
- * {@link groupNodeId}), so the dozens of hand-opened positions on a real
- * server's terminated side are one collapsible row rather than dozens of bare
- * ids drawn at the same indentation as a bot. It is a level rather than a bot
- * because there is no deployment behind it to stop, and a kind of its own
- * because the counts that say "N bots" must keep meaning it. The group level
- * follows `groupByBot`, so the flat tree still hangs those executors off the
- * fleet directly.
+ * {@link groupNodeId}). Most dead controller ids are distinct from one another
+ * — one executor each — so bucketing by id alone still leaves dozens of bare
+ * rows at the same indentation as a bot. They are gathered a second time,
+ * under one **orphans** row (`"Unattached"`), so the terminated side of a real
+ * server draws one collapsible row instead of dozens ahead of the bots the
+ * reader came for. Both levels follow `groupByBot`, so the flat tree still
+ * hangs those executors off the fleet directly.
  */
 export function buildTree(
   leaves: PerfLeaf[],
@@ -579,6 +600,7 @@ export function buildTree(
   const bots = new Map<string, PerfNode>();
   const groups = new Map<string, PerfNode>();
   const controllers = new Map<string, PerfNode>();
+  let orphans: PerfNode | null = null;
 
   // Insertion order once more: the first record an agent owns is what puts it
   // in the list, so agents come out in the order the caller sorted its records.
@@ -615,16 +637,28 @@ export function buildTree(
     return node;
   };
 
-  // The bucket for the executors nobody claims, built exactly as `botFor` is:
-  // memoised, created the first time one is seen, and pushed onto the fleet in
-  // that order — so it lands wherever its first executor was, which on the
-  // terminated side is still ahead of the bot rows. That is one collapsible row
-  // rather than 42, which was the whole complaint; sorting the fleet's children
-  // is a separate question.
+  // The one row every executor nobody claims hangs under, created the first
+  // time one is seen and pushed onto the fleet exactly once — so a terminated
+  // side with 42 dead controller ids draws one collapsible "Unattached" row
+  // ahead of the bots, not 42.
   //
   // Off when `groupByBot` is off, for the same reason the bot level is: a fleet
   // running a single bot would spend a chevron saying so, and the flat tree
   // keeps the shape its tests already pin.
+  const orphansNode = (): PerfNode | null => {
+    if (!groupByBot) return null;
+    if (!orphans) {
+      orphans = makeNode("orphans", "orphans", "Unattached");
+      fleet.children.push(orphans);
+    }
+    return orphans;
+  };
+
+  // The bucket for one dead controller id's executors, built exactly as
+  // `botFor` is: memoised, created the first time one is seen, and pushed onto
+  // `orphansNode()` in that order rather than onto the fleet directly — the
+  // per-id split is still worth keeping once the reader opens "Unattached",
+  // it just should not cost a row of its own before they do.
   const groupFor = (leaf: PerfLeaf): PerfNode | null => {
     if (!groupByBot) return null;
     const id = groupNodeId(leaf);
@@ -635,7 +669,7 @@ export function buildTree(
       // position opened by hand. It is the one name the record has.
       node = makeNode(id, "group", leaf.bot);
       groups.set(id, node);
-      fleet.children.push(node);
+      orphansNode()?.children.push(node);
     }
     return node;
   };

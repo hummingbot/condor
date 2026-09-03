@@ -29,6 +29,7 @@ declare global {
 const controller = (bot: string, id: string): ControllerInfo =>
   ({
     controller_name: "pmm_simple",
+    controller_type: "",
     controller_id: id,
     bot_name: bot,
     status: "running",

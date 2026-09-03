@@ -66,6 +66,7 @@ function snap(over: Partial<ControllerPerformanceSnapshot> = {}): ControllerPerf
 function ctrl(over: Partial<ControllerInfo> = {}): ControllerInfo {
   return {
     controller_name: "ctrl-a",
+    controller_type: "",
     controller_id: "ctrl-a",
     bot_name: "bot",
     status: "running",
