@@ -21,8 +21,8 @@ from condor import paths
 from condor.acp.client import PromptDone, TextChunk, ToolCallEvent, ToolCallUpdate
 from condor.agents.actions import read_actions
 from condor.agents.ownership import read_owned
+from condor.runtime import sessions as sessions_module
 from condor.runtime.keys import SessionKey
-from condor.runtime.sessions import AgentSession
 
 USER = 771
 
@@ -68,7 +68,13 @@ class _FakeClient:
 
 
 def _session(events: list, *, agent_slug: str = "", conv: str = "conv1", user=USER):
-    return AgentSession(
+    # The module, never the symbol: ``condor.runtime.sessions`` is the registry
+    # and only ``condor/runtime/`` may import from it by name, so everything
+    # else goes through ``condor.runtime.client`` (asserted by
+    # ``tests/runtime/test_session_facade.py``). The three other tests that
+    # build a session reach for the module the same way — a chat's deeds are
+    # written inside ``prompt_stream``, which is what has to be driven here.
+    return sessions_module.AgentSession(
         key=SessionKey(surface="web", owner=str(user or 0), slot="a"),
         agent_key="claude-code",
         client=_FakeClient(events),
