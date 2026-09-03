@@ -33,6 +33,9 @@ export function StrategyDetail() {
 
   const queryClient = useQueryClient();
   const [reviewerSessionNum, setReviewerSessionNum] = useState<number | null>(null);
+  // A tick to open the reviewer straight onto, when the caller had one (the
+  // fleet band's deed line carries the tick it happened on).
+  const [reviewerSnapshotTick, setReviewerSnapshotTick] = useState<number | null>(null);
   const [reviewerKind, setReviewerKind] = useState<"session" | "experiment">("session");
   const [showStrategyModal, setShowStrategyModal] = useState(false);
   const [showRoutinesBrowser, setShowRoutinesBrowser] = useState(false);
@@ -52,9 +55,12 @@ export function StrategyDetail() {
 
   // Check location.state for session-deep-linking (SessionReviewer nav)
   useEffect(() => {
-    const state = location.state as { openReviewer?: boolean; sessionNum?: number } | null;
+    const state = location.state as
+      | { openReviewer?: boolean; sessionNum?: number; snapshotTick?: number }
+      | null;
     if (state?.openReviewer) {
       setReviewerSessionNum(state.sessionNum ?? null);
+      setReviewerSnapshotTick(state.snapshotTick ?? null);
       navigate(location.pathname, { replace: true, state: null });
     }
   }, [location.state, location.pathname, navigate]);
@@ -448,9 +454,13 @@ export function StrategyDetail() {
           experiments={strategy.experiments}
           initialSessionNum={resolvedReviewerSession}
           initialKind={reviewerKind}
+          initialSnapshotTick={reviewerSnapshotTick}
           serverName={serverName}
           controllerIds={controllerIds}
-          onClose={() => setReviewerSessionNum(null)}
+          onClose={() => {
+            setReviewerSessionNum(null);
+            setReviewerSnapshotTick(null);
+          }}
         />
       )}
     </div>

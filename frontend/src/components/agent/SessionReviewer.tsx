@@ -24,6 +24,7 @@ import {
   SessionOverview,
   SessionSnapshots,
 } from "@/components/agent/AgentSessionContent";
+import { SessionActions } from "@/components/agent/SessionActions";
 import { MODE_STYLES } from "@/components/agent/modeStyles";
 import { ToolCallStatusIcon } from "@/components/chat/ToolCallStatus";
 import { ReportViewer } from "@/components/routines/ReportViewer";
@@ -98,6 +99,14 @@ interface SessionReviewerProps {
   experiments?: ExperimentInfo[];
   initialSessionNum: number;
   initialKind?: "session" | "experiment";
+  /**
+   * Open straight onto this tick's snapshot (FEAT-097).
+   *
+   * The fleet band's deed line carries a tick, and landing on it collapses the
+   * main page → agent → session → snapshot walk. It reuses the seam a chart
+   * marker click already goes through.
+   */
+  initialSnapshotTick?: number | null;
   serverName: string;
   controllerIds?: string[];
   onClose: () => void;
@@ -111,13 +120,16 @@ export function SessionReviewer({
   experiments = [],
   initialSessionNum,
   initialKind = "session",
+  initialSnapshotTick = null,
   serverName,
   controllerIds,
   onClose,
 }: SessionReviewerProps) {
   const [selectedNum, setSelectedNum] = useState(initialSessionNum);
   const [selectedKind, setSelectedKind] = useState<"session" | "experiment">(initialKind);
-  const [activeSubTab, setActiveSubTab] = useState<SubTabId>("overview");
+  const [activeSubTab, setActiveSubTab] = useState<SubTabId>(
+    initialSnapshotTick ? "snapshots" : "overview",
+  );
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [showSystemPrompt, setShowSystemPrompt] = useState(false);
   const [showReport, setShowReport] = useState(false);
@@ -230,8 +242,11 @@ export function SessionReviewer({
     setShowReport(false);
   }, []);
 
-  // Snapshot click from chart → navigate to snapshots tab with that tick
-  const [pendingSnapshotTick, setPendingSnapshotTick] = useState<number | null>(null);
+  // Snapshot click from chart (or a deed line's deep link) → the snapshots tab
+  // on that tick.
+  const [pendingSnapshotTick, setPendingSnapshotTick] = useState<number | null>(
+    initialSnapshotTick,
+  );
 
   const handleSnapshotClick = useCallback((tick: number) => {
     setPendingSnapshotTick(tick);
@@ -571,7 +586,8 @@ export function SessionReviewer({
               <>
                 {activeSubTab === "overview" && (
                   // Read top to bottom, this is the session's story: what it made,
-                  // what it ran, what is open, what it believed, what it decided.
+                  // what it ran, what is open, what it believed, what it did, and
+                  // what it said about doing it.
                   <div className="space-y-4">
                     <SessionKpis
                       perf={sessionPerf}
@@ -596,6 +612,18 @@ export function SessionReviewer({
                       botMode={(sessionPerf?.bot_instances?.length ?? 0) > 0}
                     />
                     <SessionCanvasPanel slug={slug} sslug={sslug} sessionNum={selectedNum} />
+                    {/* What it did, then what it said about it (FEAT-097). */}
+                    <div>
+                      <h3 className="mb-2 flex items-center gap-2 px-1 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
+                        <Zap className="h-3.5 w-3.5" /> Actions
+                      </h3>
+                      <SessionActions
+                        slug={slug}
+                        sslug={sslug}
+                        sessionNum={selectedNum}
+                        onSnapshotClick={handleSnapshotClick}
+                      />
+                    </div>
                     <div>
                       <h3 className="mb-2 flex items-center gap-2 px-1 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
                         <Activity className="h-3.5 w-3.5" /> Decisions
