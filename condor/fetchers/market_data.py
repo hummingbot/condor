@@ -20,18 +20,30 @@ async def fetch_current_price(
     Args:
         strict: Re-raise a failed request instead of degrading to None. The SDS
             registration wants the raise so a transient failure keeps the last
-            good cached price instead of caching (and broadcasting) None.
+            good cached price instead of caching (and broadcasting) None. A
+            payload that *did* come back but cannot be read is a real (empty)
+            answer rather than a failure, so it stays None even in strict mode —
+            the same carve-out `fetch_ticker_pool` and `fetch_tickers` make.
     """
     try:
-        prices = await client.market_data.get_prices(
+        result = await client.market_data.get_prices(
             connector_name=connector_name, trading_pairs=trading_pair
         )
-        return prices.get("prices", {}).get(trading_pair)
     except Exception as e:
         if strict:
             raise
         logger.warning("Error fetching price for %s: %s", trading_pair, e)
         return None
+
+    prices = result.get("prices") if isinstance(result, dict) else None
+    if not isinstance(prices, dict):
+        return None
+    if trading_pair in prices:
+        return prices[trading_pair]
+    # A venue that spells the pair its own way answers a one-pair request under
+    # its own key (`SOL-USDC` normalised differently, say). One entry back is
+    # unambiguously the one entry that was asked for; two or more is not.
+    return next(iter(prices.values())) if len(prices) == 1 else None
 
 
 async def fetch_candles(

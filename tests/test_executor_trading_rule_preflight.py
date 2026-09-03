@@ -63,8 +63,16 @@ class _Client:
         class _MarketData:
             @staticmethod
             async def get_prices(connector_name, trading_pairs):
-                outer.price_calls.append((connector_name, tuple(trading_pairs)))
-                return {"prices": {trading_pairs[0]: price}} if price else {}
+                # The real client accepts either a bare pair or a list and wraps
+                # the bare one before it posts; mirror that so this stub answers
+                # the same way for both spellings.
+                pairs = (
+                    [trading_pairs]
+                    if isinstance(trading_pairs, str)
+                    else list(trading_pairs)
+                )
+                outer.price_calls.append((connector_name, tuple(pairs)))
+                return {"prices": {pairs[0]: price}} if price else {}
 
         self.executors = _Executors()
         self.connectors = _Connectors()

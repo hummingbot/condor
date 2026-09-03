@@ -107,33 +107,6 @@ def _rule(rules: dict[str, Any], *names: str) -> float | None:
     return None
 
 
-async def _current_price(
-    client: Any, connector_name: str, trading_pair: str
-) -> float | None:
-    """Last price for the pair, or ``None`` — a price we cannot read blocks nothing."""
-    market_data = getattr(client, "market_data", None)
-    if market_data is None:
-        return None
-    try:
-        result = await market_data.get_prices(
-            connector_name=connector_name, trading_pairs=[trading_pair]
-        )
-    except Exception as exc:
-        logger.warning(
-            "No price for %s %s, skipping the notional check: %s",
-            connector_name,
-            trading_pair,
-            exc,
-        )
-        return None
-    prices = result.get("prices") if isinstance(result, dict) else None
-    if not isinstance(prices, dict):
-        return None
-    if trading_pair in prices:
-        return _amount(prices[trading_pair])
-    return _amount(next(iter(prices.values()), None)) if len(prices) == 1 else None
-
-
 async def _base_amount_violation(
     client: Any,
     *,
@@ -159,7 +132,16 @@ async def _base_amount_violation(
         return None
     price = _amount(config.get("entry_price")) or _amount(config.get("price"))
     if price is None:
-        price = await _current_price(client, connector, pair)
+        # Imported here, not at module scope: `condor.fetchers.market_data` is
+        # reached through the `condor.fetchers` package __init__, which pulls the
+        # connectors -> pool_data chain, and this MCP server is also run
+        # standalone. Same lazy-import precedent as tools/portfolio.py.
+        from condor.fetchers.market_data import fetch_current_price
+
+        # `_amount` still guards the result: a price this check can divide by has
+        # to be a positive number, and the fetcher returns the payload's value
+        # verbatim. A price we cannot read blocks nothing.
+        price = _amount(await fetch_current_price(client, connector, pair))
     if price is None:
         return None
     notional = amount * price
