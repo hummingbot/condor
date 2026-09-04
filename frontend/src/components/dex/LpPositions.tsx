@@ -1,39 +1,9 @@
-import { useQuery } from "@tanstack/react-query";
 import { ArrowRight } from "lucide-react";
-import { useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 
-import { poolLabel } from "./format";
-import {
-  LP_EXECUTOR_TYPE,
-  LP_REFRESH_MS,
-  RECENT_LP_EXECUTORS,
-  feeAmount,
-  lpStateStyle,
-  readLpPosition,
-  type LpPosition,
-} from "./lp-position";
-import { api, type PoolSummary } from "@/lib/api";
-import { formatPnl, formatUsd, isExecutorActive, pnlColor } from "@/lib/formatters";
-
-/** GeckoTerminal's multi-pool endpoint, which the labels come from, caps here. */
-const MAX_LABELLED_POOLS = 30;
-
-/**
- * A pair label for a position, preferring the pool's own.
- *
- * An LP executor's `trading_pair` is `<base_mint>-<quote_symbol>` — the form the
- * executor needs, and unreadable as a label: `So1111…112-USDC` rather than
- * `SOL-USDC`. The pool row has the symbols, so it wins when it resolved.
- */
-function labelFor(pos: LpPosition, pool: PoolSummary | undefined): string {
-  if (pool) return poolLabel(pool);
-  const [poolBase, poolQuote] = pos.pair.split("-");
-  if (poolBase && poolBase.length > 12) {
-    return `${poolBase.slice(0, 4)}…-${poolQuote ?? ""}`;
-  }
-  return pos.pair || pos.poolAddress.slice(0, 8);
-}
+import { feeAmount, lpStateStyle } from "./lp-position";
+import { useLpPositions } from "@/hooks/useLpPositions";
+import { formatPnl, formatUsd, pnlColor } from "@/lib/formatters";
 
 /**
  * The LP positions you already hold, above the pools you might enter.
@@ -43,67 +13,15 @@ function labelFor(pos: LpPosition, pool: PoolSummary | undefined): string {
  * shortest path from "how is my SOL-USDC range doing" to that pool's workspace is
  * a row here rather than a search through Trending.
  *
+ * Reading the positions belongs to {@link useLpPositions}, which the portfolio's
+ * liquidity table shares; this is only the strip's shape for them.
+ *
  * Renders nothing at all when there are no open positions: an empty panel above
  * every visit to the pool browser is a permanent cost for an occasional feature.
  */
 export function LpPositions({ server }: { server: string }) {
   const navigate = useNavigate();
-
-  const { data: executors = [] } = useQuery({
-    queryKey: ["dex-lp-executors", server],
-    queryFn: () =>
-      api.getExecutors(server, {
-        executor_type: LP_EXECUTOR_TYPE,
-        limit: RECENT_LP_EXECUTORS,
-      }),
-    refetchInterval: LP_REFRESH_MS,
-    staleTime: LP_REFRESH_MS,
-  });
-
-  const positions = useMemo(() => {
-    const open: LpPosition[] = [];
-    for (const ex of executors) {
-      if (!isExecutorActive(ex.status)) continue;
-      const pos = readLpPosition(ex);
-      if (pos) open.push(pos);
-    }
-    // Biggest first: the position most worth checking is the one with the most
-    // in it, and an unvalued position sorts last rather than to the top.
-    open.sort((a, b) => (b.valueQuote ?? -1) - (a.valueQuote ?? -1));
-    return open;
-  }, [executors]);
-
-  // Every open position is on one chain in practice (Gateway's CLMM connectors
-  // are Solana-only), but the labels are fetched per chain so a second one does
-  // not silently fall back to mint addresses.
-  const byNetwork = useMemo(() => {
-    const groups: Record<string, string[]> = {};
-    for (const pos of positions.slice(0, MAX_LABELLED_POOLS)) {
-      const list = (groups[pos.network] ??= []);
-      if (!list.includes(pos.poolAddress)) list.push(pos.poolAddress);
-    }
-    return groups;
-  }, [positions]);
-
-  const { data: pools = {} } = useQuery({
-    queryKey: ["dex-lp-pools", server, JSON.stringify(byNetwork)],
-    queryFn: async () => {
-      const entries = await Promise.all(
-        Object.entries(byNetwork).map(([network, addresses]) =>
-          api
-            .getDexPoolsByAddress(server, network, addresses)
-            .then((r) => r.pools)
-            .catch(() => [] as PoolSummary[]),
-        ),
-      );
-      const map: Record<string, PoolSummary> = {};
-      for (const pool of entries.flat()) map[pool.address] = pool;
-      return map;
-    },
-    enabled: Object.keys(byNetwork).length > 0,
-    // A pair label does not change; only the TVL beside it does.
-    staleTime: 5 * 60_000,
-  });
+  const { positions, label, dexId } = useLpPositions(server);
 
   if (!positions.length) return null;
 
@@ -120,19 +38,16 @@ export function LpPositions({ server }: { server: string }) {
 
       <div className="flex gap-2 overflow-x-auto p-3">
         {positions.map((pos) => {
-          const pool = pools[pos.poolAddress];
           const state = lpStateStyle(pos.state);
           return (
             <button
               key={pos.id}
               onClick={() => navigate(`/dex/${pos.network}/${pos.poolAddress}`)}
-              title={`Open ${labelFor(pos, pool)} on ${pos.provider || pool?.dex_id || pos.network}`}
+              title={`Open ${label(pos)} on ${pos.provider || dexId(pos) || pos.network}`}
               className="group flex min-w-[13rem] shrink-0 flex-col gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2.5 text-left transition-colors hover:bg-[var(--color-surface-hover)]"
             >
               <div className="flex items-center justify-between gap-2">
-                <span className="truncate text-sm font-medium">
-                  {labelFor(pos, pool)}
-                </span>
+                <span className="truncate text-sm font-medium">{label(pos)}</span>
                 <ArrowRight className="h-3 w-3 shrink-0 text-[var(--color-text-muted)] transition-colors group-hover:text-[var(--color-primary)]" />
               </div>
 
@@ -144,7 +59,7 @@ export function LpPositions({ server }: { server: string }) {
                   {state.label}
                 </span>
                 <span className="truncate text-[10px] text-[var(--color-text-muted)]">
-                  {pos.provider || pool?.dex_id || ""}
+                  {pos.provider || dexId(pos)}
                 </span>
               </div>
 

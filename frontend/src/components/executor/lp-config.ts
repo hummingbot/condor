@@ -4,6 +4,7 @@ import { useEffect, useMemo, useReducer } from "react";
 import type { ChartPriceMapping, ExecutorValidation, PickSlot } from "./types";
 import { api, type DexPoolInfo } from "@/lib/api";
 import { getThemeColors } from "@/lib/theme-colors";
+import { LP_DEFAULTS_KEY } from "@/lib/sessionState";
 
 // ── Sides ──
 // `side` is a TradeType enum, not a direction: it says which token(s) you are
@@ -80,7 +81,7 @@ const DEFAULTS: LPState = {
   poolTouched: false,
 };
 
-const STORAGE_KEY = "condor_lp_defaults";
+const STORAGE_KEY = LP_DEFAULTS_KEY;
 
 // The pool and the range belong to a pair, not to the user's habits, so neither is
 // persisted — only the shape of position they tend to open.
@@ -296,21 +297,23 @@ export function rangeWarnings(
 }
 
 // ── Chart pick slots ──
-// One slot per price: the two bounds and both auto-close triggers. The lower
-// limit rides `limit2`, the slot for a price the panel draws itself as an extra
-// line rather than one the chart owns.
+// One slot per price: the two bounds and both auto-close triggers. Three of them
+// are lines the chart draws from `ChartPriceMapping`; the lower limit is a line
+// the panel draws itself, so it names its own slot after the field behind it.
+const LOWER_LIMIT_SLOT = "lower_limit_price";
+
 const PICK_SLOT: Record<string, PickSlot> = {
   upper_price: "start",
   lower_price: "end",
   upper_limit_price: "limit",
-  lower_limit_price: "limit2",
+  lower_limit_price: LOWER_LIMIT_SLOT,
 };
 
-const SLOT_FIELD: Record<PickSlot, keyof LPState> = {
+const SLOT_FIELD: Record<string, keyof LPState> = {
   start: "upper_price",
   end: "lower_price",
   limit: "upper_limit_price",
-  limit2: "lower_limit_price",
+  [LOWER_LIMIT_SLOT]: "lower_limit_price",
 };
 
 // The slots are named for the grid executor; on an LP range they are prices,
@@ -319,7 +322,7 @@ const LP_LINE_LABELS: Partial<Record<PickSlot, string>> = {
   start: "Upper",
   end: "Lower",
   limit: "Upper limit",
-  limit2: "Lower limit",
+  [LOWER_LIMIT_SLOT]: "Lower limit",
 };
 
 export function isMeteoraProvider(provider: string): boolean {
@@ -381,6 +384,9 @@ export function useLpConfig(
                     : getThemeColors().red,
                 lineStyle: "dotted" as const,
                 lineWidth: 1,
+                // The chart draws this one for us, so name the slot it writes
+                // back to and the user can drag it like the other three.
+                slot: LOWER_LIMIT_SLOT,
               },
             ]
           : undefined,
@@ -423,7 +429,9 @@ export function useLpConfig(
   const save = () => saveDefaults(state);
 
   const handleChartPriceSet = (field: PickSlot, price: number) => {
-    dispatch({ type: "SET_FIELD", field: SLOT_FIELD[field], value: price });
+    const target = SLOT_FIELD[field];
+    if (!target) return;
+    dispatch({ type: "SET_FIELD", field: target, value: price });
     dispatch({ type: "SET_FIELD", field: "activePickField", value: null });
   };
 

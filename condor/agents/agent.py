@@ -22,14 +22,20 @@ consulted, delegated to and looped exactly like every other.
 
 Disk layout::
 
-    agents/{slug}/
+    <root>/{slug}/
         AGENT.md                       # Agent identity + domain knowledge (no `role`)
         skills/<slug>/SKILL.md         # shared skills (consult + every strategy) [FEAT-002/003]
         store/user_{id}/               # learned memory (the shared brain) [FEAT-003]
         strategies/{sslug}/            # owned playbooks (see strategy.py)
 
-An Agent may be **authored in the repo** (e.g. ``executor_manager``) or **created
-at runtime**; either way ``AgentStore`` can create/update/delete it.
+``<root>`` is **two** roots since FEAT-115: the shipped library the repo tracks
+and this install's own, which git has never heard of. An Agent may be
+**authored in the repo** (e.g. ``executor_manager``) or **created at runtime**;
+either way ``AgentStore`` can create/update it, and a definition that is still
+stock is forked down on the first write. The two questions an agent directory
+used to answer with one path are :attr:`Agent.home` (where writes go, always
+local) and :attr:`Agent.source` (where the authored ``AGENT.md`` actually is,
+local-then-stock).
 
 ``condor`` is one of these directories (FEAT-033) — the **default** agent, the
 one answering when no specialist is bound. What makes it default is that a falsy
@@ -48,11 +54,22 @@ from pathlib import Path
 
 from condor.frontmatter import parse_frontmatter, render_frontmatter, slugify
 from condor.fsutil import atomic_write_text
-from condor.memory.paths import CHAT_SLUG
+from condor.layering import (
+    carry_fork_stamp,
+    fork_if_stock,
+    resolves_to_stock,
+    stock_delete_error,
+)
+from condor.memory.paths import (
+    CHAT_SLUG,
+    agent_home,
+    iter_agent_slugs,
+    resolve_agent_file,
+)
 
 log = logging.getLogger(__name__)
 
-_DATA_ROOT = Path(__file__).parent.parent.parent / "agents"
+AGENT_MD = "AGENT.md"
 
 
 @dataclass
@@ -82,13 +99,33 @@ class Agent:
             self.created_at = datetime.now(timezone.utc).isoformat()
 
     @property
-    def agent_dir(self) -> Path:
-        return _DATA_ROOT / self.slug
+    def home(self) -> Path:
+        """This agent's **writable** directory. Always local, may not exist yet.
+
+        Its store, its proposals, its mutes, its strategies and any definition
+        forked down from stock. Split from the old single ``agent_dir`` in
+        FEAT-115 rather than retargeted: every call site had to be read once and
+        assigned to the right question, and a silently-repointed property would
+        have got that wrong in whichever direction the last refactor left it.
+        """
+        return agent_home(self.slug)
+
+    @property
+    def source(self) -> Path | None:
+        """The authored ``AGENT.md`` behind this Agent — local, else stock.
+
+        ``None`` only for an Agent built in memory that was never saved.
+        """
+        return resolve_agent_file(self.slug, AGENT_MD)
 
     @property
     def routines_dir(self) -> Path:
-        """Agent-level routines, shared across all of this agent's strategies."""
-        return self.agent_dir / "routines"
+        """Agent-level routines, shared across all of this agent's strategies.
+
+        The **writable** one. What the agent may *run* also includes the stock
+        layer and the shared library — see ``routines.base.assistant_routines``.
+        """
+        return self.home / "routines"
 
     @property
     def consult_hint(self) -> str:
@@ -153,16 +190,15 @@ def identity_header(slug: str, name: str = "") -> str:
     )
 
 
-def _load_agent_from_dir(agent_dir: Path) -> Agent | None:
-    """Load an Agent from ``<agent_dir>/AGENT.md`` (any dir with the file)."""
-    path = agent_dir / "AGENT.md"
+def _load_agent_from_file(path: Path, slug: str) -> Agent | None:
+    """Load an Agent from a resolved ``AGENT.md``, whichever root it came from."""
     if not path.exists():
         return None
     try:
         meta, body = parse_frontmatter(path.read_text())
         return Agent(
-            slug=agent_dir.name,
-            name=meta.get("name", agent_dir.name),
+            slug=slug,
+            name=meta.get("name", slug),
             description=meta.get("description", ""),
             instructions=body,
             agent_key=meta.get("agent_key", ""),
@@ -179,7 +215,7 @@ def _load_agent_from_dir(agent_dir: Path) -> Agent | None:
 
 
 class AgentStore:
-    """Discovery + CRUD for Agents under ``agents/*/AGENT.md``.
+    """Discovery + CRUD for Agents under ``<root>/*/AGENT.md``, both roots.
 
     Replaces ``ExpertStore`` and the identity half of ``StrategyStore``. There is
     no ``role`` discriminator and no capability flag: every directory with an
@@ -190,12 +226,16 @@ class AgentStore:
     def get(self, slug: str) -> Agent | None:
         if not slug:
             return None
-        return _load_agent_from_dir(_DATA_ROOT / slug)
+        path = resolve_agent_file(slug, AGENT_MD)
+        if path is None:
+            return None
+        return _load_agent_from_file(path, slug)
 
     def list_all(self) -> list[Agent]:
+        """Every agent either root knows — local definitions shadowing stock."""
         agents: list[Agent] = []
-        for d in self._iter_agent_dirs():
-            a = _load_agent_from_dir(d)
+        for slug in iter_agent_slugs():
+            a = self.get(slug)
             if a is not None:
                 agents.append(a)
         return agents
@@ -287,8 +327,13 @@ class AgentStore:
             raise ValueError(
                 f"'{CHAT_SLUG}' is the default agent and cannot be deleted"
             )
-        agent_dir = _DATA_ROOT / slug
-        path = agent_dir / "AGENT.md"
+        if resolves_to_stock(slug, AGENT_MD):
+            # A shipped agent has no local file to remove and an update would
+            # bring it straight back, so deletion would be a lie. FEAT-090's
+            # mute is the reversible answer that already exists.
+            raise ValueError(stock_delete_error(slug))
+        agent_dir = agent_home(slug)
+        path = agent_dir / AGENT_MD
         if not path.exists():
             return False
         path.unlink()
@@ -314,16 +359,14 @@ class AgentStore:
             "created_by": agent.created_by,
             "created_at": agent.created_at,
         }
-        agent.agent_dir.mkdir(parents=True, exist_ok=True)
+        # Forks a stock AGENT.md down before overwriting it, so the shipped
+        # copy is never the file this writes and the local one carries a
+        # ``forked_from`` stamp naming the revision it diverged from.
+        target = fork_if_stock(agent.slug, AGENT_MD)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # The meta here is rebuilt from the dataclass, which knows nothing about
+        # the fork; without this the stamp would vanish on the next save.
         atomic_write_text(
-            agent.agent_dir / "AGENT.md",
-            render_frontmatter(meta, agent.instructions),
+            target,
+            render_frontmatter(carry_fork_stamp(target, meta), agent.instructions),
         )
-
-    def _iter_agent_dirs(self):
-        if not _DATA_ROOT.exists():
-            return
-        for d in sorted(_DATA_ROOT.iterdir()):
-            if not d.is_dir() or d.name.startswith("_") or d.name == "strategies":
-                continue
-            yield d

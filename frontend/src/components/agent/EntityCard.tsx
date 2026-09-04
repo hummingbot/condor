@@ -1,16 +1,26 @@
-import { ChevronRight, Trash2, type LucideIcon } from "lucide-react";
+import { ChevronRight, FlaskConical, Trash2, type LucideIcon } from "lucide-react";
 
 import { deriveAgentStatus } from "@/components/agent/agentStatus";
 import { StatusBadge } from "@/components/agent/StatusBadge";
+import { useSeconds } from "@/hooks/useSeconds";
+import { countdown } from "@/lib/agent-attribution";
 import type { RunningInstance } from "@/lib/api";
-import { formatCurrencyPnl } from "@/lib/formatters";
+import { formatAge } from "@/lib/formatters";
 
 // ── Entity Card ──
 //
-// The one summary card for anything that loops and books PnL: an Agent on the
-// fleet grid, a Strategy on the agent page. Typed structurally (like
-// `deriveAgentStatus`) so `AgentSummary` and `StrategySummary` both satisfy it
-// without casts. ARCH-115 folded the two hand-copied versions into this one.
+// The one summary card for anything that loops: an Agent on the fleet grid, a
+// Strategy on the agent page. Typed structurally (like `deriveAgentStatus`) so
+// `AgentSummary` and `StrategySummary` both satisfy it without casts. ARCH-115
+// folded the two hand-copied versions into this one.
+//
+// It used to answer with money — Total PnL, Last Session, Open — and for most
+// loops that is three tiles of `+$0.00`, because most runs never traded and the
+// pipeline answers "not priced" with a zero. So the tiles say what a card is
+// actually asked about a loop instead (FEAT-099): when it last ticked, how many
+// ticks it has run, and when the next one is due. Money is a strategy-level
+// question and lives where it can be read properly — the Lab's KPI strip and
+// the workbench's performance panel.
 
 /** The shape both `AgentSummary` and `StrategySummary` already satisfy. */
 interface EntitySummary {
@@ -20,9 +30,16 @@ interface EntitySummary {
   status: string;
   instances?: RunningInstance[];
   session_count: number;
-  daily_pnl?: number;
-  total_pnl?: number;
-  open_positions?: number;
+  /**
+   * Dry runs and single ticks — every `experiment_N.md` on disk.
+   *
+   * The payload has carried this from the start and the card dropped it, so an
+   * agent whose only history was a dry run read as an agent that had never run
+   * at all. A dry run books no PnL by definition, which is exactly why the
+   * count has to be said: it is the only trace the run leaves on a summary.
+   */
+  experiment_count?: number;
+  tick_count?: number;
 }
 
 export function EntityCard({
@@ -39,12 +56,17 @@ export function EntityCard({
   onClick: () => void;
   onDelete: () => void;
 }) {
-  const totalPnl = entity.total_pnl ?? 0;
-  const totalPnlColor = totalPnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]";
-  const dayPnl = entity.daily_pnl ?? 0;
-  const dayPnlColor = dayPnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]";
   const status = deriveAgentStatus(entity);
   const isLive = status === "running";
+  // The loop the card is a summary of. A card that says "running" and nothing
+  // about the beat is the thing this whole pass is about.
+  const live = entity.instances?.find((i) => i.status === "running") ?? null;
+  const now = useSeconds(isLive);
+
+  const ticks = live?.tick_count ?? entity.tick_count ?? 0;
+  const lastTickAt = live?.last_tick_at ?? 0;
+  const dueIn =
+    live && lastTickAt > 0 ? lastTickAt + live.frequency_sec - now / 1000 : null;
 
   return (
     <button
@@ -92,27 +114,43 @@ export function EntityCard({
           </p>
         )}
 
+        {live?.last_did && <LastDeedLine did={live.last_did} />}
+
         <div className="grid grid-cols-4 gap-2 border-t border-[var(--color-border)]/50 pt-3">
-          <div>
-            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Total PnL</span>
-            <span className={`text-sm font-mono font-semibold ${totalPnlColor}`}>
-              {formatCurrencyPnl(totalPnl)}
-            </span>
-          </div>
-          <div>
-            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Last Session</span>
-            <span className={`text-sm font-mono ${dayPnlColor}`}>
-              {formatCurrencyPnl(dayPnl)}
-            </span>
-          </div>
-          <div>
-            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Open</span>
-            <span className="text-sm font-mono text-[var(--color-text)]">{entity.open_positions ?? 0}</span>
-          </div>
-          <div>
-            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Sessions</span>
-            <span className="text-sm font-mono text-[var(--color-text)]">{entity.session_count}</span>
-          </div>
+          <Fact
+            label="Last tick"
+            value={lastTickAt > 0 ? `${formatAge(lastTickAt)} ago` : "\u2014"}
+          />
+          <Fact label="Ticks" value={String(ticks)} />
+          <Fact
+            label="Next tick"
+            // An overdue tick is named as overdue rather than printed as a
+            // negative countdown — the same call the pulse and the fleet band
+            // both make.
+            value={
+              dueIn === null
+                ? "\u2014"
+                : dueIn > 0
+                  ? countdown(dueIn)
+                  : `overdue ${countdown(-dueIn)}`
+            }
+            sub={live ? `every ${countdown(live.frequency_sec)}` : undefined}
+          />
+          <Fact
+            label="Runs"
+            value={String(entity.session_count)}
+            chip={
+              entity.experiment_count ? (
+                <span
+                  className="flex items-center gap-0.5 rounded bg-amber-500/10 px-1 py-0.5 text-[9px] font-bold uppercase text-amber-400"
+                  title={`${entity.experiment_count} dry run${entity.experiment_count === 1 ? "" : "s"} / single ticks`}
+                >
+                  <FlaskConical className="h-2.5 w-2.5" />
+                  {entity.experiment_count} dry
+                </span>
+              ) : undefined
+            }
+          />
         </div>
       </div>
 
@@ -121,5 +159,55 @@ export function EntityCard({
         <ChevronRight className="h-3.5 w-3.5" />
       </div>
     </button>
+  );
+}
+
+/** One tile of the card's fact row. */
+function Fact({
+  label,
+  value,
+  sub,
+  chip,
+}: {
+  label: string;
+  value: string;
+  sub?: string;
+  chip?: React.ReactNode;
+}) {
+  return (
+    <div>
+      <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">
+        {label}
+      </span>
+      <span className="flex items-center gap-1 text-sm font-mono text-[var(--color-text)]">
+        {value}
+        {chip}
+      </span>
+      {sub && (
+        <span className="block text-[9px] text-[var(--color-text-muted)]/70">{sub}</span>
+      )}
+    </div>
+  );
+}
+
+/**
+ * What the last tick actually **did**, on one line.
+ *
+ * The card's job is to be scanned in a grid, so the cadence facts are tiles and
+ * this is the one thing a tile cannot hold: a sentence. It is the deed — a tool
+ * call that ran — and not the model's narration of it; `LoopPulse` in the panel
+ * behind the click shows both, plus the strip and the error.
+ */
+function LastDeedLine({ did }: { did: NonNullable<RunningInstance["last_did"]> }) {
+  return (
+    <div className="mb-3 rounded-md border border-emerald-500/15 bg-emerald-500/[0.04] px-2 py-1.5">
+      <span
+        className={`block truncate text-[11px] ${did.ok ? "text-[var(--color-text-muted)]" : "text-amber-500"}`}
+        title={did.summary}
+      >
+        #{did.tick} {did.summary}
+        {!did.ok && " \u2014 failed"}
+      </span>
+    </div>
   );
 }

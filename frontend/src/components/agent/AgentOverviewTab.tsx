@@ -1,17 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  ChevronRight,
-  Clock,
-  FlaskConical,
-  Save,
-  Zap,
-} from "lucide-react";
+import { Save, Zap } from "lucide-react";
 import { useCallback, useMemo, useState } from "react";
 
 import { AgentPnlChart, sessionsToDataPoints } from "@/components/agent/AgentPnlChart";
 import { ModeBadge } from "@/components/agent/ModeBadge";
 import { api } from "@/lib/api";
-import { formatCurrency, formatCurrencyPnl, formatCurrencyVolume } from "@/lib/formatters";
+import { formatCurrency, formatCurrencyPnl, formatCurrencyVolume, pnlTextClass } from "@/lib/formatters";
 
 // ── Markdown Editor ──
 
@@ -22,6 +16,8 @@ export function MarkdownEditor({
   onSave,
   invalidateKey,
   onDirtyChange,
+  minHeightClass = "min-h-[500px]",
+  showLabel = true,
 }: {
   label: string;
   sublabel: string;
@@ -30,6 +26,18 @@ export function MarkdownEditor({
   invalidateKey: unknown[];
   /** Notifies the host (e.g. a closable modal) when there are unsaved edits. */
   onDirtyChange?: (dirty: boolean) => void;
+  /**
+   * How tall the box starts. A near-full-screen modal can afford 500px; a card
+   * sharing a row with another card inside a disclosure cannot, and a fixed
+   * height there is what turns two documents into a page of scrollbars.
+   */
+  minHeightClass?: string;
+  /**
+   * Whether the box names itself. Off for a host that already has a titled
+   * header of its own — a card whose chrome says "Playbook · strategy.md"
+   * printing it again a row below is the same words twice in two sizes.
+   */
+  showLabel?: boolean;
 }) {
   const queryClient = useQueryClient();
   const [value, setValue] = useState(content);
@@ -52,11 +60,15 @@ export function MarkdownEditor({
 
   return (
     <div className="flex flex-col gap-2">
-      <div className="flex items-center justify-between">
-        <div>
-          <span className="text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">{label}</span>
-          <span className="ml-2 text-[10px] text-[var(--color-text-muted)]">{sublabel}</span>
-        </div>
+      <div className={`flex items-center ${showLabel ? "justify-between" : "justify-end"}`}>
+        {showLabel ? (
+          <div>
+            <span className="text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">{label}</span>
+            <span className="ml-2 text-[10px] text-[var(--color-text-muted)]">{sublabel}</span>
+          </div>
+        ) : (
+          <span className="sr-only">{label}</span>
+        )}
         <button
           onClick={() => saveMut.mutate()}
           disabled={!dirty || saveMut.isPending}
@@ -75,7 +87,7 @@ export function MarkdownEditor({
         value={value}
         onChange={handleChange}
         spellCheck={false}
-        className="min-h-[500px] w-full resize-y rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4 font-mono text-sm leading-relaxed text-[var(--color-text)] outline-none transition-colors focus:border-[var(--color-primary)]/50"
+        className={`${minHeightClass} w-full resize-y rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4 font-mono text-sm leading-relaxed text-[var(--color-text)] outline-none transition-colors focus:border-[var(--color-primary)]/50`}
       />
     </div>
   );
@@ -97,7 +109,7 @@ export function InstanceCard({ instance }: { instance: import("@/lib/api").Runni
         </div>
         <div className="flex items-center gap-3 text-xs text-[var(--color-text-muted)]">
           <span>Ticks: {instance.tick_count}</span>
-          <span className={instance.daily_pnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]"}>
+          <span className={pnlTextClass(instance.daily_pnl)}>
             PnL: {formatCurrencyPnl(instance.daily_pnl)}
           </span>
         </div>
@@ -159,11 +171,16 @@ export function InstanceCard({ instance }: { instance: import("@/lib/api").Runni
 export function PerformancePanel({
   slug,
   sslug,
-  onSessionClick,
+  dense = false,
 }: {
   slug: string;
   sslug: string;
-  onSessionClick?: (sessionNum: number, kind?: "session" | "experiment") => void;
+  /**
+   * Half a workspace row rather than a page. A prop, not a media query: the
+   * window is wide in both cases, and `lg:grid-cols-8` in a 640px column is
+   * eight stat tiles four characters wide.
+   */
+  dense?: boolean;
 }) {
   const { data } = useQuery({
     queryKey: ["strategy-performance", slug, sslug],
@@ -171,15 +188,18 @@ export function PerformancePanel({
     refetchInterval: 10000,
   });
   const totals = data?.totals || {};
-  const allRows = data?.sessions || [];
-  const sessions = allRows.filter((s) => s.kind === "session");
+  // A dry run books nothing by construction — that is what makes it a dry run —
+  // so it is never folded into the totals below, which are about money that
+  // moved. The runs themselves are listed in the Lab (FEAT-099); what stays
+  // here is the strategy-level view: the KPI strip and the equity curve.
+  const sessions = (data?.sessions || []).filter((s) => s.kind === "session");
   const totalPnl = Number(totals.total_pnl ?? 0);
   const realized = Number(totals.realized_pnl ?? 0);
   const unrealized = Number(totals.unrealized_pnl ?? 0);
   const volume = Number(totals.volume ?? 0);
   const fees = Number(totals.fees ?? 0);
   const openPos = Number(totals.open_positions ?? 0);
-  const pnlColor = totalPnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]";
+  const pnlClass = pnlTextClass(totalPnl);
 
   // Only sessions whose closes carry an outcome can be averaged. A bot-mode
   // session reports its closes with win_rate === null (the controller snapshot
@@ -200,16 +220,16 @@ export function PerformancePanel({
   const pnlData = useMemo(() => sessionsToDataPoints(sessions), [sessions]);
 
   return (
-    <div className="space-y-4 lg:col-span-2">
+    <div className={`space-y-4 ${dense ? "" : "lg:col-span-2"}`}>
       {/* Stat grid */}
       <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
         <h3 className="mb-3 flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
           <Zap className="h-3.5 w-3.5" /> Performance
         </h3>
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-4 lg:grid-cols-8">
+        <div className={`grid gap-4 ${dense ? "grid-cols-2 sm:grid-cols-4" : "grid-cols-2 sm:grid-cols-4 lg:grid-cols-8"}`}>
           <div>
             <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Total PnL</span>
-            <span className={`text-lg font-mono font-semibold ${pnlColor}`}>
+            <span className={`text-lg font-mono font-semibold ${pnlClass}`}>
               {formatCurrencyPnl(totalPnl)}
             </span>
           </div>
@@ -261,88 +281,6 @@ export function PerformancePanel({
         <AgentPnlChart data={pnlData} height={180} title="PnL Equity Curve" />
       )}
 
-      {/* Sessions & Experiments table */}
-      <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
-        <h3 className="mb-3 flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
-          <Clock className="h-3.5 w-3.5" /> Sessions ({sessions.length})
-          {allRows.filter((s) => s.kind === "experiment").length > 0 && (
-            <span className="ml-1 flex items-center gap-1 rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-400">
-              <FlaskConical className="h-2.5 w-2.5" />
-              {allRows.filter((s) => s.kind === "experiment").length} experiments
-            </span>
-          )}
-        </h3>
-        {allRows.length === 0 ? (
-          <p className="text-xs text-[var(--color-text-muted)]">No sessions yet.</p>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs">
-              <thead>
-                <tr className="text-left text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">
-                  <th className="px-2 py-1">#</th>
-                  <th className="px-2 py-1">Kind</th>
-                  <th className="px-2 py-1">Status</th>
-                  <th className="px-2 py-1 text-right">Total PnL</th>
-                  <th className="px-2 py-1 text-right">Realized</th>
-                  <th className="px-2 py-1 text-right">Unrealized</th>
-                  <th className="px-2 py-1 text-right">Volume</th>
-                  <th className="px-2 py-1 text-right">Trades</th>
-                  <th className="px-2 py-1 text-right">Open</th>
-                  {onSessionClick && <th className="px-2 py-1 w-6" />}
-                </tr>
-              </thead>
-              <tbody>
-                {allRows
-                  .slice()
-                  .sort((a, b) => (b.kind === a.kind ? b.session_num - a.session_num : a.kind === "experiment" ? 1 : -1))
-                  .map((s) => {
-                    const pnlCol = s.total_pnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]";
-                    const isExperiment = s.kind === "experiment";
-                    return (
-                      <tr
-                        key={s.agent_id}
-                        onClick={() => onSessionClick?.(s.session_num, s.kind)}
-                        className={`border-t border-[var(--color-border)]/40 font-mono ${onSessionClick ? "cursor-pointer transition-colors hover:bg-[var(--color-surface-hover)]" : ""}`}
-                      >
-                        <td className="px-2 py-1.5 text-[var(--color-text)]">{s.session_num}</td>
-                        <td className="px-2 py-1.5">
-                          {isExperiment ? (
-                            <span className="inline-flex items-center gap-0.5 rounded bg-amber-500/10 px-1.5 py-0.5 text-[9px] font-bold uppercase text-amber-400">
-                              <FlaskConical className="h-2.5 w-2.5" />
-                              exp
-                            </span>
-                          ) : (
-                            <span className="text-[var(--color-text-muted)]">{s.kind}</span>
-                          )}
-                        </td>
-                        <td className={`px-2 py-1.5 ${s.status === "running" ? "text-emerald-400" : "text-[var(--color-text-muted)]"}`}>
-                          {s.status || "—"}
-                        </td>
-                        <td className={`px-2 py-1.5 text-right ${pnlCol}`}>
-                          {formatCurrencyPnl(s.total_pnl)}
-                        </td>
-                        <td className="px-2 py-1.5 text-right text-[var(--color-text-muted)]">{formatCurrencyPnl(s.realized_pnl)}</td>
-                        <td className="px-2 py-1.5 text-right text-[var(--color-text-muted)]">{formatCurrencyPnl(s.unrealized_pnl)}</td>
-                        <td className="px-2 py-1.5 text-right text-[var(--color-text-muted)]">
-                          {formatCurrencyVolume(s.volume)}
-                        </td>
-                        <td className="px-2 py-1.5 text-right text-[var(--color-text-muted)]">
-                          {s.trade_count === 0 && s.volume > 0 ? "—" : s.trade_count}
-                        </td>
-                        <td className="px-2 py-1.5 text-right text-[var(--color-text-muted)]">{s.open_count}</td>
-                        {onSessionClick && (
-                          <td className="px-2 py-1.5 text-[var(--color-text-muted)]">
-                            <ChevronRight className="h-3.5 w-3.5" />
-                          </td>
-                        )}
-                      </tr>
-                    );
-                  })}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
     </div>
   );
 }

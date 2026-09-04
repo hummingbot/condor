@@ -2,12 +2,52 @@
 
 from __future__ import annotations
 
+import hashlib
 import html
 import json
+import logging
 import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
+
+# Plotly's browser bundle is 4.85 MB, byte-identical for every report and every
+# user. It used to be inlined into each saved document, which made the median
+# report 98.8% vendored library and re-transferred + re-parsed the whole bundle
+# on every viewer open (a ``srcDoc`` document gets no HTTP cache entry and no JS
+# compile cache). Reports now reference one persisted copy under
+# ``reports/_assets/`` and only the paths that leave the origin — Telegram
+# documents, the dashboard Download — inline it again via ``hydrate`` (PERF-267).
+ASSETS_DIRNAME = "_assets"
+# ``/api`` is the only prefix Vite proxies to the backend in dev
+# (``frontend/vite.config.ts``), so a ``/static/...`` URL would resolve against
+# the dev server and hand every report Vite's index.html.
+ASSET_URL_PREFIX = "/api/v1/reports/assets/"
+# A fixed shape, never a caller-supplied path: the filename that reaches the
+# asset route must look exactly like one of our own bundles (SEC-044/SEC-112).
+PLOTLY_ASSET_PATTERN = re.compile(r"^plotly-[0-9A-Za-z][0-9A-Za-z.]*\.js$")
+_PLOTLY_VERSION_RE = re.compile(r"plotly\.js\s+v([0-9]+(?:\.[0-9A-Za-z]+)*)")
+_PLOTLY_TAG_RE = re.compile(
+    r'<script src="'
+    + re.escape(ASSET_URL_PREFIX)
+    + r'(plotly-[0-9A-Za-z][0-9A-Za-z.]*\.js)"></script>'
+)
+
+# Every failure mode of an externally referenced bundle — a 404 from the asset
+# route, a blocked request, a hydration that found no file — otherwise ends as
+# an empty box plus a console warning nobody reads.
+PLOTLY_GUARD = """<script>
+window.addEventListener('load', function () {
+  if (window.Plotly) return;
+  var banner = document.createElement('div');
+  banner.setAttribute('role', 'alert');
+  banner.style.cssText = 'background:#ef4444;color:#fff;padding:12px 16px;border-radius:8px;margin-bottom:16px;font-weight:600';
+  banner.textContent = 'Charts unavailable \\u2014 this report could not load its plotly.js bundle.';
+  document.body.insertBefore(banner, document.body.firstChild);
+});
+</script>"""
 
 HTML_TEMPLATE = """\
 <!DOCTYPE html>
@@ -275,11 +315,78 @@ def report_runtime() -> str:
 
 
 @lru_cache(maxsize=1)
-def plotly_script() -> str:
-    """Return Plotly's installed browser bundle for fully offline reports."""
+def plotly_bundle() -> str:
+    """Return the installed Plotly browser bundle's JavaScript source."""
     from plotly.offline import get_plotlyjs
 
-    return f"<script>{get_plotlyjs()}</script>"
+    return get_plotlyjs()
+
+
+def plotly_asset_name(bundle: str) -> str:
+    """The versioned filename a bundle is persisted under.
+
+    Read from the bundle's own ``/**\\n* plotly.js vX.Y.Z`` header, falling back
+    to a content hash. The name is *pinned into* each saved report, so it must
+    change whenever the bytes do: stored reports are immutable snapshots, and
+    serving "whatever ``get_plotlyjs()`` returns today" would feed a v4 runtime
+    to a v3 figure spec after the next ``uv sync``.
+    """
+    match = _PLOTLY_VERSION_RE.search(bundle[:512])
+    version = (
+        match.group(1)
+        if match
+        else hashlib.sha256(bundle.encode("utf-8")).hexdigest()[:16]
+    )
+    return f"plotly-{version}.js"
+
+
+def assets_dir(charts_dir: Path) -> Path:
+    """The directory persisted report assets live in, under the reports dir."""
+    return charts_dir / ASSETS_DIRNAME
+
+
+def ensure_plotly_asset(charts_dir: Path) -> str:
+    """Persist the bundle under ``_assets/`` and return the head markup for it.
+
+    The tag stays **blocking** — no ``async``/``defer`` — because
+    ``to_html(..., include_plotlyjs=False)`` emits inline ``Plotly.newPlot``
+    calls in the body that run as the document parses.
+    """
+    bundle = plotly_bundle()
+    name = plotly_asset_name(bundle)
+    directory = assets_dir(charts_dir)
+    path = directory / name
+    if not path.is_file():
+        directory.mkdir(parents=True, exist_ok=True)
+        from condor.fsutil import atomic_write_text
+
+        atomic_write_text(path, bundle)
+    return f'<script src="{ASSET_URL_PREFIX}{name}"></script>{PLOTLY_GUARD}'
+
+
+def hydrate(document: str, charts_dir: Path | None = None) -> str:
+    """Inline the referenced plotly bundle so the document stands on its own.
+
+    Applied on every path that leaves the origin — a Telegram document, the
+    dashboard Download — where nothing can resolve ``/api/v1/...``. The bytes
+    come from the version the report pinned at save time, never from the
+    currently installed plotly. A document with no reference (a chartless
+    report, or one saved before PERF-267) is returned untouched.
+    """
+    if charts_dir is None:
+        from . import store
+
+        charts_dir = store._charts_dir()
+    directory = assets_dir(Path(charts_dir))
+
+    def _inline(match: re.Match[str]) -> str:
+        path = directory / match.group(1)
+        if not path.is_file():
+            logger.warning("Cannot hydrate report: missing asset %s", path)
+            return match.group(0)
+        return f"<script>{path.read_text(encoding='utf-8')}</script>"
+
+    return _PLOTLY_TAG_RE.sub(_inline, document)
 
 
 def json_for_html(value: Any) -> str:

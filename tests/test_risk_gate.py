@@ -1,7 +1,7 @@
 """Unit tests for the risk-limit gate (CORR-046).
 
 The per-tick RiskState snapshot must accumulate approved executor creates so
-that multiple ``manage_executors(create)`` calls within the same tick are gated
+that multiple ``create_*_executor`` calls within the same tick are gated
 against the running totals (executor count and exposure), not the frozen
 pre-tick numbers.
 """
@@ -21,32 +21,24 @@ from condor.agents.risk import (
 
 def _create_call(amount: float = 100.0) -> dict:
     return {
-        "tool": "manage_executors",
+        "tool": "create_grid_executor",
         "input": {
-            "action": "create",
-            "executor_config": {
-                "controller_id": "test_controller",
-                "type": "grid_executor",
-                "total_amount_quote": amount,
-            },
+            "controller_id": "test_controller",
+            "connector_name": "binance",
+            "trading_pair": "SOL-USDT",
+            "total_amount_quote": amount,
         },
     }
 
 
 def _order_call(amount: str | float) -> dict:
-    config = {
-        "controller_id": "test_controller",
-        "type": "order_executor",
-        "connector_name": "solana-mainnet-beta",
-        "trading_pair": "PUMP-USDC",
-        "amount": amount,
-    }
     return {
-        "tool": "manage_executors",
+        "tool": "create_order_executor",
         "input": {
-            "action": "create",
-            "executor_type": "order_executor",
-            "executor_config": config,
+            "controller_id": "test_controller",
+            "connector_name": "solana-mainnet-beta",
+            "trading_pair": "PUMP-USDC",
+            "amount": amount,
         },
     }
 
@@ -97,11 +89,12 @@ def test_rejected_create_does_not_accumulate():
     assert state.executor_count == 0
 
 
-def test_non_create_actions_do_not_accumulate():
+def test_non_create_tools_do_not_accumulate():
+    """`stop_executor` is dangerous by name but reduces exposure, so it is not gated."""
     engine = RiskEngine(RiskLimits())
     state = RiskState(executor_count=2, total_exposure=100.0)
 
-    call = {"tool": "manage_executors", "input": {"action": "stop", "executor_id": "x"}}
+    call = {"tool": "stop_executor", "input": {"executor_id": "x"}}
     allowed, _ = engine.check_executor_action(call, state)
     assert allowed
     assert state.executor_count == 2
@@ -113,7 +106,13 @@ class _MarketData:
         self.price = price
 
     async def get_prices(self, connector_name, trading_pairs):
-        return {"prices": {trading_pairs: self.price} if self.price else {}}
+        # The real client accepts either a bare pair or a list and wraps
+        # the bare one before it posts; mirror that so this stub answers
+        # the same way for both spellings.
+        pairs = (
+            [trading_pairs] if isinstance(trading_pairs, str) else list(trading_pairs)
+        )
+        return {"prices": {pairs[0]: self.price} if self.price else {}}
 
 
 class _PriceClient:
@@ -122,33 +121,35 @@ class _PriceClient:
 
 
 @pytest.mark.parametrize(
-    ("executor_type", "config", "expected"),
+    ("tool_name", "args", "expected"),
     [
-        ("grid_executor", {"total_amount_quote": 12}, 12),
-        ("twap_executor", {"total_amount_quote": 13}, 13),
-        ("dca_executor", {"amounts_quote": [4, 5], "total_amount_quote": 1}, 9),
-        ("order_executor", {"amount": 3, "total_amount_quote": 1}, 6),
-        ("position_executor", {"amount": 4, "total_amount_quote": 0}, 8),
-        (
-            "lp_executor",
-            {"base_amount": 3, "quote_amount": 4, "total_amount_quote": 1},
-            10,
-        ),
+        ("create_grid_executor", {"total_amount_quote": 12}, 12),
+        ("create_dca_executor", {"amounts_quote": [4, 5]}, 9),
+        ("create_order_executor", {"amount": 3}, 6),
+        # The "$" form is already the notional and must NOT be priced as base.
+        ("create_order_executor", {"amount": "$7"}, 7),
+        ("create_position_executor", {"amount": 4}, 8),
+        ("create_lp_executor", {"base_amount": 3, "quote_amount": 4}, 10),
     ],
 )
 def test_planned_amount_quote_uses_each_executor_capital_field(
-    executor_type, config, expected
+    tool_name, args, expected
 ):
-    config.update(connector_name="solana-mainnet-beta", trading_pair="PUMP-USDC")
+    args.update(connector_name="solana-mainnet-beta", trading_pair="PUMP-USDC")
 
-    amount = asyncio.run(
-        _planned_amount_quote(
-            {"executor_type": executor_type, "executor_config": config},
-            _PriceClient(2),
-        )
-    )
+    amount = asyncio.run(_planned_amount_quote(tool_name, args, _PriceClient(2)))
 
     assert amount == pytest.approx(expected)
+
+
+def test_planned_amount_quote_refuses_an_unknown_executor_tool():
+    """An unpriced create is cancelled, never approved blind."""
+    with pytest.raises(ValueError):
+        asyncio.run(
+            _planned_amount_quote(
+                "create_twap_executor", {"amount": 1}, _PriceClient(2)
+            )
+        )
 
 
 def test_oracle_prices_market_order_before_risk_check():
@@ -256,8 +257,8 @@ def test_callback_cumulative_exposure_cancelled_same_tick():
 
 # ---------------------------------------------------------------------------
 # dry_run must block manage_bots deploy/mutate actions too, not just
-# manage_executors/place_order/gateway swaps — manage_bots(deploy) places real
-# capital via a controller-based bot, a separate path from manage_executors.
+# the executor creates/place_order/gateway swaps — manage_bots(deploy) places
+# real capital via a controller-based bot, a separate path from the executors.
 # ---------------------------------------------------------------------------
 
 
@@ -416,7 +417,7 @@ def test_loop_mode_still_approves_bot_stop():
 
 def _tagged_call(controller_id) -> dict:
     call = _create_call()
-    call["input"]["executor_config"]["controller_id"] = controller_id
+    call["input"]["controller_id"] = controller_id
     return call
 
 
@@ -496,17 +497,17 @@ def _amm_call(action: str, **extra) -> dict:
 
 
 def _swap_call(amount: str, pair: str = "SOL-USDC") -> dict:
-    """A signing ``manage_gateway_swaps`` call.
+    """A signing ``execute_swap`` call.
 
     The swap used to be ``manage_amm(execute_swap)`` and was priced off the
     pool quote. It is its own pair-scoped tool now, so the gate prices it from
     the market feed instead -- the same number, reached the way this tool
-    identifies its market.
+    identifies its market. It carries no ``action``: the tool name is what says
+    this call signs (FEAT-064).
     """
     return {
-        "tool": "mcp__mcp-hummingbot__manage_gateway_swaps",
+        "tool": "mcp__mcp-hummingbot__execute_swap",
         "input": {
-            "action": "execute",
             "connector": "meteora",
             "network": "solana-mainnet-beta",
             "trading_pair": pair,

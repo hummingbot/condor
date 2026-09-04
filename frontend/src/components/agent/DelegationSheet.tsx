@@ -11,6 +11,11 @@ import {
 import { WorkspaceSheet } from "@/components/chat/WorkspaceSheet";
 import { api, type Delegation, type DelegationSummary } from "@/lib/api";
 
+/** A consult has no transcript to fetch, and the sheet says why rather than
+ *  showing an empty one — the record is a ledger entry, not a tape (FEAT-058). */
+const NO_TRANSCRIPT =
+  "A consult streams its answer straight back to the caller; only background tasks record a transcript.";
+
 /**
  * One delegation, opened: the ask, then its transcript or its result.
  *
@@ -30,11 +35,13 @@ export function DelegationSheet({
   task: Delegation | DelegationSummary;
   onClose: () => void;
 }) {
+  const isConsult = (task.kind ?? "delegate") === "consult";
   // Follow the task: while it runs there is no result yet, so the transcript
   // *is* the view. Once it is finished the answer is what the task was for, and
-  // the transcript is the follow-up question.
+  // the transcript is the follow-up question. A consult has no transcript at
+  // all, so it opens on the only thing it recorded.
   const [view, setView] = useState<"transcript" | "result">(
-    task.status === "running" ? "transcript" : "result",
+    task.status === "running" && !isConsult ? "transcript" : "result",
   );
 
   const hasBody = "result" in task;
@@ -74,9 +81,13 @@ export function DelegationSheet({
         ))}
       </div>
       {view === "transcript" ? (
-        <DelegationTranscript taskId={task.task_id} />
+        isConsult ? (
+          <p className="text-xs text-[var(--color-text-muted)]">{NO_TRANSCRIPT}</p>
+        ) : (
+          <DelegationTranscript taskId={task.task_id} />
+        )
       ) : record ? (
-        <DelegationDetail delegation={record} clamped={false} />
+        <DelegationDetail delegation={record} />
       ) : (
         <div className="flex items-center gap-2 text-xs text-[var(--color-text-muted)]">
           <Loader2 className="h-3 w-3 animate-spin" />

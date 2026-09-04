@@ -222,7 +222,7 @@ def test_start_attributes_a_targeted_routine_to_its_owning_agent(project, monkey
     """
     import condor.agents.agent as agent_mod
 
-    monkeypatch.setattr(agent_mod, "_DATA_ROOT", project / "agents")
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(project / "agents"))
     (project / "agents" / "scout" / "AGENT.md").write_text("---\nname: Scout\n---\n")
     api = _api(monkeypatch)
 
@@ -295,7 +295,8 @@ def test_manage_routines_awaits_the_delegated_actions(project, monkeypatch):
 
 def test_run_async_returns_without_waiting_for_the_run(project, monkeypatch):
     """The point of the action: a slow routine must not hold up the caller, so
-    submitting it makes exactly one call and never polls the instance."""
+    submitting it makes exactly one call and never polls the instance — and asks
+    to be woken with the outcome, which is what makes not polling workable."""
     monkeypatch.setattr(mcp_routines.settings, "agent_slug", "scout")
     api = _api(monkeypatch)
 
@@ -310,6 +311,7 @@ def test_run_async_returns_without_waiting_for_the_run(project, monkeypatch):
                 "server_name": "srv",
                 "config": {},
                 "attribute_to": "scout",
+                "on_complete": "resume",
             },
         )
     ]

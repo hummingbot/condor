@@ -13,6 +13,7 @@ Structure:
 """
 
 import logging
+from typing import Any, Awaitable, Callable
 
 from telegram import Update
 from telegram.ext import CallbackQueryHandler, ContextTypes, MessageHandler, filters
@@ -241,6 +242,245 @@ async def new_bot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 # ============================================
+# CALLBACK ACTION DISPATCH TABLES
+# ============================================
+
+HandlerFunc = Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]]
+ParamHandlerFunc = Callable[..., Awaitable[None]]
+
+# A parameter parser reads one value out of a callback. It receives the tail of
+# the callback parts starting at its own parameter, so _as_rest can take
+# everything that is left.
+ParamParser = Callable[[list[str]], Any]
+
+
+def _as_text(parts: list[str]) -> str:
+    """Take the next part verbatim."""
+    return parts[0]
+
+
+def _as_int(parts: list[str]) -> int:
+    """Take the next part as an integer."""
+    return int(parts[0])
+
+
+def _as_float(parts: list[str]) -> float:
+    """Take the next part as a float."""
+    return float(parts[0])
+
+
+def _as_rest(parts: list[str]) -> str:
+    """Take every remaining part, rejoined - for values that contain a colon."""
+    return ":".join(parts)
+
+
+# Actions dispatched with no parameters: "bots:{action}". A None handler is an
+# action that deliberately does nothing.
+SIMPLE_ACTIONS: dict[str, HandlerFunc | None] = {
+    # Menu navigation
+    "main_menu": show_bots_menu,
+    "refresh": handle_refresh,
+    "close": handle_close,
+    # Controller configs menu
+    "controller_configs": show_controller_configs_menu,
+    "list_configs": show_configs_list,
+    # Unified configs menu with multi-select
+    "cfg_select_type": show_type_selector,
+    "cfg_clear_selection": handle_cfg_clear_selection,
+    "cfg_deploy": handle_cfg_deploy,
+    "cfg_delete_confirm": handle_cfg_delete_confirm,
+    "cfg_delete_execute": handle_cfg_delete_execute,
+    # Edit loop handlers
+    "cfg_edit_loop": handle_cfg_edit_loop,
+    "cfg_edit_form": show_cfg_edit_form,
+    "cfg_edit_prev": handle_cfg_edit_prev,
+    "cfg_edit_next": handle_cfg_edit_next,
+    "cfg_edit_save": handle_cfg_edit_save,
+    "cfg_edit_save_all": handle_cfg_edit_save_all,
+    "cfg_edit_cancel": handle_cfg_edit_cancel,
+    "cfg_branch": handle_cfg_branch,
+    # Custom config upload
+    "upload_config": show_upload_config_prompt,
+    "upload_cancel": handle_upload_cancel,
+    "noop": None,  # Pagination display button - deliberately does nothing
+    "new_grid_strike": show_new_grid_strike_form,
+    "new_pmm_mister": show_new_pmm_mister_form,
+    "new_pmm_v1": show_new_pmm_v1_form,
+    # PMM V1 wizard
+    "pv1_save": handle_pv1_save,
+    "pv1_review_back": handle_pv1_review_back,
+    # Config form
+    "edit_config_back": show_config_form,
+    "toggle_side": handle_toggle_side,
+    "toggle_position_mode": handle_toggle_position_mode,
+    "save_config": handle_save_config,
+    # Deploy menu
+    "deploy_menu": show_deploy_menu,
+    "select_all": handle_select_all,
+    "clear_all": handle_clear_all,
+    "deploy_configure": show_deploy_configure,
+    "deploy_form_back": show_deploy_form,
+    "execute_deploy": handle_execute_deploy,
+    "deploy_skip_field": handle_deploy_skip_field,
+    "deploy_prev_field": handle_deploy_prev_field,
+    # Streamlined deploy flow
+    "deploy_config": show_deploy_config_step,
+    "deploy_confirm": handle_deploy_confirm,
+    "deploy_custom_name": handle_deploy_custom_name,
+    # Progressive Grid Strike wizard
+    "gs_accept_prices": handle_gs_accept_prices,
+    "gs_back_to_prices": handle_gs_back_to_prices,
+    "gs_back_to_connector": handle_gs_back_to_connector,
+    "gs_back_to_pair": handle_gs_back_to_pair,
+    "gs_back_to_side": handle_gs_back_to_side,
+    "gs_back_to_leverage": handle_gs_back_to_leverage,
+    "gs_back_to_amount": handle_gs_back_to_amount,
+    "gs_edit_id": handle_gs_edit_id,
+    "gs_edit_keep": handle_gs_edit_keep,
+    "gs_edit_tp": handle_gs_edit_tp,
+    "gs_edit_act": handle_gs_edit_act,
+    "gs_edit_max_orders": handle_gs_edit_max_orders,
+    "gs_edit_batch": handle_gs_edit_batch,
+    "gs_edit_min_amt": handle_gs_edit_min_amt,
+    "gs_edit_spread": handle_gs_edit_spread,
+    "gs_save": handle_gs_save,
+    "gs_review_back": handle_gs_review_back,
+    # PMM Mister wizard
+    "pmm_save": handle_pmm_save,
+    "pmm_review_back": handle_pmm_review_back,
+    "pmm_edit_id": handle_pmm_edit_id,
+    "pmm_edit_advanced": handle_pmm_edit_advanced,
+    # Controller chart & edit
+    "ctrl_chart": show_controller_chart,
+    "ctrl_edit": show_controller_edit,
+    # Stop controller (uses context)
+    "stop_ctrl": handle_stop_controller,
+    "confirm_stop_ctrl": handle_confirm_stop_controller,
+    # Start controller (uses context)
+    "start_ctrl": handle_start_controller,
+    "confirm_start_ctrl": handle_confirm_start_controller,
+    # Clone controller (PMM Mister only)
+    "clone_ctrl": handle_clone_controller,
+    # Stop bot (uses context)
+    "stop_bot": handle_stop_bot,
+    "confirm_stop_bot": handle_confirm_stop_bot,
+    # View logs (uses context)
+    "view_logs": show_bot_logs,
+    # Navigation
+    "back_to_bot": handle_back_to_bot,
+    "refresh_bot": handle_refresh_bot,
+    # Archived bots handlers
+    "archived": show_archived_menu,
+    "archived_timeline": show_timeline_chart,
+    "archived_refresh": handle_archived_refresh,
+}
+
+# Actions carrying parameters: "bots:{action}:{param}[:{param}]". The parser
+# tuple names each parameter the handler takes after (update, context).
+PARAMETERIZED_ACTIONS: dict[str, tuple[ParamHandlerFunc, tuple[ParamParser, ...]]] = {
+    "configs_page": (handle_configs_page, (_as_int,)),
+    "cfg_type": (show_configs_by_type, (_as_text,)),
+    "cfg_toggle": (handle_cfg_toggle, (_as_text,)),
+    "cfg_page": (handle_cfg_page, (_as_int,)),
+    "cfg_edit_field": (handle_cfg_edit_field, (_as_text,)),
+    "pv1_connector": (handle_pv1_wizard_connector, (_as_text,)),
+    "pv1_pair": (handle_pv1_wizard_pair, (_as_text,)),
+    "pv1_pair_select": (handle_pv1_pair_select, (_as_text,)),
+    "pv1_amount": (handle_pv1_wizard_amount, (_as_text,)),
+    "pv1_spreads": (handle_pv1_wizard_spreads, (_as_text,)),
+    "pv1_back": (handle_pv1_back, (_as_text,)),
+    "edit_config": (handle_edit_config, (_as_int,)),
+    "set_field": (handle_set_field, (_as_text,)),
+    "cycle_order_type": (
+        handle_cycle_order_type,
+        (_as_text,),
+    ),  # order_type_key: 'open' or 'tp'
+    "select_connector": (handle_select_connector, (_as_text,)),
+    "toggle_deploy": (handle_toggle_deploy_selection, (_as_int,)),
+    "deploy_set": (handle_deploy_set_field, (_as_text,)),
+    # Progressive deploy flow
+    "deploy_use_default": (handle_deploy_use_default, (_as_text,)),
+    "deploy_edit": (handle_deploy_edit_field, (_as_text,)),
+    # Streamlined deploy flow
+    "select_creds": (handle_select_credentials, (_as_text,)),
+    "select_image": (
+        handle_select_image,
+        (_as_rest,),
+    ),  # colons preserved: 'hummingbot:development'
+    "select_name": (handle_select_instance_name, (_as_text,)),
+    # Progressive Grid Strike wizard
+    "gs_connector": (handle_gs_wizard_connector, (_as_text,)),
+    "gs_pair": (handle_gs_wizard_pair, (_as_text,)),
+    "gs_pair_select": (handle_gs_pair_select, (_as_text,)),
+    "gs_side": (handle_gs_wizard_side, (_as_text,)),
+    "gs_leverage": (handle_gs_wizard_leverage, (_as_int,)),
+    "gs_amount": (handle_gs_wizard_amount, (_as_float,)),
+    "gs_interval": (handle_gs_interval_change, (_as_text,)),
+    "gs_edit_price": (handle_gs_edit_price, (_as_text,)),
+    "gs_tp": (handle_gs_wizard_take_profit, (_as_float,)),
+    # PMM Mister wizard
+    "pmm_connector": (handle_pmm_wizard_connector, (_as_text,)),
+    "pmm_pair": (handle_pmm_wizard_pair, (_as_text,)),
+    "pmm_pair_select": (handle_pmm_pair_select, (_as_text,)),
+    "pmm_leverage": (handle_pmm_wizard_leverage, (_as_int,)),
+    "pmm_alloc": (handle_pmm_wizard_allocation, (_as_float,)),
+    "pmm_amount": (handle_pmm_wizard_amount, (_as_float,)),
+    "pmm_spreads": (handle_pmm_wizard_spreads, (_as_text,)),
+    "pmm_tp": (handle_pmm_wizard_tp, (_as_float,)),
+    "pmm_back": (handle_pmm_back, (_as_text,)),
+    "pmm_edit": (handle_pmm_edit_field, (_as_text,)),
+    "pmm_set": (handle_pmm_set_field, (_as_text, _as_text)),
+    "pmm_adv": (handle_pmm_adv_setting, (_as_text,)),
+    # Bot detail
+    "bot_detail": (show_bot_detail, (_as_text,)),
+    # Controller detail (by index, uses context)
+    "ctrl_idx": (show_controller_detail, (_as_int,)),
+    "ctrl_set": (handle_controller_set_field, (_as_text,)),
+    "ctrl_confirm_set": (handle_controller_confirm_set, (_as_text, _as_text)),
+    # Quick stop/start controller (from bot detail view)
+    "stop_ctrl_quick": (handle_quick_stop_controller, (_as_int,)),
+    "start_ctrl_quick": (handle_quick_start_controller, (_as_int,)),
+    "refresh_ctrl": (handle_refresh_controller, (_as_int,)),
+    # Archived bots handlers
+    "archived_page": (show_archived_menu, (_as_int,)),
+    "archived_select": (show_archived_detail, (_as_int,)),
+    "archived_chart": (show_bot_chart, (_as_int,)),
+    "archived_report": (handle_generate_report, (_as_int,)),
+}
+
+
+async def _handle_parameterized_action(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, action_parts: list[str]
+) -> bool:
+    """
+    Dispatch an action that carries parameters.
+
+    Returns True when the action belongs to this module and was consumed -
+    including the case where the callback carries too few parts to call the
+    handler, which is ignored just as the missing-parameter branches were.
+    Returns False when the action is not ours, or when a parameter could not be
+    parsed; both fall through to the unknown-action reply.
+    """
+    entry = PARAMETERIZED_ACTIONS.get(action_parts[0])
+    if entry is None:
+        return False
+
+    handler, parsers = entry
+    params = action_parts[1:]
+    if len(params) < len(parsers):
+        return True
+
+    try:
+        args = [parse(params[i:]) for i, parse in enumerate(parsers)]
+    except ValueError:
+        logger.warning(f"Malformed parameters in bots action: {':'.join(action_parts)}")
+        return False
+
+    await handler(update, context, *args)
+    return True
+
+
+# ============================================
 # CALLBACK HANDLER
 # ============================================
 
@@ -261,534 +501,19 @@ async def bots_callback_handler(
         action_parts = action.split(":")
         main_action = action_parts[0]
 
-        # Menu navigation
-        if main_action == "main_menu":
-            await show_bots_menu(update, context)
-
-        elif main_action == "refresh":
-            await handle_refresh(update, context)
-
-        elif main_action == "close":
-            await handle_close(update, context)
-
-        # Controller configs menu
-        elif main_action == "controller_configs":
-            await show_controller_configs_menu(update, context)
-
-        elif main_action == "configs_page":
-            if len(action_parts) > 1:
-                page = int(action_parts[1])
-                await handle_configs_page(update, context, page)
-
-        elif main_action == "list_configs":
-            await show_configs_list(update, context)
-
-        # Unified configs menu with multi-select
-        elif main_action == "cfg_select_type":
-            await show_type_selector(update, context)
-
-        elif main_action == "cfg_type":
-            if len(action_parts) > 1:
-                controller_type = action_parts[1]
-                await show_configs_by_type(update, context, controller_type)
-
-        elif main_action == "cfg_toggle":
-            if len(action_parts) > 1:
-                config_id = action_parts[1]
-                await handle_cfg_toggle(update, context, config_id)
-
-        elif main_action == "cfg_page":
-            if len(action_parts) > 1:
-                page = int(action_parts[1])
-                await handle_cfg_page(update, context, page)
-
-        elif main_action == "cfg_clear_selection":
-            await handle_cfg_clear_selection(update, context)
-
-        elif main_action == "cfg_deploy":
-            await handle_cfg_deploy(update, context)
-
-        elif main_action == "cfg_delete_confirm":
-            await handle_cfg_delete_confirm(update, context)
-
-        elif main_action == "cfg_delete_execute":
-            await handle_cfg_delete_execute(update, context)
-
-        # Edit loop handlers
-        elif main_action == "cfg_edit_loop":
-            await handle_cfg_edit_loop(update, context)
-
-        elif main_action == "cfg_edit_form":
-            await show_cfg_edit_form(update, context)
-
-        elif main_action == "cfg_edit_field":
-            if len(action_parts) > 1:
-                field_name = action_parts[1]
-                await handle_cfg_edit_field(update, context, field_name)
-
-        elif main_action == "cfg_edit_prev":
-            await handle_cfg_edit_prev(update, context)
-
-        elif main_action == "cfg_edit_next":
-            await handle_cfg_edit_next(update, context)
-
-        elif main_action == "cfg_edit_save":
-            await handle_cfg_edit_save(update, context)
-
-        elif main_action == "cfg_edit_save_all":
-            await handle_cfg_edit_save_all(update, context)
-
-        elif main_action == "cfg_edit_cancel":
-            await handle_cfg_edit_cancel(update, context)
-
-        elif main_action == "cfg_branch":
-            await handle_cfg_branch(update, context)
-
-        # Custom config upload
-        elif main_action == "upload_config":
-            await show_upload_config_prompt(update, context)
-
-        elif main_action == "upload_cancel":
-            await handle_upload_cancel(update, context)
-
-        elif main_action == "noop":
-            pass  # Do nothing - used for pagination display button
-
-        elif main_action == "new_grid_strike":
-            await show_new_grid_strike_form(update, context)
-
-        elif main_action == "new_pmm_mister":
-            await show_new_pmm_mister_form(update, context)
-
-        elif main_action == "new_pmm_v1":
-            await show_new_pmm_v1_form(update, context)
-
-        elif main_action == "pv1_connector":
-            if len(action_parts) > 1:
-                connector = action_parts[1]
-                await handle_pv1_wizard_connector(update, context, connector)
-
-        elif main_action == "pv1_pair":
-            if len(action_parts) > 1:
-                pair = action_parts[1]
-                await handle_pv1_wizard_pair(update, context, pair)
-
-        elif main_action == "pv1_pair_select":
-            if len(action_parts) > 1:
-                pair = action_parts[1]
-                await handle_pv1_pair_select(update, context, pair)
-
-        elif main_action == "pv1_amount":
-            if len(action_parts) > 1:
-                amount = action_parts[1]
-                await handle_pv1_wizard_amount(update, context, amount)
-
-        elif main_action == "pv1_spreads":
-            if len(action_parts) > 1:
-                spread = action_parts[1]
-                await handle_pv1_wizard_spreads(update, context, spread)
-
-        elif main_action == "pv1_back":
-            if len(action_parts) > 1:
-                target = action_parts[1]
-                await handle_pv1_back(update, context, target)
-
-        elif main_action == "pv1_save":
-            await handle_pv1_save(update, context)
-
-        elif main_action == "pv1_review_back":
-            await handle_pv1_review_back(update, context)
-
-        elif main_action == "edit_config":
-            if len(action_parts) > 1:
-                config_index = int(action_parts[1])
-                await handle_edit_config(update, context, config_index)
-
-        elif main_action == "edit_config_back":
-            await show_config_form(update, context)
-
-        elif main_action == "set_field":
-            if len(action_parts) > 1:
-                field_name = action_parts[1]
-                await handle_set_field(update, context, field_name)
-
-        elif main_action == "toggle_side":
-            await handle_toggle_side(update, context)
-
-        elif main_action == "toggle_position_mode":
-            await handle_toggle_position_mode(update, context)
-
-        elif main_action == "cycle_order_type":
-            if len(action_parts) > 1:
-                order_type_key = action_parts[1]  # 'open' or 'tp'
-                await handle_cycle_order_type(update, context, order_type_key)
-
-        elif main_action == "select_connector":
-            if len(action_parts) > 1:
-                connector_name = action_parts[1]
-                await handle_select_connector(update, context, connector_name)
-
-        elif main_action == "save_config":
-            await handle_save_config(update, context)
-
-        # Deploy menu
-        elif main_action == "deploy_menu":
-            await show_deploy_menu(update, context)
-
-        elif main_action == "toggle_deploy":
-            if len(action_parts) > 1:
-                index = int(action_parts[1])
-                await handle_toggle_deploy_selection(update, context, index)
-
-        elif main_action == "select_all":
-            await handle_select_all(update, context)
-
-        elif main_action == "clear_all":
-            await handle_clear_all(update, context)
-
-        elif main_action == "deploy_configure":
-            await show_deploy_configure(update, context)
-
-        elif main_action == "deploy_form_back":
-            await show_deploy_form(update, context)
-
-        elif main_action == "deploy_set":
-            if len(action_parts) > 1:
-                field_name = action_parts[1]
-                await handle_deploy_set_field(update, context, field_name)
-
-        elif main_action == "execute_deploy":
-            await handle_execute_deploy(update, context)
-
-        # Progressive deploy flow
-        elif main_action == "deploy_use_default":
-            if len(action_parts) > 1:
-                field_name = action_parts[1]
-                await handle_deploy_use_default(update, context, field_name)
-
-        elif main_action == "deploy_skip_field":
-            await handle_deploy_skip_field(update, context)
-
-        elif main_action == "deploy_prev_field":
-            await handle_deploy_prev_field(update, context)
-
-        elif main_action == "deploy_edit":
-            if len(action_parts) > 1:
-                field_name = action_parts[1]
-                await handle_deploy_edit_field(update, context, field_name)
-
-        # Streamlined deploy flow
-        elif main_action == "deploy_config":
-            await show_deploy_config_step(update, context)
-
-        elif main_action == "select_creds":
-            if len(action_parts) > 1:
-                creds = action_parts[1]
-                await handle_select_credentials(update, context, creds)
-
-        elif main_action == "select_image":
-            if len(action_parts) > 1:
-                # Rejoin parts to preserve colons in image tag (e.g., "hummingbot:development")
-                image = ":".join(action_parts[1:])
-                await handle_select_image(update, context, image)
-
-        elif main_action == "select_name":
-            if len(action_parts) > 1:
-                name = action_parts[1]
-                await handle_select_instance_name(update, context, name)
-
-        elif main_action == "deploy_confirm":
-            await handle_deploy_confirm(update, context)
-
-        elif main_action == "deploy_custom_name":
-            await handle_deploy_custom_name(update, context)
-
-        # Progressive Grid Strike wizard
-        elif main_action == "gs_connector":
-            if len(action_parts) > 1:
-                connector = action_parts[1]
-                await handle_gs_wizard_connector(update, context, connector)
-
-        elif main_action == "gs_pair":
-            if len(action_parts) > 1:
-                pair = action_parts[1]
-                await handle_gs_wizard_pair(update, context, pair)
-
-        elif main_action == "gs_pair_select":
-            if len(action_parts) > 1:
-                pair = action_parts[1]
-                await handle_gs_pair_select(update, context, pair)
-
-        elif main_action == "gs_side":
-            if len(action_parts) > 1:
-                side_str = action_parts[1]
-                await handle_gs_wizard_side(update, context, side_str)
-
-        elif main_action == "gs_leverage":
-            if len(action_parts) > 1:
-                leverage = int(action_parts[1])
-                await handle_gs_wizard_leverage(update, context, leverage)
-
-        elif main_action == "gs_amount":
-            if len(action_parts) > 1:
-                amount = float(action_parts[1])
-                await handle_gs_wizard_amount(update, context, amount)
-
-        elif main_action == "gs_accept_prices":
-            await handle_gs_accept_prices(update, context)
-
-        elif main_action == "gs_back_to_prices":
-            await handle_gs_back_to_prices(update, context)
-
-        elif main_action == "gs_back_to_connector":
-            await handle_gs_back_to_connector(update, context)
-
-        elif main_action == "gs_back_to_pair":
-            await handle_gs_back_to_pair(update, context)
-
-        elif main_action == "gs_back_to_side":
-            await handle_gs_back_to_side(update, context)
-
-        elif main_action == "gs_back_to_leverage":
-            await handle_gs_back_to_leverage(update, context)
-
-        elif main_action == "gs_back_to_amount":
-            await handle_gs_back_to_amount(update, context)
-
-        elif main_action == "gs_interval":
-            if len(action_parts) > 1:
-                interval = action_parts[1]
-                await handle_gs_interval_change(update, context, interval)
-
-        elif main_action == "gs_edit_price":
-            if len(action_parts) > 1:
-                price_type = action_parts[1]
-                await handle_gs_edit_price(update, context, price_type)
-
-        elif main_action == "gs_tp":
-            if len(action_parts) > 1:
-                tp = float(action_parts[1])
-                await handle_gs_wizard_take_profit(update, context, tp)
-
-        elif main_action == "gs_edit_id":
-            await handle_gs_edit_id(update, context)
-
-        elif main_action == "gs_edit_keep":
-            await handle_gs_edit_keep(update, context)
-
-        elif main_action == "gs_edit_tp":
-            await handle_gs_edit_tp(update, context)
-
-        elif main_action == "gs_edit_act":
-            await handle_gs_edit_act(update, context)
-
-        elif main_action == "gs_edit_max_orders":
-            await handle_gs_edit_max_orders(update, context)
-
-        elif main_action == "gs_edit_batch":
-            await handle_gs_edit_batch(update, context)
-
-        elif main_action == "gs_edit_min_amt":
-            await handle_gs_edit_min_amt(update, context)
-
-        elif main_action == "gs_edit_spread":
-            await handle_gs_edit_spread(update, context)
-
-        elif main_action == "gs_save":
-            await handle_gs_save(update, context)
-
-        elif main_action == "gs_review_back":
-            await handle_gs_review_back(update, context)
-
-        # PMM Mister wizard
-        elif main_action == "pmm_connector":
-            if len(action_parts) > 1:
-                connector = action_parts[1]
-                await handle_pmm_wizard_connector(update, context, connector)
-
-        elif main_action == "pmm_pair":
-            if len(action_parts) > 1:
-                pair = action_parts[1]
-                await handle_pmm_wizard_pair(update, context, pair)
-
-        elif main_action == "pmm_pair_select":
-            if len(action_parts) > 1:
-                pair = action_parts[1]
-                await handle_pmm_pair_select(update, context, pair)
-
-        elif main_action == "pmm_leverage":
-            if len(action_parts) > 1:
-                leverage = int(action_parts[1])
-                await handle_pmm_wizard_leverage(update, context, leverage)
-
-        elif main_action == "pmm_alloc":
-            if len(action_parts) > 1:
-                allocation = float(action_parts[1])
-                await handle_pmm_wizard_allocation(update, context, allocation)
-
-        elif main_action == "pmm_amount":
-            if len(action_parts) > 1:
-                amount = float(action_parts[1])
-                await handle_pmm_wizard_amount(update, context, amount)
-
-        elif main_action == "pmm_spreads":
-            if len(action_parts) > 1:
-                spreads = action_parts[1]
-                await handle_pmm_wizard_spreads(update, context, spreads)
-
-        elif main_action == "pmm_tp":
-            if len(action_parts) > 1:
-                tp = float(action_parts[1])
-                await handle_pmm_wizard_tp(update, context, tp)
-
-        elif main_action == "pmm_back":
-            if len(action_parts) > 1:
-                target = action_parts[1]
-                await handle_pmm_back(update, context, target)
-
-        elif main_action == "pmm_save":
-            await handle_pmm_save(update, context)
-
-        elif main_action == "pmm_review_back":
-            await handle_pmm_review_back(update, context)
-
-        elif main_action == "pmm_edit_id":
-            await handle_pmm_edit_id(update, context)
-
-        elif main_action == "pmm_edit":
-            if len(action_parts) > 1:
-                field = action_parts[1]
-                await handle_pmm_edit_field(update, context, field)
-
-        elif main_action == "pmm_set":
-            if len(action_parts) > 2:
-                field = action_parts[1]
-                value = action_parts[2]
-                await handle_pmm_set_field(update, context, field, value)
-
-        elif main_action == "pmm_edit_advanced":
-            await handle_pmm_edit_advanced(update, context)
-
-        elif main_action == "pmm_adv":
-            if len(action_parts) > 1:
-                setting = action_parts[1]
-                await handle_pmm_adv_setting(update, context, setting)
-
-        # Bot detail
-        elif main_action == "bot_detail":
-            if len(action_parts) > 1:
-                bot_name = action_parts[1]
-                await show_bot_detail(update, context, bot_name)
-
-        # Controller detail (by index, uses context)
-        elif main_action == "ctrl_idx":
-            if len(action_parts) > 1:
-                idx = int(action_parts[1])
-                await show_controller_detail(update, context, idx)
-
-        # Controller chart & edit
-        elif main_action == "ctrl_chart":
-            await show_controller_chart(update, context)
-
-        elif main_action == "ctrl_edit":
-            await show_controller_edit(update, context)
-
-        elif main_action == "ctrl_set":
-            if len(action_parts) > 1:
-                field_name = action_parts[1]
-                await handle_controller_set_field(update, context, field_name)
-
-        elif main_action == "ctrl_confirm_set":
-            if len(action_parts) > 2:
-                field_name = action_parts[1]
-                value = action_parts[2]
-                await handle_controller_confirm_set(update, context, field_name, value)
-
-        # Stop controller (uses context)
-        elif main_action == "stop_ctrl":
-            await handle_stop_controller(update, context)
-
-        elif main_action == "confirm_stop_ctrl":
-            await handle_confirm_stop_controller(update, context)
-
-        # Start controller (uses context)
-        elif main_action == "start_ctrl":
-            await handle_start_controller(update, context)
-
-        elif main_action == "confirm_start_ctrl":
-            await handle_confirm_start_controller(update, context)
-
-        # Clone controller (PMM Mister only)
-        elif main_action == "clone_ctrl":
-            await handle_clone_controller(update, context)
-
-        # Quick stop/start controller (from bot detail view)
-        elif main_action == "stop_ctrl_quick":
-            if len(action_parts) > 1:
-                idx = int(action_parts[1])
-                await handle_quick_stop_controller(update, context, idx)
-
-        elif main_action == "start_ctrl_quick":
-            if len(action_parts) > 1:
-                idx = int(action_parts[1])
-                await handle_quick_start_controller(update, context, idx)
-
-        # Stop bot (uses context)
-        elif main_action == "stop_bot":
-            await handle_stop_bot(update, context)
-
-        elif main_action == "confirm_stop_bot":
-            await handle_confirm_stop_bot(update, context)
-
-        # View logs (uses context)
-        elif main_action == "view_logs":
-            await show_bot_logs(update, context)
-
-        # Navigation
-        elif main_action == "back_to_bot":
-            await handle_back_to_bot(update, context)
-
-        elif main_action == "refresh_bot":
-            await handle_refresh_bot(update, context)
-
-        elif main_action == "refresh_ctrl":
-            if len(action_parts) > 1:
-                idx = int(action_parts[1])
-                await handle_refresh_controller(update, context, idx)
-
-        # Archived bots handlers
-        elif main_action == "archived":
-            await show_archived_menu(update, context)
-
-        elif main_action == "archived_page":
-            if len(action_parts) > 1:
-                page = int(action_parts[1])
-                await show_archived_menu(update, context, page)
-
-        elif main_action == "archived_select":
-            if len(action_parts) > 1:
-                db_index = int(action_parts[1])
-                await show_archived_detail(update, context, db_index)
-
-        elif main_action == "archived_timeline":
-            await show_timeline_chart(update, context)
-
-        elif main_action == "archived_chart":
-            if len(action_parts) > 1:
-                db_index = int(action_parts[1])
-                await show_bot_chart(update, context, db_index)
-
-        elif main_action == "archived_report":
-            if len(action_parts) > 1:
-                db_index = int(action_parts[1])
-                await handle_generate_report(update, context, db_index)
-
-        elif main_action == "archived_refresh":
-            await handle_archived_refresh(update, context)
-
-        else:
-            logger.warning(f"Unknown bots action: {action}")
-            await query.message.reply_text(f"Unknown action: {action}")
+        # Zero-parameter actions
+        if main_action in SIMPLE_ACTIONS:
+            handler = SIMPLE_ACTIONS[main_action]
+            if handler is not None:
+                await handler(update, context)
+            return
+
+        # Actions carrying parameters
+        if await _handle_parameterized_action(update, context, action_parts):
+            return
+
+        logger.warning(f"Unknown bots action: {action}")
+        await query.message.reply_text(f"Unknown action: {action}")
 
     except Exception as e:
         # Ignore "message is not modified" errors

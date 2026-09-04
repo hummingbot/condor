@@ -128,6 +128,30 @@ async def get_current_user(
     )
 
 
+# ── Role gates ──
+
+
+def require_admin(user: WebUser) -> None:
+    """Refuse anyone who is not a Condor admin.
+
+    The role is re-read from the ConfigManager rather than trusted from the JWT
+    claim, so demoting a user takes effect on their next request rather than
+    when their 24h token expires.
+
+    Lives here, beside the server-scoped gates below, because it is the same
+    kind of thing: the one implementation of a permission line that more than
+    one router needs. It began as ``_require_admin`` in ``routes/admin.py`` and
+    was promoted when ``routes/updates.py`` needed the same line — importing a
+    private name across modules is how a gate quietly grows a second, drifting
+    copy.
+    """
+    if not get_config_manager().is_admin(user.id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required",
+        )
+
+
 # ── Server-scoped access (SEC-147) ──
 
 

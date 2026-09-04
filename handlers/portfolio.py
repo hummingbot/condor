@@ -8,9 +8,11 @@ import time
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import CallbackQueryHandler, ContextTypes
 
+from condor.fetchers.portfolio import dedupe_unified_accounts
+from condor.preferences import get_all_enabled_networks
 from handlers import is_gateway_network
+from handlers.bots._shared import NO_ACCESSIBLE_SERVERS, resolve_accessible_server
 from handlers.config import clear_config_state
-from handlers.config.user_preferences import get_all_enabled_networks
 from utils.auth import hummingbot_api_required, restricted
 from utils.telegram_formatters import (
     escape_markdown_v2,
@@ -160,6 +162,31 @@ def build_connector_detail_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+# ============================================
+# SERVER RESOLUTION (access-checked)
+# ============================================
+# The resolution itself lives in handlers/bots/_shared.py so /portfolio, /bots
+# and /trade cannot drift apart on access control. NO_ACCESSIBLE_SERVERS is
+# re-exported here (imported above) because the portfolio error paths speak
+# that wording.
+
+
+def _resolve_server_for_user(context: ContextTypes.DEFAULT_TYPE) -> str:
+    """Pick the server this user's portfolio may be read from.
+
+    Both /portfolio and its refresh callback used to choose from *every* enabled
+    server on the install and fall back to the first one, which handed a user
+    with no shared server (or a stale ``active_server`` preference) somebody
+    else's balance sheet. The resolution now lives in one place shared with
+    ``get_bots_client`` and the trade menu; this stays as the portfolio-shaped
+    entry point (it takes a ``context``, not a ``user_data`` dict).
+
+    Raises:
+        ValueError: when the user has no enabled server they can access.
+    """
+    return resolve_accessible_server(context.user_data)
+
+
 @restricted
 @hummingbot_api_required
 async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -184,30 +211,17 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     try:
+        from condor.server_data_service import ServerDataType, get_server_data_service
         from config_manager import get_config_manager
 
-        # Get first enabled server
-        servers = get_config_manager().list_servers()
-        enabled_servers = [
-            name for name, cfg in servers.items() if cfg.get("enabled", True)
-        ]
-
-        if not enabled_servers:
-            error_message = format_error_message(
-                "No enabled API servers. Edit servers.yml to enable a server."
+        # Only servers this user has access to are candidates
+        try:
+            server_name = _resolve_server_for_user(context)
+        except ValueError as e:
+            await message.reply_text(
+                format_error_message(str(e)), parse_mode="MarkdownV2"
             )
-            await message.reply_text(error_message, parse_mode="MarkdownV2")
             return
-
-        # Use user's preferred server
-        from handlers.config.user_preferences import get_active_server
-
-        preferred = get_active_server(context.user_data)
-        server_name = (
-            preferred
-            if preferred and preferred in enabled_servers
-            else enabled_servers[0]
-        )
 
         # Send initial loading message immediately
         text_msg = await message.reply_text(
@@ -227,8 +241,19 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         # ========================================
         # FETCH BALANCES
         # ========================================
+        # Read the cache the dashboard already reads instead of forcing an
+        # exchange-wide re-fetch on every render. SDS polls PORTFOLIO every 10s
+        # with a 60s TTL for each configured server, so the initial view is at
+        # most one TTL old — in practice a few seconds — and usually free. That
+        # staleness window is deliberate and bounded: mutations invalidate the
+        # key (see handlers/cex/trade.py and handlers/dex/swap.py), and the
+        # Refresh button below still forces a real get_state(refresh=True).
+        # get_or_fetch falls back to a real fetch when the key is cold and
+        # returns None rather than raising when the server is unreachable.
         try:
-            balances = await client.portfolio.get_state(refresh=True)
+            balances = await get_server_data_service().get_or_fetch(
+                server_name, ServerDataType.PORTFOLIO
+            )
         except Exception as e:
             logger.error(f"Failed to fetch balances: {e}")
             balances = None
@@ -239,6 +264,7 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             enabled_networks = get_all_enabled_networks(context.user_data)
             if enabled_networks:
                 balances = _filter_balances_by_networks(balances, enabled_networks)
+            balances, _ = dedupe_unified_accounts(balances)
 
         # Build keyboard with connector buttons
         connector_keys = _get_connector_keys(balances)
@@ -449,41 +475,47 @@ async def refresh_portfolio_dashboard(
         return
 
     try:
+        from condor.server_data_service import ServerDataType, get_server_data_service
         from config_manager import get_config_manager
 
-        # Use user's preferred server
-        servers = get_config_manager().list_servers()
-        enabled_servers = [
-            name for name, cfg in servers.items() if cfg.get("enabled", True)
-        ]
-
-        if not enabled_servers:
+        # Same access-checked resolution as the command
+        try:
+            server_name = _resolve_server_for_user(context)
+        except ValueError as e:
+            logger.warning(f"Portfolio refresh without an accessible server: {e}")
             return
-
-        from handlers.config.user_preferences import get_active_server
-
-        preferred = get_active_server(context.user_data)
-        server_name = (
-            preferred
-            if preferred and preferred in enabled_servers
-            else enabled_servers[0]
-        )
 
         client = await get_config_manager().get_client(server_name)
         server_status = "online"
 
-        # Fetch balances only
+        # Fetch balances only. This is the explicit-refresh path (the button
+        # answers "Refreshing from exchanges..."), so it keeps re-querying every
+        # exchange rather than reading the cache.
         try:
             balances = await client.portfolio.get_state(refresh=refresh)
         except Exception as e:
             logger.error(f"Failed to fetch balances: {e}")
             balances = None
 
+        if balances is not None:
+            # Push the fresh payload into the shared cache, as the web route's
+            # refresh branch does. /portfolio now renders from SDS, so leaving
+            # the older polled value in place would make the next view regress
+            # to what the user just refreshed away from. Store the raw state:
+            # every surface applies its own filtering on top.
+            try:
+                get_server_data_service().put(
+                    server_name, ServerDataType.PORTFOLIO, balances
+                )
+            except Exception as e:
+                logger.warning(f"Failed to update portfolio cache: {e}")
+
         # Filter balances by enabled networks
         if balances:
             enabled_networks = get_all_enabled_networks(context.user_data)
             if enabled_networks:
                 balances = _filter_balances_by_networks(balances, enabled_networks)
+            balances, _ = dedupe_unified_accounts(balances)
 
         connector_keys = _get_connector_keys(balances)
         reply_markup = build_portfolio_keyboard(connector_keys)

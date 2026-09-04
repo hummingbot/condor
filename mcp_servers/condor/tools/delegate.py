@@ -14,6 +14,46 @@ from mcp_servers.condor.settings import settings
 # which deliberately talks to the main process over HTTP and never imports it.
 ON_COMPLETE_CHOICES = ("notify", "resume")
 
+# The default wall-clock budget for a background task, stated here only so the
+# tool can tell the caller what it is getting when it asks for nothing. The
+# route owns the real default and the upper bound (ARCH-310); this subprocess
+# never imports the main process, so a mismatch is caught by a test rather than
+# by an import.
+DEFAULT_TIMEOUT_SEC = 900
+
+# How the user tracks a delegation, per surface. The two surfaces have genuinely
+# different UIs for this, and the hint is quoted back to the user verbatim, so a
+# dashboard-only install was being told to run a command it does not have
+# (CORR-262). Only the middle clause varies -- the "do NOT invent a status
+# command" guard is what the hint existed for and is surface-independent.
+TRACK_TELEGRAM = (
+    "they can check progress anytime with the /delegations command in Telegram"
+)
+TRACK_DASHBOARD = (
+    "they can check progress anytime in the dashboard, in the Tasks list of the "
+    "chat's context dock"
+)
+
+
+def _next_steps(session_key: str) -> str:
+    """The tracking hint for the surface this subprocess was spawned from.
+
+    ``session_key`` is a canonical key ("web:7:slot-1", "tg:42", …) minted by
+    ``_spawn_session``; the prefix is the surface. An unknown or empty key means
+    the seat is not a Telegram chat (a consult, a tick, an external MCP host), so
+    the dashboard wording is the honest default: it names a UI that exists on
+    every install, while /delegations only exists where Telegram does.
+    """
+    surface = (session_key or "").split(":", 1)[0].strip().lower()
+    where = TRACK_TELEGRAM if surface == "tg" else TRACK_DASHBOARD
+    return (
+        "Running in the background — the user is notified automatically when it "
+        "finishes, and the outcome is written into this conversation and shown "
+        f"here as it lands. Tell them {where}. You can poll it yourself "
+        'with delegate(action="get", task_id="<id>"). Do NOT invent any '
+        "other status command (e.g. there is no /task command)."
+    )
+
 
 async def delegate(
     action: str,
@@ -21,6 +61,7 @@ async def delegate(
     task: str = "",
     task_id: str = "",
     on_complete: str = "notify",
+    timeout_sec: int = 0,
 ) -> dict:
     """Dispatch a delegate action (start | list | get | stop)."""
     action = (action or "").lower()
@@ -70,31 +111,33 @@ async def delegate(
                     f"got '{on_complete}'"
                 )
             }
+        body = {
+            "task": task,
+            "chat_id": settings.chat_id,
+            "user_id": settings.user_id,
+            "server_name": settings.active_server or None,
+            # Provenance: the route resolves this to the conversation that
+            # asked for the work, so the chat can watch what it started.
+            "session_key": settings.session_key,
+            "on_complete": on_complete,
+        }
+        # Only sent when the caller actually asked for a budget: omitting the
+        # key leaves the route's default in one place instead of pinning a copy
+        # of it into every request this subprocess makes (ARCH-310). The bounds
+        # are the route's to enforce -- it answers a bad one with a 400 whose
+        # detail says the limit, which reaches the model as an error.
+        if timeout_sec:
+            body["timeout_s"] = int(timeout_sec)
         result = await call_main_api(
             "POST",
             f"/agents/{agent}/delegate",
-            {
-                "task": task,
-                "chat_id": settings.chat_id,
-                "user_id": settings.user_id,
-                "server_name": settings.active_server or None,
-                # Provenance: the route resolves this to the conversation that
-                # asked for the work, so the chat can watch what it started.
-                "session_key": settings.session_key,
-                "on_complete": on_complete,
-            },
+            body,
         )
         # Spell out how the user tracks this so the model never INVENTS a status
-        # command. There is no "/task" command — the user-facing one is
-        # "/delegations"; the user is also pinged automatically on completion.
+        # command, and name the surface they are actually on: there is no "/task"
+        # command anywhere, and no "/delegations" one outside Telegram.
         if isinstance(result, dict) and not result.get("error"):
-            result["next_steps"] = (
-                "Running in the background — the user is notified automatically "
-                "when it finishes. Tell them they can check progress anytime with "
-                "the /delegations command in Telegram. You can poll it yourself "
-                'with delegate(action="get", task_id="<id>"). Do NOT invent any '
-                "other status command (e.g. there is no /task command)."
-            )
+            result["next_steps"] = _next_steps(settings.session_key)
             if on_complete == "resume":
                 # Said explicitly so the model ends its turn instead of
                 # burning it polling for a result that will be handed to it.

@@ -201,11 +201,18 @@ export function ApiKeysSettings() {
     const cm = configMapData.config_map;
     return Object.entries(cm).map(([key, val]) => {
       const v = val as Record<string, unknown>;
+      const required = v.required !== false;
+      // `prompt` is the connector's own wording for the field ("Enter your Binance
+      // API key") and says far more than the raw key does; older API servers don't
+      // send it yet, so the label alone has to keep working. When the field is
+      // optional the prompt usually ends in "(optional)" — the badge beside the
+      // label already says that, so don't say it twice.
+      const prompt = ((v.prompt as string) || (v.description as string) || "").trim();
       return {
         key,
         type: (v.type as string) || "string",
-        required: v.required !== false,
-        description: (v.description as string) || "",
+        required,
+        prompt: required ? prompt : prompt.replace(/\s*\(optional\)\s*$/i, ""),
         isSecret: isCredentialField(key, v.type as string | undefined),
       };
     });
@@ -423,12 +430,26 @@ export function ApiKeysSettings() {
           <div className="space-y-3">
             {configFields.map((f) => (
               <div key={f.key}>
-                <label className="mb-1 flex items-center gap-1 text-xs text-[var(--color-text-muted)]">
+                <label className="mb-0.5 flex items-baseline gap-1.5 text-xs font-medium text-[var(--color-text)]">
                   {f.key}
-                  {f.required && <span className="text-[var(--color-red)]">*</span>}
+                  {f.required ? (
+                    <span
+                      title="Required"
+                      aria-label="required"
+                      className="text-base font-bold leading-none text-[var(--color-red)]"
+                    >
+                      *
+                    </span>
+                  ) : (
+                    <span className="text-[10px] font-normal uppercase tracking-wide text-[var(--color-text-muted)]">
+                      optional
+                    </span>
+                  )}
                 </label>
-                {f.description && (
-                  <p className="mb-1 text-[10px] text-[var(--color-text-muted)]/60">{f.description}</p>
+                {f.prompt && (
+                  <p className="mb-1.5 text-[11px] leading-snug text-[var(--color-text-muted)]">
+                    {f.prompt}
+                  </p>
                 )}
                 <input
                   type={f.isSecret ? "password" : "text"}

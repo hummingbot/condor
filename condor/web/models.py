@@ -22,6 +22,13 @@ class WebUser(BaseModel):
 # ── Servers ──
 
 
+class ServerMember(BaseModel):
+    """Someone a server is shared with, named rather than numbered."""
+
+    user_id: int
+    display_name: str
+
+
 class ServerInfo(BaseModel):
     name: str
     host: str
@@ -31,6 +38,12 @@ class ServerInfo(BaseModel):
     # The server this user's commands land on when none is named — the same
     # `chat_defaults` entry Telegram reads, so both surfaces agree on it.
     is_default: bool = False
+    # Who else reaches this server (FEAT-088). Populated only for the owner and
+    # for an admin: a trader seeing the rest of the member list would be telling
+    # them something their own access does not entitle them to know. Empty for
+    # everyone else, which is why the card only renders the line when it owns
+    # the server.
+    shared_with: list[ServerMember] = []
 
 
 # ── Portfolio ──
@@ -91,6 +104,11 @@ class BotDetailResponse(BaseModel):
 
 class ControllerInfo(BaseModel):
     controller_name: str
+    #: The coarse bucket upstream sorts every controller into (``generic``,
+    #: ``directional_trading``, ``market_making``) — a fallback class for a
+    #: terminated controller whose config lookup could not recover the specific
+    #: one (see ``fill_classes_from_config``).
+    controller_type: str = ""
     controller_id: str = ""
     bot_name: str
     status: str = "unknown"
@@ -144,11 +162,76 @@ class BotRunInfo(BaseModel):
     global_pnl_quote: float = 0.0
     volume_traded: float = 0.0
     num_controllers: int = 0
+    # Path to this run's archived sqlite database, when one survived the bot.
+    # Present iff the run has a deep history to open; the archived-bot routes take
+    # it as their ``db_path``.
+    archive_db_path: Optional[str] = None
+    # The controller config ids this run was *deployed with*, straight from its
+    # own ``deployment_config``.
+    #
+    # This is the authoritative run -> controller mapping, and it is the only one
+    # that exists for a run old enough to have no performance snapshots left: the
+    # deployment declared these ids before the bot ever traded. It is what lets a
+    # closed executor be attributed to the run that created it rather than to
+    # whichever live controller happens to share its config id (FEAT-089).
+    controller_ids: list[str] = []
+    # Whether this run is the live fleet rather than history.
+    #
+    # Derived, because ``run_status`` cannot answer it: upstream never writes
+    # ``RUNNING``, and the eight bots trading right now on a real server all
+    # report the literal string ``CREATED``. A container that is deployed and has
+    # no stop time is what "still running" actually means here.
+    is_live: bool = False
 
 
 class BotRunsResponse(BaseModel):
     runs: list[BotRunInfo] = []
     total: int = 0
+
+
+class TerminatedControllersResponse(BaseModel):
+    """Every controller of every run that has finished.
+
+    ``ControllerInfo`` rather than ``ControllerPerformanceSnapshot`` on purpose:
+    a snapshot is a point on a chart and deliberately drops ``close_type_counts``
+    (PERF-261), while the close-type strip leads the scope header and needs
+    them. The two populations then hand the browser the same shape, which is
+    what lets one tree, one fold and one set of panes describe both.
+    """
+
+    controllers: list[ControllerInfo] = []
+    #: How many finished runs contributed a controller. The tree's own
+    #: denominator: "12 of 137 runs are on screen" is a different fact from how
+    #: many controllers there are, and only this route can count it.
+    runs_seen: int = 0
+    server_online: bool = True
+    error_hint: Optional[str] = None
+
+
+class RunHistoryResponse(BaseModel):
+    """One finished run's sampled PnL curve, per controller (FEAT-089).
+
+    The points are bare arrays rather than objects — ``[t_ms, realized,
+    unrealized, net, volume, pct]`` — because there are up to a thousand of them
+    per controller and the field names would be most of the bytes. The client
+    expands them back into the same snapshot shape the live fleet's chart folds,
+    so one ``aggregatePnlSeries`` draws both populations.
+    """
+
+    controllers: dict[str, list[list[float]]] = {}
+    #: ``controller_id -> {"connector", "trading_pair"}``. Not decoration: a leaf
+    #: with no pair is folded as though its quote were dollars.
+    identities: dict[str, dict[str, str]] = {}
+    interval: str = "5m"
+    #: ``"snapshots"`` | ``"archive"`` | ``"none"``. Which source actually
+    #: answered, so the chart's notice can say what was drawn rather than
+    #: asserting one. ``"none"`` is an answer — a run older than the snapshot
+    #: table's retention floor was never recorded — not an error.
+    source: str = "snapshots"
+    points: int = 0
+    #: True when this came off disk. What proves the second open costs nothing.
+    cached: bool = False
+    detail: Optional[str] = None
 
 
 # ── Controller Performance ──
@@ -166,9 +249,50 @@ class ControllerPerformanceSnapshot(BaseModel):
     global_pnl_quote: float = 0.0
     global_pnl_pct: float = 0.0
     volume_traded: float = 0.0
-    close_type_counts: dict[str, int] = {}
     positions_summary: list[dict[str, Any]] = []
-    custom_info: dict[str, Any] = {}
+
+    @classmethod
+    def from_raw(cls, raw: dict) -> "ControllerPerformanceSnapshot":
+        """Build the wire model from one raw controller-performance dict.
+
+        The upstream payload nests the numbers under ``performance`` while the
+        identity fields stay at the top level. Both the REST routes and the
+        ``controller_perf`` WS stream parse through here, so a snapshot means
+        the same thing however it reached the dashboard -- the frontend merges
+        the two into one cache entry and would otherwise read a socket frame's
+        PnL as zero.
+
+        A snapshot is a *point on a chart*, so it carries only what a point is
+        drawn from. Upstream also hands back ``close_type_counts`` and a
+        ``custom_info`` blob per snapshot, and history returns one of these per
+        sampled interval -- for a grid or LP controller ``custom_info`` is by
+        far the largest object in the payload, and tens of thousands of them
+        dominated the response size, the JSON parse, react-query's structural
+        sharing walk and the browser's retained memory. Nothing ever read
+        either one off a snapshot: the dashboard reads ``close_type_counts``
+        off ``ControllerInfo`` and the agent performance rows, and
+        ``custom_info`` off executors. So they are dropped here rather than
+        only on the history route, which keeps REST rows and WS frames the one
+        identical shape they have to be (PERF-261).
+        """
+        perf = raw.get("performance", raw)
+        if not isinstance(perf, dict):
+            perf = {}
+
+        return cls(
+            timestamp=str(raw.get("timestamp", "")),
+            bot_name=raw.get("bot_name", ""),
+            controller_id=raw.get("controller_id", ""),
+            controller_name=raw.get("controller_name", ""),
+            connector=raw.get("connector", raw.get("connector_name", "")),
+            trading_pair=raw.get("trading_pair", ""),
+            realized_pnl_quote=float(perf.get("realized_pnl_quote", 0) or 0),
+            unrealized_pnl_quote=float(perf.get("unrealized_pnl_quote", 0) or 0),
+            global_pnl_quote=float(perf.get("global_pnl_quote", 0) or 0),
+            global_pnl_pct=float(perf.get("global_pnl_pct", 0) or 0),
+            volume_traded=float(perf.get("volume_traded", 0) or 0),
+            positions_summary=perf.get("positions_summary", []),
+        )
 
 
 class ControllerPerformanceLatestResponse(BaseModel):
@@ -183,6 +307,148 @@ class ControllerPerformanceHistoryResponse(BaseModel):
     interval: str = "5m"
     server_online: bool = True
     error_hint: Optional[str] = None
+
+
+# ── The shared performance surface, over both populations (FEAT-087) ──
+
+
+class PerformanceSnapshot(BaseModel):
+    """One point of a performance series, for either subject.
+
+    Deliberately **not** ``ControllerPerformanceSnapshot`` with extra fields.
+    That model is the wire shape of the old controller-only route, whose
+    ``from_raw`` digs the numbers out of a nested ``performance`` blob and whose
+    ``volume_traded`` is spelled differently from this route's ``volume_quote``;
+    the two stay separate so neither has to grow a branch for the other's
+    payload, and so the existing controller path is untouched.
+
+    Three fields carry meaning a reader must not flatten:
+
+    * ``is_terminal`` is true only on a completed executor's final row. It is
+      what makes a closed executor's series a single-table query — the terminal
+      row *is* the last point, so nothing appends a final value afterwards.
+    * ``cum_fees_quote`` is ``None`` for controllers, because
+      ``PerformanceReport`` has no fees field. Unknown is not zero, and a fees
+      chart must render the two differently.
+    * ``close_type`` is set on an executor's terminal row. ``POSITION_HOLD``
+      specifically means the position was handed to ``position_holds`` rather
+      than settled, so its PnL stays *unrealized* — upstream already makes that
+      split, and Condor must not re-derive it.
+
+    ``performance`` and ``custom_info`` are dropped rather than carried. They
+    are the raw controller passthrough — the largest objects in the payload for
+    a grid or LP controller — and PERF-261 established that nothing downstream
+    reads either off a snapshot.
+    """
+
+    timestamp: str = ""
+    subject: str = ""
+    scope_id: str = ""
+    status: str = ""
+    is_terminal: bool = False
+
+    realized_pnl_quote: float = 0.0
+    unrealized_pnl_quote: float = 0.0
+    global_pnl_quote: float = 0.0
+    global_pnl_pct: float = 0.0
+    #: Volume *generated*, in quote. On every executor type including LP, where
+    #: it is deliberately not the deposited capital.
+    volume_quote: float = 0.0
+    cum_fees_quote: Optional[float] = None
+
+    bot_name: Optional[str] = None
+    controller_id: Optional[str] = None
+    executor_id: Optional[str] = None
+    executor_type: Optional[str] = None
+    account_name: Optional[str] = None
+    connector_name: Optional[str] = None
+    trading_pair: Optional[str] = None
+    close_type: Optional[str] = None
+
+    @classmethod
+    def from_raw(cls, raw: dict) -> "PerformanceSnapshot":
+        """Build the wire model from one upstream row.
+
+        Numbers are coerced with an ``or 0`` guard because a JSON ``null`` in a
+        float column would otherwise raise, and one malformed row must not take
+        down a chart. ``cum_fees_quote`` is the exception: it is read without
+        that guard precisely so its ``None`` survives as ``None``.
+        """
+
+        def num(field: str) -> float:
+            try:
+                return float(raw.get(field) or 0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        fees = raw.get("cum_fees_quote")
+        try:
+            fees = None if fees is None else float(fees)
+        except (TypeError, ValueError):
+            fees = None
+
+        def text(field: str) -> Optional[str]:
+            value = raw.get(field)
+            return value if isinstance(value, str) and value else None
+
+        return cls(
+            timestamp=str(raw.get("timestamp", "")),
+            subject=str(raw.get("subject", "")),
+            scope_id=str(raw.get("scope_id", "")),
+            status=str(raw.get("status", "")),
+            is_terminal=bool(raw.get("is_terminal", False)),
+            realized_pnl_quote=num("realized_pnl_quote"),
+            unrealized_pnl_quote=num("unrealized_pnl_quote"),
+            global_pnl_quote=num("global_pnl_quote"),
+            global_pnl_pct=num("global_pnl_pct"),
+            volume_quote=num("volume_quote"),
+            cum_fees_quote=fees,
+            bot_name=text("bot_name"),
+            controller_id=text("controller_id"),
+            executor_id=text("executor_id"),
+            executor_type=text("executor_type"),
+            account_name=text("account_name"),
+            connector_name=text("connector_name"),
+            trading_pair=text("trading_pair"),
+            close_type=text("close_type"),
+        )
+
+
+class PerformanceHistoryResponse(BaseModel):
+    """One page of the shared history.
+
+    ``supported`` is the field that makes the fallback honest: false means this
+    API predates ``/performance/history``, which is the ordinary case for every
+    server running the published image. It is not an error and not an offline
+    server, so ``server_online`` stays true and the chart draws its derived
+    series with a notice saying why.
+    """
+
+    snapshots: list[PerformanceSnapshot] = []
+    next_cursor: Optional[str] = None
+    interval: str = "5m"
+    subject: str = ""
+    #: False when this server has no such route. See the class docstring.
+    supported: bool = True
+    server_online: bool = True
+    error_hint: Optional[str] = None
+
+
+class PerformanceCapabilityResponse(BaseModel):
+    """Whether one server serves the shared performance surface.
+
+    Cached with the other per-server fetches, so the answer costs one request
+    per server rather than one per chart — a tree click must not be a round
+    trip to ask a question whose answer only changes when the API is upgraded.
+
+    ``unknown`` separates "asked, and the route is not there" from "could not
+    ask": a server that was merely down must not have a fallback pinned to it
+    for the whole TTL after it comes back.
+    """
+
+    supported: bool = False
+    unknown: bool = False
+    detail: Optional[str] = None
 
 
 # ── Executors ──
@@ -431,6 +697,10 @@ class NormalizedExecutor(BaseModel):
     controller_id: str = ""
     custom_info: dict[str, Any] = {}
     config: dict[str, Any] = {}
+    # USD value of one unit of this market's quote currency. `pnl`, `volume` and
+    # `cum_fees_quote` above stay quote-denominated so prices on the same row
+    # remain comparable to the market's candles; renderers multiply by this.
+    usd_rate: float = 1.0
 
 
 class ArchivedBotPerformance(BaseModel):
@@ -450,6 +720,51 @@ class ArchivedBotPerformance(BaseModel):
     primary_connector: str = ""
     primary_trading_pair: str = ""
     executor_count: int = 0
+    # Quote currency of the primary market, for labelling a converted figure.
+    quote_currency: str = ""
+    # USD rate per quote currency seen in the run.
+    usd_rates: dict[str, float] = {}
+    # False when some quote had no path to USD and its figures are reported at
+    # face value in their own currency rather than silently passed off as USD.
+    converted: bool = True
+    # Which source the headline stats above were computed from. An archived
+    # database with an empty trades table falls back to executors, and the UI
+    # labels the count card accordingly instead of claiming zero trades.
+    stats_source: str = "trades"
+
+
+class ArchivedControllerRollup(BaseModel):
+    """What one controller did inside an archived run. Money is USD.
+
+    ``controller_id`` is ``""`` for the executors that ran under no controller
+    at all — an LP or a manual run — which is a row, not an omission.
+    """
+
+    controller_id: str
+    pnl_usd: float = 0.0
+    volume_usd: float = 0.0
+    fees_usd: float = 0.0
+    executor_count: int = 0
+    first_ts: float = 0.0
+    last_ts: float = 0.0
+    trading_pairs: list[str] = []
+    connectors: list[str] = []
+
+
+class ArchivedControllers(BaseModel):
+    controllers: list[ArchivedControllerRollup] = []
+
+
+class ArchivedRunReport(BaseModel):
+    """The stored report for a run (or one of its controllers), if there is one.
+
+    ``report_id`` is ``None`` for the ordinary case: nobody has charted this
+    subject yet, or the report that did has since been pruned.
+    """
+
+    report_id: str | None = None
+    created_at: str | None = None
+    title: str = ""
 
 
 class PaginatedExecutors(BaseModel):
@@ -470,6 +785,9 @@ class ReportSummary(BaseModel):
     source_type: str = ""
     source_name: str = ""
     tags: list[str] = []
+    # What the report is about, if anything (FEAT-078); "" for entries saved
+    # before the field existed. Keys come from condor.reports.subjects.
+    subject: str = ""
     agent: str = ""  # producing assistant/expert (e.g. "condor", "executor_manager")
     # Authenticated owner stamped at save time (SEC-196); None = legacy/ownerless,
     # visible to admins only.

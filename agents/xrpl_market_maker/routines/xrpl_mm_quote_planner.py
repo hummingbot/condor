@@ -10,6 +10,7 @@ import httpx
 from pydantic import BaseModel, Field
 from telegram.ext import ContextTypes
 
+from condor.fetchers.market_data import fetch_current_price
 from config_manager import get_client
 
 logger = logging.getLogger(__name__)
@@ -171,35 +172,20 @@ def _norm_candles(raw) -> list:
     return raw if isinstance(raw, list) else raw.get("data", raw.get("candles", []))
 
 
-def _extract_ref_price(raw, pair: str, fallback: float) -> float:
-    """Pull ``pair``'s price out of a prices payload, else ``fallback``.
+def _extract_ref_price(price, fallback: float) -> float:
+    """Validate a fetched reference price, else ``fallback``.
 
-    The endpoint returns either ``{pair: price}`` or a per-connector nesting
-    (``{connector: {pair: price}}``), and a flat payload can carry non-numeric
-    values (connector names) alongside the prices. Taking the first value and
-    calling ``float()`` on it therefore raises or yields a bogus reference —
-    and a wrong reference price silently misplaces every quote, so anything we
-    can't read as a positive number falls back to the last candle close.
+    ``fetch_current_price`` already resolves the payload (including a venue
+    answering a one-pair request under its own spelling of the pair); this
+    only guards the number it hands back, since a non-numeric or non-positive
+    answer would otherwise silently misplace every quote — so anything that
+    isn't a positive number falls back to the last candle close.
     """
-    if not isinstance(raw, dict):
+    try:
+        num = float(price)
+    except (TypeError, ValueError):
         return fallback
-
-    def _positive(value) -> float | None:
-        try:
-            num = float(value)
-        except (TypeError, ValueError):
-            return None
-        return num if num > 0 else None
-
-    direct = _positive(raw.get(pair))
-    if direct is not None:
-        return direct
-    for value in raw.values():
-        if isinstance(value, dict):
-            nested = _positive(value.get(pair))
-            if nested is not None:
-                return nested
-    return fallback
+    return num if num > 0 else fallback
 
 
 # ── routine ──────────────────────────────────────────────────────────────────
@@ -214,15 +200,15 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
 
     # 1. Reference fair value from the CEX — never from on-ledger data.
     try:
-        candles_raw, ref_prices = await asyncio.gather(
+        candles_raw, ref_price = await asyncio.gather(
             client.market_data.get_candles(
                 config.reference_connector,
                 config.reference_pair,
                 interval="1m",
                 max_records=120,
             ),
-            client.market_data.get_prices(
-                config.reference_connector, [config.reference_pair]
+            fetch_current_price(
+                client, config.reference_connector, config.reference_pair, strict=True
             ),
         )
     except Exception as exc:
@@ -233,7 +219,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     if not closes:
         return f"reference_price: ERROR no candle data for {config.reference_pair}"
 
-    ref_mid = _extract_ref_price(ref_prices, config.reference_pair, closes[-1])
+    ref_mid = _extract_ref_price(ref_price, closes[-1])
 
     # RLUSD/XRP is the inverse of XRP/USD (RLUSD pegged to 1 USD).
     implied_xrpl_price = (1.0 / ref_mid) if ref_mid > 0 else 0.0

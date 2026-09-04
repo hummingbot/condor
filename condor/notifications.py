@@ -269,8 +269,12 @@ class NotifyBot:
     already serves routine reports through ``GET /reports/{id}/html``.
     """
 
-    def __init__(self, kind: str = "system"):
+    def __init__(
+        self, kind: str = "system", title: str | None = None, link: str | None = None
+    ):
         self._kind = kind
+        self._title = title
+        self._link = link
 
     # -- helpers --
 
@@ -282,7 +286,13 @@ class NotifyBot:
         user_id = user_for_chat(chat_id)
         if user_id is None:
             return None
-        return await record(user_id, text, kind=self._kind, link=link)
+        return await record(
+            user_id,
+            text,
+            kind=self._kind,
+            title=self._title,
+            link=link or self._link,
+        )
 
     # -- the bot surface --
 
@@ -382,6 +392,7 @@ async def announce(
     parse_mode: str = "",
     title: str | None = None,
     link: str | None = None,
+    bell_text: str | None = None,
 ) -> Delivery:
     """Tell ``user_id`` something, on Telegram *and* on the bell, once each.
 
@@ -397,6 +408,13 @@ async def announce(
     record skipped. A group ``chat_id`` has no dashboard owner, so the bell
     push files nothing and the caller's own entry is still written — the two
     addresses are genuinely different questions.
+
+    ``bell_text`` is the same notice written for the other surface, used
+    wherever the bell is the destination. The two surfaces do not offer the
+    same next step: Telegram's tail is a slash command, while the bell entry is
+    a link the reader clicks, so a producer that ends its message with "use
+    /something" would be telling a dashboard reader to type into a Telegram it
+    may not even have. Left unset, both surfaces get ``text``.
     """
     if not text:
         return Delivery(False, False)
@@ -407,12 +425,17 @@ async def announce(
         from condor.agents.delegate import resolve_bot
 
         target = resolve_bot(bot)
+        body = text
         if isinstance(target, NotifyBot):
             # That rung files the message itself, so hand it this producer's
-            # own kind: the single entry is then the one :func:`record` below
-            # would have written, not a generic ``system`` one.
-            target = NotifyBot(kind)
-        result = await _send(target, chat_id, text, parse_mode)
+            # own kind, title and link: the single entry is then the one
+            # :func:`record` below would have written, not a generic ``system``
+            # one with nowhere to click. On a dashboard-only install this is the
+            # *only* entry the producer gets, so dropping the link here would
+            # lose it on exactly the surface that renders it (CORR-262).
+            target = NotifyBot(kind, title=title, link=link)
+            body = bell_text or text
+        result = await _send(target, chat_id, body, parse_mode)
         if isinstance(result, Notification):
             filed = result
         else:
@@ -421,5 +444,5 @@ async def announce(
     if filed is not None and (not user_id or filed.user_id == int(user_id)):
         return Delivery(sent, True)
 
-    entry = await record(user_id, text, kind=kind, title=title, link=link)
+    entry = await record(user_id, bell_text or text, kind=kind, title=title, link=link)
     return Delivery(sent, entry is not None)

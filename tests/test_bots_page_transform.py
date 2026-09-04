@@ -77,6 +77,7 @@ GOLDEN_REST = {
     "controllers": [
         {
             "controller_name": "pmm_simple",
+            "controller_type": "",
             "controller_id": "cfg-123",
             "bot_name": "epsilon",
             "status": "running",
@@ -100,6 +101,7 @@ GOLDEN_REST = {
         },
         {
             "controller_name": "quiet_ctrl",
+            "controller_type": "",
             "controller_id": "quiet_ctrl",
             "bot_name": "epsilon",
             "status": "stopped",

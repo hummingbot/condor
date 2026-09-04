@@ -95,10 +95,10 @@ class ExecutorsProvider(BaseProvider):
                 f"({reason}) with position {pos} still open on-chain. Stopping the executor "
                 "will NOT close it — it has already terminated. Close it with "
                 'manage_clmm(action="close", position_address=..., pool_address=...); '
-                'manage_executors(action="orphaned") reports the dex, pool and network for '
-                "the call, and pool_address is required. A new lp_executor CANNOT adopt the "
-                "position and would mint a second one. Then mark it recovered with "
-                f"manage_executors(action=\"resolve_orphan\", executor_id=\"{o['id']}\"). "
+                "list_orphaned_positions() reports the dex, pool and network for "
+                "the call, and pool_address is required. A new create_lp_executor CANNOT adopt "
+                "the position and would mint a second one. Then mark it recovered with "
+                f"resolve_orphaned_position(executor_id=\"{o['id']}\"). "
                 "Do not open new positions on these funds first."
             )
         if perf.bot_names:

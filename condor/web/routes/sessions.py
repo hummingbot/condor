@@ -12,6 +12,7 @@ list, so changes here need a full bot restart.
 from __future__ import annotations
 
 import logging
+import time
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
@@ -21,6 +22,7 @@ from condor.runtime import PromptRequest, SessionInfo, SessionKey, SessionSpec
 from condor.runtime import client as runtime
 from condor.runtime import conversations
 from condor.runtime.binding import UnknownAgent, remember_model_choice
+from condor.runtime.keys import WEB
 from condor.runtime.sse import SSE_HEADERS, event_stream
 from condor.web.auth import check_server_access, get_current_user
 from condor.web.models import WebUser
@@ -74,6 +76,43 @@ async def list_sessions(user: WebUser = Depends(get_current_user)):
     return await runtime.list_sessions(user_id=user.id)
 
 
+# How long a readiness sweep is reused for. The probe shells out to `npm root
+# -g` and opens sockets, so it must not run on every page load; a minute is
+# short enough that installing a CLI and reopening the picker shows it.
+_READINESS_TTL = 60.0
+_readiness_cache: tuple[float, dict] = (0.0, {})
+
+
+async def _provider_readiness() -> dict:
+    """Readiness per provider base, cached briefly (see ``_READINESS_TTL``).
+
+    The picker offers keys this machine may not be able to run — no Ollama
+    server, a CLI bridge that was never installed — and finding out at session
+    start costs the user their session (see ``_respawn``). One probe here is the
+    same one ``condor doctor``, the setup wizard and the Telegram picker make,
+    so no surface can disagree with another about what is runnable.
+    """
+    global _readiness_cache
+
+    from condor.llm import readiness
+    from condor.llm.options import AGENT_OPTIONS
+
+    stamp, cached = _readiness_cache
+    now = time.monotonic()
+    if cached and now - stamp < _READINESS_TTL:
+        return cached
+
+    bases = [readiness.base_of(k) for k in AGENT_OPTIONS]
+    try:
+        states = await readiness.probe_all(bases)
+    except Exception:  # noqa: BLE001 - a picker that cannot probe still opens
+        log.warning("Readiness probe failed; offering every model", exc_info=True)
+        return {}
+
+    _readiness_cache = (now, states)
+    return states
+
+
 @router.get("/options")
 async def session_options(user: WebUser = Depends(get_current_user)):
     """Agents and servers a session can be started with.
@@ -83,9 +122,16 @@ async def session_options(user: WebUser = Depends(get_current_user)):
     "openrouter:" that open a model list rather than naming a startable model —
     the key's shape does not tell you, since "ollama:" also ends in a colon but
     is a real key.
+
+    Each agent row also carries whether this machine can actually run it
+    (``ready``) and the sentence saying what is missing (``detail``), so the
+    picker can say "not installed — npm install -g …" up front instead of
+    letting the pick fail at session start. A probe that itself fails leaves the
+    rows unannotated rather than hiding every model.
     """
     from condor.agents.agent import AgentStore
     from condor.llm.options import AGENT_OPTIONS, DEFAULT_AGENT
+    from condor.llm.readiness import base_of
     from condor.preferences import (
         get_active_agent_key,
         get_custom_providers,
@@ -94,11 +140,21 @@ async def session_options(user: WebUser = Depends(get_current_user)):
 
     cm = get_config_manager()
     providers = get_custom_providers(load_user_data_for(user.id))
+    states = await _provider_readiness()
+
+    def _agent_row(key: str, opt: dict) -> dict:
+        row = {"key": key, "label": opt["label"], "picker": bool(opt.get("picker"))}
+        state = states.get(base_of(key))
+        if state is not None:
+            # ``usable``, not ``state == READY``: an installed bridge whose
+            # login cannot be proven must stay pickable — the marker paths are
+            # heuristics, and refusing on one would lock a working model away.
+            row["ready"] = state.usable
+            row["detail"] = state.detail
+        return row
+
     return {
-        "agents": [
-            {"key": k, "label": v["label"], "picker": bool(v.get("picker"))}
-            for k, v in AGENT_OPTIONS.items()
-        ],
+        "agents": [_agent_row(k, v) for k, v in AGENT_OPTIONS.items()],
         "custom_providers": [
             {
                 "name": p["name"],
@@ -230,15 +286,67 @@ async def session_action(
 ):
     """One multiplexed endpoint for the small lifecycle verbs."""
     parsed = _parse_key(key)
-    info = await _authorized_info(parsed, user)
 
+    if body.action in ("new", "switch"):
+        return await _respawn(parsed, await _respawnable(parsed, user), body, user)
+
+    info = await _authorized_info(parsed, user)
     if body.action == "cancel":
         return {"ok": await runtime.abort(parsed)}
 
-    if body.action in ("new", "switch"):
-        return await _respawn(parsed, info, body, user)
-
     raise HTTPException(status_code=400, detail=f"Unknown action: {body.action}")
+
+
+def _detached_slot(key: SessionKey) -> SessionInfo | None:
+    """The record behind a web slot whose subprocess is gone, if there is one.
+
+    A slot between subprocesses is normal, not an error: the budget detaches
+    idle sessions on purpose and a bot restart takes every one of them, while
+    the conversation stays on disk. ``chat_ws`` already reattaches such a slot
+    on the next message; this is the same fact, read for the picker.
+
+    Returns a session view assembled from the conversation, ``alive`` false —
+    everything a respawn needs to bring the slot back under the brain the user
+    just chose.
+    """
+    if key.surface != WEB or not key.slot:
+        return None
+    try:
+        owner = int(key.owner)
+    except (TypeError, ValueError):
+        return None
+    conv = conversations.get_conversation(owner, key.slot)
+    if conv is None:
+        return None
+    return SessionInfo(
+        key=str(key),
+        agent_key=conv.agent_key,
+        user_id=owner,
+        surface=key.surface,
+        slot=key.slot,
+        server_name=conv.server_name,
+        agent_slug=conv.agent_slug,
+        conversation_id=conv.id,
+        alive=False,
+    )
+
+
+async def _respawnable(key: SessionKey, user: WebUser) -> SessionInfo:
+    """The session a switch acts on: the live one, or the detached slot's record.
+
+    Answering a switch on a detached slot with "No session <key>" is how a user
+    learns not to trust the picker — after a restart *every* open chat is in
+    that state, and the message names none of it. Changing who answers a
+    conversation is a legitimate thing to ask of a slot that is between
+    subprocesses, so it is answered by spawning the brain that was asked for.
+    """
+    info = await runtime.get_info(key)
+    if info is None:
+        info = _detached_slot(key)
+    if info is None:
+        raise HTTPException(status_code=404, detail=f"No session {key}")
+    _require_ownership(info, user)
+    return info
 
 
 async def _respawn(
@@ -315,9 +423,11 @@ async def _respawn(
             spec, user_data=load_user_data_for(info.user_id)
         )
     except UnknownAgent as exc:
+        await _restore(key, info)
         raise HTTPException(status_code=404, detail=str(exc))
     except Exception as exc:  # noqa: BLE001 - surfaced as an HTTP error
         log.exception("Failed to respawn session %s", key)
+        await _restore(key, info)
         raise HTTPException(status_code=400, detail=str(exc))
 
     # A non-empty key on the wire is a user opening the picker and choosing, so
@@ -359,3 +469,40 @@ async def _respawn(
         )
 
     return {"ok": True, "session": new_info.model_dump(mode="json")}
+
+
+async def _restore(key: SessionKey, info: SessionInfo) -> None:
+    """Put the outgoing session back after a respawn failed to replace it.
+
+    The teardown has to happen first — ACP has no identity hot-swap — so a
+    model that cannot start (no Ollama server, an uninstalled CLI bridge) used
+    to leave the key with nothing behind it. The switch was then not merely
+    refused: every later one 404'd with "No session <key>", so the user could
+    not pick a working model without abandoning the chat. Bringing the previous
+    identity back makes a failed switch a no-op with an error attached, which is
+    what the picker's banner already claims happened.
+
+    Best effort by construction: if the old brain will not start either, the
+    original failure is still the one worth reporting, so this one is logged and
+    swallowed. The web slot is not stranded even then — ``chat_ws`` reattaches a
+    slot whose conversation still exists on the next message.
+    """
+    from condor.preferences import load_user_data_for
+
+    try:
+        await runtime.create_session(
+            SessionSpec(
+                key=str(key),
+                agent_key=info.agent_key,
+                user_id=info.user_id,
+                server_name=info.server_name,
+                agent_slug=info.agent_slug,
+                # The same transcript it was answering: a failed switch must not
+                # cost the conversation it was switching inside of.
+                conversation_id=info.conversation_id,
+                lazy_context=True,
+            ),
+            user_data=load_user_data_for(info.user_id),
+        )
+    except Exception:  # noqa: BLE001 - the caller reports the real failure
+        log.exception("Could not restore session %s after a failed switch", key)

@@ -18,6 +18,7 @@ from condor.web.models import (
     ExecutorPeriodSummary,
     WebUser,
 )
+from condor.web.routes._deeds import record_ui_deed
 from condor.web.routes._errors import upstream_error
 from config_manager import get_config_manager
 
@@ -361,6 +362,16 @@ async def create_executor_endpoint(
     executor_id = ""
     if isinstance(result, dict):
         executor_id = str(result.get("executor_id") or result.get("id") or "")
+    # ``create_lp_executor`` and friends — the same verbs the typed tools carry,
+    # so FEAT-100's tick join reads a UI create exactly as it reads an agent's.
+    record_ui_deed(
+        user,
+        verb=f"create_{body.executor_type}",
+        summary=(
+            f"Create {body.executor_type.removesuffix('_executor')} executor on "
+            f"{config.get('trading_pair') or '?'}"
+        ),
+    )
     return {"status": "ok", "executor_id": executor_id}
 
 
@@ -381,6 +392,12 @@ async def stop_executor_endpoint(
         result = await stop_executor(client, executor_id, keep_position=keep_position)
     except Exception as e:
         raise upstream_error("Failed to stop executor", e)
+    suffix = ", keeping the position" if keep_position else ""
+    record_ui_deed(
+        user,
+        verb="stop_executor",
+        summary=f"Stop executor {executor_id[:12]}...{suffix}",
+    )
     return {"status": "ok", "result": result}
 
 
@@ -438,4 +455,9 @@ async def clear_position_held(
     except Exception as e:
         logger.exception("Failed to clear held position on server %s", name)
         raise upstream_error("Failed to clear position", e)
+    record_ui_deed(
+        user,
+        verb="clear_position_held",
+        summary=f"Clear held position {pair} on {connector}",
+    )
     return {"status": "ok", "result": result}

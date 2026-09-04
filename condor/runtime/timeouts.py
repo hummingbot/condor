@@ -33,8 +33,15 @@ class TimeoutPolicy:
     # Wall-clock budget for a single prompt. Kills runaway agent turns.
     prompt_overall: int = 1800
     # How long to wait for an agent to confirm session/cancel before falling
-    # back to cancelling the request locally.
+    # back to cancelling the request locally. Short on purpose: this is what
+    # Stop costs the user, and stopping the *relay* is instant either way.
     prompt_cancel: int = 2
+    # How long the NEXT prompt waits for an abandoned turn to actually end at
+    # the agent. Separate from prompt_cancel because it buys something else:
+    # ACP session/update notifications carry no request id, so a second turn
+    # opened while the first is still generating has the first one's chunks
+    # delivered as its own answer. Paid only when an agent ignored the cancel.
+    prompt_settle: int = 10
     # How long a human has to answer a dangerous-tool confirmation.
     confirmation: int = 120
     # Keepalive cadence on an SSE stream, so proxies and clients see traffic.

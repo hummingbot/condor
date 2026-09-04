@@ -8,8 +8,9 @@ import {
   Sparkles,
 } from "lucide-react";
 
-import { LeverageField, SelectField, ToggleField, type FieldDispatch } from "@/components/executor/fields";
+import { LeverageField, SelectField, ToggleField } from "@/components/executor/fields";
 import { ORDER_TYPE_OPTIONS } from "@/components/executor/field-options";
+import { autoFillGridPrices, gridConfigErrors, gridPriceFieldValid } from "@/lib/gridExecutor";
 import type { GridState, GridAction } from "@/lib/gridExecutor";
 
 interface GridConfigPanelProps {
@@ -133,9 +134,9 @@ function NumberField({
   }, [displayValue]);
 
   return (
-    <div>
-      <label htmlFor={id} className="mb-1 block text-xs text-[var(--color-text-muted)]">{label}</label>
-      <div className="flex items-center gap-1">
+    <div className="min-w-0">
+      <label htmlFor={id} className="mb-1 block truncate text-xs text-[var(--color-text-muted)]">{label}</label>
+      <div className="flex min-w-0 items-center gap-1">
         <input
           id={id}
           ref={inputRef}
@@ -150,10 +151,10 @@ function NumberField({
           }}
           onBlur={() => setLocalValue(displayValue === 0 ? "" : String(displayValue))}
           placeholder="0"
-          className="flex-1 rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-text)] placeholder:text-[var(--color-text-muted)]/40 focus:border-[var(--color-primary)] focus:outline-none"
+          className="w-full min-w-0 flex-1 rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-text)] placeholder:text-[var(--color-text-muted)]/40 focus:border-[var(--color-primary)] focus:outline-none"
         />
         {suffix && (
-          <span className="text-[10px] text-[var(--color-text-muted)]">{suffix}</span>
+          <span className="shrink-0 text-[10px] text-[var(--color-text-muted)]">{suffix}</span>
         )}
       </div>
     </div>
@@ -171,40 +172,8 @@ function SectionHeader({ children }: { children: React.ReactNode }) {
 
 export function GridConfigPanel({ state, dispatch, currentPrice, isSpot = false, quoteCurrency = "USDT" }: GridConfigPanelProps) {
   const validation = useMemo(() => {
-    const errors: string[] = [];
+    const errors = gridConfigErrors(state);
     const warnings: string[] = [];
-
-    if (state.start_price > 0 && state.end_price > 0) {
-      if (state.start_price >= state.end_price) {
-        errors.push("Start price must be < end price");
-      }
-    }
-
-    if (state.side === 1 && state.limit_price > 0 && state.start_price > 0) {
-      if (state.limit_price >= state.start_price) {
-        errors.push("LONG: limit must be < start price");
-      }
-    }
-
-    if (state.side === 2 && state.limit_price > 0 && state.end_price > 0) {
-      if (state.limit_price <= state.end_price) {
-        errors.push("SHORT: limit must be > end price");
-      }
-    }
-
-    if (state.start_price <= 0 || state.end_price <= 0 || state.limit_price <= 0) {
-      errors.push("All prices required");
-    }
-
-    if (state.total_amount_quote <= 0) {
-      errors.push("Total amount required");
-    }
-
-    if (state.total_amount_quote > 0 && state.min_order_amount_quote > 0) {
-      if (state.total_amount_quote < state.min_order_amount_quote) {
-        errors.push("Total must be >= min order amount");
-      }
-    }
 
     // Compute estimated levels (mirrors _generate_grid_levels logic)
     let levels = 0;
@@ -233,24 +202,21 @@ export function GridConfigPanel({ state, dispatch, currentPrice, isSpot = false,
   }, [state]);
 
   const handleAutoFill = () => {
-    if (!currentPrice || currentPrice <= 0) return;
-    const p = currentPrice;
-    if (state.side === 1) {
-      const start = p * 0.99;
-      const end = p * 1.03;
-      const limit = start * 0.995;
-      dispatch({ type: "SET_FIELD", field: "start_price", value: parseFloat(start.toPrecision(6)) });
-      dispatch({ type: "SET_FIELD", field: "end_price", value: parseFloat(end.toPrecision(6)) });
-      dispatch({ type: "SET_FIELD", field: "limit_price", value: parseFloat(limit.toPrecision(6)) });
-    } else {
-      const start = p * 0.97;
-      const end = p * 1.01;
-      const limit = end * 1.005;
-      dispatch({ type: "SET_FIELD", field: "start_price", value: parseFloat(start.toPrecision(6)) });
-      dispatch({ type: "SET_FIELD", field: "end_price", value: parseFloat(end.toPrecision(6)) });
-      dispatch({ type: "SET_FIELD", field: "limit_price", value: parseFloat(limit.toPrecision(6)) });
+    const filled = autoFillGridPrices(state.side, currentPrice ?? 0);
+    if (!filled) return;
+    for (const [field, value] of Object.entries(filled)) {
+      dispatch({ type: "SET_FIELD", field, value });
     }
   };
+
+  // Draw the range around this market's price once, so the panel opens with its
+  // three lines already on the chart and ready to be dragged. Spent per market,
+  // so a range the user cleared or is mid-way through typing stays theirs.
+  useEffect(() => {
+    if (currentPrice && currentPrice > 0 && !state.anchored) {
+      dispatch({ type: "ANCHOR", price: currentPrice });
+    }
+  }, [currentPrice, state.anchored, dispatch]);
 
   const perLevel = validation.levels > 0 ? state.total_amount_quote / validation.levels : 0;
   const totalRange = state.start_price > 0 && state.end_price > 0 && state.start_price < state.end_price
@@ -302,34 +268,29 @@ export function GridConfigPanel({ state, dispatch, currentPrice, isSpot = false,
         </div>
 
         <PriceField
-          label="Start Price (lower boundary)"
+          label="Lower Price (grid start)"
           value={state.start_price}
           field="start"
           activePickField={state.activePickField}
           dispatch={dispatch}
-          valid={state.start_price > 0 && state.start_price < state.end_price}
+          valid={gridPriceFieldValid("start", state)}
         />
         <PriceField
-          label="End Price (upper boundary)"
+          label="Upper Price (grid end)"
           value={state.end_price}
           field="end"
           activePickField={state.activePickField}
           dispatch={dispatch}
-          valid={state.end_price > 0 && state.end_price > state.start_price}
+          valid={gridPriceFieldValid("end", state)}
         />
         <PriceField
-          label={`Limit Price (${state.side === 1 ? "stop-loss below" : "stop-loss above"})`}
+          label={`${state.side === 1 ? "Lower" : "Upper"} Limit (stop-loss)`}
           value={state.limit_price}
           field="limit"
           activePickField={state.activePickField}
           dispatch={dispatch}
-          valid={
-            state.limit_price > 0 &&
-            (state.side === 1
-              ? state.limit_price < state.start_price
-              : state.limit_price > state.end_price)
-          }
-          hint={state.side === 1 ? "Must be below start price" : "Must be above end price"}
+          valid={gridPriceFieldValid("limit", state)}
+          hint={state.side === 1 ? "Must be below the lower price" : "Must be above the upper price"}
         />
       </div>
 
@@ -386,7 +347,7 @@ export function GridConfigPanel({ state, dispatch, currentPrice, isSpot = false,
             )}
           </div>
         )}
-        <LeverageField value={state.leverage} field="leverage" dispatch={dispatch as unknown as FieldDispatch} isSpot={isSpot} />
+        <LeverageField value={state.leverage} field="leverage" dispatch={dispatch} isSpot={isSpot} />
       </div>
 
       {/* ── Take Profit ── */}
@@ -467,14 +428,14 @@ export function GridConfigPanel({ state, dispatch, currentPrice, isSpot = false,
               label="Open Order Type"
               value={state.open_order_type}
               field="open_order_type"
-              dispatch={dispatch as unknown as FieldDispatch}
+              dispatch={dispatch}
               options={ORDER_TYPE_OPTIONS}
             />
             <SelectField
               label="Take Profit Order Type"
               value={state.take_profit_order_type}
               field="take_profit_order_type"
-              dispatch={dispatch as unknown as FieldDispatch}
+              dispatch={dispatch}
               options={ORDER_TYPE_OPTIONS}
             />
           </div>
@@ -504,27 +465,7 @@ export function GridConfigPanel({ state, dispatch, currentPrice, isSpot = false,
 
 export function useGridValidation(state: GridState) {
   return useMemo(() => {
-    const errors: string[] = [];
-
-    if (state.start_price <= 0 || state.end_price <= 0 || state.limit_price <= 0) {
-      errors.push("All prices required");
-    }
-    if (state.start_price > 0 && state.end_price > 0 && state.start_price >= state.end_price) {
-      errors.push("Start must be < end");
-    }
-    if (state.side === 1 && state.limit_price > 0 && state.start_price > 0 && state.limit_price >= state.start_price) {
-      errors.push("LONG: limit < start");
-    }
-    if (state.side === 2 && state.limit_price > 0 && state.end_price > 0 && state.limit_price <= state.end_price) {
-      errors.push("SHORT: limit > end");
-    }
-    if (state.total_amount_quote <= 0) {
-      errors.push("Total amount required");
-    }
-    if (state.total_amount_quote > 0 && state.min_order_amount_quote > 0 && state.total_amount_quote < state.min_order_amount_quote) {
-      errors.push("Total >= min order");
-    }
-
+    const errors = gridConfigErrors(state);
     return { valid: errors.length === 0, errors };
   }, [state]);
 }

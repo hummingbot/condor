@@ -4,15 +4,27 @@ description: Expert in multi-timeframe adaptive grid trading with safety-first o
   sizing, a configurable untraded reserve, and strict risk management
 agent_key: claude-acp:opus
 tools:
-- get_market_data
+- get_prices
 - get_portfolio_overview
-- manage_executors
+- create_grid_executor
+- list_executors
+- get_executor
+- stop_executor
+- list_positions_held
 - search_history
 - manage_routines
+- manage_agents
+- manage_strategies
+- control_agent
+- get_available_models
+- consult
+- delegate
+- send_notification
 - trading_agent_journal_read
 - trading_agent_journal_write
 - manage_memory
 - manage_skill
+- run_code
 when_to_consult: When the user wants to deploy, configure, monitor, or refine an adaptive
   grid trading strategy that auto-adjusts direction based on market conditions.
 server_required: true
@@ -90,7 +102,7 @@ If any of these is missing, ask once at setup. Then stop asking.
 **How to run:**
 ```
 manage_routines(action="run", name="position_mode_check",
-    strategy_id="adaptive_grid_trader",
+    agent="adaptive_grid_trader",
     config={"connector_name": "<envelope connector>", "account_name": "master_account"})
 ```
 No trading pair — mode is account/connector-wide.

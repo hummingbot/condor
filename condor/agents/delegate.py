@@ -38,6 +38,13 @@ delegation sweeps its own owner's directory
 :data:`MAX_DELEGATION_RECORDS` terminal records and dropping the rest whole --
 so neither the disk nor the walk a history listing does grows with the age of
 the install. Nothing still running is ever a candidate.
+
+Since FEAT-058 that directory is no longer only delegations: a *consult* records
+itself there too, discriminated by a ``kind`` field, so an agent's page can list
+every run it performed rather than only the rare ones handed to the background.
+The writing lives in :mod:`condor.agents.run_records`; what stays here is what a
+delegation specifically has to say (a transcript, an event stream, a tool count)
+and a retention cap of its own, so the plentiful kind cannot evict the rare one.
 """
 
 from __future__ import annotations
@@ -50,6 +57,21 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from condor.agents import deeds
+from condor.agents.run_records import (
+    KIND_CONSULT,
+    KIND_DELEGATE,
+    RECORD_KINDS,
+    TERMINAL_STATES,
+    record_run,
+)
+from condor.runtime.wake import (  # noqa: F401 - re-exported, see ON_COMPLETE below
+    ON_COMPLETE_CHOICES,
+    ON_COMPLETE_NOTIFY,
+    ON_COMPLETE_RESUME,
+    normalize_on_complete,
+)
 
 log = logging.getLogger(__name__)
 
@@ -114,15 +136,31 @@ MAX_FINISHED_DELEGATIONS = 25
 # default the hard way.
 MAX_DELEGATION_RECORDS = int(os.environ.get("CONDOR_MAX_DELEGATION_RECORDS", "") or 500)
 
-# What happens to the conversation that asked for the work when the task ends.
-#
-# ``notify`` -- Telegram push + transcript note, and nothing else. The outcome is
-#              for the human to read.
-# ``resume`` -- additionally wake the live session with the result so the agent
-#              continues whatever it was going to do with it (FEAT-034).
-ON_COMPLETE_NOTIFY = "notify"
-ON_COMPLETE_RESUME = "resume"
-ON_COMPLETE_CHOICES = (ON_COMPLETE_NOTIFY, ON_COMPLETE_RESUME)
+# The same bound for the *other* kind of run in the same directory (FEAT-058).
+# Separate, and swept separately, because the two kinds are nothing alike: a
+# consult happens whenever one agent asks another a question, a delegation is a
+# deliberate act that cost minutes of unattended work and carries a transcript
+# nothing can rebuild. Sharing one budget would let a busy afternoon of consults
+# evict every delegation an owner has. 300 is what ``CodeRunStore.MAX_RUNS``
+# already settled on for a high-frequency run ledger.
+MAX_CONSULT_RECORDS = int(os.environ.get("CONDOR_MAX_CONSULT_RECORDS", "") or 300)
+
+
+def max_records_for(kind: str) -> int:
+    """How many terminal records of ``kind`` one owner keeps on disk.
+
+    A function rather than a mapping so the caps stay *readable at call time*:
+    both are module-level names an install (or a test) may repoint, and a dict
+    built at import would freeze whatever they were then.
+    """
+    return MAX_CONSULT_RECORDS if kind == KIND_CONSULT else MAX_DELEGATION_RECORDS
+
+
+# What happens to the conversation that asked for the work when the task ends --
+# ``notify`` (bell, transcript note, pushed line) or ``resume`` (the agent is
+# woken with the outcome and continues from it). Defined in ``runtime.wake``,
+# which owns both deliveries and is shared with the routine runner; re-exported
+# here because this module is where callers have always read them from.
 
 
 @dataclass
@@ -151,6 +189,10 @@ class DelegateTask:
     # Chronological session transcript: thoughts, tool calls, and text chunks as
     # they streamed from the agent. Populated live by the runner's event sink.
     events: list[dict] = field(default_factory=list, repr=False)
+    # The run's tool calls, folded by id, as the action log reads them. Fed by
+    # the event sink and drained once at completion into this delegation's own
+    # ``actions.jsonl`` (FEAT-105).
+    tool_calls: dict[str, dict] = field(default_factory=dict, repr=False)
     _task: asyncio.Task | None = field(default=None, repr=False)
 
     def to_dict(self) -> dict:
@@ -170,6 +212,11 @@ class DelegateTask:
             # dict is polled straight into a chat agent's context.
             "on_complete": self.on_complete,
             "started_at": self.started_at,
+            # Which channel this run came through (FEAT-058). Everything in the
+            # live registry is a delegation by construction; it is stated
+            # anyway so a row from memory and a row from disk are the same
+            # shape to the reader that merges them.
+            "kind": KIND_DELEGATE,
             # NOTE: `events` is deliberately omitted. This dict is what the MCP
             # `delegate` tool polls, so including the session stream would dump
             # the whole untruncated reasoning + tool output into a *chat agent's*
@@ -217,17 +264,12 @@ async def start_delegation(
         # Unknown values degrade to the passive behaviour rather than raising
         # here: the caller-facing validation is at the edges (the MCP tool and
         # the route), and a delegation must not fail to *start* over a flag.
-        on_complete=(
-            on_complete if on_complete in ON_COMPLETE_CHOICES else ON_COMPLETE_NOTIFY
-        ),
+        on_complete=normalize_on_complete(on_complete),
     )
     _delegations[dt.task_id] = dt
     _record_delegation_status(dt)
     dt._task = asyncio.create_task(_run(dt, bot, timeout_s))
     return dt
-
-
-TERMINAL_STATES = ("done", "error", "stopped")
 
 
 def _record_dir(dt: "DelegateTask") -> Path:
@@ -254,50 +296,29 @@ def _record_delegation_status(dt: "DelegateTask") -> None:
     in-memory registry is gone (FEAT-035). ``write_status`` merges, so the
     fields the start-time write cannot know (result, tool count, end time)
     simply arrive with the final write.
+
+    This function is now only *which fields a delegation has*: the writing, the
+    end stamp and the retention sweep moved to
+    :func:`condor.agents.run_records.record_run`, which a consult reaches too
+    (FEAT-058), so a run becomes files in exactly one place.
     """
-    try:
-        from condor.runtime.registry_file import write_status
-
-        extra = {"ended_at": time.time()} if dt.status in TERMINAL_STATES else {}
-        write_status(
-            _record_dir(dt),
-            state=dt.status,
-            task_id=dt.task_id,
-            agent_slug=dt.agent_slug,
-            chat_id=dt.chat_id,
-            user_id=dt.user_id,
-            conversation_id=dt.conversation_id,
-            session_key=dt.session_key,
-            on_complete=dt.on_complete,
-            started_at=dt.started_at,
-            task=dt.task,
-            server_name=dt.server_name,
-            result=dt.result,
-            error=dt.error,
-            tool_count=sum(1 for e in dt.events if e.get("type") == "tool"),
-            **extra,
-        )
-    except Exception:
-        log.debug(
-            "Could not record delegation status for %s", dt.task_id, exc_info=True
-        )
-
-    # The growth and the sweep in one place: a record directory only ever
-    # appears here, so the cheapest correct moment to bound the collection is
-    # the write that completes one. Outside the try above on purpose -- the
-    # status write is the delegation's own business and must have landed (or
-    # failed) on its own terms before retention gets a say. Scoped to the one
-    # owner whose directory just grew; walking every user would put the whole
-    # install on a hot path.
-    if dt.status in TERMINAL_STATES:
-        try:
-            prune_delegation_records(dt.user_id or 0)
-        except Exception:
-            log.warning(
-                "Could not prune delegation records for user %s",
-                dt.user_id or 0,
-                exc_info=True,
-            )
+    record_run(
+        user_id=dt.user_id,
+        run_id=dt.task_id,
+        agent_slug=dt.agent_slug,
+        kind=KIND_DELEGATE,
+        state=dt.status,
+        task=dt.task,
+        started_at=dt.started_at,
+        chat_id=dt.chat_id,
+        conversation_id=dt.conversation_id,
+        session_key=dt.session_key,
+        on_complete=dt.on_complete,
+        server_name=dt.server_name,
+        result=dt.result,
+        error=dt.error,
+        tool_count=sum(1 for e in dt.events if e.get("type") == "tool"),
+    )
 
 
 def _is_live_delegation(task_id: str) -> bool:
@@ -318,8 +339,25 @@ def _is_live_delegation(task_id: str) -> bool:
     return dt._task is not None and not dt._task.done()
 
 
-def prune_delegation_records(user_id: int | str) -> int:
-    """Evict this owner's oldest terminal records past :data:`MAX_DELEGATION_RECORDS`.
+def _record_dir_count(user_id: int | str) -> int:
+    """How many record directories this owner has, without reading any of them.
+
+    An upper bound on the eviction candidates of any single kind, which is all
+    :func:`prune_delegation_records` needs to skip the walk. Unreadable (or an
+    unsafe id) counts as zero, which lands on the same answer the walk itself
+    gives there: nothing to evict.
+    """
+    from condor import paths
+
+    try:
+        with os.scandir(paths.delegations_dir(user_id)) as entries:
+            return sum(1 for entry in entries if entry.is_dir())
+    except (OSError, paths.UnsafeIdError):
+        return 0
+
+
+def prune_delegation_records(user_id: int | str, kind: str | None = None) -> int:
+    """Evict this owner's oldest terminal records of ``kind`` past its cap.
 
     The disk counterpart of :func:`retire_delegation`, and modelled on
     ``RoutineStore._prune_instances`` -- the repo's existing answer to this
@@ -336,21 +374,45 @@ def prune_delegation_records(user_id: int | str) -> int:
       together -- so both the disk and the walk shrink, and a reader gets a
       clean ``None`` rather than half a record.
 
+    Since FEAT-058 the directory holds two kinds of run and each has its own
+    cap (:func:`max_records_for`), for the reason stated at
+    :data:`MAX_CONSULT_RECORDS`: one budget shared between them would let the
+    cheap, plentiful kind push out the expensive, rare one. ``kind=None`` sweeps
+    every kind, which is what an owner-wide clean-up means.
+
     Returns how many directories were evicted. Public so retention can be
     exercised (and, on a large install, run) directly rather than only as a
     side effect of finishing a delegation.
     """
     from condor.agents.delegation_history import terminal_record_dirs
 
-    if MAX_DELEGATION_RECORDS <= 0:  # retention off: keep everything
+    if kind is None:
+        return sum(prune_delegation_records(user_id, k) for k in RECORD_KINDS)
+
+    cap = max_records_for(kind)
+    if cap <= 0:  # retention off: keep everything
+        return 0
+
+    # The cheap "is there anything to evict at all" (PERF-293). Every candidate
+    # is one of this owner's record directories, so a directory *count* at or
+    # under the cap rules an eviction out without opening a single status file.
+    # Worth a syscall because of who pays: this runs at the end of every
+    # consult -- the plentiful kind -- and the walk it guards reads one
+    # ``status.json`` per record of *either* kind (``kind`` is only knowable
+    # after parsing), up to both caps together. A store below the cap, which is
+    # every install for most of its life, now pays one ``scandir`` instead of
+    # hundreds of reads. At the cap the walk is inherent and stays: "evict the
+    # oldest" cannot be answered without ordering the records, and the only way
+    # around it would be a second index of the same directory to keep in sync.
+    if _record_dir_count(user_id) <= cap:
         return 0
 
     candidates = [
         record
-        for record in terminal_record_dirs(user_id, TERMINAL_STATES)
+        for record in terminal_record_dirs(user_id, TERMINAL_STATES, kind=kind)
         if not _is_live_delegation(record[1])
     ]
-    excess = len(candidates) - MAX_DELEGATION_RECORDS
+    excess = len(candidates) - cap
     if excess <= 0:
         return 0
 
@@ -389,7 +451,11 @@ def _make_event_sink(dt: DelegateTask):
     )
 
     tl = dt.events
-    tc_map: dict[str, dict] = {}
+    # The same map the sink folds into, kept on the task so completion can write
+    # the run's deeds from it (FEAT-105). Not a second copy: ``tl`` holds the
+    # rendered timeline entries, this holds the folded calls in the shape the
+    # action log reads.
+    tc_map: dict[str, dict] = dt.tool_calls
 
     def append(entry: dict) -> None:
         tl.append(entry)
@@ -410,6 +476,14 @@ def _make_event_sink(dt: DelegateTask):
         elif isinstance(event, TextChunk):
             merge_chunk("text", event.text)
         elif isinstance(event, (ToolCallEvent, ToolCallUpdate)):
+            # Read the arguments the entry holds *before* the fold, so the bound
+            # below can tell an event that supplied new ones from one that only
+            # flipped a status or delivered output. Compared by identity rather
+            # than by re-deriving the fold's own "did this event carry input?"
+            # test: the fold is free to change that test, and an identity check
+            # cannot drift away from what it actually did (PERF-329).
+            previous = tc_map.get(event.tool_call_id)
+            previous_input = previous.get("input") if previous is not None else None
             tc = fold_tool_call_event(tc_map, event)
             if tc is not None:
                 tc["type"] = "tool"
@@ -419,7 +493,10 @@ def _make_event_sink(dt: DelegateTask):
             # folded entry looked up here, not to the return value.
             folded = tc_map.get(event.tool_call_id)
             if folded is not None:
-                _bound_tool_payloads(folded)
+                _bound_tool_payloads(
+                    folded,
+                    redact_input=folded.get("input") is not previous_input,
+                )
 
     return sink
 
@@ -456,6 +533,15 @@ async def _run(dt: DelegateTask, bot, timeout_s: int) -> None:
         dt.error = str(e)
         log.exception("Delegation %s failed", dt.task_id)
     finally:
+        # What the run did to the world, beside the transcript of it saying so
+        # (FEAT-105). First, and outside every other guard: a delegation that
+        # deployed a bot must be on record as its owner even if persisting the
+        # transcript or notifying the user then fails. Writes nothing when the
+        # run mutated nothing.
+        deeds.record_deeds(
+            deeds.for_delegation(dt.user_id, dt.task_id, dt.agent_slug),
+            list(dt.tool_calls.values()),
+        )
         try:
             _persist_transcript(dt)
         except Exception:
@@ -472,8 +558,17 @@ async def _run(dt: DelegateTask, bot, timeout_s: int) -> None:
             # produced something is worth continuing from -- a failed or timed
             # out one gives the agent nothing to work with, and the error is
             # already in the chat and in the transcript.
+            #
+            # Exactly one of the two reaches the session: the resume turn already
+            # carries the outcome, so pushing the note as well would say the same
+            # thing twice and wake the conversation twice for one task. Every
+            # other outcome -- "notify", or a "resume" that failed -- gets the
+            # free note, which is what makes a finished task visible in a
+            # dashboard that is already open (CORR-262).
             if dt.on_complete == ON_COMPLETE_RESUME and dt.status == "done":
                 await _resume_conversation(dt)
+            else:
+                await _show_completion(dt)
         # Last of all, and only once the transcript, the sidecar and the status
         # record are on disk: this may drop older finished entries, and nothing
         # may be evicted that a reader cannot still find in history.
@@ -503,26 +598,60 @@ def _clip_output(value) -> str:
     return out[:MAX_TOOL_OUTPUT] + TRUNCATION_MARKER
 
 
-def _bound_tool_payloads(tc: dict) -> None:
-    """Clip a folded tool entry's payloads to what a reader would have shown.
+def _bound_tool_payloads(tc: dict, *, redact_input: bool = True) -> None:
+    """Redact a folded tool entry's arguments, then clip and normalize its payloads.
 
     The output is what gets big (a market-data dump, a file read), and both
     projections already cut it at :data:`MAX_TOOL_OUTPUT` -- keeping the full
-    string in RAM bought nothing. The input is normally small and is left in its
-    original shape so the dashboard can render it as JSON; only one that
-    serializes past the same ceiling degrades to its clipped string form, since
-    an ``Edit``/``Write`` call can carry a whole file in its arguments.
+    string in RAM bought nothing. The input keeps its JSON shape so the dashboard
+    can render it as a tree; only one that serializes past the same ceiling
+    degrades to its clipped string form, since an ``Edit``/``Write`` call can
+    carry a whole file in its arguments.
+
+    Redaction comes *first*, and it is why this is the only place a folded entry
+    passes through. A delegated agent auto-approves its own tool calls, and at
+    least one tool in the agents' toolset takes a credential directly
+    (mcp-hummingbot's ``configure_server(password=…)``), so a verbatim argument
+    set would put a plaintext password into ``events.json``, the markdown
+    transcript and the dashboard's Input pane. The chat transcript already
+    solved this; :func:`condor.runtime.conversations._redact` is imported rather
+    than reimplemented so the two paths share one hint list and a hint added
+    there takes effect on both. Redacting before the clip means an argument set
+    too big to keep whole is redacted in the string it degrades to as well.
+
+    The serialization the size check needs is *kept* rather than measured and
+    thrown away: parsing it back leaves ``tc["input"]`` already JSON-safe, so an
+    argument the agent passed that no serializer can encode is coerced once here
+    instead of once per reader per poll (PERF-329). Being the write side, this
+    runs a handful of times per tool call; :func:`events_for_wire` ran the same
+    round-trip over the *whole* bounded stream every 2 seconds a transcript was
+    open.
+
+    ``redact_input`` is the caller's answer to "did the input just change?". A
+    tool call is folded several times -- announced, filled in, then completed
+    with its output -- and only one of those events carries arguments, so
+    re-redacting on the others allocated a fresh copy of a payload nothing had
+    touched. The entry is still mutated in place either way: ``tc`` is shared by
+    identity between the timeline and the action-log map, and copying it would
+    leave the deeds log unredacted.
     """
     import json
+
+    from condor.runtime.conversations import _redact
 
     out = tc.get("output")
     if out is not None:
         tc["output"] = _clip_output(out)
+    if not redact_input:
+        return
     inp = tc.get("input")
     if inp is not None and not isinstance(inp, str):
+        inp = _redact(inp)
         serialized = json.dumps(inp, default=str)
         if len(serialized) > MAX_TOOL_OUTPUT:
             tc["input"] = _clip_output(serialized)
+        else:
+            tc["input"] = json.loads(serialized)
 
 
 def _bound_events(events: list[dict]) -> None:
@@ -531,7 +660,7 @@ def _bound_events(events: list[dict]) -> None:
     The head is what gets dropped: a reader of a runaway session cares about how
     it ended, and the tail is also what the completion notice is drawn from. The
     count of dropped events is folded into a leading marker so the cut is
-    visible in the transcript rather than silent.
+    visible in the transcript rather than silent (CORR-143).
     """
     if len(events) <= MAX_EVENTS_PER_DELEGATION:
         return
@@ -544,7 +673,16 @@ def _bound_events(events: list[dict]) -> None:
 
 
 def _dropped_note(count: int) -> str:
-    return f"_… {count} earlier event(s) dropped to bound memory (CORR-143)_"
+    """Render the cut :func:`_bound_events` recorded, for a human to read.
+
+    Not a comment: :func:`events_for_wire` projects this as a plain ``text``
+    event and :func:`_render_session` writes it into the persisted markdown, so
+    it lands mid-narration in the sheet a user reads. It therefore names no
+    ticket -- an internal backlog id means nothing outside this repo, and the
+    bound is already explained as CORR-143 where the explanations belong
+    (:data:`MAX_TOOL_OUTPUT`'s comment and :func:`_bound_events`).
+    """
+    return f"_… {count} earlier event(s) dropped to keep this transcript bounded_"
 
 
 def retire_delegation(dt: "DelegateTask") -> int:
@@ -583,9 +721,15 @@ def events_for_wire(events: list[dict]) -> list[dict]:
     a serializer would race with a running delegation. Truncation reuses
     :func:`_clip_output`, so what a reader sees on the wire is cut at exactly the
     boundary the on-disk transcript uses.
-    """
-    import json
 
+    The copy is of the *entries*, not of the arguments inside them. A tool input
+    is never edited in place -- :func:`_bound_tool_payloads` rebinds it to a
+    fresh redacted, JSON-safe value -- so the projection reads it through, and
+    this function does no serialization of its own. That matters because the
+    dashboard polls it every 2 seconds while a task runs: re-encoding and
+    re-parsing every argument set in a 500-event stream, on the loop that is
+    also streaming the live chat, was most of what this cost (PERF-329).
+    """
     wire: list[dict] = []
     for ev in list(events):  # snapshot: the sink may append while we iterate
         kind = ev.get("type")
@@ -607,9 +751,10 @@ def events_for_wire(events: list[dict]) -> list[dict]:
                     "name": ev.get("name") or "unknown",
                     "status": ev.get("status") or "",
                     "kind": ev.get("kind") or "",
-                    # A tool input can hold anything the agent passed; round-trip
-                    # it through JSON so the response can't fail to serialize.
-                    "input": json.loads(json.dumps(inp, default=str)) if inp else None,
+                    # A tool input can hold anything the agent passed, so it is
+                    # coerced to something JSON can encode -- once, by the sink
+                    # that stored it, not again here on every poll.
+                    "input": inp if inp else None,
                     "output": _clip_output(out) if out else None,
                 }
             )
@@ -793,6 +938,66 @@ async def _resume_conversation(dt: DelegateTask) -> None:
         log.exception("Failed to resume conversation for delegation %s", dt.task_id)
 
 
+async def _show_completion(dt: DelegateTask) -> None:
+    """Show the outcome in the live session that asked for it (CORR-262).
+
+    The cheap sibling of :func:`_resume_conversation`, and the same shape
+    ``RoutineStore`` already uses after its own ``record_system``. The transcript
+    note written by :func:`_record_completion_turn` is read at *load* time, so an
+    already-open dashboard learned nothing until someone reloaded the page. This
+    pushes the same line immediately and pays for no model turn: a finished
+    delegation is worth showing, not worth an agent paraphrasing it.
+
+    Fires only where the resume turn does not -- the caller picks one -- so a
+    ``resume`` task is never woken twice for one outcome. A delegation with no
+    session or no conversation behind it (consult- or tick-started) is a no-op,
+    and nothing here may raise: by now the user has already been notified and
+    the transcript already carries the outcome.
+
+    **Not on Telegram** (CORR-266). One event, one channel per surface. On the
+    web the two deliveries are genuinely different surfaces -- ``_notify_done``
+    lights the bell, this shows the line in the transcript that is on screen --
+    but on Telegram they are the same chat: ``dt.chat_id`` is the chat and
+    ``dt.session_key`` is ``tg:{chat_id}``, so once a Telegram note sink exists
+    both would send ``_completion_text(dt)`` into it and the user would read the
+    same completion twice. ``_notify_done`` keeps the delegation, because it is
+    the channel that delivers in strictly more states: it needs only a chat id,
+    while a note additionally needs a live session still on this conversation,
+    and it is the one that also reaches the bell and the no-Telegram install.
+    The note sink is not wasted -- the routine path (``routine_store``) rings
+    only the bell and never pushes to Telegram, so there it is the sole delivery.
+    """
+    if not dt.session_key or not dt.conversation_id:
+        return
+    from condor.runtime.keys import SessionKey
+
+    try:
+        if SessionKey.parse(dt.session_key).is_telegram:
+            return
+    except ValueError:
+        pass
+    try:
+        from condor.runtime import wake
+
+        await wake.deliver_note(
+            session_key=dt.session_key,
+            conversation_id=dt.conversation_id,
+            text=_completion_text(dt),
+            kind="delegation",
+            # Who to address when the session is gone: reaped on idle, evicted
+            # by the per-user cap, or dead. The tab is still open in all three
+            # -- the bell fired microseconds earlier proves it (CORR-263).
+            user_id=dt.user_id,
+        )
+    except Exception:
+        log.debug(
+            "Could not show delegation %s in conversation %s",
+            dt.task_id,
+            dt.conversation_id,
+            exc_info=True,
+        )
+
+
 def resolve_bot(bot=None):
     """The best Telegram sender available in this process.
 
@@ -841,6 +1046,18 @@ async def _notify_done(dt: DelegateTask, bot) -> None:
     # transcript note carries, so the three surfaces cannot tell three stories
     # about one task. ``announce`` owns the "don't file it twice when the
     # resolved sender is the bell itself" rule (ARCH-212).
+    #
+    # The link is what makes the bell entry worth clicking (CORR-262): a
+    # delegation is the one notification whose whole value is a transcript the
+    # user wants to open, and an entry with no link is inert in the bell. There
+    # is no single-delegation route in the SPA, so the honest target is the
+    # agent's own page -- one the router actually resolves.
     await announce(
-        dt.user_id, dt.chat_id, _completion_text(dt), kind="delegation", bot=bot
+        dt.user_id,
+        dt.chat_id,
+        _completion_text(dt),
+        kind="delegation",
+        bot=bot,
+        title=f"Delegation · {dt.agent_slug}",
+        link=f"/agents/{dt.agent_slug}",
     )

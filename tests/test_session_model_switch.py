@@ -94,7 +94,7 @@ def env(tmp_path, monkeypatch):
     """A sandboxed agents/ tree, conversation store and runtime."""
     agents_root = tmp_path / "agents"
     agents_root.mkdir()
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", agents_root)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(agents_root))
     monkeypatch.setattr(conversations, "_live_recorders", set())
     monkeypatch.setattr(session_module, "_sessions", {})
     monkeypatch.setattr("condor.acp.client.ACPClient", _Client)

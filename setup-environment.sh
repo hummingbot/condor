@@ -1246,6 +1246,13 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
         # by construction: .env has exactly one author. Everything setup.sh
         # generates -- both broker passwords especially -- stays generated
         # there, so nothing Condor passes can weaken them.
+        #
+        # The backtesting values below are Condor's own tuning, passed through
+        # rather than written here: mm_optimizer_cycle submits a base config
+        # plus its variations at once, and hummingbot-api's default of 1
+        # concurrent worker turns that sweep into a queue. The deadline is
+        # sized for a multi-day window at a fine resolution rather than for a
+        # single ad-hoc backtest.
         if [ -d "$HB_API_DIR" ]; then
             if [ -f "$HB_API_DIR/.env" ]; then
                 msg_ok "hummingbot-api .env already exists — leaving it untouched"
@@ -1261,6 +1268,8 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
                     TAILSCALE_MODE="$HB_TAILSCALE_MODE" \
                     TAILSCALE_AUTH_KEY="$ts_auth_key" \
                     TAILSCALE_HOSTNAME="$ts_hb_hostname" \
+                    HBAPI_BACKTESTING_MAX_CONCURRENT=4 \
+                    HBAPI_BACKTESTING_TIMEOUT_SECONDS=1800 \
                     ./setup.sh); then
                     msg_ok "Hummingbot API configured by its own setup.sh"
                 else

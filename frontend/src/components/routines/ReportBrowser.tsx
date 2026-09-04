@@ -5,15 +5,12 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
-  ChevronUp,
   Clock,
   Download,
   Loader2,
-  Moon,
   Play,
   PlayCircle,
   Settings2,
-  Sun,
   Trash2,
   X,
   Zap,
@@ -23,35 +20,120 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { type RoutineInstance, api } from "@/lib/api";
-import { buildConfigValues, formatAgo, formatInterval, invalidateRoutineQueries, saveConfig } from "@/lib/routineUtils";
-import { setViewContext } from "@/lib/viewContext";
+import { toMs } from "@/lib/formatters";
+import {
+  buildConfigValues,
+  formatAgo,
+  formatInterval,
+  formatRoutineName,
+  inScope,
+  invalidateRoutineQueries,
+  resolveRoutine,
+  saveConfig,
+} from "@/lib/routineUtils";
+import { useViewFacts } from "@/lib/viewFacts";
 import { useServer } from "@/hooks/useServer";
 import { ReportFrame } from "./ReportFrame";
+import { RoutinePicker } from "./RoutinePicker";
+import {
+  RoutineLibrarySidebar,
+  type RoutineReportInfo,
+} from "./RoutineLibrarySidebar";
 import { RoutineConfigForm } from "./RoutineConfigForm";
 import { RoutineHooksPanel } from "./RoutineHooksPanel";
+import { RoutineResultView } from "./RoutineResultView";
 import { ScheduleDropdown } from "./ScheduleDropdown";
+
+/**
+ * The conversation a run launched from here belongs to.
+ *
+ * Without one — the `/routines` page, an agent's own page — a run is what it
+ * has always been: the dashboard's server, no conversation behind it.
+ */
+export interface RoutineRunContext {
+  /** The server the conversation is talking to, which is where its runs go. */
+  serverName: string;
+  /** Resolved server-side into the conversation the run reports back to. */
+  sessionKey: string;
+  /** Who the run's reports are filed under, as the chat's own runs are. */
+  agentSlug?: string;
+}
 
 interface ReportBrowserProps {
   initialSource?: string;
+  /** Open on this report of {@link initialSource}, rather than its latest. */
+  initialReportId?: string;
+  /**
+   * Open on this run of {@link initialSource}. A run that wrote no report opens
+   * on its output, which is the whole of what it produced.
+   */
+  initialInstanceId?: string;
   initialSourceTypeFilter?: string;
   instances: RoutineInstance[];
-  onClose: () => void;
+  /** Absent on the `/routines` page: a nav destination has nothing to close. */
+  onClose?: () => void;
+  /**
+   * Rendered inside the workspace pane: fill the container instead of the
+   * viewport, and leave the window's keys and the Close button to the host.
+   */
+  hosted?: boolean;
+  /**
+   * Rendered as the `/routines` page: fill the shell's main area rather than
+   * the viewport, keep the window's keys — the page *is* the screen — and drop
+   * the Close button, since there is nothing behind it to go back to.
+   */
+  page?: boolean;
+  /**
+   * The host owns the picking: it lists the routines and filters them, so this
+   * pane drops its own sidebar, scope select and title and is nothing but the
+   * report and what you can do to it. The host asks both questions with the
+   * same {@link RoutinePicker} this header asks the scope half of.
+   */
+  externalPicker?: boolean;
+  /** Told whenever the pane moves to another routine — its own ↑/↓ still do. */
+  onSourceChange?: (name: string) => void;
+  /** Run and schedule as this conversation, on its server. */
+  runContext?: RoutineRunContext;
 }
 
 export function ReportBrowser({
   instances,
   initialSource,
+  initialReportId,
+  initialInstanceId,
   initialSourceTypeFilter,
   onClose,
+  hosted = false,
+  page = false,
+  externalPicker = false,
+  onSourceChange,
+  runContext,
 }: ReportBrowserProps) {
   const { server } = useServer();
+  // The conversation's server wins over the dashboard's selector: a routine
+  // asked for beside a chat runs where that chat is pointed, not where a page
+  // the reader last touched happens to point.
+  const runServer = runContext?.serverName || server;
   const qc = useQueryClient();
-  const [sourceTypeFilter, setSourceTypeFilter] = useState<string>(initialSourceTypeFilter || "all");
-  const [isCompact, setIsCompact] = useState(false);
+  // The /routines page still filters in the older vocabulary, where the
+  // general library is `"routine"`; the picker's select only has an option for
+  // `"condor"`, and a native select handed a value no option carries shows the
+  // first one while the state says otherwise. Normalised on the way in, so the
+  // alias stops at this boundary rather than reaching the control.
+  const [sourceTypeFilter, setSourceTypeFilter] = useState<string>(
+    initialSourceTypeFilter === "routine"
+      ? "condor"
+      : initialSourceTypeFilter || "all",
+  );
+  // 550px of pane cannot hold a 256px list and a report: hosted opens on the
+  // 48px rail, the page keeps its list, and the toggle still works either way.
+  const [isCompact, setIsCompact] = useState(hosted);
+  // Typed into the sidebar's own box, which only the expanded list has — the
+  // rail and the host-picked pane never narrow the list this way.
+  const [search, setSearch] = useState("");
   const [showConfigPanel, setShowConfigPanel] = useState(false);
   const [showNotifyPanel, setShowNotifyPanel] = useState(false);
   const [showSourceModal, setShowSourceModal] = useState(false);
-  const [reportTheme, setReportTheme] = useState<"dark" | "light">("dark");
   const sidebarRef = useRef<HTMLDivElement>(null);
 
   // Fetch all routines for the sidebar
@@ -60,44 +142,147 @@ export function ReportBrowser({
     queryFn: api.getRoutines,
   });
 
-  const [activeSource, setActiveSource] = useState(initialSource ?? "");
+  const [pickedSource, setActiveSource] = useState(initialSource ?? "");
+  /**
+   * Reports, or the run's own text.
+   *
+   * A run that wrote a report is read as that report; one that only answered in
+   * text — most one-shots — has nothing in the report index, and its output is
+   * the whole of what it produced. Both are the same routine, so they are two
+   * views of this pane rather than two places to look.
+   */
+  const [view, setView] = useState<"report" | "output">(
+    initialInstanceId && !initialReportId ? "output" : "report",
+  );
 
-  // Filter routines by source type
+  /**
+   * Picking another routine is always a fresh read of it.
+   *
+   * With a host picker, the pick is the host's to make: it holds which routine
+   * the library is on — for its own list as much as for this pane — and hands
+   * it back as `initialSource`.
+   */
+  const selectSource = useCallback(
+    (name: string) => {
+      if (onSourceChange) {
+        onSourceChange(name);
+        return;
+      }
+      setActiveSource(name);
+      setView("report");
+    },
+    [onSourceChange],
+  );
+
+  /**
+   * The routine on screen, said the way the library says it.
+   *
+   * Two spellings reach here for one routine. A run names it as the store
+   * registered it — `{slug}/{name}` for an agent's own — while a report names it
+   * as the report index filed it, which is the bare name. Both have to land on
+   * the same routine, or the header's Run and Config would act on nothing.
+   */
+  const activeRoutine = useMemo(
+    () => resolveRoutine(routines, pickedSource),
+    [routines, pickedSource],
+  );
+  const activeSource = activeRoutine?.name ?? pickedSource;
+
+  /**
+   * The scope the list actually shows.
+   *
+   * A row opened from a conversation may point at a shared or general-library
+   * routine that the agent's own scope excludes, and a list that does not
+   * contain what the pane is showing is worse than a wider one — so the pane
+   * widens itself rather than hiding what the reader just clicked.
+   */
+  const effectiveScope =
+    activeRoutine &&
+    !inScope(routines, sourceTypeFilter).some(
+      (r) => r.name === activeRoutine.name,
+    )
+      ? "all"
+      : sourceTypeFilter;
+
+  /**
+   * The list, as the sidebar renders it: the picked scope, narrowed by the
+   * search box.
+   *
+   * One list, not two — ↑/↓ and Run All act on exactly what is on screen. A
+   * search that hid rows from the list while the arrows still walked them
+   * would be a filter the keyboard disagrees with.
+   */
   const filteredRoutines = useMemo(() => {
-    if (sourceTypeFilter === "all") return routines;
-    if (sourceTypeFilter === "routine") return routines.filter((r) => !r.source.startsWith("agent:"));
-    if (sourceTypeFilter === "agent") return routines.filter((r) => r.source.startsWith("agent:"));
-    // Specific agent name
-    return routines.filter((r) => r.source === `agent:${sourceTypeFilter}`);
-  }, [routines, sourceTypeFilter]);
+    const scoped = inScope(routines, effectiveScope);
+    const q = search.trim().toLowerCase();
+    if (!q) return scoped;
+    return scoped.filter(
+      (r) =>
+        r.name.toLowerCase().includes(q) ||
+        r.description.toLowerCase().includes(q) ||
+        r.category.toLowerCase().includes(q),
+    );
+  }, [routines, effectiveScope, search]);
+
+  /**
+   * What each routine's latest report says, for the card that names it.
+   *
+   * Fetched only where the cards are: the dock hands its own picker the list,
+   * so nothing there reads this.
+   */
+  const { data: reportGroups = [] } = useQuery({
+    queryKey: ["reports-grouped"],
+    queryFn: api.getReportsGrouped,
+    enabled: !externalPicker,
+    refetchInterval: 30_000,
+  });
+  const reportInfo = useMemo(() => {
+    const map = new Map<string, RoutineReportInfo>();
+    for (const g of reportGroups) {
+      map.set(g.source_name, {
+        title: g.latest_report.title,
+        created_at: g.latest_report.created_at,
+        count: g.total_count,
+        tags: g.all_tags,
+      });
+    }
+    return map;
+  }, [reportGroups]);
 
   // Set initial source once routines load if not set — pick from filtered list
   useEffect(() => {
-    if (!activeSource && filteredRoutines.length > 0) {
-      setActiveSource(filteredRoutines[0].name);
+    if (!pickedSource && filteredRoutines.length > 0) {
+      selectSource(filteredRoutines[0].name);
     }
-  }, [activeSource, filteredRoutines]);
+  }, [pickedSource, filteredRoutines, selectSource]);
+
+  /** Narrowing the list moves the reader into it, rather than stranding them. */
+  const changeScope = useCallback(
+    (next: string) => {
+      setSourceTypeFilter(next);
+      const scoped = inScope(routines, next);
+      if (!scoped.some((r) => r.name === activeSource)) {
+        selectSource(scoped[0]?.name ?? "");
+      }
+    },
+    [routines, activeSource, selectSource],
+  );
 
   // Unique source types for filter
   const hasAgents = routines.some((r) => r.source.startsWith("agent:"));
 
-  // Agent names for sub-filter
-  const agentNames = useMemo(() => {
-    const names = new Set<string>();
-    for (const r of routines) {
-      if (r.source.startsWith("agent:")) {
-        names.add(r.source.replace("agent:", ""));
-      }
-    }
-    return Array.from(names).sort();
-  }, [routines]);
-
-  // Active routine info
-  const activeRoutine = useMemo(
-    () => routines.find((r) => r.name === activeSource),
-    [routines, activeSource],
-  );
-  const isAgent = activeRoutine?.source.startsWith("agent:") ?? false;
+  /**
+   * Who owns the open routine, when an agent does.
+   *
+   * The header names it only where the scope picker does not already: with the
+   * list narrowed to that agent the badge restates the control beside it, but
+   * in a mixed list — "All routines", "All agents", or the widening this pane
+   * does for a routine outside the picked scope — it is the only thing that
+   * says whose routine this is.
+   */
+  const agentOwner = activeRoutine?.source.startsWith("agent:")
+    ? activeRoutine.source.slice("agent:".length)
+    : null;
 
   // Reports for active source — poll when a scheduled instance is active
   const hasScheduledInstance = instances.some(
@@ -109,7 +294,9 @@ export function ReportBrowser({
     enabled: !!activeSource,
     refetchInterval: hasScheduledInstance ? 10_000 : false,
   });
-  const reports = reportsData?.reports ?? [];
+  // Memoized: identity feeds the report that opens first, and a new array on
+  // every render would recompute it on every render.
+  const reports = useMemo(() => reportsData?.reports ?? [], [reportsData]);
 
   // Source code query (lazy)
   const { data: sourceData } = useQuery({
@@ -118,12 +305,30 @@ export function ReportBrowser({
     enabled: showSourceModal && !!activeSource,
   });
 
-  const [selectedReportIdx, setSelectedReportIdx] = useState(0);
+  /**
+   * Which report is open: the reader's pick, else the one the pane was opened
+   * for.
+   *
+   * A dock row points at one run, not at the newest, so "no pick yet" resolves
+   * to that report rather than to index 0 — derived rather than corrected in an
+   * effect, so the right report is on screen in the first paint and a poll that
+   * refreshes the list can never drag the reader back to it.
+   */
+  const [pickedReportIdx, setSelectedReportIdx] = useState<number | null>(null);
+  const openedOnIdx = useMemo(() => {
+    if (!initialReportId) return 0;
+    return Math.max(
+      0,
+      reports.findIndex((r) => r.id === initialReportId),
+    );
+  }, [reports, initialReportId]);
+  const selectedReportIdx = pickedReportIdx ?? openedOnIdx;
   const selectedReport = reports[selectedReportIdx] ?? null;
 
-  // Reset report index when source changes
+  // Another routine is read from the top — back to "no pick", which is the
+  // newest for a routine the pane was not opened on.
   useEffect(() => {
-    setSelectedReportIdx(0);
+    setSelectedReportIdx(null);
   }, [activeSource]);
 
   // Active instances for current source
@@ -131,6 +336,40 @@ export function ReportBrowser({
     () => instances.filter((i) => i.routine_name === activeSource && (i.status === "running" || i.status === "scheduled")),
     [instances, activeSource],
   );
+
+  /**
+   * The run behind the Output view: the one the reader clicked, else this
+   * routine's most recent. Runs live in memory, so there may be none — the
+   * toggle is offered only when there is something to toggle to.
+   */
+  const outputRun = useMemo(() => {
+    const forSource = instances.filter((i) => i.routine_name === activeSource);
+    const clicked =
+      initialInstanceId &&
+      forSource.find((i) => i.instance_id === initialInstanceId);
+    if (clicked) return clicked;
+    return (
+      [...forSource].sort(
+        (a, b) =>
+          toMs(b.last_run_at ?? b.created_at) -
+          toMs(a.last_run_at ?? a.created_at),
+      )[0] ?? null
+    );
+  }, [instances, activeSource, initialInstanceId]);
+
+  // `last_result` on the list is truncated; the sections, tables and chart of a
+  // run live behind its own route, so the view that shows them fetches it.
+  const { data: outputRunFull } = useQuery({
+    queryKey: ["routine-instance", outputRun?.instance_id],
+    queryFn: () => api.getRoutineInstance(outputRun!.instance_id),
+    enabled: view === "output" && !!outputRun,
+  });
+  const shownRun = outputRunFull ?? outputRun;
+  // Offered while there is a run with something to say — and kept while the
+  // reader is looking at it, so the switch cannot vanish from under them.
+  const hasOutput =
+    view === "output" ||
+    !!(outputRun && (outputRun.has_result || outputRun.last_result || outputRun.error));
 
   // Latest failed instance for error display
   const latestFailedInstance = useMemo(
@@ -166,7 +405,11 @@ export function ReportBrowser({
   }, [polledInstance, activeSource, qc]);
 
   const runMutation = useMutation({
-    mutationFn: () => api.runRoutine(server!, activeSource, configValues),
+    mutationFn: () =>
+      api.runRoutine(runServer!, activeSource, configValues, {
+        sessionKey: runContext?.sessionKey,
+        attributeTo: runContext?.agentSlug,
+      }),
     onSuccess: (data) => {
       setPollingInstanceId(data.instance_id);
       qc.invalidateQueries({ queryKey: ["routine-instances"] });
@@ -176,7 +419,7 @@ export function ReportBrowser({
 
   const scheduleMutation = useMutation({
     mutationFn: (intervalSec: number) =>
-      api.scheduleRoutine(server!, activeSource, configValues, intervalSec),
+      api.scheduleRoutine(runServer!, activeSource, configValues, intervalSec),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["routine-instances"] });
       setShowConfigPanel(false);
@@ -206,7 +449,7 @@ export function ReportBrowser({
   const [runAllProgress, setRunAllProgress] = useState<{ current: number; total: number } | null>(null);
 
   const runAll = useCallback(async () => {
-    if (!server || filteredRoutines.length === 0) return;
+    if (!runServer || filteredRoutines.length === 0) return;
     const toRun = filteredRoutines;
     setRunAllProgress({ current: 0, total: toRun.length });
     for (let i = 0; i < toRun.length; i++) {
@@ -214,7 +457,10 @@ export function ReportBrowser({
       const routine = toRun[i];
       const cfg = buildConfigValues(routine);
       try {
-        await api.runRoutine(server, routine.name, cfg);
+        await api.runRoutine(runServer, routine.name, cfg, {
+          sessionKey: runContext?.sessionKey,
+          attributeTo: runContext?.agentSlug,
+        });
       } catch {
         // continue with remaining routines
       }
@@ -222,7 +468,7 @@ export function ReportBrowser({
     setRunAllProgress(null);
     invalidateRoutineQueries(qc);
     qc.invalidateQueries({ queryKey: ["routine-reports"] });
-  }, [server, filteredRoutines, qc]);
+  }, [runServer, runContext, filteredRoutines, qc]);
 
   const [confirmDelete, setConfirmDelete] = useState(false);
 
@@ -234,7 +480,9 @@ export function ReportBrowser({
    */
   const downloadReport = useCallback(async () => {
     if (!selectedReport) return;
-    const html = await api.getReportHtml(selectedReport.id);
+    // Hydrated: the saved file is opened at `file://`, where the shared plotly
+    // bundle the stored report references cannot resolve (PERF-267).
+    const html = await api.getReportHtml(selectedReport.id, { hydrate: true });
     const url = URL.createObjectURL(new Blob([html], { type: "text/html" }));
     const link = document.createElement("a");
     link.href = url;
@@ -248,26 +496,37 @@ export function ReportBrowser({
 
   const goSourceUp = useCallback(() => {
     if (activeSourceIdx > 0) {
-      setActiveSource(filteredRoutines[activeSourceIdx - 1].name);
+      selectSource(filteredRoutines[activeSourceIdx - 1].name);
     }
-  }, [activeSourceIdx, filteredRoutines]);
+  }, [activeSourceIdx, filteredRoutines, selectSource]);
 
   const goSourceDown = useCallback(() => {
     if (activeSourceIdx < filteredRoutines.length - 1) {
-      setActiveSource(filteredRoutines[activeSourceIdx + 1].name);
+      selectSource(filteredRoutines[activeSourceIdx + 1].name);
     }
-  }, [activeSourceIdx, filteredRoutines]);
+  }, [activeSourceIdx, filteredRoutines, selectSource]);
 
   const goPrevReport = useCallback(() => {
-    if (selectedReportIdx > 0) setSelectedReportIdx((i) => i - 1);
+    if (selectedReportIdx > 0) setSelectedReportIdx(selectedReportIdx - 1);
   }, [selectedReportIdx]);
 
   const goNextReport = useCallback(() => {
-    if (selectedReportIdx < reports.length - 1) setSelectedReportIdx((i) => i + 1);
+    if (selectedReportIdx < reports.length - 1)
+      setSelectedReportIdx(selectedReportIdx + 1);
   }, [selectedReportIdx, reports.length]);
 
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
+  /**
+   * The browser's own keys.
+   *
+   * Full screen they are the window's, because the browser *is* the window.
+   * Hosted they are the container's: a live composer sits beside the pane, and
+   * a "k" typed into the chat that paged the report list would make the whole
+   * arrangement feel broken. Escape is the host's too — {@link WorkspaceSheet}
+   * owns closing the pane, and Escape belongs to the conversation — so hosted
+   * it only dismisses this browser's own panels.
+   */
+  const handleKey = useCallback(
+    (e: Pick<KeyboardEvent, "key" | "target" | "preventDefault">) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement) return;
       if (e.key === "ArrowUp") { goSourceUp(); e.preventDefault(); }
       else if (e.key === "ArrowDown") { goSourceDown(); e.preventDefault(); }
@@ -277,13 +536,27 @@ export function ReportBrowser({
         if (showSourceModal) setShowSourceModal(false);
         else if (showConfigPanel) setShowConfigPanel(false);
         else if (showNotifyPanel) setShowNotifyPanel(false);
-        else onClose();
+        else if (!hosted && onClose) onClose();
+        else return;
         e.preventDefault();
       }
-    };
+    },
+    [goSourceUp, goSourceDown, goPrevReport, goNextReport, onClose, hosted, showConfigPanel, showNotifyPanel, showSourceModal],
+  );
+
+  useEffect(() => {
+    if (hosted) return;
+    const handler = (e: KeyboardEvent) => handleKey(e);
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [goSourceUp, goSourceDown, goPrevReport, goNextReport, onClose, showConfigPanel, showNotifyPanel, showSourceModal]);
+  }, [hosted, handleKey]);
+
+  // Hosted, the keys only reach the browser while it has focus — so it takes
+  // focus once, on open. The click that opened it already left the composer.
+  const rootRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (hosted) rootRef.current?.focus({ preventScroll: true });
+  }, [hosted]);
 
   // Scroll active source into view
   useEffect(() => {
@@ -291,213 +564,97 @@ export function ReportBrowser({
     el?.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }, [activeSource]);
 
-  // Update view context for chat integration
-  useEffect(() => {
-    if (selectedReport) {
-      setViewContext({
-        filename: selectedReport.filename,
-        title: selectedReport.title,
-        source_name: activeSource,
-      });
-    }
-    return () => setViewContext(null);
-  }, [selectedReport, activeSource]);
+  // Tell the chat what report is open, for as long as the reader is (FEAT-059).
+  useViewFacts(() =>
+    view === "output" && shownRun
+      ? {
+          label: "Routine output",
+          subject: `the output of the last ${activeSource} run`,
+        }
+      : selectedReport && view === "report"
+        ? {
+            label: "Routine report",
+            subject: `report "${selectedReport.title}" (${selectedReport.filename}) from ${activeSource}`,
+          }
+        : null,
+  );
 
   return (
-    <div className="fixed inset-0 z-50 flex bg-[var(--color-bg)]">
-      {/* Left sidebar: routine list */}
-      <div
-        className={`flex flex-col border-r border-[var(--color-border)] bg-[var(--color-surface)] transition-all ${
-          isCompact ? "w-12" : "w-64"
-        }`}
-      >
-        {/* Sidebar header */}
-        <div className="flex items-center justify-between border-b border-[var(--color-border)] px-3 py-2.5">
-          {!isCompact && (
-            <span className="text-xs font-bold uppercase tracking-wider text-[var(--color-text-muted)]">
-              Routines
-            </span>
-          )}
-          <button
-            onClick={() => setIsCompact(!isCompact)}
-            className="rounded p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
-          >
-            {isCompact ? <ChevronRight className="h-3.5 w-3.5" /> : <ChevronLeft className="h-3.5 w-3.5" />}
-          </button>
-        </div>
-
-        {/* Source type filter */}
-        {!isCompact && hasAgents && (
-          <div className="flex flex-wrap gap-1 border-b border-[var(--color-border)] px-3 py-2">
-            <button
-              onClick={() => setSourceTypeFilter("all")}
-              className={`rounded-full px-2 py-0.5 text-[10px] font-medium transition-colors ${
-                sourceTypeFilter === "all"
-                  ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
-                  : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
-              }`}
-            >
-              All
-            </button>
-            <button
-              onClick={() => setSourceTypeFilter("routine")}
-              className={`rounded-full px-2 py-0.5 text-[10px] font-medium transition-colors ${
-                sourceTypeFilter === "routine"
-                  ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
-                  : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
-              }`}
-            >
-              Routines
-            </button>
-            <button
-              onClick={() => setSourceTypeFilter("agent")}
-              className={`flex items-center gap-0.5 rounded-full px-2 py-0.5 text-[10px] font-medium transition-colors ${
-                sourceTypeFilter === "agent"
-                  ? "bg-purple-500/10 text-purple-400"
-                  : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
-              }`}
-            >
-              <Brain className="h-2.5 w-2.5" />
-              Agents
-            </button>
-            {agentNames.map((name) => (
-              <button
-                key={name}
-                onClick={() => setSourceTypeFilter(name)}
-                className={`flex items-center gap-0.5 rounded-full px-2 py-0.5 text-[10px] font-medium transition-colors ${
-                  sourceTypeFilter === name
-                    ? "bg-purple-500/10 text-purple-400"
-                    : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
-                }`}
-              >
-                <Brain className="h-2 w-2" />
-                {name}
-              </button>
-            ))}
-          </div>
-        )}
-
-        {/* Routine list */}
-        <div ref={sidebarRef} className="flex-1 overflow-y-auto scrollbar-thin">
-          {filteredRoutines.map((r) => {
-            const isActive = r.name === activeSource;
-            const hasActiveInstance = instances.some(
-              (i) => i.routine_name === r.name && (i.status === "running" || i.status === "scheduled"),
-            );
-            const isRoutineAgent = r.source.startsWith("agent:");
-            const displayName = r.name.replace(/_/g, " ");
-
-            if (isCompact) {
-              return (
-                <button
-                  key={r.name}
-                  onClick={() => setActiveSource(r.name)}
-                  {...(isActive ? { "data-active-source": true } : {})}
-                  className={`flex w-full items-center justify-center py-3 transition-colors ${
-                    isActive
-                      ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
-                      : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
-                  }`}
-                  title={displayName}
-                >
-                  {isRoutineAgent ? (
-                    <Brain className="h-4 w-4 text-purple-400" />
-                  ) : hasActiveInstance ? (
-                    <span className="h-2.5 w-2.5 rounded-full bg-emerald-400 shadow-[0_0_6px_theme(colors.emerald.400)]" />
-                  ) : (
-                    <span className="text-[10px] font-bold uppercase leading-none">
-                      {displayName.slice(0, 2)}
-                    </span>
-                  )}
-                </button>
-              );
-            }
-
-            return (
-              <button
-                key={r.name}
-                onClick={() => setActiveSource(r.name)}
-                {...(isActive ? { "data-active-source": true } : {})}
-                className={`w-full px-3 py-2.5 text-left transition-all ${
-                  isActive
-                    ? "bg-[var(--color-primary)]/5 border-l-2 border-l-[var(--color-primary)]"
-                    : "border-l-2 border-l-transparent hover:bg-[var(--color-surface-hover)]"
-                }`}
-              >
-                <div className="flex items-center justify-between gap-1">
-                  <span className={`truncate text-xs font-medium ${isActive ? "text-[var(--color-text)]" : "text-[var(--color-text-muted)]"}`}>
-                    {displayName}
-                  </span>
-                  <div className="flex items-center gap-1 shrink-0">
-                    {hasActiveInstance && (
-                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 shadow-[0_0_4px_theme(colors.emerald.400)]" />
-                    )}
-                    {r.report_count > 0 && (
-                      <span className="text-[9px] text-[var(--color-text-muted)]/60">
-                        {r.report_count}
-                      </span>
-                    )}
-                  </div>
-                </div>
-                <div className="mt-0.5 flex items-center gap-1.5">
-                  {isRoutineAgent && (
-                    <span className="flex items-center gap-0.5 rounded bg-purple-500/10 px-1 py-0.5 text-[8px] font-bold uppercase text-purple-400">
-                      <Brain className="h-2 w-2" />
-                      agent
-                    </span>
-                  )}
-                  <span className="text-[9px] text-[var(--color-text-muted)]/50 truncate">
-                    {r.description}
-                  </span>
-                </div>
-              </button>
-            );
-          })}
-        </div>
-
-        {/* Navigation hint */}
-        {!isCompact && (
-          <div className="border-t border-[var(--color-border)] px-3 py-2 text-[10px] text-[var(--color-text-muted)]/60">
-            <span className="flex items-center gap-1.5">
-              <span className="flex items-center gap-0.5">
-                <kbd className="inline-flex h-4 min-w-[16px] items-center justify-center rounded border border-[var(--color-border)] bg-[var(--color-surface-hover)] px-0.5 text-[8px] font-medium">
-                  <ChevronUp className="h-2.5 w-2.5" />
-                </kbd>
-                <kbd className="inline-flex h-4 min-w-[16px] items-center justify-center rounded border border-[var(--color-border)] bg-[var(--color-surface-hover)] px-0.5 text-[8px] font-medium">
-                  <ChevronDown className="h-2.5 w-2.5" />
-                </kbd>
-                <span className="ml-0.5">source</span>
-              </span>
-              <span className="flex items-center gap-0.5">
-                <kbd className="inline-flex h-4 min-w-[16px] items-center justify-center rounded border border-[var(--color-border)] bg-[var(--color-surface-hover)] px-0.5 text-[8px] font-medium">
-                  <ChevronLeft className="h-2.5 w-2.5" />
-                </kbd>
-                <kbd className="inline-flex h-4 min-w-[16px] items-center justify-center rounded border border-[var(--color-border)] bg-[var(--color-surface-hover)] px-0.5 text-[8px] font-medium">
-                  <ChevronRight className="h-2.5 w-2.5" />
-                </kbd>
-                <span className="ml-0.5">report</span>
-              </span>
-              <kbd className="inline-flex h-4 items-center justify-center rounded border border-[var(--color-border)] bg-[var(--color-surface-hover)] px-1 text-[8px] font-medium">
-                esc
-              </kbd>
-            </span>
-          </div>
-        )}
-      </div>
+    <div
+      ref={rootRef}
+      // Hosted, the pane already sizes and paints; full screen, this is the page.
+      className={
+        hosted
+          ? "flex min-h-0 w-full flex-1 overflow-hidden outline-none"
+          : page
+            ? "flex h-full min-h-0 w-full overflow-hidden outline-none"
+            : "fixed inset-0 z-50 flex bg-[var(--color-bg)]"
+      }
+      tabIndex={hosted ? -1 : undefined}
+      onKeyDown={hosted ? handleKey : undefined}
+    >
+      {/* The library's left column — dropped when the host lists the routines
+          itself (the dock's picker), which is what gives the report the whole
+          pane. */}
+      {!externalPicker && (
+        <RoutineLibrarySidebar
+          routines={routines}
+          listed={filteredRoutines}
+          instances={instances}
+          activeSource={activeSource}
+          onSelect={selectSource}
+          scope={effectiveScope}
+          onScopeChange={changeScope}
+          search={search}
+          onSearchChange={setSearch}
+          compact={isCompact}
+          onToggleCompact={() => setIsCompact((v) => !v)}
+          onStopInstance={(id) => stopMutation.mutate(id)}
+          stopping={stopMutation.isPending}
+          listRef={sidebarRef}
+          reportInfo={reportInfo}
+        />
+      )}
 
       {/* Main content */}
-      <div className="flex flex-1 flex-col">
-        {/* Top bar */}
-        <div className="flex items-center justify-between border-b border-[var(--color-border)] px-4 py-2">
-          <div className="flex items-center gap-3 min-w-0">
-            <h2 className="truncate text-sm font-semibold text-[var(--color-text)]">
-              {activeSource.replace(/_/g, " ")}
-            </h2>
-            {isAgent && (
-              <span className="flex items-center gap-0.5 rounded bg-purple-500/10 px-1.5 py-0.5 text-[9px] font-bold uppercase text-purple-400">
-                <Brain className="h-2.5 w-2.5" />
-                {activeRoutine?.source.replace("agent:", "")}
-              </span>
+      <div className="flex min-w-0 flex-1 flex-col">
+        {/* Top bar — wraps rather than widening the column: at pane width the
+            actions drop to a second row, and the routine's name keeps its own.
+            Left to overflow it would lay the whole column out wider than the
+            pane and clip the report off the right of the screen. */}
+        <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-[var(--color-border)] px-4 py-2">
+          {/* Nothing to say on the left once the host names the routine and no
+              run is live — and an empty column here would keep the width the
+              actions need. */}
+          {(!externalPicker || sourceInstances.length > 0) && (
+          <div className="flex min-w-0 flex-1 items-center gap-3">
+            {/* Whose routines this pane is listing, and which one it is on —
+                unless the host is already saying both. Beside a conversation
+                the dock's picker names the routine and the sheet above titles
+                it, and a header that repeated them spent the row that the run
+                controls need. */}
+            {!externalPicker && (
+              <>
+                {hasAgents && isCompact && (
+                  <RoutinePicker
+                    parts="scope"
+                    variant="inline"
+                    routines={routines}
+                    scope={effectiveScope}
+                    onScopeChange={changeScope}
+                    onSelect={selectSource}
+                  />
+                )}
+                <h2 className="truncate text-sm font-semibold text-[var(--color-text)]">
+                  {formatRoutineName(activeSource)}
+                </h2>
+                {agentOwner && effectiveScope !== agentOwner && (
+                  <span className="flex items-center gap-0.5 rounded bg-purple-500/10 px-1.5 py-0.5 text-[9px] font-bold uppercase text-purple-400">
+                    <Brain className="h-2.5 w-2.5" />
+                    {agentOwner}
+                  </span>
+                )}
+              </>
             )}
             {sourceInstances.length > 0 && (
               <div className="flex items-center gap-2">
@@ -524,9 +681,13 @@ export function ReportBrowser({
               </div>
             )}
           </div>
-          <div className="flex items-center gap-1">
+          )}
+          {/* Wraps within itself: at pane width the run controls and the report
+              pager together outrun one row, and a group that cannot break is a
+              group whose right-hand end is simply cut off. */}
+          <div className="flex flex-wrap items-center justify-end gap-1">
             {/* Run / Config actions — always show when routine exists */}
-            {activeRoutine && server && (
+            {activeRoutine && runServer && (
               <div className="flex items-center gap-1 mr-2">
                 <button
                   onClick={() => setShowSourceModal(true)}
@@ -568,7 +729,7 @@ export function ReportBrowser({
                 </button>
                 <button
                   onClick={() => runMutation.mutate()}
-                  disabled={runMutation.isPending || !server}
+                  disabled={runMutation.isPending || !runServer}
                   className="flex items-center gap-1 rounded bg-[var(--color-primary)] px-2.5 py-1 text-[10px] font-semibold text-white transition-colors hover:bg-[var(--color-primary)]/80 disabled:opacity-50"
                   title="Run with current config"
                 >
@@ -582,13 +743,13 @@ export function ReportBrowser({
                 {!activeRoutine.is_continuous && (
                   <ScheduleDropdown
                     onSchedule={(sec) => scheduleMutation.mutate(sec)}
-                    disabled={scheduleMutation.isPending || !server}
+                    disabled={scheduleMutation.isPending || !runServer}
                   />
                 )}
                 {filteredRoutines.length > 1 && (
                   <button
                     onClick={runAll}
-                    disabled={!!runAllProgress || !server}
+                    disabled={!!runAllProgress || !runServer}
                     className="flex items-center gap-1 rounded bg-[var(--color-surface-hover)] px-2.5 py-1 text-[10px] font-semibold text-[var(--color-text)] transition-colors hover:bg-[var(--color-border)] disabled:opacity-50"
                     title="Run all filtered routines with default configs"
                   >
@@ -607,8 +768,32 @@ export function ReportBrowser({
                 )}
               </div>
             )}
+            {/* What this routine's last run said, when it said it in text
+                rather than in a report — and the way back to the reports. */}
+            {hasOutput && (
+              <div className="mr-1 flex items-center gap-0.5 rounded bg-[var(--color-surface-hover)] p-0.5">
+                {(["report", "output"] as const).map((id) => (
+                  <button
+                    key={id}
+                    onClick={() => setView(id)}
+                    className={`rounded px-2 py-0.5 text-[10px] font-semibold capitalize transition-colors ${
+                      view === id
+                        ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+                        : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+                    }`}
+                    title={
+                      id === "report"
+                        ? "The pages this routine wrote"
+                        : "What its last run handed back"
+                    }
+                  >
+                    {id}
+                  </button>
+                ))}
+              </div>
+            )}
             {/* Report navigation */}
-            {reports.length > 1 && (
+            {view === "report" && reports.length > 1 && (
               <>
                 <span className="mr-1 text-[10px] text-[var(--color-text-muted)]">
                   {selectedReportIdx + 1} of {reports.length}
@@ -632,7 +817,7 @@ export function ReportBrowser({
               </>
             )}
             {/* Download */}
-            {selectedReport && (
+            {view === "report" && selectedReport && (
               <button
                 onClick={downloadReport}
                 className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
@@ -642,7 +827,7 @@ export function ReportBrowser({
               </button>
             )}
             {/* Delete */}
-            {selectedReport && (
+            {view === "report" && selectedReport && (
               confirmDelete ? (
                 <div className="flex items-center gap-1 ml-2">
                   <span className="text-xs text-[var(--color-red)]">Delete?</span>
@@ -669,23 +854,17 @@ export function ReportBrowser({
                 </button>
               )
             )}
-            {/* Report theme toggle */}
-            <button
-              onClick={() => setReportTheme((t) => (t === "dark" ? "light" : "dark"))}
-              className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-              title={`Switch to ${reportTheme === "dark" ? "light" : "dark"} report theme`}
-            >
-              {reportTheme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-            </button>
-            {/* Agent chat toggle */}
-            {/* Close */}
-            <button
-              onClick={onClose}
-              className="ml-1 rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-              title="Close (Esc)"
-            >
-              <X className="h-4 w-4" />
-            </button>
+            {/* Close — the sheet's header has one when hosted, and the page
+                is a nav destination rather than something you dismiss. */}
+            {!hosted && !page && onClose && (
+              <button
+                onClick={onClose}
+                className="ml-1 rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+                title="Close (Esc)"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            )}
           </div>
         </div>
 
@@ -755,7 +934,7 @@ export function ReportBrowser({
         )}
 
         {/* Report timeline strip at top */}
-        {reports.length > 1 && (
+        {view === "report" && reports.length > 1 && (
           <div className="flex items-center gap-1 border-b border-[var(--color-border)]/50 px-4 py-1.5">
             {reports.slice(0, 10).map((r, idx) => (
               <button
@@ -808,7 +987,25 @@ export function ReportBrowser({
 
         {/* Report content */}
         <div className="relative flex-1">
-          {loadingReports ? (
+          {view === "output" ? (
+            <div className="h-full overflow-auto px-4 py-3">
+              {!shownRun ? (
+                <p className="text-xs text-[var(--color-text-muted)]">
+                  This routine has no run in memory.
+                </p>
+              ) : shownRun.error ? (
+                <pre className="whitespace-pre-wrap break-words font-mono text-xs text-[var(--color-red)]">
+                  {shownRun.error}
+                </pre>
+              ) : shownRun.has_result || shownRun.result_text ? (
+                <RoutineResultView instance={shownRun} />
+              ) : (
+                <p className="whitespace-pre-wrap text-xs text-[var(--color-text-muted)]">
+                  {shownRun.last_result || "(no output yet)"}
+                </p>
+              )}
+            </div>
+          ) : loadingReports ? (
             <div className="flex h-full items-center justify-center">
               <Loader2 className="h-6 w-6 animate-spin text-[var(--color-text-muted)]" />
             </div>
@@ -825,7 +1022,7 @@ export function ReportBrowser({
                     <pre className="whitespace-pre-wrap break-words text-left font-mono text-xs text-[var(--color-text-muted)] bg-[var(--color-surface)] rounded p-3 max-h-60 overflow-y-auto">
                       {(polledInstance?.status === "failed" ? polledInstance.error : latestFailedInstance?.error) || "Unknown error"}
                     </pre>
-                    {activeRoutine && server && (
+                    {activeRoutine && runServer && (
                       <button
                         onClick={() => runMutation.mutate()}
                         disabled={runMutation.isPending}
@@ -868,7 +1065,7 @@ export function ReportBrowser({
                       />
                     </div>
                   )}
-                  {activeRoutine && server && (
+                  {activeRoutine && runServer && (
                     <button
                       onClick={() => runMutation.mutate()}
                       disabled={runMutation.isPending}
@@ -891,15 +1088,11 @@ export function ReportBrowser({
               )}
             </div>
           ) : (
-            <ReportFrame
-              reportId={selectedReport.id}
-              title={selectedReport.title}
-              theme={reportTheme}
-            />
+            <ReportFrame reportId={selectedReport.id} title={selectedReport.title} />
           )}
 
           {/* Chevron overlays for report navigation */}
-          {selectedReport && selectedReportIdx > 0 && (
+          {view === "report" && selectedReport && selectedReportIdx > 0 && (
             <button
               onClick={goPrevReport}
               className="absolute left-3 top-1/2 -translate-y-1/2 rounded-full bg-black/40 p-2 text-white/60 hover:bg-black/60 hover:text-white transition-all"
@@ -909,7 +1102,9 @@ export function ReportBrowser({
               <ChevronLeft className="h-5 w-5" />
             </button>
           )}
-          {selectedReport && selectedReportIdx < reports.length - 1 && (
+          {view === "report" &&
+            selectedReport &&
+            selectedReportIdx < reports.length - 1 && (
             <button
               onClick={goNextReport}
               className="absolute right-3 top-1/2 -translate-y-1/2 rounded-full bg-black/40 p-2 text-white/60 hover:bg-black/60 hover:text-white transition-all"

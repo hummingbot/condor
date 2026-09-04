@@ -15,20 +15,24 @@ either side fails here instead of in production.
 import inspect
 import typing
 
+from condor.runtime.danger import is_mutating_tool_call
 from handlers.agents._shared import (
+    CREATE_EXECUTOR_TOOLS,
     DANGEROUS_AMM_ACTIONS,
     DANGEROUS_BOT_ACTIONS,
     DANGEROUS_CLMM_ACTIONS,
     DANGEROUS_CONFIG_RESOURCES,
-    DANGEROUS_EXECUTOR_ACTIONS,
-    DANGEROUS_SWAP_ACTIONS,
+    DANGEROUS_CONTROL_ACTIONS,
     DANGEROUS_TOOLS,
     is_dangerous_tool_call,
 )
 from mcp_servers.hummingbot_api import server as mcp_server
 
 # Gate names that belong to a different MCP server than hummingbot_api.
-_FOREIGN_TOOLS = {"place_order"}
+# ``control_agent`` is on the condor orchestration server, and gets its own
+# resolution test below rather than this file's Literal-reading one — its
+# actions are a dict in the tool module, not an annotation.
+_FOREIGN_TOOLS = {"place_order", "control_agent"}
 
 
 def _registered_tools() -> dict:
@@ -62,8 +66,6 @@ def test_gated_actions_exist_on_their_tools():
     for tool_name, actions in (
         ("manage_clmm", DANGEROUS_CLMM_ACTIONS),
         ("manage_amm", DANGEROUS_AMM_ACTIONS),
-        ("manage_gateway_swaps", DANGEROUS_SWAP_ACTIONS),
-        ("manage_executors", DANGEROUS_EXECUTOR_ACTIONS),
         ("manage_bots", DANGEROUS_BOT_ACTIONS),
     ):
         available = _action_literals(tool_name)
@@ -85,24 +87,126 @@ def test_every_liquidity_moving_action_is_gated():
         ), f"{tool_name} write action(s) ungated: {sorted(writes - gated)}"
 
 
-def test_every_signing_swap_action_is_gated():
+def test_the_swap_family_is_gated_by_name():
     """The swap twin of :func:`test_every_liquidity_moving_action_is_gated`.
 
-    ``manage_gateway_swaps`` registers four actions and only ``execute`` signs,
-    so ``DANGEROUS_SWAP_ACTIONS`` covers the surface today. The reason to pin it
-    is what sits one layer down: the implementation also handles
-    ``execute_quote`` — it signs a quote taken earlier by ``action="quote"`` —
-    and that action is simply not in the registered ``Literal``, so nothing can
-    reach it. Adding it to that Literal would be a one-word change with no
-    obvious connection to this gate, and the swap would sign unconfirmed and
-    unpriced. This test is that connection.
+    The swap tools carry no ``action`` at all since FEAT-064: ``execute_swap``
+    is the only one that signs and it is gated by name, so the three reads must
+    stay off the gate and the writer must stay on it. What this pins is the
+    layer below: the implementation also handles ``execute_quote`` — it signs a
+    quote taken earlier — and no registered tool reaches it. Registering one
+    would be a small change with no obvious connection to this gate, and the
+    swap would sign unconfirmed and unpriced. This test is that connection.
     """
-    read_only = {"quote", "search", "get_status"}
-    writes = _action_literals("manage_gateway_swaps") - read_only
-    assert writes <= DANGEROUS_SWAP_ACTIONS, (
-        "manage_gateway_swaps signing action(s) ungated: "
-        f"{sorted(writes - DANGEROUS_SWAP_ACTIONS)}"
+    registered = _registered_tools()
+    assert "manage_gateway_swaps" not in registered, (
+        "the multiplexed swap tool is back: a free quote and a signature share a "
+        "name again, and the gate is back to sniffing an action string"
     )
+    assert "execute_swap" in DANGEROUS_TOOLS
+    assert is_dangerous_tool_call({"tool": "execute_swap", "input": {}})
+
+    for name in ("quote_swap", "get_swap_status", "search_swaps"):
+        assert name in registered, f"{name} is no longer registered"
+        assert name not in DANGEROUS_TOOLS, f"{name} reads only; gating it is noise"
+        assert not is_dangerous_tool_call(
+            {"tool": f"mcp__mcp-hummingbot__{name}", "input": {}}
+        ), f"{name} needlessly gated"
+
+
+def test_the_executor_family_is_gated_by_name():
+    """The executor twin of :func:`test_the_swap_family_is_gated_by_name`.
+
+    The typed split (FEAT-062) gave every executor type its own create tool, so
+    there is no ``action`` to sniff: the five creates and ``stop_executor`` are
+    gated by name, and the nine read/control tools must stay off the gate. What
+    this pins is that a create can never be reintroduced under a name the gate
+    does not know — the old mega-tool is asserted gone, and every registered
+    ``create_*``/``stop_*`` name has to be in ``DANGEROUS_TOOLS``.
+    """
+    registered = _registered_tools()
+    assert "manage_executors" not in registered, (
+        "the multiplexed executor tool is back: a create and a list share a name "
+        "again, and the gate is back to sniffing an action string"
+    )
+
+    for name in sorted(CREATE_EXECUTOR_TOOLS | {"stop_executor"}):
+        assert name in registered, f"{name} is gated but no longer registered"
+        assert name in DANGEROUS_TOOLS, f"{name} moves funds and must be gated"
+        assert is_dangerous_tool_call(
+            {"tool": f"mcp__mcp-hummingbot__{name}", "input": {}}
+        ), f"{name} was not gated"
+
+    for name in (
+        "list_executors",
+        "get_executor",
+        "list_positions_held",
+        "clear_position_held",
+        "get_performance_report",
+        "list_orphaned_positions",
+        "resolve_orphaned_position",
+        "executor_defaults",
+    ):
+        assert name in registered, f"{name} is no longer registered"
+        assert name not in DANGEROUS_TOOLS, f"{name} reads only; gating it is noise"
+        assert not is_dangerous_tool_call(
+            {"tool": f"mcp__mcp-hummingbot__{name}", "input": {}}
+        ), f"{name} needlessly gated"
+
+    # Every executor-creating name the server registers must be gated: a sixth
+    # executor type added later without a gate entry fails here.
+    creates = {
+        name
+        for name in registered
+        if name.startswith("create_") and name.endswith("_executor")
+    }
+    assert creates == set(CREATE_EXECUTOR_TOOLS), (
+        "registered create tools and the gate list disagree: "
+        f"{sorted(creates ^ set(CREATE_EXECUTOR_TOOLS))}"
+    )
+
+
+def test_a_gated_executor_call_names_what_it_will_do():
+    """The confirmation prompt must show the size, not the bare tool name."""
+    from handlers.agents.confirmation import format_tool_summary
+
+    for call, expected in (
+        (
+            {
+                "tool": "create_grid_executor",
+                "input": {"trading_pair": "SOL-USDT", "total_amount_quote": 500},
+            },
+            "Create grid executor on SOL-USDT for 500 quote",
+        ),
+        (
+            {
+                "tool": "create_position_executor",
+                "input": {"trading_pair": "BTC-USDT", "amount": 0.01},
+            },
+            "Create position executor on BTC-USDT of 0.01",
+        ),
+        (
+            {
+                "tool": "create_dca_executor",
+                "input": {"trading_pair": "ETH-USDT", "amounts_quote": [50, 50]},
+            },
+            "Create dca executor on ETH-USDT for 100 quote over 2 levels",
+        ),
+        (
+            {
+                "tool": "create_lp_executor",
+                "input": {"trading_pair": "SOL-USDC", "quote_amount": 25},
+            },
+            "Create lp executor on SOL-USDC with 0 base / 25 quote",
+        ),
+        (
+            {"tool": "stop_executor", "input": {"executor_id": "abcdef012345678"}},
+            "Stop executor abcdef012345",
+        ),
+    ):
+        summary = format_tool_summary(call)
+        assert expected in summary, f"{call['tool']} rendered {summary!r}"
+        assert summary != call["tool"]
 
 
 def test_lp_writes_require_confirmation():
@@ -151,13 +255,14 @@ def test_gated_calls_render_a_specific_confirmation_summary():
         assert summary != tool_name
 
 
-def test_gateway_config_gates_wallets_and_only_wallets():
-    """manage_gateway_config is gated on resource_type, not action.
+def test_gateway_config_gates_nothing_now_that_wallets_are_read_only():
+    """manage_gateway_config is gated on resource_type, not action — and gates nothing.
 
-    `wallets` + `add` takes a private key, so it needs a human. Everything else the
-    tool edits is Gateway's own symbol/address mapping — deleting a token moves no
-    funds and changes nothing on-chain, so gating it would stop a config edit while
-    leaving the trades it enables ungated.
+    `wallets` was the one gated resource because `add` took a private key; that path
+    is gone (wallets are read-only over MCP, FEAT-065). Everything the tool still
+    edits is Gateway's own symbol/address mapping — deleting a token moves no funds
+    and changes nothing on-chain, so gating it would stop a config edit while leaving
+    the trades it enables ungated.
     """
     fn = _registered_tools()["manage_gateway_config"]
     resources = {
@@ -171,14 +276,8 @@ def test_gateway_config_gates_wallets_and_only_wallets():
         f"gated resource(s) the tool has no such value for: "
         f"{sorted(DANGEROUS_CONFIG_RESOURCES - resources)}"
     )
-    assert DANGEROUS_CONFIG_RESOURCES == {"wallets"}
+    assert DANGEROUS_CONFIG_RESOURCES == set()
 
-    assert is_dangerous_tool_call(
-        {
-            "tool": "manage_gateway_config",
-            "input": {"resource_type": "wallets", "action": "add"},
-        }
-    )
     for resource in resources - DANGEROUS_CONFIG_RESOURCES:
         for action in ("list", "add", "delete"):
             assert not is_dangerous_tool_call(
@@ -193,3 +292,386 @@ def test_gateway_config_fails_closed_on_an_unreadable_resource():
     """SEC-093: a call whose resource_type cannot be read is treated as dangerous."""
     for bad in ({}, {"resource_type": None}, {"resource_type": 7}, {"action": "add"}):
         assert is_dangerous_tool_call({"tool": "manage_gateway_config", "input": bad})
+
+
+# ---------------------------------------------------------------------------
+# control_agent: starting a loop is the third capital path (SEC-275)
+# ---------------------------------------------------------------------------
+
+
+def _control_actions() -> set[str]:
+    """Every action string ``control_agent`` actually accepts.
+
+    Its actions are not a ``Literal`` on the signature — the tool takes a bare
+    ``str`` and resolves it through ``_resolve_action``, which accepts both the
+    short spelling (``start``) and the legacy internal one (``start_agent``).
+    Both reach the same lifecycle call, so the gate has to know both.
+    """
+    from mcp_servers.condor.tools import trading_agent
+
+    accepted = set(trading_agent._CONTROL_ACTIONS)
+    accepted.update(
+        action
+        for action, (owner, _call) in trading_agent._ACTION_OWNER.items()
+        if owner == "control_agent"
+    )
+    return accepted
+
+
+def test_control_agent_is_registered_by_the_condor_server():
+    from mcp_servers.condor import server as condor_server
+
+    assert "control_agent" in DANGEROUS_TOOLS
+    tool = getattr(condor_server, "control_agent", None)
+    assert tool is not None, "control_agent is gated but the condor server drops it"
+    # The ring's *names* live in ``profiles.py`` now (FEAT-091); what the server
+    # actually mounts is the resolved tuple, which is the honest thing to assert.
+    assert (
+        condor_server.control_agent in condor_server.TOOL_PROFILES["agent"]
+    ), "control_agent is gated but no seat mounts it — the gate is dead code"
+
+
+def test_gated_control_actions_exist_on_the_tool():
+    unknown = DANGEROUS_CONTROL_ACTIONS - _control_actions()
+    assert not unknown, f"control_agent has no such action(s): {sorted(unknown)}"
+
+
+def test_both_spellings_of_start_are_gated():
+    """``start`` and its legacy alias ``start_agent`` reach the same live loop."""
+    for action in ("start", "start_agent"):
+        assert is_dangerous_tool_call(
+            {
+                "tool": "mcp__condor__control_agent",
+                "input": {"action": action, "strategy_id": "acme.momentum"},
+            }
+        ), f"control_agent({action}) launches a live loop unconfirmed"
+
+
+def test_control_reads_and_brakes_are_not_gated():
+    """Reads and the brakes stay on the fast path — a prompt there is harmful."""
+    for action in sorted(_control_actions() - DANGEROUS_CONTROL_ACTIONS):
+        assert not is_dangerous_tool_call(
+            {
+                "tool": "mcp__condor__control_agent",
+                "input": {"action": action, "agent_id": "acme.momentum.1"},
+            }
+        ), f"control_agent({action}) needlessly gated"
+
+
+def test_a_dca_ladder_of_numeric_strings_still_states_its_size():
+    """The MCP schema says list[float], but the summary sees the raw wire value.
+
+    pydantic coerces ["100", "100"] happily, so the call is valid — but that
+    coercion happens inside the MCP server, long after the confirmation is
+    rendered. Summing the raw list raised, and a raise inside the permission
+    callback is a silent cancellation of a funds call nobody ever saw.
+    """
+    from handlers.agents.confirmation import format_tool_summary
+
+    summary = format_tool_summary(
+        {
+            "tool": "mcp__mcp-hummingbot__create_dca_executor",
+            "input": {"trading_pair": "SOL-USDC", "amounts_quote": ["100", "100"]},
+        }
+    )
+    assert summary == "Create dca executor on SOL-USDC for 200 quote over 2 levels"
+
+    # The "$100" quote-denominated form risk._quote_amount already accepts.
+    dollars = format_tool_summary(
+        {
+            "tool": "create_dca_executor",
+            "input": {"trading_pair": "SOL-USDC", "amounts_quote": ["$50", 50.0]},
+        }
+    )
+    assert dollars == "Create dca executor on SOL-USDC for 100 quote over 2 levels"
+
+
+def test_an_unreadable_dca_rung_drops_the_total_instead_of_raising():
+    """A rung we cannot parse means we cannot state the size — so we don't.
+
+    The depth is still true and still rendered; the total is omitted rather than
+    partially summed, because a summary that understates what is being approved
+    is worse than one that says less.
+    """
+    from handlers.agents.confirmation import format_tool_summary
+
+    for amounts in ([100, None], ["abc", 1], [{"amount": 1}], ["nan", 1], [1, "inf"]):
+        summary = format_tool_summary(
+            {
+                "tool": "create_dca_executor",
+                "input": {"trading_pair": "SOL-USDC", "amounts_quote": amounts},
+            }
+        )
+        assert "Create dca executor on SOL-USDC" in summary, amounts
+        assert f"over {len(amounts)} levels" in summary, amounts
+        assert "quote" not in summary, f"{amounts!r} rendered a total it cannot know"
+
+
+def test_every_other_summarized_number_survives_arriving_as_a_string():
+    """Amounts are not the only figure a model can send quoted.
+
+    Prices, levels, spreads and percentages ride the same uncoerced wire, so the
+    whole summary path is pinned against string-typed numerics at once.
+    """
+    from handlers.agents.confirmation import format_tool_summary
+
+    for call, expected in (
+        (
+            {
+                "tool": "create_grid_executor",
+                "input": {"trading_pair": "SOL-USDT", "total_amount_quote": "500"},
+            },
+            "Create grid executor on SOL-USDT for 500 quote",
+        ),
+        (
+            {
+                "tool": "create_position_executor",
+                "input": {"trading_pair": "BTC-USDT", "amount": "0.01"},
+            },
+            "Create position executor on BTC-USDT of 0.01",
+        ),
+        (
+            {
+                "tool": "create_lp_executor",
+                "input": {
+                    "trading_pair": "SOL-USDC",
+                    "base_amount": "1.5",
+                    "quote_amount": "25",
+                },
+            },
+            "Create lp executor on SOL-USDC with 1.5 base / 25 quote",
+        ),
+        (
+            {
+                "tool": "place_order",
+                "input": {
+                    "trade_type": "BUY",
+                    "trading_pair": "SOL-USDC",
+                    "amount": "1",
+                    "order_type": "LIMIT",
+                    "price": "100",
+                    "connector_name": "binance",
+                },
+            },
+            "BUY 1 SOL-USDC (LIMIT) @ 100 on binance",
+        ),
+        (
+            {
+                "tool": "execute_swap",
+                "input": {"trading_pair": "SOL-USDC", "side": "BUY", "amount": "1.25"},
+            },
+            "Swap BUY 1.25 SOL-USDC",
+        ),
+        (
+            {
+                "tool": "manage_clmm",
+                "input": {
+                    "action": "open",
+                    "connector": "meteora",
+                    "pool_address": "poolpoolpool",
+                    "lower_price": "180.5",
+                    "upper_price": "220",
+                },
+            },
+            "over 180.5-220",
+        ),
+        (
+            {
+                "tool": "manage_amm",
+                "input": {
+                    "action": "add_liquidity",
+                    "connector": "raydium",
+                    "base_token_amount": "2",
+                    "quote_token_amount": "400",
+                },
+            },
+            "Add 2 base / 400 quote",
+        ),
+        (
+            {
+                "tool": "manage_clmm",
+                "input": {
+                    "action": "remove_liquidity",
+                    "connector": "meteora",
+                    "percentage_to_remove": "50",
+                },
+            },
+            "Remove 50% from",
+        ),
+        (
+            {
+                "tool": "mcp__condor__control_agent",
+                "input": {
+                    "action": "start",
+                    "strategy_id": "acme.momentum",
+                    "config": {"total_amount_quote": "500"},
+                },
+            },
+            "sized 500 quote",
+        ),
+    ):
+        summary = format_tool_summary(call)
+        assert expected in summary, f"{call['tool']} rendered {summary!r}"
+        assert summary != call["tool"]
+
+
+def test_control_agent_fails_closed_on_an_unreadable_action():
+    """SEC-093: a call we cannot classify is a call that goes to a human."""
+    for bad in ({}, {"action": None}, {"action": 7}, {"action": ""}, "not json", None):
+        assert is_dangerous_tool_call(
+            {"tool": "mcp__condor__control_agent", "input": bad}
+        ), f"{bad!r} slipped past the gate"
+
+
+def test_a_gated_start_names_the_strategy_it_will_run():
+    """The prompt must show the loop being started, not an opaque config blob."""
+    from handlers.agents.confirmation import format_tool_summary
+
+    summary = format_tool_summary(
+        {
+            "tool": "mcp__condor__control_agent",
+            "input": {
+                "action": "start",
+                "strategy_id": "acme.momentum",
+                "config": {"execution_mode": "loop", "total_amount_quote": 500},
+            },
+        }
+    )
+    assert "acme.momentum" in summary
+    assert "loop" in summary
+    assert "500" in summary
+    assert summary != "control_agent"
+
+    # A start with no overrides still names its strategy rather than rendering "?"
+    bare = format_tool_summary(
+        {
+            "tool": "control_agent",
+            "input": {"action": "start", "strategy_id": "acme.momentum"},
+        }
+    )
+    assert "acme.momentum" in bare
+
+
+def test_the_tick_seat_cannot_reach_control_agent():
+    """A tick must not be able to launch another loop; it never mounts the tool."""
+    from mcp_servers.condor import server as condor_server
+
+    assert condor_server.control_agent not in condor_server.TOOL_PROFILES["tick"]
+
+
+# ---------------------------------------------------------------------------
+# The log's predicate: what changed the world (FEAT-097)
+# ---------------------------------------------------------------------------
+#
+# ``is_mutating_tool_call`` asks a different question than the gate over the
+# same sets. These pin the two places it must differ (the ungated brakes, the
+# ungated config edits), the fail-open rule, and — the load-bearing one — that
+# it is a superset of the gate, so a newly gated action can never become an
+# unrecorded one.
+
+
+def _call(tool: str, **args) -> dict:
+    return {"tool": tool, "input": args}
+
+
+def test_a_create_and_a_stop_are_recorded():
+    for tool in CREATE_EXECUTOR_TOOLS:
+        assert is_mutating_tool_call(_call(tool, trading_pair="SOL-USDC"))
+    assert is_mutating_tool_call(_call("stop_executor", executor_id="abc"))
+    assert is_mutating_tool_call(_call("place_order", trading_pair="SOL-USDC"))
+    assert is_mutating_tool_call(_call("execute_swap", trading_pair="SOL-USDC"))
+
+
+def test_a_bot_deploy_is_recorded_and_a_bot_status_is_not():
+    assert is_mutating_tool_call(_call("manage_bots", action="deploy", bot_name="b"))
+    assert not is_mutating_tool_call(
+        _call("manage_bots", action="status", bot_name="b")
+    )
+    assert not is_mutating_tool_call(_call("manage_bots", action="logs", bot_name="b"))
+
+
+def test_the_ungated_brakes_are_recorded():
+    """The gate lets a stop through; the log must still say it happened."""
+    for action in ("stop", "pause", "resume", "shutdown", "stop_agent"):
+        call = _call("control_agent", action=action, agent_id="a.b_1")
+        assert not is_dangerous_tool_call(call), f"{action} became gated"
+        assert is_mutating_tool_call(call), f"{action} went unrecorded"
+    assert not is_mutating_tool_call(_call("control_agent", action="list"))
+    assert not is_mutating_tool_call(_call("control_agent", action="get_state"))
+
+
+def test_an_ungated_config_edit_is_recorded():
+    """``DANGEROUS_CONFIG_RESOURCES`` is empty on purpose; the log is not."""
+    for action in ("add", "delete", "update", "save"):
+        call = _call("manage_gateway_config", action=action, resource_type="tokens")
+        assert not is_dangerous_tool_call(call)
+        assert is_mutating_tool_call(call)
+    for action in ("list", "get"):
+        assert not is_mutating_tool_call(
+            _call("manage_gateway_config", action=action, resource_type="tokens")
+        )
+
+
+def test_the_log_fails_open_where_the_gate_fails_closed():
+    """An action nobody has heard of is recorded, not dropped."""
+    assert is_mutating_tool_call({"tool": "manage_bots", "input": None})
+    assert is_mutating_tool_call({"tool": "manage_bots", "input": "not json"})
+    assert is_mutating_tool_call(_call("manage_bots", bot_name="b"))
+    # A dispatch tool that grew an action neither set names.
+    assert is_mutating_tool_call(_call("manage_bots", action="teleport"))
+    assert is_mutating_tool_call(_call("manage_clmm", action="rebalance"))
+    assert is_mutating_tool_call(_call("control_agent", action="reincarnate"))
+    assert is_mutating_tool_call(_call("manage_gateway_config", action="mutate"))
+
+
+def test_a_read_only_tool_is_not_recorded():
+    for tool in ("get_prices", "list_executors", "quote_swap", "manage_controllers"):
+        assert not is_mutating_tool_call(_call(tool, action="list"))
+
+
+def _every_plausible_call() -> list[dict]:
+    """One call per (tool, action/resource) the registry accepts, plus the junk.
+
+    Built from the tools themselves rather than a hand-written list, so an
+    action added to a gated tool lands in the subset assertion below on its own.
+    """
+    calls: list[dict] = []
+    for tool in ("manage_bots", "manage_clmm", "manage_amm", "manage_gateway_config"):
+        for action in _action_literals(tool):
+            calls.append(_call(tool, action=action, resource_type="tokens"))
+            calls.append(_call(tool, action=action))
+    for resource in _action_literals("manage_gateway_config"):
+        calls.append(_call("manage_gateway_config", resource_type=resource))
+    for action in _control_actions():
+        calls.append(_call("control_agent", action=action, agent_id="a.b_1"))
+    for tool in sorted(DANGEROUS_TOOLS | {"manage_bots"}):
+        calls.append(_call(tool))
+        calls.append({"tool": tool, "input": None})
+        calls.append({"tool": tool, "input": {"action": None}})
+        calls.append({"tool": f"mcp__mcp-hummingbot__{tool}", "input": {}})
+    return calls
+
+
+def test_everything_the_gate_stops_the_log_records():
+    """``dangerous ⊆ mutating``, over every call either predicate can see.
+
+    The whole risk of having two predicates over one set of tools is drift. A
+    call that needs a human and leaves no trace is the drift that matters: the
+    band would confidently show the *previous* deed while a human was approving
+    a new one.
+    """
+    for call in _every_plausible_call():
+        if is_dangerous_tool_call(call):
+            assert is_mutating_tool_call(call), f"gated but unrecorded: {call}"
+
+
+def test_every_liquidity_moving_action_is_recorded():
+    """The log twin of :func:`test_every_liquidity_moving_action_is_gated`."""
+    read_only = {"pool_info", "position_info", "positions_owned", "quote_liquidity"}
+    for tool in ("manage_clmm", "manage_amm", "manage_bots"):
+        for action in (
+            _action_literals(tool) - read_only - {"status", "logs", "get_config"}
+        ):
+            assert is_mutating_tool_call(
+                _call(tool, action=action)
+            ), f"{tool}:{action} writes but is not recorded"

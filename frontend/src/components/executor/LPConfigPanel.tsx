@@ -10,7 +10,6 @@ import {
   SelectField,
   ToggleField,
   ValidationMessages,
-  type FieldDispatch,
 } from "./fields";
 import type { ExecutorValidation } from "./types";
 import type { DexPoolInfo } from "@/lib/api";
@@ -117,8 +116,6 @@ export function LPConfigPanel({
   quoteSymbol,
   lockedPoolAddress,
 }: Props) {
-  const d = dispatch as FieldDispatch;
-
   // A DEX pair's chart can be blank (no candles for the pool) while the pool's own
   // price is known, so the resolved pool is a second source for the anchor.
   const price = currentPrice && currentPrice > 0 ? currentPrice : pool?.current_price ?? null;
@@ -199,7 +196,7 @@ export function LPConfigPanel({
               type="text"
               value={state.pool_address}
               onChange={(e) =>
-                d({ type: "SET_FIELD", field: "pool_address", value: e.target.value.trim() })
+                dispatch({ type: "SET_FIELD", field: "pool_address", value: e.target.value.trim() })
               }
               placeholder="Pool contract address"
               spellCheck={false}
@@ -210,7 +207,7 @@ export function LPConfigPanel({
             label="LP Provider"
             value={state.lp_provider}
             field="lp_provider"
-            dispatch={d}
+            dispatch={dispatch}
             options={PROVIDER_OPTIONS}
           />
         </div>
@@ -274,7 +271,7 @@ export function LPConfigPanel({
           value={state.upper_price}
           field="upper_price"
           activePickField={state.activePickField}
-          dispatch={d}
+          dispatch={dispatch}
           valid={state.upper_price > state.lower_price}
         />
         <PriceField
@@ -282,7 +279,7 @@ export function LPConfigPanel({
           value={state.lower_price}
           field="lower_price"
           activePickField={state.activePickField}
-          dispatch={d}
+          dispatch={dispatch}
           valid={state.lower_price > 0 && state.lower_price < state.upper_price}
         />
       </div>
@@ -295,7 +292,7 @@ export function LPConfigPanel({
           value={state.upper_limit_price}
           field="upper_limit_price"
           activePickField={state.activePickField}
-          dispatch={d}
+          dispatch={dispatch}
           valid={state.upper_limit_price > state.upper_price}
           hint="Close when price rises to this level"
         />
@@ -304,7 +301,7 @@ export function LPConfigPanel({
           value={state.lower_limit_price}
           field="lower_limit_price"
           activePickField={state.activePickField}
-          dispatch={d}
+          dispatch={dispatch}
           valid={
             state.lower_limit_price > 0 && state.lower_limit_price < state.lower_price
           }
@@ -323,7 +320,7 @@ export function LPConfigPanel({
             label={`Base Amount (${baseAsset})`}
             value={state.base_amount}
             field="base_amount"
-            dispatch={d}
+            dispatch={dispatch}
             step={0.001}
             min={0}
           />
@@ -331,7 +328,7 @@ export function LPConfigPanel({
             available={baseAvailable}
             symbol={baseAsset}
             onPick={(pct) =>
-              d({ type: "SET_FIELD", field: "base_amount", value: sizeFrom(baseAvailable, pct) })
+              dispatch({ type: "SET_FIELD", field: "base_amount", value: sizeFrom(baseAvailable, pct) })
             }
           />
         </div>
@@ -340,7 +337,7 @@ export function LPConfigPanel({
             label={`Quote Amount (${quoteAsset})`}
             value={state.quote_amount}
             field="quote_amount"
-            dispatch={d}
+            dispatch={dispatch}
             step={0.001}
             min={0}
           />
@@ -348,7 +345,7 @@ export function LPConfigPanel({
             available={quoteAvailable}
             symbol={quoteAsset}
             onPick={(pct) =>
-              d({ type: "SET_FIELD", field: "quote_amount", value: sizeFrom(quoteAvailable, pct) })
+              dispatch({ type: "SET_FIELD", field: "quote_amount", value: sizeFrom(quoteAvailable, pct) })
             }
           />
         </div>
@@ -361,7 +358,7 @@ export function LPConfigPanel({
           label="Keep Position"
           value={state.keep_position}
           field="keep_position"
-          dispatch={d}
+          dispatch={dispatch}
         />
         <p className="text-[10px] text-[var(--color-text-muted)]">
           On close, keep the net token change as a spot position instead of swapping
@@ -376,14 +373,14 @@ export function LPConfigPanel({
         <AdvancedSection
           open={state.showAdvanced}
           onToggle={() =>
-            d({ type: "SET_FIELD", field: "showAdvanced", value: !state.showAdvanced })
+            dispatch({ type: "SET_FIELD", field: "showAdvanced", value: !state.showAdvanced })
           }
         >
           <SelectField
             label="Meteora Strategy"
             value={state.strategy_type}
             field="strategy_type"
-            dispatch={d}
+            dispatch={dispatch}
             options={STRATEGY_TYPE_OPTIONS}
           />
         </AdvancedSection>

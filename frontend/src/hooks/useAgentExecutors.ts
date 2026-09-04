@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 
 import { useCondorWebSocket } from "@/hooks/useWebSocket";
 import { type ExecutorInfo, api } from "@/lib/api";
+import { executorsQuery } from "@/lib/queryClient";
 
 /**
  * Hook to get real-time executor data for an agent by subscribing to the
@@ -19,10 +20,10 @@ export function useAgentExecutors(
   const channels = useMemo(() => (channel ? [channel] : []), [channel]);
   useCondorWebSocket(channels, serverName ?? null);
 
-  // Read from React Query cache — the WS hook in useWebSocket.ts already
-  // updates ["executors", server, ""] on every WS message
+  // Read from React Query cache — the shared socket already pushes every
+  // `executors:<server>` frame into this exact (unfiltered) entry.
   const { data: allExecutors, isLoading } = useQuery({
-    queryKey: ["executors", serverName, ""],
+    queryKey: executorsQuery(serverName).queryKey,
     queryFn: () => api.getExecutors(serverName!),
     enabled: !!serverName,
     refetchInterval: 10000, // Fallback polling

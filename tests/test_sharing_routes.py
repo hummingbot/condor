@@ -17,6 +17,7 @@ for the admin check.
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 
 import pytest
@@ -98,15 +99,79 @@ def test_a_stranger_reaches_nothing(chat):
 
 
 def test_an_unknown_conversation_is_a_404(chat):
-    with pytest.raises(HTTPException) as raised:
-        run(routes.preview_share("nosuchid", user=OWNER))
-    assert raised.value.status_code == 404
+    """On every verb, not just preview. The three of them do their work in a
+    worker thread now (PERF-235), and an exception that does not come back
+    across that boundary would surface as a 500 instead."""
+    for verb in (
+        routes.preview_share,
+        routes.submit_share,
+        routes.unshare_conversation,
+    ):
+        with pytest.raises(HTTPException) as raised:
+            run(verb("nosuchid", user=OWNER))
+        assert raised.value.status_code == 404, verb.__name__
 
 
 def test_a_malformed_id_is_a_400(chat):
-    with pytest.raises(HTTPException) as raised:
-        run(routes.preview_share("../../etc/passwd", user=OWNER))
-    assert raised.value.status_code == 400
+    for verb in (
+        routes.preview_share,
+        routes.submit_share,
+        routes.unshare_conversation,
+    ):
+        with pytest.raises(HTTPException) as raised:
+            run(verb("../../etc/passwd", user=OWNER))
+        assert raised.value.status_code == 400, verb.__name__
+
+
+# ── The shared event loop ────────────────────────────────────────────────
+
+
+def test_a_slow_scrub_does_not_stop_the_rest_of_the_install(chat, monkeypatch):
+    """Acceptance criterion (PERF-235): a request that scrubs a transcript must
+    not hold the event loop while it does it.
+
+    ``main.py`` runs uvicorn as a task beside PTB's polling and job queue, so a
+    scrub on the loop is not slow for its caller — it is a stopped bot for
+    everyone. The gate here proves the overlap rather than timing it: the slow
+    scrub is released *by the second request*, so the first can only finish if
+    the second ran while it was still in flight. Inline on the loop the second
+    request could not start, the wait would expire instead, and both assertions
+    below would fail.
+    """
+    from condor.sharing import scrub as scrub_module
+
+    started = threading.Event()
+    release = threading.Event()
+    order: list[str] = []
+    freed: list[bool] = []
+    real_scrubber = scrub_module.scrubber
+
+    def slow_scrubber(*args, **kwargs):
+        started.set()
+        freed.append(release.wait(5))
+        order.append("first")
+        return real_scrubber(*args, **kwargs)
+
+    # The build's redaction seam: since PERF-284 it is the per-share
+    # ``Scrubber`` that ``wire.bound`` calls turn by turn, not a whole-transcript
+    # ``scrub``. What is being gated is unchanged — the slow part of a build must
+    # not run on the loop.
+    monkeypatch.setattr(scrub_module, "scrubber", slow_scrubber)
+
+    async def drive():
+        first = asyncio.create_task(routes.preview_share(chat.id, user=OWNER))
+        await asyncio.to_thread(started.wait, 5)  # the scrub is now in flight
+        settings = await routes.get_sharing_settings(user=OWNER)
+        order.append("second")
+        release.set()
+        return settings, await first
+
+    settings, preview = run(drive())
+
+    assert freed == [True], "the scrub timed out instead of being released"
+    assert order == ["second", "first"]
+    assert settings.pending == 0
+    assert preview["turns"]
 
 
 # ── The vetoes ───────────────────────────────────────────────────────────
@@ -157,6 +222,25 @@ def test_settings_are_readable_by_every_seat(chat):
     admins = run(routes.get_sharing_settings(user=ADMIN))
     assert theirs.enabled and admins.enabled
     assert theirs.can_change is False and admins.can_change is True
+
+
+def test_settings_count_the_queue_without_reading_it(chat, monkeypatch):
+    """Acceptance criterion (PERF-237): ``pending`` is the number
+    ``len(outbox.pending())`` would give, arrived at without parsing a single
+    queued transcript — this runs on the event loop, and a queued record is a
+    whole conversation."""
+    run(routes.submit_share(chat.id, user=OWNER))
+    expected = len(outbox.pending())
+
+    parsed: list[str] = []
+    real = outbox.json.loads
+    monkeypatch.setattr(
+        outbox.json, "loads", lambda text, *a, **k: (parsed.append(text), real(text))[1]
+    )
+    settings = run(routes.get_sharing_settings(user=OWNER))
+
+    assert settings.pending == expected == 1
+    assert parsed == []
 
 
 # ── Unsharing ────────────────────────────────────────────────────────────
@@ -225,6 +309,31 @@ def test_the_preference_starts_off_and_is_the_callers_own(chat):
     there is no id to name one, and a stranger sees their own default."""
     assert run(routes.get_preference(user=OWNER)).state == consent.OFF
     assert run(routes.get_preference(user=STRANGER)).state == consent.OFF
+
+
+def test_the_preference_never_reads_the_conversation_store(chat, monkeypatch):
+    """The answer is three consent lookups and a timestamp. It used to also
+    walk the whole store to count shares, for a number no caller read
+    (PERF-239); a store read that explodes must not be able to reach this
+    route — nor the PUT, which answers by calling it."""
+
+    def boom(*args, **kwargs):
+        raise AssertionError("the preference route read the conversation store")
+
+    monkeypatch.setattr(conversations, "list_conversations", boom)
+
+    answer = run(routes.get_preference(user=OWNER))
+    assert answer.state == consent.OFF
+    assert answer.allowed is True
+    assert answer.sweeping is False
+
+    stored = run(
+        routes.set_preference(
+            routes.SharingPreferenceUpdate(state="always"), user=OWNER
+        )
+    )
+    assert stored.state == consent.ALWAYS
+    assert stored.sweeping
 
 
 def test_choosing_always_records_the_moment_and_starts_sweeping(chat):

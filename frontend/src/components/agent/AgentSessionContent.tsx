@@ -11,16 +11,17 @@ import { useCallback, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-import { ExecutorChart, type SnapshotBubble } from "@/components/charts/ExecutorChart";
+import { ExecutorChart } from "@/components/charts/ExecutorChart";
 import { PairLabel } from "@/components/executor/PairLabel";
 import { AgentPnlChart, metricsToDataPoints } from "@/components/agent/AgentPnlChart";
 import { useAgentExecutors } from "@/hooks/useAgentExecutors";
+import { snapshotQueryOptions, useSnapshotBubbles } from "@/hooks/useSnapshotBubbles";
 import { type AgentExecutorRow, type AgentPerformance, type ExecutorInfo, api } from "@/lib/api";
 import { groupExecutorsByMarket } from "@/lib/executor-overlays";
 import { type ParsedJournal, type ParsedSnapshot, parseSnapshot } from "@/lib/parse-agent";
-import { formatCompactUsd, formatCurrencyPnl, toolCallState } from "@/lib/formatters";
+import { formatCompactUsd, formatCurrencyPnl, pnlTextClass, toolCallState } from "@/lib/formatters";
 import { useRates } from "@/hooks/useRates";
-import { DetailPanel, ExecutorTable, type SortDir, type SortKey } from "@/components/executor/ExecutorTable";
+import { DetailPanel, ExecutorTable, type SortDir, type SortKey } from "@/components/perf/ExecutorTable";
 
 // ── Helper ──
 
@@ -86,7 +87,15 @@ export function SessionKpis({
   onOpenReport,
 }: {
   perf?: AgentPerformance | null;
-  summary?: { status: string; lastTick: number; lastAction: string };
+  /**
+   * The run's own headline facts — its status and how far it has ticked.
+   *
+   * It carried the last action too, truncated to one line, until the answer
+   * stack put that sentence *whole* six pixels below this strip (FEAT-119).
+   * Optional rather than removed from `ParsedJournal`'s summary, so a caller
+   * can go on handing this the summary it already has.
+   */
+  summary?: { status: string; lastTick: number; lastAction?: string };
   hasReport?: boolean;
   onOpenReport?: () => void;
 }) {
@@ -136,7 +145,7 @@ export function SessionKpis({
         <Kpi
           label="Total PnL"
           value={formatCurrencyPnl(total)}
-          className={total >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]"}
+          className={pnlTextClass(total)}
         />
         <Kpi label="Realized" value={formatCurrencyPnl(perf?.realized_pnl ?? 0)} />
         <Kpi label="Unrealized" value={formatCurrencyPnl(perf?.unrealized_pnl ?? 0)} />
@@ -161,12 +170,6 @@ export function SessionKpis({
           </button>
         )}
       </div>
-
-      {summary?.lastAction && (
-        <p className="px-1 text-xs text-[var(--color-text-muted)]">
-          <span className="text-[10px] uppercase tracking-wider">Last action</span> — {summary.lastAction}
-        </p>
-      )}
     </div>
   );
 }
@@ -220,7 +223,7 @@ export function SessionBots({ perf }: { perf?: AgentPerformance | null }) {
                 >
                   {live ? "running" : "stopped"}
                 </span>
-                <span className={`ml-auto font-mono text-xs ${realized >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]"}`}>
+                <span className={`ml-auto font-mono text-xs ${pnlTextClass(realized)}`}>
                   {formatCurrencyPnl(realized)}
                 </span>
                 <span className="font-mono text-[10px] text-[var(--color-text-muted)]">{formatCompactUsd(volume)} vol</span>
@@ -507,42 +510,9 @@ export function SessionExecutors({
     queryFn: () => api.getSessionSnapshots(slug, sslug, sessionNum),
   });
 
-  // Fetch each snapshot content for agent response previews
-  const snapshotSummaries = snapshotsData?.snapshots ?? [];
-  const snapshotQueries = useQuery({
-    queryKey: ["strategy", slug, sslug, "session", sessionNum, "snapshot-contents", snapshotSummaries.map((s) => s.tick).join(",")],
-    queryFn: async () => {
-      // Fetch all snapshots concurrently: Promise.all preserves input order, so
-      // the result stays sorted by tick while latency collapses to the slowest
-      // request instead of the sum of all of them.
-      return Promise.all(
-        snapshotSummaries.map(async (snap): Promise<SnapshotBubble> => {
-          try {
-            const data = await api.getSnapshot(slug, sslug, sessionNum, snap.tick);
-            if (data?.content) {
-              const parsed = parseSnapshot(data.content);
-              return {
-                tick: snap.tick,
-                timestamp: snap.timestamp,
-                agentResponse: parsed.agentResponse,
-                toolCallCount: parsed.toolCalls.length,
-              };
-            }
-            return { tick: snap.tick, timestamp: snap.timestamp };
-          } catch {
-            return { tick: snap.tick, timestamp: snap.timestamp };
-          }
-        }),
-      );
-    },
-    enabled: snapshotSummaries.length > 0,
-    staleTime: 60000,
-  });
-
-  const snapshotBubbles = snapshotQueries.data ?? snapshotSummaries.map((s) => ({
-    tick: s.tick,
-    timestamp: s.timestamp,
-  }));
+  // One query per snapshot body, shared with SnapshotDetail — see useSnapshotBubbles.
+  const snapshotSummaries = useMemo(() => snapshotsData?.snapshots ?? [], [snapshotsData]);
+  const snapshotBubbles = useSnapshotBubbles(slug, sslug, sessionNum, snapshotSummaries);
 
   // Group executors by connector:pair for charts
   const chartGroups = useMemo(
@@ -654,7 +624,7 @@ export function SessionExecutors({
                       <td className="py-2 pr-3 text-right font-mono text-[var(--color-text)]">{Math.abs(amount).toFixed(4)}</td>
                       <td className="py-2 pr-3 text-right font-mono text-[var(--color-text-muted)]">${entry.toFixed(2)}</td>
                       <td className="py-2 pr-3 text-right font-mono text-[var(--color-text)]">${current.toFixed(2)}</td>
-                      <td className={`py-2 pr-3 text-right font-mono ${upnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]"}`}>
+                      <td className={`py-2 pr-3 text-right font-mono ${pnlTextClass(upnl)}`}>
                         {formatCurrencyPnl(upnl)}
                       </td>
                       <td className="py-2 text-right font-mono text-[var(--color-text-muted)]">{p.leverage ? `${p.leverage}x` : "—"}</td>
@@ -681,7 +651,7 @@ export function SessionExecutors({
                   className="text-xs font-medium text-[var(--color-text)]"
                 />
                 <span className="text-[10px] text-[var(--color-text-muted)]">{group[0].connector}</span>
-                <span className={`ml-auto font-mono text-xs ${pairPnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]"}`}>
+                <span className={`ml-auto font-mono text-xs ${pnlTextClass(pairPnl)}`}>
                   {formatCurrencyPnl(pairPnl)}
                 </span>
                 <span className="text-[10px] text-[var(--color-text-muted)]">{group.length} exec</span>
@@ -733,64 +703,18 @@ export function SessionExecutors({
   );
 }
 
-// ── Session Snapshots ──
-
-export function SessionSnapshots({ slug, sslug, sessionNum, initialTick }: { slug: string; sslug: string; sessionNum: number; initialTick?: number | null }) {
-  const [selectedTick, setSelectedTick] = useState<number>(initialTick ?? 0);
-
-  const { data: snapshotsData } = useQuery({
-    queryKey: ["strategy", slug, sslug, "session", sessionNum, "snapshots"],
-    queryFn: () => api.getSessionSnapshots(slug, sslug, sessionNum),
-  });
-
-  const snapshots = snapshotsData?.snapshots || [];
-
-  if (snapshots.length === 0) {
-    return <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">No snapshots yet.</p>;
-  }
-
-  return (
-    <div className="flex flex-col gap-4 lg:flex-row">
-      {/* Snapshot list */}
-      <div className="w-full shrink-0 lg:w-72">
-        <div className="max-h-[600px] space-y-1 overflow-y-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-2">
-          {snapshots.map((snap) => (
-            <button
-              key={snap.tick}
-              onClick={() => setSelectedTick(snap.tick)}
-              className={`flex w-full items-center justify-between rounded-md px-3 py-2 text-left transition-colors ${
-                selectedTick === snap.tick
-                  ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
-                  : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
-              }`}
-            >
-              <div className="flex items-center gap-2">
-                <span className="font-mono text-xs font-bold">#{snap.tick}</span>
-                <span className="text-[10px]">{snap.timestamp}</span>
-              </div>
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Snapshot detail */}
-      <div className="min-w-0 flex-1">
-        {selectedTick > 0 ? (
-          <SnapshotDetail slug={slug} sslug={sslug} sessionNum={sessionNum} tick={selectedTick} />
-        ) : (
-          <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">Select a snapshot to view details.</p>
-        )}
-      </div>
-    </div>
-  );
-}
-
 // ── Snapshot Detail ──
+//
+// One tick: what it saw, what it decided, what it called. This used to be
+// private behind `SessionSnapshots`, a picker column plus this detail, reachable
+// only three clicks deep inside an overlay with no URL. The Lab's tick spine is
+// that picker, so the pair is gone and this is exported (FEAT-099).
 
-function SnapshotDetail({ slug, sslug, sessionNum, tick }: { slug: string; sslug: string; sessionNum: number; tick: number }) {
+export function SnapshotDetail({ slug, sslug, sessionNum, tick }: { slug: string; sslug: string; sessionNum: number; tick: number }) {
+  // Same options the marker previews use, so a tick already previewed renders
+  // straight from cache — no second request, no spinner.
   const { data, isLoading } = useQuery({
-    queryKey: ["strategy", slug, sslug, "session", sessionNum, "snapshot", tick],
-    queryFn: () => api.getSnapshot(slug, sslug, sessionNum, tick),
+    ...snapshotQueryOptions(slug, sslug, sessionNum, tick),
     enabled: tick > 0,
   });
 
@@ -811,6 +735,18 @@ function SnapshotDetail({ slug, sslug, sessionNum, tick }: { slug: string; sslug
     return <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">Select a snapshot to view details.</p>;
   }
 
+  return <SnapshotBody parsed={parsed} />;
+}
+
+/**
+ * The rendering half of a snapshot, over an already-parsed one.
+ *
+ * Split out because a dry run is the *same document* under another name: an
+ * `experiment_N.md` is one tick, parsed by the same `parseSnapshot`, and the
+ * Lab renders it here rather than keeping a second copy of this layout the way
+ * `SessionReviewer` did.
+ */
+export function SnapshotBody({ parsed }: { parsed: ParsedSnapshot }) {
   return (
     <div className="space-y-4">
       {/* Header */}
@@ -824,12 +760,23 @@ function SnapshotDetail({ slug, sslug, sessionNum, tick }: { slug: string; sslug
         <SystemPromptCard prompt={parsed.systemPrompt} charCount={parsed.systemPromptLength} />
       )}
 
-      {/* Agent Response */}
+      {/* Agent Response.
+          Through the chat's own markdown renderer (FEAT-103), not printed as
+          plain text. What the model writes here *is* markdown — the parser's
+          own comment two files over says so — so `**bold**` and `| tables |`
+          were reaching the reader as literal characters, and streamed chunks
+          read glued together. It is the text the whole workspace exists to
+          surface, and `chat-markdown` is already the house style for it. */}
       {parsed.agentResponse && (
         <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-5">
           <h4 className="mb-3 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">Agent Response</h4>
-          <div className="whitespace-pre-wrap text-sm leading-relaxed text-[var(--color-text)]">
-            {parsed.agentResponse}
+          <div
+            data-agent-response
+            className="chat-markdown text-sm leading-relaxed text-[var(--color-text)]"
+          >
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+              {parsed.agentResponse}
+            </ReactMarkdown>
           </div>
         </div>
       )}

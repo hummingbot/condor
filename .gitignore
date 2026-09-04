@@ -180,7 +180,6 @@ data/
 # Per-assistant runtime stores (FEAT-003): definitions are committed, stores are not.
 # assistants/{name}/AGENT.md is tracked; assistants/{name}/store/ is runtime.
 assistants/*/store/
-agents/*/store/
 
 # Node
 node_modules/
@@ -197,14 +196,14 @@ node_modules/
 # Pre-FEAT-051 location; kept ignored so an install mid-migration stays clean.
 condor/.runtime/
 
-# Agent runtime artifacts: learnings, session journals and dry-run experiments
-# (not committed). Delegation records moved to .condor/users/{id}/delegations/
-# in FEAT-051; the pattern stays so an install that still holds the unowned
-# legacy ones does not commit them.
-agents/**/learnings.md
-agents/**/sessions/
-agents/**/dry_runs/
-agents/**/delegations/
+# Nothing under agents/ is ignored any more, and that is the point (FEAT-115).
+# It used to need six patterns because the product wrote its stores, learnings,
+# session journals, dry runs and proposals into the same tree git tracks. They
+# all live under .condor/agents/ now, along with everything else this install
+# writes, so agents/ is a library the repo ships and a dirty file in it means
+# somebody edited the library on purpose. The boot migration (.migrated-v2)
+# moves an existing install's copies across; a pattern kept here would only
+# hide it having failed.
 
 # Editor and AI-assistant workspace config: local to each developer's setup,
 # not repo policy. .claude/settings.local.json is already covered above.
@@ -217,6 +216,10 @@ frontend/.claude/
 # Playwright MCP scratch: page snapshots, screenshots and console logs written
 # during frontend debugging sessions. Pure session artifacts.
 .playwright-mcp/
+
+# Screenshots dropped at the repo root by a debugging session. The dashboard's
+# own images live under frontend/; nothing at the root is ever referenced.
+/*.png
 
 # Working notes on Gateway defects, edited by more than one session at a time.
 # Tracking it made every `git add -A` sweep whichever session was mid-edit into the other

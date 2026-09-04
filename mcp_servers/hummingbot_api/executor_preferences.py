@@ -191,23 +191,6 @@ class ExecutorPreferencesManager:
 
         return defaults
 
-    def get_executor_guide(self, executor_type: str) -> str | None:
-        """Load the documentation guide for a specific executor type from a markdown file.
-
-        Reads `hummingbot_mcp/guides/{executor_type}.md` and returns its content.
-
-        Args:
-            executor_type: The executor type (e.g., 'grid_executor')
-
-        Returns:
-            The markdown content of the guide, or None if the file doesn't exist.
-        """
-        guides_dir = Path(__file__).parent / "guides"
-        guide_file = guides_dir / f"{executor_type}.md"
-        if guide_file.exists():
-            return guide_file.read_text().strip()
-        return None
-
     def get_defaults(self, executor_type: str) -> dict[str, Any]:
         """Get default configuration for an executor type.
 

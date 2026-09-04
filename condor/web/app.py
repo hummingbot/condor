@@ -29,6 +29,7 @@ from condor.web.routes import (
     notifications,
     portfolio,
     positions,
+    push,
     reports,
     routines,
     servers,
@@ -36,6 +37,7 @@ from condor.web.routes import (
     settings,
     sharing,
     transcribe,
+    updates,
     ws,
 )
 
@@ -55,6 +57,28 @@ def _build_cors_origins() -> list[str]:
         if origin not in origins:
             origins.append(origin)
     return origins
+
+
+# The SPA shell and every unhashed file beside it: revalidate on each load.
+# Cheap — a 304 — and the only thing that guarantees a refresh is looking at the
+# build that is actually installed.
+_NO_CACHE = {"Cache-Control": "no-cache, must-revalidate"}
+
+
+class _HashedAssets(StaticFiles):
+    """``/assets``, whose filenames carry a content hash.
+
+    A hash in the name makes the bytes immutable by construction, so they are
+    cacheable forever: a new build writes new names, and the shell that names
+    them is never cached (see ``_NO_CACHE``). Left to browser heuristics the two
+    could drift apart — a fresh shell asking for chunks the cache answers from a
+    build ago — which is a version skew nobody can see.
+    """
+
+    def file_response(self, *args, **kwargs):  # type: ignore[override]
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return response
 
 
 def create_app() -> FastAPI:
@@ -90,6 +114,9 @@ def create_app() -> FastAPI:
     app.include_router(dex.router, prefix="/api/v1")
     app.include_router(meta.router, prefix="/api/v1")
     app.include_router(notifications.router, prefix="/api/v1")
+    # Importing this module registered a Web Push sink on the notification
+    # bus (FEAT-083), the same way ``chat_ws`` registers the socket one.
+    app.include_router(push.router, prefix="/api/v1")
     app.include_router(ws.router, prefix="/api/v1")
     app.include_router(agents.router, prefix="/api/v1")
     app.include_router(routines.router, prefix="/api/v1")
@@ -102,12 +129,17 @@ def create_app() -> FastAPI:
     app.include_router(conversations.router, prefix="/api/v1")
     app.include_router(sharing.router, prefix="/api/v1")
     app.include_router(transcribe.router, prefix="/api/v1")
+    app.include_router(updates.router, prefix="/api/v1")
 
     # Report bodies are NOT mounted here. They used to be served by an
     # unauthenticated ``/reports/{filename:path}`` route, which made every
     # report — portfolio value, PnL, positions — readable by anyone who could
     # guess a filename. They now go through the authenticated
     # ``GET /api/v1/reports/{report_id}/html`` handler instead (SEC-112).
+    # The one report-adjacent thing served without auth is the vendored plotly
+    # bundle, at ``GET /api/v1/reports/assets/{filename}`` — library bytes, not
+    # content, behind a fixed allowlist (PERF-267). It sits under ``/api/`` so
+    # the arm below already turns a miss into a real 404 instead of index.html.
 
     # ── Serve built frontend (production) ──
     dist = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
@@ -115,7 +147,9 @@ def create_app() -> FastAPI:
         index_html = dist / "index.html"
         dist_root = dist.resolve()
         app.mount(
-            "/assets", StaticFiles(directory=str(dist / "assets")), name="static-assets"
+            "/assets",
+            _HashedAssets(directory=str(dist / "assets")),
+            name="static-assets",
         )
 
         @app.get("/{full_path:path}")
@@ -149,7 +183,12 @@ def create_app() -> FastAPI:
                     and candidate.is_relative_to(dist_root)
                     and candidate.is_file()
                 ):
-                    return FileResponse(candidate)
-            return FileResponse(index_html)
+                    return FileResponse(candidate, headers=_NO_CACHE)
+            # Never from cache without asking. The shell names the hashed bundle
+            # the whole app is, so a browser that reuses a stale one reuses a
+            # stale *build*: a reader who refreshed the chat got a UI from
+            # before the routine library existed — its "Browse all" gone and
+            # `/routines` back in the nav — with no way to tell it was old.
+            return FileResponse(index_html, headers=_NO_CACHE)
 
     return app

@@ -32,6 +32,7 @@ import json
 import secrets
 import time
 import uuid
+from collections.abc import Callable
 
 from condor.runtime.conversations import TurnEntry
 
@@ -67,12 +68,20 @@ def token_hash(token: str) -> str:
     return hashlib.sha256((token or "").encode("utf-8")).hexdigest()
 
 
-def _size(turns: list[TurnEntry]) -> int:
-    return sum(
-        len(json.dumps(t.model_dump(mode="json"), ensure_ascii=False).encode("utf-8"))
+def _turn_bytes(turn: TurnEntry) -> int:
+    return (
+        len(
+            json.dumps(turn.model_dump(mode="json"), ensure_ascii=False).encode("utf-8")
+        )
         + 1
-        for t in turns
     )
+
+
+def _size(turns: list[TurnEntry]) -> int:
+    """The wire cost of a whole list. :func:`bound` no longer needs it — it
+    accumulates the same total a turn at a time — but "how big is this
+    transcript" is the question a size-cap test asks, so it stays."""
+    return sum(_turn_bytes(t) for t in turns)
 
 
 def _omitted_marker(count: int) -> TurnEntry:
@@ -83,16 +92,15 @@ def _omitted_marker(count: int) -> TurnEntry:
     )
 
 
-def _turn_bytes(turn: TurnEntry) -> int:
-    return (
-        len(
-            json.dumps(turn.model_dump(mode="json"), ensure_ascii=False).encode("utf-8")
-        )
-        + 1
-    )
+def _unscrubbed(turn: TurnEntry) -> TurnEntry:
+    return turn
 
 
-def bound(turns: list[TurnEntry]) -> tuple[list[TurnEntry], bool]:
+def bound(
+    turns: list[TurnEntry],
+    *,
+    scrub_one: Callable[[TurnEntry], TurnEntry] | None = None,
+) -> tuple[list[TurnEntry], bool]:
     """``(turns, truncated)`` — the transcript, trimmed from the middle.
 
     The middle is what goes, because the head and the tail are what a reader
@@ -103,33 +111,63 @@ def bound(turns: list[TurnEntry]) -> tuple[list[TurnEntry], bool]:
     a share keeps a balanced number of turns from each end rather than a long
     opening and a single closing line. The marker's own cost is reserved up
     front, so the result is under the cap including it.
+
+    ``scrub_one`` is how a caller pays for redaction only on what it sends. A
+    share's archive can be many times what fits, and scrubbing a turn is ~50
+    substring and regex passes over every string in it, so :func:`bound` calls
+    ``scrub_one`` as it *admits* each turn rather than being handed a whole
+    scrubbed transcript. It measures the scrubbed turn, because a pseudonym can
+    be longer than the value it replaced and the raw turn is therefore not an
+    upper bound on the wire cost. Left unset it is the identity, so a caller
+    that hands over already-scrubbed turns — or raw ones it does not want
+    redacted — gets the behaviour this function always had.
     """
-    if len(turns) <= 2 or _size(turns) <= MAX_SHARE_BYTES:
-        return list(turns), False
+    scrub = scrub_one or _unscrubbed
+    if len(turns) <= 2:
+        return [scrub(t) for t in turns], False
 
     budget = MAX_SHARE_BYTES - _turn_bytes(_omitted_marker(len(turns)))
-    sizes = [_turn_bytes(t) for t in turns]
 
     head: list[TurnEntry] = []
     tail: list[TurnEntry] = []
     low, high, used, from_head = 0, len(turns) - 1, 0, True
+    held: TurnEntry | None = None
+    index = 0
     while low <= high:
         index = low if from_head else high
-        if used + sizes[index] > budget:
+        held = scrub(turns[index])
+        size = _turn_bytes(held)
+        if used + size > budget:
             break
-        used += sizes[index]
+        used += size
         if from_head:
-            head.append(turns[index])
+            head.append(held)
             low += 1
         else:
-            tail.insert(0, turns[index])
+            tail.insert(0, held)
             high -= 1
+        held = None
         from_head = not from_head
 
-    dropped = len(turns) - len(head) - len(tail)
-    if dropped <= 0:  # the marker's reservation was all that did not fit
-        return list(turns), False
-    return head + [_omitted_marker(dropped)] + tail, True
+    if low > high:  # the whole transcript fits, marker reservation included
+        return head + tail, False
+
+    # Spending the budget is not yet a reason to truncate: the budget holds back
+    # the marker's own bytes, and a transcript that fits ``MAX_SHARE_BYTES``
+    # whole is still sent whole — that is the ``dropped <= 0`` case this
+    # function has always had. So walk what is left, and stop the moment it
+    # cannot fit. The extra scrubbing that costs is bounded by the one turn that
+    # overflowed plus the marker's reservation, not by the size of the archive.
+    rest: list[TurnEntry] = []
+    total = used
+    for i in range(low, high + 1):
+        entry = held if i == index else scrub(turns[i])
+        total += _turn_bytes(entry)
+        if total > MAX_SHARE_BYTES:
+            dropped = len(turns) - len(head) - len(tail)
+            return head + [_omitted_marker(dropped)] + tail, True
+        rest.append(entry)
+    return head + rest + tail, False
 
 
 def envelope(

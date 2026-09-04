@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 
 import { useChatSocket } from "@/hooks/useChatSocket";
+import { useConversationParam } from "@/hooks/useConversationParam";
 import {
   api,
   type AgentBindingOption,
@@ -34,6 +35,12 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     chat.connect();
   }, [chat.connect]);
+
+  // `?conversation=<id>` opens one conversation, from wherever the link was
+  // (FEAT-111). Read here for the same reason the socket is: the slots live in
+  // this provider, so a link that lands on any route can hand one over without
+  // waiting for the chat workspace to mount.
+  useConversationParam(chat.resumeConversation);
 
   return <ChatContext value={chat}>{children}</ChatContext>;
 }

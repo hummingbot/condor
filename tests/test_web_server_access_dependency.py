@@ -67,6 +67,16 @@ ALLOWLIST: dict[tuple[str, str], str] = {
     ("POST", "/api/v1/settings/servers/{name}/default"): "404-shaped, non-enumerable",
 }
 
+# Routes where ``?server=`` narrows a listing rather than scoping it. The
+# backtest archive spans every server the caller can reach (FEAT-075), so the
+# parameter is an optional filter and authorization is applied by *dropping*
+# what the caller may not see. A guard here would be wrong twice: it would make
+# the filter mandatory, and it would answer 403 for a server whose existence the
+# caller should not learn. Pinned by ``test_filtering_routes_filter_by_access``.
+FILTERED: dict[tuple[str, str], str] = {
+    ("GET", "/api/v1/backtesting/archive"): "authorization filters, not gates",
+}
+
 # Routes that read a server but have never had an access check. NOT a licence:
 # each is a live gap, listed so the sweep above stays green while they are
 # fixed under their own item rather than silently smuggled into SEC-147.
@@ -129,7 +139,7 @@ def test_every_server_scoped_route_carries_the_guard(app):
             continue
         for method in methods:
             key = (method, route.path)
-            if key in ALLOWLIST or key in KNOWN_GAPS:
+            if key in ALLOWLIST or key in KNOWN_GAPS or key in FILTERED:
                 continue
             missing.append(f"{method} {route.path} ({why}) -> {route.name}")
     assert not missing, (
@@ -192,6 +202,30 @@ def test_allowlisted_routes_still_check_access_inline(app):
         source = inspect.getsource(route.endpoint)
         assert "has_server_access" in source, key
         assert "Server not found" in source, key
+
+
+def test_filtering_routes_filter_by_access(app):
+    """The filtering exception is not an unguarded one: it drops what it must.
+
+    ``has_server_access`` has to appear on the path the endpoint takes, and the
+    result has to be a *filter* over the accessible set rather than a refusal —
+    which is what ``_accessible_servers`` is. The behaviour itself is pinned in
+    ``tests/test_backtest_archive_routes.py``; this keeps the sweep honest.
+    """
+    import condor.web.routes.backtesting as bt_routes
+
+    by_key = {}
+    for route in app.routes:
+        if not isinstance(route, APIRoute):
+            continue
+        for method in route.methods:
+            by_key[(method, route.path)] = route
+
+    assert "has_server_access" in inspect.getsource(bt_routes._accessible_servers)
+    for key in FILTERED:
+        route = by_key.get(key)
+        assert route is not None, f"filtering route no longer exists: {key}"
+        assert "_accessible_servers" in inspect.getsource(route.endpoint), key
 
 
 def test_body_param_sites_call_the_shared_helper():

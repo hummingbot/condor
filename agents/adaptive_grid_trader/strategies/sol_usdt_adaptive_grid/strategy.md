@@ -129,14 +129,14 @@ A grid that reaches meaningful unrealized profit should lock it in rather than r
 ### 1. Baseline (if missing or >24h)
 ```
 manage_routines(action="run", name="baseline_7d",
-  strategy_id="adaptive_grid_trader.sol_usdt_adaptive_grid",
+  agent="adaptive_grid_trader",
   config={"trading_pair":"SOL-USDT","connector_name":"binance_perpetual"})
 ```
 
 ### 2. Hourly MTF
 ```
 manage_routines(action="run", name="hourly_mtf_check",
-  strategy_id="adaptive_grid_trader.sol_usdt_adaptive_grid",
+  agent="adaptive_grid_trader",
   config={"trading_pair":"SOL-USDT","connector_name":"binance_perpetual",
           "lifetime_hours":8.0,"baseline_atr":<from_1>})
 ```
@@ -144,7 +144,7 @@ Ignore PROFILE=HOLD as first-entry veto.
 
 ### 3. Live state
 ```
-manage_executors(action="search", connector_names=["binance_perpetual"],
+list_executors(connector_names=["binance_perpetual"],
   trading_pairs=["SOL-USDT"], executor_types=["grid_executor"], status="RUNNING")
 get_portfolio_overview(connector_names=["binance_perpetual"],
   include_perp_positions=True, include_balances=True,
@@ -154,19 +154,18 @@ get_portfolio_overview(connector_names=["binance_perpetual"],
 
 ### 3a. Orphan cleanup (before any deploy)
 If step 3 shows **active orders on SOL-USDT** but **no running executor owns them**, they are stale leftovers.
-1. Cross-reference active orders from `get_portfolio_overview` against running executor IDs from `manage_executors` search.
-2. Any order whose `client_order_id` does not belong to a running executor → cancel it:
+1. Cross-reference active orders from `get_portfolio_overview` against running executor IDs from `list_executors`.
+2. Any order whose `client_order_id` belongs to an executor that is still running → stop that executor (stopping it cancels the orders it owns):
    ```
-   manage_executors(action="cancel_order", connector_name="binance_perpetual",
-     trading_pair="SOL-USDT", order_id="<orphan_order_id>")
+   stop_executor(executor_id="<owning_executor_id>")
    ```
-3. If cancel fails, retry once. If still stuck, journal the orphan and **continue** (do not HOLD solely because of an uncancellable orphan — attempt deployment anyway unless the orphan blocks balance).
+3. If the stop fails, retry once. If still stuck, journal the orphan and **continue** (do not HOLD solely because of an uncancellable orphan — attempt deployment anyway unless the orphan blocks balance).
 4. Verify orders are gone before proceeding to deploy.
 
 ### 3b. Account menu (mandatory on flat / first entry / before TWO_SIDED)
 ```
 manage_routines(action="run", name="position_mode_check",
-  strategy_id="adaptive_grid_trader",
+  agent="adaptive_grid_trader",
   config={"connector_name":"binance_perpetual","account_name":"master_account"})
 ```
 Branch only on **`mode: HEDGE|ONEWAY`** and **`two_sided_allowed`**.

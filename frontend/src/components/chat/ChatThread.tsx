@@ -1,11 +1,12 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { AlertTriangle, Bot, Brain, Loader2, MessageSquare, X } from "lucide-react";
 
 import type { ChatSlot } from "@/hooks/useChatSocket";
-import type { ChatAgentOption } from "@/lib/api";
+import { CHAT_SLUG, type AgentSummary, type ChatAgentOption } from "@/lib/api";
+import { speakerNames } from "@/lib/agentColor";
 import { ChatInput } from "./ChatInput";
 import { ChatMessageView } from "./ChatMessage";
-import { SharingIndicator } from "./SharingIndicator";
+import { Starters, type Starter } from "./Starters";
 
 /** How close to the end still counts as "following the answer", in pixels. */
 const NEAR_BOTTOM_PX = 80;
@@ -43,9 +44,12 @@ export function ChatThread({
   onSend,
   onAbort,
   emptyState,
+  starters = [],
   boundAgent,
+  roster,
   columnClassName = "",
   autoFocus = false,
+  composerLeading,
 }: {
   /** The conversation on screen, or null when there is none yet. */
   slot: ChatSlot | null;
@@ -65,20 +69,84 @@ export function ChatThread({
   onResolvePermission: (requestId: string, approved: boolean) => void;
   switchError?: string | null;
   onDismissSwitchError?: () => void;
-  onSend: (text: string) => void;
+  /** `files` only when the user attached something; the starters below call
+   *  this with words alone and are untouched by it existing (FEAT-098). */
+  onSend: (text: string, files?: File[]) => void;
   onAbort: () => void;
   /** Rendered instead of a transcript when there is no slot. */
   emptyState?: React.ReactNode;
+  /**
+   * Openers for a session that exists but has not been written in yet. The
+   * `emptyState` hero carries its own copy for the no-slot case; these are the
+   * same list, kept on screen for as long as the transcript is empty.
+   */
+  starters?: Starter[];
   /**
    * The domain Agent this conversation is bound to, when the surface knows it.
    * A bound chat opens under that agent's name — the user picked Backpack MM,
    * so "Condor / General trading assistant" would name the wrong counterpart.
    */
   boundAgent?: { name: string; description?: string };
+  /**
+   * The domain-Agent roster, used only to put a name to a turn's stamped slug.
+   *
+   * Deliberately not `agents`, which is the *brain* roster — model options
+   * keyed by `agent_key` — and cannot resolve an Agent slug at all. Optional:
+   * without it a turn still resolves to the conversation's own binding or to
+   * its slug, which is a worse label but never a wrong one.
+   */
+  roster?: AgentSummary[];
   /** Reading column for the messages, e.g. `mx-auto w-full max-w-3xl`. */
   columnClassName?: string;
   autoFocus?: boolean;
+  /**
+   * Controls the surface wants at the left edge of the composer, acting on
+   * this conversation — sharing it, today. Passed straight through to
+   * `ChatInput`: the thread does not own the gesture, it only owns the one box
+   * that is unmistakably about the chat on screen.
+   */
+  composerLeading?: React.ReactNode;
 }) {
+  /**
+   * A stamped slug's display name.
+   *
+   * `""` is the default agent — Condor under whatever name the roster gives
+   * it. A slug the roster does not know still names itself rather than
+   * borrowing the current binding's name, which is the whole failure this
+   * replaces; the binding is only allowed to answer for its own slug.
+   */
+  const resolveSpeaker = useCallback(
+    (slug: string) => {
+      const match = roster?.find((a) => a.slug === (slug || CHAT_SLUG));
+      if (match) return match.name;
+      if (!slug) return "Condor";
+      if (slug === slot?.info.agent_slug)
+        return boundAgent?.name || slot?.info.label || slug;
+      return slug;
+    },
+    [roster, slot?.info.agent_slug, slot?.info.label, boundAgent?.name],
+  );
+
+  /**
+   * Who is answering at each point of the transcript.
+   *
+   * Resolved here rather than in the message because a turn that carries no
+   * attribution — a user line, a divider, anything recorded before the backend
+   * stamped one — is only placeable by walking the handovers around it, and
+   * that needs the whole list. Turns that do carry it answer for themselves.
+   * The name is also the key the gutter colour is hashed from, which is what
+   * makes a transcript with two counterparts in it scannable at a glance.
+   */
+  const speakers = useMemo(
+    () =>
+      speakerNames(
+        slot?.messages ?? [],
+        boundAgent?.name || slot?.info.label || "Assistant",
+        resolveSpeaker,
+      ),
+    [slot?.messages, slot?.info.label, boundAgent?.name, resolveSpeaker],
+  );
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const scrollFrameRef = useRef<number | null>(null);
@@ -143,15 +211,6 @@ export function ChatThread({
 
   return (
     <>
-      {/* Automatic sharing, while it is on. Above the permission banner because
-          it is a standing condition of the conversation rather than something
-          that just happened, and non-dismissable by design: with Always on
-          nobody reads the payload before it leaves, so the user must not be
-          able to forget it (FEAT-055). */}
-      {slot?.info.conversation_id && (
-        <SharingIndicator conversationId={slot.info.conversation_id} />
-      )}
-
       {/* Permission request banner */}
       {permissionRequest && (
         <div className="border-b border-amber-500/30 bg-amber-500/10 px-4 py-3">
@@ -240,6 +299,14 @@ export function ChatThread({
                   Warming up — type away, it will be sent
                 </p>
               )}
+              {/* Still offered here, not only on the hero: the session spawns
+                  before the first word is typed, and the openers used to
+                  vanish with it. */}
+              <Starters
+                starters={starters}
+                onAsk={onSend}
+                className="mt-5 max-w-sm"
+              />
             </div>
           ) : (
             // Which bubble is being written into is the transcript's own
@@ -249,12 +316,19 @@ export function ChatThread({
             // snapped the still-running bubble's thinking and tool blocks shut
             // the instant such a note landed behind it. `isStreaming` is
             // already scoped to the slot on screen.
-            slot.messages.map((msg) => (
-              <ChatMessageView key={msg.id} message={msg} live={isStreaming && !!msg.open} />
+            slot.messages.map((msg, i) => (
+              <ChatMessageView
+                key={msg.id}
+                message={msg}
+                live={isStreaming && !!msg.open}
+                agentName={speakers[i]}
+              />
             ))
           )}
           {isQueued && (
-            <div className="mb-3 flex items-center gap-1.5 pl-8 text-[11px] text-[var(--color-text-muted)]">
+            // Indented to the gutter every turn now hangs from, not to the
+            // avatar that used to sit there.
+            <div className="mb-3 flex items-center gap-1.5 pl-3 text-[11px] text-[var(--color-text-muted)]">
               <Loader2 className="h-3 w-3 animate-spin" />
               Waiting its turn
             </div>
@@ -279,6 +353,12 @@ export function ChatThread({
             // not a chat with Condor, and the placeholder was the last place
             // the UI still said otherwise (FEAT-025).
             placeholder={`Ask ${(slot.info.agent_slug && slot.info.label) || "Condor"}...`}
+            leading={composerLeading}
+            // Half-written words survive leaving the page, per conversation.
+            // Keyed on the conversation rather than the slot: a session that is
+            // reaped and respawned is the same chat to the person writing in
+            // it, and the slot id it comes back under is not the one they left.
+            draftKey={slot.info.conversation_id || slot.info.slot_id}
           />
         </div>
       )}
