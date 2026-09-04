@@ -36,7 +36,6 @@ from pathlib import Path
 
 from condor.frontmatter import parse_frontmatter, render_frontmatter
 from condor.fsutil import atomic_write_text
-from condor.memory.paths import agent_home, stock_agent_home
 
 log = logging.getLogger(__name__)
 
@@ -55,15 +54,28 @@ def content_digest(path: Path) -> str:
     return f"sha256:{digest[:12]}"
 
 
+def _homes(agent_slug: str | None) -> tuple[Path, Path]:
+    """``(local, stock)`` for an agent, imported at call time.
+
+    ``condor.memory`` reaches back here (``SkillStore`` forks a stock playbook
+    before it edits one), and its package ``__init__`` imports ``skills``, so a
+    module-level import in either direction closes a cycle. This one is inside
+    the call, which is also where the env overrides have to be read anyway.
+    """
+    from condor.memory.paths import agent_home_layers
+
+    return agent_home_layers(agent_slug)
+
+
 def stock_path(agent_slug: str | None, *rel: str) -> Path | None:
     """The stock copy of an item, or ``None`` when the library ships none."""
-    candidate = stock_agent_home(agent_slug).joinpath(*rel)
+    candidate = _homes(agent_slug)[1].joinpath(*rel)
     return candidate if candidate.exists() else None
 
 
 def local_path(agent_slug: str | None, *rel: str) -> Path:
     """Where a write of this item lands. Always local; may not exist yet."""
-    return agent_home(agent_slug).joinpath(*rel)
+    return _homes(agent_slug)[0].joinpath(*rel)
 
 
 def stock_only(local: Path, stock: Path) -> bool:
@@ -77,9 +89,8 @@ def stock_only(local: Path, stock: Path) -> bool:
 
 def resolves_to_stock(agent_slug: str | None, *rel: str) -> bool:
     """:func:`stock_only` for an item addressed by agent slug and relative path."""
-    return stock_only(
-        local_path(agent_slug, *rel), stock_agent_home(agent_slug).joinpath(*rel)
-    )
+    local, stock = _homes(agent_slug)
+    return stock_only(local.joinpath(*rel), stock.joinpath(*rel))
 
 
 def stock_delete_error(item: str, *, mute_kind: str = "") -> str:
@@ -100,6 +111,31 @@ def stock_delete_error(item: str, *, mute_kind: str = "") -> str:
     return f"{base} Edit it instead: your change is kept as a local fork."
 
 
+def stamp_fork(path: Path, digest: str) -> bool:
+    """Write ``forked_from``/``forked_at`` into a markdown file's frontmatter.
+
+    Returns whether a stamp was written. Public because the boot migration
+    hoists an install's already-modified files out of the tracked tree and has
+    to record what they diverged from, without having a stock file to copy.
+    """
+    if path.suffix != ".md":
+        return False
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    meta, body = parse_frontmatter(text)
+    if not meta:
+        return False
+    meta[FORKED_FROM_KEY] = digest
+    meta[FORKED_AT_KEY] = datetime.now(timezone.utc).isoformat()
+    try:
+        atomic_write_text(path, render_frontmatter(meta, body))
+    except OSError:
+        return False
+    return True
+
+
 def _stamp(path: Path, source: Path, digest: str) -> None:
     """Record the fork in a markdown file's frontmatter, if it has any.
 
@@ -109,21 +145,8 @@ def _stamp(path: Path, source: Path, digest: str) -> None:
     by machinery that would not survive it. That gap is real and recorded in the
     feature rather than papered over with a sidecar nobody would read.
     """
-    if path.suffix != ".md":
-        return
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
-        return
-    meta, body = parse_frontmatter(text)
-    if not meta:
-        return
-    meta[FORKED_FROM_KEY] = digest
-    meta[FORKED_AT_KEY] = datetime.now(timezone.utc).isoformat()
-    try:
-        atomic_write_text(path, render_frontmatter(meta, body))
-    except OSError:
-        log.warning("Could not stamp the fork of %s", source, exc_info=True)
+    if not stamp_fork(path, digest) and path.suffix == ".md":
+        log.debug("No frontmatter to stamp on the fork of %s", source)
 
 
 def fork_path(local: Path, stock: Path, label: str = "") -> Path:
@@ -168,11 +191,11 @@ def fork_path(local: Path, stock: Path, label: str = "") -> Path:
 
 def fork_if_stock(agent_slug: str | None, *rel: str) -> Path:
     """The local path to write ``<agent>/<*rel>`` at, forking stock down first."""
-    slug = agent_slug or ""
+    local, stock = _homes(agent_slug)
     return fork_path(
-        local_path(agent_slug, *rel),
-        stock_agent_home(agent_slug).joinpath(*rel),
-        label=f"{slug}/{'/'.join(rel)}",
+        local.joinpath(*rel),
+        stock.joinpath(*rel),
+        label=f"{agent_slug or ''}/{'/'.join(rel)}",
     )
 
 
