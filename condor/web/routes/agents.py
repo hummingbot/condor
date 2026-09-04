@@ -685,6 +685,34 @@ class AgentConfigRequest(BaseModel):
     )
 
 
+class RestartOnBootRequest(BaseModel):
+    """Whether this strategy's loop comes back after Condor restarts."""
+
+    enabled: bool = Field(
+        description="True makes the boot pass start a fresh session for an "
+        "interrupted run of this strategy; False leaves it stopped."
+    )
+
+
+class ClaimBotRequest(BaseModel):
+    """Attribute a bot that is already running to one of this strategy's runs."""
+
+    bot_name: str = Field(
+        description="The bot to claim. A deploy suffix (-YYYYMMDD-HHMMSS) is "
+        "stripped, so the running instance and its base name both work."
+    )
+    session_num: int = Field(
+        default=0,
+        description="Which session owns it; 0 = the newest one on disk.",
+    )
+    since: float = Field(
+        default=0.0,
+        description="Epoch seconds the ownership window opens at. 0 = now, "
+        "which under-reports a bot that has been trading for hours; pass the "
+        "bot's own deploy time to attribute what it already made.",
+    )
+
+
 class MuteRequest(BaseModel):
     """Switch one item off for this Agent, or back on (FEAT-090, FEAT-091)."""
 
@@ -2982,6 +3010,153 @@ async def resume_strategy(
             raise HTTPException(status_code=404, detail="No strategy found")
         engines[0].resume()
     return {"resumed": True}
+
+
+@router.post("/{slug}/strategies/{sslug}/restart-on-boot")
+async def set_restart_on_boot(
+    slug: str,
+    sslug: str,
+    req: RestartOnBootRequest,
+    user: WebUser = Depends(get_current_user),
+):
+    """Opt this strategy's loop in or out of resuming after a Condor restart.
+
+    ``LoopSupervisor.reconcile_boot`` has always been able to restart an
+    interrupted run, but only for a session whose status file carries
+    ``restart_on_boot`` — and nothing ever set it, so every loop died at a
+    restart no matter what its owner wanted. This is the switch.
+
+    It writes in **two places on purpose**, because a strategy has two futures:
+
+    * the stored config, so the *next* session starts opted in; and
+    * every live engine's config, re-recording its status file immediately, so
+      the session already running is covered without being stopped first. That
+      second half is the one that matters in practice — you decide you want a
+      loop to survive restarts precisely while watching it run, and telling
+      someone to stop and restart a live trading loop to set that is telling
+      them to take the risk the switch exists to avoid.
+
+    Persisting to config.yml rather than the strategy's front matter keeps it
+    beside every other run field ``load_full_config`` overlays, which is what
+    ``_restart`` re-reads when the boot pass fires.
+    """
+    from condor.agents.config import load_full_config, save_full_config
+    from condor.runtime.loops import get_supervisor
+
+    strategy = _get_strategy(slug, sslug)
+
+    config = load_full_config(strategy.dir, strategy.default_config)
+    config["restart_on_boot"] = req.enabled
+    save_full_config(strategy.dir, config)
+
+    # The engines the caller may act on — someone else's loop is simply not in
+    # the set, the same rule stop/pause/resume follow (SEC-251).
+    supervisor = get_supervisor()
+    live = 0
+    for engine in _authorized_engines_for(slug, sslug, user):
+        engine.config["restart_on_boot"] = req.enabled
+        # Re-record rather than wait for the next tick: a loop on an hourly
+        # cadence would otherwise carry the old answer on disk for an hour,
+        # which is exactly the window a restart happens in. Its *current* state
+        # goes back down verbatim — ``LoopState``'s values are these strings —
+        # so recording the flag never also changes what the run claims to be.
+        supervisor.record(engine, engine.status)
+        live += 1
+
+    return {"restart_on_boot": req.enabled, "applied_to_running": live}
+
+
+@router.post("/{slug}/strategies/{sslug}/claim-bot")
+async def claim_bot(
+    slug: str,
+    sslug: str,
+    req: ClaimBotRequest,
+    user: WebUser = Depends(get_current_user),
+):
+    """Attribute an already-running bot to one of this strategy's sessions.
+
+    The repair for a run whose ownership claim never landed. A session records
+    what it deployed in ``owned_bots.json``, and everything downstream —
+    ``condor.agents.attribution``, the strategy's performance panel, the fleet
+    browser's tree — keys on that file. When the claim is lost, the fleet trades
+    on unattributed and every money surface for the agent reads ``$0.00`` while
+    ``/bots`` shows the controllers live with real volume.
+
+    The claim used to be lost routinely: over the ACP bridge a tool call's
+    arguments arrive as ``rawInput``, and until that was translated at the
+    boundary nothing could see *which* bot a ``manage_bots`` call had deployed.
+    That is fixed for new runs, and this is the door for the ones that already
+    happened — plus for the honest general case of a bot deployed by hand, or by
+    a previous install, that someone now wants a strategy to answer for.
+
+    Deliberately **manual**. A name-based sweep is the tempting automation and
+    the wrong one: a bot outside the strategy's namespace looks exactly like
+    somebody else's bot, and claiming another run's trading is a mis-attribution
+    that quietly moves money between two agents' books. A person naming the bot
+    is the only evidence there is.
+
+    ``since`` is the load-bearing parameter. The ledger slices PnL over the
+    window it owns a bot for, so claiming at "now" credits the strategy with
+    nothing it has already made; passing the bot's deploy time is what makes the
+    back-fill actually report the run's history.
+    """
+    from condor.agents.config import load_full_config
+    from condor.agents.ownership import (
+        BotLedger,
+        bot_namespace,
+        declared_names,
+        strip_deploy_suffix,
+    )
+
+    strategy = _get_strategy(slug, sslug)
+
+    base = strip_deploy_suffix((req.bot_name or "").strip())
+    if not base:
+        raise HTTPException(status_code=400, detail="No bot name given")
+
+    sessions_root = strategy.dir / "sessions"
+    if req.session_num:
+        session_dir = sessions_root / f"session_{req.session_num}"
+    else:
+        candidates = sorted(
+            (d for d in sessions_root.glob("session_*") if d.is_dir()),
+            key=lambda d: d.stat().st_mtime,
+        )
+        session_dir = candidates[-1] if candidates else None
+    if session_dir is None or not session_dir.is_dir():
+        raise HTTPException(
+            status_code=404,
+            detail="This strategy has no session to attribute the bot to. "
+            "Start it once, then claim.",
+        )
+
+    namespace = bot_namespace(slug, sslug)
+    config = load_full_config(strategy.dir, strategy.default_config)
+    # ``enforced=False``: the claim is the evidence, and the namespace rule is
+    # exactly what a hand-deployed bot fails. ``declared`` carries the name so a
+    # later reopen of this ledger still reads it as owned.
+    ledger = BotLedger(
+        namespace,
+        session_dir,
+        declared=[*declared_names(config, namespace), base],
+        enforced=False,
+    )
+    ledger.adopt(base, req.since or None)
+
+    # The fleet map caches its registry; without this the claim is on disk and
+    # invisible until the cache turns over.
+    try:
+        from condor.agents.fleet_map import reset_fleet_map_cache
+
+        reset_fleet_map_cache()
+    except Exception:  # noqa: BLE001 - a stale cache must not fail the claim
+        log.debug("claim_bot: could not reset the fleet map cache", exc_info=True)
+
+    return {
+        "claimed": base,
+        "session": session_dir.name,
+        "owned": [bot.base for bot in ledger.owned()],
+    }
 
 
 # ── Learnings ──

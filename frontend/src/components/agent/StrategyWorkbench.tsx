@@ -11,6 +11,7 @@ import {
   PerformancePanel,
 } from "@/components/agent/AgentOverviewTab";
 import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
+import { DeployedFleet } from "@/components/agent/DeployedFleet";
 import { LoopPulse } from "@/components/agent/LoopPulse";
 import { isLiveRun, runFacts, runLabel } from "@/components/agent/lab/runs";
 import { DiscardChangesDialog } from "@/components/editor/EditorDialogs";
@@ -82,6 +83,17 @@ export function StrategyWorkbench({
   const [playbookDirty, setPlaybookDirty] = useState(false);
   const [learningsDirty, setLearningsDirty] = useState(false);
   const [showDiscardConfirm, setShowDiscardConfirm] = useState(false);
+
+  // "Resume after restart", written straight from the loop's own spine. It
+  // invalidates the strategy rather than tracking the answer locally, so the
+  // chip reflects what is actually on disk and a failed write snaps back
+  // instead of leaving the reader believing a loop is armed when it is not.
+  const restartMutation = useMutation({
+    mutationFn: (enabled: boolean) => api.setRestartOnBoot(slug, sslug, enabled),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["strategy", slug, sslug] });
+    },
+  });
 
   const deleteMutation = useMutation({
     mutationFn: () => api.deleteStrategy(slug, sslug),
@@ -228,9 +240,23 @@ export function StrategyWorkbench({
   const liveInstance = instances.find((i) => i.status === "running") ?? instances[0] ?? null;
 
   const actionClass =
-    "flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] transition-all hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]";
-  /** In a pane the labels are dropped for room; on a page they read normally. */
-  const labelClass = dense ? "hidden" : "hidden sm:inline";
+    "flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] transition-all hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]";
+  /**
+   * Every action says its name, at every width.
+   *
+   * These used to be icons alone in a pane (`dense ? "hidden" : …`) and icons
+   * alone on a narrow page, on the theory that a `title` covers it. It does
+   * not: a tooltip is hover-only, so on the surface where these are read most
+   * — the chat's pane — the header was four unlabelled glyphs, and the only
+   * way to find out what one did was to press it. A document icon, a stack, a
+   * scroll and a bin are not a vocabulary anyone has agreed to learn.
+   *
+   * Room comes from the row wrapping (it already does) and from `denseLabel`
+   * shortening the one long name, rather than from deleting all four.
+   */
+  const labelClass = "inline";
+  /** "View in fleet" is the only label a 400px column cannot take whole. */
+  const denseLabel = (full: string, short: string) => (dense ? short : full);
 
   return (
     <div className="w-full">
@@ -267,7 +293,7 @@ export function StrategyWorkbench({
             title="See this strategy's bots and executors beside the rest of the fleet"
           >
             <Layers className="h-3.5 w-3.5" />
-            <span className={labelClass}>View in fleet</span>
+            <span className={labelClass}>{denseLabel("View in fleet", "Fleet")}</span>
           </button>
           <button
             onClick={() => setShowRoutinesBrowser(true)}
@@ -305,6 +331,8 @@ export function StrategyWorkbench({
           status={strategy.status}
           config={strategy.config}
           onOpenTick={handleOpenTick}
+          onSetRestartOnBoot={(enabled) => restartMutation.mutate(enabled)}
+          settingRestartOnBoot={restartMutation.isPending}
         />
       </div>
 
@@ -333,6 +361,15 @@ export function StrategyWorkbench({
             {strategy.agent_id}
           </span>
         )}
+      </div>
+
+      {/* What the loop actually put into the world. Directly under the pulse
+          and above the charts: the mechanism says what it is doing, and this
+          says what is out there doing it. Before this the only answer on this
+          surface was a button that navigated to `/bots` — which is to say, the
+          answer cost you the strategy you were reading. */}
+      <div className="mb-4">
+        <DeployedFleet slug={slug} sslug={sslug} serverName={serverName} dense={dense} />
       </div>
 
       {/* Market Context Strip */}

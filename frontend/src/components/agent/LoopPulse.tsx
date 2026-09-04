@@ -1,4 +1,4 @@
-import { AlertTriangle, Repeat, Zap } from "lucide-react";
+import { AlertTriangle, Power, Repeat, Zap } from "lucide-react";
 
 import { ModeBadge } from "@/components/agent/ModeBadge";
 import { useSeconds } from "@/hooks/useSeconds";
@@ -56,6 +56,8 @@ export function LoopPulse({
   status,
   config,
   onOpenTick,
+  onSetRestartOnBoot,
+  settingRestartOnBoot = false,
 }: {
   /** The live session, when there is one. */
   instance: RunningInstance | null;
@@ -65,6 +67,13 @@ export function LoopPulse({
   config: Record<string, unknown>;
   /** Land on this tick's snapshot. Absent = the beats are not clickable. */
   onOpenTick?: (sessionNum: number, tick: number) => void;
+  /**
+   * Flip "resume after restart". Absent = the chip is read-only, which is what
+   * a host that cannot write the strategy wants.
+   */
+  onSetRestartOnBoot?: (enabled: boolean) => void;
+  /** Whether that write is in flight, so the chip can say so rather than lie. */
+  settingRestartOnBoot?: boolean;
 }) {
   const running = instance?.status === "running";
   const now = useSeconds(running);
@@ -136,6 +145,17 @@ export function LoopPulse({
             session {instance.session_num}
           </span>
         )}
+        {/* Whether the loop survives a Condor restart belongs on the spine and
+            not in the start dialog alone: it is a property of the loop, true
+            or false whether or not anything is running, and the moment you
+            want to set it is while watching one run. Pushed to the end of the
+            row so the cadence and the tick count — read far more often — keep
+            their place. */}
+        <RestartChip
+          enabled={!!config.restart_on_boot}
+          onChange={onSetRestartOnBoot}
+          pending={settingRestartOnBoot}
+        />
       </div>
 
       {/* ── The beat: which ticks happened, and the gap to the next ── */}
@@ -230,6 +250,65 @@ export function LoopPulse({
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * Whether this loop comes back by itself after Condor restarts.
+ *
+ * Off is the default and off is drawn *plainly* rather than in a warning
+ * colour: not resuming is the safe state, and a muted chip is how the spine
+ * says "this is a setting" instead of "this is a problem". On is emerald, the
+ * same green every other live thing on this card uses, because an armed loop
+ * is a live fact about it.
+ *
+ * It always states its own meaning in words. The whole reason this control
+ * exists is a reader who restarted Condor and was surprised to find the loop
+ * stopped, so a chip they have to hover to decode would be the same failure in
+ * a smaller font.
+ */
+function RestartChip({
+  enabled,
+  onChange,
+  pending,
+}: {
+  enabled: boolean;
+  onChange?: (enabled: boolean) => void;
+  pending: boolean;
+}) {
+  const label = enabled ? "resumes on restart" : "stops on restart";
+  const tone = enabled
+    ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-500"
+    : "border-[var(--color-border)] text-[var(--color-text-muted)]";
+
+  if (!onChange) {
+    return (
+      <span
+        className={`flex items-center gap-1 rounded border px-1.5 py-0.5 text-[11px] ${tone}`}
+      >
+        <Power className="h-3 w-3" />
+        {label}
+      </span>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={enabled}
+      disabled={pending}
+      onClick={() => onChange(!enabled)}
+      title={
+        enabled
+          ? "Condor restarts this loop in a fresh session after it restarts. Click to turn off."
+          : "This loop stays stopped after Condor restarts. Click to have it resume."
+      }
+      className={`flex items-center gap-1 rounded border px-1.5 py-0.5 text-[11px] transition-colors hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)] disabled:opacity-50 ${tone}`}
+    >
+      <Power className="h-3 w-3" />
+      {pending ? "saving…" : label}
+    </button>
   );
 }
 

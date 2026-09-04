@@ -3125,6 +3125,38 @@ export const api = {
       { method: "POST" },
     ),
 
+  /**
+   * Whether this strategy's loop comes back after Condor restarts.
+   *
+   * Writes the stored config (so the next session starts opted in) *and* every
+   * live engine's status file (so the session already running is covered
+   * without being stopped first). `applied_to_running` says how many of the
+   * latter there were, which is what lets the caller say "from the next
+   * restart" rather than guess.
+   */
+  setRestartOnBoot: (slug: string, sslug: string, enabled: boolean) =>
+    apiFetch<{ restart_on_boot: boolean; applied_to_running: number }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/restart-on-boot`,
+      { method: "POST", body: JSON.stringify({ enabled }) },
+    ),
+
+  /**
+   * Attribute an already-running bot to this strategy's newest session.
+   *
+   * The repair for a run whose ownership claim never landed — every run from
+   * before the ACP arguments fix, whose `owned_bots.json` was never written, so
+   * the fleet trades on unattributed and every money surface reads $0.
+   *
+   * `since` is what makes it a back-fill rather than a fresh start: the ledger
+   * slices PnL over the window it owns the bot for, so claiming at "now"
+   * credits the strategy with nothing it has already made.
+   */
+  claimBot: (slug: string, sslug: string, botName: string, since = 0) =>
+    apiFetch<{ claimed: string; session: string; owned: string[] }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/claim-bot`,
+      { method: "POST", body: JSON.stringify({ bot_name: botName, since }) },
+    ),
+
   updateStrategyLearnings: (slug: string, sslug: string, content: string) =>
     apiFetch<{ updated: boolean }>(
       `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/learnings`,

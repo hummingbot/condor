@@ -21,6 +21,7 @@ import remarkGfm from "remark-gfm";
 import { ActivityFeed } from "@/components/agent/ActivityFeed";
 import { MarkdownEditor } from "@/components/agent/AgentOverviewTab";
 import { AgentStrategies } from "@/components/agent/AgentStrategies";
+import { LoopBanner } from "@/components/agent/LoopBanner";
 import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
 import type {
   KnowledgeLayout,
@@ -150,6 +151,23 @@ export function AgentKnowledge({
     // open is what matters; a poll here would walk the skill and memory stores
     // on disk every few seconds for a panel nobody is looking at.
     staleTime: 30_000,
+  });
+
+  /**
+   * The loops, for the banner above the sections.
+   *
+   * The same `["agent", slug]` key `AgentStrategies` reads, so the two share
+   * one set of records through react-query and the banner costs no second
+   * fetch when the Strategies section is open. Same conditional cadence for
+   * the same reason (PERF-305): only a live loop can move a countdown, and an
+   * idle agent should not buy 5s of Hummingbot round-trips to be told so.
+   */
+  const { data: agentDetail } = useQuery({
+    queryKey: ["agent", slug],
+    queryFn: () => api.getAgent(slug),
+    enabled: !!slug && layout === "rail",
+    refetchInterval: (q) =>
+      q.state.data?.strategies.some((s) => s.status === "running") ? 5000 : false,
   });
 
   // One dirty flag for whichever editor is mounted — only ever one is.
@@ -591,10 +609,23 @@ export function AgentKnowledge({
   // The rail is beside its body and both scroll independently, so a long
   // AGENT.md never scrolls the sections out of reach. A bare host draws its own
   // navigation and gets the bodies alone.
+  // The banner spans the rail as well as the body, and sits outside the
+  // scroller: "there is a loop running" must not be a fact you scroll past.
+  // Only where a host can receive the click — a rail host that passes no
+  // `onOpenStrategy` has nowhere to open the workbench, and a strip that says
+  // something is running but cannot take you to it is worse than none.
   return rail ? (
-    <div className="flex min-h-0 flex-1 overflow-hidden">
-      <div className="min-w-0 flex-1 overflow-y-auto px-3 py-2">{body}</div>
-      {nav}
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+      {onOpenStrategy && (
+        <LoopBanner
+          strategies={agentDetail?.strategies ?? []}
+          onOpenStrategy={onOpenStrategy}
+        />
+      )}
+      <div className="flex min-h-0 flex-1 overflow-hidden">
+        <div className="min-w-0 flex-1 overflow-y-auto px-3 py-2">{body}</div>
+        {nav}
+      </div>
     </div>
   ) : (
     <div>{body}</div>

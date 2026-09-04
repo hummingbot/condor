@@ -62,6 +62,14 @@ class AgentConfig(BaseModel):
     max_ticks: int = Field(
         default=0, description="Max ticks before auto-stop; 0 = unlimited"
     )
+    restart_on_boot: bool = Field(
+        default=False,
+        description="Resume this loop after Condor restarts. The boot pass "
+        "(condor.runtime.loops) marks an interrupted run and, only with this "
+        "set, starts a FRESH session from the config as it stands then. Off by "
+        "default: a trading loop that resumes unattended after a crash nobody "
+        "noticed is a decision its owner has to make per strategy.",
+    )
     bot_name: str = Field(
         default="",
         description="If set, the agent operates this Hummingbot bot's controllers "
