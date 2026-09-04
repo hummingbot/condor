@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Bell, Bot, CheckCheck, Terminal, Workflow, Zap } from "lucide-react";
 import { useNavigate } from "react-router-dom";
@@ -6,6 +6,7 @@ import { useNavigate } from "react-router-dom";
 import { AnchoredMenu } from "@/components/ui/AnchoredMenu";
 import { NOTIFICATIONS_KEY } from "@/hooks/useChatSocket";
 import { api, type AppNotification, type NotificationsResponse } from "@/lib/api";
+import { setAppBadge } from "@/lib/appBadge";
 import { useAuth } from "@/lib/auth";
 import { formatRelativeTime } from "@/lib/formatters";
 
@@ -66,6 +67,12 @@ export function NotificationBell() {
 
   const items = data?.items ?? [];
   const unread = data?.unread ?? 0;
+
+  // The dock icon carries the same number as the bell (FEAT-082). Not a second
+  // source of truth: it is a second render of the count this component already
+  // holds, so it cannot drift from what the dropdown shows, and it follows the
+  // bell through the poll, a live socket write and marking everything read.
+  useEffect(() => setAppBadge(unread), [unread]);
 
   const markRead = useMutation({
     mutationFn: (ids?: string[]) => api.markNotificationsRead(ids),
