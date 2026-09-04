@@ -14,7 +14,7 @@
 //
 // Nothing here fetches and nothing here renders.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { AGENT_SECTIONS_KEY } from "@/lib/sessionState";
 
@@ -105,7 +105,7 @@ function writeSections(ids: readonly SectionId[]): void {
  * Which disclosures are open, and the toggle that moves them.
  *
  * `useAccountPanels`' rules, with one difference: the toggles write the URL as
- * well as the storage. The desk is a pane the reader is *in*, and a parameter
+ * well as recording the set. The desk is a pane the reader is *in*, and a parameter
  * per click there would be a history stack nobody can press Back through; a
  * disclosure on a page is a thing you send someone, so `?open=` follows the
  * reader rather than only carrying them in. The write replaces rather than
@@ -124,15 +124,36 @@ export function useSections(
     () => parseSections(raw) ?? readSections(),
   );
 
-  const applied = useRef(raw);
-  useEffect(() => {
-    if (applied.current === raw) return;
-    applied.current = raw;
+  /**
+   * A `?open=` that *changes* is a second arrival, so it is honoured like one.
+   *
+   * The initial state above covers a page somebody opened at the address; this
+   * covers the same address reached from inside the app, where nothing
+   * unmounts — a link in the chat, or the redirect a retired `?view=` lands
+   * through. Adjusted during render rather than in an effect: it is state
+   * derived from a changed input, which is the case React documents this for,
+   * and an effect would paint the old sections for a frame first.
+   *
+   * What was last applied is *state* and not a ref, which is the same guidance
+   * read from the other end: a ref is for values a render does not depend on,
+   * and this one decides what a render draws.
+   *
+   * A toggle's own write comes back through here and re-applies what it just
+   * set, which costs a parse and changes nothing — the round trip through the
+   * URL is what keeps one answer to "which are open" rather than two.
+   */
+  const [applied, setApplied] = useState(raw);
+  if (applied !== raw) {
+    setApplied(raw);
     const wanted = parseSections(raw);
-    if (!wanted) return;
-    setOpen(wanted);
-    writeSections(wanted);
-  }, [raw]);
+    if (wanted) setOpen(wanted);
+  }
+
+  // Recorded here rather than at the toggle, so one line covers all three ways
+  // the set can change: a click, an address somebody sent, and a redirect.
+  useEffect(() => {
+    writeSections(open);
+  }, [open]);
 
   // Off `open` rather than out of a `setOpen` updater: writing storage and the
   // URL is a side effect, and an updater is a function React is free to call
@@ -143,11 +164,7 @@ export function useSections(
         ? open.filter((s) => s !== id)
         : ordered([...open, id]);
       setOpen(next);
-      writeSections(next);
-      const serialized = serializeSections(next);
-      // The effect above must not read our own write back as an arrival.
-      applied.current = serialized || null;
-      setRaw(serialized);
+      setRaw(serializeSections(next));
     },
     [open, setRaw],
   );
