@@ -19,6 +19,40 @@ export interface ToolCall {
   status: string;
 }
 
+/**
+ * One step of a turn's run, in the order it happened (ARCH-330).
+ *
+ * A tool step carries the call's *id*, not the call: the call itself lives in
+ * `ChatMessage.toolCalls` and keeps being patched there by `tool_call_update`,
+ * so a copy here would be a second, stale answer to "what is that tool doing".
+ * The renderer joins the two.
+ */
+export type RunStep =
+  | { type: "thought"; text: string }
+  | { type: "tool"; id: string };
+
+/**
+ * Extend the run's trailing reasoning step, or open a new one.
+ *
+ * The counterpart of `Recorder._note_thought` in
+ * condor/runtime/conversations.py, and it has to merge on the same rule: a
+ * step per streamed chunk would say nothing about order, and only a tool call
+ * landing between two stretches of reasoning starts a new one. Because the
+ * flush that commits buffered text runs before any tool step is appended, a
+ * reasoning run split across several 50ms windows still lands as one step —
+ * so a turn watched live ends up with the same steps as the same turn reloaded
+ * from disk.
+ */
+function appendThoughtStep(steps: RunStep[] | undefined, text: string): RunStep[] {
+  const current = steps ?? [];
+  if (!text) return current;
+  const last = current[current.length - 1];
+  if (last && last.type === "thought") {
+    return [...current.slice(0, -1), { type: "thought", text: last.text + text }];
+  }
+  return [...current, { type: "thought", text }];
+}
+
 /** What each key shape means, said once per conversation (FEAT-056).
  *
  * The two `redacted` kinds describe text the user can see is gone. The other
@@ -54,6 +88,19 @@ export interface ChatMessage {
   text: string;
   toolCalls: ToolCall[];
   thought?: string;
+  /**
+   * How the reasoning and the tool calls interleaved (ARCH-330).
+   *
+   * `thought` and `toolCalls` say *what* the run held; this says in what
+   * order, which neither of them can — a turn that thinks, calls, thinks again
+   * and calls a second time is one merged string beside a flat list there.
+   * Both are still carried, so nothing that only knows them changes.
+   *
+   * Absent means the order is not known: a turn hydrated from a transcript
+   * written before the recorder kept it. The renderer falls back to what it
+   * always drew — the reasoning, then the calls.
+   */
+  events?: RunStep[];
   /** System: "switch" | "error" | "delegation" | "resume" | "notification" |
    * "routine" | "secret_notice". */
   kind?: string;
@@ -357,6 +404,34 @@ function isRenderableTurn(
   return !!turn.text || !!turn.thought || toolCalls.length > 0 || attachments.length > 0;
 }
 
+/**
+ * The recorded run, resolved against the calls the same turn carries.
+ *
+ * A tool step names a call by id; a step naming one this turn does not hold is
+ * dropped rather than rendered as a nameless row. `undefined` — not an empty
+ * list — is the answer for a turn recorded before the order was kept, because
+ * the renderer has to be able to tell "the run was empty" from "nobody wrote
+ * the order down" and only the second one falls back to the flat fields.
+ */
+function turnToRunSteps(
+  turn: ConversationTurn,
+  toolCalls: ToolCall[],
+): RunStep[] | undefined {
+  const recorded = turn.events;
+  if (!recorded || recorded.length === 0) return undefined;
+  const known = new Set(toolCalls.map((tc) => tc.tool_call_id));
+  const steps: RunStep[] = [];
+  for (const step of recorded) {
+    if (step.type === "thought") {
+      if (step.text) steps.push({ type: "thought", text: step.text });
+    } else if (step.type === "tool") {
+      const id = String(step.id ?? "");
+      if (known.has(id)) steps.push({ type: "tool", id });
+    }
+  }
+  return steps;
+}
+
 function turnsToMessages(
   turns: ConversationTurn[],
   conversationId: string,
@@ -388,6 +463,7 @@ function turnsToMessages(
       text: turn.text,
       toolCalls,
       thought: turn.thought || undefined,
+      events: turnToRunSteps(turn, toolCalls),
       kind: turn.kind || undefined,
       ts: turn.ts,
       // A slug names the bound Agent. An empty slug with a model behind it is
@@ -682,6 +758,11 @@ export function useChatSocket() {
               // Left alone when nothing was buffered, so a bubble with no
               // reasoning keeps `thought` undefined rather than gaining "".
               thought: buf.thought ? (m.thought || "") + buf.thought : m.thought,
+              // The same reasoning, placed in the run. Buffered fragments are
+              // committed before any tool step is appended (`appendToStream`
+              // flushes first), so this lands on the correct side of every
+              // call the turn made.
+              events: buf.thought ? appendThoughtStep(m.events, buf.thought) : m.events,
             }),
             // "" is the default agent, not "unknown": a slot with no binding is
             // Condor answering, and saying so is what keeps the turn out of the
@@ -1336,6 +1417,10 @@ export function useChatSocket() {
           appendToStream(slotId, (m) => ({
             ...m,
             toolCalls: [...m.toolCalls, tc],
+            // Its place in the run, beside the call itself. `appendToStream`
+            // has already committed whatever reasoning was buffered, so the
+            // step lands after the thinking that led to it.
+            events: [...(m.events ?? []), { type: "tool", id: tc.tool_call_id }],
           }));
           break;
         }

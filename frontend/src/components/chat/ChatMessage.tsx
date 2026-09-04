@@ -465,6 +465,7 @@ export const ChatMessageView = memo(function ChatMessageView({
       <RunStrip
         thought={message.thought}
         toolCalls={message.toolCalls}
+        events={message.events}
         live={live}
         thinking={live && !message.text}
       />

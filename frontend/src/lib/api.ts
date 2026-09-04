@@ -1763,6 +1763,30 @@ export interface ConversationTurn {
    * before this existed, and on every turn that carried nothing.
    */
   attachments?: ConversationAttachment[];
+  /**
+   * The order the run happened in, as the recorder kept it (ARCH-330).
+   *
+   * A step is either a stretch of reasoning or a call, and a call step *names*
+   * an entry of `tool_calls` rather than repeating it — so the detail has one
+   * home and the two can never disagree. Absent or empty on every turn
+   * recorded before this existed, which means "the order was not kept", not
+   * "the agent did nothing": the flat fields are the fallback then.
+   */
+  events?: ConversationRunStep[];
+}
+
+/**
+ * One step of a turn's run: reasoning, or a call named by its id.
+ *
+ * Deliberately not a discriminated union. This is wire data whose `type` a
+ * newer backend is free to extend, and a union would let the compiler promise
+ * a narrowing the JSON cannot honour; the reader tests the tag itself and
+ * ignores a step it does not recognise.
+ */
+export interface ConversationRunStep {
+  type: string;
+  text?: string;
+  id?: string;
 }
 
 /** One stored image on a turn. No filename: none is ever recorded. */
