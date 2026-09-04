@@ -95,6 +95,37 @@ export function stripDeploySuffix(name: string): string {
 }
 
 /**
+ * A running bot's name and every asked-for name it can have come from.
+ *
+ * The suffix is appended **per deploy**, and a redeploy of a name that already
+ * carries one appends a second: `pmm-king-btcbrl` becomes
+ * `pmm-king-btcbrl-20260903-181000`, and redeploying *that* becomes
+ * `pmm-king-btcbrl-20260903-181000-20260903-151237`. `stripDeploySuffix` is
+ * anchored at the end and mirrors the Python one call for call, so it takes one
+ * suffix off — which is right for the name a deploy was given and one short for
+ * the name a redeploy was given.
+ *
+ * That one is not a corner case: it is the bot that has been running longest,
+ * which is exactly the bot with the most trading under it, and it arrived at
+ * `/bots` credited to nobody. So the deed lookup asks for every name in the
+ * chain rather than for one, longest first — the most specific record that
+ * exists wins, and a bot that was deployed once is unaffected because its chain
+ * is the two names it always had.
+ *
+ * The two enforced rules do not need this: they match by prefix, and a prefix
+ * survives any number of suffixes.
+ */
+export function deployNameChain(name: string): string[] {
+  const chain: string[] = [];
+  let current = (name || "").trim();
+  while (current && !chain.includes(current)) {
+    chain.push(current);
+    current = stripDeploySuffix(current);
+  }
+  return chain;
+}
+
+/**
  * True for the namespace itself, a tagged sibling, and any deployed instance.
  *
  * `condor/agents/ownership.py:in_namespace`, verbatim: `brigado-brl_mm`,
@@ -221,7 +252,9 @@ export const DEED_TITLE = "attributed by a recorded deed, not by name";
  * `controllerId` fallback sits between them and the deeds for the same reason —
  * a standalone executor's `agent_id` tag is enforced too (`risk.py`).
  *
- * The deed lookup is last and cheapest: one object lookup on a base name.
+ * The deed lookup is last and cheapest: one object lookup per name in the
+ * bot's deploy chain (see {@link deployNameChain}), and a chain is two names long
+ * on every bot that was deployed once.
  */
 export function attributionOf(
   owners: FleetOwner[],
@@ -243,8 +276,11 @@ export function attributionOf(
   }
   const tagged = agentOfControllerId(owners, controllerId);
   if (tagged) return { runKey: tagged, how: "namespace" };
-  const deed = name ? deeds?.bots?.[name] : undefined;
-  return deed ? { runKey: deed.runKey, how: "deed" } : UNOWNED;
+  for (const candidate of deployNameChain(botName)) {
+    const deed = deeds?.bots?.[candidate];
+    if (deed) return { runKey: deed.runKey, how: "deed" };
+  }
+  return UNOWNED;
 }
 
 /**

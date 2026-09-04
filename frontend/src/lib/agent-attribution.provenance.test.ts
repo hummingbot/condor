@@ -16,6 +16,7 @@ import {
   agentOfBot,
   attributionOf,
   DEED_TITLE,
+  deployNameChain,
   provenanceOf,
   type DeedIndex,
   type FleetOwner,
@@ -135,5 +136,76 @@ describe("provenanceOf", () => {
 
   it("says out loud what the marker means", () => {
     expect(DEED_TITLE).toBe("attributed by a recorded deed, not by name");
+  });
+});
+
+// ── The redeployed bot (the `pmm-king-btcbrl` case) ──
+//
+// A deploy stamps `-YYYYMMDD-HHMMSS` onto the name it was given, so redeploying
+// a bot that already carries one stamps a second. The deed index is keyed by
+// the name the agent asked for, and a single strip stopped reaching it from the
+// first redeploy on — which is the bot that has been running longest, and so
+// the one with the most trading behind it. It arrived at `/bots` credited to
+// nobody, and the owner level collapsed for want of a second bucket.
+
+describe("deployNameChain", () => {
+  it("keeps the name it was given, then every name it can have come from", () => {
+    expect(deployNameChain("pmm-king-btcbrl-20260903-181000-20260903-151237")).toEqual([
+      "pmm-king-btcbrl-20260903-181000-20260903-151237",
+      "pmm-king-btcbrl-20260903-181000",
+      "pmm-king-btcbrl",
+    ]);
+  });
+
+  it("is the two names a bot deployed once has always had", () => {
+    expect(deployNameChain("alpha-20260731-101500")).toEqual([
+      "alpha-20260731-101500",
+      "alpha",
+    ]);
+    expect(deployNameChain("alpha")).toEqual(["alpha"]);
+    expect(deployNameChain("")).toEqual([]);
+  });
+
+  it("does not mistake a partial stamp for one", () => {
+    // `-20260901-2315` is four digits short of a deploy suffix, and a bot may
+    // legitimately be named that way.
+    expect(deployNameChain("pmm-king-btcbrl-20260901-2315")).toEqual([
+      "pmm-king-btcbrl-20260901-2315",
+    ]);
+  });
+});
+
+describe("a redeployed bot still reaches its deed", () => {
+  it("credits the run that asked for the name, two stamps ago", () => {
+    const att = attributionOf(
+      [],
+      deeds({ "pmm-king-btcbrl": "brigado.pmm_king_btc_brl_fleet_operator" }),
+      "pmm-king-btcbrl-20260903-181000-20260903-151237",
+    );
+    expect(att).toEqual({
+      runKey: "brigado.pmm_king_btc_brl_fleet_operator",
+      how: "deed",
+    });
+  });
+
+  it("prefers the most specific record when the index holds several", () => {
+    const att = attributionOf(
+      [],
+      deeds({
+        "pmm-king-btcbrl": "condor.chat",
+        "pmm-king-btcbrl-20260903-181000": "brigado.pmm_king_btc_brl_fleet_operator",
+      }),
+      "pmm-king-btcbrl-20260903-181000-20260903-151237",
+    );
+    expect(att.runKey).toBe("brigado.pmm_king_btc_brl_fleet_operator");
+  });
+
+  it("still lets an enforced rule beat every name in the chain", () => {
+    const att = attributionOf(
+      [owner({ namespace: "brigado-brl_mm" })],
+      deeds({ "brigado-brl_mm-btc": "condor.chat" }),
+      "brigado-brl_mm-btc-20260903-181000-20260903-151237",
+    );
+    expect(att).toEqual({ runKey: "brigado.brl_mm", how: "namespace" });
   });
 });
