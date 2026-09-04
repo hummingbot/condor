@@ -23,7 +23,7 @@ import { useAuthedImage } from "@/hooks/useAuthedImage";
 import { agentColor } from "@/lib/agentColor";
 import { copyText } from "@/lib/clipboard";
 import { splitStreamedMarkdown } from "@/lib/markdownStream";
-import { ChartBlock } from "./ChartBlock";
+import { ChartSlot, ChartSlotHost } from "./ChartSlots";
 import { RunStrip } from "./ToolCallStatus";
 
 /** One array, so the plugin list is never a fresh prop on a streamed frame. */
@@ -109,6 +109,10 @@ function numericColumns(node?: Element): string | undefined {
  * in a <pre> — replacing the wrapper is what keeps the chart out of a
  * whitespace-preserving box it was never meant to live in.
  *
+ * What it leaves behind is a `ChartSlot`, not the chart: the chart's instance
+ * belongs to the `ChartSlotHost` above this tree, so that swapping the tree at
+ * settle moves it rather than rebuilding it (PERF-328).
+ *
  * The `table` override is the other thing markdown cannot say: a column of
  * amounts only reads as a column when its digits align on the right, and GFM
  * alignment is the author's to set — the model does not set it.
@@ -120,7 +124,7 @@ function markdownComponents(live: boolean): Components {
       if (isValidElement<{ className?: string; children?: ReactNode }>(child)) {
         const className = child.props.className ?? "";
         if (className.split(" ").includes("language-chart")) {
-          return <ChartBlock raw={nodeText(child.props.children)} live={live} />;
+          return <ChartSlot raw={nodeText(child.props.children)} live={live} />;
         }
       }
       return <pre {...props}>{children}</pre>;
@@ -470,19 +474,23 @@ export const ChatMessageView = memo(function ChatMessageView({
         thinking={live && !message.text}
       />
       {message.text && (
-        <div className="chat-markdown text-sm">
-          {/* A settled turn takes the single whole-text pass it always took:
-              that is the same path a reloaded transcript renders through, so
-              what the reader ends up looking at cannot depend on whether they
-              watched it arrive. */}
-          {live ? (
-            <StreamedMarkdown text={message.text} />
-          ) : (
-            <ReactMarkdown remarkPlugins={GFM} components={STATIC_COMPONENTS}>
-              {message.text}
-            </ReactMarkdown>
-          )}
-        </div>
+        /* Every chart in the answer is owned here, above the swap below, so
+           that the swap cannot destroy one (PERF-328). */
+        <ChartSlotHost text={message.text} live={live}>
+          <div className="chat-markdown text-sm">
+            {/* A settled turn takes the single whole-text pass it always took:
+                that is the same path a reloaded transcript renders through, so
+                what the reader ends up looking at cannot depend on whether they
+                watched it arrive. */}
+            {live ? (
+              <StreamedMarkdown text={message.text} />
+            ) : (
+              <ReactMarkdown remarkPlugins={GFM} components={STATIC_COMPONENTS}>
+                {message.text}
+              </ReactMarkdown>
+            )}
+          </div>
+        </ChartSlotHost>
       )}
       {!message.text && message.toolCalls.length === 0 && !message.thought && (
         <div className="flex items-center gap-1.5 text-sm text-[var(--color-text-muted)]">
