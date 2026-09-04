@@ -305,103 +305,6 @@ PYEOF
     return 1
 }
 
-# Does anything already own this host's tailnet interface?
-#
-# Prints: sidecar | native | none. Mirrors hummingbot-api's tailnet-state.sh --
-# duplicated deliberately, because Condor installs on machines where that
-# checkout does not exist.
-#
-# Detects the RESOURCE, not the sibling product: the most common conflict is a
-# VPS already running Tailscale for the admin's own SSH access, which no
-# "is hummingbot-api here?" check would ever see. Two kernel-mode tailscaled
-# in one network namespace is fatal and silent -- the loser dies with
-# tstun.New("tailscale0"): device or resource busy while its container keeps
-# reporting "running".
-tailnet_sidecar_running() {
-    command_exists docker &&
-    docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'hummingbot-tailscale'
-}
-
-# A tailscaled on the HOST ITSELF -- not hummingbot-api's sidecar.
-#
-# The distinction matters: the sidecar runs with network_mode: host, so a
-# kernel-mode one creates tailscale0 in the host's own namespace and its
-# process is visible from the host. Both of those would otherwise read as a
-# native daemon that is not there. The host's tailscaled socket is the one
-# signal a sidecar cannot be mistaken for, since it keeps its own inside the
-# container.
-_tailnet_tailscaled_pids() { pgrep -x tailscaled 2>/dev/null; }
-
-_tailnet_in_container() {
-    [ -r "/proc/$1/cgroup" ] &&
-    grep -qE '(docker|containerd|libpod|kubepods)' "/proc/$1/cgroup" 2>/dev/null
-}
-
-# A tailscaled that is NOT inside a container. No /proc (macOS) means we
-# cannot say it is containerised, and there a container's processes are not
-# visible here anyway -- so treating it as a host daemon is right.
-_tailnet_host_tailscaled() {
-    local pid
-    for pid in $(_tailnet_tailscaled_pids); do
-        _tailnet_in_container "$pid" && continue
-        return 0
-    done
-    return 1
-}
-
-# A containerised tailscaled that is NOT our own sidecar -- someone else's
-# host-networked Tailscale container, which contends for tailscale0 exactly
-# like a host daemon would. Identified by container id in the cgroup path,
-# since the sidecar's tailscaled is a child of containerboot and so does not
-# match the container's own main PID.
-_tailnet_foreign_container_tailscaled() {
-    local ours pid
-    ours="$(docker inspect -f '{{.Id}}' hummingbot-tailscale 2>/dev/null || true)"
-    for pid in $(_tailnet_tailscaled_pids); do
-        _tailnet_in_container "$pid" || continue
-        if [ -n "$ours" ] && grep -q "$ours" "/proc/$pid/cgroup" 2>/dev/null; then
-            continue
-        fi
-        return 0
-    done
-    return 1
-}
-
-tailnet_has_native() {
-    # 1. The host's own tailscaled socket. Definitive: a sidecar keeps its
-    #    socket inside its container and cannot answer here.
-    if command_exists tailscale && tailscale status >/dev/null 2>&1; then
-        return 0
-    fi
-    # 2. A tailscaled process outside any container. Also definitive, and it
-    #    still works when the host has no tailscale CLI installed.
-    _tailnet_host_tailscaled && return 0
-    # 3. tailscale0 exists. A kernel-mode sidecar runs with network_mode:
-    #    host and creates that device in the host's own namespace, so OUR
-    #    sidecar is the one owner that is not a conflict. Anything else --
-    #    another host-networked Tailscale container, or an owner that cannot
-    #    be identified -- contends just as a host daemon would.
-    #
-    #    The asymmetry decides the unknown case: answering "native" when it is
-    #    only our own sidecar costs an unnecessary userspace downgrade, and
-    #    userspace serves port 8000 perfectly well. Answering "not native"
-    #    when something else owns the device costs a wedged sidecar and an
-    #    unreachable API. So anything unproven resolves toward native.
-    if ip link show tailscale0 >/dev/null 2>&1; then
-        if tailnet_sidecar_running && ! _tailnet_foreign_container_tailscaled; then
-            return 1
-        fi
-        return 0
-    fi
-    return 1
-}
-
-tailnet_state() {
-    tailnet_has_native && { echo native; return; }
-    tailnet_sidecar_running && { echo sidecar; return; }
-    echo none
-}
-
 # On WSL2, systemd doesn't manage tailscaled — we must start the daemon manually
 # before calling `tailscale up`, otherwise the call silently fails.
 tailscale_up() {
@@ -1135,7 +1038,6 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
         ts_hb_hostname="hummingbot-api"
         HB_TAILSCALE_MODE=none
         use_tailscale="${use_tailscale_early:-N}"
-        _ts_state="$(tailnet_state)"
         # Only a NATIVE daemon is a node Condor can reuse. A hummingbot-api
         # sidecar is a separate tailnet identity with its socket inside its
         # container: `tailscale ip` on the host returns nothing for it, so
@@ -1146,13 +1048,38 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
         # natively alongside it -- that is the collision this whole change
         # exists to prevent, and it must not be walked into here either. A
         # userspace sidecar holds no device, so enrolling is fine.
-        _ts_blocked_by_sidecar=false
-        if [ "$_ts_state" = sidecar ] && ip link show tailscale0 >/dev/null 2>&1; then
-            _ts_blocked_by_sidecar=true
+        # Two facts decide this, and neither needs to attribute a process to a
+        # host or a container:
+        #   can we USE a host daemon?   status answers AND yields an address
+        #   is the device taken?        tailscale0 already exists
+        #
+        # Reuse requires the first. Enrolling requires the absence of the
+        # second: `tailscale up` against a device something else owns fails,
+        # and that something else is usually hummingbot-api's kernel-mode
+        # sidecar.
+        #
+        # Deliberately NOT derived from tailnet_state(). That has to decide
+        # whether a tailscaled belongs to this host or to a container, and it
+        # cannot always -- an unreadable /proc, a cgroup with no recognised
+        # marker, a docker daemon this user may not query. A sidecar
+        # misattributed as native there has no host address, which used to
+        # fall through to enrollment and contend for the very device the
+        # sidecar was holding. Asking what we can use, and what is already
+        # taken, has no such failure mode.
+        _ts_host_usable=false
+        if command_exists tailscale && tailscale status >/dev/null 2>&1 \
+           && [ -n "$(tailscale ip -4 2>/dev/null | head -1)" ]; then
+            _ts_host_usable=true
         fi
-        if [[ "${use_tailscale:-}" =~ ^[Yy]$ ]] && [ "$_ts_blocked_by_sidecar" = true ]; then
-            msg_warn "hummingbot-api's Tailscale sidecar owns this machine's tailnet device."
-            msg_info "Condor cannot join the tailnet while it runs in kernel mode."
+        _ts_device_busy=false
+        ip link show tailscale0 >/dev/null 2>&1 && _ts_device_busy=true
+
+        if [[ "${use_tailscale:-}" =~ ^[Yy]$ ]] && [ "$_ts_host_usable" != true ] \
+           && [ "$_ts_device_busy" = true ]; then
+            msg_warn "Something already owns this machine's tailnet device (tailscale0),"
+            msg_warn "and it is not a daemon Condor can use — most likely hummingbot-api's"
+            msg_warn "Tailscale sidecar running in kernel mode."
+            msg_info "Joining now would contend for the same device and fail."
             msg_info "Fix it in ../hummingbot-api, then re-run this setup:"
             msg_info "  set TAILSCALE_MODE=host in its .env  (one shared node), or"
             msg_info "  set TAILSCALE_MODE=sidecar           (its own node, userspace)"
@@ -1164,7 +1091,7 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
           # Already on the tailnet: no key needed to reuse this machine's own
           # node. Asking for one would demand a credential for a join we are
           # about to skip.
-          if [ "$_ts_state" = native ]; then
+          if [ "$_ts_host_usable" = true ]; then
             msg_ok "Tailscale already active on this machine — no auth key needed"
           else
             echo ""
@@ -1194,19 +1121,13 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
             # with a daemon already running produced output byte-identical to
             # one without, because nothing ever looked. The remote-API branch
             # above has always checked; this one never did.
-            # `native` still has to yield a usable address before we skip
-            # enrollment. Detection can be fooled -- an unreadable /proc, a
-            # docker daemon this user cannot query -- and the failure mode of
-            # guessing wrong is an install that reports success with no
-            # address and a dashboard on localhost. An address is the thing we
-            # actually need, so require it rather than infer it.
-            if [ "$_ts_state" = native ] && [ -n "$(tailscale ip -4 2>/dev/null | head -1)" ]; then
+            # Reuse only a daemon we can actually use. Reaching the else means
+            # the device is free -- the busy case bailed out above -- so
+            # enrolling here cannot contend with anything.
+            if [ "$_ts_host_usable" = true ]; then
                 msg_ok "Tailscale already active on this machine — reusing its node"
                 msg_info "Not joining the tailnet a second time: one machine, one node."
             else
-                if [ "$_ts_state" = native ]; then
-                    msg_warn "A tailscaled is present but reports no IPv4 address — enrolling this machine."
-                fi
                 msg_info "Installing Tailscale on this machine..."
                 curl -fsSL https://tailscale.com/install.sh | sh
                 msg_info "Connecting to Tailscale network..."
