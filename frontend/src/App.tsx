@@ -17,7 +17,6 @@ import { BotDetail } from "@/pages/BotDetail";
 import { Bots } from "@/pages/Bots";
 import { CreateExecutor } from "@/pages/CreateExecutor";
 import { Dex } from "@/pages/Dex";
-import { Floor } from "@/pages/Floor";
 import { DexPool } from "@/pages/DexPool";
 import { Login } from "@/pages/Login";
 import { Portfolio } from "@/pages/Portfolio";
@@ -92,10 +91,15 @@ export default function App() {
                   path="/fleet"
                   element={<Navigate to={EXECUTION_PATH} replace />}
                 />
-                {/* What every agent adds up to (FEAT-112). A page and not a
-                    section of the fleet overview: that page is one row per
-                    agent, and an aggregate chart is not a row. */}
-                <Route path="/floor" element={<Floor />} />
+                {/* What every agent adds up to is the fleet scope of the
+                    browser (FEAT-116) — the same records, folded once, split by
+                    the level below whichever scope the reader is on. Kept as a
+                    redirect rather than deleted: it is in bookmarks and in the
+                    nav people remember. The three parameters it spent —
+                    `?basis=`, `?from=`, `?range=` — are the ones the browser's
+                    own chart reads, so a reader who lands there and sets them
+                    again is setting the same three. */}
+                <Route path="/floor" element={<Navigate to="/bots" replace />} />
                 <Route path="/portfolio" element={<Portfolio />} />
                 <Route path="/bots" element={<Bots />} />
                 <Route path="/bots/:id" element={<BotDetail />} />

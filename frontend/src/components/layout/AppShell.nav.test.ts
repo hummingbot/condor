@@ -22,13 +22,15 @@ import { describe, expect, it } from "vitest";
 import { FULL_BLEED_ROUTES, NAV_ITEMS } from "@/lib/nav";
 
 describe("the nav", () => {
-  it("has no fleet entry: the fleet is a panel of the home now", () => {
-    // FEAT-114. `/fleet` still resolves — it redirects into the panel — but a
-    // nav entry onto a redirect is a door that opens onto another door.
+  it("has neither a fleet nor a floor entry: both are somebody else's report now", () => {
+    // FEAT-114 and FEAT-116. Both addresses still resolve — each redirects into
+    // the surface that absorbed it — but a nav entry onto a redirect is a door
+    // that opens onto another door. The floor's is `/bots`, which is on the
+    // list already, one entry along from the agents it used to sit beside.
     const paths: string[] = NAV_ITEMS.map((item) => item.to);
     expect(paths).not.toContain("/fleet");
-    expect(paths.indexOf("/floor")).toBe(paths.indexOf("/") + 1);
-    expect(NAV_ITEMS.find((item) => item.to === "/floor")?.label).toBe("Floor");
+    expect(paths).not.toContain("/floor");
+    expect(paths).toContain("/bots");
   });
 
   it("gives every nav entry a distinct address and label", () => {
@@ -38,8 +40,11 @@ describe("the nav", () => {
 });
 
 describe("full bleed", () => {
-  it("includes the floor, which owns its own scrolling under a sticky strip", () => {
-    expect(FULL_BLEED_ROUTES).toContain("/floor");
+  it("includes the browser, a scope sidebar beside a report column", () => {
+    // And not the floor: that page's own two-part layout is this one's since
+    // FEAT-116, and a layout rule for a redirect is a rule about nothing.
+    expect(FULL_BLEED_ROUTES).toContain("/bots");
+    expect(FULL_BLEED_ROUTES as readonly string[]).not.toContain("/floor");
   });
 
   it("includes the home, which scrolls its own transcript", () => {

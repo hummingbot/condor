@@ -16,7 +16,7 @@ import type { SetURLSearchParams } from "react-router-dom";
 
 import { PnlRangeStrip } from "@/components/bots/PnlRangeStrip";
 
-import type { FloorModel } from "@/components/agent/floor/floor";
+import type { ScopeOwner } from "@/components/perf/scopeOwners";
 import {
   formatAxisCurrency,
   formatAxisTime,
@@ -51,15 +51,21 @@ import {
 import { getThemeColors } from "@/lib/theme-colors";
 
 /**
- * The fleet's PnL, one line per agent (FEAT-112).
+ * A scope's PnL, one line per child of it (FEAT-112, rehosted by FEAT-116).
+ *
+ * It was `FloorChart`, and it drew one line per agent because the page it was
+ * on was about agents. The lines are whatever the tree's next level is now —
+ * agents at the fleet scope, bots inside an agent, pairs under `?groupBy=pair`
+ * — which is the same picture with the special case taken out of it. Which
+ * children those are is {@link scopeOwners}' answer; everything here is about
+ * drawing N series that already exist.
  *
  * A **sibling** of `PnlEvolutionChart`, not a change to it. That chart is 1050
  * lines built on fixed `dataKey` strings, a legend grouped by pane and a
  * two-pane geometry contract; adding an arbitrary series dimension to it would
- * touch the most-used chart in the app for a page that did not exist yet. What
- * is shared instead is everything *pure*: the axis gutter, the pane insets, the
- * bucket and bar geometry, the position axis rules, the time-range grammar and
- * the range strip.
+ * touch the most-used chart in the app. What is shared instead is everything
+ * *pure*: the axis gutter, the pane insets, the bucket and bar geometry, the
+ * position axis rules, the time-range grammar and the range strip.
  *
  * The one contract that must not be broken: **both panes reserve `AXIS_WIDTH`
  * on the left and on the right**, or their plot areas differ and the synced
@@ -71,28 +77,44 @@ import { getThemeColors } from "@/lib/theme-colors";
  * `aggregatePnlSeries` forward-fills per controller, so the equality is a
  * property of the fold (see `lib/owner-series`).
  *
- * Series visibility is **page-local state**, deliberately not the module-level
+ * Series visibility is **scope-local state**, deliberately not the module-level
  * `localStorage` store in `lib/pnl-chart`: that store's keys are the fixed
  * `PnlSeriesKey` union and its scope is every chart on the device, neither of
- * which fits a set of series named after this install's agents.
+ * which fits a set of series named after this install's agents and bots.
  */
-export function FloorChart({
-  model,
+export function OwnerPnlChart({
+  owners,
   rows,
   keys,
+  symbol,
+  net,
+  capital,
+  title,
+  height,
   params,
   setParams,
 }: {
-  model: FloorModel;
+  /** The scope's children, in the tree's own order — labels, and what Relative divides by. */
+  owners: readonly ScopeOwner[];
   /** The merged rows, absolute and measured from inception. */
   rows: FloorChartRow[];
-  /** The owner keys, in the order the rows band lists them. */
+  /** The owner keys, in the order the tree lists them. */
   keys: readonly string[];
+  /** The display currency's symbol, so every screen prints one currency. */
+  symbol: string;
+  /** The scope's own folded net — what the line's end is checked against. */
+  net: number;
+  /** The scope's own declared capital — what Relative measures the Total against. */
+  capital: number;
+  /** `Fleet PnL by agent`, and so on: the browser names the level. */
+  title: string;
+  /** The room the report column has left, split between the two panes. */
+  height: number;
   params: URLSearchParams;
   setParams: SetURLSearchParams;
 }) {
   const instanceId = useId().replace(/[^a-zA-Z0-9]/g, "");
-  const posGradientId = `floorPos${instanceId}`;
+  const posGradientId = `ownerPos${instanceId}`;
 
   const basis = parseBasis(params.get("basis"));
   const from = parseBaseline(params.get("from"));
@@ -122,29 +144,25 @@ export function FloorChart({
     [rows, viewStart, viewEnd],
   );
 
-  /** Each owner's declared capital — what Relative divides by. */
-  const capital = useMemo(() => {
-    const by: Record<string, number> = { total: model.total.capital };
-    for (const row of model.rows) by[row.slug] = row.totals.capital;
-    for (const other of model.others) by[other.key] = other.totals.capital;
+  /** Each line's declared capital, and the scope's own — what Relative divides by. */
+  const capitalOf = useMemo(() => {
+    const by: Record<string, number> = { total: capital };
+    for (const owner of owners) by[owner.key] = owner.capital;
     return by;
-  }, [model]);
+  }, [owners, capital]);
 
   const { rows: drawnRows, unplottable } = useMemo(
-    () => rebaseRows(visible, keys, { basis, from, capital }),
-    [visible, keys, basis, from, capital],
+    () => rebaseRows(visible, keys, { basis, from, capital: capitalOf }),
+    [visible, keys, basis, from, capitalOf],
   );
   const muted = useMemo(() => new Set(unplottable.map((u) => u.key)), [unplottable]);
 
-  const labels = useMemo(() => {
-    const by = new Map<string, string>();
-    model.rows.forEach((row) => by.set(row.slug, row.name));
-    model.others.forEach((other) => by.set(other.key, other.label));
-    return by;
-  }, [model]);
+  const labels = useMemo(
+    () => new Map(owners.map((owner) => [owner.key, owner.label])),
+    [owners],
+  );
 
   const latest = drawnRows.length > 0 ? drawnRows[drawnRows.length - 1] : null;
-  const symbol = model.symbol;
   const tc = getThemeColors();
 
   const fmt = useCallback(
@@ -216,10 +234,9 @@ export function FloorChart({
   // practice, the follow-up is `executorSeries` contributing closed outcomes as
   // a second source, which `lib/perf-history` already knows how to arbitrate.
   const lastAbsolute = rows.length > 0 ? rows[rows.length - 1].total : null;
-  const gap = lastAbsolute === null ? 0 : model.total.net - lastAbsolute;
+  const gap = lastAbsolute === null ? 0 : net - lastAbsolute;
   const showGap =
-    lastAbsolute !== null &&
-    Math.abs(gap) > Math.max(0.01, Math.abs(model.total.net) * 0.005);
+    lastAbsolute !== null && Math.abs(gap) > Math.max(0.01, Math.abs(net) * 0.005);
 
   const fullSpanMs = rows.length > 1 ? rows[rows.length - 1].time - rows[0].time : 0;
   const selectRange = useCallback(
@@ -244,15 +261,21 @@ export function FloorChart({
   const drawn = keys.filter((key) => !hidden.has(key) && !muted.has(key));
   const totalDrawn = !hidden.has("total") && !muted.has("total");
 
+  // The same 65/35 split `PnlEvolutionChart` takes, off the same measured box,
+  // so switching between the aggregate chart and this one does not resize the
+  // report column under the reader.
+  const pnlHeight = Math.round(height * 0.65);
+  const activityHeight = height - pnlHeight;
+
   return (
     <div
-      data-floor-chart
-      className="overflow-hidden rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]"
+      data-owner-chart
+      className="h-full overflow-hidden rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]"
     >
       <div className="flex flex-wrap items-start justify-between gap-2 border-b border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5">
         <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
           <p className="text-[10px] font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
-            PnL by agent
+            {title}
           </p>
           <LegendChip
             label="Total"
@@ -317,7 +340,7 @@ export function FloorChart({
           `attributedMoney`'s rule, one level up: no statement is not `0`. */}
       {unplottable.length > 0 && (
         <p
-          data-floor-unplottable
+          data-owner-unplottable
           className="border-b border-[var(--color-border)] px-3 py-1 text-[10px] text-[var(--color-text-muted)]"
         >
           Not plotted in Relative — no declared capital to measure against:{" "}
@@ -330,7 +353,7 @@ export function FloorChart({
 
       {showGap && (
         <p
-          data-floor-gap
+          data-owner-gap
           className="border-b border-[var(--color-border)] px-3 py-1 text-[10px] text-[var(--color-yellow)]"
           title="Records with no controller history — a standalone executor, for instance — are in the fold and cannot be in the line."
         >
@@ -342,7 +365,7 @@ export function FloorChart({
 
       {drawnRows.length === 0 ? (
         <p
-          data-floor-chart-empty
+          data-owner-chart-empty
           className="px-3 py-12 text-center text-sm text-[var(--color-text-muted)]"
         >
           No performance history yet.
@@ -353,7 +376,7 @@ export function FloorChart({
             style={{ paddingLeft: PANE_PAD_X, paddingRight: PANE_PAD_X }}
             data-pane="pnl"
           >
-            <ResponsiveContainer width="100%" height={260}>
+            <ResponsiveContainer width="100%" height={pnlHeight}>
               <ComposedChart
                 data={drawnRows}
                 margin={{ top: 12, right: PANE_MARGIN_RIGHT, left: 0, bottom: 0 }}
@@ -400,7 +423,7 @@ export function FloorChart({
                 />
                 <Tooltip
                   content={
-                    <FloorTooltip
+                    <OwnerTooltip
                       labels={labels}
                       keys={drawn}
                       format={fmt}
@@ -448,7 +471,7 @@ export function FloorChart({
             data-pane="activity"
             className="border-t border-[var(--color-border)]"
           >
-            <ResponsiveContainer width="100%" height={90} onResize={onActivityResize}>
+            <ResponsiveContainer width="100%" height={activityHeight} onResize={onActivityResize}>
               <ComposedChart
                 data={drawnRows}
                 margin={{ top: 4, right: PANE_MARGIN_RIGHT, left: 0, bottom: 4 }}
@@ -550,8 +573,8 @@ export function FloorChart({
           <p className="border-t border-[var(--color-border)] px-3 py-1 text-[10px] text-[var(--color-text-muted)]">
             {bucketLabel ? `Bars are volume traded per ${bucketLabel} bucket. ` : ""}
             The lines are folded from controller performance history, one call per
-            agent — the same fold `/bots` draws at{" "}
-            <code className="font-mono">?scope=agent:</code>.
+            line — the same fold this page draws when you walk into one of them
+            with <code className="font-mono">?scope=</code>.
           </p>
         </>
       )}
@@ -563,8 +586,8 @@ export function FloorChart({
  * One legend entry, doubling as the visibility toggle.
  *
  * `PnlEvolutionChart`'s `LegendEntry` pattern; the store behind it is this
- * page's own state rather than the device-wide one, because these series are
- * named after this install's agents.
+ * chart's own state rather than the device-wide one, because these series are
+ * named after whatever the scope's children happen to be.
  */
 function LegendChip({
   test,
@@ -586,7 +609,7 @@ function LegendChip({
   return (
     <button
       type="button"
-      data-floor-legend={test ?? "total"}
+      data-owner-legend={test ?? "total"}
       data-drawn={drawn}
       onClick={onToggle}
       title={drawn ? `Hide ${label}` : `Show ${label}`}
@@ -622,7 +645,7 @@ function Toggle<T extends string>({
         <button
           key={option.value}
           type="button"
-          data-floor-toggle={option.value}
+          data-owner-toggle={option.value}
           data-active={option.value === active}
           onClick={() => onPick(option.value)}
           className={`rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors ${
@@ -643,7 +666,7 @@ interface TooltipPayload {
   value?: number;
 }
 
-function FloorTooltip({
+function OwnerTooltip({
   active,
   payload,
   label,

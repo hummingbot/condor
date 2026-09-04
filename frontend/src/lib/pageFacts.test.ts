@@ -29,9 +29,13 @@ declare global {
 }
 
 describe("routeFacts", () => {
-  it("knows the floor, so the chat can say what is on screen (FEAT-112)", () => {
-    expect(routeFacts("/floor", "")?.label).toBe("Floor");
-    expect(routeFacts("/floor", "?basis=rel&range=7d")?.label).toBe("Floor");
+  it("says nothing about the floor, which is the browser's fleet scope now", () => {
+    // FEAT-116: `/floor` redirects to `/bots`, so the reader is never on it
+    // long enough for a fact about it to be true. What it used to describe —
+    // the window, the basis, the baseline — the browser contributes itself,
+    // under the `/bots` label, from the same three parameters.
+    expect(routeFacts("/floor", "")).toBeNull();
+    expect(routeFacts("/floor", "?basis=rel&range=7d")).toBeNull();
   });
 
   it("says nothing on the home, which is the chat", () => {
