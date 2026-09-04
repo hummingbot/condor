@@ -443,9 +443,12 @@ export const ChatMessageView = memo(function ChatMessageView({
           <TurnActions ts={message.ts} text={message.text} />
         </div>
       </div>
-      {/* The thought is the live thing only until the answer starts landing in
-          this same turn. Keying the collapse on `text` too means a lost
-          `prompt_done` cannot leave it stuck open. */}
+      {/* `live` is the only thing that opens the strip: the run is worth
+          reading while it is the whole of the turn, and `useLiveDisclosure`
+          latches the user's own click over that for the rest of its life.
+          `thinking` — still streaming, no answer text yet — only picks the
+          wording ("Thinking..." vs "Thought") and keeps the spinner turning;
+          the arrival of `text` collapses nothing. */}
       <RunStrip
         thought={message.thought}
         toolCalls={message.toolCalls}
