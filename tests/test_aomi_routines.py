@@ -72,7 +72,9 @@ class FakePipeline:
         fail_describe=(),
         fail_read=None,
         fail_skill=None,
+        skill_operations=None,
     ):
+        self.skill_operations = skill_operations or {}
         self.apps = apps or {}
         self.operations = operations or {}
         self.descriptors = descriptors or {}
@@ -112,6 +114,18 @@ class FakePipeline:
             raise self.fail_skill
         for name in self.skills:
             yield _Entry(name, kind="skill")
+
+    async def list_skill_operations(self, name):
+        self.calls.append(("list_skill_operations", name))
+        if self.fail_skill:
+            raise self.fail_skill
+        return types.SimpleNamespace(
+            names=lambda: list(self.skill_operations.get(name, []))
+        )
+
+    async def describe_skill_operation(self, name, op):
+        self.calls.append(("describe_skill_operation", name, op))
+        return self.descriptors[(f"skill:{name}", op)]
 
     async def skill_markdown(self, name):
         self.calls.append(("skill_markdown", name))
@@ -167,8 +181,10 @@ def _catalog_pipeline() -> FakePipeline:
 def test_config_defaults_and_descriptions():
     assert catalog.Config().model_dump() == {
         "app": "",
+        "skill": "",
         "describe": True,
         "max_operations": 40,
+        "include_skills": True,
     }
     assert read.Config().model_dump() == {
         "op": "context",
@@ -194,8 +210,8 @@ def test_catalog_lists_apps_operations_and_stars_required_args(monkeypatch):
     assert isinstance(result, RoutineResult)
     text = result.text
     assert text.startswith("# Aomi Pipeline catalog")
-    assert "## uniswap (2 operations)" in text
-    assert "## aave (1 operations)" in text
+    assert "## app `uniswap` (2 operations)" in text
+    assert "## app `aave` (1 operations)" in text
     assert (
         "- `swap` — Swap tokens on Uniswap. (args: token_in*, amount*, slippage)"
         in text
@@ -203,10 +219,11 @@ def test_catalog_lists_apps_operations_and_stars_required_args(monkeypatch):
     assert "Second line" not in text
     assert "- `supply` — Supply to Aave. (args: asset*)" in text
     assert "aomi_read" in text and "onchain_executor" in text
-    assert result.table_columns == ["app", "operation", "args"]
+    assert result.table_columns == ["source", "operation", "kind", "args"]
     assert {
-        "app": "uniswap",
+        "source": "uniswap",
         "operation": "swap",
+        "kind": "executable",
         "args": "token_in*, amount*, slippage",
     } in (result.table_data)
     assert len(result.table_data) == 3
@@ -220,11 +237,13 @@ def test_catalog_scopes_to_one_app_and_can_skip_descriptors(monkeypatch):
         catalog.run(catalog.Config(app="aave", describe=False), context=None)
     )
 
-    assert "## aave (1 operations)" in result.text
+    assert "## app `aave` (1 operations)" in result.text
     assert "uniswap" not in result.text
     assert ("list_apps",) not in pipeline.calls
     assert not any(c[0] == "describe_operation" for c in pipeline.calls)
-    assert result.table_data == [{"app": "aave", "operation": "supply", "args": ""}]
+    assert result.table_data == [
+        {"source": "aave", "operation": "supply", "kind": "executable", "args": ""}
+    ]
 
 
 def test_catalog_tolerates_one_failing_descriptor(monkeypatch):
@@ -525,3 +544,72 @@ def test_config_json_is_the_shape_the_dashboard_renders():
             assert info.annotation in (str, bool, int), (module.__name__, name)
             assert info.description, (module.__name__, name)
     json.dumps(read.Config().model_dump())
+
+
+def test_catalog_hides_harness_plumbing_and_lifecycle_primitives(monkeypatch):
+    pytest.importorskip("aomi.pipeline.policy")
+    pipeline = FakePipeline(
+        apps={
+            "default": [
+                "call_v4_swap",
+                "get_account_info",
+                "ask_authorization",
+                "evm_commit_txs",
+                "dummy_echo",
+                "jupiter_prepare_swap",
+            ]
+        },
+    )
+    _use(monkeypatch, pipeline)
+
+    result = asyncio.run(catalog.run(catalog.Config(describe=False), context=None))
+
+    text = result.text
+    assert "## app `default` (3 operations, 3 harness-internal hidden)" in text
+    assert "### Uniswap V4 swaps" in text and "- `call_v4_swap`" in text
+    assert "- `get_account_info` — read" in text
+    assert "- `jupiter_prepare_swap` (svm)" in text
+    for hidden in ("ask_authorization", "evm_commit_txs", "dummy_echo"):
+        assert hidden not in text
+    kinds = {row["operation"]: row["kind"] for row in result.table_data}
+    assert kinds == {
+        "call_v4_swap": "executable",
+        "get_account_info": "read",
+        "jupiter_prepare_swap": "executable",
+    }
+
+
+def test_catalog_lists_skills_and_expands_one(monkeypatch):
+    pipeline = FakePipeline(
+        apps={"default": ["call_v4_swap"]},
+        skills=["aave", "lido"],
+        skill_operations={"aave": ["aave_supply", "aave_get_positions"]},
+        descriptors={
+            ("skill:aave", "aave_supply"): _Descriptor(
+                "aave_supply",
+                "Supply an asset to Aave.",
+                {"required": ["asset", "amount"]},
+            ),
+            ("skill:aave", "aave_get_positions"): _Descriptor(
+                "aave_get_positions", "Read Aave positions."
+            ),
+        },
+    )
+    _use(monkeypatch, pipeline)
+
+    listing = asyncio.run(catalog.run(catalog.Config(describe=False), context=None))
+    assert "## skills (2)" in listing.text and "`aave`, `lido`" in listing.text
+    assert ("list_skill_operations", "aave") not in pipeline.calls
+
+    expanded = asyncio.run(catalog.run(catalog.Config(skill="aave"), context=None))
+    text = expanded.text
+    assert "### skill `aave` (2 operations)" in text
+    assert "- `aave_supply` — Supply an asset to Aave. (args: asset*, amount*)" in text
+    assert "- `aave_get_positions` — read: Read Aave positions." in text
+    assert "## app" not in text
+    assert {
+        "source": "skill:aave",
+        "operation": "aave_supply",
+        "kind": "executable",
+        "args": "asset*, amount*",
+    } in expanded.table_data

@@ -1,8 +1,9 @@
-"""List the apps and operations the Aomi Pipeline can execute on-chain."""
+"""List what the Aomi Pipeline can execute on-chain: app operations and protocol skills."""
 
 CATEGORY = "DeFi"
 
 import logging
+from collections import defaultdict
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -11,30 +12,69 @@ from routines.base import RoutineResult
 
 logger = logging.getLogger(__name__)
 
-TABLE_COLUMNS = ["app", "operation", "args"]
+TABLE_COLUMNS = ["source", "operation", "kind", "args"]
 
 FOOTER = (
-    "Read chain state with the `aomi_read` routine (account, contract, "
-    "token-holdings, context). Execute an operation with "
-    "`manage_executors(action='create', executor_type='onchain_executor')` — "
-    "pass `mode='operation'` with `app`, `operation` and `arguments`, or "
-    "`mode='calls'` with raw `evm_stage_tx` calls."
+    "Reads return state or a quote and stage nothing; run them with the `aomi_read` "
+    "routine or as `mode='operation'` dry runs. Execute an operation with "
+    "`manage_executors(action='create', executor_type='onchain_executor')`: "
+    "`mode='operation'` with `app` (or `skills=['<skill>']`), `operation` and "
+    "`arguments`; or `mode='calls'` with raw EVM calls. Solana operations need "
+    "`chain='svm'`. Aomi's own chat plumbing (authorization, scheduling, threads) and "
+    "its stage/simulate/commit primitives are not listed: the executor owns that lifecycle."
 )
 
 
 class Config(BaseModel):
-    """Browse the Aomi Pipeline catalog: apps, their operations and argument schemas."""
+    """Browse the Aomi Pipeline catalog: executable operations, reads, and protocol skills."""
 
     app: str = Field(
         default="", description="One app to list (blank = every app in the catalog)"
+    )
+    skill: str = Field(
+        default="",
+        description="One protocol skill to expand (e.g. 'aave'); blank lists every skill",
     )
     describe: bool = Field(
         default=True,
         description="Fetch each operation's descriptor (description + argument schema)",
     )
     max_operations: int = Field(
-        default=40, description="Cap on operations listed per app"
+        default=40, description="Cap on operations listed per app or skill"
     )
+    include_skills: bool = Field(
+        default=True, description="Also list protocol skills (Aave, Morpho, Lido, ...)"
+    )
+
+
+def _policy():
+    """The shared classification from the `aomi` package, or a permissive stand-in."""
+    try:
+        from aomi.pipeline import policy
+
+        return policy
+    except (
+        ImportError
+    ):  # pragma: no cover - the client ships it; keep the routine usable
+
+        class _Permissive:
+            @staticmethod
+            def is_visible(name: str) -> bool:
+                return True
+
+            @staticmethod
+            def classify(name: str) -> str:
+                return "executable"
+
+            @staticmethod
+            def group_of(name: str) -> str:
+                return "Operations"
+
+            @staticmethod
+            def chain_family_of(name: str) -> str:
+                return "evm"
+
+        return _Permissive()
 
 
 def _first_line(text: Any) -> str:
@@ -42,51 +82,131 @@ def _first_line(text: Any) -> str:
 
 
 def _args_label(descriptor: Any) -> str:
-    """``a*, b`` — every argument, the required ones starred."""
-    required = set(getattr(descriptor, "required_args", None) or [])
+    """``a*, b`` — every argument, the required ones starred; `topic` is harness-internal."""
+    required_list = list(getattr(descriptor, "required_args", None) or [])
+    required = set(required_list)
     names = list((getattr(descriptor, "properties", None) or {}).keys())
-    for name in required:
+    for name in required_list:  # schema order, not set order
         if name not in names:
             names.append(name)
+    names = [n for n in names if n != "topic"]
     return ", ".join(f"{n}*" if n in required else n for n in names)
 
 
-async def _describe(client: Any, app: str, op: str) -> tuple[str, str]:
+async def _describe(describe_fn, *key: str) -> tuple[str, str]:
     """``(description, args)`` for one operation; a failure is a labelled blank."""
     try:
-        descriptor = await client.describe_operation(app, op)
+        descriptor = await describe_fn(*key)
     except Exception as e:  # noqa: BLE001 - one bad descriptor must not sink the run
-        logger.warning("Aomi describe_operation(%s, %s) failed: %s", app, op, e)
+        logger.warning("Aomi describe %s failed: %s", key, e)
         return f"(describe failed: {e})", ""
     return _first_line(descriptor.description), _args_label(descriptor)
 
 
+def _bullet(op: str, description: str, args: str, chain: str) -> str:
+    bullet = f"- `{op}`"
+    if chain == "svm":
+        bullet += " (svm)"
+    if description:
+        bullet += f" — {description}"
+    if args:
+        bullet += f" (args: {args})"
+    return bullet
+
+
+async def _list_app(
+    client: Any, app: str, config: Config, policy, rows: list[dict]
+) -> list[str]:
+    ops = [entry.name async for entry in client.list_operations(app)]
+    visible = [op for op in ops if policy.is_visible(op)]
+    hidden = len(ops) - len(visible)
+    lines = [
+        f"## app `{app}` ({len(visible)} operations"
+        + (f", {hidden} harness-internal hidden)" if hidden else ")")
+    ]
+    grouped: dict[str, list[str]] = defaultdict(list)
+    for op in visible[: max(config.max_operations, 0)]:
+        grouped[policy.group_of(op)].append(op)
+    for group in sorted(grouped, key=lambda g: (g == "Protocol operations", g)):
+        lines.append(f"### {group}")
+        for op in grouped[group]:
+            kind = policy.classify(op)
+            chain = policy.chain_family_of(op)
+            description, args = "", ""
+            if config.describe:
+                description, args = await _describe(client.describe_operation, app, op)
+            if kind == "read":
+                description = (
+                    ("read: " + description).strip() if description else "read"
+                )
+            lines.append(_bullet(op, description, args, chain))
+            rows.append({"source": app, "operation": op, "kind": kind, "args": args})
+    if len(visible) > config.max_operations:
+        lines.append(f"- … {len(visible) - config.max_operations} more not shown")
+    lines.append("")
+    return lines
+
+
+async def _list_skills(
+    client: Any, config: Config, policy, rows: list[dict]
+) -> list[str]:
+    if config.skill:
+        skills = [config.skill]
+    else:
+        skills = [entry.name async for entry in client.list_skills()]
+    if not skills:
+        return []
+    lines = [f"## skills ({len(skills)})"]
+    if not config.skill:
+        lines.append(", ".join(f"`{s}`" for s in skills))
+        lines.append(
+            "Pass `skill='<name>'` to list a skill's operations, or `aomi_skill` for its instructions."
+        )
+        lines.append("")
+        return lines
+    for skill in skills:
+        directory = await client.list_skill_operations(skill)
+        ops = [op for op in directory.names() if policy.is_visible(op)]
+        lines.append(f"### skill `{skill}` ({len(ops)} operations)")
+        for op in ops[: max(config.max_operations, 0)]:
+            kind = policy.classify(op)
+            chain = policy.chain_family_of(op)
+            description, args = "", ""
+            if config.describe:
+                description, args = await _describe(
+                    client.describe_skill_operation, skill, op
+                )
+            if kind == "read":
+                description = (
+                    ("read: " + description).strip() if description else "read"
+                )
+            lines.append(_bullet(op, description, args, chain))
+            rows.append(
+                {
+                    "source": f"skill:{skill}",
+                    "operation": op,
+                    "kind": kind,
+                    "args": args,
+                }
+            )
+        lines.append("")
+    return lines
+
+
 async def _walk(client: Any, config: Config) -> tuple[str, list[dict]]:
-    if config.app:
+    policy = _policy()
+    rows: list[dict] = []
+    lines = ["# Aomi Pipeline catalog", ""]
+    if config.skill:
+        apps: list[str] = []
+    elif config.app:
         apps = [config.app]
     else:
         apps = [entry.name async for entry in client.list_apps()]
-
-    lines = ["# Aomi Pipeline catalog", ""]
-    rows: list[dict] = []
     for app in apps:
-        ops = [entry.name async for entry in client.list_operations(app)]
-        lines.append(f"## {app} ({len(ops)} operations)")
-        for op in ops[: max(config.max_operations, 0)]:
-            description, args = "", ""
-            if config.describe:
-                description, args = await _describe(client, app, op)
-            bullet = f"- `{op}`"
-            if description:
-                bullet += f" — {description}"
-            if args:
-                bullet += f" (args: {args})"
-            lines.append(bullet)
-            rows.append({"app": app, "operation": op, "args": args})
-        if len(ops) > config.max_operations:
-            lines.append(f"- … {len(ops) - config.max_operations} more not shown")
-        lines.append("")
-
+        lines += await _list_app(client, app, config, policy, rows)
+    if config.include_skills or config.skill:
+        lines += await _list_skills(client, config, policy, rows)
     lines.append(FOOTER)
     return "\n".join(lines), rows
 

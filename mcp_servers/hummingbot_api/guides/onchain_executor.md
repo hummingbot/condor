@@ -5,10 +5,21 @@ set of calls to the Aomi Pipeline, which fork-simulates them, and — when
 the transaction hashes on the executor.
 
 Two ways to say what to sign:
-- **`mode="operation"`** — an app operation from the Aomi catalog (`app`,
-  `operation`, `arguments`). Aomi builds the calls; you never touch calldata.
-- **`mode="calls"`** — raw `evm_stage_tx` calls (`to`, `data`, `value`). For a
-  contract call, a native transfer, or anything the catalog does not cover.
+- **`mode="operation"`** — a catalog operation: either an app operation (`app`,
+  `operation`, `arguments`) or a protocol-skill operation (`skills=["aave"]`,
+  `operation`, `arguments` — Aave, Morpho, Compound, Curve, Pendle, Lido and 30+
+  more live under skills). Aomi builds the calls; you never touch calldata.
+  Solana operations (Jupiter, Raydium, Sanctum, deBridge) work here with `chain="svm"`.
+- **`mode="calls"`** — raw EVM calls (`to`, `data`, `value`). For a contract call,
+  a native transfer, or anything the catalog does not cover. EVM only.
+
+What the catalog will **not** offer you: Aomi's own chat plumbing
+(`ask_authorization`, `schedule_cron`, `spawn_thread`, `brave_search`, ...) and its
+raw stage/simulate/commit primitives (`evm_stage_tx`, `evm_commit_txs`,
+`svm_commit_ix`, ...). Authorization is decided by the wallet's signing policy on
+the Aomi side, scheduling is the tick engine's job, and this executor owns the
+lifecycle. Passing one of those as `operation` is refused at create time. Reads
+(`get_*`, `*_quote`, `*_status`) are listed for `aomi_read`, not as build targets.
 
 **Use when:**
 - Executing a DeFi action (swap, lend, stake, bridge) on an EVM chain from an agent
@@ -18,13 +29,13 @@ Two ways to say what to sign:
 **Avoid when:**
 - Trading on a CEX (use order/position/grid/dca executors)
 - Providing CLMM liquidity (use `lp_executor`)
-- Solana — this executor is EVM-only
+- Solana swaps that Hummingbot's own Gateway connectors already cover (Jupiter, Raydium, Orca, Meteora) — prefer the native `lp_executor`/Gateway path there; use this executor for what Gateway lacks
 
 #### Setup Workflow
 
-1. **Browse the catalog** — run the `aomi_catalog` routine (optionally
-   `app="<name>"`) to see which apps and operations exist, and which arguments
-   each requires (starred in the listing).
+1. **Browse the catalog** — run the `aomi_catalog` routine: apps and their
+   executable operations, reads, and the protocol skills. Pass `skill="aave"` to
+   expand one skill's operations and their arguments (required ones starred).
 2. **Read state first** — run the `aomi_read` routine (`op="account"` for the
    wallet's balance and nonce, `op="token-holdings"` for an ERC-20 balance,
    `op="contract"` to inspect a target, `op="context"` for block and gas). Do not
@@ -43,6 +54,8 @@ Two ways to say what to sign:
 | Parameter | Required | Meaning |
 |---|---|---|
 | `chain_id` | yes | EVM chain: `8453` Base, `1` Ethereum, `42161` Arbitrum, `10` Optimism |
+| `chain` | no | `evm` (default) or `svm` for Solana operations in `mode=operation` |
+| `skills` | no | Protocol skills to load; with exactly one, a bare `operation` resolves into that skill |
 | `mode` | yes | `calls` (raw `evm_stage_tx` calls) or `operation` (an app operation) |
 | `calls[]` | `mode=calls` | Each `{to, description, data: {signature, args, raw}, value}` — `value` is a **wei string** (`"0"` for none); `data.signature` + `data.args` for an ABI call, or `data.raw` for pre-encoded calldata |
 | `app` / `operation` / `arguments` | `mode=operation` | The catalog entry to execute and its argument map (see `aomi_catalog`) |
