@@ -107,14 +107,16 @@ def resolve_web_host(env=None) -> str:
 
     Three deployments, three answers:
 
-    * **Local machine, no Tailscale** — ``127.0.0.1``. You browse it at
-      ``localhost:8088``, and nothing else can reach it.
-    * **VPS, no Tailscale** — ``0.0.0.0``, so ``VPS_IP:8088`` works. Telegram
-      mode authenticates, which is what makes a public bind defensible here;
-      local mode does not, so it stays on loopback regardless.
-    * **Tailscale on** — this node's own tailnet address. The dashboard is
-      then reachable at ``<tailnet-ip>:8088`` from anywhere on the tailnet and
-      from nowhere else, because a public interface was never bound at all.
+    * **Local mode** — ``127.0.0.1``, always, Tailscale or not. This dashboard
+      has no login at all, so it stays on the loopback interface and you browse
+      it at ``localhost:8088``. Tailscale does not change that: a tailnet is a
+      smaller audience than the internet, not an authenticated one, and
+      "everyone on the tailnet" is still more than "nobody".
+    * **Telegram mode, no Tailscale** — ``0.0.0.0``, so ``VPS_IP:8088`` works.
+      This mode authenticates, which is what makes a public bind defensible.
+    * **Telegram mode, Tailscale on** — this node's own tailnet address. The
+      dashboard is reachable at ``<tailnet-ip>:8088`` from anywhere on the
+      tailnet and nowhere else, because a public interface is never bound.
 
     Binding the tailnet address directly replaced a ``127.0.0.1`` bind plus
     ``tailscale serve``. Serve needs the daemon socket, which refuses
@@ -134,12 +136,14 @@ def resolve_web_host(env=None) -> str:
     explicit = (env.get("WEB_HOST") or "").strip()
     if explicit:
         return explicit
+    # Local mode is checked BEFORE Tailscale, deliberately: an unauthenticated
+    # dashboard does not go on the tailnet just because a tailnet exists.
+    if resolve_mode(env) == MODE_LOCAL:
+        return "127.0.0.1"
     if resolve_use_tailscale(env):
         from utils.tailscale import tailnet_ip
 
         return tailnet_ip() or "127.0.0.1"
-    if resolve_mode(env) == MODE_LOCAL:
-        return "127.0.0.1"
     return "0.0.0.0"
 
 

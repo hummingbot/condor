@@ -382,7 +382,15 @@ def check_dashboard_port() -> list[Check]:
     held_by = f" (held by {owner})" if owner else ""
 
     public = [b for b in binds if _is_public_bind(b)]
-    if USE_TAILSCALE:
+
+    # Local mode stays on loopback whether or not Tailscale is on: the
+    # dashboard has no login, and a tailnet is a smaller audience than the
+    # internet, not an authenticated one. So the Tailscale expectations below
+    # do not apply here -- a loopback bind is the correct end state, not a
+    # fallback that failed.
+    from utils.config import LOCAL_MODE
+
+    if USE_TAILSCALE and not LOCAL_MODE:
         if public:
             return [
                 Check(
@@ -425,13 +433,29 @@ def check_dashboard_port() -> list[Check]:
         ]
 
     if public:
+        # Local mode has no login, so a public bind there is a different order
+        # of problem -- and it can only happen by setting WEB_HOST explicitly.
+        # "Enable Tailscale" is also the wrong hint when it is already on.
+        remedy = (
+            "unset WEB_HOST to go back to loopback"
+            if LOCAL_MODE
+            else (
+                "firewall it"
+                if USE_TAILSCALE
+                else "Enable Tailscale (`make setup`) or firewall it"
+            )
+        )
         return [
             Check(
                 "Dashboard port",
-                WARN,
-                f"{WEB_PORT} is reachable on all interfaces{held_by} — fine on a "
-                "trusted LAN, risky on a public VPS. Enable Tailscale "
-                "(`make setup`) or firewall it.",
+                FAIL if LOCAL_MODE else WARN,
+                f"{WEB_PORT} is reachable on all interfaces{held_by} — "
+                + (
+                    "local mode has no login at all, so this is open to "
+                    f"anyone who can route to it. {remedy}."
+                    if LOCAL_MODE
+                    else f"fine on a trusted LAN, risky on a public VPS. {remedy}."
+                ),
             )
         ]
     return [Check("Dashboard port", OK, f"127.0.0.1:{WEB_PORT} only{held_by}")]

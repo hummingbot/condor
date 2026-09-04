@@ -1001,7 +1001,17 @@ async def _run_dual(application: Application) -> None:
     # callers, so this often cannot succeed either; say so plainly rather than
     # leaving the dashboard silently unreachable.
     web_app = create_app()
-    if USE_TAILSCALE:
+    if USE_TAILSCALE and LOCAL_MODE:
+        # Local mode keeps loopback even with Tailscale on: the dashboard has
+        # no login, and a tailnet is a smaller audience than the internet, not
+        # an authenticated one. Intended, so no proxy and no warning.
+        logger.info(
+            "Dashboard on http://%s:%s — local mode stays on loopback even "
+            "with Tailscale enabled (no login on this dashboard).",
+            WEB_HOST,
+            WEB_PORT,
+        )
+    elif USE_TAILSCALE:
         from utils.tailscale import is_tailnet_ip
 
         if is_tailnet_ip(WEB_HOST):

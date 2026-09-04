@@ -147,26 +147,42 @@ def test_web_host_is_the_explicit_opt_out(mode):
 
 # ── Bind address under Tailscale ──
 #
-# Three deployments, three answers: localhost for a local install, every
-# interface for a VPS that authenticates, and this node's tailnet address when
-# Tailscale is on -- reachable across the tailnet and on no public interface.
-# The dashboard used to bind loopback and rely on `tailscale serve`, which
-# needs the daemon socket and so refused unprivileged callers: the proxy never
-# came up and the dashboard was reachable from nowhere at all.
+# Three deployments, three answers: loopback for local mode, every interface
+# for a Telegram-mode VPS that authenticates, and this node's tailnet address
+# when Tailscale is on -- reachable across the tailnet and on no public
+# interface. The dashboard used to bind loopback and rely on `tailscale
+# serve`, which needs the daemon socket and so refused unprivileged callers:
+# the proxy never came up and the dashboard was reachable from nowhere at all.
 
 
-@pytest.mark.parametrize("mode", ["local", "telegram"])
-def test_tailscale_binds_this_nodes_tailnet_address(monkeypatch, mode):
+def test_tailscale_binds_this_nodes_tailnet_address(monkeypatch):
     """CONTROL (b) under Tailscale: on the tailnet, and nowhere else."""
     import utils.tailscale as ts
 
     monkeypatch.setattr(ts, "tailnet_ip", lambda timeout=5: "100.101.1.5")
-    env = {"CONDOR_MODE": mode, "USE_TAILSCALE": "true"}
+    env = {"CONDOR_MODE": "telegram", "USE_TAILSCALE": "true"}
 
     host = resolve_web_host(env)
 
     assert host == "100.101.1.5"
     assert not ipaddress.ip_address(host).is_loopback
+
+
+def test_local_mode_keeps_loopback_even_with_tailscale(monkeypatch):
+    """CONTROL (b). A tailnet is a smaller audience, not an authenticated one.
+
+    Local mode has no login at all, so it must not go onto the tailnet just
+    because a tailnet is available — "everyone on the tailnet" is still more
+    than "nobody". The mode check therefore runs *before* the Tailscale one.
+    """
+    import utils.tailscale as ts
+
+    monkeypatch.setattr(ts, "tailnet_ip", lambda timeout=5: "100.101.1.5")
+
+    host = resolve_web_host({"CONDOR_MODE": "local", "USE_TAILSCALE": "true"})
+
+    assert ipaddress.ip_address(host).is_loopback
+    assert host == "127.0.0.1"
 
 
 def test_tailscale_fails_closed_when_the_address_is_unknown(monkeypatch):
