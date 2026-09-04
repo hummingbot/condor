@@ -349,10 +349,20 @@ _tailnet_host_tailscaled() {
     return 1
 }
 
-_tailnet_container_tailscaled() {
-    local pid
+# A containerised tailscaled that is NOT our own sidecar -- someone else's
+# host-networked Tailscale container, which contends for tailscale0 exactly
+# like a host daemon would. Identified by container id in the cgroup path,
+# since the sidecar's tailscaled is a child of containerboot and so does not
+# match the container's own main PID.
+_tailnet_foreign_container_tailscaled() {
+    local ours pid
+    ours="$(docker inspect -f '{{.Id}}' hummingbot-tailscale 2>/dev/null || true)"
     for pid in $(_tailnet_tailscaled_pids); do
-        _tailnet_in_container "$pid" && return 0
+        _tailnet_in_container "$pid" || continue
+        if [ -n "$ours" ] && grep -q "$ours" "/proc/$pid/cgroup" 2>/dev/null; then
+            continue
+        fi
+        return 0
     done
     return 1
 }
@@ -366,11 +376,22 @@ tailnet_has_native() {
     # 2. A tailscaled process outside any container. Also definitive, and it
     #    still works when the host has no tailscale CLI installed.
     _tailnet_host_tailscaled && return 0
-    # 3. tailscale0 on its own is weaker evidence: a kernel-mode sidecar runs
-    #    with network_mode: host and creates that device in the host's own
-    #    namespace. Trust it only when nothing containerised could have.
-    if ! tailnet_sidecar_running && ! _tailnet_container_tailscaled; then
-        ip link show tailscale0 >/dev/null 2>&1 && return 0
+    # 3. tailscale0 exists. A kernel-mode sidecar runs with network_mode:
+    #    host and creates that device in the host's own namespace, so OUR
+    #    sidecar is the one owner that is not a conflict. Anything else --
+    #    another host-networked Tailscale container, or an owner that cannot
+    #    be identified -- contends just as a host daemon would.
+    #
+    #    The asymmetry decides the unknown case: answering "native" when it is
+    #    only our own sidecar costs an unnecessary userspace downgrade, and
+    #    userspace serves port 8000 perfectly well. Answering "not native"
+    #    when something else owns the device costs a wedged sidecar and an
+    #    unreachable API. So anything unproven resolves toward native.
+    if ip link show tailscale0 >/dev/null 2>&1; then
+        if tailnet_sidecar_running && ! _tailnet_foreign_container_tailscaled; then
+            return 1
+        fi
+        return 0
     fi
     return 1
 }
@@ -872,6 +893,8 @@ echo -e "${BOLD}Step 3: Hummingbot API${RESET}"
 echo ""
 
 hb_api_deployed=false
+# Configured is not the same as answering; the summary must not conflate them.
+hb_api_healthy=false
 
 # Source .env again to get latest values
 if [ -f "$ENV_FILE" ]; then
@@ -1373,6 +1396,7 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
                     for i in $(seq 1 30); do
                         if api_health_check; then
                             msg_ok "Hummingbot API is healthy"
+                            hb_api_healthy=true
                             break
                         fi
                         sleep 2
@@ -1389,9 +1413,13 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
                 msg_info "Start API later: cd $HB_API_DIR && docker compose up -d"
             fi
 
-            # Only claim this when setup.sh actually wrote a config. Setting
-            # it regardless drove the config.yml credential sync and the
-            # closing summary off credentials that were never saved.
+            # hb_api_deployed means CONFIGURED, and drives the config.yml
+            # credential sync -- which is right even when the stack did not
+            # come up, since the credentials are valid and the API can be
+            # started later. Whether it is actually RUNNING is a separate
+            # fact, tracked by hb_api_healthy, because a deploy that failed
+            # (no Docker, a compose error, a container that never answers)
+            # must not be summarised as running.
             if [ "$hb_api_ready" = true ]; then
                 msg_ok "Hummingbot API credentials saved"
                 hb_api_deployed=true
@@ -1545,9 +1573,13 @@ else
 echo ""
 echo -e "  Then send ${BOLD}/start${RESET} to your Telegram bot."
 fi
-if [ "${hb_api_deployed:-}" = true ]; then
+if [ "${hb_api_healthy:-false}" = true ]; then
 echo ""
 echo -e "  Hummingbot API is running — config at ${BOLD}../hummingbot-api/.env${RESET}"
+elif [ "${hb_api_deployed:-}" = true ]; then
+echo ""
+echo -e "  Hummingbot API is configured but ${BOLD}not answering yet${RESET} — config at ${BOLD}../hummingbot-api/.env${RESET}"
+echo -e "  ${DIM}Start or check it: cd ../hummingbot-api && make deploy && make doctor${RESET}"
 fi
 if [ "${TS_DEPLOY:-false}" = true ]; then
 echo ""
