@@ -588,7 +588,7 @@ def _clip_output(value) -> str:
 
 
 def _bound_tool_payloads(tc: dict) -> None:
-    """Clip a folded tool entry's payloads to what a reader would have shown.
+    """Redact a folded tool entry's arguments, then clip its payloads.
 
     The output is what gets big (a market-data dump, a file read), and both
     projections already cut it at :data:`MAX_TOOL_OUTPUT` -- keeping the full
@@ -596,14 +596,29 @@ def _bound_tool_payloads(tc: dict) -> None:
     original shape so the dashboard can render it as JSON; only one that
     serializes past the same ceiling degrades to its clipped string form, since
     an ``Edit``/``Write`` call can carry a whole file in its arguments.
+
+    Redaction comes *first*, and it is why this is the only place a folded entry
+    passes through. A delegated agent auto-approves its own tool calls, and at
+    least one tool in the agents' toolset takes a credential directly
+    (mcp-hummingbot's ``configure_server(password=…)``), so a verbatim argument
+    set would put a plaintext password into ``events.json``, the markdown
+    transcript and the dashboard's Input pane. The chat transcript already
+    solved this; :func:`condor.runtime.conversations._redact` is imported rather
+    than reimplemented so the two paths share one hint list and a hint added
+    there takes effect on both. Redacting before the clip means an argument set
+    too big to keep whole is redacted in the string it degrades to as well.
     """
     import json
+
+    from condor.runtime.conversations import _redact
 
     out = tc.get("output")
     if out is not None:
         tc["output"] = _clip_output(out)
     inp = tc.get("input")
     if inp is not None and not isinstance(inp, str):
+        inp = _redact(inp)
+        tc["input"] = inp
         serialized = json.dumps(inp, default=str)
         if len(serialized) > MAX_TOOL_OUTPUT:
             tc["input"] = _clip_output(serialized)

@@ -459,6 +459,132 @@ def test_delegation_persists_full_session_transcript(tmp_path, monkeypatch):
     assert "Done: 3 pools." in text
 
 
+# ── Credential redaction on the persisted transcript (SEC-332) ──
+
+
+def test_delegation_transcript_redacts_credential_arguments(tmp_path, monkeypatch):
+    """A delegated agent's tool arguments never reach disk with a secret in them.
+
+    The delegate path auto-approves its own tool calls, and at least one tool in
+    the toolset takes a credential directly, so a verbatim argument set would
+    put a plaintext password into every durable projection at once. All three
+    are asserted here -- the events sidecar, the markdown transcript and the
+    wire the dashboard's Input pane reads -- because they are separate writers
+    of the same folded entry and a redaction that only covers one is no
+    redaction at all.
+    """
+    import json
+
+    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
+    _write_agent(tmp_path, "scout")
+
+    from condor.acp.client import ToolCallEvent, ToolCallUpdate
+    from condor.agents.delegate import events_for_wire
+
+    async def fake_run(*, event_sink, **kw):
+        event_sink(
+            ToolCallEvent(
+                tool_call_id="t1",
+                title="configure_server",
+                status="in_progress",
+                kind="other",
+                input={
+                    "name": "brigado",
+                    "password": "hunter2",
+                    "api_key": "sk-live-abcdef",
+                    "trading_pair": "SOL-USDC",
+                    "nested": {"wallet_private_key": "5Kd3…", "amount": 12.5},
+                },
+            )
+        )
+        event_sink(ToolCallUpdate(tool_call_id="t1", status="completed", output="ok"))
+        return "configured"
+
+    monkeypatch.setattr(consult_module, "_run_agent_to_completion", fake_run)
+
+    async def scenario():
+        dt = await start_delegation(
+            agent_slug="scout",
+            user_id=1,
+            chat_id=42,
+            server_name=None,
+            task="configure the server",
+            bot=_FakeBot(),
+        )
+        await _drain(dt)
+        return dt
+
+    dt = asyncio.run(scenario())
+    assert dt.status == "done"
+
+    secrets = ("hunter2", "sk-live-abcdef", "5Kd3…")
+    record_dir = paths.delegation_dir(1, dt.task_id)
+    sidecar = (record_dir / "events.json").read_text()
+    transcript = (record_dir / "transcript.md").read_text()
+    wire = json.dumps(events_for_wire(dt.events))
+    live = json.dumps(dt.events, default=str)
+
+    for blob in (sidecar, transcript, wire, live):
+        for secret in secrets:
+            assert secret not in blob
+        # The non-secret arguments survive: a redactor that eats the trading
+        # pair has made the transcript useless rather than safe.
+        assert "SOL-USDC" in blob
+        assert "brigado" in blob
+        assert "[redacted]" in blob
+
+    # And the shape is untouched -- keys stay, only the values are replaced.
+    inp = events_for_wire(dt.events)[0]["input"]
+    assert inp["password"] == "[redacted]"
+    assert inp["api_key"] == "[redacted]"
+    assert inp["nested"]["wallet_private_key"] == "[redacted]"
+    assert inp["nested"]["amount"] == 12.5
+
+
+def test_oversized_tool_input_is_redacted_before_it_is_clipped():
+    """The size clip must not be a way for a secret to survive redaction.
+
+    An argument set too large to keep whole degrades to its serialized string
+    form; if the clip ran first, that string would be a verbatim credential
+    dump with an ellipsis on the end.
+    """
+    from condor.agents.delegate import MAX_TOOL_OUTPUT, _bound_tool_payloads
+
+    tc = {
+        "id": "t1",
+        "name": "configure_server",
+        "input": {
+            "password": "hunter2",
+            "notes": "x" * (MAX_TOOL_OUTPUT + 100),
+        },
+    }
+    _bound_tool_payloads(tc)
+
+    assert isinstance(tc["input"], str)  # degraded to the clipped form
+    assert "hunter2" not in tc["input"]
+    assert "[redacted]" in tc["input"]
+
+
+def test_delegate_redaction_reuses_the_chat_transcript_hint_list():
+    """One hint list, two paths: a hint added for chat covers delegate too.
+
+    Asserted by patching the shared tuple rather than by comparing two copies,
+    which is the only way to catch a divergent second list being introduced.
+    """
+    from condor.agents.delegate import _bound_tool_payloads
+    from condor.runtime import conversations
+
+    original = conversations._SECRET_KEY_HINTS
+    try:
+        conversations._SECRET_KEY_HINTS = original + ("vault_pin",)
+        tc = {"input": {"vault_pin": "4321", "pair": "SOL-USDC"}}
+        _bound_tool_payloads(tc)
+    finally:
+        conversations._SECRET_KEY_HINTS = original
+
+    assert tc["input"] == {"vault_pin": "[redacted]", "pair": "SOL-USDC"}
+
+
 # ── The wire projection (FEAT-022) ──
 
 
