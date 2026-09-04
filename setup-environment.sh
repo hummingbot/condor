@@ -330,12 +330,46 @@ tailnet_sidecar_running() {
 # native daemon that is not there. The host's tailscaled socket is the one
 # signal a sidecar cannot be mistaken for, since it keeps its own inside the
 # container.
+_tailnet_tailscaled_pids() { pgrep -x tailscaled 2>/dev/null; }
+
+_tailnet_in_container() {
+    [ -r "/proc/$1/cgroup" ] &&
+    grep -qE '(docker|containerd|libpod|kubepods)' "/proc/$1/cgroup" 2>/dev/null
+}
+
+# A tailscaled that is NOT inside a container. No /proc (macOS) means we
+# cannot say it is containerised, and there a container's processes are not
+# visible here anyway -- so treating it as a host daemon is right.
+_tailnet_host_tailscaled() {
+    local pid
+    for pid in $(_tailnet_tailscaled_pids); do
+        _tailnet_in_container "$pid" && continue
+        return 0
+    done
+    return 1
+}
+
+_tailnet_container_tailscaled() {
+    local pid
+    for pid in $(_tailnet_tailscaled_pids); do
+        _tailnet_in_container "$pid" && return 0
+    done
+    return 1
+}
+
 tailnet_has_native() {
+    # 1. The host's own tailscaled socket. Definitive: a sidecar keeps its
+    #    socket inside its container and cannot answer here.
     if command_exists tailscale && tailscale status >/dev/null 2>&1; then
         return 0
     fi
-    if ! tailnet_sidecar_running; then
-        pgrep -x tailscaled >/dev/null 2>&1 && return 0
+    # 2. A tailscaled process outside any container. Also definitive, and it
+    #    still works when the host has no tailscale CLI installed.
+    _tailnet_host_tailscaled && return 0
+    # 3. tailscale0 on its own is weaker evidence: a kernel-mode sidecar runs
+    #    with network_mode: host and creates that device in the host's own
+    #    namespace. Trust it only when nothing containerised could have.
+    if ! tailnet_sidecar_running && ! _tailnet_container_tailscaled; then
         ip link show tailscale0 >/dev/null 2>&1 && return 0
     fi
     return 1
@@ -1137,10 +1171,19 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
             # with a daemon already running produced output byte-identical to
             # one without, because nothing ever looked. The remote-API branch
             # above has always checked; this one never did.
-            if [ "$_ts_state" = native ]; then
+            # `native` still has to yield a usable address before we skip
+            # enrollment. Detection can be fooled -- an unreadable /proc, a
+            # docker daemon this user cannot query -- and the failure mode of
+            # guessing wrong is an install that reports success with no
+            # address and a dashboard on localhost. An address is the thing we
+            # actually need, so require it rather than infer it.
+            if [ "$_ts_state" = native ] && [ -n "$(tailscale ip -4 2>/dev/null | head -1)" ]; then
                 msg_ok "Tailscale already active on this machine — reusing its node"
                 msg_info "Not joining the tailnet a second time: one machine, one node."
             else
+                if [ "$_ts_state" = native ]; then
+                    msg_warn "A tailscaled is present but reports no IPv4 address — enrolling this machine."
+                fi
                 msg_info "Installing Tailscale on this machine..."
                 curl -fsSL https://tailscale.com/install.sh | sh
                 msg_info "Connecting to Tailscale network..."
@@ -1254,8 +1297,14 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
         # sized for a multi-day window at a fine resolution rather than for a
         # single ad-hoc backtest.
         if [ -d "$HB_API_DIR" ]; then
+            # Tracks whether the API is actually configured. Deploying an
+            # unconfigured stack produces containers that cannot authenticate
+            # to their own broker, and reporting it as running sends people
+            # looking for the fault in the wrong place.
+            hb_api_ready=false
             if [ -f "$HB_API_DIR/.env" ]; then
                 msg_ok "hummingbot-api .env already exists — leaving it untouched"
+                hb_api_ready=true
             elif [ -x "$HB_API_DIR/setup.sh" ] || [ -f "$HB_API_DIR/setup.sh" ]; then
                 msg_info "Running hummingbot-api's own setup (non-interactive)..."
                 if (cd "$HB_API_DIR" && chmod +x setup.sh 2>/dev/null; \
@@ -1272,9 +1321,10 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
                     HBAPI_BACKTESTING_TIMEOUT_SECONDS=1800 \
                     ./setup.sh); then
                     msg_ok "Hummingbot API configured by its own setup.sh"
+                    hb_api_ready=true
                 else
                     msg_error "hummingbot-api setup.sh failed — see the output above"
-                    msg_info "Run it yourself: cd $HB_API_DIR && ./setup.sh"
+                    msg_info "Run it yourself: cd $HB_API_DIR && ./setup.sh, then: make deploy"
                 fi
             else
                 msg_error "No setup.sh found in $HB_API_DIR — cannot configure the API"
@@ -1292,7 +1342,10 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
             # one copy upstream is the fix -- there is nothing to inject here.
 
             # Deploy if Docker is available
-            if [ "$docker_available" = true ] && [ -f "$HB_API_DIR/docker-compose.yml" ]; then
+            if [ "$hb_api_ready" != true ]; then
+                msg_warn "Skipping the API deploy: it has no configuration to start with."
+                msg_info "Fix the error above, then: cd $HB_API_DIR && make deploy"
+            elif [ "$docker_available" = true ] && [ -f "$HB_API_DIR/docker-compose.yml" ]; then
                 msg_info "Starting Hummingbot API stack..."
                 # `make deploy`, not a raw `docker compose up -d`.
                 #
@@ -1336,8 +1389,17 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
                 msg_info "Start API later: cd $HB_API_DIR && docker compose up -d"
             fi
 
-            msg_ok "Hummingbot API credentials saved"
-            hb_api_deployed=true
+            # Only claim this when setup.sh actually wrote a config. Setting
+            # it regardless drove the config.yml credential sync and the
+            # closing summary off credentials that were never saved.
+            if [ "$hb_api_ready" = true ]; then
+                msg_ok "Hummingbot API credentials saved"
+                hb_api_deployed=true
+            else
+                set_env_var DEPLOY_HUMMINGBOT_API "false"
+                msg_warn "Hummingbot API is not configured — Condor will start without it."
+                msg_info "Once it is set up, add it to Condor via /servers or config.yml."
+            fi
         fi
     fi
     fi  # end existing_api != skip
