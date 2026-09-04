@@ -1,15 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
-import {
-  ChevronRight,
-  Coins,
-  ExternalLink,
-  Layers,
-  ListTree,
-  ScrollText,
-  Table2,
-  X,
-} from "lucide-react";
-import { useCallback, useMemo, useState } from "react";
+import { ChevronRight, ExternalLink, X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
 import { DelegationSheet } from "@/components/agent/DelegationSheet";
@@ -23,6 +14,8 @@ import { MoneyView } from "@/components/agent/workspace/MoneyView";
 import { LoopBar } from "@/components/agent/workspace/LoopBar";
 import { NowView } from "@/components/agent/workspace/NowView";
 import { PlaybookView } from "@/components/agent/workspace/PlaybookView";
+import { SectionRail } from "@/components/agent/workspace/SectionRail";
+import { SECTION_META } from "@/components/agent/workspace/sectionMeta";
 import {
   useSections,
   type SectionId,
@@ -85,35 +78,6 @@ function delegationTask(run: AgentRunRow, agent: string): DelegationSummary {
   };
 }
 
-/** What each disclosure is, for the reader deciding whether to open it. */
-const HINTS: Record<SectionId, { label: string; hint: string; Icon: typeof Coins }> = {
-  runs: {
-    label: "Runs",
-    hint: "Every run of every strategy — loops, dry runs, tasks and chats",
-    Icon: ListTree,
-  },
-  detail: {
-    label: "Detail",
-    hint: "The bots and executors this run ran, its deeds, and what it wrote",
-    Icon: Table2,
-  },
-  money: {
-    label: "Money",
-    hint: "Everything the agent owns, and why it differs from the run above",
-    Icon: Coins,
-  },
-  fleet: {
-    label: "Fleet",
-    hint: "This agent's own records, in the fleet browser",
-    Icon: Layers,
-  },
-  playbook: {
-    label: "Playbook",
-    hint: "The strategy's playbook, its config and what it has learned",
-    Icon: ScrollText,
-  },
-};
-
 /**
  * One agent's page: the run you are looking at, read top to bottom (FEAT-119).
  *
@@ -137,6 +101,13 @@ const HINTS: Record<SectionId, { label: string; hint: string; Icon: typeof Coins
  *   editors, and a page that mounted them eagerly would cost more than the
  *   spine it replaces. Which are open is `?open=`, so a screen is a thing you
  *   can send somebody.
+ *
+ * Down the left is the **index** (FEAT-120): the answer stack and the five
+ * bands, with what this screen already knows about each. It is not the spine
+ * come back — a rail entry is the *same button* as the band's own header, so
+ * the body never swaps and `?open=` still names a set — it is the half the
+ * disclosures could not do, which is telling a reader what is on the screen
+ * without scrolling a chart's height to find out.
  *
  * Nothing here navigates to another view of itself. A tick is the one thing
  * that covers the screen, as an overlay `?tick=` opens and closing clears — so
@@ -265,6 +236,49 @@ export function AgentRunScreen({
     [navigate, setParams],
   );
 
+  /**
+   * The rail's own two moves: back to the answer stack, and open-and-show.
+   *
+   * The scroller is a ref rather than the window because this screen is a
+   * column with its own overflow — `window.scrollTo` would move nothing.
+   *
+   * Opening scrolls in an effect and not in the click, because at click time
+   * the band is still closed and there is nothing to scroll to: the set moves
+   * first, React mounts the body, and *then* the pending id is spent. A rail
+   * click that *closes* a band scrolls nowhere, which is why the effect checks
+   * the set rather than trusting its own request.
+   *
+   * The request is a ref rather than state, which is the guidance read the
+   * right way round: no render depends on it — it is consumed by a side effect
+   * one render later — and holding it in state would be a set in an effect to
+   * clear it again.
+   */
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const pendingScroll = useRef<SectionId | null>(null);
+
+  useEffect(() => {
+    const id = pendingScroll.current;
+    if (!id) return;
+    pendingScroll.current = null;
+    if (!open.includes(id)) return;
+    bodyRef.current
+      ?.querySelector(`[data-section-body="${id}"]`)
+      // Guarded: jsdom has no layout, so it implements no `scrollIntoView`,
+      // and a rail click in a test must not throw for want of a viewport.
+      ?.scrollIntoView?.({ block: "start", behavior: "smooth" });
+  }, [open]);
+
+  // The same action as the band's own header, reached from the index: one rule
+  // for what a click does, so `?open=` never depends on which of the two the
+  // reader used.
+  const selectSection = useCallback(
+    (id: SectionId) => {
+      toggle(id);
+      pendingScroll.current = id;
+    },
+    [toggle],
+  );
+
   // The page has already guarded this by the time it mounts the screen — the
   // query is shared and warm — so this only shows on a hard reload racing it.
   if (isLoading || !agent) {
@@ -282,6 +296,28 @@ export function AgentRunScreen({
   // disclosure that cannot fetch its own bots.
   const strategyServer =
     (strategy?.config?.server_name as string) || agent.server_name || "";
+
+  /**
+   * What the rail says about each section, out of what this screen already has.
+   *
+   * Money and Fleet carry nothing on purpose. Both headline a *fold* of the
+   * whole fleet, which is the query their disclosures exist to defer — and the
+   * cheaper numbers lying around (the run rollup, this run's deployments) are a
+   * different quantity from the one the band prints, which is the exact
+   * confusion FEAT-109 was spent settling.
+   */
+  const lastTick = decisions[decisions.length - 1]?.tick ?? 0;
+  const railFacts = {
+    runs: runs.length
+      ? `${runs.length}${runs.length >= runLimit ? "+" : ""}`
+      : null,
+    detail: deployments.length ? `${deployments.length} deployed` : null,
+    money: null,
+    fleet: null,
+    playbook: strategy
+      ? `${Object.keys(strategy.config ?? {}).length} settings`
+      : null,
+  };
 
   const isOpen = (id: SectionId) => open.includes(id);
 
@@ -302,141 +338,162 @@ export function AgentRunScreen({
         onSelectTick={(next) => setParams({ tick: next })}
       />
 
-      <div className="min-h-0 flex-1 overflow-y-auto">
-        {!sslug ? (
-          <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">
-            This agent has no strategies yet, so there is no loop to look at.
-          </p>
-        ) : (
-          <>
-            <div className="p-4">
-              <NowView
-                slug={agent.slug}
-                sslug={sslug}
-                sessionNum={sessionNum}
-                alerts={alerts}
-                decisions={decisions}
-                deployments={deployments}
-                perf={perf}
-                journal={journal}
-                pnlSeries={pnlSeries}
-                onOpenTick={(next) => setParams({ tick: next })}
-              />
-            </div>
+      <div className="flex min-h-0 flex-1">
+        {sslug && (
+          <SectionRail
+            open={open}
+            facts={railFacts}
+            nowFact={
+              alerts.length > 0
+                ? `${alerts.length} alert${alerts.length > 1 ? "s" : ""}`
+                : lastTick > 0
+                  ? `tick #${lastTick}`
+                  : null
+            }
+            nowAlert={alerts.length > 0}
+            onSelect={selectSection}
+            onTop={() =>
+              bodyRef.current?.scrollTo?.({ top: 0, behavior: "smooth" })
+            }
+          />
+        )}
 
-            <div className="border-t border-[var(--color-border)]">
-              <Disclosure
-                id="runs"
-                open={isOpen("runs")}
-                onToggle={toggle}
-                flush
-              >
-                {/* A bounded height rather than the page's: the rail scrolls
-                    beside its body, which is what it was built to do, and a
-                    rail as tall as every run would push the four disclosures
-                    below it off the end of the screen. */}
-                <div className="flex h-[70vh] min-h-0">
-                  <RunRail
-                    runs={runs}
-                    strategyFilter={url.strategy}
-                    onStrategyFilter={(next) => setParams({ strategy: next })}
-                    selectedKey={
-                      selectedRun
-                        ? `${selectedRun.strategy_slug}:${selectedRun.run_id}`
-                        : null
-                    }
-                    onSelectRun={openRun}
-                    isLoading={false}
-                    hasMore={runs.length >= runLimit}
-                    onShowMore={() => setRunLimit((n) => n + RUN_PAGE)}
-                  />
-                  <div className="min-h-0 flex-1 overflow-y-auto p-4">
-                    <RunBody
-                      slug={agent.slug}
-                      run={selectedRun}
-                      onClearRun={() => setParams({ run: null })}
-                    />
-                  </div>
-                </div>
-              </Disclosure>
-
-              <Disclosure id="detail" open={isOpen("detail")} onToggle={toggle}>
-                {selectedRun && sessionNum > 0 ? (
-                  <RunOverview
-                    slug={agent.slug}
-                    sslug={sslug}
-                    sessionNum={sessionNum}
-                    serverName={strategyServer}
-                    controllerIds={instance ? [instance.agent_id] : undefined}
-                    isLiveSession={
-                      selectedRun.status === "running" ||
-                      selectedRun.status === "paused"
-                    }
-                    onSelectTick={(next) => setParams({ tick: next })}
-                  />
-                ) : (
-                  <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">
-                    Pick a loop run above to read what it ran.
-                  </p>
-                )}
-              </Disclosure>
-
-              <Disclosure id="money" open={isOpen("money")} onToggle={toggle}>
-                {/* Two numbers, named apart and reconciled (FEAT-109). The
-                    headline is the fleet *fold*, which is a different quantity
-                    from the run rollup in the vitals above — shown alone,
-                    either one is a lie by omission. */}
-                <MoneyView
+        <div ref={bodyRef} className="min-h-0 flex-1 overflow-y-auto">
+          {!sslug ? (
+            <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">
+              This agent has no strategies yet, so there is no loop to look at.
+            </p>
+          ) : (
+            <>
+              <div className="p-4">
+                <NowView
                   slug={agent.slug}
                   sslug={sslug}
-                  strategy={url.strategy}
-                  strategies={agent.strategies ?? []}
-                  serverName={strategyServer}
+                  sessionNum={sessionNum}
+                  alerts={alerts}
+                  decisions={decisions}
+                  deployments={deployments}
+                  perf={perf}
+                  journal={journal}
+                  pnlSeries={pnlSeries}
+                  onOpenTick={(next) => setParams({ tick: next })}
                 />
-              </Disclosure>
+              </div>
 
-              <Disclosure
-                id="fleet"
-                open={isOpen("fleet")}
-                onToggle={toggle}
-                flush
-              >
-                {/* `/bots`' browser is a two-column layout: it gets its own
-                    sideways scroller, as it has on that page, rather than
-                    letting a narrow window scroll the whole screen sideways. */}
-                <div className="flex h-[70vh] min-h-0 overflow-x-auto">
-                  <AgentFleet
+              <div className="border-t border-[var(--color-border)]">
+                <Disclosure
+                  id="runs"
+                  open={isOpen("runs")}
+                  onToggle={toggle}
+                  flush
+                >
+                  {/* A bounded height rather than the page's: the rail scrolls
+                      beside its body, which is what it was built to do, and a
+                      rail as tall as every run would push the four disclosures
+                      below it off the end of the screen. */}
+                  <div className="flex h-[70vh] min-h-0">
+                    <RunRail
+                      runs={runs}
+                      strategyFilter={url.strategy}
+                      onStrategyFilter={(next) => setParams({ strategy: next })}
+                      selectedKey={
+                        selectedRun
+                          ? `${selectedRun.strategy_slug}:${selectedRun.run_id}`
+                          : null
+                      }
+                      onSelectRun={openRun}
+                      isLoading={false}
+                      hasMore={runs.length >= runLimit}
+                      onShowMore={() => setRunLimit((n) => n + RUN_PAGE)}
+                    />
+                    <div className="min-h-0 flex-1 overflow-y-auto p-4">
+                      <RunBody
+                        slug={agent.slug}
+                        run={selectedRun}
+                        onClearRun={() => setParams({ run: null })}
+                      />
+                    </div>
+                  </div>
+                </Disclosure>
+
+                <Disclosure id="detail" open={isOpen("detail")} onToggle={toggle}>
+                  {selectedRun && sessionNum > 0 ? (
+                    <RunOverview
+                      slug={agent.slug}
+                      sslug={sslug}
+                      sessionNum={sessionNum}
+                      serverName={strategyServer}
+                      controllerIds={instance ? [instance.agent_id] : undefined}
+                      isLiveSession={
+                        selectedRun.status === "running" ||
+                        selectedRun.status === "paused"
+                      }
+                      onSelectTick={(next) => setParams({ tick: next })}
+                    />
+                  ) : (
+                    <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">
+                      Pick a loop run above to read what it ran.
+                    </p>
+                  )}
+                </Disclosure>
+
+                <Disclosure id="money" open={isOpen("money")} onToggle={toggle}>
+                  {/* Two numbers, named apart and reconciled (FEAT-109). The
+                      headline is the fleet *fold*, which is a different quantity
+                      from the run rollup in the vitals above — shown alone,
+                      either one is a lie by omission. */}
+                  <MoneyView
                     slug={agent.slug}
                     sslug={sslug}
+                    strategy={url.strategy}
+                    strategies={agent.strategies ?? []}
                     serverName={strategyServer}
-                    run={selectedRun}
                   />
-                </div>
-              </Disclosure>
+                </Disclosure>
 
-              <Disclosure id="playbook" open={isOpen("playbook")} onToggle={toggle}>
-                {/* What the strategy is *told* — its brief, its learnings and
-                    its settings — and nothing this screen already answers. The
-                    workbench used to be here and it is a page: its title, its
-                    controls, its pulse, its ledger and its performance panel
-                    each restated something within two inches of themselves,
-                    while `strategy.md` was behind a button in a modal. */}
-                {strategy ? (
-                  <PlaybookView
-                    slug={agent.slug}
-                    sslug={sslug}
-                    strategy={strategy}
-                    onDeleted={() => setParams({ strategy: null })}
-                  />
-                ) : (
-                  <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">
-                    Loading this strategy's playbook…
-                  </p>
-                )}
-              </Disclosure>
-            </div>
-          </>
-        )}
+                <Disclosure
+                  id="fleet"
+                  open={isOpen("fleet")}
+                  onToggle={toggle}
+                  flush
+                >
+                  {/* `/bots`' browser is a two-column layout: it gets its own
+                      sideways scroller, as it has on that page, rather than
+                      letting a narrow window scroll the whole screen sideways. */}
+                  <div className="flex h-[70vh] min-h-0 overflow-x-auto">
+                    <AgentFleet
+                      slug={agent.slug}
+                      sslug={sslug}
+                      serverName={strategyServer}
+                      run={selectedRun}
+                    />
+                  </div>
+                </Disclosure>
+
+                <Disclosure id="playbook" open={isOpen("playbook")} onToggle={toggle}>
+                  {/* What the strategy is *told* — its brief, its learnings and
+                      its settings — and nothing this screen already answers. The
+                      workbench used to be here and it is a page: its title, its
+                      controls, its pulse, its ledger and its performance panel
+                      each restated something within two inches of themselves,
+                      while `strategy.md` was behind a button in a modal. */}
+                  {strategy ? (
+                    <PlaybookView
+                      slug={agent.slug}
+                      sslug={sslug}
+                      strategy={strategy}
+                      onDeleted={() => setParams({ strategy: null })}
+                    />
+                  ) : (
+                    <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">
+                      Loading this strategy's playbook…
+                    </p>
+                  )}
+                </Disclosure>
+              </div>
+            </>
+          )}
+        </div>
       </div>
 
       {/* One tick, over the screen rather than instead of it — so closing it
@@ -495,9 +552,13 @@ function Disclosure({
   flush?: boolean;
   children: React.ReactNode;
 }) {
-  const { label, hint, Icon } = HINTS[id];
+  const { label, hint, Icon } = SECTION_META[id];
   return (
-    <section className="border-b border-[var(--color-border)]">
+    <section
+      id={`section-${id}`}
+      data-section-body={id}
+      className="border-b border-[var(--color-border)]"
+    >
       <h2>
         <button
           type="button"

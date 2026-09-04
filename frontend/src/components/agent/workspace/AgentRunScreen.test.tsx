@@ -194,6 +194,8 @@ const bodies = () =>
   );
 const section = (id: string) =>
   container.querySelector<HTMLButtonElement>(`[data-section="${id}"]`)!;
+const rail = (id: string) =>
+  container.querySelector<HTMLButtonElement>(`[data-rail="${id}"]`)!;
 const search = () => at.split("?")[1] ?? "";
 
 async function click(el: HTMLElement) {
@@ -382,5 +384,66 @@ describe("the header slot", () => {
     expect(
       container.querySelector("[data-header]")!.getAttribute("data-header"),
     ).toBe("brl_mm");
+  });
+});
+
+describe("the index down the side (FEAT-120)", () => {
+  it("names the answer stack and all five bands, before any scrolling", async () => {
+    // The gap it fills: the bands sit under a chart and a decision and a
+    // ledger, so what is *on* this screen cost a scroll to find out.
+    await render("/");
+    expect(rail("now")).not.toBeNull();
+    for (const id of ["runs", "detail", "money", "fleet", "playbook"]) {
+      expect(rail(id).getAttribute("aria-expanded")).toBe("false");
+    }
+  });
+
+  it("carries what the screen already knows, and buys nothing to say it", async () => {
+    await render("/");
+    expect(rail("runs").textContent).toContain("1");
+    // Money and Fleet stay blank on purpose: both headline a fold of the whole
+    // fleet, which is the query their disclosure exists to defer, and the
+    // cheaper numbers to hand are a different quantity (FEAT-109).
+    expect(rail("money").textContent).toBe("Money");
+    expect(rail("fleet").textContent).toBe("Fleet");
+    expect(mounted).not.toContain("fleet");
+  });
+
+  it("is the same button as the band's own header", async () => {
+    await render("/");
+    await click(rail("money"));
+    expect(bodies()).toEqual(["answers", "money"]);
+    expect(search()).toBe("open=money");
+    expect(section("money").getAttribute("aria-expanded")).toBe("true");
+
+    // Including on the way back: one action, two places to reach it, so the
+    // URL never depends on which of the two the reader used.
+    await click(rail("money"));
+    expect(bodies()).toEqual(["answers"]);
+    expect(search()).toBe("");
+  });
+
+  it("keeps `?open=` a set — opening a second band does not close the first", async () => {
+    await render("/?open=money");
+    await click(rail("playbook"));
+    expect(new URLSearchParams(search()).get("open")).toBe("money.playbook");
+    expect(bodies()).toEqual(["answers", "money", "playbook"]);
+  });
+
+  it("marks what is open, so the rail says where the reader is", async () => {
+    await render("/?open=fleet");
+    expect(rail("fleet").getAttribute("aria-expanded")).toBe("true");
+    expect(rail("runs").getAttribute("aria-expanded")).toBe("false");
+    // The band it points at is addressable, which is what the scroll uses.
+    expect(rail("fleet").getAttribute("aria-controls")).toBe("section-fleet");
+    expect(container.querySelector("#section-fleet")).not.toBeNull();
+  });
+
+  it("has nothing to index when the agent has no strategy", async () => {
+    getAgent.mockResolvedValue({ ...AGENT, strategies: [] });
+    getAgentRuns.mockResolvedValue([]);
+    await render("/");
+    expect(container.querySelector("[data-section-rail]")).toBeNull();
+    expect(container.textContent).toContain("no strategies yet");
   });
 });
