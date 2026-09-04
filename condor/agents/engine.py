@@ -36,7 +36,13 @@ from .agent import Agent
 from .journal import JournalManager, next_experiment_number, next_session_number
 from .prompts import build_tick_prompt
 from .providers import ProviderRegistry
-from .risk import RiskEngine, RiskLimits, RiskState, auto_approve_with_risk_check
+from .risk import (
+    RefusalLog,
+    RiskEngine,
+    RiskLimits,
+    RiskState,
+    auto_approve_with_risk_check,
+)
 from .strategy import Strategy
 
 log = logging.getLogger(__name__)
@@ -111,6 +117,16 @@ class TickEngine:
     _last_skill_data: dict[str, Any] = field(default_factory=dict, init=False)
     _adoption_done: bool = field(default=False, init=False, repr=False)
     _mode_mismatch_noted: bool = field(default=False, init=False, repr=False)
+    # What the risk gate refused, and why. The gate appends during the tick
+    # (condor.agents.risk.RefusalLog); the tick drains it into the journal and
+    # into `_last_refusals`, which the NEXT tick's prompt shows the agent — the
+    # only channel that reaches it, since a permission response carries no
+    # reason. Without it a refused call reads to the agent as an approval that
+    # never came, and an unattended agent then waits for a human who is not there.
+    _refusals: "RefusalLog" = field(default_factory=RefusalLog, init=False, repr=False)
+    _last_refusals: list[dict[str, Any]] = field(
+        default_factory=list, init=False, repr=False
+    )
     # Why the loop ended, for the strategy_run telemetry event: "user" unless
     # something in the loop set it first.
     _last_stop_reason: str = field(default="user", init=False, repr=False)
@@ -602,6 +618,7 @@ class TickEngine:
             canvas=canvas_text,
             canvas_nudge=canvas_nudge,
             loop_state=loop_state,
+            refusals=self._last_refusals,
         )
 
         # 6. Create a fresh agent client per tick (clean context window)
@@ -642,6 +659,12 @@ class TickEngine:
 
         response_text = "".join(response_chunks)
         tick_duration = time.time() - self._last_tick_at
+
+        # What the gate refused this tick, taken before either branch below so a
+        # dry run and a live tick both carry it. It reaches the agent through the
+        # next tick's prompt; the journal entry below is for the human reading
+        # the session afterwards.
+        self._last_refusals = self._refusals.drain()
 
         from datetime import datetime, timezone
 
@@ -708,6 +731,7 @@ class TickEngine:
                 )
 
                 self._journal_ownership_violations(tick_num)
+                self._journal_refusals(tick_num)
                 self._journal_mode_mismatch(tick_num)
 
                 skill_pnl = self._last_skill_data.get("total_pnl", 0.0)
@@ -942,6 +966,25 @@ class TickEngine:
                 f"namespace '{self.ledger.namespace}'",
             )
 
+    def _journal_refusals(self, tick_num: int) -> None:
+        """Record what the risk gate refused this tick, and why.
+
+        The sibling of :meth:`_journal_ownership_violations`, for the rest of
+        the gate. The same drained list goes into the next tick's prompt: a
+        cancelled call is all the model sees at the time, and read bare it is
+        indistinguishable from a confirmation nobody answered. Told the reason
+        instead, the agent can resize, change tack, or stop — the three things an
+        unattended seat can actually do about it.
+        """
+        if not self._last_refusals or not self.journal:
+            return
+        for entry in self._last_refusals:
+            self.journal.append_action(
+                tick_num,
+                "risk_blocked",
+                f"{entry['tool']} refused — {entry['reason']}",
+            )
+
     async def _collect_stream(self, acp_client: ACPClient, prompt: str):
         """Wrapper to make prompt_stream compatible with wait_for."""
         async for event in acp_client.prompt_stream(prompt):
@@ -982,6 +1025,7 @@ class TickEngine:
             ledger=self.ledger,
             agent_id=self.agent_id,
             price_client=price_client,
+            refusals=self._refusals,
         )
 
         # Shared factory (ARCH-192). Engine specifics: an explicit model_base_url

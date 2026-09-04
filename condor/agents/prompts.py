@@ -26,6 +26,11 @@ log = logging.getLogger(__name__)
 # values, ~1.5k tokens of input.
 MAX_STATE_SECTION_CHARS = 3 * MAX_STATE_VALUE_CHARS
 
+# How many of last tick's refusals the prompt shows. The whole point is the
+# correction, and the newest few carry it; a tick that got refused twenty times
+# has a problem no prompt block is going to fix.
+MAX_REFUSALS_SHOWN = 5
+
 # What a clipped value says about itself, so a truncated blob is never mistaken
 # for the whole value (consult._clip uses the same marker).
 TRUNCATION_MARKER = "… (truncated)"
@@ -96,6 +101,35 @@ DRY RUN MESSAGING:
 - Use conditional language: "Would place grid..." not "Grid placed"
 - Prefix actions with 🧪 to signal dry-run
 - End with: "No executors were created (dry run)"
+"""
+
+# What authorizes a live tick to act. The house rules shared with the
+# chat say to confirm before moving money, and they are right *there* — a chat
+# has a user in it. This seat does not: the approval happened once, when the user
+# approved `control_agent(action="start")` with this session's execution mode,
+# capital and risk limits, and the runtime enforces that envelope on every call
+# (condor.agents.risk). Without this block the agent reads the shared rule
+# literally, holds a valid in-limit trade for a confirmation nobody will send,
+# and journals the hold as "awaiting approval" — a loop that cannot trade.
+#
+# Live modes only. A dry run must not read any of this as licence to act; its
+# own base prompt already tells it to take no action at all.
+AUTHORIZATION_LIVE_UNATTENDED = """\
+[AUTHORIZATION — this seat is unattended and already approved]
+- Nobody is watching this tick. A question asked here is never answered: the
+  tick ends, the loop moves on, and the market does not wait.
+- Your authorization is the launch the user already approved: this strategy,
+  this execution mode, this capital, and the limits in [RISK STATE] below. The
+  house rule about confirming before you move money is the ATTENDED rule — it
+  governs a chat with a human in it, not this loop.
+- Inside that envelope, ACT: create, stop and replace your own executors (or
+  steer your own bot's controllers) without asking. Never hold a trade that is
+  within your limits to wait for a confirmation, and never journal a hold as
+  "pending approval".
+- The envelope is enforced by the runtime, not by you. Every call is checked
+  against those limits before it runs, and one that breaches them comes back
+  CANCELLED. That is the guard deciding — not a missing approval. Read the
+  reason, then resize, change tack, or stop. Do not resend the same call.
 """
 
 BASE_PROMPT_COMMON = """\
@@ -389,6 +423,7 @@ def build_tick_prompt(
     canvas: str = "",
     canvas_nudge: str = "",
     loop_state: dict[str, Any] | None = None,
+    refusals: list[dict[str, Any]] | None = None,
 ) -> str:
     """Build the full prompt for one agent tick.
 
@@ -434,6 +469,11 @@ def build_tick_prompt(
     core_rules = core_rules_section(getattr(agent, "slug", "") or None)
     if core_rules:
         sections.append(core_rules)
+
+    # Directly under the house rules, because it says which of them apply to an
+    # unattended seat that is already approved. Live modes only.
+    if not is_dry_run:
+        sections.append(AUTHORIZATION_LIVE_UNATTENDED)
 
     # Tool preload is ACP-specific (ToolSearch); pydantic-ai auto-discovers MCP tools
     if not use_pydantic_ai:
@@ -547,6 +587,25 @@ def build_tick_prompt(
         f"Status: {'BLOCKED - ' + rs.get('block_reason', '') if rs.get('is_blocked') else 'ACTIVE'}",
     ]
     sections.append("\n".join(risk_lines))
+
+    # What the gate refused last tick, and why. The permission response the model
+    # saw carried no reason (see condor.agents.risk.RefusalLog), so this block is
+    # the only place the correction can reach it — and an agent that never learns
+    # why a call was cancelled either repeats it or mistakes it for a missing
+    # human approval and stops trading.
+    if refusals:
+        refusal_lines = [
+            "[REFUSED LAST TICK — the runtime gate decided this, not a missing approval]"
+        ]
+        refusal_lines += [
+            f"- {entry.get('tool') or 'a call'}: {entry.get('reason') or 'no reason recorded'}"
+            for entry in refusals[-MAX_REFUSALS_SHOWN:]
+        ]
+        refusal_lines.append(
+            "Do not resend a refused call unchanged and do not wait for approval: "
+            "act on the reason, or journal why you are standing down."
+        )
+        sections.append("\n".join(refusal_lines))
 
     # Loop state -- the scratch cursors this (agent, strategy) has persisted
     # (condor.runtime.state): a last-processed executor id, a cooldown deadline.

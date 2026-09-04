@@ -313,8 +313,10 @@ def _refusal_text(tool_name: str, reason: str) -> str:
     detail = f": {reason}" if reason else ""
     return (
         f"{REFUSAL_PREFIX}: `{tool_name}` was blocked by the permission gate"
-        f"{detail}. The call did NOT execute and nothing changed. Do not retry "
-        f"it — tell the user it was refused, or choose a different action."
+        f"{detail}. The call did NOT execute and nothing changed. This is the "
+        f"guard deciding, not a human approval that never arrived: do not retry "
+        f"the same call and do not wait for anyone. Report the refusal, and act "
+        f"on the reason — a different size, a different action, or none."
     )
 
 
@@ -1014,7 +1016,20 @@ class PydanticAIClient:
                                                 and outcome.get("outcome") == "selected"
                                             )
                                             if not approved:
-                                                reason = "denied by the risk/confirmation gate"
+                                                # The gate says why when it can
+                                                # (condor.agents.risk attaches a
+                                                # ``reason``); an agent told only
+                                                # "denied" reads its own refusal
+                                                # as a missing approval and waits
+                                                # for a human it may not have.
+                                                reason = (
+                                                    (
+                                                        result.get("reason")
+                                                        if isinstance(result, dict)
+                                                        else ""
+                                                    )
+                                                    or "denied by the risk/confirmation gate"
+                                                )
                                         except Exception as exc:
                                             log.exception(
                                                 "Permission check failed for %s — "

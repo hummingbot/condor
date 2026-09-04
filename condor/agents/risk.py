@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -406,6 +407,46 @@ class RiskEngine:
         return True, ""
 
 
+#: How many refusals one session keeps. The tick prompt shows a handful; the
+#: rest exist so a burst of them is still visible in the journal.
+_MAX_REFUSALS = 20
+
+
+class RefusalLog:
+    """What the unattended gate refused, and why.
+
+    A permission callback can only say *allow* or *cancel*. Neither ACP's
+    permission response nor the pydantic-ai gate carries a reason back on its
+    own, so a create refused for breaching the position limit and a create that
+    genuinely wanted a human look identical from inside the model: both come
+    back as "cancelled". A loop agent reading that reports it as *awaiting
+    approval* and holds — which is exactly what an unattended seat must never
+    do, since nobody is coming.
+
+    So the gate writes down why it said no. Same shape as ``BotLedger``'s
+    violation list, and used the same way: appended here, drained by the engine
+    after the tick, journaled, and shown in the next tick's prompt.
+    """
+
+    def __init__(self) -> None:
+        self._pending: list[dict[str, Any]] = []
+
+    def note(self, tool: str, reason: str, now: float | None = None) -> None:
+        self._pending.append(
+            {
+                "tool": tool or "",
+                "reason": reason or "",
+                "at": time.time() if now is None else now,
+            }
+        )
+        self._pending = self._pending[-_MAX_REFUSALS:]
+
+    def drain(self) -> list[dict[str, Any]]:
+        """Return the refusals not yet reported, clearing the pending list."""
+        pending, self._pending = self._pending, []
+        return pending
+
+
 def auto_approve_with_risk_check(
     risk_engine: RiskEngine,
     risk_state: RiskState,
@@ -413,6 +454,7 @@ def auto_approve_with_risk_check(
     ledger: "BotLedger | None" = None,
     agent_id: str = "",
     price_client: Any = None,
+    refusals: RefusalLog | None = None,
 ):
     """Build a permission callback that auto-approves safe tools and risk-checks dangerous ones.
 
@@ -427,7 +469,39 @@ def auto_approve_with_risk_check(
     session that opened it, so checking only that *some* tag is present lets a
     mistyped one open a live position no session can ever claim. Empty (consults,
     chat, tests) keeps the presence-only check.
+
+    ``refusals`` collects why each cancelled call was cancelled. Without it a
+    refusal is a log line the model never sees, and an unattended agent has no
+    way to tell "the gate refused this for a reason it could act on" from "a
+    human never approved it" — the second reading makes it wait for a human it
+    does not have. See :class:`RefusalLog`.
     """
+
+    def deny(
+        tool_name: str,
+        reason: str,
+        *,
+        record: bool = True,
+        level: int = logging.WARNING,
+    ) -> dict[str, Any]:
+        """Cancel this call, saying why — in the log, in the record, in the reply.
+
+        The reason rides back on the callback result so the pydantic-ai gate can
+        hand it to the model in-band as the tool's result. The ACP bridge gets
+        only the ``outcome`` (``condor.acp.client._on_request_permission`` keeps
+        the rest off the wire, which its schema does not carry), so the same
+        reason also goes to ``refusals`` for the journal and the next tick.
+
+        ``record=False`` is for a refusal that already keeps its own record — the
+        ownership one, which the ledger writes down and the [CONTROLLER MODE]
+        block reports — so the session journal does not carry the same event
+        under two names. ``level`` drops a dry run's refusals back to INFO: there
+        every mutation is refused, and twenty warnings a tick is not a signal.
+        """
+        log.log(level, "Risk gate refused %s: %s", tool_name or "<unknown>", reason)
+        if record and refusals is not None:
+            refusals.note(tool_name, reason)
+        return {"outcome": {"outcome": "cancelled"}, "reason": reason}
 
     async def callback(tool_call: dict, options: list[dict]) -> dict:
         if is_dangerous_tool_call(tool_call):
@@ -438,8 +512,7 @@ def auto_approve_with_risk_check(
             # through to the auto-approve tail (SEC-093).
             input_data = tool_call_input(tool_call)
             if input_data is None:
-                log.warning("Blocked %s: tool arguments could not be read", tool_name)
-                return {"outcome": {"outcome": "cancelled"}}
+                return deny(tool_name, "its arguments could not be read")
 
             # Dry-run mode: block ALL mutating actions.
             #
@@ -454,12 +527,11 @@ def auto_approve_with_risk_check(
             # nothing does. Reaching this line is the decision; blocking is
             # unconditional.
             if execution_mode == "dry_run":
-                log.info(
-                    "Dry-run mode: blocked %s(%s)",
+                return deny(
                     tool_name,
-                    input_data.get("action", "") or "?",
+                    "this session runs in dry-run mode, where nothing mutates",
+                    level=logging.INFO,
                 )
-                return {"outcome": {"outcome": "cancelled"}}
 
             # For executor creates, run risk check. The name is the classification
             # since FEAT-062 — `stop_executor` is dangerous too, but it reduces
@@ -471,32 +543,30 @@ def auto_approve_with_risk_check(
                 # blob, so there is one place it can be.
                 tag = str(input_data.get("controller_id") or "")
                 if not tag:
-                    log.warning("Blocked executor create: missing controller_id")
-                    return {"outcome": {"outcome": "cancelled"}}
-                if agent_id and tag != agent_id:
-                    log.warning(
-                        "Blocked executor create: controller_id %r is not this "
-                        "session's agent_id %r — the position would be "
-                        "unattributable",
-                        tag,
-                        agent_id,
+                    return deny(
+                        tool_name,
+                        "it carries no controller_id, so the position it opens "
+                        "could never be attributed to this session",
                     )
-                    return {"outcome": {"outcome": "cancelled"}}
+                if agent_id and tag != agent_id:
+                    return deny(
+                        tool_name,
+                        f"controller_id {tag!r} is not this session's id "
+                        f"{agent_id!r} — the position would be unattributable",
+                    )
 
                 try:
                     planned_amount_quote = await _planned_amount_quote(
                         tool_name, input_data, price_client
                     )
                 except Exception as exc:
-                    log.warning("Blocked %s: %s", tool_name, exc)
-                    return {"outcome": {"outcome": "cancelled"}}
+                    return deny(tool_name, f"it could not be priced: {exc}")
 
                 allowed, reason = risk_engine.check_executor_action(
                     tool_call, risk_state, planned_amount_quote
                 )
                 if not allowed:
-                    log.warning("Risk engine blocked tool call: %s", reason)
-                    return {"outcome": {"outcome": "cancelled"}}
+                    return deny(tool_name, reason)
 
             # Bot deploys place real capital via controllers — bound the loss
             # (declared drawdown kill switch) since the amount isn't in the call
@@ -511,20 +581,17 @@ def auto_approve_with_risk_check(
                     if action in DANGEROUS_BOT_ACTIONS:
                         bot_name = input_data.get("bot_name", "") or ""
                         if not ledger.owns(bot_name):
-                            log.warning(
-                                "Ownership: blocked manage_bots(%s) on '%s' "
-                                "(namespace %s)",
-                                action,
-                                bot_name,
-                                ledger.namespace,
-                            )
                             ledger.note_violation(bot_name, action)
-                            return {"outcome": {"outcome": "cancelled"}}
+                            return deny(
+                                tool_name,
+                                f"bot '{bot_name}' is outside this session's "
+                                f"namespace '{ledger.namespace}'",
+                                record=False,  # the ledger already has it
+                            )
 
                 allowed, reason = risk_engine.check_bot_action(tool_call, risk_state)
                 if not allowed:
-                    log.warning("Risk engine blocked tool call: %s", reason)
-                    return {"outcome": {"outcome": "cancelled"}}
+                    return deny(tool_name, reason)
 
                 # Recorded only once the call is actually going through, so a
                 # risk-rejected deploy never lands in the ledger.
@@ -551,20 +618,21 @@ def auto_approve_with_risk_check(
                             tool_name, input_data, price_client
                         )
                     except Exception as exc:
-                        log.warning("Blocked %s(%s): %s", tool_name, action, exc)
-                        return {"outcome": {"outcome": "cancelled"}}
+                        return deny(tool_name, f"it could not be priced: {exc}")
 
                 allowed, reason = risk_engine.check_dex_action(
                     tool_call, risk_state, notional_quote
                 )
                 if not allowed:
-                    log.warning("Risk engine blocked tool call: %s", reason)
-                    return {"outcome": {"outcome": "cancelled"}}
+                    return deny(tool_name, reason)
 
             # Block direct order placement entirely
             if tool_name == "place_order":
-                log.warning("Blocked direct place_order (agents must use executors)")
-                return {"outcome": {"outcome": "cancelled"}}
+                return deny(
+                    tool_name,
+                    "an agent never places an order directly — use a "
+                    "create_*_executor tool instead",
+                )
 
         # Auto-approve everything else
         for opt in options:
@@ -574,7 +642,7 @@ def auto_approve_with_risk_check(
             return {
                 "outcome": {"outcome": "selected", "optionId": options[0]["optionId"]}
             }
-        return {"outcome": {"outcome": "cancelled"}}
+        return deny(tool_call_name(tool_call), "no permission option was offered")
 
     return callback
 

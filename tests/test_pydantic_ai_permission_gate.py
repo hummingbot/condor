@@ -288,6 +288,28 @@ def test_bot_ownership_denial_blocks_the_deploy(tmp_path):
     assert violations and violations[0]["name"] == "someone-elses-bot"
 
 
+def test_the_refusal_carries_the_gates_own_reason():
+    """ "Denied" alone reads as a missing approval; the reason reads as a limit."""
+
+    async def deny(tool_call: dict, options: list[dict]) -> dict:
+        return {
+            "outcome": {"outcome": "cancelled"},
+            "reason": "Max open executors (5) reached",
+        }
+
+    client, _ = _client_with("manage_bots", {"action": "deploy"}, deny)
+    _drive(client)
+
+    returns = [
+        part.content
+        for message in client._message_history
+        for part in getattr(message, "parts", [])
+        if getattr(part, "tool_call_id", None) == "call-1"
+        and isinstance(getattr(part, "content", None), str)
+    ]
+    assert any("Max open executors (5) reached" in content for content in returns)
+
+
 def test_refused_call_tells_the_model_it_did_not_run():
     """The model gets an in-band refusal instead of a silent success."""
 

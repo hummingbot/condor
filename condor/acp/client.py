@@ -1102,13 +1102,27 @@ class ACPClient:
         if self.permission_callback:
             tool_call = normalize_tool_call(toolCall or {})
             try:
-                return await self.permission_callback(tool_call, options)
+                result = await self.permission_callback(tool_call, options)
             except Exception:
                 log.exception(
                     "Permission callback failed for %s — denying",
                     tool_call.get("title") or "<unknown tool>",
                 )
                 return {"outcome": {"outcome": "cancelled"}}
+            # Only the outcome goes on the wire. A callback may return more —
+            # the risk gate attaches the ``reason`` it refused for, which the
+            # pydantic-ai path hands the model in-band — but ACP's
+            # RequestPermissionResponse has no field for it, and a bridge that
+            # validates its input strictly would reject the whole response and
+            # turn a plain refusal into a protocol error. The reason reaches the
+            # unattended agent by the other road: RefusalLog → journal → the next
+            # tick's prompt.
+            outcome = result.get("outcome") if isinstance(result, dict) else None
+            return (
+                {"outcome": outcome}
+                if outcome
+                else {"outcome": {"outcome": "cancelled"}}
+            )
 
         # Default: auto-approve
         for opt in options:
