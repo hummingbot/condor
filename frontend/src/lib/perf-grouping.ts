@@ -133,15 +133,26 @@ export function distinguishes(
 /**
  * The grouping actually worth building, given what is in scope.
  *
- * Owner-first is not owner-always: an axis whose leaves all share one key is
- * dropped before the tree is built, so a one-owner fleet draws no owner level
- * and a one-bot fleet draws no bot level, exactly as before. What makes this
- * pay off is [[FEAT-106]] — its two buckets mean the owner axis distinguishes
- * something on almost every install, where a bare run key distinguished
- * nothing on most of them.
+ * An axis whose leaves all share one key is dropped before the tree is built,
+ * so a one-owner fleet spends no chevron under its bots and a one-bot agent
+ * spends none under its controllers.
  *
- * `keep` is never dropped whatever it says, because a rooted browser's floor
- * needs a node to be: see {@link groupingForRoot}.
+ * **The outermost axis is never dropped**, and that is the correction here. It
+ * is the axis the reader *pressed a button for*: pressing `Pair` on a fleet
+ * that trades one pair used to answer with eighteen bare controller rows —
+ * every one of them captioned `BTC-BRL`, and nowhere on the page the one number
+ * the question was asking for. "They all agree" is not a reason to withhold the
+ * total; it is the case where the total is easiest to read. The same rule is
+ * what makes `/bots` owner-*first* rather than owner-when-it-happens: the agent
+ * row is where an agent's fleet is added up, so it draws even for an install
+ * with exactly one owner in it.
+ *
+ * Only the levels *nested under* it are still collapsible, which is where the
+ * original rule was earning its keep — a wasted chevron on every row of a list
+ * is a different cost from one row at the top that carries the answer.
+ *
+ * `keep` is never dropped either, because a rooted browser's floor needs a node
+ * to be: see {@link groupingForRoot}.
  */
 export function collapseGrouping(
   grouping: readonly GroupAxis[],
@@ -149,7 +160,9 @@ export function collapseGrouping(
   deeds?: DeedIndex | null,
   keep?: GroupAxis | null,
 ): GroupAxis[] {
-  return grouping.filter((axis) => axis === keep || distinguishes(leaves, axis, deeds));
+  return grouping.filter(
+    (axis, index) => index === 0 || axis === keep || distinguishes(leaves, axis, deeds),
+  );
 }
 
 /**

@@ -179,10 +179,12 @@ describe("/bots, grouped", () => {
     expect(hasRow("beta")).toBe(true);
     expect(hasRow("SOL-USDC")).toBe(false);
     // Nothing on this fleet is attributed and no deed index reaches back, so
-    // every record falls in one owner bucket and the level collapses — a fleet
-    // that agrees about ownership still spends no chevron saying so.
-    expect(text()).not.toContain("Before the ledger");
-    expect(text()).not.toContain("Outside Condor");
+    // every record falls in *one* owner bucket — and the row is drawn anyway.
+    // The reader pressed Owner: the bucket is where the fleet's trading is
+    // added up under whoever made it, and "they all agree" is the case where
+    // that total is easiest to read, not a reason to withhold it.
+    expect(text()).toContain("Before the ledger");
+    expect(hasRow("alpha")).toBe(true);
   });
 
   it("regroups by pair when the link says so, without touching the fleet total", async () => {

@@ -87,9 +87,19 @@ describe("collapseGrouping", () => {
   const owned = leafFromController(controller({ bot_name: "brigado-brl_mm-btc" }), BRIGADO);
   const other = leafFromController(controller({ bot_name: "hand-rolled", trading_pair: "BTC-USDT" }));
 
-  it("drops a level that tells nothing apart — a fleet of one bot spends no chevron", () => {
+  it("drops a nested level that tells nothing apart — a one-bot owner spends no chevron", () => {
     const one = [leafFromController(controller())];
-    expect(collapseGrouping(["agent", "bot"], one, null)).toEqual([]);
+    expect(collapseGrouping(["agent", "bot"], one, null)).toEqual(["agent"]);
+  });
+
+  // The correction the eighteen-controller fleet forced: pressing Pair on a
+  // fleet that trades one pair answered with eighteen bare controller rows and
+  // no total anywhere. The outermost axis is the question that was asked.
+  it("never drops the outermost axis, whatever the population agrees about", () => {
+    const one = [leafFromController(controller())];
+    expect(collapseGrouping(["pair"], one, null)).toEqual(["pair"]);
+    expect(collapseGrouping(["ctrlType"], one, null)).toEqual(["ctrlType"]);
+    expect(collapseGrouping(["bot"], one, null)).toEqual(["bot"]);
   });
 
   it("keeps a level the moment two records disagree", () => {
@@ -108,10 +118,10 @@ describe("collapseGrouping", () => {
     expect(collapseGrouping(["agent"], [before, after], deeds)).toEqual(["agent"]);
   });
 
-  it("never drops the axis it is told to keep", () => {
+  it("never drops the axis it is told to keep, wherever it is nested", () => {
     const one = [leafFromController(controller({ bot_name: "brigado-brl_mm-btc" }), BRIGADO)];
-    expect(collapseGrouping(["agent", "bot"], one, null)).toEqual([]);
-    expect(collapseGrouping(["agent", "bot"], one, null, "agent")).toEqual(["agent"]);
+    expect(collapseGrouping(["agent", "bot"], one, null)).toEqual(["agent"]);
+    expect(collapseGrouping(["agent", "bot"], one, null, "bot")).toEqual(["agent", "bot"]);
   });
 
   it("counts an empty population as distinguishing, so a filter does not reshape the tree", () => {
