@@ -198,6 +198,13 @@ def _to_ws_message(event: RuntimeEvent, slot_id: str) -> dict | None:
             "slot_id": slot_id,
             "tool_call_id": event.field("tool_call_id"),
             "status": event.field("status"),
+            # The ACP adapter announces some calls with a placeholder name and
+            # supplies the real one on the update (CORR-327). Dropping ``title``
+            # here left the dashboard showing the generic label until a reload
+            # replayed the transcript. It rides along as an added key, never a
+            # substitution: it is null when the update carries no name, and the
+            # client keeps whatever the create frame already gave it.
+            "title": event.field("title"),
         }
     if event.type == EventType.HEARTBEAT:
         return {
