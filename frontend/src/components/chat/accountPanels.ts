@@ -54,8 +54,8 @@ export const PANELS: {
     id: "execution",
     label: "Execution",
     Icon: Cpu,
-    hint: "The controllers trading right now, and what each has done",
-    disabledHint: "Select a server to see what is running",
+    hint: "Every controller deployed — what it has done, and pause or start it",
+    disabledHint: "Select a server to see what is deployed",
   },
 ];
 

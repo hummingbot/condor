@@ -50,7 +50,11 @@ let FLEET: {
 };
 
 vi.mock("@/lib/api", () => ({
-  api: { claimBot: vi.fn(async () => ({ claimed: "", session: "", owned: [] })) },
+  api: {
+    claimBot: vi.fn(async () => ({ claimed: "", session: "", owned: [] })),
+    stopControllers: vi.fn(async () => ({})),
+    startControllers: vi.fn(async () => ({})),
+  },
 }));
 
 vi.mock("@/hooks/useFleetData", () => ({
@@ -230,6 +234,44 @@ describe("the rows it shows", () => {
 
     const dot = host.querySelector('[title="Stopped (kill switch on)"]');
     expect(dot).not.toBeNull();
+  });
+
+  it("pauses and starts a controller from the row, without leaving the strategy", async () => {
+    // The same control the execution dock and the fleet browser carry: a
+    // reader who found their strategy's controllers here should not have to go
+    // and find them a second time somewhere else to pause one.
+    FLEET = {
+      controllers: [
+        controller({ controller_id: "quoting" }),
+        controller({ controller_id: "off", config: { manual_kill_switch: true } }),
+      ],
+      owners: [owner()],
+      isLoading: false,
+    };
+    await render(panel());
+
+    const toggles = [
+      ...host.querySelectorAll<HTMLButtonElement>("[data-controller-toggle]"),
+    ];
+    expect(toggles).toHaveLength(2);
+
+    await act(async () => {
+      toggles[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(api.stopControllers).toHaveBeenCalledWith(
+      "brigado_2",
+      "brigado-fleet_op-20260903-181000",
+      ["quoting"],
+    );
+
+    await act(async () => {
+      toggles[1].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(api.startControllers).toHaveBeenCalledWith(
+      "brigado_2",
+      "brigado-fleet_op-20260903-181000",
+      ["off"],
+    );
   });
 });
 

@@ -3,6 +3,7 @@ import { ArrowRight } from "lucide-react";
 import { Fragment, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 
+import { ControllerToggle } from "@/components/perf/ControllerToggle";
 import { useCondorWebSocket } from "@/hooks/useWebSocket";
 import { useRates } from "@/hooks/useRates";
 import { api, type ControllerInfo } from "@/lib/api";
@@ -51,6 +52,9 @@ const COLUMNS: {
   { key: "realized", label: "Real.", hint: "Realized PnL", num: true, width: 68 },
   { key: "unrealized", label: "Unreal.", hint: "Unrealized PnL on open positions", num: true, width: 68 },
   { key: "net", label: "Net", hint: "The controller's own total — not realized + unrealized", num: true, width: 70 },
+  // No heading: the button in it says what it does, and two glyphs of column
+  // title would cost more width than the button itself.
+  { key: "act", label: "", hint: "Pause or start the controller", num: false, width: 26 },
 ];
 
 /** The width every column but the first is worth, plus a floor for the first. */
@@ -97,12 +101,12 @@ function clipBotName(name: string): string {
 /**
  * What is trading right now on the server this conversation is about.
  *
- * The live fleet, in the shape the perf browser folds it: controllers grouped
- * under the bot that deployed them, the executors each is running, and the
- * executors no live controller claims. Every row deep-links into `/bots` by the
- * `?scope=` id the browser reads (FEAT-084, FEAT-086) — and builds that id by
- * calling `controllerNodeId` on the same `PerfLeaf` the browser folds, so the
- * two can only drift if the browser's own tree does.
+ * The deployed fleet, in the shape the perf browser folds it: controllers
+ * grouped under the bot that deployed them, the executors each is running, and
+ * the executors no deployed controller claims. Every row deep-links into
+ * `/bots` by the `?scope=` id the browser reads (FEAT-084, FEAT-086) — and
+ * builds that id by calling `controllerNodeId` on the same `PerfLeaf` the
+ * browser folds, so the two can only drift if the browser's own tree does.
  *
  * **Running is the kill switch, not `status`.** The `/bots` payload hardcodes
  * `"running"` for every controller it reports; what actually stops one is
@@ -111,8 +115,15 @@ function clipBotName(name: string): string {
  * is answering "what is running", a paused controller listed as live would be
  * the exact wrong answer.
  *
- * Read-only by design. Stopping a controller belongs to the scope that owns it
- * in the browser, where a confirmation has room to say what it is stopping.
+ * **Paused controllers are listed too, and can be started from here.** A paused
+ * controller is still deployed: it holds its config, its history and whatever
+ * position it was left with, and it is one click from quoting again. Hiding it
+ * made the panel answer "what exists on this bot" with "what is quoting", so a
+ * fleet somebody had paused read as a fleet that had gone missing — and the
+ * repair was three navigations away, in the browser. The row keeps the pause
+ * and start on it: one click, no confirmation, because pausing cancels orders
+ * but takes nothing down and the same click puts it back. Stopping the *bot* is
+ * still the browser's, where an armed confirmation has room to say what dies.
  *
  * Mounted only while the section is open (see `DockSection`): closed, neither
  * query nor the socket subscription below exists.
@@ -141,30 +152,42 @@ export function DockExecution({ server }: { server: string }) {
   });
 
   /**
-   * The controllers actually trading, deduped the way everything that keys a
-   * controller has to be: on bot + config id, because one config deployed to
-   * two bots is two independent controllers sharing an id (CORR-241).
+   * Every controller the fleet is carrying, quoting or paused, deduped the way
+   * everything that keys a controller has to be: on bot + config id, because
+   * one config deployed to two bots is two independent controllers sharing an
+   * id (CORR-241).
+   *
+   * Sorted by bot then label and *not* by state: a controller keeps its place
+   * in its bot's list when it is paused, so pausing one from this panel does
+   * not make the row jump out from under the cursor that just paused it.
    */
-  const live = useMemo<PerfLeaf[]>(() => {
+  const deployed = useMemo<PerfLeaf[]>(() => {
     const seen = new Map<string, ControllerInfo>();
     for (const c of bots?.controllers ?? []) seen.set(controllerKey(c), c);
     return [...seen.values()]
       .map((c) => leafFromController(c))
-      .filter((leaf) => leaf.status !== "stopped")
       .sort((a, b) => a.bot.localeCompare(b.bot) || a.label.localeCompare(b.label));
   }, [bots]);
+
+  const paused = useMemo(
+    () => deployed.filter((leaf) => leaf.status === "stopped").length,
+    [deployed],
+  );
 
   /**
    * How many live executors each controller is running, and how many nobody
    * claims.
    *
    * The record carries a `controller_id` and no bot, so the bot is looked up
-   * from the live fleet — the same rule `leafFromExecutor` documents, filing an
-   * executor that matches no live controller under `(unattached)`.
+   * from the deployed fleet — the same rule `leafFromExecutor` documents,
+   * filing an executor that matches no deployed controller under
+   * `(unattached)`. Paused controllers are in that lookup: one that was paused
+   * while an executor was still winding down owns that executor, and filing it
+   * under Unattached instead would invent an orphan that has a parent.
    */
   const { byController, unattached, liveExecutors } = useMemo(() => {
     const botByController = new Map<string, string>();
-    for (const leaf of live) botByController.set(leaf.controllerId, leaf.bot);
+    for (const leaf of deployed) botByController.set(leaf.controllerId, leaf.bot);
 
     const counts = new Map<string, number>();
     let orphans = 0;
@@ -181,7 +204,7 @@ export function DockExecution({ server }: { server: string }) {
       counts.set(key, (counts.get(key) ?? 0) + 1);
     }
     return { byController: counts, unattached: orphans, liveExecutors: total };
-  }, [live, executors]);
+  }, [deployed, executors]);
 
   /**
    * The rows, grouped under the bot that deployed them.
@@ -200,16 +223,16 @@ export function DockExecution({ server }: { server: string }) {
    */
   const groups = useMemo(() => {
     const out: { bot: string; leaves: PerfLeaf[] }[] = [];
-    for (const leaf of live) {
+    for (const leaf of deployed) {
       const last = out[out.length - 1];
       if (last && last.bot === leaf.bot) last.leaves.push(leaf);
       else out.push({ bot: leaf.bot, leaves: [leaf] });
     }
     return out;
-  }, [live]);
+  }, [deployed]);
 
   const { convert, currencySymbol } = useRates(
-    useMemo(() => live.map((leaf) => quoteOf(leaf.pair)), [live]),
+    useMemo(() => deployed.map((leaf) => quoteOf(leaf.pair)), [deployed]),
   );
 
   const footer = (
@@ -242,11 +265,11 @@ export function DockExecution({ server }: { server: string }) {
     );
   }
 
-  if (!live.length && !unattached) {
+  if (!deployed.length && !unattached) {
     return (
       <div className="flex flex-col">
         <p className="px-3 py-2 text-[11px] text-[var(--color-text-muted)]">
-          No controllers running on {server}.
+          No controllers deployed on {server}.
         </p>
         {footer}
       </div>
@@ -262,7 +285,13 @@ export function DockExecution({ server }: { server: string }) {
         data-testid="execution-counts"
       >
         <span className="min-w-0 flex-1 truncate">
-          {live.length} controller{live.length === 1 ? "" : "s"}
+          {deployed.length} controller{deployed.length === 1 ? "" : "s"}
+          {/* Said here rather than left to be counted down the rows: how much
+              of a fleet is actually quoting is the first thing this panel is
+              read for, and a paused row looks like a quiet one from a distance. */}
+          {paused > 0 && (
+            <span className="text-[var(--color-yellow)]"> · {paused} paused</span>
+          )}
         </span>
         <span className="shrink-0 tabular-nums">
           {liveExecutors} executor{liveExecutors === 1 ? "" : "s"}
@@ -302,10 +331,10 @@ export function DockExecution({ server }: { server: string }) {
                   className={`px-1.5 pb-1 font-medium ${
                     col.num ? "text-right" : "text-left"
                   } ${col.key === "controller" ? "pl-3" : ""} ${
-                    col.key === "net" ? "pr-3" : ""
+                    col.key === "act" ? "pr-3" : ""
                   }`}
                 >
-                  {col.label}
+                  {col.label || <span className="sr-only">{col.hint}</span>}
                 </th>
               ))}
             </tr>
@@ -340,20 +369,28 @@ export function DockExecution({ server }: { server: string }) {
                     ? (Date.now() - leaf.startedAt) / 3_600_000
                     : NaN;
                   const scope = controllerNodeId(leaf);
+                  const stopped = leaf.status === "stopped";
                   return (
                     <tr
                       key={leaf.id}
                       data-controller-row
+                      data-paused={stopped ? "" : undefined}
                       role="button"
                       tabIndex={0}
-                      title={`${leaf.label} on ${leaf.bot}`}
+                      title={`${leaf.label} on ${leaf.bot}${stopped ? " — paused" : ""}`}
                       onClick={() => navigate(`/bots?scope=${scope}`)}
                       onKeyDown={(e) => {
                         if (e.key !== "Enter" && e.key !== " ") return;
                         e.preventDefault();
                         navigate(`/bots?scope=${scope}`);
                       }}
-                      className="cursor-pointer transition-colors hover:bg-[var(--color-surface-hover)]"
+                      className={`cursor-pointer transition-colors hover:bg-[var(--color-surface-hover)] ${
+                        // Paused rows are dimmed rather than tinted: their
+                        // numbers are still true, they are just no longer
+                        // moving, and a row that shouted would compete with the
+                        // PnL colours for the same glance.
+                        stopped ? "opacity-55" : ""
+                      }`}
                     >
                       {/* The column that absorbs the slack, and the only one
                           allowed to truncate: two rows under the same bot are
@@ -388,10 +425,23 @@ export function DockExecution({ server }: { server: string }) {
                         {formatCurrencyPnl(unrealized, currencySymbol)}
                       </td>
                       <td
-                        className="whitespace-nowrap py-0.5 pl-1.5 pr-3 text-right font-mono font-medium tabular-nums"
+                        className="whitespace-nowrap px-1.5 py-0.5 text-right font-mono font-medium tabular-nums"
                         style={{ color: pnlColor(net) }}
                       >
                         {formatCurrencyPnl(net, currencySymbol)}
+                      </td>
+                      {/* The one cell that acts rather than reports. It stops
+                          the click from reaching the row, because the row
+                          navigates away and a pause that also left the page
+                          would look like it had done something else. */}
+                      <td className="py-0.5 pl-1.5 pr-3 text-right">
+                        <ControllerToggle
+                          server={server}
+                          bot={leaf.bot}
+                          controllerId={leaf.controllerId}
+                          stopped={stopped}
+                          label={leaf.label}
+                        />
                       </td>
                     </tr>
                   );

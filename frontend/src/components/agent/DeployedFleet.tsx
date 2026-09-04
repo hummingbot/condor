@@ -7,6 +7,7 @@ import {
   BEFORE_LEDGER,
   BEFORE_LEDGER_LABEL,
 } from "@/components/perf/agentFilter";
+import { ControllerToggle } from "@/components/perf/ControllerToggle";
 import { useFleetData } from "@/hooks/useFleetData";
 import { attributionOf } from "@/lib/agent-attribution";
 import { api, type ControllerInfo } from "@/lib/api";
@@ -226,6 +227,7 @@ export function DeployedFleet({
                   <ControllerRow
                     key={ctrl.controller_id || ctrl.controller_name}
                     controller={ctrl}
+                    server={serverName}
                     dense={dense}
                     formatPnl={fleet.rateFormatPnl}
                     formatValue={fleet.rateFormatValue}
@@ -281,11 +283,14 @@ function Stat({
  */
 function ControllerRow({
   controller,
+  server,
   dense,
   formatPnl,
   formatValue,
 }: {
   controller: ControllerInfo;
+  /** Where it runs — the strategy's server, which is what the fleet was read from. */
+  server: string;
   dense: boolean;
   /** The fleet's own formatters: they mark an unconverted figure with a ⚠. */
   formatPnl: (value: number, quote: string) => string;
@@ -325,6 +330,19 @@ function ControllerRow({
       <span className="w-24 shrink-0 truncate text-right font-mono text-[10px] tabular-nums text-[var(--color-text-muted)]">
         {formatValue(controller.volume_traded, quote)}
       </span>
+      {/* The same control the execution dock and the fleet browser carry, so a
+          reader who has found their strategy's controllers here does not have
+          to go and find them again somewhere else to pause one. Drawn only when
+          the server is known: without one there is nothing to post to. */}
+      {server && (
+        <ControllerToggle
+          server={server}
+          bot={controller.bot_name}
+          controllerId={controller.controller_id || controller.controller_name}
+          stopped={stopped}
+          label={controller.controller_id || controller.controller_name}
+        />
+      )}
     </div>
   );
 }

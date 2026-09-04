@@ -7,8 +7,6 @@ import {
   Database,
   Layers,
   Loader2,
-  Pause,
-  Play,
   Rocket,
   ScrollText,
   Server,
@@ -29,6 +27,7 @@ import { PnlEvolutionChart } from "@/components/bots/PnlEvolutionChart";
 import { ExecutorChart } from "@/components/charts/ExecutorChart";
 import { DetailPanel } from "@/components/perf/ExecutorTable";
 import { ExecutorRows, StopConfirmDialog } from "@/components/perf/ExecutorRows";
+import { ControllerToggle } from "@/components/perf/ControllerToggle";
 import { useExecutorStop } from "@/components/perf/executorActions";
 import {
   agentBucketLabel,
@@ -1501,18 +1500,11 @@ export function PerfBrowser({
     retry: false,
   });
 
+  // The kill switch, not `status`: the payload hardcodes the latter. Flipping
+  // it belongs to `ControllerToggle`, which every surface that lists a
+  // controller draws — this header, the execution dock and a strategy's fleet.
   const isKilled = activeCtrl?.config?.manual_kill_switch === true;
   const isStopping = activeCtrl?.status === "stopping";
-
-  const toggleMutation = useMutation({
-    mutationFn: () =>
-      isKilled
-        ? api.startControllers(server, activeCtrl!.bot_name, [activeCtrl!.controller_id])
-        : api.stopControllers(server, activeCtrl!.bot_name, [activeCtrl!.controller_id]),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["bots", server] });
-    },
-  });
 
   // ── What a single-bot scope owns: the bot itself, its logs, and stopping it ──
 
@@ -2677,33 +2669,16 @@ export function PerfBrowser({
               </button>
             )}
 
-            {liveCtrl && (
-              <button
-                onClick={() => toggleMutation.mutate()}
-                disabled={toggleMutation.isPending || isStopping}
-                className={`flex items-center gap-1.5 rounded px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50 ${
-                  isStopping
-                    ? "text-[var(--color-yellow)]"
-                    : isKilled
-                      ? "text-[var(--color-green)] hover:bg-[var(--color-green)]/10"
-                      : "text-[var(--color-yellow)] hover:bg-[var(--color-yellow)]/10"
-                }`}
-                title={isStopping ? "Stopping..." : isKilled ? "Start controller" : "Pause controller"}
-              >
-                {toggleMutation.isPending || isStopping ? (
-                  <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
-                ) : isKilled ? (
-                  <>
-                    <Play className="h-3.5 w-3.5" />
-                    Start
-                  </>
-                ) : (
-                  <>
-                    <Pause className="h-3.5 w-3.5" />
-                    Pause
-                  </>
-                )}
-              </button>
+            {liveCtrl && activeCtrl && (
+              <ControllerToggle
+                server={server}
+                bot={activeCtrl.bot_name}
+                controllerId={activeCtrl.controller_id}
+                stopped={isKilled}
+                stopping={isStopping}
+                label={activeCtrl.controller_id}
+                variant="labelled"
+              />
             )}
             {/* The config editor: a drawer you open, not a column that is always
                 there. It only describes a single controller, so an aggregate

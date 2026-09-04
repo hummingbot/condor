@@ -29,11 +29,15 @@ import type { ControllerInfo, ExecutorInfo } from "@/lib/api";
 
 const getBots = vi.fn();
 const getExecutors = vi.fn();
+const stopControllers = vi.fn();
+const startControllers = vi.fn();
 
 vi.mock("@/lib/api", () => ({
   api: {
     getBots: (...a: unknown[]) => getBots(...a),
     getExecutors: (...a: unknown[]) => getExecutors(...a),
+    stopControllers: (...a: unknown[]) => stopControllers(...a),
+    startControllers: (...a: unknown[]) => startControllers(...a),
     getRates: () => Promise.resolve({ rates: {} }),
   },
 }));
@@ -130,6 +134,11 @@ async function click(el: HTMLElement) {
 }
 
 const rows = () => [...container.querySelectorAll("[data-controller-row]")];
+/** The pause/start button on the row whose controller is `label`. */
+const toggleOn = (label: string) =>
+  rows()
+    .find((r) => r.querySelector("td")!.textContent === label)!
+    .querySelector<HTMLButtonElement>("[data-controller-toggle]")!;
 /** The bot group headers, one per bot with anything live under it. */
 const botHeaders = () => [...container.querySelectorAll("[data-bot-group]")];
 const rowFor = (title: string) =>
@@ -148,6 +157,8 @@ beforeEach(() => {
     total_volume: 0,
   });
   getExecutors.mockResolvedValue([executor()]);
+  stopControllers.mockResolvedValue({});
+  startControllers.mockResolvedValue({});
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -172,7 +183,7 @@ describe("the execution panel", () => {
     expect(navigate).toHaveBeenLastCalledWith("/bots?scope=bot:backpack-mm-3");
   });
 
-  it("leaves out a controller whose kill switch is on", async () => {
+  it("lists a controller whose kill switch is on, and says so", async () => {
     getBots.mockResolvedValue({
       controllers: [
         controller(),
@@ -191,9 +202,47 @@ describe("the execution panel", () => {
 
     await render();
 
-    expect(text()).not.toContain("grid_v1");
-    expect(rows()).toHaveLength(1);
-    expect(counts()).toContain("1 controller");
+    // Paused is still deployed: the row is there, marked, and one click from
+    // quoting again — hiding it read as a fleet that had gone missing.
+    expect(rows()).toHaveLength(2);
+    expect(text()).toContain("grid_v1");
+    expect(counts()).toContain("2 controllers");
+    expect(counts()).toContain("1 paused");
+    expect(rowFor("grid_v1 on brigado-2 — paused").hasAttribute("data-paused")).toBe(
+      true,
+    );
+    expect(rowFor("pmm_v2 on backpack-mm-3").hasAttribute("data-paused")).toBe(false);
+  });
+
+  it("starts a paused controller and pauses a quoting one, from its own row", async () => {
+    getBots.mockResolvedValue({
+      controllers: [
+        controller(),
+        controller({
+          controller_id: "grid_v1",
+          config: { manual_kill_switch: true },
+        }),
+      ],
+      bots: [],
+      total_pnl: 0,
+      total_volume: 0,
+    });
+
+    await render();
+
+    await click(toggleOn("grid_v1"));
+    expect(startControllers).toHaveBeenCalledWith(SERVER, "backpack-mm-3", [
+      "grid_v1",
+    ]);
+
+    await click(toggleOn("pmm_v2"));
+    expect(stopControllers).toHaveBeenCalledWith(SERVER, "backpack-mm-3", [
+      "pmm_v2",
+    ]);
+
+    // Neither click left the panel: the row navigates, the button in it does
+    // not, or a pause would look like it had done something else entirely.
+    expect(navigate).not.toHaveBeenCalled();
   });
 
   it("gives one config on two bots two rows and two scopes", async () => {
@@ -276,7 +325,7 @@ describe("the execution panel", () => {
 
     await render();
 
-    expect(text()).toContain(`No controllers running on ${SERVER}`);
+    expect(text()).toContain(`No controllers deployed on ${SERVER}`);
     expect(text()).toContain("Open execution");
   });
 });
