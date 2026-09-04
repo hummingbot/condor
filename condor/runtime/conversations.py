@@ -41,7 +41,12 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field
 
 from condor import paths
-from condor.acp.client import ToolCallEvent, ToolCallUpdate, fold_tool_call_event
+from condor.acp.client import (
+    ToolCallEvent,
+    ToolCallUpdate,
+    fold_tool_call_event,
+    normalize_tool_title,
+)
 from condor.fsutil import atomic_write_bytes
 from condor.runtime.events import EventType
 from condor.runtime.registry_file import read_status, write_status
@@ -1005,7 +1010,15 @@ class Recorder:
                 self._tools,
                 ToolCallEvent(
                     tool_call_id=call_id,
-                    title=str(event.field("title") or ""),
+                    # The transcript is the record, and it is read forever, so
+                    # a title that says nothing is recognised as nothing here
+                    # rather than written down verbatim (CORR-327). The same
+                    # seam the ACP client normalizes on, applied again at the
+                    # last gate before disk because a producer that is not the
+                    # ACP wire (the pydantic-ai client, the tick relay) reaches
+                    # the recorder without passing it.
+                    title=normalize_tool_title(event.field("title"))
+                    or normalize_tool_title(event.field("kind")),
                     status=str(event.field("status") or ""),
                     kind=str(event.field("kind") or ""),
                     input=_dict_or_none(event.field("input")),
@@ -1017,7 +1030,11 @@ class Recorder:
                 ToolCallUpdate(
                     tool_call_id=str(event.field("tool_call_id") or ""),
                     status=str(event.field("status") or ""),
-                    title=str(event.field("title") or ""),
+                    # No ``kind`` fallback on an update, unlike the create
+                    # above: the fold overwrites the name whenever the update
+                    # carries one, so an update whose title says nothing must
+                    # stay empty and leave the announced name standing.
+                    title=normalize_tool_title(event.field("title")),
                     output=str(event.field("output") or ""),
                     input=_dict_or_none(event.field("input")),
                 ),

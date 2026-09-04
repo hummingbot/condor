@@ -23,6 +23,36 @@ from .jsonrpc import JSONRPCPeer
 log = logging.getLogger(__name__)
 
 
+#: Values an adapter sends when it means "no name". ``undefined`` is a
+#: JavaScript ``undefined`` that reached the wire as text; ``null``/``none`` are
+#: the JSON and Python spellings of the same absence. Compared case-folded, and
+#: only after a JSON-quoted scalar has been unwrapped.
+_ABSENT_TOOL_NAMES = frozenset({"undefined", "null", "none"})
+
+
+def normalize_tool_title(value: Any) -> str:
+    """A tool title stripped of encoding artefacts, or ``""`` when it says nothing.
+
+    The ACP adapter can hand us a title that is not a name: a real transcript
+    carries five ``kind: "fetch"`` calls titled ``'"undefined"'`` — a JavaScript
+    ``undefined`` that was JSON-encoded on its way to the wire, quote characters
+    and all (CORR-327). Condor writes tool titles to the transcript, and a
+    transcript is read forever, so a value that means nothing must be recognised
+    as nothing *before* it is persisted rather than papered over by each reader.
+
+    A value that both starts and ends with ``"`` is an encoding artefact, not a
+    name, so it is unwrapped; a non-string is not a name at all. What survives is
+    returned byte-identical — a legitimate ``mcp__condor__run_code`` is never
+    rewritten.
+    """
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    while len(text) >= 2 and text.startswith('"') and text.endswith('"'):
+        text = text[1:-1].strip()
+    return "" if text.casefold() in _ABSENT_TOOL_NAMES else text
+
+
 def normalize_tool_call(payload: dict[str, Any]) -> dict[str, Any]:
     """Canonical ``{tool, title, input}`` view of an ACP ``toolCall`` (SEC-093).
 
@@ -39,10 +69,20 @@ def normalize_tool_call(payload: dict[str, Any]) -> dict[str, Any]:
     "no arguments I can read" from "an empty argument set", and fail closed on
     the former.
     """
-    title = payload.get("title") or ""
+    name = normalize_tool_title(payload.get("title"))
     normalized = dict(payload)
-    normalized["title"] = title
-    normalized["tool"] = payload.get("tool") or title
+    # A call whose title says nothing still has to read as *something*: the tool
+    # name if the adapter sent one, else the call's ``kind``, so a broken fetch
+    # reads as "fetch" rather than as a lie (CORR-327).
+    normalized["title"] = (
+        name
+        or normalize_tool_title(payload.get("tool"))
+        or normalize_tool_title(payload.get("kind"))
+    )
+    # ``tool`` deliberately does NOT take the ``kind`` fallback: it is what the
+    # danger list and the risk gate dispatch on, and a category is not a tool
+    # name. An unreadable one stays empty and those callers fail closed.
+    normalized["tool"] = payload.get("tool") or name
     args = payload.get("rawInput")
     if args is None:
         args = payload.get("input")
@@ -1010,13 +1050,17 @@ class ACPClient:
             if text:
                 self._event_queue.put_nowait(ThoughtChunk(text=text))
         elif kind == "tool_call":
+            call = normalize_tool_call(update)
             self._event_queue.put_nowait(
                 ToolCallEvent(
                     tool_call_id=update.get("toolCallId", ""),
-                    title=update.get("title", ""),
+                    # Same seam as ``input``: the title comes from the canonical
+                    # view, so a malformed one never reaches a consumer — the
+                    # transcript recorder above all (CORR-327).
+                    title=call["title"],
                     status=update.get("status", "pending"),
                     kind=update.get("kind", "other"),
-                    input=normalize_tool_call(update)["input"],
+                    input=call["input"],
                 )
             )
         elif kind == "tool_call_update":
@@ -1024,7 +1068,12 @@ class ACPClient:
                 ToolCallUpdate(
                     tool_call_id=update.get("toolCallId", ""),
                     status=update.get("status"),
-                    title=update.get("title"),
+                    # Empty rather than garbage when the adapter's title says
+                    # nothing, and no ``kind`` fallback here: every fold patches
+                    # the name only when the update carries one, so "" leaves
+                    # the announced title standing instead of overwriting a real
+                    # name with noise — or with a category (CORR-327).
+                    title=normalize_tool_title(update.get("title")),
                     output=update.get("output"),
                     # Same seam as the ``tool_call`` branch above: the wire
                     # spells arguments ``rawInput`` and every consumer reads
