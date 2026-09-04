@@ -473,18 +473,58 @@ export function useChatSocket() {
     Record<string, PermissionRequest>
   >({});
 
-  // Helpers to update a specific slot's messages
+  /**
+   * Replace one conversation's transcript. The only place that knows how.
+   *
+   * Every messages-only update in this file goes through here, which is what
+   * makes "which slot does this event belong to" a single decision rather than
+   * one repeated at each call site: a field added to a system entry, or a
+   * change to how a slot is matched (following `refAliases`, say), is applied
+   * once instead of being hunted for in a dozen near-identical `map`s.
+   *
+   * The updater is handed the slot as well as its messages, so a transcript
+   * that needs a fact about its conversation — the agent a bubble is stamped
+   * with — can read it without reaching back into `slots`. Updates that also
+   * touch `info` or `pending` are *not* messages-only and stay written out.
+   */
   const updateSlotMessages = useCallback(
-    (slotId: string, updater: (msgs: ChatMessage[]) => ChatMessage[]) => {
+    (
+      slotId: string,
+      updater: (msgs: ChatMessage[], slot: ChatSlot) => ChatMessage[],
+    ) => {
       setSlots((prev) =>
         prev.map((s) =>
           s.info.slot_id === slotId
-            ? { ...s, messages: updater(s.messages) }
+            ? { ...s, messages: updater(s.messages, s) }
             : s,
         ),
       );
     },
     [],
+  );
+
+  /**
+   * Append one system divider — a reload, a routine's note, a secret notice.
+   *
+   * They differ only in their words and their kind, so that is all a caller
+   * says. The id and the timestamp are minted here, at the moment the note
+   * actually joins the transcript.
+   */
+  const appendSystemNote = useCallback(
+    (slotId: string, text: string, kind?: string) => {
+      updateSlotMessages(slotId, (msgs) => [
+        ...msgs,
+        {
+          id: nextMsgId(),
+          role: "system" as const,
+          text,
+          kind,
+          toolCalls: [],
+          ts: nowTs(),
+        },
+      ]);
+    },
+    [updateSlotMessages],
   );
 
   // A slot is streaming from its first fragment until its prompt ends. Both
@@ -630,19 +670,13 @@ export function useChatSocket() {
       // Whatever is buffered was received before this event and has to land
       // before it, or the two arrive in the transcript out of order.
       flushChunks();
-      setSlots((prev) =>
-        prev.map((s) =>
-          s.info.slot_id === slotId
-            ? {
-                ...s,
-                messages: foldIntoStream(s.messages, patch, s.info.agent_slug ?? ""),
-              }
-            : s,
-        ),
+      updateSlotMessages(slotId, (msgs, s) =>
+        // "" is the default agent, not "unknown" — same rule as the flush.
+        foldIntoStream(msgs, patch, s.info.agent_slug ?? ""),
       );
       startStreaming(slotId);
     },
-    [flushChunks, startStreaming],
+    [flushChunks, startStreaming, updateSlotMessages],
   );
 
   // Actions asked for before the socket was open. "Chat" on an agent's page
@@ -838,22 +872,17 @@ export function useChatSocket() {
         // An empty transcript never wipes the screen: on a resync that would
         // trade a missed note for a lost conversation.
         if (restored.length === 0) return;
-        setSlots((prev) =>
-          prev.map((s) => {
-            if (s.info.slot_id !== slotId) return s;
-            const kept = superseded
-              ? s.messages.filter((m) => !superseded.has(m.id))
-              : s.messages;
-            return { ...s, messages: [...restored, ...kept] };
-          }),
-        );
+        updateSlotMessages(slotId, (msgs) => {
+          const kept = superseded ? msgs.filter((m) => !superseded.has(m.id)) : msgs;
+          return [...restored, ...kept];
+        });
       } catch {
         // A conversation we cannot read is not worth breaking the chat over.
         // The slot keeps whatever it had; a later reconnect tries again.
         if (!resync) hydratedSlots.current.delete(slotId);
       }
     },
-    [],
+    [updateSlotMessages],
   );
 
   /**
@@ -1252,26 +1281,22 @@ export function useChatSocket() {
           if (!slotId) break;
           const tcId = data.tool_call_id as string;
           const status = data.status as string | undefined;
-          setSlots((prev) =>
-            prev.map((s) => {
-              if (s.info.slot_id !== slotId) return s;
-              // Addressed by the call's own id rather than by "whatever is
-              // streaming": a status that lands after the bubble stopped being
-              // current still belongs to the call it names.
-              const msgs = s.messages.map((m) =>
-                m.toolCalls.some((tc) => tc.tool_call_id === tcId)
-                  ? {
-                      ...m,
-                      toolCalls: m.toolCalls.map((tc) =>
-                        tc.tool_call_id === tcId
-                          ? { ...tc, status: status || tc.status }
-                          : tc,
-                      ),
-                    }
-                  : m,
-              );
-              return { ...s, messages: msgs };
-            }),
+          // Addressed by the call's own id rather than by "whatever is
+          // streaming": a status that lands after the bubble stopped being
+          // current still belongs to the call it names.
+          updateSlotMessages(slotId, (msgs) =>
+            msgs.map((m) =>
+              m.toolCalls.some((tc) => tc.tool_call_id === tcId)
+                ? {
+                    ...m,
+                    toolCalls: m.toolCalls.map((tc) =>
+                      tc.tool_call_id === tcId
+                        ? { ...tc, status: status || tc.status }
+                        : tc,
+                    ),
+                  }
+                : m,
+            ),
           );
           break;
         }
@@ -1299,20 +1324,17 @@ export function useChatSocket() {
           // avoided by never letting this happen at all.
           if (!slotId) break;
           flushChunks(slotId);
-          setSlots((prev) =>
-            prev.map((s) => {
-              if (s.info.slot_id !== slotId) return s;
-              const msgs = settleToolCalls(s.messages);
-              // The partial is the last thing the agent said. The user's new
-              // message is already below it — `sendMessage` appended it before
-              // the wire even carried it — so this walks back to find it.
-              const idx = msgs.map((m) => m.role).lastIndexOf("assistant");
-              if (idx < 0) return { ...s, messages: msgs };
-              const marked = [...msgs];
-              marked[idx] = { ...marked[idx], interrupted: true };
-              return { ...s, messages: marked };
-            }),
-          );
+          updateSlotMessages(slotId, (prev) => {
+            const msgs = settleToolCalls(prev);
+            // The partial is the last thing the agent said. The user's new
+            // message is already below it — `sendMessage` appended it before
+            // the wire even carried it — so this walks back to find it.
+            const idx = msgs.map((m) => m.role).lastIndexOf("assistant");
+            if (idx < 0) return msgs;
+            const marked = [...msgs];
+            marked[idx] = { ...marked[idx], interrupted: true };
+            return marked;
+          });
           stopStreaming(slotId);
           break;
         }
@@ -1337,25 +1359,10 @@ export function useChatSocket() {
           if (!slotId) break;
           flushChunks(slotId);
           const parts = (data.parts as string[]) || [];
-          setSlots((prev) =>
-            prev.map((s) =>
-              s.info.slot_id === slotId
-                ? {
-                    ...s,
-                    messages: [
-                      ...s.messages,
-                      {
-                        id: nextMsgId(),
-                        role: "system" as const,
-                        text: `Reloaded to apply configuration changes (${parts.join(", ")})`,
-                        kind: "reload",
-                        toolCalls: [],
-                        ts: nowTs(),
-                      },
-                    ],
-                  }
-                : s,
-            ),
+          appendSystemNote(
+            slotId,
+            `Reloaded to apply configuration changes (${parts.join(", ")})`,
+            "reload",
           );
           break;
         }
@@ -1370,26 +1377,7 @@ export function useChatSocket() {
           const noteText = (data.text as string) || "";
           const noteKind = (data.kind as string) || undefined;
           if (!noteText) break;
-          setSlots((prev) =>
-            prev.map((s) =>
-              s.info.slot_id === slotId
-                ? {
-                    ...s,
-                    messages: [
-                      ...s.messages,
-                      {
-                        id: nextMsgId(),
-                        role: "system" as const,
-                        text: noteText,
-                        kind: noteKind,
-                        toolCalls: [],
-                        ts: nowTs(),
-                      },
-                    ],
-                  }
-                : s,
-            ),
-          );
+          appendSystemNote(slotId, noteText, noteKind);
           break;
         }
 
@@ -1406,26 +1394,7 @@ export function useChatSocket() {
           const secretKind = data.kind as string;
           const text = SECRET_NOTICES[secretKind];
           if (!text) break;
-          setSlots((prev) =>
-            prev.map((s) =>
-              s.info.slot_id === slotId
-                ? {
-                    ...s,
-                    messages: [
-                      ...s.messages,
-                      {
-                        id: nextMsgId(),
-                        role: "system" as const,
-                        text,
-                        kind: "secret_notice",
-                        toolCalls: [],
-                        ts: nowTs(),
-                      },
-                    ],
-                  }
-                : s,
-            ),
-          );
+          appendSystemNote(slotId, text, "secret_notice");
           break;
         }
 
@@ -1438,13 +1407,7 @@ export function useChatSocket() {
             // so the settle below sees the flushed transcript.
             flushChunks(slotId);
             // Mark any in-flight tool calls as completed so the spinner stops
-            setSlots((prev) =>
-              prev.map((s) =>
-                s.info.slot_id === slotId
-                  ? { ...s, messages: settleToolCalls(s.messages) }
-                  : s,
-              ),
-            );
+            updateSlotMessages(slotId, settleToolCalls);
             // Only this conversation ended. Another tab may still be
             // mid-answer, and its composer stays locked until its own turn is
             // done.
@@ -1527,6 +1490,7 @@ export function useChatSocket() {
       }
     },
     [
+      appendSystemNote,
       appendToStream,
       bufferChunk,
       flushChunks,
@@ -1534,6 +1498,7 @@ export function useChatSocket() {
       prewarmLatest,
       queryClient,
       stopStreaming,
+      updateSlotMessages,
       uploadAndSend,
     ],
   );
@@ -1742,15 +1707,9 @@ export function useChatSocket() {
       // one conversation says nothing about the others.
       stopStreaming(slotId);
       // Mark any in-flight tool calls as completed
-      setSlots((prev) =>
-        prev.map((s) =>
-          s.info.slot_id === slotId
-            ? { ...s, messages: settleToolCalls(s.messages) }
-            : s,
-        ),
-      );
+      updateSlotMessages(slotId, settleToolCalls);
     },
-    [flushChunks, send, stopStreaming],
+    [flushChunks, send, stopStreaming, updateSlotMessages],
   );
 
   const resolvePermission = useCallback(
