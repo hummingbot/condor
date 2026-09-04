@@ -475,6 +475,9 @@ class TickEngine:
         positions_result = skill_results.get("positions")
         if positions_result:
             self._last_skill_data["positions"] = positions_result.data
+        drift_result = skill_results.get("drift")
+        if drift_result:
+            self._last_skill_data["drift"] = drift_result.data
 
         # Convert provider results to summary strings
         core_data_summaries: dict[str, str] = {
@@ -496,6 +499,7 @@ class TickEngine:
         risk_state.total_exposure = float(
             self._last_skill_data.get("total_exposure", 0.0) or 0.0
         )
+        self._apply_drift_verdict(risk_state, drift_result)
 
         # Hard kill-switch: escalate to an emergency winddown before the soft
         # pause below. Experiments never trade for real, so they never shut down.
@@ -767,6 +771,46 @@ class TickEngine:
                 tick_num,
                 len(tool_calls),
                 len(response_text),
+            )
+
+    def _apply_drift_verdict(self, risk_state, drift_result) -> None:
+        """Carry the venue check's verdict into the risk state ([[FEAT-113]]).
+
+        The drift figures always reach the prompt, so the agent reads the same
+        verdict the gate acted on. Whether they *bind* is the operator's call:
+        with ``max_drift_quote`` at its -1 default nothing is ever blocked,
+        because small drift is normal and an install that blocked on dust would
+        be taught to raise the limit until it never fired.
+
+        Enabled, it fails closed the way ``get_state`` already does for missing
+        metrics: a venue that did not answer, a drift past the limit, or a drift
+        provider that failed outright all leave the book untrusted — and an
+        untrusted book refuses new exposure while every brake still passes.
+        """
+        if drift_result is None:
+            return
+
+        data = drift_result.data or {}
+        worst = data.get("worst_quote")
+        risk_state.drift_quote = worst
+
+        limit = self.risk.limits.max_drift_quote
+        if limit < 0:
+            return
+
+        if not data:
+            risk_state.book_trusted = False
+            risk_state.drift_reason = "the venue check did not run"
+        elif not data.get("trusted", True):
+            risk_state.book_trusted = False
+            risk_state.drift_reason = (
+                f"venue unanswered: {data.get('reason') or 'no reason given'}"
+            )
+        elif worst is not None and worst > limit:
+            risk_state.book_trusted = False
+            risk_state.drift_reason = (
+                f"drift ${worst:,.2f} on your controllers exceeds the "
+                f"${limit:,.2f} limit"
             )
 
     async def _adopt_running_bots(self, client) -> None:

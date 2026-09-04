@@ -36,6 +36,12 @@ class RiskLimits:
     # Hard kill-switch: a deeper drawdown than the soft ``max_drawdown_pct`` pause;
     # breaching it winds down positions (see condor.agents.shutdown). -1 = disabled.
     shutdown_drawdown_pct: float = -1.0
+    # Largest |drift| in quote, among rows this agent's controllers are party to,
+    # that still counts as a book worth trading on ([[FEAT-113]]). -1 = disabled
+    # (the default: small drift is normal — dust from partial fills, a fee taken
+    # in kind, a position closing between the two reads — and an install that
+    # blocked on it would be taught to raise this until it never fired).
+    max_drift_quote: float = -1.0
 
     @classmethod
     def from_dict(cls, d: dict) -> RiskLimits:
@@ -53,6 +59,13 @@ class RiskState:
     # soft ``is_blocked`` only pauses the tick; this triggers an emergency winddown.
     should_shutdown: bool = False
     shutdown_reason: str = ""
+    # The venue check ([[FEAT-113]]). ``book_trusted`` is False when the drift
+    # gate is enabled and either the venue did not answer or this agent's worst
+    # drift breaches ``max_drift_quote``. An untrustworthy book is a missing
+    # metric, so it refuses new exposure and lets every brake through.
+    book_trusted: bool = True
+    drift_quote: float | None = None  # None = nothing priced, never 0.0
+    drift_reason: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -63,6 +76,9 @@ class RiskState:
             "block_reason": self.block_reason,
             "should_shutdown": self.should_shutdown,
             "shutdown_reason": self.shutdown_reason,
+            "book_trusted": self.book_trusted,
+            "drift_quote": self.drift_quote,
+            "drift_reason": self.drift_reason,
             # Include limits for prompt display
             "max_position_size": (
                 self._limits.max_position_size_quote
@@ -77,6 +93,9 @@ class RiskState:
             ),
             "shutdown_drawdown_pct": (
                 self._limits.shutdown_drawdown_pct if hasattr(self, "_limits") else -1
+            ),
+            "max_drift_quote": (
+                self._limits.max_drift_quote if hasattr(self, "_limits") else -1
             ),
         }
 
@@ -117,6 +136,30 @@ def _dex_call_label(tool_name: str, input_data: dict[str, Any]) -> str:
 #: under a breached limit: refusing them would trap a loop agent in a position
 #: it is no longer permitted to unwind.
 RISK_REDUCING_DEX_ACTIONS = frozenset({"remove_liquidity", "close", "collect_fees"})
+
+
+#: Bot actions that add exposure, and so are the ones an untrustworthy book
+#: refuses. ``stop_bot``/``stop_controllers`` are the brakes and are never gated
+#: here — the ``danger.py`` rule that the failure mode of standing in front of a
+#: brake is worse than the failure mode of letting one through.
+EXPOSURE_ADDING_BOT_ACTIONS = frozenset(
+    {"deploy", "start_controllers", "update_config"}
+)
+
+
+def _book_refusal(current_state: "RiskState | None") -> tuple[bool, str] | None:
+    """The drift guard, or None when the book is trustworthy.
+
+    An untrustworthy book is a missing metric ([[FEAT-113]]), and the repo
+    already answers that at ``RiskEngine.get_state``: without real numbers we
+    must not approve creates. So this refuses **adding** exposure and is placed,
+    in every gate, after that gate has decided the call adds any — every
+    exposure-reducing path returns before reaching it.
+    """
+    if current_state is None or current_state.book_trusted:
+        return None
+    reason = current_state.drift_reason or "the venue check did not agree"
+    return False, f"Book untrusted: {reason}"
 
 
 class RiskEngine:
@@ -200,6 +243,12 @@ class RiskEngine:
         if tool_call_name(tool_call) not in CREATE_EXECUTOR_TOOLS:
             return True, ""
 
+        # A book the venue contradicts cannot size a create. `stop_executor`
+        # returned above, so this only ever stands in front of new exposure.
+        refusal = _book_refusal(current_state)
+        if refusal:
+            return refusal
+
         # Check executor count
         if current_state.executor_count >= self.limits.max_open_executors:
             return (
@@ -228,7 +277,9 @@ class RiskEngine:
 
         return True, ""
 
-    def check_bot_action(self, tool_call: dict) -> tuple[bool, str]:
+    def check_bot_action(
+        self, tool_call: dict, current_state: RiskState | None = None
+    ) -> tuple[bool, str]:
         """Check a manage_bots call against risk limits.
 
         A bot's capital lives in saved controller configs on the API server,
@@ -239,12 +290,20 @@ class RiskEngine:
         ``update_config`` is only gated when it declares a
         ``total_amount_quote`` above the position limit.
 
+        ``current_state`` carries the venue check's verdict ([[FEAT-113]]);
+        without one (older callers, tests) the drift guard simply does not fire.
+
         Returns (allowed, reason).
         """
         input_data = tool_call_input(tool_call)
         if input_data is None:
             return False, "Tool arguments could not be read"
         action = input_data.get("action", "")
+
+        if action in EXPOSURE_ADDING_BOT_ACTIONS:
+            refusal = _book_refusal(current_state)
+            if refusal:
+                return refusal
 
         if action == "deploy":
             cap = input_data.get("max_global_drawdown_quote")
@@ -315,6 +374,12 @@ class RiskEngine:
 
         if action in RISK_REDUCING_DEX_ACTIONS:
             return True, ""
+
+        # Everything that returns capital has passed above; what is left signs
+        # new exposure against a book the venue contradicts.
+        refusal = _book_refusal(current_state)
+        if refusal:
+            return refusal
 
         if (
             notional_quote is None
@@ -456,7 +521,7 @@ def auto_approve_with_risk_check(
                             ledger.note_violation(bot_name, action)
                             return {"outcome": {"outcome": "cancelled"}}
 
-                allowed, reason = risk_engine.check_bot_action(tool_call)
+                allowed, reason = risk_engine.check_bot_action(tool_call, risk_state)
                 if not allowed:
                     log.warning("Risk engine blocked tool call: %s", reason)
                     return {"outcome": {"outcome": "cancelled"}}

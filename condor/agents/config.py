@@ -29,6 +29,12 @@ class RiskLimitsConfig(BaseModel):
         description="Max drawdown %% that triggers an emergency winddown "
         "(closes positions per shutdown.md); -1 = disabled",
     )
+    max_drift_quote: float = Field(
+        default=-1.0,
+        description="Largest book-vs-venue drift (quote) this agent's own "
+        "controllers may show before new exposure is refused; brakes always "
+        "pass. -1 = disabled",
+    )
 
 
 class AgentConfig(BaseModel):
