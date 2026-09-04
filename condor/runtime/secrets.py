@@ -291,6 +291,25 @@ def _bytes_ok(match: str) -> bool:
     )
 
 
+def keypair_array_spans(text: str) -> list[tuple[int, int]]:
+    """Offsets of every real keypair array in ``text`` — the shape *and* the bound.
+
+    :data:`KEYPAIR_ARRAY_RE` only finds a bracketed run of exactly 64 ints of
+    one to three digits; the 0–255 check is what decides that run is a key
+    rather than a list of numbers that happens to be 64 long. Neither half
+    means anything alone, so they are one function — and one function is what
+    :mod:`condor.sharing.scrub` imports to ask the same question at *egress*
+    that this module asks at *ingress*. A second copy there would be a second
+    calibration of "what is a keypair", which is exactly what :func:`phrase_spans`
+    already exists to prevent for the recovery-phrase shape.
+    """
+    return [
+        match.span()
+        for match in KEYPAIR_ARRAY_RE.finditer(text)
+        if _bytes_ok(match.group(0))
+    ]
+
+
 def scan(text: str) -> list[Finding]:
     """Every key-shaped run in ``text``, in order. Never returns the value."""
     if not text:
@@ -299,9 +318,10 @@ def scan(text: str) -> list[Finding]:
     findings: list[Finding] = [
         Finding(MNEMONIC, True, start, end) for start, end in phrase_spans(text)
     ]
-    for match in KEYPAIR_ARRAY_RE.finditer(text):
-        if _bytes_ok(match.group(0)):
-            findings.append(Finding(SOLANA_KEYPAIR, True, *match.span()))
+    findings += [
+        Finding(SOLANA_KEYPAIR, True, start, end)
+        for start, end in keypair_array_spans(text)
+    ]
     for match in HEX64_RE.finditer(text):
         findings.append(Finding(EVM_HEX64, False, *match.span()))
     for match in B58_KEY_RE.finditer(text):

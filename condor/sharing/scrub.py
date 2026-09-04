@@ -15,7 +15,8 @@ string is a secret; we are replacing strings we know are ours.
 **Tier 2 — structural patterns.** Only for shapes that cannot plausibly be
 anything else: an EVM address, a 64-hex blob, a base58 address, a prefixed API
 token, a long mixed-case secret run, an email, a URL carrying a query string or
-userinfo, an IP, a seed-phrase-shaped run of words. Everything here is
+userinfo, an IP, a seed-phrase-shaped run of words, a 64-byte Solana keypair
+array. Everything here is
 best-effort by construction, and it now has two consumers with very different
 safety nets behind it. An explicit share ends in a dialog that shows the user
 the exact bytes before anything is sent, so a pattern that misses is at least
@@ -58,8 +59,11 @@ from pydantic_core import PydanticUndefined
 
 from condor.runtime.conversations import TurnEntry
 from condor.runtime.secrets import HEX64_RE as _HEX64_RE
+from condor.runtime.secrets import KEYPAIR_ARRAY_RE as _KEYPAIR_RE
+from condor.runtime.secrets import MNEMONIC as _MNEMONIC
 from condor.runtime.secrets import SEED_CANDIDATE_RE as _WORD_RUN_RE
-from condor.runtime.secrets import bip39_words, phrase_spans
+from condor.runtime.secrets import SOLANA_KEYPAIR as _SOLANA_KEYPAIR
+from condor.runtime.secrets import bip39_words, keypair_array_spans, phrase_spans
 
 log = logging.getLogger(__name__)
 
@@ -87,8 +91,27 @@ TIER2_CATEGORIES = (
     "url",
     "ip",
     "seed_phrase",
+    "solana_keypair",
 )
 CATEGORIES = TIER1_CATEGORIES + TIER2_CATEGORIES
+
+# The shapes ``condor.runtime.secrets`` is certain enough to *eat* at ingress,
+# each mapped to the tier-2 category that catches the same shape here.
+#
+# The two modules were already meant to share one calibration, and for the
+# phrase shape they did; the keypair array was certain at ingress and invisible
+# at egress for a release (SEC-331). That gap is not a missing regex so much as
+# a missing statement that the two sets have to match, because the ingress gate
+# does not cover for this one: ``secrets.redact`` runs on what the *user typed*,
+# while a key reaches a transcript through a tool payload — a read of
+# ``id.json``, a ``run_code`` stdout — that no funnel ever saw, and archived
+# turns predate ingress redaction entirely. For those, this module is the last
+# gate. The guard test in ``tests/test_sharing_scrub.py`` fails when
+# ``secrets.KINDS`` grows a certain kind this table does not name.
+CERTAIN_KIND_CATEGORIES: dict[str, str] = {
+    _MNEMONIC: "seed_phrase",
+    _SOLANA_KEYPAIR: "solana_keypair",
+}
 
 _TAGS = {
     "known_key": "API_KEY",
@@ -106,6 +129,7 @@ _TAGS = {
     "url": "URL",
     "ip": "IP",
     "seed_phrase": "SEED_PHRASE",
+    "solana_keypair": "SOLANA_KEYPAIR",
 }
 
 # Categories whose value is case-insensitive on the wire, so the pseudonym has
@@ -178,8 +202,9 @@ _IPV6_RE = re.compile(
     r"(?<![0-9A-Fa-f:])(?:[0-9A-Fa-f]{1,4}:){3,7}[0-9A-Fa-f]{1,4}(?![0-9A-Fa-f:])"
 )
 # The shapes a recovery phrase can be pasted in, the wordlist that decides
-# whether a run of words is one, and the scan that finds the runs, all live in
-# ``condor.runtime.secrets``. That module answers the same question at
+# whether a run of words is one, the scan that finds the runs, and the
+# ``[64 ints]`` keypair array with the 0–255 bound that decides *it*, all live
+# in ``condor.runtime.secrets``. That module answers the same question at
 # *ingress* — before a pasted phrase reaches the model or the first disk write
 # — and two copies of a detector is two calibrations, only one of which anyone
 # is ever looking at. What stays here is what is the scrubber's own business:
@@ -456,9 +481,26 @@ def _seed_phrase(scrubber: "Scrubber", category: str, match: re.Match) -> str:
     return "".join(out)
 
 
+def _keypair(scrubber: "Scrubber", category: str, match: re.Match) -> str:
+    """Replace the candidate only if every one of its 64 elements is a byte.
+
+    The regex found the *shape* — a bracketed run of exactly 64 small ints —
+    and :func:`condor.runtime.secrets.keypair_array_spans` decides whether that
+    run is really a key, the same division of labour ``_seed_phrase`` makes with
+    :func:`phrase_spans` and ``_ipv4`` makes with ``_octets_ok``. The bound is
+    the whole guard: a 64-long list of numbers is not rare in a tool result, and
+    a corpus in which any of them came back as ``SOLANA_KEYPAIR_a3f91c`` would
+    be silently corrupted. Out-of-range elements leave it byte for byte, exactly
+    as ``999.1.1.1`` survives ``_ipv4``.
+    """
+    src = match.group(0)
+    return scrubber._hit(category, src) if keypair_array_spans(src) else src
+
+
 # Order matters — see the note above the patterns.
 _PATTERNS: tuple[tuple[str, re.Pattern, object], ...] = (
     ("seed_phrase", _WORD_RUN_RE, _seed_phrase),
+    ("solana_keypair", _KEYPAIR_RE, _keypair),
     ("url", _URL_RE, _url),
     ("email", _EMAIL_RE, _plain),
     ("hex64", _HEX64_RE, _plain),

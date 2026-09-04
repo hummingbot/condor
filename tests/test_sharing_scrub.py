@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from condor.runtime import secrets
 from condor.runtime.conversations import TurnEntry, _tool_input
 from condor.sharing import scrub, wire
 
@@ -43,6 +44,9 @@ TX_HASH = "0x" + "9f" * 32
 BARE_HEX64 = TX_HASH[2:]
 ANTHROPIC_KEY = "sk-ant-api03-QQzzAAbbCCdd1122334455"
 SEED = "legal winner thank year wave sausage worth useful legal winner thank yellow"
+# What ``solana-keygen`` writes and every wallet export offers: 64 bytes as a
+# JSON int array. These bytes count rather than being a key.
+KEYPAIR = "[" + ",".join(str((i * 7 + 3) % 256) for i in range(64)) + "]"
 
 
 def _scrub(text: str) -> tuple[str, dict[str, int]]:
@@ -191,6 +195,60 @@ def test_the_vendored_wordlist_is_the_canonical_one():
     assert len(words) == 2048
     assert "abandon" in words and "zoo" in words
     assert all(3 <= len(w) <= 8 and w.isalpha() and w.islower() for w in words)
+
+
+# ── The keypair array (SEC-331) ──────────────────────────────────────────
+
+
+def test_a_solana_keypair_array_is_replaced_and_counted():
+    """``condor.runtime.secrets`` has always called this shape a *certain*
+    secret, and for a release the scrubber could not see it at all.
+
+    Ingress redaction does not cover for that: it runs on what the user typed,
+    while a key reaches a transcript through a tool payload nobody typed — a
+    read of ``~/.config/solana/id.json``, a ``run_code`` stdout — and the sweep
+    ships those turns with no human reading them.
+    """
+    out, counts = _scrub(f"here is my keypair {KEYPAIR}")
+    assert counts["solana_keypair"] == 1
+    assert KEYPAIR not in out
+    assert re.search(r"SOLANA_KEYPAIR_[0-9a-f]{6}", out)
+
+
+@pytest.mark.parametrize(
+    "survivor",
+    [
+        # 64 elements, but none of them a byte — the shape without the bound.
+        "[" + ",".join(str(300 + i) for i in range(64)) + "]",
+        # A series that is merely long. The count is exactly 64 or it is not a key.
+        "[" + ",".join(str(i % 256) for i in range(100)) + "]",
+        # Prices, not bytes.
+        "[" + ",".join(f"{i}.5" for i in range(64)) + "]",
+    ],
+)
+def test_an_ordinary_numeric_array_is_not_a_keypair(survivor):
+    """A false positive here silently corrupts a tool result, so the octet
+    bound and the exact element count both have to hold — the same way
+    ``999.1.1.1`` survives ``_ipv4``."""
+    out, counts = _scrub(f"the series is {survivor}")
+    assert survivor in out
+    assert counts["solana_keypair"] == 0
+
+
+def test_every_certain_ingress_kind_has_an_egress_pattern():
+    """The gap SEC-331 found was not a missing regex but a missing statement
+    that the two modules' notion of a secret has to match.
+
+    ``secrets.KINDS`` marks a kind certain when the ingress gate will eat it
+    unasked; anything that certain must not be able to leave in a share. A new
+    shape added there now breaks this rather than shipping unnoticed.
+    """
+    certain = {kind for kind, is_certain in secrets.KINDS.items() if is_certain}
+    assert set(scrub.CERTAIN_KIND_CATEGORIES) == certain
+    registered = {category for category, _, _ in scrub._PATTERNS}
+    for kind, category in scrub.CERTAIN_KIND_CATEGORIES.items():
+        assert category in registered, f"{kind} has no tier-2 pattern"
+        assert category in scrub.CATEGORIES, f"{kind} is missing from the counts"
 
 
 def test_a_url_keeps_its_scheme_and_host_but_loses_its_query():
