@@ -17,6 +17,7 @@ and both are slow (kaleido) or write to the repo.
 
 import asyncio
 import io
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -61,6 +62,14 @@ _PAYLOAD = {
 }
 
 
+# Inside the store's payload retention window by construction
+# (``DEFAULT_RETENTION_DAYS`` in condor/backtest_store.py). This was a literal
+# date until it aged past that window and turned every test in this file red
+# exactly 30 days after it was written — a date that is always "yesterday"
+# cannot expire.
+_CREATED_AT = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+
+
 def _envelope(task_id: str, status: str = "completed", error=None) -> dict:
     return {
         "task_id": task_id,
@@ -72,7 +81,7 @@ def _envelope(task_id: str, status: str = "completed", error=None) -> dict:
             "trade_cost": 0.0002,
             "config": {"id": CONFIG_NAME, "controller_name": "ema_trend_v1"},
         },
-        "created_at": "2026-08-05T00:00:00+00:00",
+        "created_at": _CREATED_AT,
         "error": error,
         **({"result": _PAYLOAD} if status == "completed" else {}),
     }
