@@ -44,6 +44,12 @@ import type { LibraryFocus } from "@/components/chat/DockRoutines";
  * eye while typing, and because `?panel=deployed` is what makes it linkable and
  * closable by Back.
  *
+ * `agent` carries an optional slug since FEAT-114. The pane's subject used to
+ * be the conversation's agent and nothing else, so an Execution row naming a
+ * *different* agent had nowhere to open it; the slug is what gives that row a
+ * destination. Absent still means the conversation's, which is what every link
+ * already written to `?panel=agent` means.
+ *
  * A strategy is a member rather than a sheet stacked on the agent panel: two
  * sheets portalled into one pane stack with no way to tell which scrollbar
  * belongs to what (see `WorkspaceSheet`'s `taken`). So the strategy *replaces*
@@ -51,7 +57,7 @@ import type { LibraryFocus } from "@/components/chat/DockRoutines";
  * agent slug it was opened from.
  */
 export type PaneView =
-  | { kind: "agent" }
+  | { kind: "agent"; slug?: string }
   | { kind: "desk" }
   | { kind: "deployed" }
   | { kind: "routines"; focus: LibraryFocus }
@@ -61,6 +67,19 @@ export type PaneView =
 export const PANEL_PARAM = "panel";
 /** `{agentSlug}/{strategySlug}` — the strategy sheet's whole address. */
 export const LOOP_PARAM = "loop";
+/**
+ * Whose agent panel is in the pane, when it is not the conversation's own
+ * (FEAT-114) — the Execution panel's agent rows open a *different* agent.
+ *
+ * Spelled `who` and not `agent`, which is the obvious name and is taken: `/`
+ * already reads `?agent=<slug>` as *start or focus a conversation with this
+ * agent* and strips it a tick later (see `AgentChatTab`), so writing the pane's
+ * subject there would spawn a chat and then erase itself.
+ *
+ * Written only when the slug differs from the conversation's, so every link
+ * ever made to a bare `?panel=agent` keeps meaning "the agent I am talking to".
+ */
+export const AGENT_PARAM = "who";
 
 /**
  * Read the pane out of the query string.
@@ -73,8 +92,13 @@ export function readPane(
   libraryFocus: LibraryFocus,
 ): PaneView {
   switch (params.get(PANEL_PARAM)) {
-    case "agent":
-      return { kind: "agent" };
+    case "agent": {
+      // `undefined` rather than `""`: a bare `?panel=agent` is not a request
+      // for a nameless agent, it is the conversation's own, and the page
+      // resolves it that way.
+      const slug = params.get(AGENT_PARAM) || "";
+      return slug ? { kind: "agent", slug } : { kind: "agent" };
+    }
     case "desk":
       return { kind: "desk" };
     case "deployed":
@@ -105,6 +129,7 @@ export function writePane(
   if (!pane) {
     next.delete(PANEL_PARAM);
     next.delete(LOOP_PARAM);
+    next.delete(AGENT_PARAM);
     return next;
   }
   next.set(PANEL_PARAM, pane.kind);
@@ -113,5 +138,7 @@ export function writePane(
   } else {
     next.delete(LOOP_PARAM);
   }
+  if (pane.kind === "agent" && pane.slug) next.set(AGENT_PARAM, pane.slug);
+  else next.delete(AGENT_PARAM);
   return next;
 }

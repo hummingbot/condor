@@ -1501,3 +1501,148 @@ def test_read_transcript_tail_skips_malformed_lines_like_the_full_read(conv_root
         "middle",
         "newest",
     ]
+
+
+# ── The order the run happened in (ARCH-330) ──
+
+
+def test_the_recorder_keeps_think_call_think_call_in_that_order(conv_root):
+    """The four steps of a real turn, in the order the model produced them.
+
+    ``thought`` and ``tool_calls`` cannot say this: the two reasoning runs are
+    one string there and the two calls are a flat list, so a reader is left
+    guessing whether the agent thought once before both calls or thought again
+    between them — which is the whole of what a trajectory is for.
+    """
+    meta = new_conversation(USER, WEB)
+    rec = Recorder(USER, meta.id, "how much cash?")
+
+    rec.observe(RuntimeEvent(type="thought", data={"text": "Check the book. "}))
+    rec.observe(
+        RuntimeEvent(
+            type="tool_call",
+            data={"tool_call_id": "t1", "title": "get_prices", "status": "pending"},
+        )
+    )
+    rec.observe(RuntimeEvent(type="thought", data={"text": "Now the balances."}))
+    rec.observe(
+        RuntimeEvent(
+            type="tool_call",
+            data={"tool_call_id": "t2", "title": "get_portfolio", "status": "pending"},
+        )
+    )
+    rec.observe(RuntimeEvent(type="text", data={"text": "You have $50."}))
+    rec.flush()
+
+    assert read_transcript(USER, meta.id)[-1].events == [
+        {"type": "thought", "text": "Check the book. "},
+        {"type": "tool", "id": "t1"},
+        {"type": "thought", "text": "Now the balances."},
+        {"type": "tool", "id": "t2"},
+    ]
+
+
+def test_the_run_is_a_projection_of_the_two_flat_fields(conv_root):
+    """Additive, not a replacement — every existing reader keeps its answer.
+
+    The reasoning in the steps concatenates back to ``thought`` byte for byte
+    and the tool steps name exactly the calls ``tool_calls`` holds, so nothing
+    downstream (``replay_context``, sharing, Telegram, an older client) has to
+    learn the new field to stay correct.
+    """
+    meta = new_conversation(USER, WEB)
+    rec = Recorder(USER, meta.id, "check")
+
+    for chunk in ("Weigh ", "the ", "spread. "):
+        rec.observe(RuntimeEvent(type="thought", data={"text": chunk}))
+    rec.observe(
+        RuntimeEvent(
+            type="tool_call",
+            data={"tool_call_id": "t1", "title": "get_prices", "status": "pending"},
+        )
+    )
+    rec.observe(RuntimeEvent(type="thought", data={"text": "Thin."}))
+    rec.flush()
+
+    turn = read_transcript(USER, meta.id)[-1]
+    steps = turn.events
+    assert "".join(s["text"] for s in steps if s["type"] == "thought") == turn.thought
+    assert [s["id"] for s in steps if s["type"] == "tool"] == [
+        call["id"] for call in turn.tool_calls
+    ]
+    assert [s["type"] for s in steps] == [
+        "thought",
+        "tool",
+        "thought",
+    ], "consecutive reasoning chunks are one step; a call between them starts another"
+
+
+def test_the_run_never_names_a_call_the_turn_does_not_hold(conv_root):
+    """One step per call, and only for calls that reached disk.
+
+    A repeat announcement patches the call in flight — the ACP bridge does this
+    routinely as arguments stream in — and must not put the same tool in the
+    run twice. An update for a call nobody announced creates nothing at all, so
+    it leaves no dangling step either.
+    """
+    meta = new_conversation(USER, WEB)
+    rec = Recorder(USER, meta.id, "read it")
+
+    rec.observe(
+        RuntimeEvent(
+            type="tool_call",
+            data={"tool_call_id": "t1", "title": "Read", "status": "pending"},
+        )
+    )
+    rec.observe(
+        RuntimeEvent(
+            type="tool_call",
+            data={
+                "tool_call_id": "t1",
+                "title": "Read",
+                "status": "in_progress",
+                "input": {"path": "config.py"},
+            },
+        )
+    )
+    rec.observe(
+        RuntimeEvent(
+            type="tool_update",
+            data={"tool_call_id": "ghost", "status": "completed", "output": "?"},
+        )
+    )
+    rec.flush()
+
+    turn = read_transcript(USER, meta.id)[-1]
+    assert turn.events == [{"type": "tool", "id": "t1"}]
+    assert [call["id"] for call in turn.tool_calls] == ["t1"]
+
+
+def test_a_turn_written_before_the_order_existed_still_reads(conv_root):
+    """The growth contract: an older line parses, and says so honestly.
+
+    An empty run is "the order was not recorded", which is what every turn on
+    disk today is — not "the agent did nothing". A reader falls back to the
+    flat fields for those, and they are still fully populated.
+    """
+    meta = new_conversation(USER, WEB)
+    _write_raw_transcript(
+        conv_root,
+        meta.id,
+        [
+            json.dumps(
+                {
+                    "role": "assistant",
+                    "text": "done",
+                    "thought": "thinking",
+                    "tool_calls": [{"id": "t1", "title": "get_prices"}],
+                }
+            )
+            + "\n"
+        ],
+    )
+
+    turn = read_transcript(USER, meta.id)[-1]
+    assert turn.events == []
+    assert turn.thought == "thinking"
+    assert turn.tool_calls[0]["title"] == "get_prices"

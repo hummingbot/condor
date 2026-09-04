@@ -1,6 +1,3 @@
-import { Navigate, useSearchParams } from "react-router-dom";
-
-import { legacyFleetPath } from "@/lib/homeView";
 import { AgentChatTab } from "@/pages/tabs/AgentChatTab";
 
 /**
@@ -8,26 +5,19 @@ import { AgentChatTab } from "@/pages/tabs/AgentChatTab";
  *
  * It was briefly two views of one route: FEAT-104 hung a fleet overview off
  * `/?view=fleet` and then made it what a bare `/` means. Both halves of that
- * are undone here. The overview earned a page — it is `/fleet` now, in the nav
- * beside `/floor`, reachable by typing its name instead of by remembering a
- * query parameter — and the home went back to being the thing every link,
- * notification and reflex in this product already pointed at. A route that
- * rendered two unrelated screens depending on its search string was a switch
- * nobody could see from the address bar.
+ * are undone, and now so is the page it was moved to — what every agent is
+ * doing is the Execution panel of this screen's own right rail (FEAT-114),
+ * read owner first, beside the conversation rather than a tab away from it.
  *
- * The old spelling still forwards, because it is in bookmarks and in
- * notification payloads: `legacyFleetPath` hands `/?view=fleet` to `/fleet`
- * with everything but `view` carried across.
+ * So `?view=` on `/` means nothing here again, and the module that forwarded
+ * the old spelling is gone with the page it forwarded to: `/fleet` is still a
+ * route, and it redirects into the panel, so a bookmark of either spelling
+ * lands on the home with the fleet open.
  *
  * Owns the full viewport and scrolls its own transcript, so the shell drops
  * `main`'s padding for this route (see `AppShell`).
  */
 export function Agents() {
-  const [searchParams] = useSearchParams();
-
-  const legacy = legacyFleetPath(searchParams);
-  if (legacy) return <Navigate to={legacy} replace />;
-
   return (
     <div className="h-full min-h-0">
       <AgentChatTab />

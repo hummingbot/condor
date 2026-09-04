@@ -271,11 +271,11 @@ export interface RowFold {
   /**
    * The whole fold, for a caller that needs more than the headline (FEAT-112).
    *
-   * The overview's row prints `net` and `volume` and nothing else; the floor's
-   * row prints six more figures out of the same fold, and its strip sums them.
-   * Additive, so `FleetOverview` is untouched — and additive *here* rather
-   * than a second `foldLeaves` at the floor, which is the whole rule ARCH-324
-   * set: one producer, read by two screens.
+   * The overview's row printed `net` and `volume` and nothing else; the
+   * floor's row prints six more figures out of the same fold, and its strip
+   * sums them. Additive, so the overview was untouched — and additive *here*
+   * rather than a second `foldLeaves` at the floor, which is the whole rule
+   * ARCH-324 set: one producer, read by every screen.
    */
   totals: PerfTotals;
   /**

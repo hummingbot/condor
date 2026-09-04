@@ -16,6 +16,7 @@ import { ConversationList } from "@/components/chat/ConversationList";
 import { WORKSPACE_BAR } from "@/components/chat/workspaceBar";
 import { AnchoredMenu } from "@/components/ui/AnchoredMenu";
 import { useWorkspacePane } from "@/hooks/useWorkspacePane";
+import { EXECUTION_PATH } from "@/components/chat/accountPanels";
 import { CHAT_SLUG, type AgentSummary, type ConversationMeta } from "@/lib/api";
 import { CHAT_RAIL_OPEN_KEY } from "@/lib/sessionState";
 
@@ -228,10 +229,12 @@ export const ChatRail = memo(function ChatRail({
  * This line used to be the whole answer to "what is running": it replaced a
  * fleet grid whose only unique job it already did. `/fleet` (FEAT-104) took
  * that job back, and carries the money, the last decision and the next tick
- * this line never could. What is left is a glance for somebody mid-conversation
- * who does not want to leave it, and a way over to the page that says the rest:
- * the fleet is the last row of the list, and the whole strip when nothing is
- * looping at all.
+ * this line never could. That page is gone again (FEAT-114) and its rows are
+ * the Execution panel one column to the right, so what is left here is a glance
+ * for somebody mid-conversation who does not want to leave it — and a way into
+ * the panel that says the rest, without leaving the conversation at all: the
+ * fleet is the last row of the list, and the whole strip when nothing is
+ * looping.
  */
 function LiveStrip({
   agents,
@@ -263,7 +266,7 @@ function LiveStrip({
     <>
       {agents.length === 0 ? (
         <Link
-          to="/fleet"
+          to={EXECUTION_PATH}
           className={rowClass}
           title="See every agent and what it last did"
         >
@@ -330,7 +333,7 @@ function LiveStrip({
         {/* The list is the running agents; this is everything else about them,
             including the ones that are not running. */}
         <Link
-          to="/fleet"
+          to={EXECUTION_PATH}
           onClick={() => setOpen(false)}
           className="mt-0.5 flex items-center gap-2 border-t border-[var(--color-border)] px-2.5 py-1.5 text-xs text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
         >

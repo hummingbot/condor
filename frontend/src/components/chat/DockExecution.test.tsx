@@ -35,7 +35,16 @@ const startControllers = vi.fn();
 vi.mock("@/lib/api", () => ({
   api: {
     getBots: (...a: unknown[]) => getBots(...a),
-    getExecutors: (...a: unknown[]) => getExecutors(...a),
+    // The panel reads its fleet through `useFleetData` now (FEAT-114), which
+    // walks the executors a page at a time under the key `/bots` already
+    // holds — the whole point of the swap being that the two hosts share one
+    // set of queries rather than doubling them.
+    getExecutorsPage: async (...a: unknown[]) => ({
+      executors: await getExecutors(...a),
+      next_cursor: null,
+    }),
+    getFleetMap: () => Promise.resolve({ owners: [], deeds: { bots: {}, since: 0 } }),
+    getAgents: () => Promise.resolve([]),
     stopControllers: (...a: unknown[]) => stopControllers(...a),
     startControllers: (...a: unknown[]) => startControllers(...a),
     getRates: () => Promise.resolve({ rates: {} }),
@@ -139,7 +148,10 @@ const toggleOn = (label: string) =>
   rows()
     .find((r) => r.querySelector("td")!.textContent === label)!
     .querySelector<HTMLButtonElement>("[data-controller-toggle]")!;
-/** The bot group headers, one per bot with anything live under it. */
+/**
+ * The bot group headers — one per bot, and none at all for an owner running a
+ * single one: a fleet running one bot must not spend a chevron saying so.
+ */
 const botHeaders = () => [...container.querySelectorAll("[data-bot-group]")];
 const rowFor = (title: string) =>
   container.querySelector<HTMLElement>(`[title="${title}"]`)!;
@@ -177,10 +189,8 @@ describe("the execution panel", () => {
     await click(rows()[0] as HTMLElement);
     expect(navigate).toHaveBeenCalledWith("/bots?scope=ctrl:backpack-mm-3:pmm_v2");
 
-    // The group header above it is the bot's whole branch, not this row's.
-    expect(botHeaders()).toHaveLength(1);
-    await click(rowFor("Everything backpack-mm-3 is running"));
-    expect(navigate).toHaveBeenLastCalledWith("/bots?scope=bot:backpack-mm-3");
+    // And spends no row on the bot: one owner, one bot, nothing to tell apart.
+    expect(botHeaders()).toHaveLength(0);
   });
 
   it("lists a controller whose kill switch is on, and says so", async () => {
@@ -258,6 +268,9 @@ describe("the execution panel", () => {
     expect(rows()).toHaveLength(2);
     // Two bots, so two groups: the config id alone would have merged them.
     expect(botHeaders()).toHaveLength(2);
+    // The group header is the bot's whole branch, not any one row's.
+    await click(rowFor("Everything backpack-mm-3 is running"));
+    expect(navigate).toHaveBeenLastCalledWith("/bots?scope=bot:backpack-mm-3");
     await click(rowFor("pmm_v2 on backpack-mm-3"));
     expect(navigate).toHaveBeenLastCalledWith("/bots?scope=ctrl:backpack-mm-3:pmm_v2");
     await click(rowFor("pmm_v2 on brigado-2"));
@@ -291,7 +304,9 @@ describe("the execution panel", () => {
     const bot =
       "pmm-fleet-btcbrl-global-20260829-121810-20260829-121810-rollback-20260902-071331";
     getBots.mockResolvedValue({
-      controllers: [controller({ bot_name: bot })],
+      // Two bots, so the header level is worth drawing at all — with one, the
+      // panel collapses it and there is no name to clip.
+      controllers: [controller({ bot_name: bot }), controller({ bot_name: "brigado-2" })],
       bots: [],
       total_pnl: 0,
       total_volume: 0,
@@ -299,7 +314,9 @@ describe("the execution panel", () => {
 
     await render();
 
-    const header = botHeaders()[0] as HTMLElement;
+    const header = botHeaders().find(
+      (el) => el.getAttribute("title") === `Everything ${bot} is running`,
+    ) as HTMLElement;
     const shown = header.textContent!.trim();
     // Short enough that the header can never be the widest line in the panel,
     // which is what had it reading as a title over the column headings.

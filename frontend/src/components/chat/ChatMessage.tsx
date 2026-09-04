@@ -3,6 +3,7 @@ import type { Element, ElementContent } from "hast";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
+  AlertTriangle,
   Bell,
   Check,
   Copy,
@@ -271,6 +272,12 @@ const NOTE_KINDS: Record<string, { label: string; Icon: typeof Zap }> = {
   notification: { label: "Notified", Icon: Bell },
   routine: { label: "Routine", Icon: Zap },
   reload: { label: "Reloaded", Icon: RotateCw },
+  // A prompt that failed before producing anything, as the recorder writes it
+  // (`TurnEntry(role="system", kind="error")` in conversations.py) and as the
+  // live `error` frame now appends it. The text is an arbitrary backend
+  // exception — long, frequently multi-line — which is precisely what the
+  // divider below cannot render.
+  error: { label: "Error", Icon: AlertTriangle },
 };
 
 /**
@@ -359,6 +366,12 @@ export const ChatMessageView = memo(function ChatMessageView({
   // the user out of band, and the transcript records that it did. And so is a
   // `routine` outcome — a run's result, often a multi-line error, which the
   // divider rendered as one shouting, unreadable, un-wrapped line.
+  //
+  // An `error` is the same failure one step earlier: the prompt itself died.
+  // It arrived here reading as a divider for the same reason the routine note
+  // once did, and the live `error` frame drew it as a `⚠️` bubble besides — so
+  // the same event was a warning before a reload and a broken rule after one.
+  // One kind, one block, whichever path put it on screen.
   const note = message.kind ? NOTE_KINDS[message.kind] : undefined;
   if (message.role === "system" && note) {
     const { label, Icon } = note;
@@ -452,6 +465,7 @@ export const ChatMessageView = memo(function ChatMessageView({
       <RunStrip
         thought={message.thought}
         toolCalls={message.toolCalls}
+        events={message.events}
         live={live}
         thinking={live && !message.text}
       />

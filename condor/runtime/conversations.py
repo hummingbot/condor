@@ -364,6 +364,16 @@ class TurnEntry(BaseModel):
     one. Empty means the stream never reported an ending — the abandoned
     generator (page reload, WS disconnect), and every turn written before this
     field existed.
+
+    ``events`` is the *order* the run happened in, which ``thought`` and
+    ``tool_calls`` cannot express: a turn that thinks, calls a tool, thinks
+    again and calls a second one lands in those two fields as one merged
+    reasoning blob beside a flat list, and no reader can put the four steps
+    back. It is additive and derived — the two flat fields are still written
+    in full — so every existing reader (``replay_context``, ``condor.sharing``,
+    Telegram, an older client) is untouched, and a turn recorded before this
+    existed simply has an empty list, which reads as "the order was not kept"
+    rather than as "nothing happened".
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -397,6 +407,15 @@ class TurnEntry(BaseModel):
             "{id, mime, bytes} — an id under this conversation's attachments/ "
             "directory, its type, and its size. Never the payload and never a "
             "filename."
+        ),
+    )
+    events: list[dict] = Field(
+        default_factory=list,
+        description=(
+            "The run in the order it happened: {type: 'thought', text} and "
+            "{type: 'tool', id} naming an entry of tool_calls. Derived — the "
+            "reasoning is the same text as thought, and the tool detail is not "
+            "repeated here. Empty = order not recorded (pre-ARCH-330 turns)."
         ),
     )
 
@@ -968,6 +987,12 @@ class Recorder:
         # into — the fold's spelling, not disk's. ``_recorded_calls`` renames
         # and bounds it on the way out.
         self._tools: dict[str, dict] = {}
+        # The order those two were produced in (ARCH-330). A third accumulator
+        # rather than a replacement for either, because ``thought`` and
+        # ``tool_calls`` are the shape every existing reader of a transcript
+        # already knows: this says how they interleaved, and they still say
+        # what was in them.
+        self._events: list[dict] = []
         self._error = ""
         # Stays empty unless a DONE arrives: an abandoned generator never
         # reports an ending, and "unknown" is the honest record of that.
@@ -994,6 +1019,12 @@ class Recorder:
         key naming. Doing it after the fold rather than during is deliberate —
         redacting on arrival would hand the fold an already-clipped ``input``
         and a later, fuller one could no longer replace it.
+
+        Arrival order is the one thing that *cannot* be recovered later, so it
+        is recorded here as it happens (ARCH-330): a reasoning step extends the
+        run's trailing thought entry, a newly announced call appends a step
+        naming it. Both accumulators keep being filled beside it — this only
+        remembers how they took turns.
         """
         if not self.enabled:
             return
@@ -1001,12 +1032,13 @@ class Recorder:
             self._text.append(event.text)
         elif event.type == EventType.THOUGHT:
             self._thought.append(event.text)
+            self._note_thought(event.text)
         elif event.type == EventType.TOOL_CALL:
             # Not keyed on the id alone: an adapter that does not identify its
             # calls still gets one entry per call rather than one entry
             # overwritten N times.
             call_id = str(event.field("tool_call_id") or len(self._tools))
-            fold_tool_call_event(
+            created = fold_tool_call_event(
                 self._tools,
                 ToolCallEvent(
                     tool_call_id=call_id,
@@ -1024,6 +1056,11 @@ class Recorder:
                     input=_dict_or_none(event.field("input")),
                 ),
             )
+            # The fold returns the entry only when it *created* one, so a
+            # re-announcement of a call already in flight patches it without
+            # putting a second step in the run.
+            if created is not None:
+                self._events.append({"type": "tool", "id": call_id})
         elif event.type == EventType.TOOL_UPDATE:
             fold_tool_call_event(
                 self._tools,
@@ -1043,6 +1080,39 @@ class Recorder:
             self._error = str(event.field("message", "") or "")
         elif event.type == EventType.DONE:
             self._stop = event.stop_reason
+
+    def _note_thought(self, text: str) -> None:
+        """Extend the run's trailing reasoning step, or open a new one.
+
+        Reasoning arrives one token-sized chunk at a time, so a step per chunk
+        would be thousands of entries saying nothing about order. Consecutive
+        chunks are one step, and only a tool call landing between them starts
+        another — which is exactly the interleaving this list exists to keep.
+        Merging is also what makes the list a faithful projection: the steps'
+        text concatenates back to ``thought`` byte for byte.
+        """
+        if not text:
+            return
+        if self._events and self._events[-1]["type"] == "thought":
+            self._events[-1]["text"] += text
+        else:
+            self._events.append({"type": "thought", "text": text})
+
+    def _recorded_events(self, calls: list[dict]) -> list[dict]:
+        """The run's order in the shape the transcript stores.
+
+        A tool step *names* its call rather than repeating it. The payload is
+        redacted, clipped and truncated once, in ``tool_calls``, and copying it
+        here would both double the line and give a reader two versions of one
+        call to disagree about. A step naming a call that did not reach disk is
+        dropped, so the two fields can never contradict each other.
+        """
+        known = {str(call.get("id") or "") for call in calls}
+        return [
+            dict(event)
+            for event in self._events
+            if event["type"] != "tool" or event["id"] in known
+        ]
 
     def _recorded_calls(self) -> list[dict]:
         """The folded calls in the shape the transcript stores.
@@ -1112,6 +1182,7 @@ class Recorder:
                         text=text,
                         thought="".join(self._thought),
                         tool_calls=tools,
+                        events=self._recorded_events(tools),
                         stop_reason=self._stop,
                         **self._attribution(),
                     ),

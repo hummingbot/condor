@@ -19,6 +19,40 @@ export interface ToolCall {
   status: string;
 }
 
+/**
+ * One step of a turn's run, in the order it happened (ARCH-330).
+ *
+ * A tool step carries the call's *id*, not the call: the call itself lives in
+ * `ChatMessage.toolCalls` and keeps being patched there by `tool_call_update`,
+ * so a copy here would be a second, stale answer to "what is that tool doing".
+ * The renderer joins the two.
+ */
+export type RunStep =
+  | { type: "thought"; text: string }
+  | { type: "tool"; id: string };
+
+/**
+ * Extend the run's trailing reasoning step, or open a new one.
+ *
+ * The counterpart of `Recorder._note_thought` in
+ * condor/runtime/conversations.py, and it has to merge on the same rule: a
+ * step per streamed chunk would say nothing about order, and only a tool call
+ * landing between two stretches of reasoning starts a new one. Because the
+ * flush that commits buffered text runs before any tool step is appended, a
+ * reasoning run split across several 50ms windows still lands as one step —
+ * so a turn watched live ends up with the same steps as the same turn reloaded
+ * from disk.
+ */
+function appendThoughtStep(steps: RunStep[] | undefined, text: string): RunStep[] {
+  const current = steps ?? [];
+  if (!text) return current;
+  const last = current[current.length - 1];
+  if (last && last.type === "thought") {
+    return [...current.slice(0, -1), { type: "thought", text: last.text + text }];
+  }
+  return [...current, { type: "thought", text }];
+}
+
 /** What each key shape means, said once per conversation (FEAT-056).
  *
  * The two `redacted` kinds describe text the user can see is gone. The other
@@ -54,6 +88,19 @@ export interface ChatMessage {
   text: string;
   toolCalls: ToolCall[];
   thought?: string;
+  /**
+   * How the reasoning and the tool calls interleaved (ARCH-330).
+   *
+   * `thought` and `toolCalls` say *what* the run held; this says in what
+   * order, which neither of them can — a turn that thinks, calls, thinks again
+   * and calls a second time is one merged string beside a flat list there.
+   * Both are still carried, so nothing that only knows them changes.
+   *
+   * Absent means the order is not known: a turn hydrated from a transcript
+   * written before the recorder kept it. The renderer falls back to what it
+   * always drew — the reasoning, then the calls.
+   */
+  events?: RunStep[];
   /** System: "switch" | "error" | "delegation" | "resume" | "notification" |
    * "routine" | "secret_notice". */
   kind?: string;
@@ -269,7 +316,13 @@ function closeStream(msgs: ChatMessage[]): ChatMessage[] {
   return msgs.map((m) => (m.open ? { ...m, open: false } : m));
 }
 
-/** Stop every tool call that is still spinning. A prompt that ended, ended. */
+/** Stop every tool call that is still spinning. A prompt that ended, ended.
+ *
+ *  "Still spinning" is `toolCallState`'s answer, not "not `completed`" — and
+ *  the difference is the whole of CORR-324. A call the permission gate refused
+ *  is over: rewriting it to `completed` here told the user a tool ran that they
+ *  had said no to. It reads as terminal there, so it is left exactly as the
+ *  bridge reported it, which is also what the transcript on disk holds. */
 function settleToolCalls(msgs: ChatMessage[]): ChatMessage[] {
   return msgs.map((m) =>
     m.toolCalls.some((tc) => toolCallState(tc.status) === "pending")
@@ -323,6 +376,62 @@ function endedEarly(stopReason: string | undefined): boolean {
   return !!stopReason && stopReason !== "end_turn";
 }
 
+/**
+ * Is there anything in this turn to put on screen?
+ *
+ * The counterpart is `Recorder.flush` in condor/runtime/conversations.py: it
+ * writes an assistant turn when there is text **or** tool calls **or**
+ * reasoning, and it is the only thing that decides what reaches disk. This is
+ * the same question asked of what came back, so the two answers have to agree
+ * — and they had drifted apart on exactly the case the recorder added the
+ * `thought` clause for: a turn the user stopped, or a stream that failed,
+ * while the model was still thinking. That turn was rendered live, is on disk,
+ * and is replayed into the resumed session's context, but the client called it
+ * empty and dropped it, so the transcript silently lost a turn the user had
+ * just been reading.
+ *
+ * Attachments are this side's own clause and have no counterpart in `flush`:
+ * they hang off the *opening* turn, which is written unconditionally. A
+ * picture with no words is still the message.
+ *
+ * One predicate, so the next field added to a turn is considered once.
+ */
+function isRenderableTurn(
+  turn: ConversationTurn,
+  toolCalls: ToolCall[],
+  attachments: ChatAttachment[],
+): boolean {
+  return !!turn.text || !!turn.thought || toolCalls.length > 0 || attachments.length > 0;
+}
+
+/**
+ * The recorded run, resolved against the calls the same turn carries.
+ *
+ * A tool step names a call by id; a step naming one this turn does not hold is
+ * dropped rather than rendered as a nameless row. `undefined` — not an empty
+ * list — is the answer for a turn recorded before the order was kept, because
+ * the renderer has to be able to tell "the run was empty" from "nobody wrote
+ * the order down" and only the second one falls back to the flat fields.
+ */
+function turnToRunSteps(
+  turn: ConversationTurn,
+  toolCalls: ToolCall[],
+): RunStep[] | undefined {
+  const recorded = turn.events;
+  if (!recorded || recorded.length === 0) return undefined;
+  const known = new Set(toolCalls.map((tc) => tc.tool_call_id));
+  const steps: RunStep[] = [];
+  for (const step of recorded) {
+    if (step.type === "thought") {
+      if (step.text) steps.push({ type: "thought", text: step.text });
+    } else if (step.type === "tool") {
+      const id = String(step.id ?? "");
+      if (known.has(id)) steps.push({ type: "tool", id });
+    }
+  }
+  return steps;
+}
+
 function turnsToMessages(
   turns: ConversationTurn[],
   conversationId: string,
@@ -341,10 +450,9 @@ function turnsToMessages(
       url: api.attachmentUrl(conversationId, a.id),
       mime: a.mime,
     }));
-    // A turn with no text and no tools is an artifact of a prompt that died
-    // before producing anything; rendering it as an empty bubble is noise —
-    // unless it carried a picture, which *is* the message.
-    if (!turn.text && toolCalls.length === 0 && attachments.length === 0) return;
+    // A turn holding nothing at all is an artifact of a prompt that died
+    // before producing anything; rendering it as an empty bubble is noise.
+    if (!isRenderableTurn(turn, toolCalls, attachments)) return;
     // A handover reads the same after a reload as it did live: the backend
     // records it as a system turn, so there is one source for the divider.
     const role =
@@ -355,6 +463,7 @@ function turnsToMessages(
       text: turn.text,
       toolCalls,
       thought: turn.thought || undefined,
+      events: turnToRunSteps(turn, toolCalls),
       kind: turn.kind || undefined,
       ts: turn.ts,
       // A slug names the bound Agent. An empty slug with a model behind it is
@@ -649,6 +758,11 @@ export function useChatSocket() {
               // Left alone when nothing was buffered, so a bubble with no
               // reasoning keeps `thought` undefined rather than gaining "".
               thought: buf.thought ? (m.thought || "") + buf.thought : m.thought,
+              // The same reasoning, placed in the run. Buffered fragments are
+              // committed before any tool step is appended (`appendToStream`
+              // flushes first), so this lands on the correct side of every
+              // call the turn made.
+              events: buf.thought ? appendThoughtStep(m.events, buf.thought) : m.events,
             }),
             // "" is the default agent, not "unknown": a slot with no binding is
             // Condor answering, and saying so is what keeps the turn out of the
@@ -1303,6 +1417,10 @@ export function useChatSocket() {
           appendToStream(slotId, (m) => ({
             ...m,
             toolCalls: [...m.toolCalls, tc],
+            // Its place in the run, beside the call itself. `appendToStream`
+            // has already committed whatever reasoning was buffered, so the
+            // step lands after the thinking that led to it.
+            events: [...(m.events ?? []), { type: "tool", id: tc.tool_call_id }],
           }));
           break;
         }
@@ -1453,7 +1571,14 @@ export function useChatSocket() {
           // above the error bubble appended below — and the turn is over, so
           // the next response starts a new bubble.
           flushChunks(errSlotId || undefined);
-          // Show error as a system message in the chat
+          // The failure joins the transcript in the shape the transcript
+          // already records it in: the recorder writes a failed prompt as
+          // `TurnEntry(role="system", kind="error")`, so appending a synthetic
+          // *assistant* turn with a `⚠️` glued to the front made the same event
+          // read one way live and another after a reload — and put words in
+          // the agent's mouth that the agent never said. `error` is a note
+          // kind now, so the glyph and the label come from the renderer and
+          // the text is the backend's own message, unadorned.
           const errMsg = (data.message as string) || "Unknown error";
           if (errSlotId) {
             // Nothing is coming for a tab whose spawn failed — dropping
@@ -1470,8 +1595,9 @@ export function useChatSocket() {
                     ...s.messages,
                     {
                       id,
-                      role: "assistant" as const,
-                      text: `⚠️ ${errMsg}`,
+                      role: "system" as const,
+                      kind: "error",
+                      text: errMsg,
                       toolCalls: [],
                       ts: nowTs(),
                     },

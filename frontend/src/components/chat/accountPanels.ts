@@ -25,9 +25,10 @@
  * the other: whether the desk is the thing on screen.
  */
 import { Cpu, Wallet } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { RailItem } from "@/components/chat/WorkspaceRail";
+import { PANEL_PARAM } from "@/components/chat/paneUrl";
 import { ACCOUNT_DOCK_KEY } from "@/lib/sessionState";
 
 /** The two questions a person holds in their head while typing at a trader. */
@@ -58,6 +59,36 @@ export const PANELS: {
     disabledHint: "Select a server to see what is deployed",
   },
 ];
+
+/**
+ * The desk in the query string — a `.`-joined list of panel ids (FEAT-114).
+ *
+ * What makes the desk a place you can send someone, the same argument `?panel=`
+ * made for the pane one module over: `/fleet` redirects to
+ * {@link EXECUTION_PATH}, and a redirect that could only open the *pane* would
+ * land on whichever sections this browser happened to have recorded.
+ */
+export const DESK_PARAM = "desk";
+
+/** `/fleet`'s replacement, and the address the rail's fleet lines open. */
+export const EXECUTION_PATH = `/?${PANEL_PARAM}=desk&${DESK_PARAM}=execution`;
+
+/**
+ * `"portfolio.execution"` → `["portfolio", "execution"]`, or `null` for a value
+ * that names no section at all.
+ *
+ * Parsed the way `parseGrouping` parses its axes: unknown ids are dropped and
+ * repeats collapse, because a stale or hand-edited parameter should open the
+ * sections it does name rather than an error. `null` — nothing at all was
+ * named — is what falls back to what this browser had recorded, so a bare
+ * `?panel=desk` still opens the desk the reader left.
+ */
+export function parseDesk(raw: string | null | undefined): PanelId[] | null {
+  const text = (raw || "").trim();
+  if (!text) return null;
+  const ids = ordered(text.split(".").map((part) => part.trim()));
+  return ids.length > 0 ? ids : null;
+}
 
 /** In the order the panel draws them, whatever order they were clicked in. */
 function ordered(ids: unknown[]): PanelId[] {
@@ -98,20 +129,48 @@ export function deskWasOpen(): boolean {
 export function useAccountPanels({
   server,
   open,
+  desk = null,
   onOpenChange,
 }: {
   server: string | null;
   /** The desk is what the workspace pane is showing right now. */
   open: boolean;
+  /** The raw `?desk=` value, when the URL names the sections (FEAT-114). */
+  desk?: string | null;
   /** Ask the workspace for the pane, or give it back. */
   onOpenChange: (open: boolean) => void;
 }) {
-  const [sections, setSections] = useState<PanelId[]>(readOpen);
+  const [sections, setSections] = useState<PanelId[]>(
+    // The URL wins over storage on arrival, and only on arrival: a link that
+    // names the desk is somebody saying which sections they meant, and what
+    // this browser last had open is only a guess at the same thing.
+    () => parseDesk(desk) ?? readOpen(),
+  );
 
   const write = (next: PanelId[]) => {
     setSections(next);
     localStorage.setItem(ACCOUNT_DOCK_KEY, JSON.stringify(next));
   };
+
+  /**
+   * A `?desk=` that *changes* is a second arrival, so it is honoured like one.
+   *
+   * The initial state above covers a page somebody opened at the address; this
+   * covers the same address reached from inside the app, where nothing
+   * unmounts. Guarded on the raw value so it fires once per distinct
+   * parameter and never argues with the toggles below, which do not write to
+   * the URL at all.
+   */
+  const applied = useRef(desk);
+  useEffect(() => {
+    if (applied.current === desk) return;
+    applied.current = desk;
+    const wanted = parseDesk(desk);
+    if (!wanted) return;
+    write(wanted);
+    onOpenChange(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [desk]);
 
   /**
    * Turn a section on or off — and, with it, the panel.

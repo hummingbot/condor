@@ -60,16 +60,43 @@ export function formatToolName(title?: unknown): string {
   return name.replace(/_/g, " ").replace(/\s+/g, " ").trim() || UNNAMED_TOOL;
 }
 
+/**
+ * A call that never ran because something said no.
+ *
+ * The permission gate emits `blocked` and then `continue`s — no further update
+ * for that id ever arrives (condor/acp/pydantic_ai_client.py). Read as
+ * "in flight", that refusal is the worst possible lie: live, the settle pass
+ * rewrote it to `completed` when the prompt ended, so a call the user *refused*
+ * finished the turn wearing a green check; reloaded, it span forever on a turn
+ * that was over. Both halves come from the same missing word.
+ *
+ * The other spellings are here because the refusal vocabulary is not one
+ * bridge's: `condor/agents/actions.py` already reads back exactly this set
+ * (`_REFUSED_STATUSES`), and the confirmation layer answers `cancelled` while
+ * the admin surface says `rejected`. One list, so a new adapter's word is added
+ * in one place rather than discovered as a spinner.
+ */
+const REFUSED_STATUSES = new Set([
+  "blocked",
+  "denied",
+  "rejected",
+  "cancelled",
+  "canceled",
+  "error",
+]);
+
 /** Classify an ACP tool-call status into the three states the UI renders.
  *
  *  The wire vocabulary is `pending | in_progress | completed | failed` — it
  *  comes straight off the ACP `tool_call`/`tool_call_update` stream (see the
  *  `ToolCallEvent` dataclass in condor/acp/client.py) and is what the journal
  *  writes as `### N. name (status)` for parse-agent.ts to read back. Anything
- *  that is not a terminal `completed`/`failed` is still in flight. */
+ *  that is neither terminally done nor terminally refused is still in flight —
+ *  and "still in flight" is a claim the rest of the UI acts on, so a status
+ *  that means the call is over must never fall through to it. */
 export function toolCallState(status: string): "ok" | "error" | "pending" {
   if (status === "completed") return "ok";
-  if (status === "failed") return "error";
+  if (status === "failed" || REFUSED_STATUSES.has(status)) return "error";
   return "pending";
 }
 

@@ -42,6 +42,9 @@ import {
 import { BubbleGroup, type BubbleOption } from "@/components/perf/FilterBubbles";
 import { PopulationToggle } from "@/components/perf/PopulationToggle";
 import { PositionsTable } from "@/components/perf/PositionsTable";
+import { OwnerPnlChart } from "@/components/perf/OwnerPnlChart";
+import { ScopeBreakdowns } from "@/components/perf/ScopeBreakdowns";
+import { ownerNoun, scopeOwners } from "@/components/perf/scopeOwners";
 import { ScopeTree, StatusDot } from "@/components/perf/ScopeTree";
 import { YamlConfigEditor } from "@/components/perf/YamlConfigEditor";
 import { ArchivedBotDetail } from "@/components/bots/ArchivedBotDetail";
@@ -84,6 +87,7 @@ import {
   resolveScope,
   runStatus,
   UNATTACHED_BOT,
+  UNKNOWN_LABEL,
   visibleNodeIds,
   type Grain,
   type PerfNode,
@@ -104,6 +108,8 @@ import { GroupByPicker } from "@/components/perf/GroupByPicker";
 import { resolvePerfSeries, scopeInterval } from "@/lib/perf-history";
 import { chartNotice } from "@/lib/perf-notices";
 import { buildPositionRows, parseSide, type PositionRow } from "@/lib/perf-positions";
+import { groupSpine } from "@/components/agent/floor/floor";
+import { mergeOwnerRows, ownerSeries } from "@/lib/owner-series";
 import { aggregatePnlSeries, snapshotsFromRunHistory } from "@/lib/pnl-chart";
 import { buildAttributor, runWindows } from "@/lib/run-attribution";
 import { dropDeletedRunQueries } from "@/lib/run-deletion";
@@ -224,7 +230,7 @@ const EXEC_HISTORY_STALE_MS = 60_000;
 const EXEC_HISTORY_MAX_PAGES = 2;
 
 /** Which of the bottom band's two occupants is showing, if either. */
-type BandKey = "positions" | "executors" | null;
+type BandKey = "positions" | "executors" | "breakdown" | null;
 
 /**
  * How far back a terminated fold reaches, and how long that is in ms.
@@ -447,9 +453,22 @@ function useMeasuredHeight<T extends HTMLElement>() {
  * The sub-line's height is reserved even when there is nothing to say, so the
  * tiles' baselines line up whether or not a given one has a qualifier.
  */
-function Kpi({ label, value, sub, color }: { label: string; value: string; sub?: string; color?: string }) {
+function Kpi({
+  label,
+  value,
+  sub,
+  color,
+  title,
+}: {
+  label: string;
+  value: string;
+  sub?: string;
+  color?: string;
+  /** What the number is a *reading of*, when that is not what it looks like. */
+  title?: string;
+}) {
   return (
-    <div>
+    <div data-kpi={label} title={title}>
       <div className="text-[var(--color-text-muted)] text-[10px] uppercase tracking-wider mb-0.5">{label}</div>
       <div className="text-lg font-semibold tabular-nums leading-tight" style={color ? { color } : undefined}>
         {value}
@@ -461,7 +480,7 @@ function Kpi({ label, value, sub, color }: { label: string; value: string; sub?:
   );
 }
 
-/** One of the bottom band's two headers: a disclosure that is also a switch. */
+/** One of the bottom band's headers: a disclosure that is also a switch. */
 function BandTab({
   label,
   open,
@@ -1779,6 +1798,52 @@ export function PerfBrowser({
     [scopedControllers],
   );
 
+  // ── One line per child of this scope (FEAT-116) ──
+  //
+  // The floor was a page that drew one line per agent over the whole fleet.
+  // The same picture is this chart at the fleet scope, and the *rule* behind it
+  // — split by the level below the one you are on — draws one line per bot
+  // inside an agent and one per pair under `?groupBy=pair`. There is no
+  // scope-kind test anywhere: a scope that does not split answers with no
+  // owners, and the aggregate chart below is what draws instead.
+
+  const ownerLines = useMemo(() => scopeOwners(scope, cv, now), [scope, cv, now]);
+
+  /**
+   * The owner lines and their Total, merged onto one timeline.
+   *
+   * **No fetch.** `ownerSeries` is `aggregatePnlSeries` once per owner over the
+   * `snapshots` this component is already handed — the identical call the
+   * single-series chart below makes for the scope as a whole — so the split
+   * costs a second read of an array in memory and nothing on the wire.
+   *
+   * The Total is folded over the *union of the owners' keys*, and the children's
+   * spines partition the scope's own, so the lines add up to it by construction
+   * rather than by assertion (see `lib/owner-series`).
+   */
+  const ownerChart = useMemo(() => {
+    if (ownerLines.length === 0) return null;
+    const series = ownerSeries(snapshots, ownerLines, scopedControllers, convert);
+    const merged = mergeOwnerRows([series.total], series.owners);
+    // The same two-point threshold the aggregate chart holds itself to, and for
+    // the same reason: a split of a history that has not been recorded yet says
+    // less than the chain's own "no performance history" does.
+    return merged.rows.length >= 2 ? merged : null;
+  }, [ownerLines, snapshots, scopedControllers, convert]);
+
+  // The same spine the tiles are folded from, cut two ways that the tree cannot
+  // cut it: `leaf.connector` is on the leaf but is deliberately not a
+  // `GroupAxis` (see `groupSpine`), and an instrument breakdown at a scope
+  // already grouped by pair is still the honest answer for that scope.
+  const byPair = useMemo(
+    () => groupSpine(scopedLeaves, (leaf) => leaf.pair || UNKNOWN_LABEL, cv, now),
+    [scopedLeaves, cv, now],
+  );
+  const byVenue = useMemo(
+    () => groupSpine(scopedLeaves, (leaf) => leaf.connector || UNKNOWN_LABEL, cv, now),
+    [scopedLeaves, cv, now],
+  );
+
   /**
    * Where this scope's series comes from.
    *
@@ -1932,6 +1997,23 @@ export function PerfBrowser({
    * back the window reaches. Without them the block invites an answer about the
    * whole fleet derived from a filtered slice of one population of it.
    */
+  /** The biggest lines and what share of the scope's gross each one is. */
+  const ownerShare = () => {
+    const gross = ownerLines.reduce((sum, line) => sum + Math.abs(line.net), 0);
+    const ranked = [...ownerLines].sort((a, b) => Math.abs(b.net) - Math.abs(a.net));
+    const named = ranked
+      .slice(0, 3)
+      .map(
+        (line) =>
+          `${line.label} ${formatCurrencyPnl(line.net, currencySymbol)}${
+            gross > 0 ? ` (${Math.round((Math.abs(line.net) / gross) * 100)}% of gross)` : ""
+          }`,
+      )
+      .join(", ");
+    const rest = ranked.length - 3;
+    return rest > 0 ? `${named}, and ${rest} more` : named;
+  };
+
   useViewFacts(() => {
     /** `executor type a/b`, or `… 7 selected` once a list stops being readable. */
     const picked = (noun: string, values: string[]) =>
@@ -1994,6 +2076,29 @@ export function PerfBrowser({
         // it out reads as "filters unknown" rather than "showing everything".
         filters: chips.length ? chips.join(", ") : "none",
         window: population === "terminated" ? period : undefined,
+        // ── The split, and how it is set (FEAT-116) ──
+        //
+        // What the floor used to contribute under its own label. It cannot be
+        // read off a cache from the route entry: the tree is never written to
+        // one, and *which lines are drawn* is a fact about the tree and the
+        // scope the reader walked to. Ranked by size and capped, because the
+        // useful half of "one line per agent" is which two are moving.
+        split: ownerChart
+          ? `one line per ${ownerNoun(scope.children[0].kind)} — ${ownerShare()}`
+          : undefined,
+        // Only where there is a split to set: `?basis=`, `?from=` and
+        // `?range=` do nothing to the single aggregate series.
+        basis: ownerChart
+          ? searchParams.get("basis") === "rel"
+            ? "relative to declared capital"
+            : "absolute"
+          : undefined,
+        "measured from": ownerChart
+          ? searchParams.get("from") === "window"
+            ? "the window on screen"
+            : "inception"
+          : undefined,
+        "chart window": ownerChart ? (searchParams.get("range") ?? "all") : undefined,
         "in scope": scope.leaves.length,
         "executors loaded": paging
           ? paging.capped
@@ -2793,6 +2898,13 @@ export function PerfBrowser({
                 <Kpi
                   label="Fees"
                   value={totals.fees > 0 ? formatCurrencyVolume(totals.fees, currencySymbol) : "—"}
+                  // A floor and not a total: `leafFromController` hardcodes
+                  // `fees: 0` because the controllers payload reports no fee
+                  // total of its own, so what is measurable here is the
+                  // executors' fees. The caption rides on the tile rather than
+                  // the number gaining a footnote — a figure that has to be
+                  // read with an asterisk is a figure with an asterisk in it.
+                  title="Executor fees only — the controllers payload reports no fee total, so this is a floor, not a total."
                   // What the fees ate: the share of gross the venue took, which
                   // is the thing an absolute fee total cannot say on its own.
                   sub={
@@ -2918,6 +3030,24 @@ export function PerfBrowser({
                     currencySymbol={currencySymbol}
                     controller={activeCtrl}
                   />
+                ) : ownerChart ? (
+                  /* This scope splits, so the report is the split: a Total plus
+                     one line per child, in the tree's own colours and order.
+                     Before the aggregate series below rather than instead of
+                     it — a scope with one child, a controller or an executor
+                     draws the single curve it always drew (FEAT-116). */
+                  <OwnerPnlChart
+                    owners={ownerLines}
+                    rows={ownerChart.rows}
+                    keys={ownerChart.keys}
+                    symbol={currencySymbol}
+                    net={totals.net}
+                    capital={totals.capital}
+                    title={`${chartTitle} by ${ownerNoun(scope.children[0].kind)}`}
+                    height={chartHeight}
+                    params={searchParams}
+                    setParams={setSearchParams}
+                  />
                 ) : chartData.length >= 2 ? (
                   <PnlEvolutionChart
                     data={chartData}
@@ -2951,11 +3081,12 @@ export function PerfBrowser({
             {/* ── The bottom band (FEAT-085, FEAT-086) ──
 
                 A one-line header pinned under the chart, opening over it when
-                the reader wants a breakdown. Two things can be underneath a
-                scope — the positions it is holding and the executors that make
-                it up — and they share one band rather than stacking, so the
-                chart's height depends on the strip alone and not on what the
-                selected node happens to have.
+                the reader wants a breakdown. Three things can be underneath a
+                scope — the positions it is holding, the executors that make it
+                up, and the same records cut by instrument and by venue
+                (FEAT-116) — and they share one band rather than stacking, so
+                the chart's height depends on the strip alone and not on what
+                the selected node happens to have.
 
                 Both are tables rather than grids of cards: at fleet scope these
                 are dozens or thousands of one-line facts, and a row each is
@@ -2965,7 +3096,9 @@ export function PerfBrowser({
                 floor above — the chart is the reason the reader is here, and a
                 table that scrolls two rows shorter costs less than a curve drawn
                 in half the room it needs. */}
-            {(positionRows.length > 0 || scopedExecutors.length > 0) && (
+            {(positionRows.length > 0 ||
+              scopedExecutors.length > 0 ||
+              scopedLeaves.length > 0) && (
               <div
                 className={`flex min-h-0 flex-col rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden ${
                   band ? "max-h-[45%] min-h-[132px]" : "shrink-0"
@@ -2988,6 +3121,17 @@ export function PerfBrowser({
                       data-executors-toggle
                     />
                   )}
+                  {/* Offered wherever there is a spine to cut, which is every
+                      scope with a record in it — including a single controller,
+                      whose one instrument and one venue is a true answer. */}
+                  {scopedLeaves.length > 0 && (
+                    <BandTab
+                      label="Breakdown"
+                      open={band === "breakdown"}
+                      onClick={() => toggleBand("breakdown")}
+                      data-breakdown-toggle
+                    />
+                  )}
                 </div>
 
                 {band === "executors" && scopedExecutors.length > 0 && (
@@ -3002,6 +3146,14 @@ export function PerfBrowser({
                       rateFormatDetailed={rateFormatDetailed}
                     />
                   </div>
+                )}
+
+                {band === "breakdown" && scopedLeaves.length > 0 && (
+                  <ScopeBreakdowns
+                    byPair={byPair}
+                    byVenue={byVenue}
+                    symbol={currencySymbol}
+                  />
                 )}
 
                 {band === "positions" && positionRows.length > 0 && (
