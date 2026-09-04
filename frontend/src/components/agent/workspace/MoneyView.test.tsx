@@ -96,7 +96,8 @@ function fleet(controllers: ControllerInfo[], over: Partial<FleetData> = {}) {
       bots: { sol_scalper: { runKey: "brigado.chat", runId: "c1", at: 1 } },
       since: 1,
     },
-    convert: (value: number) => value,
+    // The real `ConvertFn` shape: a value and whether a rate was found.
+    convert: (value: number) => ({ value, converted: true }),
     currencySymbol: "$",
     ...over,
   } as Partial<FleetData>;

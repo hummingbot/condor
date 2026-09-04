@@ -21,8 +21,24 @@ import {
   UNATTACHED_BOT,
   leafFromController,
   leafFromExecutor,
+  type ConvertQuote,
   type PerfLeaf,
 } from "@/lib/perf-tree";
+import type { ConvertFn } from "@/lib/rates";
+
+/**
+ * `useRates`'s converter, in the shape the fold takes.
+ *
+ * Two adaptations in one place rather than one per host: a leaf is denominated
+ * in its **pair's quote** and `useRates` is asked about a currency, and the
+ * fold wants a number where the rate answers with a number and whether it could
+ * convert at all. FEAT-109's whole premise is that the headline and `/bots`
+ * report one quantity — they would not, by an FX rate, if either host wrote its
+ * own adapter and the two ever disagreed about the fallback quote.
+ */
+export function quoteConverter(convert: ConvertFn): ConvertQuote {
+  return (value: number, pair: string) => convert(value, pair?.split("-")[1] || "USDT").value;
+}
 
 /**
  * Which bot each controller id is running, or `null` where two bots share it.

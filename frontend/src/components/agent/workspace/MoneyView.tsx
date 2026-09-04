@@ -19,7 +19,7 @@ import {
   formatCurrencyVolume,
   pnlTextClass,
 } from "@/lib/formatters";
-import { runningLeaves } from "@/lib/perf-population";
+import { quoteConverter, runningLeaves } from "@/lib/perf-population";
 
 /**
  * What this agent has made — both answers, named apart (FEAT-109).
@@ -77,6 +77,11 @@ export function MoneyView({
   // print — so a mount-time reading is enough, and it keeps the render pure.
   const now = useSeconds(false);
 
+  // One converter with `/bots` (FEAT-109's currency risk): the fold converts
+  // per leaf using the leaf's quote, and two headline numbers that differ by an
+  // FX fallback would make the reconciliation blame the wrong thing.
+  const cv = useMemo(() => quoteConverter(fleet.convert), [fleet.convert]);
+
   const leaves = useMemo(
     () =>
       runningLeaves({
@@ -125,11 +130,11 @@ export function MoneyView({
         strategy,
         leaves,
         deeds: fleet.deeds,
-        convert: fleet.convert,
+        convert: cv,
         now,
         attributed,
       }),
-    [slug, strategy, leaves, fleet.deeds, fleet.convert, now, attributed],
+    [slug, strategy, leaves, fleet.deeds, cv, now, attributed],
   );
 
   const symbol = fleet.currencySymbol;

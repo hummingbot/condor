@@ -91,7 +91,7 @@ import {
   type Population,
   type PerfLeaf,
 } from "@/lib/perf-tree";
-import { botsByController, runningLeaves } from "@/lib/perf-population";
+import { botsByController, quoteConverter, runningLeaves } from "@/lib/perf-population";
 import {
   collapseGrouping,
   DEFAULT_GROUPING,
@@ -514,13 +514,9 @@ export function PerfBrowser({
   onClearRun,
 }: PerfBrowserProps) {
   const controllers = controllersProp;
-  const cv = useCallback(
-    (val: number, pair: string) => {
-      const quote = pair?.split("-")[1] || "USDT";
-      return convert(val, quote).value;
-    },
-    [convert],
-  );
+  // Shared with the workspace's Money view (FEAT-109): one adapter, so the two
+  // screens cannot report the same fold in two currencies.
+  const cv = useMemo(() => quoteConverter(convert), [convert]);
   const queryClient = useQueryClient();
   const [isCompact, setIsCompact] = useState(false);
   // One right-hand slot, three occupants. Config and logs used to be able to
