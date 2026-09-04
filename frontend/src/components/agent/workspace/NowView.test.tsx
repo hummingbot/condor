@@ -1,11 +1,12 @@
 /**
- * Now is the view the whole feature exists for, so it has to say three things.
+ * The answer stack: everything the reader opens the page to find out, at once.
  *
- * What needs a person, what the agent last decided **in full**, and what it put
- * into the world. The third is `DeploymentLedger`'s job and is pinned in its own
- * file; what is pinned here is the first two — that an alert is an address into
- * the tick that caused it, and that the decision arrives as rendered markdown
- * rather than as the asterisks and pipes a model actually writes.
+ * Its vitals, what needs a person, what the agent last decided **in full**, what
+ * it has earned and what it put into the world. The ledger and the chart are
+ * their own components, pinned in their own files; what is pinned here is that
+ * the five bands are on one screen — and, since FEAT-119, that the last action
+ * is on it **once**: the strip printed it truncated to a line while the band
+ * below printed it whole, which is the duplication the merge exists to remove.
  *
  * Needs a DOM, so this file overrides vitest's default `node` environment.
  *
@@ -18,20 +19,34 @@ import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { RunningInstance } from "@/lib/api";
-import type { Decision } from "@/lib/parse-agent";
+import type { AgentPerformance } from "@/lib/api";
+import type { Decision, ParsedJournal } from "@/lib/parse-agent";
 import { NowView } from "./NowView";
 import { alertsFor } from "./views";
 
 vi.mock("@/lib/api", () => ({
   api: {
-    getSessionCanvas: vi.fn(async () => ({
-      section_order: [],
-      section_titles: {},
-      sections: {},
-    })),
+    getSessionReport: vi.fn(async () => ({ report: null })),
   },
 }));
+
+// The report viewer reaches the theme through `window.matchMedia`, which jsdom
+// does not have. It is the strip's own door and is pinned where it is built.
+vi.mock("@/components/routines/ReportViewer", () => ({
+  ReportViewer: () => <div data-report />,
+}));
+
+// The chart is `lightweight-charts` under a canvas jsdom does not have. What
+// this file asserts about it is whether it was asked for, which the stub says.
+vi.mock("@/components/agent/AgentSessionContent", async () => {
+  const real = await vi.importActual<
+    typeof import("@/components/agent/AgentSessionContent")
+  >("@/components/agent/AgentSessionContent");
+  return {
+    ...real,
+    SessionOverview: () => <div data-pnl-chart />,
+  };
+});
 
 declare global {
   var IS_REACT_ACT_ENVIRONMENT: boolean;
@@ -51,13 +66,31 @@ function decision(over: Partial<Decision> = {}): Decision {
   };
 }
 
-/** Only the three fields the countdown and the overdue rule actually read. */
-function loop(): RunningInstance {
+/** Enough priced money for the vitals strip to have something to print. */
+function traded(): AgentPerformance {
   return {
-    status: "running",
-    last_tick_at: 1_000,
-    frequency_sec: 60,
-  } as RunningInstance;
+    total_pnl: 64,
+    realized_pnl: 40,
+    unrealized_pnl: 24,
+    volume: 12_000,
+    fees: 3,
+    trade_count: 8,
+    open_count: 2,
+  } as AgentPerformance;
+}
+
+/** A journal whose summary is what the strip reads — status and last tick. */
+function summary(over: Partial<ParsedJournal["summary"]> = {}): ParsedJournal {
+  return {
+    summary: {
+      status: "ACTIVE",
+      lastTick: 14,
+      lastAction: "Spreads held; BRL vol falling.",
+      ...over,
+    },
+    metrics: [],
+    decisions: [],
+  } as unknown as ParsedJournal;
 }
 
 async function render(props: Partial<Parameters<typeof NowView>[0]> = {}) {
@@ -75,7 +108,8 @@ async function render(props: Partial<Parameters<typeof NowView>[0]> = {}) {
             alerts={[]}
             decisions={[]}
             deployments={[]}
-            instance={null}
+            perf={null}
+            journal={null}
             onOpenTick={() => {}}
             {...props}
           />
@@ -167,16 +201,47 @@ describe("the last decision", () => {
   });
 });
 
-describe("the next tick", () => {
-  it("counts down while something is looping", async () => {
-    vi.setSystemTime(new Date(1_030_000));
-    await render({ instance: loop() });
-    expect(text()).toContain("Next tick in");
-    vi.useRealTimers();
+describe("the vitals", () => {
+  it("lead the stack when the run has priced money in it", async () => {
+    await render({ perf: traded(), journal: summary() });
+    expect(text()).toContain("Total PnL");
+    expect(text()).toContain("#14");
   });
 
-  it("says nothing is looping rather than counting down to nothing", async () => {
-    await render({ instance: null });
-    expect(text()).toContain("Nothing is looping");
+  it("are absent for a run that never traded, rather than eight zeroes", async () => {
+    await render({ perf: null, journal: summary() });
+    expect(text()).not.toContain("Total PnL");
+  });
+
+  it("print the last action nowhere — the band below has it whole", async () => {
+    // The duplication FEAT-119 removes: the strip truncated the sentence to one
+    // line six pixels above the band that renders it as markdown.
+    await render({
+      perf: traded(),
+      journal: summary(),
+      decisions: [decision({ action: "Spreads held; BRL vol falling." })],
+    });
+    const whole = text().split("Spreads held").length - 1;
+    expect(whole).toBe(1);
+    expect(text()).not.toContain("Last action");
+  });
+});
+
+describe("the realized-PnL chart", () => {
+  it("is on the stack once the run has a journal to draw from", async () => {
+    await render({ journal: summary() });
+    expect(container.querySelector("[data-pnl-chart]")).not.toBeNull();
+  });
+
+  it("is absent for a run with no journal at all", async () => {
+    await render({ journal: null });
+    expect(container.querySelector("[data-pnl-chart]")).toBeNull();
+  });
+});
+
+describe("the deployed table", () => {
+  it("is on the stack, once", async () => {
+    await render({});
+    expect(text().split("Deployed").length - 1).toBe(1);
   });
 });

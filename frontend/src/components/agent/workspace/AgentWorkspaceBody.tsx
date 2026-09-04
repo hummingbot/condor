@@ -250,12 +250,13 @@ export function AgentWorkspaceBody({
   // Now, because the spine carries the count on every view — an alert you have
   // to open a section to discover is not one — and the three queries behind it
   // are the tick spine's and the run overview's own, so they cost one round.
-  const { alerts, decisions, deployments, sessionNum } = useWorkspaceAlerts({
-    slug,
-    sslug,
-    run: selectedRun,
-    instance,
-  });
+  const { alerts, decisions, journal, deployments, perf, pnlSeries, sessionNum } =
+    useWorkspaceAlerts({
+      slug,
+      sslug,
+      run: selectedRun,
+      instance,
+    });
 
   const { data: routineInstances = [] } = useQuery({
     queryKey: ["routine-instances"],
@@ -414,7 +415,9 @@ export function AgentWorkspaceBody({
       alerts={alerts}
       decisions={decisions}
       deployments={deployments}
-      instance={instance}
+      perf={perf}
+      journal={journal}
+      pnlSeries={pnlSeries}
       onOpenTick={(next) => selectTick(next, "now")}
     />
   ) : (

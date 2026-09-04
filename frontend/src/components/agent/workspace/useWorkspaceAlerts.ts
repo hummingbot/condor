@@ -9,20 +9,26 @@ import {
 import { useSeconds } from "@/hooks/useSeconds";
 import {
   api,
+  type AgentPerformance,
   type AgentRunRow,
   type DeploymentRow,
   type RunningInstance,
 } from "@/lib/api";
-import { parseJournal, type Decision } from "@/lib/parse-agent";
+import { parseJournal, type Decision, type ParsedJournal } from "@/lib/parse-agent";
 
 /**
- * What this run wants a person for, and the three readings it is derived from.
+ * One run, in the three readings the screen is built out of.
  *
- * A hook and not a lump inside `NowView` because the spine carries the count on
- * every view: an alert you have to open a section to discover is not one. The
- * three queries are the tick spine's and the run overview's own, key for key,
- * so react-query hands both callers the same cache entries and the whole screen
- * still makes one round of requests.
+ * It started as the alert rules alone — a hook rather than a lump inside a
+ * body, because the count had to be carried where the alerts were not. What
+ * made it the run's whole reading is FEAT-119: the vitals, the last decision,
+ * the chart and the deployed table are five facets of one run and they are on
+ * one screen now, so the three responses they are cut from are read once here
+ * and handed out, rather than each band re-declaring the query it wants.
+ *
+ * Still three queries and still the tick spine's and the detail bands' own, key
+ * for key, so react-query hands every caller the same cache entries and the
+ * whole screen makes one round of requests.
  */
 export function useWorkspaceAlerts({
   slug,
@@ -38,7 +44,13 @@ export function useWorkspaceAlerts({
   alerts: WorkspaceAlert[];
   /** The run's decisions, newest last — the journal's own order. */
   decisions: Decision[];
+  /** The whole journal, for the bands that want its metrics and its summary. */
+  journal: ParsedJournal | null;
   deployments: DeploymentRow[];
+  /** What the run's records are worth — the vitals strip's own numbers. */
+  perf: AgentPerformance | null;
+  /** Realized PnL over the run, derived from the bots' own history. */
+  pnlSeries: { timestamp: string; pnl: number }[] | null;
   /** 0 when the scope has no session run, which is what gates every query. */
   sessionNum: number;
 } {
@@ -68,10 +80,11 @@ export function useWorkspaceAlerts({
   // infers the whole `journalData` as the dependency and refuses to preserve a
   // memo whose declared one is narrower.
   const journalContent = journalData?.content;
-  const decisions = useMemo(
-    () => (journalContent ? parseJournal(journalContent).decisions : []),
+  const journal = useMemo(
+    () => (journalContent ? parseJournal(journalContent) : null),
     [journalContent],
   );
+  const decisions = journal?.decisions ?? EMPTY_DECISIONS;
 
   // A clock only while something is looping — an overdue tick is the only alert
   // that changes on its own, and a `Date.now()` in render is what the compiler
@@ -92,5 +105,16 @@ export function useWorkspaceAlerts({
     [actions, deployments, decisions, instance, now],
   );
 
-  return { alerts, decisions, deployments: deployments ?? [], sessionNum };
+  return {
+    alerts,
+    decisions,
+    journal,
+    deployments: deployments ?? [],
+    perf: perfData?.performance ?? null,
+    pnlSeries: perfData?.pnl_series ?? null,
+    sessionNum,
+  };
 }
+
+/** One frozen empty list, so "no journal yet" is a stable identity. */
+const EMPTY_DECISIONS: Decision[] = [];

@@ -1,20 +1,15 @@
 import { useQuery } from "@tanstack/react-query";
-import { Activity, AlertTriangle, FileText, Zap } from "lucide-react";
-import { useMemo, useState } from "react";
+import { Activity, AlertTriangle, Zap } from "lucide-react";
+import { useMemo } from "react";
 
 import {
   SessionActivity,
   SessionBots,
   SessionCanvasPanel,
   SessionExecutors,
-  SessionKpis,
-  SessionOverview,
   SnapshotBody,
 } from "@/components/agent/AgentSessionContent";
 import { SessionActions } from "@/components/agent/SessionActions";
-import { DeploymentLedger } from "@/components/agent/lab/DeploymentLedger";
-import { hasPricedMoney } from "@/components/agent/lab/runs";
-import { ReportViewer } from "@/components/routines/ReportViewer";
 import { api } from "@/lib/api";
 import {
   type ParsedJournal,
@@ -24,17 +19,19 @@ import {
 } from "@/lib/parse-agent";
 
 /**
- * One run, read top to bottom.
+ * The evidence behind a run: what it ran, what it did, and what it said.
  *
  * Every band here is an existing export of `AgentSessionContent` — that is what
- * made this feature tractable at all: `SessionReviewer` was a shell (a sidebar,
- * a sub-tab bar and a top bar) around bodies that were already written, so the
- * Lab replaces the shell and reuses the bodies unchanged.
+ * made the Lab tractable at all: `SessionReviewer` was a shell (a sidebar, a
+ * sub-tab bar and a top bar) around bodies that were already written, so the
+ * Lab replaced the shell and reused the bodies unchanged.
  *
- * The one thing that is *not* carried over is the fake zero. The reviewer showed
- * its KPI strip unconditionally, so a run that never traded reported eight
- * `+$0.00` tiles — the absence of a fact printed as a fact. Here the strip
- * appears only when there is priced money to put in it.
+ * It used to open with the run's *answers* too — the vitals strip, the
+ * deployment ledger and the PnL chart — which is the same set the Now view led
+ * with one spine entry away (FEAT-119). Those are the answer stack now, read
+ * once, and what is left here is the evidence a reader opens when the answer is
+ * not enough: the bots and executors it ran, the deeds it did, the narrative it
+ * wrote and the questions it left itself.
  */
 export function RunOverview({
   slug,
@@ -54,8 +51,6 @@ export function RunOverview({
   /** A deed row or a chart marker is an address into a tick. */
   onSelectTick: (tick: number) => void;
 }) {
-  const [showReport, setShowReport] = useState(false);
-
   const { data: journalData } = useQuery({
     queryKey: ["strategy", slug, sslug, "session", sessionNum, "journal"],
     queryFn: () => api.getSessionJournal(slug, sslug, sessionNum),
@@ -69,13 +64,6 @@ export function RunOverview({
     refetchInterval: 10000,
   });
   const perf = perfData?.performance ?? null;
-
-  const { data: reportData } = useQuery({
-    queryKey: ["strategy", slug, sslug, "session", sessionNum, "report"],
-    queryFn: () => api.getSessionReport(slug, sslug, sessionNum),
-    enabled: sessionNum > 0,
-  });
-  const report = reportData?.report ?? null;
 
   // Hoisted rather than reached through in the dependency list: the compiler
   // infers the whole `journalData` as the dependency and refuses to preserve a
@@ -100,42 +88,6 @@ export function RunOverview({
 
   return (
     <div className="space-y-4">
-      {hasPricedMoney(perf) ? (
-        <SessionKpis
-          perf={perf}
-          summary={journal?.summary}
-          hasReport={!!report}
-          onOpenReport={() => setShowReport(true)}
-        />
-      ) : (
-        report && (
-          // The strip is where the report lives, so a run with no money to put
-          // in a strip would otherwise lose the only door to its own report.
-          <div className="flex justify-end">
-            <button
-              type="button"
-              onClick={() => setShowReport(true)}
-              className="flex items-center gap-1.5 rounded-md border border-[var(--color-border)] px-2.5 py-1 text-[11px] font-medium text-[var(--color-text-muted)] transition-colors hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
-            >
-              <FileText className="h-3 w-3" /> Session report
-            </button>
-          </div>
-        )
-      )}
-      {/* What the run put into the world (FEAT-100) — read from the same
-          response the strip above folds, so the two can never disagree. */}
-      <DeploymentLedger
-        rows={perfData?.deployments ?? []}
-        runKey={`${slug}.${sslug}`}
-        sessionNum={sessionNum}
-      />
-      {journal && (
-        <SessionOverview
-          journal={journal}
-          perf={perf}
-          pnlSeries={perfData?.pnl_series}
-        />
-      )}
       <SessionBots perf={perf} />
       <SessionExecutors
         slug={slug}
@@ -161,18 +113,6 @@ export function RunOverview({
         <Band icon={Activity} label="Decisions">
           <SessionActivity journal={journal} />
         </Band>
-      )}
-
-      {showReport && report && (
-        <div className="fixed inset-0 z-50 flex flex-col bg-[var(--color-bg)] p-4">
-          <ReportViewer
-            report={report}
-            reports={[report]}
-            onSelect={() => {}}
-            onClose={() => setShowReport(false)}
-            allowFullscreen={false}
-          />
-        </div>
       )}
     </div>
   );

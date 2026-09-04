@@ -87,7 +87,15 @@ export function SessionKpis({
   onOpenReport,
 }: {
   perf?: AgentPerformance | null;
-  summary?: { status: string; lastTick: number; lastAction: string };
+  /**
+   * The run's own headline facts — its status and how far it has ticked.
+   *
+   * It carried the last action too, truncated to one line, until the answer
+   * stack put that sentence *whole* six pixels below this strip (FEAT-119).
+   * Optional rather than removed from `ParsedJournal`'s summary, so a caller
+   * can go on handing this the summary it already has.
+   */
+  summary?: { status: string; lastTick: number; lastAction?: string };
   hasReport?: boolean;
   onOpenReport?: () => void;
 }) {
@@ -162,12 +170,6 @@ export function SessionKpis({
           </button>
         )}
       </div>
-
-      {summary?.lastAction && (
-        <p className="px-1 text-xs text-[var(--color-text-muted)]">
-          <span className="text-[10px] uppercase tracking-wider">Last action</span> — {summary.lastAction}
-        </p>
-      )}
     </div>
   );
 }

@@ -1,35 +1,36 @@
-import { AlertTriangle, Clock, MessageSquareQuote } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
+import { AlertTriangle, FileText, MessageSquareQuote } from "lucide-react";
+import { useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-import { SessionCanvasPanel } from "@/components/agent/AgentSessionContent";
+import {
+  SessionKpis,
+  SessionOverview,
+} from "@/components/agent/AgentSessionContent";
 import { DeploymentLedger } from "@/components/agent/lab/DeploymentLedger";
+import { hasPricedMoney } from "@/components/agent/lab/runs";
 import type { WorkspaceAlert } from "@/components/agent/workspace/views";
-import { useSeconds } from "@/hooks/useSeconds";
-import { countdown } from "@/lib/agent-attribution";
-import type { RunningInstance } from "@/lib/api";
-import type { Decision } from "@/lib/parse-agent";
+import { ReportViewer } from "@/components/routines/ReportViewer";
+import { api, type AgentPerformance } from "@/lib/api";
+import type { Decision, ParsedJournal } from "@/lib/parse-agent";
 
 /**
- * What this agent is doing, right now (FEAT-103).
+ * What this run is and what it did, with nothing to click first (FEAT-119).
  *
- * The one genuinely new body in the workspace, and it fetches nothing the rest
- * of the screen was not already fetching — it composes what is on disk in the
- * order a person actually asks for it:
+ * Five facets of one run — its vitals, what wants a person, what it last
+ * decided, what it has earned and what it put into the world — read top to
+ * bottom. They were split across two views (Now and the run overview) only
+ * because a spine needed entries, and the split cost three bands twice over:
+ * the deployment ledger, the canvas, and the last action, printed truncated to
+ * one line in the vitals strip and whole six pixels below it. Merging them is
+ * net-subtractive, which is the test for whether a consolidation is real.
  *
- * 1. **What needs you.** Derived from the run's own deeds and journal, not
- *    polled from anywhere: a failed action, a deploy the ledger never recorded,
- *    a tick that is late. The rules are pure, in `views.ts`.
- * 2. **What it last decided, in full.** The newest `## Decisions` entry, as
- *    markdown rather than as one truncated line of plain text. This is the
- *    single biggest legibility win in the feature and it costs no new query.
- * 3. **What it put into the world.** The deployment ledger for this run
- *    (FEAT-100), with its link into the fleet (FEAT-101).
- * 4. **When it goes again**, and the questions it has left open on its canvas.
- *
- * Before this, an agent opened on its `AGENT.md` — a document that does not
- * change while a loop runs — and the last thing it said was one truncated line
- * on a page two navigations away.
+ * It still fetches almost nothing of its own. The vitals, the journal, the
+ * chart's series and the ledger all come off `useWorkspaceAlerts`' three
+ * responses, which the tick spine and the detail bands were reading anyway; the
+ * one query in here is the run's own report, which used to hang off the strip
+ * in the overview and travels with it.
  */
 export function NowView({
   slug,
@@ -38,7 +39,9 @@ export function NowView({
   alerts,
   decisions,
   deployments,
-  instance,
+  perf,
+  journal,
+  pnlSeries,
   onOpenTick,
 }: {
   slug: string;
@@ -49,21 +52,55 @@ export function NowView({
   /** The run's decisions, newest last. */
   decisions: Decision[];
   deployments: React.ComponentProps<typeof DeploymentLedger>["rows"];
-  /** The live engine, when there is one. */
-  instance: RunningInstance | null;
+  /** What the run's records are worth, for the vitals strip. */
+  perf: AgentPerformance | null;
+  /** The run's journal, for the strip's status and the chart's fallback. */
+  journal: ParsedJournal | null;
+  pnlSeries?: { timestamp: string; pnl: number }[] | null;
   /** An alert, or the decision's own tick badge, is an address into a tick. */
   onOpenTick: (tick: number) => void;
 }) {
-  const now = useSeconds(instance?.status === "running");
+  const [showReport, setShowReport] = useState(false);
   const last = decisions[decisions.length - 1] ?? null;
 
-  const dueIn =
-    instance && instance.last_tick_at > 0 && instance.frequency_sec > 0
-      ? instance.last_tick_at + instance.frequency_sec - now / 1000
-      : null;
+  const { data: reportData } = useQuery({
+    queryKey: ["strategy", slug, sslug, "session", sessionNum, "report"],
+    queryFn: () => api.getSessionReport(slug, sslug, sessionNum),
+    enabled: sessionNum > 0,
+  });
+  const report = reportData?.report ?? null;
 
   return (
     <div className="space-y-4">
+      {/* ① The run's vitals. The strip appears only when there is priced money
+          to put in it: a run that never traded reporting eight `+$0.00` tiles
+          is the absence of a fact printed as a fact. */}
+      {hasPricedMoney(perf) ? (
+        <SessionKpis
+          perf={perf}
+          summary={journal?.summary}
+          hasReport={!!report}
+          onOpenReport={() => setShowReport(true)}
+        />
+      ) : (
+        report && (
+          // The strip is where the report lives, so a run with no money to put
+          // in a strip would otherwise lose the only door to its own report.
+          <div className="flex justify-end">
+            <button
+              type="button"
+              onClick={() => setShowReport(true)}
+              className="flex items-center gap-1.5 rounded-md border border-[var(--color-border)] px-2.5 py-1 text-[11px] font-medium text-[var(--color-text-muted)] transition-colors hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
+            >
+              <FileText className="h-3 w-3" /> Session report
+            </button>
+          </div>
+        )
+      )}
+
+      {/* ② What needs you. Derived from the run's own deeds and journal, not
+          polled from anywhere: a failed action, a deploy the ledger never
+          recorded, a tick that is late. The rules are pure, in `views.ts`. */}
       {alerts.length > 0 && (
         <div data-now-alerts className="space-y-2">
           {alerts.map((alert) => (
@@ -72,9 +109,9 @@ export function NowView({
         </div>
       )}
 
-      {/* What it last decided, whole. Through the chat's own markdown renderer,
-          because a model writes bold, lists and tables and the reader was
-          getting the asterisks and the pipes. */}
+      {/* ③ What it last decided, whole. Through the chat's own markdown
+          renderer, because a model writes bold, lists and tables and the reader
+          was getting the asterisks and the pipes. */}
       <div
         data-now-decision
         className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4"
@@ -126,33 +163,31 @@ export function NowView({
         )}
       </div>
 
-      {/* What it put into the world (FEAT-100), read from the same response the
-          money views fold — so the two can never disagree. */}
+      {/* ④ What it has earned over the run. `SessionOverview` is the chart and
+          nothing else, and it draws nothing at all under two points — which is
+          the honest answer for a run one tick old. */}
+      {journal && (
+        <SessionOverview journal={journal} perf={perf} pnlSeries={pnlSeries} />
+      )}
+
+      {/* ⑤ What it put into the world (FEAT-100), read from the same response
+          the vitals fold — so the two can never disagree. */}
       <DeploymentLedger
         rows={deployments}
         runKey={`${slug}.${sslug}`}
         sessionNum={sessionNum || undefined}
       />
 
-      <div className="flex flex-wrap items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-2.5 text-xs text-[var(--color-text-muted)]">
-        <Clock className="h-3.5 w-3.5" />
-        {dueIn === null ? (
-          <span>Nothing is looping.</span>
-        ) : dueIn > 0 ? (
-          <span data-now-countdown className="font-mono">
-            Next tick in {countdown(dueIn)}
-          </span>
-        ) : (
-          <span data-now-countdown className="font-mono text-amber-400">
-            Overdue {countdown(-dueIn)}
-          </span>
-        )}
-      </div>
-
-      {/* The questions it has left open for itself — nothing at all when it has
-          written none, which is the honest answer for most runs. */}
-      {sessionNum > 0 && (
-        <SessionCanvasPanel slug={slug} sslug={sslug} sessionNum={sessionNum} />
+      {showReport && report && (
+        <div className="fixed inset-0 z-50 flex flex-col bg-[var(--color-bg)] p-4">
+          <ReportViewer
+            report={report}
+            reports={[report]}
+            onSelect={() => {}}
+            onClose={() => setShowReport(false)}
+            allowFullscreen={false}
+          />
+        </div>
       )}
     </div>
   );
