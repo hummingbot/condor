@@ -104,10 +104,24 @@ HEX64_RE = re.compile(_NOT_ID_BEFORE + r"(?:0x)?[0-9a-fA-F]{64}" + _NOT_ID_AFTER
 # *address* to 32–44, so an address can never reach this pattern.
 B58_KEY_RE = re.compile(_NOT_ID_BEFORE + r"[1-9A-HJ-NP-Za-km-z]{87,88}" + _NOT_ID_AFTER)
 
+#: How long a Solana keypair export is, in either shape — the bracketed run in
+#: a text paste and the real list of ints a tool result carries. Both callers
+#: derive their length from this, so there is one place the count is stated.
+KEYPAIR_LEN = 64
+
 # What ``solana-keygen`` writes and every wallet export offers: 64 bytes as a
 # JSON array of ints. The 0–255 bound is checked after the match rather than
 # spelled in the regex, which keeps the pattern readable and the check exact.
-KEYPAIR_ARRAY_RE = re.compile(r"\[\s*\d{1,3}(?:\s*,\s*\d{1,3}){63}\s*,?\s*\]")
+_BYTE = r"\d{1,3}"
+KEYPAIR_ARRAY_RE = re.compile(
+    r"\[\s*"
+    + _BYTE
+    + r"(?:\s*,\s*"
+    + _BYTE
+    + r"){"
+    + str(KEYPAIR_LEN - 1)
+    + r"}\s*,?\s*\]"
+)
 
 # ── BIP-39 recovery phrases ──────────────────────────────────────────────
 #
@@ -308,6 +322,44 @@ def keypair_array_spans(text: str) -> list[tuple[int, int]]:
         for match in KEYPAIR_ARRAY_RE.finditer(text)
         if _bytes_ok(match.group(0))
     ]
+
+
+def is_keypair_array(value: object) -> bool:
+    """Is ``value`` a keypair that arrived as a real *list*, not as text?
+
+    The structural spelling of the same secret :func:`keypair_array_spans`
+    finds in a string: ``json.load`` of an ``id.json``, a ``run_code`` that
+    returned the bytes instead of printing them, a tool result that carries the
+    array as an array. No element of such a list is a secret on its own, so a
+    scanner that only ever sees leaves sees 64 harmless numbers (SEC-336).
+
+    It answers by asking the *text* question. The list is written out in the one
+    spelling :data:`KEYPAIR_ARRAY_RE` is calibrated for and handed straight to
+    :func:`keypair_array_spans`; a match that covers the whole rendering is the
+    same 64×(0–255) judgement the text path makes, not a second one that can
+    drift from it — which is the entire reason that function is public.
+
+    Only real ``int`` elements count. A keypair reaches a payload through
+    ``json``, which spells a byte as an ``int`` and nothing else, so a list of
+    floats, decimals or booleans that happens to render as small integers is a
+    series rather than a key.
+    """
+    if not isinstance(value, (list, tuple)) or len(value) != KEYPAIR_LEN:
+        return False
+    if not all(type(item) is int for item in value):
+        return False
+    rendered = keypair_array_text(value)
+    return keypair_array_spans(rendered) == [(0, len(rendered))]
+
+
+def keypair_array_text(value) -> str:
+    """``value`` rendered the way :func:`is_keypair_array` judged it.
+
+    One spelling for one key: the pseudonym a share gives a keypair-as-list is
+    keyed off this, so the same 64 bytes are the same pseudonym however the
+    tool that produced them spaced its JSON.
+    """
+    return "[" + ", ".join(str(item) for item in value) + "]"
 
 
 def scan(text: str) -> list[Finding]:
