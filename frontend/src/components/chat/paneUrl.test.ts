@@ -10,7 +10,13 @@
 
 import { describe, expect, it } from "vitest";
 
-import { AGENT_PARAM, readPane, writePane, type PaneView } from "./paneUrl";
+import {
+  AGENT_PARAM,
+  TAB_PARAM,
+  readPane,
+  writePane,
+  type PaneView,
+} from "./paneUrl";
 
 const q = (search: string) => new URLSearchParams(search);
 const round = (pane: PaneView, focus = {}) =>
@@ -20,9 +26,6 @@ describe("reading the pane off the URL", () => {
   it("opens the panel the URL names", () => {
     expect(readPane(q("?panel=agent"), {})).toEqual({ kind: "agent" });
     expect(readPane(q("?panel=desk"), {})).toEqual({ kind: "desk" });
-    // The conversation's own ledger (FEAT-110) — addressable like the rest, so
-    // Escape and Back close it and it can be sent to someone.
-    expect(readPane(q("?panel=deployed"), {})).toEqual({ kind: "deployed" });
   });
 
   it("reads whose agent panel it is, and defaults to the conversation's", () => {
@@ -89,7 +92,6 @@ describe("writing the pane into the URL", () => {
   it("round-trips every panel", () => {
     expect(round({ kind: "agent" })).toEqual({ kind: "agent" });
     expect(round({ kind: "desk" })).toEqual({ kind: "desk" });
-    expect(round({ kind: "deployed" })).toEqual({ kind: "deployed" });
     expect(
       round({ kind: "strategy", agentSlug: "brigado", strategySlug: "brl_mm" }),
     ).toEqual({ kind: "strategy", agentSlug: "brigado", strategySlug: "brl_mm" });
@@ -138,42 +140,59 @@ describe("writing the pane into the URL", () => {
     expect(next.get("loop")).toBeNull();
   });
 
-  describe("the agent panel's own contents (FEAT-117)", () => {
-    /** The panel is the whole workspace, so these four are part of what is open. */
-    const OPEN = `?panel=agent&${AGENT_PARAM}=brigado&view=money&strategy=brl_mm&run=s:3&tick=40`;
+  describe("the section the panel is open on (FEAT-118)", () => {
+    it("round-trips a section, and writes nothing for Brain", () => {
+      expect(round({ kind: "agent", tab: "tools" })).toEqual({
+        kind: "agent",
+        tab: "tools",
+      });
+      // Brain is where a panel with nothing said opens, so the shortest URL
+      // keeps being the common case.
+      expect(writePane(q(""), { kind: "agent" }).get(TAB_PARAM)).toBeNull();
+    });
 
-    it("keeps them while the pane goes on showing the same agent", () => {
-      const next = writePane(q(OPEN), { kind: "agent", slug: "brigado" });
+    it("keeps the section while the pane goes on showing the same agent", () => {
+      const open = `?panel=agent&${AGENT_PARAM}=brigado&${TAB_PARAM}=skills`;
+      expect(
+        writePane(q(open), { kind: "agent", slug: "brigado" }).get(TAB_PARAM),
+      ).toBe("skills");
+    });
+
+    it("drops it when the pane opens a different agent", () => {
+      // Brigado's Skills are not Quiet's, and a Back through them would
+      // restore a pane nobody asked for.
+      const open = `?panel=agent&${AGENT_PARAM}=brigado&${TAB_PARAM}=skills`;
+      const next = writePane(q(open), { kind: "agent", slug: "quiet" });
+      expect(next.get(AGENT_PARAM)).toBe("quiet");
+      expect(next.get(TAB_PARAM)).toBeNull();
+    });
+
+    it("drops it when another panel takes the pane, and when it closes", () => {
+      const open = `?panel=agent&${TAB_PARAM}=memories`;
+      expect(writePane(q(open), { kind: "desk" }).get(TAB_PARAM)).toBeNull();
+      expect(writePane(q(open), null).get(TAB_PARAM)).toBeNull();
+    });
+
+    it("reads a section nobody has as a panel open on Brain", () => {
+      // A hand-typed `?tab=` is not an error page: the link still asked for
+      // this agent's panel and that is what it gets.
+      expect(readPane(q(`?panel=agent&${TAB_PARAM}=nonsense`), {})).toEqual({
+        kind: "agent",
+      });
+    });
+
+    it("spends none of the workspace's four parameters", () => {
+      // The pane stopped being the workspace (FEAT-118), so `?view=`,
+      // `?strategy=`, `?run=` and `?tick=` are none of its business — it
+      // neither writes them nor clears somebody else's.
+      const next = writePane(q("?view=money&strategy=brl_mm&run=s:3&tick=40"), {
+        kind: "agent",
+        tab: "strategies",
+      });
       expect(next.get("view")).toBe("money");
       expect(next.get("strategy")).toBe("brl_mm");
       expect(next.get("run")).toBe("s:3");
       expect(next.get("tick")).toBe("40");
-    });
-
-    it("drops them when the pane closes", () => {
-      const closed = writePane(q(OPEN), null);
-      for (const key of ["panel", AGENT_PARAM, "view", "strategy", "run", "tick"]) {
-        expect(closed.get(key)).toBeNull();
-      }
-    });
-
-    it("drops them when another panel takes the pane", () => {
-      expect(writePane(q(OPEN), { kind: "desk" }).get("view")).toBeNull();
-    });
-
-    it("drops them when the pane opens a different agent", () => {
-      // A scope and a run that belong to Brigado are not Quiet's, and a Back
-      // through them would restore a pane nobody asked for.
-      const next = writePane(q(OPEN), { kind: "agent", slug: "quiet" });
-      expect(next.get(AGENT_PARAM)).toBe("quiet");
-      expect(next.get("view")).toBeNull();
-      expect(next.get("strategy")).toBeNull();
-    });
-
-    it("drops them when the pane falls back to the conversation's agent", () => {
-      const next = writePane(q(OPEN), { kind: "agent" });
-      expect(next.get(AGENT_PARAM)).toBeNull();
-      expect(next.get("view")).toBeNull();
     });
   });
 });

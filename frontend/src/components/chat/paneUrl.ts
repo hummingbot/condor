@@ -23,7 +23,10 @@
  * would have started anyway.
  */
 
-import { clearWorkspaceSearch } from "@/components/agent/workspace/workspaceUrl";
+import {
+  isKnowledgeTab,
+  type KnowledgeTabId,
+} from "@/components/agent/knowledgeTabs";
 import type { LibraryFocus } from "@/components/chat/DockRoutines";
 
 /**
@@ -39,17 +42,17 @@ import type { LibraryFocus } from "@/components/chat/DockRoutines";
  * asking for more width than a laptop has. Which *sections* the desk is showing
  * is `useAccountPanels`', not this: this only says the desk is on.
  *
- * `deployed` is the conversation's own ledger (FEAT-110) — what this chat put
- * into the world. A pane member rather than a section of the context dock
- * because it is a table you read, not a list you watch out of the corner of an
- * eye while typing, and because `?panel=deployed` is what makes it linkable and
- * closable by Back.
- *
  * `agent` carries an optional slug since FEAT-114. The pane's subject used to
  * be the conversation's agent and nothing else, so an Execution row naming a
  * *different* agent had nowhere to open it; the slug is what gives that row a
  * destination. Absent still means the conversation's, which is what every link
  * already written to `?panel=agent` means.
+ *
+ * It carries its open section too, since FEAT-118: the panel is the agent's
+ * seven Being sections again, and which one is open is a fact about the pane
+ * like the slug is. It used to be `useState` inside the panel, which meant the
+ * pane could not be sent, Back did not step through the sections and a reload
+ * landed on Brain whatever you had been reading.
  *
  * A strategy is a member rather than a sheet stacked on the agent panel: two
  * sheets portalled into one pane stack with no way to tell which scrollbar
@@ -58,9 +61,8 @@ import type { LibraryFocus } from "@/components/chat/DockRoutines";
  * agent slug it was opened from.
  */
 export type PaneView =
-  | { kind: "agent"; slug?: string }
+  | { kind: "agent"; slug?: string; tab?: KnowledgeTabId }
   | { kind: "desk" }
-  | { kind: "deployed" }
   | { kind: "routines"; focus: LibraryFocus }
   | { kind: "strategy"; agentSlug: string; strategySlug: string }
   | null;
@@ -81,6 +83,14 @@ export const LOOP_PARAM = "loop";
  * ever made to a bare `?panel=agent` keeps meaning "the agent I am talking to".
  */
 export const AGENT_PARAM = "who";
+/**
+ * Which of the agent panel's seven sections is open (FEAT-118).
+ *
+ * The same word the agent page spells its section with — `parseWorkspace`
+ * already honours `?tab=` as a synonym for `?view=` there — so a section can be
+ * carried between the two hosts as a value rather than translated.
+ */
+export const TAB_PARAM = "tab";
 
 /**
  * Read the pane out of the query string.
@@ -98,12 +108,18 @@ export function readPane(
       // for a nameless agent, it is the conversation's own, and the page
       // resolves it that way.
       const slug = params.get(AGENT_PARAM) || "";
-      return slug ? { kind: "agent", slug } : { kind: "agent" };
+      // A hand-typed section that names nothing is a panel open on Brain, not
+      // an error: the pane is still exactly the thing the link asked for.
+      const raw = params.get(TAB_PARAM);
+      const tab = isKnowledgeTab(raw) ? raw : undefined;
+      return {
+        kind: "agent",
+        ...(slug ? { slug } : {}),
+        ...(tab ? { tab } : {}),
+      };
     }
     case "desk":
       return { kind: "desk" };
-    case "deployed":
-      return { kind: "deployed" };
     case "routines":
       return { kind: "routines", focus: libraryFocus };
     case "strategy": {
@@ -124,12 +140,13 @@ export function readPane(
 /**
  * The query string with this pane in it — or with every trace of one gone.
  *
- * "Every trace" includes the agent panel's *contents* since FEAT-117: the panel
- * is the whole workspace now, so `?view=`, `?strategy=`, `?run=` and `?tick=`
- * are as much a part of what is open as `?panel=` is. They are kept only while
- * the pane goes on showing the same agent — closing it, or opening a different
- * agent, leaves a scope and a run that belong to somebody else, and a Back
- * through them would restore a pane nobody asked for.
+ * "Every trace" includes the agent panel's open section. The pane spent the
+ * workspace's four parameters while it *was* the workspace (FEAT-117); it
+ * spends `?tab=` instead now that it is the seven Being sections again
+ * (FEAT-118), which is one key rather than four and has no cascade rules at
+ * all. The section is kept only while the pane goes on showing the same agent:
+ * pointing it at somebody else must not carry the previous agent's section,
+ * because a Back through that would restore a pane nobody asked for.
  */
 export function writePane(
   params: URLSearchParams,
@@ -139,13 +156,12 @@ export function writePane(
     pane?.kind === "agent" &&
     params.get(PANEL_PARAM) === "agent" &&
     (pane.slug ?? "") === (params.get(AGENT_PARAM) ?? "");
-  const next = sameAgent
-    ? new URLSearchParams(params)
-    : clearWorkspaceSearch(params);
+  const next = new URLSearchParams(params);
   if (!pane) {
     next.delete(PANEL_PARAM);
     next.delete(LOOP_PARAM);
     next.delete(AGENT_PARAM);
+    next.delete(TAB_PARAM);
     return next;
   }
   next.set(PANEL_PARAM, pane.kind);
@@ -156,5 +172,18 @@ export function writePane(
   }
   if (pane.kind === "agent" && pane.slug) next.set(AGENT_PARAM, pane.slug);
   else next.delete(AGENT_PARAM);
+  if (pane.kind === "agent") {
+    // Said outright, else whatever the same agent's pane was already open on —
+    // so the rail's own tile re-opens the section you left it on rather than
+    // resetting to Brain under you.
+    const carried = isKnowledgeTab(params.get(TAB_PARAM))
+      ? (params.get(TAB_PARAM) as KnowledgeTabId)
+      : undefined;
+    const tab = pane.tab ?? (sameAgent ? carried : undefined);
+    if (tab) next.set(TAB_PARAM, tab);
+    else next.delete(TAB_PARAM);
+  } else {
+    next.delete(TAB_PARAM);
+  }
   return next;
 }

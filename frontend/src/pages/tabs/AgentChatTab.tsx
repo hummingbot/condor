@@ -28,11 +28,6 @@ import { ChatThread } from "@/components/chat/ChatThread";
 import { ContextDock } from "@/components/chat/ContextDock";
 import { useContextPanels } from "@/components/chat/contextPanels";
 import {
-  deployedRailItem,
-  useConversationDeployments,
-} from "@/components/chat/deployedPanel";
-import { DockDeployed } from "@/components/chat/DockDeployed";
-import {
   PANEL_PARAM,
   readPane,
   writePane,
@@ -430,18 +425,6 @@ export function AgentChatTab() {
     agentSlug: activeSlot?.info.agent_slug || "",
     libraryOpen: pane?.kind === "routines",
   });
-  /**
-   * What this conversation has deployed, read whether or not its panel is open.
-   *
-   * The count is the tile's badge, and a badge that only appears once you open
-   * the thing it is on is not a badge — it is the whole answer to the panel's
-   * discoverability, which is why this is polled here beside the delegations
-   * rather than inside `DockDeployed`. The panel shares the query, so opening
-   * it costs nothing (FEAT-110).
-   */
-  const deployed = useConversationDeployments(conversationId);
-  const deployedCount = deployed.data?.deployments.length ?? 0;
-
   return (
     <WorkspacePaneProvider>
       <div className="flex h-full min-h-0">
@@ -598,6 +581,11 @@ export function AgentChatTab() {
               customProviders={customProviders}
               agentBindings={agentBindings}
               isStreaming={isActiveStreaming}
+              // Which section is open lives on the home's query string
+              // (FEAT-118), so Back steps through the seven and a pane open on
+              // Tools can be sent to somebody.
+              tab={pane.tab}
+              onTabChange={(t) => openPane({ ...pane, tab: t })}
               // With a session this moves the conversation; without one it is
               // the model the next `start_session` carries, which is the same
               // field the hero's picker sets.
@@ -614,6 +602,15 @@ export function AgentChatTab() {
               onOpenRoutine={(name) =>
                 openPane({ kind: "routines", focus: { source: name } })
               }
+              // And a strategy card to the workbench sheet, which never went
+              // anywhere — FEAT-117 only stopped the panel from opening it.
+              onOpenStrategy={(sslug) =>
+                openPane({
+                  kind: "strategy",
+                  agentSlug: openSlug,
+                  strategySlug: sslug,
+                })
+              }
               // A revision is its own thread: `fresh`, not `focus`, so the
               // request does not land under whatever unrelated thing this
               // agent was last asked. The workspace itself stays put — the
@@ -625,12 +622,10 @@ export function AgentChatTab() {
             />
           )}
 
-          {/* One of the agent's loops, on its own, from a pasted
-              `?panel=strategy&loop=`. The agent panel no longer opens this: a
-              strategy is one of its spine's own views now (FEAT-117), so a
-              card scopes the workspace in place instead of handing the pane to
-              a second surface. The address stays resolvable, and closing it
-              returns to the panel rather than to an empty row. */}
+          {/* One of the agent's loops, on its own — opened by a strategy card
+              in the panel, or from a pasted `?panel=strategy&loop=`. It
+              replaces the panel rather than stacking on it, and closing it
+              puts the panel back rather than leaving an empty row. */}
           {pane?.kind === "strategy" && (
             <StrategySheet
               key={`${pane.agentSlug}/${pane.strategySlug}`}
@@ -644,18 +639,6 @@ export function AgentChatTab() {
                   ...(pane.agentSlug === panelSlug ? {} : { slug: pane.agentSlug }),
                 })
               }
-            />
-          )}
-
-          {/* What this conversation put into the world (FEAT-110) — the
-              bots it deployed, the controllers those ran and what each has
-              made, so "did that actually happen" is answered next to where it
-              was asked instead of in the fleet browser's thirty-four rows. */}
-          {pane?.kind === "deployed" && (
-            <DockDeployed
-              conversationId={conversationId}
-              agentSlug={activeSlot?.info.agent_slug || ""}
-              onClose={() => openPane(null)}
             />
           )}
 
@@ -746,10 +729,10 @@ export function AgentChatTab() {
                   id: "agent",
                   label: "Agent",
                   Icon: Bot,
-                  // What the pane opens is the agent's whole workspace now
-                  // (FEAT-117), not the seven sections it used to be, so the
-                  // hint stops promising only half of it.
-                  hint: `Open ${panelAgent?.name || "Condor"} — what it is doing, and what it is`,
+                  // What the pane opens is the agent's seven Being sections
+                  // again (FEAT-118) — what it *is*. What it did is a click
+                  // away, behind the panel's own Workspace door.
+                  hint: `Open ${panelAgent?.name || "Condor"} — what it knows and what it runs`,
                   // A strategy opened from the panel is still the agent's
                   // subject, and the tile that opened it must not read as off
                   // while it is on screen.
@@ -764,21 +747,12 @@ export function AgentChatTab() {
               ],
             },
             { id: "desk", items: account.railItems },
-            {
-              id: "conversation",
-              items: [
-                ...context.railItems,
-                deployedRailItem({
-                  conversationId,
-                  count: deployedCount,
-                  active: pane?.kind === "deployed",
-                  onToggle: () =>
-                    openPane(
-                      pane?.kind === "deployed" ? null : { kind: "deployed" },
-                    ),
-                }),
-              ],
-            },
+            /* Tasks and Routines, and no Deployed: the conversation's ledger
+               went with FEAT-118, and FEAT-119 gives it a home on the run
+               screen where a conversation is one more kind of run. Until then
+               the fleet browser answers it, filtered to this chat's own
+               deployments. */
+            { id: "conversation", items: context.railItems },
           ]}
         />
       </div>
