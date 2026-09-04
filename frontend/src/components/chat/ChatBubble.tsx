@@ -23,7 +23,7 @@ import {
   normalizeAgentSlug,
 } from "@/lib/agentSlug";
 import { api, CHAT_SLUG } from "@/lib/api";
-import { homeView } from "@/lib/homeView";
+import { homePath, homeView } from "@/lib/homeView";
 import { routeFacts } from "@/lib/pageFacts";
 import { BUBBLE_OPEN_KEY } from "@/lib/sessionState";
 import { collectViewFacts, renderViewBlock } from "@/lib/viewFacts";
@@ -184,7 +184,11 @@ export function ChatBubble() {
     // Hijacking `activeSlotId` is right here: it is the gesture that asks
     // for the conversation to become the workspace's.
     if (slot && slotId) chat.setActiveSlotId(slotId);
-    navigate("/");
+    // By view and not by path: the workspace this button means is the
+    // *conversation*, and a bare `/` is the fleet overview since FEAT-104
+    // step 3 — it would have carried the hijacked slot to a page that cannot
+    // show it.
+    navigate(homePath("chat"));
   };
 
   return (

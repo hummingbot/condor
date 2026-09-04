@@ -19,10 +19,11 @@ import { AgentChatTab } from "@/pages/tabs/AgentChatTab";
  * ever stops carrying those, the grid's argument applies again and this should
  * go the same way.
  *
- * `?view=chat` — and, for now, a bare `/` — is the conversation, unchanged,
- * with `?agent=` and `?ask=` (FEAT-092) working beneath it. Which of the two a
- * bare `/` means is one constant in `lib/homeView.ts`, and moving it is the
- * habit change this feature is really about.
+ * `?view=chat` is the conversation, unchanged — and so is any `/` carrying the
+ * chat's own handover parameters, because `homeView` reads `?agent=`, `?ask=`
+ * (FEAT-092) and `?conversation=` (FEAT-111) as naming it. A bare `/` is the
+ * overview since step 3 moved the one constant in `lib/homeView.ts`, which is
+ * the habit change this feature was really about.
  *
  * Both views own the full viewport and scroll their own bodies, so the shell
  * drops `main`'s padding for this route (see `AppShell`).

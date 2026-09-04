@@ -555,8 +555,8 @@ const ROUTES: {
     /**
      * The fleet overview — the home's other view (FEAT-104).
      *
-     * Only ever reached with `?view=fleet`: the chat view returns above,
-     * before this table is walked.
+     * Reached by a bare `/` since FEAT-104 step 3, and by an explicit
+     * `?view=fleet`: the chat view returns above, before this table is walked.
      *
      * Read through `fleetRows`, the page's own rule, rather than by summing
      * the payload again here — including its dash: an agent with nothing

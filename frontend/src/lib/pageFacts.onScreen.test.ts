@@ -722,7 +722,12 @@ describe("/ — the fleet overview", () => {
   });
 
   it("contributes nothing at all on the chat view", () => {
-    expect(routeFacts("/", "", qc)).toBeNull();
+    expect(routeFacts("/", "?view=chat", qc)).toBeNull();
+    expect(routeFacts("/", "?agent=brigado&ask=status", qc)).toBeNull();
+  });
+
+  it("is what a bare `/` says now that the overview is the home", () => {
+    expect(onScreenLine("/", "")).toContain("agents 1 running / 2");
   });
 });
 

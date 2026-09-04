@@ -64,9 +64,7 @@ const NAV_ITEMS = [
  * `/bots` joined the chat workspace when the controller browser became the page
  * (FEAT-084): a scope sidebar and a report column, both screen-tall, have
  * nothing to do with `main`'s 24px. `/routines` is the same shape, for the same
- * reason (FEAT-091). Kept separate from `isChatWorkspace`, which
- * still means *the chat* specifically — the keys-overlay exemption is about the
- * conversation, not about padding.
+ * reason (FEAT-091).
  *
  * `/` left this list in FEAT-104. It is not one route with one body any more:
  * it mounts a conversation and a fleet overview, and which of them is on screen
@@ -119,31 +117,35 @@ function AppShellBody() {
   // one revertible commit without touching this file.
   const homeVersion = pathname === "/" ? homeView(search) : null;
 
-  // The chat takes the full height and owns its own scrolling, so the shell
-  // drops `main`'s padding for it. `/agents/:slug` is an ordinary padded page,
-  // deliberately not matched here.
-  const isChatWorkspace = homeVersion === "chat";
-
+  // Both views of the home take the full height and own their own scrolling,
+  // so the shell drops `main`'s padding for them. `/agents/:slug` is an
+  // ordinary padded page, deliberately not matched here.
   const isFullBleed =
     (homeVersion !== null && FULL_BLEED_HOME_VIEWS.includes(homeVersion)) ||
     FULL_BLEED_ROUTES.includes(pathname) ||
     FULL_BLEED_PATTERNS.some((re) => re.test(pathname));
 
-  // The chat is the landing page and needs no exchange keys, so the blocking
-  // overlay would otherwise be the first thing every unconfigured user hits —
-  // on the one surface that can talk them through connecting.
+  // The home is exempt in *both* its views (FEAT-104 step 3). The exemption
+  // used to be the chat's alone, on the grounds that it is the one surface that
+  // can talk a new user through connecting keys. Flipping the default moved the
+  // front door: an install with no keys would otherwise meet a blocking overlay
+  // before it ever met the product, over a page that needs no keys either — the
+  // overview reads agents, loops and journals, none of which are an exchange —
+  // and with the chat that would explain it hidden one click behind the block.
+  // The route is the unit here, not the view, so the exemption cannot come
+  // undone the next time the default moves.
   const exemptRoutes = ["/routines", "/settings"];
   const showKeysOverlay =
-    server && !keysLoading && !hasKeys && !isChatWorkspace &&
+    server && !keysLoading && !hasKeys && homeVersion === null &&
     !exemptRoutes.some((r) => pathname.startsWith(r));
 
   // ⌘K used to toggle the overlay panel. It now goes to the chat, so the
   // reflex still lands somewhere sensible instead of silently doing nothing.
   //
-  // Asked for by view rather than spelled as a path (FEAT-104): today the chat
-  // is what a bare `/` means and this resolves to exactly that, and when step 3
-  // makes the overview the default it resolves to `/?view=chat` with no edit
-  // here. The reflex is a keystroke to a *conversation*, whatever the home is.
+  // Asked for by view rather than spelled as a path (FEAT-104): this resolved
+  // to a bare `/` while the chat was the home and resolves to `/?view=chat` now
+  // that the overview is, and step 3 needed no edit here to make that true. The
+  // reflex is a keystroke to a *conversation*, whatever the home is.
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === "k") {

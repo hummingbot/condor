@@ -17,6 +17,7 @@ import { WORKSPACE_BAR } from "@/components/chat/workspaceBar";
 import { AnchoredMenu } from "@/components/ui/AnchoredMenu";
 import { useWorkspacePane } from "@/hooks/useWorkspacePane";
 import { CHAT_SLUG, type AgentSummary, type ConversationMeta } from "@/lib/api";
+import { homePath } from "@/lib/homeView";
 import { CHAT_RAIL_OPEN_KEY } from "@/lib/sessionState";
 
 function readOpen(): boolean {
@@ -223,9 +224,15 @@ export const ChatRail = memo(function ChatRail({
  * What is looping, and the door into it.
  *
  * Strategies live on an agent's own page, so that is where this points — one
- * live agent is a direct link, several open a short list. This replaced the
- * fleet grid: the grid's only unique job was showing which agents are running,
- * and a line at the top of the rail does that without a second page.
+ * live agent is a direct link, several open a short list.
+ *
+ * This line used to be the whole answer to "what is running": it replaced a
+ * fleet grid whose only unique job it already did. Since FEAT-104 step 3 that
+ * is no longer its job — the home *is* the overview, and it carries the money,
+ * the last decision and the next tick this line never could. What is left is a
+ * glance for somebody mid-conversation who does not want to leave it, and a way
+ * back to the page that says the rest: the fleet is the last row of the list,
+ * and the whole strip when nothing is looping at all.
  */
 function LiveStrip({
   agents,
@@ -256,12 +263,17 @@ function LiveStrip({
   return (
     <>
       {agents.length === 0 ? (
-        <span className={rowClass}>
+        <Link
+          to={homePath("fleet")}
+          className={rowClass}
+          title="See every agent and what it last did"
+        >
           {icon}
           <span className="min-w-0 flex-1 truncate">
             Nothing looping{tasks}
           </span>
-        </span>
+          <ArrowUpRight className="h-3 w-3 shrink-0" />
+        </Link>
       ) : agents.length === 1 ? (
         <Link
           to={`/agents/${agents[0].slug}`}
@@ -316,6 +328,16 @@ function LiveStrip({
             <ArrowUpRight className="h-3 w-3 shrink-0 text-[var(--color-text-muted)]" />
           </Link>
         ))}
+        {/* The list is the running agents; this is everything else about them,
+            including the ones that are not running. */}
+        <Link
+          to={homePath("fleet")}
+          onClick={() => setOpen(false)}
+          className="mt-0.5 flex items-center gap-2 border-t border-[var(--color-border)] px-2.5 py-1.5 text-xs text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+        >
+          <span className="min-w-0 flex-1 truncate">The whole fleet</span>
+          <ArrowUpRight className="h-3 w-3 shrink-0" />
+        </Link>
       </AnchoredMenu>
     </>
   );

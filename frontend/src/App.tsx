@@ -102,6 +102,11 @@ export default function App() {
                 />
                 <Route path="/routines" element={<Routines />} />
                 <Route path="/reports" element={<Navigate to="/routines?tab=reports" replace />} />
+                {/* `/agents` has pointed at the home since the fleet grid
+                    was deleted, and since FEAT-104 step 3 the home is a list of
+                    agents again — the first time this redirect has meant what
+                    it says. Still a redirect and not a second route: one
+                    overview, at the address people already have. */}
                 <Route path="/agents" element={<Navigate to="/" replace />} />
                 {/* One agent, one screen: every section, run and tick is a query
                     parameter on this route (FEAT-103). */}

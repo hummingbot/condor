@@ -30,14 +30,16 @@ declare global {
 
 describe("routeFacts", () => {
   it("says nothing on the chat workspace", () => {
-    expect(routeFacts("/", "")).toBeNull();
     expect(routeFacts("/", "?view=chat")).toBeNull();
-    // `?agent=` and `?ask=` are the chat's own parameters (FEAT-092) and must
-    // not be mistaken for a view.
+    // `?agent=` and `?ask=` are the chat's own parameters (FEAT-092), and
+    // `?conversation=` (FEAT-111) is one too: they name the chat rather than a
+    // view, and must not be mistaken for either a view or a page to describe.
     expect(routeFacts("/", "?agent=brigado&ask=status")).toBeNull();
+    expect(routeFacts("/", "?conversation=7f3a")).toBeNull();
   });
 
-  it("describes the home's other view, which is a page about the agents", () => {
+  it("describes the home, which since FEAT-104 step 3 is the overview", () => {
+    expect(routeFacts("/", "")?.label).toBe("Fleet overview");
     expect(routeFacts("/", "?view=fleet")?.label).toBe("Fleet overview");
   });
 
