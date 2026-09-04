@@ -242,5 +242,199 @@ def test_lp_branch_is_skipped_when_not_requested():
     assert not any(s["title"] == "LP Positions (CLMM)" for s in result["sections"])
 
 
+# ---------------------------------------------------------------------------
+# onchain_executor through manage_executors: the MCP layer must forward the
+# config to the API untouched (it is the API that knows the executor), reject
+# fields the schema does not list, and make the type discoverable.
+# ---------------------------------------------------------------------------
+
+ONCHAIN_SCHEMA = {
+    "properties": {
+        key: {}
+        for key in (
+            "type",
+            "controller_id",
+            "chain_id",
+            "mode",
+            "calls",
+            "notional_quote",
+            "max_gas_quote",
+            "app",
+            "operation",
+            "arguments",
+            "commit",
+        )
+    }
+}
+
+
+class FakeExecutorsRouter:
+    def __init__(self, schema=ONCHAIN_SCHEMA):
+        self.schema = schema
+        self.created = None
+
+    async def get_executor_config_schema(self, executor_type):
+        assert executor_type == "onchain_executor"
+        return self.schema
+
+    async def create_executor(self, executor_config, account_name, controller_id):
+        self.created = (executor_config, account_name, controller_id)
+        return {"executor_id": "onchain-0001"}
+
+
+class FakeExecutorClient:
+    def __init__(self):
+        self.executors = FakeExecutorsRouter()
+
+
+@pytest.fixture
+def isolated_preferences(tmp_path, monkeypatch):
+    """Point the tool at a scratch preferences file so ~/.hummingbot_mcp is untouched."""
+    from mcp_servers.hummingbot_api import executor_preferences as prefs_module
+    from mcp_servers.hummingbot_api.tools import executors as tool_module
+
+    manager = prefs_module.ExecutorPreferencesManager(tmp_path / "prefs.md")
+    monkeypatch.setattr(tool_module, "executor_preferences", manager)
+    return manager
+
+
+ONCHAIN_CONFIG = {
+    "chain_id": 8453,
+    "mode": "calls",
+    "calls": [
+        {
+            "to": "0x" + "11" * 20,
+            "description": "self-transfer",
+            "data": {"signature": "", "args": [], "raw": ""},
+            "value": "0",
+        }
+    ],
+    "notional_quote": 1,
+    "max_gas_quote": 1,
+    "commit": True,
+}
+
+
+def test_onchain_create_forwards_the_config_unchanged_plus_type(isolated_preferences):
+    from mcp_servers.hummingbot_api.schemas import ManageExecutorsRequest
+    from mcp_servers.hummingbot_api.tools.executors import manage_executors
+
+    client = FakeExecutorClient()
+    result = asyncio.run(
+        manage_executors(
+            client,
+            ManageExecutorsRequest(
+                action="create",
+                executor_type="onchain_executor",
+                executor_config=dict(ONCHAIN_CONFIG),
+                controller_id="agent-a",
+            ),
+        )
+    )
+
+    assert "error" not in result, result
+    config, account, controller_id = client.executors.created
+    assert config == {**ONCHAIN_CONFIG, "type": "onchain_executor"}
+    assert config["calls"][0]["value"] == "0"  # a wei string stays a string
+    assert account == "master_account"
+    assert controller_id == "agent-a"
+    assert "onchain-0001" in result["formatted_output"]
+
+
+def test_onchain_create_takes_controller_id_from_the_config_too(isolated_preferences):
+    from mcp_servers.hummingbot_api.schemas import ManageExecutorsRequest
+    from mcp_servers.hummingbot_api.tools.executors import manage_executors
+
+    client = FakeExecutorClient()
+    asyncio.run(
+        manage_executors(
+            client,
+            ManageExecutorsRequest(
+                action="create",
+                executor_type="onchain_executor",
+                executor_config={**ONCHAIN_CONFIG, "controller_id": "e2e-agent"},
+            ),
+        )
+    )
+
+    config, _, controller_id = client.executors.created
+    assert controller_id == "e2e-agent"
+    assert "controller_id" not in config
+
+
+def test_onchain_create_rejects_a_field_the_schema_does_not_list(isolated_preferences):
+    from mcp_servers.hummingbot_api.schemas import ManageExecutorsRequest
+    from mcp_servers.hummingbot_api.tools.executors import manage_executors
+
+    client = FakeExecutorClient()
+    result = asyncio.run(
+        manage_executors(
+            client,
+            ManageExecutorsRequest(
+                action="create",
+                executor_type="onchain_executor",
+                executor_config={**ONCHAIN_CONFIG, "trading_pair": "ETH-USDT"},
+            ),
+        )
+    )
+
+    assert "Unknown field 'trading_pair'" in result["error"]
+    assert client.executors.created is None
+
+
+def test_list_types_mentions_onchain_executor(isolated_preferences):
+    from mcp_servers.hummingbot_api.schemas import ManageExecutorsRequest
+    from mcp_servers.hummingbot_api.tools.executors import manage_executors
+
+    result = asyncio.run(
+        manage_executors(FakeExecutorClient(), ManageExecutorsRequest())
+    )
+
+    assert result["action"] == "list_types"
+    assert "onchain_executor" in result["formatted_output"]
+    assert "Aomi" in result["formatted_output"]
+
+
+def test_onchain_guide_documents_the_chain_id(isolated_preferences):
+    guide = isolated_preferences.get_executor_guide("onchain_executor")
+
+    assert guide is not None
+    assert "chain_id" in guide
+    for term in ("notional_quote", "custom_info.tx_hashes", "awaiting_wallet", "8453"):
+        assert term in guide, term
+
+
+def test_onchain_schema_stage_prints_the_guide_and_the_schema(isolated_preferences):
+    from mcp_servers.hummingbot_api.schemas import ManageExecutorsRequest
+    from mcp_servers.hummingbot_api.tools.executors import manage_executors
+
+    result = asyncio.run(
+        manage_executors(
+            FakeExecutorClient(),
+            ManageExecutorsRequest(executor_type="onchain_executor"),
+        )
+    )
+
+    assert result["action"] == "show_schema"
+    assert "### Onchain Executor" in result["formatted_output"]
+    assert "chain_id" in result["formatted_output"]
+
+
+def test_default_preferences_template_carries_an_onchain_section(isolated_preferences):
+    from mcp_servers.hummingbot_api.executor_preferences import (
+        DEFAULT_PREFERENCES_TEMPLATE,
+    )
+
+    assert "### Onchain Executor Defaults" in DEFAULT_PREFERENCES_TEMPLATE
+    # Every value is commented out: the template must not silently seed a chain.
+    assert isolated_preferences.get_defaults("onchain_executor") == {}
+
+
+def test_server_docstring_lists_onchain_executor():
+    import mcp_servers.hummingbot_api.server as server
+
+    assert "onchain_executor" in (server.manage_executors.__doc__ or "")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

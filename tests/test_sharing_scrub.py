@@ -280,3 +280,23 @@ def test_sharing_never_imports_the_telemetry_taxonomy():
             if any(name.startswith("condor.telemetry.schema") for name in names):
                 offenders.append(f"{path.name}:{node.lineno}")
     assert offenders == []
+
+
+# ── The install table ────────────────────────────────────────────────────
+
+
+def test_the_aomi_bearer_is_a_known_key(monkeypatch):
+    """``AOMI_TOKEN`` signs on-chain transactions: it must never leave the install."""
+    import utils.config  # noqa: F401  (load_dotenv() runs once; setenv must come after)
+
+    monkeypatch.setenv("AOMI_TOKEN", "aomi-bearer-0123456789abcdef")
+
+    assert ("aomi-bearer-0123456789abcdef", "known_key") in scrub.install_values()
+
+
+def test_an_unset_aomi_bearer_adds_nothing(monkeypatch):
+    import utils.config  # noqa: F401
+
+    monkeypatch.delenv("AOMI_TOKEN", raising=False)
+
+    assert not any(v == "" for v, _ in scrub.install_values())

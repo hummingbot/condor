@@ -118,6 +118,20 @@ lp_executor:
   # Note: side is TradeType enum (1=BUY/quote-only, 2=SELL/base-only, 3=RANGE/both)
 ```
 
+### Onchain Executor Defaults
+
+```yaml
+onchain_executor:
+  # Set your preferred defaults here (all optional, ask user if not set):
+  # chain_id: 8453  # 8453=Base, 1=Ethereum, 42161=Arbitrum, 10=Optimism
+  # mode: calls  # calls (raw evm_stage_tx calls) | operation (app + operation + arguments)
+  # commit: true  # false = simulate only, nothing is signed
+  # max_gas_quote: 5  # gas ceiling in quote terms, added to the risk-gate valuation
+  #
+  # Note: notional_quote is per-create, never a default — the risk gate values
+  # each create with it, so it must describe the calls actually being signed
+```
+
 ---
 
 *Last updated: Never*

@@ -47,8 +47,19 @@ dev = ["pytest", "pytest-asyncio", "black", "isort", "pre-commit"]
 # first, then drop this block here.
 hummingbot-api-client = { git = "https://github.com/hummingbot/hummingbot-api-client.git", branch = "feat/clmm-bin-count" }
 
+
+# The on-chain executor routines/provider need the `aomi` Pipeline client. It is optional at
+# runtime (every import is lazy) so the base install stays unchanged:
+#   uv pip install "aomi @ git+https://github.com/aomi-labs/aomi-python"
+# or, for local development against a checkout: uv pip install -e ../aomi-python
+
 [tool.isort]
 profile = "black"
+
+[tool.pytest.ini_options]
+markers = [
+    "e2e: live tests against a running Hummingbot API and Aomi (skipped unless HUMMINGBOT_API_URL and AOMI_TOKEN are set)",
+]
 
 [tool.setuptools.package-data]
 "condor.reports" = ["report_runtime.js"]
