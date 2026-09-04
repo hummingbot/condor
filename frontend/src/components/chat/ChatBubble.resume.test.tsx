@@ -213,6 +213,7 @@ describe("ChatBubble with no live slot on an agent's page", () => {
     expect(chat.sendMessage).toHaveBeenCalledWith(
       "conv-x",
       "and what about fees?",
+      undefined,
     );
   });
 

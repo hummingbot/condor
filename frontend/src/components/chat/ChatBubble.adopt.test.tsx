@@ -151,6 +151,7 @@ describe("ChatBubble on an agent's page", () => {
     expect(chat.sendMessage).toHaveBeenCalledWith(
       "slot-x",
       "and what about fees?",
+      undefined,
     );
   });
 
@@ -214,7 +215,11 @@ describe("ChatBubble on an agent's page", () => {
     expect(container.textContent).toContain("the unbound thread");
     send("carry on");
     expect(chat.startSession).not.toHaveBeenCalled();
-    expect(chat.sendMessage).toHaveBeenCalledWith("slot-condor", "carry on");
+    expect(chat.sendMessage).toHaveBeenCalledWith(
+      "slot-condor",
+      "carry on",
+      undefined,
+    );
   });
 
   it("ignores a live conversation with a different agent", () => {

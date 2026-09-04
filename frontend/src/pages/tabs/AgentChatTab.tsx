@@ -223,7 +223,10 @@ export function AgentChatTab() {
    * session cap stays a non-issue.
    */
   const talkTo = useCallback(
-    (agentSlug: string, opts?: { intent?: TalkIntent; text?: string }) => {
+    (
+      agentSlug: string,
+      opts?: { intent?: TalkIntent; text?: string; files?: File[] },
+    ) => {
       // Links speak the registry's spelling — `/?agent=condor` from an agent
       // page — while a chat binds Condor by binding nobody. Translate once,
       // here, or the lookup below misses the live Condor conversation and
@@ -244,7 +247,8 @@ export function AgentChatTab() {
           mine.find((s) => s.info.slot_id === activeRef.current) ?? mine.at(-1);
         if (live) {
           chat.setActiveSlotId(live.info.slot_id);
-          if (opts?.text) chat.sendMessage(live.info.slot_id, opts.text);
+          if (opts?.text || opts?.files?.length)
+            chat.sendMessage(live.info.slot_id, opts.text ?? "", opts.files);
           return;
         }
       }
@@ -259,7 +263,10 @@ export function AgentChatTab() {
       );
       // The tab is on screen before the spawn is; the outbox flushes this the
       // moment the session lands, which is what makes a new chat feel warm.
-      if (opts?.text) chat.sendMessage(slotId, opts.text);
+      // Attachments wait in that same queue and are uploaded at flush, so an
+      // image can open a conversation that does not exist yet.
+      if (opts?.text || opts?.files?.length)
+        chat.sendMessage(slotId, opts.text ?? "", opts.files);
     },
     [
       chat.sendMessage,
@@ -558,7 +565,9 @@ export function AgentChatTab() {
                   customProviders={customProviders}
                   agentBindings={agentBindings}
                   selectedKey={pendingAgentKey ?? defaultAgent}
-                  onAsk={(text) => talkTo(heroAgent?.slug || "", { text })}
+                  onAsk={(text, files) =>
+                    talkTo(heroAgent?.slug || "", { text, files })
+                  }
                   // The picker moves the model and nothing else; who answers is
                   // the rail's question, and it is already answered by the row
                   // the user highlighted.
@@ -801,7 +810,8 @@ function Hero({
   /** The model the next session starts on — owned by the tab, not by the hero,
    *  because the tab is what calls `startSession`. */
   selectedKey: string;
-  onAsk: (text: string) => void;
+  /** `files` only when the user attached something; `Starters` sends words. */
+  onAsk: (text: string, files?: File[]) => void;
   onPickBrain: (selection: BrainSelection) => void;
 }) {
   const starters = useStarters(

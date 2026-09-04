@@ -160,7 +160,7 @@ export function ChatBubble() {
     ? slot?.info.label || boundSummary?.name || slug
     : agents.find((a) => a.slug === CHAT_SLUG)?.name || "Condor";
 
-  const ask = (text: string) => {
+  const ask = (text: string, files?: File[]) => {
     let id = slotId;
     // `slotId` is read off a live slot, so this is belt and braces rather than
     // the load-bearing check it used to be — but a send into a dead id is
@@ -176,7 +176,9 @@ export function ChatBubble() {
       );
     }
     setSlotBySlug((m) => (m[slug] === id ? m : { ...m, [slug]: id }));
-    chat.sendMessage(id, text);
+    // The images ride along: a send into a spawn still in flight queues them
+    // with the words and uploads both once the conversation exists.
+    chat.sendMessage(id, text, files);
   };
 
   const openInWorkspace = () => {
@@ -368,7 +370,8 @@ function BubbleHero({
   routeLabel?: string;
   /** Resolved by the bubble, so the hero and the thread never disagree. */
   starters: Starter[];
-  onAsk: (text: string) => void;
+  /** `files` only when the user attached something; `Starters` sends words. */
+  onAsk: (text: string, files?: File[]) => void;
 }) {
   return (
     <div className="flex flex-1 flex-col items-center justify-center px-3 text-center">
