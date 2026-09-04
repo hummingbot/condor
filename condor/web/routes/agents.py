@@ -497,16 +497,24 @@ class SnapshotSummary(BaseModel):
 
 
 class RunRow(BaseModel):
-    """One run of one strategy, as the Lab's rail reads it (FEAT-099).
+    """One run of an agent, as the workspace's rail reads it (FEAT-099, FEAT-111).
 
-    The wire shape of :func:`condor.agents.sessions_index.list_runs`, plus the
-    two fields only the route knows: which strategy the run belongs to. There
-    is deliberately **no money here** — see the route below.
+    The wire shape of :func:`condor.agents.all_runs.list_all_runs`: a loop's
+    session or experiment, plus the two kinds that belong to no strategy — a
+    delegation and a conversation. There is deliberately **no money here** — see
+    the route below.
     """
 
-    #: ``s3`` | ``e1`` — the ``?run=`` value, unique within a strategy.
+    #: ``s:3`` | ``e:1`` | ``d:abc123`` | ``c:7f3a`` — the ``?run=`` value,
+    #: unique across every kind. The pre-FEAT-111 two-character form (``s3``)
+    #: is still *parsed* by the reader; it is no longer written.
     run_id: str
+    #: ``session`` | ``experiment`` | ``delegation`` | ``conversation``.
     kind: str
+    #: The opaque half of ``run_id``: a number as a string for a loop run, a
+    #: task or conversation id for the other two.
+    id: str = ""
+    #: The ordinal, for the two kinds that have one. ``0`` otherwise.
     number: int
     agent_id: str = ""
     status: str = ""
@@ -521,8 +529,12 @@ class RunRow(BaseModel):
     #: Whether ``actions.jsonl`` exists at all. A run written before FEAT-097
     #: has none, and its ticks must not be coloured "did nothing".
     has_actions_log: bool = False
+    #: Empty for a delegation and a conversation: a strategy is a loop concept.
     strategy_slug: str = ""
     strategy_name: str = ""
+    #: What this run was about, for the kinds that have no strategy to name —
+    #: a conversation's title, a delegation's ask. Empty for a loop run.
+    title: str = ""
 
 
 class RunsResponse(BaseModel):
@@ -3041,15 +3053,26 @@ async def set_strategy_state(
 
 # ── Runs ──
 
+#: One page of the rail, and the ceiling a caller can ask for. The window is
+#: the rail's own state (a "show more" raises it), so the cap is what stops a
+#: hand-typed ``?limit=`` from turning a 5s poll into an archive dump.
+DEFAULT_RUN_LIMIT = 100
+MAX_RUN_LIMIT = 500
+
 
 @router.get("/{slug}/runs", response_model=RunsResponse)
-async def list_agent_runs(slug: str, user: WebUser = Depends(get_current_user)):
-    """Every run this agent has ever had, across all its strategies (FEAT-099).
+async def list_agent_runs(
+    slug: str,
+    limit: int = DEFAULT_RUN_LIMIT,
+    user: WebUser = Depends(get_current_user),
+):
+    """Every stretch of work this agent has done (FEAT-099, FEAT-111).
 
-    The unit of a loop agent is the **run** — ``sessions/session_N/`` or
-    ``dry_runs/experiment_M.md`` — and a run is a sequence of ticks. This is the
-    index the Lab's rail is built from, so it answers with tick counts and
-    durations rather than with money.
+    Four kinds, one time-ordered list: a loop's ``sessions/session_N/``, an
+    experiment's ``dry_runs/experiment_M.md``, a delegation's status record and
+    a conversation's ``meta.json``. Two of them live under a strategy and two
+    belong to no strategy at all — which is why an agent that only ever gets
+    chatted with, Condor included, used to have an empty Runs rail.
 
     Deliberately **disk only** — no ``get_client``, no
     ``_compute_strategy_performance``, no Hummingbot request of any kind — which
@@ -3058,28 +3081,17 @@ async def list_agent_runs(slug: str, user: WebUser = Depends(get_current_user)):
     putting it here would either make the rail slow or make it lie. A run's PnL
     is read in the run overview, from the strategy's ``/performance`` query.
 
-    A strategy whose directory cannot be read contributes no rows rather than
-    failing the whole response: one unreadable playbook must not cost the reader
-    every other run the agent has.
+    ``limit`` is the rail's window, not a filter: a chatty install has hundreds
+    of conversations and the rail asks for a bigger page when the reader wants
+    one. The two per-user kinds are scoped to the caller, because a conversation
+    is private — so two people legitimately see different rails for one agent,
+    and the rail says so rather than letting it read as data loss.
     """
-    from condor.agents.sessions_index import list_runs
+    from condor.agents.all_runs import list_all_runs
 
     _get_agent(slug)
-    rows: list[RunRow] = []
-    for strategy in _strategy_store().list(slug):
-        try:
-            runs = list_runs(strategy.dir, _runkey(slug, strategy.slug))
-        except Exception:
-            log.debug(
-                "Could not index runs for %s/%s", slug, strategy.slug, exc_info=True
-            )
-            continue
-        rows.extend(
-            RunRow(**run, strategy_slug=strategy.slug, strategy_name=strategy.name)
-            for run in runs
-        )
-    rows.sort(key=lambda r: (r.started_at or 0.0, r.number), reverse=True)
-    return RunsResponse(runs=rows)
+    rows = list_all_runs(slug, user.id, limit=max(1, min(limit, MAX_RUN_LIMIT)))
+    return RunsResponse(runs=[RunRow(**row) for row in rows])
 
 
 # ── Sessions ──
