@@ -70,7 +70,7 @@ def perf_env(tmp_path, monkeypatch):
     monkeypatch.setattr(loops_module.get_supervisor(), "_engines", {})
 
     def use_client(client):
-        async def _fake_get_client(strategy_dir, default_config):
+        async def _fake_get_client(strategy_dir, default_config, principal):
             return client, "srv"
 
         monkeypatch.setattr(agents_routes, "_get_client_for_strategy", _fake_get_client)
@@ -80,7 +80,7 @@ def perf_env(tmp_path, monkeypatch):
 
 def _compute(strategy_dir):
     return asyncio.run(
-        agents_routes._compute_strategy_performance(RUN_KEY, strategy_dir, None)
+        agents_routes._compute_strategy_performance(RUN_KEY, strategy_dir, None, 1)
     )
 
 

@@ -9,7 +9,7 @@ import {
   type NotificationsResponse,
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
-import { toolCallState } from "@/lib/formatters";
+import { namesATool, toolCallState } from "@/lib/formatters";
 import { collectViewFacts, renderViewBlock } from "@/lib/viewFacts";
 import { WS_AUTH_SUBPROTOCOL } from "@/lib/websocket";
 
@@ -1429,6 +1429,22 @@ export function useChatSocket() {
           if (!slotId) break;
           const tcId = data.tool_call_id as string;
           const status = data.status as string | undefined;
+          // A name can arrive late. The ACP adapter announces a call before it
+          // knows what it is and supplies the title on a following update, so
+          // an update that carries one patches the name — exactly what
+          // `fold_tool_call_event` does on the way to disk
+          // (condor/acp/client.py). Ignoring it here was the whole of CORR-327:
+          // the row read "tool" while it ran and its real name after a reload,
+          // and a view that only heals on reload is the worst shape a
+          // disagreement can have.
+          //
+          // The asymmetry is deliberate and is the backend's, not a second one:
+          // a title is patched in only when it names something, so an update
+          // whose title says nothing — blank, or a placeholder like
+          // "undefined" — leaves the announced name standing rather than
+          // overwriting a real name with noise. `namesATool` is the renderer's
+          // own rule (39aaf321), asked here instead of restated.
+          const title = namesATool(data.title) ? String(data.title) : "";
           // Addressed by the call's own id rather than by "whatever is
           // streaming": a status that lands after the bubble stopped being
           // current still belongs to the call it names.
@@ -1439,7 +1455,11 @@ export function useChatSocket() {
                     ...m,
                     toolCalls: m.toolCalls.map((tc) =>
                       tc.tool_call_id === tcId
-                        ? { ...tc, status: status || tc.status }
+                        ? {
+                            ...tc,
+                            status: status || tc.status,
+                            title: title || tc.title,
+                          }
                         : tc,
                     ),
                   }
