@@ -353,7 +353,7 @@ async def get_conversation_deployments(
     since = min((b.since for b in owned if b.since > 0), default=0.0)
 
     perf: Any = AgentPerformance(agent_id=agent_id)
-    client = await _client_for(meta)
+    client = await _client_for(meta, owner_id)
     if client is not None:
         try:
             perf = await fetch_agent_performance(
@@ -368,17 +368,40 @@ async def get_conversation_deployments(
     return ConversationDeployments(deployments=rows)
 
 
-async def _client_for(meta: ConversationMeta):
+async def _client_for(meta: ConversationMeta, subject_id: int):
     """The API client for the server this conversation trades on, or ``None``.
 
     A chat pinned to one server must be priced against that one; a chat that
     never named a server has no fleet to ask about, and its recorded bots are
     still worth listing without money beside them.
+
+    The stored name is held to existence *and* reach before it is turned into
+    credentials (SEC-333), on the same principal the route already resolved —
+    the conversation's owner, which is also who the deed ledger below is read
+    for, so the label and the money can never disagree about whose fleet this
+    is. That predicate is ``sessions.py``'s ``usable()``, and the level is the
+    TRADER floor ``check_server_access`` applies to every server-scoped web
+    call. It matters twice: the name was written from a client-supplied field
+    when the conversation was minted, and access to a real server can be
+    revoked long after — without this, an old chat kept querying a withdrawn
+    server with the install's credentials for its whole life. An unreachable
+    name is simply a conversation with no priceable fleet, which this route
+    already renders.
     """
     if not meta.server_name:
         return None
+    cm = get_config_manager()
+    if not cm.get_server(meta.server_name) or not cm.has_server_access(
+        subject_id, meta.server_name
+    ):
+        log.warning(
+            "deployments: %s cannot reach server %s; listing without money",
+            subject_id,
+            meta.server_name,
+        )
+        return None
     try:
-        return await get_config_manager().get_client(meta.server_name)
+        return await cm.get_client(meta.server_name)
     except Exception as e:  # noqa: BLE001 - an offline server is not a 500
         log.warning("get_client(%s) failed: %s", meta.server_name, e)
         return None

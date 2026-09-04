@@ -39,9 +39,20 @@ class FakeConfigManager:
     def __init__(self, client=None):
         self.client = client
         self.calls: list[str] = []
+        # The install knows this server, and this caller may trade on it.
+        self.servers = {SERVER}
+        self.reachable = {SERVER}
+        self.access_checks: list[tuple[int, str]] = []
 
     def is_admin(self, user_id):
         return False
+
+    def get_server(self, name):
+        return {"name": name} if name in self.servers else None
+
+    def has_server_access(self, user_id, name, min_permission=None):
+        self.access_checks.append((user_id, name))
+        return name in self.reachable
 
     async def get_client(self, name):
         self.calls.append(name)
@@ -275,6 +286,71 @@ def test_someone_elses_conversation_is_not_yours_to_read(cm):
 
 def test_an_unknown_conversation_is_a_404(cm):
     assert _client().get("/conversations/nope/deployments").status_code == 404
+
+
+# ── Whose server it is (SEC-333) ──
+
+
+def test_a_server_the_caller_cannot_reach_is_never_queried(cm, monkeypatch):
+    """A stored name is not a licence to spend the install's credentials.
+
+    Access can be revoked, or the share withdrawn, long after the conversation
+    named the server — and the name itself was written from a client-supplied
+    field. So the name is re-checked at read time, and an unreachable one is
+    just a conversation with no priceable fleet: the record still names the
+    bot, the money column is empty, and the server is never asked.
+    """
+    meta = _conversation()
+    _deploy(meta.id, "condor-solmm")
+    cm.client = object()
+    cm.reachable = set()  # the share was withdrawn
+    calls = _with_perf(monkeypatch, _Perf(bot_names=["condor-solmm-1"]))
+
+    body = _client().get(f"/conversations/{meta.id}/deployments").json()
+
+    assert [r["label"] for r in body["deployments"]] == ["condor-solmm"]
+    assert body["deployments"][0]["pnl"] == 0.0
+    assert cm.calls == []  # no client was ever built for that server
+    assert calls == []  # and nothing was fetched from it
+    # Checked against the principal the route resolved, never waved through.
+    assert cm.access_checks == [(USER.id, SERVER)]
+
+
+def test_a_server_the_caller_can_trade_on_is_priced_as_before(cm, monkeypatch):
+    """The normal case is untouched: reach granted, fleet queried, money shown."""
+    meta = _conversation()
+    _deploy(meta.id, "condor-solmm")
+    cm.client = object()
+    _with_perf(
+        monkeypatch,
+        _Perf(
+            bot_names=["condor-solmm-20260904-101500"],
+            controllers=[
+                _controller("condor-solmm-20260904-101500", "sol", pnl=7.25, volume=100)
+            ],
+        ),
+    )
+
+    body = _client().get(f"/conversations/{meta.id}/deployments").json()
+
+    assert cm.access_checks == [(USER.id, SERVER)]
+    assert cm.calls == [SERVER]
+    assert body["deployments"][0]["pnl"] == pytest.approx(7.25)
+
+
+def test_a_server_that_no_longer_exists_is_not_asked_about(cm, monkeypatch):
+    """Existence *and* reach — ``has_server_access`` says yes to an admin on any
+    string, so a name that survives its server must not resurrect it."""
+    meta = _conversation()
+    _deploy(meta.id, "condor-solmm")
+    cm.client = object()
+    cm.servers = set()  # the server was deleted; the conversation still names it
+    _with_perf(monkeypatch, _Perf())
+
+    body = _client().get(f"/conversations/{meta.id}/deployments").json()
+
+    assert [r["label"] for r in body["deployments"]] == ["condor-solmm"]
+    assert cm.calls == []
 
 
 # ── Executors a conversation opened (CORR-325) ──
