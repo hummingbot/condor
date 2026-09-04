@@ -103,6 +103,10 @@ GENERAL:
 - The mcp-hummingbot server is pre-configured. Do NOT call configure_server.
 - Keep tool chains short (1-5 calls per tick).
 - Your executor state and positions are pre-loaded in [CORE DATA] below — no need to query them.
+- [CORE DATA - drift] is your book checked against the exchange itself. A MISMATCH,
+  GHOST or ORPHAN row means your book is wrong about a live position: say so and size
+  down or reconcile before adding to it. UNANSWERED means the venue did not reply — do
+  not read it as "flat".
 
 SKILLS & ROUTINES:
 - [AVAILABLE SKILLS & ROUTINES] below lists SKILLS (playbooks — know-how: when to
