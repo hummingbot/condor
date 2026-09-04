@@ -441,7 +441,7 @@ async def chat_websocket(ws: WebSocket, token: str | None = Query(default=None))
     # it is the one thing a disconnect must not cancel.
     turn_tasks: set[asyncio.Task] = set()
 
-    def _spawn(coro, *, is_turn: bool = False):
+    def _run_bg(coro, *, is_turn: bool = False):
         task = asyncio.create_task(coro)
         bg_tasks.add(task)
         task.add_done_callback(bg_tasks.discard)
@@ -461,20 +461,20 @@ async def chat_websocket(ws: WebSocket, token: str | None = Query(default=None))
             action = msg.get("action")
 
             if action == "start_session":
-                _spawn(_handle_start_session(ws, user_id, msg))
+                _run_bg(_handle_start_session(ws, user_id, msg))
             elif action == "resume_conversation":
-                _spawn(_handle_resume_conversation(ws, user_id, msg))
+                _run_bg(_handle_resume_conversation(ws, user_id, msg))
             elif action == "send_message":
-                _spawn(_handle_send_message(ws, user_id, msg), is_turn=True)
+                _run_bg(_handle_send_message(ws, user_id, msg), is_turn=True)
             elif action == "destroy_session":
-                _spawn(_handle_destroy_session(ws, user_id, msg))
+                _run_bg(_handle_destroy_session(ws, user_id, msg))
             elif action == "list_sessions":
                 sessions = await _get_user_sessions(user_id)
                 await _send(ws, {"event": "sessions_list", "sessions": sessions})
             elif action == "resolve_permission":
                 await _handle_resolve_permission(user_id, msg)
             elif action == "abort_prompt":
-                _spawn(_handle_abort_prompt(ws, user_id, msg))
+                _run_bg(_handle_abort_prompt(ws, user_id, msg))
             else:
                 await _send(
                     ws, {"event": "error", "message": f"Unknown action: {action}"}
