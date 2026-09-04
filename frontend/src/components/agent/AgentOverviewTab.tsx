@@ -16,6 +16,8 @@ export function MarkdownEditor({
   onSave,
   invalidateKey,
   onDirtyChange,
+  minHeightClass = "min-h-[500px]",
+  showLabel = true,
 }: {
   label: string;
   sublabel: string;
@@ -24,6 +26,18 @@ export function MarkdownEditor({
   invalidateKey: unknown[];
   /** Notifies the host (e.g. a closable modal) when there are unsaved edits. */
   onDirtyChange?: (dirty: boolean) => void;
+  /**
+   * How tall the box starts. A near-full-screen modal can afford 500px; a card
+   * sharing a row with another card inside a disclosure cannot, and a fixed
+   * height there is what turns two documents into a page of scrollbars.
+   */
+  minHeightClass?: string;
+  /**
+   * Whether the box names itself. Off for a host that already has a titled
+   * header of its own — a card whose chrome says "Playbook · strategy.md"
+   * printing it again a row below is the same words twice in two sizes.
+   */
+  showLabel?: boolean;
 }) {
   const queryClient = useQueryClient();
   const [value, setValue] = useState(content);
@@ -46,11 +60,15 @@ export function MarkdownEditor({
 
   return (
     <div className="flex flex-col gap-2">
-      <div className="flex items-center justify-between">
-        <div>
-          <span className="text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">{label}</span>
-          <span className="ml-2 text-[10px] text-[var(--color-text-muted)]">{sublabel}</span>
-        </div>
+      <div className={`flex items-center ${showLabel ? "justify-between" : "justify-end"}`}>
+        {showLabel ? (
+          <div>
+            <span className="text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">{label}</span>
+            <span className="ml-2 text-[10px] text-[var(--color-text-muted)]">{sublabel}</span>
+          </div>
+        ) : (
+          <span className="sr-only">{label}</span>
+        )}
         <button
           onClick={() => saveMut.mutate()}
           disabled={!dirty || saveMut.isPending}
@@ -69,7 +87,7 @@ export function MarkdownEditor({
         value={value}
         onChange={handleChange}
         spellCheck={false}
-        className="min-h-[500px] w-full resize-y rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4 font-mono text-sm leading-relaxed text-[var(--color-text)] outline-none transition-colors focus:border-[var(--color-primary)]/50"
+        className={`${minHeightClass} w-full resize-y rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4 font-mono text-sm leading-relaxed text-[var(--color-text)] outline-none transition-colors focus:border-[var(--color-primary)]/50`}
       />
     </div>
   );

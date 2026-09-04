@@ -7,7 +7,7 @@
  *
  * The second is that the evidence costs nothing until it is asked for. That is
  * the whole difference between this screen and the longer scroll it could have
- * been: `AgentFleet` pulls the entire fleet and `StrategyWorkbench` mounts two
+ * been: `AgentFleet` pulls the entire fleet and `PlaybookView` mounts two
  * markdown editors, so a closed disclosure has to mount *nothing* — which is
  * what the stubs below can prove and a rendered page cannot.
  *
@@ -71,8 +71,8 @@ vi.mock("@/components/agent/workspace/MoneyView", () => ({
 vi.mock("@/components/agent/workspace/AgentFleet", () => ({
   AgentFleet: stub("fleet"),
 }));
-vi.mock("@/components/agent/StrategyWorkbench", () => ({
-  StrategyWorkbench: stub("playbook"),
+vi.mock("@/components/agent/workspace/PlaybookView", () => ({
+  PlaybookView: stub("playbook"),
 }));
 vi.mock("@/components/agent/lab/RunRail", () => ({ RunRail: stub("rail") }));
 vi.mock("@/components/agent/lab/RunOverview", () => ({

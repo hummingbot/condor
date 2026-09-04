@@ -17,12 +17,12 @@ import { SnapshotDetail } from "@/components/agent/AgentSessionContent";
 import { DeploymentLedger } from "@/components/agent/lab/DeploymentLedger";
 import { ExperimentDetail, RunOverview } from "@/components/agent/lab/RunOverview";
 import { RunRail } from "@/components/agent/lab/RunRail";
-import { StrategyWorkbench } from "@/components/agent/StrategyWorkbench";
 import { isLoopRun } from "@/components/agent/lab/runs";
 import { AgentFleet } from "@/components/agent/workspace/AgentFleet";
 import { MoneyView } from "@/components/agent/workspace/MoneyView";
 import { LoopBar } from "@/components/agent/workspace/LoopBar";
 import { NowView } from "@/components/agent/workspace/NowView";
+import { PlaybookView } from "@/components/agent/workspace/PlaybookView";
 import {
   useSections,
   type SectionId,
@@ -133,7 +133,7 @@ const HINTS: Record<SectionId, { label: string; hint: string; Icon: typeof Coins
  * - **Five disclosures** under it — Runs, Detail, Money, Fleet, Playbook —
  *   which open *in place* and render nothing at all while closed. That last
  *   part is what makes one screen affordable rather than merely longer: the
- *   fleet browser pulls the whole fleet and the workbench mounts two markdown
+ *   fleet browser pulls the whole fleet and the playbook mounts two markdown
  *   editors, and a page that mounted them eagerly would cost more than the
  *   spine it replaces. Which are open is `?open=`, so a screen is a thing you
  *   can send somebody.
@@ -415,15 +415,24 @@ export function AgentRunScreen({
               </Disclosure>
 
               <Disclosure id="playbook" open={isOpen("playbook")} onToggle={toggle}>
-                {/* The Runs band comes off here — the disclosure above is the
-                    rail now, and a second list of the same runs inside this one
-                    is the duplication this screen exists to remove. */}
-                <StrategyWorkbench
-                  slug={agent.slug}
-                  sslug={sslug}
-                  showRuns={false}
-                  onDeleted={() => setParams({ strategy: null })}
-                />
+                {/* What the strategy is *told* — its brief, its learnings and
+                    its settings — and nothing this screen already answers. The
+                    workbench used to be here and it is a page: its title, its
+                    controls, its pulse, its ledger and its performance panel
+                    each restated something within two inches of themselves,
+                    while `strategy.md` was behind a button in a modal. */}
+                {strategy ? (
+                  <PlaybookView
+                    slug={agent.slug}
+                    sslug={sslug}
+                    strategy={strategy}
+                    onDeleted={() => setParams({ strategy: null })}
+                  />
+                ) : (
+                  <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">
+                    Loading this strategy's playbook…
+                  </p>
+                )}
               </Disclosure>
             </div>
           </>
@@ -469,7 +478,7 @@ export function AgentRunScreen({
  *
  * The lazy mount is the whole argument for the disclosure over a section that
  * is simply on the page: `AgentFleet` pulls the entire fleet and
- * `StrategyWorkbench` mounts two markdown editors, so a closed one has to cost
+ * `PlaybookView` mounts two markdown editors, so a closed one has to cost
  * what a closed spine entry cost — which is nothing.
  */
 function Disclosure({
