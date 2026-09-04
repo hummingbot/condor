@@ -364,11 +364,18 @@ export function StrategyWorkbench({
         )}
       </div>
 
-      {/* What the loop actually put into the world. Directly under the pulse
-          and above the charts: the mechanism says what it is doing, and this
-          says what is out there doing it. Before this the only answer on this
-          surface was a button that navigated to `/bots` — which is to say, the
-          answer cost you the strategy you were reading. */}
+      {/* The money, directly under the pulse: what a strategy is judged on is
+          how it did, and reading it used to mean scrolling past the fleet, the
+          live charts and the runs to reach the bottom of the page. */}
+      <div className={`mb-4 grid grid-cols-1 gap-6 ${dense ? "" : "lg:grid-cols-2"}`}>
+        <PerformancePanel slug={slug} sslug={sslug} dense={dense} />
+      </div>
+
+      {/* What the loop actually put into the world. Under the money and above
+          the charts: the totals say how it went, and this says what is still
+          out there doing it. Before this the only answer on this surface was a
+          button that navigated to `/bots` — which is to say, the answer cost
+          you the strategy you were reading. */}
       <div className="mb-4">
         <DeployedFleet slug={slug} sslug={sslug} serverName={serverName} dense={dense} />
       </div>
@@ -420,11 +427,6 @@ export function StrategyWorkbench({
           <RunsBand slug={slug} sslug={sslug} labUrl={labUrl} />
         </div>
       )}
-
-      {/* Performance Panel — strategy-level money, which is what it always was */}
-      <div className={`mb-8 grid grid-cols-1 gap-6 ${dense ? "" : "lg:grid-cols-2"}`}>
-        <PerformancePanel slug={slug} sslug={sslug} dense={dense} />
-      </div>
 
       {/* Playbook & Learnings Modal (near full-screen) */}
       {showStrategyModal && (
