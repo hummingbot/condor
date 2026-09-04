@@ -103,6 +103,8 @@ export function botScope(bot: string): string {
 export interface Term {
   /** What this set of records is, in the reader's terms. */
   label: string;
+  /** The run key that owns them — what decides where the link goes. */
+  runKey: string;
   /** What it contributes to `fold − attributed`, in display currency. */
   delta: number;
   /** The fleet scope that opens exactly these records. */
@@ -124,8 +126,40 @@ export interface Term {
  */
 export interface Lead {
   label: string;
+  /** The run key that owns them — what decides where the link goes. */
+  runKey: string;
   scope: string;
   count: number;
+}
+
+/**
+ * Where a term's or a lead's records are actually read.
+ *
+ * The workspace's own Fleet view whenever it can be — following a link out of
+ * the workspace unmounts the frame, the loop bar and the tick spine, which is
+ * one of the six navigations FEAT-103 exists to delete. But that view is
+ * **rooted** at one run key and the root is a floor, not a default
+ * (`clampScope`, FEAT-108): a link to a sibling scope would be clamped back to
+ * the root and the reader would land on the agent's own fleet believing they
+ * were looking at what the chat deployed.
+ *
+ * So a scope inside the floor stays home, and one outside it goes to `/bots`,
+ * where every scope resolves. Silently showing the wrong records is the one
+ * outcome not on the table.
+ */
+export function recordsHref(
+  slug: string,
+  sslug: string,
+  item: { runKey: string; scope: string },
+): string {
+  if (item.runKey === `${slug}.${sslug}`) {
+    return (
+      `/agents/${encodeURIComponent(slug)}?view=fleet` +
+      `&strategy=${encodeURIComponent(sslug)}` +
+      `&fscope=${encodeURIComponent(item.scope)}`
+    );
+  }
+  return `/bots?scope=${encodeURIComponent(item.scope)}`;
 }
 
 /** What the two numbers are, and everything that stands between them. */
@@ -230,6 +264,7 @@ export function reconcile(input: ReconcileInput): Reconciliation {
     const spine = spineOf(runKey);
     return {
       label: PSEUDO_LABELS[splitRunKey(runKey).strategy],
+      runKey,
       delta: foldLeaves(spine, convert, now).net,
       scope: agentScope(runKey),
       count: spine.length,
@@ -243,18 +278,21 @@ export function reconcile(input: ReconcileInput): Reconciliation {
   // strategy *declared* or that Condor only knows by a recorded deed — is the
   // case that produces a residual by construction: the fold has its whole
   // history and the rollup has only the part inside an owner window.
-  const adopted = new Map<string, number>();
+  const adopted = new Map<string, { runKey: string; count: number }>();
   for (const runKey of runKeys) {
     if (isPseudoRunKey(runKey)) continue;
     for (const leaf of spineOf(runKey)) {
       if (!ADOPTED.includes(leaf.how)) continue;
-      adopted.set(leaf.bot, (adopted.get(leaf.bot) ?? 0) + 1);
+      const seen = adopted.get(leaf.bot);
+      if (seen) seen.count += 1;
+      else adopted.set(leaf.bot, { runKey, count: 1 });
     }
   }
   const leads: Lead[] = [...adopted]
     .sort((a, b) => a[0].localeCompare(b[0]))
-    .map(([bot, count]) => ({
+    .map(([bot, { runKey, count }]) => ({
       label: `${bot} — adopted, so its history starts before this agent's runs`,
+      runKey,
       scope: botScope(bot),
       count,
     }));

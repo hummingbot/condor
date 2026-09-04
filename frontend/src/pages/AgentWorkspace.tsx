@@ -12,7 +12,6 @@ import {
 
 import { AgentKnowledge } from "@/components/agent/AgentKnowledge";
 import { DelegationSheet } from "@/components/agent/DelegationSheet";
-import { PerformancePanel } from "@/components/agent/AgentOverviewTab";
 import { SnapshotDetail } from "@/components/agent/AgentSessionContent";
 import { ExperimentDetail, RunOverview } from "@/components/agent/lab/RunOverview";
 import { RunRail } from "@/components/agent/lab/RunRail";
@@ -21,6 +20,7 @@ import { StrategyWorkbench } from "@/components/agent/StrategyWorkbench";
 import { isLoopRun } from "@/components/agent/lab/runs";
 import { isKnowledgeTab } from "@/components/agent/knowledgeTabs";
 import { AgentFleet } from "@/components/agent/workspace/AgentFleet";
+import { MoneyView } from "@/components/agent/workspace/MoneyView";
 import { LoopBar } from "@/components/agent/workspace/LoopBar";
 import { NowView } from "@/components/agent/workspace/NowView";
 import { useWorkspaceAlerts } from "@/components/agent/workspace/useWorkspaceAlerts";
@@ -386,7 +386,17 @@ export function AgentWorkspace() {
       This agent has no strategies yet, so there is no loop to look at.
     </p>
   ) : view === "money" ? (
-    <PerformancePanel slug={agent.slug} sslug={sslug} />
+    /* Two numbers, named apart and reconciled (FEAT-109). This used to be the
+       run rollup alone, which is a different quantity from the one the fleet
+       page prints at the same scope — and shown as the only number, the reader
+       had no way to know that neither was broken. */
+    <MoneyView
+      slug={agent.slug}
+      sslug={sslug}
+      strategy={url.strategy}
+      strategies={agent.strategies ?? []}
+      serverName={strategyServer}
+    />
   ) : view === "tick" ? (
     /* One tick of one run, the same body the Lab renders — reached by clicking
        a beat on the spine above, which is why this view has no picker of its

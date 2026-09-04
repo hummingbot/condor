@@ -27,6 +27,7 @@ import {
   agentScope,
   botScope,
   isPseudoRunKey,
+  recordsHref,
   reconcile,
   splitRunKey,
 } from "./reconcile";
@@ -266,5 +267,42 @@ describe("the dash rule", () => {
     const r = reconcile(base([owned("brigado.brl_mm", { net: 0, volume: 5_000 })], 0));
     expect(r.reported).toBe(true);
     expect(r.totals.volume).toBe(5_000);
+  });
+});
+
+describe("where a term's records are read", () => {
+  it("stays in the workspace for a scope inside the Fleet view's floor", () => {
+    expect(
+      recordsHref("brigado", "brl_mm", {
+        runKey: "brigado.brl_mm",
+        scope: botScope("old_hand_bot"),
+      }),
+    ).toBe(
+      "/agents/brigado?view=fleet&strategy=brl_mm&fscope=bot%3Aold_hand_bot",
+    );
+  });
+
+  it("goes to /bots for a scope the rooted view would clamp away", () => {
+    // `agent:brigado.chat` is a *sibling* of the Fleet view's root, so a
+    // workspace link would be clamped back to the root and quietly show the
+    // agent's own fleet instead of what its chat deployed.
+    expect(
+      recordsHref("brigado", "brl_mm", {
+        runKey: "brigado.chat",
+        scope: agentScope("brigado.chat"),
+      }),
+    ).toBe("/bots?scope=agent%3Abrigado.chat");
+  });
+
+  it("gives every term and every lead a link", () => {
+    const leaves = [
+      owned("brigado.brl_mm", { net: 64, id: "a" }),
+      owned("brigado.chat", { net: 27, id: "c", bot: "sol_scalper", how: "deed" }),
+      owned("brigado.brl_mm", { net: 30, id: "b", bot: "old_hand_bot", how: "declared" }),
+    ];
+    const r = reconcile(base(leaves, 74));
+    for (const item of [...r.terms, ...r.leads]) {
+      expect(recordsHref("brigado", "brl_mm", item)).toMatch(/^\/(agents|bots)/);
+    }
   });
 });
