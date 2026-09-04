@@ -476,6 +476,14 @@ def _make_event_sink(dt: DelegateTask):
         elif isinstance(event, TextChunk):
             merge_chunk("text", event.text)
         elif isinstance(event, (ToolCallEvent, ToolCallUpdate)):
+            # Read the arguments the entry holds *before* the fold, so the bound
+            # below can tell an event that supplied new ones from one that only
+            # flipped a status or delivered output. Compared by identity rather
+            # than by re-deriving the fold's own "did this event carry input?"
+            # test: the fold is free to change that test, and an identity check
+            # cannot drift away from what it actually did (PERF-329).
+            previous = tc_map.get(event.tool_call_id)
+            previous_input = previous.get("input") if previous is not None else None
             tc = fold_tool_call_event(tc_map, event)
             if tc is not None:
                 tc["type"] = "tool"
@@ -485,7 +493,10 @@ def _make_event_sink(dt: DelegateTask):
             # folded entry looked up here, not to the return value.
             folded = tc_map.get(event.tool_call_id)
             if folded is not None:
-                _bound_tool_payloads(folded)
+                _bound_tool_payloads(
+                    folded,
+                    redact_input=folded.get("input") is not previous_input,
+                )
 
     return sink
 
@@ -587,15 +598,15 @@ def _clip_output(value) -> str:
     return out[:MAX_TOOL_OUTPUT] + TRUNCATION_MARKER
 
 
-def _bound_tool_payloads(tc: dict) -> None:
-    """Redact a folded tool entry's arguments, then clip its payloads.
+def _bound_tool_payloads(tc: dict, *, redact_input: bool = True) -> None:
+    """Redact a folded tool entry's arguments, then clip and normalize its payloads.
 
     The output is what gets big (a market-data dump, a file read), and both
     projections already cut it at :data:`MAX_TOOL_OUTPUT` -- keeping the full
-    string in RAM bought nothing. The input is normally small and is left in its
-    original shape so the dashboard can render it as JSON; only one that
-    serializes past the same ceiling degrades to its clipped string form, since
-    an ``Edit``/``Write`` call can carry a whole file in its arguments.
+    string in RAM bought nothing. The input keeps its JSON shape so the dashboard
+    can render it as a tree; only one that serializes past the same ceiling
+    degrades to its clipped string form, since an ``Edit``/``Write`` call can
+    carry a whole file in its arguments.
 
     Redaction comes *first*, and it is why this is the only place a folded entry
     passes through. A delegated agent auto-approves its own tool calls, and at
@@ -607,6 +618,22 @@ def _bound_tool_payloads(tc: dict) -> None:
     than reimplemented so the two paths share one hint list and a hint added
     there takes effect on both. Redacting before the clip means an argument set
     too big to keep whole is redacted in the string it degrades to as well.
+
+    The serialization the size check needs is *kept* rather than measured and
+    thrown away: parsing it back leaves ``tc["input"]`` already JSON-safe, so an
+    argument the agent passed that no serializer can encode is coerced once here
+    instead of once per reader per poll (PERF-329). Being the write side, this
+    runs a handful of times per tool call; :func:`events_for_wire` ran the same
+    round-trip over the *whole* bounded stream every 2 seconds a transcript was
+    open.
+
+    ``redact_input`` is the caller's answer to "did the input just change?". A
+    tool call is folded several times -- announced, filled in, then completed
+    with its output -- and only one of those events carries arguments, so
+    re-redacting on the others allocated a fresh copy of a payload nothing had
+    touched. The entry is still mutated in place either way: ``tc`` is shared by
+    identity between the timeline and the action-log map, and copying it would
+    leave the deeds log unredacted.
     """
     import json
 
@@ -615,13 +642,16 @@ def _bound_tool_payloads(tc: dict) -> None:
     out = tc.get("output")
     if out is not None:
         tc["output"] = _clip_output(out)
+    if not redact_input:
+        return
     inp = tc.get("input")
     if inp is not None and not isinstance(inp, str):
         inp = _redact(inp)
-        tc["input"] = inp
         serialized = json.dumps(inp, default=str)
         if len(serialized) > MAX_TOOL_OUTPUT:
             tc["input"] = _clip_output(serialized)
+        else:
+            tc["input"] = json.loads(serialized)
 
 
 def _bound_events(events: list[dict]) -> None:
@@ -682,9 +712,15 @@ def events_for_wire(events: list[dict]) -> list[dict]:
     a serializer would race with a running delegation. Truncation reuses
     :func:`_clip_output`, so what a reader sees on the wire is cut at exactly the
     boundary the on-disk transcript uses.
-    """
-    import json
 
+    The copy is of the *entries*, not of the arguments inside them. A tool input
+    is never edited in place -- :func:`_bound_tool_payloads` rebinds it to a
+    fresh redacted, JSON-safe value -- so the projection reads it through, and
+    this function does no serialization of its own. That matters because the
+    dashboard polls it every 2 seconds while a task runs: re-encoding and
+    re-parsing every argument set in a 500-event stream, on the loop that is
+    also streaming the live chat, was most of what this cost (PERF-329).
+    """
     wire: list[dict] = []
     for ev in list(events):  # snapshot: the sink may append while we iterate
         kind = ev.get("type")
@@ -706,9 +742,10 @@ def events_for_wire(events: list[dict]) -> list[dict]:
                     "name": ev.get("name") or "unknown",
                     "status": ev.get("status") or "",
                     "kind": ev.get("kind") or "",
-                    # A tool input can hold anything the agent passed; round-trip
-                    # it through JSON so the response can't fail to serialize.
-                    "input": json.loads(json.dumps(inp, default=str)) if inp else None,
+                    # A tool input can hold anything the agent passed, so it is
+                    # coerced to something JSON can encode -- once, by the sink
+                    # that stored it, not again here on every poll.
+                    "input": inp if inp else None,
                     "output": _clip_output(out) if out else None,
                 }
             )

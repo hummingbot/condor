@@ -674,7 +674,7 @@ def test_events_for_wire_returns_a_copy():
 
     wire = events_for_wire(events)
     wire[0]["status"] = "completed"
-    wire[0]["input"]["pair"] = "MUTATED"
+    wire[0]["input"] = {"pair": "MUTATED"}
     wire.append({"type": "text", "text": "injected"})
 
     assert events[0]["status"] == "in_progress"
@@ -682,30 +682,121 @@ def test_events_for_wire_returns_a_copy():
     assert len(events) == 1
 
 
-def test_events_for_wire_makes_input_json_safe():
-    """A tool input can hold anything; the response must still serialize."""
+def test_events_for_wire_does_not_reserialize_the_input(monkeypatch):
+    """The 2-second poll must not re-encode arguments the sink already coerced.
+
+    The projection is a *read* path: a transcript left open re-runs it over the
+    whole bounded stream every two seconds, on the loop that is also streaming
+    the live chat, so a JSON round-trip per tool call there is paid once per
+    reader per poll for work the write side already did (PERF-329). Asserted by
+    making ``json`` itself fail, which is the only way to catch a round-trip
+    being reintroduced.
+    """
     import json
 
-    from condor.agents.delegate import events_for_wire
+    from condor.agents import delegate as delegate_module
 
-    class Opaque:
-        def __repr__(self):
-            return "<opaque>"
+    def explode(*a, **kw):  # pragma: no cover - the point is that it is not hit
+        raise AssertionError("events_for_wire must not serialize on the read path")
 
-    wire = events_for_wire(
+    monkeypatch.setattr(json, "dumps", explode)
+    monkeypatch.setattr(json, "loads", explode)
+
+    wire = delegate_module.events_for_wire(
         [
             {
                 "type": "tool",
                 "id": "t1",
                 "name": "scan",
                 "status": "completed",
-                "input": {"obj": Opaque()},
+                "input": {"pair": "SOL-USDC"},
+                "output": "ok",
             }
         ]
     )
 
-    assert json.dumps(wire)  # would raise if the projection leaked the object
-    assert wire[0]["input"] == {"obj": "<opaque>"}
+    assert wire[0]["input"] == {"pair": "SOL-USDC"}
+
+
+def test_folded_tool_input_is_stored_json_safe():
+    """A tool input can hold anything; what the sink stores must still serialize.
+
+    The guarantee the wire used to buy with a per-poll round-trip, moved to the
+    single write-side choke point every folded entry passes through -- so the
+    events sidecar, the markdown transcript and the HTTP response all inherit it
+    from one coercion instead of repeating it.
+    """
+    import json
+
+    from condor.agents.delegate import _bound_tool_payloads, events_for_wire
+
+    class Opaque:
+        def __repr__(self):
+            return "<opaque>"
+
+    tc = {"type": "tool", "id": "t1", "name": "scan", "input": {"obj": Opaque()}}
+    _bound_tool_payloads(tc)
+
+    assert tc["input"] == {"obj": "<opaque>"}
+    assert json.dumps(events_for_wire([tc]))  # would raise if the object leaked
+
+
+def test_bound_tool_payloads_skips_redaction_when_the_input_did_not_change():
+    """An output-only patch must not re-walk an argument set nothing touched.
+
+    A tool call is folded several times and only one of those events carries
+    arguments; redacting on the others allocated a fresh copy of the payload per
+    event for no change (PERF-329). Skipping is safe only because it is
+    idempotent -- the entry stays exactly as the redacting call left it.
+    """
+    from condor.agents.delegate import _bound_tool_payloads
+
+    tc = {"input": {"password": "hunter2", "pair": "SOL-USDC"}, "output": "ok"}
+    _bound_tool_payloads(tc)
+    redacted = tc["input"]
+
+    tc["output"] = "later output"
+    _bound_tool_payloads(tc, redact_input=False)
+
+    assert tc["output"] == "later output"  # the output bound still runs
+    assert tc["input"] is redacted  # untouched, not re-allocated
+    assert tc["input"] == {"password": "[redacted]", "pair": "SOL-USDC"}
+
+
+def test_late_arguments_on_an_update_are_still_redacted():
+    """The skip must key off what the fold *did*, not off the event's shape.
+
+    ``claude-agent-acp`` announces a call with no arguments and supplies them on
+    a later update, so a bound that only redacted on the announcement would put
+    a plaintext credential in every projection of the call that matters.
+    """
+    import json
+
+    from condor.acp.client import ToolCallEvent, ToolCallUpdate
+    from condor.agents.delegate import _make_event_sink
+
+    class _DT:
+        events: list = []
+        tool_calls: dict = {}
+
+    dt = _DT()
+    dt.events, dt.tool_calls = [], {}
+    sink = _make_event_sink(dt)
+
+    sink(ToolCallEvent(tool_call_id="t1", title="configure_server", status="pending"))
+    sink(
+        ToolCallUpdate(
+            tool_call_id="t1",
+            status="in_progress",
+            input={"password": "hunter2", "pair": "SOL-USDC"},
+        )
+    )
+    sink(ToolCallUpdate(tool_call_id="t1", status="completed", output="ok"))
+
+    assert "hunter2" not in json.dumps(dt.events, default=str)
+    assert dt.events[0]["input"]["password"] == "[redacted]"
+    # Same object in both projections: the action log reads the map (FEAT-105).
+    assert dt.tool_calls["t1"] is dt.events[0]
 
 
 def test_to_dict_still_omits_events():
