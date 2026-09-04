@@ -72,7 +72,9 @@ type, tx hashes, and the wallet balance. Trust it over memory.
 - `mode: "operation"` lets Aomi build the bundle from a catalog builder (Uniswap V4, LI.FI,
   deBridge, Lido/ether.fi claims, Solana swaps): set `app`, `operation`, and `arguments`
   exactly as the descriptor from `aomi_catalog` requires. Solana operations need
-  `chain: "svm"`; prefer Hummingbot's own Gateway executors where they already cover the venue.
+  `chain: "svm"`, `chain_id: 1`, and the builder's skill loaded (`skills: ["jupiter"]`);
+  dry runs are verified, commits need a `server_auto` Solana wallet on the Aomi side. Prefer
+  Hummingbot's own Gateway executors where they already cover the venue.
 - Every other protocol is `mode: "calls"` built from its skill: for an Aave supply on Base,
   read `aomi_skill("aave")`, take the Pool address for chain 8453 and the `supply(...)`
   signature, and stage the approve + supply calls with `data.signature` and `data.args`.

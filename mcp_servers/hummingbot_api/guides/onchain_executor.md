@@ -8,7 +8,12 @@ Two ways to say what to sign:
 - **`mode="operation"`** — a builder from the catalog (`app`, `operation`,
   `arguments`): Uniswap V4 swaps, LI.FI swaps/bridges, deBridge orders, Lido and
   ether.fi withdrawal claims, and the Solana swaps (Jupiter, Raydium, Sanctum) with
-  `chain="svm"`. Aomi builds the calls; you never touch calldata.
+  `chain="svm"` plus `skills=["jupiter"]` (the builder's skill must be loaded).
+  Aomi builds the calls; you never touch calldata. Solana is verified through
+  staging and simulation (a Jupiter SOL→USDC dry run returns a 7-instruction
+  bundle); a Solana *commit* additionally needs the wallet bound `server_auto`
+  on the Aomi side, and quote-based builders can be refused at commit as stale
+  when the fresh quote no longer matches the simulated build.
 - **`mode="calls"`** — raw EVM calls (`to`, `data`, `value`). This is how every
   other protocol is reached: Aomi's 40+ **skills** (Aave, Morpho, Compound, Curve,
   Pendle, Lido, ether.fi, Rocket Pool, ...) are instructions — contract addresses,
@@ -56,7 +61,7 @@ lifecycle. Passing one of those as `operation` is refused at create time. Reads
 | Parameter | Required | Meaning |
 |---|---|---|
 | `chain_id` | yes | EVM chain: `8453` Base, `1` Ethereum, `42161` Arbitrum, `10` Optimism |
-| `chain` | no | `evm` (default) or `svm` for Solana operations in `mode=operation` |
+| `chain` | no | `evm` (default) or `svm` for Solana operations in `mode=operation` (then `chain_id: 1`, optional `cluster`) |
 | `skills` | no | Skills to load alongside the app for a build (rarely needed; skills are read with `aomi_skill`) |
 | `mode` | yes | `calls` (raw `evm_stage_tx` calls) or `operation` (an app operation) |
 | `calls[]` | `mode=calls` | Each `{to, description, data: {signature, args, raw}, value}` — `value` is a **wei string** (`"0"` for none); `data.signature` + `data.args` for an ABI call, or `data.raw` for pre-encoded calldata |
