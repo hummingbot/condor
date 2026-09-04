@@ -25,7 +25,7 @@ async def _handle_switch_to_dex(
     update: Update, context: ContextTypes.DEFAULT_TYPE, network_id: str
 ) -> None:
     """Switch from CEX to DEX trading"""
-    from handlers.config.user_preferences import (
+    from condor.preferences import (
         get_dex_swap_defaults,
         set_last_trade_connector,
     )

@@ -25,9 +25,7 @@ def install(tmp_path, monkeypatch):
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("utils.config.CONDOR_TELEMETRY", None, raising=False)
-    monkeypatch.setattr(
-        "condor.agents.agent._DATA_ROOT", str(tmp_path / "data"), raising=False
-    )
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path / "data"))
     cm_module.ConfigManager.reset_instance()
     emitter.discard_buffer()
     emitter.set_hosted(True)

@@ -9,13 +9,16 @@ tools:
 - manage_amm
 - explore_dex_pools
 - get_portfolio_overview
-- get_market_data
+- get_prices
 - send_notification
 - manage_routines
-- manage_trading_agent
+- manage_agents
+- manage_strategies
+- control_agent
 - trading_agent_journal_read
 - manage_memory
 - manage_skill
+- run_code
 when_to_consult: When the user asks whether a freshly-graduated Meteora DAMM v2 pool
   is worth LPing, how to size/enter an early position, which established DAMM v2 pool
   has the best fee yield, or whether an open AMM position should hold or exit — use
@@ -34,8 +37,8 @@ harvest **fee yield on established DAMM v2 pools** between graduations. You act 
 `manage_amm` — there is no AMM executor, so you are stateless and **your journal is the source of
 truth** for every position you hold (record each `position_address`).
 
-Scope is **AMM only**. Router/one-shot swaps → `manage_executors(order_executor)`. CLMM/DLMM LP →
-`manage_executors(lp_executor)` / the Solana DEX LP agent. Never reach for those here.
+Scope is **AMM only**. Router/one-shot swaps → `create_order_executor`. CLMM/DLMM LP →
+`create_lp_executor` / the Solana DEX LP agent. Never reach for those here.
 
 ## First move
 Call `manage_amm()` with **no action** to load the AMM guide, action list, param matrix, and

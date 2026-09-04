@@ -24,6 +24,7 @@ from condor.runtime.registry_file import (
     STATUS_FILENAME,
     LoopState,
     is_stale,
+    is_suspended,
     read_status,
     write_status,
 )
@@ -53,6 +54,10 @@ class ReconcileReport:
 
     interrupted: list[InterruptedRun] = field(default_factory=list)
     restarted: list[InterruptedRun] = field(default_factory=list)
+    # Runs the last process wound down on its way out and this one brought back.
+    # Kept apart from ``interrupted``: nothing went wrong, so the owner gets no
+    # "interrupted run" message for a restart they asked for.
+    resumed: list[InterruptedRun] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     delegations: int = 0
     orphan_state: int = 0
@@ -162,26 +167,39 @@ class LoopSupervisor:
 
         Deliberately ``stop()`` and not the shutdown sequence: winding down
         positions is an emergency action, not what a restart should do.
+
+        Each engine records STOPPED on its way out, which is the same thing a
+        run ended by its owner writes — so the next boot found nothing to
+        resume and ``restart_on_boot`` fired only after a crash, which is the
+        opposite of what the flag reads like. Overwrite that with SUSPENDED:
+        the process ended this run, and the next one settles it.
         """
         for engine in list(self._engines.values()):
             try:
                 await engine.stop()
             except Exception:
                 log.exception("Error stopping engine %s", engine.agent_id)
+            else:
+                self.record(engine, LoopState.SUSPENDED)
 
     # ── Boot reconciliation ──
 
     async def reconcile_boot(self, agents_root: Path | None = None) -> ReconcileReport:
         """Settle what the previous process left running.
 
-        Any status file in a live state whose boot id is not ours belongs to a
-        process that died. Mark it interrupted, note it in the journal, and —
-        only when the session opted in — start a *new* session. An old session
-        number is never resurrected: its journal is closed history.
+        Two kinds of leftovers, told apart by the state on disk. A status file
+        in a *live* state under a foreign boot id belongs to a process that
+        died: mark it interrupted and note it in the journal. A SUSPENDED one
+        was wound down by the last shutdown, so nothing is wrong with it and
+        the owner hears nothing about it — it is simply retired here.
+
+        Either way the session opting into ``restart_on_boot`` gets a *new*
+        session started. An old session number is never resurrected: its
+        journal is closed history.
         """
         report = ReconcileReport()
 
-        for session_dir, status in self._stale_sessions(agents_root):
+        for session_dir, status, crashed in self._sessions_to_settle(agents_root):
             run = InterruptedRun(
                 agent_slug=status.get("agent_slug", "?"),
                 strategy_slug=status.get("strategy_slug", "?"),
@@ -190,14 +208,22 @@ class LoopSupervisor:
                 session_dir=session_dir,
             )
 
-            self._mark_interrupted(session_dir, status, run)
-            report.interrupted.append(run)
+            if crashed:
+                self._mark_interrupted(session_dir, status, run)
+                report.interrupted.append(run)
+            else:
+                # The shutdown already closed the journal and the ownership
+                # window, so all that is left is to retire the record — before
+                # the restart, so that a resume which throws cannot leave a
+                # SUSPENDED file for every later boot to try again.
+                write_status(session_dir, state=LoopState.STOPPED, boot_id=BOOT_ID)
 
             if status.get("restart_on_boot"):
                 try:
                     if await self._restart(status):
                         run.restarted = True
-                        report.restarted.append(run)
+                        bucket = report.restarted if crashed else report.resumed
+                        bucket.append(run)
                 except Exception as exc:  # noqa: BLE001 - reported, never fatal
                     log.exception("Could not restart %s", run.label)
                     report.errors.append(f"{run.label}: restart failed ({exc})")
@@ -212,11 +238,13 @@ class LoopSupervisor:
         except Exception:
             log.warning("State cleanup failed during boot", exc_info=True)
 
-        if report.total or report.delegations:
+        if report.total or report.resumed or report.delegations:
             log.warning(
-                "Boot reconciliation: %d interrupted, %d restarted, %d delegations",
+                "Boot reconciliation: %d interrupted, %d restarted, "
+                "%d resumed, %d delegations",
                 report.total,
                 len(report.restarted),
+                len(report.resumed),
                 report.delegations,
             )
         return report
@@ -246,9 +274,9 @@ class LoopSupervisor:
 
     def _reconcile_legacy_delegations(self, agents_root: Path | None) -> int:
         """The same sweep over ``agents/{slug}/delegations/{task}.status.json``."""
-        from condor.agents.agent import _DATA_ROOT
+        from condor.paths import local_agents_root
 
-        root = Path(agents_root) if agents_root is not None else _DATA_ROOT
+        root = Path(agents_root) if agents_root is not None else local_agents_root()
         if not root.is_dir():
             return 0
 
@@ -270,16 +298,21 @@ class LoopSupervisor:
         write_status(directory, filename, state=LoopState.INTERRUPTED, boot_id=BOOT_ID)
         return 1
 
-    def _stale_sessions(self, agents_root: Path | None):
-        """Yield (session_dir, status) for every run a dead process left live."""
-        from condor.agents.agent import _DATA_ROOT
-        from condor.agents.sessions_index import SESSION_DIRNAMES
+    def _sessions_to_settle(self, agents_root: Path | None):
+        """Yield (session_dir, status, crashed) for every run a boot must settle.
 
-        root = Path(agents_root) if agents_root is not None else _DATA_ROOT
+        ``crashed`` is True for a run the last process left in a live state (it
+        died holding it) and False for one that process wound down on its way
+        out — the difference between a loss to report and a restart to honour.
+        """
+        from condor.agents.sessions_index import SESSION_DIRNAMES
+        from condor.paths import local_agents_root
+
+        root = Path(agents_root) if agents_root is not None else local_agents_root()
         if not root.is_dir():
             return
 
-        # agents/*/strategies/*/sessions/session_*/status.json — the layout is
+        # <local>/*/strategies/*/sessions/session_*/status.json — the layout is
         # owned by the journal, so the directory names come from there.
         for agent_dir in sorted(p for p in root.iterdir() if p.is_dir()):
             strategies = agent_dir / "strategies"
@@ -294,8 +327,12 @@ class LoopSupervisor:
                         if not session_dir.is_dir():
                             continue
                         status = read_status(session_dir)
-                        if status and is_stale(status):
-                            yield session_dir, status
+                        if not status:
+                            continue
+                        if is_stale(status):
+                            yield session_dir, status, True
+                        elif is_suspended(status):
+                            yield session_dir, status, False
 
     def _mark_interrupted(
         self, session_dir: Path, status: dict, run: InterruptedRun
@@ -391,7 +428,7 @@ class LoopSupervisor:
         # Revalidate against the config as it stands NOW, not as the dead
         # session had it: the user may have changed it precisely because the
         # last run misbehaved. load_full_config raises if it no longer validates.
-        config = load_full_config(strategy.dir, strategy.default_config)
+        config = load_full_config(strategy.home, strategy.default_config)
         config["restart_on_boot"] = True
 
         engine = TickEngine(

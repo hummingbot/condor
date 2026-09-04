@@ -3,7 +3,7 @@
 Each strategy is a tick-loop playbook that lives **under its owning Agent**, as
 ``strategy.md`` (YAML frontmatter + markdown body) inside a per-strategy folder::
 
-    agents/
+    <root>/
         {agent_slug}/
             AGENT.md                       # the owning Agent (see agent.py)
             routines/                      # routines shared by all of this agent's strategies
@@ -21,7 +21,15 @@ Authoring one is optional: an Agent that owns none still loops, on the *default*
 playbook :func:`StrategyStore.ensure_default` materializes from its identity.
 The Agent's memory/skills/routines (the "brain") are shared across all of its
 strategies and its consults — they live one level up, at
-``agents/{agent_slug}/``.
+``{agent_slug}/``.
+
+A strategy directory is a **mixed node** since FEAT-115: ``strategy.md`` is
+library content (authored, shareable, possibly shipped by the repo) while
+``learnings.md``, ``config.yml``, ``state.json``, ``sessions/`` and ``dry_runs/``
+beside it are this install's runtime output. So the folder answers two
+questions, and has two properties: :attr:`Strategy.home` is the local directory
+everything runtime is written into, and :attr:`Strategy.source` is the resolved
+``strategy.md`` — local, else the shipped one.
 """
 
 from __future__ import annotations
@@ -35,10 +43,23 @@ from typing import Any
 
 from condor.frontmatter import parse_frontmatter, render_frontmatter, slugify
 from condor.fsutil import atomic_write_text
+from condor.layering import (
+    carry_fork_stamp,
+    fork_if_stock,
+    resolves_to_stock,
+    stock_delete_error,
+)
+from condor.memory.paths import (
+    agent_home,
+    agent_home_layers,
+    iter_agent_slugs,
+    resolve_agent_file,
+)
 
 log = logging.getLogger(__name__)
 
-_DATA_ROOT = Path(__file__).parent.parent.parent / "agents"
+STRATEGIES_DIRNAME = "strategies"
+STRATEGY_MD = "strategy.md"
 
 # Every Agent is loopable — one that was never given a bespoke playbook loops
 # this one, created on its first start (see ``StrategyStore.ensure_default``).
@@ -90,9 +111,21 @@ class Strategy:
         return f"{self.agent_slug}.{self.slug}"
 
     @property
-    def dir(self) -> Path:
-        """This strategy's folder: agents/{agent_slug}/strategies/{slug}/."""
-        return _DATA_ROOT / self.agent_slug / "strategies" / self.slug
+    def home(self) -> Path:
+        """The **writable** folder of this strategy: ``<local>/{agent}/strategies/{slug}``.
+
+        Sessions, learnings, config, runtime state, dry runs and the ownership
+        ledger — everything this install produced by running the playbook. Local
+        always: none of it has a stock counterpart to layer over.
+        """
+        return agent_home(self.agent_slug) / STRATEGIES_DIRNAME / self.slug
+
+    @property
+    def source(self) -> Path | None:
+        """The authored ``strategy.md`` — local, else the shipped one."""
+        return resolve_agent_file(
+            self.agent_slug, STRATEGIES_DIRNAME, self.slug, STRATEGY_MD
+        )
 
 
 def split_key(key: str) -> tuple[str, str] | None:
@@ -136,11 +169,11 @@ class StrategyStore:
     view keyed by the opaque composite id.
     """
 
-    def _strategies_root(self, agent_slug: str) -> Path:
-        return _DATA_ROOT / agent_slug / "strategies"
-
-    def _strategy_md_path(self, strategy: Strategy) -> Path:
-        return strategy.dir / "strategy.md"
+    def _strategies_roots(self, agent_slug: str) -> tuple[Path, ...]:
+        """``(local, stock)`` strategy folders of an agent — read order."""
+        return tuple(
+            home / STRATEGIES_DIRNAME for home in agent_home_layers(agent_slug)
+        )
 
     def create(
         self,
@@ -154,6 +187,17 @@ class StrategyStore:
         default_trading_context: str = "",
         created_by: int = 0,
     ) -> Strategy:
+        # The pseudo-strategies a chat, a delegation and the dashboard record
+        # their deeds under are ordinary run keys (FEAT-105), so a real strategy
+        # taking one of those slugs would make ``brigado.chat`` mean two things
+        # and every joined surface would report them as one run.
+        from condor.agents.deeds import RESERVED_STRATEGY_SLUGS
+
+        if slugify(name) in RESERVED_STRATEGY_SLUGS:
+            raise ValueError(
+                f"'{name}' is reserved: {', '.join(sorted(RESERVED_STRATEGY_SLUGS))} "
+                "name Condor's own non-loop runs. Pick another name."
+            )
         strategy = Strategy(
             agent_slug=agent_slug,
             name=name,
@@ -170,13 +214,13 @@ class StrategyStore:
             "Created strategy %s under agent %s (dir: %s)",
             strategy.slug,
             agent_slug,
-            strategy.dir,
+            strategy.home,
         )
         return strategy
 
     def get(self, agent_slug: str, sslug: str) -> Strategy | None:
-        path = self._strategies_root(agent_slug) / sslug / "strategy.md"
-        if not path.exists():
+        path = resolve_agent_file(agent_slug, STRATEGIES_DIRNAME, sslug, STRATEGY_MD)
+        if path is None:
             return None
         return _load_strategy_from_file(path, agent_slug)
 
@@ -230,17 +274,25 @@ class StrategyStore:
         return self.ensure_default(key)
 
     def list(self, agent_slug: str) -> list[Strategy]:
+        """This agent's playbooks — the union of both roots, local shadowing stock.
+
+        The slugs are collected across the layers first and each is then
+        resolved through :meth:`get`, so a locally forked ``strategy.md``
+        shadows the shipped one of the same name rather than being listed twice.
+        """
+        sslugs: set[str] = set()
+        for root in self._strategies_roots(agent_slug):
+            try:
+                children = sorted(root.iterdir())
+            except OSError:
+                continue
+            for d in children:
+                if d.is_dir() and (d / STRATEGY_MD).exists():
+                    sslugs.add(d.name)
+
         strategies: list[Strategy] = []
-        root = self._strategies_root(agent_slug)
-        if not root.exists():
-            return strategies
-        for d in sorted(root.iterdir()):
-            if not d.is_dir():
-                continue
-            md = d / "strategy.md"
-            if not md.exists():
-                continue
-            s = _load_strategy_from_file(md, agent_slug)
+        for sslug in sorted(sslugs):
+            s = self.get(agent_slug, sslug)
             if s is not None:
                 strategies.append(s)
         return strategies
@@ -248,25 +300,32 @@ class StrategyStore:
     def list_all(self) -> list[Strategy]:
         """Every strategy across every agent (flat view for overviews/MCP)."""
         strategies: list[Strategy] = []
-        if not _DATA_ROOT.exists():
-            return strategies
-        for agent_dir in sorted(_DATA_ROOT.iterdir()):
-            if not agent_dir.is_dir() or agent_dir.name.startswith("_"):
-                continue
-            strategies.extend(self.list(agent_dir.name))
+        for slug in iter_agent_slugs():
+            strategies.extend(self.list(slug))
         return strategies
 
     def update(self, strategy: Strategy) -> None:
         self._save(strategy)
 
     def delete(self, agent_slug: str, sslug: str) -> bool:
+        """Remove a strategy — its local folder, and only if the playbook is local.
+
+        The directory is a mixed node, so this crosses the boundary and has to
+        say which half it means. A shipped ``strategy.md`` is refused outright
+        (an update would bring it back); a *local* strategy whose playbook is
+        stock cannot exist, because writing one forks it down first. What is
+        removed is :attr:`Strategy.home` — sessions, learnings, config and state
+        included, which is what deleting a strategy has always meant.
+        """
         strategy = self.get(agent_slug, sslug)
         if not strategy:
             return False
+        if resolves_to_stock(agent_slug, STRATEGIES_DIRNAME, sslug, STRATEGY_MD):
+            raise ValueError(stock_delete_error(f"{agent_slug}.{sslug}"))
         try:
-            shutil.rmtree(strategy.dir)
+            shutil.rmtree(strategy.home)
         except Exception:
-            log.exception("Failed to remove strategy dir %s", strategy.dir)
+            log.exception("Failed to remove strategy dir %s", strategy.home)
             return False
         log.info("Deleted strategy %s under agent %s", sslug, agent_slug)
         return True
@@ -282,8 +341,13 @@ class StrategyStore:
             "created_by": strategy.created_by,
             "created_at": strategy.created_at,
         }
-        strategy.dir.mkdir(parents=True, exist_ok=True)
+        # Forks a shipped playbook down before overwriting it, so the tracked
+        # copy is never the file this writes.
+        target = fork_if_stock(
+            strategy.agent_slug, STRATEGIES_DIRNAME, strategy.slug, STRATEGY_MD
+        )
+        target.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_text(
-            self._strategy_md_path(strategy),
-            render_frontmatter(meta, strategy.instructions),
+            target,
+            render_frontmatter(carry_fork_stamp(target, meta), strategy.instructions),
         )

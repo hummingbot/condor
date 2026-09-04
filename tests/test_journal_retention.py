@@ -121,9 +121,9 @@ def _engine(tmp_path, monkeypatch):
     from condor.agents.engine import TickEngine
     from condor.agents.strategy import Strategy
 
-    monkeypatch.setattr(strategy_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     strategy = Strategy(agent_slug="brigado", name="Grid")
-    strategy.dir.mkdir(parents=True, exist_ok=True)
+    strategy.home.mkdir(parents=True, exist_ok=True)
     agent = Agent(slug="brigado", name="Brigado")
     return TickEngine(
         agent=agent,

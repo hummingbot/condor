@@ -94,7 +94,9 @@ def test_a_detached_slot_reattaches_and_answers_the_message(ws_env):
         await _handle_start_session(ws, USER, {"agent_key": "claude-code"})
         slot_id = ws.events("session_started")[0]["slot_id"]
         await _chat(slot_id, "my favourite pair is SOL-USDC")
-        # Exactly what _enforce_session_budget does to an idle victim.
+        # The slot loses its subprocess, and the runtime keeps no memory of it
+        # at all — the harshest version of what the budget does to an idle
+        # victim, and the one a bot restart leaves behind.
         await runtime.destroy(SessionKey.web(USER, slot_id))
         assert await runtime.get_info(SessionKey.web(USER, slot_id)) is None
 

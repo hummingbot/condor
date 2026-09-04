@@ -14,15 +14,16 @@ import logging
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
-from condor.server_data_service import ServerDataType, get_server_data_service
-from config_manager import get_client
-from handlers.config.user_preferences import (
+from condor.fetchers.market_data import fetch_current_price
+from condor.preferences import (
     get_all_enabled_networks,
     get_clob_account,
     get_clob_order_defaults,
     set_clob_last_order,
     set_last_trade_connector,
 )
+from condor.server_data_service import ServerDataType, get_server_data_service
+from config_manager import get_client
 from handlers.dex._shared import format_relative_time
 from utils.telegram_formatters import (
     escape_markdown_v2,
@@ -178,7 +179,7 @@ async def handle_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     params = context.user_data.get("trade_params", {})
     user_id = context.user_data.get("_user_id")
     if user_id:
-        from handlers.config.user_preferences import get_active_server
+        from condor.preferences import get_active_server
 
         server = get_active_server(context.user_data)
         if server:
@@ -238,7 +239,7 @@ async def handle_trade_refresh(
 
     # Invalidate both old cache and SDS
     invalidate_cache(context.user_data, "balances", "orders", "positions")
-    from handlers.config.user_preferences import get_active_server
+    from condor.preferences import get_active_server
 
     server = get_active_server(context.user_data)
     if server:
@@ -547,7 +548,7 @@ async def show_trade_menu(
 ) -> None:
     """Display the unified trade menu with balances and data"""
     from config_manager import get_config_manager
-    from handlers.config.user_preferences import get_active_server
+    from handlers.bots._shared import resolve_accessible_server_or_none
 
     params = context.user_data.get("trade_params", {})
     connector = params.get("connector", "binance_perpetual")
@@ -557,31 +558,10 @@ async def show_trade_menu(
 
     # Get current server name and status - with proper access control
     cm = get_config_manager()
-    user_id = context.user_data.get("_user_id")
 
-    # Only use servers the user has access to
-    if user_id:
-        accessible_servers = cm.get_accessible_servers(user_id)
-        all_servers = cm.list_servers()
-        enabled_accessible = [
-            s for s in accessible_servers if all_servers.get(s, {}).get("enabled", True)
-        ]
-    else:
-        logger.warning(
-            "show_trade_menu called without user_id - cannot verify server access"
-        )
-        all_servers = cm.list_servers()
-        enabled_accessible = [
-            name for name, cfg in all_servers.items() if cfg.get("enabled", True)
-        ]
-
-    preferred = get_active_server(context.user_data)
-    # Only use preferred if user has access to it
-    server_name = (
-        preferred
-        if preferred and preferred in enabled_accessible
-        else (enabled_accessible[0] if enabled_accessible else None)
-    )
+    # Only use servers the user has access to; the menu renders serverless
+    # rather than raising when there is nothing this user may reach.
+    server_name = resolve_accessible_server_or_none(context.user_data)
     server_status = "online"
     if server_name:
         try:
@@ -702,7 +682,7 @@ async def _update_trade_message(context: ContextTypes.DEFAULT_TYPE, message) -> 
     is_perpetual = _is_perpetual_connector(connector)
 
     # Get all cached data from SDS (server-scoped), fall back to old cache
-    from handlers.config.user_preferences import get_active_server
+    from condor.preferences import get_active_server
 
     server = get_active_server(context.user_data)
     sds = get_server_data_service()
@@ -790,7 +770,7 @@ async def _fetch_trade_data_background(
         return
 
     # Get SDS for dual-write (server-scoped)
-    from handlers.config.user_preferences import get_active_server
+    from condor.preferences import get_active_server
 
     server = get_active_server(context.user_data)
     sds = get_server_data_service()
@@ -816,10 +796,7 @@ async def _fetch_trade_data_background(
 
     async def fetch_price_safe():
         try:
-            prices = await client.market_data.get_prices(
-                connector_name=connector, trading_pairs=trading_pair
-            )
-            price = prices["prices"].get(trading_pair)
+            price = await fetch_current_price(client, connector, trading_pair)
             if price:
                 context.user_data["current_market_price"] = price
                 if server:
@@ -868,10 +845,12 @@ async def _fetch_trade_data_background(
 
             # If amount is in USD, convert to base token volume
             if "$" in str(amount):
-                prices = await client.market_data.get_prices(
-                    connector_name=connector, trading_pairs=trading_pair
+                current_price = (
+                    await fetch_current_price(
+                        client, connector, trading_pair, strict=True
+                    )
+                    or 1
                 )
-                current_price = prices["prices"].get(trading_pair, 1)
                 volume = volume / current_price
 
             # Fetch BUY and SELL quotes
@@ -903,10 +882,9 @@ async def _fetch_trade_data_background(
             # Fallback to mid price if quotes failed
             if buy_price is None and sell_price is None:
                 try:
-                    prices = await client.market_data.get_prices(
-                        connector_name=connector, trading_pairs=trading_pair
+                    mid_price = await fetch_current_price(
+                        client, connector, trading_pair
                     )
-                    mid_price = prices["prices"].get(trading_pair)
                     if mid_price:
                         buy_price = mid_price * 1.0005
                         sell_price = mid_price * 0.9995
@@ -1023,10 +1001,10 @@ async def handle_trade_get_quote(
 
         # If amount is in USD, we need to convert to base token volume
         if "$" in str(amount):
-            prices = await client.market_data.get_prices(
-                connector_name=connector, trading_pairs=trading_pair
+            current_price = (
+                await fetch_current_price(client, connector, trading_pair, strict=True)
+                or 1
             )
-            current_price = prices["prices"].get(trading_pair, 1)
             volume = volume / current_price
 
         # Fetch BUY and SELL quotes in parallel
@@ -1063,10 +1041,7 @@ async def handle_trade_get_quote(
         if buy_price is None and sell_price is None:
             logger.info("get_price_for_volume failed, trying get_prices fallback")
             try:
-                prices = await client.market_data.get_prices(
-                    connector_name=connector, trading_pairs=trading_pair
-                )
-                mid_price = prices["prices"].get(trading_pair)
+                mid_price = await fetch_current_price(client, connector, trading_pair)
                 if mid_price:
                     buy_price = mid_price * 1.0005
                     sell_price = mid_price * 0.9995
@@ -1157,35 +1132,15 @@ async def handle_trade_set_connector(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
     """Show available CEX connectors and DEX networks for selection"""
-    from config_manager import get_config_manager
-    from handlers.config.user_preferences import get_active_server
+    from handlers.bots._shared import resolve_accessible_server_or_none
 
     chat_id = update.effective_chat.id
     keyboard = []
 
-    # Get server name for cache keying - with proper access control
-    cm = get_config_manager()
-    user_id = context.user_data.get("_user_id")
-
-    # Only use servers the user has access to
-    if user_id:
-        accessible_servers = cm.get_accessible_servers(user_id)
-        all_servers = cm.list_servers()
-        enabled_accessible = [
-            s for s in accessible_servers if all_servers.get(s, {}).get("enabled", True)
-        ]
-    else:
-        all_servers = cm.list_servers()
-        enabled_accessible = [
-            name for name, cfg in all_servers.items() if cfg.get("enabled", True)
-        ]
-
-    preferred = get_active_server(context.user_data)
-    server_name = (
-        preferred
-        if preferred and preferred in enabled_accessible
-        else (enabled_accessible[0] if enabled_accessible else "default")
-    )
+    # Get server name for cache keying - with proper access control. Only a
+    # cache-key component, so the historical "default" literal is kept for the
+    # no-accessible-server case rather than poisoning keys with None.
+    server_name = resolve_accessible_server_or_none(context.user_data) or "default"
 
     try:
         client = await get_client(chat_id, context=context)
@@ -1315,7 +1270,7 @@ async def handle_trade_connector_select(
 
     # Invalidate SDS cache and update subscription for new connector
     user_id = context.user_data.get("_user_id")
-    from handlers.config.user_preferences import get_active_server
+    from condor.preferences import get_active_server
 
     server = get_active_server(context.user_data)
     if server:
@@ -1535,10 +1490,9 @@ async def handle_trade_execute(
         is_quote_amount = "$" in str(amount)
         if is_quote_amount:
             usd_value = float(str(amount).replace("$", ""))
-            prices = await client.market_data.get_prices(
-                connector_name=connector, trading_pairs=trading_pair
+            current_price = await fetch_current_price(
+                client, connector, trading_pair, strict=True
             )
-            current_price = prices["prices"][trading_pair]
             amount_float = usd_value / current_price
         else:
             amount_float = float(amount)
@@ -1562,7 +1516,7 @@ async def handle_trade_execute(
         invalidate_cache(context.user_data, "balances", "orders", "positions")
         context.user_data["_force_cex_balance_refresh"] = True
         # Also invalidate SDS cache (server-scoped)
-        from handlers.config.user_preferences import get_active_server
+        from condor.preferences import get_active_server
 
         exec_server = get_active_server(context.user_data)
         if exec_server:
@@ -1645,7 +1599,7 @@ async def _update_trade_menu_after_input(
         is_perpetual = _is_perpetual_connector(connector)
 
         # Get cached data from SDS (server-scoped), fall back to old cache
-        from handlers.config.user_preferences import get_active_server
+        from condor.preferences import get_active_server
 
         input_server = get_active_server(context.user_data)
         sds = get_server_data_service()
@@ -1772,10 +1726,9 @@ async def process_trade(
         is_quote_amount = "$" in str(amount)
         if is_quote_amount:
             usd_value = float(str(amount).replace("$", ""))
-            prices = await client.market_data.get_prices(
-                connector_name=connector, trading_pairs=trading_pair
+            current_price = await fetch_current_price(
+                client, connector, trading_pair, strict=True
             )
-            current_price = prices["prices"][trading_pair]
             amount_float = usd_value / current_price
         else:
             amount_float = float(amount)
@@ -1800,7 +1753,7 @@ async def process_trade(
         invalidate_cache(context.user_data, "balances", "orders", "positions")
         context.user_data["_force_cex_balance_refresh"] = True
         # Also invalidate SDS (server-scoped)
-        from handlers.config.user_preferences import get_active_server
+        from condor.preferences import get_active_server
 
         qt_server = get_active_server(context.user_data)
         if qt_server:

@@ -25,7 +25,6 @@ export function PriceField({
   dispatch,
   valid,
   hint,
-  pickable = true,
 }: {
   label: string;
   value: number;
@@ -34,12 +33,6 @@ export function PriceField({
   dispatch: FieldDispatch;
   valid: boolean;
   hint?: string;
-  /**
-   * Whether this price can be picked off the chart. A panel that has run out of
-   * pick slots turns the crosshair off for the remaining prices rather than
-   * offering a button that does nothing.
-   */
-  pickable?: boolean;
 }) {
   const isActive = activePickField === field;
   const id = useId();
@@ -82,7 +75,6 @@ export function PriceField({
               : "border-[var(--color-border)] focus:border-[var(--color-primary)]"
           }`}
         />
-        {pickable && (
         <button
           onClick={() =>
             dispatch({
@@ -100,7 +92,6 @@ export function PriceField({
         >
           <Crosshair className="h-3.5 w-3.5" />
         </button>
-        )}
       </div>
       {hint && <p className="mt-0.5 text-[10px] text-[var(--color-text-muted)]">{hint}</p>}
     </div>
@@ -182,7 +173,11 @@ export function NumberField({
   suffix?: string;
   isPercent?: boolean;
 }) {
-  const displayValue = isPercent ? value * 100 : value;
+  // A percentage is stored as a fraction, and scaling one back up lands on
+  // binary-float noise: 0.0212 * 100 is 2.1199999999999997, which the input then
+  // renders in full. Harmless when it only surfaced on blur; not harmless now
+  // that dragging a barrier line rewrites this field on every frame.
+  const displayValue = isPercent ? Number((value * 100).toPrecision(12)) : value;
   const id = useId();
   const inputRef = useRef<HTMLInputElement>(null);
   const [localValue, setLocalValue] = useState(displayValue === 0 ? "" : String(displayValue));

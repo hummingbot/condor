@@ -24,6 +24,12 @@ from typing import TYPE_CHECKING, Any
 from condor import dex_candles
 from condor.asyncutil import TaskSet
 from condor.fetchers.market_data import fetch_historical_candles, normalize_candle
+from condor.web.streams.hummingbot_ws import (
+    WS_PERMANENT,
+    WS_RETRY_CAP,
+    WS_SLOW_RETRY,
+    WS_SLOW_RETRY_CAP,
+)
 
 if TYPE_CHECKING:
     from condor.web.ws_manager import _Connection
@@ -47,6 +53,34 @@ _INTERVAL_SECONDS: dict[str, int] = {
     "1d": 86400,
     "1w": 604800,
 }
+
+# A forming candle is worth refreshing a handful of times over its life — more
+# than that redraws the same bar. Five is the target.
+_GECKO_POLLS_PER_CANDLE = 5
+# Never faster than this on a 1m chart, and never slower than this on a coarse
+# one: a chart that has not moved in three minutes reads as broken even when the
+# candle it is filling is an hour long.
+_GECKO_POLL_MIN = 30
+_GECKO_POLL_MAX = 180
+
+
+def _gecko_poll_interval(interval_sec: int) -> int:
+    """How often to re-fetch a GeckoTerminal-backed candle channel, in seconds.
+
+    Every open pool chart polls upstream forever, bypassing the OHLCV cache so it
+    sees the forming candle, and they all draw on one shared per-minute
+    GeckoTerminal budget (``_GECKO_RATE_LIMIT`` in ``condor/pool_data.py``). So
+    the poll rate has to scale with the candle: a 15m chart refreshed every
+    minute spends fifteen requests per candle to redraw the same bar, which is
+    exactly the budget a second trader's chart then cannot have.
+
+    Scaling it is also what makes a coarser interval *cost* less — the reason to
+    default a pool chart to 15m rather than 5m in the first place.
+    """
+    return max(
+        _GECKO_POLL_MIN, min(interval_sec // _GECKO_POLLS_PER_CANDLE, _GECKO_POLL_MAX)
+    )
+
 
 # Auto-cleanup candle buffers unused for this long
 _CANDLE_BUFFER_IDLE_TTL = 600  # 10 minutes
@@ -197,7 +231,7 @@ class CandleStreamsMixin:
 
         # Provided by HummingbotStreamsMixin on the composed manager.
         @staticmethod
-        def _is_permanent_ws_error(error_str: str) -> bool: ...
+        def _classify_ws_error(exc: BaseException) -> str: ...
 
     @staticmethod
     def _normalize_candle(c: Any) -> dict | None:
@@ -510,10 +544,11 @@ class CandleStreamsMixin:
                 return
             except Exception as e:
                 error_str = str(e)
-                # Detect permanent failures — don't retry (issue #134, see
-                # _is_permanent_ws_error).
-                if self._is_permanent_ws_error(error_str):
-                    logger.warning(
+                verdict = self._classify_ws_error(e)
+                # Only an invalid symbol is permanent (issue #134, see
+                # _classify_ws_error); a refused handshake is retried slowly.
+                if verdict == WS_PERMANENT:
+                    logger.error(
                         "Candle stream permanent error for %s: %s — giving up",
                         channel,
                         e,
@@ -522,12 +557,15 @@ class CandleStreamsMixin:
                         channel,
                         {"type": "error", "message": f"Stream failed: {error_str}"},
                     )
-                    # Stop the paired REST poll fallback — nothing valid to poll.
-                    poll_task = self._candle_poll_tasks.pop(channel, None)
-                    if poll_task and not poll_task.done():
-                        poll_task.cancel()
+                    # The REST poll fallback stays up, and is started if it
+                    # somehow is not running. It reaches the same candles over
+                    # a different endpoint, so a socket this side has given up
+                    # on says nothing about whether it can still draw the
+                    # chart — and it is the only thing left that could.
+                    self._ensure_candle_poll_fallback(channel)
                     return
 
+                cap = WS_SLOW_RETRY_CAP if verdict == WS_SLOW_RETRY else WS_RETRY_CAP
                 logger.warning(
                     "Candle stream error for %s: %s, reconnecting in %ds...",
                     channel,
@@ -542,7 +580,7 @@ class CandleStreamsMixin:
                     },
                 )
                 await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 60)
+                backoff = min(backoff * 2, cap)
 
     # -- REST poll fallback --
 
@@ -576,7 +614,7 @@ class CandleStreamsMixin:
         # polls stay well clear of its per-minute rate limit — every chart on the
         # dashboard shares one budget — while still refreshing a forming candle.
         poll_interval = (
-            max(min(interval_sec // 2, 60), 30) if gecko else min(interval_sec, 10)
+            _gecko_poll_interval(interval_sec) if gecko else min(interval_sec, 10)
         )
         was_stale = gecko
 

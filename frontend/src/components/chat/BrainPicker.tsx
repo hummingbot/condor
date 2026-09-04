@@ -1,7 +1,9 @@
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Bot, ChevronDown, ChevronLeft, ChevronRight, Loader2, Search } from "lucide-react";
 
+import { AnchoredMenu } from "@/components/ui/AnchoredMenu";
+import { useBrainLabel } from "@/hooks/useBrainLabel";
 import {
   api,
   customAgentKey,
@@ -28,62 +30,30 @@ export interface BrainSelection {
   agentKey?: string;
 }
 
-/** Resolve the button label for the current selection, incl. openrouter:<slug>. */
-function modelLabel(
-  agentKey: string,
-  agents: ChatAgentOption[],
-  orModels?: OpenRouterModelOption[] | null,
-): string {
-  const match = agents.find((a) => a.key === agentKey);
-  if (match) return match.label;
-  if (agentKey.startsWith("openrouter:")) {
-    const slug = agentKey.slice("openrouter:".length);
-    const model = orModels?.find((m) => m.slug === slug);
-    return `OpenRouter: ${model?.name || slug}`;
-  }
-  // Name the endpoint, so a user with several can tell which one is live
-  const custom = parseCustomAgentKey(agentKey);
-  if (custom) return `${custom.provider}: ${custom.model}`;
-  return agentKey;
-}
+/** Stable empties, so the label memo is not rebuilt by a default literal. */
+const NO_PROVIDERS: CustomProvider[] = [];
+const NO_BINDINGS: AgentBindingOption[] = [];
 
 /**
- * Trim a model label down to what distinguishes it, for the button.
+ * The model list itself, without a trigger.
  *
- * The catalogue names models "<provider> — <model>", and next to a bound
- * Agent's name only the model half earns the width. "Ollama — Default Model"
- * is the exception the split gets wrong: there the provider *is* the answer.
+ * Split out from {@link BrainPicker} so the agent panel can hang the very same
+ * list off its own row (FEAT-081) rather than growing a second one that would
+ * have to be kept in step with this one — the drill-downs into OpenRouter and
+ * custom endpoints most of all.
+ *
+ * Meant to be mounted only while its menu is open: the drill-down state is
+ * this component's, so closing the menu unmounts it and the list reopens at
+ * the top level, which is where a reader expects to find it.
  */
-function shortModelLabel(label: string): string {
-  const [provider, model] = label.split(" — ");
-  if (!model) return label;
-  return model.startsWith("Default") ? provider : model;
-}
-
-/**
- * "What's answering" — the model, and only the model.
- *
- * This picks the LLM, which for a bound Agent *is* its `agent_key` in AGENT.md:
- * the backend persists the pick there, so it reaches consult, delegate and its
- * loops too. It does not bind or unbind an Agent — that is a different question
- * with a different answer ("who am I talking to"), and it belongs to the rail,
- * which can also switch conversations and start one. Offering it here as well
- * gave two doors to one thing and neither of them the full gesture.
- *
- * Picker sentinels ("openrouter:", "custom:") are drill-downs, never selectable
- * keys — the backend flags them, since the key's shape does not tell you
- * ("ollama:" also ends in a colon and is a real key meaning "that backend's
- * default model").
- */
-export function BrainPicker({
+export function BrainMenuBody({
   agents,
-  customProviders = [],
-  agentBindings = [],
+  customProviders = NO_PROVIDERS,
+  agentBindings = NO_BINDINGS,
   selectedAgentKey,
   selectedAgentSlug = "",
   onSelect,
-  variant,
-  disabled = false,
+  onClose,
 }: {
   agents: ChatAgentOption[];
   customProviders?: CustomProvider[];
@@ -91,10 +61,9 @@ export function BrainPicker({
   selectedAgentKey: string;
   selectedAgentSlug?: string;
   onSelect: (selection: BrainSelection) => void;
-  variant: "block" | "inline";
-  disabled?: boolean;
+  /** Dismiss the menu around this list — a pick is the end of the errand. */
+  onClose: () => void;
 }) {
-  const [open, setOpen] = useState(false);
   // null = top level, otherwise the submenu we drilled into
   const [submenu, setSubmenu] = useState<
     { kind: "openrouter" } | { kind: "custom"; name: string } | null
@@ -107,17 +76,13 @@ export function BrainPicker({
   // Direct picks are everything the backend didn't flag as a picker.
   const directAgents = agents.filter((a) => !a.picker);
   const hasOpenRouter = agents.some((a) => a.key === "openrouter:" && a.picker);
-  const boundAgent = agentBindings.find((a) => a.slug === selectedAgentSlug);
-  // An empty key means "whatever the bound Agent runs on", so the picker has to
-  // resolve it the same way the backend does — otherwise the button would name
-  // an Agent without saying what will actually answer.
-  const effectiveKey = selectedAgentKey || boundAgent?.agent_key || "";
-  const model = modelLabel(effectiveKey, agents, models);
-  // Who answers *and* on what: the Agent is the identity, the model is not a
-  // detail the user can be left guessing at, since picking one moves the Agent.
-  const label = boundAgent
-    ? `${boundAgent.name} · ${shortModelLabel(model)}`
-    : model;
+  const { boundAgent, effectiveKey } = useBrainLabel({
+    agents,
+    agentBindings,
+    selectedAgentKey,
+    selectedAgentSlug,
+    orModels: models,
+  });
   const activeCustom = parseCustomAgentKey(effectiveKey);
 
   // Custom endpoint models, fetched per endpoint on open
@@ -139,15 +104,9 @@ export function BrainPicker({
       .finally(() => setLoading(false));
   };
 
-  const closeAll = () => {
-    setOpen(false);
-    setSubmenu(null);
-    setQuery("");
-  };
-
   const pick = (selection: BrainSelection) => {
     onSelect(selection);
-    closeAll();
+    onClose();
   };
 
   const q = query.trim().toLowerCase();
@@ -178,180 +137,267 @@ export function BrainPicker({
       </span>
     ) : null;
 
+  if (submenu === null) {
+    return (
+      <>
+        {/* An Agent's model is global — it reaches consult, delegate
+            and its loops — so the consequence of picking one here is
+            stated, never a silent side effect. */}
+        {boundAgent &&
+          sectionHeader(`Model — also becomes ${boundAgent.name}'s default`, true)}
+        {directAgents.map((a) => {
+          // `ready === false` is the backend saying this machine cannot run it
+          // — no Ollama server, a bridge that was never installed. An absent
+          // field means it could not probe, which must read as "offer it".
+          const blocked = a.ready === false;
+          return (
+            <button
+              key={a.key}
+              onClick={() => pick({ agentKey: a.key })}
+              disabled={blocked}
+              title={blocked ? a.detail : undefined}
+              className={
+                blocked
+                  ? "flex w-full flex-col items-start gap-0.5 px-2.5 py-1.5 text-left text-xs text-[var(--color-text-muted)] opacity-60"
+                  : rowClass(a.key === effectiveKey)
+              }
+            >
+              <span className="flex w-full items-center gap-1.5">
+                <span className="truncate">{a.label}</span>
+                {defaultTag(a.key)}
+              </span>
+              {/* The fix, on the row it belongs to: the alternative is picking
+                  it, losing the session, and reading the same sentence in a
+                  banner afterwards. */}
+              {blocked && a.detail && (
+                <span className="w-full truncate text-[10px]" title={a.detail}>
+                  {a.detail}
+                </span>
+              )}
+            </button>
+          );
+        })}
+        {hasOpenRouter && (
+          <button
+            onClick={() => {
+              setSubmenu({ kind: "openrouter" });
+              loadModels();
+            }}
+            className={`flex w-full items-center justify-between px-2.5 py-1.5 text-left text-xs hover:bg-[var(--color-surface-hover)] ${
+              effectiveKey.startsWith("openrouter:")
+                ? "font-medium text-[var(--color-primary)]"
+                : "text-[var(--color-text)]"
+            }`}
+          >
+            <span>OpenRouter — Pick Model</span>
+            <ChevronRight className="h-3 w-3 shrink-0 text-[var(--color-text-muted)]" />
+          </button>
+        )}
+        {customProviders.length > 0 && sectionHeader("Custom endpoints")}
+        {customProviders.map((p) => (
+          <button
+            key={p.name}
+            onClick={() => setSubmenu({ kind: "custom", name: p.name })}
+            className={`flex w-full items-center justify-between gap-1 px-2.5 py-1.5 text-left text-xs hover:bg-[var(--color-surface-hover)] ${
+              activeCustom?.provider === p.name
+                ? "font-medium text-[var(--color-primary)]"
+                : "text-[var(--color-text)]"
+            }`}
+          >
+            <span className="truncate">
+              {p.name}
+              {activeCustom?.provider === p.name && (
+                <span className="text-[var(--color-text-muted)]">
+                  {" "}
+                  — {activeCustom.model}
+                </span>
+              )}
+            </span>
+            <ChevronRight className="h-3 w-3 shrink-0 text-[var(--color-text-muted)]" />
+          </button>
+        ))}
+      </>
+    );
+  }
+
+  if (submenu.kind === "custom") {
+    return (
+      <>
+        <button
+          onClick={() => setSubmenu(null)}
+          className="flex items-center gap-1 border-b border-[var(--color-border)] px-2.5 py-1.5 text-left text-[11px] text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+        >
+          <ChevronLeft className="h-3 w-3" /> {submenu.name}
+        </button>
+        {customModels.isLoading && (
+          <div className="flex items-center gap-2 px-2.5 py-2 text-xs text-[var(--color-text-muted)]">
+            <Loader2 className="h-3 w-3 animate-spin" /> Loading models…
+          </div>
+        )}
+        {customModels.isError && (
+          <div className="px-2.5 py-2 text-xs text-red-400">
+            {(customModels.error as Error).message}
+          </div>
+        )}
+        {customModels.data?.models.map((model) => {
+          const key = customAgentKey(submenu.name, model);
+          return (
+            <button
+              key={model}
+              title={model}
+              onClick={() => pick({ agentKey: key })}
+              className={rowClass(key === effectiveKey)}
+            >
+              <span className="truncate">{model}</span>
+              {defaultTag(key)}
+            </button>
+          );
+        })}
+        {customModels.data?.models.length === 0 && (
+          <div className="px-2.5 py-2 text-xs text-[var(--color-text-muted)]">
+            No chat models available
+          </div>
+        )}
+      </>
+    );
+  }
+
   return (
-    <div className="relative">
+    <>
       <button
+        onClick={() => setSubmenu(null)}
+        className="flex items-center gap-1 border-b border-[var(--color-border)] px-2.5 py-1.5 text-left text-[11px] text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+      >
+        <ChevronLeft className="h-3 w-3" /> Back
+      </button>
+      <div className="sticky top-0 flex items-center gap-1 border-b border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1.5">
+        <Search className="h-3 w-3 shrink-0 text-[var(--color-text-muted)]" />
+        <input
+          autoFocus
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search models..."
+          className="w-full bg-transparent text-xs text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:outline-none"
+        />
+      </div>
+      {loading && (
+        <div className="flex items-center gap-2 px-2.5 py-2 text-xs text-[var(--color-text-muted)]">
+          <Loader2 className="h-3 w-3 animate-spin" /> Loading models…
+        </div>
+      )}
+      {error && <div className="px-2.5 py-2 text-xs text-red-400">{error}</div>}
+      {!loading && !error && filtered.length === 0 && (
+        <div className="px-2.5 py-2 text-xs text-[var(--color-text-muted)]">
+          No models found
+        </div>
+      )}
+      {filtered.map((m) => (
+        <button
+          key={m.slug}
+          title={m.slug}
+          onClick={() => pick({ agentKey: `openrouter:${m.slug}` })}
+          className={`flex w-full flex-col items-start px-2.5 py-1.5 text-left text-xs hover:bg-[var(--color-surface-hover)] ${
+            effectiveKey === `openrouter:${m.slug}`
+              ? "font-medium text-[var(--color-primary)]"
+              : "text-[var(--color-text)]"
+          }`}
+        >
+          <span className="w-full truncate">{m.name}</span>
+          <span className="w-full truncate text-[10px] text-[var(--color-text-muted)]">
+            {m.slug}
+            {m.prompt_price > 0 ? ` · $${m.prompt_price.toFixed(2)}/M in` : " · free"}
+          </span>
+        </button>
+      ))}
+    </>
+  );
+}
+
+/**
+ * "What's answering" — the model, and only the model.
+ *
+ * This picks the LLM, which for a bound Agent *is* its `agent_key` in AGENT.md:
+ * the backend persists the pick there, so it reaches consult, delegate and its
+ * loops too. It does not bind or unbind an Agent — that is a different question
+ * with a different answer ("who am I talking to"), and it belongs to the rail,
+ * which can also switch conversations and start one. Offering it here as well
+ * gave two doors to one thing and neither of them the full gesture.
+ *
+ * Picker sentinels ("openrouter:", "custom:") are drill-downs, never selectable
+ * keys — the backend flags them, since the key's shape does not tell you
+ * ("ollama:" also ends in a colon and is a real key meaning "that backend's
+ * default model").
+ */
+export function BrainPicker({
+  agents,
+  customProviders = NO_PROVIDERS,
+  agentBindings = NO_BINDINGS,
+  selectedAgentKey,
+  selectedAgentSlug = "",
+  onSelect,
+  disabled = false,
+}: {
+  agents: ChatAgentOption[];
+  customProviders?: CustomProvider[];
+  agentBindings?: AgentBindingOption[];
+  selectedAgentKey: string;
+  selectedAgentSlug?: string;
+  onSelect: (selection: BrainSelection) => void;
+  disabled?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  // State, not a ref: the portalled panel only gets coordinates once a render
+  // has handed it the resolved trigger element.
+  const [anchor, setAnchor] = useState<HTMLElement | null>(null);
+
+  const { boundAgent, label } = useBrainLabel({
+    agents,
+    agentBindings,
+    selectedAgentKey,
+    selectedAgentSlug,
+  });
+
+  const close = useCallback(() => setOpen(false), []);
+
+  return (
+    <>
+      <button
+        ref={setAnchor}
         onClick={() => setOpen((v) => !v)}
         disabled={disabled}
+        aria-expanded={open}
+        aria-haspopup="listbox"
         title={boundAgent ? boundAgent.description || boundAgent.name : label}
-        className={`${
-          variant === "block"
-            ? "flex w-full items-center justify-between rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1.5 text-left text-xs text-[var(--color-text)] hover:border-[var(--color-primary)]/40"
-            : "flex items-center gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs text-[var(--color-text)] hover:border-[var(--color-primary)]/40"
-        } disabled:cursor-not-allowed disabled:opacity-50`}
+        className="flex items-center gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs text-[var(--color-text)] hover:border-[var(--color-primary)]/40 disabled:cursor-not-allowed disabled:opacity-50"
       >
         {boundAgent && <Bot className="h-3 w-3 shrink-0 text-[var(--color-accent)]" />}
         <span className="truncate">{label}</span>
         <ChevronDown className="ml-1 h-3 w-3 shrink-0 text-[var(--color-text-muted)]" />
       </button>
-      {open && (
-        <>
-          <div className="fixed inset-0 z-40" onClick={closeAll} />
-          <div
-            className={`absolute top-full z-50 mt-1 flex max-h-72 flex-col overflow-y-auto rounded border border-[var(--color-border)] bg-[var(--color-surface)] py-0.5 shadow-lg ${
-              variant === "block" ? "left-0 w-full" : "right-0 w-64"
-            }`}
-          >
-            {submenu === null ? (
-              <>
-                {/* An Agent's model is global — it reaches consult, delegate
-                    and its loops — so the consequence of picking one here is
-                    stated, never a silent side effect. */}
-                {boundAgent &&
-                  sectionHeader(
-                    `Model — also becomes ${boundAgent.name}'s default`,
-                    true,
-                  )}
-                {directAgents.map((a) => (
-                  <button
-                    key={a.key}
-                    onClick={() => pick({ agentKey: a.key })}
-                    className={rowClass(a.key === effectiveKey)}
-                  >
-                    <span className="truncate">{a.label}</span>
-                    {defaultTag(a.key)}
-                  </button>
-                ))}
-                {hasOpenRouter && (
-                  <button
-                    onClick={() => {
-                      setSubmenu({ kind: "openrouter" });
-                      loadModels();
-                    }}
-                    className={`flex w-full items-center justify-between px-2.5 py-1.5 text-left text-xs hover:bg-[var(--color-surface-hover)] ${
-                      effectiveKey.startsWith("openrouter:")
-                        ? "font-medium text-[var(--color-primary)]"
-                        : "text-[var(--color-text)]"
-                    }`}
-                  >
-                    <span>OpenRouter — Pick Model</span>
-                    <ChevronRight className="h-3 w-3 shrink-0 text-[var(--color-text-muted)]" />
-                  </button>
-                )}
-                {customProviders.length > 0 && sectionHeader("Custom endpoints")}
-                {customProviders.map((p) => (
-                  <button
-                    key={p.name}
-                    onClick={() => setSubmenu({ kind: "custom", name: p.name })}
-                    className={`flex w-full items-center justify-between gap-1 px-2.5 py-1.5 text-left text-xs hover:bg-[var(--color-surface-hover)] ${
-                      activeCustom?.provider === p.name
-                        ? "font-medium text-[var(--color-primary)]"
-                        : "text-[var(--color-text)]"
-                    }`}
-                  >
-                    <span className="truncate">
-                      {p.name}
-                      {activeCustom?.provider === p.name && (
-                        <span className="text-[var(--color-text-muted)]">
-                          {" "}
-                          — {activeCustom.model}
-                        </span>
-                      )}
-                    </span>
-                    <ChevronRight className="h-3 w-3 shrink-0 text-[var(--color-text-muted)]" />
-                  </button>
-                ))}
-              </>
-            ) : submenu.kind === "custom" ? (
-              <>
-                <button
-                  onClick={() => setSubmenu(null)}
-                  className="flex items-center gap-1 border-b border-[var(--color-border)] px-2.5 py-1.5 text-left text-[11px] text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
-                >
-                  <ChevronLeft className="h-3 w-3" /> {submenu.name}
-                </button>
-                {customModels.isLoading && (
-                  <div className="flex items-center gap-2 px-2.5 py-2 text-xs text-[var(--color-text-muted)]">
-                    <Loader2 className="h-3 w-3 animate-spin" /> Loading models…
-                  </div>
-                )}
-                {customModels.isError && (
-                  <div className="px-2.5 py-2 text-xs text-red-400">
-                    {(customModels.error as Error).message}
-                  </div>
-                )}
-                {customModels.data?.models.map((model) => {
-                  const key = customAgentKey(submenu.name, model);
-                  return (
-                    <button
-                      key={model}
-                      title={model}
-                      onClick={() => pick({ agentKey: key })}
-                      className={rowClass(key === effectiveKey)}
-                    >
-                      <span className="truncate">{model}</span>
-                      {defaultTag(key)}
-                    </button>
-                  );
-                })}
-                {customModels.data?.models.length === 0 && (
-                  <div className="px-2.5 py-2 text-xs text-[var(--color-text-muted)]">
-                    No chat models available
-                  </div>
-                )}
-              </>
-            ) : (
-              <>
-                <button
-                  onClick={() => setSubmenu(null)}
-                  className="flex items-center gap-1 border-b border-[var(--color-border)] px-2.5 py-1.5 text-left text-[11px] text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
-                >
-                  <ChevronLeft className="h-3 w-3" /> Back
-                </button>
-                <div className="sticky top-0 flex items-center gap-1 border-b border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1.5">
-                  <Search className="h-3 w-3 shrink-0 text-[var(--color-text-muted)]" />
-                  <input
-                    autoFocus
-                    value={query}
-                    onChange={(e) => setQuery(e.target.value)}
-                    placeholder="Search models..."
-                    className="w-full bg-transparent text-xs text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:outline-none"
-                  />
-                </div>
-                {loading && (
-                  <div className="flex items-center gap-2 px-2.5 py-2 text-xs text-[var(--color-text-muted)]">
-                    <Loader2 className="h-3 w-3 animate-spin" /> Loading models…
-                  </div>
-                )}
-                {error && <div className="px-2.5 py-2 text-xs text-red-400">{error}</div>}
-                {!loading && !error && filtered.length === 0 && (
-                  <div className="px-2.5 py-2 text-xs text-[var(--color-text-muted)]">
-                    No models found
-                  </div>
-                )}
-                {filtered.map((m) => (
-                  <button
-                    key={m.slug}
-                    title={m.slug}
-                    onClick={() => pick({ agentKey: `openrouter:${m.slug}` })}
-                    className={`flex w-full flex-col items-start px-2.5 py-1.5 text-left text-xs hover:bg-[var(--color-surface-hover)] ${
-                      effectiveKey === `openrouter:${m.slug}`
-                        ? "font-medium text-[var(--color-primary)]"
-                        : "text-[var(--color-text)]"
-                    }`}
-                  >
-                    <span className="w-full truncate">{m.name}</span>
-                    <span className="w-full truncate text-[10px] text-[var(--color-text-muted)]">
-                      {m.slug}
-                      {m.prompt_price > 0 ? ` · $${m.prompt_price.toFixed(2)}/M in` : " · free"}
-                    </span>
-                  </button>
-                ))}
-              </>
-            )}
-          </div>
-        </>
-      )}
-    </div>
+      {/* Portalled, not `absolute`: the panel used to be a descendant of the
+          trigger, so `main`'s `overflow-auto` on /agents/:slug clipped it — and
+          a right-aligned 256px panel grows *leftward*, where a scroll container
+          has no overflow region to scroll back into, so those pixels were gone
+          for good. `maxHeight` travels as a prop because a Tailwind `max-h-*`
+          in `className` loses to the inline height the portalled panel sets. */}
+      <AnchoredMenu
+        anchor={anchor}
+        open={open}
+        onClose={close}
+        align="left"
+        maxHeight={288}
+        className="flex w-64 flex-col py-0.5"
+      >
+        <BrainMenuBody
+          agents={agents}
+          customProviders={customProviders}
+          agentBindings={agentBindings}
+          selectedAgentKey={selectedAgentKey}
+          selectedAgentSlug={selectedAgentSlug}
+          onSelect={onSelect}
+          onClose={close}
+        />
+      </AnchoredMenu>
+    </>
   );
 }

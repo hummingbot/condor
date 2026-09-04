@@ -6,10 +6,14 @@ import asyncio
 import logging
 import os
 import sys
+from collections.abc import Iterable
 from typing import Any, Literal
 
 from mcp.server.fastmcp import FastMCP
 
+from mcp_servers._profiles import make_resolver
+from mcp_servers._profiles import register_tools as _register_tools
+from mcp_servers._profiles import resolve_profiles
 from mcp_servers.hummingbot_api.formatters import (
     format_active_bots_as_table,
     format_amm_result,
@@ -22,6 +26,7 @@ from mcp_servers.hummingbot_api.formatters import (
 )
 from mcp_servers.hummingbot_api.hummingbot_client import hummingbot_client
 from mcp_servers.hummingbot_api.middleware import GATEWAY_LOG_HINT, handle_errors
+from mcp_servers.hummingbot_api.profiles import PROFILE_TOOLS
 from mcp_servers.hummingbot_api.schemas import (
     AMMRequest,
     CLMMRequest,
@@ -29,18 +34,16 @@ from mcp_servers.hummingbot_api.schemas import (
     GatewayConfigRequest,
     GatewayContainerRequest,
     GatewaySwapRequest,
-    ManageExecutorsRequest,
 )
-from mcp_servers.hummingbot_api.settings import settings
+from mcp_servers.hummingbot_api.settings import DEFAULT_TOOL_PROFILE, settings
 from mcp_servers.hummingbot_api.tools import bot_management as bot_management_tools
 from mcp_servers.hummingbot_api.tools import controllers as controllers_tools
+from mcp_servers.hummingbot_api.tools import executor_create
+from mcp_servers.hummingbot_api.tools import executors as executors_tools
 from mcp_servers.hummingbot_api.tools import history as history_tools
 from mcp_servers.hummingbot_api.tools import market_data as market_data_tools
 from mcp_servers.hummingbot_api.tools import portfolio as portfolio_tools
 from mcp_servers.hummingbot_api.tools import trading as trading_tools
-from mcp_servers.hummingbot_api.tools.executors import (
-    manage_executors as manage_executors_impl,
-)
 from mcp_servers.hummingbot_api.tools.gateway import (
     manage_gateway_config as manage_gateway_config_impl,
 )
@@ -72,11 +75,29 @@ mcp = FastMCP("hummingbot-mcp")
 
 # Server Management Tools
 #
-# Connecting/removing exchange API keys is intentionally NOT exposed here.
-# Keys are managed exclusively through the Condor web dashboard (Settings → Keys).
+# No secret is a parameter of any tool on this server. Connecting/removing exchange
+# API keys and adding/removing Gateway wallets are intentionally NOT exposed here:
+# a key typed at an agent is persisted by the chat transport, by the bot's state and
+# by every transcript that session writes, and no confirmation gate un-leaks it.
+# Both are managed exclusively through the Condor web dashboard (Settings → Keys,
+# Settings → Gateway).
 
 
-@mcp.tool()
+def _credentials_were_injected() -> bool:
+    """True when this process was spawned holding somebody else's credentials.
+
+    The same env signal ``_apply_cli_args`` reads, deliberately: whatever it
+    lifted onto ``settings`` is a secret this process was *handed* by its
+    spawner (``build_mcp_servers_for_session``), not one supplied by whoever is
+    talking to it over stdio. A standalone launch — the uvx console script, an
+    external MCP host, the checked-in ``.mcp.json`` — sets neither, so it reads
+    False and keeps the full configure-and-persist behaviour.
+    """
+    return bool(
+        os.getenv("HUMMINGBOT_API_USERNAME") or os.getenv("HUMMINGBOT_API_PASSWORD")
+    )
+
+
 @handle_errors("configure server")
 async def configure_server(
     name: str | None = None,
@@ -115,6 +136,26 @@ async def configure_server(
             f"  Name: {settings.server_name}\n"
             f"  URL: {settings.api_url}\n"
             f"  Username: {settings.api_username}\n"
+        )
+
+    # Past here the tool would rebuild the connection around whatever host it was
+    # handed, carrying over every field it wasn't given — including the password.
+    # In a Condor-spawned process that password is the *server owner's*, so a
+    # single configure_server(host=…) would authenticate against a host the model
+    # named, and save_server_config would leave it in cleartext in the
+    # machine-global ~/.hummingbot_mcp/server.yml (SEC-253). Tool output is
+    # untrusted input, so "the prompt says don't call this" is not a control.
+    # Injected credentials are not ours to re-send anywhere: refuse the mutation
+    # and leave repointing to the dashboard's owner-gated Settings → Servers.
+    if _credentials_were_injected():
+        return (
+            "Changing the server connection is disabled for this session.\n\n"
+            "This MCP server was started by Condor and holds the API credentials "
+            "of the server's owner, so it cannot be repointed from a chat.\n\n"
+            f"  Name: {settings.server_name}\n"
+            f"  URL: {settings.api_url}\n\n"
+            "Add, edit or switch servers in the Condor dashboard: "
+            "Settings → Servers.\n"
         )
 
     # Build new config with partial updates (use in-memory settings, not disk)
@@ -158,7 +199,6 @@ async def configure_server(
         )
 
 
-@mcp.tool()
 @handle_errors("get portfolio overview")
 async def get_portfolio_overview(
     account_names: list[str] | None = None,
@@ -224,7 +264,6 @@ async def get_portfolio_overview(
 # Trading Tools
 
 
-@mcp.tool()
 @handle_errors("set position mode and leverage")
 async def set_account_position_mode_and_leverage(
     account_name: str,
@@ -262,7 +301,6 @@ async def set_account_position_mode_and_leverage(
     return response.strip()
 
 
-@mcp.tool()
 @handle_errors("search history")
 async def search_history(
     data_type: Literal["orders", "perp_positions", "clmm_positions"],
@@ -330,131 +368,41 @@ async def search_history(
 
 
 # Market Data Tools
+#
+# One tool, on purpose (ARCH-308). The candle, order book and funding-rate
+# readers that used to sit here returned a rendered table, so anything computed
+# from one — a spread, an indicator, three venues compared — had to be fetched a
+# second time through ``run_code`` to get numbers back. That is now the only
+# path: ``client.market_data.*`` inside a snippet returns dicts and gathers
+# across venues in one round trip. ``get_prices`` survives because a quote read
+# once and not computed on is answered completely by its own text.
 
 
-@mcp.tool()
-@handle_errors("get market data")
-async def get_market_data(
-    data_type: Literal["prices", "candles", "funding_rate", "order_book"],
-    connector_name: str,
-    trading_pairs: list[str] | None = None,
-    trading_pair: str | None = None,
-    interval: str = "1h",
-    days: int = 30,
-    query_type: (
-        Literal[
-            "snapshot",
-            "volume_for_price",
-            "price_for_volume",
-            "quote_volume_for_price",
-            "price_for_quote_volume",
-        ]
-        | None
-    ) = None,
-    query_value: float | None = None,
-    is_buy: bool = True,
-) -> str:
-    """Get market data: prices, candles, funding rates, or order book data.
-
-    Data Types:
-    - prices: Get latest prices for multiple trading pairs
-    - candles: Get OHLCV candle data for a trading pair
-    - funding_rate: Get perpetual funding rate (connector must have _perpetual)
-    - order_book: Get order book snapshot or queries
+@handle_errors("get prices")
+async def get_prices(connector_name: str, trading_pairs: list[str]) -> str:
+    """Get the latest price for one or more trading pairs on a connector.
 
     Args:
-        data_type: Type of market data to retrieve ('prices', 'candles', 'funding_rate', 'order_book')
         connector_name: Exchange connector name (e.g., 'binance', 'binance_perpetual')
-        trading_pairs: List of trading pairs (required for 'prices', e.g., ['BTC-USDT', 'ETH-USD'])
-        trading_pair: Single trading pair (required for 'candles', 'funding_rate', 'order_book')
-        interval: Candle interval for 'candles' (default: '1h'). Options: '1m', '5m', '15m', '30m', '1h', '4h', '1d'.
-        days: Number of days of historical data for 'candles' (default: 30).
-        query_type: Order book query type for 'order_book' (default: 'snapshot'). Options: 'snapshot',
-            'volume_for_price', 'price_for_volume', 'quote_volume_for_price', 'price_for_quote_volume'.
-        query_value: Value for order book queries (required if query_type is not 'snapshot').
-        is_buy: Side for order book queries (default: True for buy side).
+        trading_pairs: Trading pairs to price (e.g., ['BTC-USDT', 'ETH-USDT'])
+
+    Example:
+    - get_prices("binance", ["BTC-USDT", "ETH-USDT"])
     """
     client = await hummingbot_client.get_client()
 
-    if data_type == "prices":
-        if not trading_pairs:
-            return "Error: 'trading_pairs' is required for data_type='prices'"
-        result = await market_data_tools.get_prices(
-            client=client,
-            connector_name=connector_name,
-            trading_pairs=trading_pairs,
-        )
-        return (
-            f"Latest Prices for {result['connector_name']}:\n"
-            f"Timestamp: {result['timestamp']}\n\n"
-            f"{result['prices_table']}"
-        )
-
-    elif data_type == "candles":
-        if not trading_pair:
-            return "Error: 'trading_pair' is required for data_type='candles'"
-        result = await market_data_tools.get_candles(
-            client=client,
-            connector_name=connector_name,
-            trading_pair=trading_pair,
-            interval=interval,
-            days=days,
-        )
-        return (
-            f"Candles for {result['trading_pair']} on {result['connector_name']}:\n"
-            f"Interval: {result['interval']}\n"
-            f"Total Candles: {result['total_candles']}\n\n"
-            f"{result['candles_table']}"
-        )
-
-    elif data_type == "funding_rate":
-        if not trading_pair:
-            return "Error: 'trading_pair' is required for data_type='funding_rate'"
-        result = await market_data_tools.get_funding_rate(
-            client=client,
-            connector_name=connector_name,
-            trading_pair=trading_pair,
-        )
-        return (
-            f"Funding Rate for {result['trading_pair']} on {result['connector_name']}:\n\n"
-            f"Funding Rate: {result['funding_rate_pct']:.4f}%\n"
-            f"Mark Price: ${result['mark_price']:.2f}\n"
-            f"Index Price: ${result['index_price']:.2f}\n"
-            f"Next Funding Time: {result['next_funding_time']}"
-        )
-
-    elif data_type == "order_book":
-        if not trading_pair:
-            return "Error: 'trading_pair' is required for data_type='order_book'"
-        result = await market_data_tools.get_order_book(
-            client=client,
-            connector_name=connector_name,
-            trading_pair=trading_pair,
-            query_type=query_type or "snapshot",
-            query_value=query_value,
-            is_buy=is_buy,
-        )
-        if result["query_type"] == "snapshot":
-            return (
-                f"Order Book Snapshot for {result['trading_pair']} on {result['connector_name']}:\n"
-                f"Timestamp: {result['timestamp']}\n"
-                f"Top 10 Levels:\n\n"
-                f"{result['order_book_table']}"
-            )
-        else:
-            return (
-                f"Order Book Query for {result['trading_pair']} on {result['connector_name']}:\n\n"
-                f"Query Type: {result['query_type']}\n"
-                f"Query Value: {result['query_value']}\n"
-                f"Side: {result['side']}\n"
-                f"Result: {result['result']}"
-            )
-
-    else:
-        return f"Error: Invalid data_type '{data_type}'. Use 'prices', 'candles', 'funding_rate', or 'order_book'"
+    result = await market_data_tools.get_prices(
+        client=client,
+        connector_name=connector_name,
+        trading_pairs=trading_pairs,
+    )
+    return (
+        f"Latest Prices for {result['connector_name']}:\n"
+        f"Timestamp: {result['timestamp']}\n\n"
+        f"{result['prices_table']}"
+    )
 
 
-@mcp.tool()
 @handle_errors("manage controllers")
 async def manage_controllers(
     action: Literal["list", "describe", "upsert", "delete"],
@@ -475,9 +423,10 @@ async def manage_controllers(
     Works with reusable strategy definitions and parameter sets for future deployments.
     Does NOT affect running bots. To modify a live bot's config, use manage_bots with action='update_config'.
 
-    ⚠️ NOTE: For most trading strategies (grid, DCA, position trading), use manage_executors() instead.
-    Only use controllers when the user EXPLICITLY asks for "controllers", "bots", or needs advanced
-    multi-strategy bot deployments with centralized risk management.
+    ⚠️ NOTE: For most trading strategies use the create_*_executor tools instead —
+    create_grid_executor, create_dca_executor, create_position_executor. Only use
+    controllers when the user EXPLICITLY asks for "controllers", "bots", or needs
+    advanced multi-strategy bot deployments with centralized risk management.
 
     Exploration flow:
     1. action="list" → List all controllers and their configs
@@ -537,7 +486,6 @@ async def manage_controllers(
     return result.get("formatted_output") or result.get("message", str(result))
 
 
-@mcp.tool()
 @handle_errors("manage bots")
 async def manage_bots(
     action: Literal[
@@ -566,8 +514,9 @@ async def manage_bots(
 ) -> str:
     """Manage controller-based bots: deploy, monitor, get logs, control execution, and modify runtime configs.
 
-    ⚠️ NOTE: For most trading strategies (grid, DCA, position trading), use manage_executors() instead.
-    Only use bots when the user EXPLICITLY asks for "bot" deployment or needs advanced features like
+    ⚠️ NOTE: For most trading strategies use the create_*_executor tools instead —
+    create_grid_executor, create_dca_executor, create_position_executor. Only use bots
+    when the user EXPLICITLY asks for "bot" deployment or needs advanced features like
     multi-strategy bots with centralized risk management.
 
     Actions:
@@ -686,128 +635,805 @@ async def manage_bots(
 
 
 # Executor Management Tools
+#
+# One tool per executor type for creation, and small named tools for the read and
+# control side (FEAT-062). The typed signature IS the config schema: a wrong field is
+# a host-side validation error naming the field, and creating an executor costs one
+# call instead of a schema fetch followed by a create. The confirmation gate keys on
+# the NAME here — every `create_*_executor` and `stop_executor` is dangerous, every
+# read is not — so there is no `action` to sniff and no fail-closed ambiguity.
+# See `mcp_servers/TOOL_STYLE.md`.
 
 
-@mcp.tool()
-@handle_errors("manage executors")
-async def manage_executors(
-    action: (
-        Literal[
-            "create",
-            "search",
-            "stop",
-            "get_logs",
-            "get_preferences",
-            "save_preferences",
-            "reset_preferences",
-            "positions_summary",
-            "clear_position",
-            "performance_report",
-            "orphaned",
-            "resolve_orphan",
-        ]
-        | None
-    ) = None,
-    executor_type: str | None = None,
-    executor_config: dict[str, Any] | None = None,
-    executor_id: str | None = None,
-    log_level: str | None = None,
+@handle_errors("create position executor")
+async def create_position_executor(
+    connector_name: str,
+    trading_pair: str,
+    side: Literal[1, 2],
+    amount: float,
+    entry_price: float | None = None,
+    leverage: int | None = None,
+    stop_loss: float | None = None,
+    take_profit: float | None = None,
+    time_limit: int | None = None,
+    trailing_stop_activation_price: float | None = None,
+    trailing_stop_trailing_delta: float | None = None,
+    open_order_type: Literal[1, 2, 3] | None = None,
+    take_profit_order_type: Literal[1, 2, 3] | None = None,
+    stop_loss_order_type: Literal[1, 2, 3] | None = None,
+    time_limit_order_type: Literal[1, 2, 3] | None = None,
+    level_id: str | None = None,
+    account_name: str | None = None,
+    controller_id: str | None = None,
+    save_as_default: bool = False,
+) -> str:
+    """Open a directional position with automated stop-loss and take-profit. Spends real funds.
+
+    Use this tool when you have a directional view and want the exit managed for you:
+    one entry, then stop-loss / take-profit / time-limit / trailing-stop barriers that
+    close the position without another call.
+
+    Do NOT use when: you want to build the position gradually (`create_dca_executor`),
+    trade a range without a directional view (`create_grid_executor`), or place a plain
+    one-off order with no managed exit (`create_order_executor`).
+
+    AMOUNT IS IN BASE CURRENCY, NOT USD. This is the sharpest trap in the tool: for
+    BTC-USDT, `amount=0.01` is 0.01 BTC, not $0.01 and not $100. To size by USD, price
+    the pair first and divide — `amount = usd_value / price`. There is no
+    `total_amount_quote` here; that field belongs to the grid executor.
+
+    ORDER TYPES are `1`=MARKET, `2`=LIMIT, `3`=LIMIT_MAKER. Omitting them uses the
+    backend's own defaults (LIMIT to open, MARKET for every exit).
+
+    Args:
+        connector_name: Exchange connector, e.g. 'binance_perpetual'.
+        trading_pair: Trading pair, e.g. 'BTC-USDT'.
+        side: 1 = BUY/LONG, 2 = SELL/SHORT.
+        amount: Position size in BASE currency (see above).
+        entry_price: Limit entry price. OMIT for a market entry.
+        leverage: Leverage multiplier. Backend default 1.
+        stop_loss: Stop-loss as a decimal fraction, e.g. 0.02 = 2%.
+        take_profit: Take-profit as a decimal fraction, e.g. 0.03 = 3%.
+        time_limit: Maximum position duration in SECONDS.
+        trailing_stop_activation_price: Price delta at which the trailing stop arms.
+            Only takes effect together with trailing_stop_trailing_delta.
+        trailing_stop_trailing_delta: Distance the trailing stop follows behind price.
+        open_order_type: Order type for the entry. Backend default 2 (LIMIT).
+        take_profit_order_type: Backend default 1 (MARKET).
+        stop_loss_order_type: Backend default 1 (MARKET).
+        time_limit_order_type: Backend default 1 (MARKET).
+        level_id: Optional identifier tag.
+        account_name: Account to trade from. Default 'master_account'.
+        controller_id: Controller tag that owns the executor. Default 'main'. An
+            autonomous agent MUST pass its own agent id here — it is what attributes
+            the position to the session that opened it.
+        save_as_default: Save these arguments as the defaults for position executors.
+
+    Example:
+    - Long 0.01 BTC at 5x with a 2% stop and 3% target:
+      create_position_executor("binance_perpetual", "BTC-USDT", 1, 0.01, leverage=5,
+      stop_loss=0.02, take_profit=0.03)
+
+    For sizing from a stop distance and setting the risk/reward, read the
+    'directional_position' skill if the Condor skills library is available.
+    """
+    client = await hummingbot_client.get_client()
+    result = await executor_create.create_position_executor(
+        client,
+        connector_name=connector_name,
+        trading_pair=trading_pair,
+        side=side,
+        amount=amount,
+        entry_price=entry_price,
+        leverage=leverage,
+        stop_loss=stop_loss,
+        take_profit=take_profit,
+        time_limit=time_limit,
+        trailing_stop_activation_price=trailing_stop_activation_price,
+        trailing_stop_trailing_delta=trailing_stop_trailing_delta,
+        open_order_type=open_order_type,
+        take_profit_order_type=take_profit_order_type,
+        stop_loss_order_type=stop_loss_order_type,
+        time_limit_order_type=time_limit_order_type,
+        level_id=level_id,
+        account_name=account_name,
+        controller_id=controller_id,
+        save_as_default=save_as_default,
+    )
+    return result.get("formatted_output", str(result))
+
+
+@handle_errors("create grid executor")
+async def create_grid_executor(
+    connector_name: str,
+    trading_pair: str,
+    side: Literal[1, 2],
+    start_price: float,
+    end_price: float,
+    limit_price: float,
+    total_amount_quote: float,
+    take_profit: float | None = None,
+    open_order_type: Literal[1, 2, 3] | None = None,
+    take_profit_order_type: Literal[1, 2, 3] | None = None,
+    min_spread_between_orders: float | None = None,
+    min_order_amount_quote: float | None = None,
+    max_open_orders: int | None = None,
+    max_orders_per_batch: int | None = None,
+    order_frequency: int | None = None,
+    activation_bounds: float | None = None,
+    safe_extra_spread: float | None = None,
+    leverage: int | None = None,
+    keep_position: bool | None = None,
+    coerce_tp_to_step: bool | None = None,
+    deduct_base_fees: bool | None = None,
+    level_id: str | None = None,
+    account_name: str | None = None,
+    controller_id: str | None = None,
+    save_as_default: bool = False,
+) -> str:
+    """Run a grid of limit orders across a price range. Spends real funds.
+
+    Use this tool when the market is ranging and you want to earn the oscillation
+    rather than a direction: buys fill low, each filled buy places its own sell a
+    take-profit away.
+
+    Do NOT use when: the market is strongly trending (one-sided fills), or capital is
+    too small to spread across levels. For a single directional entry use
+    `create_position_executor`.
+
+    DIRECTION RULES — `side` is explicit and `limit_price` alone does NOT set it:
+    - LONG  (side=1): limit_price < start_price < end_price
+    - SHORT (side=2): start_price < end_price < limit_price
+    A grid that violates its side's ordering is rejected here rather than silently
+    never filling.
+
+    RISK IS `limit_price` + `keep_position`, NOT A STOP-LOSS. There is no stop_loss
+    parameter and never suggest one. When price crosses `limit_price` the grid stops:
+    `keep_position=False` closes the accumulated position (a stop-loss exit),
+    `keep_position=True` holds it for a recovery.
+
+    LEVEL COUNT is the intersection of two limits — `total_amount_quote /
+    min_order_amount_quote`, and the price range divided by
+    `min_spread_between_orders`. The tighter one wins.
+
+    Args:
+        connector_name: Exchange connector, e.g. 'binance_perpetual'.
+        trading_pair: Trading pair, e.g. 'SOL-USDT'.
+        side: 1 = LONG grid (accumulate base), 2 = SHORT grid (sell into strength).
+        start_price: Lower grid boundary.
+        end_price: Upper grid boundary.
+        limit_price: Safety boundary that stops the grid. See DIRECTION RULES.
+        total_amount_quote: Capital allocated, in QUOTE currency.
+        take_profit: Distance for the opposite order on each fill, as a decimal
+            fraction, e.g. 0.0002 = 0.02%.
+        open_order_type: 1=MARKET, 2=LIMIT, 3=LIMIT_MAKER. 3 is recommended — post-only
+            orders earn maker fees.
+        take_profit_order_type: Same enum; 3 recommended.
+        min_spread_between_orders: Minimum price distance between levels as a decimal
+            fraction. Backend default 0.0005.
+        min_order_amount_quote: Minimum size per order in quote currency. Backend
+            default 5.
+        max_open_orders: Hard cap on concurrent open orders. Backend default 5.
+        max_orders_per_batch: Orders submitted per batch. Backend default: unlimited.
+        order_frequency: Seconds between order batches. Backend default 0.
+        activation_bounds: Only place orders within this fraction of current price,
+            e.g. 0.001 = 0.1%. OMIT to place every order at once.
+        safe_extra_spread: Backend default 0.0001.
+        leverage: Leverage multiplier. Backend default 20 — pass 1 for spot-like sizing.
+        keep_position: Hold the accumulated position when the grid stops. Backend
+            default False (close it). See RISK above.
+        coerce_tp_to_step: Raise take-profit to at least one grid step, so a level
+            cannot close before the next one fills. Backend default False.
+        deduct_base_fees: Backend default False.
+        level_id: Optional identifier tag.
+        account_name: Account to trade from. Default 'master_account'.
+        controller_id: Controller tag that owns the executor. Default 'main'. An
+            autonomous agent MUST pass its own agent id here.
+        save_as_default: Save these arguments as the defaults for grid executors.
+
+    Example:
+    - A $500 long grid on SOL-USDT between 140 and 150, stopping under 138:
+      create_grid_executor("binance", "SOL-USDT", 1, 140, 150, 138, 500,
+      take_profit=0.002, open_order_type=3, take_profit_order_type=3, leverage=1)
+
+    For confirming the market is ranging and choosing the prices and level count, read
+    the 'run_a_grid' skill if the Condor skills library is available.
+    """
+    client = await hummingbot_client.get_client()
+    result = await executor_create.create_grid_executor(
+        client,
+        connector_name=connector_name,
+        trading_pair=trading_pair,
+        side=side,
+        start_price=start_price,
+        end_price=end_price,
+        limit_price=limit_price,
+        total_amount_quote=total_amount_quote,
+        take_profit=take_profit,
+        open_order_type=open_order_type,
+        take_profit_order_type=take_profit_order_type,
+        min_spread_between_orders=min_spread_between_orders,
+        min_order_amount_quote=min_order_amount_quote,
+        max_open_orders=max_open_orders,
+        max_orders_per_batch=max_orders_per_batch,
+        order_frequency=order_frequency,
+        activation_bounds=activation_bounds,
+        safe_extra_spread=safe_extra_spread,
+        leverage=leverage,
+        keep_position=keep_position,
+        coerce_tp_to_step=coerce_tp_to_step,
+        deduct_base_fees=deduct_base_fees,
+        level_id=level_id,
+        account_name=account_name,
+        controller_id=controller_id,
+        save_as_default=save_as_default,
+    )
+    return result.get("formatted_output", str(result))
+
+
+@handle_errors("create DCA executor")
+async def create_dca_executor(
+    connector_name: str,
+    trading_pair: str,
+    side: Literal[1, 2],
+    amounts_quote: list[float],
+    prices: list[float],
+    leverage: int | None = None,
+    take_profit: float | None = None,
+    stop_loss: float | None = None,
+    time_limit: int | None = None,
+    trailing_stop_activation_price: float | None = None,
+    trailing_stop_trailing_delta: float | None = None,
+    mode: Literal["MAKER", "TAKER"] | None = None,
+    level_id: str | None = None,
+    account_name: str | None = None,
+    controller_id: str | None = None,
+    save_as_default: bool = False,
+) -> str:
+    """Average into a position over a ladder of price levels. Spends real funds.
+
+    Use this tool when you want to accumulate gradually and reduce timing risk: one
+    order per level, at decreasing prices for a BUY and increasing for a SELL, with a
+    shared exit across the whole ladder.
+
+    Do NOT use when: you want the full position now (`create_position_executor` or
+    `create_order_executor`), or you want two-sided range trading
+    (`create_grid_executor`).
+
+    AMOUNTS ARE IN QUOTE CURRENCY AND THE TWO LISTS ARE PARALLEL. `amounts_quote` and
+    `prices` are one list of levels split in two — index i is one order of
+    `amounts_quote[i]` quote currency at `prices[i]`. A length mismatch is rejected
+    here. Note this is the opposite convention from `create_position_executor`, whose
+    `amount` is in base currency.
+
+    Args:
+        connector_name: Exchange connector, e.g. 'binance_perpetual'.
+        trading_pair: Trading pair, e.g. 'BTC-USDT'.
+        side: 1 = BUY, 2 = SELL.
+        amounts_quote: Order sizes in QUOTE currency, one per level, e.g. [100, 100, 150].
+        prices: Price for each level, same length as amounts_quote, e.g. [50000, 48000, 46000].
+        leverage: Leverage multiplier. Backend default 1.
+        take_profit: Take-profit as a decimal fraction, e.g. 0.03 = 3%.
+        stop_loss: Stop-loss as a decimal fraction, e.g. 0.05 = 5%.
+        time_limit: Maximum duration in SECONDS.
+        trailing_stop_activation_price: Price delta at which the trailing stop arms.
+            Only takes effect together with trailing_stop_trailing_delta.
+        trailing_stop_trailing_delta: Distance the trailing stop follows behind price.
+        mode: 'MAKER' places limit orders, 'TAKER' market orders. Backend default MAKER.
+        level_id: Optional identifier tag.
+        account_name: Account to trade from. Default 'master_account'.
+        controller_id: Controller tag that owns the executor. Default 'main'. An
+            autonomous agent MUST pass its own agent id here.
+        save_as_default: Save these arguments as the defaults for DCA executors.
+
+    Example:
+    - Ladder $350 into BTC across three levels with a 3% target and 5% stop:
+      create_dca_executor("binance_perpetual", "BTC-USDT", 1, [100, 100, 150],
+      [50000, 48000, 46000], take_profit=0.03, stop_loss=0.05)
+
+    For spacing the levels and distributing size across them, read the
+    'dca_into_position' skill if the Condor skills library is available.
+    """
+    client = await hummingbot_client.get_client()
+    result = await executor_create.create_dca_executor(
+        client,
+        connector_name=connector_name,
+        trading_pair=trading_pair,
+        side=side,
+        amounts_quote=amounts_quote,
+        prices=prices,
+        leverage=leverage,
+        take_profit=take_profit,
+        stop_loss=stop_loss,
+        time_limit=time_limit,
+        trailing_stop_activation_price=trailing_stop_activation_price,
+        trailing_stop_trailing_delta=trailing_stop_trailing_delta,
+        mode=mode,
+        level_id=level_id,
+        account_name=account_name,
+        controller_id=controller_id,
+        save_as_default=save_as_default,
+    )
+    return result.get("formatted_output", str(result))
+
+
+@handle_errors("create order executor")
+async def create_order_executor(
+    connector_name: str,
+    trading_pair: str,
+    side: Literal[1, 2],
+    amount: str,
+    execution_strategy: Literal["MARKET", "LIMIT", "LIMIT_MAKER", "LIMIT_CHASER"],
+    price: float | None = None,
+    chaser_distance: float | None = None,
+    chaser_refresh_threshold: float | None = None,
+    leverage: int | None = None,
+    position_action: Literal["OPEN", "CLOSE", "NIL"] | None = None,
+    level_id: str | None = None,
+    account_name: str | None = None,
+    controller_id: str | None = None,
+    save_as_default: bool = False,
+) -> str:
+    """Place one buy or sell order with a chosen execution strategy. Spends real funds.
+
+    This is the standard way to place a plain order, and to CANCEL one: stop its
+    executor with `stop_executor`.
+
+    THIS IS ALSO HOW YOU SWAP ON A DEX. Set `connector_name` to a NETWORK
+    ('solana-mainnet-beta', 'ethereum-mainnet') with execution_strategy='MARKET' and
+    the order routes through Gateway's unified swap route — the same one `execute_swap`
+    uses, but with the slippage ramp and an executor record attached. The router is not
+    selectable per order; it comes from the network's configured swapProvider. Prefer
+    this over a one-shot `execute_swap` for any swap that is part of a strategy.
+
+    Do NOT use when: you want a managed stop-loss/take-profit exit
+    (`create_position_executor`), or multi-level entry (`create_dca_executor` /
+    `create_grid_executor`).
+
+    ON SOLANA, WHETHER YOU RECEIVED WHAT YOU ASKED FOR DEPENDS ON THE ROUTE. A BUY is
+    an ExactOut order; a thin token with no ExactOut route is quoted by pricing the sell
+    leg forward instead — roughly 2.5% short, up to 4.83% observed. The order is
+    silently RESIZED, not overcharged, which is what makes it dangerous to a caller who
+    asked for a quantity. The quote's `approximation` flag says which case you are in:
+    when true, read the true post-swap wallet balance before feeding the amount into a
+    call that must spend those tokens (an LP open's base_amount, say); when false the
+    figure is exact to the lamport. A blanket safety haircut is wrong on an exact fill.
+
+    OBSERVABILITY: `custom_info` carries `transaction_hash` (the on-chain signature —
+    `order_id` is internal and appears nowhere on chain), plus `slippage_pct` and
+    `max_slippage_pct`. `slippage_pct` is the LIVE tolerance: above the configured start
+    means earlier attempts failed on slippage and this one is paying to get through.
+
+    Args:
+        connector_name: Exchange connector, or a NETWORK id for a DEX swap (see above).
+        trading_pair: Trading pair, e.g. 'SOL-USDC'. On a DEX either side may be a raw
+            TOKEN ADDRESS instead of a symbol — 'BANKJmvh...-USDC' is valid, and the
+            token does NOT need to be registered with Gateway first: it resolves the
+            mint and reads decimals on-chain. Never add a token to Gateway as a
+            prerequisite for trading it, and never guess decimals in order to do so.
+        side: 1 = BUY, 2 = SELL.
+        amount: Order amount in BASE currency, or a USD value as a '$'-prefixed string
+            such as '$100'. A string either way.
+        execution_strategy: 'MARKET' fills now; 'LIMIT' rests at `price`; 'LIMIT_MAKER'
+            is post-only and is rejected if it would match immediately; 'LIMIT_CHASER'
+            re-posts as the market moves.
+        price: Required for LIMIT and LIMIT_MAKER.
+        chaser_distance: How far from best price to rest, as a decimal fraction, e.g.
+            0.001 = 0.1%. Required with chaser_refresh_threshold for LIMIT_CHASER.
+        chaser_refresh_threshold: How far price must move before re-posting, as a
+            decimal fraction, e.g. 0.0005 = 0.05%.
+        leverage: Leverage multiplier. Backend default 1.
+        position_action: 'OPEN' or 'CLOSE' — useful for perpetuals in HEDGE mode.
+            Backend default OPEN.
+        level_id: Optional identifier tag.
+        account_name: Account to trade from. Default 'master_account'.
+        controller_id: Controller tag that owns the executor. Default 'main'. An
+            autonomous agent MUST pass its own agent id here.
+        save_as_default: Save these arguments as the defaults for order executors.
+
+    Examples:
+    - Market-buy $100 of SOL: create_order_executor("binance", "SOL-USDT", 1, "$100",
+      "MARKET")
+    - Swap 0.5 SOL for USDC on Solana: create_order_executor("solana-mainnet-beta",
+      "SOL-USDC", 2, "0.5", "MARKET")
+    """
+    client = await hummingbot_client.get_client()
+    result = await executor_create.create_order_executor(
+        client,
+        connector_name=connector_name,
+        trading_pair=trading_pair,
+        side=side,
+        amount=amount,
+        execution_strategy=execution_strategy,
+        price=price,
+        chaser_distance=chaser_distance,
+        chaser_refresh_threshold=chaser_refresh_threshold,
+        leverage=leverage,
+        position_action=position_action,
+        level_id=level_id,
+        account_name=account_name,
+        controller_id=controller_id,
+        save_as_default=save_as_default,
+    )
+    return result.get("formatted_output", str(result))
+
+
+@handle_errors("create LP executor", GATEWAY_LOG_HINT)
+async def create_lp_executor(
+    connector_name: str,
+    lp_provider: str,
+    trading_pair: str,
+    pool_address: str,
+    lower_price: float,
+    upper_price: float,
+    side: Literal[1, 2, 3],
+    base_amount: float | None = None,
+    quote_amount: float | None = None,
+    upper_limit_price: float | None = None,
+    lower_limit_price: float | None = None,
+    swap_provider: str | None = None,
+    keep_position: bool | None = None,
+    extra_params: dict[str, Any] | None = None,
+    account_name: str | None = None,
+    controller_id: str | None = None,
+    save_as_default: bool = False,
+) -> str:
+    """Open a managed CLMM liquidity position inside a price range. Spends real funds.
+
+    This is the standard way to provide liquidity: the executor opens the position,
+    tracks whether price is in range, accrues fees, and auto-closes when price crosses
+    a limit price. Close it with `stop_executor`, never by hand.
+
+    Use `explore_dex_pools` first to find the pool and read its current price, unless
+    the user supplied a pool address.
+
+    Do NOT use when: you want a one-off unmanaged position (`manage_clmm`), or
+    directional exposure without impermanent-loss risk (the CEX executors above).
+
+    `connector_name` IS THE NETWORK, NOT THE DEX. Pass 'solana-mainnet-beta',
+    'ethereum-mainnet', 'arbitrum-one', 'base-mainnet', 'binance-smart-chain'. Passing
+    'meteora/clmm' here is the most common failure and the API rejects it with "Invalid
+    network format". The DEX goes in `lp_provider`, as 'dex/trading_type'.
+
+    SIDE PICKS WHICH TOKENS YOU SUPPLY, and the range has to agree with it:
+    - side=1 (BUY, quote only): range BELOW current price. Quote converts to base as
+      price falls into it.
+    - side=2 (SELL, base only): range ABOVE current price. Base converts to quote as
+      price rises into it.
+    - side=3 (RANGE, both): range around current price.
+
+    AUTO-CLOSE. `upper_limit_price` / `lower_limit_price` close the position when price
+    crosses them, and they fire only while the position is OUT_OF_RANGE. Set BOTH when
+    you want a closed strategy — otherwise the position sits out of range indefinitely
+    on the unprotected side.
+
+    A stopped executor always closes the on-chain position; `keep_position` only decides
+    whether the net token change is KEPT as a spot position or swapped back to the
+    original quote asset.
+
+    Args:
+        connector_name: The NETWORK, e.g. 'solana-mainnet-beta'. See above.
+        lp_provider: DEX and trading type as 'dex/trading_type' — 'meteora/clmm',
+            'raydium/clmm', 'orca/clmm' on Solana; 'uniswap/clmm', 'pancakeswap/clmm'
+            on EVM.
+        trading_pair: Token pair, e.g. 'SOL-USDC'.
+        pool_address: Pool contract address, from `explore_dex_pools`.
+        lower_price: Lower bound of the range. Must be below upper_price.
+        upper_price: Upper bound of the range.
+        side: 1 = BUY (quote only), 2 = SELL (base only), 3 = RANGE (both).
+        base_amount: Base token to provide. Give this, quote_amount, or both.
+        quote_amount: Quote token to provide.
+        upper_limit_price: Auto-close when price rises to or above this.
+        lower_limit_price: Auto-close when price falls to or below this.
+        swap_provider: Provider for the close-out swap when keep_position=False, e.g.
+            'jupiter/router'. OMIT to use the network's default.
+        keep_position: Keep the net token change as a held spot position on close.
+            Backend default False (swap back to the original quote asset).
+        extra_params: Connector-specific parameters. Meteora takes
+            {"strategyType": 0} — 0=Spot (uniform), 1=Curve (concentrated at price),
+            2=Bid-Ask (at the range edges).
+        account_name: Account to trade from. Default 'master_account'.
+        controller_id: Controller tag that owns the executor. Default 'main'. An
+            autonomous agent MUST pass its own agent id here.
+        save_as_default: Save these arguments as the defaults for LP executors.
+
+    Example:
+    - Single-sided 1 SOL into a BONK-SOL pool with a range below spot:
+      create_lp_executor("solana-mainnet-beta", "meteora/clmm", "BONK-SOL", "<pool>",
+      lower_price=p*0.8, upper_price=p, side=1, quote_amount=1.0,
+      lower_limit_price=p*0.72, upper_limit_price=p*1.1)
+
+    For choosing the pool, sizing the range and picking the side, read the
+    'open_lp_position' skill if the Condor skills library is available.
+    """
+    client = await hummingbot_client.get_client()
+    result = await executor_create.create_lp_executor(
+        client,
+        connector_name=connector_name,
+        lp_provider=lp_provider,
+        trading_pair=trading_pair,
+        pool_address=pool_address,
+        lower_price=lower_price,
+        upper_price=upper_price,
+        side=side,
+        base_amount=base_amount,
+        quote_amount=quote_amount,
+        upper_limit_price=upper_limit_price,
+        lower_limit_price=lower_limit_price,
+        swap_provider=swap_provider,
+        keep_position=keep_position,
+        extra_params=extra_params,
+        account_name=account_name,
+        controller_id=controller_id,
+        save_as_default=save_as_default,
+    )
+    return result.get("formatted_output", str(result))
+
+
+@handle_errors("list executors")
+async def list_executors(
     account_names: list[str] | None = None,
     connector_names: list[str] | None = None,
     trading_pairs: list[str] | None = None,
     executor_types: list[str] | None = None,
+    controller_ids: list[str] | None = None,
     status: str | None = None,
     cursor: str | None = None,
     limit: int = 50,
-    keep_position: bool = False,
-    save_as_default: bool = False,
-    preferences_content: str | None = None,
-    account_name: str | None = None,
-    connector_name: str | None = None,
-    trading_pair: str | None = None,
-    controller_id: str | None = None,
-    controller_ids: list[str] | None = None,
 ) -> str:
-    """Manage trading executors: create, search, stop, and configure preferences.
+    """List executors, filtered. Read-only.
 
-    This is the DEFAULT tool for ALL trading operations. Use progressive disclosure to get
-    the full guide and config schema for any executor type before creating.
+    Use this tool when you need the fleet: what is running, on which pairs, under which
+    controller. For one executor's full detail use `get_executor`.
 
-    Executor Types (pass executor_type with no action to see full guide + schema):
-    - order_executor: Buy/sell orders (MARKET, LIMIT, LIMIT_MAKER, LIMIT_CHASER)
-    - position_executor: Directional positions with SL/TP management
-    - grid_executor: Grid trading for range-bound markets
-    - dca_executor: Dollar-cost averaging with scheduled levels
-    - lp_executor: CLMM LP positions on Meteora/Raydium (use explore_dex_pools first)
-
-    Actions:
-    - (none) + executor_type → Show full guide, config schema, and saved defaults
-    - create + executor_config → Create executor (merged with saved defaults)
-    - search → List/filter executors (add executor_id for detail)
-    - stop + executor_id → Stop executor (with keep_position option)
-    - get_logs + executor_id → Get logs (active executors only)
-    - get_preferences / save_preferences / reset_preferences → Manage saved defaults
-    - positions_summary → View all positions (add connector_name + trading_pair to filter)
-    - clear_position + connector_name + trading_pair → Clear externally-closed position
-    - performance_report → Get executor performance report (optionally filter by controller_id)
-    - orphaned → List terminated executors that may still own an on-chain LP position (recover before opening new ones).
-      Reports the dex, pool and network needed to close each one with `manage_clmm(action="close")`
-    - resolve_orphan + executor_id → Mark an orphaned position as recovered, after closing it with `manage_clmm`.
-      Stopping a terminated executor does NOT close its position
+    Every filter is optional and they AND together. Omitting all of them lists
+    everything up to `limit`.
 
     Args:
-        action: Action to perform. Leave empty to see executor types or config schema.
-        executor_type: Type of executor. Provide alone to see its full guide and config schema.
-        executor_config: Configuration for creating an executor. Required for 'create' action.
-        executor_id: Executor ID for 'search' (detail), 'stop', or 'get_logs' actions.
-        log_level: Filter logs by level - 'ERROR', 'WARNING', 'INFO', 'DEBUG' (for get_logs).
-        account_names: Filter by account names (for search).
-        connector_names: Filter by connector names (for search).
-        trading_pairs: Filter by trading pairs (for search).
-        executor_types: Filter by executor types (for search).
-        status: Filter by status - 'RUNNING', 'TERMINATED' (for search).
-        cursor: Pagination cursor for search results.
-        limit: Maximum results to return (default: 50, max: 1000).
-        keep_position: When stopping, keep the position open instead of closing it (default: False).
-        save_as_default: Save executor_config as default for this executor_type (default: False).
-        preferences_content: Complete markdown content for the preferences file. Required for 'save_preferences'.
-        account_name: Account name for creating executors (default: 'master_account').
-        connector_name: Connector name for position filtering or clearing.
-        trading_pair: Trading pair for position filtering or clearing.
-        controller_id: Controller ID that owns the executor. Used for create, positions_summary, clear_position, and performance_report.
-        controller_ids: Filter by controller IDs (for search).
+        account_names: Filter by account names.
+        connector_names: Filter by connector names.
+        trading_pairs: Filter by trading pairs.
+        executor_types: Filter by type, e.g. ['grid_executor', 'lp_executor'].
+        controller_ids: Filter by the controller tag that owns them.
+        status: 'RUNNING' or 'TERMINATED'.
+        cursor: Pagination cursor from a previous call.
+        limit: Maximum results, 1-1000. Default 50.
     """
-    # Create and validate request using Pydantic model
-    request = ManageExecutorsRequest(
-        action=action,
-        executor_type=executor_type,
-        executor_config=executor_config,
-        executor_id=executor_id,
-        log_level=log_level,
+    client = await hummingbot_client.get_client()
+    result = await executors_tools.list_executors(
+        client,
         account_names=account_names,
         connector_names=connector_names,
         trading_pairs=trading_pairs,
         executor_types=executor_types,
+        controller_ids=controller_ids,
         status=status,
         cursor=cursor,
         limit=limit,
-        keep_position=keep_position,
-        save_as_default=save_as_default,
-        preferences_content=preferences_content,
-        account_name=account_name,
-        connector_name=connector_name,
-        trading_pair=trading_pair,
-        controller_id=controller_id,
-        controller_ids=controller_ids,
     )
-
-    client = await hummingbot_client.get_client()
-    result = await manage_executors_impl(client, request)
-
     return result.get("formatted_output", str(result))
 
 
-@mcp.tool()
+@handle_errors("get executor")
+async def get_executor(
+    executor_id: str,
+    include_logs: bool = False,
+    log_level: str | None = None,
+    log_limit: int = 50,
+) -> str:
+    """Get one executor's full detail, optionally with its logs. Read-only.
+
+    Use this tool when you have an executor id and need its config, state and PnL. To
+    find the id first, use `list_executors`.
+
+    LOGS EXIST ONLY WHILE THE EXECUTOR RUNS. They are cleared on completion, so an
+    empty log list on a terminated executor is normal and not a failure. If the detail
+    is available but the logs are not, both facts are reported rather than neither.
+
+    Args:
+        executor_id: The executor to fetch.
+        include_logs: Also fetch this executor's logs.
+        log_level: Filter logs to 'ERROR', 'WARNING', 'INFO' or 'DEBUG'.
+        log_limit: Maximum log entries. Default 50.
+    """
+    client = await hummingbot_client.get_client()
+    result = await executors_tools.get_executor(
+        client,
+        executor_id=executor_id,
+        include_logs=include_logs,
+        log_level=log_level,
+        log_limit=log_limit,
+    )
+    return result.get("formatted_output", str(result))
+
+
+@handle_errors("stop executor")
+async def stop_executor(
+    executor_id: str,
+    keep_position: bool = False,
+) -> str:
+    """Stop a running executor and close or keep its position. Moves real funds.
+
+    This is also how you CANCEL an order placed with `create_order_executor`.
+
+    STOPPING AN ALREADY-TERMINATED EXECUTOR IS A NO-OP, NOT AN ERROR. It returns the
+    final close_type instead of a 404, and — for an LP executor — whether a position
+    was left open on-chain. A 404 means the id is unknown to the API database. A
+    terminated executor's on-chain position CANNOT be closed by stopping it; start from
+    `list_orphaned_positions`, and for the recovery procedure read the
+    'recover_orphaned_position' skill if the Condor skills library is available.
+
+    Args:
+        executor_id: The executor to stop.
+        keep_position: Keep the position open instead of closing it. Default False.
+            For an LP executor the on-chain position always closes; this only decides
+            whether the net token change is kept as a spot position or swapped back.
+    """
+    client = await hummingbot_client.get_client()
+    result = await executors_tools.stop_executor(
+        client,
+        executor_id=executor_id,
+        keep_position=keep_position,
+    )
+    return result.get("formatted_output", str(result))
+
+
+@handle_errors("list orphaned positions")
+async def list_orphaned_positions() -> str:
+    """List terminated executors that may still own an on-chain position. Read-only.
+
+    Use this tool when an LP executor terminated unexpectedly, and before opening any
+    new position on the same funds. It reports the dex, pool and network needed to close
+    each one.
+
+    An orphan is a position with no automated owner: a close that exhausted its retries
+    (POSITION_HOLD with a hold_reason), a legacy FAILED executor still carrying a
+    position_address, or an LP executor reaped by an API restart. Stopping the executor
+    will NOT close it — it has already terminated — and a fresh `create_lp_executor`
+    CANNOT adopt it; it would mint a second funded position on top.
+
+    Recover with `manage_clmm(action="close", ...)`, where pool_address is REQUIRED
+    because LP-executor positions are opened straight against Gateway and have no row in
+    the API database. Then call `resolve_orphaned_position`.
+
+    For the full cross-server procedure, read the 'recover_orphaned_position' skill if
+    the Condor skills library is available.
+    """
+    client = await hummingbot_client.get_client()
+    result = await executors_tools.list_orphaned_positions(client)
+    return result.get("formatted_output", str(result))
+
+
+@handle_errors("resolve orphaned position")
+async def resolve_orphaned_position(executor_id: str) -> str:
+    """Mark an orphaned position as recovered, after closing it. Read-only bookkeeping.
+
+    Use this tool ONLY after the position is actually closed on-chain via
+    `manage_clmm(action="close", ...)`. It updates the API database so the orphan stops
+    appearing in listings and warnings; it closes nothing itself.
+
+    If an lp_rebalancer controller was managing the executor, restart that controller
+    (or its bot) afterwards: its orphan halt is held in memory and only clears on
+    restart.
+
+    Args:
+        executor_id: The orphaned executor, from `list_orphaned_positions`.
+    """
+    client = await hummingbot_client.get_client()
+    result = await executors_tools.resolve_orphaned_position(
+        client, executor_id=executor_id
+    )
+    return result.get("formatted_output", str(result))
+
+
+@handle_errors("list positions held")
+async def list_positions_held(
+    connector_name: str | None = None,
+    trading_pair: str | None = None,
+    account_name: str | None = None,
+    controller_id: str | None = None,
+) -> str:
+    """List spot positions held by executors. Read-only.
+
+    Use this tool to see what the bot is actually holding, as opposed to which
+    executors are running (`list_executors`). Give BOTH connector_name and trading_pair
+    for one position's detail; omit them for the whole summary.
+
+    Args:
+        connector_name: Connector to filter by. Needs trading_pair to select one.
+        trading_pair: Trading pair to filter by. Needs connector_name.
+        account_name: Account. Default 'master_account'.
+        controller_id: Restrict to one controller's positions.
+    """
+    client = await hummingbot_client.get_client()
+    result = await executors_tools.list_positions_held(
+        client,
+        connector_name=connector_name,
+        trading_pair=trading_pair,
+        account_name=account_name,
+        controller_id=controller_id,
+    )
+    return result.get("formatted_output", str(result))
+
+
+@handle_errors("clear position held")
+async def clear_position_held(
+    connector_name: str,
+    trading_pair: str,
+    account_name: str | None = None,
+    controller_id: str | None = None,
+) -> str:
+    """Clear a held position that was already closed elsewhere. Bookkeeping only.
+
+    Use this tool when a position was closed outside the bot (on the exchange UI, say)
+    and the API still shows it held. It moves no funds and closes nothing — it only
+    corrects the record.
+
+    Do NOT use it to close a live position: stop its executor with `stop_executor`.
+
+    Args:
+        connector_name: Connector the stale position is recorded under.
+        trading_pair: Trading pair of the stale position.
+        account_name: Account. Default 'master_account'.
+        controller_id: Controller that owned it, if any.
+    """
+    client = await hummingbot_client.get_client()
+    result = await executors_tools.clear_position_held(
+        client,
+        connector_name=connector_name,
+        trading_pair=trading_pair,
+        account_name=account_name,
+        controller_id=controller_id,
+    )
+    return result.get("formatted_output", str(result))
+
+
+@handle_errors("get performance report")
+async def get_performance_report(controller_id: str | None = None) -> str:
+    """Get aggregate executor performance. Read-only.
+
+    Use this tool for realized and unrealized PnL across executors, optionally scoped to
+    one controller.
+
+    Args:
+        controller_id: Restrict the report to one controller's executors. OMIT for all.
+    """
+    client = await hummingbot_client.get_client()
+    result = await executors_tools.get_performance_report(
+        client, controller_id=controller_id
+    )
+    return result.get("formatted_output", str(result))
+
+
+@handle_errors("manage executor defaults")
+async def executor_defaults(
+    action: Literal["get", "save", "reset"],
+    content: str | None = None,
+) -> str:
+    """Read, replace or reset the saved executor defaults. Local file, no funds.
+
+    Saved defaults merge UNDERNEATH whatever a `create_*_executor` call actually passes,
+    so they fill in the fields the call omitted and never override one it set. This is
+    how a user's preferred leverage or account travels across sessions.
+
+    Do NOT use this to create an executor — the create tools merge the defaults
+    themselves. To save the arguments of a create as the new defaults, pass
+    `save_as_default=True` on that create instead of editing this file.
+
+    Actions:
+    - "get": Read the whole defaults file, markdown and YAML blocks included.
+    - "save": Replace the whole file with `content`. Read it with "get" first — this
+      overwrites, it does not merge.
+    - "reset": Restore the shipped documentation, preserving existing YAML configs.
+
+    Args:
+        action: One of get, save, reset.
+        content: Complete markdown content. Required for "save".
+    """
+    result = await executors_tools.executor_defaults(action=action, content=content)
+    return result.get("formatted_output", str(result))
+
+
 @handle_errors("explore DEX pools", GATEWAY_LOG_HINT)
 async def explore_dex_pools(
     action: Literal["list_pools", "get_pool_info"],
@@ -829,7 +1455,7 @@ async def explore_dex_pools(
     - list_pools: Browse available CLMM pools with filtering and sorting
     - get_pool_info: Get detailed information about a specific pool (requires network + pool_address)
 
-    To manage LP positions, use `manage_executors` with `lp_executor` type.
+    To manage LP positions, use `create_lp_executor`.
     To check on-chain positions, use `get_portfolio_overview` with `include_lp_positions=True`.
 
     Args:
@@ -870,7 +1496,6 @@ async def explore_dex_pools(
     return format_gateway_clmm_pool_result(action, result)
 
 
-@mcp.tool()
 @handle_errors("manage Gateway config", GATEWAY_LOG_HINT)
 async def manage_gateway_config(
     resource_type: Literal[
@@ -891,8 +1516,6 @@ async def manage_gateway_config(
     search: str | None = None,
     network: str | None = None,
     chain: str | None = None,
-    private_key: str | None = None,
-    wallet_address: str | None = None,
 ) -> str:
     """Read and edit Gateway's own configuration — chains, networks, tokens, connectors, pools, wallets.
 
@@ -910,8 +1533,8 @@ async def manage_gateway_config(
     - tokens: the per-network symbol/address/decimals mapping (list, add, delete)
     - connectors: DEX connector config
     - pools: the named pool registry (list, add)
-    - wallets: wallet add/delete. GATED — needs confirmation, and `add` takes a private
-      key. Prefer importing a wallet outside the agent.
+    - wallets: list only. Add or remove wallets in the Condor dashboard
+      (Settings → Gateway) — a private key must never be sent through chat.
 
     Args:
         resource_type: Which part of Gateway's config to act on.
@@ -929,9 +1552,7 @@ async def manage_gateway_config(
         pool_address: Pool contract address. Required to add a pool.
         search: Filter tokens by symbol or name when listing.
         network: Bare network name ('mainnet-beta'). Required to list pools.
-        chain: Chain for a wallet action ('solana', 'ethereum').
-        private_key: Private key for 'add' wallet. Gated; avoid where possible.
-        wallet_address: Wallet address for 'delete' wallet.
+        chain: Filter wallets by chain when listing ('solana', 'ethereum').
     """
     request = GatewayConfigRequest(
         resource_type=resource_type,
@@ -950,8 +1571,6 @@ async def manage_gateway_config(
         search=search,
         network=network,
         chain=chain,
-        private_key=private_key,
-        wallet_address=wallet_address,
     )
 
     client = await hummingbot_client.get_client()
@@ -959,7 +1578,6 @@ async def manage_gateway_config(
     return format_gateway_config_result(result)
 
 
-@mcp.tool()
 @handle_errors("manage Gateway container")
 async def manage_gateway_container(
     action: Literal["get_status", "start", "stop", "restart", "get_logs"],
@@ -983,7 +1601,6 @@ async def manage_gateway_container(
     return format_gateway_container_result(result)
 
 
-@mcp.tool()
 @handle_errors("manage AMM", GATEWAY_LOG_HINT)
 async def manage_amm(
     action: (
@@ -1034,8 +1651,8 @@ async def manage_amm(
     (required); raydium→ammConfigIndex (optional); uniswap/pancakeswap (EVM)→none
     (0.30% fixed fee). Unknown keys are rejected with a 400.
 
-    Scope: AMM only. Router/one-shot swaps → manage_executors(order_executor); CLMM LP →
-    manage_executors(lp_executor).
+    Scope: AMM only. Router/one-shot swaps → `create_order_executor`; CLMM LP →
+    `create_lp_executor`.
 
     Args:
         action: AMM action. Leave empty to load the AMM guide + param matrix.
@@ -1077,7 +1694,6 @@ async def manage_amm(
     return format_amm_result(action, result)
 
 
-@mcp.tool()
 @handle_errors("manage CLMM", GATEWAY_LOG_HINT)
 async def manage_clmm(
     action: (
@@ -1113,12 +1729,11 @@ async def manage_clmm(
     Stateless — you hold position state in your journal. Progressive disclosure: call with NO
     `action` to load the CLMM guide.
 
-    THE UNMANAGED PATH. For normal LP work use `manage_executors` with `lp_executor`, which owns
-    range monitoring, rebalancing and bounded close retries. Use this tool when no executor can do
-    that for you — above all to RECOVER AN ORPHANED POSITION: a terminated executor cannot be told
-    to close anything (`manage_executors(action="stop")` on one is correctly a no-op), so the
-    position must be closed by address here, then marked with
-    `manage_executors(action="resolve_orphan")`.
+    THE UNMANAGED PATH. For normal LP work use `create_lp_executor`, which owns range
+    monitoring, rebalancing and bounded close retries. Use this tool when no executor can do
+    that for you — above all to RECOVER AN ORPHANED POSITION, which is closed by address here
+    and then marked with `resolve_orphaned_position`. For that procedure read the
+    'recover_orphaned_position' skill if the Condor skills library is available.
 
     Actions:
     - position_info → your positions in a pool with amounts, range, and uncollected fees
@@ -1131,10 +1746,6 @@ async def manage_clmm(
     remove_liquidity at 100% leaves an EMPTY POSITION OPEN; only `close` closes the account. To
     recover an orphan, use `close`.
 
-    Positions opened by an lp_executor are not in the API database (the bot opens them straight
-    against Gateway), and they close fine anyway: the API never reads `pool_address` on
-    close/collect_fees.
-
     Pool discovery lives in `explore_dex_pools`.
 
     Args:
@@ -1145,8 +1756,10 @@ async def manage_clmm(
         network: Network ID in 'chain-network' format (e.g. 'solana-mainnet-beta', 'ethereum-mainnet').
             For an orphan record this is the `connector_name` field.
         wallet_address: Wallet address (optional, uses default if not provided).
-        pool_address: Pool contract address. Required for open; informational elsewhere —
-            position_info takes no pool filter and close/collect_fees never read it.
+        pool_address: Pool contract address. Required for open. On close/collect_fees pass
+            it whenever you have it — a position opened by an lp_executor has no row in the
+            API database, so the pool cannot be looked up and the call can fail without it.
+            position_info takes no pool filter.
         position_address: Position NFT address (add_liquidity, remove_liquidity, close, collect_fees).
         lower_price: Lower price bound of the range (open).
         upper_price: Upper price bound of the range (open).
@@ -1187,55 +1800,25 @@ async def manage_clmm(
     return format_clmm_result(action, result)
 
 
-@mcp.tool()
-@handle_errors("manage Gateway swaps", GATEWAY_LOG_HINT)
-async def manage_gateway_swaps(
-    action: Literal["quote", "execute", "search", "get_status"],
-    connector: str | None = None,
-    network: str | None = None,
-    trading_pair: str | None = None,
-    side: Literal["BUY", "SELL"] | None = None,
-    amount: str | None = None,
+@handle_errors("quote a Gateway swap", GATEWAY_LOG_HINT)
+async def quote_swap(
+    connector: str,
+    network: str,
+    trading_pair: str,
+    side: Literal["BUY", "SELL"],
+    amount: str,
     slippage_pct: str | None = None,
-    wallet_address: str | None = None,
-    transaction_hash: str | None = None,
     extra_params: dict[str, Any] | None = None,
-    search_connector: str | None = None,
-    search_network: str | None = None,
-    search_wallet_address: str | None = None,
-    search_trading_pair: str | None = None,
-    status: Literal["SUBMITTED", "CONFIRMED", "FAILED"] | None = None,
-    start_time: int | None = None,
-    end_time: int | None = None,
-    limit: int = 50,
-    offset: int = 0,
 ) -> str:
-    """One-shot DEX swaps through Gateway's unified swap route — quote, execute, and track.
+    """Price a DEX swap through Gateway's unified swap route — free, signs nothing.
 
-    PREFER order_executor FOR SWAPS. `manage_executors(action="create",
-    executor_type="order_executor", ...)` with `connector_name=<network>` (e.g.
-    "solana-mainnet-beta") and `execution_strategy="MARKET"` swaps through this same
-    Gateway route, and adds what a one-shot call cannot:
-      - the slippage ramp (`slippage_pct` / `slippage_multiplier` / `max_slippage_pct`),
-        which starts tight and widens only on a failure Gateway attributes to slippage.
-        A swap here carries ONE fixed tolerance and never retries at a wider one.
-      - an executor record, so the fill is tagged with `controller_id` and reaches PnL
-        attribution. A swap here is written to swap history only, so an entry executed
-        this way and the position it funds land in different ledgers.
-
-    Use this tool when order_executor cannot express what you need: a quote without an
-    execution, resolving or searching swap history, or a pool-scoped connector the
-    executor does not route to.
+    Use this tool when: you want the price, the expected output and the price impact
+    before committing anything. A quote costs nothing and moves nothing, so take one
+    first — `execute_swap` is the call that spends.
 
     "Unified" is about Gateway's routes, not about tool choice. Router aggregators
     (jupiter, 0x) and pool-scoped AMM/CLMM swaps all resolve to one route here; the
     pool-scoped `/trading/amm/*-swap` routes no longer exist.
-
-    Actions:
-    - quote → price, expected output, and price impact BEFORE committing (free, always do this first)
-    - execute → submit the swap on-chain; returns a transaction hash
-    - get_status → resolve a submitted swap by transaction_hash
-    - search → query swap history with filters
 
     CONNECTOR FORMAT. `connector` is "name/type":
     - "jupiter/router", "0x/router" — aggregator routing across every pool it knows
@@ -1252,41 +1835,95 @@ async def manage_gateway_swaps(
     which quotes off live on-chain routes rather than a config file.
 
     LP work is elsewhere: `manage_amm` (AMM pools), `manage_clmm` (CLMM positions),
-    `manage_executors(lp_executor)` (managed LP).
+    `create_lp_executor` (managed LP).
 
     Args:
-        action: Swap action to perform.
-        connector: Connector in "name/type" form (required for quote/execute), e.g.
-            'jupiter/router', 'meteora/amm', 'raydium/clmm'.
-        network: Network ID in 'chain-network' format (required for quote/execute), e.g.
-            'solana-mainnet-beta', 'ethereum-mainnet'.
-        trading_pair: Trading pair as 'BASE-QUOTE' (required for quote/execute). Either
-            side may be a SYMBOL or a raw TOKEN ADDRESS, and the address does NOT have to
-            be registered with Gateway first — Gateway resolves an unknown mint on the
-            spot and reads its decimals on-chain. Do not add a token to Gateway's list as
-            a prerequisite for trading it: that write is a symbol/address mapping, it is
-            not required here, and guessing decimals to satisfy it corrupts the mapping.
-            Pool-scoped connectors match Gateway's pool list by SYMBOL.
-        side: 'BUY' (buy base with quote) or 'SELL' (sell base for quote). Required for quote/execute.
-        amount: Base token amount to buy or sell (required for quote/execute).
+        connector: Connector in "name/type" form, e.g. 'jupiter/router', 'meteora/amm',
+            'raydium/clmm'.
+        network: Network ID in 'chain-network' format, e.g. 'solana-mainnet-beta',
+            'ethereum-mainnet'.
+        trading_pair: Trading pair as 'BASE-QUOTE'. Either side may be a SYMBOL or a raw
+            TOKEN ADDRESS, and the address does NOT have to be registered with Gateway
+            first — Gateway resolves an unknown mint on the spot and reads its decimals
+            on-chain. Do not add a token to Gateway's list as a prerequisite for trading
+            it: that write is a symbol/address mapping, it is not required here, and
+            guessing decimals to satisfy it corrupts the mapping. Pool-scoped connectors
+            match Gateway's pool list by SYMBOL.
+        side: 'BUY' (buy base with quote) or 'SELL' (sell base for quote).
+        amount: Base token amount to buy or sell.
         slippage_pct: Maximum slippage percentage. OMIT to use the connector's configured
             slippage; '0' is a real value, not "use the default".
-        wallet_address: Wallet for execute (optional, uses the default wallet).
-        transaction_hash: Transaction hash (required for get_status).
         extra_params: Connector-specific params under Gateway's own names. Supported:
             'approximateIfNoExactOut' (bool, jupiter/dflow/okx/titan routers).
-        search_connector: Filter history by connector (search).
-        search_network: Filter history by network (search).
-        search_wallet_address: Filter history by wallet address (search).
-        search_trading_pair: Filter history by trading pair (search).
-        status: Filter history by status: SUBMITTED | CONFIRMED | FAILED (search).
-        start_time: Start timestamp in unix seconds (search).
-        end_time: End timestamp in unix seconds (search).
-        limit: Max results for search (default 50, max 1000).
-        offset: Pagination offset for search (default 0).
     """
     request = GatewaySwapRequest(
-        action=action,
+        action="quote",
+        connector=connector,
+        network=network,
+        trading_pair=trading_pair,
+        side=side,
+        amount=amount,
+        slippage_pct=slippage_pct,
+        extra_params=extra_params,
+    )
+
+    client = await hummingbot_client.get_client()
+    result = await manage_gateway_swaps_impl(client, request)
+    return format_gateway_swap_result("quote", result)
+
+
+@handle_errors("execute a Gateway swap", GATEWAY_LOG_HINT)
+async def execute_swap(
+    connector: str,
+    network: str,
+    trading_pair: str,
+    side: Literal["BUY", "SELL"],
+    amount: str,
+    slippage_pct: str | None = None,
+    wallet_address: str | None = None,
+    extra_params: dict[str, Any] | None = None,
+) -> str:
+    """Sign and submit a one-shot DEX swap on-chain. Spends real funds — quote first.
+
+    Same connector/network semantics as `quote_swap` (the "name/type" connector form,
+    and Gateway's symbol-matched pool resolution) — read that tool's docstring for them,
+    then take a quote before calling this.
+
+    Do NOT use when:
+    - the swap is part of a strategy → `create_order_executor` with
+      `connector_name=<network>` (e.g.
+      "solana-mainnet-beta") and `execution_strategy="MARKET"` swaps through this same
+      Gateway route, and adds what a one-shot call cannot: the slippage ramp
+      (`slippage_pct` / `slippage_multiplier` / `max_slippage_pct`), which starts tight
+      and widens only on a failure Gateway attributes to slippage — a swap here carries
+      ONE fixed tolerance and never retries at a wider one — and an executor record, so
+      the fill is tagged with `controller_id` and reaches PnL attribution. A swap here is
+      written to swap history only, so an entry executed this way and the position it
+      funds land in different ledgers.
+    - you only want a price → `quote_swap` (free).
+
+    Use this tool when order_executor cannot express what you need: a pool-scoped
+    connector the executor does not route to, or a one-off swap outside any strategy.
+
+    Returns a transaction hash; resolve it with `get_swap_status`.
+
+    Args:
+        connector: Connector in "name/type" form, e.g. 'jupiter/router', 'meteora/amm',
+            'raydium/clmm'.
+        network: Network ID in 'chain-network' format, e.g. 'solana-mainnet-beta',
+            'ethereum-mainnet'.
+        trading_pair: Trading pair as 'BASE-QUOTE'; either side may be a SYMBOL or a raw
+            TOKEN ADDRESS (see `quote_swap`).
+        side: 'BUY' (buy base with quote) or 'SELL' (sell base for quote).
+        amount: Base token amount to buy or sell.
+        slippage_pct: Maximum slippage percentage. OMIT to use the connector's configured
+            slippage; '0' is a real value, not "use the default".
+        wallet_address: Wallet to sign with (optional, uses the default wallet).
+        extra_params: Connector-specific params under Gateway's own names. Supported:
+            'approximateIfNoExactOut' (bool, jupiter/dflow/okx/titan routers).
+    """
+    request = GatewaySwapRequest(
+        action="execute",
         connector=connector,
         network=network,
         trading_pair=trading_pair,
@@ -1294,12 +1931,65 @@ async def manage_gateway_swaps(
         amount=amount,
         slippage_pct=slippage_pct,
         wallet_address=wallet_address,
-        transaction_hash=transaction_hash,
         extra_params=extra_params,
-        search_connector=search_connector,
-        search_network=search_network,
-        search_wallet_address=search_wallet_address,
-        search_trading_pair=search_trading_pair,
+    )
+
+    client = await hummingbot_client.get_client()
+    result = await manage_gateway_swaps_impl(client, request)
+    return format_gateway_swap_result("execute", result)
+
+
+@handle_errors("get Gateway swap status", GATEWAY_LOG_HINT)
+async def get_swap_status(transaction_hash: str) -> str:
+    """Resolve a submitted swap by its transaction hash.
+
+    Use this tool when: `execute_swap` returned a hash and you need to know whether the
+    swap confirmed, is still pending, or failed.
+
+    Args:
+        transaction_hash: Transaction hash returned by `execute_swap`.
+    """
+    request = GatewaySwapRequest(action="get_status", transaction_hash=transaction_hash)
+
+    client = await hummingbot_client.get_client()
+    result = await manage_gateway_swaps_impl(client, request)
+    return format_gateway_swap_result("get_status", result)
+
+
+@handle_errors("search Gateway swaps", GATEWAY_LOG_HINT)
+async def search_swaps(
+    connector: str | None = None,
+    network: str | None = None,
+    wallet_address: str | None = None,
+    trading_pair: str | None = None,
+    status: Literal["SUBMITTED", "CONFIRMED", "FAILED"] | None = None,
+    start_time: int | None = None,
+    end_time: int | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> str:
+    """Query swap history with filters. Reads only — every argument is a filter.
+
+    Use this tool when: you want to see what was swapped, by whom and when. Omitting a
+    filter leaves that dimension unrestricted.
+
+    Args:
+        connector: Filter by connector.
+        network: Filter by network.
+        wallet_address: Filter by wallet address.
+        trading_pair: Filter by trading pair.
+        status: Filter by status: SUBMITTED | CONFIRMED | FAILED.
+        start_time: Start timestamp in unix seconds.
+        end_time: End timestamp in unix seconds.
+        limit: Max results (default 50, max 1000).
+        offset: Pagination offset (default 0).
+    """
+    request = GatewaySwapRequest(
+        action="search",
+        connector=connector,
+        network=network,
+        wallet_address=wallet_address,
+        trading_pair=trading_pair,
         status=status,
         start_time=start_time,
         end_time=end_time,
@@ -1309,13 +1999,12 @@ async def manage_gateway_swaps(
 
     client = await hummingbot_client.get_client()
     result = await manage_gateway_swaps_impl(client, request)
-    return format_gateway_swap_result(action, result)
+    return format_gateway_swap_result("search", result)
 
 
 # GeckoTerminal Tools
 
 
-@mcp.tool()
 @handle_errors("explore GeckoTerminal")
 async def explore_geckoterminal(
     action: Literal[
@@ -1387,6 +2076,53 @@ async def explore_geckoterminal(
         trade_volume_filter=trade_volume_filter,
     )
     return result.get("formatted_output", str(result))
+
+
+# ── Tool profiles (FEAT-066) ─────────────────────────────────────────────────
+#
+# Tool allowlists are only enforced for pydantic-ai model keys; an ACP bridge
+# (claude-code, gemini, copilot) runs unrestricted. For those seats the surface a
+# session MOUNTS is the whole permission model, so which tools this process
+# registers is a security boundary — hence explicit registration below instead of
+# an ``@mcp.tool()`` decorator that fires for everyone at import.
+#
+# The rings themselves — which tool sits in which one, and why — moved to
+# ``profiles.py`` as plain name strings (FEAT-091), because the web process has
+# to read them to draw a switch per tool and cannot import *this* module to ask:
+# importing it parses argv and builds the ``FastMCP`` singleton. Here the names
+# are resolved back into functions, at import, which is what keeps the table and
+# the functions provably in step.
+
+
+#: The tool function a name in ``profiles.PROFILE_TOOLS`` refers to, looked up
+#: in *this* module — or a loud failure at import (ARCH-289: the mechanics are
+#: shared with the condor server, the namespace is not).
+_resolve = make_resolver(globals())
+
+#: profile name → the tools it registers, resolved from ``profiles.PROFILE_TOOLS``
+#: (which carries the prose on what each ring is for).
+TOOL_PROFILES: dict[str, tuple] = resolve_profiles(globals(), PROFILE_TOOLS)
+
+
+def register_tools(
+    server: FastMCP,
+    profile: str = DEFAULT_TOOL_PROFILE,
+    muted: Iterable[str] = (),
+) -> None:
+    """Register this profile's tools on ``server``, minus the muted ones.
+
+    This server's rings and its own default; the rules — unknown profile raises
+    rather than widening to ``full``, ``muted`` only ever subtracts — live once,
+    in ``mcp_servers/_profiles.py``.
+    """
+    _register_tools(server, TOOL_PROFILES, profile, muted)
+
+
+# Registration happens at import, not in ``_run()``: ``mcp`` is a module-level
+# singleton and the profile and the mute list are resolved from argv at import
+# (settings), so the server object is complete for anything that inspects it
+# before startup.
+register_tools(mcp, settings.tool_profile, settings.muted_tools)
 
 
 def _apply_cli_args():

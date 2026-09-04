@@ -2,7 +2,7 @@
 
 A stateless, chain- & DEX-agnostic tool for **AMM** liquidity and **pool creation**. You hold
 position state in your journal (there is no AMM executor). Swaps that just need best execution go
-through `manage_executors(order_executor)`; CLMM LP goes through `manage_executors(lp_executor)`.
+through `create_order_executor`; CLMM LP goes through `create_lp_executor`.
 `manage_amm` is **AMM-only**.
 
 ## Connectors & networks

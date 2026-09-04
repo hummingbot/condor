@@ -46,6 +46,26 @@ PERMISSION_HIERARCHY = {
 # Declared here so the gate and the thing that grants it share one spelling.
 CODE_RUN_PREFERENCE = "code_run"
 
+# The sentinel `main.py` used to write into `username` when Telegram gave it
+# none (FEAT-088). It only ever meant "absent", but stored it is indistinguishable
+# from a real handle, so the panel renders `@No username` forever. It is dropped
+# on load and never written again — an absent handle is an absent key.
+ABSENT_USERNAME = "No username"
+
+# How stale `last_seen` is allowed to get before a contact rewrites config.yml.
+# `restricted` runs on every message *and* every button press, and each write is
+# a full YAML dump of the file, so recording the exact second would turn a menu
+# walk into a dozen rewrites. Five minutes is far finer than the "2 days ago"
+# the panel renders.
+LAST_SEEN_RESOLUTION_SEC = 300
+
+# Preference keys that are capability grants rather than settings. They live in
+# the same ``user_preferences`` map as a UI toggle, so any endpoint that merges
+# a caller-supplied dict into that map is a privilege-escalation path unless it
+# refuses these first (SEC-250). Writing one goes through its own audited setter
+# — ``set_code_run_grant`` for ``code_run`` — never through a bulk merge.
+RESERVED_PREFERENCE_KEYS = frozenset({CODE_RUN_PREFERENCE})
+
 
 class ConfigManager:
     """
@@ -72,6 +92,23 @@ class ConfigManager:
         self._client_locks: Dict[str, asyncio.Lock] = (
             {}
         )  # per-server lock for get_client
+        # When a connect last failed, per server. Client creation is serialized
+        # by _client_locks, so without this every caller queued behind a down
+        # server pays the full connect timeout again, one after another: the 10
+        # concurrent fetches SDS fires per server at boot turned one unreachable
+        # host into ~110s of serial timeouts before the dashboard could bind.
+        self._client_failures: Dict[str, float] = {}  # server_name -> failed_at
+        self._client_failure_ttl = 30  # seconds to fail fast after a failure
+        # Short-lived memo of check_server_status results so the N parallel
+        # probes fired by one menu render (and repeated taps) collapse to one
+        # probe per server. Kept well under _client_verify_interval.
+        self._status_cache: Dict[str, Tuple[dict, float]] = (
+            {}
+        )  # server_name -> (status_result, checked_at)
+        self._status_ttl = 15  # seconds
+        self._status_locks: Dict[str, asyncio.Lock] = (
+            {}
+        )  # per-server lock for check_server_status
         # True when an existing config file could not be read: the in-memory
         # state is empty and MUST NOT be written back over the file on disk.
         self._load_failed = False
@@ -158,6 +195,24 @@ class ConfigManager:
         self._data.setdefault("chat_defaults", {})
         self._data.setdefault("user_preferences", {})
         self._data.setdefault("telemetry", {})
+        self._data.setdefault("sharing", {})
+
+        # Drop the `"No username"` sentinel (FEAT-088). It is not a migration of
+        # meaning — the string only ever stood for "Telegram told us nothing" —
+        # so leaving it would keep `@No username` renderable for the life of the
+        # install. Healed on load and rewritten on the next save.
+        users = self._data["users"]
+        if any(
+            isinstance(r, dict) and r.get("username") == ABSENT_USERNAME
+            for r in users.values()
+        ):
+            for record in users.values():
+                if isinstance(record, dict) and record.get("username") == (
+                    ABSENT_USERNAME
+                ):
+                    record.pop("username", None)
+            self._save_config()
+
         # Migrate audit_log from config.yml to separate file (one-time)
         if "audit_log" in self._data:
             self._audit_log = self._data.pop("audit_log")
@@ -230,6 +285,11 @@ class ConfigManager:
                 "user_preferences": self._data.get("user_preferences", {}),
                 "web_jwt_secret": self._data.get("web_jwt_secret"),
                 "telemetry": self._data.get("telemetry", {}),
+                # Same omission as ARCH-177 above, one section newer: without
+                # this the admin's sharing veto, each user's standing answer and
+                # the share_secret behind the stable pseudonyms were re-minted
+                # on every restart (CORR-244).
+                "sharing": self._data.get("sharing", {}),
                 "version": self._data.get("version", self.VERSION),
             }
             # Keep a copy of the last known-good file before truncating it,
@@ -353,9 +413,8 @@ class ConfigManager:
             logger.error(f"Server '{name}' not found")
             return False
 
-        # Clear cached client
-        if name in self._clients:
-            del self._clients[name]
+        # Clear cached client and any memoized status
+        self._invalidate_server_caches(name)
 
         if host is not None:
             servers[name]["host"] = host
@@ -377,9 +436,8 @@ class ConfigManager:
             logger.error(f"Server '{name}' not found")
             return False
 
-        # Clear cached client
-        if name in self._clients:
-            del self._clients[name]
+        # Clear cached client and any memoized status
+        self._invalidate_server_caches(name)
 
         del servers[name]
 
@@ -425,6 +483,17 @@ class ConfigManager:
             self.config_path,
         )
         return secret
+
+    def _invalidate_server_caches(self, name: str):
+        """Drop the pooled client and memoized status for a server.
+
+        Called whenever the server's credentials or existence change, so a
+        cached client or status can never outlive the config it was built from.
+        """
+        self._clients.pop(name, None)
+        self._status_cache.pop(name, None)
+        # New credentials deserve a real attempt, not the old failure's cooldown.
+        self._client_failures.pop(name, None)
 
     async def get_client(self, name: str = None):
         """Get or create API client for a server."""
@@ -485,6 +554,20 @@ class ConfigManager:
                     pass
                 del self._clients[name]
 
+        # Fail fast while a recent connect failure is still fresh, so a queue of
+        # callers behind an unreachable host costs one connect timeout in total
+        # rather than one each. Cleared on success, on a config change, and by
+        # simply ageing out — so a server that comes back is retried within
+        # _client_failure_ttl without anything having to notice it recovered.
+        failed_at = self._client_failures.get(name)
+        if failed_at is not None:
+            if time.time() - failed_at < self._client_failure_ttl:
+                raise ConnectionError(
+                    f"Server '{name}' is unreachable (last attempt "
+                    f"{time.time() - failed_at:.0f}s ago); not retrying yet"
+                )
+            del self._client_failures[name]
+
         # Create new client
         server = self._data["servers"][name]
         base_url = f"http://{server['host']}:{server['port']}"
@@ -499,10 +582,12 @@ class ConfigManager:
             await client.init()
             await client.accounts.list_accounts()
             self._clients[name] = (client, time.time())
+            self._client_failures.pop(name, None)
             logger.info(f"Connected to server '{name}' at {base_url}")
             return client
         except Exception as e:
             await client.close()
+            self._client_failures[name] = time.time()
             logger.error(f"Failed to connect to '{name}': {e}")
             raise
 
@@ -549,12 +634,82 @@ class ConfigManager:
             raise ValueError("No servers configured")
         return await self.get_client(server_name)
 
-    async def check_server_status(self, name: str) -> dict:
-        """Check if a server is online."""
-        from hummingbot_api_client import HummingbotAPIClient
+    STATUS_PROBE_TIMEOUT = 3  # seconds — a dead server must not stall a menu
 
+    @staticmethod
+    def _classify_status_error(exc: Exception) -> dict:
+        """Map a failed liveness probe to the status shown in the menus."""
+        error_msg = str(exc)
+        if isinstance(exc, asyncio.TimeoutError):
+            return {"status": "offline", "message": "Connection timeout"}
+        if "401" in error_msg:
+            return {"status": "auth_error", "message": "Invalid credentials"}
+        if "timeout" in error_msg.lower():
+            return {"status": "offline", "message": "Connection timeout"}
+        if "connect" in error_msg.lower():
+            return {"status": "offline", "message": "Cannot reach server"}
+        return {"status": "error", "message": f"Error: {error_msg[:80]}"}
+
+    def _pooled_client(self, name: str):
+        """Return the pooled client for a server if it is still within TTL."""
+        entry = self._clients.get(name)
+        if not entry:
+            return None
+        client, connected_at = entry
+        if time.time() - connected_at >= self._client_ttl:
+            return None
+        return client
+
+    async def check_server_status(self, name: str) -> dict:
+        """Check if a server is online.
+
+        Probes through the pooled client when ConfigManager already holds one,
+        and only builds a short-timeout throwaway client when there is none (or
+        when the pooled session itself is broken). Results are memoized per
+        server for _status_ttl seconds so one menu render costs at most one
+        probe per server.
+        """
         if name not in self._data["servers"]:
             return {"status": "error", "message": "Server not found"}
+
+        cached = self._status_cache.get(name)
+        if cached and time.time() - cached[1] < self._status_ttl:
+            return dict(cached[0])
+
+        lock = self._status_locks.setdefault(name, asyncio.Lock())
+        async with lock:
+            # Re-check: a concurrent probe for this server may have just landed
+            cached = self._status_cache.get(name)
+            if cached and time.time() - cached[1] < self._status_ttl:
+                return dict(cached[0])
+
+            result = await self._probe_server_status(name)
+            self._status_cache[name] = (result, time.time())
+            return dict(result)
+
+    async def _probe_server_status(self, name: str) -> dict:
+        """Run one liveness probe, preferring the pooled client."""
+        # Same call shape as condor/fetchers/server_status.py:fetch_server_status
+        # so the two liveness probes stay in step.
+        client = self._pooled_client(name)
+        if client is not None:
+            try:
+                await asyncio.wait_for(
+                    client.accounts.list_accounts(),
+                    timeout=self.STATUS_PROBE_TIMEOUT,
+                )
+                return {"status": "online", "message": "Connected and authenticated"}
+            except Exception as e:
+                # The pooled session may simply be stale — confirm with a fresh
+                # short-timeout client rather than reporting a false outage.
+                # The pooled client is never closed here: get_client owns it.
+                logger.debug(f"Pooled status probe for '{name}' failed: {e}")
+
+        return await self._probe_server_status_fresh(name)
+
+    async def _probe_server_status_fresh(self, name: str) -> dict:
+        """Liveness probe over a throwaway short-timeout client."""
+        from hummingbot_api_client import HummingbotAPIClient
 
         server = self._data["servers"][name]
         base_url = f"http://{server['host']}:{server['port']}"
@@ -571,15 +726,7 @@ class ConfigManager:
             await client.accounts.list_accounts()
             return {"status": "online", "message": "Connected and authenticated"}
         except Exception as e:
-            error_msg = str(e)
-            if "401" in error_msg:
-                return {"status": "auth_error", "message": "Invalid credentials"}
-            elif "timeout" in error_msg.lower():
-                return {"status": "offline", "message": "Connection timeout"}
-            elif "connect" in error_msg.lower():
-                return {"status": "offline", "message": "Cannot reach server"}
-            else:
-                return {"status": "error", "message": f"Error: {error_msg[:80]}"}
+            return self._classify_status_error(e)
         finally:
             try:
                 await client.close()
@@ -595,6 +742,7 @@ class ConfigManager:
             except Exception as e:
                 logger.error(f"Error closing client '{name}': {e}")
         self._clients.clear()
+        self._status_cache.clear()
 
     # =========================================================================
     # USER MANAGEMENT
@@ -664,22 +812,93 @@ class ConfigManager:
         role = self.get_user_role(user_id)
         return role in (UserRole.ADMIN, UserRole.USER)
 
-    def register_pending(self, user_id: int, username: str = None) -> bool:
-        """Register a new pending user."""
+    def register_pending(
+        self,
+        user_id: int,
+        username: str = None,
+        first_name: str = None,
+        last_name: str = None,
+    ) -> bool:
+        """Register a new pending user.
+
+        Records the names Telegram supplied alongside the handle (FEAT-088):
+        the admin panel has to answer *who this is*, and a handle is optional on
+        Telegram while a first name is not. Absent fields are left out of the
+        record rather than stored as `None` or as a `"No username"` placeholder,
+        so "we were never told" and "they are called this" stay distinguishable.
+        """
         users = self._data["users"]
         if user_id in users:
             return False
 
-        users[user_id] = {
+        record = {
             "user_id": user_id,
-            "username": username,
             "role": UserRole.PENDING.value,
             "created_at": time.time(),
         }
+        for key, value in (
+            ("username", username),
+            ("first_name", first_name),
+            ("last_name", last_name),
+        ):
+            value = (value or "").strip()
+            if value and value != ABSENT_USERNAME:
+                record[key] = value
+        users[user_id] = record
         self._audit("user_registered", "user", str(user_id), user_id)
         self._save_config()
         logger.info(f"Registered pending user {user_id}")
         return True
+
+    def touch_user_identity(
+        self,
+        user_id: int,
+        *,
+        username: str = None,
+        first_name: str = None,
+        last_name: str = None,
+    ) -> bool:
+        """Record what Telegram currently says this person is called.
+
+        Called on every authorized contact, because a handle changes silently:
+        captured once at registration it is stale forever, and the admin panel
+        ends up naming someone by a handle nobody answers to.
+
+        **Never writes a falsy value over a stored one.** Telegram updates carry
+        whichever fields they carry, and a message that simply omits the username
+        must not erase the handle we already know — that would make the record
+        worse the more often we look at it. Only a differing, non-empty value is
+        a write.
+
+        Returns True when something changed, so callers can tell a real capture
+        from the overwhelmingly common no-op; the save happens here, like every
+        other verb on this class.
+        """
+        user = self._data.get("users", {}).get(user_id)
+        if user is None:
+            return False
+
+        changed = False
+        for key, value in (
+            ("username", username),
+            ("first_name", first_name),
+            ("last_name", last_name),
+        ):
+            value = (value or "").strip()
+            if not value or value == ABSENT_USERNAME:
+                continue
+            if user.get(key) != value:
+                user[key] = value
+                changed = True
+
+        now = time.time()
+        if now - float(user.get("last_seen") or 0) >= LAST_SEEN_RESOLUTION_SEC:
+            user["last_seen"] = now
+            changed = True
+
+        if changed:
+            self._save_config()
+        return changed
 
     def approve_user(self, user_id: int, admin_id: int) -> bool:
         """Approve a pending user."""
@@ -766,7 +985,21 @@ class ConfigManager:
         self._save_config()
 
     def set_user_preferences(self, user_id: int, updates: dict) -> None:
-        """Merge multiple preference values and persist."""
+        """Merge multiple preference values and persist.
+
+        This is the bulk path, and the only caller feeds it a dict straight off
+        the wire, so it refuses ``RESERVED_PREFERENCE_KEYS`` outright: a
+        capability grant shares this map with ordinary settings, and merging one
+        in from a request body would hand a user the very grant its audited
+        setter exists to control (SEC-250). Grants are written one at a time
+        through ``set_user_preference``, which ``set_code_run_grant`` drives.
+        """
+        reserved = RESERVED_PREFERENCE_KEYS.intersection(updates)
+        if reserved:
+            raise ValueError(
+                f"Reserved preference keys cannot be set in bulk: "
+                f"{', '.join(sorted(reserved))}"
+            )
         prefs = self._data.setdefault("user_preferences", {})
         if user_id not in prefs:
             prefs[user_id] = {}
@@ -967,6 +1200,42 @@ class ConfigManager:
                 pass
         return result
 
+    def list_registered_servers(self) -> list:
+        """Every server that has an access record, in a stable order.
+
+        The admin panel asks the question no per-user accessor answers — "what
+        is *this* person's access to *every* server" — and needs the full list
+        to render the servers they cannot reach as much as the ones they can.
+        """
+        return sorted(self._data.get("server_access", {}))
+
+    def get_granted_user_ids(self) -> set:
+        """Every user id holding a share on some server.
+
+        Not the same set as ``users``: a grant outlives the record it was made
+        to, and such an id is live access that nothing in the product can show
+        or revoke. The admin panel unions the two so an orphan grant is a row
+        rather than a hole in config.yml (FEAT-088).
+        """
+        ids = set()
+        for access in self._data.get("server_access", {}).values():
+            ids.update(access.get("shared_with", {}))
+        return ids
+
+    def get_server_members(self, server_name: str) -> list:
+        """Who this server is shared with, named (FEAT-088).
+
+        ``get_server_shared_users`` answers the same question in ids, which is
+        what a permission check wants and what a person reading a server card
+        cannot use. Both exist because resolving a name is a display concern the
+        access checks have no business paying for.
+        """
+        users = self._data.get("users", {})
+        return [
+            {"user_id": uid, "display_name": user_display_name(users.get(uid), uid)}
+            for uid, _perm in self.get_server_shared_users(server_name)
+        ]
+
     def get_accessible_servers(self, user_id: int) -> list:
         """Get all servers a user can access."""
         if self.is_admin(user_id):
@@ -1093,6 +1362,34 @@ class ConfigManager:
         return list(reversed(self._audit_log))[:limit]
 
 
+def user_display_name(record: Optional[dict], user_id: int = None) -> str:
+    """What to call this person, from whatever Telegram has told us (FEAT-088).
+
+    One ladder: full name, then the handle, then the id. It is defined here
+    rather than in the admin routes because the client resolves the same ladder
+    in ``identity.ts`` for rows it renders while a mutation is in flight, and two
+    copies of a naming rule drift into two different names for one person.
+
+    ``user_id`` is the fallback for a record that does not carry its own — an id
+    that appears only in ``server_access`` has no ``users`` entry at all, and
+    still has to be nameable enough to revoke.
+    """
+    record = record or {}
+    uid = record.get("user_id") if record.get("user_id") is not None else user_id
+
+    first = str(record.get("first_name") or "").strip()
+    last = str(record.get("last_name") or "").strip()
+    full = " ".join(part for part in (first, last) if part)
+    if full:
+        return full
+
+    username = str(record.get("username") or "").strip()
+    if username and username != ABSENT_USERNAME:
+        return username
+
+    return f"User {uid}" if uid is not None else ""
+
+
 # Convenience functions
 def get_config_manager() -> ConfigManager:
     """Get the ConfigManager singleton instance."""
@@ -1124,8 +1421,7 @@ def get_effective_server(chat_id: int, user_data: dict = None) -> str | None:
     Returns:
         Server name or None
     """
-    from condor.preferences import SERVER_PIN_KEY
-    from handlers.config.user_preferences import get_active_server
+    from condor.preferences import SERVER_PIN_KEY, get_active_server
 
     # A context built for one server — a routine or an agent run launched
     # against it — carries its own answer and is never re-resolved from a chat's
@@ -1143,7 +1439,7 @@ def get_effective_server(chat_id: int, user_data: dict = None) -> str | None:
         # persists the whole preference section to config.yml, and this runs on
         # every server lookup.
         if user_data is not None and get_active_server(user_data) != chat_default:
-            from handlers.config.user_preferences import set_active_server
+            from condor.preferences import set_active_server
 
             set_active_server(user_data, chat_default)
         return chat_default
@@ -1157,9 +1453,18 @@ def get_effective_server(chat_id: int, user_data: dict = None) -> str | None:
     return None
 
 
-async def get_client(chat_id: int, user_id: int = None, context=None):
-    """Get the API client for the user's preferred server."""
-    preferred_server = None
+async def get_client(
+    chat_id: int, user_id: int = None, context=None, server: str = None
+):
+    """Get the API client for the user's preferred server.
+
+    ``server`` names it outright, for a caller that has already resolved which
+    server the work belongs to and must not have that answer re-derived. A
+    routine is the case: it files its results under the server it was launched
+    against, so resolving the client from the chat's ambient preferences
+    instead is how a run gets executed on one box and recorded under another.
+    """
+    preferred_server = server
     if context is not None:
         # Handle both normal context and job context (where user_data may be None)
         user_data = context.user_data
@@ -1168,7 +1473,8 @@ async def get_client(chat_id: int, user_id: int = None, context=None):
 
         if user_id is None and user_data is not None:
             user_id = user_data.get("_user_id")
-        preferred_server = get_effective_server(chat_id, user_data)
+        if preferred_server is None:
+            preferred_server = get_effective_server(chat_id, user_data)
 
     return await get_config_manager().get_client_for_chat(
         chat_id, user_id, preferred_server

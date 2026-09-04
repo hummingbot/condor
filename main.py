@@ -8,7 +8,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.error import NetworkError
+from telegram.error import BadRequest, NetworkError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -66,6 +66,25 @@ def _get_start_menu_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard)
 
 
+def _dashboard_button_url(url: str) -> str | None:
+    """The dashboard link Telegram will accept in an inline URL button, if any.
+
+    Telegram rejects ``localhost`` outright ("Wrong HTTP URL") but accepts the
+    loopback IP, so the local default (``http://localhost:8088``) still gets a
+    button by swapping the host — which is what a Telegram client running on
+    the same machine needs anyway. Any other dotless hostname (a bare LAN name)
+    has no such equivalent, so those keep the copy-paste link only.
+    """
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if host == "localhost":
+        parsed = parsed._replace(netloc=parsed.netloc.replace(host, "127.0.0.1", 1))
+        return parsed.geturl()
+    if "." not in host:
+        return None
+    return url
+
+
 @restricted
 async def web_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Generate a one-time login link for the web dashboard."""
@@ -80,22 +99,43 @@ async def web_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         "localhost" in WEB_URL or "127.0.0.1" in WEB_URL or "." not in _hostname
     )
 
+    button_url = _dashboard_button_url(url)
+    keyboard = (
+        InlineKeyboardMarkup(
+            [[InlineKeyboardButton("🌐 Open Dashboard", url=button_url)]]
+        )
+        if button_url
+        else None
+    )
+
     if is_localhost:
+        # A loopback button only opens on the machine running the bot, so the
+        # raw link stays visible for a phone on the same network to adapt.
+        text = (
+            f"🌐 *Web Dashboard*\n\n"
+            f"Open this link in your browser:\n`{url}`\n\n"
+            f"_Link valid for 5 minutes\\._"
+        )
+    else:
+        text = (
+            "🌐 *Web Dashboard*\n\n"
+            "Tap the button below to open the dashboard\\.\n"
+            "_Link valid for 5 minutes\\._"
+        )
+
+    try:
+        await update.message.reply_text(
+            text, reply_markup=keyboard, parse_mode="MarkdownV2"
+        )
+    except BadRequest:
+        # Telegram refuses URL buttons it can't parse (host without a public
+        # TLD, an unusual scheme). Losing the button must not lose the link.
+        if keyboard is None:
+            raise
         await update.message.reply_text(
             f"🌐 *Web Dashboard*\n\n"
             f"Open this link in your browser:\n`{url}`\n\n"
             f"_Link valid for 5 minutes\\._",
-            parse_mode="MarkdownV2",
-        )
-    else:
-        keyboard = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("🌐 Open Dashboard", url=url)]]
-        )
-        await update.message.reply_text(
-            "🌐 *Web Dashboard*\n\n"
-            "Tap the button below to open the dashboard\\.\n"
-            "_Link valid for 5 minutes\\._",
-            reply_markup=keyboard,
             parse_mode="MarkdownV2",
         )
 
@@ -103,10 +143,16 @@ async def web_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Start the conversation and display available commands (BotFather style)."""
     from config_manager import UserRole, get_config_manager
-    from utils.auth import _notify_admin_new_user
+    from utils.auth import _capture_identity, _notify_admin_new_user
 
-    user_id = update.effective_user.id
-    username = update.effective_user.username or "No username"
+    tg_user = update.effective_user
+    user_id = tg_user.id
+    username = tg_user.username or ""
+    # What to print where the reply says "Username:". An absent handle is shown
+    # as absent rather than stored as the "No username" string the record used
+    # to carry (FEAT-088) — the sentinel was a display default that leaked into
+    # config.yml and became a name the admin panel then had to render.
+    handle_display = f"@{username}" if username else "not set"
 
     cm = get_config_manager()
     role = cm.get_user_role(user_id)
@@ -124,7 +170,7 @@ Your access request is awaiting admin approval.
 
 Your Info:
 User ID: {user_id}
-Username: @{username}
+Username: {handle_display}
 
 You will be notified when approved."""
         await update.message.reply_text(reply_text)
@@ -132,7 +178,12 @@ You will be notified when approved."""
 
     # Handle new users - register as pending
     if role is None:
-        is_new = cm.register_pending(user_id, username)
+        is_new = cm.register_pending(
+            user_id,
+            username,
+            first_name=tg_user.first_name,
+            last_name=tg_user.last_name,
+        )
         if is_new:
             await _notify_admin_new_user(context, user_id, username)
 
@@ -142,13 +193,14 @@ Your request has been sent to the admin for approval.
 
 Your Info:
 User ID: {user_id}
-Username: @{username}
+Username: {handle_display}
 
 You will be notified when approved."""
         await update.message.reply_text(reply_text)
         return
 
     # User is approved (USER or ADMIN role)
+    _capture_identity(update)
     clear_all_input_states(context)
 
     reply_text = """I can help you create and manage trading bots on any CEX or DEX using Hummingbot API servers\\.
@@ -522,7 +574,7 @@ async def register_bot_commands(application: Application) -> None:
     if ADMIN_USER_ID:
         admin_commands = commands + [
             BotCommand("admin", "Admin panel - manage users and access"),
-            BotCommand("update", "Check for updates and restart"),
+            BotCommand("update", "Check for and install updates"),
         ]
         try:
             await application.bot.set_my_commands(
@@ -589,6 +641,31 @@ def _outbound_bot(application: Application):
     return NotifyBot()
 
 
+# Strong references to fire-and-forget boot tasks. asyncio only holds a weak
+# one, so a task nobody awaits can be garbage-collected mid-flight; keeping the
+# handle here (and discarding it on completion) is the documented fix.
+_BACKGROUND_TASKS: set[asyncio.Task] = set()
+
+
+def _spawn_background(coro, label: str) -> asyncio.Task:
+    """Run ``coro`` off the critical path, logging rather than swallowing errors.
+
+    For work the process wants done soon but must not wait for — cache warm-up
+    being the case that used to gate the uvicorn bind behind a dead server's
+    connect timeouts.
+    """
+    task = asyncio.create_task(coro)
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
+
+    def _report(t: asyncio.Task) -> None:
+        if not t.cancelled() and t.exception() is not None:
+            logger.error("%s failed: %s", label, t.exception())
+
+    task.add_done_callback(_report)
+    return task
+
+
 async def startup(application: Application) -> None:
     """Bring the process up: commands, caches, supervisors, boot reconciliation.
 
@@ -618,6 +695,18 @@ async def startup(application: Application) -> None:
 
     asyncio.get_event_loop().run_in_executor(None, _get_model, DEFAULT_MODEL)
 
+    # Same reason, different work: bringing the backtest archive to its tiered
+    # v2 layout (FEAT-075) parses and re-compresses every saved payload, which
+    # is minutes on a store measured in gigabytes. It is deliberately NOT part
+    # of ``ensure_migrated`` above -- that one runs before the first update is
+    # served. The archive degrades honestly while this runs (summaries report
+    # ``status: unknown`` and the dashboard says "indexing"), so the tab stays
+    # usable throughout, and the work is per-file and idempotent so a crash
+    # resumes rather than restarts.
+    from condor.backtest_store import migrate_backtest_archive
+
+    asyncio.get_event_loop().run_in_executor(None, migrate_backtest_archive)
+
     # Whatever this process pushes at users from here on. In local mode there is
     # no Telegram to push to, so it is the dashboard bell (FEAT-048) instead —
     # which is what keeps the documented "context.bot is never None" contract
@@ -646,7 +735,14 @@ async def startup(application: Application) -> None:
     sds_register()
     sds = get_server_data_service()
     sds.start()
-    await sds.auto_subscribe_servers()
+    # Warm the cache in the background, never on the critical path: every
+    # subscription's initial fetch opens a client, and client creation is
+    # serialized per server (ConfigManager._client_locks), so one unreachable
+    # server used to hold the Telegram start and the uvicorn bind behind a
+    # queue of connect timeouts. A cold read degrades to what a down server
+    # already returns (None) and the poll loop fills it in; a reachable server
+    # is warm within a second either way.
+    _spawn_background(sds.auto_subscribe_servers(), "SDS auto-subscribe")
 
     # Ride the ticker-pool poll the SDS just started: an hourly price snapshot
     # per server is the only source of 24h change on the CLOB side, and it costs
@@ -713,6 +809,18 @@ async def startup(application: Application) -> None:
         sharing_sweep.register_jobs(application)
     except Exception:
         logger.exception("Sharing job registration failed (continuing without it)")
+
+    # Reflection (FEAT-073): read a finished conversation back once, for the
+    # facts and the intents in it. The sharing sweep's neighbour by shape and
+    # not by subject — it shares no consent record, no queue and no endpoint
+    # with it, and nothing it reads leaves the machine. Free on an install with
+    # nothing finished to read, and off entirely with CONDOR_REFLECTION=off.
+    try:
+        from condor.agents import reflection
+
+        reflection.register_jobs(application)
+    except Exception:
+        logger.exception("Reflection job registration failed (continuing without it)")
 
     # Start file watcher
     asyncio.create_task(watch_and_reload(application))
@@ -1009,6 +1117,20 @@ async def _run_dual(application: Application) -> None:
     # Start WebSocket manager
     get_ws_manager().start()
 
+    # A run the journal still calls live is a run no process is driving: this one
+    # just booted, and a run is only ever executed by the process that started
+    # it. Judged before anything else looks at it, and deliberately *outside*
+    # the admin block below -- an install with no ADMIN_USER_ID used to leave
+    # the journal live for ever, which is a settings panel stuck on a spinner
+    # that neither a reload nor a relaunch could clear.
+    from condor import updates
+
+    try:
+        finished = await updates.finalize_pending_run()
+    except Exception:
+        logger.warning("Could not finalize the pending update run", exc_info=True)
+        finished = None
+
     # Notify admin that Condor has started
     from utils.config import ADMIN_USER_ID
 
@@ -1023,16 +1145,30 @@ async def _run_dual(application: Application) -> None:
             )
             version = f" ({branch} @ {commit})" if commit else ""
             boot_text = f"Condor is online and ready.{version}"
-            if not LOCAL_MODE:
-                await application.bot.send_message(
-                    chat_id=int(ADMIN_USER_ID),
-                    text=boot_text,
-                )
-            # The same notice on the dashboard bell (FEAT-048), so an admin who
-            # only has the browser open still sees which commit came up.
-            from condor.notifications import record
 
-            await record(int(ADMIN_USER_ID), boot_text, kind="system")
+            # Judged above, before the admin block, so the panel is correct even
+            # on an install with nobody to tell. What is left here is the
+            # telling: a Condor old enough to exec itself at the end of an
+            # update could not report its own outcome, because the process that
+            # would have is the one that died (FEAT-070).
+            if finished is not None and finished.state == "succeeded":
+                moved = f"{(finished.from_commit or '')[:7]} → {commit}"
+                boot_text = f"Update complete: {branch} {moved}. Condor is ready."
+            elif finished is not None:
+                boot_text = f"Update failed: {finished.error} Condor is ready.{version}"
+
+            # One call reaches Telegram *and* the dashboard bell (FEAT-048), so
+            # an admin who only has the browser open still sees which commit
+            # came up -- and whether the update that asked for it worked.
+            from condor import notifications
+
+            await notifications.announce(
+                int(ADMIN_USER_ID),
+                None if LOCAL_MODE else int(ADMIN_USER_ID),
+                boot_text,
+                kind="system",
+                bot=None if LOCAL_MODE else application.bot,
+            )
         except Exception as e:
             logger.warning(f"Failed to send startup notification to admin: {e}")
 

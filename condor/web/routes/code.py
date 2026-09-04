@@ -6,8 +6,11 @@ POSTs its snippet to this route, exactly as ``manage_routines(action="run")``
 already delegates a routine run — same destination, same context, one pattern
 for the next reader of ``tools/code.py`` beside ``tools/routines.py``.
 
-There are no GET endpoints on purpose: history is read straight off disk by the
-subprocess, which shares the filesystem, just as routine CRUD is.
+The *history* is not served here for the subprocess's sake: it reads the store
+straight off disk, which it can, because it shares the filesystem. A browser
+does not — so FEAT-061 added exactly one GET, for one run's body, and left the
+listing where the dashboard already reads every other kind of run
+(``/agents/delegations/history``).
 
 A snippet runs unsandboxed in this process, so reaching this route *is* reaching
 everything the bot can reach — config.yml, the web JWT secret, os.environ. The
@@ -23,6 +26,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from condor.code_runner import DEFAULT_TIMEOUT, MAX_TIMEOUT, execute_code
+from condor.code_runs import get_code_run_store
 from condor.web.auth import check_server_access, get_current_user
 from condor.web.models import WebUser
 from config_manager import CODE_RUN_PREFERENCE, get_config_manager
@@ -97,3 +101,36 @@ async def run_code(
         chat_id=user.id,
         session_key=body.session_key,
     )
+
+
+@router.get("/runs/{run_id}")
+async def get_code_run(run_id: str, user: WebUser = Depends(get_current_user)):
+    """One recorded run in full — its code, stdout, result and traceback.
+
+    Gated twice, and both gates are the point. ``_may_run_code`` first, because
+    a run's stdout is whatever the snippet printed and a snippet can print
+    ``os.environ``: reading one is as sensitive as producing it, so it sits
+    behind the same door in the same file. Then ownership, because the store is
+    global and a grant is not a licence to read a colleague's output.
+
+    A run with no owner — everything written before FEAT-061 — is admin-only
+    rather than world-readable, the same fail-closed rule ownerless reports
+    follow (SEC-196).
+
+    404, never 403, for a run this caller may not have: the id is opaque and
+    guessable ids are not a thing worth confirming. Unknown, illegal and
+    forbidden ids are one answer, and ``CodeRunStore.get`` already refuses an id
+    that is not a legal id rather than turning it into a path.
+    """
+    if not _may_run_code(user.id):
+        log.warning("Denied /code/runs to user %s (not admin, no grant)", user.id)
+        raise HTTPException(status_code=403, detail="Not allowed to run code")
+
+    run = get_code_run_store().get(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"No code run '{run_id}'")
+
+    owner = run.get("user_id") or 0
+    if not get_config_manager().is_admin(user.id) and owner != user.id:
+        raise HTTPException(status_code=404, detail=f"No code run '{run_id}'")
+    return run

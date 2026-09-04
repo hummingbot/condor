@@ -137,13 +137,34 @@ def test_describe_a_routine_returns_its_config_fields():
     assert 'await call_routine("arb_check"' in text
 
 
-def test_describe_a_routine_accepts_the_bare_name_of_an_agent_routine():
+def test_describe_a_routine_accepts_the_bare_name_of_an_agent_routine(tmp_path):
+    """Seeded rather than borrowed from the checkout.
+
+    This used to read whichever agent routines the developer happened to have on
+    disk, which is exactly the isolation FEAT-115 closed: with both agent roots
+    repointed at tmp dirs there is nothing to borrow, so the fixture writes the
+    one routine the assertion needs.
+    """
+    from condor.memory.paths import agent_home
+    from condor.routine_store import get_routine_store
+
+    routines_dir = agent_home("scout") / "routines"
+    routines_dir.mkdir(parents=True, exist_ok=True)
+    (routines_dir / "pulse_check.py").write_text(
+        "from pydantic import BaseModel\n\n\n"
+        "class Config(BaseModel):\n"
+        '    """Check the pulse."""\n\n\n'
+        "async def run(config, context):\n"
+        "    return 'ok'\n",
+        "utf-8",
+    )
+    get_routine_store()._routines_cache = None
+
     entry = next(
         (r for r in primitives._routine_entries() if "/" in r["name"]),
         None,
     )
-    if entry is None:  # pragma: no cover - repo ships agent routines
-        pytest.skip("no agent-prefixed routine in this checkout")
+    assert entry is not None, "the seeded agent routine did not reach the catalog"
 
     bare = entry["name"].split("/")[-1]
 

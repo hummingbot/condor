@@ -1,22 +1,12 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
-import {
-  Activity,
-  Bot,
-  Brain,
-  Bug,
-  Droplets,
-  Eye,
-  Moon,
-  Settings,
-  Sun,
-  Swords,
-  Wallet,
-  Zap,
-} from "lucide-react";
+import { Bug, Eye, Moon, Sun } from "lucide-react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 
+import { ChatBubble } from "@/components/chat/ChatBubble";
 import { ConnectKeysOverlay } from "@/components/ConnectKeysOverlay";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
+import { RelaunchBanner } from "@/components/RelaunchBanner";
 import { ReportIssueDialog } from "@/components/ReportIssueDialog";
 import { TelemetryConsentBanner } from "@/components/TelemetryConsentBanner";
 import { ChatProvider } from "@/hooks/useChat";
@@ -24,19 +14,25 @@ import { useCredentials } from "@/hooks/useCredentials";
 import { usePrefetchData } from "@/hooks/usePrefetchData";
 import { useServer } from "@/hooks/useServer";
 import { useTheme } from "@/hooks/useTheme";
+import { NAV_ITEMS, FULL_BLEED_ROUTES } from "@/lib/nav";
+import { routeFacts } from "@/lib/pageFacts";
+import { useViewFacts } from "@/lib/viewFacts";
 import { CurrencySelector } from "./CurrencySelector";
 import { NotificationBell } from "./NotificationBell";
 import { ServerSelector } from "./ServerSelector";
 
-const NAV_ITEMS = [
-  { to: "/", icon: Brain, label: "Agents" },
-  { to: "/portfolio", icon: Wallet, label: "Portfolio" },
-  { to: "/trade", icon: Swords, label: "Trade" },
-  { to: "/dex", icon: Droplets, label: "DEX" },
-  { to: "/bots", icon: Bot, label: "Bots" },
-  { to: "/executors", icon: Activity, label: "Executors" },
-  { to: "/routines", icon: Zap, label: "Routines" },
-] as const;
+/**
+ * Full-bleed routes that carry a parameter, so an exact match cannot find them.
+ *
+ * The Lab (`/agents/:slug/runs`, FEAT-099) was the first: a rail, a tick spine
+ * and a body, all screen-tall, under a slug the shell cannot enumerate. The
+ * agent workspace absorbed it (FEAT-103) and is the same shape in every view —
+ * a header, a loop bar, a spine and a body, each scrolling on its own — so the
+ * Lab's pattern is replaced by an exact match on the one route. Kept as a
+ * separate pattern list rather than turned into a `startsWith` over the array
+ * above, because `/` is in that array and prefixes everything.
+ */
+const FULL_BLEED_PATTERNS = [/^\/agents\/[^/]+$/];
 
 /**
  * The shell owns the chat state.
@@ -56,28 +52,33 @@ export function AppShell() {
 
 function AppShellBody() {
   const { server } = useServer();
-  const { pathname } = useLocation();
+  const { pathname, search } = useLocation();
   const { theme, toggleTheme } = useTheme();
   const navigate = useNavigate();
   const { hasKeys, isLoading: keysLoading } = useCredentials();
   const [reportOpen, setReportOpen] = useState(false);
 
-  // The chat workspace takes the full height and owns its own scrolling, so
-  // the shell drops `main`'s padding for it. It lives at `/` — the entry point
-  // — while `/agents/:slug` is an ordinary padded page, deliberately not
-  // matched here.
-  const isChatWorkspace = pathname === "/";
+  // A pathname is enough: every full-bleed screen is its own route.
+  // `/agents/:slug` is an ordinary padded page, deliberately not matched here.
+  const isFullBleed =
+    FULL_BLEED_ROUTES.includes(pathname) ||
+    FULL_BLEED_PATTERNS.some((re) => re.test(pathname));
 
-  // The chat is the landing page and needs no exchange keys, so the blocking
-  // overlay would otherwise be the first thing every unconfigured user hits —
-  // on the one surface that can talk them through connecting.
+  // The home is exempt because it is the chat: the one surface that can talk a
+  // new user through connecting keys, and so the last one that should be
+  // hidden behind a block telling them to. `/fleet` is exempt for the weaker
+  // but sufficient reason that it needs no keys either — it reads agents,
+  // loops and journals, none of which is an exchange — so blocking it would
+  // teach nobody anything. Matched exactly rather than by prefix, because `/`
+  // prefixes every route in the app.
   const exemptRoutes = ["/routines", "/settings"];
   const showKeysOverlay =
-    server && !keysLoading && !hasKeys && !isChatWorkspace &&
+    server && !keysLoading && !hasKeys && pathname !== "/" &&
     !exemptRoutes.some((r) => pathname.startsWith(r));
 
   // ⌘K used to toggle the overlay panel. It now goes to the chat, so the
   // reflex still lands somewhere sensible instead of silently doing nothing.
+  // The keystroke means a *conversation*, and the home is one again.
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === "k") {
@@ -91,6 +92,15 @@ function AppShellBody() {
 
   // Prefetch core data (executors, bots) and subscribe to WS channels early
   usePrefetchData();
+
+  // The route baseline for the chat's page context (FEAT-059): every page
+  // gets a label and a URL-derived subject through the same seam richer
+  // contributors use, so the chat never has to know about the router.
+  // The client is handed over so the table can also read what each page is
+  // rendering (FEAT-060) — at send time, out of the cache the page fetched
+  // through, rather than from eight components each pushing their state here.
+  const queryClient = useQueryClient();
+  useViewFacts(() => routeFacts(pathname, search, queryClient));
 
   return (
     <div className="flex h-screen flex-col">
@@ -145,20 +155,6 @@ function AppShellBody() {
               <Bug className="h-4 w-4" />
             </button>
 
-            <NavLink
-              to="/settings"
-              className={({ isActive }) =>
-                `rounded p-1.5 transition-colors ${
-                  isActive
-                    ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
-                    : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-accent)]"
-                }`
-              }
-              title="Settings"
-            >
-              <Settings className="h-4 w-4" />
-            </NavLink>
-
             <button
               onClick={toggleTheme}
               className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-accent)]"
@@ -177,6 +173,13 @@ function AppShellBody() {
         </div>
       </header>
 
+      {/* An update landed but this process is still the old one, so the bundle
+          in the browser is ahead of the API answering it. Above `main` for the
+          same reason the consent strip is: every page needs it, and the chat
+          workspace owns its own scrolling. Renders nothing the rest of the
+          time, which is nearly always. */}
+      <RelaunchBanner />
+
       {/* Asks once, for an install that has never answered (FEAT-023). Renders
           nothing for everyone else, including on the chat workspace, which owns
           its own scrolling — hence outside `main` rather than inside it. */}
@@ -185,7 +188,7 @@ function AppShellBody() {
       {/* Main content */}
       <main
         className={`relative flex-1 ${
-          isChatWorkspace ? "overflow-hidden" : "overflow-auto p-6"
+          isFullBleed ? "overflow-hidden" : "overflow-auto p-6"
         }`}
       >
         <ErrorBoundary resetKey={pathname + server}>
@@ -195,6 +198,11 @@ function AppShellBody() {
       </main>
 
       <ReportIssueDialog open={reportOpen} onClose={() => setReportOpen(false)} />
+
+      {/* The quick chat on every page but `/` (FEAT-059). Inside the
+          provider, outside `main`, so it neither scrolls with the page nor
+          unmounts on navigation. */}
+      <ChatBubble />
     </div>
   );
 }

@@ -174,3 +174,105 @@ def test_a_switch_that_cannot_spawn_leaves_no_divider(env):
 
     assert res.status_code == 404
     assert read_transcript(USER.id, conv_id) == [], "no handover was recorded"
+
+
+def _boot_failure(marker: str, message: str):
+    """An ACPClient whose ``start`` fails for one bridge — a brain that cannot boot.
+
+    Keyed on the command so the *other* brains still start: restoring the
+    outgoing session is the behaviour under test, and a fake that failed for
+    everything would hide whether it was even attempted.
+    """
+
+    class _Failing(_Client):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self._doomed = marker in str(kwargs.get("command", ""))
+
+        async def start(self):
+            if self._doomed:
+                raise RuntimeError(message)
+
+    return _Failing
+
+
+def test_a_switch_that_cannot_start_leaves_the_previous_brain_answering(
+    env, monkeypatch
+):
+    """The teardown comes first, so a failed spawn must not cost the session."""
+    key, conv_id = _live_session()
+    monkeypatch.setattr(
+        "condor.acp.client.ACPClient",
+        _boot_failure("gemini", "No local model found for 'ollama'."),
+    )
+
+    res = _client().post(
+        f"/sessions/{key}/action", json={"action": "switch", "agent_key": "gemini"}
+    )
+
+    assert res.status_code == 400
+    assert "No local model" in res.json()["detail"], "the real reason is reported"
+
+    info = asyncio.run(runtime.get_info(SessionKey.parse(key)))
+    assert info is not None, "a refused switch is a no-op, not a destroyed session"
+    assert info.agent_key == "claude-code", "the outgoing brain is back"
+    assert info.conversation_id == conv_id, "answering into the same transcript"
+    assert read_transcript(USER.id, conv_id) == [], "no divider claims a handover"
+
+
+def test_a_failed_switch_does_not_block_the_next_one(env, monkeypatch):
+    """The bug this restore exists for: pick an unrunnable model, then a good one.
+
+    Without the restore the first pick left the key empty, and every later
+    switch 404'd with "No session <key>" — the picker was dead until the user
+    abandoned the chat.
+    """
+    key, _ = _live_session()
+    client = _client()
+    monkeypatch.setattr("condor.acp.client.ACPClient", _boot_failure("gemini", "boom"))
+    assert (
+        client.post(
+            f"/sessions/{key}/action", json={"action": "switch", "agent_key": "gemini"}
+        ).status_code
+        == 400
+    )
+
+    res = client.post(
+        f"/sessions/{key}/action", json={"action": "switch", "agent_key": "codex"}
+    )
+
+    assert res.status_code == 200, res.json()
+    assert res.json()["session"]["agent_key"] == "codex"
+
+
+def test_switching_on_a_slot_between_subprocesses_brings_it_back(env):
+    """A restart takes every session and leaves every conversation.
+
+    The picker asked about a slot in that state used to get "No session <key>",
+    which names none of it and left the user no way back but abandoning the
+    chat. A switch is a spawn either way, so it spawns the brain that was asked
+    for and answers into the transcript that was already there.
+    """
+    key, conv_id = _live_session()
+    asyncio.run(runtime.destroy(SessionKey.parse(key)))
+    assert asyncio.run(runtime.get_info(SessionKey.parse(key))) is None
+
+    res = _client().post(
+        f"/sessions/{key}/action", json={"action": "switch", "agent_key": "codex"}
+    )
+
+    assert res.status_code == 200, res.json()
+    session = res.json()["session"]
+    assert session["agent_key"] == "codex"
+    assert session["conversation_id"] == conv_id, "the same chat, resumed"
+
+
+def test_a_switch_on_a_key_with_no_conversation_is_still_a_404(env):
+    """Nothing to reattach to: an unknown slot is not a chat to spawn into."""
+    key = str(SessionKey.web(USER.id, "conversation-that-never-existed"))
+
+    res = _client().post(
+        f"/sessions/{key}/action", json={"action": "switch", "agent_key": "codex"}
+    )
+
+    assert res.status_code == 404

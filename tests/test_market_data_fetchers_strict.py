@@ -80,3 +80,66 @@ def test_current_price_strict_reraises():
 def test_current_price_lenient_default_degrades_to_none():
     client = FailingClient(RuntimeError("connection refused"))
     assert asyncio.run(fetch_current_price(client, "binance", "BTC-USDT")) is None
+
+
+# ---------------------------------------------------------------------------
+# ARCH-320: a payload that came back but cannot be read is an empty answer,
+# never a raise. These two guards used to live only in a private copy of the
+# unwrap (`executor_create._current_price`), which made the shared helper the
+# strictly worse one to reach for.
+# ---------------------------------------------------------------------------
+
+
+class _PriceClient:
+    """Client whose ``get_prices`` returns a canned payload."""
+
+    def __init__(self, payload):
+        self.market_data = self._MarketData(payload)
+
+    class _MarketData:
+        def __init__(self, payload):
+            self._payload = payload
+
+        async def get_prices(self, connector_name="", trading_pairs=""):
+            return self._payload
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"prices": None},
+        {"prices": []},
+        {"prices": "BTC-USDT=60000"},
+        {},
+        None,
+        "not a payload at all",
+    ],
+)
+def test_current_price_reads_an_unreadable_payload_as_none(payload):
+    client = _PriceClient(payload)
+    assert asyncio.run(fetch_current_price(client, "binance", "BTC-USDT")) is None
+
+
+def test_an_unreadable_payload_is_an_answer_not_a_failure_in_strict_mode():
+    """Strict re-raises a failed *request*; a payload that arrived is not one."""
+    client = _PriceClient({"prices": ["BTC-USDT", 60000.0]})
+    assert (
+        asyncio.run(fetch_current_price(client, "binance", "BTC-USDT", strict=True))
+        is None
+    )
+
+
+def test_a_lone_entry_answers_a_one_pair_request_under_the_venues_own_key():
+    """A venue that normalises the pair its own way still answers the question."""
+    client = _PriceClient({"prices": {"SOL/USDC": 210.5}})
+    assert asyncio.run(fetch_current_price(client, "jupiter", "SOL-USDC")) == 210.5
+
+
+def test_two_entries_under_other_keys_stay_ambiguous_and_yield_none():
+    client = _PriceClient({"prices": {"SOL/USDC": 210.5, "SOL/USDT": 210.4}})
+    assert asyncio.run(fetch_current_price(client, "jupiter", "SOL-USDC")) is None
+
+
+def test_the_requested_key_still_wins_over_the_lone_entry_fallback():
+    client = _PriceClient({"prices": {"BTC-USDT": 60000.0}})
+    assert asyncio.run(fetch_current_price(client, "binance", "BTC-USDT")) == 60000.0

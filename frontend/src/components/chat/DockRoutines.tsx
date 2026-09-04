@@ -1,13 +1,20 @@
 import { useQuery } from "@tanstack/react-query";
-import { FileText, Loader2 } from "lucide-react";
-import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 
 import { WorkspaceSheet } from "@/components/chat/WorkspaceSheet";
-import { ReportFrame } from "@/components/routines/ReportFrame";
-import { RoutineResultView } from "@/components/routines/RoutineResultView";
-import { api, type ReportSummary, type RoutineInstance } from "@/lib/api";
+import {
+  ReportBrowser,
+  type RoutineRunContext,
+} from "@/components/routines/ReportBrowser";
+import { RoutinePicker } from "@/components/routines/RoutinePicker";
+import {
+  api,
+  type ReportSummary,
+  type RoutineInfo,
+  type RoutineInstance,
+} from "@/lib/api";
 import { formatRelativeTime, toMs } from "@/lib/formatters";
-import { formatRoutineName } from "@/lib/routineUtils";
+import { formatRoutineName, type RoutineScope } from "@/lib/routineUtils";
 
 /**
  * A row in the dock: one routine run.
@@ -16,11 +23,25 @@ import { formatRoutineName } from "@/lib/routineUtils";
  * *instance* is a run this process still holds — it may be running right now,
  * and it carries the text the caller got back. A *report* is the HTML a finished
  * run rendered, which outlives the process. A run that is both appears once, as
- * an instance, and the sheet offers its report alongside its output.
+ * an instance, and the library opens it on the report it wrote.
  */
 type Run =
   | { kind: "instance"; key: string; at: number; instance: RoutineInstance }
   | { kind: "report"; key: string; at: number; report: ReportSummary };
+
+/**
+ * What the library pane opens on.
+ *
+ * A row fills in what it points at: the routine, the report it wrote, and the
+ * run behind it, whose text output is all there is when it wrote no report.
+ * `{}` is "the whole library", which is what a scope with nothing in it leaves
+ * the pane on — the dock has no door of its own onto the unfocused library.
+ */
+export type LibraryFocus = {
+  source?: string;
+  reportId?: string;
+  instanceId?: string;
+};
 
 /**
  * The runs this dock claims, out of every instance in the process.
@@ -65,15 +86,16 @@ export function DockRoutines({
   instances,
   agentSlug,
   conversationId,
+  onLibraryChange,
 }: {
   instances: RoutineInstance[];
   /** Bound agent's slug, or "" for the unbound Condor conversation. */
   agentSlug: string;
   /** The conversation on screen, so its own runs are never filtered out. */
   conversationId: string;
+  /** Where a row asks to be read: the dock owns the pane (see {@link ContextDock}). */
+  onLibraryChange?: (focus: LibraryFocus) => void;
 }) {
-  const [openKey, setOpenKey] = useState<string | null>(null);
-
   // Only fetched while the section is open — the dock renders children behind
   // its own collapse, so this query starts with the first expand.
   const { data: reportData } = useQuery({
@@ -115,8 +137,6 @@ export function DockRoutines({
       })),
   ].sort((a, b) => b.at - a.at);
 
-  const open = runs.find((r) => r.key === openKey);
-
   return (
     <>
       {runs.length === 0 ? (
@@ -130,27 +150,28 @@ export function DockRoutines({
               <InstanceRow
                 key={run.key}
                 instance={run.instance}
-                onOpen={() => setOpenKey(run.key)}
+                onOpen={() =>
+                  onLibraryChange?.({
+                    source: run.instance.routine_name,
+                    reportId: run.instance.report_id ?? undefined,
+                    instanceId: run.instance.instance_id,
+                  })
+                }
               />
             ) : (
               <ReportRow
                 key={run.key}
                 report={run.report}
-                onOpen={() => setOpenKey(run.key)}
+                onOpen={() =>
+                  onLibraryChange?.({
+                    source: run.report.source_name || undefined,
+                    reportId: run.report.id,
+                  })
+                }
               />
             ),
           )}
         </div>
-      )}
-
-      {open?.kind === "instance" && (
-        <RoutineRunSheet
-          instance={open.instance}
-          onClose={() => setOpenKey(null)}
-        />
-      )}
-      {open?.kind === "report" && (
-        <ReportSheet report={open.report} onClose={() => setOpenKey(null)} />
       )}
     </>
   );
@@ -250,133 +271,116 @@ function ReportRow({
   );
 }
 
-// ── Sheets ──
-
-function ReportSheet({
-  report,
+/**
+ * The library, beside the conversation that wanted it.
+ *
+ * Pick a routine, configure it, run it, and read what it wrote — without the
+ * chat leaving the screen. A dock row opens this same pane on the run it points
+ * at, so a routine is read in one place however you reached it.
+ *
+ * Mounted by the dock itself rather than by the list of rows: collapsing the
+ * Routines section, or the whole dock, must not take the pane down with it.
+ * A reader who opened a report and tidied the column away kept neither.
+ */
+export function RoutineLibrarySheet({
+  library,
+  instances,
+  routines,
+  scope,
+  onScopeChange,
+  onSelectRoutine,
+  agentName,
+  runContext,
   onClose,
 }: {
-  report: ReportSummary;
+  library: LibraryFocus;
+  instances: RoutineInstance[];
+  /** The library, for the header's own picker and for naming what is open. */
+  routines: RoutineInfo[];
+  scope: RoutineScope;
+  onScopeChange: (next: RoutineScope) => void;
+  onSelectRoutine: (name: string) => void;
+  /** Who is answering, for the bar's accessible name with nothing picked yet. */
+  agentName?: string;
+  runContext?: RoutineRunContext;
   onClose: () => void;
 }) {
+  const navigate = useNavigate();
+
+  /**
+   * Maximizing takes the reader to `/routines`, on the routine they are
+   * reading.
+   *
+   * The full-screen version of this pane is not a taller sheet — it is the
+   * page, which is the same browser with the sidebar, the cards and the runs
+   * strip there is no room for beside a conversation. Everything the pane was
+   * focused on goes with them, so the page opens on the same report rather than
+   * on the routine's newest; the pane closes behind them, since what it held is
+   * now on screen.
+   */
+  const openFullPage = () => {
+    const params = new URLSearchParams();
+    if (scope && scope !== "all") params.set("agent", scope);
+    if (library.source) params.set("routine", library.source);
+    if (library.reportId) params.set("report", library.reportId);
+    if (library.instanceId) params.set("run", library.instanceId);
+    const query = params.toString();
+    onClose();
+    navigate(`/routines${query ? `?${query}` : ""}`);
+  };
+
   return (
     <WorkspaceSheet
-      title={report.title}
-      subtitle={formatRelativeTime(report.created_at, "")}
+      // The bar names what is open with the control that changes it, so this
+      // is only the accessible name behind it.
+      title={
+        library.source
+          ? formatRoutineName(library.source)
+          : agentName
+            ? `Every routine ${agentName} can run`
+            : "Routines"
+      }
+      header={
+        <RoutinePicker
+          variant="inline"
+          routines={routines}
+          instances={instances}
+          scope={scope}
+          onScopeChange={onScopeChange}
+          source={library.source}
+          onSelect={onSelectRoutine}
+          // Both halves of the question, always: whose routines this lists and
+          // which one of them is open. The pair used to be split with the dock,
+          // which meant the scope disappeared whenever the column or its
+          // Routines section was folded — a filter you had to go and re-open
+          // something else to reach. It belongs over the list it filters.
+          parts="both"
+          arrows
+        />
+      }
       onClose={onClose}
       bleed
+      onFullscreen={openFullPage}
+      // Below `xl` there is no pane, so this is today's full-screen browser.
       defaultZen
     >
-      <ReportFrame
-        reportId={report.id}
-        title={report.title}
-        className="min-h-0 flex-1"
+      <ReportBrowser
+        // Remounted per focus: opening the pane on another run is a fresh
+        // read of it, not a browser that has to be talked out of the last.
+        key={`${scope}:${library.source ?? ""}:${library.reportId ?? ""}:${library.instanceId ?? ""}`}
+        hosted
+        // The picking is the dock's (or this header's): no sidebar, no scope
+        // select and no title in the pane, which is then only the report.
+        externalPicker
+        onSourceChange={onSelectRoutine}
+        initialSource={library.source}
+        initialReportId={library.reportId}
+        initialInstanceId={library.instanceId}
+        initialSourceTypeFilter={scope}
+        instances={instances}
+        runContext={runContext}
+        onClose={onClose}
       />
-    </WorkspaceSheet>
-  );
-}
-
-/**
- * A run's full output.
- *
- * `/routines/instances` returns only the metadata and a truncated `last_result`
- * — the structured sections, tables and chart live behind the single-instance
- * route, so the sheet fetches the one run it is showing.
- *
- * When the run rendered a report, that report opens first: it is the page the
- * routine wrote, where `result_text` is only the summary handed back to whoever
- * asked. The report may have aged out of the index (the store keeps a fixed
- * number), in which case the output is all there is and is shown alone.
- */
-function RoutineRunSheet({
-  instance,
-  onClose,
-}: {
-  instance: RoutineInstance;
-  onClose: () => void;
-}) {
-  const { data, isLoading } = useQuery({
-    queryKey: ["routine-instance", instance.instance_id],
-    queryFn: () => api.getRoutineInstance(instance.instance_id),
-  });
-  const full = data ?? instance;
-
-  const reportId = full.report_id;
-  const { data: report, isLoading: reportLoading } = useQuery({
-    queryKey: ["report", reportId],
-    queryFn: () => api.getReport(reportId!),
-    enabled: !!reportId,
-    retry: false,
-  });
-
-  const [view, setView] = useState<"report" | "output">("report");
-  const showReport = !!report && view === "report";
-
-  return (
-    <WorkspaceSheet
-      title={formatRoutineName(instance.routine_name)}
-      subtitle={formatRelativeTime(instance.last_run_at, "never run")}
-      onClose={onClose}
-      // With a report in play the sheet body becomes the layout: a tab strip and
-      // whichever view owns the rest of it. Without one there is nothing to
-      // switch to, so the sheet's own padding is right.
-      bleed={!!report}
-      // The report itself arrives a fetch later, but the row already knows there
-      // is one — read that, so the sheet opens at its final size instead of
-      // resizing under the reader.
-      defaultZen={!!instance.report_id}
-    >
-      {report && (
-        <div className="flex shrink-0 items-center gap-1 border-b border-[var(--color-border)]/50 px-6 py-2">
-          {(["report", "output"] as const).map((id) => (
-            <button
-              key={id}
-              type="button"
-              onClick={() => setView(id)}
-              className={`rounded-md px-3 py-1.5 text-xs font-medium capitalize transition-all ${
-                view === id
-                  ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
-                  : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-              }`}
-            >
-              {id === "report" ? (
-                <span className="flex items-center gap-1.5">
-                  <FileText className="h-3 w-3" />
-                  Report
-                </span>
-              ) : (
-                id
-              )}
-            </button>
-          ))}
-        </div>
-      )}
-
-      {showReport ? (
-        <ReportFrame
-          reportId={report.id}
-          title={report.title}
-          className="min-h-0 flex-1"
-        />
-      ) : (
-        <div className={report ? "min-h-0 flex-1 overflow-auto px-6 py-4" : ""}>
-          {isLoading || reportLoading ? (
-            <div className="flex items-center gap-2 text-xs text-[var(--color-text-muted)]">
-              <Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading run…
-            </div>
-          ) : full.error ? (
-            <pre className="whitespace-pre-wrap break-words font-mono text-xs text-red-300">
-              {full.error}
-            </pre>
-          ) : full.has_result || full.result_text ? (
-            <RoutineResultView instance={full} />
-          ) : (
-            <p className="text-xs text-[var(--color-text-muted)]">
-              {full.last_result || "(no output yet)"}
-            </p>
-          )}
-        </div>
-      )}
     </WorkspaceSheet>
   );
 }

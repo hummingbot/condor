@@ -35,16 +35,19 @@ When managing a running pmm_mister bot, there are **two independent config store
 
 ## Step 1 — Gather market data
 
-Fetch candles for the target pair (1h, last 7 days) and current price:
+Fetch candles for the target pair (1h, last 7 days) and current price — candles come
+from `run_code`, which returns numbers rather than a rendered table:
 
+```python
+df = await client.market_data.get_candles_last_days(<connector>, <pair>, days=7, interval="1h")
 ```
-get_market_data(data_type="candles", connector_name=<connector>, trading_pair=<pair>, interval="1h", days=7)
-get_market_data(data_type="prices", connector_name=<connector>, trading_pairs=[<pair>])
+```
+get_prices(connector_name=<connector>, trading_pairs=[<pair>])
 ```
 
-If the pair is on a perpetual connector, also fetch funding rate:
-```
-get_market_data(data_type="funding_rate", connector_name=<connector_perpetual>, trading_pair=<pair>)
+If the pair is on a perpetual connector, also fetch funding rate in the snippet:
+```python
+funding = await client.market_data.get_funding_info(<connector_perpetual>, <pair>)
 ```
 
 ---
@@ -334,7 +337,10 @@ each with its own executor set and capital allocation.
 
 ```
 manage_bots(action="status")
-manage_executors(action="list", bot_name=<bot_name>)
+list_executors(controller_ids=[
+  "NNN_pmm_<connector>_<PAIR>_variantA",
+  "NNN_pmm_<connector>_<PAIR>_variantB"
+])
 ```
 
 Confirm executors appear for both config names.

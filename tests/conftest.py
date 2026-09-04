@@ -5,22 +5,27 @@ import sys
 
 import pytest
 
-from condor.memory.paths import shared_routines_root
+from condor.memory.paths import shared_routines_roots
 
 
 def load_shared_routine(name: str):
-    """Import a routine from ``agents/_shared/routines`` as a module.
+    """Import a routine from the **shipped** ``agents/_shared/routines``.
 
     A shared routine (FEAT-038) lives outside any package, so it has no dotted
     import path — production loads it exactly this way, from its file. Tests that
     need the module's internals (not just the ``RoutineInfo``) go through here so
     they exercise the same loading the routine actually gets.
+
+    Explicitly the stock layer: these are library files the repo ships, and the
+    isolation fixture below repoints *both* roots at empty tmp dirs. Callers
+    import at module scope, before any fixture runs, which is what makes this
+    resolve the real repo — the ``[1]`` keeps it doing so if that ever changes.
     """
     module_name = f"shared_routine_{name}"
     if module_name in sys.modules:
         return sys.modules[module_name]
 
-    path = shared_routines_root() / f"{name}.py"
+    path = shared_routines_roots()[1] / f"{name}.py"
     spec = importlib.util.spec_from_file_location(module_name, path)
     if not spec or not spec.loader:  # pragma: no cover - a missing file is the bug
         raise ImportError(f"No shared routine '{name}' at {path}")
@@ -61,19 +66,28 @@ def _isolated_runtime_root(tmp_path, monkeypatch):
     ``data/code_runs/``). They all resolve through ``condor.paths`` now, so
     ``$CONDOR_DATA_DIR`` moves the lot.
 
-    The third line covers ``agents/``: every ``MemoryStore`` and ``SkillStore``
-    hangs off it and ``mkdir(parents=True)``s on write, so a module that did not
-    monkeypatch ``condor.memory.paths._PROJECT_ROOT`` by hand wrote into the
-    developer's own memory and skill library -- it left an ``audit.log`` for a
-    ``user_424242`` that appears nowhere in the repo. Ten modules remembered;
-    the knob means none of them has to (CORR-220).
+    The last two lines cover the agent tree, which is **two** roots since
+    FEAT-115: every ``MemoryStore`` and ``SkillStore`` hangs off the writable one
+    and ``mkdir(parents=True)``s on write, so a module that did not monkeypatch
+    ``condor.memory.paths._PROJECT_ROOT`` by hand wrote into the developer's own
+    memory and skill library -- it left an ``audit.log`` for a ``user_424242``
+    that appears nowhere in the repo. Ten modules remembered; the knob means none
+    of them has to (CORR-220).
+
+    **Both** roots are repointed, and the stock one at an empty directory. A
+    test that saw the real shipped library layered under its tmp root would get
+    the developer's whole agent registry back in every listing, and the isolation
+    the previous paragraph describes would be only half true. A test that really
+    wants the shipped tree names it (``load_shared_routine`` above, and the few
+    that assert on ``agents/condor/AGENT.md``).
+
+    ``tmp_path / "agents"`` and not ``condor-agents`` for the writable root:
+    ``tmp_path`` stands in for the repo root in the agent tests, so the registry
+    and the stores stay one tree.
     """
     from condor import paths
 
     monkeypatch.setenv(paths.RUNTIME_ROOT_ENV, str(tmp_path / "condor-runtime"))
     monkeypatch.setenv(paths.DATA_DIR_ENV, str(tmp_path / "condor-data"))
-    # ``tmp_path / "agents"`` and not ``condor-agents``: ``tmp_path`` stands in
-    # for the repo root in the agent tests, and several roots still out of scope
-    # here (``agent.py``/``strategy.py``'s ``_DATA_ROOT``) are monkeypatched to
-    # that same directory, so the registry and the stores stay one tree.
     monkeypatch.setenv(paths.AGENTS_ROOT_ENV, str(tmp_path / "agents"))
+    monkeypatch.setenv(paths.STOCK_AGENTS_ROOT_ENV, str(tmp_path / "stock-agents"))

@@ -22,7 +22,15 @@
  */
 
 import { candleStore } from "./candle-store";
-import { queryClient } from "./queryClient";
+import { controllerKey } from "./controller-identity";
+import {
+  CONTROLLER_PERF_ROOTS,
+  controllerPerfHistoryAllQuery,
+  controllerPerfHistoryQuery,
+  executorsQuery,
+  parseExecutorsKey,
+  queryClient,
+} from "./queryClient";
 import type {
   BotsPageResponse,
   ControllerInfo,
@@ -57,22 +65,184 @@ const connectHandlers = new Set<() => void>();
 
 /**
  * Merge incoming performance snapshots into existing ones, deduplicating by
- * `controller_id:timestamp`.
+ * controller *and bot* plus timestamp.
+ *
+ * The bot is not decoration in this key: `controller_id` is a config id two
+ * bots can be running at once, and the sampler dumps them at one shared
+ * timestamp, so deduping on `id:timestamp` threw away the second bot's frame
+ * every tick as if it were a repeat of the first (CORR-241).
  */
 function mergeSnapshots(
   existing: ControllerPerformanceSnapshot[],
   incoming: ControllerPerformanceSnapshot[],
 ): ControllerPerformanceSnapshot[] {
   const merged = [...existing];
-  const seen = new Set(existing.map((s) => `${s.controller_id}:${s.timestamp}`));
+  const snapKey = (s: ControllerPerformanceSnapshot) => `${controllerKey(s)}:${s.timestamp}`;
+  const seen = new Set(existing.map(snapKey));
   for (const snap of incoming) {
-    const key = `${snap.controller_id}:${snap.timestamp}`;
+    const key = snapKey(snap);
     if (!seen.has(key)) {
       merged.push(snap);
       seen.add(key);
     }
   }
   return merged;
+}
+
+/**
+ * Merge snapshots into every cached performance-history query under `prefix`.
+ *
+ * The readers of these caches append a time bound and a sampling interval to
+ * the key (see `controllerPerfHistoryQuery` for the whole shape) that is
+ * derived from data this module never sees. `setQueryData` matches by
+ * exact key hash, so the socket has to discover the live keys rather than
+ * reconstruct them. Entries that don't exist yet are left alone — the query's own fetch
+ * seeds them, and merging into a missing entry would produce a history with no
+ * beginning.
+ */
+function mergeIntoMatchingQueries(
+  prefix: unknown[],
+  snapshots: ControllerPerformanceSnapshot[],
+): void {
+  for (const entry of queryClient.getQueryCache().findAll({ queryKey: prefix })) {
+    queryClient.setQueryData(
+      entry.queryKey,
+      (old: ControllerPerformanceHistoryResponse | undefined) => {
+        if (!old) return old;
+        // Append new snapshots and deduplicate by bot+controller+timestamp
+        return { ...old, snapshots: mergeSnapshots(old.snapshots ?? [], snapshots) };
+      },
+    );
+  }
+}
+
+/**
+ * The rows an `executors:<server>` frame carries.
+ *
+ * The stream is untyped on the wire, so only the fields this module reads are
+ * asserted: the `id` the merge keys on, and the two columns the filtered views
+ * narrow by.
+ */
+type ExecutorFrameRow = {
+  id?: string;
+  controller_id?: string;
+  trading_pair?: string;
+};
+
+/** The `["executors-infinite", server]` cache, as the walk in `Bots.tsx` builds it. */
+type ExecutorPages = {
+  pages?: { executors?: ExecutorFrameRow[]; next_cursor?: string | null }[];
+  pageParams?: unknown[];
+};
+
+/**
+ * Fold a live `executors` frame into the cursor-paginated infinite list.
+ *
+ * Pages 1..n of that query are anchored on the cursor page 0 ended at
+ * (`getNextPageParam: lastPage.next_cursor`), so the seam between two pages
+ * never moves once it is drawn. Rewriting page 0 by position — what this used
+ * to do, `frame.slice(0, page0.length)` — therefore slid page 0's window
+ * without sliding the seam: every row the frame pushed past the end of page 0
+ * was then in no page at all. It disappeared from the table and, worse, from
+ * the KPI totals folded over those same flattened pages, until the 60s
+ * fallback poll happened to repair it. A frame *shorter* than page 0
+ * truncated it outright, which the stream does routinely: it broadcasts the
+ * in-memory executor list, a different, generally smaller and differently
+ * ordered set than the REST history the walk paged through.
+ *
+ * So merge by id instead — the same upsert `useMainControllerData` folds its
+ * three sources with. Every held row the frame also carries is refreshed where
+ * it already sits; only ids no page holds are prepended to page 0; nothing is
+ * ever dropped for being absent from the frame, because the frame says what is
+ * live now, not what the history contains. A row the walk handed out twice
+ * (an active executor can be served both from memory and from its DB page) is
+ * collapsed to its first copy, since a duplicate is counted twice by every
+ * total on the screen.
+ */
+function mergeExecutorPages(
+  old: ExecutorPages | undefined,
+  incoming: ExecutorFrameRow[],
+): ExecutorPages | undefined {
+  if (!old?.pages?.length) return old;
+
+  const fresh = new Map<string, ExecutorFrameRow>();
+  for (const ex of incoming) {
+    if (ex?.id) fresh.set(ex.id, ex);
+  }
+
+  const held = new Set<string>();
+  let touched = false;
+  const pages = old.pages.map((page) => {
+    let changed = false;
+    const executors: ExecutorFrameRow[] = [];
+    for (const row of page.executors ?? []) {
+      const id = row?.id;
+      if (!id) {
+        executors.push(row);
+        continue;
+      }
+      if (held.has(id)) {
+        changed = true; // already kept, in this page or an earlier one
+        continue;
+      }
+      held.add(id);
+      const next = fresh.get(id);
+      if (next && next !== row) changed = true;
+      executors.push(next ?? row);
+    }
+    if (!changed) return page;
+    touched = true;
+    return { ...page, executors };
+  });
+
+  // Whatever the pages did not already hold is genuinely new, and belongs at
+  // the head of the newest page.
+  const added = [...fresh.entries()].filter(([id]) => !held.has(id)).map(([, ex]) => ex);
+  if (!added.length) return touched ? { ...old, pages } : old;
+
+  const [first, ...rest] = pages;
+  return {
+    ...old,
+    pages: [{ ...first, executors: [...added, ...(first.executors ?? [])] }, ...rest],
+  };
+}
+
+/**
+ * Whether this socket has ever been up, so the first connect is not read as a gap.
+ */
+let everConnected = false;
+
+/**
+ * Re-check the performance histories after the connection came back.
+ *
+ * While the socket is up, `mergeIntoMatchingQueries` keeps these entries at the
+ * live edge and the queries' own timer is only a long safety net
+ * (`HISTORY_REFETCH_MS`). A drop breaks the first half of that: frames sent
+ * while the connection was down are gone — the stream broadcasts the *latest*
+ * snapshot every 30s and never replays — so the cached series has a hole
+ * between the disconnect and now, and waiting up to ten minutes for the net to
+ * catch it would be exactly the "quietly stale to save requests" trade this
+ * whole change exists not to make.
+ *
+ * Invalidating instead makes the repair immediate and still cheap: each active
+ * chart refetches, and a refetch is now a tail fetch from its own newest cached
+ * snapshot (`refreshControllerHistory`), so the request that closes the gap is
+ * bounded by the length of the gap rather than by the length of the history.
+ * That is what makes an aggressive repair affordable here.
+ *
+ * The first connect of a socket is skipped: nothing was missed before there was
+ * a connection, and the queries are loading their first full walk at that exact
+ * moment. Both roots are re-checked separately (`CONTROLLER_PERF_ROOTS`)
+ * because react-query matches key arrays element by element.
+ */
+function resyncPerformanceHistories(): void {
+  if (!everConnected) {
+    everConnected = true;
+    return;
+  }
+  for (const root of CONTROLLER_PERF_ROOTS) {
+    queryClient.invalidateQueries({ queryKey: [root] });
+  }
 }
 
 /**
@@ -84,8 +254,10 @@ function mergeSnapshots(
  * segment (`portfolio:<server>`, `orderbook:<server>:<connector>:<pair>`, …),
  * which is what the backend authorizes against, so that is the authoritative
  * source for the cache key too.
+ *
+ * Exported for tests; the socket wires it up itself in `openSocket`.
  */
-function handleMessage(channel: string, data: unknown): void {
+export function handleMessage(channel: string, data: unknown): void {
   const parts = channel.split(":");
   const prefix = parts[0];
   const server = parts[1];
@@ -120,19 +292,19 @@ function handleMessage(channel: string, data: unknown): void {
       if (!incoming?.controllers) return old ?? data;
       if (!old?.controllers?.length) return incoming;
 
-      // Key by controller_id (stable) — controller_name may differ between REST and WS
+      // Key by bot + controller_id (stable) — controller_name may differ
+      // between REST and WS, and the id alone is shared by every bot running
+      // the same controller config (CORR-241).
       const oldMap = new Map<string, ControllerInfo>();
       for (const c of old.controllers) {
-        const key = `${c.bot_name}-${c.controller_id || c.controller_name}`;
-        oldMap.set(key, c);
+        oldMap.set(controllerKey(c), c);
       }
       const oldBotMap = new Map(old.bots.map((b) => [b.bot_name, b]));
 
       return {
         ...incoming,
         controllers: incoming.controllers.map((c) => {
-          const key = `${c.bot_name}-${c.controller_id || c.controller_name}`;
-          const prev = oldMap.get(key);
+          const prev = oldMap.get(controllerKey(c));
           if (!prev) return c;
           return {
             ...c,
@@ -151,72 +323,72 @@ function handleMessage(channel: string, data: unknown): void {
       };
     });
   } else if (prefix === "executors") {
-    queryClient.setQueryData(["executors", server, ""], data);
-    // Also update any filtered executor queries (e.g. ["executors", server, "main", pair])
-    const allExecs = data as { controller_id?: string; trading_pair?: string }[];
+    const unfiltered = executorsQuery(server);
+    queryClient.setQueryData(unfiltered.queryKey, data);
+    const allExecs = data as ExecutorFrameRow[];
     if (Array.isArray(allExecs)) {
-      const cache = queryClient.getQueryCache().findAll({ queryKey: ["executors", server] });
-      for (const entry of cache) {
-        const key = entry.queryKey as string[];
-        // Skip the unfiltered key (already set above)
-        if (key.length <= 3 && key[2] === "") continue;
-        // key format: ["executors", server, controllerId, pair]
-        if (key.length === 4) {
-          const [, , cid, tp] = key;
-          const filtered = allExecs.filter(
-            (ex) => (!cid || ex.controller_id === cid) && (!tp || ex.trading_pair === tp),
-          );
-          queryClient.setQueryData(key, filtered);
-        }
+      // Filtered views of the same list are derived from this one frame. Which
+      // narrowings someone is currently watching is recorded nowhere but in the
+      // live keys, so they are read back through the shared parser rather than
+      // destructured here — `executorsQuery` owns the order.
+      for (const entry of queryClient.getQueryCache().findAll({ queryKey: unfiltered.prefix })) {
+        const filter = parseExecutorsKey(entry.queryKey);
+        if (!filter) continue;
+        // The unfiltered entry, already written above.
+        if (!filter.controllerId && !filter.pair) continue;
+        queryClient.setQueryData(
+          entry.queryKey,
+          allExecs.filter(
+            (ex) =>
+              (!filter.controllerId || ex.controller_id === filter.controllerId) &&
+              (!filter.pair || ex.trading_pair === filter.pair),
+          ),
+        );
       }
-    }
-    const execs = data as unknown[];
-    if (Array.isArray(execs)) {
+
+      // The paginated list the browser walks reads the same frame, but it can
+      // only be merged into — see `mergeExecutorPages`.
       queryClient.setQueryData(
         ["executors-infinite", server],
-        (old: { pages?: { executors: unknown[]; next_cursor: string | null }[]; pageParams?: unknown[] } | undefined) => {
-          if (!old?.pages?.length) return old;
-          const firstPage = old.pages[0];
-          const limit = firstPage.executors.length || 50;
-          const nextFirst = {
-            ...firstPage,
-            executors: execs.slice(0, limit),
-          };
-          return { ...old, pages: [nextFirst, ...old.pages.slice(1)] };
-        },
+        (old: ExecutorPages | undefined) => mergeExecutorPages(old, allExecs),
       );
     }
   } else if (prefix === "controller_perf") {
-    // Update the "all controllers" sparkline cache
     const incoming = data as { snapshots?: ControllerPerformanceSnapshot[] };
     if (incoming?.snapshots) {
-      queryClient.setQueryData(
-        ["controller-perf-history-all", server],
-        (old: ControllerPerformanceHistoryResponse | undefined) => {
-          if (!old) return old;
-          // Append new snapshots and deduplicate by controller_id+timestamp
-          const merged = mergeSnapshots(old.snapshots ?? [], incoming.snapshots!);
-          return { ...old, snapshots: merged };
-        },
+      // Both readers key on a time bound the socket cannot know — the fleet
+      // query adds `earliestDeploy` (ActiveBotsTab) and the per-controller one
+      // adds `deployedAt` (ControllerPnlChart) — and on the sampling interval
+      // derived from it (PERF-238). `setQueryData` matches the key hash
+      // exactly, so writing the short prefix here landed on an entry that never
+      // exists and every frame was silently dropped. Resolve the live keys from
+      // the cache instead, the way the `executors` branch above does. Live
+      // frames arrive at the socket's own cadence and are merged whatever the
+      // cache's interval: they only add detail at the right-hand edge.
+      mergeIntoMatchingQueries(
+        controllerPerfHistoryAllQuery(server).prefix,
+        incoming.snapshots,
       );
 
-      // Also update per-controller history caches
+      // Same, per controller. The per-controller cache is scoped to one bot
+      // (ControllerPnlChart asks upstream for a single `bot_name`), so the
+      // routing has to be scoped to one bot too: grouping on the bare
+      // `controller_id` pushed a sibling bot's rows into its neighbour's chart
+      // whenever both ran the same controller config (CORR-241).
       const byController = new Map<string, ControllerPerformanceSnapshot[]>();
       for (const snap of incoming.snapshots) {
         const cid = snap.controller_id || snap.controller_name;
         if (!cid) continue;
-        const arr = byController.get(cid) ?? [];
+        const key = `${snap.bot_name ?? ""}\u0000${cid}`;
+        const arr = byController.get(key) ?? [];
         arr.push(snap);
-        byController.set(cid, arr);
+        byController.set(key, arr);
       }
-      for (const [cid, snaps] of byController) {
-        queryClient.setQueryData(
-          ["controller-perf-history", server, cid],
-          (old: ControllerPerformanceHistoryResponse | undefined) => {
-            if (!old) return old;
-            const merged = mergeSnapshots(old.snapshots ?? [], snaps);
-            return { ...old, snapshots: merged };
-          },
+      for (const [key, snaps] of byController) {
+        const [botName, cid] = key.split("\u0000");
+        mergeIntoMatchingQueries(
+          controllerPerfHistoryQuery(server, { botName, controllerId: cid }).prefix,
+          snaps,
         );
       }
     }
@@ -238,6 +410,7 @@ function openSocket(token: string): CondorWebSocket {
   ws.onMessage(handleMessage);
   ws.onConnect(() => {
     version++;
+    resyncPerformanceHistories();
     for (const handler of connectHandlers) handler();
   });
 

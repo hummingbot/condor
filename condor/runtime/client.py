@@ -18,7 +18,7 @@ import time
 from typing import AsyncIterator, Literal
 
 from condor.acp.pydantic_ai_client import model_prefix
-from condor.runtime import conversations
+from condor.runtime import conversations, secrets
 from condor.runtime.events import EventType, RuntimeEvent
 from condor.runtime.keys import SessionKey
 from condor.runtime.models import PromptRequest, SessionInfo, SessionSpec
@@ -60,9 +60,9 @@ def _local():
     return sessions
 
 
-def bound_agent_context(bound, user_id: int, platform: str) -> str:
+def bound_agent_context(bound, user_id: int, platform: str, agent_key: str = "") -> str:
     """Opening context for a chat bound to a specialist Agent."""
-    return _local().bound_agent_context(bound, user_id, platform)
+    return _local().bound_agent_context(bound, user_id, platform, agent_key)
 
 
 async def create_session(
@@ -110,9 +110,17 @@ async def conversation_for_session(session_key: str) -> str:
         return ""
 
 
-async def list_sessions(user_id: int | None = None) -> list[SessionInfo]:
-    """List sessions, optionally filtered by owning user."""
-    return _local().list_sessions(user_id)
+async def list_sessions(
+    user_id: int | None = None, *, include_detached: bool = False
+) -> list[SessionInfo]:
+    """List sessions, optionally filtered by owning user.
+
+    ``include_detached`` adds the slots whose subprocess was reaped but whose
+    conversation is still there, reported with ``alive`` false. That is the
+    roster a frontend rebuilds its tab strip from; the default stays "what is
+    running right now".
+    """
+    return _local().list_sessions(user_id, include_detached=include_detached)
 
 
 async def destroy(key: SessionKey) -> bool:
@@ -187,8 +195,10 @@ async def prompt(
     *queues*. It defaults to ``reject`` — the pre-FEAT-030 behaviour — so
     delegations, strategy ticks and every other caller are untouched.
 
-    ``req.image_b64``/``req.image_mime`` are accepted but not yet forwarded:
-    the underlying ACP and Pydantic AI clients are text-only today.
+    ``req.images`` travel beside the text to whichever client is behind the
+    session, which turns them into that protocol's own content blocks. They are
+    resolved to bytes by the caller — the funnel never sees an attachment id —
+    and are recorded on the user turn as ``{id, mime, bytes}``, no payload.
     """
     raw_key = str(key)
     session = _local().get_session(key)
@@ -212,19 +222,107 @@ async def prompt(
             # rather than a composer that looks broken.
             yield RuntimeEvent.queued(session_key=raw_key)
 
+    # A configuration change reaches the chat that is already open (FEAT-093).
+    # A chat session hands its model, instructions, tool profile, mute list and
+    # server to the subprocess exactly once, at session/new, so an operator who
+    # switches a playbook off in the panel used to have to know to start a new
+    # chat. The staleness is recomputed here instead: the start of a turn is the
+    # one moment that is both safe (nothing in flight) and the last at which the
+    # change can still matter. This is the fourth cross-cutting concern this
+    # funnel has claimed, on the same argument as the first three — it is the
+    # only code path every turn on every surface takes.
+    #
+    # After ``on_busy`` on purpose: ``steer`` has just stopped the turn ahead,
+    # so it lands on a session that can be reloaded, while ``queue`` is still
+    # busy and defers to the turn after this one.
+    try:
+        reloaded = await _local().refresh_if_stale(key)
+    except Exception as exc:  # noqa: BLE001 - surfaced to the caller as an event
+        # The destroy happens before the spawn, as it does for every existing
+        # swap, so a configuration that cannot spawn leaves the key empty. The
+        # turn fails; the durable conversation is untouched and each surface's
+        # existing reattach re-creates on the next message.
+        log.exception("Could not reload session %s for a config change", raw_key)
+        yield RuntimeEvent.error(
+            f"Could not apply the new configuration: {exc}", session_key=raw_key
+        )
+        yield RuntimeEvent.done("error", session_key=raw_key)
+        return
+
+    if reloaded:
+        session = _local().get_session(key)
+        if session is None:
+            yield RuntimeEvent.error(f"No session for {raw_key}", session_key=raw_key)
+            yield RuntimeEvent.done("no_session", session_key=raw_key)
+            return
+        yield RuntimeEvent.reloaded(reloaded, session_key=raw_key)
+        # Recorded *after* the respawn, so the note is not swept into its own
+        # replay, and so a reload that failed leaves no note claiming it
+        # happened. Part names only — never a digest, never what changed.
+        conversations.record_system(
+            session.user_id,
+            session.conversation_id,
+            f"Reloaded to apply configuration changes ({', '.join(reloaded)})",
+            kind="reload",
+        )
+
+    # An agent that says it does not take pictures is told so here, before the
+    # prompt is built, rather than by a mid-turn protocol rejection the user
+    # cannot read. ACP answers this at the handshake; the pydantic-ai client has
+    # nothing equivalent to introspect and defaults to True, forwarding
+    # optimistically so the provider's own error is what surfaces (FEAT-098).
+    if req.images and not getattr(session.client, "accepts_images", True):
+        yield RuntimeEvent.error(
+            f"{session.label} cannot read images. "
+            "Switch the model, or describe what is in the picture.",
+            session_key=raw_key,
+        )
+        yield RuntimeEvent.done("error", session_key=raw_key)
+        return
+
+    # Key material never gets past this line (FEAT-056). It is the same
+    # argument the funnel already makes for recording and for ``on_busy``,
+    # applied to a third cross-cutting concern: ``clean`` feeds both the
+    # Recorder below and ``prompt_stream`` further down, so sanitising it here
+    # covers Telegram, the dashboard, background wakes, delegations and MCP at
+    # once — and covers surface number four, which would otherwise inherit the
+    # omission. Only *certain* shapes are replaced; ``findings`` carries the
+    # ambiguous ones too, for telemetry to count and for the surfaces to warn
+    # about. See :mod:`condor.runtime.secrets`.
+    clean, findings = secrets.redact(req.text)
+    # Redacted like the text, for the same reason and by the same rule — a
+    # page that renders a credential must not be the one hole in FEAT-056. Its
+    # findings are dropped on purpose: ``findings`` drives the secret *notice*,
+    # which tells the user about something they typed.
+    view, _ = secrets.redact(req.view_context)
+    # The model hears the page; the transcript keeps only the user's words.
+    # Anything recorded is replayed on resume and shown by ShareConversation,
+    # and a page the user was on is true of a moment, not of the conversation.
+    wire = f"{view}\n\n{clean}" if view.strip() else clean
+
     # Stamped from the live session, not from the conversation meta: the meta's
     # agent_key/agent_slug are last-write-wins, so a chat that switches models
     # mid-way would attribute its whole history to whatever answered last.
     recorder = conversations.Recorder(
         session.user_id,
         session.conversation_id,
-        req.text,
+        clean,
         agent_key=session.agent_key,
         agent_slug=session.agent_slug,
         # Empty for a turn the user typed; set when something else drove it
         # (a background task waking the chat), so the opening line is recorded
         # as a system note rather than as the user's words.
         user_kind=req.user_kind,
+        # The reference, never the payload: an id under this conversation's
+        # own attachments/ directory, its type and its size. That is what lets
+        # a reload put the picture back in the user's bubble — and what makes a
+        # share of this conversation carry an inert reference no corpus can
+        # resolve, which needed no special case in condor/sharing.
+        attachments=[
+            {"id": image.id, "mime": image.mime, "bytes": len(image.data)}
+            for image in req.images
+            if image.id
+        ],
     )
     # Turn shape for telemetry (FEAT-023): counts and categories only. Nothing
     # about what was asked, answered, or which file a tool touched.
@@ -232,7 +330,9 @@ async def prompt(
     tool_kinds: dict[str, int] = {}
     outcome = "aborted"
     try:
-        async for event in session.prompt_stream(req.text, lock_timeout=lock_timeout):
+        async for event in session.prompt_stream(
+            wire, images=req.images or None, lock_timeout=lock_timeout
+        ):
             runtime_event = RuntimeEvent.from_acp(event, session_key=raw_key)
             if runtime_event.type is EventType.TOOL_CALL:
                 # The ACP `kind` ("read", "execute", …), never the `title`: a
@@ -268,19 +368,33 @@ async def prompt(
             outcome=outcome,
             surface=_SURFACES.get(getattr(key, "surface", ""), "other"),
             tools=tool_kinds,
+            # Counts per kind, never an offset and never a value — the same
+            # "counts and categories only" contract the rest of this call
+            # already holds to.
+            secrets=secrets.counts(findings),
         )
 
 
 async def prompt_once(key: SessionKey, text: str) -> str:
     """Send a prompt and wait for the whole reply.
 
-    For turns the user never sees streamed — injecting mode context, asking the
-    agent to summarize itself for /compact. Raises KeyError when the session is
-    gone, since every caller here has just checked that it exists.
+    For turns the user never sees streamed — asking the agent to summarize
+    itself for /compact, and re-injecting that summary into the fresh session.
+    Raises KeyError when the session is gone, since every caller here has just
+    checked that it exists.
+
+    Redacted for the same reason ``prompt`` is (FEAT-056), and not because the
+    text is usually a template: /compact's custom instructions are a *user's*
+    words, wrapped in a template and sent from here, so without this line the
+    funnel had a second door — Telegram deleted the message carrying a pasted
+    phrase and told the user "it was not sent to the agent" while this call
+    sent it. ``findings`` are dropped on purpose: the surface that took the
+    text already scanned its own copy and owns the notice.
     """
     session = _local().get_session(key)
     if session is None:
         raise KeyError(f"No session for {key}")
+    text, _ = secrets.redact(text)
     return await session.client.prompt(text)
 
 

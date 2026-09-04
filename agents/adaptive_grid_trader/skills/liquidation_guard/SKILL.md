@@ -3,7 +3,7 @@ name: liquidation_guard
 description: 'Pre-deploy checklist: order size validation + liquidation price guard
   for grid executors on perpetual futures'
 when_to_use: Before every grid_executor deployment on perpetual futures. Run after
-  hourly_mtf_check produces a recommendation and before calling manage_executors(action='create').
+  hourly_mtf_check produces a recommendation and before calling create_grid_executor().
 created: '2026-07-30T14:22:18Z'
 source: agent:adaptive_grid_trader
 ---

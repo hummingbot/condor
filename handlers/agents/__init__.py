@@ -17,6 +17,9 @@ from condor.runtime import (
     SessionSpec,
 )
 from condor.runtime import client as runtime
+from condor.runtime import (
+    secrets,
+)
 from handlers import clear_all_input_states
 from utils.auth import restricted
 
@@ -40,8 +43,10 @@ from .confirmation import resolve_confirmation
 from .menu import show_agent_menu
 from .stream import TelegramStreamer
 
-# Imported for its import-time registration: it is what lets a finished
-# background task render its continuation in the chat that asked (FEAT-034).
+# Imported for its import-time registrations: the wake sink is what lets a
+# finished background task render its continuation in the chat that asked
+# (FEAT-034), and the note sink is what lets one show a cheap outcome note there
+# without spending a turn (CORR-266).
 from . import wake as _wake  # noqa: F401  isort:skip
 
 log = logging.getLogger(__name__)
@@ -237,9 +242,107 @@ def _reclaim_default_agent(context: ContextTypes.DEFAULT_TYPE) -> str:
     return agent_key
 
 
+# What someone can type after /agent to mean the coordinator rather than a
+# specialist, so the command can unbind a chat as well as bind it.
+_CONDOR_ALIASES = {"condor", "coordinator", "default", "none", "-"}
+
+# How many agents an unresolved argument lists back. A long roster belongs in
+# the picker, which paginates; this is only meant to name the near misses.
+_ARG_LIST_LIMIT = 10
+
+
+def _normalize_agent_query(text: str) -> str:
+    """Fold the ways one agent's name gets typed into one comparable form.
+
+    Slugs are underscored and names are spaced and capitalised, so "Orca LP
+    Expert", "orca_lp_expert" and "orca-lp-expert" all have to arrive at the
+    same string before anything can be compared.
+    """
+    return "".join(c for c in text.lower() if c.isalnum())
+
+
+def _resolve_agent_argument(arg: str) -> tuple[str, str, str]:
+    """Resolve ``/agent <name>`` to ``(slug, label, error)``.
+
+    Exact matches win over partial ones, so an agent whose name is contained in
+    another's is still reachable by typing it in full. A partial match that hits
+    more than one agent is refused rather than guessed: raising the wrong
+    specialist swaps the identity, the tools, the pinned server and the memory
+    scope at once, and the only thing on screen to catch it would be the name in
+    the header. An empty slug with no error is the coordinator.
+    """
+    from condor.agents.agent import AgentStore
+
+    if arg.strip().lower() in _CONDOR_ALIASES:
+        return "", "Condor", ""
+
+    needle = _normalize_agent_query(arg)
+    if not needle:
+        return "", "", "Tell me who to talk to, e.g. /agent orca_lp_expert."
+
+    agents = AgentStore().list_specialists()
+    if not agents:
+        return (
+            "",
+            "",
+            "No agents defined yet. Create one with /agent → Condor, or from "
+            "the dashboard's Agents page.",
+        )
+
+    def _label(agent) -> str:
+        return agent.name or agent.slug
+
+    def _listing(rows) -> str:
+        shown = "\n".join(f"• {_label(a)} ({a.slug})" for a in rows[:_ARG_LIST_LIMIT])
+        rest = len(rows) - _ARG_LIST_LIMIT
+        if rest > 0:
+            shown += f"\n…and {rest} more — see /agent → Talk to."
+        return shown
+
+    keys = {
+        a.slug: (_normalize_agent_query(a.slug), _normalize_agent_query(_label(a)))
+        for a in agents
+    }
+    matches = [a for a in agents if needle in keys[a.slug]]
+    if not matches:
+        matches = [a for a in agents if any(needle in k for k in keys[a.slug])]
+
+    if not matches:
+        return "", "", f"No agent matches '{arg}'. You can talk to:\n{_listing(agents)}"
+    if len(matches) > 1:
+        return (
+            "",
+            "",
+            f"'{arg}' matches more than one agent:\n{_listing(matches)}"
+            "\n\nType the slug in full.",
+        )
+    return matches[0].slug, _label(matches[0]), ""
+
+
+async def _handle_agent_argument(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, arg: str
+) -> None:
+    """``/agent <name>`` — raise that specialist without going through the menu.
+
+    The shortcut for the chats that always belong to the same desk: two taps and
+    a page of picker collapse into the name you already know. ``/agent condor``
+    is the way back to the coordinator.
+    """
+    slug, label, error = _resolve_agent_argument(arg)
+    if error:
+        await update.message.reply_text(error)
+        return
+
+    await _raise_agent(update, context, slug, label)
+
+
 @restricted
 async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /agent command — manage agent settings and session."""
+    """Handle /agent command — manage agent settings and session.
+
+    With an argument it names who to talk to and skips the menu entirely; with
+    none it opens the menu as it always has.
+    """
     chat_type = update.effective_chat.type
     if chat_type in ("group", "supergroup"):
         await update.message.reply_text("The agent is only available in private chats.")
@@ -269,6 +372,12 @@ async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         # logic above can restore DEFAULT_AGENT once its CLI is installed.
         set_active_llm(context, available[0])
         context.user_data["agent_llm_auto"] = True
+
+    # Checked after the CLI fallback above, so a named agent is raised on a
+    # model that can actually start rather than refused for the default's sake.
+    if context.args:
+        await _handle_agent_argument(update, context, " ".join(context.args))
+        return
 
     await show_agent_menu(update, context)
 
@@ -332,6 +441,24 @@ async def agent_callback_handler(
     # persona axis was deleted (FEAT-033) send; the value is ignored.
     if action == "start" or action.startswith("mode:"):
         await _handle_start(update, context)
+
+    # The button on the ambiguous-shape notice (FEAT-056). Nothing about the
+    # certain shapes is silenceable — those are removed whatever this says.
+    elif action == "secret_notices_off":
+        from condor.preferences import set_secret_notices
+
+        set_secret_notices(context.user_data, False)
+        await query.message.edit_text(
+            "I will not flag key-shaped values again. It is back on from "
+            "/agent → Settings whenever you want it."
+        )
+    elif action == "secret_notices_toggle":
+        from condor.preferences import secret_notices_enabled, set_secret_notices
+
+        set_secret_notices(
+            context.user_data, not secret_notices_enabled(context.user_data)
+        )
+        await _handle_settings(update, context)
 
     # Settings
     elif action == "settings":
@@ -523,15 +650,37 @@ async def _handle_start(
         await message.edit_text(f"Failed to start agent: {e}")
 
 
+async def _probe_llm_readiness() -> dict:
+    """Which providers this machine can run right now, or ``{}`` if unaskable.
+
+    The same probe ``condor doctor``, the setup wizard and the dashboard's
+    picker make, so no surface can disagree with another about what is
+    runnable. A probe that fails marks nothing rather than blanking the menu.
+    """
+    from condor.llm import readiness
+
+    try:
+        return await readiness.probe_all([readiness.base_of(k) for k in AGENT_OPTIONS])
+    except Exception:  # noqa: BLE001 - a menu that cannot probe still opens
+        log.warning("LLM readiness probe failed", exc_info=True)
+        return {}
+
+
 async def _handle_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show settings sub-menu with LLM picker."""
+    from condor.preferences import secret_notices_enabled
+
     from .menu import _settings_keyboard
 
     query = update.callback_query
     current_llm = context.user_data.get("agent_llm", DEFAULT_AGENT)
     await query.message.edit_text(
         "Select the LLM for new sessions:",
-        reply_markup=_settings_keyboard(current_llm),
+        reply_markup=_settings_keyboard(
+            current_llm,
+            secret_notices_enabled(context.user_data),
+            await _probe_llm_readiness(),
+        ),
     )
 
 
@@ -552,8 +701,20 @@ async def _handle_set_llm(
     await destroy_session(chat_id)
 
     label = AGENT_OPTIONS[llm_key]["label"]
+    # Said at the pick, not at the next message: the session spawns on whatever
+    # the user types next, and a model that cannot start would fail there with
+    # the reason buried in an error. Not a refusal — someone who is about to
+    # run `ollama serve` is entitled to select it first.
+    from condor.llm import readiness
+
+    state = (await _probe_llm_readiness()).get(readiness.base_of(llm_key))
+    warning = (
+        f"\n\n⚠️ Not usable yet: {state.detail}"
+        if state is not None and not state.usable
+        else ""
+    )
     await query.message.edit_text(
-        f"LLM set to {label}. New sessions will use this model.\n\n"
+        f"LLM set to {label}. New sessions will use this model.{warning}\n\n"
         "Use /agent to continue."
     )
 
@@ -1550,19 +1711,15 @@ async def _handle_talk_to(
 async def _handle_talk_pick(
     update: Update, context: ContextTypes.DEFAULT_TYPE, index: int
 ) -> None:
-    """Bind (or unbind) the chat's session to a domain Agent.
+    """Bind (or unbind) the chat's session to the Agent at ``index``.
 
-    ACP cannot hot-swap an identity, so this reaps the subprocess and spawns a
-    new one under the same key. The conversation is carried across that reap and
-    the handover is marked in the transcript, so switching happens *inside* one
-    chat — the same semantics the dashboard's ``switch`` action already has.
+    The index is a position in the list the keyboard was built from, so this
+    re-reads that same list; the work of actually standing the agent up is
+    :func:`_raise_agent`, which ``/agent <name>`` reaches by another door.
     """
     from condor.agents.agent import AgentStore
-    from condor.runtime import conversations
 
     query = update.callback_query
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
 
     agent_slug = ""
     label = "Condor"
@@ -1576,15 +1733,54 @@ async def _handle_talk_pick(
         agent_slug = agents[index].slug
         label = agents[index].name or agent_slug
 
+    await _raise_agent(update, context, agent_slug, label, status=query.message)
+
+
+async def _raise_agent(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    agent_slug: str,
+    label: str,
+    status=None,
+) -> None:
+    """Put this chat in front of ``agent_slug``, spawning it if need be.
+
+    ACP cannot hot-swap an identity, so this reaps the subprocess and spawns a
+    new one under the same key. The conversation is carried across that reap and
+    the handover is marked in the transcript, so switching happens *inside* one
+    chat — the same semantics the dashboard's ``switch`` action already has.
+
+    With nothing running the same call *raises* the specialist instead, which is
+    what makes "start this chat as the funding desk" expressible at all: the
+    picker used to hang off a live session, so the only way to reach a
+    specialist was to boot the coordinator and immediately switch away from it.
+
+    ``status`` is the message that narrates the swap. The picker owns one
+    already — the menu it was tapped from, edited in place — while a command has
+    none yet and lets this reply with one, so the first thing on screen is the
+    verb rather than a placeholder.
+    """
+    from condor.runtime import conversations
+
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+
     agent_key = _reclaim_default_agent(context)
     bot = context.bot
 
     _perm_cb = _tg_permission_callback(bot, chat_id, user_id)
 
-    # Read before the teardown — afterwards there is no session left to ask.
+    # Both read before the teardown — afterwards there is no session left to ask
+    # either what conversation it was in or whether it was ever there.
     conversation_id = await _chat_conversation_id(chat_id, context.user_data)
+    session = await get_session(chat_id)
+    switching = bool(session and session.alive)
+    verb = "Switching to" if switching else "Starting"
 
-    await query.message.edit_text(f"Switching to {label}...")
+    if status is None:
+        status = await update.message.reply_text(f"{verb} {label}...")
+    else:
+        await status.edit_text(f"{verb} {label}...")
     await destroy_session(chat_id)
 
     try:
@@ -1599,7 +1795,9 @@ async def _handle_talk_pick(
         )
     except Exception as e:
         log.exception("Failed to bind session to agent %r", agent_slug)
-        await query.message.edit_text(f"Could not switch to {label}: {e}")
+        await status.edit_text(
+            f"Could not {'switch to' if switching else 'start'} {label}: {e}"
+        )
         return
 
     # Only once the session actually stands up: a chat must never be left
@@ -1616,7 +1814,7 @@ async def _handle_talk_pick(
             user_id, conversation_id, f"Switched to {label}", kind="switch"
         )
 
-    await query.message.edit_text(
+    await status.edit_text(
         f"Now talking to {label}."
         + (" The conversation so far is carried over." if carried else "")
         + "\n\nSend a message to continue."
@@ -1824,6 +2022,21 @@ async def _do_compact_from_message(
     )
 
 
+def _voice_display(text: str) -> str:
+    """What a transcription is allowed to look like on screen.
+
+    The raw transcript still flows on: ``_handle_pasted_secrets`` needs it to
+    detect the phrase and delete the voice message, and ``runtime.prompt``
+    redacts itself before the model or the disk sees anything. But nothing the
+    bot *renders* may carry a spoken recovery phrase — otherwise the notice
+    ("I removed a recovery phrase ... and deleted the message") is a lie while
+    the phrase is still legible in the bot's own message, first as the
+    transcription edit and then as the prefix the streamer keeps at the head of
+    every edit through the final answer (SEC-281).
+    """
+    return secrets.redact(text)[0]
+
+
 async def agent_voice_handler(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
@@ -1884,7 +2097,7 @@ async def agent_voice_handler(
     # Show the transcribed text
     from utils.telegram_formatters import escape_markdown_v2
 
-    escaped = escape_markdown_v2(text)
+    escaped = escape_markdown_v2(_voice_display(text))
     await status_msg.edit_text(
         f"🎙 _{escaped}_\n\nThinking\\.\\.\\.", parse_mode="MarkdownV2"
     )
@@ -1896,6 +2109,101 @@ async def agent_voice_handler(
     # Forward to agent handler — pass transcribed text via chat_data
     # (Message.text is read-only in python-telegram-bot)
     await agent_message_handler(update, context)
+
+
+# ── Pasted key material (FEAT-056) ───────────────────────────────────────
+#
+# The safety property is not here: the runtime redacts the certain shapes on
+# every way into a session — ``runtime.prompt`` for a streamed turn and
+# ``runtime.prompt_once`` for the unstreamed ones /compact sends — so this
+# handler could do nothing and a pasted phrase would still never reach the
+# model or the disk. The custom-compact branch below is why the second of
+# those matters: it hands this same text to the agent wrapped in a template.
+# What lives here is the half only Telegram can do — deleting the message that
+# carried it, and saying why the text the user is looking at just changed.
+
+_SECRET_SEEN_KEY = "_secret_notice_seen"
+
+_CERTAIN_NOTICE = (
+    "I removed a recovery phrase from that message and deleted the message. "
+    "It was not sent to the agent and it is not in the transcript.\n\n"
+    "Import wallets with /gateway — that flow is the only one that should ever "
+    "see a key.\n\n"
+    "Telegram had the message until the delete landed, so if that phrase holds "
+    "funds, move them."
+)
+
+_AMBIGUOUS_NOTICE = {
+    secrets.EVM_HEX64: (
+        "Heads up: that message carried a 0x value 64 hex digits long. An EVM "
+        "private key looks exactly like that — and so does a transaction hash, "
+        "which is why it was passed through untouched."
+    ),
+    secrets.SOLANA_B58: (
+        "Heads up: that message carried an 87–88 character base58 value. A "
+        "Solana secret key looks exactly like that — and so does a transaction "
+        "signature, which is why it was passed through untouched."
+    ),
+}
+
+_AMBIGUOUS_TAIL = (
+    "\n\nIf it was a key, treat it as exposed: it reached the agent and the "
+    "transcript. I only say this once per conversation."
+)
+
+
+async def _handle_pasted_secrets(update, context, text: str) -> None:
+    """Delete what was eaten, warn once about what was not.
+
+    Both branches run off ``secrets.scan`` on this surface's own copy of the
+    text. Running the detector twice is free, and two calls to one pure
+    function cannot disagree with each other the way two implementations would.
+    """
+    findings = secrets.scan(text)
+    if not findings:
+        return
+
+    if any(finding.certain for finding in findings):
+        # Mirrors handlers/config/gateway/wallets.py: the message goes first,
+        # and its failure is not the user's problem to hear about.
+        try:
+            await update.message.delete()
+        except Exception:  # noqa: BLE001 - best effort, and already logged there
+            log.debug("Could not delete a message carrying key material")
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id, text=_CERTAIN_NOTICE
+        )
+
+    from condor.preferences import secret_notices_enabled
+
+    if not secret_notices_enabled(context.user_data):
+        return
+
+    # Per conversation, so a fresh chat is told again, and per kind, so being
+    # warned about a hash does not use up the warning about a keypair. The flag
+    # is the kind string — never the value, and never a hash of one.
+    conv_id = stored_chat_conversation(context.user_data)
+    seen = context.chat_data.setdefault(_SECRET_SEEN_KEY, {})
+    told = seen.setdefault(conv_id, [])
+    for kind in dict.fromkeys(
+        finding.kind for finding in findings if not finding.certain
+    ):
+        if kind in told or kind not in _AMBIGUOUS_NOTICE:
+            continue
+        told.append(kind)
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=_AMBIGUOUS_NOTICE[kind] + _AMBIGUOUS_TAIL,
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "Stop warning me", callback_data="agent:secret_notices_off"
+                        )
+                    ]
+                ]
+            ),
+        )
 
 
 async def agent_message_handler(
@@ -1930,6 +2238,12 @@ async def agent_message_handler(
 
     if not text:
         return
+
+    # Before every state branch below, because a phrase pasted into any of them
+    # is still a phrase on Telegram's servers. The turn itself continues: the
+    # funnel already replaced the value, so the agent sees a marker it can talk
+    # about rather than a hole.
+    await _handle_pasted_secrets(update, context, text)
 
     # "-" resets the ACP session: destroy current and let the next block auto-create a new one
     if text.strip() == "-":
@@ -2025,7 +2339,7 @@ async def agent_message_handler(
     # Keep the spoken question at the head of the streamed answer: the streamer
     # edits the very placeholder that was showing the transcript, so without the
     # prefix the user's words would be overwritten by the reply.
-    prefix = f"🎙 {voice_transcription}" if voice_transcription else ""
+    prefix = f"🎙 {_voice_display(voice_transcription)}" if voice_transcription else ""
 
     # Send or reuse placeholder message
     if voice_placeholder:

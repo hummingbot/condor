@@ -150,12 +150,12 @@ def test_connector_from_config_is_not_dropped():
 
 MARKERS = ("current_position_average_price", "break_even_price", "held_position_orders")
 
-# ``condor/web/routes/archived.py`` reads ``current_position_average_price`` too,
+# ``condor/fetchers/archived_run.py`` reads ``current_position_average_price`` too,
 # but it is not a copy of this transform: it maps *archived* executors out of a DB
 # export, where the row's price is by definition the close price and the
 # timestamps arrive as ISO strings. It is listed here so a real second copy of the
 # live transform still trips the assertion below.
-KNOWN_SEPARATE_TRANSFORMS = {"condor/web/routes/archived.py"}
+KNOWN_SEPARATE_TRANSFORMS = {"condor/fetchers/archived_run.py"}
 
 
 @pytest.mark.parametrize("marker", MARKERS)

@@ -332,6 +332,29 @@ def describe_origin(session_key: str) -> str:
     return who or where or ""
 
 
+def _summarize(tool_call: dict[str, Any]) -> str:
+    """The confirmation line, or a truthful stand-in when rendering it raises.
+
+    ``format_tool_summary`` is pure formatting, but it reads *wire* arguments
+    whose shapes nothing has coerced yet, and it runs inside the permission
+    callback — where the ACP client turns any exception into a *cancellation*.
+    A formatting bug there therefore denies a funds call no human ever saw
+    (CORR-294). Belt and braces: the branch that raised still gets fixed, this
+    only guarantees the failure surfaces as a prompt someone can refuse.
+
+    The stand-in qualifies the name rather than returning it bare, matching
+    ``format_tool_summary``'s own "(arguments could not be read)" line: a bare
+    tool name reads like a rendered summary, and that is treated as a defect.
+    It describes nothing about the call it cannot vouch for.
+    """
+    try:
+        return danger.format_tool_summary(tool_call)
+    except Exception:
+        tool_name = tool_call.get("tool") or tool_call.get("title") or "Unknown"
+        log.exception("Could not summarize %s; prompting with its name", tool_name)
+        return f"{tool_name} (arguments could not be summarized)"
+
+
 def build_permission_callback(
     session_key: str,
     user_id: int,
@@ -365,7 +388,7 @@ def build_permission_callback(
         pending = _registry.register(
             session_key=session_key,
             user_id=user_id,
-            summary=danger.format_tool_summary(tool_call),
+            summary=_summarize(tool_call),
             origin=describe_origin(session_key),
             tool_call=tool_call,
             options=options,

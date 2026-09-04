@@ -13,6 +13,10 @@ from utils.config import resolve_admin_id
 
 logger = logging.getLogger("condor.mcp")
 
+#: Default tool profile (FEAT-066). ``full`` on purpose: a launch with no flag —
+#: the checked-in ``.mcp.json``, an external MCP host — keeps the whole surface.
+DEFAULT_TOOL_PROFILE = "full"
+
 
 @dataclass
 class Settings:
@@ -32,6 +36,20 @@ class Settings:
     # refuse to recurse. Every agent has this seat now, not just Condor, since an
     # agent can start a delegation of itself (FEAT-041).
     delegate_worker: bool = False
+    # Which slice of the tool surface this process registers (FEAT-066). An ACP
+    # bridge runs unrestricted, so for those seats the mounted surface IS the
+    # permission model: see ``server.TOOL_PROFILES``. It is a separate flag from
+    # the two above rather than derived from them, because the seat it narrows is
+    # the *tick*, and neither ``agent_slug`` nor ``delegate_worker`` tells an
+    # unattended loop apart from an attended consult of the same specialist.
+    tool_profile: str = DEFAULT_TOOL_PROFILE
+    # Tools the operator switched off for this agent (FEAT-091), arriving as
+    # ``--mute-tools a,b,c``. Subtracted from the profile in
+    # ``server.register_tools``, so a muted tool is never registered and the
+    # model is never told it exists — the only enforcement that also holds on an
+    # ACP seat, which cannot be handed an allowlist. Empty is the norm: an
+    # install nobody has curated spawns exactly the argv it always did.
+    muted_tools: tuple[str, ...] = ()
 
     @property
     def specialist_slug(self) -> str:
@@ -90,6 +108,11 @@ def _resolve_user_id(argv_user_id: int | None) -> int:
     return 0
 
 
+def _split_names(raw: str) -> tuple[str, ...]:
+    """``"a, b,,c"`` → ``("a", "b", "c")``. Blanks are not names."""
+    return tuple(name.strip() for name in (raw or "").split(",") if name.strip())
+
+
 def _parse_settings() -> Settings:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--chat-id", type=int, default=None)
@@ -98,6 +121,8 @@ def _parse_settings() -> Settings:
     parser.add_argument("--server-name", default=None)
     parser.add_argument("--session-key", default=None)
     parser.add_argument("--delegate-worker", action="store_true", default=False)
+    parser.add_argument("--profile", default=DEFAULT_TOOL_PROFILE)
+    parser.add_argument("--mute-tools", default="")
     args, _ = parser.parse_known_args()
 
     return Settings(
@@ -120,6 +145,8 @@ def _parse_settings() -> Settings:
         delegate_worker=(
             args.delegate_worker or os.environ.get("CONDOR_DELEGATE_WORKER", "") == "1"
         ),
+        tool_profile=args.profile,
+        muted_tools=_split_names(args.mute_tools),
     )
 
 

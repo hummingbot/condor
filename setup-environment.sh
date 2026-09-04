@@ -1070,6 +1070,13 @@ TAILSCALE_HOSTNAME=${ts_hb_hostname}
 # localhost, tailnet node or not -- so port 8000 never needs to sit on every
 # interface here. See docker-compose.yml / docker-compose.tailscale.yml.
 API_BIND_HOST=127.0.0.1
+# Each backtest runs in its own worker process behind this semaphore, and the
+# upstream default of 1 turns a sweep into a queue: condor's mm_optimizer_cycle
+# submits a base config plus its variations at once. Four run side by side, and
+# the deadline is sized for a multi-day window at a fine resolution rather than
+# for a single ad-hoc backtest.
+BACKTESTING_MAX_CONCURRENT=4
+BACKTESTING_TIMEOUT_SECONDS=1800
 HBEOF
             # Holds the API password, the config password and (when set) a
             # Tailscale auth key -- not a world-readable file.

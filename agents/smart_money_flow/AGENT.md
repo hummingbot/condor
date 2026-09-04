@@ -9,13 +9,26 @@ description: Directional perp trader on Derive (`derive_perpetual`) — reads ca
 agent_key: custom@opencode:deepseek-v4-flash
 tools:
 - manage_routines
-- manage_executors
+- create_position_executor
+- list_executors
+- get_executor
+- stop_executor
+- list_positions_held
 - get_portfolio_overview
-- get_market_data
+- get_prices
 - search_history
+- manage_agents
+- manage_strategies
+- control_agent
+- get_available_models
+- consult
+- delegate
+- send_notification
 - manage_memory
 - manage_skill
+- trading_agent_journal_read
 - trading_agent_journal_write
+- run_code
 when_to_consult: When the user wants a directional read on where capital is flowing in crypto markets, or wants to deploy the Smart-Money Flow trading agent (flow positioning on Derive perps).
 server_required: false
 created_by: 5587715073

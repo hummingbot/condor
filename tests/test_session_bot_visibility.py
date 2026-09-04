@@ -347,7 +347,7 @@ def test_canvas_endpoint_serves_sections_and_revisions(tmp_path, monkeypatch):
     monkeypatch.setattr(
         agents_route,
         "_get_strategy",
-        lambda slug, sslug: type("S", (), {"dir": sdir})(),
+        lambda slug, sslug: type("S", (), {"home": sdir})(),
     )
     out = asyncio.run(agents_route.get_session_canvas("ag", "st", 1, user=_User()))
     assert out["sections"]["thesis"].startswith("Trend following")
@@ -365,7 +365,7 @@ def test_report_endpoint_returns_null_for_a_session_that_kept_none(
     monkeypatch.setattr(
         agents_route,
         "_get_strategy",
-        lambda slug, sslug: type("S", (), {"dir": sdir})(),
+        lambda slug, sslug: type("S", (), {"home": sdir})(),
     )
     monkeypatch.setattr(
         "condor.reports.list_reports", lambda **kw: ([], 0), raising=False
@@ -379,7 +379,7 @@ def test_report_endpoint_matches_the_session_it_was_written_for(tmp_path, monkey
     monkeypatch.setattr(
         agents_route,
         "_get_strategy",
-        lambda slug, sslug: type("S", (), {"dir": sdir})(),
+        lambda slug, sslug: type("S", (), {"home": sdir})(),
     )
     rows = [
         {

@@ -1,3 +1,12 @@
+import type {
+  AgentActionRow,
+  DeedIndex,
+  FleetMap,
+  FleetOwner,
+} from "@/lib/agent-attribution";
+import { controllerKey } from "@/lib/controller-identity";
+import { collectCursorPages, type WalkOutcome } from "@/lib/history-pagination";
+
 import { authFetch, authHeaders } from "./auth-token";
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
@@ -28,12 +37,30 @@ export interface AppNotification {
   read: boolean;
 }
 
+/** One browser on one device, as Settings lists it (FEAT-083).
+ *
+ * No key material: the store holds the browser's public key and auth secret so
+ * it can encrypt *to* it, and there is no reader for them out here. */
+export interface PushSubscriptionRow {
+  /** The push service URL. Also the identity of the row. */
+  endpoint: string;
+  /** "Chrome on macOS" — best-effort, so a user can tell devices apart. */
+  label: string;
+  created: number;
+}
+
 export interface NotificationsResponse {
   items: AppNotification[];
   unread: number;
 }
 
 // ── Types ──
+
+/** Someone a server is shared with, named rather than numbered. */
+export interface ServerMember {
+  user_id: number;
+  display_name: string;
+}
 
 export interface ServerInfo {
   name: string;
@@ -43,6 +70,13 @@ export interface ServerInfo {
   permission: string;
   /** The server commands fall back to when none is named — shared with Telegram. */
   is_default: boolean;
+  /**
+   * Who else reaches this server (FEAT-088). The backend populates it only for
+   * the owner and for an admin, so an empty list on a server you merely trade
+   * on means "not your business" rather than "nobody" — which is why only the
+   * owner's card renders the line.
+   */
+  shared_with?: ServerMember[];
 }
 
 export interface BalanceItem {
@@ -97,6 +131,9 @@ export interface BotDetail {
 
 export interface ControllerInfo {
   controller_name: string;
+  /** The coarse bucket upstream sorts every controller into, when the specific
+   *  class (`controller_name`) could not be recovered — see `controllerClassOf`. */
+  controller_type: string;
   controller_id: string;
   bot_name: string;
   status: string;
@@ -154,11 +191,61 @@ export interface BotRunInfo {
   global_pnl_quote: number;
   volume_traded: number;
   num_controllers: number;
+  /** This run's archived sqlite path, or null when no database survived it. */
+  archive_db_path: string | null;
+  /**
+   * The controller config ids this run was deployed with, from its own
+   * `deployment_config` — the authoritative run → controller mapping, and the
+   * only one that exists for a run with no snapshots left (FEAT-089).
+   */
+  controller_ids: string[];
+  /**
+   * Whether this run is still the live fleet. Derived server-side: upstream
+   * never writes `run_status: "RUNNING"`, so reading that string files every
+   * bot trading right now under history.
+   */
+  is_live: boolean;
 }
 
 export interface BotRunsResponse {
   runs: BotRunInfo[];
   total: number;
+}
+
+/** One finished run's sampled PnL curve, per controller (FEAT-089). */
+export interface RunHistoryResponse {
+  /** `controller_id -> [[t_ms, realized, unrealized, net, volume, pct], ...]` */
+  controllers: Record<string, number[][]>;
+  /** `controller_id -> { connector, trading_pair }` — what the fold converts through. */
+  identities: Record<string, { connector: string; trading_pair: string }>;
+  interval: string;
+  /**
+   * Which source answered: sampled snapshots, the archived database, or
+   * nothing. `"none"` is an answer — a run older than the server's snapshot
+   * retention was never recorded — and the chart's notice says which it was
+   * rather than asserting one.
+   */
+  source: "snapshots" | "archive" | "none";
+  points: number;
+  /** True when it came off Condor's disk rather than off the wire. */
+  cached: boolean;
+  detail?: string | null;
+}
+
+/**
+ * Every controller of every run that has finished (FEAT-089).
+ *
+ * `ControllerInfo`, the same shape the live fleet arrives in, so one tree, one
+ * fold and one set of panes describe both populations. Not
+ * `ControllerPerformanceSnapshot`: that drops `close_type_counts` on purpose
+ * (PERF-261) and the close-type strip leads the scope header.
+ */
+export interface TerminatedControllersResponse {
+  controllers: ControllerInfo[];
+  /** How many finished runs contributed a controller — the tree's denominator. */
+  runs_seen: number;
+  server_online?: boolean;
+  error_hint?: string;
 }
 
 export interface ControllerPerformanceSnapshot {
@@ -173,9 +260,7 @@ export interface ControllerPerformanceSnapshot {
   global_pnl_quote: number;
   global_pnl_pct: number;
   volume_traded: number;
-  close_type_counts: Record<string, number>;
   positions_summary: Record<string, unknown>[];
-  custom_info: Record<string, unknown>;
 }
 
 export interface ControllerPerformanceHistoryResponse {
@@ -184,6 +269,79 @@ export interface ControllerPerformanceHistoryResponse {
   interval: string;
   server_online?: boolean;
   error_hint?: string;
+}
+
+/** Which population a performance query is about. */
+export type PerfSubject = "controller" | "executor";
+
+/**
+ * One point of a performance series, for either population (FEAT-087).
+ *
+ * Distinct from `ControllerPerformanceSnapshot`, which is the wire shape of the
+ * older controller-only route: the numbers here are flat rather than nested
+ * under `performance`, and volume is spelled `volume_quote`. The two stay
+ * separate so neither grows a branch for the other's payload.
+ */
+export interface PerformanceSnapshot {
+  timestamp: string;
+  subject: PerfSubject | "";
+  /** `controller_id` for controllers, `executor_id` for executors. */
+  scope_id: string;
+  status: string;
+  /**
+   * True only on a completed executor's final row. It is what makes a closed
+   * executor's series a single query — the terminal row *is* the last point,
+   * so nothing appends a final value after it.
+   */
+  is_terminal: boolean;
+  realized_pnl_quote: number;
+  unrealized_pnl_quote: number;
+  global_pnl_quote: number;
+  global_pnl_pct: number;
+  /** Volume *generated*, in quote — on every executor type, LP included. */
+  volume_quote: number;
+  /**
+   * `null` for controllers, whose `PerformanceReport` has no fees field.
+   * Unknown is not zero: a fees figure must render the two differently.
+   */
+  cum_fees_quote: number | null;
+  bot_name: string | null;
+  controller_id: string | null;
+  executor_id: string | null;
+  executor_type: string | null;
+  account_name: string | null;
+  connector_name: string | null;
+  trading_pair: string | null;
+  /** Set on an executor's terminal row. `POSITION_HOLD` stays *unrealized*. */
+  close_type: string | null;
+}
+
+export interface PerformanceHistoryResponse {
+  snapshots: PerformanceSnapshot[];
+  next_cursor: string | null;
+  interval: string;
+  subject: PerfSubject | "";
+  /**
+   * False when this server has no `/performance/history` at all — an older
+   * API, which is the ordinary case rather than a failure. The client falls
+   * back to its derived series and the chart says why.
+   */
+  supported: boolean;
+  server_online?: boolean;
+  error_hint?: string;
+}
+
+/**
+ * Whether one server serves the shared performance surface.
+ *
+ * `unknown` separates "asked, and it is not there" from "could not ask": a
+ * server that was merely down must not have a fallback pinned to it for the
+ * whole cache TTL after it comes back.
+ */
+export interface PerformanceCapabilityResponse {
+  supported: boolean;
+  unknown: boolean;
+  detail?: string | null;
 }
 
 export interface ExecutorInfo {
@@ -205,6 +363,25 @@ export interface ExecutorInfo {
   close_timestamp: number;
   custom_info: Record<string, unknown>;
   config: Record<string, unknown>;
+}
+
+/**
+ * An executor row from an *archived* run (backend `NormalizedExecutor`).
+ *
+ * Only the archived reader resolves a USD rate per row, so only the archived
+ * type carries one. Declaring `usd_rate` on the shared `ExecutorInfo` promised
+ * a field the live `/executors` route and the WS frames never send (backend
+ * `ExecutorInfo` has no such field), which invited a live surface to write
+ * `ex.usd_rate ?? 1` and report a BRL or EUR figure behind a `$`.
+ *
+ * Required, not optional: the backend defaults it to 1.0 and
+ * `QuoteRates.for_pair` falls back to 1.0 for an unresolvable quote, so an
+ * archived row always arrives with a number.
+ */
+export interface ArchivedExecutor extends ExecutorInfo {
+  /** USD value of one unit of this market's quote. `pnl`, `volume` and
+   *  `cum_fees_quote` are quote-denominated; multiply by this to show USD. */
+  usd_rate: number;
 }
 
 /** Executor totals for a period, aggregated server-side over the full history.
@@ -304,6 +481,14 @@ interface WireVenue {
   name: string;
   hummingbot_market_data: boolean;
   clmm_lp: boolean;
+  /**
+   * Optional only so a frontend that gets ahead of its backend degrades the safe
+   * way: a server that predates ARCH-271 omits the key, and an absent trait must
+   * read as *credentialed* (the pre-ARCH-272 status quo, where every venue the
+   * endpoint reported was one the account held keys on). Reading it as `false`
+   * would put the whole panel behind the view-only overlay.
+   */
+  credentialed?: boolean;
 }
 
 /**
@@ -570,6 +755,18 @@ export interface RunningInstance {
   tick_timeout_sec: number;
   execution_mode: "dry_run" | "run_once" | "loop";
   risk_limits: Record<string, unknown>;
+  // ── The loop's pulse ──
+  // The engine has always computed these; the wire model dropped them, so a
+  // strategy view could say "running" and nothing about when it last ran.
+  /** Unix seconds the current tick started. 0 before the first one. */
+  last_tick_at: number;
+  /** 0 = unbounded; otherwise the tick this session stops at. */
+  max_ticks: number;
+  /** What the loop last *said* — the journal's `Last action:` line. */
+  last_action: string;
+  /** What the loop last *did* — one mutating tool call, or null. */
+  last_did: AgentActionRow | null;
+  last_error: string;
 }
 
 export interface StrategySummary {
@@ -585,6 +782,16 @@ export interface StrategySummary {
   total_pnl: number;
   total_volume: number;
   open_positions: number;
+  /**
+   * Where this strategy's records live — its own config's server, `""` when it
+   * declared none (ARCH-324).
+   *
+   * The rollup above was computed *from* this server, so a reader that wants to
+   * fold the same records has to fetch them from here. Optional on the wire so
+   * an older backend reads as "no server" and the caller shows a dash rather
+   * than folding the wrong fleet.
+   */
+  server_name?: string;
   instances: RunningInstance[];
 }
 
@@ -597,6 +804,48 @@ export interface StrategySummary {
  * to lift it out or offer the same identity twice.
  */
 export const CHAT_SLUG = "condor";
+
+/**
+ * The fleet map's wire shape (`GET /agents/fleet-map`, FEAT-096).
+ *
+ * Snake-cased, like every other payload in this file. `getFleetMap` is the one
+ * call that maps rather than returning the wire type: the rule it feeds
+ * (`lib/agent-attribution`) is pure domain logic with no HTTP in it, so it
+ * speaks the app's casing and the translation happens once, here.
+ */
+interface FleetOwnerWire {
+  run_key: string;
+  agent_slug: string;
+  agent_name: string;
+  strategy_slug: string;
+  strategy_name: string;
+  namespace: string;
+  declared_bots: string[];
+  agent_ids: string[];
+  live: {
+    agent_id: string;
+    session_num: number;
+    status: string;
+    tick_count: number;
+    last_tick_at: number;
+    frequency_sec: number;
+    last_action: string;
+    last_did: AgentActionRow | null;
+    last_error: string;
+  } | null;
+}
+
+/**
+ * The deed index's wire shape (FEAT-106), snake-cased like everything else here.
+ *
+ * Absent from an older backend, and the mapper below reads that as an empty
+ * index — which attributes nothing and judges nothing, exactly as the page
+ * behaved before this field existed.
+ */
+interface DeedIndexWire {
+  bots?: Record<string, { run_key: string; run_id?: string; at?: number }>;
+  since?: number;
+}
 
 export interface AgentSummary {
   slug: string;
@@ -617,6 +866,13 @@ export interface AgentSummary {
   total_pnl: number;
   total_volume: number;
   open_positions: number;
+  /**
+   * The agent's server *pin*, `""` when it follows the ambient one (ARCH-324).
+   *
+   * A strategy's own `server_name` overrides it — the rule `AgentWorkspace`
+   * already applies (`strategy?.config?.server_name || agent.server_name`).
+   */
+  server_name?: string;
   instances: RunningInstance[];
 }
 
@@ -645,6 +901,10 @@ export interface AgentPerformance {
   agent_id: string;
   session_num: number;
   kind: "session" | "experiment";
+  /** For an experiment: `dry_run` or `run_once`. Empty for a session. */
+  execution_mode?: string;
+  /** An experiment whose snapshot recorded an error. */
+  error?: boolean;
   status: string;
   realized_pnl: number;
   unrealized_pnl: number;
@@ -700,6 +960,41 @@ export interface AgentControllerRow {
   close_type_counts: Record<string, number>;
 }
 
+/**
+ * One thing a run put into the world (FEAT-100).
+ *
+ * The wire shape of `condor.web.routes.agents.DeploymentRow`, mapped straight
+ * through. A bot the run deployed, a controller one of those bots ran, or a
+ * standalone executor it created — the three kinds together answer "what did
+ * this run actually do out there", which used to require leaving the agent for
+ * the fleet browser and reading the strategy's whole lifetime instead.
+ */
+export interface DeploymentRow {
+  kind: "bot" | "controller" | "executor";
+  /** The base name, the controller id, or `"grid SOL-USDC"`. */
+  label: string;
+  /** Origin for a bot, connector·pair for a controller, connector otherwise. */
+  detail: string;
+  /**
+   * The tick whose creating call most likely produced this, or `null`.
+   *
+   * The actions log records a call's arguments and never its result, so there
+   * is no id to join on and the tick is matched on time. `null` is the honest
+   * answer — no log, a stale window, or a bot adopted rather than deployed —
+   * and is rendered as `—`, never as a guess.
+   */
+  created_tick: number | null;
+  started_at: number;
+  /** When the run stopped owning it; `null` while it still does. */
+  ended_at: number | null;
+  /** Read off ownership, never off a performance snapshot's `status`. */
+  live: boolean;
+  pnl: number;
+  volume: number;
+  /** The fleet address this row links to: `bot:` / `ctrl:` / `exec:`. */
+  scope: string;
+}
+
 export interface SessionCanvas {
   sections: Record<string, string>;
   section_titles: Record<string, string>;
@@ -743,21 +1038,171 @@ export interface AgentDetail {
   strategies: StrategySummary[];
 }
 
+/**
+ * The Agent's brain, read back for a human.
+ *
+ * The four libraries the model is handed at the top of every turn — its
+ * playbooks, what it remembers about you, the scripts it can run and the
+ * strategies it owns — plus its identity and tool allowlist. Metadata only:
+ * a skill's or memory's body costs a deliberate fetch (`getAgentSkill` /
+ * `getAgentMemory`), so opening the panel never pulls the whole library.
+ */
+/**
+ * One tool this agent's seat actually mounts (FEAT-091).
+ *
+ * Not the AGENT.md allowlist: that is only enforced for pydantic-ai model keys,
+ * and an ACP bridge (claude-code, gemini, copilot) runs unrestricted — so for
+ * most seats the list is decoration and this row is the real surface. Switching
+ * one off means the next session does not register it at all.
+ */
+export interface ToolCard {
+  name: string;
+  /** Which subprocess registers it: `condor` or `hummingbot`. */
+  server: string;
+  description: string;
+  /** Switched off by the operator — the next session never mounts it. */
+  muted: boolean;
+  /** The AGENT.md allowlist names it (the pydantic-ai filter, not the mount). */
+  allowlisted: boolean;
+}
+
+export interface AgentBrain {
+  slug: string;
+  name: string;
+  description: string;
+  agent_md: string;
+  agent_key: string;
+  when_to_consult: string;
+  server_required: boolean;
+  server_name: string;
+  /** Every tool this agent's seat mounts, each with its switch. */
+  tools: ToolCard[];
+  /** Empty AGENT.md allowlist = every mounted tool, which is not "no tools". */
+  tools_unrestricted: boolean;
+  skills: SkillCard[];
+  /** The one playbook this agent has offered and nobody has ruled on yet. */
+  skill_proposal: SkillProposal | null;
+  memories: MemoryCard[];
+  routines: RoutineCard[];
+  strategies: StrategyCard[];
+}
+
+/**
+ * A playbook the agent proposed from a conversation (FEAT-074).
+ *
+ * It is not in the library and reaches no prompt until somebody accepts it, so
+ * unlike a `SkillCard` it carries its body: the whole point of the card is
+ * reading what you are about to put in every future turn before saying yes.
+ */
+export interface SkillProposal {
+  name: string;
+  description: string;
+  when_to_use: string;
+  body: string;
+  source: string;
+  /** The conversation it was worked out in. */
+  from_conversation: string;
+  created: string;
+}
+
+/**
+ * One opener this Agent learned the caller keeps asking it for (FEAT-073).
+ *
+ * Learned rows only: the server never sends the static defaults, because the
+ * client has always owned its own cold-start copy. An empty list is therefore
+ * the correct answer for a new user, not a missing one.
+ */
+export interface StarterRow {
+  title: string;
+  hint: string;
+  /** Sent verbatim on click. */
+  prompt: string;
+  /** A keyword from the icon vocabulary, or "" — see `Starters.tsx`. */
+  icon: string;
+  /** The playbook this intent maps to, when it maps to one. */
+  skill: string;
+}
+
+export interface SkillCard {
+  slug: string;
+  name: string;
+  description: string;
+  when_to_use: string;
+  /** From `agents/_shared/skills` rather than this Agent's own library. */
+  shared: boolean;
+  /** Shared *and* not writable from here — read-only for this Agent. */
+  inherited: boolean;
+  /** Switched off for this Agent: listed here, and nowhere the agent looks. */
+  muted: boolean;
+  references_routine: string;
+  routine_ok: boolean;
+}
+
+export interface MemoryCard {
+  name: string;
+  description: string;
+  type: string;
+  created: string;
+  source: string;
+}
+
+export interface RoutineCard {
+  name: string;
+  description: string;
+  continuous: boolean;
+  /** `"global"` for the shared library, `"agent:<slug>"` for its own. */
+  source: string;
+  category: string;
+  /** Switched off for this Agent. `/routines` still lists and runs it. */
+  muted: boolean;
+}
+
+export interface StrategyCard {
+  slug: string;
+  name: string;
+  description: string;
+  status: string;
+}
+
+export interface SkillBody extends SkillCard {
+  body: string;
+  files: string[];
+}
+
 // How a delegation ended. `running`…`stopped` come from the live registry;
 // `interrupted` is a task whose process died mid-flight, and `unknown` a
-// transcript too old to say — both only ever arrive from history.
+// transcript too old to say — both only ever arrive from history. `timeout` is
+// a code run cut off by its budget (FEAT-061): the store records it apart from
+// `error`, so the wire keeps it apart rather than flattening the distinction.
 export type DelegationStatus =
   | "running"
   | "done"
   | "error"
   | "stopped"
   | "interrupted"
+  | "timeout"
   | "unknown";
 
-// Delegation = a fire-and-forget background task handed to a detached Agent
-// instance (DELEGATE mode). The registry is in-process, but the record outlives
-// it on disk — so this shape also comes back from history (FEAT-035), where
-// `ended_at`/`tool_count` are known and the live registry has nothing to say.
+/**
+ * Which channel a run came through (FEAT-058).
+ *
+ * `delegate` — a fire-and-forget background task handed to a detached Agent
+ * instance. `consult` — the synchronous channel every other agent, the bot and
+ * this dashboard use, which records a ledger entry and no transcript. `code` —
+ * a snippet the agent ran (FEAT-061); it comes from its own store and the
+ * history route merges it in, so a row is a row whichever store answered.
+ *
+ * The name on the wire (and the route, and the directory) stays "delegation"
+ * for both: it is where these records already lived, and splitting the store
+ * would cost every reader a merge for a rename nobody would see.
+ */
+export type DelegationKind = "delegate" | "consult" | "code";
+
+// Delegation = one agent run. The registry is in-process, but the record
+// outlives it on disk — so this shape also comes back from history (FEAT-035),
+// where `ended_at`/`tool_count` are known and the live registry has nothing to
+// say. Fields a given kind does not have are absent rather than zeroed: a
+// consult has no tool count, a delegation records no caller.
 export interface Delegation {
   task_id: string;
   agent: string;
@@ -768,6 +1213,10 @@ export interface Delegation {
   status: DelegationStatus;
   result: string;
   error: string;
+  /** Absent on records written before kinds existed — those were delegations. */
+  kind?: DelegationKind;
+  /** Consults only: the slug of the agent that asked. "" is a person asking. */
+  caller?: string;
   /** The conversation that started this task; "" when there was none. */
   conversation_id: string;
   /** Wall-clock start (epoch seconds) — drives the elapsed time. */
@@ -778,6 +1227,34 @@ export interface Delegation {
 
 /** A history row: the record minus the bodies, which the sheet fetches on open. */
 export type DelegationSummary = Omit<Delegation, "result" | "error">;
+
+/**
+ * One recorded snippet, in full (FEAT-061).
+ *
+ * A code row in the Activity feed is a `DelegationSummary` like any other; this
+ * is what opening it fetches, and it is a different shape on purpose — a
+ * delegation has one body, a code run has four (what ran, what it printed, what
+ * it returned, how it broke).
+ */
+export interface CodeRun {
+  id: string;
+  created: number;
+  agent: string;
+  user_id: number;
+  label: string;
+  server: string;
+  /** The store's own word: what `_CODE_STATUS` maps into a feed row's status. */
+  status: "ok" | "error" | "timeout";
+  duration_ms: number;
+  code: string;
+  stdout: string;
+  /** The snippet's `result` global, rendered; "" when it set none. */
+  result: string;
+  error: string;
+  traceback: string;
+  report_id: string;
+  session_key: string;
+}
 
 // One entry of a delegation's session transcript. Mirrors the three shapes the
 // runner's event sink folds into `DelegateTask.events`; tool entries are patched
@@ -820,6 +1297,59 @@ export interface SnapshotSummary {
   file: string;
 }
 
+/**
+ * One run of one strategy — a session or a dry run (FEAT-099).
+ *
+ * The unit the Lab is keyed on. Snake-cased like every other payload here, and
+ * deliberately carrying **no money**: pricing a run is a per-session backend
+ * fan-out, and putting it on a rail that polls every five seconds would either
+ * make the rail slow or make it lie. A run's PnL is read in the run overview,
+ * from the strategy's `/performance` query.
+ */
+export interface AgentRunRow {
+  /**
+   * `s:3` | `e:1` | `d:abc123` | `c:7f3a` — the `?run=` value, unique across
+   * every kind. The pre-FEAT-111 form (`s3`) is still parsed, never written.
+   */
+  run_id: string;
+  /**
+   * The two kinds that live under a strategy, and the two that do not: a
+   * delegation's own record and a conversation (FEAT-111).
+   */
+  kind: "session" | "experiment" | "delegation" | "conversation";
+  /** The opaque half of `run_id`: `"3"` for a loop run, an id for the rest. */
+  id: string;
+  /** The ordinal, for the two kinds that have one. `0` otherwise. */
+  number: number;
+  agent_id: string;
+  /** `running|paused|stopped|interrupted|idle|error`. */
+  status: string;
+  /** `dry_run` | `run_once` for an experiment; empty for a session. */
+  execution_mode: string;
+  tick_count: number;
+  snapshot_count: number;
+  /** Epoch **seconds** — `journal.md`'s ctime, not the first tick's time. */
+  started_at: number | null;
+  /** Epoch **seconds**, or null while the run is still live. */
+  ended_at: number | null;
+  error: boolean;
+  /**
+   * Whether `actions.jsonl` exists for this run at all.
+   *
+   * A run written before FEAT-097 has none, and nothing is backfilled — so its
+   * ticks must read as *unrecorded*, never as ticks that did nothing.
+   */
+  has_actions_log: boolean;
+  /** Empty for a delegation and a conversation: a strategy is a loop concept. */
+  strategy_slug: string;
+  strategy_name: string;
+  /**
+   * What this run was about, for the kinds with no strategy to name — a
+   * conversation's title, a delegation's ask. Empty for a loop run.
+   */
+  title: string;
+}
+
 // ── Routines ──
 
 export interface RoutineFieldInfo {
@@ -848,6 +1378,8 @@ export interface RoutineInstance {
   config: Record<string, unknown>;
   status: string;
   source: string;
+  /** The server the run was launched against. */
+  server_name?: string;
   /**
    * The conversation that asked for this run, "" for the scheduler, the
    * dashboard and Telegram. Set since ARCH-089, and what scopes a run to a
@@ -895,6 +1427,31 @@ export interface PnlPoint {
   pnl: number;
 }
 
+export interface ArchivedControllerRollup {
+  /** "" for the executors that ran under no controller — an LP or manual leg. */
+  controller_id: string;
+  pnl_usd: number;
+  volume_usd: number;
+  fees_usd: number;
+  executor_count: number;
+  first_ts: number;
+  last_ts: number;
+  trading_pairs: string[];
+  connectors: string[];
+}
+
+/**
+ * The stored report for a run, or one controller of it.
+ *
+ * `report_id` is null for the ordinary case: nobody has charted this subject
+ * yet, or the report that did has since been pruned from the index.
+ */
+export interface ArchivedRunReport {
+  report_id: string | null;
+  created_at: string | null;
+  title: string;
+}
+
 export interface ArchivedBotPerformance {
   bot_name: string;
   db_path: string;
@@ -908,14 +1465,22 @@ export interface ArchivedBotPerformance {
   cumulative_pnl: PnlPoint[];
   trading_pairs: string[];
   exchanges: string[];
-  executors: ExecutorInfo[];
+  executors: ArchivedExecutor[];
   primary_connector: string;
   primary_trading_pair: string;
   executor_count: number;
+  /** Quote currency of the primary market, e.g. "BRL". */
+  quote_currency: string;
+  /** USD rate per quote currency seen in the run. */
+  usd_rates: Record<string, number>;
+  /** False when a quote had no path to USD; its figures stay in that currency. */
+  converted: boolean;
+  /** "trades" or "executors" — which source the headline stats came from. */
+  stats_source: string;
 }
 
 export interface PaginatedExecutors {
-  executors: ExecutorInfo[];
+  executors: ArchivedExecutor[];
   total: number;
   offset: number;
   limit: number;
@@ -1067,6 +1632,13 @@ export interface ChatAgentOption {
    *  rather than naming a startable model. Sent explicitly because the key's
    *  shape doesn't tell you — "ollama:" also ends in a colon but IS startable. */
   picker?: boolean;
+  /** Whether this machine can actually run it: no Ollama server and no
+   *  installed CLI bridge are both false. Absent when the backend could not
+   *  probe, which reads as "offer it" — never as "unavailable". */
+  ready?: boolean;
+  /** The sentence behind `ready`, naming the fix ("not installed — npm
+   *  install -g @github/copilot"). Shown on the row that cannot be picked. */
+  detail?: string;
 }
 
 /** A saved OpenAI-compatible endpoint (Venice AI, Together, local vLLM, ...). */
@@ -1128,16 +1700,6 @@ export interface SessionInfo {
   conversation_id: string;
 }
 
-export interface CreateSessionRequest {
-  key: string;
-  agent_key: string;
-  server_name?: string | null;
-  agent_slug?: string;
-  lazy_context?: boolean;
-  /** Empty mints a new conversation; an id resumes that transcript. */
-  conversation_id?: string;
-}
-
 // ── Conversations ──
 //
 // A session is the live subprocess; a conversation is what was said. The
@@ -1171,14 +1733,86 @@ export interface ConversationTurn {
   text: string;
   thought: string;
   tool_calls: { id?: string; title?: string; status?: string }[];
-  /** System entries only: "switch" | "error". */
+  /** System entries only: "switch" | "error" | "delegation" | "resume" |
+   *  "notification". Same union as the backend's `TurnEntry.kind`. */
   kind: string;
   ts: number;
+  /**
+   * Who produced this turn — the backend's `TurnEntry` attribution, mirrored
+   * here rather than dropped.
+   *
+   * It lives on the turn because the conversation's meta is last-write-wins: a
+   * chat that hands over mid-way would otherwise credit its whole history to
+   * whoever answered last, which is exactly what the transcript used to do.
+   * `agent_key` is the model, `agent_slug` the bound Agent with `""` meaning
+   * the default one, Condor. Both empty is a turn written before attribution
+   * existed — unattributed, not "Condor". Optional because a stored line older
+   * than the field parses without it.
+   */
+  agent_key?: string;
+  agent_slug?: string;
+  /** Assistant turns: how the stream ended; "" or absent = never reported. */
+  stop_reason?: string;
+  /**
+   * User turns: what was handed over with the words (FEAT-098).
+   *
+   * The reference and never the payload — an id under this conversation's own
+   * `attachments/` directory, its type and its size. The bytes come from the
+   * bearer-guarded GET beside it, which is why they are fetched into an object
+   * URL rather than pointed at by an `<img src>`. Absent on every turn recorded
+   * before this existed, and on every turn that carried nothing.
+   */
+  attachments?: ConversationAttachment[];
+  /**
+   * The order the run happened in, as the recorder kept it (ARCH-330).
+   *
+   * A step is either a stretch of reasoning or a call, and a call step *names*
+   * an entry of `tool_calls` rather than repeating it — so the detail has one
+   * home and the two can never disagree. Absent or empty on every turn
+   * recorded before this existed, which means "the order was not kept", not
+   * "the agent did nothing": the flat fields are the fallback then.
+   */
+  events?: ConversationRunStep[];
+}
+
+/**
+ * One step of a turn's run: reasoning, or a call named by its id.
+ *
+ * Deliberately not a discriminated union. This is wire data whose `type` a
+ * newer backend is free to extend, and a union would let the compiler promise
+ * a narrowing the JSON cannot honour; the reader tests the tag itself and
+ * ignores a step it does not recognise.
+ */
+export interface ConversationRunStep {
+  type: string;
+  text?: string;
+  id?: string;
+}
+
+/** One stored image on a turn. No filename: none is ever recorded. */
+export interface ConversationAttachment {
+  id: string;
+  mime: string;
+  bytes: number;
 }
 
 export interface ConversationDetail {
   meta: ConversationMeta;
   turns: ConversationTurn[];
+}
+
+/**
+ * What one conversation created, and whether it could have recorded it
+ * (FEAT-110).
+ *
+ * `predates_ledger` separates two answers that look identical on screen and are
+ * not: *this conversation deployed nothing*, and *this conversation ran before
+ * Condor wrote down what it did*. Every conversation older than FEAT-105 is the
+ * second one, and telling a reader the first about it would be a confident lie.
+ */
+export interface ConversationDeployments {
+  deployments: DeploymentRow[];
+  predates_ledger: boolean;
 }
 
 // ── Sharing a conversation (FEAT-054) ──
@@ -1250,7 +1884,6 @@ export interface SharingPreferenceResponse {
   allowed: boolean;
   /** Always is on *and* the install permits it — the two can disagree. */
   sweeping: boolean;
-  shared_count: number;
 }
 
 export interface ConversationSharingStatus {
@@ -1286,10 +1919,13 @@ export function parseCustomAgentKey(
   if (colon < 0) return null;
   const prefix = agentKey.slice(0, colon);
   if (!prefix.startsWith("custom@")) return null;
-  return { provider: prefix.slice("custom@".length), model: agentKey.slice(colon + 1) };
+  return {
+    provider: prefix.slice("custom@".length),
+    model: agentKey.slice(colon + 1),
+  };
 }
 
-// ── Backtesting ──
+// ── The running build ──
 
 export interface AppEnvResponse {
   version: string;
@@ -1300,14 +1936,330 @@ export interface AppEnvResponse {
   in_docker: boolean;
 }
 
-export interface BacktestTask {
-  task_id: string;
-  status: "pending" | "running" | "completed" | "failed";
-  config?: Record<string, unknown>;
-  result?: Record<string, unknown>;
-  error?: string;
-  created_at?: number;
-  saved?: boolean;
+/**
+ * Whether the running process is older than the code on disk.
+ *
+ * A Condor update lands the new commit and rebuilds this bundle but does not
+ * exec the server (`condor/updates/run.py`), so until someone relaunches it the
+ * browser is new and the backend is old. Everything but `required` is absent
+ * when nothing is owed.
+ */
+export interface RelaunchResponse {
+  required: boolean;
+  branch?: string;
+  /** Short sha the process is still running. */
+  from_commit?: string;
+  /** Short sha on disk, waiting for the relaunch. */
+  target_commit?: string;
+  at?: number | null;
+}
+
+// ── Controller performance history ──
+
+/** Everything the history route accepts except the two the walk owns. */
+export interface ControllerPerformanceHistoryQuery {
+  bot_name?: string;
+  controller_id?: string;
+  start_time?: string;
+  end_time?: string;
+  interval?: string;
+}
+
+/** A whole history, assembled from however many pages it took. */
+export interface ControllerPerformanceHistoryAllResponse extends ControllerPerformanceHistoryResponse {
+  /** How many requests were issued. */
+  pages: number;
+  /** True when a cap or a failure ended the walk before the history ran out. */
+  truncated: boolean;
+  /** Why it stopped — `"complete"` is the only one that means "this is all of it". */
+  outcome: WalkOutcome;
+}
+
+function fetchControllerPerformanceHistoryPage(
+  server: string,
+  params: ControllerPerformanceHistoryQuery & {
+    limit?: number;
+    cursor?: string;
+  } = {},
+  init?: RequestInit,
+) {
+  const qs = new URLSearchParams();
+  if (params.bot_name) qs.set("bot_name", params.bot_name);
+  if (params.controller_id) qs.set("controller_id", params.controller_id);
+  if (params.start_time) qs.set("start_time", params.start_time);
+  if (params.end_time) qs.set("end_time", params.end_time);
+  if (params.interval) qs.set("interval", params.interval);
+  if (params.limit) qs.set("limit", String(params.limit));
+  if (params.cursor) qs.set("cursor", params.cursor);
+  const q = qs.toString();
+  return apiFetch<ControllerPerformanceHistoryResponse>(
+    `/api/v1/servers/${encodeURIComponent(server)}/controller-performance/history${q ? `?${q}` : ""}`,
+    init,
+  );
+}
+
+/**
+ * The whole history a query describes, walked page by page.
+ *
+ * One request answers with at most `limit` ROWS, and the route caps `limit` at
+ * 1000 (CORR-260) — but the sampler writes one row per controller per dump, so
+ * for a fleet of N controllers those 1000 rows are only 1000/N instants. Both
+ * charts used to issue that single request and never look at `next_cursor`, so
+ * the visible window silently collapsed as controllers were added: ten
+ * controllers at five-minute dumps drew eight hours however far back the bots
+ * actually went (CORR-237). The cursor is the only way to ask for more, and
+ * since CORR-259 the route actually forwards it.
+ *
+ * **The interval is bound once, here, and every page carries that same value.**
+ * It is not a detail: `pickSamplingInterval` chooses a resolution from how long
+ * the fleet has been running (PERF-238), and a follow-up page fetched at a
+ * different resolution would splice two resolutions into one series — a line
+ * whose left half is hourly and whose right half is five-minutely, with no
+ * visible seam. `params` is spread into every request unchanged and only
+ * `limit`/`cursor` vary between pages, which is what makes that true by
+ * construction rather than by discipline.
+ *
+ * The result is shape-compatible with a single page — same `snapshots`, same
+ * `interval` — because the shared socket merges live frames into whatever these
+ * queries cached (`mergeIntoMatchingQueries`) by spreading it. It adds only
+ * `pages`/`truncated`/`outcome`, and `next_cursor` becomes "where a resumed
+ * walk would continue", which is null exactly when the history ran out.
+ */
+async function fetchControllerPerformanceHistoryAll(
+  server: string,
+  params: ControllerPerformanceHistoryQuery = {},
+  opts: {
+    pageSize?: number;
+    maxRows?: number;
+    maxPages?: number;
+    signal?: AbortSignal;
+  } = {},
+): Promise<ControllerPerformanceHistoryAllResponse> {
+  let first: ControllerPerformanceHistoryResponse | undefined;
+
+  const walk = await collectCursorPages<ControllerPerformanceSnapshot>(
+    async ({ limit, cursor }) => {
+      const page = await fetchControllerPerformanceHistoryPage(
+        server,
+        { ...params, limit, cursor },
+        { signal: opts.signal },
+      );
+      first ??= page;
+      return {
+        rows: page.snapshots ?? [],
+        nextCursor: page.next_cursor ?? null,
+      };
+    },
+    {
+      pageSize: opts.pageSize,
+      maxRows: opts.maxRows,
+      maxPages: opts.maxPages,
+      signal: opts.signal,
+      // Pages overlap when the newest one is being appended to as it is read.
+      // Keyed on bot + controller + timestamp, because a bare controller id is
+      // a config id two bots can share (CORR-241) and their rows land on one
+      // shared dump timestamp.
+      dedupeKey: (snap) => `${controllerKey(snap)}:${snap.timestamp}`,
+    },
+  );
+
+  return {
+    snapshots: walk.rows,
+    next_cursor: walk.nextCursor,
+    interval: first?.interval ?? params.interval ?? "5m",
+    server_online: first?.server_online,
+    error_hint: first?.error_hint,
+    pages: walk.pages,
+    truncated: walk.truncated,
+    outcome: walk.outcome,
+  };
+}
+
+/**
+ * The fleet's history, fetched **one controller at a time** (FEAT-089).
+ *
+ * The route this wraps looks like it takes a fleet and returns a fleet's
+ * history, and it does not: upstream's downsampler buckets by *time only*, so a
+ * request that spans several controllers keeps one row per bucket and silently
+ * drops the rest. Measured against a real 12-controller fleet over one window,
+ * the same query answers with 12 of 12 controllers at `5m` and 11 of 12 at
+ * `1h` — and `samplingIntervalSince` picks `15m` or coarser for any fleet older
+ * than ~3.5 days (PERF-238). So the fleet chart has been quietly missing
+ * controllers on every long-lived fleet, forward-filling whatever it happened
+ * to receive.
+ *
+ * Binding `controller_id` fixes it at the source: each bucket then holds only
+ * that controller's rows, so nothing is dropped at any interval. The same 12
+ * controllers at `1h` come back complete in 912 rows and 1.28 MB — against
+ * ~104k rows for the same span at `5m`, which is what asking for the finest
+ * interval instead would cost.
+ *
+ * `bot_name` is bound too, because a controller id is a *config* id two bots
+ * can share (CORR-241).
+ *
+ * The result is shape-compatible with the single-query walk it replaces —
+ * same `snapshots`, same `interval` — because the shared socket merges live
+ * frames into whatever these queries cached by spreading it. `truncated` is
+ * true if *any* controller's walk was cut short: a fleet series missing one
+ * controller's oldest end is a partial fleet series.
+ */
+export async function fetchControllerPerformanceHistoryByController(
+  server: string,
+  controllers: readonly { bot_name: string; controller_id: string }[],
+  params: ControllerPerformanceHistoryQuery = {},
+  opts: {
+    pageSize?: number;
+    /** Rows per controller. One page covers `HISTORY_POINT_BUDGET` instants. */
+    maxRows?: number;
+    maxPages?: number;
+    signal?: AbortSignal;
+    concurrency?: number;
+  } = {},
+): Promise<ControllerPerformanceHistoryAllResponse> {
+  const { concurrency: requested, ...walkOpts } = opts;
+  const targets = controllers.filter((c) => c.controller_id);
+  if (targets.length === 0) {
+    return {
+      snapshots: [], next_cursor: null, interval: params.interval ?? "5m",
+      pages: 0, truncated: false, outcome: "complete",
+    };
+  }
+
+  const results: ControllerPerformanceHistoryAllResponse[] = [];
+  // Bounded rather than all at once: these are sequential page walks against
+  // one API that is also serving the live fleet, and a 30-controller fleet
+  // opening 30 simultaneous walks is a self-inflicted outage.
+  const concurrency = Math.max(1, requested ?? 4);
+  for (let i = 0; i < targets.length; i += concurrency) {
+    results.push(
+      ...(await Promise.all(
+        targets.slice(i, i + concurrency).map((c) =>
+          fetchControllerPerformanceHistoryAll(
+            server,
+            { ...params, bot_name: c.bot_name, controller_id: c.controller_id },
+            walkOpts,
+          ),
+        ),
+      )),
+    );
+  }
+
+  return {
+    snapshots: results.flatMap((r) => r.snapshots),
+    // Per-controller cursors cannot be merged into one, and nothing resumes
+    // this walk: `refreshControllerHistory` tails by `start_time`, not by
+    // cursor. Saying null would claim the history ran out, so `truncated`
+    // carries that fact instead.
+    next_cursor: null,
+    interval: results[0]?.interval ?? params.interval ?? "5m",
+    server_online: results.find((r) => r.server_online === false)?.server_online,
+    error_hint: results.find((r) => r.error_hint)?.error_hint,
+    pages: results.reduce((sum, r) => sum + r.pages, 0),
+    truncated: results.some((r) => r.truncated),
+    outcome:
+      results.find((r) => r.outcome === "error")?.outcome ??
+      results.find((r) => r.outcome !== "complete")?.outcome ??
+      "complete",
+  };
+}
+
+// ── The shared performance surface (FEAT-087) ──
+
+/** Everything `/performance/history` accepts except the two the walk owns. */
+export interface PerformanceHistoryQuery {
+  subject: PerfSubject;
+  bot_name?: string;
+  controller_id?: string;
+  executor_id?: string;
+  executor_type?: string;
+  account_name?: string;
+  connector_name?: string;
+  trading_pair?: string;
+  start_time?: string;
+  end_time?: string;
+  interval?: string;
+}
+
+/** A whole performance history, assembled from however many pages it took. */
+export interface PerformanceHistoryAllResponse extends PerformanceHistoryResponse {
+  pages: number;
+  truncated: boolean;
+  outcome: WalkOutcome;
+}
+
+function fetchPerformanceHistoryPage(
+  server: string,
+  params: PerformanceHistoryQuery & { limit?: number; cursor?: string },
+  init?: RequestInit,
+) {
+  const qs = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null && value !== "") qs.set(key, String(value));
+  }
+  return apiFetch<PerformanceHistoryResponse>(
+    `/api/v1/servers/${encodeURIComponent(server)}/performance/history?${qs.toString()}`,
+    init,
+  );
+}
+
+/**
+ * The whole history a performance query describes, walked page by page.
+ *
+ * The same bounded walk the controller history uses, for the same reasons: one
+ * request answers with at most `limit` rows, the route caps `limit` at 1000,
+ * and dropping `next_cursor` silently collapses the visible window (CORR-237).
+ * The interval is bound once here and every page carries it, so a follow-up
+ * page cannot splice a second resolution into one line.
+ *
+ * **A server without the route ends the walk on the first page**, with
+ * `supported: false` and no rows. That is not an error and not a short page to
+ * retry: the route does not exist, and the caller draws its derived series.
+ */
+export async function fetchPerformanceHistoryAll(
+  server: string,
+  params: PerformanceHistoryQuery,
+  opts: { pageSize?: number; maxRows?: number; maxPages?: number; signal?: AbortSignal } = {},
+): Promise<PerformanceHistoryAllResponse> {
+  let first: PerformanceHistoryResponse | undefined;
+
+  const walk = await collectCursorPages<PerformanceSnapshot>(
+    async ({ limit, cursor }) => {
+      const page = await fetchPerformanceHistoryPage(
+        server,
+        { ...params, limit, cursor },
+        { signal: opts.signal },
+      );
+      first ??= page;
+      // An unsupported route has no next page and never will. Reporting no
+      // cursor ends the walk on this one request rather than on the row cap.
+      return {
+        rows: page.supported === false ? [] : (page.snapshots ?? []),
+        nextCursor: page.supported === false ? null : (page.next_cursor ?? null),
+      };
+    },
+    {
+      pageSize: opts.pageSize,
+      maxRows: opts.maxRows,
+      maxPages: opts.maxPages,
+      signal: opts.signal,
+      // Pages overlap when the newest one is being appended to as it is read.
+      // Keyed on the scope joined to the instant — one row per scope per dump.
+      dedupeKey: (row) => `${row.bot_name ?? ""}:${row.scope_id}:${row.timestamp}`,
+    },
+  );
+
+  return {
+    snapshots: walk.rows,
+    next_cursor: walk.nextCursor,
+    interval: first?.interval ?? params.interval ?? "5m",
+    subject: params.subject,
+    supported: first?.supported ?? true,
+    server_online: first?.server_online,
+    error_hint: first?.error_hint,
+    pages: walk.pages,
+    truncated: walk.truncated,
+    outcome: walk.outcome,
+  };
 }
 
 // ── API functions ──
@@ -1318,10 +2270,8 @@ export const api = {
   /** Build identity — shown to the user when they file an issue. */
   getEnv: () => apiFetch<AppEnvResponse>("/api/v1/meta/env"),
 
-  getServerStatus: (name: string) =>
-    apiFetch<{ online: boolean; error?: string }>(
-      `/api/v1/servers/${encodeURIComponent(name)}/status`,
-    ),
+  /** Whether an update has landed that this process is not running yet. */
+  getRelaunch: () => apiFetch<RelaunchResponse>("/api/v1/meta/relaunch"),
 
   getPortfolio: (server: string, refresh = false) =>
     apiFetch<PortfolioResponse>(
@@ -1334,10 +2284,14 @@ export const api = {
     ),
 
   getBots: (server: string) =>
-    apiFetch<BotsPageResponse>(`/api/v1/servers/${encodeURIComponent(server)}/bots`),
+    apiFetch<BotsPageResponse>(
+      `/api/v1/servers/${encodeURIComponent(server)}/bots`,
+    ),
 
   getBot: (server: string, botId: string) =>
-    apiFetch<BotDetail>(`/api/v1/servers/${encodeURIComponent(server)}/bots/${encodeURIComponent(botId)}`),
+    apiFetch<BotDetail>(
+      `/api/v1/servers/${encodeURIComponent(server)}/bots/${encodeURIComponent(botId)}`,
+    ),
 
   getAvailableConfigs: (server: string) =>
     apiFetch<AvailableControllersResponse>(
@@ -1349,62 +2303,110 @@ export const api = {
       `/api/v1/servers/${encodeURIComponent(server)}/controllers/configs/${encodeURIComponent(configId)}`,
     ),
 
-  updateConfig: (server: string, configId: string, data: Record<string, unknown>) =>
-    apiFetch<{ updated: boolean }>(`/api/v1/servers/${encodeURIComponent(server)}/controllers/configs/${encodeURIComponent(configId)}`, {
-      method: "PUT",
-      body: JSON.stringify(data),
-    }),
+  updateConfig: (
+    server: string,
+    configId: string,
+    data: Record<string, unknown>,
+  ) =>
+    apiFetch<{ updated: boolean }>(
+      `/api/v1/servers/${encodeURIComponent(server)}/controllers/configs/${encodeURIComponent(configId)}`,
+      {
+        method: "PUT",
+        body: JSON.stringify(data),
+      },
+    ),
 
-  updateBotControllerConfig: (server: string, botName: string, configId: string, data: Record<string, unknown>) =>
-    apiFetch<{ updated: boolean }>(`/api/v1/servers/${encodeURIComponent(server)}/bots/${encodeURIComponent(botName)}/controllers/${encodeURIComponent(configId)}/config`, {
-      method: "PUT",
-      body: JSON.stringify(data),
-    }),
+  updateBotControllerConfig: (
+    server: string,
+    botName: string,
+    configId: string,
+    data: Record<string, unknown>,
+  ) =>
+    apiFetch<{ updated: boolean }>(
+      `/api/v1/servers/${encodeURIComponent(server)}/bots/${encodeURIComponent(botName)}/controllers/${encodeURIComponent(configId)}/config`,
+      {
+        method: "PUT",
+        body: JSON.stringify(data),
+      },
+    ),
 
   updateConfigYaml: (server: string, configId: string, yamlContent: string) =>
-    apiFetch<{ updated: boolean }>(`/api/v1/servers/${encodeURIComponent(server)}/controllers/configs/${encodeURIComponent(configId)}`, {
-      method: "PUT",
-      body: JSON.stringify({ yaml_content: yamlContent }),
-    }),
+    apiFetch<{ updated: boolean }>(
+      `/api/v1/servers/${encodeURIComponent(server)}/controllers/configs/${encodeURIComponent(configId)}`,
+      {
+        method: "PUT",
+        body: JSON.stringify({ yaml_content: yamlContent }),
+      },
+    ),
 
-  getControllerConfigTemplate: (server: string, controllerType: string, controllerName: string) =>
+  getControllerConfigTemplate: (
+    server: string,
+    controllerType: string,
+    controllerName: string,
+  ) =>
     apiFetch<Record<string, unknown>>(
       `/api/v1/servers/${encodeURIComponent(server)}/controllers/${encodeURIComponent(controllerType)}/${encodeURIComponent(controllerName)}/template`,
     ),
 
-  createControllerConfig: (server: string, configId: string, data: Record<string, unknown>) =>
-    apiFetch<{ created: boolean; config_id: string }>(`/api/v1/servers/${encodeURIComponent(server)}/controllers/configs`, {
-      method: "POST",
-      body: JSON.stringify({ ...data, id: configId }),
-    }),
+  createControllerConfig: (
+    server: string,
+    configId: string,
+    data: Record<string, unknown>,
+  ) =>
+    apiFetch<{ created: boolean; config_id: string }>(
+      `/api/v1/servers/${encodeURIComponent(server)}/controllers/configs`,
+      {
+        method: "POST",
+        body: JSON.stringify({ ...data, id: configId }),
+      },
+    ),
 
   deleteControllerConfig: (server: string, configId: string) =>
-    apiFetch<{ deleted: boolean }>(`/api/v1/servers/${encodeURIComponent(server)}/controllers/configs/${encodeURIComponent(configId)}`, {
-      method: "DELETE",
-    }),
+    apiFetch<{ deleted: boolean }>(
+      `/api/v1/servers/${encodeURIComponent(server)}/controllers/configs/${encodeURIComponent(configId)}`,
+      {
+        method: "DELETE",
+      },
+    ),
 
-  deleteController: (server: string, controllerType: string, controllerName: string) =>
+  deleteController: (
+    server: string,
+    controllerType: string,
+    controllerName: string,
+  ) =>
     apiFetch<{ deleted: boolean }>(
       `/api/v1/servers/${encodeURIComponent(server)}/controllers/${encodeURIComponent(controllerType)}/${encodeURIComponent(controllerName)}`,
       { method: "DELETE" },
     ),
 
-  getControllerSource: (server: string, controllerType: string, controllerName: string) =>
+  getControllerSource: (
+    server: string,
+    controllerType: string,
+    controllerName: string,
+  ) =>
     apiFetch<ControllerSourceResponse>(
       `/api/v1/servers/${encodeURIComponent(server)}/controllers/${encodeURIComponent(controllerType)}/${encodeURIComponent(controllerName)}/source`,
     ),
 
-  updateControllerSource: (server: string, controllerType: string, controllerName: string, source: string) =>
+  updateControllerSource: (
+    server: string,
+    controllerType: string,
+    controllerName: string,
+    source: string,
+  ) =>
     apiFetch<{ updated: boolean }>(
       `/api/v1/servers/${encodeURIComponent(server)}/controllers/${encodeURIComponent(controllerType)}/${encodeURIComponent(controllerName)}/source`,
       { method: "PUT", body: JSON.stringify({ source }) },
     ),
 
   deployBot: (server: string, data: DeployBotRequest) =>
-    apiFetch<Record<string, unknown>>(`/api/v1/servers/${encodeURIComponent(server)}/bots/deploy`, {
-      method: "POST",
-      body: JSON.stringify(data),
-    }),
+    apiFetch<Record<string, unknown>>(
+      `/api/v1/servers/${encodeURIComponent(server)}/bots/deploy`,
+      {
+        method: "POST",
+        body: JSON.stringify(data),
+      },
+    ),
 
   stopBot: (server: string, botName: string) =>
     apiFetch<Record<string, unknown>>(
@@ -1412,43 +2414,65 @@ export const api = {
       { method: "POST" },
     ),
 
-  stopControllers: (server: string, botName: string, controllerNames: string[]) =>
+  stopControllers: (
+    server: string,
+    botName: string,
+    controllerNames: string[],
+  ) =>
     apiFetch<Record<string, unknown>>(
       `/api/v1/servers/${encodeURIComponent(server)}/bots/${encodeURIComponent(botName)}/controllers/stop`,
-      { method: "POST", body: JSON.stringify({ controller_names: controllerNames }) },
+      {
+        method: "POST",
+        body: JSON.stringify({ controller_names: controllerNames }),
+      },
     ),
 
-  startControllers: (server: string, botName: string, controllerNames: string[]) =>
+  startControllers: (
+    server: string,
+    botName: string,
+    controllerNames: string[],
+  ) =>
     apiFetch<Record<string, unknown>>(
       `/api/v1/servers/${encodeURIComponent(server)}/bots/${encodeURIComponent(botName)}/controllers/start`,
-      { method: "POST", body: JSON.stringify({ controller_names: controllerNames }) },
+      {
+        method: "POST",
+        body: JSON.stringify({ controller_names: controllerNames }),
+      },
     ),
 
-  getControllerPerformanceHistory: (
-    server: string,
-    params: {
-      bot_name?: string;
-      controller_id?: string;
-      start_time?: string;
-      end_time?: string;
-      interval?: string;
-      limit?: number;
-      cursor?: string;
-    } = {},
-  ) => {
-    const qs = new URLSearchParams();
-    if (params.bot_name) qs.set("bot_name", params.bot_name);
-    if (params.controller_id) qs.set("controller_id", params.controller_id);
-    if (params.start_time) qs.set("start_time", params.start_time);
-    if (params.end_time) qs.set("end_time", params.end_time);
-    if (params.interval) qs.set("interval", params.interval);
-    if (params.limit) qs.set("limit", String(params.limit));
-    if (params.cursor) qs.set("cursor", params.cursor);
-    const q = qs.toString();
-    return apiFetch<ControllerPerformanceHistoryResponse>(
-      `/api/v1/servers/${encodeURIComponent(server)}/controller-performance/history${q ? `?${q}` : ""}`,
-    );
-  },
+  /** One page of controller performance history. Charts want the whole thing — see below. */
+  getControllerPerformanceHistory: fetchControllerPerformanceHistoryPage,
+
+  /**
+   * Every page of controller performance history, at one constant interval.
+   *
+   * What the charts call: a single page is at most 1000 rows, and rows are per
+   * controller, so one request is a window that shrinks as the fleet grows
+   * (CORR-237).
+   */
+  getControllerPerformanceHistoryAll: fetchControllerPerformanceHistoryAll,
+
+  /**
+   * The fleet's history, one controller at a time — the only way to get all of
+   * them at an interval coarser than `5m` (FEAT-089).
+   */
+  getControllerPerformanceHistoryByController:
+    fetchControllerPerformanceHistoryByController,
+
+  /**
+   * Whether this server serves `/performance/history` (FEAT-087).
+   *
+   * One request per server, cached server-side with the other per-server data,
+   * so every chart on the page shares one answer and a tree click costs
+   * nothing.
+   */
+  getPerformanceCapability: (server: string) =>
+    apiFetch<PerformanceCapabilityResponse>(
+      `/api/v1/servers/${encodeURIComponent(server)}/performance/capability`,
+    ),
+
+  /** One scope's sampled performance series, for either population (FEAT-087). */
+  getPerformanceHistory: fetchPerformanceHistoryAll,
 
   getBotRuns: (
     server: string,
@@ -1463,7 +2487,8 @@ export const api = {
     const qs = new URLSearchParams();
     if (params.bot_name) qs.set("bot_name", params.bot_name);
     if (params.run_status) qs.set("run_status", params.run_status);
-    if (params.deployment_status) qs.set("deployment_status", params.deployment_status);
+    if (params.deployment_status)
+      qs.set("deployment_status", params.deployment_status);
     if (params.limit) qs.set("limit", String(params.limit));
     if (params.offset) qs.set("offset", String(params.offset));
     const q = qs.toString();
@@ -1472,14 +2497,57 @@ export const api = {
     );
   },
 
+  /**
+   * The controllers of every finished run.
+   *
+   * One upstream call for the whole terminated population — the latest
+   * snapshot of every controller of every bot the API has ever orchestrated —
+   * joined to the runs and cached warm server-side, so walking the Terminated
+   * tree costs nothing.
+   */
+  getTerminatedControllers: (server: string) =>
+    apiFetch<TerminatedControllersResponse>(
+      `/api/v1/servers/${encodeURIComponent(server)}/terminated/controllers`,
+    ),
+
+  /**
+   * One finished run's curve, walked once by Condor and cached for ever.
+   *
+   * Immutable by construction — the bot has stopped — so the caller should tell
+   * react-query so: `staleTime: Infinity`. The first open pays one walk behind
+   * a spinner; every one after it is a file open.
+   */
+  getRunHistory: (
+    server: string,
+    botName: string,
+    deployedAt: string,
+    /** The run's archived database, for a run older than the snapshot table. */
+    dbPath?: string | null,
+  ) => {
+    const qs = new URLSearchParams({ bot_name: botName, deployed_at: deployedAt });
+    if (dbPath) qs.set("db_path", dbPath);
+    return apiFetch<RunHistoryResponse>(
+      `/api/v1/servers/${encodeURIComponent(server)}/terminated/history?${qs}`,
+    );
+  },
+
   deleteBotRun: (server: string, botRunId: number) =>
-    apiFetch<{ deleted: boolean }>(`/api/v1/servers/${encodeURIComponent(server)}/bot-runs/${botRunId}`, {
-      method: "DELETE",
-    }),
+    apiFetch<{ deleted: boolean }>(
+      `/api/v1/servers/${encodeURIComponent(server)}/bot-runs/${botRunId}`,
+      {
+        method: "DELETE",
+      },
+    ),
 
   getExecutors: (
     server: string,
-    params?: { executor_type?: string; trading_pair?: string; status?: string; controller_id?: string; limit?: number },
+    params?: {
+      executor_type?: string;
+      trading_pair?: string;
+      status?: string;
+      controller_id?: string;
+      limit?: number;
+    },
   ) => {
     const qs = new URLSearchParams();
     if (params?.executor_type) qs.set("executor_type", params.executor_type);
@@ -1523,7 +2591,12 @@ export const api = {
 
   createExecutor: (
     server: string,
-    data: { executor_type: string; config: Record<string, unknown>; account_name?: string; controller_id?: string },
+    data: {
+      executor_type: string;
+      config: Record<string, unknown>;
+      account_name?: string;
+      controller_id?: string;
+    },
   ) =>
     apiFetch<{ status: string; executor_id: string }>(
       `/api/v1/servers/${encodeURIComponent(server)}/executors`,
@@ -1537,10 +2610,19 @@ export const api = {
     ),
 
   getPositionsHeld: (server: string) =>
-    apiFetch<PositionsResponse>(`/api/v1/servers/${encodeURIComponent(server)}/executors/positions`),
+    apiFetch<PositionsResponse>(
+      `/api/v1/servers/${encodeURIComponent(server)}/executors/positions`,
+    ),
 
-  clearPositionHeld: (server: string, connector: string, pair: string, controllerId?: string) => {
-    const params = controllerId ? `?controller_id=${encodeURIComponent(controllerId)}` : "";
+  clearPositionHeld: (
+    server: string,
+    connector: string,
+    pair: string,
+    controllerId?: string,
+  ) => {
+    const params = controllerId
+      ? `?controller_id=${encodeURIComponent(controllerId)}`
+      : "";
     return apiFetch<{ status: string }>(
       `/api/v1/servers/${encodeURIComponent(server)}/executors/positions/${encodeURIComponent(connector)}/${encodeURIComponent(pair)}${params}`,
       { method: "DELETE" },
@@ -1548,13 +2630,19 @@ export const api = {
   },
 
   getConsolidatedPositions: (server: string) =>
-    apiFetch<ConsolidatedPositionsResponse>(`/api/v1/servers/${encodeURIComponent(server)}/positions`),
+    apiFetch<ConsolidatedPositionsResponse>(
+      `/api/v1/servers/${encodeURIComponent(server)}/positions`,
+    ),
 
   getConnectors: (server: string) =>
-    apiFetch<string[]>(`/api/v1/servers/${encodeURIComponent(server)}/market/connectors`),
+    apiFetch<string[]>(
+      `/api/v1/servers/${encodeURIComponent(server)}/market/connectors`,
+    ),
 
   getConnectedExchanges: (server: string) =>
-    apiFetch<string[]>(`/api/v1/servers/${encodeURIComponent(server)}/market/connected-exchanges`),
+    apiFetch<string[]>(
+      `/api/v1/servers/${encodeURIComponent(server)}/market/connected-exchanges`,
+    ),
 
   /** Venues the trade panel can offer, with the traits each UI decision rests on. */
   getVenues: (server: string) =>
@@ -1565,6 +2653,7 @@ export const api = {
         name: v.name,
         hummingbotMarketData: !!v.hummingbot_market_data,
         clmmLp: !!v.clmm_lp,
+        credentialed: v.credentialed ?? true,
       })),
     ),
 
@@ -1587,13 +2676,13 @@ export const api = {
       pools: PoolSummary[];
       has_more?: boolean;
       upstream?: DexUpstream;
-    }>(`/api/v1/servers/${encodeURIComponent(server)}/dex/pools?${params}`).then(
-      (r) => ({
-        pools: r.pools ?? [],
-        has_more: !!r.has_more,
-        upstream: r.upstream,
-      }),
-    );
+    }>(
+      `/api/v1/servers/${encodeURIComponent(server)}/dex/pools?${params}`,
+    ).then((r) => ({
+      pools: r.pools ?? [],
+      has_more: !!r.has_more,
+      upstream: r.upstream,
+    }));
   },
 
   /**
@@ -1688,7 +2777,12 @@ export const api = {
    * `available: false` with a reason rather than failing: a venue Condor cannot
    * read bins from is something to say, not an error to raise.
    */
-  getPoolBins: (server: string, address: string, network: string, connector: string) =>
+  getPoolBins: (
+    server: string,
+    address: string,
+    network: string,
+    connector: string,
+  ) =>
     apiFetch<PoolBins>(
       `/api/v1/servers/${encodeURIComponent(server)}/dex/pools/${encodeURIComponent(address)}/bins?network=${encodeURIComponent(network)}&connector=${encodeURIComponent(connector)}`,
     ),
@@ -1717,12 +2811,7 @@ export const api = {
       `/api/v1/servers/${encodeURIComponent(server)}/market/tickers?connector=${encodeURIComponent(connector)}`,
     ),
 
-  getOrderBook: (
-    server: string,
-    connector: string,
-    pair: string,
-    depth = 20,
-  ) =>
+  getOrderBook: (server: string, connector: string, pair: string, depth = 20) =>
     apiFetch<OrderBookResponse>(
       `/api/v1/servers/${encodeURIComponent(server)}/market/order-book?connector=${encodeURIComponent(connector)}&trading_pair=${encodeURIComponent(pair)}&depth=${depth}`,
     ),
@@ -1757,36 +2846,178 @@ export const api = {
 
   getAgents: () => apiFetch<AgentSummary[]>("/api/v1/agents"),
 
+  /**
+   * Who owns which trading, and what their loop is doing (FEAT-096).
+   *
+   * Deliberately not `getAgents`, which fans out a performance fetch per
+   * session of every strategy and is the most expensive read in the app. This
+   * one makes no Hummingbot call at all, which is what lets `/bots` poll it.
+   */
+  getFleetMap: async (): Promise<FleetMap> => {
+    const data = await apiFetch<{ owners: FleetOwnerWire[]; deeds?: DeedIndexWire }>(
+      "/api/v1/agents/fleet-map",
+    );
+    const owners: FleetOwner[] = (data.owners ?? []).map((owner) => ({
+      runKey: owner.run_key,
+      agentSlug: owner.agent_slug,
+      agentName: owner.agent_name,
+      strategySlug: owner.strategy_slug,
+      strategyName: owner.strategy_name,
+      namespace: owner.namespace,
+      declaredBots: owner.declared_bots ?? [],
+      agentIds: owner.agent_ids ?? [],
+      live: owner.live
+        ? {
+            agentId: owner.live.agent_id,
+            sessionNum: owner.live.session_num,
+            status: owner.live.status,
+            tickCount: owner.live.tick_count,
+            lastTickAt: owner.live.last_tick_at,
+            frequencySec: owner.live.frequency_sec,
+            lastAction: owner.live.last_action,
+            lastDid: owner.live.last_did ?? null,
+            lastError: owner.live.last_error,
+          }
+        : null,
+    }));
+    const deeds: DeedIndex = { bots: {}, since: data.deeds?.since ?? 0 };
+    for (const [name, ref] of Object.entries(data.deeds?.bots ?? {})) {
+      deeds.bots[name] = { runKey: ref.run_key, runId: ref.run_id ?? "", at: ref.at ?? 0 };
+    }
+    return { owners, deeds };
+  },
+
   getAgent: (slug: string) =>
     apiFetch<AgentDetail>(`/api/v1/agents/${encodeURIComponent(slug)}`),
 
-  createAgent: (data: {
-    name: string;
-    description?: string;
-    instructions?: string;
-    agent_key?: string;
-    tools?: string[];
-    when_to_consult?: string;
-    server_required?: boolean;
-    server_name?: string;
-  }) =>
-    apiFetch<AgentSummary>("/api/v1/agents", {
-      method: "POST",
-      body: JSON.stringify(data),
-    }),
+  /** Identity + the four libraries, for the panel behind a conversation. */
+  getAgentBrain: (slug: string) =>
+    apiFetch<AgentBrain>(`/api/v1/agents/${encodeURIComponent(slug)}/brain`),
+
+  getAgentSkill: (slug: string, name: string) =>
+    apiFetch<SkillBody>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/skills/${encodeURIComponent(name)}`,
+    ),
+
+  getAgentMemory: (slug: string, name: string) =>
+    apiFetch<{ name: string; body: string }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/memories/${encodeURIComponent(name)}`,
+    ),
+
+  /** What this Agent learned *you* ask it for — the openers on an empty chat. */
+  getAgentStarters: (slug: string) =>
+    apiFetch<{ starters: StarterRow[] }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/starters`,
+    ),
+
+  /** Add a playbook to this Agent's own library. Publishing to the shared one
+   *  is Condor's decision alone, so there is no `shared` flag to pass. */
+  createAgentSkill: (
+    slug: string,
+    data: {
+      name: string;
+      description: string;
+      when_to_use: string;
+      body: string;
+      references_routine?: string;
+    },
+  ) =>
+    apiFetch<{ saved: boolean; name: string }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/skills`,
+      { method: "POST", body: JSON.stringify(data) },
+    ),
+
+  /** Patch a playbook. Omitted fields are left alone; `references_routine: ""`
+   *  unlinks the routine, which is why it is only sent when it changed. */
+  updateAgentSkill: (
+    slug: string,
+    name: string,
+    data: {
+      description?: string;
+      when_to_use?: string;
+      body?: string;
+      references_routine?: string;
+    },
+  ) =>
+    apiFetch<SkillBody>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/skills/${encodeURIComponent(name)}`,
+      { method: "PUT", body: JSON.stringify(data) },
+    ),
+
+  /** Switch one playbook, routine or tool off for this Agent, or back on.
+   *
+   *  Curation, not deletion: the item stays on disk, stays in this panel and
+   *  stays editable, and every other Agent reading the same shared file is
+   *  untouched. It takes effect on the Agent's next tick or next session — a
+   *  system prompt already built is not rewritten, and a tool is mounted when
+   *  the MCP subprocess starts, so a muted one goes with the next session. */
+  setAgentMute: (
+    slug: string,
+    data: { kind: "skill" | "routine" | "tool"; name: string; muted: boolean },
+  ) =>
+    apiFetch<{ kind: string; name: string; muted: boolean }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/mutes`,
+      { method: "PUT", body: JSON.stringify(data) },
+    ),
+
+  deleteAgentSkill: (slug: string, name: string) =>
+    apiFetch<{ deleted: boolean }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/skills/${encodeURIComponent(name)}`,
+      { method: "DELETE" },
+    ),
+
+  /** Accept the offered playbook: it becomes an ordinary skill in this Agent's
+   *  own library. The only path by which a proposal ever reaches a prompt. */
+  acceptAgentSkillProposal: (slug: string) =>
+    apiFetch<{ accepted: boolean; name: string }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/skill-proposals/accept`,
+      { method: "POST" },
+    ),
+
+  /** Throw the offered playbook away. The library is untouched either way. */
+  discardAgentSkillProposal: (slug: string) =>
+    apiFetch<{ discarded: boolean }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/skill-proposals`,
+      { method: "DELETE" },
+    ),
+
+  /** Create or overwrite one of your memories with this Agent — the store keys
+   *  on the slug, so one call serves both. */
+  saveAgentMemory: (
+    slug: string,
+    name: string,
+    data: { content: string; description: string; type?: string },
+  ) =>
+    apiFetch<{ saved: boolean; name: string }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/memories/${encodeURIComponent(name)}`,
+      { method: "PUT", body: JSON.stringify(data) },
+    ),
+
+  deleteAgentMemory: (slug: string, name: string) =>
+    apiFetch<{ deleted: boolean }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/memories/${encodeURIComponent(name)}`,
+      { method: "DELETE" },
+    ),
 
   updateAgentMd: (slug: string, content: string) =>
-    apiFetch<{ updated: boolean }>(`/api/v1/agents/${encodeURIComponent(slug)}`, {
-      method: "PUT",
-      body: JSON.stringify({ content }),
-    }),
+    apiFetch<{ updated: boolean }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}`,
+      {
+        method: "PUT",
+        body: JSON.stringify({ content }),
+      },
+    ),
 
   /** Set or clear the Agent's server pin and model. An empty `server_name`
    *  clears the pin, so the Agent follows whatever server the chat is pointed
    *  at; an empty `agent_key` clears the model, falling back to the chat's. */
   updateAgentConfig: (
     slug: string,
-    data: { server_name?: string; server_required?: boolean; agent_key?: string },
+    data: {
+      server_name?: string;
+      server_required?: boolean;
+      agent_key?: string;
+    },
   ) =>
     apiFetch<{
       updated: boolean;
@@ -1799,9 +3030,12 @@ export const api = {
     }),
 
   deleteAgent: (slug: string) =>
-    apiFetch<{ deleted: boolean }>(`/api/v1/agents/${encodeURIComponent(slug)}`, {
-      method: "DELETE",
-    }),
+    apiFetch<{ deleted: boolean }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}`,
+      {
+        method: "DELETE",
+      },
+    ),
 
   // ── Delegations (fire-and-forget background agent tasks) ──
 
@@ -1810,11 +3044,20 @@ export const api = {
 
   /** Every delegation ever recorded, newest first — live ones included, and the
    *  ones whose process is long gone. Optionally scoped to one agent. */
-  getDelegationHistory: (agent?: string, limit = 100) =>
+  /** Recorded runs, newest first. `kind` omitted means every channel. */
+  getDelegationHistory: (agent?: string, limit = 100, kind?: DelegationKind) =>
     apiFetch<{ delegations: DelegationSummary[] }>(
       `/api/v1/agents/delegations/history?limit=${limit}` +
-        (agent ? `&agent=${encodeURIComponent(agent)}` : ""),
+        (agent ? `&agent=${encodeURIComponent(agent)}` : "") +
+        (kind ? `&kind=${kind}` : ""),
     ),
+
+  /** One code run in full — code, stdout, result, traceback (FEAT-061).
+   *  Behind the same gate that ran it: a run's output is as sensitive as the
+   *  snippet was, so a caller without `code_run` gets a 403 and a run that is
+   *  not theirs a 404. */
+  getCodeRun: (runId: string) =>
+    apiFetch<CodeRun>(`/api/v1/code/runs/${encodeURIComponent(runId)}`),
 
   /** One delegation's full record, from the registry or from disk. */
   getDelegation: (taskId: string) =>
@@ -1841,9 +3084,6 @@ export const api = {
     ),
 
   // ── Strategies (playbooks that loop under an Agent) ──
-
-  getStrategies: (slug: string) =>
-    apiFetch<StrategySummary[]>(`/api/v1/agents/${encodeURIComponent(slug)}/strategies`),
 
   getStrategy: (slug: string, sslug: string) =>
     apiFetch<StrategyDetail>(
@@ -1879,12 +3119,6 @@ export const api = {
       { method: "PUT", body: JSON.stringify({ content }) },
     ),
 
-  updateStrategyConfig: (slug: string, sslug: string, config: Record<string, unknown>) =>
-    apiFetch<{ updated: boolean }>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/config`,
-      { method: "PUT", body: JSON.stringify({ config }) },
-    ),
-
   deleteStrategy: (slug: string, sslug: string) =>
     apiFetch<{ deleted: boolean }>(
       `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}`,
@@ -1896,7 +3130,11 @@ export const api = {
       `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/performance`,
     ),
 
-  getStrategySessionExecutors: (slug: string, sslug: string, sessionNum: number) =>
+  getStrategySessionExecutors: (
+    slug: string,
+    sslug: string,
+    sessionNum: number,
+  ) =>
     apiFetch<{
       executors: AgentExecutorRow[];
       performance: AgentPerformance;
@@ -1904,6 +3142,9 @@ export const api = {
       // from the bots' own history, not from the journal's per-tick snapshots,
       // which only record what the aggregator believed at the time.
       pnl_series?: { timestamp: string; pnl: number; volume: number }[];
+      /** What this run put into the world (FEAT-100). Empty for a run that
+       *  deployed nothing, and for a session whose server is unreachable. */
+      deployments?: DeploymentRow[];
     }>(
       `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/sessions/${sessionNum}/executors`,
     ),
@@ -1937,9 +3178,55 @@ export const api = {
       { method: "POST" },
     ),
 
-  getStrategyLearnings: (slug: string, sslug: string) =>
-    apiFetch<{ content: string }>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/learnings`,
+  /**
+   * Whether this strategy's loop comes back after Condor restarts.
+   *
+   * Writes the stored config (so the next session starts opted in) *and* every
+   * live engine's status file (so the session already running is covered
+   * without being stopped first). `applied_to_running` says how many of the
+   * latter there were, which is what lets the caller say "from the next
+   * restart" rather than guess.
+   */
+  setRestartOnBoot: (slug: string, sslug: string, enabled: boolean) =>
+    apiFetch<{ restart_on_boot: boolean; applied_to_running: number }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/restart-on-boot`,
+      { method: "POST", body: JSON.stringify({ enabled }) },
+    ),
+
+  /**
+   * Attribute an already-running bot to this strategy's newest session.
+   *
+   * The repair for a run whose ownership claim never landed — every run from
+   * before the ACP arguments fix, whose `owned_bots.json` was never written, so
+   * the fleet trades on unattributed and every money surface reads $0.
+   *
+   * `since` is what makes it a back-fill rather than a fresh start: the ledger
+   * slices PnL over the window it owns the bot for, so claiming at "now"
+   * credits the strategy with nothing it has already made.
+   */
+  claimBot: (slug: string, sslug: string, botName: string, since = 0) =>
+    apiFetch<{ claimed: string; session: string; owned: string[] }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/claim-bot`,
+      { method: "POST", body: JSON.stringify({ bot_name: botName, since }) },
+    ),
+
+  /**
+   * Take a bot back off this strategy — the undo of `claimBot`.
+   *
+   * Claiming was one-way, so a misclick put another strategy's trading on this
+   * one's book permanently. It clears the bot from *every* session of the
+   * strategy, not just the newest: ownership is re-derived on each boot from
+   * prior sessions and from recorded deploys, so a single-session delete undoes
+   * itself on the next restart.
+   *
+   * `sessions` names the runs that actually changed and `live_runs` how many
+   * running loops were corrected in memory — an empty pair means the bot was
+   * not this strategy's to begin with.
+   */
+  unclaimBot: (slug: string, sslug: string, botName: string) =>
+    apiFetch<{ unclaimed: string; sessions: string[]; live_runs: number }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/unclaim-bot`,
+      { method: "POST", body: JSON.stringify({ bot_name: botName }) },
     ),
 
   updateStrategyLearnings: (slug: string, sslug: string, content: string) =>
@@ -1948,10 +3235,26 @@ export const api = {
       { method: "PUT", body: JSON.stringify({ content }) },
     ),
 
-  getStrategySessions: (slug: string, sslug: string) =>
-    apiFetch<{ sessions: SessionInfo[] }>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/sessions`,
-    ),
+  /**
+   * Every run this agent ever had, across its strategies, newest first
+   * (FEAT-099).
+   *
+   * The rail's whole query. Like `getFleetMap`, it makes no Hummingbot call —
+   * which is what lets the Lab poll it.
+   */
+  /**
+   * Every stretch of work an agent has done, newest first (FEAT-111).
+   *
+   * `limit` is the rail's window and not a filter: a chatty install has
+   * hundreds of conversations, and the rail asks for a bigger page rather than
+   * pulling the archive on every five-second poll.
+   */
+  getAgentRuns: async (slug: string, limit?: number): Promise<AgentRunRow[]> => {
+    const data = await apiFetch<{ runs: AgentRunRow[] }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/runs${limit ? `?limit=${limit}` : ""}`,
+    );
+    return data.runs ?? [];
+  },
 
   getSessionJournal: (slug: string, sslug: string, sessionNum: number) =>
     apiFetch<{ content: string }>(
@@ -1961,6 +3264,17 @@ export const api = {
   getSessionSnapshots: (slug: string, sslug: string, sessionNum: number) =>
     apiFetch<{ snapshots: SnapshotSummary[] }>(
       `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/sessions/${sessionNum}/snapshots`,
+    ),
+
+  /**
+   * What this session actually *did*, oldest-first (FEAT-097).
+   *
+   * Structured rows, so nothing downstream runs a regex over markdown to find
+   * out. Makes no Hummingbot call — it is one tail read of a JSONL sidecar.
+   */
+  getSessionActions: (slug: string, sslug: string, sessionNum: number, limit?: number) =>
+    apiFetch<{ actions: AgentActionRow[] }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/sessions/${sessionNum}/actions${limit ? `?limit=${limit}` : ""}`,
     ),
 
   getSessionCanvas: (slug: string, sslug: string, sessionNum: number) =>
@@ -1974,57 +3288,17 @@ export const api = {
       `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/sessions/${sessionNum}/report`,
     ),
 
-  getSnapshot: (slug: string, sslug: string, sessionNum: number, tick: number) =>
+  getSnapshot: (
+    slug: string,
+    sslug: string,
+    sessionNum: number,
+    tick: number,
+  ) =>
     apiFetch<{ content: string; tick: number }>(
       `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/sessions/${sessionNum}/snapshots/${tick}`,
     ),
 
-  // ── Backtesting ──
-
-  submitBacktest: (
-    server: string,
-    data: {
-      config_id: string;
-      start_time: number;
-      end_time: number;
-      backtesting_resolution?: string;
-      trade_cost?: number;
-    },
-  ) =>
-    apiFetch<BacktestTask>(`/api/v1/servers/${encodeURIComponent(server)}/backtesting/tasks`, {
-      method: "POST",
-      body: JSON.stringify(data),
-    }),
-
-  listBacktestTasks: (server: string) =>
-    apiFetch<BacktestTask[]>(`/api/v1/servers/${encodeURIComponent(server)}/backtesting/tasks`),
-
-  getBacktestTask: (server: string, taskId: string) =>
-    apiFetch<BacktestTask>(
-      `/api/v1/servers/${encodeURIComponent(server)}/backtesting/tasks/${encodeURIComponent(taskId)}`,
-    ),
-
-  deleteBacktestTask: (server: string, taskId: string) =>
-    apiFetch<Record<string, unknown>>(
-      `/api/v1/servers/${encodeURIComponent(server)}/backtesting/tasks/${encodeURIComponent(taskId)}`,
-      { method: "DELETE" },
-    ),
-
-  getSavedBacktests: (server: string) =>
-    apiFetch<BacktestTask[]>(`/api/v1/servers/${encodeURIComponent(server)}/backtesting/saved`),
-
-  deleteSavedBacktest: (server: string, taskId: string) =>
-    apiFetch<Record<string, unknown>>(
-      `/api/v1/servers/${encodeURIComponent(server)}/backtesting/saved/${encodeURIComponent(taskId)}`,
-      { method: "DELETE" },
-    ),
-
   // ── Experiments ──
-
-  getAgentExperiments: (slug: string, sslug: string) =>
-    apiFetch<{ experiments: ExperimentInfo[] }>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/experiments`,
-    ),
 
   getExperiment: (slug: string, sslug: string, expNum: number) =>
     apiFetch<{ content: string; number: number }>(
@@ -2034,21 +3308,55 @@ export const api = {
   // ── Archived Bots ──
 
   getArchivedBots: (server: string) =>
-    apiFetch<{ bots: ArchivedBotSummary[] }>(`/api/v1/servers/${encodeURIComponent(server)}/archived`),
+    apiFetch<{ bots: ArchivedBotSummary[] }>(
+      `/api/v1/servers/${encodeURIComponent(server)}/archived`,
+    ),
 
-  getArchivedBotPerformance: (server: string, dbPath: string, includeExecutors = false) =>
+  getArchivedBotPerformance: (
+    server: string,
+    dbPath: string,
+    includeExecutors = false,
+  ) =>
     apiFetch<ArchivedBotPerformance>(
       `/api/v1/servers/${encodeURIComponent(server)}/archived/performance?db_path=${encodeURIComponent(dbPath)}&include_executors=${includeExecutors}`,
     ),
 
-  getArchivedExecutors: (server: string, dbPath: string, offset = 0, limit = 50) =>
+  getArchivedExecutors: (
+    server: string,
+    dbPath: string,
+    offset = 0,
+    limit = 50,
+  ) =>
     apiFetch<PaginatedExecutors>(
       `/api/v1/servers/${encodeURIComponent(server)}/archived/executors?db_path=${encodeURIComponent(dbPath)}&offset=${offset}&limit=${limit}`,
     ),
 
+  getArchivedControllers: (server: string, dbPath: string) =>
+    apiFetch<{ controllers: ArchivedControllerRollup[] }>(
+      `/api/v1/servers/${encodeURIComponent(server)}/archived/controllers?db_path=${encodeURIComponent(dbPath)}`,
+    ),
+
+  /**
+   * The stored report for this run, or one controller of it.
+   *
+   * The subject key is built server-side from these parts — the dashboard sends
+   * components, never a key, so a lookup cannot be pointed at another server.
+   */
+  getArchivedReport: (server: string, dbPath: string, controllerId = "") =>
+    apiFetch<ArchivedRunReport>(
+      `/api/v1/servers/${encodeURIComponent(server)}/archived/report?db_path=${encodeURIComponent(dbPath)}&controller_id=${encodeURIComponent(controllerId)}`,
+    ),
+
   // ── Reports ──
 
-  getReports: (params?: { source_type?: string; tag?: string; search?: string; agent?: string; limit?: number; offset?: number }) => {
+  getReports: (params?: {
+    source_type?: string;
+    tag?: string;
+    search?: string;
+    agent?: string;
+    limit?: number;
+    offset?: number;
+  }) => {
     const qs = new URLSearchParams();
     if (params?.source_type) qs.set("source_type", params.source_type);
     if (params?.tag) qs.set("tag", params.tag);
@@ -2063,7 +3371,8 @@ export const api = {
   getReport: (id: string) =>
     apiFetch<ReportSummary>(`/api/v1/reports/${encodeURIComponent(id)}`),
 
-  getReportsGrouped: () => apiFetch<ReportGroup[]>("/api/v1/reports/latest-by-source"),
+  getReportsGrouped: () =>
+    apiFetch<ReportGroup[]>("/api/v1/reports/latest-by-source"),
 
   /**
    * A report's rendered HTML body.
@@ -2071,15 +3380,29 @@ export const api = {
    * Report bodies are authenticated (SEC-112), and an iframe `src` cannot carry
    * an Authorization header — so callers fetch the HTML here and hand it to the
    * iframe as `srcDoc`, keeping the token in a header instead of the URL.
+   *
+   * A chart report does not carry plotly.js; it references the one shared copy
+   * at `/api/v1/reports/assets/` (PERF-267), which a `srcdoc` frame resolves
+   * against the parent origin and the browser caches across reports. Pass
+   * `hydrate` to get that bundle inlined instead — for the Download button,
+   * whose file is opened at `file://` where nothing resolves.
    */
-  getReportHtml: async (id: string): Promise<string> => {
-    const res = await authFetch(`/api/v1/reports/${encodeURIComponent(id)}/html`);
+  getReportHtml: async (
+    id: string,
+    options: { hydrate?: boolean } = {},
+  ): Promise<string> => {
+    const res = await authFetch(
+      `/api/v1/reports/${encodeURIComponent(id)}/html${options.hydrate ? "?hydrate=1" : ""}`,
+    );
     if (!res.ok) throw new Error(`Failed to load report (${res.status})`);
     return res.text();
   },
 
   deleteReport: (id: string) =>
-    apiFetch<{ deleted: boolean }>(`/api/v1/reports/${encodeURIComponent(id)}`, { method: "DELETE" }),
+    apiFetch<{ deleted: boolean }>(
+      `/api/v1/reports/${encodeURIComponent(id)}`,
+      { method: "DELETE" },
+    ),
 
   // ── Routines ──
 
@@ -2089,13 +3412,36 @@ export const api = {
     apiFetch<RoutineInstance[]>("/api/v1/routines/instances"),
 
   getRoutineInstance: (id: string) =>
-    apiFetch<RoutineInstance>(`/api/v1/routines/instances/${encodeURIComponent(id)}`),
-
-  runRoutine: (server: string, name: string, config: Record<string, unknown> = {}) =>
-    apiFetch<{ instance_id: string }>(
-      `/api/v1/routines/run`,
-      { method: "POST", body: JSON.stringify({ routine_name: name, server_name: server, config }) },
+    apiFetch<RoutineInstance>(
+      `/api/v1/routines/instances/${encodeURIComponent(id)}`,
     ),
+
+  /**
+   * Run a routine once.
+   *
+   * `opts` is the conversation behind the run, when there is one: the route
+   * resolves `session_key` into a conversation id, stamps the instance with it
+   * — which is what puts the run in that conversation's dock — and posts the
+   * outcome back into the chat when it lands (`on_complete` defaults to
+   * `notify` there). Omitted, the run is what it always was: nobody's but the
+   * dashboard's.
+   */
+  runRoutine: (
+    server: string,
+    name: string,
+    config: Record<string, unknown> = {},
+    opts?: { sessionKey?: string; attributeTo?: string },
+  ) =>
+    apiFetch<{ instance_id: string }>(`/api/v1/routines/run`, {
+      method: "POST",
+      body: JSON.stringify({
+        routine_name: name,
+        server_name: server,
+        config,
+        ...(opts?.sessionKey ? { session_key: opts.sessionKey } : {}),
+        ...(opts?.attributeTo ? { attribute_to: opts.attributeTo } : {}),
+      }),
+    }),
 
   scheduleRoutine: (
     server: string,
@@ -2103,15 +3449,23 @@ export const api = {
     config: Record<string, unknown> = {},
     interval_sec: number = 300,
   ) =>
-    apiFetch<{ instance_id: string }>(
-      `/api/v1/routines/schedule`,
-      { method: "POST", body: JSON.stringify({ routine_name: name, server_name: server, config, interval_sec }) },
-    ),
+    apiFetch<{ instance_id: string }>(`/api/v1/routines/schedule`, {
+      method: "POST",
+      body: JSON.stringify({
+        routine_name: name,
+        server_name: server,
+        config,
+        interval_sec,
+      }),
+    }),
 
   stopRoutineInstance: (id: string) =>
-    apiFetch<{ stopped: boolean }>(`/api/v1/routines/instances/${encodeURIComponent(id)}/stop`, {
-      method: "POST",
-    }),
+    apiFetch<{ stopped: boolean }>(
+      `/api/v1/routines/instances/${encodeURIComponent(id)}/stop`,
+      {
+        method: "POST",
+      },
+    ),
 
   getRoutineSource: (name: string) =>
     apiFetch<{ filename: string; source: string }>(
@@ -2129,80 +3483,127 @@ export const api = {
     ),
 
   getRoutineHooks: (name: string) =>
-    apiFetch<RoutineHooks>(`/api/v1/routines/${encodeURIComponent(name)}/hooks`),
+    apiFetch<RoutineHooks>(
+      `/api/v1/routines/${encodeURIComponent(name)}/hooks`,
+    ),
 
   saveRoutineHooks: (name: string, hooks: RoutineHooks) =>
-    apiFetch<RoutineHooks>(`/api/v1/routines/${encodeURIComponent(name)}/hooks`, {
-      method: "PUT",
-      body: JSON.stringify(hooks),
-    }),
-
-  // ── Agent Routines & Reports ──
-
-  getAgentRoutines: (slug: string) =>
-    apiFetch<RoutineInfo[]>(`/api/v1/agents/${encodeURIComponent(slug)}/routines`),
-
-  getAgentReports: (slug: string) =>
-    apiFetch<ReportsListResponse>(`/api/v1/agents/${encodeURIComponent(slug)}/reports`),
+    apiFetch<RoutineHooks>(
+      `/api/v1/routines/${encodeURIComponent(name)}/hooks`,
+      {
+        method: "PUT",
+        body: JSON.stringify(hooks),
+      },
+    ),
 
   // ── Settings ──
 
   getSettingsServers: () => apiFetch<ServerInfo[]>("/api/v1/settings/servers"),
 
-  addServer: (data: { name: string; host: string; port: number; username: string; password: string }) =>
+  addServer: (data: {
+    name: string;
+    host: string;
+    port: number;
+    username: string;
+    password: string;
+  }) =>
     apiFetch<{ added: boolean; name: string }>("/api/v1/settings/servers", {
       method: "POST",
       body: JSON.stringify(data),
     }),
 
-  updateServer: (name: string, data: { host?: string; port?: number; username?: string; password?: string }) =>
-    apiFetch<{ updated: boolean }>(`/api/v1/settings/servers/${encodeURIComponent(name)}`, {
-      method: "PUT",
-      body: JSON.stringify(data),
-    }),
+  updateServer: (
+    name: string,
+    data: {
+      host?: string;
+      port?: number;
+      username?: string;
+      password?: string;
+    },
+  ) =>
+    apiFetch<{ updated: boolean }>(
+      `/api/v1/settings/servers/${encodeURIComponent(name)}`,
+      {
+        method: "PUT",
+        body: JSON.stringify(data),
+      },
+    ),
 
   deleteServer: (name: string) =>
-    apiFetch<{ deleted: boolean }>(`/api/v1/settings/servers/${encodeURIComponent(name)}`, {
-      method: "DELETE",
-    }),
+    apiFetch<{ deleted: boolean }>(
+      `/api/v1/settings/servers/${encodeURIComponent(name)}`,
+      {
+        method: "DELETE",
+      },
+    ),
 
   setDefaultServer: (name: string) =>
-    apiFetch<{ default: boolean }>(`/api/v1/settings/servers/${encodeURIComponent(name)}/default`, {
-      method: "POST",
-    }),
+    apiFetch<{ default: boolean }>(
+      `/api/v1/settings/servers/${encodeURIComponent(name)}/default`,
+      {
+        method: "POST",
+      },
+    ),
 
   getGatewayStatus: (server: string) =>
-    apiFetch<GatewayStatus>(`/api/v1/settings/gateway/status?server=${encodeURIComponent(server)}`),
+    apiFetch<GatewayStatus>(
+      `/api/v1/settings/gateway/status?server=${encodeURIComponent(server)}`,
+    ),
 
   startGateway: (server: string, data: { image: string; port?: number }) =>
-    apiFetch<{ started: boolean }>(`/api/v1/settings/gateway/start?server=${encodeURIComponent(server)}`, {
-      method: "POST",
-      body: JSON.stringify(data),
-    }),
+    apiFetch<{ started: boolean }>(
+      `/api/v1/settings/gateway/start?server=${encodeURIComponent(server)}`,
+      {
+        method: "POST",
+        body: JSON.stringify(data),
+      },
+    ),
 
   stopGateway: (server: string) =>
-    apiFetch<{ stopped: boolean }>(`/api/v1/settings/gateway/stop?server=${encodeURIComponent(server)}`, {
-      method: "POST",
-    }),
+    apiFetch<{ stopped: boolean }>(
+      `/api/v1/settings/gateway/stop?server=${encodeURIComponent(server)}`,
+      {
+        method: "POST",
+      },
+    ),
 
   restartGateway: (server: string) =>
-    apiFetch<{ restarted: boolean }>(`/api/v1/settings/gateway/restart?server=${encodeURIComponent(server)}`, {
-      method: "POST",
-    }),
+    apiFetch<{ restarted: boolean }>(
+      `/api/v1/settings/gateway/restart?server=${encodeURIComponent(server)}`,
+      {
+        method: "POST",
+      },
+    ),
 
   pullGatewayImage: (server: string, data: { image: string }) =>
-    apiFetch<{ pulled: boolean; image: string }>(`/api/v1/settings/gateway/pull?server=${encodeURIComponent(server)}`, {
-      method: "POST",
-      body: JSON.stringify(data),
-    }),
+    apiFetch<{ pulled: boolean; image: string }>(
+      `/api/v1/settings/gateway/pull?server=${encodeURIComponent(server)}`,
+      {
+        method: "POST",
+        body: JSON.stringify(data),
+      },
+    ),
 
   getGatewayPullStatus: (server: string) =>
-    apiFetch<{ pull_operations: Record<string, { status: string; progress: string; duration_seconds: number; started_at: number }>; total_operations: number }>(
+    apiFetch<{
+      pull_operations: Record<
+        string,
+        {
+          status: string;
+          progress: string;
+          duration_seconds: number;
+          started_at: number;
+        }
+      >;
+      total_operations: number;
+    }>(
       `/api/v1/settings/gateway/pull-status?server=${encodeURIComponent(server)}`,
     ),
 
   getGatewayLogs: (server: string) =>
-    apiFetch<{ logs: string }>(`/api/v1/settings/gateway/logs?server=${encodeURIComponent(server)}`),
+    apiFetch<{ logs: string }>(
+      `/api/v1/settings/gateway/logs?server=${encodeURIComponent(server)}`,
+    ),
 
   getGatewayNetworks: (server: string) =>
     apiFetch<{ networks: GatewayNetworkInfo[] }>(
@@ -2233,12 +3634,20 @@ export const api = {
     server: string,
     data: { chain: string; private_key: string; set_default?: boolean },
   ) =>
-    apiFetch<{ added: boolean; chain: string; address: string | null; is_default: boolean }>(
+    apiFetch<{
+      added: boolean;
+      chain: string;
+      address: string | null;
+      is_default: boolean;
+    }>(
       `/api/v1/settings/gateway/wallets?server=${encodeURIComponent(server)}`,
       { method: "POST", body: JSON.stringify(data) },
     ),
 
-  setDefaultGatewayWallet: (server: string, data: { chain: string; address: string }) =>
+  setDefaultGatewayWallet: (
+    server: string,
+    data: { chain: string; address: string },
+  ) =>
     apiFetch<{ default: boolean }>(
       `/api/v1/settings/gateway/wallets/default?server=${encodeURIComponent(server)}`,
       { method: "POST", body: JSON.stringify(data) },
@@ -2251,7 +3660,9 @@ export const api = {
     ),
 
   getCredentials: (server: string) =>
-    apiFetch<{ credentials: (CredentialInfo | string)[] }>(`/api/v1/settings/credentials?server=${encodeURIComponent(server)}`),
+    apiFetch<{ credentials: (CredentialInfo | string)[] }>(
+      `/api/v1/settings/credentials?server=${encodeURIComponent(server)}`,
+    ),
 
   getAvailableConnectors: (server: string, type?: string) => {
     let url = `/api/v1/settings/connectors?server=${encodeURIComponent(server)}`;
@@ -2264,11 +3675,17 @@ export const api = {
       `/api/v1/settings/connectors/${encodeURIComponent(name)}/config-map?server=${encodeURIComponent(server)}`,
     ),
 
-  addCredential: (server: string, data: { connector_name: string; credentials: Record<string, string> }) =>
-    apiFetch<{ added: boolean }>(`/api/v1/settings/credentials?server=${encodeURIComponent(server)}`, {
-      method: "POST",
-      body: JSON.stringify(data),
-    }),
+  addCredential: (
+    server: string,
+    data: { connector_name: string; credentials: Record<string, string> },
+  ) =>
+    apiFetch<{ added: boolean }>(
+      `/api/v1/settings/credentials?server=${encodeURIComponent(server)}`,
+      {
+        method: "POST",
+        body: JSON.stringify(data),
+      },
+    ),
 
   deleteCredential: (server: string, connector: string) =>
     apiFetch<{ deleted: boolean }>(
@@ -2295,15 +3712,17 @@ export const api = {
   /** Admin only (403 otherwise), and 409 when `CONDOR_TELEMETRY` is pinned.
    * `off` records a refusal and purges whatever was collected. */
   setTelemetryLevel: (level: TelemetryEffectiveLevel) =>
-    apiFetch<{ level: TelemetryEffectiveLevel; consent: TelemetryConsentState }>(
-      `/api/v1/settings/telemetry?level=${level}`,
-      { method: "PUT" },
-    ),
+    apiFetch<{
+      level: TelemetryEffectiveLevel;
+      consent: TelemetryConsentState;
+    }>(`/api/v1/settings/telemetry?level=${level}`, { method: "PUT" }),
 
   // ── Chat ──
 
   getOpenRouterModels: () =>
-    apiFetch<{ models: OpenRouterModelOption[] }>("/api/v1/chat/openrouter/models"),
+    apiFetch<{ models: OpenRouterModelOption[] }>(
+      "/api/v1/chat/openrouter/models",
+    ),
 
   // ── Sessions (runtime API) ──
   //
@@ -2312,14 +3731,6 @@ export const api = {
 
   getSessionOptions: () =>
     apiFetch<SessionOptionsResponse>("/api/v1/sessions/options"),
-
-  listSessions: () => apiFetch<SessionInfo[]>("/api/v1/sessions"),
-
-  createSession: (spec: CreateSessionRequest) =>
-    apiFetch<SessionInfo>("/api/v1/sessions", {
-      method: "POST",
-      body: JSON.stringify(spec),
-    }),
 
   destroySession: (key: string) =>
     apiFetch<{ destroyed: boolean }>(
@@ -2335,12 +3746,6 @@ export const api = {
       { method: "POST", body: JSON.stringify({ action: "switch", ...body }) },
     ),
 
-  cancelSessionPrompt: (key: string) =>
-    apiFetch<{ ok: boolean }>(
-      `/api/v1/sessions/${encodeURIComponent(key)}/action`,
-      { method: "POST", body: JSON.stringify({ action: "cancel" }) },
-    ),
-
   // ── Conversations (durable transcripts) ──
   //
   // Everything the user has ever said, across Telegram and the dashboard, in
@@ -2354,20 +3759,68 @@ export const api = {
       `/api/v1/conversations/${encodeURIComponent(id)}?limit=${limit}`,
     ),
 
+  /**
+   * What this conversation put into the world (FEAT-110).
+   *
+   * The conversation-shaped sibling of a run's ledger, in the same
+   * `DeploymentRow` shape, so the panel beside the chat and the one in the
+   * agent's Lab are the same component reading the same wire.
+   */
+  getConversationDeployments: (id: string) =>
+    apiFetch<ConversationDeployments>(
+      `/api/v1/conversations/${encodeURIComponent(id)}/deployments`,
+    ),
+
   renameConversation: (id: string, title: string) =>
-    apiFetch<ConversationMeta>(`/api/v1/conversations/${encodeURIComponent(id)}`, {
-      method: "PATCH",
-      body: JSON.stringify({ title }),
-    }),
+    apiFetch<ConversationMeta>(
+      `/api/v1/conversations/${encodeURIComponent(id)}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({ title }),
+      },
+    ),
+
+  /**
+   * Store one image against a conversation; the id goes on the send frame.
+   *
+   * Called at *send* time, not at paste time (FEAT-098): the composer holds the
+   * browser's own `File` objects and previews them with `createObjectURL`, so
+   * nothing is written to disk for a message that is never sent and there is no
+   * orphan to sweep. `authFetch` because the body is `FormData` — forcing
+   * `Content-Type: application/json` on it would be wrong.
+   */
+  uploadAttachment: async (
+    conversationId: string,
+    file: File,
+  ): Promise<ConversationAttachment> => {
+    const body = new FormData();
+    body.append("file", file);
+    const res = await authFetch(
+      `/api/v1/conversations/${encodeURIComponent(conversationId)}/attachments`,
+      { method: "POST", body },
+    );
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}));
+      throw new Error(detail.detail || `Upload failed: ${res.status}`);
+    }
+    return res.json();
+  },
+
+  /** Where the bytes of a stored attachment live. Bearer-guarded, so this is a
+   *  URL for `useAuthedImage` to fetch, never one for an `<img src>`. */
+  attachmentUrl: (conversationId: string, attachmentId: string) =>
+    `/api/v1/conversations/${encodeURIComponent(conversationId)}/attachments/` +
+    encodeURIComponent(attachmentId),
 
   /** The only way to lose a transcript. Killing a session no longer does.
    *  A shared conversation is unshared on the way out — otherwise "delete"
    *  would mean "delete here, keep there". */
   deleteConversation: (id: string) =>
-    apiFetch<{ deleted: boolean; sessions_destroyed: number; unshared: boolean }>(
-      `/api/v1/conversations/${encodeURIComponent(id)}`,
-      { method: "DELETE" },
-    ),
+    apiFetch<{
+      deleted: boolean;
+      sessions_destroyed: number;
+      unshared: boolean;
+    }>(`/api/v1/conversations/${encodeURIComponent(id)}`, { method: "DELETE" }),
 
   // ── Sharing a conversation (FEAT-054) ──
 
@@ -2380,9 +3833,12 @@ export const api = {
     ),
 
   shareConversation: (id: string) =>
-    apiFetch<ShareReceipt>(`/api/v1/sharing/conversations/${encodeURIComponent(id)}`, {
-      method: "POST",
-    }),
+    apiFetch<ShareReceipt>(
+      `/api/v1/sharing/conversations/${encodeURIComponent(id)}`,
+      {
+        method: "POST",
+      },
+    ),
 
   unshareConversation: (id: string) =>
     apiFetch<{ unshared: boolean; conversation_id: string }>(
@@ -2436,11 +3892,17 @@ export const api = {
   // ── Custom OpenAI-compatible LLM endpoints ──
 
   getCustomProviders: () =>
-    apiFetch<{ providers: CustomProvider[] }>("/api/v1/settings/custom-providers"),
+    apiFetch<{ providers: CustomProvider[] }>(
+      "/api/v1/settings/custom-providers",
+    ),
 
   /** Validates the endpoint server-side before saving; rejects with the
    *  provider's own error text (bad key, unreachable host, wrong shape). */
-  addCustomProvider: (data: { base_url: string; api_key?: string; name?: string }) =>
+  addCustomProvider: (data: {
+    base_url: string;
+    api_key?: string;
+    name?: string;
+  }) =>
     apiFetch<{ provider: CustomProvider; models: string[] }>(
       "/api/v1/settings/custom-providers",
       { method: "POST", body: JSON.stringify(data) },
@@ -2469,4 +3931,36 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ ids: ids ?? null }),
     }),
+
+  // ── Web Push (FEAT-083) ──
+  //
+  // The bell with the window closed. Every one of these is scoped to the JWT
+  // server-side: an endpoint in a body is a device to store, never an
+  // authorization to touch someone else's row.
+
+  /** The `applicationServerKey` this browser needs before it can subscribe. */
+  getVapidKey: () => apiFetch<{ public_key: string }>("/api/v1/push/vapid"),
+
+  /** The caller's own subscribed devices. */
+  getPushSubscriptions: () =>
+    apiFetch<{ items: PushSubscriptionRow[] }>("/api/v1/push/subscriptions"),
+
+  /** Register (or re-register) one browser. Upserts on `endpoint`. */
+  pushSubscribe: (body: {
+    endpoint: string;
+    p256dh: string;
+    auth: string;
+    label: string;
+  }) =>
+    apiFetch<{ subscribed: boolean; items: PushSubscriptionRow[] }>(
+      "/api/v1/push/subscribe",
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+
+  /** Forget one of the caller's own devices. */
+  pushUnsubscribe: (endpoint: string) =>
+    apiFetch<{ removed: boolean; items: PushSubscriptionRow[] }>(
+      "/api/v1/push/unsubscribe",
+      { method: "POST", body: JSON.stringify({ endpoint }) },
+    ),
 };

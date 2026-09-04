@@ -38,7 +38,6 @@ from .bots import (
 # Executor formatters
 from .executors import (
     format_executor_detail,
-    format_executor_schema_table,
     format_executor_summary,
     format_executor_types_table,
     format_executors_table,
@@ -58,8 +57,6 @@ from .gateway import (
 
 # Market data formatters
 from .market_data import (
-    format_candles_as_table,
-    format_order_book_as_table,
     format_prices_as_table,
 )
 
@@ -102,8 +99,6 @@ __all__ = [
     "format_positions_as_table",
     # Market data formatters
     "format_prices_as_table",
-    "format_candles_as_table",
-    "format_order_book_as_table",
     # Bot formatters
     "format_bot_logs_as_table",
     "format_active_bots_as_table",
@@ -116,6 +111,5 @@ __all__ = [
     "format_executor_detail",
     "format_positions_held_table",
     "format_positions_summary",
-    "format_executor_schema_table",
     "format_executor_summary",
 ]

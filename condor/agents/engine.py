@@ -3,7 +3,7 @@
 One TickEngine instance per running agent.  Each tick:
 1. Pre-compute core data providers (active executors)
 2. Read journal (learnings + summary + recent decisions)
-3. Build prompt with strategy + data + risk state
+3. Build prompt with strategy + data + risk state + loop state
 4. Spawn a fresh ACP session, stream events, capture tool calls
 5. Save full snapshot and update journal
 """
@@ -31,11 +31,18 @@ from condor.runtime.registry_file import LoopState
 from condor.runtime.timeouts import resolve_tick_timeout
 from condor.telemetry import taps as telemetry_taps
 
+from . import actions as actions_mod
 from .agent import Agent
 from .journal import JournalManager, next_experiment_number, next_session_number
 from .prompts import build_tick_prompt
 from .providers import ProviderRegistry
-from .risk import RiskEngine, RiskLimits, RiskState, auto_approve_with_risk_check
+from .risk import (
+    RefusalLog,
+    RiskEngine,
+    RiskLimits,
+    RiskState,
+    auto_approve_with_risk_check,
+)
 from .strategy import Strategy
 
 log = logging.getLogger(__name__)
@@ -108,9 +115,18 @@ class TickEngine:
     _last_tick_at: float = field(default=0.0, init=False)
     _last_error: str = field(default="", init=False)
     _last_skill_data: dict[str, Any] = field(default_factory=dict, init=False)
-    _cached_routines_section: str | None = field(default=None, init=False, repr=False)
     _adoption_done: bool = field(default=False, init=False, repr=False)
     _mode_mismatch_noted: bool = field(default=False, init=False, repr=False)
+    # What the risk gate refused, and why. The gate appends during the tick
+    # (condor.agents.risk.RefusalLog); the tick drains it into the journal and
+    # into `_last_refusals`, which the NEXT tick's prompt shows the agent — the
+    # only channel that reaches it, since a permission response carries no
+    # reason. Without it a refused call reads to the agent as an approval that
+    # never came, and an unattended agent then waits for a human who is not there.
+    _refusals: "RefusalLog" = field(default_factory=RefusalLog, init=False, repr=False)
+    _last_refusals: list[dict[str, Any]] = field(
+        default_factory=list, init=False, repr=False
+    )
     # Why the loop ended, for the strategy_run telemetry event: "user" unless
     # something in the loop set it first.
     _last_stop_reason: str = field(default="user", init=False, repr=False)
@@ -130,7 +146,7 @@ class TickEngine:
         # The journal/sessions/learnings hang off the *strategy* dir (one level
         # below the Agent), so each playbook keeps its own operational history
         # while the Agent's brain (memory/skills) stays shared at the parent.
-        strategy_dir = self.strategy.dir
+        strategy_dir = self.strategy.home
         mode = self.config.get("execution_mode", "loop")
         self.is_experiment = mode in ("dry_run", "run_once")
 
@@ -475,6 +491,9 @@ class TickEngine:
         positions_result = skill_results.get("positions")
         if positions_result:
             self._last_skill_data["positions"] = positions_result.data
+        drift_result = skill_results.get("drift")
+        if drift_result:
+            self._last_skill_data["drift"] = drift_result.data
 
         # Convert provider results to summary strings
         core_data_summaries: dict[str, str] = {
@@ -496,6 +515,7 @@ class TickEngine:
         risk_state.total_exposure = float(
             self._last_skill_data.get("total_exposure", 0.0) or 0.0
         )
+        self._apply_drift_verdict(risk_state, drift_result)
 
         # Hard kill-switch: escalate to an emergency winddown before the soft
         # pause below. Experiments never trade for real, so they never shut down.
@@ -517,14 +537,18 @@ class TickEngine:
             return
 
         # 5. Build prompt (server credentials are injected via env into MCP process)
-        # Cache routine discovery on first tick — routines rarely change mid-session
-        if self._cached_routines_section is None:
-            from .prompts import _build_routines_section
+        # Routine discovery is read fresh each tick, like the skills index right
+        # below it. It used to be cached on the first tick on the grounds that
+        # "routines rarely change mid-session" — FEAT-090 made that false: an
+        # operator switching a routine off for this agent expects it to leave
+        # the loop's prompt, and a loop that has been running for a week would
+        # otherwise never notice. Discovery is a directory walk, once per tick.
+        from .prompts import _build_routines_section
 
-            try:
-                self._cached_routines_section = _build_routines_section(self.strategy)
-            except Exception:
-                self._cached_routines_section = ""
+        try:
+            routines_section = _build_routines_section(self.strategy)
+        except Exception:
+            routines_section = ""
 
         # User memory index (advisory) — read fresh each tick so memory written
         # by the chat or by the agent itself shows up promptly. It's a small file
@@ -567,6 +591,15 @@ class TickEngine:
             except Exception:
                 log.exception("TickEngine %s: canvas read failed", self.agent_id)
 
+        # Scratch cursors this strategy owns (condor.runtime.state). Whatever
+        # the dashboard or an attended session left there is shown to the tick;
+        # an unreadable state file must not take the tick down with it.
+        try:
+            loop_state = self.state.list()
+        except Exception:
+            log.exception("TickEngine %s: loop state read failed", self.agent_id)
+            loop_state = {}
+
         prompt = build_tick_prompt(
             agent=self.agent,
             strategy=self.strategy,
@@ -578,12 +611,14 @@ class TickEngine:
             risk_state=risk_state.to_dict(),
             tick_number=next_tick,
             agent_id=self.agent_id,
-            cached_routines_section=self._cached_routines_section or None,
+            cached_routines_section=routines_section or None,
             user_memory=user_memory,
             skills_index=skills_index,
             ledger=self.ledger,
             canvas=canvas_text,
             canvas_nudge=canvas_nudge,
+            loop_state=loop_state,
+            refusals=self._last_refusals,
         )
 
         # 6. Create a fresh agent client per tick (clean context window)
@@ -625,6 +660,12 @@ class TickEngine:
         response_text = "".join(response_chunks)
         tick_duration = time.time() - self._last_tick_at
 
+        # What the gate refused this tick, taken before either branch below so a
+        # dry run and a live tick both carry it. It reaches the agent through the
+        # next tick's prompt; the journal entry below is for the human reading
+        # the session afterwards.
+        self._last_refusals = self._refusals.drain()
+
         from datetime import datetime, timezone
 
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -635,7 +676,7 @@ class TickEngine:
             from .journal import save_experiment_snapshot
 
             save_experiment_snapshot(
-                agent_dir=self.strategy.dir,
+                agent_dir=self.strategy.home,
                 experiment_num=self.session_num,
                 execution_mode=mode,
                 timestamp=timestamp,
@@ -655,15 +696,42 @@ class TickEngine:
                 len(response_text),
             )
         else:
+            # What the tick actually *did*, as opposed to what it said (FEAT-097).
+            # Derived here rather than at stream time because the outcome of a
+            # call is only known once its terminal update has folded in, and a
+            # log whose whole purpose is "what it did" must not record intent.
+            # The tick number is the one ``record_tick`` is about to assign
+            # (it increments and returns the counter), needed here because the
+            # same call wants the action *count* for journal.md's Ticks line —
+            # which has read ``actions=0`` on every tick ever written.
+            tick_actions = actions_mod.actions_from_tool_calls(
+                tool_calls, tick=self.journal.tick_count + 1, at=time.time()
+            )
+
+            # And what it took ownership of (FEAT-102). Derived from the same
+            # folded list, so a deploy that is logged is a deploy that is owned.
+            # The risk gate already claims a deploy on its way *in*
+            # (``condor.agents.risk``), but only when the permission callback
+            # fires and only if it could read the arguments; this claims it on
+            # the way out, from the call that actually completed. ``note_deploy``
+            # is idempotent and never downgrades an adopted bot, so the two
+            # claims cost nothing — and the gate's earlier ``since`` is the
+            # correct attribution window, which is why it stays.
+            if self.ledger is not None:
+                for bot_name in actions_mod.deployed_bot_names(tool_calls):
+                    self.ledger.note_deploy(bot_name)
+
             # Sessions: full journal tracking. Every journal.md update of this
             # tick goes into one batch, so the file is rewritten once instead of
             # three-to-five times (PERF-136).
             with self.journal.batch():
                 tick_num = self.journal.record_tick(
                     response_summary=response_text[:500],
+                    actions=len(tick_actions),
                 )
 
                 self._journal_ownership_violations(tick_num)
+                self._journal_refusals(tick_num)
                 self._journal_mode_mismatch(tick_num)
 
                 skill_pnl = self._last_skill_data.get("total_pnl", 0.0)
@@ -700,6 +768,7 @@ class TickEngine:
                 risk_state=risk_state.to_dict(),
                 duration=tick_duration,
             )
+            actions_mod.append_actions(self.session_dir, tick_actions)
 
             # Live session report (FEAT-036). Deterministic render over data we
             # already hold — no tokens. The guard is load-bearing: a charting or
@@ -728,6 +797,46 @@ class TickEngine:
                 len(response_text),
             )
 
+    def _apply_drift_verdict(self, risk_state, drift_result) -> None:
+        """Carry the venue check's verdict into the risk state ([[FEAT-113]]).
+
+        The drift figures always reach the prompt, so the agent reads the same
+        verdict the gate acted on. Whether they *bind* is the operator's call:
+        with ``max_drift_quote`` at its -1 default nothing is ever blocked,
+        because small drift is normal and an install that blocked on dust would
+        be taught to raise the limit until it never fired.
+
+        Enabled, it fails closed the way ``get_state`` already does for missing
+        metrics: a venue that did not answer, a drift past the limit, or a drift
+        provider that failed outright all leave the book untrusted — and an
+        untrusted book refuses new exposure while every brake still passes.
+        """
+        if drift_result is None:
+            return
+
+        data = drift_result.data or {}
+        worst = data.get("worst_quote")
+        risk_state.drift_quote = worst
+
+        limit = self.risk.limits.max_drift_quote
+        if limit < 0:
+            return
+
+        if not data:
+            risk_state.book_trusted = False
+            risk_state.drift_reason = "the venue check did not run"
+        elif not data.get("trusted", True):
+            risk_state.book_trusted = False
+            risk_state.drift_reason = (
+                f"venue unanswered: {data.get('reason') or 'no reason given'}"
+            )
+        elif worst is not None and worst > limit:
+            risk_state.book_trusted = False
+            risk_state.drift_reason = (
+                f"drift ${worst:,.2f} on your controllers exceeds the "
+                f"${limit:,.2f} limit"
+            )
+
     async def _adopt_running_bots(self, client) -> None:
         """Record the bots already live that belong to us (FEAT-017).
 
@@ -751,15 +860,36 @@ class TickEngine:
             log.warning("TickEngine %s: bot adoption deferred (%s)", self.agent_id, e)
             return
 
-        from .ownership import prior_session_bases, strip_deploy_suffix
+        from .ownership import prior_session_bases, read_disowned, strip_deploy_suffix
+
+        # What a person has said is *not* ours, which outranks all three sources
+        # below. Every one of them is an inference from a name or a log, and a
+        # mis-attributed bot is one somebody has to be able to hand back — a
+        # namespace match cannot be argued with, and a recorded deploy is a
+        # permanent fact that would otherwise re-claim the bot on every restart
+        # for the life of the strategy.
+        disowned = read_disowned(getattr(self.strategy, "home", None))
 
         inherited: set[str] = set()
         if not self.ledger.enforced and self.session_dir is not None:
             inherited = prior_session_bases(self.session_dir.parent)
 
+        # A third source, as conservative as the other two: the bases this
+        # session's *own* action log records deploying (FEAT-102). Reading back
+        # what we wrote is a record, not a guess, and it is what lets a restart
+        # — or a session whose first ticks predate this feature — recover its
+        # fleet on the next tick instead of never.
+        recorded = {
+            strip_deploy_suffix(name)
+            for name in actions_mod.recorded_deploy_names(self.session_dir)
+        }
+        inherited |= {base for base in recorded if base}
+
         now = time.time()
         for instance_name in all_perf:
             base = strip_deploy_suffix(instance_name)
+            if base in disowned:
+                continue
             if self.ledger.owns(instance_name) or base in inherited:
                 self.ledger.adopt(instance_name, now)
         self._adoption_done = True
@@ -846,6 +976,25 @@ class TickEngine:
                 f"namespace '{self.ledger.namespace}'",
             )
 
+    def _journal_refusals(self, tick_num: int) -> None:
+        """Record what the risk gate refused this tick, and why.
+
+        The sibling of :meth:`_journal_ownership_violations`, for the rest of
+        the gate. The same drained list goes into the next tick's prompt: a
+        cancelled call is all the model sees at the time, and read bare it is
+        indistinguishable from a confirmation nobody answered. Told the reason
+        instead, the agent can resize, change tack, or stop — the three things an
+        unattended seat can actually do about it.
+        """
+        if not self._last_refusals or not self.journal:
+            return
+        for entry in self._last_refusals:
+            self.journal.append_action(
+                tick_num,
+                "risk_blocked",
+                f"{entry['tool']} refused — {entry['reason']}",
+            )
+
     async def _collect_stream(self, acp_client: ACPClient, prompt: str):
         """Wrapper to make prompt_stream compatible with wait_for."""
         async for event in acp_client.prompt_stream(prompt):
@@ -869,11 +1018,15 @@ class TickEngine:
         mode = self.config.get("execution_mode", "loop")
 
         # A configured server pins the toolset; None falls back to the chat's.
+        # tick=True narrows both subprocesses to the loop profile (FEAT-066).
+        # This seat runs unattended behind an auto-approving permission callback,
+        # so what it can reach at all is decided here, by what gets mounted.
         mcp_servers = toolsets.build_mcp_servers_for_session(
             self.user_id,
             self.chat_id,
             server_name=self.config.get("server_name"),
             agent_slug=self.agent.slug,
+            tick=True,
         )
         permission_cb = auto_approve_with_risk_check(
             self.risk,
@@ -882,6 +1035,8 @@ class TickEngine:
             ledger=self.ledger,
             agent_id=self.agent_id,
             price_client=price_client,
+            refusals=self._refusals,
+            executor_owners=self._executor_owners(),
         )
 
         # Shared factory (ARCH-192). Engine specifics: an explicit model_base_url
@@ -903,6 +1058,32 @@ class TickEngine:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _executor_owners(self) -> dict[str, str]:
+        """This session's executors as ``id -> controller_id`` (SEC-559).
+
+        The gate binds ``stop_executor`` to the session with this: an id in here
+        is one of ours, so the common stop costs no extra API call. It reads the
+        snapshot the tick already fetched to build the prompt — ``all_executors``
+        is the full set (the session's own tag plus every row of the bots its
+        ledger owns), with the RUNNING-only ``executors`` as the fallback for a
+        provider result that carries no full set.
+        """
+        rows = (
+            self._last_skill_data.get("all_executors")
+            or self._last_skill_data.get("executors")
+            or []
+        )
+        if not isinstance(rows, list):
+            return {}
+        owners: dict[str, str] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            executor_id = str(row.get("id") or "")
+            if executor_id:
+                owners[executor_id] = str(row.get("controller_id") or "")
+        return owners
 
     def _agent_key(self) -> str:
         """Resolve the model for this run: config override > strategy override > Agent."""

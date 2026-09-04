@@ -15,9 +15,18 @@ string is a secret; we are replacing strings we know are ours.
 **Tier 2 — structural patterns.** Only for shapes that cannot plausibly be
 anything else: an EVM address, a 64-hex blob, a base58 address, a prefixed API
 token, a long mixed-case secret run, an email, a URL carrying a query string or
-userinfo, an IP, a seed-phrase-shaped run of words. Everything here is
-best-effort by construction, which is why the feature ships an explicit button
-whose dialog shows the user the exact bytes before anything is sent.
+userinfo, an IP, a seed-phrase-shaped run of words, a 64-byte Solana keypair
+array. Everything here is
+best-effort by construction, and it now has two consumers with very different
+safety nets behind it. An explicit share ends in a dialog that shows the user
+the exact bytes before anything is sent, so a pattern that misses is at least
+visible. The sweep in :mod:`condor.sharing.sweep` sends what nobody has read:
+there **the scrubber is the last gate**, and the compensating controls are the
+ones that module's docstring holds — a narrow definition of what may be taken
+at all, a chip in the header that cannot be dismissed while it happens, and
+revocation after. Calibrate a new pattern against the sweep rather than the
+dialog. It is the stricter of the two callers, and the "nothing was replaced"
+the dialog prints is only ever as honest as the pattern that produced it.
 
 **Pseudonyms are stable and one-way.** ``TAG_{hmac_sha256(share_secret, value)[:6]}``.
 Within a transcript the same wallet is the same ``SOL_ADDR_a3f91c`` in every
@@ -42,9 +51,25 @@ import hmac
 import logging
 import os
 import re
+import types
 from pathlib import Path
+from typing import Any, Union, get_args, get_origin
+
+from pydantic_core import PydanticUndefined
 
 from condor.runtime.conversations import TurnEntry
+from condor.runtime.secrets import HEX64_RE as _HEX64_RE
+from condor.runtime.secrets import KEYPAIR_ARRAY_RE as _KEYPAIR_RE
+from condor.runtime.secrets import MNEMONIC as _MNEMONIC
+from condor.runtime.secrets import SEED_CANDIDATE_RE as _WORD_RUN_RE
+from condor.runtime.secrets import SOLANA_KEYPAIR as _SOLANA_KEYPAIR
+from condor.runtime.secrets import (
+    bip39_words,
+    is_keypair_array,
+    keypair_array_spans,
+    keypair_array_text,
+    phrase_spans,
+)
 
 log = logging.getLogger(__name__)
 
@@ -72,8 +97,27 @@ TIER2_CATEGORIES = (
     "url",
     "ip",
     "seed_phrase",
+    "solana_keypair",
 )
 CATEGORIES = TIER1_CATEGORIES + TIER2_CATEGORIES
+
+# The shapes ``condor.runtime.secrets`` is certain enough to *eat* at ingress,
+# each mapped to the tier-2 category that catches the same shape here.
+#
+# The two modules were already meant to share one calibration, and for the
+# phrase shape they did; the keypair array was certain at ingress and invisible
+# at egress for a release (SEC-331). That gap is not a missing regex so much as
+# a missing statement that the two sets have to match, because the ingress gate
+# does not cover for this one: ``secrets.redact`` runs on what the *user typed*,
+# while a key reaches a transcript through a tool payload — a read of
+# ``id.json``, a ``run_code`` stdout — that no funnel ever saw, and archived
+# turns predate ingress redaction entirely. For those, this module is the last
+# gate. The guard test in ``tests/test_sharing_scrub.py`` fails when
+# ``secrets.KINDS`` grows a certain kind this table does not name.
+CERTAIN_KIND_CATEGORIES: dict[str, str] = {
+    _MNEMONIC: "seed_phrase",
+    _SOLANA_KEYPAIR: "solana_keypair",
+}
 
 _TAGS = {
     "known_key": "API_KEY",
@@ -91,6 +135,7 @@ _TAGS = {
     "url": "URL",
     "ip": "IP",
     "seed_phrase": "SEED_PHRASE",
+    "solana_keypair": "SOLANA_KEYPAIR",
 }
 
 # Categories whose value is case-insensitive on the wire, so the pseudonym has
@@ -105,9 +150,20 @@ _CASE_FOLDED = frozenset({"evm_addr", "hex64", "ip", "email", "known_url"})
 _MIN_KNOWN_CHARS = 4
 _MIN_KNOWN_DIGITS = 6
 
-# Nesting past this is not walked, matching ``_redact``'s bound in
-# ``condor.runtime.conversations``: the payload came from a tool we do not own.
-_MAX_DEPTH = 6
+# Nesting past this is not walked, and what sits there is elided rather than
+# emitted: the payload came from a tool we do not own, so an unwalked value is
+# one this module cannot promise is clean.
+#
+# One deeper than ``_REDACT_MAX_DEPTH`` in ``condor.runtime.conversations`` so
+# the two budgets line up where it matters. ``_redact`` runs on a tool call's
+# ``input`` dict from depth 0, while :meth:`Scrubber.turn` enters at the *call*
+# and reaches ``input`` at depth 1 — the extra level pays for that offset, so a
+# value ``_redact`` kept on disk is a value this still walks.
+_MAX_DEPTH = 7
+
+# What replaces a container sitting at the cap — ``_redact``'s own marker, so a
+# transcript reads the same whichever gate elided it.
+_ELIDED = "…"
 
 # ── Tier 2 patterns ──────────────────────────────────────────────────────
 #
@@ -126,7 +182,6 @@ _MAX_DEPTH = 6
 _NOT_ID_BEFORE = r"(?<![A-Za-z0-9_\-])"
 _NOT_ID_AFTER = r"(?![A-Za-z0-9_\-])"
 
-_HEX64_RE = re.compile(r"0x[0-9a-fA-F]{64}" + _NOT_ID_AFTER)
 _EVM_RE = re.compile(r"0x[0-9a-fA-F]{40}" + _NOT_ID_AFTER)
 _TOKEN_RE = re.compile(
     _NOT_ID_BEFORE
@@ -152,52 +207,108 @@ _IPV4_RE = re.compile(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])")
 _IPV6_RE = re.compile(
     r"(?<![0-9A-Fa-f:])(?:[0-9A-Fa-f]{1,4}:){3,7}[0-9A-Fa-f]{1,4}(?![0-9A-Fa-f:])"
 )
-# Twelve or more consecutive lowercase words of 3–8 letters, single-spaced —
-# the shape of a BIP-39 recovery phrase, and the *candidate* for one. Shape
-# alone is not enough in either direction: an English sentence can reach twelve
-# long words, and a real phrase can repeat one, so neither a prose test nor a
-# distinctness test decides this. :func:`_seed_phrase` decides it against the
-# vendored wordlist, where membership is exact.
-_WORD_RUN_RE = re.compile(
-    _NOT_ID_BEFORE + r"[a-z]{3,8}(?: [a-z]{3,8}){11,}" + _NOT_ID_AFTER
-)
-
-# The shortest run of wordlist entries treated as a phrase. Twelve is the
-# smallest mnemonic BIP-39 defines, so a shorter run is a coincidence.
-SEED_MIN_WORDS = 12
-
-_BIP39_PATH = Path(__file__).resolve().parent / "bip39_english.txt"
-_bip39: frozenset[str] | None = None
-
-
-def bip39_words() -> frozenset[str]:
-    """The vendored BIP-39 English wordlist, read once.
-
-    Vendored rather than guessed at. The alternative was a structural heuristic
-    — "twelve short lowercase words that never repeat" — and it failed in the
-    direction that matters: BIP-39's own test vector (``legal winner thank year
-    wave sausage worth useful legal winner thank yellow``) repeats three words,
-    so a distinctness rule waves a real recovery phrase straight through. 14 kB
-    of exact membership buys both directions at once.
-
-    The file is the canonical list, sha256
-    ``2f5eed53a4727b4bf8880d8f3f199efc90e58503646d9ff8eff3a2ed3b24dbda``, 2048
-    words, ``abandon`` to ``zoo``. A missing or unreadable file degrades to no
-    phrase detection rather than failing the share — tier 2's other patterns and
-    the user's own eyes are still in front of it.
-    """
-    global _bip39
-    if _bip39 is None:
-        try:
-            _bip39 = frozenset(_BIP39_PATH.read_text(encoding="utf-8").split())
-        except OSError:  # pragma: no cover - a mangled install
-            log.warning("Sharing could not read the BIP-39 wordlist", exc_info=True)
-            _bip39 = frozenset()
-    return _bip39
+# The shapes a recovery phrase can be pasted in, the wordlist that decides
+# whether a run of words is one, the scan that finds the runs, and the
+# ``[64 ints]`` keypair array with the 0–255 bound that decides *it*, all live
+# in ``condor.runtime.secrets``. That module answers the same question at
+# *ingress* — before a pasted phrase reaches the model or the first disk write
+# — and two copies of a detector is two calibrations, only one of which anyone
+# is ever looking at. What stays here is what is the scrubber's own business:
+# the pseudonym, the count, and the category name on the wire.
+#
+# ``bip39_words`` is re-exported for the guard test that asserts the vendored
+# list is the canonical one.
 
 
 def _octets_ok(match: str) -> bool:
     return all(part.isdigit() and int(part) <= 255 for part in match.split("."))
+
+
+# ── What the scrubber covers ─────────────────────────────────────────────
+#
+# ``wire.envelope`` posts ``model_dump()`` of the *whole* entry, so every field
+# this module does not touch travels verbatim. Naming the fields here — text,
+# thought, tool_calls — would leave the redaction rule owned by one module and
+# silently depended on by another, and it would fail **open**: a field added
+# later by someone who has never opened ``condor/sharing/`` would ship
+# unredacted, and no test would fail, because none of them enumerate the model.
+#
+# So coverage is derived from ``TurnEntry`` itself. Each field is placed in a
+# bucket by its declared type:
+#
+#   ``TEXT``     a string — scrubbed through :meth:`Scrubber.text`
+#   ``PAYLOAD``  a container — walked by :meth:`Scrubber.payload`
+#   ``SCALAR``   a number or a flag — no free text can hide in one
+#
+# ``extra="ignore"`` on ``TurnEntry`` makes the declared fields the whole
+# surface, so the enumeration is complete by construction, and a new text field
+# is redacted the day it is added rather than the day someone notices.
+#
+# A field whose type fits no bucket — a nested model, say — is left
+# ``UNCLASSIFIED`` and never travels: :meth:`Scrubber.turn` drops it to its
+# default, or refuses the share outright if it has none. That is the same move
+# ``ATTRIBUTABLE_SURFACES`` makes for an unrecognised surface. The guard test in
+# ``tests/test_sharing_scrub.py`` fails on the same condition, so a build breaks
+# before it can take that path.
+
+TEXT = "text"
+PAYLOAD = "payload"
+SCALAR = "scalar"
+UNCLASSIFIED = ""
+
+BUCKETS = (TEXT, PAYLOAD, SCALAR)
+
+_SCALAR_TYPES = (bool, int, float)
+_PAYLOAD_TYPES = (list, tuple, set, frozenset, dict)
+
+
+def classify(annotation) -> str:
+    """The bucket one field annotation falls into, or :data:`UNCLASSIFIED`."""
+    if annotation is str:
+        return TEXT
+    if annotation in _SCALAR_TYPES:
+        return SCALAR
+    if annotation is Any:
+        return PAYLOAD  # unknown at rest, and ``payload`` walks anything
+    origin = get_origin(annotation)
+    if origin in (Union, types.UnionType):
+        # ``str | None`` is text. A union of buckets is walked as a payload,
+        # which handles a string, a container and a scalar alike.
+        inner = {classify(arg) for arg in get_args(annotation) if arg is not type(None)}
+        if UNCLASSIFIED in inner or not inner:
+            return UNCLASSIFIED
+        return inner.pop() if len(inner) == 1 else PAYLOAD
+    container = origin or annotation
+    if isinstance(container, type) and issubclass(container, _PAYLOAD_TYPES):
+        return PAYLOAD
+    return UNCLASSIFIED
+
+
+#: ``{field name: bucket}`` for every field ``TurnEntry`` declares, computed
+#: once at import. The guard test reads this.
+TURN_FIELDS: dict[str, str] = {
+    name: classify(field.annotation) for name, field in TurnEntry.model_fields.items()
+}
+
+
+def _dropped(name: str, value):
+    """An unclassified field, removed from the share rather than sent raw.
+
+    Fail closed: a shape this module does not know how to walk is a shape it
+    cannot promise is clean. ``TurnEntry``'s growth contract says every field
+    past ``role`` carries a default that reads as "not recorded", so dropping to
+    that default is both valid and honest. A field with no default cannot be
+    dropped, so the share does not go at all — the sweep catches that per
+    conversation and the button reports it.
+    """
+    default = TurnEntry.model_fields[name].get_default(call_default_factory=True)
+    if default is PydanticUndefined:
+        raise ValueError(
+            f"Sharing cannot classify the required turn field {name!r}; "
+            "teach condor.sharing.scrub.classify about it before sharing."
+        )
+    log.warning("Sharing dropped the unclassified turn field %r from a share", name)
+    return default
 
 
 class Scrubber:
@@ -272,12 +383,42 @@ class Scrubber:
         A key is the tool author's contract — ``_redact`` already replaced the
         credential-shaped ones by name before this ever reached disk. A value is
         what a model or an exchange wrote, so it is what this has to look at.
+
+        One value is judged as a *container* rather than as a leaf: a Solana
+        keypair spelled as a real list of 64 ints. That is a deliberate change
+        of type on the wire — the list leaves as the string
+        ``SOLANA_KEYPAIR_a3f91c``, exactly what the same key pasted as text
+        already becomes — and it is safe here because a payload is
+        schemaless by construction: the walk already rewrites strings in place,
+        every reader of a share is a reader of arbitrary tool JSON, and
+        ``turn`` splices a top-level payload list element by element, so no
+        declared ``TurnEntry`` field can change type. Leaving the list a list
+        would mean either emitting a fake 64-byte array or 64 pseudonyms for
+        one secret, both of which say less than the tag does.
         """
         if depth >= _MAX_DEPTH:
+            # Fail closed, like ``_dropped`` and like ``_redact``'s own cap: a
+            # leaf string is cheap to scrub and has nothing below it to walk, so
+            # it still gets a pseudonym; anything with more structure under it is
+            # elided rather than handed to the collector unread.
+            if isinstance(value, str):
+                return self.text(value)
+            if isinstance(value, (dict, list, tuple)):
+                return _ELIDED
             return value
         if isinstance(value, dict):
             return {str(k): self.payload(v, depth + 1) for k, v in value.items()}
         if isinstance(value, (list, tuple)):
+            if is_keypair_array(value):
+                # The one secret that is not a leaf. Every tier-2 pattern reads
+                # a string, so a keypair that arrived as a real JSON array —
+                # ``json.load`` of an ``id.json``, a tool that returned the
+                # bytes rather than printing them — walked out of here as 64
+                # harmless numbers (SEC-336). The list is replaced whole,
+                # because the secret *is* the list: replacing its elements one
+                # by one would either leak the rest or emit 64 pseudonyms for
+                # one key.
+                return self._hit("solana_keypair", keypair_array_text(value))
             return [self.payload(v, depth + 1) for v in value]
         if isinstance(value, str):
             return self.text(value)
@@ -286,17 +427,32 @@ class Scrubber:
     def turn(self, entry: TurnEntry) -> TurnEntry:
         """One transcript line, scrubbed into a new entry.
 
+        Every field the model declares, by its declared type — see the note
+        above :data:`TURN_FIELDS` for why the fields are read off the model
+        rather than named here.
+
         ``TurnEntry`` *is* the wire format for a share — the model already on
         disk, not a parallel extraction path — so the scrubbed turn is the same
         type and every existing reader of a transcript can read a share.
         """
-        return entry.model_copy(
-            update={
-                "text": self.text(entry.text),
-                "thought": self.text(entry.thought),
-                "tool_calls": [self.payload(call) for call in entry.tool_calls],
-            }
-        )
+        update: dict = {}
+        for name, bucket in TURN_FIELDS.items():
+            if bucket == SCALAR:
+                continue
+            value = getattr(entry, name)
+            if bucket == TEXT:
+                update[name] = self.text(value) if isinstance(value, str) else value
+            elif bucket == PAYLOAD:
+                # Each element from depth 0, so a tool call is walked exactly as
+                # deep as it was when this loop named ``tool_calls`` itself.
+                update[name] = (
+                    [self.payload(item) for item in value]
+                    if isinstance(value, (list, tuple))
+                    else self.payload(value)
+                )
+            else:
+                update[name] = _dropped(name, value)
+        return entry.model_copy(update=update)
 
 
 # ── Tier-2 handlers ──────────────────────────────────────────────────────
@@ -331,42 +487,48 @@ def _url(scrubber: "Scrubber", category: str, match: re.Match) -> str:
 
 
 def _seed_phrase(scrubber: "Scrubber", category: str, match: re.Match) -> str:
-    """Replace each maximal run of ``SEED_MIN_WORDS``+ wordlist entries.
+    """Replace each maximal run of wordlist entries inside the candidate.
 
-    The regex only found a candidate of the right *shape*; membership is what
-    decides. Scanning inside the candidate rather than judging it whole is what
-    lets a phrase pasted mid-sentence be caught without taking the sentence
-    around it: "my phrase is ``abandon … zoo`` please check" loses the phrase
-    and keeps the question.
+    The regex only found a candidate of the right *shape*;
+    :func:`condor.runtime.secrets.phrase_spans` decides which parts of it are
+    really a phrase, and returns those parts as offsets. Everything between
+    them — the prose a phrase was pasted into, the "and it is not working"
+    after it — is re-emitted byte for byte, line breaks and numbering intact.
     """
-    words = bip39_words()
-    if not words:
-        return match.group(0)
-
-    tokens = match.group(0).split(" ")
+    src = match.group(0)
+    spans = phrase_spans(src)
+    if not spans:
+        return src
     out: list[str] = []
-    run: list[str] = []
+    cursor = 0
+    for start, end in spans:
+        out.append(src[cursor:start])
+        out.append(scrubber._hit(category, src[start:end]))
+        cursor = end
+    out.append(src[cursor:])
+    return "".join(out)
 
-    def flush() -> None:
-        if len(run) >= SEED_MIN_WORDS:
-            out.append(scrubber._hit(category, " ".join(run)))
-        else:
-            out.extend(run)
-        run.clear()
 
-    for token in tokens:
-        if token in words:
-            run.append(token)
-        else:
-            flush()
-            out.append(token)
-    flush()
-    return " ".join(out)
+def _keypair(scrubber: "Scrubber", category: str, match: re.Match) -> str:
+    """Replace the candidate only if every one of its 64 elements is a byte.
+
+    The regex found the *shape* — a bracketed run of exactly 64 small ints —
+    and :func:`condor.runtime.secrets.keypair_array_spans` decides whether that
+    run is really a key, the same division of labour ``_seed_phrase`` makes with
+    :func:`phrase_spans` and ``_ipv4`` makes with ``_octets_ok``. The bound is
+    the whole guard: a 64-long list of numbers is not rare in a tool result, and
+    a corpus in which any of them came back as ``SOLANA_KEYPAIR_a3f91c`` would
+    be silently corrupted. Out-of-range elements leave it byte for byte, exactly
+    as ``999.1.1.1`` survives ``_ipv4``.
+    """
+    src = match.group(0)
+    return scrubber._hit(category, src) if keypair_array_spans(src) else src
 
 
 # Order matters — see the note above the patterns.
 _PATTERNS: tuple[tuple[str, re.Pattern, object], ...] = (
     ("seed_phrase", _WORD_RUN_RE, _seed_phrase),
+    ("solana_keypair", _KEYPAIR_RE, _keypair),
     ("url", _URL_RE, _url),
     ("email", _EMAIL_RE, _plain),
     ("hex64", _HEX64_RE, _plain),
@@ -443,6 +605,20 @@ def install_values(user_id: int | str | None = None) -> list[tuple[str, str]]:
     ):
         add(os.environ.get(var, ""), "known_key")
 
+    # This install's VAPID signing key (FEAT-083). Tier 1 and not a tier-2
+    # pattern on purpose: a raw P-256 scalar is 43 base64url characters, which
+    # is also an id, a digest and half the opaque strings in a transcript, so
+    # the shape is not decidable -- but the *value* is one this install knows,
+    # which is exactly what this table is for. It reaches a transcript by one
+    # plausible route, and it is the likeliest one: an operator debugging "push
+    # stopped working" pastes the key file into the chat.
+    try:
+        from condor.push import configured_private_key
+
+        add(configured_private_key(), "known_key")
+    except Exception:  # noqa: BLE001 - no key is the common case, not a failure
+        log.debug("Sharing could not read the VAPID key", exc_info=True)
+
     # This user's own saved endpoints and wallets.
     if user_id is not None:
         try:
@@ -473,6 +649,26 @@ def install_values(user_id: int | str | None = None) -> list[tuple[str, str]]:
     return values
 
 
+def scrubber(
+    *,
+    secret: str,
+    user_id: int | str | None = None,
+    known: list[tuple[str, str]] | None = None,
+) -> Scrubber:
+    """One share's :class:`Scrubber`, with the install's table already built.
+
+    The factory exists so a caller that scrubs turn by turn — :func:`bound`,
+    which redacts only the turns it admits — builds the known-value table the
+    same way :func:`scrub` does, rather than reassembling it at the call site.
+    Read ``counts`` off the returned object once the last turn has gone through.
+
+    ``known`` is injectable so a test can state the install's values instead of
+    inheriting the developer's; production passes ``user_id`` and lets
+    :func:`install_values` build it.
+    """
+    return Scrubber(secret, known if known is not None else install_values(user_id))
+
+
 def scrub(
     turns: list[TurnEntry],
     *,
@@ -480,12 +676,6 @@ def scrub(
     user_id: int | str | None = None,
     known: list[tuple[str, str]] | None = None,
 ) -> tuple[list[TurnEntry], dict[str, int]]:
-    """``(scrubbed turns, counts)`` — the whole of what a share is allowed to be.
-
-    ``known`` is injectable so a test can state the install's values instead of
-    inheriting the developer's; production passes ``user_id`` and lets
-    :func:`install_values` build it.
-    """
-    table = known if known is not None else install_values(user_id)
-    scrubber = Scrubber(secret, table)
-    return [scrubber.turn(turn) for turn in turns], scrubber.counts
+    """``(scrubbed turns, counts)`` — the whole of what a share is allowed to be."""
+    one = scrubber(secret=secret, user_id=user_id, known=known)
+    return [one.turn(turn) for turn in turns], one.counts
