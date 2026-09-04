@@ -75,12 +75,14 @@ from condor.fetchers.performance_history import (
 from condor.fetchers.portfolio import fetch_portfolio, fetch_portfolio_history
 from condor.fetchers.positions import fetch_positions
 from condor.fetchers.server_status import fetch_server_status
+from condor.fetchers.tracked_positions import fetch_tracked_positions
 from condor.fetchers.trading_rules import fetch_trading_rules
 
 __all__ = [
     "fetch_portfolio",
     "fetch_portfolio_history",
     "fetch_positions",
+    "fetch_tracked_positions",
     "fetch_active_orders",
     "fetch_trading_rules",
     "fetch_connectors",
