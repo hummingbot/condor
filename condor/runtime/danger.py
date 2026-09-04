@@ -191,6 +191,27 @@ def is_dangerous_tool_call(tool_call: dict[str, Any]) -> bool:
     return False
 
 
+def _onchain_create_summary(config: dict[str, Any]) -> str:
+    """The confirmation line for an ``onchain_executor`` create.
+
+    There is no trading pair to print: the human approving it needs the chain,
+    what is being signed (an app operation or N raw calls), and whether it
+    commits or only simulates.
+    """
+    chain = config.get("chain_id", "?")
+    mode = config.get("mode") or ("operation" if config.get("operation") else "calls")
+    if mode == "operation":
+        what = f"{config.get('app', '?')}/{config.get('operation', '?')}"
+    else:
+        calls = config.get("calls") or []
+        n = len(calls) if isinstance(calls, list) else "?"
+        what = f"{n} raw call(s)"
+    verb = "Simulate" if config.get("commit") is False else "Execute"
+    notional = config.get("notional_quote")
+    tail = f" (~{notional} quote)" if notional else ""
+    return f"{verb} on-chain {what} on chain {chain}{tail}"
+
+
 def format_tool_summary(tool_call: dict[str, Any]) -> str:
     """Format a tool call into a human-readable summary for the confirmation message."""
     # The bare name, or an ACP call (``mcp__mcp-hummingbot__manage_bots``) would
@@ -221,6 +242,8 @@ def format_tool_summary(tool_call: dict[str, Any]) -> str:
         exec_id = input_data.get("executor_id", "")
         if action == "create" and exec_type:
             config = input_data.get("executor_config", {})
+            if exec_type == "onchain_executor":
+                return _onchain_create_summary(config)
             pair = config.get("trading_pair", "?")
             return f"Create {exec_type} on {pair}"
         if action == "stop" and exec_id:

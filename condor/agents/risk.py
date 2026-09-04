@@ -529,11 +529,105 @@ async def _planned_amount_quote(input_data: dict[str, Any], client: Any) -> floa
             amount = quote
     elif executor_type in {"grid_executor", "twap_executor"}:
         amount = float(config["total_amount_quote"])
+    elif executor_type == "onchain_executor":
+        amount = await _onchain_notional_quote(config, client)
     else:
         raise ValueError(f"unsupported executor type: {executor_type or 'unknown'}")
 
     if not math.isfinite(amount) or amount <= 0:
         raise ValueError("planned quote amount must be a positive finite number")
+    return amount
+
+
+# Native token per EVM chain the on-chain executor can sign on, as the CEX pair
+# the price feed quotes it in. A chain not listed here cannot have its native
+# value priced, so its create must declare ``notional_quote`` instead.
+_NATIVE_PRICE_PAIR = {
+    1: "ETH-USDT",
+    10: "ETH-USDT",
+    56: "BNB-USDT",
+    137: "POL-USDT",
+    8453: "ETH-USDT",
+    42161: "ETH-USDT",
+    59144: "ETH-USDT",
+}
+_WEI_PER_NATIVE = 10**18
+
+
+def _wei(value: Any) -> int:
+    """A call's ``value`` in wei: an int, a decimal string or ``0x`` hex.
+
+    Refuses a negative amount and anything it cannot read: the caller is about
+    to sign a transaction carrying it.
+    """
+    if value is None or value == "":
+        return 0
+    if isinstance(value, bool):
+        raise ValueError(f"value must be a wei amount, got {value!r}")
+    if isinstance(value, int):
+        wei = value
+    elif isinstance(value, str):
+        text = value.strip()
+        try:
+            wei = int(text, 16) if text.lower().startswith("0x") else int(text)
+        except ValueError as exc:
+            raise ValueError(f"value must be a wei amount, got {value!r}") from exc
+    else:
+        raise ValueError(f"value must be a wei amount, got {value!r}")
+    if wei < 0:
+        raise ValueError("value cannot be negative")
+    return wei
+
+
+async def _onchain_notional_quote(config: dict[str, Any], client: Any) -> float:
+    """Value an ``onchain_executor`` create in quote (USD-ish) terms.
+
+    The executor signs arbitrary calls, so the position it opens is not
+    readable from its config the way an order's ``amount`` is. Three things
+    bound it, and the gate takes the largest reading of the first two plus the
+    third: the agent's declared ``notional_quote``, the native value the calls
+    carry (priced through the CEX feed), and the declared ``max_gas_quote``.
+    A create that declares nothing and sends no native value has no bound and
+    is refused, the same fail-closed rule the DEX path applies.
+    """
+    notional = float(config.get("notional_quote") or 0)
+    if not math.isfinite(notional) or notional < 0:
+        raise ValueError("notional_quote must be a non-negative finite number")
+    gas = float(config.get("max_gas_quote") or 0)
+    if not math.isfinite(gas) or gas < 0:
+        raise ValueError("max_gas_quote must be a non-negative finite number")
+
+    calls = config.get("calls") or []
+    wei = sum(_wei(call.get("value")) for call in calls if isinstance(call, dict))
+
+    priced_native = 0.0
+    if wei > 0:
+        chain_id = int(config.get("chain_id") or 0)
+        pair = _NATIVE_PRICE_PAIR.get(chain_id)
+        price = None
+        if pair and client is not None:
+            from condor.fetchers.market_data import fetch_current_price
+
+            price = await fetch_current_price(
+                client, config.get("price_connector") or "binance", pair
+            )
+        if price is None:
+            if notional <= 0:
+                raise ValueError(
+                    "native value cannot be priced on chain "
+                    f"{chain_id or '?'}; declare notional_quote"
+                )
+        else:
+            price = float(price)
+            if not math.isfinite(price) or price <= 0:
+                raise ValueError("reference price must be a positive finite number")
+            priced_native = wei / _WEI_PER_NATIVE * price
+
+    amount = max(notional, priced_native) + gas
+    if not math.isfinite(amount) or amount <= 0:
+        raise ValueError(
+            "onchain_executor create has no quote bound: declare notional_quote"
+        )
     return amount
 
 

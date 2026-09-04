@@ -739,6 +739,9 @@ async def manage_executors(
     - grid_executor: Grid trading for range-bound markets
     - dca_executor: Dollar-cost averaging with scheduled levels
     - lp_executor: CLMM LP positions on Meteora/Raydium (use explore_dex_pools first)
+    - onchain_executor: Arbitrary EVM transactions via the Aomi Pipeline — an app
+      operation or raw calls, fork-simulated then committed (browse the catalog with
+      the aomi_catalog routine first; declare notional_quote so the risk gate can value it)
 
     Actions:
     - (none) + executor_type → Show full guide, config schema, and saved defaults

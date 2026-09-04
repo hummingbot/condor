@@ -134,6 +134,7 @@ class _PriceClient:
             {"base_amount": 3, "quote_amount": 4, "total_amount_quote": 1},
             10,
         ),
+        ("onchain_executor", {"notional_quote": 11, "total_amount_quote": 1}, 11),
     ],
 )
 def test_planned_amount_quote_uses_each_executor_capital_field(
@@ -734,3 +735,262 @@ def test_amm_guide_load_is_not_risk_checked():
 
     assert result["outcome"]["outcome"] == "selected"
     assert state.total_exposure == 0
+
+
+# ---------------------------------------------------------------------------
+# onchain_executor: an arbitrary EVM transaction has no ``amount`` field to
+# read, so the gate values it from what the create declares (notional_quote,
+# max_gas_quote) and what the calls carry (native value, priced via the feed).
+# A create with no bound at all is refused — fail closed, like the DEX path.
+# ---------------------------------------------------------------------------
+
+HALF_ETH_WEI = 500_000_000_000_000_000
+HALF_ETH_HEX = "0x6f05b59d3b20000"
+
+
+def _onchain_config(**over) -> dict:
+    config = {
+        "controller_id": "test_controller",
+        "chain_id": 8453,
+        "mode": "calls",
+        "calls": [
+            {
+                "to": "0x" + "11" * 20,
+                "description": "self-transfer",
+                "data": {"signature": "", "args": [], "raw": ""},
+                "value": "0",
+            }
+        ],
+    }
+    config.update(over)
+    return config
+
+
+def _onchain_call(**over) -> dict:
+    return {
+        "tool": "manage_executors",
+        "input": {
+            "action": "create",
+            "executor_type": "onchain_executor",
+            "executor_config": _onchain_config(**over),
+        },
+    }
+
+
+def _onchain_callback(limit=500.0, price=2000.0, agent_id=""):
+    state = RiskState()
+    callback = auto_approve_with_risk_check(
+        RiskEngine(RiskLimits(max_position_size_quote=limit)),
+        state,
+        price_client=_PriceClient(price),
+        agent_id=agent_id,
+    )
+    return callback, state
+
+
+def test_onchain_create_with_a_declared_notional_passes_and_accumulates():
+    callback, state = _onchain_callback(limit=500.0)
+
+    result = asyncio.run(callback(_onchain_call(notional_quote=120), _OPTIONS))
+
+    assert result["outcome"]["outcome"] == "selected"
+    assert state.total_exposure == pytest.approx(120.0)
+    assert state.executor_count == 1
+
+
+@pytest.mark.parametrize("notional", [None, 0, -5, "nan", "lots"])
+def test_onchain_create_without_a_usable_notional_is_cancelled(notional):
+    """Zero native value and no declared bound: nothing bounds it, so refuse."""
+    callback, state = _onchain_callback(limit=500.0)
+    over = {} if notional is None else {"notional_quote": notional}
+
+    result = asyncio.run(callback(_onchain_call(**over), _OPTIONS))
+
+    assert result["outcome"]["outcome"] == "cancelled"
+    assert state.total_exposure == 0
+    assert state.executor_count == 0
+
+
+def test_onchain_native_value_is_priced_through_the_feed():
+    """0.5 ETH at 2000 is 1000 quote: over a 500 limit, under a 2000 one."""
+    call = _onchain_call(calls=[{"to": "0x" + "11" * 20, "value": str(HALF_ETH_WEI)}])
+
+    blocked_cb, blocked_state = _onchain_callback(limit=500.0, price=2000.0)
+    blocked = asyncio.run(blocked_cb(call, _OPTIONS))
+    assert blocked["outcome"]["outcome"] == "cancelled"
+    assert blocked_state.total_exposure == 0
+
+    allowed_cb, allowed_state = _onchain_callback(limit=2000.0, price=2000.0)
+    allowed = asyncio.run(allowed_cb(call, _OPTIONS))
+    assert allowed["outcome"]["outcome"] == "selected"
+    assert allowed_state.total_exposure == pytest.approx(1000.0)
+
+
+def test_onchain_hex_wei_is_accepted():
+    amount = asyncio.run(
+        _planned_amount_quote(
+            {
+                "executor_type": "onchain_executor",
+                "executor_config": _onchain_config(
+                    calls=[{"to": "0x1", "value": HALF_ETH_HEX}]
+                ),
+            },
+            _PriceClient(2000.0),
+        )
+    )
+
+    assert amount == pytest.approx(1000.0)
+
+
+def test_onchain_takes_the_larger_of_notional_and_priced_value():
+    """The declared bound never shrinks a create that visibly carries more."""
+    cb, state = _onchain_callback(limit=5000.0, price=2000.0)
+    call = _onchain_call(
+        notional_quote=50, calls=[{"to": "0x1", "value": str(HALF_ETH_WEI)}]
+    )
+
+    result = asyncio.run(cb(call, _OPTIONS))
+
+    assert result["outcome"]["outcome"] == "selected"
+    assert state.total_exposure == pytest.approx(1000.0)
+
+
+def test_onchain_unpriced_native_value_falls_back_to_the_declared_notional():
+    cb, state = _onchain_callback(limit=500.0, price=None)
+    call = _onchain_call(
+        notional_quote=80, calls=[{"to": "0x1", "value": str(HALF_ETH_WEI)}]
+    )
+
+    result = asyncio.run(cb(call, _OPTIONS))
+
+    assert result["outcome"]["outcome"] == "selected"
+    assert state.total_exposure == pytest.approx(80.0)
+
+
+def test_onchain_unpriced_native_value_with_no_notional_is_cancelled():
+    cb, state = _onchain_callback(limit=500.0, price=None)
+    call = _onchain_call(calls=[{"to": "0x1", "value": str(HALF_ETH_WEI)}])
+
+    result = asyncio.run(cb(call, _OPTIONS))
+
+    assert result["outcome"]["outcome"] == "cancelled"
+    assert state.total_exposure == 0
+
+
+def test_onchain_unknown_chain_cannot_price_native_value():
+    with pytest.raises(ValueError, match="declare notional_quote"):
+        asyncio.run(
+            _planned_amount_quote(
+                {
+                    "executor_type": "onchain_executor",
+                    "executor_config": _onchain_config(
+                        chain_id=99999, calls=[{"to": "0x1", "value": "1"}]
+                    ),
+                },
+                _PriceClient(2000.0),
+            )
+        )
+
+
+def test_onchain_gas_is_added_to_the_valuation():
+    cb, state = _onchain_callback(limit=500.0)
+
+    result = asyncio.run(
+        cb(_onchain_call(notional_quote=100, max_gas_quote=7.5), _OPTIONS)
+    )
+
+    assert result["outcome"]["outcome"] == "selected"
+    assert state.total_exposure == pytest.approx(107.5)
+
+
+def test_onchain_gas_alone_does_not_bound_a_create_with_negative_notional():
+    cb, state = _onchain_callback(limit=500.0)
+
+    result = asyncio.run(
+        cb(_onchain_call(notional_quote=-1, max_gas_quote=5), _OPTIONS)
+    )
+
+    assert result["outcome"]["outcome"] == "cancelled"
+
+
+def test_onchain_over_the_position_limit_is_cancelled():
+    cb, state = _onchain_callback(limit=100.0)
+
+    result = asyncio.run(cb(_onchain_call(notional_quote=150), _OPTIONS))
+
+    assert result["outcome"]["outcome"] == "cancelled"
+    assert state.total_exposure == 0
+
+
+def test_onchain_controller_id_mismatch_is_still_cancelled():
+    cb, state = _onchain_callback(limit=500.0, agent_id="agent-a")
+
+    result = asyncio.run(
+        cb(_onchain_call(notional_quote=10, controller_id="agent-b"), _OPTIONS)
+    )
+
+    assert result["outcome"]["outcome"] == "cancelled"
+    assert state.total_exposure == 0
+
+
+def test_onchain_negative_value_is_refused_even_with_a_notional():
+    with pytest.raises(ValueError, match="negative"):
+        asyncio.run(
+            _planned_amount_quote(
+                {
+                    "executor_type": "onchain_executor",
+                    "executor_config": _onchain_config(
+                        notional_quote=10, calls=[{"to": "0x1", "value": "-1"}]
+                    ),
+                },
+                _PriceClient(2000.0),
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(None, 0), ("", 0), (0, 0), ("12", 12), (12, 12), ("0x10", 16), ("0X10", 16)],
+)
+def test_wei_parses_ints_decimal_strings_and_hex(value, expected):
+    from condor.agents.risk import _wei
+
+    assert _wei(value) == expected
+
+
+@pytest.mark.parametrize("value", ["-1", -1, "1.5", "abc", True, [1]])
+def test_wei_refuses_what_it_cannot_sign_for(value):
+    from condor.agents.risk import _wei
+
+    with pytest.raises(ValueError):
+        _wei(value)
+
+
+def test_planned_amount_quote_onchain_row():
+    """The onchain row of the per-executor capital-field table."""
+    amount = asyncio.run(
+        _planned_amount_quote(
+            {
+                "executor_type": "onchain_executor",
+                "executor_config": {"notional_quote": 14, "total_amount_quote": 1},
+            },
+            _PriceClient(2),
+        )
+    )
+
+    assert amount == pytest.approx(14)
+
+
+def test_onchain_confirmation_summary_names_chain_and_mode():
+    from condor.runtime.danger import format_tool_summary
+
+    summary = format_tool_summary(_onchain_call(notional_quote=25))
+    assert summary == "Execute on-chain 1 raw call(s) on chain 8453 (~25 quote)"
+
+    op_call = _onchain_call(
+        mode="operation", app="uniswap", operation="swap", commit=False, calls=None
+    )
+    assert (
+        format_tool_summary(op_call) == "Simulate on-chain uniswap/swap on chain 8453"
+    )
+    assert " on ?" not in summary

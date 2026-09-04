@@ -440,6 +440,7 @@ def install_values(user_id: int | str | None = None) -> list[tuple[str, str]]:
         "DEEPSEEK_API_KEY",
         "TELEGRAM_TOKEN",
         "CUSTOM_LLM_API_KEY",
+        "AOMI_TOKEN",
     ):
         add(os.environ.get(var, ""), "known_key")
 
