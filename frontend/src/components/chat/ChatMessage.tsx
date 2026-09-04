@@ -21,8 +21,12 @@ import type {
 import { useAuthedImage } from "@/hooks/useAuthedImage";
 import { agentColor } from "@/lib/agentColor";
 import { copyText } from "@/lib/clipboard";
+import { splitStreamedMarkdown } from "@/lib/markdownStream";
 import { ChartBlock } from "./ChartBlock";
 import { RunStrip } from "./ToolCallStatus";
+
+/** One array, so the plugin list is never a fresh prop on a streamed frame. */
+const GFM = [remarkGfm];
 
 /** Flatten a rendered subtree back into the source text it was parsed from. */
 function nodeText(children: ReactNode): string {
@@ -134,6 +138,58 @@ function markdownComponents(live: boolean): Components {
 // remount every block in the bubble on each streamed chunk.
 const LIVE_COMPONENTS = markdownComponents(true);
 const STATIC_COMPONENTS = markdownComponents(false);
+
+/**
+ * A finished stretch of a streaming answer, parsed once and then left alone.
+ *
+ * `memo` is the whole point: the chunk's text never changes again, so React
+ * skips it entirely on every later frame — remark does not re-parse it and
+ * `numericColumns` does not re-walk the tables inside it.
+ */
+const FrozenMarkdown = memo(function FrozenMarkdown({ text }: { text: string }) {
+  return (
+    <ReactMarkdown remarkPlugins={GFM} components={LIVE_COMPONENTS}>
+      {text}
+    </ReactMarkdown>
+  );
+});
+
+/**
+ * The answer as it arrives (PERF-327).
+ *
+ * Handing the whole accumulated text to one `<ReactMarkdown>` on every 50ms
+ * commit costs O(n²) over an answer: measured on a table-heavy report, a 21 KB
+ * answer burned 6.3s of main thread on parsing while it streamed, and the
+ * per-frame cost kept climbing as the answer grew.
+ *
+ * So only the unfinished end is re-parsed. `splitStreamedMarkdown` hands back
+ * the stretches whose blocks are provably closed — nothing typed later can
+ * reach back across the cut — and those are frozen behind a memo. What is left
+ * is bounded, so the cost of a frame stops growing with the length of the
+ * answer. When it cannot prove a cut is safe it reports none, and this renders
+ * exactly as it always did.
+ *
+ * `LIVE_COMPONENTS` on both halves, so a chunk renders while streaming exactly
+ * as it would have inside the single whole-text pass — in particular a
+ * ```chart fence keeps its placeholder instead of flipping to a raw fence.
+ */
+function StreamedMarkdown({ text }: { text: string }) {
+  const { frozen, tail } = splitStreamedMarkdown(text);
+  return (
+    <>
+      {frozen.map((chunk, i) => (
+        // Append-only: chunk i is the same string for the rest of the answer,
+        // so its index is a stable identity.
+        <FrozenMarkdown key={i} text={chunk} />
+      ))}
+      {tail && (
+        <ReactMarkdown remarkPlugins={GFM} components={LIVE_COMPONENTS}>
+          {tail}
+        </ReactMarkdown>
+      )}
+    </>
+  );
+}
 
 /** The turn's clock time, in the reader's own timezone. */
 function clockTime(ts?: number): string {
@@ -283,7 +339,7 @@ export const ChatMessageView = memo(function ChatMessageView({
           </div>
         </div>
         <div className="chat-markdown text-sm text-[var(--color-text-muted)]">
-          <ReactMarkdown remarkPlugins={[remarkGfm]} components={STATIC_COMPONENTS}>
+          <ReactMarkdown remarkPlugins={GFM} components={STATIC_COMPONENTS}>
             {message.text}
           </ReactMarkdown>
         </div>
@@ -316,7 +372,7 @@ export const ChatMessageView = memo(function ChatMessageView({
           </div>
         </div>
         <div className="chat-markdown text-sm text-[var(--color-text-muted)]">
-          <ReactMarkdown remarkPlugins={[remarkGfm]} components={STATIC_COMPONENTS}>
+          <ReactMarkdown remarkPlugins={GFM} components={STATIC_COMPONENTS}>
             {message.text}
           </ReactMarkdown>
         </div>
@@ -398,12 +454,17 @@ export const ChatMessageView = memo(function ChatMessageView({
       />
       {message.text && (
         <div className="chat-markdown text-sm">
-          <ReactMarkdown
-            remarkPlugins={[remarkGfm]}
-            components={live ? LIVE_COMPONENTS : STATIC_COMPONENTS}
-          >
-            {message.text}
-          </ReactMarkdown>
+          {/* A settled turn takes the single whole-text pass it always took:
+              that is the same path a reloaded transcript renders through, so
+              what the reader ends up looking at cannot depend on whether they
+              watched it arrive. */}
+          {live ? (
+            <StreamedMarkdown text={message.text} />
+          ) : (
+            <ReactMarkdown remarkPlugins={GFM} components={STATIC_COMPONENTS}>
+              {message.text}
+            </ReactMarkdown>
+          )}
         </div>
       )}
       {!message.text && message.toolCalls.length === 0 && !message.thought && (
