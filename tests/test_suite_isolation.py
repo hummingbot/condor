@@ -10,7 +10,7 @@ bot may be running while the suite is), so what is pinned here is the mechanism
 instead: with the autouse fixture in ``conftest.py`` active, every path a
 writer can build resolves outside the repository. If someone reintroduces a
 root that ignores ``CONDOR_RUNTIME_ROOT``, ``CONDOR_DATA_DIR`` or
-``CONDOR_AGENTS_ROOT``, one of these fails.
+``CONDOR_AGENTS_ROOT`` or ``CONDOR_STOCK_AGENTS_ROOT``, one of these fails.
 
 All three roots are covered, because all three are durable and all three were
 reachable from a test: ``.condor/`` (conversations, delegations, state,
@@ -54,10 +54,22 @@ def test_the_agent_stores_are_isolated_too():
     the two stores can build is asserted here, the default slug and a named
     agent alike.
     """
-    assert paths.agents_root() != REPO / "agents"
-    assert _outside_the_repo(paths.agents_root())
-    assert _outside_the_repo(memory_paths.assistant_home())
-    assert _outside_the_repo(memory_paths.assistant_home("grid_scalper"))
+    assert paths.local_agents_root() != REPO / "agents"
+    assert _outside_the_repo(paths.local_agents_root())
+    # The shipped root is repointed too: a test that saw the real library
+    # layered under its tmp root would list the developer's whole registry.
+    assert paths.stock_agents_root() != REPO / "agents"
+    assert _outside_the_repo(paths.stock_agents_root())
+    assert _outside_the_repo(memory_paths.agent_home())
+    assert _outside_the_repo(memory_paths.agent_home("grid_scalper"))
+    for home in memory_paths.agent_home_layers("grid_scalper"):
+        assert _outside_the_repo(home)
+    for root in memory_paths.shared_skills_roots():
+        assert _outside_the_repo(root)
+    for root in memory_paths.shared_routines_roots():
+        assert _outside_the_repo(root)
+    for root in memory_paths.defaults_layers():
+        assert _outside_the_repo(root)
     assert _outside_the_repo(memory_paths.store_root(42))
     assert _outside_the_repo(memory_paths.store_root(42, "grid_scalper"))
     assert _outside_the_repo(memory_paths.builtin_skills_root("grid_scalper"))

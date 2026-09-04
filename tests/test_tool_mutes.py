@@ -303,7 +303,7 @@ def web_env(tmp_path, monkeypatch):
     from condor.agents import agent as agent_module
     from condor.agents.agent import AgentStore
 
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     AgentStore().create(name="Brigado", description="BRL market making")
     return tmp_path
 

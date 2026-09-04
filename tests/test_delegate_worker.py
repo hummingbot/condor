@@ -86,8 +86,7 @@ def test_a_specialist_is_never_re_framed_as_a_condor_worker(
     """A specialist reads its OWN worker framing — never the coordinator's."""
     from condor.agents.agent import identity_header
 
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
-    monkeypatch.setattr(strategy_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     _write_agent(tmp_path, "backpack_mm", name="Backpack MM")
 
     text = _instructions(settings_obj, monkeypatch, slug="backpack_mm", worker=True)
@@ -102,8 +101,7 @@ def test_a_specialist_is_never_re_framed_as_a_condor_worker(
 
 
 def _specialist_instructions(settings_obj, monkeypatch, tmp_path, *, worker: bool):
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
-    monkeypatch.setattr(strategy_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     _write_agent(tmp_path, "backpack_mm", name="Backpack MM")
     return _instructions(settings_obj, monkeypatch, slug="backpack_mm", worker=worker)
 
@@ -281,8 +279,7 @@ def _delegated_worker_kwarg(monkeypatch, tmp_path, slug: str) -> bool:
     from condor.acp import client as acp_client_module
     from condor.agents.consult import _run_agent_to_completion
 
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
-    monkeypatch.setattr(strategy_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     _write_agent(tmp_path, slug, name=slug.title())
 
     seen: dict = {}

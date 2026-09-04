@@ -38,8 +38,7 @@ def _fresh_caches():
 
 
 def _roots(monkeypatch, tmp_path):
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
-    monkeypatch.setattr(strategy_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
 
 
 def _write_agent(root: Path, slug: str, name: str) -> Path:

@@ -26,8 +26,7 @@ def _write_agent(root, slug, *, body="Body.", **frontmatter):
 
 
 def _patch_roots(monkeypatch, tmp_path):
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
-    monkeypatch.setattr(strategy_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
 
 
 # ── Agent discovery + the index every Agent appears in ──
@@ -131,8 +130,8 @@ def test_strategy_crud_under_agent(tmp_path, monkeypatch):
     )
     assert s.slug == "brl_mm"
     assert s.key == "brigado.brl_mm"
-    assert s.dir == tmp_path / "brigado" / "strategies" / "brl_mm"
-    assert (s.dir / "strategy.md").exists()
+    assert s.home == tmp_path / "brigado" / "strategies" / "brl_mm"
+    assert (s.home / "strategy.md").exists()
 
     # get / get_by_key / list
     assert store.get("brigado", "brl_mm").instructions.strip() == "do the thing"
@@ -179,7 +178,7 @@ def test_agent_with_no_strategy_is_still_loopable(tmp_path, monkeypatch):
     assert resolved is not None
     assert resolved.slug == strategy_module.DEFAULT_STRATEGY_SLUG
     assert resolved.key == "brigado.default"
-    assert (resolved.dir / "strategy.md").exists()
+    assert (resolved.home / "strategy.md").exists()
     assert resolved.instructions.strip()  # a real playbook body, not empty
 
     # Idempotent: a second start reuses the same one instead of piling up.

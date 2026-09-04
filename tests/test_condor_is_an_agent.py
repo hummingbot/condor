@@ -33,8 +33,7 @@ def _write_agent(root, slug, *, body="Body.", **frontmatter):
 @pytest.fixture
 def registry(tmp_path, monkeypatch):
     """A registry containing Condor and one specialist, like the real one."""
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
-    monkeypatch.setattr(strategy_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     _write_agent(tmp_path, CHAT_SLUG, name="Condor", agent_key="claude-acp:sonnet")
     _write_agent(
         tmp_path, "brigado", name="Brigado", when_to_consult="BRL market making"
@@ -62,9 +61,19 @@ def test_chat_routines_dir_is_the_repo_root_library():
 
 
 def test_a_specialist_still_owns_an_isolated_routines_dir():
-    from routines.base import assistant_routines_dir
+    """And it is the **writable** one — the local root, not the shipped tree."""
+    from condor.paths import local_agents_root, stock_agents_root
+    from routines.base import assistant_routines_dir, assistant_routines_dirs
 
-    assert assistant_routines_dir("brigado") == _REPO_ROOT / "agents/brigado/routines"
+    assert (
+        assistant_routines_dir("brigado")
+        == local_agents_root() / "brigado" / "routines"
+    )
+    # What it may *run* also includes the shipped library, under its own.
+    assert assistant_routines_dirs("brigado") == (
+        local_agents_root() / "brigado" / "routines",
+        stock_agents_root() / "brigado" / "routines",
+    )
 
 
 # ── Carve-out 2: the chat's MCP instructions stay the coordinator's ──
@@ -119,12 +128,18 @@ def test_settings_specialist_slug_only_names_specialists():
 # ── One registry, one loader ──
 
 
-def test_condor_is_a_real_record_in_the_agent_store():
+def test_condor_is_a_real_record_in_the_agent_store(monkeypatch):
     """Not a fixture: the shipped repo must actually load Condor as an agent."""
+    from condor import paths
+
+    # Condor is *stock*, so this reads the shipped root rather than the suite's
+    # empty tmp one. Read-only, so nothing lands in the developer's install.
+    monkeypatch.delenv(paths.STOCK_AGENTS_ROOT_ENV, raising=False)
+
     agent = AgentStore().get(CHAT_SLUG)
     assert agent is not None
     assert agent.name == "Condor"
-    assert agent.agent_dir == _REPO_ROOT / "agents" / CHAT_SLUG
+    assert agent.source == _REPO_ROOT / "agents" / CHAT_SLUG / "AGENT.md"
     assert agent.instructions, "AGENT.md body is the chat's system prompt"
     # Not consulted by specialists: it is the coordinator, not a domain expert.
     assert agent.when_to_consult == ""
@@ -136,20 +151,31 @@ def test_the_assistants_tree_is_gone():
 
 def test_the_chats_store_and_skills_moved_with_it(monkeypatch):
     from condor import paths
-    from condor.memory.paths import builtin_skills_root, store_root
+    from condor.memory.paths import (
+        builtin_skills_root,
+        builtin_skills_roots,
+        store_root,
+    )
 
-    # Production's view: this pins where the chat's store and library *are* in
-    # the shipped repo, so the suite-wide ``agents/`` override comes off.
-    # Read-only, so nothing lands in the developer's install (CORR-220).
+    # Production's view: this pins where the chat's store and library *are* on a
+    # real install, so the suite-wide overrides come off. Read-only, so nothing
+    # lands in the developer's install (CORR-220).
     monkeypatch.delenv(paths.AGENTS_ROOT_ENV, raising=False)
+    monkeypatch.delenv(paths.STOCK_AGENTS_ROOT_ENV, raising=False)
+    monkeypatch.delenv(paths.RUNTIME_ROOT_ENV, raising=False)
 
-    home = _REPO_ROOT / "agents" / CHAT_SLUG
-    assert store_root(42) == home / "store" / "user_42"
+    stock = _REPO_ROOT / "agents" / CHAT_SLUG
+    local = _REPO_ROOT / ".condor" / "agents" / CHAT_SLUG
+
+    # The store and the writable library are this install's (FEAT-115)...
+    assert store_root(42) == local / "store" / "user_42"
     assert store_root(42, CHAT_SLUG) == store_root(42, None)
-    assert builtin_skills_root() == home / "skills"
+    assert builtin_skills_root() == local / "skills"
+    # ...and the shipped one is still read, under it.
+    assert builtin_skills_roots() == (local / "skills", stock / "skills")
     # The shipped library came across intact rather than being re-created empty.
     # (Published playbooks live in agents/_shared/skills, not here — FEAT-031.)
-    assert (home / "skills" / "agent_builder" / "SKILL.md").exists()
+    assert (stock / "skills" / "agent_builder" / "SKILL.md").exists()
 
 
 def test_the_chat_does_not_list_a_skill_twice(tmp_path):

@@ -277,7 +277,7 @@ def test_a_session_with_no_server_still_answers_with_every_field(tmp_path, monke
     monkeypatch.setattr(
         agents_route,
         "_get_strategy",
-        lambda slug, sslug: type("S", (), {"dir": sdir, "default_config": {}})(),
+        lambda slug, sslug: type("S", (), {"home": sdir, "default_config": {}})(),
     )
 
     async def _no_client(*a, **kw):
@@ -333,7 +333,7 @@ def test_the_endpoint_serves_the_ledger_the_session_recorded(tmp_path, monkeypat
     monkeypatch.setattr(
         agents_route,
         "_get_strategy",
-        lambda slug, sslug: type("S", (), {"dir": sdir, "default_config": {}})(),
+        lambda slug, sslug: type("S", (), {"home": sdir, "default_config": {}})(),
     )
 
     async def _client(*a, **kw):

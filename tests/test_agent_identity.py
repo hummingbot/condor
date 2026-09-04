@@ -23,8 +23,7 @@ def _write_agent(root, slug, *, body="Body.", **frontmatter):
 
 
 def _patch_roots(monkeypatch, tmp_path):
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
-    monkeypatch.setattr(strategy_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
 
 
 @pytest.fixture

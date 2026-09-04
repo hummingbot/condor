@@ -62,7 +62,7 @@ def wakes(monkeypatch):
 
 
 def _agent_root(tmp_path, monkeypatch, slug="scout"):
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     return _write_agent(tmp_path, slug)
 
 

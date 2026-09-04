@@ -100,7 +100,7 @@ def _loop_runs(agent_slug: str, limit: int) -> list[dict[str, Any]]:
     for strategy in StrategyStore().list(agent_slug):
         try:
             # ``{agent}.{strategy}`` is the run key everywhere in this codebase.
-            runs = list_runs(strategy.dir, f"{agent_slug}.{strategy.slug}")
+            runs = list_runs(strategy.home, f"{agent_slug}.{strategy.slug}")
         except Exception:  # noqa: BLE001 - one bad playbook, not the whole rail
             log.debug(
                 "Could not index runs for %s/%s",

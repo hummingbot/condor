@@ -43,8 +43,7 @@ class FakeConfigManager:
 
 @pytest.fixture
 def env(tmp_path, monkeypatch):
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
-    monkeypatch.setattr(strategy_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     monkeypatch.setattr(
         "config_manager.get_config_manager", lambda: FakeConfigManager()
     )
@@ -85,7 +84,7 @@ def test_an_unpinned_agent_reports_an_empty_server_not_a_guess(env):
 
 def test_each_strategy_carries_the_server_its_records_were_read_from(env):
     strategy = StrategyStore().create(agent_slug="brigado", name="BRL MM")
-    save_agent_config(strategy.dir, AgentConfig(server_name="brigado_2"))
+    save_agent_config(strategy.home, AgentConfig(server_name="brigado_2"))
 
     summary = _brigado()
     listed = next(s for s in summary["strategies"] if s["slug"] == "brl_mm")
@@ -94,7 +93,7 @@ def test_each_strategy_carries_the_server_its_records_were_read_from(env):
 
 def test_a_strategy_that_declares_no_server_reports_none(env):
     strategy = StrategyStore().create(agent_slug="brigado", name="BRL MM")
-    save_agent_config(strategy.dir, AgentConfig(server_name=""))
+    save_agent_config(strategy.home, AgentConfig(server_name=""))
 
     listed = next(s for s in _brigado()["strategies"] if s["slug"] == "brl_mm")
     assert listed["server_name"] == ""

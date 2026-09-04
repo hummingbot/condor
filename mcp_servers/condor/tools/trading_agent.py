@@ -332,7 +332,7 @@ async def _agent_lifecycle(
             from condor.agents.config import load_full_config
             from config_manager import get_config_manager, get_effective_server
 
-            config_dict = load_full_config(strategy.dir, strategy.default_config)
+            config_dict = load_full_config(strategy.home, strategy.default_config)
             if config:
                 if config.get("dry_run") and "execution_mode" not in config:
                     config["execution_mode"] = "dry_run"
@@ -407,7 +407,7 @@ def _resolve_journal_manager(agent_id: str):
                 "content": "(experiment mode — no journal, results saved to dry_runs/)"
             }
         session_dir = engine.session_dir
-        agent_dir = engine.strategy.dir
+        agent_dir = engine.strategy.home
     else:
         from condor.agents.journal import resolve_agent_dirs
 
@@ -524,7 +524,7 @@ def journal_write(
                 "skipped": "experiment mode — no journal; the tick is saved as a dry-run snapshot"
             }
         session_dir = engine.session_dir
-        agent_dir = engine.strategy.dir
+        agent_dir = engine.strategy.home
     else:
         from condor.agents.journal import resolve_agent_dirs
 

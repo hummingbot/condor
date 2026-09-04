@@ -99,7 +99,7 @@ def registry(tmp_path, monkeypatch):
     question this feature answers is whether a mute written to disk changes what
     the next spawn's argv carries, and a stub would answer it about the stub.
     """
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     # ``routines.base`` resolves the repo root at import, so without this the
     # routines half of the mute assertions would write into the real library.
     monkeypatch.setattr(routines_base, "_PROJECT_ROOT", tmp_path)

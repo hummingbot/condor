@@ -139,7 +139,7 @@ def _build_registry() -> list[FleetOwner]:
             ids = sorted(
                 agent_id
                 for agent_id, _num, _kind in enumerate_agent_ids(
-                    strategy.key, strategy.dir
+                    strategy.key, strategy.home
                 )
             )
         except Exception:

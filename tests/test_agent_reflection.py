@@ -89,7 +89,7 @@ def env(tmp_path, monkeypatch):
     """One agent on disk, with the shipped reflect.md beside it."""
     root = tmp_path / "agents"
     root.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", root)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(root))
     AgentStore().create(name="Brigado", description="BRL MM", agent_key="claude-code")
 
     defaults = root / "_defaults"

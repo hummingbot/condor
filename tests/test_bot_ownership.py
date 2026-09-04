@@ -346,9 +346,9 @@ def _engine(tmp_path, monkeypatch, config):
     from condor.agents.engine import TickEngine
     from condor.agents.strategy import Strategy
 
-    monkeypatch.setattr(strategy_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     strategy = Strategy(agent_slug="brigado", name="EMA Trend")
-    strategy.dir.mkdir(parents=True, exist_ok=True)
+    strategy.home.mkdir(parents=True, exist_ok=True)
     agent = Agent(slug="brigado", name="Brigado")
     return TickEngine(
         agent=agent, strategy=strategy, config=dict(config), chat_id=1, user_id=1
@@ -410,7 +410,7 @@ def test_experiment_engine_ledger_writes_no_file(tmp_path, monkeypatch):
     assert engine.session_dir is None
     assert engine.ledger is not None and engine.ledger.path is None
     engine.ledger.note_deploy(f"{NS}-btc", now=1000.0)
-    assert not list(engine.strategy.dir.rglob("owned_bots.json"))
+    assert not list(engine.strategy.home.rglob("owned_bots.json"))
 
 
 def test_engine_adopts_a_live_bot_in_its_namespace(tmp_path, monkeypatch):

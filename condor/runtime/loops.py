@@ -246,9 +246,9 @@ class LoopSupervisor:
 
     def _reconcile_legacy_delegations(self, agents_root: Path | None) -> int:
         """The same sweep over ``agents/{slug}/delegations/{task}.status.json``."""
-        from condor.agents.agent import _DATA_ROOT
+        from condor.paths import local_agents_root
 
-        root = Path(agents_root) if agents_root is not None else _DATA_ROOT
+        root = Path(agents_root) if agents_root is not None else local_agents_root()
         if not root.is_dir():
             return 0
 
@@ -272,14 +272,14 @@ class LoopSupervisor:
 
     def _stale_sessions(self, agents_root: Path | None):
         """Yield (session_dir, status) for every run a dead process left live."""
-        from condor.agents.agent import _DATA_ROOT
         from condor.agents.sessions_index import SESSION_DIRNAMES
+        from condor.paths import local_agents_root
 
-        root = Path(agents_root) if agents_root is not None else _DATA_ROOT
+        root = Path(agents_root) if agents_root is not None else local_agents_root()
         if not root.is_dir():
             return
 
-        # agents/*/strategies/*/sessions/session_*/status.json — the layout is
+        # <local>/*/strategies/*/sessions/session_*/status.json — the layout is
         # owned by the journal, so the directory names come from there.
         for agent_dir in sorted(p for p in root.iterdir() if p.is_dir()):
             strategies = agent_dir / "strategies"
@@ -391,7 +391,7 @@ class LoopSupervisor:
         # Revalidate against the config as it stands NOW, not as the dead
         # session had it: the user may have changed it precisely because the
         # last run misbehaved. load_full_config raises if it no longer validates.
-        config = load_full_config(strategy.dir, strategy.default_config)
+        config = load_full_config(strategy.home, strategy.default_config)
         config["restart_on_boot"] = True
 
         engine = TickEngine(

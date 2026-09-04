@@ -220,7 +220,7 @@ def _loop_runs() -> Iterator[tuple[Path, str, str]]:
     for strategy in strategies:
         for dirname in SESSION_DIRNAMES:
             try:
-                children = sorted((strategy.dir / dirname).iterdir())
+                children = sorted((strategy.home / dirname).iterdir())
             except OSError:
                 continue
             for child in children:

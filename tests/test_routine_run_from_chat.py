@@ -222,7 +222,7 @@ def test_start_attributes_a_targeted_routine_to_its_owning_agent(project, monkey
     """
     import condor.agents.agent as agent_mod
 
-    monkeypatch.setattr(agent_mod, "_DATA_ROOT", project / "agents")
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(project / "agents"))
     (project / "agents" / "scout" / "AGENT.md").write_text("---\nname: Scout\n---\n")
     api = _api(monkeypatch)
 

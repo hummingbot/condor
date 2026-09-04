@@ -46,8 +46,7 @@ class _FakeClient:
 @pytest.fixture
 def agents_root(tmp_path, monkeypatch):
     """An agents/ tree with one pinned Agent and one serverless Agent."""
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
-
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     store = AgentStore()
     store.create(
         name="Executor Manager",
@@ -164,7 +163,7 @@ def test_ownerless_session_argv_matches_the_env_fallback(monkeypatch):
 
 def test_a_missing_default_record_still_starts_the_chat(monkeypatch, tmp_path):
     """An unreadable agents/condor/AGENT.md degrades; it does not fail closed."""
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     monkeypatch.setattr(
         "condor.runtime.toolsets.build_mcp_servers_for_session", lambda *a, **kw: []
     )
@@ -177,7 +176,7 @@ def test_a_missing_default_record_still_starts_the_chat(monkeypatch, tmp_path):
 
 
 def test_a_named_agent_that_does_not_exist_still_raises(monkeypatch, tmp_path):
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     with pytest.raises(UnknownAgent):
         binding.resolve(_spec(agent_slug="ghost"))
 

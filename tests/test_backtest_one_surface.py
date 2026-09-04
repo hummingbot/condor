@@ -211,9 +211,10 @@ def test_both_routines_are_published_to_every_assistant(monkeypatch):
     from routines.base import assistant_routines, discover_routines
 
     # A fact about the *shipped* library, so it reads the real ``agents/``
-    # rather than the suite's tmp one. Read-only: nothing here writes, which is
-    # the only condition under which dropping the isolation knob is allowed.
+    # rather than the suite's tmp roots. Read-only: nothing here writes, which
+    # is the only condition under which dropping the isolation knobs is allowed.
     monkeypatch.delenv(paths.AGENTS_ROOT_ENV, raising=False)
+    monkeypatch.delenv(paths.STOCK_AGENTS_ROOT_ENV, raising=False)
 
     chat = discover_routines(force_reload=True)
     agent = assistant_routines("directional_trader", force_reload=True)

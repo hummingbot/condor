@@ -77,10 +77,11 @@ class MigrationReport:
 def ensure_migrated(agents_root: Path | None = None) -> MigrationReport:
     """Bring this install onto ``.condor/``. Safe to call on every boot.
 
-    ``agents_root`` is the *source* of step 2 and it lives outside the runtime
-    root, so it is a parameter and not a lookup: repointing ``$CONDOR_RUNTIME_ROOT``
-    alone would otherwise still let this walk the real ``agents/`` tree and move
-    records out of it. Production passes nothing and gets ``_DATA_ROOT``.
+    ``agents_root`` is the *source* of the agent-tree steps and it lives outside
+    the runtime root, so it is a parameter and not a lookup: repointing
+    ``$CONDOR_RUNTIME_ROOT`` alone would otherwise still let this walk the real
+    ``agents/`` tree and move records out of it. Production passes nothing and
+    gets :func:`condor.paths.stock_agents_root`.
     """
     root = paths.runtime_root()
     report = MigrationReport()
@@ -231,9 +232,7 @@ def _migrate_delegations(
     report: MigrationReport, agents_root: Path | None = None
 ) -> None:
     """``agents/{slug}/delegations/{task}.*`` → ``users/{id}/delegations/{task}/``."""
-    from condor.agents.agent import _DATA_ROOT
-
-    root = Path(agents_root) if agents_root is not None else Path(_DATA_ROOT)
+    root = Path(agents_root) if agents_root is not None else paths.stock_agents_root()
     if not root.is_dir():
         return
 

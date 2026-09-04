@@ -294,8 +294,7 @@ def _seed_agent_and_strategy(
     from condor.agents.agent import AgentStore
     from condor.agents.strategy import StrategyStore
 
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", agents_root)
-    monkeypatch.setattr(strategy_module, "_DATA_ROOT", agents_root)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(agents_root))
     AgentStore().create(name=agent_slug, created_by=created_by)
     StrategyStore().create(agent_slug=agent_slug, name=sslug, created_by=created_by)
 

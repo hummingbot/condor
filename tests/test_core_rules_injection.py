@@ -21,7 +21,7 @@ from condor.agents.prompts import (
     core_rules_section,
     load_core_rules,
 )
-from condor.paths import agents_root
+from condor.paths import local_agents_root
 
 RULES = "- Always read the playbook first."
 OVERRIDE = "- Brigado answers only in BRL."
@@ -30,7 +30,7 @@ OVERRIDE = "- Brigado answers only in BRL."
 @pytest.fixture
 def defaults():
     """An empty registry with the shared rulebook in it."""
-    root = agents_root()
+    root = local_agents_root()
     (root / "_defaults").mkdir(parents=True, exist_ok=True)
     (root / "_defaults" / "core_rules.md").write_text(RULES, "utf-8")
     return root
@@ -142,7 +142,6 @@ def _instructions(monkeypatch, slug: str) -> str:
     from mcp_servers.condor import server
     from mcp_servers.condor.settings import settings
 
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", agents_root())
     monkeypatch.setattr(settings, "agent_slug", slug)
     return server._build_instructions()
 

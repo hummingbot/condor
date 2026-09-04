@@ -130,7 +130,7 @@ class TickEngine:
         # The journal/sessions/learnings hang off the *strategy* dir (one level
         # below the Agent), so each playbook keeps its own operational history
         # while the Agent's brain (memory/skills) stays shared at the parent.
-        strategy_dir = self.strategy.dir
+        strategy_dir = self.strategy.home
         mode = self.config.get("execution_mode", "loop")
         self.is_experiment = mode in ("dry_run", "run_once")
 
@@ -653,7 +653,7 @@ class TickEngine:
             from .journal import save_experiment_snapshot
 
             save_experiment_snapshot(
-                agent_dir=self.strategy.dir,
+                agent_dir=self.strategy.home,
                 experiment_num=self.session_num,
                 execution_mode=mode,
                 timestamp=timestamp,

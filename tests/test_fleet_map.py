@@ -42,8 +42,7 @@ def _write_strategy(root, agent_slug, sslug, name, *, config=""):
 
 
 def _roots(monkeypatch, tmp_path):
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
-    monkeypatch.setattr(strategy_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
 
 
 def _no_engines(monkeypatch):

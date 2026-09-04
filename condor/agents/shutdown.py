@@ -23,7 +23,7 @@ from typing import Any
 from condor.frontmatter import parse_frontmatter
 from condor.runtime.timeouts import resolve_tick_timeout
 
-from .strategy import Strategy
+from .strategy import STRATEGIES_DIRNAME, Strategy
 
 log = logging.getLogger(__name__)
 
@@ -77,18 +77,20 @@ def load_shutdown_policy(strategy: Strategy) -> tuple[ShutdownPolicy, str]:
     """Resolve the shutdown policy + LLM body for ``strategy``.
 
     Walks strategy → agent → shipped default, returning the first ``shutdown.md``
-    found. Paths are derived from ``strategy.dir`` (``.../agents/{slug}/strategies/
-    {sslug}``) so the resolution follows the same (possibly test-patched) data root
-    as the rest of the agent store. If nothing is on disk, returns the built-in
-    default policy with an empty body.
+    found, and consults **both roots at each level** (local before stock), so an
+    install that wrote its own policy shadows the shipped one for that level and
+    nothing else. It used to reach the defaults by walking *up* from
+    ``strategy.dir``, which with two roots would land in whichever layer the
+    strategy happened to resolve from. If nothing is on disk, returns the
+    built-in default policy with an empty body.
     """
-    # strategy.dir == {root}/{agent_slug}/strategies/{sslug}
-    agent_dir = strategy.dir.parent.parent  # {root}/{agent_slug}
-    data_root = agent_dir.parent  # {root}
+    from condor.memory.paths import agent_home_layers, defaults_layers
+
+    homes = agent_home_layers(strategy.agent_slug)
     candidates = [
-        strategy.dir / "shutdown.md",
-        agent_dir / "shutdown.md",
-        data_root / "_defaults" / "shutdown.md",
+        *(h / STRATEGIES_DIRNAME / strategy.slug / "shutdown.md" for h in homes),
+        *(h / "shutdown.md" for h in homes),
+        *(d / "shutdown.md" for d in defaults_layers()),
     ]
     for path in candidates:
         if not path.exists():

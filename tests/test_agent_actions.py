@@ -336,7 +336,7 @@ def _strategy_at(monkeypatch, tmp_path):
     session_dir = tmp_path / "sessions" / "session_7"
     session_dir.mkdir(parents=True)
     monkeypatch.setattr(
-        routes, "_get_strategy", lambda slug, sslug: SimpleNamespace(dir=tmp_path)
+        routes, "_get_strategy", lambda slug, sslug: SimpleNamespace(home=tmp_path)
     )
     return session_dir
 

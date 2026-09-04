@@ -108,10 +108,11 @@ def load_policy(agent_slug: str | None = None) -> str:
     parsed off and discarded — this file is a body, but an override is free to
     carry metadata without it leaking into the prompt.
     """
-    from condor.memory.paths import assistant_home
+    from condor.memory.paths import agent_home_layers, defaults_layers
 
-    home = assistant_home(agent_slug)
-    for path in (home / REFLECT_FILENAME, home.parent / "_defaults" / REFLECT_FILENAME):
+    candidates = [home / REFLECT_FILENAME for home in agent_home_layers(agent_slug)]
+    candidates += [d / REFLECT_FILENAME for d in defaults_layers()]
+    for path in candidates:
         try:
             if not path.is_file():
                 continue
