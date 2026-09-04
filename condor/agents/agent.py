@@ -215,7 +215,7 @@ def _load_agent_from_file(path: Path, slug: str) -> Agent | None:
 
 
 class AgentStore:
-    """Discovery + CRUD for Agents under ``agents/*/AGENT.md``.
+    """Discovery + CRUD for Agents under ``<root>/*/AGENT.md``, both roots.
 
     Replaces ``ExpertStore`` and the identity half of ``StrategyStore``. There is
     no ``role`` discriminator and no capability flag: every directory with an

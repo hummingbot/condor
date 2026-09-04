@@ -379,3 +379,98 @@ def test_resolve_agent_file_prefers_local_and_falls_back_per_file(stock):
         == stock / "skills" / "recon" / "SKILL.md"
     )
     assert resolve_agent_file("scout", "nothing.md") is None
+
+
+# ── 10. What travels to a subprocess, and the one way back into the library ──
+
+
+def test_an_mcp_child_is_handed_both_roots_resolved(monkeypatch):
+    """A stdio MCP child gets ``env`` from its own config, not the parent's.
+
+    So an unset variable does not mean "inherit" — it means the child recomputes
+    a default, and would land on a different local root than its parent whenever
+    the parent derived one from ``$CONDOR_RUNTIME_ROOT``. Both roots therefore
+    travel resolved.
+    """
+    from condor.paths import local_agents_root, stock_agents_root
+    from condor.runtime import toolsets
+
+    monkeypatch.setattr(toolsets, "_bot_token", lambda: "t")
+    entries = toolsets._env_entries(
+        TELEGRAM_BOT_TOKEN="t",
+        CONDOR_AGENTS_ROOT=str(local_agents_root()),
+        CONDOR_STOCK_AGENTS_ROOT=str(stock_agents_root()),
+    )
+    env = {e["name"]: e["value"] for e in entries}
+
+    assert env["CONDOR_AGENTS_ROOT"] == str(local_agents_root())
+    assert env["CONDOR_STOCK_AGENTS_ROOT"] == str(stock_agents_root())
+    assert env["CONDOR_AGENTS_ROOT"] != env["CONDOR_STOCK_AGENTS_ROOT"]
+
+
+def test_publishing_copies_the_library_half_and_leaves_the_runtime_behind(stock):
+    """The maintainer's only path into the shipped tree — and it stays a library.
+
+    A whole-directory copy would drag the store, the journals and the mute set
+    into the tracked tree, which is the wound the feature closed.
+    """
+    from condor.layering import publish_to_stock
+
+    home = agent_home("perps")
+    _write(
+        home / "AGENT.md", AGENT_MD.format(name="Perps", desc="mine", body="Funding.")
+    )
+    _write(
+        home / "skills" / "basis" / "SKILL.md", SKILL_MD.format(slug="basis", body="B.")
+    )
+    _write(
+        home / "strategies" / "carry" / "strategy.md", "---\nname: Carry\n---\n\ntick\n"
+    )
+    _write(home / "strategies" / "carry" / "learnings.md", "learned")
+    _write(home / "store" / "user_7" / "audit.log", "ran")
+    _write(home / "mutes.yml", "skills: []\n")
+
+    result = publish_to_stock("perps")
+
+    assert result["published"] is True
+    # Repo-relative, so the maintainer can read them straight into ``git add``.
+    prefix = stock.parent.name
+    assert set(result["paths"]) == {
+        f"{prefix}/perps/AGENT.md",
+        f"{prefix}/perps/skills/basis/SKILL.md",
+        f"{prefix}/perps/strategies/carry/strategy.md",
+    }
+    shipped = stock_agent_home("perps")
+    assert (shipped / "AGENT.md").exists()
+    assert not (shipped / "store").exists()
+    assert not (shipped / "mutes.yml").exists()
+    assert not (shipped / "strategies" / "carry" / "learnings.md").exists()
+
+
+def test_publishing_clears_the_fork_stamp(stock):
+    from condor.layering import publish_to_stock
+
+    agent = AgentStore().get("scout")
+    agent.instructions = "Mine."
+    AgentStore().update(agent)
+    assert FORKED_FROM_KEY in (agent_home("scout") / "AGENT.md").read_text()
+
+    publish_to_stock("scout", "AGENT.md")
+
+    # A shipped file claiming to be forked from a shipped file would make every
+    # install that pulls it look forked from itself.
+    assert FORKED_FROM_KEY not in (stock / "AGENT.md").read_text()
+    assert "Mine." in (stock / "AGENT.md").read_text()
+
+
+def test_publishing_is_admin_only(stock, monkeypatch):
+    from mcp_servers.condor.tools import trading_agent
+
+    monkeypatch.setattr(
+        "config_manager.get_config_manager",
+        lambda: type("CM", (), {"is_admin": staticmethod(lambda _uid: False)})(),
+    )
+
+    result = trading_agent.manage_agents(action="publish", agent_slug="scout")
+
+    assert "admin-only" in result["error"]

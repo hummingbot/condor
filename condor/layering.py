@@ -24,6 +24,12 @@ and no shadow manifest: the answer already shipped as FEAT-090's mute set, which
 removes a playbook or routine from the *run* rather than hiding it from a list,
 and is reversible. :func:`stock_delete_error` is the refusal, and it names the
 mute.
+
+**And one way back.** Once every write is local, the maintainer editing an agent
+through the product has no way to author the library at all — so
+:func:`publish_to_stock` is not a nice-to-have, it is what keeps the library
+authorable. It is the single sanctioned write into the shipped tree; the dirty
+tree it leaves is *intended*, and the maintainer commits it.
 """
 
 from __future__ import annotations
@@ -239,3 +245,108 @@ def clear_fork_stamp(path: Path) -> None:
         atomic_write_text(path, render_frontmatter(meta, body))
     except OSError:
         log.warning("Could not clear the fork stamp on %s", path, exc_info=True)
+
+
+# ── Publishing: the one sanctioned write into the shipped library ──
+
+# What a published agent consists of. An allowlist rather than a denylist, and
+# deliberately: a whole-directory copy would drag ``store/``, ``sessions/`` and
+# the mute set into the tracked tree, which is the exact wound this feature
+# closed. Anything not named here is this install's, not the library's.
+_RUNTIME_NAMES = frozenset(
+    {
+        "store",
+        "proposals",
+        "mutes.yml",
+        "delegations",
+        "sessions",
+        "dry_runs",
+        "learnings.md",
+        "state.json",
+        "config.yml",
+        "owned_bots.json",
+    }
+)
+
+
+def publishable_files(home: Path, path: str = "") -> list[Path]:
+    """Every library file under ``home``, relative to it — runtime output skipped.
+
+    ``path`` narrows to one file or folder (``skills/recon``,
+    ``strategies/grid``); empty takes the whole agent. The runtime filter applies
+    either way, so naming a folder cannot smuggle a store out.
+    """
+    rel_parts = tuple(part for part in path.split("/") if part and part != "..")
+    base = home.joinpath(*rel_parts)
+    if base.is_file():
+        return [Path(*rel_parts)]
+    if not base.is_dir():
+        return []
+
+    found: list[Path] = []
+    for candidate in sorted(base.rglob("*")):
+        if not candidate.is_file() or candidate.name.startswith("."):
+            continue
+        rel = candidate.relative_to(home)
+        if any(part in _RUNTIME_NAMES for part in rel.parts):
+            continue
+        found.append(rel)
+    return found
+
+
+def publish_to_stock(agent_slug: str, path: str = "") -> dict:
+    """Copy this install's agent (or one item of it) into the shipped library.
+
+    The inverse of :func:`fork_if_stock`, and the only write into the tracked
+    tree in the product. The fork stamp is cleared on the way in — a shipped
+    file that still claimed to be forked from a shipped file would make every
+    install that pulls it look forked from itself.
+
+    Returns the paths to commit, relative to the repo, so the maintainer can see
+    what their tree now holds. Overwriting is the point here (publishing an
+    updated playbook is the normal case), which is exactly why this is
+    admin-only and why the caller is told what changed.
+    """
+    local_home, stock_home = _homes(agent_slug)
+    if not local_home.is_dir():
+        return {"error": f"'{agent_slug}' has nothing local to publish"}
+
+    files = publishable_files(local_home, path)
+    if not files:
+        target = f"{agent_slug}/{path}" if path else agent_slug
+        return {"error": f"Nothing publishable at '{target}'"}
+
+    published: list[str] = []
+    for rel in files:
+        destination = stock_home / rel
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(local_home / rel, destination)
+            clear_fork_stamp(destination)
+        except OSError:
+            log.warning("Could not publish %s/%s", agent_slug, rel, exc_info=True)
+            continue
+        published.append(_repo_relative(destination))
+
+    log.info(
+        "agents: published %d file(s) of %s into stock", len(published), agent_slug
+    )
+    return {
+        "published": True,
+        "agent_slug": agent_slug,
+        "paths": published,
+        "note": (
+            "These are now dirty in the repo, which is intended — review and "
+            "commit them. Nothing else in the product writes here."
+        ),
+    }
+
+
+def _repo_relative(path: Path) -> str:
+    """``agents/<slug>/...`` when the shipped root sits in a checkout."""
+    from condor.paths import stock_agents_root
+
+    try:
+        return str(path.relative_to(stock_agents_root().parent))
+    except ValueError:
+        return str(path)

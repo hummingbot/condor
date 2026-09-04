@@ -35,7 +35,12 @@ _NO_SERVER = (
 
 
 def _shared_root() -> Path:
-    """``agents/_shared/routines`` — the library every assistant reads."""
+    """The **writable** shared library: ``.condor/agents/_shared/routines``.
+
+    Reads also see the shipped ``agents/_shared/routines`` under it; a publish
+    lands local, and a published routine of the same name shadows the shipped
+    one exactly as an agent's own routine shadows a shared one.
+    """
     from condor.memory.paths import shared_routines_root
 
     return shared_routines_root()
@@ -44,14 +49,15 @@ def _shared_root() -> Path:
 def _get_agent_routines_dir(target: str | None, shared: bool = False) -> Path | None:
     """Resolve the routines directory to write to.
 
-    Routines live at the **Agent** level (``agents/<slug>/routines``), shared
+    Routines live at the **Agent** level (``.condor/agents/<slug>/routines`` —
+    always the writable root, never the tracked library), shared
     across all of that agent's strategies — so ``target`` is an *agent* selector:
     a bare agent slug ("agent_slug") is the canonical form. A composite strategy
     key ("agent_slug.strategy_slug") is still accepted and resolves to its
     *owning agent's* dir (the strategy half is discarded — there is no
     per-strategy routines dir). Without a ``target``, the current assistant's own
     dir — the general library (root ``routines/``) for the chat, or the launched
-    Agent's (``agents/<slug>/routines``, ``settings.agent_slug``).
+    Agent's (``.condor/agents/<slug>/routines``, ``settings.agent_slug``).
 
     ``shared=True`` targets the published library every assistant reads
     (:func:`condor.memory.paths.shared_routines_root`), and is honored **only**

@@ -128,7 +128,7 @@ def _manage_strategy(
 
 
 def _list_agent_definitions() -> dict:
-    """List the Agent identities (agents/*/AGENT.md).
+    """List the Agent identities (``*/AGENT.md`` across both agent roots).
 
     An *agent* (e.g. ``executor_manager``, ``brigado``) is distinct from a
     *strategy* (a looping playbook it owns) and from a running *instance*. This
@@ -185,6 +185,38 @@ def _creator_agent_key() -> str:
         return ""
 
 
+def _publish_agent(agent_slug: str, path: str) -> dict:
+    """Copy a local agent into the shipped library. Admin only.
+
+    Every other write in the product lands in the local root, which means the
+    maintainer editing an agent through the product has no way to author what
+    the repo ships. This is that way — and the single sanctioned write into the
+    tracked tree, so it is gated on the one role that owns the checkout.
+
+    There is no matching "install": a shipped agent is present the moment the
+    install pulls. Publishing is a copy plus a commit; anything more would be a
+    distribution system nobody asked for.
+    """
+    from condor.layering import publish_to_stock
+
+    try:
+        from config_manager import get_config_manager
+
+        is_admin = get_config_manager().is_admin(settings.user_id)
+    except Exception:  # noqa: BLE001 - no config is not a licence to publish
+        is_admin = False
+    if not is_admin:
+        return {
+            "error": (
+                "Publishing writes into the tracked library the repo ships, so "
+                "it is admin-only. Your edit is already saved locally and is "
+                "what this install reads."
+            )
+        }
+
+    return publish_to_stock(agent_slug, path)
+
+
 def _manage_agent(
     action: str,
     agent_slug: str | None,
@@ -196,6 +228,7 @@ def _manage_agent(
     when_to_consult: str | None,
     server_required: bool | None,
     server_name: str | None,
+    path: str | None = None,
 ) -> dict:
     from condor.agents.agent import AgentStore
 
@@ -272,6 +305,11 @@ def _manage_agent(
             a.server_name = server_name
         store.update(a)
         return {"updated": True, "agent_slug": a.slug}
+
+    if action == "publish_agent":
+        if not agent_slug:
+            return {"error": "agent_slug is required"}
+        return _publish_agent(agent_slug, path or "")
 
     if action == "delete_agent":
         if not agent_slug:
@@ -604,6 +642,10 @@ _ACTION_OWNER: dict[str, tuple[str, str]] = {
     "get_agent": ("manage_agents", 'manage_agents(action="get", agent_slug=...)'),
     "update_agent": ("manage_agents", 'manage_agents(action="update", agent_slug=...)'),
     "delete_agent": ("manage_agents", 'manage_agents(action="delete", agent_slug=...)'),
+    "publish_agent": (
+        "manage_agents",
+        'manage_agents(action="publish", agent_slug=...)',
+    ),
     "list_strategies": ("manage_strategies", 'manage_strategies(action="list")'),
     "get_strategy": (
         "manage_strategies",
@@ -651,6 +693,7 @@ _AGENT_ACTIONS = {
     "get": "get_agent",
     "update": "update_agent",
     "delete": "delete_agent",
+    "publish": "publish_agent",
 }
 
 _STRATEGY_ACTIONS = {
@@ -703,6 +746,7 @@ def manage_agents(
     when_to_consult: str | None = None,
     server_required: bool | None = None,
     server_name: str | None = None,
+    path: str | None = None,
 ) -> dict:
     resolved, err = _resolve_action("manage_agents", action, _AGENT_ACTIONS)
     if err:
@@ -720,6 +764,7 @@ def manage_agents(
         when_to_consult,
         server_required,
         server_name,
+        path,
     )
 
 

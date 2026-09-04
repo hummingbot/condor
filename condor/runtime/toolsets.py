@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from condor.acp.client import bot_process_marker
+from condor.paths import local_agents_root, stock_agents_root
 
 log = logging.getLogger(__name__)
 
@@ -363,7 +364,18 @@ def build_mcp_servers_for_session(
             session_key=session_key,
             muted_tools=muted_tools,
         ),
-        "env": _env_entries(TELEGRAM_BOT_TOKEN=_bot_token()),
+        # Both agent roots travel *resolved* rather than as whatever the parent
+        # happened to have in its environment. A stdio MCP child gets the ``env``
+        # from its own config, not the parent's (see ``runtime/sessions.py``), so
+        # an unset var here means the child recomputes a default -- and it would
+        # get a different local root than its parent whenever the parent derived
+        # one from ``$CONDOR_RUNTIME_ROOT``. Passing the answer removes the
+        # derivation from the child's problem entirely.
+        "env": _env_entries(
+            TELEGRAM_BOT_TOKEN=_bot_token(),
+            CONDOR_AGENTS_ROOT=str(local_agents_root()),
+            CONDOR_STOCK_AGENTS_ROOT=str(stock_agents_root()),
+        ),
     }
 
     if not server_name:
