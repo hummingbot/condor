@@ -1267,7 +1267,12 @@ export function useChatSocket() {
           if (!slotId) break;
           const tc: ToolCall = {
             tool_call_id: data.tool_call_id as string,
-            title: data.title as string,
+            // Coerced, not cast: `as string` is a compile-time assertion that
+            // buys nothing off the wire, and a frame arriving without a title
+            // used to put `undefined` into a field typed `string`. The history
+            // path at the top of this hook has always coerced; this is the live
+            // path saying the same thing (CORR-326).
+            title: String(data.title ?? ""),
             status: data.status as string,
           };
           appendToStream(slotId, (m) => ({

@@ -9,6 +9,7 @@ import {
   formatRelativeTime,
   formatRuntimeHours,
   formatTime,
+  formatToolName,
   roundToPricePrecision,
   shortBotName,
 } from "./formatters";
@@ -389,5 +390,91 @@ describe("formatRelativeTime", () => {
   // for anything under a minute, a clock skewed into the future included.
   it("counts a future timestamp backwards rather than clamping it", () => {
     expect(formatRelativeTime(secondsAgo(-3))).toBe("-3s ago");
+  });
+});
+
+// CORR-326: `formatToolName` is typed as total and must actually be total. The
+// live `tool_call` frame is the reason — it used to build its `ToolCall` with an
+// unchecked `data.title as string` cast, so a frame without the field reached
+// `title.includes(...)` as `undefined` and threw inside the render of the bubble
+// that was *streaming right then*, while the same turn re-read from history
+// (which coerces) drew fine. These cases are the contract: no input throws, and
+// every input names something a reader can act on.
+describe("formatToolName", () => {
+  describe("well-formed names — unchanged, byte for byte", () => {
+    it("keeps the tool and drops the mcp__<server>__ prefix", () => {
+      expect(formatToolName("mcp__condor__run_code")).toBe("run code");
+      expect(formatToolName("mcp__condor__manage_routines")).toBe("manage routines");
+    });
+
+    it("leaves a bare name alone but for its underscores", () => {
+      expect(formatToolName("ToolSearch")).toBe("ToolSearch");
+      expect(formatToolName("read_file")).toBe("read file");
+    });
+  });
+
+  describe("a title that is absent", () => {
+    it("returns the fallback instead of throwing", () => {
+      expect(() => formatToolName(undefined)).not.toThrow();
+      expect(formatToolName(undefined)).toBe("tool");
+      expect(formatToolName(null)).toBe("tool");
+      expect(formatToolName()).toBe("tool");
+    });
+
+    // What the live path now hands it: `String(data.title ?? "")` on a frame
+    // that carried no title at all.
+    it("returns the fallback for the empty string the coercion produces", () => {
+      expect(formatToolName("")).toBe("tool");
+      expect(formatToolName("   ")).toBe("tool");
+    });
+  });
+
+  describe("a title that is not a string", () => {
+    // The wire is JSON; nothing stops it sending a number, a flag or an object
+    // in a field the types call `string`.
+    it("names nothing rather than rendering a coerced value as if it ran", () => {
+      expect(formatToolName(42)).toBe("tool");
+      expect(formatToolName(true)).toBe("tool");
+      expect(formatToolName({ name: "run_code" })).toBe("tool");
+      expect(formatToolName(["run_code"])).toBe("tool");
+      expect(() => formatToolName({})).not.toThrow();
+    });
+  });
+
+  describe("a title that is present but says nothing", () => {
+    // A real transcript holds five calls whose stored title is the string
+    // "undefined", quotes included — five identical rows telling the reader
+    // nothing. CORR-327 stops new ones being written; this keeps the ones
+    // already on disk readable.
+    it("unwraps a double-stringified sentinel and falls back", () => {
+      expect(formatToolName('"undefined"')).toBe("tool");
+      expect(formatToolName("'undefined'")).toBe("tool");
+      expect(formatToolName("undefined")).toBe("tool");
+      expect(formatToolName("null")).toBe("tool");
+      expect(formatToolName("None")).toBe("tool");
+      expect(formatToolName("[object Object]")).toBe("tool");
+    });
+
+    it("keeps a real name that merely arrived quoted", () => {
+      expect(formatToolName('"mcp__condor__run_code"')).toBe("run code");
+    });
+  });
+
+  describe("a title that is garbage or unprintable", () => {
+    it("turns control characters into spaces so the row stays one line", () => {
+      expect(formatToolName("read\nfile")).toBe("read file");
+      expect(formatToolName("run\u0000_code")).toBe("run code");
+    });
+
+    it("falls back when nothing printable is left", () => {
+      expect(formatToolName("\u0000\u0007\u001b")).toBe("tool");
+      expect(formatToolName("___")).toBe("tool");
+      expect(formatToolName("__")).toBe("tool");
+    });
+
+    it("never yields an empty name from a stray separator", () => {
+      expect(formatToolName("mcp__condor__")).toBe("condor");
+      expect(formatToolName("mcp__condor__run_code__")).toBe("run code");
+    });
   });
 });

@@ -1,10 +1,63 @@
 // ── Centralized Formatters ──
 
-/** Humanize a tool-call name: strip the `mcp__<server>__` prefix and underscores.
- *  e.g. "mcp__condor__manage_routines" → "manage routines", "ToolSearch" → "ToolSearch". */
-export function formatToolName(title: string): string {
-  const name = title.includes("__") ? title.split("__").pop()! : title;
-  return name.replace(/_/g, " ");
+/** What a tool call is called when it turns out not to be called anything. */
+const UNNAMED_TOOL = "tool";
+
+/** Control characters — a title that carries one would break the single-line row.
+ *  The control range is the whole point here, so `no-control-regex` is off by
+ *  intent rather than by accident. */
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/g;
+
+/** Strings that are the *absence* of a name wearing a name's clothes. Python's
+ *  `None` and JS's `undefined`/`null` all reach the wire stringified by some
+ *  adapter or other; `[object Object]` is what `String()` makes of a payload
+ *  that was never a name at all. */
+const NOT_A_NAME = new Set(["undefined", "null", "none", "nan", "[object object]"]);
+
+/**
+ * Humanize a tool-call name: strip the `mcp__<server>__` prefix and underscores.
+ * e.g. "mcp__condor__manage_routines" → "manage routines", "ToolSearch" → "ToolSearch".
+ *
+ * **Total by contract**: every input returns a string and nothing throws. That
+ * is not defensiveness for its own sake — the argument comes off an untyped
+ * wire. The live `tool_call` frame used to build its `ToolCall` with an
+ * unchecked `data.title as string` cast, so a frame missing the field handed
+ * this function `undefined` and `title.includes` took down the bubble that was
+ * *currently streaming*, while the same turn re-read from history (which
+ * coerces) rendered fine. A renderer that only breaks live and heals on reload
+ * is the worst shape that failure can have, so the guarantee lives here, at the
+ * one place all four call sites share, rather than at each of them.
+ *
+ * The sentinel check is the second half: a title that is present but meaningless
+ * — the literal string `"undefined"`, quotes included, of which a real
+ * transcript holds five — renders as `tool` instead of shouting a word that
+ * tells the reader nothing. CORR-327 normalises those at the ACP seam before
+ * they are persisted; this keeps the transcripts already on disk readable.
+ */
+export function formatToolName(title?: unknown): string {
+  // A name is a string. A number, a boolean, an object or a missing field is
+  // not a mangled name, it is the absence of one — say so rather than render
+  // "42" or "[object Object]" as if it were what ran.
+  if (typeof title !== "string") return UNNAMED_TOOL;
+
+  // Control characters become spaces (not nothing) so "read\nfile" degrades to
+  // two words rather than one invented one, and the row stays on one line.
+  let raw = title.replace(CONTROL_CHARS, " ").trim();
+
+  // One layer of wrapping quotes comes off, so the sentinel check below sees a
+  // double-stringified value (`"\"undefined\""`) for what it is.
+  const quoted = raw.match(/^"(.*)"$/s) ?? raw.match(/^'(.*)'$/s);
+  if (quoted) raw = quoted[1].trim();
+
+  if (!raw || NOT_A_NAME.has(raw.toLowerCase())) return UNNAMED_TOOL;
+
+  // `mcp__<server>__<tool>` → the tool. Empty segments are skipped so a
+  // trailing or tripled separator cannot yield an empty name.
+  const segments = raw.split("__").filter((s) => s.trim() !== "");
+  const name = segments.length ? segments[segments.length - 1] : raw;
+
+  return name.replace(/_/g, " ").replace(/\s+/g, " ").trim() || UNNAMED_TOOL;
 }
 
 /** Classify an ACP tool-call status into the three states the UI renders.
