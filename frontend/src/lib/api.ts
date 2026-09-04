@@ -1732,6 +1732,20 @@ export interface ConversationDetail {
   turns: ConversationTurn[];
 }
 
+/**
+ * What one conversation created, and whether it could have recorded it
+ * (FEAT-110).
+ *
+ * `predates_ledger` separates two answers that look identical on screen and are
+ * not: *this conversation deployed nothing*, and *this conversation ran before
+ * Condor wrote down what it did*. Every conversation older than FEAT-105 is the
+ * second one, and telling a reader the first about it would be a confident lie.
+ */
+export interface ConversationDeployments {
+  deployments: DeploymentRow[];
+  predates_ledger: boolean;
+}
+
 // ── Sharing a conversation (FEAT-054) ──
 //
 // A separate surface from telemetry on purpose. Telemetry is anonymous counts
@@ -3616,6 +3630,18 @@ export const api = {
   getConversation: (id: string, limit = 200) =>
     apiFetch<ConversationDetail>(
       `/api/v1/conversations/${encodeURIComponent(id)}?limit=${limit}`,
+    ),
+
+  /**
+   * What this conversation put into the world (FEAT-110).
+   *
+   * The conversation-shaped sibling of a run's ledger, in the same
+   * `DeploymentRow` shape, so the panel beside the chat and the one in the
+   * agent's Lab are the same component reading the same wire.
+   */
+  getConversationDeployments: (id: string) =>
+    apiFetch<ConversationDeployments>(
+      `/api/v1/conversations/${encodeURIComponent(id)}/deployments`,
     ),
 
   renameConversation: (id: string, title: string) =>

@@ -38,6 +38,12 @@ import type { LibraryFocus } from "@/components/chat/DockRoutines";
  * asking for more width than a laptop has. Which *sections* the desk is showing
  * is `useAccountPanels`', not this: this only says the desk is on.
  *
+ * `deployed` is the conversation's own ledger (FEAT-110) — what this chat put
+ * into the world. A pane member rather than a section of the context dock
+ * because it is a table you read, not a list you watch out of the corner of an
+ * eye while typing, and because `?panel=deployed` is what makes it linkable and
+ * closable by Back.
+ *
  * A strategy is a member rather than a sheet stacked on the agent panel: two
  * sheets portalled into one pane stack with no way to tell which scrollbar
  * belongs to what (see `WorkspaceSheet`'s `taken`). So the strategy *replaces*
@@ -47,6 +53,7 @@ import type { LibraryFocus } from "@/components/chat/DockRoutines";
 export type PaneView =
   | { kind: "agent" }
   | { kind: "desk" }
+  | { kind: "deployed" }
   | { kind: "routines"; focus: LibraryFocus }
   | { kind: "strategy"; agentSlug: string; strategySlug: string }
   | null;
@@ -70,6 +77,8 @@ export function readPane(
       return { kind: "agent" };
     case "desk":
       return { kind: "desk" };
+    case "deployed":
+      return { kind: "deployed" };
     case "routines":
       return { kind: "routines", focus: libraryFocus };
     case "strategy": {

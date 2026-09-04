@@ -20,6 +20,9 @@ describe("reading the pane off the URL", () => {
   it("opens the panel the URL names", () => {
     expect(readPane(q("?panel=agent"), {})).toEqual({ kind: "agent" });
     expect(readPane(q("?panel=desk"), {})).toEqual({ kind: "desk" });
+    // The conversation's own ledger (FEAT-110) — addressable like the rest, so
+    // Escape and Back close it and it can be sent to someone.
+    expect(readPane(q("?panel=deployed"), {})).toEqual({ kind: "deployed" });
   });
 
   it("closes for anything it does not have", () => {
@@ -61,6 +64,7 @@ describe("writing the pane into the URL", () => {
   it("round-trips every panel", () => {
     expect(round({ kind: "agent" })).toEqual({ kind: "agent" });
     expect(round({ kind: "desk" })).toEqual({ kind: "desk" });
+    expect(round({ kind: "deployed" })).toEqual({ kind: "deployed" });
     expect(
       round({ kind: "strategy", agentSlug: "brigado", strategySlug: "brl_mm" }),
     ).toEqual({ kind: "strategy", agentSlug: "brigado", strategySlug: "brl_mm" });

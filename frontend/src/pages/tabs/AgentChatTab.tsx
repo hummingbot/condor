@@ -24,6 +24,11 @@ import { ChatThread } from "@/components/chat/ChatThread";
 import { ContextDock } from "@/components/chat/ContextDock";
 import { useContextPanels } from "@/components/chat/contextPanels";
 import {
+  deployedRailItem,
+  useConversationDeployments,
+} from "@/components/chat/deployedPanel";
+import { DockDeployed } from "@/components/chat/DockDeployed";
+import {
   PANEL_PARAM,
   readPane,
   writePane,
@@ -392,12 +397,24 @@ export function AgentChatTab() {
     open: pane?.kind === "desk",
     onOpenChange: (open) => openPane(open ? { kind: "desk" } : null),
   });
+  const conversationId = activeSlot?.info.conversation_id || "";
   const context = useContextPanels({
     delegations: delegationData?.delegations ?? [],
-    conversationId: activeSlot?.info.conversation_id || "",
+    conversationId,
     agentSlug: activeSlot?.info.agent_slug || "",
     libraryOpen: pane?.kind === "routines",
   });
+  /**
+   * What this conversation has deployed, read whether or not its panel is open.
+   *
+   * The count is the tile's badge, and a badge that only appears once you open
+   * the thing it is on is not a badge — it is the whole answer to the panel's
+   * discoverability, which is why this is polled here beside the delegations
+   * rather than inside `DockDeployed`. The panel shares the query, so opening
+   * it costs nothing (FEAT-110).
+   */
+  const deployed = useConversationDeployments(conversationId);
+  const deployedCount = deployed.data?.deployments.length ?? 0;
 
   return (
     <WorkspacePaneProvider>
@@ -600,6 +617,18 @@ export function AgentChatTab() {
             />
           )}
 
+          {/* What this conversation put into the world (FEAT-110) — the
+              bots it deployed, the controllers those ran and what each has
+              made, so "did that actually happen" is answered next to where it
+              was asked instead of in the fleet browser's thirty-four rows. */}
+          {pane?.kind === "deployed" && (
+            <DockDeployed
+              conversationId={conversationId}
+              agentSlug={activeSlot?.info.agent_slug || ""}
+              onClose={() => openPane(null)}
+            />
+          )}
+
           {/* The desk this conversation trades on — the pane's other big
               occupant (FEAT-094, revised): a sheet like the agent panel above,
               at the same split, so the two cannot be on screen together and
@@ -698,7 +727,21 @@ export function AgentChatTab() {
               ],
             },
             { id: "desk", items: account.railItems },
-            { id: "conversation", items: context.railItems },
+            {
+              id: "conversation",
+              items: [
+                ...context.railItems,
+                deployedRailItem({
+                  conversationId,
+                  count: deployedCount,
+                  active: pane?.kind === "deployed",
+                  onToggle: () =>
+                    openPane(
+                      pane?.kind === "deployed" ? null : { kind: "deployed" },
+                    ),
+                }),
+              ],
+            },
           ]}
         />
       </div>
