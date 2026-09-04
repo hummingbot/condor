@@ -474,3 +474,66 @@ def test_publishing_is_admin_only(stock, monkeypatch):
     result = trading_agent.manage_agents(action="publish", agent_slug="scout")
 
     assert "admin-only" in result["error"]
+
+
+# ── 11. The routine tools an agent actually calls ──
+
+
+def _routine_src(desc: str) -> str:
+    return (
+        "from pydantic import BaseModel\n\n\n"
+        "class Config(BaseModel):\n"
+        f'    """{desc}"""\n\n\n'
+        "async def run(config, context):\n"
+        "    return 'ok'\n"
+    )
+
+
+def test_an_agent_can_read_and_edit_a_shipped_routine_but_not_delete_it(stock):
+    from mcp_servers.condor.tools import routines as routine_tools
+
+    _write(stock / "routines" / "recon_sweep.py", _routine_src("SHIPPED"))
+
+    read = routine_tools.read_routine("recon_sweep", "scout")
+    assert "SHIPPED" in read["code"]
+
+    edited = routine_tools.edit_routine("recon_sweep", _routine_src("MINE"), "scout")
+    assert edited.get("updated") is True
+    # The edit forked it down; the shipped copy is untouched.
+    assert "SHIPPED" in (stock / "routines" / "recon_sweep.py").read_text()
+    assert "MINE" in (agent_home("scout") / "routines" / "recon_sweep.py").read_text()
+
+
+def test_deleting_a_shipped_routine_is_refused_and_names_the_mute(stock):
+    from mcp_servers.condor.tools import routines as routine_tools
+
+    _write(stock / "routines" / "recon_sweep.py", _routine_src("SHIPPED"))
+
+    result = routine_tools.delete_routine("recon_sweep", "scout")
+
+    assert "mute" in result["error"]
+    assert (stock / "routines" / "recon_sweep.py").exists()
+
+
+def test_a_promoted_proposal_lands_in_the_local_library(stock):
+    """The proposal names a slug the library already ships, so it forks it."""
+    from condor.memory import proposals
+
+    proposals.put(
+        "scout",
+        name="recon",
+        description="d",
+        when_to_use="whenever",
+        body="Promoted.",
+    )
+
+    result = proposals.accept("scout")
+
+    assert result.get("accepted") is True, result
+    # And the offer itself was this install's from the start.
+    assert not (stock / "proposals").exists()
+    assert (
+        "Promoted."
+        in (agent_home("scout") / "skills" / "recon" / "SKILL.md").read_text()
+    )
+    assert (stock / "skills" / "recon" / "SKILL.md").read_text().endswith("Look.\n")

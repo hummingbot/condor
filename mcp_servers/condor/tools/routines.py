@@ -15,12 +15,16 @@ longer than a conversation turn.
 """
 
 import asyncio
+import logging
+import shutil
 import time
 from pathlib import Path
 
 from mcp_servers.condor.condor_client import call_main_api
 from mcp_servers.condor.exceptions import APIError
 from mcp_servers.condor.settings import caller_slug, settings
+
+log = logging.getLogger(__name__)
 
 # Wall-clock budget for a delegated one-shot run, unchanged from when the tool
 # executed the routine itself, and the granularity we poll the run with.
@@ -32,6 +36,13 @@ _NO_SERVER = (
     "registered. Ask the user to select a server (/servers in Telegram, or the "
     "server selector in the dashboard) and try again."
 )
+
+
+def _shared_roots() -> tuple[Path, ...]:
+    """Both shared routine libraries in read order: this install's, then shipped."""
+    from condor.memory.paths import shared_routines_roots
+
+    return shared_routines_roots()
 
 
 def _shared_root() -> Path:
@@ -86,6 +97,24 @@ def _get_agent_routines_dir(target: str | None, shared: bool = False) -> Path | 
         return None
 
     return assistant_routines_dir(settings.specialist_slug or None)
+
+
+def _stock_twin(routines_dir: Path, name: str) -> Path | None:
+    """The shipped ``<name>.py`` behind a writable routines dir, if there is one.
+
+    A routine carries no frontmatter, so a fork of one is indistinguishable from
+    a routine authored locally — accepted (FEAT-115), because routines already
+    shadow by name and always have. What this buys is that *editing* a shipped
+    routine works: the file is copied down first and the edit lands on the copy.
+    """
+    from condor.paths import local_agents_root, stock_agents_root
+
+    try:
+        relative = routines_dir.relative_to(local_agents_root())
+    except ValueError:
+        return None  # the chat's general library: tracked, but not an agent root
+    twin = stock_agents_root() / relative / f"{name}.py"
+    return twin if twin.is_file() else None
 
 
 def _own_plus_shared(slug: str | None) -> dict:
@@ -691,13 +720,19 @@ def read_routine(name: str, target: str | None, shared: bool = False) -> dict:
         file_path = routines_dir / f"{name}.py"
         if file_path.exists():
             return {"name": name, "code": file_path.read_text(), "scope": "agent"}
+        # ...and the shipped one under it, which an agent can read and edit (the
+        # edit forks it down) but never delete.
+        twin = _stock_twin(routines_dir, name)
+        if twin is not None:
+            return {"name": name, "code": twin.read_text(), "scope": "agent"}
 
     # An assistant can read the source of anything it can run, so the shared
     # library is on the fallback path too — read-only for an agent, which the
     # `scope` says (writes go through _get_agent_routines_dir and never land here).
-    shared_path = _shared_root() / f"{name}.py"
-    if shared_path.exists():
-        return {"name": name, "code": shared_path.read_text(), "scope": "shared"}
+    for shared_path in _shared_roots():
+        candidate = shared_path / f"{name}.py"
+        if candidate.exists():
+            return {"name": name, "code": candidate.read_text(), "scope": "shared"}
 
     global_path = Path("routines") / f"{name}.py"
     if global_path.exists():
@@ -720,9 +755,16 @@ def edit_routine(
 
     file_path = routines_dir / f"{name}.py"
     if not file_path.exists():
-        return {
-            "error": f"Agent routine '{name}' not found. Use action='create_routine' first."
-        }
+        # A shipped routine is forked down and the edit lands on the copy, the
+        # same copy-on-write every other write path does (FEAT-115).
+        twin = _stock_twin(routines_dir, name)
+        if twin is None:
+            return {
+                "error": f"Agent routine '{name}' not found. Use action='create_routine' first."
+            }
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(twin, file_path)
+        log.info("agents: forked %s from stock (routine)", file_path)
 
     if not code:
         return {"error": "code is required"}
@@ -759,6 +801,10 @@ def delete_routine(name: str, target: str | None, shared: bool = False) -> dict:
 
     file_path = routines_dir / f"{name}.py"
     if not file_path.exists():
+        if _stock_twin(routines_dir, name) is not None:
+            from condor.layering import stock_delete_error
+
+            return {"error": stock_delete_error(name, mute_kind="routine")}
         return {"error": f"Agent routine '{name}' not found"}
 
     file_path.unlink()
