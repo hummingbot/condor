@@ -43,6 +43,11 @@ class LoopState:
     COMPLETED = "completed"
     INTERRUPTED = "interrupted"
     ERROR = "error"
+    # Ended by the process going down, not by its owner. A clean shutdown stops
+    # every engine, which used to record STOPPED — indistinguishable on disk
+    # from "the owner pressed stop", so the next boot had nothing to resume and
+    # ``restart_on_boot`` only ever fired after a crash.
+    SUSPENDED = "suspended"
 
 
 # States that only make sense while the owning process is alive. Finding one of
@@ -158,5 +163,17 @@ def read_status(
 def is_stale(status: dict[str, Any]) -> bool:
     """True when this status was written by a process that is no longer us."""
     return status.get("state") in LIVE_STATES and status.get("boot_id") not in (
+        BOOT_ID,
+    )
+
+
+def is_suspended(status: dict[str, Any]) -> bool:
+    """True when a previous process wound this run down on its way out.
+
+    The clean counterpart of :func:`is_stale`: nothing was lost, the run simply
+    ended because the process did. A boot pass settles it — resuming it when the
+    session opted in — but must never report it as an interrupted run.
+    """
+    return status.get("state") == LoopState.SUSPENDED and status.get("boot_id") not in (
         BOOT_ID,
     )

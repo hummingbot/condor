@@ -325,7 +325,12 @@ def _snapshot_count(session_dir: Path) -> int:
 def _session_run(session_dir: Path, num: int, run_key: str) -> dict[str, Any]:
     """One session, as a run row."""
     from condor.agents.actions import ACTIONS_FILENAME
-    from condor.runtime.registry_file import LIVE_STATES, is_stale, read_status
+    from condor.runtime.registry_file import (
+        LIVE_STATES,
+        LoopState,
+        is_stale,
+        read_status,
+    )
 
     status = read_status(session_dir) or {}
     # A live state stamped by a boot that is not ours belongs to a process that
@@ -334,6 +339,11 @@ def _session_run(session_dir: Path, num: int, run_key: str) -> dict[str, Any]:
     state = status.get("state") or "idle"
     if is_stale(status):
         state = "interrupted"
+    elif state == LoopState.SUSPENDED:
+        # A shutdown wound this run down and the next boot will settle it into a
+        # stopped run or a fresh session. To a reader it is over either way, and
+        # "suspended" is a word about the process, not about this run.
+        state = LoopState.STOPPED
     live = state in LIVE_STATES
     ended = status.get("updated_at")
 

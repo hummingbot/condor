@@ -501,7 +501,9 @@ def test_stop_all_stops_every_engine(tmp_path):
     assert sorted(stopped) == ["brigado.mm_1", "brigado.mm_2"]
     assert supervisor.all() == {}
     for d in dirs:
-        assert read_status(d)["state"] == LoopState.STOPPED
+        # SUSPENDED, not STOPPED: the process ended these, not their owner, and
+        # only that distinction lets the next boot honour ``restart_on_boot``.
+        assert read_status(d)["state"] == LoopState.SUSPENDED
 
 
 def test_for_strategy_filters_by_pair(tmp_path):
