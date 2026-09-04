@@ -78,7 +78,6 @@ import {
   emptyScopeNode,
   foldLeaves,
   indexTree,
-  leafFromController,
   leafFromExecutor,
   leafFromTerminatedController,
   matchesGrain,
@@ -92,6 +91,7 @@ import {
   type Population,
   type PerfLeaf,
 } from "@/lib/perf-tree";
+import { botsByController, runningLeaves } from "@/lib/perf-population";
 import {
   collapseGrouping,
   DEFAULT_GROUPING,
@@ -777,16 +777,7 @@ export function PerfBrowser({
    * The live map is the fallback for the second, not a competitor: an executor
    * of a bot that is *still deployed* has no closed run window to sit in.
    */
-  const botByController = useMemo(() => {
-    const owners = new Map<string, string | null>();
-    for (const c of controllers) {
-      const id = c.controller_id || c.controller_name;
-      if (!id) continue;
-      const known = owners.get(id);
-      owners.set(id, known === undefined || known === c.bot_name ? c.bot_name : null);
-    }
-    return owners;
-  }, [controllers]);
+  const botByController = useMemo(() => botsByController(controllers), [controllers]);
 
   const attribute = useMemo(() => buildAttributor(runWindows(runs)), [runs]);
 
@@ -823,7 +814,6 @@ export function PerfBrowser({
   const leavesFor = useCallback(
     (which: Population): PerfLeaf[] => {
       const all: PerfLeaf[] = [];
-      const botOf = (ex: ExecutorInfo) => botByController.get(ex.controller_id) ?? UNATTACHED_BOT;
       /**
        * The run a record belongs to **and how we know**: the two links the
        * runtime enforces — the bot's namespace, and the session id a standalone
@@ -854,16 +844,13 @@ export function PerfBrowser({
         return owner ?? botByController.get(ex.controller_id) ?? UNATTACHED_BOT;
       };
       if (which === "running") {
-        for (const c of controllers) {
-          const att = agentOf(c.bot_name, "");
-          all.push(leafFromController(c, att.runKey, att.how));
-        }
-        for (const ex of executors) {
-          if (!isExecutorActive(ex.status)) continue;
-          const bot = botOf(ex);
-          const att = agentOf(bot, ex.controller_id);
-          all.push(leafFromExecutor(ex, bot, att.runKey, att.how));
-        }
+        // Shared with the workspace's Money view rather than written twice
+        // (FEAT-109): that view has to report the same number this browser
+        // reports at `?scope=agent:{runKey}`, and two copies of the
+        // construction would make them agree by coincidence.
+        all.push(
+          ...runningLeaves({ controllers, executors, owners, deeds, botByController }),
+        );
       } else {
         // The window applies to what has finished, and is measured from each
         // record's *end*: a period called "the last week" is the trading that
