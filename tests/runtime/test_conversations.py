@@ -1056,7 +1056,7 @@ def bound_agent(tmp_path, monkeypatch):
     from condor.agents import agent as agent_module
     from condor.agents.agent import AgentStore
 
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path / "agents")
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path / "agents"))
     return AgentStore().create(
         name="Brigado",
         description="Domain agent",

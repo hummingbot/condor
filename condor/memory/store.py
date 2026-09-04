@@ -12,7 +12,7 @@ subprocess (the ``manage_memory`` tool) alike.
 Each store lives under its assistant's home, keyed by ``user_id`` (FEAT-003);
 :func:`condor.memory.paths.store_root` resolves the root. Layout on disk::
 
-    {assistant_home}/store/user_{user_id}/
+    {agent_home}/store/user_{user_id}/
         MEMORY.md            # injectable index: one line per memory
         memories/
             <slug>.md        # one fact per file (frontmatter + body)

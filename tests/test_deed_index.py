@@ -40,13 +40,12 @@ def _fresh_cache():
 def _isolated_agents(monkeypatch, tmp_path):
     """The agent registry, off the developer's install.
 
-    ``$CONDOR_AGENTS_ROOT`` does not reach ``strategy.py``'s own ``_DATA_ROOT``
-    (the suite's own fixture says so), and this module walks every session on
-    disk — so without this every test here reads the real ``agents/`` tree and
-    its answer depends on whose laptop it runs on.
+    This module walks every session on disk, so without a root of its own each
+    test here would answer from whatever the suite's shared tmp root happened to
+    accumulate. ``$CONDOR_AGENTS_ROOT`` now reaches every store (FEAT-115 dragged
+    the last seven bypasses through the resolver), so one ``setenv`` does it.
     """
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
-    monkeypatch.setattr(strategy_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
 
 
 def _no_engines(monkeypatch):

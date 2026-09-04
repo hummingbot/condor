@@ -32,7 +32,7 @@ USER = 7
 @pytest.fixture(autouse=True)
 def _roots(monkeypatch, tmp_path):
     """The strategy store's root; the durable roots come from ``conftest``."""
-    monkeypatch.setattr(strategy_module, "_DATA_ROOT", tmp_path / "agents")
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path / "agents"))
 
 
 def _write_strategy(root: Path, agent_slug: str, sslug: str, name: str) -> Path:
@@ -317,7 +317,7 @@ def _write_agent(root: Path, slug: str, name: str) -> Path:
 def test_the_route_serves_the_union_in_the_new_grammar(monkeypatch, tmp_path):
     from condor.agents import agent as agent_module
 
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path / "agents")
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path / "agents"))
     _write_agent(tmp_path, "brigado", "Brigado")
     sdir = _write_strategy(tmp_path, "brigado", "brl_mm", "BRL MM")
     _write_session(sdir, 1, ticks=2)
@@ -337,7 +337,7 @@ def test_the_route_bounds_what_a_caller_can_ask_for(monkeypatch, tmp_path):
     from condor.agents import agent as agent_module
     from condor.web.routes.agents import MAX_RUN_LIMIT
 
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path / "agents")
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path / "agents"))
     _write_agent(tmp_path, "brigado", "Brigado")
 
     seen: list[int] = []
@@ -360,7 +360,7 @@ def test_the_route_bounds_what_a_caller_can_ask_for(monkeypatch, tmp_path):
 def test_a_conversation_of_another_person_is_not_in_this_rail(monkeypatch, tmp_path):
     from condor.agents import agent as agent_module
 
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path / "agents")
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path / "agents"))
     _write_agent(tmp_path, "brigado", "Brigado")
     _write_conversation(USER + 1, "not-mine", agent_slug="brigado")
 

@@ -234,7 +234,7 @@ def _agent(tmp_path, monkeypatch):
 
     root = tmp_path / "agents"
     root.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", root)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(root))
     return AgentStore().create(name="Market Making Expert").slug
 
 

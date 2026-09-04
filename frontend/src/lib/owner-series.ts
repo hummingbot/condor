@@ -122,10 +122,12 @@ export interface FloorChartRow extends PnlChartPoint {
  * it would charge the same trading to every later bucket, so it is summed at
  * the instants that actually carry it and is zero everywhere else.
  *
- * `total` takes an array of series rather than one because a floor spans
- * servers, and each server folds its own fleet with its own currency converter
- * (see `FloorSlice`). Owners may likewise repeat a key across servers; repeats
- * are summed, which is what makes an agent trading on two servers one line.
+ * `total` takes an array of series rather than one because a caller may hold
+ * several folds that belong on one timeline — one per server, each folded with
+ * its own currency converter, which is the shape the retired floor page had.
+ * Owners may likewise repeat a key across those folds; repeats are summed,
+ * which is what makes an agent trading on two servers one line. `/bots` is one
+ * server and hands over one.
  */
 export function mergeOwnerRows(
   total: readonly PnlChartPoint[][],

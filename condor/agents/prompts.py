@@ -339,22 +339,20 @@ def load_core_rules(agent_slug: str | None = None) -> str:
     """The shared behavioural rules for this agent: its own, else the default.
 
     Resolved exactly like :func:`condor.agents.reflection.load_policy` —
-    ``agents/<slug>/core_rules.md`` then ``agents/_defaults/core_rules.md``, both
-    hanging off :func:`condor.paths.agents_root` so tests and a relocated install
-    land where their data actually is. A falsy slug reads only the default, which
-    is what the chat seat wants.
+    ``<slug>/core_rules.md`` then ``_defaults/core_rules.md``, each consulted in
+    both roots (local before stock), so an install that dropped its own house
+    rules in shadows the shipped ones without losing them. A falsy slug reads
+    only the default, which is what the chat seat wants.
 
     Read on every call, never cached: editing the file is meant to be visible on
     the next tick. Returns ``""`` when nothing is on disk or the file is
     unreadable — a missing rulebook must never be what breaks a tick.
     """
-    from condor.memory.paths import assistant_home
+    from condor.memory.paths import agent_home_layers, defaults_layers
 
-    home = assistant_home(agent_slug)
-    for path in (
-        home / CORE_RULES_FILENAME,
-        home.parent / "_defaults" / CORE_RULES_FILENAME,
-    ):
+    candidates = [home / CORE_RULES_FILENAME for home in agent_home_layers(agent_slug)]
+    candidates += [d / CORE_RULES_FILENAME for d in defaults_layers()]
+    for path in candidates:
         try:
             if not path.is_file():
                 continue

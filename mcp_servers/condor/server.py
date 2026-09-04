@@ -472,13 +472,16 @@ async def manage_routines(
     - "edit_routine": Update an agent-local routine (requires name, code)
     - "delete_routine": Delete an agent-local routine (requires name)
 
-    Agent-local routines live in agents/{slug}/routines/ and are visible only to
-    that AGENT — they are shared across all of its strategies, there is no
-    per-strategy routine library. They follow the same pattern as global
+    Agent-local routines live in .condor/agents/{slug}/routines/ and are visible
+    only to that AGENT — they are shared across all of its strategies, there is
+    no per-strategy routine library. They follow the same pattern as global
     routines: a Config(BaseModel) class and an async run(config, context) function.
+    Writes always land under .condor/agents/ — never under the tracked agents/
+    library the repo ships, which you read but do not edit.
 
     Beside those per-agent libraries there is ONE shared library
-    (agents/_shared/routines) that every assistant also reads, mirroring
+    (.condor/agents/_shared/routines, layered over the shipped
+    agents/_shared/routines) that every assistant also reads, mirroring
     manage_skill's `shared`. A routine there is listed with scope="shared" and
     runs under its bare name from any seat. Publication is the library it lives
     in, not a flag in the file: `shared=True` on "create_routine" writes there.
@@ -672,8 +675,9 @@ async def manage_agents(
     when_to_consult: str | None = None,
     server_required: bool | None = None,
     server_name: str | None = None,
+    path: str | None = None,
 ) -> dict:
-    """Create and edit agent identities (agents/{slug}/AGENT.md).
+    """Create and edit agent identities (.condor/agents/{slug}/AGENT.md).
 
     An *agent* (e.g. "executor_manager", "brigado") is an identity — the brain,
     and the primary artifact. It is created FIRST; everything else hangs off its
@@ -691,10 +695,17 @@ async def manage_agents(
     - "get": Full definition including the AGENT.md body (requires agent_slug).
     - "update": Change AGENT.md / metadata (requires agent_slug + fields to change).
     - "delete": Delete an agent (requires agent_slug; refuses if it still owns
-      strategies).
+      strategies). Refused outright for an agent the repo ships — mute or edit
+      it instead; an update would bring a deleted one straight back.
+    - "publish": ADMIN ONLY. Copy a local agent into the tracked library the
+      repo ships (requires agent_slug; `path` narrows it to one skill or
+      strategy). Every other write lands under .condor/agents/, so this is the
+      only way to author what other installs receive. It leaves the repo dirty
+      on purpose — review and commit. There is no "install": a shipped agent is
+      present the moment an install pulls.
 
     Args:
-        action: One of list, create, get, update, delete.
+        action: One of list, create, get, update, delete, publish.
         agent_slug: The agent to act on (get/update/delete).
         name: Agent name (create/update).
         description: Agent description (create/update).
@@ -715,6 +726,10 @@ async def manage_agents(
             strategy it deploys use THIS server regardless of the chat's active
             server, and on a machine without that server the agent is broken. Do
             not fill it in with whatever server the chat happens to be on.
+        path: For "publish" only — narrow to one item of the agent, relative to
+            its directory ("skills/lp_rebalance", "strategies/grid", "AGENT.md").
+            Empty publishes the whole agent's library half; its store, journals,
+            mutes and session output are never published.
 
     Returns:
         Action-specific result dict.
@@ -730,6 +745,7 @@ async def manage_agents(
         when_to_consult=when_to_consult,
         server_required=server_required,
         server_name=server_name,
+        path=path,
     )
 
 

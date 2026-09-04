@@ -43,7 +43,7 @@ from pathlib import Path
 
 from condor.frontmatter import parse_frontmatter, render_frontmatter
 
-from .paths import assistant_home
+from .paths import agent_home
 from .skills import SkillStore
 from .store import _atomic_write, _slugify, _utcnow
 
@@ -63,7 +63,7 @@ LINE_MAX_CHARS = 200
 
 def proposals_root(agent_slug: str | None = None) -> Path:
     """``agents/<slug>/proposals`` — a sibling of the skill library, off its glob."""
-    return assistant_home(agent_slug) / PROPOSALS_DIRNAME
+    return agent_home(agent_slug) / PROPOSALS_DIRNAME
 
 
 def _line(value, limit: int = LINE_MAX_CHARS) -> str:

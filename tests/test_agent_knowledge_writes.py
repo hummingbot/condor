@@ -28,7 +28,7 @@ OTHER = WebUser(id=999, username="v", first_name="V", role="user")
 
 @pytest.fixture
 def env(tmp_path, monkeypatch):
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     AgentStore().create(name="Brigado", description="BRL market making")
     return tmp_path
 

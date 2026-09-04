@@ -36,7 +36,7 @@ OTHER = "brigado.other"
 @pytest.fixture
 def state_root(tmp_path, monkeypatch):
     """Isolated on-disk root and a clean in-memory cache."""
-    monkeypatch.setattr("condor.agents.agent._DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     monkeypatch.setattr(state_module, "_cache", {})
     monkeypatch.setattr(state_module, "_last_write", {})
     monkeypatch.setattr(state_module, "_dirty", set())

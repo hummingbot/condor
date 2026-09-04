@@ -43,7 +43,7 @@ import yaml
 
 from condor.fsutil import atomic_write_text
 
-from .paths import assistant_home
+from .paths import agent_home
 
 # The kinds a mute can address. ``tools`` is written and read here from the
 # start so FEAT-091 adds a filter, not a file format.
@@ -57,7 +57,7 @@ def mutes_path(agent_slug: str | None = None) -> Path:
     mutes rather than "no mutes" — otherwise the one assistant every unbound
     session talks to would be the one that cannot be curated.
     """
-    return assistant_home(agent_slug) / "mutes.yml"
+    return agent_home(agent_slug) / "mutes.yml"
 
 
 def load_mutes(agent_slug: str | None = None) -> dict[str, set[str]]:

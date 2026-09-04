@@ -116,7 +116,7 @@ def _legacy_dirs(agent_slug: str | None = None):
         agents = store.list_all()
 
     for agent in agents:
-        d = agent.agent_dir / "delegations"
+        d = agent.home / "delegations"
         if d.is_dir():
             yield agent.slug, d
 

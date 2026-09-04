@@ -1,4 +1,6 @@
-import type { FloorBucket, FloorModel } from "@/components/agent/floor/floor";
+import { useMemo } from "react";
+
+import type { FloorBucket } from "@/components/agent/floor/floor";
 import {
   formatCurrencyPnl,
   formatCurrencyVolume,
@@ -7,16 +9,19 @@ import {
 } from "@/lib/formatters";
 
 /**
- * The same records, cut two other ways (FEAT-112).
+ * The scope's records, cut two other ways (FEAT-112, rehosted by FEAT-116).
  *
- * By instrument and by venue — two questions the per-agent rows cannot answer
- * because they cut *across* every agent at once: what is the fleet actually
- * holding, and where.
+ * By instrument and by venue — two questions the scope tree cannot answer,
+ * because they cut *across* whatever level the reader is on: what is this scope
+ * actually holding, and where. It was the floor's, over the whole fleet; it is
+ * the band's third entry now, at any scope, because the question does not stop
+ * being asked one click into the tree.
  *
- * Both are slices of the one accounting spine, folded by the same `foldLeaves`
- * with the same `ConvertQuote`, so `Σ buckets == the fleet fold` by
- * construction. That is what lets a share be printed as a share: it is a
- * fraction of a whole this page actually holds, not of a subtotal.
+ * Both are slices of the one accounting spine — `scope.leaves` — folded by the
+ * same `foldLeaves` with the same `ConvertQuote` as the KPI tiles above, so
+ * `Σ buckets == the scope's own fold` by construction. That is what lets a
+ * share be printed as a share: it is a fraction of a whole this scope actually
+ * holds, not of a subtotal.
  *
  * Exposure is signed, and the sign is the most important thing about it, so it
  * is drawn as a bar diverging from a centre line rather than as a number in a
@@ -24,28 +29,53 @@ import {
  * `positions_summary` — not from a `side` field, which the leaf does not carry
  * and which a controller (a bag of both sides) could not answer anyway.
  *
- * **Leverage and margin health are absent and captioned as absent.** There is
- * no accounts or margin route in this app; an empty panel would read as a
- * number still loading.
+ * **What nothing in this app measures is named at the foot of the band**, where
+ * it is read next to the numbers it qualifies rather than as an empty panel,
+ * which reads as a number still loading.
  */
-export function FloorBreakdowns({ model }: { model: FloorModel }) {
+export function ScopeBreakdowns({
+  byPair,
+  byVenue,
+  symbol,
+}: {
+  byPair: FloorBucket[];
+  byVenue: FloorBucket[];
+  symbol: string;
+}) {
   return (
-    <div className="grid gap-4 md:grid-cols-2">
-      <Breakdown
-        title="By instrument"
-        test="pair"
-        buckets={model.byPair}
-        symbol={model.symbol}
-        caption="Signed exposure from each record's open positions."
-      />
-      <Breakdown
-        title="By venue"
-        test="venue"
-        buckets={model.byVenue}
-        symbol={model.symbol}
-        label={formatConnectorName}
-        caption="Leverage and margin health are not measured — no route reports them."
-      />
+    <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin border-t border-[var(--color-border)]/60 p-3">
+      <div className="grid gap-3 md:grid-cols-2">
+        <Breakdown
+          title="By instrument"
+          test="pair"
+          buckets={byPair}
+          symbol={symbol}
+          caption="Signed exposure from each record's open positions."
+        />
+        <Breakdown
+          title="By venue"
+          test="venue"
+          buckets={byVenue}
+          symbol={symbol}
+          label={formatConnectorName}
+          caption="Leverage and margin health are not measured — no route reports them."
+        />
+      </div>
+
+      {/* The four subjects this app has no record of, said once, under the
+          numbers they qualify. `leafFromController` hardcodes `fees: 0`, so the
+          Fees tile above is a floor and says so in its own title; the other
+          three have no source at all — there is no accounts or orders route,
+          and no record names an account. */}
+      <p
+        data-not-measured
+        className="mt-3 text-[10px] leading-relaxed text-[var(--color-text-muted)]"
+      >
+        Not measured here: margin, leverage and account health; live orders and
+        fill-level flow; sub-accounts; and fees, which are executor-only and
+        therefore a floor. Condor's records carry none of them, so nothing on
+        this screen stands in for them.
+      </p>
     </div>
   );
 }
@@ -65,15 +95,23 @@ function Breakdown({
   caption: string;
   label?: (value: string) => string;
 }) {
-  // The widest bar is the scale, so a fleet whose whole book is one instrument
+  // Ranked by what the scope is most exposed to. `groupSpine` emits buckets in
+  // the spine's own order, which is the order the records arrived in — an order
+  // about nothing. Sorted here rather than at the call site, because it is a
+  // reading order and not a property of the fold.
+  const ranked = useMemo(
+    () => [...buckets].sort((a, b) => Math.abs(b.exposure) - Math.abs(a.exposure)),
+    [buckets],
+  );
+  // The widest bar is the scale, so a scope whose whole book is one instrument
   // still shows a full bar rather than a sliver measured against a notional
   // maximum nobody chose.
-  const widest = buckets.reduce((max, b) => Math.max(max, Math.abs(b.exposure)), 0);
-  const gross = buckets.reduce((sum, b) => sum + Math.abs(b.exposure), 0);
+  const widest = ranked.reduce((max, b) => Math.max(max, Math.abs(b.exposure)), 0);
+  const gross = ranked.reduce((sum, b) => sum + Math.abs(b.exposure), 0);
 
   return (
     <section
-      data-floor-breakdown={test}
+      data-breakdown={test}
       className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]"
     >
       <header className="flex items-baseline justify-between border-b border-[var(--color-border)] px-3 py-1.5">
@@ -81,20 +119,20 @@ function Breakdown({
           {title}
         </h2>
         <span className="text-[10px] text-[var(--color-text-muted)]">
-          {buckets.length} of {buckets.length}
+          {ranked.length}
         </span>
       </header>
 
-      {buckets.length === 0 ? (
+      {ranked.length === 0 ? (
         <p className="px-3 py-4 text-center text-xs text-[var(--color-text-muted)]">
           Nothing to fold yet.
         </p>
       ) : (
         <ul className="divide-y divide-[var(--color-border)]">
-          {buckets.map((bucket) => (
+          {ranked.map((bucket) => (
             <li
               key={bucket.key}
-              data-floor-bucket={bucket.key}
+              data-bucket={bucket.key}
               className="grid grid-cols-[1fr_auto] items-center gap-x-3 px-3 py-1.5"
             >
               <div className="min-w-0">
@@ -103,7 +141,7 @@ function Breakdown({
               </div>
               <div className="text-right">
                 <span
-                  data-floor-bucket-net
+                  data-bucket-net
                   className={`block font-mono text-xs font-semibold ${pnlTextClass(
                     bucket.totals.net,
                   )}`}
@@ -149,7 +187,7 @@ function ExposureBar({ value, widest }: { value: number; widest: number }) {
         className="absolute inset-y-0 left-1/2 w-px bg-[var(--color-border)]"
       />
       <span
-        data-floor-exposure={long ? "long" : "short"}
+        data-exposure={long ? "long" : "short"}
         className={`absolute inset-y-0 rounded-sm ${
           long ? "bg-[var(--color-green)]" : "bg-[var(--color-red)]"
         }`}

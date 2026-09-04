@@ -17,16 +17,22 @@ from typing import Any
 
 import condor.reports as reports
 from condor import primitives, routine_hooks
+from condor.memory.paths import agent_home_layers, iter_agent_slugs
 from condor.telemetry import taps as telemetry_taps
 from routines.base import (
     RoutineResult,
+    _merged_from,
     discover_routines,
-    discover_routines_from_path,
     get_routine,
     normalize_result,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _agent_routine_dirs(slug: str) -> tuple:
+    """An agent's routine dirs in read order: local first, then shipped."""
+    return tuple(home / "routines" for home in agent_home_layers(slug))
 
 
 class _HttpBot:
@@ -274,28 +280,18 @@ class RoutineStore:
         """
         all_routines = dict(discover_routines())
 
-        # Scan agents/*/routines/
-        agents_dir = Path(__file__).resolve().parent.parent / "agents"
-        if agents_dir.exists():
-            for agent_dir in sorted(agents_dir.iterdir()):
-                # `_`-prefixed dirs are not agents (`_shared`, `_defaults`) —
-                # same rule as AgentStore._iter_agent_dirs, so a library dir can
-                # never surface here as a routine owner named `_shared/...`.
-                if agent_dir.name.startswith("_"):
-                    continue
-                routines_path = agent_dir / "routines"
-                if not routines_path.is_dir():
-                    continue
-                slug = agent_dir.name
-                agent_routines = discover_routines_from_path(
-                    routines_path, agent_slug=slug
-                )
-                for rname, rinfo in agent_routines.items():
-                    # Shallow-copy before prefixing: the RoutineInfo is shared
-                    # with the discovery cache and must keep its bare name.
-                    prefixed_info = copy.copy(rinfo)
-                    prefixed_info.name = f"{slug}/{rname}"
-                    all_routines[prefixed_info.name] = prefixed_info
+        # Scan <root>/*/routines/ across both agent roots (FEAT-115): the
+        # `_`-prefixed library dirs are skipped by ``iter_agent_slugs``, so one
+        # can never surface here as a routine owner named `_shared/...`, and a
+        # local routine shadows the shipped one of the same name.
+        for slug in iter_agent_slugs():
+            agent_routines = _merged_from(_agent_routine_dirs(slug), agent_slug=slug)
+            for rname, rinfo in agent_routines.items():
+                # Shallow-copy before prefixing: the RoutineInfo is shared
+                # with the discovery cache and must keep its bare name.
+                prefixed_info = copy.copy(rinfo)
+                prefixed_info.name = f"{slug}/{rname}"
+                all_routines[prefixed_info.name] = prefixed_info
 
         return all_routines
 
@@ -778,10 +774,7 @@ class RoutineStore:
         # Try agent format: slug/name
         if "/" in routine_name:
             slug, rname = routine_name.split("/", 1)
-            agents_dir = (
-                Path(__file__).resolve().parent.parent / "agents" / slug / "routines"
-            )
-            agent_routines = discover_routines_from_path(agents_dir, agent_slug=slug)
+            agent_routines = _merged_from(_agent_routine_dirs(slug), agent_slug=slug)
             return agent_routines.get(rname)
         return None
 

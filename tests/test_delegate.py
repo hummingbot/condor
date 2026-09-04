@@ -60,7 +60,7 @@ async def _drain(dt):
 
 
 def test_delegation_runs_to_done_and_persists(tmp_path, monkeypatch):
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     _write_agent(tmp_path, "scout")
 
     seen = {}
@@ -105,7 +105,7 @@ def test_delegation_runs_to_done_and_persists(tmp_path, monkeypatch):
 
 
 def test_delegation_captures_error(tmp_path, monkeypatch):
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     _write_agent(tmp_path, "scout")
 
     async def boom(**kw):
@@ -134,7 +134,7 @@ def test_delegation_captures_error(tmp_path, monkeypatch):
 
 
 def test_stop_cancels_running_delegation(tmp_path, monkeypatch):
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     _write_agent(tmp_path, "scout")
 
     async def slow(**kw):
@@ -180,7 +180,7 @@ def test_delegation_carries_conversation_provenance(tmp_path, monkeypatch):
     """
     import json
 
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     _write_agent(tmp_path, "scout")
     # The task now writes its outcome back to the conversation (ARCH-087), so
     # keep that write inside tmp_path rather than in the real store.
@@ -273,7 +273,7 @@ def test_completed_delegation_lands_in_its_conversation(tmp_path, monkeypatch):
     Without this the conversation ends on "I started a background task" and the
     resumed session replays that same unanswered story.
     """
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path / "agents")
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path / "agents"))
     _write_agent(tmp_path / "agents", "scout")
     conversations = _isolate_conversations(tmp_path, monkeypatch)
     meta = conversations.new_conversation(1, "web")
@@ -296,7 +296,7 @@ def test_completed_delegation_lands_in_its_conversation(tmp_path, monkeypatch):
 
 def test_delegation_without_conversation_records_nothing(tmp_path, monkeypatch):
     """A consult- or tick-started task has no conversation: no write, no raise."""
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path / "agents")
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path / "agents"))
     _write_agent(tmp_path / "agents", "scout")
     _isolate_conversations(tmp_path, monkeypatch)
 
@@ -309,7 +309,7 @@ def test_delegation_without_conversation_records_nothing(tmp_path, monkeypatch):
 
 def test_failed_delegation_records_the_same_failure_it_pushes(tmp_path, monkeypatch):
     """An error is reported to the conversation exactly as it is to the chat."""
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path / "agents")
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path / "agents"))
     _write_agent(tmp_path / "agents", "scout")
     conversations = _isolate_conversations(tmp_path, monkeypatch)
     meta = conversations.new_conversation(1, "web")
@@ -330,7 +330,7 @@ def test_failed_delegation_records_the_same_failure_it_pushes(tmp_path, monkeypa
 
 def test_stopped_delegation_records_nothing(tmp_path, monkeypatch):
     """A cancelled task stays silent in the transcript, as it does in the chat."""
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path / "agents")
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path / "agents"))
     _write_agent(tmp_path / "agents", "scout")
     conversations = _isolate_conversations(tmp_path, monkeypatch)
     meta = conversations.new_conversation(1, "web")
@@ -400,7 +400,7 @@ def test_session_key_resolution_never_raises():
 def test_delegation_persists_full_session_transcript(tmp_path, monkeypatch):
     """The runner feeds streamed events to an event_sink and the transcript
     captures reasoning, tool calls (input/output), and the final result."""
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     _write_agent(tmp_path, "scout")
 
     from condor.acp.client import TextChunk, ThoughtChunk, ToolCallEvent, ToolCallUpdate
@@ -475,7 +475,7 @@ def test_delegation_transcript_redacts_credential_arguments(tmp_path, monkeypatc
     """
     import json
 
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     _write_agent(tmp_path, "scout")
 
     from condor.acp.client import ToolCallEvent, ToolCallUpdate
@@ -823,7 +823,7 @@ def test_events_route_shows_a_running_delegation_live(tmp_path, monkeypatch):
     `id`, so the client updates the row instead of remounting it) completed with
     its output — without the task having finished.
     """
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     _write_agent(tmp_path, "scout")
 
     from condor.acp.client import ThoughtChunk, ToolCallEvent, ToolCallUpdate

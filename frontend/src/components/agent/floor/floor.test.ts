@@ -1,33 +1,24 @@
 /**
- * The floor's one claim: the parts add up to the whole.
+ * The one claim under every reading of a spine: the parts add up to the whole.
  *
- * Everything else on the page is a presentation of a fold that already existed.
- * What is new is the *partition* — that the fleet total equals the agent rows
- * plus the two unowned buckets plus whatever is attributed to a run key no
- * listed agent claims — and that every sub-fold is a slice of the same spine.
- * Those are the properties pinned here, together with the two refusals that
- * make the strip honest: a reading with a zero denominator is suppressed rather
- * than zeroed, and the floor's row is the *agent entire* rather than one scoped
- * strategy of it.
+ * The floor is not a page any more (FEAT-116) — the browser draws the report
+ * and `components/perf/scopeOwners` decides what it splits into — but the
+ * arithmetic it needed did not go with it, because it was never about the page.
+ * What is pinned here is that a breakdown is a *slice of the same spine* and so
+ * sums to the same fold; that {@link sumTotals} is a rule and not a spread,
+ * because three of its fields are not additive; and that an agent's fold is the
+ * *agent entire* rather than one scoped strategy of it, which is what
+ * `floorTargets` exists to say.
  */
 
 import { describe, expect, it } from "vitest";
 
-import {
-  feeBps,
-  groupSpine,
-  mergeSlices,
-  partitionFloor,
-  sumTotals,
-  turnover,
-  type FloorSlice,
-} from "@/components/agent/floor/floor";
+import { groupSpine, sumTotals } from "@/components/agent/floor/floor";
 import {
   floorTargets,
   foldRows,
   foldTargets,
 } from "@/components/agent/workspace/fleet";
-import { BEFORE_LEDGER, OUTSIDE } from "@/components/perf/agentFilter";
 import type { AgentSummary, ControllerInfo } from "@/lib/api";
 import type { ConvertQuote, PerfLeaf } from "@/lib/perf-tree";
 import { foldLeaves } from "@/lib/perf-tree";
@@ -77,116 +68,30 @@ function position(amount: number, price: number, side = "buy") {
   return { amount, entry_price: price, side };
 }
 
-describe("the partition is complete", () => {
-  const leaves = [
-    leaf({ agent: "alpha.mm", how: "namespace", net: 100, volume: 1_000 }),
-    leaf({ agent: "alpha.chat", how: "deed", net: 5, volume: 20 }),
-    leaf({ agent: "beta.grid", how: "namespace", net: -30, volume: 500 }),
-    // Attributed to an agent nobody listed — the residual by construction: a
-    // run key whose agent was deleted while its bots went on trading.
-    leaf({ agent: "ghost.mm", how: "namespace", net: 7, volume: 70 }),
-    // Unowned, after the ledger opened — Outside Condor.
-    leaf({ net: 11, volume: 90, startedAt: NOW - 60_000 }),
-    // Unowned, before the ledger opened — Before the ledger.
-    leaf({ net: -2, volume: 30, startedAt: NOW - 9_000_000 }),
-  ];
-
-  const listed = ["alpha", "beta"];
-  const partition = partitionFloor({ leaves, deeds: DEEDS, convert: cv, now: NOW, listed });
-  const rows = foldRows(
-    listed.map((slug) => ({ slug, strategy: null })),
-    { leaves, deeds: DEEDS, convert: cv, now: NOW, symbol: "$" },
-  );
-
-  it("names the two unowned buckets and the unclaimed run key", () => {
-    expect(partition.others.map((o) => o.kind).sort()).toEqual([
-      "before",
-      "outside",
-      "residual",
-    ]);
-    const residual = partition.others.find((o) => o.kind === "residual")!;
-    expect(residual.key).toBe("ghost.mm");
-    expect(residual.scope).toBe("agent:ghost.mm");
-    expect(residual.totals.net).toBe(7);
-  });
-
-  it("keeps the unowned buckets apart rather than lumping them together", () => {
-    const outside = partition.others.find((o) => o.key === OUTSIDE)!;
-    const before = partition.others.find((o) => o.key === BEFORE_LEDGER)!;
-    expect(outside.totals.net).toBe(11);
-    expect(before.totals.net).toBe(-2);
-  });
-
-  it("makes the fleet total the sum of every part, exactly", () => {
-    const fromRows = [...rows.values()].reduce((sum, fold) => sum + fold.net, 0);
-    const fromOthers = partition.others.reduce((sum, o) => sum + o.totals.net, 0);
-    expect(fromRows + fromOthers).toBeCloseTo(partition.total.net, 9);
-    // And every leaf is in exactly one of them.
-    expect(partition.total.count).toBe(leaves.length);
-  });
-
-  it("reports it through mergeSlices as a zero residual", () => {
-    const slice: FloorSlice = {
-      server: "s1",
-      symbol: "$",
-      rows,
-      others: partition.others,
-      total: partition.total,
-      byPair: [],
-      byVenue: [],
-      series: { total: [], owners: [] },
-    };
-    const model = mergeSlices([slice], [
-      { slug: "alpha", name: "Alpha" },
-      { slug: "beta", name: "Beta" },
-    ]);
-    expect(model.unaccounted).toBeCloseTo(0, 9);
-    expect(model.rows.map((r) => r.slug)).toEqual(["alpha", "beta"]);
-    expect(model.total.net).toBeCloseTo(91, 9);
-  });
-
-  it("claims an agent's pseudo runs for its own row, not for the residual", () => {
-    // `alpha.chat` is a chat deploy: it belongs to alpha as much as its
-    // strategy's records do, and `reconcile` includes it unconditionally.
-    expect(rows.get("alpha")!.net).toBe(105);
-    expect(partition.others.some((o) => o.key.startsWith("alpha."))).toBe(false);
-  });
-});
-
 describe("the breakdowns are slices of the same spine", () => {
   const leaves = [
     leaf({ agent: "alpha.mm", pair: "SOL-USDC", connector: "binance", net: 40, volume: 400 }),
     leaf({ agent: "alpha.mm", pair: "BTC-USDT", connector: "binance", net: -10, volume: 900 }),
     leaf({ agent: "beta.grid", pair: "SOL-USDC", connector: "kucoin", net: 6, volume: 70 }),
   ];
-  const partition = partitionFloor({
-    leaves,
-    deeds: DEEDS,
-    convert: cv,
-    now: NOW,
-    listed: ["alpha", "beta"],
-  });
+  // The scope's own accounting spine and its own fold — the two things the
+  // browser hands the band and the KPI tiles, from one `scope.leaves`.
+  const whole = foldLeaves(leaves, cv, NOW);
 
-  it("sums the per-instrument folds to the fleet fold", () => {
-    const byPair = groupSpine(partition.spine, (l) => l.pair, cv, NOW);
+  it("sums the per-instrument folds to the scope's own fold", () => {
+    const byPair = groupSpine(leaves, (l) => l.pair, cv, NOW);
     expect(byPair.map((b) => b.key).sort()).toEqual(["BTC-USDT", "SOL-USDC"]);
-    expect(byPair.reduce((sum, b) => sum + b.totals.net, 0)).toBeCloseTo(
-      partition.total.net,
-      9,
-    );
+    expect(byPair.reduce((sum, b) => sum + b.totals.net, 0)).toBeCloseTo(whole.net, 9);
     expect(byPair.reduce((sum, b) => sum + b.totals.volume, 0)).toBeCloseTo(
-      partition.total.volume,
+      whole.volume,
       9,
     );
   });
 
-  it("sums the per-venue folds to the fleet fold", () => {
-    const byVenue = groupSpine(partition.spine, (l) => l.connector, cv, NOW);
+  it("sums the per-venue folds to the scope's own fold", () => {
+    const byVenue = groupSpine(leaves, (l) => l.connector, cv, NOW);
     expect(byVenue.map((b) => b.key).sort()).toEqual(["binance", "kucoin"]);
-    expect(byVenue.reduce((sum, b) => sum + b.totals.net, 0)).toBeCloseTo(
-      partition.total.net,
-      9,
-    );
+    expect(byVenue.reduce((sum, b) => sum + b.totals.net, 0)).toBeCloseTo(whole.net, 9);
   });
 
   it("reads signed exposure off the positions, not off a side field", () => {
@@ -240,25 +145,7 @@ describe("sumTotals is a rule, not a spread", () => {
   });
 });
 
-describe("the normalized readings", () => {
-  it("are suppressed, not zeroed, when their denominator is zero", () => {
-    const nothing = foldLeaves([leaf({})], cv, NOW);
-    expect(feeBps(nothing)).toBeNull();
-    expect(turnover(nothing)).toBeNull();
-  });
-
-  it("measure fees as bps of volume and volume as turnover of capital", () => {
-    const traded = foldLeaves(
-      [leaf({ volume: 1_000_000, fees: 250, capital: 20_000 })],
-      cv,
-      NOW,
-    );
-    expect(feeBps(traded)).toBeCloseTo(2.5, 9);
-    expect(turnover(traded)).toBeCloseTo(50, 9);
-  });
-});
-
-describe("the floor's row is the agent entire", () => {
+describe("an agent's fold is the agent entire", () => {
   function strategy(slug: string, server = "") {
     return {
       slug,
@@ -348,49 +235,5 @@ describe("the floor's row is the agent entire", () => {
     expect(fold.lastClose).toBe(NOW - 60_000);
     expect(fold.running).toBe(1);
     expect(fold.totals.net).toBe(3);
-  });
-});
-
-describe("mergeSlices across servers", () => {
-  it("sums an agent's per-server folds into one row", () => {
-    const make = (net: number): FloorSlice => ({
-      server: `s${net}`,
-      symbol: "$",
-      rows: new Map([
-        [
-          "alpha",
-          {
-            net,
-            volume: net * 10,
-            symbol: "$",
-            reported: true,
-            totals: foldLeaves([leaf({ net, volume: net * 10 })], cv, NOW),
-            keys: [`bot:${net}`],
-            exposure: net,
-            lastClose: net,
-            running: 1,
-          },
-        ],
-      ]),
-      others: [],
-      total: foldLeaves([leaf({ net, volume: net * 10 })], cv, NOW),
-      byPair: [],
-      byVenue: [],
-      series: { total: [], owners: [] },
-    });
-
-    const model = mergeSlices([make(10), make(4)], [{ slug: "alpha", name: "Alpha" }]);
-    expect(model.rows).toHaveLength(1);
-    expect(model.rows[0].totals.net).toBeCloseTo(14, 9);
-    expect(model.rows[0].keys).toEqual(["bot:10", "bot:4"]);
-    expect(model.rows[0].exposure).toBeCloseTo(14, 9);
-    expect(model.rows[0].lastClose).toBe(10);
-    expect(model.unaccounted).toBeCloseTo(0, 9);
-  });
-
-  it("drops an agent no server has answered for rather than showing it a zero", () => {
-    const model = mergeSlices([], [{ slug: "alpha", name: "Alpha" }]);
-    expect(model.rows).toEqual([]);
-    expect(model.total.net).toBe(0);
   });
 });

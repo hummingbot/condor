@@ -46,6 +46,7 @@ from condor.agents.sessions_index import (
     list_sessions,
 )
 from condor.fsutil import atomic_write_text
+from condor.layering import fork_if_stock
 from condor.web.auth import check_server_access, get_current_user
 from condor.web.models import ReportSummary, WebUser
 
@@ -1122,7 +1123,7 @@ def _instance_from_engine(engine, perf_by_id: dict) -> RunningInstance:
 async def _build_strategy_summary(strategy) -> StrategySummary:
     """Roll up disk + engine + performance state for one strategy."""
     run_key = _runkey(strategy.agent_slug, strategy.slug)
-    strategy_dir = strategy.dir
+    strategy_dir = strategy.home
 
     try:
         sessions_perf, totals = await _compute_strategy_performance(
@@ -1573,11 +1574,7 @@ async def get_agent(slug: str, user: WebUser = Depends(get_current_user)):
         slug=agent.slug,
         name=agent.name,
         description=agent.description,
-        agent_md=(
-            (agent.agent_dir / "AGENT.md").read_text()
-            if (agent.agent_dir / "AGENT.md").exists()
-            else ""
-        ),
+        agent_md=agent.source.read_text() if agent.source else "",
         agent_key=agent.agent_key,
         tools=agent.tools,
         when_to_consult=agent.consult_hint,
@@ -1638,7 +1635,7 @@ def _strategy_cards(slug: str) -> list[StrategyCard]:
             status = engines[0].get_info().get("status", "running")
         else:
             disk_info = infer_latest_session_status(
-                strategy.dir, _runkey(slug, strategy.slug)
+                strategy.home, _runkey(slug, strategy.slug)
             )
             if disk_info:
                 status = disk_info["status"]
@@ -1703,7 +1700,7 @@ async def get_agent_brain(slug: str, user: WebUser = Depends(get_current_user)):
     """
     agent = _get_agent(slug)
 
-    agent_md_path = agent.agent_dir / "AGENT.md"
+    agent_md_path = agent.source
 
     skills: list[SkillCard] = []
     try:
@@ -1749,7 +1746,7 @@ async def get_agent_brain(slug: str, user: WebUser = Depends(get_current_user)):
         slug=agent.slug,
         name=agent.name,
         description=agent.description,
-        agent_md=agent_md_path.read_text() if agent_md_path.exists() else "",
+        agent_md=agent_md_path.read_text() if agent_md_path else "",
         agent_key=agent.agent_key,
         when_to_consult=agent.consult_hint,
         server_required=agent.server_required,
@@ -1999,7 +1996,10 @@ async def update_agent_md(
 ):
     """Update AGENT.md content."""
     agent = _get_agent(slug)
-    atomic_write_text(agent.agent_dir / "AGENT.md", req.content)
+    # Straight past ``AgentStore``, so the stock guard is stated here rather
+    # than inherited: a shipped AGENT.md is forked into the local root first and
+    # this writes the fork (FEAT-115).
+    atomic_write_text(fork_if_stock(agent.slug, "AGENT.md"), req.content)
     return {"updated": True}
 
 
@@ -2405,9 +2405,9 @@ async def create_strategy(
     if req.config:
         from condor.agents.config import AgentConfig, save_agent_config
 
-        save_agent_config(strategy.dir, AgentConfig.from_dict(req.config))
+        save_agent_config(strategy.home, AgentConfig.from_dict(req.config))
 
-    learnings_path = strategy.dir / "learnings.md"
+    learnings_path = strategy.home / "learnings.md"
     if not learnings_path.exists():
         atomic_write_text(
             learnings_path,
@@ -2445,7 +2445,7 @@ async def get_strategy(
 ):
     """Get strategy detail."""
     strategy = _get_strategy(slug, sslug)
-    strategy_dir = strategy.dir
+    strategy_dir = strategy.home
     run_key = _runkey(slug, sslug)
 
     md_path = strategy_dir / "strategy.md"
@@ -2510,7 +2510,9 @@ async def update_strategy_md(
 ):
     """Update strategy.md content."""
     strategy = _get_strategy(slug, sslug)
-    atomic_write_text(strategy.dir / "strategy.md", req.content)
+    # Same as ``update_agent_md``: past ``StrategyStore``, so the fork is here.
+    target = fork_if_stock(slug, "strategies", strategy.slug, "strategy.md")
+    atomic_write_text(target, req.content)
     return {"updated": True}
 
 
@@ -2525,9 +2527,9 @@ async def update_strategy_config(
     strategy = _get_strategy(slug, sslug)
     from condor.agents.config import load_full_config, save_full_config
 
-    config_dict = load_full_config(strategy.dir, strategy.default_config)
+    config_dict = load_full_config(strategy.home, strategy.default_config)
     config_dict.update(req.config)
-    save_full_config(strategy.dir, config_dict)
+    save_full_config(strategy.home, config_dict)
     return {"updated": True, "config": config_dict}
 
 
@@ -2561,7 +2563,7 @@ async def get_strategy_performance(
     strategy = _get_strategy(slug, sslug)
     run_key = _runkey(slug, sslug)
     sessions, totals = await _compute_strategy_performance(
-        run_key, strategy.dir, strategy.default_config
+        run_key, strategy.home, strategy.default_config
     )
     running_ids = {e.agent_id for e in _get_engines_for(slug, sslug) if e.is_running}
     for s in sessions:
@@ -2718,7 +2720,7 @@ async def get_session_executors(
     strategy = _get_strategy(slug, sslug)
     agent_id = f"{_runkey(slug, sslug)}_{session_num}"
     client, _server = await _get_client_for_strategy(
-        strategy.dir, strategy.default_config
+        strategy.home, strategy.default_config
     )
     if client is None:
         return {
@@ -2737,16 +2739,16 @@ async def get_session_executors(
     # belongs to whoever operates the bot now.
     session_nums = [
         n
-        for _, n, k in enumerate_agent_ids(_runkey(slug, sslug), strategy.dir)
+        for _, n, k in enumerate_agent_ids(_runkey(slug, sslug), strategy.home)
         if k == "session"
     ]
     bot_names = current_owner_bases(
-        strategy.dir, strategy.default_config, session_nums, session_num
+        strategy.home, strategy.default_config, session_nums, session_num
     )
     # Slice the bot to this session's window for the same reason the rollup does:
     # merging the lifetime aggregate here made the session detail disagree with
     # the session's own row in the strategy list.
-    owned = session_ownership(strategy.dir, strategy.default_config, session_num)
+    owned = session_ownership(strategy.home, strategy.default_config, session_num)
     since = min((b.since for b in owned if b.since > 0), default=0.0)
     perf = await fetch_agent_performance(
         client, agent_id, bot_names=bot_names, since=since
@@ -2794,7 +2796,7 @@ async def get_session_executors(
     # gets no tick numbers.
     from condor.agents.actions import read_actions
 
-    session_dir = find_session_dir(strategy.dir, session_num)
+    session_dir = find_session_dir(strategy.home, session_num)
     deployments = build_deployments(
         owned,
         bot_names,
@@ -2852,7 +2854,7 @@ async def _start(agent, strategy, req: StartStrategyRequest, user_id: int) -> di
     from condor.agents.engine import TickEngine
     from config_manager import get_config_manager
 
-    config_dict = load_full_config(strategy.dir, strategy.default_config)
+    config_dict = load_full_config(strategy.home, strategy.default_config)
     if req.config:
         config_dict.update(req.config)
 
@@ -3083,9 +3085,9 @@ async def set_restart_on_boot(
 
     strategy = _get_strategy(slug, sslug)
 
-    config = load_full_config(strategy.dir, strategy.default_config)
+    config = load_full_config(strategy.home, strategy.default_config)
     config["restart_on_boot"] = req.enabled
-    save_full_config(strategy.dir, config)
+    save_full_config(strategy.home, config)
 
     # The engines the caller may act on — someone else's loop is simply not in
     # the set, the same rule stop/pause/resume follow (SEC-251).
@@ -3152,7 +3154,7 @@ async def claim_bot(
     if not base:
         raise HTTPException(status_code=400, detail="No bot name given")
 
-    sessions_root = strategy.dir / "sessions"
+    sessions_root = strategy.home / "sessions"
     if req.session_num:
         session_dir = sessions_root / f"session_{req.session_num}"
     else:
@@ -3169,7 +3171,7 @@ async def claim_bot(
         )
 
     namespace = bot_namespace(slug, sslug)
-    config = load_full_config(strategy.dir, strategy.default_config)
+    config = load_full_config(strategy.home, strategy.default_config)
     # ``enforced=False``: the claim is the evidence, and the namespace rule is
     # exactly what a hand-deployed bot fails. ``declared`` carries the name so a
     # later reopen of this ledger still reads it as owned.
@@ -3206,7 +3208,7 @@ async def get_learnings(
 ):
     """Read a strategy's learnings.md."""
     strategy = _get_strategy(slug, sslug)
-    learnings_path = strategy.dir / "learnings.md"
+    learnings_path = strategy.home / "learnings.md"
     content = learnings_path.read_text() if learnings_path.exists() else ""
     return {"content": content}
 
@@ -3220,7 +3222,10 @@ async def update_learnings(
 ):
     """Update a strategy's learnings.md."""
     strategy = _get_strategy(slug, sslug)
-    atomic_write_text(strategy.dir / "learnings.md", req.content)
+    # The third raw write, and the one with no fork question to ask: learnings
+    # are this install's output, so ``home`` is local by construction and there
+    # is no shipped counterpart to shadow.
+    atomic_write_text(strategy.home / "learnings.md", req.content)
     return {"updated": True}
 
 
@@ -3316,7 +3321,7 @@ async def list_strategy_sessions(
 ):
     """List sessions for a strategy."""
     strategy = _get_strategy(slug, sslug)
-    sessions = list_sessions(strategy.dir)
+    sessions = list_sessions(strategy.home)
     return {"sessions": [SessionInfo(**s).model_dump() for s in sessions]}
 
 
@@ -3329,7 +3334,7 @@ async def get_journal(
 ):
     """Read journal.md for a session."""
     strategy = _get_strategy(slug, sslug)
-    session_dir = find_session_dir(strategy.dir, session_num)
+    session_dir = find_session_dir(strategy.home, session_num)
     if not session_dir:
         raise HTTPException(status_code=404, detail=f"Session {session_num} not found")
     journal_path = session_dir / "journal.md"
@@ -3357,7 +3362,7 @@ async def get_session_canvas(
     from condor.agents import canvas as canvas_mod
 
     strategy = _get_strategy(slug, sslug)
-    session_dir = find_session_dir(strategy.dir, session_num)
+    session_dir = find_session_dir(strategy.home, session_num)
     if not session_dir:
         raise HTTPException(status_code=404, detail=f"Session {session_num} not found")
     return {
@@ -3414,7 +3419,7 @@ async def list_session_actions(
     it — only first segments are at risk there.
     """
     strategy = _get_strategy(slug, sslug)
-    session_dir = find_session_dir(strategy.dir, session_num)
+    session_dir = find_session_dir(strategy.home, session_num)
     if not session_dir:
         raise HTTPException(status_code=404, detail=f"Session {session_num} not found")
 
@@ -3434,7 +3439,7 @@ async def list_snapshots(
 ):
     """List snapshots for a session."""
     strategy = _get_strategy(slug, sslug)
-    session_dir = find_session_dir(strategy.dir, session_num)
+    session_dir = find_session_dir(strategy.home, session_num)
     if not session_dir:
         raise HTTPException(status_code=404, detail=f"Session {session_num} not found")
 
@@ -3452,7 +3457,7 @@ async def get_snapshot(
 ):
     """Read a specific snapshot."""
     strategy = _get_strategy(slug, sslug)
-    session_dir = find_session_dir(strategy.dir, session_num)
+    session_dir = find_session_dir(strategy.home, session_num)
     if not session_dir:
         raise HTTPException(status_code=404, detail=f"Session {session_num} not found")
 
@@ -3472,7 +3477,7 @@ async def list_strategy_experiments(
 ):
     """List experiments for a strategy."""
     strategy = _get_strategy(slug, sslug)
-    experiments = list_experiments(strategy.dir)
+    experiments = list_experiments(strategy.home)
     return {"experiments": [ExperimentInfo(**e).model_dump() for e in experiments]}
 
 
@@ -3482,7 +3487,7 @@ async def get_experiment(
 ):
     """Read an experiment snapshot."""
     strategy = _get_strategy(slug, sslug)
-    path = find_experiment_file(strategy.dir, exp_num)
+    path = find_experiment_file(strategy.home, exp_num)
     if not path:
         raise HTTPException(status_code=404, detail=f"Experiment {exp_num} not found")
     return {"content": path.read_text(), "number": exp_num}

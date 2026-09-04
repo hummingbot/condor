@@ -27,7 +27,7 @@ def agents_root(tmp_path, monkeypatch):
 
     root = tmp_path / "agents"
     root.mkdir()
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", root)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(root))
     return root
 
 

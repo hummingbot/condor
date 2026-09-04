@@ -79,11 +79,11 @@ def _state_dir(namespace: str) -> Path:
     deleting a strategy takes its state with it. Everything else falls back to
     a shared runtime directory.
     """
-    from condor.agents.agent import _DATA_ROOT
+    from condor.paths import local_agents_root
 
     if namespace.count(".") == 1:
         agent_slug, strategy_slug = namespace.split(".", 1)
-        candidate = _DATA_ROOT / agent_slug / "strategies" / strategy_slug
+        candidate = local_agents_root() / agent_slug / "strategies" / strategy_slug
         if candidate.is_dir():
             return candidate
 
@@ -245,9 +245,9 @@ class BoundState:
 
 def cleanup_orphans(agents_root: Path | None = None) -> int:
     """Forget namespaces whose strategy directory is gone. Returns the count."""
-    from condor.agents.agent import _DATA_ROOT
+    from condor.paths import local_agents_root
 
-    root = Path(agents_root) if agents_root is not None else _DATA_ROOT
+    root = Path(agents_root) if agents_root is not None else local_agents_root()
     removed = 0
     for namespace in list(_cache):
         if namespace.count(".") != 1:

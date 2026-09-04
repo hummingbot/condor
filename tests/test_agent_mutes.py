@@ -240,10 +240,9 @@ def test_muting_for_the_chat_leaves_the_human_routines_page_alone(isolated_routi
 @pytest.fixture
 def web_env(tmp_path, monkeypatch):
     """One real Agent on disk, reachable through the agents router."""
-    from condor.agents import agent as agent_module
     from condor.agents.agent import AgentStore
 
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path / "agents"))
     AgentStore().create(name="Brigado", description="BRL market making")
     return tmp_path
 
