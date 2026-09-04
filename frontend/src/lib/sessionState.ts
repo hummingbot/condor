@@ -73,6 +73,16 @@ export const DEX_PAIRS_KEY_PREFIX = "condor_dex_pairs:";
  */
 export const ROUTINE_CONFIG_KEY_PREFIX = "routine_config:";
 
+/**
+ * One unsent composer draft per conversation, suffixed with the conversation's
+ * id (lib/chatDrafts).
+ *
+ * CLEARED, and of everything here it is the most literally so: a draft is a
+ * sentence the outgoing user typed and never sent, and it would otherwise be
+ * sitting in the box — one Enter from being sent under the incoming identity.
+ */
+export const CHAT_DRAFT_KEY_PREFIX = "condor.chat.draft:";
+
 // ── KEPT keys ──
 //
 // Declared here and deliberately absent from SESSION_KEYS below, each with the
@@ -228,8 +238,12 @@ const SESSION_KEYS = [
   DEX_FAVORITES_KEY,
 ];
 
-/** Key families written one entry per routine / per connector. */
-const SESSION_KEY_PREFIXES = [ROUTINE_CONFIG_KEY_PREFIX, DEX_PAIRS_KEY_PREFIX];
+/** Key families written one entry per routine / connector / conversation. */
+const SESSION_KEY_PREFIXES = [
+  ROUTINE_CONFIG_KEY_PREFIX,
+  DEX_PAIRS_KEY_PREFIX,
+  CHAT_DRAFT_KEY_PREFIX,
+];
 
 /**
  * Drop the outgoing session's stored form state, keeping device preferences.

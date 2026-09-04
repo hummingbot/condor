@@ -387,7 +387,10 @@ function BubbleHero({
         </div>
       )}
       <div className="mt-3 w-full">
-        <ChatInput onSend={onAsk} autoFocus />
+        {/* Its own draft namespace, not the workspace hero's: the bubble asks
+            about the page you are standing on, and a question typed here is
+            not the one waiting in the full chat. */}
+        <ChatInput onSend={onAsk} autoFocus draftKey={`bubble:${name}`} />
       </div>
       <Starters starters={starters} onAsk={onAsk} />
     </div>

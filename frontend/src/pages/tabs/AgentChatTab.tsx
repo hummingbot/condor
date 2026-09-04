@@ -804,7 +804,15 @@ function Hero({
         </div>
 
         <div className="mt-4">
-          <ChatInput onSend={onAsk} autoFocus />
+          {/* There is no conversation to key a draft on yet, so it hangs off
+              whoever the first message will go to: leaving the page before
+              pressing Enter is exactly when the words are least recoverable,
+              because nothing has been sent anywhere. */}
+          <ChatInput
+            onSend={onAsk}
+            autoFocus
+            draftKey={`new:${agent?.slug || "condor"}`}
+          />
         </div>
 
         <Starters starters={starters} onAsk={onAsk} className="mt-4" />

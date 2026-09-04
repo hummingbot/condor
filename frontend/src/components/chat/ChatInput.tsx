@@ -4,6 +4,7 @@ import { Loader2, Mic, Paperclip, Send, Square, X } from "lucide-react";
 
 import { api } from "@/lib/api";
 import { authFetch } from "@/lib/auth-token";
+import { readDraft, writeDraft } from "@/lib/chatDrafts";
 
 /** What the composer will accept, and what the store will keep. Kept in step
  *  with `condor/runtime/attachments.py` — the backend refuses anything else. */
@@ -51,6 +52,16 @@ interface ChatInputProps {
    * then exactly what it was.
    */
   leading?: React.ReactNode;
+  /**
+   * Where an unsent draft is kept while this composer is not on screen —
+   * normally the conversation's id (lib/chatDrafts).
+   *
+   * Every chat surface is inside a route, so walking to the portfolio and back
+   * unmounts the composer and used to take the half-written message with it.
+   * Optional: without a key the box is exactly what it was, which is what the
+   * call sites that have no conversation to hang a draft on want.
+   */
+  draftKey?: string;
 }
 
 type RecordingState = "idle" | "recording" | "transcribing";
@@ -63,9 +74,34 @@ export function ChatInput({
   autoFocus,
   placeholder = "Ask Condor...",
   leading,
+  draftKey,
 }: ChatInputProps) {
-  const [value, setValue] = useState("");
+  const [value, setValue] = useState(() => readDraft(draftKey));
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // ── The draft ──
+  //
+  // Written through one setter rather than from an effect on `value`: the key
+  // can change under a mounted composer (the session strip switches
+  // conversations without unmounting it), and an effect cannot tell "the text
+  // changed" from "the conversation did" in time to avoid filing one chat's
+  // sentence under the next chat's name.
+  const draftKeyRef = useRef(draftKey);
+  const valueRef = useRef(value);
+  valueRef.current = value;
+
+  const commit = useCallback((next: string) => {
+    setValue(next);
+    writeDraft(draftKeyRef.current, next);
+  }, []);
+
+  // A different conversation: whatever was left in *its* box, not this one's.
+  useEffect(() => {
+    if (draftKey === draftKeyRef.current) return;
+    draftKeyRef.current = draftKey;
+    setValue(readDraft(draftKey));
+  }, [draftKey]);
+
   // The box around the textarea is the affordance, so it has to know when the
   // textarea has the caret. `:focus-within` would do it without state, but the
   // recording and transcribing branches replace the textarea entirely.
@@ -178,7 +214,10 @@ export function ChatInput({
     // refusing one, and this is the other half of that.
     if ((!trimmed && files.length === 0) || disabled) return;
     onSend(trimmed, files.length ? files.map((f) => f.file) : undefined);
-    setValue("");
+    // Through `commit`, so the stored draft goes with the box it was in: a
+    // message that has been sent must not be waiting in the composer again the
+    // next time this surface mounts.
+    commit("");
     // The object URLs are handed to the transcript's optimistic bubble, which
     // renders them for the life of the session, so they are dropped here rather
     // than revoked: revoking would blank the picture the user just sent.
@@ -253,7 +292,7 @@ export function ChatInput({
               onSend(text);
             } else {
               // Append to textarea for editing
-              setValue((prev) => (prev ? `${prev} ${text}` : text));
+              commit(valueRef.current ? `${valueRef.current} ${text}` : text);
               setTimeout(() => textareaRef.current?.focus(), 50);
             }
           }
@@ -279,7 +318,7 @@ export function ChatInput({
       setVoiceError("Microphone access denied");
       setRecordingState("idle");
     }
-  }, [onSend]);
+  }, [onSend, commit]);
 
   const stopRecording = useCallback(() => {
     mediaRecorderRef.current?.stop();
@@ -428,7 +467,7 @@ export function ChatInput({
               autoFocus={autoFocus}
               value={value}
               onChange={(e) => {
-                setValue(e.target.value);
+                commit(e.target.value);
                 if (voiceError) setVoiceError(null);
               }}
               onKeyDown={handleKeyDown}

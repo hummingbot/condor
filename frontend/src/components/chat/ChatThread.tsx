@@ -354,6 +354,11 @@ export function ChatThread({
             // the UI still said otherwise (FEAT-025).
             placeholder={`Ask ${(slot.info.agent_slug && slot.info.label) || "Condor"}...`}
             leading={composerLeading}
+            // Half-written words survive leaving the page, per conversation.
+            // Keyed on the conversation rather than the slot: a session that is
+            // reaped and respawned is the same chat to the person writing in
+            // it, and the slot id it comes back under is not the one they left.
+            draftKey={slot.info.conversation_id || slot.info.slot_id}
           />
         </div>
       )}
