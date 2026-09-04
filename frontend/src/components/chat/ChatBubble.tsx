@@ -23,7 +23,6 @@ import {
   normalizeAgentSlug,
 } from "@/lib/agentSlug";
 import { api, CHAT_SLUG } from "@/lib/api";
-import { homePath, homeView } from "@/lib/homeView";
 import { routeFacts } from "@/lib/pageFacts";
 import { BUBBLE_OPEN_KEY } from "@/lib/sessionState";
 import { collectViewFacts, renderViewBlock } from "@/lib/viewFacts";
@@ -40,14 +39,14 @@ import { collectViewFacts, renderViewBlock } from "@/lib/viewFacts";
  * message is actually sent, and the send carries the page context of that
  * moment.
  *
- * Hidden on the chat view of `/` — the workspace *is* the chat there. That rule
- * carries a second job: `ChatInput` binds ⌘M on `window`, so exactly one
- * composer may be mounted at a time, and hiding here is what guarantees it.
+ * Hidden on `/` — the home *is* the chat. That rule carries a second job:
+ * `ChatInput` binds ⌘M on `window`, so exactly one composer may be mounted at a
+ * time, and hiding here is what guarantees it.
  *
- * Which is why the rule reads the *view* and not the pathname since FEAT-104:
- * `/?view=fleet` mounts the fleet overview, which has no composer in it, so the
- * bubble belongs there like it does on every other page — and hiding it would
- * leave the home with no way to ask anything at all.
+ * It spent FEAT-104 reading a query parameter instead, because `/` mounted a
+ * fleet overview too and that page has no composer of its own. The overview is
+ * `/fleet` now, an ordinary page that keeps the bubble like every other one, so
+ * the pathname answers the question again.
  */
 export function ChatBubble() {
   const chat = useChat();
@@ -119,8 +118,8 @@ export function ChatBubble() {
   const starters = useStarters(slug, bubbleStarters(facts?.label), open);
 
   // Hooks above, bail-out below: `/agents/:slug` keeps the bubble, and so does
-  // the fleet overview; the chat view of `/` is the only surface that loses it.
-  if (pathname === "/" && homeView(search) === "chat") return null;
+  // `/fleet`; the home is the only surface that loses it.
+  if (pathname === "/") return null;
 
   const toggle = (next: boolean) => {
     setOpen(next);
@@ -184,11 +183,7 @@ export function ChatBubble() {
     // Hijacking `activeSlotId` is right here: it is the gesture that asks
     // for the conversation to become the workspace's.
     if (slot && slotId) chat.setActiveSlotId(slotId);
-    // By view and not by path: the workspace this button means is the
-    // *conversation*, and a bare `/` is the fleet overview since FEAT-104
-    // step 3 — it would have carried the hijacked slot to a page that cannot
-    // show it.
-    navigate(homePath("chat"));
+    navigate("/");
   };
 
   return (

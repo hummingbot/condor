@@ -271,8 +271,8 @@ export interface RowFold {
   /**
    * The whole fold, for a caller that needs more than the headline (FEAT-112).
    *
-   * The home row prints `net` and `volume` and nothing else; the floor's row
-   * prints six more figures out of the same fold, and its strip sums them.
+   * The overview's row prints `net` and `volume` and nothing else; the floor's
+   * row prints six more figures out of the same fold, and its strip sums them.
    * Additive, so `FleetOverview` is untouched — and additive *here* rather
    * than a second `foldLeaves` at the floor, which is the whole rule ARCH-324
    * set: one producer, read by two screens.
@@ -371,11 +371,12 @@ export function foldTargets(
  *
  * The sibling of {@link foldTargets}, and the difference is the whole reason
  * both exist. `foldTargets` narrows an agent to `scopeStrategy(agent)` because
- * a home row *is about* one strategy and links into it. A floor row is about
- * the agent, and using the scoped rule here would be a silent loss: records
- * belonging to an agent's other strategies are **attributed** — so they are in
- * neither *Outside Condor* nor *Before the ledger* — and no row would claim
- * them. They would vanish out of a total whose entire job is to be complete.
+ * an overview row *is about* one strategy and links into it. A floor row is
+ * about the agent, and using the scoped rule here would be a silent loss:
+ * records belonging to an agent's other strategies are **attributed** — so
+ * they are in neither *Outside Condor* nor *Before the ledger* — and no row
+ * would claim them. They would vanish out of a total whose entire job is to be
+ * complete.
  *
  * So the strategy is `null`, which `reconcile` reads as *every real run key of
  * this agent*, with the three pseudo keys (`chat`/`delegation`/`ui`) included
@@ -419,15 +420,15 @@ export function floorTargets(
 /**
  * One server's rows, folded — `reconcile` called, not reimplemented (ARCH-324).
  *
- * The whole point of the item this closes: the home row and the Money view
- * headline are the same quantity, and the only way to guarantee that is for
+ * The whole point of the item this closes: the overview's row and the Money
+ * view headline are the same quantity, and the only way to guarantee that is for
  * both to run the same function over the same leaves at the same scope. A
  * second conversion here — even a correct one — would make the two screens
  * agree by coincidence and drift the first time a leaf gained a field, which is
  * the conflation FEAT-109 extracted `lib/perf-population.ts` to end.
  *
- * `attributed` is `null` because a home row does not reconcile: it prints the
- * fold and links to the screen that accounts for the difference.
+ * `attributed` is `null` because an overview row does not reconcile: it prints
+ * the fold and links to the screen that accounts for the difference.
  */
 export function foldRows(
   targets: readonly FoldTarget[],
@@ -507,10 +508,11 @@ export function strategylessAgents(
  * The server a row's records are actually fetched from (ARCH-324).
  *
  * `AgentWorkspace` opens the Fleet and Money views against *the strategy's
- * configured server, else the agent's pin, else the ambient one*. A home row
- * links into exactly that screen, so it has to resolve the server exactly that
- * way — a different rule would have the two screens fold two different fleets
- * and disagree by construction, which is the conflation this row exists to end.
+ * configured server, else the agent's pin, else the ambient one*. An overview
+ * row links into exactly that screen, so it has to resolve the server exactly
+ * that way — a different rule would have the two screens fold two different
+ * fleets and disagree by construction, which is the conflation this row exists
+ * to end.
  *
  * `""` when none of the three says anything. That is an answer, not a gap: it
  * means nobody has said where this agent trades, and the caller shows a dash
@@ -552,7 +554,7 @@ export function moneyHref(row: Pick<FleetRow, "slug" | "strategy">): string {
  * The tick a decision came from, as an address.
  *
  * The workspace's own grammar (`?view=tick&strategy=&tick=`), so the last line
- * on the home page is a link into the whole tick that wrote it rather than a
+ * on the overview is a link into the whole tick that wrote it rather than a
  * dead-end summary. Falls back to the row's workspace when there is no deed to
  * point at.
  */

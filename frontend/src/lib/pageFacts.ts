@@ -5,7 +5,6 @@ import { fleetRows } from "@/components/agent/workspace/fleet";
 import { poolLabel } from "@/components/dex/format";
 import { readLpPosition } from "@/components/dex/lp-position";
 import { getDisplayCurrency } from "@/hooks/useDisplayCurrency";
-import { homeView } from "@/lib/homeView";
 import type {
   AgentBrain,
   AgentDetail,
@@ -98,11 +97,11 @@ export function routeFacts(
   search: string,
   qc?: QueryClient,
 ): ViewFacts | null {
-  // The chat view of the home already *is* the chat; telling the agent "the
-  // user is looking at a chat with you" is noise. Its other view is not
-  // (FEAT-104) — the fleet overview is a page *about* the agents, so it falls
-  // through to the `^/$` entry below and describes itself like any other.
-  if (pathname === "/" && homeView(search) === "chat") return null;
+  // The home already *is* the chat; telling the agent "the user is looking at
+  // a chat with you" is noise, and there is no second view of this route to
+  // exempt from the rule any more — the fleet overview is `/fleet`, a page
+  // *about* the agents that describes itself like any other.
+  if (pathname === "/") return null;
 
   const params = new URLSearchParams(search);
   // `?view=` is the agent workspace's spelling of the same idea (FEAT-103):
@@ -553,17 +552,16 @@ const ROUTES: {
 }[] = [
   {
     /**
-     * The fleet overview — the home's other view (FEAT-104).
-     *
-     * Reached by a bare `/` since FEAT-104 step 3, and by an explicit
-     * `?view=fleet`: the chat view returns above, before this table is walked.
+     * The fleet overview (FEAT-104) — a page since the home went back to being
+     * the conversation, so it is matched by its own pathname rather than by a
+     * `?view=` on `/`, which returns above.
      *
      * Read through `fleetRows`, the page's own rule, rather than by summing
      * the payload again here — including its dash: an agent with nothing
      * attributed is *counted* as unattributed instead of being folded into the
      * net as a zero, which is the same honesty the row prints.
      */
-    pattern: /^\/$/,
+    pattern: /^\/fleet$/,
     facts: () => ({ label: "Fleet overview" }),
     onScreen: (_parts, _view, qc) => {
       const agents = fresh<AgentSummary[]>(qc, ["agents"]);

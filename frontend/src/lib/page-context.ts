@@ -8,7 +8,6 @@
  * the socket, so the dialog can hand it over pre-written.
  */
 
-import { homeView } from "@/lib/homeView";
 import { queryClient } from "@/lib/queryClient";
 import { DISPLAY_CURRENCY_KEY, THEME_KEY } from "@/lib/sessionState";
 import { socketStatus } from "@/lib/shared-socket";
@@ -53,12 +52,11 @@ export function describePage(pathname: string, search = ""): PageContext {
 
   switch (first) {
     case "":
-      // The home is two pages (FEAT-104), and an issue filed from one of them
-      // should not be labelled the other.
-      return of(
-        homeView(search) === "fleet" ? "Fleet overview" : "Chat workspace",
-        "Agents & chat",
-      );
+      return of("Chat workspace", "Agents & chat");
+    // The fleet overview spent FEAT-104 as `/?view=fleet` and was read off the
+    // search string here; it is a page now, so it is a case like any other.
+    case "fleet":
+      return of("Fleet overview", "Agents & chat");
     // Only the two-and-three-segment agent routes are real: `/agents` itself is
     // a `<Navigate to="/">` in App.tsx, so it redirects before any consumer of
     // this module reads the location, and a bare-`/agents` branch here would be

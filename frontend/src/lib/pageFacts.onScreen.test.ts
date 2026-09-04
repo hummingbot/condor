@@ -663,7 +663,7 @@ describe("/routines", () => {
   });
 });
 
-describe("/ — the fleet overview", () => {
+describe("/fleet — the fleet overview", () => {
   beforeEach(() => {
     qc.setQueryData(["agents"], [
       {
@@ -709,7 +709,7 @@ describe("/ — the fleet overview", () => {
   });
 
   it("says what is looping and what has actually been attributed", () => {
-    const line = onScreenLine("/", "?view=fleet");
+    const line = onScreenLine("/fleet", "");
     expect(line).toContain("agents 1 running / 2");
     expect(line).toContain("Brigado tick 412");
     expect(line).toContain("attributed net +$64.12");
@@ -718,16 +718,13 @@ describe("/ — the fleet overview", () => {
   it("counts the agents with nothing attributed rather than summing a zero", () => {
     // A dash on the row must not become a `$0.00` in the block: the two are
     // different statements and only one of them is true.
-    expect(onScreenLine("/", "?view=fleet")).toContain("unattributed 1");
+    expect(onScreenLine("/fleet", "")).toContain("unattributed 1");
   });
 
-  it("contributes nothing at all on the chat view", () => {
+  it("contributes nothing at all from the home, which is the chat", () => {
+    expect(routeFacts("/", "", qc)).toBeNull();
     expect(routeFacts("/", "?view=chat", qc)).toBeNull();
     expect(routeFacts("/", "?agent=brigado&ask=status", qc)).toBeNull();
-  });
-
-  it("is what a bare `/` says now that the overview is the home", () => {
-    expect(onScreenLine("/", "")).toContain("agents 1 running / 2");
   });
 });
 

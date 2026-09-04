@@ -32,7 +32,8 @@ import {
 import { quoteConverter, runningLeaves } from "@/lib/perf-population";
 
 /**
- * What every agent is doing, on one screen (FEAT-104).
+ * What every agent is doing, on one screen (FEAT-104) — the page behind
+ * `/fleet`.
  *
  * A card grid of the fleet used to live at this address and was deleted on the
  * grounds that "its only unique job was showing which agents are running, and a
@@ -51,13 +52,15 @@ import { quoteConverter, runningLeaves } from "@/lib/perf-population";
  *
  * **The money is the fold** (ARCH-324). It used to be the run rollup, because
  * `AgentSummary` carried no server and a fold is computed over a server's
- * records — so the home showed one quantity and the Money view another, for the
+ * records — so this page showed one quantity and the Money view another, for the
  * same agent, and FEAT-109 had to ship the difference as a label. The summary
  * carries its server now, so each row folds through `reconcile` at the very
  * scope its money link opens, and the two screens print one number.
  *
- * Owns its own scrolling: `main` is full bleed on `/` under either view
- * (`lib/homeView.ts`).
+ * Owns its own scrolling: `/fleet` is in the shell's `FULL_BLEED_ROUTES`, so
+ * `main` gives a screen-tall list no padding and no scrollbar of its own. It
+ * spent FEAT-104 as `/?view=fleet` and got the same treatment through the
+ * home's view list; having its own address is what let that list go away.
  */
 export function FleetOverview() {
   const { data: agents = [] } = useQuery({
@@ -145,7 +148,7 @@ export function FleetOverview() {
         </div>
 
         {/* A name and a "never run" — not a card, and not hidden. Hidden would
-            make the home lie about how many agents this install has; a card
+            make the page lie about how many agents this install has; a card
             would weigh a thing with no loop, no money and no decision the same
             as one that is trading. */}
         {idle.length > 0 && (

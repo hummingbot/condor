@@ -34,18 +34,21 @@ describe("routeFacts", () => {
     expect(routeFacts("/floor", "?basis=rel&range=7d")?.label).toBe("Floor");
   });
 
-  it("says nothing on the chat workspace", () => {
+  it("says nothing on the home, which is the chat", () => {
+    expect(routeFacts("/", "")).toBeNull();
+    // Whatever the URL carries: `?agent=` and `?ask=` (FEAT-092) and
+    // `?conversation=` (FEAT-111) are the chat's own parameters, and a bare
+    // `/` is the chat too. Describing a chat to the agent in it is noise.
     expect(routeFacts("/", "?view=chat")).toBeNull();
-    // `?agent=` and `?ask=` are the chat's own parameters (FEAT-092), and
-    // `?conversation=` (FEAT-111) is one too: they name the chat rather than a
-    // view, and must not be mistaken for either a view or a page to describe.
     expect(routeFacts("/", "?agent=brigado&ask=status")).toBeNull();
     expect(routeFacts("/", "?conversation=7f3a")).toBeNull();
   });
 
-  it("describes the home, which since FEAT-104 step 3 is the overview", () => {
-    expect(routeFacts("/", "")?.label).toBe("Fleet overview");
-    expect(routeFacts("/", "?view=fleet")?.label).toBe("Fleet overview");
+  it("describes the fleet overview, which is a page of its own", () => {
+    expect(routeFacts("/fleet", "")?.label).toBe("Fleet overview");
+    expect(routeFacts("/fleet", "?server=brigado")?.label).toBe(
+      "Fleet overview",
+    );
   });
 
   it("labels every plain page", () => {

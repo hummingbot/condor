@@ -29,11 +29,11 @@ import { UNKNOWN_LABEL } from "@/lib/perf-tree";
 /**
  * Every agent's trading, added up on one floor (FEAT-112).
  *
- * Not a view of the home. `/` already carries two views of one question and its
- * `?view=fleet` overview is deliberately *per agent* — one row, one scoped
- * strategy, one link out. The floor asks what the home cannot: not "what is
- * each agent doing" but **what do they add up to**, which needs a chart, a fold
- * of the whole population and breakdowns that cut across every agent at once.
+ * Not a section of `/fleet`. That page is deliberately *per agent* — one row,
+ * one scoped strategy, one link out. The floor asks what it cannot: not "what
+ * is each agent doing" but **what do they add up to**, which needs a chart, a
+ * fold of the whole population and breakdowns that cut across every agent at
+ * once.
  *
  * There is **one fold on this page, read four ways.** The rows are `reconcile`
  * called through `foldRows` — the one producer ARCH-324 established — the strip
@@ -190,9 +190,10 @@ function ServerFloor({
   const fleet = useFleetData(server, { population: "running", history: true });
   const now = useSeconds(false);
 
-  // One converter with `/bots`, the Money view and the home row: the fold
-  // converts per leaf using the leaf's own quote, and two numbers that differed
-  // by an FX fallback would be exactly the disagreement ARCH-324 closed.
+  // One converter with `/bots`, the Money view and the fleet overview's row:
+  // the fold converts per leaf using the leaf's own quote, and two numbers that
+  // differed by an FX fallback would be exactly the disagreement ARCH-324
+  // closed.
   const cv = useMemo(() => quoteConverter(fleet.convert), [fleet.convert]);
 
   const leaves = useMemo(

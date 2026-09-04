@@ -1,37 +1,32 @@
-import { useSearchParams } from "react-router-dom";
+import { Navigate, useSearchParams } from "react-router-dom";
 
-import { FleetOverview } from "@/components/agent/workspace/FleetOverview";
-import { homeView } from "@/lib/homeView";
+import { legacyFleetPath } from "@/lib/homeView";
 import { AgentChatTab } from "@/pages/tabs/AgentChatTab";
 
 /**
- * The home, which is two views of the same question (FEAT-104).
+ * The home, which is the conversation (FEAT-077).
  *
- * It used to be two *pages*: a chat and a card grid of the fleet. The grid went
- * because its only unique job was showing which agents are running, and a line
- * at the top of the rail does that without a second page — an agent's
- * strategies, its brain and its routines all live on `/agents/:slug`, and its
- * background tasks in the chat's own dock.
+ * It was briefly two views of one route: FEAT-104 hung a fleet overview off
+ * `/?view=fleet` and then made it what a bare `/` means. Both halves of that
+ * are undone here. The overview earned a page — it is `/fleet` now, in the nav
+ * beside `/floor`, reachable by typing its name instead of by remembering a
+ * query parameter — and the home went back to being the thing every link,
+ * notification and reflex in this product already pointed at. A route that
+ * rendered two unrelated screens depending on its search string was a switch
+ * nobody could see from the address bar.
  *
- * What comes back at `?view=fleet` is not that grid. The bar it has to clear is
- * the rail's live line, so every row carries what the line cannot: the money
- * its fleet actually made, what it last decided, and when it ticks next. If it
- * ever stops carrying those, the grid's argument applies again and this should
- * go the same way.
+ * The old spelling still forwards, because it is in bookmarks and in
+ * notification payloads: `legacyFleetPath` hands `/?view=fleet` to `/fleet`
+ * with everything but `view` carried across.
  *
- * `?view=chat` is the conversation, unchanged — and so is any `/` carrying the
- * chat's own handover parameters, because `homeView` reads `?agent=`, `?ask=`
- * (FEAT-092) and `?conversation=` (FEAT-111) as naming it. A bare `/` is the
- * overview since step 3 moved the one constant in `lib/homeView.ts`, which is
- * the habit change this feature was really about.
- *
- * Both views own the full viewport and scroll their own bodies, so the shell
- * drops `main`'s padding for this route (see `AppShell`).
+ * Owns the full viewport and scrolls its own transcript, so the shell drops
+ * `main`'s padding for this route (see `AppShell`).
  */
 export function Agents() {
   const [searchParams] = useSearchParams();
 
-  if (homeView(searchParams) === "fleet") return <FleetOverview />;
+  const legacy = legacyFleetPath(searchParams);
+  if (legacy) return <Navigate to={legacy} replace />;
 
   return (
     <div className="h-full min-h-0">

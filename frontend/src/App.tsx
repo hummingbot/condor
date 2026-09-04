@@ -2,6 +2,7 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import { useCallback, useState } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 
+import { FleetOverview } from "@/components/agent/workspace/FleetOverview";
 import { AppShell } from "@/components/layout/AppShell";
 import { ServerContext } from "@/hooks/useServer";
 import { AuthContext, SERVER_KEY, useAuth, useAuthState } from "@/lib/auth";
@@ -81,9 +82,14 @@ export default function App() {
                 }
               >
                 <Route path="/" element={<Agents />} />
-                {/* What every agent adds up to (FEAT-112). A page rather than a
-                    third `?view=` on the home: `/`'s parameter already means
-                    *chat or fleet*, and an aggregate chart is not a row. */}
+                {/* What every agent is doing, one row each. It spent FEAT-104
+                    as `/?view=fleet`, a screen with no address anyone could
+                    type; a page of its own is what it was all along. `/`
+                    forwards the old spelling (see `pages/Agents.tsx`). */}
+                <Route path="/fleet" element={<FleetOverview />} />
+                {/* What every agent adds up to (FEAT-112). A page and not a
+                    section of the fleet overview: that page is one row per
+                    agent, and an aggregate chart is not a row. */}
                 <Route path="/floor" element={<Floor />} />
                 <Route path="/portfolio" element={<Portfolio />} />
                 <Route path="/bots" element={<Bots />} />
@@ -108,10 +114,10 @@ export default function App() {
                 <Route path="/routines" element={<Routines />} />
                 <Route path="/reports" element={<Navigate to="/routines?tab=reports" replace />} />
                 {/* `/agents` has pointed at the home since the fleet grid
-                    was deleted, and since FEAT-104 step 3 the home is a list of
-                    agents again — the first time this redirect has meant what
-                    it says. Still a redirect and not a second route: one
-                    overview, at the address people already have. */}
+                    was deleted, and the home is the conversation with every
+                    agent one message away — which is what somebody typing this
+                    is after. The listing they might mean instead is `/fleet`,
+                    one click away in the nav. */}
                 <Route path="/agents" element={<Navigate to="/" replace />} />
                 {/* One agent, one screen: every section, run and tick is a query
                     parameter on this route (FEAT-103). */}

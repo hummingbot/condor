@@ -1,6 +1,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import {
+  Activity,
   Bot,
   Brain,
   Bug,
@@ -27,7 +28,6 @@ import { useCredentials } from "@/hooks/useCredentials";
 import { usePrefetchData } from "@/hooks/usePrefetchData";
 import { useServer } from "@/hooks/useServer";
 import { useTheme } from "@/hooks/useTheme";
-import { FULL_BLEED_HOME_VIEWS, homePath, homeView } from "@/lib/homeView";
 import { routeFacts } from "@/lib/pageFacts";
 import { useViewFacts } from "@/lib/viewFacts";
 import { CurrencySelector } from "./CurrencySelector";
@@ -50,6 +50,7 @@ import { ServerSelector } from "./ServerSelector";
  */
 export const NAV_ITEMS = [
   { to: "/", icon: Brain, label: "Agents" },
+  { to: "/fleet", icon: Activity, label: "Fleet" },
   { to: "/floor", icon: LayoutDashboard, label: "Floor" },
   { to: "/portfolio", icon: Wallet, label: "Portfolio" },
   { to: "/trade", icon: Swords, label: "Trade" },
@@ -68,17 +69,18 @@ export const NAV_ITEMS = [
  * nothing to do with `main`'s 24px. `/routines` is the same shape, for the same
  * reason (FEAT-091).
  *
- * `/` left this list in FEAT-104. It is not one route with one body any more:
- * it mounts a conversation and a fleet overview, and which of them is on screen
- * is a query parameter — so the answer comes from `FULL_BLEED_HOME_VIEWS`,
- * which happens to be *both* of them, rather than from the pathname.
- */
-/*
+ * `/` left this list for the length of FEAT-104, when it mounted two screens
+ * under one path and the answer had to be read off the query string. The
+ * overview is `/fleet` now and the home is the conversation again, so both are
+ * back to being what they always were: a pathname with one body, each owning
+ * the viewport. The chat scrolls its transcript; the fleet is a screen-tall
+ * list that scrolls itself.
+ *
  * `/floor` is full bleed for the same reason (FEAT-112): a sticky fleet strip
  * over a body that scrolls under it is a two-part layout, and `main`'s 24px and
  * its own scrollbar would give the page a second one.
  */
-export const FULL_BLEED_ROUTES = ["/bots", "/routines", "/floor"];
+export const FULL_BLEED_ROUTES = ["/", "/bots", "/routines", "/floor", "/fleet"];
 
 /**
  * Full-bleed routes that carry a parameter, so an exact match cannot find them.
@@ -117,47 +119,33 @@ function AppShellBody() {
   const { hasKeys, isLoading: keysLoading } = useCredentials();
   const [reportOpen, setReportOpen] = useState(false);
 
-  // Which of the home's two views is on screen, or `null` off the home route
-  // (FEAT-104). The three special cases below used to be three readings of the
-  // pathname; `/` now mounts a conversation *and* a fleet overview, so they are
-  // three readings of the view — which is what lets step 3 flip the default in
-  // one revertible commit without touching this file.
-  const homeVersion = pathname === "/" ? homeView(search) : null;
-
-  // Both views of the home take the full height and own their own scrolling,
-  // so the shell drops `main`'s padding for them. `/agents/:slug` is an
-  // ordinary padded page, deliberately not matched here.
+  // A pathname is enough again: every full-bleed screen is its own route now
+  // that the fleet overview has one. `/agents/:slug` is an ordinary padded
+  // page, deliberately not matched here.
   const isFullBleed =
-    (homeVersion !== null && FULL_BLEED_HOME_VIEWS.includes(homeVersion)) ||
     FULL_BLEED_ROUTES.includes(pathname) ||
     FULL_BLEED_PATTERNS.some((re) => re.test(pathname));
 
-  // The home is exempt in *both* its views (FEAT-104 step 3). The exemption
-  // used to be the chat's alone, on the grounds that it is the one surface that
-  // can talk a new user through connecting keys. Flipping the default moved the
-  // front door: an install with no keys would otherwise meet a blocking overlay
-  // before it ever met the product, over a page that needs no keys either — the
-  // overview reads agents, loops and journals, none of which are an exchange —
-  // and with the chat that would explain it hidden one click behind the block.
-  // The route is the unit here, not the view, so the exemption cannot come
-  // undone the next time the default moves.
-  const exemptRoutes = ["/routines", "/settings"];
+  // The home is exempt because it is the chat: the one surface that can talk a
+  // new user through connecting keys, and so the last one that should be
+  // hidden behind a block telling them to. `/fleet` is exempt for the weaker
+  // but sufficient reason that it needs no keys either — it reads agents,
+  // loops and journals, none of which is an exchange — so blocking it would
+  // teach nobody anything. Matched exactly rather than by prefix, because `/`
+  // prefixes every route in the app.
+  const exemptRoutes = ["/routines", "/settings", "/fleet"];
   const showKeysOverlay =
-    server && !keysLoading && !hasKeys && homeVersion === null &&
+    server && !keysLoading && !hasKeys && pathname !== "/" &&
     !exemptRoutes.some((r) => pathname.startsWith(r));
 
   // ⌘K used to toggle the overlay panel. It now goes to the chat, so the
   // reflex still lands somewhere sensible instead of silently doing nothing.
-  //
-  // Asked for by view rather than spelled as a path (FEAT-104): this resolved
-  // to a bare `/` while the chat was the home and resolves to `/?view=chat` now
-  // that the overview is, and step 3 needed no edit here to make that true. The
-  // reflex is a keystroke to a *conversation*, whatever the home is.
+  // The keystroke means a *conversation*, and the home is one again.
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === "k") {
         e.preventDefault();
-        navigate(homePath("chat"));
+        navigate("/");
       }
     };
     window.addEventListener("keydown", onKeyDown);
