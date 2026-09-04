@@ -19,7 +19,13 @@ import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { AgentSummary, RunningInstance, StrategySummary } from "@/lib/api";
+import type { FleetData } from "@/hooks/useFleetData";
+import type {
+  AgentSummary,
+  ControllerInfo,
+  RunningInstance,
+  StrategySummary,
+} from "@/lib/api";
 import { FleetOverview } from "./FleetOverview";
 
 const getAgents = vi.fn<() => Promise<AgentSummary[]>>();
@@ -27,6 +33,63 @@ const getAgents = vi.fn<() => Promise<AgentSummary[]>>();
 vi.mock("@/lib/api", () => ({
   api: { getAgents: () => getAgents() },
 }));
+
+/**
+ * The fleet a row folds, swapped per test (ARCH-324).
+ *
+ * A row only fetches one when its agent has a server to fold on, so every test
+ * above that declares no server never reaches this at all — which is the dash
+ * case, and the reason those tests need nothing from here.
+ */
+const fleetData = vi.fn<(server: string) => Partial<FleetData>>();
+vi.mock("@/hooks/useFleetData", () => ({
+  useFleetData: (server: string) => fleetData(server),
+}));
+
+const OWNERS = [
+  {
+    runKey: "brigado.brl_mm",
+    agentSlug: "brigado",
+    agentName: "Brigado",
+    strategySlug: "brl_mm",
+    strategyName: "BRL MM",
+    namespace: "brigado-brl_mm",
+    declaredBots: [] as string[],
+    agentIds: [] as string[],
+    live: null,
+  },
+];
+
+function controller(over: Partial<ControllerInfo>): ControllerInfo {
+  return {
+    controller_name: "pmm_simple",
+    controller_type: "",
+    controller_id: "c1",
+    bot_name: "brigado-brl_mm-btc",
+    status: "running",
+    connector: "binance",
+    trading_pair: "SOL-USDC",
+    realized_pnl_quote: 0,
+    unrealized_pnl_quote: 0,
+    global_pnl_quote: 0,
+    volume_traded: 0,
+    close_type_counts: {},
+    positions: [],
+    deployed_at: "2026-09-04T08:00:00Z",
+    ...over,
+  } as unknown as ControllerInfo;
+}
+
+function fleet(controllers: ControllerInfo[]): Partial<FleetData> {
+  return {
+    controllers,
+    executors: [],
+    owners: OWNERS,
+    deeds: { bots: {}, since: 1 },
+    convert: (value: number) => ({ value, converted: true }),
+    currencySymbol: "$",
+  } as Partial<FleetData>;
+}
 
 declare global {
   var IS_REACT_ACT_ENVIRONMENT: boolean;
@@ -109,12 +172,14 @@ beforeEach(() => {
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
+  fleetData.mockReturnValue(fleet([]));
 });
 
 afterEach(() => {
   act(() => root.unmount());
   container.remove();
   getAgents.mockReset();
+  fleetData.mockReset();
   vi.useRealTimers();
 });
 
@@ -146,8 +211,8 @@ describe("the order", () => {
 });
 
 describe("the money", () => {
-  it("is a dash, never a zero, for a run that has claimed nothing", async () => {
-    await render([agent({ strategies: [strategy()] })]);
+  it("is a dash, never a zero, when its records say nothing", async () => {
+    await render([agent({ server_name: "brigado", strategies: [strategy()] })]);
 
     const net = pick("brigado").querySelector("[data-fleet-net]")!;
     const volume = pick("brigado").querySelector("[data-fleet-volume]")!;
@@ -156,14 +221,13 @@ describe("the money", () => {
     expect(volume.textContent).toContain("—");
   });
 
-  it("is the attributed net and volume when the ledger has something to say", async () => {
-    await render([
-      agent({
-        total_pnl: 64.12,
-        total_volume: 2_549_843,
-        strategies: [strategy()],
-      }),
-    ]);
+  it("is the fold of its records when they have something to say", async () => {
+    fleetData.mockReturnValue(
+      fleet([
+        controller({ global_pnl_quote: 64.12, volume_traded: 2_549_843 }),
+      ]),
+    );
+    await render([agent({ server_name: "brigado", strategies: [strategy()] })]);
 
     expect(
       pick("brigado").querySelector("[data-fleet-net]")!.textContent,
@@ -171,6 +235,77 @@ describe("the money", () => {
     expect(
       pick("brigado").querySelector("[data-fleet-volume]")!.textContent,
     ).toContain("$2.5M");
+  });
+
+  it("ignores the run rollup entirely — the column is the fold now", async () => {
+    fleetData.mockReturnValue(fleet([controller({ global_pnl_quote: 91 })]));
+    await render([
+      agent({
+        server_name: "brigado",
+        total_pnl: 64,
+        total_volume: 5_000,
+        strategies: [strategy()],
+      }),
+    ]);
+
+    const net = pick("brigado").querySelector("[data-fleet-net]")!.textContent;
+    expect(net).toContain("91");
+    expect(net).not.toContain("64");
+  });
+});
+
+describe("an agent with no server (ARCH-324)", () => {
+  it("shows a dash rather than folding whichever fleet is at hand", async () => {
+    // A real fleet, with real money in it, on the server the app happens to be
+    // pointed at. The agent has declared none, so none of it is its money.
+    fleetData.mockReturnValue(fleet([controller({ global_pnl_quote: 91 })]));
+    await render([agent({ strategies: [strategy()] })]);
+
+    const money = pick("brigado").querySelector("[data-fleet-money]")!;
+    expect(money.querySelector("[data-fleet-net]")!.textContent).toBe("—");
+    expect(money.querySelector("[data-fleet-net]")!.textContent).not.toContain(
+      "0.00",
+    );
+    expect(money.querySelector("[data-fleet-volume]")!.textContent).toContain(
+      "—",
+    );
+    expect(
+      money.querySelector("[data-fleet-money-label]")!.textContent,
+    ).toContain("no server to fold");
+  });
+
+  it("says nothing while the declared server has not answered", async () => {
+    // A declared server whose fleet is still empty is not `$0.00` either — it
+    // is a server that has not spoken yet.
+    fleetData.mockReturnValue(fleet([]));
+    await render([agent({ server_name: "brigado", strategies: [strategy()] })]);
+
+    expect(
+      pick("brigado").querySelector("[data-fleet-net]")!.textContent,
+    ).toBe("—");
+  });
+});
+
+describe("which server a row folds on (ARCH-324)", () => {
+  it("is the strategy's own, not the agent's pin, when the two differ", async () => {
+    // `AgentWorkspace` opens the Money view against the strategy's configured
+    // server and falls back to the agent's pin. A row that resolved it the
+    // other way round would fold a fleet the Money view never looks at.
+    fleetData.mockImplementation((server: string) =>
+      fleet([
+        controller({ global_pnl_quote: server === "brigado" ? 91 : 500 }),
+      ]),
+    );
+    await render([
+      agent({
+        server_name: "the_agents_pin",
+        strategies: [strategy({ server_name: "brigado" })],
+      }),
+    ]);
+
+    const net = pick("brigado").querySelector("[data-fleet-net]")!.textContent;
+    expect(net).toContain("91");
+    expect(net).not.toContain("500");
   });
 });
 
@@ -285,11 +420,13 @@ describe("an agent with no strategies", () => {
   });
 });
 
-describe("the money column says which number it is (FEAT-109)", () => {
-  it("names it as what the runs earned and links to the reconciliation", async () => {
+describe("the money column says which number it is (FEAT-109 / ARCH-324)", () => {
+  it("names it as what the records show and links to the reconciliation", async () => {
+    fleetData.mockReturnValue(fleet([controller({ global_pnl_quote: 64 })]));
     await render([
       agent({
         slug: "brigado",
+        server_name: "brigado",
         total_pnl: 64,
         total_volume: 5_000,
         strategies: [strategy()],
@@ -297,15 +434,19 @@ describe("the money column says which number it is (FEAT-109)", () => {
     ]);
 
     const money = pick("brigado").querySelector<HTMLAnchorElement>("[data-fleet-money]")!;
-    expect(money.textContent).toContain("its runs earned");
+    expect(money.textContent).toContain("what its records show");
+    // The `?strategy=` is what narrows the Money view's fold to the run keys
+    // this row folded — the link and the number are the same scope.
     expect(money.getAttribute("href")).toBe("/agents/brigado?view=money&strategy=brl_mm");
   });
 
-  it("keeps the dash rule: a run that claimed nothing shows no number at all", async () => {
-    await render([agent({ slug: "brigado", strategies: [strategy()] })]);
+  it("keeps the dash rule: records that say nothing show no number at all", async () => {
+    await render([
+      agent({ slug: "brigado", server_name: "brigado", strategies: [strategy()] }),
+    ]);
 
     const money = pick("brigado").querySelector("[data-fleet-money]")!;
     expect(money.querySelector("[data-fleet-net]")?.textContent).toBe("—");
-    expect(money.textContent).toContain("its runs earned");
+    expect(money.textContent).toContain("what its records show");
   });
 });

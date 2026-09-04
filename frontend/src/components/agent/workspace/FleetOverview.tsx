@@ -1,18 +1,27 @@
 import { useQuery } from "@tanstack/react-query";
 import { AlertTriangle, ArrowUpRight, Brain, Clock, Server } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 
 import {
   decisionHref,
   fleetRows,
+  foldRows,
+  foldServerOf,
+  foldTargets,
   moneyHref,
   rowHref,
+  sameFolds,
   strategylessAgents,
   dueInSec,
   type FleetRow,
+  type FoldTarget,
+  type RowFold,
 } from "@/components/agent/workspace/fleet";
 import type { WorkspaceAlert } from "@/components/agent/workspace/views";
+import { useFleetData } from "@/hooks/useFleetData";
 import { useSeconds } from "@/hooks/useSeconds";
+import { useServer } from "@/hooks/useServer";
 import { countdown } from "@/lib/agent-attribution";
 import { api } from "@/lib/api";
 import {
@@ -20,6 +29,7 @@ import {
   formatCurrencyVolume,
   pnlTextClass,
 } from "@/lib/formatters";
+import { quoteConverter, runningLeaves } from "@/lib/perf-population";
 
 /**
  * What every agent is doing, on one screen (FEAT-104).
@@ -34,9 +44,17 @@ import {
  * none of those.
  *
  * One `["agents"]` query — key and interval identical to the chat rail's, so
- * react-query dedupes and this page costs no extra request — and one clock,
- * alive only while something is looping. Every judgement it makes is in
- * `fleet.ts`; this file is markup and a query.
+ * react-query dedupes and this page costs no extra request — one fleet per
+ * server the fleet actually trades on, and one clock, alive only while
+ * something is looping. Every judgement it makes is in `fleet.ts`; this file is
+ * markup and queries.
+ *
+ * **The money is the fold** (ARCH-324). It used to be the run rollup, because
+ * `AgentSummary` carried no server and a fold is computed over a server's
+ * records — so the home showed one quantity and the Money view another, for the
+ * same agent, and FEAT-109 had to ship the difference as a label. The summary
+ * carries its server now, so each row folds through `reconcile` at the very
+ * scope its money link opens, and the two screens print one number.
  *
  * Owns its own scrolling: `main` is full bleed on `/` under either view
  * (`lib/homeView.ts`).
@@ -47,6 +65,7 @@ export function FleetOverview() {
     queryFn: api.getAgents,
     refetchInterval: 10000,
   });
+  const { server: ambient } = useServer();
 
   // A clock only while something is looping — the countdown is the one thing on
   // this page that moves on its own, and a `Date.now()` in render is what the
@@ -62,6 +81,34 @@ export function FleetOverview() {
   const idle = strategylessAgents(agents);
   const looping = rows.filter((row) => row.live?.status === "running").length;
 
+  /**
+   * One fold per server, lifted out of the components that fetch them.
+   *
+   * A fleet is fetched per server and a hook cannot be called in a loop, so
+   * each server gets a `ServerFold` of its own that renders nothing and reports
+   * what it folded. Kept keyed by server rather than merged on arrival, so a
+   * server that drops out of the list takes its rows' numbers with it instead
+   * of leaving a stale fold behind under an agent that moved.
+   */
+  const groups = useMemo(() => foldTargets(agents, ambient), [agents, ambient]);
+  const [byServer, setByServer] = useState<
+    Record<string, ReadonlyMap<string, RowFold>>
+  >({});
+  const report = useCallback(
+    (server: string, folds: ReadonlyMap<string, RowFold>) =>
+      setByServer((prev) =>
+        sameFolds(prev[server], folds) ? prev : { ...prev, [server]: folds },
+      ),
+    [],
+  );
+  const folds = useMemo(() => {
+    const all = new Map<string, RowFold>();
+    for (const { server } of groups) {
+      for (const [slug, fold] of byServer[server] ?? []) all.set(slug, fold);
+    }
+    return all;
+  }, [groups, byServer]);
+
   return (
     <div className="h-full min-h-0 overflow-y-auto p-6">
       <div className="mx-auto w-full max-w-5xl">
@@ -76,9 +123,24 @@ export function FleetOverview() {
           </p>
         </header>
 
+        {groups.map(({ server, targets }) => (
+          <ServerFold
+            key={server}
+            server={server}
+            targets={targets}
+            onFold={report}
+          />
+        ))}
+
         <div className="space-y-2">
           {rows.map((row) => (
-            <Row key={row.slug} row={row} nowSec={nowSec} />
+            <Row
+              key={row.slug}
+              row={row}
+              nowSec={nowSec}
+              server={foldServerOf(row, ambient)}
+              fold={folds.get(row.slug) ?? null}
+            />
           ))}
         </div>
 
@@ -120,10 +182,89 @@ export function FleetOverview() {
   );
 }
 
-function Row({ row, nowSec }: { row: FleetRow; nowSec: number }) {
+/**
+ * One server's fleet, folded for the rows that trade on it (ARCH-324).
+ *
+ * Renders nothing: the rows stay in one globally ordered list, and grouping
+ * them by server on screen would reorder the page around a fact the reader did
+ * not ask about. What it owns is the fetch — under `useFleetData`'s own query
+ * keys, so a reader who then opens `/bots` or an agent's Money view on this
+ * server shares these caches rather than doubling them.
+ *
+ * The performance-history walk is off: this page folds and draws no chart, and
+ * the walk costs a paged request per controller.
+ *
+ * Its clock is `useSeconds(false)` — a mount-time reading, as the Money view
+ * takes it. The fold's clock feeds only the measured runtime, which no row
+ * prints, and a ticking one would re-fold and re-publish every second.
+ */
+function ServerFold({
+  server,
+  targets,
+  onFold,
+}: {
+  server: string;
+  targets: readonly FoldTarget[];
+  onFold: (server: string, folds: ReadonlyMap<string, RowFold>) => void;
+}) {
+  const fleet = useFleetData(server, { population: "running", history: false });
+  const now = useSeconds(false);
+
+  // One converter with `/bots` and the Money view: the fold converts per leaf
+  // using the leaf's own quote, and two numbers that differed by an FX fallback
+  // would be exactly the disagreement this closes.
+  const cv = useMemo(() => quoteConverter(fleet.convert), [fleet.convert]);
+
+  const leaves = useMemo(
+    () =>
+      runningLeaves({
+        controllers: fleet.controllers,
+        executors: fleet.executors,
+        owners: fleet.owners,
+        deeds: fleet.deeds,
+      }),
+    [fleet.controllers, fleet.executors, fleet.owners, fleet.deeds],
+  );
+
+  const folds = useMemo(
+    () =>
+      foldRows(targets, {
+        leaves,
+        deeds: fleet.deeds,
+        convert: cv,
+        now,
+        symbol: fleet.currencySymbol ?? "$",
+      }),
+    [targets, leaves, fleet.deeds, cv, now, fleet.currencySymbol],
+  );
+
+  useEffect(() => onFold(server, folds), [server, folds, onFold]);
+
+  return null;
+}
+
+function Row({
+  row,
+  nowSec,
+  server,
+  fold,
+}: {
+  row: FleetRow;
+  nowSec: number;
+  /** The server its records are folded from, `""` when nobody has said. */
+  server: string;
+  /** Its fold, or `null` while the server has not answered. */
+  fold: RowFold | null;
+}) {
   const live = row.live;
   const running = live?.status === "running";
   const due = dueInSec(live, nowSec);
+
+  // A dash unless there is a server to fold, a fold back from it, and something
+  // in it worth stating. `$0.00` for money that is merely unattributed is the
+  // one thing this column is not allowed to print (FEAT-109's rule, ARCH-324's
+  // new way to break it).
+  const money = server && fold?.reported ? fold : null;
 
   return (
     <div
@@ -156,7 +297,9 @@ function Row({ row, nowSec }: { row: FleetRow; nowSec: number }) {
               </span>
             )}
             {row.agentKey && <Chip icon={Brain} text={row.agentKey} />}
-            {row.serverName && <Chip icon={Server} text={row.serverName} />}
+            {(row.serverName || server) && (
+              <Chip icon={Server} text={row.serverName || server} />
+            )}
           </div>
 
           {/* When it goes again — the fact the rail's live line cannot say. */}
@@ -230,38 +373,47 @@ function Row({ row, nowSec }: { row: FleetRow; nowSec: number }) {
           )}
         </div>
 
-        {/* Attributed, not aggregate: a dash where a run has claimed nothing,
-            because `$0.00` and "nothing to report" are different statements and
-            only one of them is true.
+        {/* The fold, at the scope this link opens (ARCH-324) — the same
+            computation over the same records as the Money view's headline, so
+            the two screens print one number for one agent rather than two
+            correct ones that look like a contradiction.
 
-            And *named* (FEAT-109): this is what the agent's runs earned, which
-            is not the same quantity as the fold the fleet page prints for the
-            same agent. Both are correct; shown as a bare number this column
-            would read as a contradiction, so it says which one it is and links
-            to the screen where the two are reconciled. */}
+            A dash wherever it cannot be said: no server has been declared for
+            this agent anywhere, or the server has not answered yet, or its
+            records say nothing at all. `$0.00` would read as "it traded and
+            broke even", which is a different statement and not this one. */}
         <Link
           to={moneyHref(row)}
           data-fleet-money
           className="group shrink-0 text-right"
-          title="What its runs earned — its records show a different number, reconciled on the Money view"
+          title={
+            server
+              ? "Every record this agent owns, folded as it stands now — the number the Money view leads with"
+              : "Nobody has said which server this agent trades on, so its records cannot be folded"
+          }
         >
           <div
             data-fleet-net
             className={`font-mono text-sm font-semibold ${
-              row.net === null ? "text-[var(--color-text-muted)]" : pnlTextClass(row.net)
+              money === null ? "text-[var(--color-text-muted)]" : pnlTextClass(money.net)
             }`}
           >
-            {row.net === null ? "—" : formatCurrencyPnl(row.net)}
+            {money === null ? "—" : formatCurrencyPnl(money.net, money.symbol)}
           </div>
           <div
             data-fleet-volume
             className="font-mono text-[11px] text-[var(--color-text-muted)]"
           >
-            {row.volume === null ? "—" : formatCurrencyVolume(row.volume)}{" "}
+            {money === null
+              ? "—"
+              : formatCurrencyVolume(money.volume, money.symbol)}{" "}
             vol
           </div>
-          <div className="text-[10px] text-[var(--color-text-muted)] transition-colors group-hover:text-[var(--color-primary)]">
-            its runs earned
+          <div
+            data-fleet-money-label
+            className="text-[10px] text-[var(--color-text-muted)] transition-colors group-hover:text-[var(--color-primary)]"
+          >
+            {server ? "what its records show" : "no server to fold"}
           </div>
         </Link>
       </div>

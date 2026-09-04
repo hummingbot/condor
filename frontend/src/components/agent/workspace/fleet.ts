@@ -15,6 +15,10 @@
 // rendered page.
 
 import {
+  reconcile,
+  type ReconcileInput,
+} from "@/components/agent/workspace/reconcile";
+import {
   alertsFor,
   type WorkspaceAlert,
 } from "@/components/agent/workspace/views";
@@ -58,6 +62,15 @@ export interface FleetRow {
   lastSaid: string;
   /** Which server its tools trade on, when a loop is up to say. */
   serverName: string;
+  /**
+   * Where this row's records live, before the ambient fallback — the scoped
+   * strategy's configured server, else the agent's pin, else `""` (ARCH-324).
+   *
+   * Resolved through {@link foldServerOf} at the point of use, because the
+   * ambient server is the app's and not the agent's and nothing in this file
+   * knows what the app is currently pointed at.
+   */
+  declaredServer: string;
   /** What wants a person, from `alertsFor` — the workspace's own rule. */
   alerts: WorkspaceAlert[];
 }
@@ -91,6 +104,22 @@ export function scopeStrategy(agent: AgentSummary): {
 }
 
 /**
+ * The server a row declares, before any ambient fallback (ARCH-324).
+ *
+ * `AgentWorkspace`'s rule, to the letter: the strategy's own configured server,
+ * else the agent's pin. Both can be empty — an agent that declares no pin
+ * follows whichever server the chat is on, which is what most of them do — and
+ * empty is passed on as empty rather than substituted here, because this file
+ * does not know what the app is currently pointed at.
+ */
+export function declaredServerOf(
+  agent: Pick<AgentSummary, "server_name">,
+  strategy: Pick<StrategySummary, "server_name"> | null,
+): string {
+  return strategy?.server_name || agent.server_name || "";
+}
+
+/**
  * What this agent's **runs** earned — or nothing, honestly.
  *
  * The rule FEAT-099 set for fake zeros, applied to the money FEAT-102 made
@@ -108,13 +137,15 @@ export function scopeStrategy(agent: AgentSummary): {
  * **This is the run rollup** (FEAT-109). `GET /agents` rolls up
  * `_compute_strategy_performance`, which tiles each bot's history across the
  * owner windows its sessions declared — so a bot a chat deployed, and the
- * history of a bot adopted after it had already traded, are not in it. The
- * fold the fleet page prints is the other number, and the two are reconciled on
- * the agent's Money view. This page cannot show the fold: folding needs a
- * server's records and `AgentSummary` does not say which server an agent trades
- * on, so a row would have to guess — and a column carrying the fold for some
- * agents and the rollup for others is exactly the conflation FEAT-109 exists to
- * end.
+ * history of a bot adopted after it had already traded, are not in it.
+ *
+ * The money column no longer *prints* this number — since ARCH-324 it prints
+ * the fold, the same quantity the Money view leads with — but the ordering
+ * still uses it, and deliberately: the rollup arrives with the `["agents"]`
+ * response every row is built from, while a fold arrives per server, one
+ * answer at a time. Sorting on the fold would reorder the list under the
+ * reader's cursor as each server replied. So the list is ranked by what the
+ * runs earned and each row states what its records show.
  */
 export function attributedMoney(agent: {
   total_pnl: number;
@@ -204,6 +235,7 @@ export function fleetRows(
         lastDid: live?.last_did ?? null,
         lastSaid: live?.last_action ?? "",
         serverName: live?.server_name ?? "",
+        declaredServer: declaredServerOf(agent, strategy),
         alerts: fleetAlerts(live, nowSec),
       };
     });
@@ -218,6 +250,116 @@ export function fleetRows(
     }
     return a.name.localeCompare(b.name);
   });
+}
+
+/** One row's fold, in the shape the money column prints it. */
+export interface RowFold {
+  /** `PerfTotals.net`, in display currency — the Money view's headline. */
+  net: number;
+  volume: number;
+  /** The display currency's symbol, so both screens print one currency. */
+  symbol: string;
+  /**
+   * Whether the records say anything at all.
+   *
+   * `reconcile`'s own judgement, unchanged: no volume, no PnL and no open
+   * position is *no statement*, not `$0.00`, and the column shows a dash.
+   */
+  reported: boolean;
+}
+
+/** One agent's fold, addressed the way its money link addresses it. */
+export interface FoldTarget {
+  slug: string;
+  /** The scoped strategy, or `null` — what narrows the fold, as `?strategy=`. */
+  strategy: string | null;
+}
+
+/**
+ * Every row that folds, grouped by the server its records are fetched from.
+ *
+ * A hook cannot be called in a loop and a fleet is fetched per server, so the
+ * page needs to know its servers before it renders anything — and an agent with
+ * no server anywhere in the chain is simply absent from this list, which is
+ * what makes its row a dash instead of a fold of somebody else's fleet.
+ *
+ * Sorted by server name so the components mount in a stable order across polls.
+ */
+export function foldTargets(
+  agents: readonly AgentSummary[],
+  ambient: string | null,
+): { server: string; targets: FoldTarget[] }[] {
+  const by = new Map<string, FoldTarget[]>();
+  for (const agent of agents) {
+    if ((agent.strategies ?? []).length === 0) continue;
+    const { strategy } = scopeStrategy(agent);
+    const server = declaredServerOf(agent, strategy) || ambient || "";
+    if (!server) continue;
+    const target: FoldTarget = { slug: agent.slug, strategy: strategy?.slug ?? null };
+    const listed = by.get(server);
+    if (listed) listed.push(target);
+    else by.set(server, [target]);
+  }
+  return [...by]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([server, targets]) => ({ server, targets }));
+}
+
+/**
+ * One server's rows, folded — `reconcile` called, not reimplemented (ARCH-324).
+ *
+ * The whole point of the item this closes: the home row and the Money view
+ * headline are the same quantity, and the only way to guarantee that is for
+ * both to run the same function over the same leaves at the same scope. A
+ * second conversion here — even a correct one — would make the two screens
+ * agree by coincidence and drift the first time a leaf gained a field, which is
+ * the conflation FEAT-109 extracted `lib/perf-population.ts` to end.
+ *
+ * `attributed` is `null` because a home row does not reconcile: it prints the
+ * fold and links to the screen that accounts for the difference.
+ */
+export function foldRows(
+  targets: readonly FoldTarget[],
+  input: Omit<ReconcileInput, "slug" | "strategy" | "attributed"> & { symbol: string },
+): Map<string, RowFold> {
+  const { symbol, ...rest } = input;
+  const folds = new Map<string, RowFold>();
+  for (const target of targets) {
+    const r = reconcile({
+      ...rest,
+      slug: target.slug,
+      strategy: target.strategy,
+      attributed: null,
+    });
+    folds.set(target.slug, {
+      net: r.fold,
+      volume: r.totals.volume,
+      symbol,
+      reported: r.reported,
+    });
+  }
+  return folds;
+}
+
+/** Whether two folds say the same thing — the guard on lifting them into state. */
+export function sameFolds(
+  a: ReadonlyMap<string, RowFold> | undefined,
+  b: ReadonlyMap<string, RowFold>,
+): boolean {
+  if (!a || a.size !== b.size) return false;
+  for (const [slug, fold] of b) {
+    const seen = a.get(slug);
+    if (
+      !seen ||
+      seen.net !== fold.net ||
+      seen.volume !== fold.volume ||
+      seen.symbol !== fold.symbol ||
+      seen.reported !== fold.reported
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 
 /**
@@ -236,6 +378,26 @@ export function strategylessAgents(
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
+/**
+ * The server a row's records are actually fetched from (ARCH-324).
+ *
+ * `AgentWorkspace` opens the Fleet and Money views against *the strategy's
+ * configured server, else the agent's pin, else the ambient one*. A home row
+ * links into exactly that screen, so it has to resolve the server exactly that
+ * way — a different rule would have the two screens fold two different fleets
+ * and disagree by construction, which is the conflation this row exists to end.
+ *
+ * `""` when none of the three says anything. That is an answer, not a gap: it
+ * means nobody has said where this agent trades, and the caller shows a dash
+ * rather than folding whichever fleet happens to be at hand.
+ */
+export function foldServerOf(
+  row: Pick<FleetRow, "declaredServer">,
+  ambient: string | null,
+): string {
+  return row.declaredServer || ambient || "";
+}
+
 /** The workspace this row opens — `/agents/:slug`, scoped when we know it. */
 export function rowHref(row: Pick<FleetRow, "slug" | "strategy">): string {
   const base = `/agents/${encodeURIComponent(row.slug)}`;
@@ -247,9 +409,12 @@ export function rowHref(row: Pick<FleetRow, "slug" | "strategy">): string {
 /**
  * Where the two numbers are read side by side.
  *
- * The row shows one of them — the rollup — so the figure is a link to the
- * screen that shows both and accounts for the difference, rather than a number
- * a reader has to reconcile against `/bots` in their head (FEAT-109).
+ * Since ARCH-324 the row shows the *fold*, at this exact scope — same agent,
+ * same strategy, same server — so the headline on the other side of this link
+ * is the same number the reader just clicked, and the band under it accounts
+ * for the difference against what the runs earned (FEAT-109). The `?strategy=`
+ * is load-bearing for that: it is what makes the Money view's fold narrow to
+ * the run keys this row folded.
  */
 export function moneyHref(row: Pick<FleetRow, "slug" | "strategy">): string {
   const base = `/agents/${encodeURIComponent(row.slug)}?view=money`;

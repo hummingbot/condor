@@ -162,6 +162,10 @@ class StrategySummary(BaseModel):
     total_pnl: float = 0.0
     total_volume: float = 0.0
     open_positions: int = 0
+    #: Where this strategy's records live — its own config's server, empty when
+    #: it declared none. Carried so a reader can *fold* those records and not
+    #: only read the rollup computed from them (ARCH-324).
+    server_name: str = ""
     instances: list[RunningInstance] = []
 
 
@@ -184,6 +188,12 @@ class AgentSummary(BaseModel):
     total_pnl: float = 0.0
     total_volume: float = 0.0
     open_positions: int = 0
+    #: The agent's server *pin* — empty means "follow whichever server the chat
+    #: is on", which is what most agents declare. ``AgentDetail`` has carried it
+    #: since the workspace needed it; the summary did not, which is why the home
+    #: overview could roll an agent's runs up but never fold its records
+    #: (ARCH-324). A strategy's own ``server_name`` overrides it.
+    server_name: str = ""
     instances: list[RunningInstance] = []
 
 
@@ -855,16 +865,32 @@ def _get_engines_for(agent_slug: str, sslug: str) -> list:
 # code that owns the layout. This module keeps only HTTP concerns.
 
 
-async def _get_client_for_strategy(strategy_dir: Path, default_config: dict | None):
-    """Resolve a Hummingbot API client for a strategy, based on its config.yml."""
+def _strategy_server(strategy_dir: Path, default_config: dict | None) -> str:
+    """Which server this strategy's records live on, or ``""`` when it has none.
+
+    The one answer to that question, so the client this module fetches
+    performance with and the server name it *reports* cannot drift apart. A
+    reader that folds a strategy's records has to fetch them from the same
+    place the rollup was computed from, or the two numbers are about two
+    fleets (ARCH-324).
+
+    Empty is a real state, not a missing one: ``AgentConfig`` defaults to
+    ``"local"``, so an empty string is a strategy that explicitly declared no
+    server — and the caller is expected to say so rather than substitute one.
+    """
     from condor.agents.config import load_agent_config
-    from config_manager import get_config_manager
 
     try:
-        cfg = load_agent_config(strategy_dir, default_config)
+        return load_agent_config(strategy_dir, default_config).server_name or ""
     except Exception:
-        return None, ""
-    server_name = cfg.server_name or ""
+        return ""
+
+
+async def _get_client_for_strategy(strategy_dir: Path, default_config: dict | None):
+    """Resolve a Hummingbot API client for a strategy, based on its config.yml."""
+    from config_manager import get_config_manager
+
+    server_name = _strategy_server(strategy_dir, default_config)
     if not server_name:
         return None, ""
     cm = get_config_manager()
@@ -1143,6 +1169,7 @@ async def _build_strategy_summary(strategy) -> StrategySummary:
         total_pnl=float(totals.get("total_pnl", 0.0)),
         total_volume=float(totals.get("volume", 0.0)),
         open_positions=int(totals.get("open_positions", 0)),
+        server_name=_strategy_server(strategy_dir, strategy.default_config),
         instances=instances,
     )
 
@@ -1183,6 +1210,7 @@ async def list_agents(user: WebUser = Depends(get_current_user)):
                 description=agent.description,
                 when_to_consult=agent.consult_hint,
                 agent_key=agent.agent_key,
+                server_name=agent.server_name,
                 strategy_count=len(strat_summaries),
                 strategies=strat_summaries,
                 **_aggregate_strategy_perf(strat_summaries),

@@ -770,6 +770,16 @@ export interface StrategySummary {
   total_pnl: number;
   total_volume: number;
   open_positions: number;
+  /**
+   * Where this strategy's records live — its own config's server, `""` when it
+   * declared none (ARCH-324).
+   *
+   * The rollup above was computed *from* this server, so a reader that wants to
+   * fold the same records has to fetch them from here. Optional on the wire so
+   * an older backend reads as "no server" and the caller shows a dash rather
+   * than folding the wrong fleet.
+   */
+  server_name?: string;
   instances: RunningInstance[];
 }
 
@@ -844,6 +854,13 @@ export interface AgentSummary {
   total_pnl: number;
   total_volume: number;
   open_positions: number;
+  /**
+   * The agent's server *pin*, `""` when it follows the ambient one (ARCH-324).
+   *
+   * A strategy's own `server_name` overrides it — the rule `AgentWorkspace`
+   * already applies (`strategy?.config?.server_name || agent.server_name`).
+   */
+  server_name?: string;
   instances: RunningInstance[];
 }
 

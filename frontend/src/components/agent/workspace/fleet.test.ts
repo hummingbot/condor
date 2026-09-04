@@ -13,10 +13,13 @@ import { describe, expect, it } from "vitest";
 import type { AgentSummary, RunningInstance, StrategySummary } from "@/lib/api";
 import {
   attributedMoney,
+  declaredServerOf,
   decisionHref,
   dueInSec,
   fleetAlerts,
   fleetRows,
+  foldServerOf,
+  foldTargets,
   moneyHref,
   rowHref,
   scopeStrategy,
@@ -309,5 +312,79 @@ describe("the money column is named, not bare (FEAT-109)", () => {
 
   it("still has an address for an agent that owns no strategy", () => {
     expect(moneyHref({ ...row, strategy: null })).toBe("/agents/brigado?view=money");
+  });
+});
+
+describe("which server a row's records are folded from (ARCH-324)", () => {
+  it("prefers the strategy's own over the agent's pin", () => {
+    expect(
+      declaredServerOf(
+        agent({ server_name: "the_pin" }),
+        strategy({ server_name: "brigado" }),
+      ),
+    ).toBe("brigado");
+  });
+
+  it("falls back to the agent's pin, then to nothing", () => {
+    expect(declaredServerOf(agent({ server_name: "the_pin" }), strategy())).toBe(
+      "the_pin",
+    );
+    expect(declaredServerOf(agent(), strategy())).toBe("");
+  });
+
+  it("takes the ambient server only when nobody declared one", () => {
+    expect(foldServerOf({ declaredServer: "brigado" }, "ambient")).toBe("brigado");
+    expect(foldServerOf({ declaredServer: "" }, "ambient")).toBe("ambient");
+  });
+
+  it("is empty — not a substitute — when there is no ambient one either", () => {
+    expect(foldServerOf({ declaredServer: "" }, null)).toBe("");
+  });
+});
+
+describe("what each server is asked to fold (ARCH-324)", () => {
+  it("groups the rows by the server their records are fetched from", () => {
+    expect(
+      foldTargets(
+        [
+          agent({ slug: "a", server_name: "one", strategies: [strategy()] }),
+          agent({ slug: "b", server_name: "two", strategies: [strategy()] }),
+          agent({ slug: "c", server_name: "one", strategies: [strategy()] }),
+        ],
+        null,
+      ),
+    ).toEqual([
+      {
+        server: "one",
+        targets: [
+          { slug: "a", strategy: "brl_mm" },
+          { slug: "c", strategy: "brl_mm" },
+        ],
+      },
+      { server: "two", targets: [{ slug: "b", strategy: "brl_mm" }] },
+    ]);
+  });
+
+  it("narrows each fold to the strategy its money link opens", () => {
+    const [{ targets }] = foldTargets(
+      [
+        agent({
+          server_name: "one",
+          strategies: [strategy({ slug: "ema" }), strategy({ slug: "brl_mm" })],
+        }),
+      ],
+      null,
+    );
+    // `scopeStrategy` picked it, `moneyHref` links to it, the fold narrows to
+    // it — one scope, so the row and the headline cannot disagree.
+    expect(targets).toEqual([{ slug: "brigado", strategy: "ema" }]);
+  });
+
+  it("leaves out an agent nobody has given a server, rather than guessing", () => {
+    expect(foldTargets([agent({ strategies: [strategy()] })], null)).toEqual([]);
+  });
+
+  it("leaves out an agent that owns no strategy at all", () => {
+    expect(foldTargets([agent({ server_name: "one" })], null)).toEqual([]);
   });
 });
