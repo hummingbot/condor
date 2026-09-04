@@ -304,6 +304,25 @@ function nextClientRef(): string {
 // died with the subprocess, and invisible to Telegram. The backend now records
 // every turn (FEAT-015), so the transcript is fetched, never mirrored.
 
+/**
+ * Did the recorded stream end early?
+ *
+ * The truth lives on disk: `TurnEntry.stop_reason` is written by the recorder
+ * precisely so a reply cut short — by a steer, an abort, a timeout, a dropped
+ * subprocess, a backend error — can be told apart from a finished one. Live,
+ * the `prompt_interrupted` frame marks the bubble; a reload had nothing, so
+ * the same partial came back reading like the agent's considered answer.
+ *
+ * `end_turn` is the only reason that means "it finished". `""` is *not* a
+ * synonym for it: it is "never reported" — the abandoned generator, and every
+ * turn written before the field existed — so it is left unmarked rather than
+ * guessed at in either direction. Everything else the backend actually said,
+ * including reasons no adapter emits yet, is an early ending.
+ */
+function endedEarly(stopReason: string | undefined): boolean {
+  return !!stopReason && stopReason !== "end_turn";
+}
+
 function turnsToMessages(
   turns: ConversationTurn[],
   conversationId: string,
@@ -344,6 +363,12 @@ function turnsToMessages(
       // attributed turns at all and is left unattributed so the divider walk
       // still gets to answer for it.
       agentSlug: turn.agent_slug || (turn.agent_key ? "" : undefined),
+      // The seam the live `prompt_interrupted` frame draws, drawn again from
+      // the record — so a reload says the same thing the user watched happen.
+      // Assistant turns only: `stop_reason` describes a model stream, and a
+      // system divider has none to describe.
+      interrupted:
+        role === "assistant" && endedEarly(turn.stop_reason) ? true : undefined,
       attachments: attachments.length ? attachments : undefined,
     });
   });
