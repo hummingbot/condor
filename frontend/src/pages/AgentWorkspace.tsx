@@ -11,12 +11,14 @@ import {
 } from "react-router-dom";
 
 import { AgentKnowledge } from "@/components/agent/AgentKnowledge";
+import { DelegationSheet } from "@/components/agent/DelegationSheet";
 import { PerformancePanel } from "@/components/agent/AgentOverviewTab";
 import { SnapshotDetail } from "@/components/agent/AgentSessionContent";
 import { ExperimentDetail, RunOverview } from "@/components/agent/lab/RunOverview";
 import { RunRail } from "@/components/agent/lab/RunRail";
 import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
 import { StrategyWorkbench } from "@/components/agent/StrategyWorkbench";
+import { isLoopRun } from "@/components/agent/lab/runs";
 import { isKnowledgeTab } from "@/components/agent/knowledgeTabs";
 import { AgentFleet } from "@/components/agent/workspace/AgentFleet";
 import { LoopBar } from "@/components/agent/workspace/LoopBar";
@@ -34,7 +36,59 @@ import {
   type WorkspaceViewId,
 } from "@/components/agent/workspace/views";
 import { ReportBrowser } from "@/components/routines/ReportBrowser";
-import { api, type AgentRunRow } from "@/lib/api";
+import {
+  api,
+  type AgentRunRow,
+  type DelegationStatus,
+  type DelegationSummary,
+} from "@/lib/api";
+
+/**
+ * How many runs one page of the rail holds (FEAT-111).
+ *
+ * The rail lists four kinds now, and conversations are the unbounded one: a
+ * year of chatting is hundreds of rows, and a five-second poll that pulled all
+ * of them would undo the cheapness that licenses the poll in the first place.
+ */
+const RUN_PAGE = 100;
+
+/** Statuses `DELEGATION_STATUS` can colour; anything else is `unknown`. */
+const DELEGATION_STATUSES: readonly DelegationStatus[] = [
+  "running",
+  "done",
+  "error",
+  "stopped",
+  "interrupted",
+  "timeout",
+  "unknown",
+];
+
+/**
+ * A rail row, as the delegation sheet reads a history row.
+ *
+ * The row carries the record's *listing* fields and none of its bodies, which
+ * is exactly the shape `DelegationSheet` was built to open — it fetches the
+ * record itself when the caller has no body, and that is how a task recorded by
+ * a long-dead process is still readable. The status is narrowed rather than
+ * cast: a record written by a newer build could name a state this dashboard
+ * cannot colour, and `unknown` is the honest cell for it.
+ */
+function delegationTask(run: AgentRunRow, agent: string): DelegationSummary {
+  const status = DELEGATION_STATUSES.find((s) => s === run.status) ?? "unknown";
+  return {
+    task_id: run.id,
+    agent,
+    user_id: 0,
+    chat_id: 0,
+    server_name: null,
+    task: run.title,
+    status,
+    kind: run.execution_mode === "consult" ? "consult" : "delegate",
+    conversation_id: "",
+    started_at: run.started_at ?? 0,
+    ended_at: run.ended_at ?? 0,
+  };
+}
 
 /**
  * One agent, one screen, one route (FEAT-103).
@@ -137,9 +191,14 @@ export function AgentWorkspace() {
     refetchInterval: 5000,
   });
 
+  // The rail's window, not a filter (FEAT-111). An install that has been
+  // chatted with for a year has hundreds of conversations, and pulling the
+  // archive on a five-second poll is how a cheap rail stops being cheap. The
+  // window widens on request and stays widened for the visit.
+  const [runLimit, setRunLimit] = useState(RUN_PAGE);
   const { data: runs = [] } = useQuery({
-    queryKey: ["agent-runs", slug],
-    queryFn: () => api.getAgentRuns(slug),
+    queryKey: ["agent-runs", slug, runLimit],
+    queryFn: () => api.getAgentRuns(slug, runLimit),
     enabled: !!slug,
     refetchInterval: 5000,
   });
@@ -157,8 +216,14 @@ export function AgentWorkspace() {
     [runs, sslug, url.run],
   );
 
+  // The loop bar's picker is a loop concept end to end — it names ticks and a
+  // cadence — so it is handed the loop's runs only. A chat in that dropdown
+  // would offer a run whose every other control is inert.
   const scopedRuns = useMemo(
-    () => (sslug ? runs.filter((r) => r.strategy_slug === sslug) : runs),
+    () =>
+      runs.filter(
+        (r) => isLoopRun(r.kind) && (!sslug || r.strategy_slug === sslug),
+      ),
     [runs, sslug],
   );
 
@@ -217,6 +282,33 @@ export function AgentWorkspace() {
         }`,
       ),
     [navigate, slug],
+  );
+
+  /**
+   * Opening a run, which is now four different things (FEAT-111).
+   *
+   * A loop run and a delegation are *selections*: the rail stays, the body
+   * changes, and `?run=` says which. A conversation is not — the chat is the
+   * surface for a conversation, and rebuilding a wide surface inside a narrow
+   * one is exactly what FEAT-103's alternative D argued against. So a chat row
+   * navigates to the chat, carrying the conversation it wants opened.
+   *
+   * `?strategy=` moves only for the kinds that have one; a delegation setting
+   * the scope to `""` would drop the loop the reader was looking at.
+   */
+  const openRun = useCallback(
+    (run: AgentRunRow) => {
+      if (run.kind === "conversation") {
+        navigate(`/?conversation=${encodeURIComponent(run.id)}`);
+        return;
+      }
+      setParams(
+        isLoopRun(run.kind)
+          ? { strategy: run.strategy_slug, run: run.run_id, tick: null }
+          : { run: run.run_id, tick: null },
+      );
+    },
+    [navigate, setParams],
   );
 
   if (error && !agent) {
@@ -327,13 +419,14 @@ export function AgentWorkspace() {
         setParams({ strategy: next, run: null, tick: null })
       }
       selected={selectedRun}
-      onSelectRun={(run) =>
-        setParams({ strategy: run.strategy_slug, run: run.run_id, tick: null })
-      }
+      onSelectRun={openRun}
       tick={url.tick}
       onSelectTick={(next) => selectTick(next, "runs")}
       serverName={strategyServer}
       controllerIds={instance ? [instance.agent_id] : undefined}
+      hasMore={runs.length >= runLimit}
+      onShowMore={() => setRunLimit((n) => n + RUN_PAGE)}
+      onClearRun={() => setParams({ run: null, tick: null })}
     />
   ) : view === "now" ? (
     <NowView
@@ -376,7 +469,7 @@ export function AgentWorkspace() {
           setParams({ strategy: next, run: null, tick: null })
         }
         runs={scopedRuns}
-        run={selectedRun}
+        run={selectedRun && isLoopRun(selectedRun.kind) ? selectedRun : null}
         onSelectRun={(runId) => setParams({ run: runId, tick: null })}
         instance={instance}
         tick={url.tick}
@@ -441,6 +534,9 @@ function RunsView({
   onSelectTick,
   serverName,
   controllerIds,
+  hasMore,
+  onShowMore,
+  onClearRun,
 }: {
   slug: string;
   runs: AgentRunRow[];
@@ -452,6 +548,10 @@ function RunsView({
   onSelectTick: (tick: number | null) => void;
   serverName: string;
   controllerIds?: string[];
+  hasMore?: boolean;
+  onShowMore?: () => void;
+  /** Put the selection back to the newest run — the sheet's way out. */
+  onClearRun: () => void;
 }) {
   return (
     <>
@@ -464,11 +564,28 @@ function RunsView({
         }
         onSelectRun={onSelectRun}
         isLoading={false}
+        hasMore={hasMore}
+        onShowMore={onShowMore}
       />
       <div className="min-h-0 flex-1 overflow-y-auto p-4">
         {!selected ? (
           <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">
             This agent has no runs yet.
+          </p>
+        ) : selected.kind === "delegation" ? (
+          /* The one place a background task is read already exists — the dock,
+             the fleet card and an agent's history all open this sheet — and a
+             rail row is the fourth caller, not a fourth copy. */
+          <DelegationSheet
+            task={delegationTask(selected, slug)}
+            onClose={onClearRun}
+          />
+        ) : selected.kind === "conversation" ? (
+          /* Only reachable from a hand-typed `?run=c:…`: a chat row navigates
+             to the chat rather than selecting. The rail still highlights it,
+             so the body says where its transcript is instead of nothing. */
+          <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">
+            {selected.title || "This chat"} is read in the chat.
           </p>
         ) : selected.kind === "experiment" ? (
           <ExperimentDetail
