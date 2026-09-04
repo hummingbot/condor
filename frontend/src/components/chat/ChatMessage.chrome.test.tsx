@@ -94,6 +94,10 @@ describe("out-of-band notes", () => {
     // (FEAT-093). It is a quiet note, not a handover divider: the counterpart
     // did not change, only what it was told.
     ["reload", "Reloaded"],
+    // A prompt that failed before producing anything (CORR-325). It used to
+    // fall through to the handover divider, which shouted an arbitrary backend
+    // exception in 10px capitals on one un-wrapping line.
+    ["error", "Error"],
   ];
 
   for (const [kind, label] of kinds) {
@@ -110,6 +114,22 @@ describe("out-of-band notes", () => {
 
     expect(container.textContent).toContain("Key material");
     expect(container.innerHTML).toContain("amber-500/10");
+  });
+
+  it("wraps a failed prompt's message instead of shouting it on one line", () => {
+    // What the recorder actually writes: an exception message, several
+    // sentences of it, as `TurnEntry(role="system", kind="error")`.
+    const boom =
+      "Connection to the agent subprocess was lost while the prompt was in " +
+      "flight.\nThe session has been discarded; nothing was sent to the venue.";
+    render(message({ role: "system", kind: "error", text: boom }));
+
+    expect(container.textContent).toContain("Error");
+    expect(container.querySelector(".chat-markdown")).not.toBeNull();
+    // The divider's treatment is the failure: 10px capitals that refuse to
+    // wrap and overflow the column.
+    expect(container.innerHTML).not.toContain("whitespace-nowrap");
+    expect(container.innerHTML).not.toContain("uppercase tracking-wider");
   });
 
   it("still renders a handover as a divider, not as a turn", () => {

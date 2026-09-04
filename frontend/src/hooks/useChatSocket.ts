@@ -1459,7 +1459,14 @@ export function useChatSocket() {
           // above the error bubble appended below — and the turn is over, so
           // the next response starts a new bubble.
           flushChunks(errSlotId || undefined);
-          // Show error as a system message in the chat
+          // The failure joins the transcript in the shape the transcript
+          // already records it in: the recorder writes a failed prompt as
+          // `TurnEntry(role="system", kind="error")`, so appending a synthetic
+          // *assistant* turn with a `⚠️` glued to the front made the same event
+          // read one way live and another after a reload — and put words in
+          // the agent's mouth that the agent never said. `error` is a note
+          // kind now, so the glyph and the label come from the renderer and
+          // the text is the backend's own message, unadorned.
           const errMsg = (data.message as string) || "Unknown error";
           if (errSlotId) {
             // Nothing is coming for a tab whose spawn failed — dropping
@@ -1476,8 +1483,9 @@ export function useChatSocket() {
                     ...s.messages,
                     {
                       id,
-                      role: "assistant" as const,
-                      text: `⚠️ ${errMsg}`,
+                      role: "system" as const,
+                      kind: "error",
+                      text: errMsg,
                       toolCalls: [],
                       ts: nowTs(),
                     },

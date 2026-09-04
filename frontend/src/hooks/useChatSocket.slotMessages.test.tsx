@@ -184,6 +184,23 @@ describe("a system note, whatever raised it", () => {
     expect(messages("s2")).toEqual([]);
   });
 
+  it("is what a stream error becomes too, not an assistant bubble (CORR-325)", async () => {
+    await arrive();
+    const boom = "Connection to the agent subprocess was lost.\nNothing was sent.";
+    deliver({ event: "error", slot_id: "s1", message: boom });
+
+    const [note] = messages("s1");
+    // The recorder writes exactly this shape for a prompt that failed before
+    // producing anything, so the live frame and the reloaded turn are one
+    // rendering rather than a `⚠️` bubble that becomes a divider on reload.
+    expect(note.role).toBe("system");
+    expect(note.kind).toBe("error");
+    // The backend's own words, unadorned: the glyph and the label belong to
+    // the renderer, and the transcript on disk carries no prefix.
+    expect(note.text).toBe(boom);
+    expect(messages("s2")).toEqual([]);
+  });
+
   it("carries no kind when the backend named none", async () => {
     await arrive();
     deliver({ event: "system_note", slot_id: "s1", text: "Something happened" });
