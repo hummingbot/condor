@@ -10,6 +10,8 @@ source: chat
 
 ## Self-Improve — Real-Time Reflex
 
+> **Scope**: reactive, in-conversation, single-turn. Fires immediately after a feedback moment — a correction, a stated preference, a missed step. For *proactive* systematic improvement of a skill (multi-round scenario testing loop), use `skill_optimizer` instead.
+
 Run this checklist immediately after any feedback moment. Do NOT accumulate and review at end of session (token-expensive and easy to forget).
 
 ### Checklist
@@ -34,6 +36,14 @@ Run this checklist immediately after any feedback moment. Do NOT accumulate and 
 
 **3. Is this a one-off or session-specific detail?**
 - → Skip it. Don't pollute memory/skills with ephemeral context.
+
+### When to escalate to `skill_optimizer`
+A single reactive edit (step 2 above) is right for most feedback moments. Escalate to `skill_optimizer` when:
+- The user asks for systematic or automated improvement ("make it handle edge cases", "iterate on this skill")
+- The same gap has surfaced more than once across conversations
+- The skill is complex enough that a single edit may introduce new blind spots
+
+`skill_optimizer` runs a multi-round scenario-testing loop in the background — read it before triggering.
 
 ### Rules
 - Save in the moment, not at the end
