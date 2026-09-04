@@ -93,7 +93,13 @@ export function FleetOverview() {
    * server that drops out of the list takes its rows' numbers with it instead
    * of leaving a stale fold behind under an agent that moved.
    */
-  const groups = useMemo(() => foldTargets(agents, ambient), [agents, ambient]);
+  // Left to the compiler rather than memoised by hand. `agents` arrives from a
+  // query and is only ever read through helpers that build fresh arrays, but
+  // the compiler cannot prove that and bails on the whole component when it
+  // finds a manual memo it cannot preserve — so the hand-written one bought a
+  // stable identity for a handful of servers and cost every other optimisation
+  // in the file. Same reason `nowSec` above is not memoised.
+  const groups = foldTargets(agents, ambient);
   const [byServer, setByServer] = useState<
     Record<string, ReadonlyMap<string, RowFold>>
   >({});
@@ -104,13 +110,16 @@ export function FleetOverview() {
       ),
     [],
   );
-  const folds = useMemo(() => {
+  // Left to the compiler too, and for the same reason as `groups` above: it
+  // depends on `groups`, so a manual memo here is the same unpreservable one a
+  // line further down.
+  const folds = (() => {
     const all = new Map<string, RowFold>();
     for (const { server } of groups) {
       for (const [slug, fold] of byServer[server] ?? []) all.set(slug, fold);
     }
     return all;
-  }, [groups, byServer]);
+  })();
 
   return (
     <div className="h-full min-h-0 overflow-y-auto p-6">

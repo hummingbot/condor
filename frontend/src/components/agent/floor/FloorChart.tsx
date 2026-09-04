@@ -29,6 +29,7 @@ import {
   parseBaseline,
   parseBasis,
   rebaseRows,
+  seriesColor,
   type FloorChartRow,
 } from "@/lib/owner-series";
 import {
@@ -694,11 +695,6 @@ function FloorTooltip({
   );
 }
 
-/** The eight categorical tokens, cycled — see the note beside them in index.css. */
-export function seriesColor(index: number): string {
-  return `var(--chart-series-${(Math.max(0, index) % 8) + 1})`;
-}
-
 /** The windows the chips offer, and what each one means as a `TimeRange`. */
 const WINDOWS = [
   { value: "1d", label: "1D", ms: 24 * 3_600_000 },
@@ -716,7 +712,7 @@ type WindowValue = (typeof WINDOWS)[number]["value"];
  * rule: a stale or hand-edited parameter should land the reader on the page
  * they asked for.
  */
-export function parseWindow(raw: string | null): {
+function parseWindow(raw: string | null): {
   value: WindowValue;
   range: TimeRange | null;
 } {

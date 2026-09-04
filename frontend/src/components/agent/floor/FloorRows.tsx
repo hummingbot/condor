@@ -2,8 +2,11 @@ import { ArrowUpRight } from "lucide-react";
 import { Link } from "react-router-dom";
 
 import type { FloorModel, FloorMoney } from "@/components/agent/floor/floor";
-import { seriesColor } from "@/components/agent/floor/FloorChart";
-import { ownerDataKey, type FloorChartRow } from "@/lib/owner-series";
+import {
+  ownerDataKey,
+  seriesColor,
+  type FloorChartRow,
+} from "@/lib/owner-series";
 import {
   formatAge,
   formatCurrencyPnl,
@@ -224,7 +227,7 @@ function Cell({
 }
 
 /** One owner's line out of the merged rows — the values it actually carries. */
-export function sparkPoints(
+function sparkPoints(
   rows: readonly FloorChartRow[],
   key: string,
 ): number[] {

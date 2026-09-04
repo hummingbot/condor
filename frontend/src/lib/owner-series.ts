@@ -299,3 +299,8 @@ export function rebaseRows(
     unplottable,
   };
 }
+
+/** The eight categorical tokens, cycled — see the note beside them in index.css. */
+export function seriesColor(index: number): string {
+  return `var(--chart-series-${(Math.max(0, index) % 8) + 1})`;
+}

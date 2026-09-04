@@ -10,24 +10,15 @@
  * with no nav entry to reach it by and its padding decided by a list of home
  * views rather than by the shell's own array.
  *
- * The module reaches `localStorage` at import time (the display-currency
- * preference, through `pageFacts`), so this file takes a DOM even though it
- * renders nothing.
- *
- * @vitest-environment jsdom
+ * Both live in `lib/nav` rather than beside the shell that renders them: a
+ * module may not export a component and plain data both (the lint gate's
+ * `react-refresh/only-export-components`), and having them in a leaf module is
+ * what lets this file read them with a static import and no DOM at all.
  */
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
-// `useTheme` reads the media query at module scope and jsdom has no
-// `matchMedia`. Stubbed before the import below, which is why that import is
-// dynamic: a static one is hoisted above this line.
-vi.stubGlobal(
-  "matchMedia",
-  () => ({ matches: false, addEventListener: () => {}, removeEventListener: () => {} }),
-);
-
-const { FULL_BLEED_ROUTES, NAV_ITEMS } = await import("./AppShell");
+import { FULL_BLEED_ROUTES, NAV_ITEMS } from "@/lib/nav";
 
 describe("the nav", () => {
   it("has a door to the fleet, between the agents and the floor", () => {
