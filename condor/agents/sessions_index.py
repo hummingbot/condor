@@ -64,7 +64,9 @@ def infer_latest_session_status(
         "agent_id": status.get("agent_id") or f"{run_key}_{num}",
         "session_num": num,
         "status": status.get("state", "idle"),
-        "tick_count": count_journal_ticks(latest / "journal.md"),
+        # Memoised (PERF-323): ``_build_strategy_summary`` calls this once per
+        # strategy on every ``GET /api/v1/agents``, which the chat rail polls.
+        "tick_count": _journal_tick_count(latest / "journal.md"),
     }
 
 
@@ -274,6 +276,10 @@ def list_session_snapshots(session_dir: Path) -> list[dict[str, Any]]:
 # pulls a whole ``journal.md``, once per session, on every poll. Memoised on
 # (mtime, size) — the same idiom as the two caches above, and safe for the same
 # reason: a journal only ever grows, so a changed file re-parses.
+#
+# ``infer_latest_session_status`` reads the same number through this memo too
+# (PERF-323): it is the hotter of the two paths, since ``/api/v1/agents`` runs
+# it once per strategy on a poll the chat rail never stops.
 #
 # Only the *count* is cached. A run's status and end time come from a small
 # ``status.json`` read every time, because a live run's are exactly the fields

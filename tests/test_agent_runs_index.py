@@ -20,7 +20,7 @@ from starlette.routing import Match
 from condor.agents import agent as agent_module
 from condor.agents import sessions_index
 from condor.agents import strategy as strategy_module
-from condor.agents.sessions_index import list_runs
+from condor.agents.sessions_index import infer_latest_session_status, list_runs
 from condor.runtime.registry_file import BOOT_ID
 from condor.web.routes.agents import router
 
@@ -289,6 +289,32 @@ def test_an_unchanged_journal_is_read_once(tmp_path, monkeypatch):
 
     for _ in range(5):
         assert list_runs(strategy_dir, "brigado.brl_mm")[0]["tick_count"] == 30
+    assert len(reads) == 1
+
+
+def test_the_status_summary_reads_an_unchanged_journal_once(tmp_path, monkeypatch):
+    """``infer_latest_session_status`` goes through the same memo (PERF-323).
+
+    It is the hotter caller of the two: ``/api/v1/agents`` runs it once per
+    strategy on every chat-rail poll, so an uncached read here costs a whole
+    ``journal.md`` per strategy, several times a minute.
+    """
+    strategy_dir = tmp_path / "brl_mm"
+    _write_session(strategy_dir, 1, ticks=30)
+
+    reads: list[Path] = []
+    real = Path.read_text
+
+    def spy(self, *args, **kwargs):
+        if self.name == "journal.md":
+            reads.append(self)
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", spy)
+
+    for _ in range(2):
+        status = infer_latest_session_status(strategy_dir, "brigado.brl_mm")
+        assert status["tick_count"] == 30
     assert len(reads) == 1
 
 
