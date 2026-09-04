@@ -447,6 +447,66 @@ class RefusalLog:
         return pending
 
 
+async def _fetch_controller_id(client: Any, executor_id: str) -> str:
+    """The controller tag on one executor, straight from the API.
+
+    The fallback path of the ownership check: an id the tick's snapshot cannot
+    place is either an executor this session opened *after* the snapshot was
+    taken (earlier in this same tick) or somebody else's. Only the API can tell
+    those apart. Returns ``""`` when the id resolves to nothing — an unknown id,
+    an unreachable API, or an executor carrying no tag at all — which the caller
+    reads as "unattributable", never as "mine".
+    """
+    if client is None or not executor_id:
+        return ""
+    try:
+        from condor.fetchers.executors import get_executor_detail
+
+        detail = await get_executor_detail(client, executor_id)
+    except Exception:  # pragma: no cover - defensive, the fetcher already traps
+        return ""
+    if not isinstance(detail, dict):
+        return ""
+    config = detail.get("config")
+    cfg = config if isinstance(config, dict) else detail
+    return str(cfg.get("controller_id") or detail.get("controller_id") or "")
+
+
+async def _stop_refusal(
+    executor_id: str,
+    agent_id: str,
+    executor_owners: dict[str, str] | None,
+    client: Any,
+) -> str:
+    """Why this session may not stop ``executor_id`` — ``""`` when it may.
+
+    Ownership is read off the tick's own executor snapshot first: those rows
+    *are* this session's executors (the provider builds them from the session's
+    ``controller_id`` plus the bots its ledger owns), so membership settles it
+    without a round trip. Controller-mode executors carry their bot controller's
+    tag rather than the ``agent_id``, which is why membership — not a tag
+    comparison — is what the snapshot answers.
+    """
+    if not executor_id:
+        return "it names no executor_id, so the executor's owner cannot be checked"
+    if executor_owners and executor_id in executor_owners:
+        return ""
+
+    controller = await _fetch_controller_id(client, executor_id)
+    if not controller:
+        return (
+            f"executor {executor_id!r} could not be attributed to any session — "
+            "it is in neither this tick's executor snapshot nor the API's records"
+        )
+    if controller != agent_id:
+        return (
+            f"executor {executor_id!r} belongs to controller {controller!r}, not "
+            f"to this session {agent_id!r} — stopping it would close another "
+            "session's position"
+        )
+    return ""
+
+
 def auto_approve_with_risk_check(
     risk_engine: RiskEngine,
     risk_state: RiskState,
@@ -455,6 +515,7 @@ def auto_approve_with_risk_check(
     agent_id: str = "",
     price_client: Any = None,
     refusals: RefusalLog | None = None,
+    executor_owners: dict[str, str] | None = None,
 ):
     """Build a permission callback that auto-approves safe tools and risk-checks dangerous ones.
 
@@ -475,6 +536,13 @@ def auto_approve_with_risk_check(
     way to tell "the gate refused this for a reason it could act on" from "a
     human never approved it" — the second reading makes it wait for a human it
     does not have. See :class:`RefusalLog`.
+
+    ``executor_owners`` is the tick's executor snapshot as ``id -> controller_id``
+    and binds ``stop_executor`` to this session the way the tag above binds a
+    create (SEC-559). Without it — and without an ``agent_id`` — a stop is only
+    as scoped as it is today, which is not at all. ``price_client`` doubles as the
+    API client for the single-executor lookup that resolves an id the snapshot
+    does not carry.
     """
 
     def deny(
@@ -566,6 +634,29 @@ def auto_approve_with_risk_check(
                     tool_call, risk_state, planned_amount_quote
                 )
                 if not allowed:
+                    return deny(tool_name, reason)
+
+            # A stop moves real funds too — `keep_position=False`, the default,
+            # closes the position at market — and unlike a create it carries no
+            # ownership tag of its own: only an id, and `list_executors` hands
+            # out the whole fleet's. So bind it to the session the same way the
+            # create above is bound (SEC-559).
+            #
+            # `danger.py` deliberately never stands in front of a brake, and
+            # this is a refusal on a stop. The rule holds: a session's brake is
+            # *its own* executors, and those stay ungated — resolved from the
+            # snapshot, no round trip, no risk check. What is refused is one
+            # session braking for another, which is not a brake but a
+            # liquidation. Attended seats (empty `agent_id`: chat, consults,
+            # tests) keep today's behavior, where a human confirms the stop.
+            if tool_name == "stop_executor" and agent_id:
+                reason = await _stop_refusal(
+                    str(input_data.get("executor_id") or ""),
+                    agent_id,
+                    executor_owners,
+                    price_client,
+                )
+                if reason:
                     return deny(tool_name, reason)
 
             # Bot deploys place real capital via controllers — bound the loss

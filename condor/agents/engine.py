@@ -1026,6 +1026,7 @@ class TickEngine:
             agent_id=self.agent_id,
             price_client=price_client,
             refusals=self._refusals,
+            executor_owners=self._executor_owners(),
         )
 
         # Shared factory (ARCH-192). Engine specifics: an explicit model_base_url
@@ -1047,6 +1048,32 @@ class TickEngine:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _executor_owners(self) -> dict[str, str]:
+        """This session's executors as ``id -> controller_id`` (SEC-559).
+
+        The gate binds ``stop_executor`` to the session with this: an id in here
+        is one of ours, so the common stop costs no extra API call. It reads the
+        snapshot the tick already fetched to build the prompt — ``all_executors``
+        is the full set (the session's own tag plus every row of the bots its
+        ledger owns), with the RUNNING-only ``executors`` as the fallback for a
+        provider result that carries no full set.
+        """
+        rows = (
+            self._last_skill_data.get("all_executors")
+            or self._last_skill_data.get("executors")
+            or []
+        )
+        if not isinstance(rows, list):
+            return {}
+        owners: dict[str, str] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            executor_id = str(row.get("id") or "")
+            if executor_id:
+                owners[executor_id] = str(row.get("controller_id") or "")
+        return owners
 
     def _agent_key(self) -> str:
         """Resolve the model for this run: config override > strategy override > Agent."""
