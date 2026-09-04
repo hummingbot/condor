@@ -179,6 +179,19 @@ export interface Reconciliation {
   /** Every run key of this agent that has records in the fleet, in scope. */
   runKeys: string[];
   /**
+   * The leaves {@link Reconciliation.totals} was folded over — the **accounting
+   * spine** of this scope, not every leaf beneath it.
+   *
+   * Carried out rather than recomputed by callers (FEAT-112). The floor needs
+   * more of this scope than its headline — the controller keys its chart line
+   * is drawn from, the signed notional of its open positions, when it last
+   * closed something — and every one of those is a reading of *these* leaves.
+   * A caller that re-derived them from `runKeys` would be a second selection
+   * of the same records, free to disagree with the one the number came from
+   * the first time the tree's spine rule changed.
+   */
+  spine: PerfLeaf[];
+  /**
    * Whether the fold has anything to say at all.
    *
    * FEAT-104's rule, applied to the fold: an agent whose records show no
@@ -305,6 +318,7 @@ export function reconcile(input: ReconcileInput): Reconciliation {
     unaccounted,
     leads,
     runKeys,
+    spine: mine,
     reported: totals.volume > 0 || totals.net !== 0 || totals.positions > 0,
   };
 }

@@ -28,6 +28,8 @@ import type {
   RunningInstance,
   StrategySummary,
 } from "@/lib/api";
+import { positionQuoteValue } from "@/lib/pnl-chart";
+import type { ConvertQuote, PerfLeaf, PerfTotals } from "@/lib/perf-tree";
 
 /** One agent, as the overview reports it. */
 export interface FleetRow {
@@ -266,6 +268,65 @@ export interface RowFold {
    * position is *no statement*, not `$0.00`, and the column shows a dash.
    */
   reported: boolean;
+  /**
+   * The whole fold, for a caller that needs more than the headline (FEAT-112).
+   *
+   * The home row prints `net` and `volume` and nothing else; the floor's row
+   * prints six more figures out of the same fold, and its strip sums them.
+   * Additive, so `FleetOverview` is untouched — and additive *here* rather
+   * than a second `foldLeaves` at the floor, which is the whole rule ARCH-324
+   * set: one producer, read by two screens.
+   */
+  totals: PerfTotals;
+  /**
+   * The owner's controller keys (`bot:controller_id`), for `aggregatePnlSeries`.
+   *
+   * Taken off the spine the fold was measured over, so the line and the number
+   * describe the same records. Executor leaves carry no controller history and
+   * so contribute no key — which is exactly the gap the floor's honesty note
+   * names rather than hides.
+   */
+  keys: string[];
+  /**
+   * Signed quote notional over the spine, in display currency.
+   *
+   * `positionQuoteValue`, the existing tested reader of a `positions_summary`
+   * — not a `side` field. `ExecutorInfo.side` exists but `leafFromExecutor`
+   * does not copy it, and a controller is a bag of both sides anyway, so the
+   * sign has to come from the positions themselves.
+   */
+  exposure: number;
+  /** `max(endedAt)` over the spine, or `null` — the honest half of "liveness". */
+  lastClose: number | null;
+  /** How many leaves in the spine are still live. */
+  running: number;
+}
+
+/**
+ * The signed notional a scope's open positions add up to, in display currency.
+ *
+ * Converted per leaf with the leaf's own pair, for the same reason `foldLeaves`
+ * converts per leaf: a scope spanning two quotes summed at one rate reports a
+ * number nobody holds.
+ */
+export function spineExposure(spine: readonly PerfLeaf[], cv: ConvertQuote): number {
+  let value = 0;
+  for (const leaf of spine) value += cv(positionQuoteValue(leaf.positions), leaf.pair);
+  return value;
+}
+
+/** When a scope last closed something, or `null` when it never has. */
+export function spineLastClose(spine: readonly PerfLeaf[]): number | null {
+  let last: number | null = null;
+  for (const leaf of spine) {
+    if (leaf.endedAt !== null && (last === null || leaf.endedAt > last)) last = leaf.endedAt;
+  }
+  return last;
+}
+
+/** The controller keys in a spine — what a chart line is drawn from. */
+export function spineKeys(spine: readonly PerfLeaf[]): string[] {
+  return spine.filter((leaf) => leaf.kind === "controller").map((leaf) => leaf.id);
 }
 
 /** One agent's fold, addressed the way its money link addresses it. */
@@ -306,6 +367,56 @@ export function foldTargets(
 }
 
 /**
+ * Every agent entire, grouped by every server it declares (FEAT-112).
+ *
+ * The sibling of {@link foldTargets}, and the difference is the whole reason
+ * both exist. `foldTargets` narrows an agent to `scopeStrategy(agent)` because
+ * a home row *is about* one strategy and links into it. A floor row is about
+ * the agent, and using the scoped rule here would be a silent loss: records
+ * belonging to an agent's other strategies are **attributed** — so they are in
+ * neither *Outside Condor* nor *Before the ledger* — and no row would claim
+ * them. They would vanish out of a total whose entire job is to be complete.
+ *
+ * So the strategy is `null`, which `reconcile` reads as *every real run key of
+ * this agent*, with the three pseudo keys (`chat`/`delegation`/`ui`) included
+ * as they always are.
+ *
+ * And an agent is emitted on **every distinct server any of its strategies
+ * declares** — else its own pin, else the ambient one — rather than on the one
+ * its scoped strategy names. A generalisation `foldTargets` does not need,
+ * because one strategy has one server; the floor sums an agent's per-server
+ * folds, so an agent whose two strategies run on two servers is one row over
+ * both fleets rather than one fleet arbitrarily picked.
+ *
+ * Sorted by server name so the components mount in a stable order across polls.
+ */
+export function floorTargets(
+  agents: readonly AgentSummary[],
+  ambient: string | null,
+): { server: string; targets: FoldTarget[] }[] {
+  const by = new Map<string, FoldTarget[]>();
+  for (const agent of agents) {
+    const strategies = agent.strategies ?? [];
+    if (strategies.length === 0) continue;
+    const servers = new Set<string>();
+    for (const strategy of strategies) {
+      const server = declaredServerOf(agent, strategy) || ambient || "";
+      if (server) servers.add(server);
+    }
+    for (const server of servers) {
+      // `strategy: null` — the agent entire, every door included.
+      const target: FoldTarget = { slug: agent.slug, strategy: null };
+      const listed = by.get(server);
+      if (listed) listed.push(target);
+      else by.set(server, [target]);
+    }
+  }
+  return [...by]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([server, targets]) => ({ server, targets }));
+}
+
+/**
  * One server's rows, folded — `reconcile` called, not reimplemented (ARCH-324).
  *
  * The whole point of the item this closes: the home row and the Money view
@@ -336,12 +447,26 @@ export function foldRows(
       volume: r.totals.volume,
       symbol,
       reported: r.reported,
+      totals: r.totals,
+      keys: spineKeys(r.spine),
+      exposure: spineExposure(r.spine, rest.convert),
+      lastClose: spineLastClose(r.spine),
+      running: r.spine.filter((leaf) => leaf.running).length,
     });
   }
   return folds;
 }
 
-/** Whether two folds say the same thing — the guard on lifting them into state. */
+/**
+ * Whether two folds say the same thing — the guard on lifting them into state.
+ *
+ * Still the four scalars after FEAT-112 widened `RowFold`, and deliberately.
+ * The new fields are derived from the same leaves in the same `reconcile` call
+ * as `net` and `volume`, so a scalar-equal fold is a fold-equal fold; while
+ * `keys` is a fresh array on every poll, so comparing it by identity — or
+ * `totals` by object identity — would fail this guard every single time and
+ * put the host into a render loop.
+ */
 export function sameFolds(
   a: ReadonlyMap<string, RowFold> | undefined,
   b: ReadonlyMap<string, RowFold>,
