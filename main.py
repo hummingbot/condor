@@ -1128,6 +1128,15 @@ async def _run_dual(application: Application) -> None:
                 WEB_HOST,
                 WEB_PORT,
             )
+        elif os.environ.get("WEB_HOST", "").strip():
+            # An explicit WEB_HOST is a deliberate opt-out, not a failed
+            # lookup. Warning about a tailnet address we were never asked to
+            # find would report someone's own choice as a fault.
+            logger.info(
+                "Dashboard on http://%s:%s — WEB_HOST was set explicitly.",
+                WEB_HOST,
+                WEB_PORT,
+            )
         else:
             from utils.tailscale import ensure_serve
 

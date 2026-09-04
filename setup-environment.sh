@@ -305,6 +305,23 @@ PYEOF
     return 1
 }
 
+# Does the tailnet device exist on this host?
+#
+# /sys/class/net is present on every Linux kernel and reading it needs no
+# iproute2, so a host without `ip` still gets a real answer rather than the
+# permissive one -- previously a missing `ip` read as "device free" and sent
+# a caller straight into the collision this is meant to detect.
+#
+# No /sys and no tools means this is not Linux, and a network_mode: host
+# container cannot hold the host's device there in the first place, so
+# "absent" is the correct answer rather than a guess.
+tailnet_device_present() {
+    [ -e /sys/class/net/tailscale0 ] && return 0
+    command_exists ip && ip link show tailscale0 >/dev/null 2>&1 && return 0
+    command_exists ifconfig && ifconfig tailscale0 >/dev/null 2>&1 && return 0
+    return 1
+}
+
 # On WSL2, systemd doesn't manage tailscaled — we must start the daemon manually
 # before calling `tailscale up`, otherwise the call silently fails.
 tailscale_up() {
@@ -1072,7 +1089,7 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
             _ts_host_usable=true
         fi
         _ts_device_busy=false
-        ip link show tailscale0 >/dev/null 2>&1 && _ts_device_busy=true
+        tailnet_device_present && _ts_device_busy=true
 
         if [[ "${use_tailscale:-}" =~ ^[Yy]$ ]] && [ "$_ts_host_usable" != true ] \
            && [ "$_ts_device_busy" = true ]; then
@@ -1086,6 +1103,13 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
             msg_info "then run 'make deploy' there. Continuing without Tailscale for Condor."
             use_tailscale="N"
             use_tailscale_early="N"
+            # Step 1 already recorded USE_TAILSCALE=true. Leaving it would put
+            # the rest of the system at odds with what we just told the user:
+            # main.py would try a tailnet bind, fail closed to loopback, and
+            # doctor would report the dashboard as unreachable -- all correct
+            # individually, and all confusing after "continuing without".
+            USE_TAILSCALE=false
+            set_env_var USE_TAILSCALE "false"
         fi
         if [[ "${use_tailscale:-}" =~ ^[Yy]$ ]]; then
           # Already on the tailnet: no key needed to reuse this machine's own
