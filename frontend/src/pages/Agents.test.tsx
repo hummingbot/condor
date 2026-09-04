@@ -1,35 +1,44 @@
 /**
- * The home is the conversation, and the fleet overview is a page.
+ * The home is the conversation, and every fleet address lands back on it.
  *
  * FEAT-104 mounted an overview under `/?view=fleet` and then made it what a
- * bare `/` means. Both are undone: `/` is the chat it has been since FEAT-077,
- * `/fleet` is the overview, and the only thing left of the query parameter is a
- * redirect for the URLs already in bookmarks and notification payloads. That
- * redirect is the case worth a test — it has to keep the *rest* of the query
- * string, because a URL that reached the old overview could carry anything
- * beside `view`, and dropping it would land somebody on a plausible wrong page.
+ * bare `/` means; FEAT-114 retired the page that replaced it, because what
+ * every agent is doing belongs beside the conversation rather than a tab away
+ * from it. So both spellings are now bookmarks pointing at a screen that is no
+ * longer separate, and what this file pins is that neither 404s and neither
+ * hijacks the home: `?view=` on `/` means nothing again — [[FEAT-117]] is about
+ * to reuse it — and `/fleet` redirects into the panel with the desk named, so
+ * the reader arrives at the fleet rather than at whatever their browser last
+ * had open.
  *
- * The two routes are wired here exactly as `App.tsx` wires them, since the
- * forwarding is only true if something is listening at the other end. Both
- * bodies are stubbed: what is under test is the routing, not either page.
+ * The routes are wired here exactly as `App.tsx` wires them, since a redirect
+ * is only true if something is listening at the other end. Both bodies are
+ * stubbed: what is under test is the routing, not either screen.
  *
  * @vitest-environment jsdom
  */
 
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
+import {
+  MemoryRouter,
+  Navigate,
+  Route,
+  Routes,
+  useLocation,
+} from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { EXECUTION_PATH } from "@/components/chat/accountPanels";
 import { Agents } from "./Agents";
 
 vi.mock("@/pages/tabs/AgentChatTab", () => ({
   AgentChatTab: () => <div data-stub="chat" />,
 }));
 
-function FleetStub() {
+function Where() {
   const { pathname, search } = useLocation();
-  return <div data-stub="fleet" data-at={pathname + search} />;
+  return <div data-stub="home" data-at={pathname + search} />;
 }
 
 declare global {
@@ -40,20 +49,38 @@ let container: HTMLDivElement;
 let root: Root;
 
 async function at(url: string) {
+  // A fresh root per URL: `MemoryRouter` reads `initialEntries` once, so
+  // re-rendering into the same root would keep answering for the first URL.
+  await act(() => root.unmount());
+  container.remove();
+  container = document.createElement("div");
+  document.body.appendChild(container);
+  root = createRoot(container);
   await act(async () => {
     root.render(
       <MemoryRouter initialEntries={[url]}>
         <Routes>
-          <Route path="/" element={<Agents />} />
-          <Route path="/fleet" element={<FleetStub />} />
+          <Route
+            path="/"
+            element={
+              <>
+                <Agents />
+                <Where />
+              </>
+            }
+          />
+          <Route path="/fleet" element={<Navigate to={EXECUTION_PATH} replace />} />
         </Routes>
       </MemoryRouter>,
     );
   });
-  return container.querySelector("[data-stub]");
+  return container;
 }
 
-const stub = async (url: string) => (await at(url))?.getAttribute("data-stub");
+const stub = async (url: string) =>
+  (await at(url)).querySelector("[data-stub='chat']") ? "chat" : null;
+const landed = async (url: string) =>
+  (await at(url)).querySelector("[data-stub='home']")?.getAttribute("data-at");
 
 beforeEach(() => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
@@ -84,21 +111,24 @@ describe("the home", () => {
     expect(await stub("/?view=now")).toBe("chat");
   });
 
-  it("forwards the overview's old address to its page", async () => {
-    const el = await at("/?view=fleet");
-    expect(el?.getAttribute("data-stub")).toBe("fleet");
-    expect(el?.getAttribute("data-at")).toBe("/fleet");
-  });
-
-  it("forwards it with everything that was riding along", async () => {
-    const el = await at("/?view=fleet&server=brigado&agent=quiet");
-    expect(el?.getAttribute("data-stub")).toBe("fleet");
-    expect(el?.getAttribute("data-at")).toBe("/fleet?server=brigado&agent=quiet");
+  it("no longer forwards the overview's old spelling anywhere", async () => {
+    // The page it forwarded to is gone, and `?view=` on `/` is free again.
+    // Staying put with the parameter untouched is what makes it reusable.
+    expect(await stub("/?view=fleet")).toBe("chat");
+    expect(await landed("/?view=fleet")).toBe("/?view=fleet");
+    expect(await landed("/?view=fleet&server=brigado")).toBe(
+      "/?view=fleet&server=brigado",
+    );
   });
 });
 
-describe("the fleet overview", () => {
-  it("has an address of its own", async () => {
-    expect(await stub("/fleet")).toBe("fleet");
+describe("/fleet", () => {
+  it("lands on the home with the Execution panel open", async () => {
+    expect(await stub("/fleet")).toBe("chat");
+    // Both halves matter: `panel=desk` is what puts the desk in the pane, and
+    // `desk=execution` is what makes it the fleet rather than the portfolio.
+    const where = await landed("/fleet");
+    expect(where).toContain("panel=desk");
+    expect(where).toContain("desk=execution");
   });
 });

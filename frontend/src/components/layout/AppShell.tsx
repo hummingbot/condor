@@ -58,9 +58,8 @@ function AppShellBody() {
   const { hasKeys, isLoading: keysLoading } = useCredentials();
   const [reportOpen, setReportOpen] = useState(false);
 
-  // A pathname is enough again: every full-bleed screen is its own route now
-  // that the fleet overview has one. `/agents/:slug` is an ordinary padded
-  // page, deliberately not matched here.
+  // A pathname is enough: every full-bleed screen is its own route.
+  // `/agents/:slug` is an ordinary padded page, deliberately not matched here.
   const isFullBleed =
     FULL_BLEED_ROUTES.includes(pathname) ||
     FULL_BLEED_PATTERNS.some((re) => re.test(pathname));
@@ -72,7 +71,7 @@ function AppShellBody() {
   // loops and journals, none of which is an exchange — so blocking it would
   // teach nobody anything. Matched exactly rather than by prefix, because `/`
   // prefixes every route in the app.
-  const exemptRoutes = ["/routines", "/settings", "/fleet"];
+  const exemptRoutes = ["/routines", "/settings"];
   const showKeysOverlay =
     server && !keysLoading && !hasKeys && pathname !== "/" &&
     !exemptRoutes.some((r) => pathname.startsWith(r));

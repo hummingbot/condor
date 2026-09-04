@@ -6,9 +6,10 @@
  * arrays a hundred lines apart and that a rendered test would need the whole
  * chat provider, the socket and the credentials query to reach. Read directly
  * instead: they are data, and `/fleet` is the case that shows why both have to
- * be edited together — it spent FEAT-104 as a query parameter on the home,
- * with no nav entry to reach it by and its padding decided by a list of home
- * views rather than by the shell's own array.
+ * be edited together — it spent FEAT-104 as a query parameter on the home, got
+ * a page and a nav entry, and lost both again in FEAT-114 when what every agent
+ * is doing became a panel of the home's own rail. An entry left in either array
+ * for a route that no longer renders a page is a door onto a redirect.
  *
  * Both live in `lib/nav` rather than beside the shell that renders them: a
  * module may not export a component and plain data both (the lint gate's
@@ -21,12 +22,12 @@ import { describe, expect, it } from "vitest";
 import { FULL_BLEED_ROUTES, NAV_ITEMS } from "@/lib/nav";
 
 describe("the nav", () => {
-  it("has a door to the fleet, between the agents and the floor", () => {
-    const paths = NAV_ITEMS.map((item) => item.to);
-    expect(paths).toContain("/fleet");
-    expect(paths.indexOf("/fleet")).toBe(paths.indexOf("/") + 1);
-    expect(paths.indexOf("/floor")).toBe(paths.indexOf("/fleet") + 1);
-    expect(NAV_ITEMS.find((item) => item.to === "/fleet")?.label).toBe("Fleet");
+  it("has no fleet entry: the fleet is a panel of the home now", () => {
+    // FEAT-114. `/fleet` still resolves — it redirects into the panel — but a
+    // nav entry onto a redirect is a door that opens onto another door.
+    const paths: string[] = NAV_ITEMS.map((item) => item.to);
+    expect(paths).not.toContain("/fleet");
+    expect(paths.indexOf("/floor")).toBe(paths.indexOf("/") + 1);
     expect(NAV_ITEMS.find((item) => item.to === "/floor")?.label).toBe("Floor");
   });
 
@@ -41,11 +42,12 @@ describe("full bleed", () => {
     expect(FULL_BLEED_ROUTES).toContain("/floor");
   });
 
-  it("includes the home and the fleet, one body each again", () => {
-    // Both were answered by `FULL_BLEED_HOME_VIEWS` while `/` mounted two
-    // screens. The chat scrolls its transcript and the fleet is a screen-tall
-    // list that scrolls itself; neither wants `main`'s padding.
+  it("includes the home, which scrolls its own transcript", () => {
+    // It was answered by `FULL_BLEED_HOME_VIEWS` while `/` mounted two screens.
+    // The chat scrolls its transcript and does not want `main`'s padding.
     expect(FULL_BLEED_ROUTES).toContain("/");
-    expect(FULL_BLEED_ROUTES).toContain("/fleet");
+    // And the fleet is not a route with a body any more (FEAT-114), so a
+    // layout rule for it would be a rule about a redirect.
+    expect(FULL_BLEED_ROUTES as readonly string[]).not.toContain("/fleet");
   });
 });

@@ -1,5 +1,4 @@
 import {
-  Activity,
   Bot,
   Brain,
   Droplets,
@@ -24,10 +23,15 @@ import {
  * separate thing to look at. A controller is a bag of executors, so both are
  * scopes of the one browser behind Bots, and two doors to one report was the
  * problem that feature exists to fix.
+ *
+ * Fleet left it in FEAT-114, for the same reason one level up. *What is every
+ * agent doing* is now the Execution panel of the chat's right rail, read owner
+ * first — beside the conversation it is asked in, rather than a tab away from
+ * it — so the nav loses an entry and the reader loses nothing. `/fleet`
+ * redirects to that panel's own address.
  */
 export const NAV_ITEMS = [
   { to: "/", icon: Brain, label: "Agents" },
-  { to: "/fleet", icon: Activity, label: "Fleet" },
   { to: "/floor", icon: LayoutDashboard, label: "Floor" },
   { to: "/portfolio", icon: Wallet, label: "Portfolio" },
   { to: "/trade", icon: Swords, label: "Trade" },
@@ -47,14 +51,13 @@ export const NAV_ITEMS = [
  * reason (FEAT-091).
  *
  * `/` left this list for the length of FEAT-104, when it mounted two screens
- * under one path and the answer had to be read off the query string. The
- * overview is `/fleet` now and the home is the conversation again, so both are
- * back to being what they always were: a pathname with one body, each owning
- * the viewport. The chat scrolls its transcript; the fleet is a screen-tall
- * list that scrolls itself.
+ * under one path and the answer had to be read off the query string. The home
+ * is the conversation again — a pathname with one body owning the viewport,
+ * scrolling its own transcript — and the fleet overview it briefly shared the
+ * route with is a panel of that conversation's rail now (FEAT-114).
  *
  * `/floor` is full bleed for the same reason (FEAT-112): a sticky fleet strip
  * over a body that scrolls under it is a two-part layout, and `main`'s 24px and
  * its own scrollbar would give the page a second one.
  */
-export const FULL_BLEED_ROUTES = ["/", "/bots", "/routines", "/floor", "/fleet"];
+export const FULL_BLEED_ROUTES = ["/", "/bots", "/routines", "/floor"];

@@ -663,7 +663,7 @@ describe("/routines", () => {
   });
 });
 
-describe("/fleet — the fleet overview", () => {
+describe("/fleet — retired to the home's Execution panel (FEAT-114)", () => {
   beforeEach(() => {
     qc.setQueryData(["agents"], [
       {
@@ -708,17 +708,11 @@ describe("/fleet — the fleet overview", () => {
     ]);
   });
 
-  it("says what is looping and what has actually been attributed", () => {
-    const line = onScreenLine("/fleet", "");
-    expect(line).toContain("agents 1 running / 2");
-    expect(line).toContain("Brigado tick 412");
-    expect(line).toContain("attributed net +$64.12");
-  });
-
-  it("counts the agents with nothing attributed rather than summing a zero", () => {
-    // A dash on the row must not become a `$0.00` in the block: the two are
-    // different statements and only one of them is true.
-    expect(onScreenLine("/fleet", "")).toContain("unattributed 1");
+  it("describes nothing, because nobody is ever looking at it", () => {
+    // The route survives as a redirect into the panel, so a reader is on it
+    // for one render. Facts about a page that immediately becomes another one
+    // would be a screen the agent is told about and the user never saw.
+    expect(routeFacts("/fleet", "", qc)).toBeNull();
   });
 
   it("contributes nothing at all from the home, which is the chat", () => {

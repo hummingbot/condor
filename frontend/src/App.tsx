@@ -2,7 +2,7 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import { useCallback, useState } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 
-import { FleetOverview } from "@/components/agent/workspace/FleetOverview";
+import { EXECUTION_PATH } from "@/components/chat/accountPanels";
 import { AppShell } from "@/components/layout/AppShell";
 import { ServerContext } from "@/hooks/useServer";
 import { AuthContext, SERVER_KEY, useAuth, useAuthState } from "@/lib/auth";
@@ -82,11 +82,16 @@ export default function App() {
                 }
               >
                 <Route path="/" element={<Agents />} />
-                {/* What every agent is doing, one row each. It spent FEAT-104
-                    as `/?view=fleet`, a screen with no address anyone could
-                    type; a page of its own is what it was all along. `/`
-                    forwards the old spelling (see `pages/Agents.tsx`). */}
-                <Route path="/fleet" element={<FleetOverview />} />
+                {/* What every agent is doing is the conversation's Execution
+                    panel now, read owner first (FEAT-114) — so this address is
+                    a redirect into it rather than a page. Kept rather than
+                    deleted: it is in bookmarks and in the nav people remember,
+                    and `?desk=` is what makes the redirect open the section
+                    instead of whatever the browser last had. */}
+                <Route
+                  path="/fleet"
+                  element={<Navigate to={EXECUTION_PATH} replace />}
+                />
                 {/* What every agent adds up to (FEAT-112). A page and not a
                     section of the fleet overview: that page is one row per
                     agent, and an aggregate chart is not a row. */}
@@ -116,8 +121,8 @@ export default function App() {
                 {/* `/agents` has pointed at the home since the fleet grid
                     was deleted, and the home is the conversation with every
                     agent one message away — which is what somebody typing this
-                    is after. The listing they might mean instead is `/fleet`,
-                    one click away in the nav. */}
+                    is after. The listing they might mean instead is the
+                    Execution panel on that same screen (FEAT-114). */}
                 <Route path="/agents" element={<Navigate to="/" replace />} />
                 {/* One agent, one screen: every section, run and tick is a query
                     parameter on this route (FEAT-103). */}

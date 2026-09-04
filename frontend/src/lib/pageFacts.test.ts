@@ -44,11 +44,11 @@ describe("routeFacts", () => {
     expect(routeFacts("/", "?conversation=7f3a")).toBeNull();
   });
 
-  it("describes the fleet overview, which is a page of its own", () => {
-    expect(routeFacts("/fleet", "")?.label).toBe("Fleet overview");
-    expect(routeFacts("/fleet", "?server=brigado")?.label).toBe(
-      "Fleet overview",
-    );
+  it("says nothing about the fleet overview, which is no longer a page", () => {
+    // FEAT-114: `/fleet` redirects into the home's Execution panel, so the
+    // reader is never on it long enough for a fact about it to be true.
+    expect(routeFacts("/fleet", "")).toBeNull();
+    expect(routeFacts("/fleet", "?server=brigado")).toBeNull();
   });
 
   it("labels every plain page", () => {

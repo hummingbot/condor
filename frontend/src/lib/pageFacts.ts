@@ -99,8 +99,10 @@ export function routeFacts(
 ): ViewFacts | null {
   // The home already *is* the chat; telling the agent "the user is looking at
   // a chat with you" is noise, and there is no second view of this route to
-  // exempt from the rule any more — the fleet overview is `/fleet`, a page
-  // *about* the agents that describes itself like any other.
+  // exempt from the rule. What the reader has open *beside* the transcript —
+  // the desk's Execution panel, since FEAT-114 — is the conversation's own
+  // furniture rather than a page, and the agent can read the same fleet
+  // through its tools at any scope it is asked about.
   if (pathname === "/") return null;
 
   const params = new URLSearchParams(search);
@@ -550,48 +552,6 @@ const ROUTES: {
   ) => string | undefined;
   onScreen?: Reader;
 }[] = [
-  {
-    /**
-     * The fleet overview (FEAT-104) — a page since the home went back to being
-     * the conversation, so it is matched by its own pathname rather than by a
-     * `?view=` on `/`, which returns above.
-     *
-     * Read through `fleetRows`, the page's own rule, rather than by summing
-     * the payload again here — including its dash: an agent with nothing
-     * attributed is *counted* as unattributed instead of being folded into the
-     * net as a zero, which is the same honesty the row prints.
-     */
-    pattern: /^\/fleet$/,
-    facts: () => ({ label: "Fleet overview" }),
-    onScreen: (_parts, _view, qc) => {
-      const agents = fresh<AgentSummary[]>(qc, ["agents"]);
-      if (!Array.isArray(agents) || agents.length === 0) return undefined;
-      const m = money(qc);
-      const rows = fleetRows(agents, Date.now() / 1000);
-      const looping = rows.filter((row) => row.live?.status === "running");
-      const attributed = rows.filter((row) => row.net !== null);
-      const net = attributed.reduce((sum, row) => sum + (row.net ?? 0), 0);
-      const { best, worst } = extremes(
-        attributed.map((row) => ({ name: row.name, value: row.net ?? 0 })),
-        m.pnl,
-      );
-      const wants = rows.filter((row) => row.alerts.length > 0);
-      return {
-        agents: ratio(looping.length, rows.length),
-        looping: names(
-          looping.map((row) => `${row.name} tick ${row.live?.tick_count ?? 0}`),
-        ),
-        "attributed net": attributed.length > 0 ? m.pnl(net) : undefined,
-        unattributed: rows.length - attributed.length || undefined,
-        best,
-        worst,
-        // R4, and the reason a reader opened this page at all.
-        "wants a person":
-          names(wants.map((row) => `${row.name}: ${row.alerts[0].text}`), 2) ||
-          undefined,
-      };
-    },
-  },
   {
     /**
      * The floor — every agent's trading, added up (FEAT-112).
