@@ -126,12 +126,22 @@ function render(strategies: readonly StrategySummary[] = STRATEGIES) {
   });
 }
 
-/** Let the rollup queries settle, so the reconciliation band has both numbers. */
-async function settle() {
-  await act(async () => {
-    await Promise.resolve();
-    await new Promise((r) => setTimeout(r, 0));
-  });
+/** Let the rollup queries settle, so the reconciliation band has both numbers.
+ *
+ * One flush is not enough here. This view awaits two sources -- the fold, which
+ * is synchronous, and `getStrategyPerformance`, which is not -- and the
+ * reconciliation only renders once the second has answered and its state update
+ * has been committed. A single microtask plus a 0ms timer wins that race most of
+ * the time and loses it under load, which made the residual case fail about one
+ * run in five. Flushing until the work is done removes the race rather than
+ * widening the window. */
+async function settle(passes = 10) {
+  for (let i = 0; i < passes; i++) {
+    await act(async () => {
+      await Promise.resolve();
+      await new Promise((r) => setTimeout(r, 0));
+    });
+  }
 }
 
 beforeEach(() => {
