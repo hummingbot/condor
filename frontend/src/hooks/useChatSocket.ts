@@ -494,6 +494,41 @@ function turnsToMessages(
 const FLUSH_INTERVAL_MS = 50;
 
 /**
+ * How long a streaming slot may go without a single frame before it is treated
+ * as out of contact (ARCH-329).
+ *
+ * Nothing else bounds the wait for `prompt_done`. If that frame is lost — the
+ * socket drops mid-answer and `onclose` does not clear `streamingSlots`, the
+ * backend dies, a bug swallows it — the slot streams forever: the composer
+ * stays locked and `RunStrip` stays expanded with its spinner turning on a turn
+ * that will never finish.
+ *
+ * The clock is calibrated against a signal the wire already carries rather than
+ * guessed. `ACPClient._stream` waits 30s on its event queue and, on every
+ * timeout, emits a `Heartbeat` instead of going quiet, so a *healthy* prompt
+ * says something at least every 30 seconds no matter how long the tool it is
+ * waiting on takes. Three consecutive missed beats is therefore silence the
+ * protocol does not produce on its own, while still leaving a slow-but-alive
+ * run an enormous margin — the point being that a long tool call must never
+ * trip this. A watchdog that turns a working run into a false failure would be
+ * worse than the bug it fixes.
+ *
+ * The margin is real but not absolute: `PydanticAIClient` emits its heartbeat
+ * at model-request boundaries rather than on a timer, so a single very long
+ * tool call there can outlast this. That is precisely why expiry is
+ * recoverable — see `stalledSlots`.
+ */
+const STALL_TIMEOUT_MS = 90_000;
+
+/**
+ * How often the stall sweep looks. Coarse on purpose: it decides nothing on its
+ * own — `STALL_TIMEOUT_MS` measured against the last frame does — so this only
+ * sets how promptly the verdict is noticed, and a slow tick keeps an idle chat
+ * from waking React every second.
+ */
+const STALL_SWEEP_MS = 5_000;
+
+/**
  * The bell's cache key (FEAT-048).
  *
  * Lives here because this is where the live `notification` event is written
@@ -595,6 +630,29 @@ export function useChatSocket() {
   // first cleared it for all of them, stopping the other tabs' spinners and
   // re-enabling their composer and brain picker underneath a live prompt.
   const [streamingSlots, setStreamingSlots] = useState<Record<string, true>>({});
+  /**
+   * Conversations that were streaming and have gone silent (ARCH-329).
+   *
+   * Held *beside* `streamingSlots` rather than removed from it, because the two
+   * say different things and only one of them is known: `streamingSlots` is the
+   * fact that a turn started and no frame has ended it, which stays true; this
+   * is a suspicion about a wire, which the next frame can withdraw. Keeping the
+   * turn on the books is what makes recovery free — a slot that speaks again is
+   * streaming once more, with nothing to rebuild, because nothing was torn down.
+   *
+   * Nothing is written into the transcript when this is set, and that is the
+   * point. The honest render of a turn whose end was lost is the one a reload
+   * produces, and a reload finds exactly what is on screen now: the text that
+   * arrived, and a tool call still marked in-flight because it never reported
+   * otherwise. Settling those calls here — or marking the bubble `interrupted`,
+   * which means the *user* redirected the agent — would invent an ending the
+   * transcript does not have and put the live view back out of step with the
+   * reloaded one, which is the disagreement CORR-323, CORR-325 and CORR-327
+   * were each filed to close.
+   */
+  const [stalledSlots, setStalledSlots] = useState<Record<string, true>>({});
+  /** When each slot last had *any* frame addressed to it. Epoch ms. */
+  const lastFrameAt = useRef<Record<string, number>>({});
   // Conversations whose turn has been accepted but has not started — it is
   // waiting behind the one in front of it. Keyed by slot like everything else
   // here, and short-lived: the first fragment of the answer clears it.
@@ -673,13 +731,40 @@ export function useChatSocket() {
     });
   }, []);
 
+  /**
+   * This conversation just said something. Restart its clock (ARCH-329).
+   *
+   * Called for *every* frame that names a slot, whatever it carries — a token,
+   * a tool update, a heartbeat. That breadth is the whole safety argument: the
+   * watchdog below measures silence, not slowness, so anything at all arriving
+   * for a slot proves contact and buys another full timeout. A tool call that
+   * runs for ten minutes is not silence — the backend heartbeats through it —
+   * and so cannot trip it.
+   *
+   * Clearing the stall here is also what makes expiry recoverable rather than
+   * terminal: a slot written off as out of contact is reinstated by the very
+   * next frame, and since the turn was never closed there is nothing to undo.
+   */
+  const noteFrame = useCallback((slotId: string) => {
+    lastFrameAt.current[slotId] = Date.now();
+    setStalledSlots((prev) => {
+      if (!(slotId in prev)) return prev;
+      const next = { ...prev };
+      delete next[slotId];
+      return next;
+    });
+  }, []);
+
   const startStreaming = useCallback(
     (slotId: string) => {
       setStreamingSlots((prev) => (prev[slotId] ? prev : { ...prev, [slotId]: true }));
+      // The turn starts on the clock: without this a slot whose very first
+      // frame was also its last would be measured from an epoch it never had.
+      noteFrame(slotId);
       // The wait is over the moment the answer starts arriving.
       clearQueued(slotId);
     },
-    [clearQueued],
+    [clearQueued, noteFrame],
   );
 
   /** End streaming for *one* conversation. Never for the others. */
@@ -691,10 +776,62 @@ export function useChatSocket() {
         delete next[slotId];
         return next;
       });
+      // A turn that has properly ended cannot be out of contact: the frame that
+      // ended it is the contact. Left behind, the flag would still be sitting
+      // there when the slot's *next* turn began.
+      setStalledSlots((prev) => {
+        if (!(slotId in prev)) return prev;
+        const next = { ...prev };
+        delete next[slotId];
+        return next;
+      });
+      delete lastFrameAt.current[slotId];
       clearQueued(slotId);
     },
     [clearQueued],
   );
+
+  /**
+   * The watchdog: notice a streaming conversation that has stopped speaking.
+   *
+   * Nothing else bounds the wait for `prompt_done`, and every existing recovery
+   * from a lost one is something the *user* has to do — send another message,
+   * press Stop. Until they do, `isSlotStreaming` keeps answering yes, so the
+   * composer keeps its Stop button, the brain picker stays disabled and the run
+   * strip stays expanded with its spinner turning on a turn that ended long ago.
+   * A socket that drops mid-answer reaches this state on its own: `onclose`
+   * reconnects but never clears `streamingSlots`.
+   *
+   * One interval for the hook rather than a timer per slot: recording a frame
+   * then costs a ref write instead of tearing down and rearming a timeout on
+   * every token, and the sweep compares timestamps, so its own coarseness
+   * cannot shorten anyone's timeout — only delay the verdict by a tick.
+   *
+   * It runs only while something is streaming, which is also what stops it: the
+   * effect re-subscribes when `streamingSlots` changes identity, and the setters
+   * above return the previous object whenever nothing did.
+   */
+  useEffect(() => {
+    const ids = Object.keys(streamingSlots);
+    if (ids.length === 0) return;
+    const sweep = setInterval(() => {
+      const cutoff = Date.now() - STALL_TIMEOUT_MS;
+      setStalledSlots((prev) => {
+        let next: Record<string, true> | null = null;
+        for (const id of ids) {
+          if (id in prev) continue;
+          const last = lastFrameAt.current[id];
+          // No stamp at all is not silence — it is a slot whose clock never
+          // started — and writing it off would be a guess.
+          if (last === undefined || last > cutoff) continue;
+          next = next || { ...prev };
+          next[id] = true;
+        }
+        return next || prev;
+      });
+    }, STALL_SWEEP_MS);
+    return () => clearInterval(sweep);
+  }, [streamingSlots]);
 
   // ── Streamed fragments are coalesced, not committed one per frame ──
   //
@@ -1219,6 +1356,10 @@ export function useChatSocket() {
     (data: Record<string, unknown>) => {
       const event = data.event as string;
       const slotId = data.slot_id as string | undefined;
+      // Before the switch, so liveness is a property of the wire rather than of
+      // the handful of frames somebody remembered to list (ARCH-329). A frame
+      // this switch ignores entirely still proves the conversation is alive.
+      if (slotId) noteFrame(slotId);
 
       switch (event) {
         case "sessions_list": {
@@ -1662,6 +1803,12 @@ export function useChatSocket() {
         }
 
         case "heartbeat":
+          // Nothing to draw — a heartbeat carries no content. It is not inert,
+          // though: `noteFrame` above already took it, and taking it is the
+          // whole reason the stall watchdog can tell a lost turn from a slow
+          // one. `ACPClient._stream` emits one every 30s that its event queue
+          // stays empty, so this frame is a healthy prompt's proof of life
+          // during exactly the long silences that would otherwise look dead.
           break;
       }
     },
@@ -1671,6 +1818,7 @@ export function useChatSocket() {
       bufferChunk,
       flushChunks,
       hydrateSlot,
+      noteFrame,
       prewarmLatest,
       queryClient,
       stopStreaming,
@@ -1928,13 +2076,24 @@ export function useChatSocket() {
   }, [slots]);
 
   const activeSlot = slots.find((s) => s.info.slot_id === activeSlotId) || null;
-  /** Is *this* conversation mid-answer? The only question a consumer should ask. */
+  /**
+   * Is *this* conversation mid-answer? The only question a consumer should ask.
+   *
+   * A slot that has gone silent past the watchdog's patience answers *no* while
+   * it stays silent (ARCH-329). "A turn was started and nothing ended it" is
+   * not the same claim as "an answer is arriving", and it is the second one
+   * every caller here is really making — the spinner, the Stop button, the
+   * disabled brain picker, the run strip held open. Answering from the one
+   * place they all ask is what settles them together, without a component
+   * having to learn what a stall is.
+   */
   const isSlotStreaming = useCallback(
-    (slotId: string | null | undefined) => !!slotId && slotId in streamingSlots,
-    [streamingSlots],
+    (slotId: string | null | undefined) =>
+      !!slotId && slotId in streamingSlots && !(slotId in stalledSlots),
+    [streamingSlots, stalledSlots],
   );
   /** Any conversation at all, for chrome that is not tied to one tab. */
-  const isStreaming = Object.keys(streamingSlots).length > 0;
+  const isStreaming = Object.keys(streamingSlots).some((id) => !(id in stalledSlots));
   /** Is *this* conversation waiting for the turn ahead of it to finish? */
   const isSlotQueued = useCallback(
     (slotId: string | null | undefined) => !!slotId && slotId in queuedSlots,
