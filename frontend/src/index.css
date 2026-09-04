@@ -32,6 +32,18 @@
   --chart-series-3: #8a5fd6;
   --chart-series-4: #0e9e6a;
 
+  /* Series 5-8 (FEAT-112): a fleet has more agents than four, and the floor's
+     chart draws one line each. Not generated hues — the four above are the ones
+     validated for this surface, so these take four *hues the first four do not
+     use* (pink, cyan, red, olive) at the same lightness band, which is the most
+     separation this palette can be extended by honestly. Beyond four series the
+     identifying channel is the legend label, which the floor's legend carries
+     for every line; colour is the hint that ties a line to its row. */
+  --chart-series-5: #d67ba8;
+  --chart-series-6: #3fb8c4;
+  --chart-series-7: #e0685a;
+  --chart-series-8: #9db33f;
+
   /* Chat surfaces.
 
      `--chat-inset` is the recessed ground *inside* an answer: code fences,
@@ -87,6 +99,18 @@
   --chart-series-3: #7d4dd6;
   --chart-series-4: #009e73;
 
+  /* Series 5-8 (FEAT-112): a fleet has more agents than four, and the floor's
+     chart draws one line each. Not generated hues — the four above are the ones
+     validated for this surface, so these take four *hues the first four do not
+     use* (pink, cyan, red, olive) at the same lightness band, which is the most
+     separation this palette can be extended by honestly. Beyond four series the
+     identifying channel is the legend label, which the floor's legend carries
+     for every line; colour is the hint that ties a line to its row. */
+  --chart-series-5: #b0407e;
+  --chart-series-6: #0f8a99;
+  --chart-series-7: #c9453a;
+  --chart-series-8: #6f8215;
+
   /* Chat surfaces — recessed *down* from the page here, which is the bug
      READ-293 came from: the fence used to reuse `--color-bg` and so sat
      lighter than the container it was nested in. */
@@ -126,6 +150,18 @@
   --chart-series-2: #c98200;
   --chart-series-3: #8a5fd6;
   --chart-series-4: #0e9e6a;
+
+  /* Series 5-8 (FEAT-112): a fleet has more agents than four, and the floor's
+     chart draws one line each. Not generated hues — the four above are the ones
+     validated for this surface, so these take four *hues the first four do not
+     use* (pink, cyan, red, olive) at the same lightness band, which is the most
+     separation this palette can be extended by honestly. Beyond four series the
+     identifying channel is the legend label, which the floor's legend carries
+     for every line; colour is the hint that ties a line to its row. */
+  --chart-series-5: #d67ba8;
+  --chart-series-6: #3fb8c4;
+  --chart-series-7: #e0685a;
+  --chart-series-8: #9db33f;
 
   /* Chat surfaces — same direction as dark; `--on-primary` is read on the
      blue primary, where white is 2.2:1. */

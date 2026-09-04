@@ -595,6 +595,33 @@ const ROUTES: {
     },
   },
   {
+    /**
+     * The floor — every agent's trading, added up (FEAT-112).
+     *
+     * What is reported here is the **view state and the population**, not the
+     * money. The fold lives in the page's per-server components and is never
+     * written to a cache, so summing `["bots", server]` again here would be a
+     * second fold of the same records in a third place — precisely the drift
+     * `reconcile.ts` and ARCH-324 exist to prevent. The chat is told which
+     * screen is up and how it is set; for the numbers it can read `/bots` at
+     * the scope the reader is asking about.
+     */
+    pattern: /^\/floor$/,
+    facts: () => ({ label: "Floor" }),
+    onScreen: (_parts, _view, qc, params) => {
+      const agents = fresh<AgentSummary[]>(qc, ["agents"]);
+      if (!Array.isArray(agents)) return undefined;
+      const rows = fleetRows(agents, Date.now() / 1000);
+      const looping = rows.filter((row) => row.live?.status === "running");
+      return {
+        agents: ratio(looping.length, rows.length),
+        window: params.get("range") ?? "all",
+        basis: params.get("basis") === "rel" ? "relative to capital" : "absolute",
+        "measured from": params.get("from") === "window" ? "window" : "inception",
+      };
+    },
+  },
+  {
     pattern: /^\/portfolio$/,
     facts: () => ({ label: "Portfolio" }),
     onScreen: (_p, tab, qc) => {

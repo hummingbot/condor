@@ -29,6 +29,11 @@ declare global {
 }
 
 describe("routeFacts", () => {
+  it("knows the floor, so the chat can say what is on screen (FEAT-112)", () => {
+    expect(routeFacts("/floor", "")?.label).toBe("Floor");
+    expect(routeFacts("/floor", "?basis=rel&range=7d")?.label).toBe("Floor");
+  });
+
   it("says nothing on the chat workspace", () => {
     expect(routeFacts("/", "?view=chat")).toBeNull();
     // `?agent=` and `?ask=` are the chat's own parameters (FEAT-092), and

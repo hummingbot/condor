@@ -6,6 +6,7 @@ import {
   Bug,
   Droplets,
   Eye,
+  LayoutDashboard,
   Moon,
   Settings,
   Sun,
@@ -47,8 +48,9 @@ import { ServerSelector } from "./ServerSelector";
  * scopes of the one browser behind Bots, and two doors to one report was the
  * problem that feature exists to fix.
  */
-const NAV_ITEMS = [
+export const NAV_ITEMS = [
   { to: "/", icon: Brain, label: "Agents" },
+  { to: "/floor", icon: LayoutDashboard, label: "Floor" },
   { to: "/portfolio", icon: Wallet, label: "Portfolio" },
   { to: "/trade", icon: Swords, label: "Trade" },
   { to: "/dex", icon: Droplets, label: "DEX" },
@@ -71,7 +73,12 @@ const NAV_ITEMS = [
  * is a query parameter — so the answer comes from `FULL_BLEED_HOME_VIEWS`,
  * which happens to be *both* of them, rather than from the pathname.
  */
-const FULL_BLEED_ROUTES = ["/bots", "/routines"];
+/*
+ * `/floor` is full bleed for the same reason (FEAT-112): a sticky fleet strip
+ * over a body that scrolls under it is a two-part layout, and `main`'s 24px and
+ * its own scrollbar would give the page a second one.
+ */
+export const FULL_BLEED_ROUTES = ["/bots", "/routines", "/floor"];
 
 /**
  * Full-bleed routes that carry a parameter, so an exact match cannot find them.

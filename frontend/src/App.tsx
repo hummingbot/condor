@@ -16,6 +16,7 @@ import { BotDetail } from "@/pages/BotDetail";
 import { Bots } from "@/pages/Bots";
 import { CreateExecutor } from "@/pages/CreateExecutor";
 import { Dex } from "@/pages/Dex";
+import { Floor } from "@/pages/Floor";
 import { DexPool } from "@/pages/DexPool";
 import { Login } from "@/pages/Login";
 import { Portfolio } from "@/pages/Portfolio";
@@ -80,6 +81,10 @@ export default function App() {
                 }
               >
                 <Route path="/" element={<Agents />} />
+                {/* What every agent adds up to (FEAT-112). A page rather than a
+                    third `?view=` on the home: `/`'s parameter already means
+                    *chat or fleet*, and an aggregate chart is not a row. */}
+                <Route path="/floor" element={<Floor />} />
                 <Route path="/portfolio" element={<Portfolio />} />
                 <Route path="/bots" element={<Bots />} />
                 <Route path="/bots/:id" element={<BotDetail />} />
