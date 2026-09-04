@@ -544,7 +544,7 @@ export function rowHref(row: Pick<FleetRow, "slug" | "strategy">): string {
  * the run keys this row folded.
  */
 export function moneyHref(row: Pick<FleetRow, "slug" | "strategy">): string {
-  const base = `/agents/${encodeURIComponent(row.slug)}?view=money`;
+  const base = `/agents/${encodeURIComponent(row.slug)}?open=money`;
   return row.strategy
     ? `${base}&strategy=${encodeURIComponent(row.strategy.slug)}`
     : base;
@@ -553,18 +553,19 @@ export function moneyHref(row: Pick<FleetRow, "slug" | "strategy">): string {
 /**
  * The tick a decision came from, as an address.
  *
- * The workspace's own grammar (`?view=tick&strategy=&tick=`), so the last line
- * on the overview is a link into the whole tick that wrote it rather than a
- * dead-end summary. Falls back to the row's workspace when there is no deed to
- * point at.
+ * The screen's own grammar (`?strategy=&tick=`), so the last line on the
+ * overview is a link into the whole tick that wrote it rather than a dead-end
+ * summary. A `?tick=` opens the tick over the screen (FEAT-119), which is why
+ * there is no section to name. Falls back to the row's workspace when there is
+ * no deed to point at.
  */
 export function decisionHref(
   row: Pick<FleetRow, "slug" | "strategy" | "lastDid">,
 ): string {
   if (!row.lastDid || !row.strategy || row.lastDid.tick <= 0) return rowHref(row);
   return (
-    `/agents/${encodeURIComponent(row.slug)}?view=tick` +
-    `&strategy=${encodeURIComponent(row.strategy.slug)}` +
+    `/agents/${encodeURIComponent(row.slug)}` +
+    `?strategy=${encodeURIComponent(row.strategy.slug)}` +
     `&tick=${row.lastDid.tick}`
   );
 }

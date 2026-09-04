@@ -154,7 +154,7 @@ export function recordsHref(
 ): string {
   if (item.runKey === `${slug}.${sslug}`) {
     return (
-      `/agents/${encodeURIComponent(slug)}?view=fleet` +
+      `/agents/${encodeURIComponent(slug)}?open=fleet` +
       `&strategy=${encodeURIComponent(sslug)}` +
       `&fscope=${encodeURIComponent(item.scope)}`
     );

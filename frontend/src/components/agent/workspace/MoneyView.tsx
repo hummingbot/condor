@@ -188,7 +188,7 @@ export function MoneyView({
             <>
               {" "}
               <Link
-                to={`/agents/${encodeURIComponent(slug)}?view=fleet&strategy=${encodeURIComponent(sslug)}`}
+                to={`/agents/${encodeURIComponent(slug)}?open=fleet&strategy=${encodeURIComponent(sslug)}`}
                 className="inline-flex items-center gap-0.5 underline-offset-2 hover:text-[var(--color-primary)] hover:underline"
               >
                 Open the fleet <ArrowUpRight className="h-3 w-3" />

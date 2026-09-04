@@ -62,7 +62,7 @@ export function StrategySheet({
       // to and come back to.
       onFullscreen={() =>
         navigate(
-          `/agents/${slug}?view=playbook&strategy=${encodeURIComponent(sslug)}`,
+          `/agents/${slug}?open=playbook&strategy=${encodeURIComponent(sslug)}`,
         )
       }
       onClose={onClose}

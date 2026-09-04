@@ -173,11 +173,10 @@ export function AgentPanel({
       >
         <AgentKnowledge
           slug={slug}
-          layout="rail"
           // A column, not a page: the strategy cards read the viewport's
           // breakpoints, and on a wide window three of them would land side by
-          // side in a 400px pane. Stated beside `layout` rather than inferred
-          // from it, because they are two different facts (FEAT-117).
+          // side in a 400px pane. Stated rather than inferred from the rail,
+          // because they were always two different facts (FEAT-117).
           dense
           tab={tab}
           onTabChange={onTabChange}

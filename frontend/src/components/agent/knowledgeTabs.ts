@@ -9,27 +9,6 @@
 
 import { KNOWLEDGE_TAB_KEY } from "@/lib/sessionState";
 
-/**
- * How the sections are offered.
- *
- * `"rail"` is an 80px column down the right edge, each section a key with its
- * name set flat under its icon, which is the only thing that fits in the chat's
- * 400–700px pane: eight tabs wrap to three rows there, and three rows of chrome
- * above a 400px column is most of the column. On the right because in the chat
- * that edge is against the dock, where every other control that opens something
- * into the pane already lives.
- *
- * `"bare"` is the bodies with no chrome at all, for a host that already draws
- * the navigation. The agent workspace does — its spine carries these seven
- * sections beside the loop's own views (FEAT-103) — and a panel that drew a
- * second strip inside that would be two navigations for one thing.
- *
- * There used to be a third, `"tabs"`: a horizontal strip, for the agent page.
- * The page is gone and the spine replaced the strip, so the layout went with
- * it rather than being kept beside its replacement.
- */
-export type KnowledgeLayout = "rail" | "bare";
-
 /** The sections, in the order every host shows them. */
 export const KNOWLEDGE_TABS = [
   "brain",

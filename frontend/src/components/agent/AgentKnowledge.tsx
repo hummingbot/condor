@@ -23,10 +23,7 @@ import { MarkdownEditor } from "@/components/agent/AgentOverviewTab";
 import { AgentStrategies } from "@/components/agent/AgentStrategies";
 import { LoopBanner } from "@/components/agent/LoopBanner";
 import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
-import type {
-  KnowledgeLayout,
-  KnowledgeTabId,
-} from "@/components/agent/knowledgeTabs";
+import type { KnowledgeTabId } from "@/components/agent/knowledgeTabs";
 import {
   BodyReader,
   type Reading,
@@ -72,7 +69,6 @@ import { formatRoutineName } from "@/lib/routineUtils";
  */
 export function AgentKnowledge({
   slug,
-  layout = "bare",
   dense = false,
   tab,
   onTabChange,
@@ -84,27 +80,14 @@ export function AgentKnowledge({
 }: {
   slug: string;
   /**
-   * How the sections are offered — see {@link KnowledgeLayout}.
-   *
-   * Defaults to `"bare"`, which is what a host that says nothing about its own
-   * navigation is asking for: the bodies. It used to default to `"rail"`, and
-   * that made the workspace draw the keys *beside* its own spine because it
-   * passed nothing — two navigations for one thing, which is the arrangement
-   * FEAT-103 spent the spine to be rid of. A rail is a deliberate request now,
-   * and the chat's panel is the one host that makes it (FEAT-118).
-   */
-  layout?: KnowledgeLayout;
-  /**
    * Whether the host is a column rather than a page.
    *
    * All this decides is whether the strategy cards lay out as a grid: the
    * grid's breakpoints are the *viewport's*, so in the chat's 400–700px pane a
    * wide window put three cards side by side in a column that fits one. It used
-   * to ride on `layout === "rail"`, which said the same thing by accident;
-   * FEAT-117 split it out so the width is stated rather than inferred, and it
-   * stays its own prop now that `layout` is back beside it (FEAT-118). The rail
-   * host passes both, because "draw the keys" and "this is 400px wide" are two
-   * facts and only one of them is about navigation.
+   * to ride on a `layout` prop that said the same thing by accident; FEAT-117
+   * split it out so the width is stated rather than inferred, and it outlived
+   * that prop (FEAT-119) — "this is 400px wide" was always the useful half.
    */
   dense?: boolean;
   /**
@@ -188,7 +171,7 @@ export function AgentKnowledge({
   const { data: agentDetail } = useQuery({
     queryKey: ["agent", slug],
     queryFn: () => api.getAgent(slug),
-    enabled: !!slug && layout === "rail",
+    enabled: !!slug,
     refetchInterval: (q) =>
       q.state.data?.strategies.some((s) => s.status === "running") ? 5000 : false,
   });
@@ -368,9 +351,6 @@ export function AgentKnowledge({
     },
   ];
 
-  const rail = layout === "rail";
-  const bare = layout === "bare";
-
   /** Every section change also leaves whatever drill-down or editor was open. */
   const openTab = (id: KnowledgeTabId) => {
     setTab(id);
@@ -378,20 +358,19 @@ export function AgentKnowledge({
     leaveEditor();
   };
 
-  // A host that draws its own navigation gets none of ours (FEAT-103).
-  const nav = bare ? null : rail ? (
-    // A column down the *right* edge, because eight tabs wrap to three rows in
-    // a 400px pane — and because in the chat this rail sits against the dock,
-    // where everything else you click to open something already is. Same tabs,
-    // same counts, same order, each still saying its name: an icon alone made
-    // the reader learn seven glyphs to find "Tools".
-    //
-    // The names are set flat rather than turned on their side. Sideways text
-    // buys 30px of width and charges the reader for it — a Latin word is
-    // recognised by its shape, and rotating it makes you decode it letter by
-    // letter — and it charges the column too: `STRATEGIES` on its side is 60px
-    // of height per key, so the seven ran the full height of the pane. Upright
-    // at 10px they are ~36px each, and the whole rail is a third of the column.
+  // A column down the *right* edge, because eight tabs wrap to three rows in a
+  // 400px pane — and because in the chat this rail sits against the dock, where
+  // everything else you click to open something already is. Same tabs, same
+  // counts, same order, each still saying its name: an icon alone made the
+  // reader learn seven glyphs to find "Tools".
+  //
+  // The names are set flat rather than turned on their side. Sideways text buys
+  // 30px of width and charges the reader for it — a Latin word is recognised by
+  // its shape, and rotating it makes you decode it letter by letter — and it
+  // charges the column too: `STRATEGIES` on its side is 60px of height per key,
+  // so the seven ran the full height of the pane. Upright at 10px they are
+  // ~36px each, and the whole rail is a third of the column.
+  const nav = (
     <div
       role="tablist"
       aria-orientation="vertical"
@@ -454,7 +433,7 @@ export function AgentKnowledge({
         );
       })}
     </div>
-  ) : null;
+  );
 
   const body = (
     <>
@@ -630,14 +609,19 @@ export function AgentKnowledge({
   );
 
   // The rail is beside its body and both scroll independently, so a long
-  // AGENT.md never scrolls the sections out of reach. A bare host draws its own
-  // navigation and gets the bodies alone.
+  // AGENT.md never scrolls the sections out of reach.
+  //
+  // There used to be a second arrangement — the bodies with no chrome at all,
+  // for a host that drew its own navigation. The agent page was that host and
+  // its spine was that navigation, and both went with FEAT-119; the rail is the
+  // only way these sections are offered now, so it is not a prop any more.
+  //
   // The banner spans the rail as well as the body, and sits outside the
   // scroller: "there is a loop running" must not be a fact you scroll past.
-  // Only where a host can receive the click — a rail host that passes no
+  // Only where a host can receive the click — a host that passes no
   // `onOpenStrategy` has nowhere to open the workbench, and a strip that says
   // something is running but cannot take you to it is worse than none.
-  return rail ? (
+  return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
       {onOpenStrategy && (
         <LoopBanner
@@ -650,8 +634,6 @@ export function AgentKnowledge({
         {nav}
       </div>
     </div>
-  ) : (
-    <div>{body}</div>
   );
 }
 

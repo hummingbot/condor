@@ -85,10 +85,11 @@ export function AgentStrategies({
   /**
    * One door, wherever this is hosted.
    *
-   * On a page that door is the Lab (FEAT-099): a card is a summary of what a
-   * loop has been *doing*, and the runs are what it has been doing. The
-   * workbench is one click further, on the workspace's own spine — it is where
-   * you operate a strategy, not where you read it.
+   * On a page that door is the run screen with its Runs disclosure open
+   * (FEAT-099, FEAT-119): a card is a summary of what a loop has been *doing*,
+   * and the runs are what it has been doing. The workbench is one disclosure
+   * further down the same screen — it is where you operate a strategy, not
+   * where you read it.
    *
    * The chat's pane still opens the workbench in the pane: three panes do not
    * fit a 640px column.
@@ -97,7 +98,7 @@ export function AgentStrategies({
     if (onOpenStrategy) onOpenStrategy(strategySlug);
     else
       navigate(
-        `/agents/${slug}?view=runs&strategy=${encodeURIComponent(strategySlug)}`,
+        `/agents/${slug}?open=runs&strategy=${encodeURIComponent(strategySlug)}`,
       );
   }
 
@@ -111,7 +112,7 @@ export function AgentStrategies({
     if (onOpenStrategy) onOpenStrategy(strategySlug);
     else
       navigate(
-        `/agents/${slug}?view=playbook&strategy=${encodeURIComponent(strategySlug)}`,
+        `/agents/${slug}?open=playbook&strategy=${encodeURIComponent(strategySlug)}`,
       );
   }
 

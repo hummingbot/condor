@@ -66,7 +66,7 @@ export interface RunRef {
  * colon and an id that does not have to be a number, because a conversation's
  * is a uuid. `s3` is the form the Lab wrote before that, and it keeps parsing
  * forever: those links are in bookmarks and in notification payloads, exactly
- * as `?tab=` keeps parsing as a synonym for `?view=`.
+ * as `?view=` keeps landing somewhere (`sections.ts`).
  */
 export function parseRunId(value: string | null | undefined): RunRef | null {
   if (!value) return null;

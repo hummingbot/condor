@@ -6,7 +6,8 @@
  * slots, so a second host that forgot to pass them would have shown an agent
  * with no strategies at all. The chat's agent panel is that second host, and
  * these cases pin what makes it possible — a controlled `tab` that a URL or a
- * pane can drive, a rail layout for a 400px column, and seven sections that
+ * pane can drive, a rail down the right edge of a 400px column, and seven
+ * sections that
  * are the component's own rather than the page's.
  *
  * The rail is asked for now rather than assumed: a host that says nothing about
@@ -173,7 +174,7 @@ describe("the sections", () => {
       "activity",
     ]);
 
-    await render({ slug: "orca", layout: "rail" });
+    await render({ slug: "orca" });
     expect(tabs()).toHaveLength(KNOWLEDGE_TABS.length);
     // Seven keys and nothing else. The rail is the Being taxonomy, so an
     // eighth key that is not a section — a Now, a Deployed — is the drift
@@ -189,19 +190,10 @@ describe("the sections", () => {
     ]);
   });
 
-  it("are drawn by nobody when the host asks for none", async () => {
-    // The workspace's spine carries these seven beside the loop's own views
-    // (FEAT-103), and a strip inside a `"bare"` host would be a second
-    // navigation for one thing.
-    await render({ slug: "orca", layout: "bare" });
-    expect(container.querySelector('[role="tablist"]')).toBeNull();
-    expect(container.querySelector('[role="tab"]')).toBeNull();
-  });
-
   it("include Strategies and Activity with nothing injected", async () => {
     // The two the page used to hand in. A host cannot forget them any more,
     // because there is nothing left for a host to pass.
-    await render({ slug: "orca", layout: "rail" });
+    await render({ slug: "orca" });
 
     await click(tabNamed("Strategies"));
     expect(body()).toContain("No strategies yet");
@@ -219,7 +211,7 @@ describe("the sections", () => {
 
 describe("the open section", () => {
   it("is the component's own when the host does not say", async () => {
-    await render({ slug: "orca", layout: "rail" });
+    await render({ slug: "orca" });
     expect(selected()!.textContent).toContain("Brain");
 
     await click(tabNamed("Skills"));
@@ -228,7 +220,7 @@ describe("the open section", () => {
 
   it("is the host's when it does, and a click only asks", async () => {
     const onTabChange = vi.fn();
-    await render({ slug: "orca", layout: "rail", tab: "skills", onTabChange });
+    await render({ slug: "orca", tab: "skills", onTabChange });
 
     // Opened where the host said, not on Brain.
     expect(selected()!.textContent).toContain("Skills");
@@ -244,7 +236,7 @@ describe("the open section", () => {
 
 describe("the rail layout", () => {
   it("is a vertical column that still says the section's name", async () => {
-    await render({ slug: "orca", layout: "rail" });
+    await render({ slug: "orca" });
 
     expect(tablist().getAttribute("aria-orientation")).toBe("vertical");
     // Eight labelled tabs wrap to three rows in a 400px pane, which is what
@@ -266,7 +258,7 @@ describe("the rail layout", () => {
   });
 
   it("still opens every section it names", async () => {
-    await render({ slug: "orca", layout: "rail" });
+    await render({ slug: "orca" });
 
     await click(tabNamed("Routines"));
     expect(body()).toContain("Pool Walk");
@@ -275,7 +267,7 @@ describe("the rail layout", () => {
 
 describe("a routine row", () => {
   it("is inert until a host offers somewhere to open it", async () => {
-    await render({ slug: "orca", layout: "rail" });
+    await render({ slug: "orca" });
     await click(tabNamed("Routines"));
 
     const row = [...container.querySelectorAll("button")].find((b) =>
@@ -286,7 +278,7 @@ describe("a routine row", () => {
 
   it("hands the routine to the host that has a library", async () => {
     const onOpenRoutine = vi.fn();
-    await render({ slug: "orca", layout: "rail", onOpenRoutine });
+    await render({ slug: "orca", onOpenRoutine });
     await click(tabNamed("Routines"));
 
     const row = [...container.querySelectorAll("button")].find((b) =>
@@ -328,7 +320,7 @@ describe("the brain section", () => {
   });
 
   it("names the agent's slug, model and server nowhere — the host does", async () => {
-    await render({ slug: "orca", layout: "rail" });
+    await render({ slug: "orca" });
 
     // The chat's panel carries the live model and server in its own bar one
     // line above this, and the agent page carries slug, model and server in

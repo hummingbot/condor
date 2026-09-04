@@ -153,7 +153,7 @@ it("still navigates when the host is a page", async () => {
   });
 
   expect(path).toBe("/agents/brigado");
-  expect(search).toBe("?view=runs&strategy=brl_mm");
+  expect(search).toBe("?open=runs&strategy=brl_mm");
 });
 
 it("counts dry runs on the card, which book no PnL to be seen by", async () => {

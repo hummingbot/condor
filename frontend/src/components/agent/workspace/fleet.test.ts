@@ -289,7 +289,7 @@ describe("the addresses a row carries", () => {
 
   it("make the last decision a link into the tick that made it", () => {
     expect(decisionHref(row)).toBe(
-      "/agents/brigado?view=tick&strategy=brl_mm&tick=42",
+      "/agents/brigado?strategy=brl_mm&tick=42",
     );
   });
 
@@ -307,11 +307,11 @@ describe("the money column is named, not bare (FEAT-109)", () => {
   )[0];
 
   it("links the rollup to the screen that reconciles it against the fold", () => {
-    expect(moneyHref(row)).toBe("/agents/brigado?view=money&strategy=brl_mm");
+    expect(moneyHref(row)).toBe("/agents/brigado?open=money&strategy=brl_mm");
   });
 
   it("still has an address for an agent that owns no strategy", () => {
-    expect(moneyHref({ ...row, strategy: null })).toBe("/agents/brigado?view=money");
+    expect(moneyHref({ ...row, strategy: null })).toBe("/agents/brigado?open=money");
   });
 });
 

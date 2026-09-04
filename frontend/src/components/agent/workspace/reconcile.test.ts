@@ -278,7 +278,7 @@ describe("where a term's records are read", () => {
         scope: botScope("old_hand_bot"),
       }),
     ).toBe(
-      "/agents/brigado?view=fleet&strategy=brl_mm&fscope=bot%3Aold_hand_bot",
+      "/agents/brigado?open=fleet&strategy=brl_mm&fscope=bot%3Aold_hand_bot",
     );
   });
 

@@ -165,9 +165,9 @@ function ModelPicker({ slug, agentKey }: { slug: string; agentKey: string }) {
  * the agent's name. So reading a run meant not being able to see whether the
  * loop that wrote it was still running, and stopping it meant two navigations.
  *
- * It does not unmount when `?view=` changes, which is the whole point: the
- * header, the loop bar and the spine are the frame, and going deeper only ever
- * swaps the body inside it.
+ * It does not unmount when anything under it moves, which is the whole point:
+ * the header and the loop bar are the frame, and reading further down the
+ * screen or opening a disclosure never takes them off it.
  */
 export function WorkspaceHeader({
   agent,

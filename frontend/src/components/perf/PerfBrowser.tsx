@@ -716,9 +716,9 @@ export function PerfBrowser({
     (next: string) => setParam(param, next, rootScope),
     [setParam, param, rootScope],
   );
-  // Not namespaced by `param`, for the reason `?population=` is not: the
-  // workspace's grammar spends `?view=`, `?strategy=`, `?run=` and `?tick=`,
-  // and none of them is a grouping, so there is nothing to collide with.
+  // Not namespaced by `param`, for the reason `?population=` is not: the run
+  // screen's grammar spends `?strategy=`, `?run=`, `?tick=` and `?open=`, and
+  // none of them is a grouping, so there is nothing to collide with.
   const setGrouping = useCallback(
     (axes: readonly GroupAxis[]) =>
       setParam("groupBy", formatGrouping(axes), formatGrouping(DEFAULT_GROUPING)),

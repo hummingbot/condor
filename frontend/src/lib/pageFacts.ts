@@ -104,10 +104,10 @@ export function routeFacts(
   if (pathname === "/") return null;
 
   const params = new URLSearchParams(search);
-  // `?view=` is the agent workspace's spelling of the same idea (FEAT-103):
-  // one route whose section is a query parameter. Read here rather than in the
-  // one entry that uses it, so a route never has to parse a search string.
-  const tab = params.get("view") || params.get("tab") || "";
+  // A page's own tab, where it has one — `/routines?tab=reports`, `/portfolio`.
+  // Read here rather than in the entries that use it, so a route never has to
+  // parse a search string of its own.
+  const tab = params.get("tab") || "";
 
   for (const { pattern, facts, subject, onScreen } of ROUTES) {
     const m = pathname.match(pattern);
@@ -336,25 +336,6 @@ function byType(rows: { type: string }[], cap = 2): string | undefined {
     cap,
   );
 }
-
-/**
- * What each `?view=` is called, for the one route that has nine of them.
- *
- * Absent from the table means the workspace's own name: `now` is the default
- * view and every Knowledge section is still "the agent", read one way or
- * another. The four that get their own label are the ones a reader would not
- * recognise under it.
- */
-const VIEW_LABELS: Record<string, string> = {
-  runs: "Agent runs",
-  tick: "Agent tick",
-  playbook: "Strategy playbook",
-  money: "Strategy performance",
-  fleet: "Agent fleet",
-};
-
-/** The views the run index is actually on screen for. */
-const RUN_VIEWS = new Set(["runs", "tick", "fleet"]);
 
 /** The agent itself: who it is, what is looping, and what that has made. */
 function agentIdentityFacts(
@@ -930,25 +911,24 @@ const ROUTES: {
   },
   {
     /**
-     * The agent workspace — one route, and `?view=` says which of its nine
-     * sections is on screen (FEAT-103).
+     * The agent's run screen — one route, one screen (FEAT-103, FEAT-119).
      *
      * This is three entries folded into one. `/agents/:slug/runs` (the Lab) and
-     * `/agents/:slug/strategies/:sslug` (the strategy page) both redirect here
-     * now, so a block written for either pattern would never be reached — and,
-     * worse, without the fold the chat would describe every one of the nine
-     * views as the same page.
+     * `/agents/:slug/strategies/:sslug` (the strategy page) both redirect here,
+     * so a block written for either pattern would never be reached.
      *
-     * What is read follows what is shown: the agent always, the strategy when
-     * one is in scope, the runs when the reader is looking at them. A page that
-     * reports facts nobody can see on it is padding, and R-do-not-pad is the
-     * rule over all of them.
+     * It used to read `?view=` for which of nine bodies was up. There is no
+     * body switch any more: the run's answers are always on the screen and the
+     * evidence is disclosures under them, so the only thing that changes what
+     * the reader is looking *at* is a `?tick=`, which covers the screen. What
+     * `?open=` names is how far down they have scrolled, which is not a fact
+     * about the agent and is not reported — R-do-not-pad.
      */
     pattern: /^\/agents\/([^/]+)$/,
-    facts: ([slug], view, params) => {
+    facts: ([slug], _view, params) => {
       const sslug = params.get("strategy");
       return {
-        label: VIEW_LABELS[view] ?? "Agent workspace",
+        label: params.get("tick") ? "Agent tick" : "Agent run screen",
         subject: sslug
           ? `strategy "${sslug}" of agent "${slug}"`
           : `agent "${slug}"`,
@@ -966,12 +946,15 @@ const ROUTES: {
         ? `strategy "${detail.name}" of agent "${slug}"`
         : undefined;
     },
-    onScreen: ([slug], view, qc, params) => {
+    onScreen: ([slug], _view, qc, params) => {
       const agent = fresh<AgentDetail>(qc, ["agent"], (key) => key[1] === slug);
       const sslug = params.get("strategy");
       const base = agent ? agentIdentityFacts(agent, slug, qc) : undefined;
       const scoped = sslug ? strategyScopeFacts(slug, sslug, agent, qc) : undefined;
-      const runs = RUN_VIEWS.has(view) ? agentRunsFacts(slug, sslug, qc) : undefined;
+      // Unconditional since FEAT-119: the screen *is* a run, and the loop bar
+      // above it lists every other one. It used to be gated on three of the
+      // nine views because the other six put a different body on screen.
+      const runs = agentRunsFacts(slug, sslug, qc);
       if (!base && !scoped && !runs) return undefined;
       return { ...base, ...scoped, ...runs };
     },

@@ -74,17 +74,23 @@ describe("routeFacts", () => {
       subject: "pool 7qbRF6 on solana",
     });
     expect(routeFacts("/agents/orca-lp-expert", "")).toEqual({
-      label: "Agent workspace",
+      label: "Agent run screen",
       subject: 'agent "orca-lp-expert"',
     });
-    // One route with nine views (FEAT-103): the strategy is a scope in the
-    // query string, and the label follows the view rather than the path.
+    // One route, one screen (FEAT-119): the strategy is a scope in the query
+    // string, and which disclosures are open says how far the reader scrolled
+    // rather than what page they are on.
     expect(
-      routeFacts("/agents/orca-lp-expert", "?view=playbook&strategy=sol-lp"),
+      routeFacts("/agents/orca-lp-expert", "?open=playbook&strategy=sol-lp"),
     ).toEqual({
-      label: "Strategy playbook",
+      label: "Agent run screen",
       subject: 'strategy "sol-lp" of agent "orca-lp-expert"',
     });
+    // A tick is the one thing that covers the screen, so it is the one thing
+    // that changes what the reader is looking at.
+    expect(
+      routeFacts("/agents/orca-lp-expert", "?strategy=sol-lp&tick=40")?.label,
+    ).toBe("Agent tick");
   });
 
   it("decodes URL-encoded parts", () => {
