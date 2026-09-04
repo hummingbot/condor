@@ -317,14 +317,33 @@ PYEOF
 # in one network namespace is fatal and silent -- the loser dies with
 # tstun.New("tailscale0"): device or resource busy while its container keeps
 # reporting "running".
-tailnet_state() {
-    if command_exists docker &&
-       docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'hummingbot-tailscale'; then
-        echo sidecar; return
+tailnet_sidecar_running() {
+    command_exists docker &&
+    docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'hummingbot-tailscale'
+}
+
+# A tailscaled on the HOST ITSELF -- not hummingbot-api's sidecar.
+#
+# The distinction matters: the sidecar runs with network_mode: host, so a
+# kernel-mode one creates tailscale0 in the host's own namespace and its
+# process is visible from the host. Both of those would otherwise read as a
+# native daemon that is not there. The host's tailscaled socket is the one
+# signal a sidecar cannot be mistaken for, since it keeps its own inside the
+# container.
+tailnet_has_native() {
+    if command_exists tailscale && tailscale status >/dev/null 2>&1; then
+        return 0
     fi
-    if pgrep -x tailscaled >/dev/null 2>&1; then echo native; return; fi
-    if ip link show tailscale0 >/dev/null 2>&1; then echo native; return; fi
-    if command_exists tailscale && tailscale status >/dev/null 2>&1; then echo native; return; fi
+    if ! tailnet_sidecar_running; then
+        pgrep -x tailscaled >/dev/null 2>&1 && return 0
+        ip link show tailscale0 >/dev/null 2>&1 && return 0
+    fi
+    return 1
+}
+
+tailnet_state() {
+    tailnet_has_native && { echo native; return; }
+    tailnet_sidecar_running && { echo sidecar; return; }
     echo none
 }
 
@@ -1060,12 +1079,36 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
         HB_TAILSCALE_MODE=none
         use_tailscale="${use_tailscale_early:-N}"
         _ts_state="$(tailnet_state)"
+        # Only a NATIVE daemon is a node Condor can reuse. A hummingbot-api
+        # sidecar is a separate tailnet identity with its socket inside its
+        # container: `tailscale ip` on the host returns nothing for it, so
+        # treating it as reusable produced an install that reported "Tailscale
+        # connected" with no address and a dashboard reachable from nowhere.
+        #
+        # A kernel-mode sidecar also OWNS tailscale0, so Condor cannot enroll
+        # natively alongside it -- that is the collision this whole change
+        # exists to prevent, and it must not be walked into here either. A
+        # userspace sidecar holds no device, so enrolling is fine.
+        _ts_blocked_by_sidecar=false
+        if [ "$_ts_state" = sidecar ] && ip link show tailscale0 >/dev/null 2>&1; then
+            _ts_blocked_by_sidecar=true
+        fi
+        if [[ "${use_tailscale:-}" =~ ^[Yy]$ ]] && [ "$_ts_blocked_by_sidecar" = true ]; then
+            msg_warn "hummingbot-api's Tailscale sidecar owns this machine's tailnet device."
+            msg_info "Condor cannot join the tailnet while it runs in kernel mode."
+            msg_info "Fix it in ../hummingbot-api, then re-run this setup:"
+            msg_info "  set TAILSCALE_MODE=host in its .env  (one shared node), or"
+            msg_info "  set TAILSCALE_MODE=sidecar           (its own node, userspace)"
+            msg_info "then run 'make deploy' there. Continuing without Tailscale for Condor."
+            use_tailscale="N"
+            use_tailscale_early="N"
+        fi
         if [[ "${use_tailscale:-}" =~ ^[Yy]$ ]]; then
           # Already on the tailnet: no key needed to reuse this machine's own
           # node. Asking for one would demand a credential for a join we are
           # about to skip.
-          if [ "$_ts_state" != none ]; then
-            msg_ok "Tailscale already active on this machine ($_ts_state) — no auth key needed"
+          if [ "$_ts_state" = native ]; then
+            msg_ok "Tailscale already active on this machine — no auth key needed"
           else
             echo ""
             echo -e "  ${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
@@ -1094,18 +1137,26 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
             # with a daemon already running produced output byte-identical to
             # one without, because nothing ever looked. The remote-API branch
             # above has always checked; this one never did.
-            if [ "$_ts_state" = none ]; then
+            if [ "$_ts_state" = native ]; then
+                msg_ok "Tailscale already active on this machine — reusing its node"
+                msg_info "Not joining the tailnet a second time: one machine, one node."
+            else
                 msg_info "Installing Tailscale on this machine..."
                 curl -fsSL https://tailscale.com/install.sh | sh
                 msg_info "Connecting to Tailscale network..."
                 tailscale_up --authkey="$ts_auth_key" --hostname="condor" --accept-dns=true
-            else
-                msg_ok "Tailscale already active on this machine ($_ts_state) — reusing it"
-                msg_info "Not joining the tailnet a second time: one machine, one node."
             fi
             ts_condor_ip=$(tailscale ip -4 2>/dev/null | head -1)
-            TS_DEPLOY=true
-            msg_ok "Tailscale connected — this machine (and its dashboard) is reachable on your tailnet"
+            # Report what actually happened. Without an address there is no
+            # tailnet bind and no working /web link, so announcing success
+            # here just moves the failure somewhere harder to diagnose.
+            if [ -n "${ts_condor_ip:-}" ]; then
+                TS_DEPLOY=true
+                msg_ok "Tailscale connected — this machine (and its dashboard) is reachable on your tailnet"
+            else
+                msg_warn "Tailscale did not report an address for this machine."
+                msg_info "The dashboard will stay on localhost until \`tailscale status\` is healthy."
+            fi
             # Tailscale on: the dashboard binds this node's tailnet address, so
             # that is the URL /web must hand out. This used to also require
             # SERVER_IP, which is only ever prompted in the non-Tailscale
