@@ -329,6 +329,34 @@ function endedEarly(stopReason: string | undefined): boolean {
   return !!stopReason && stopReason !== "end_turn";
 }
 
+/**
+ * Is there anything in this turn to put on screen?
+ *
+ * The counterpart is `Recorder.flush` in condor/runtime/conversations.py: it
+ * writes an assistant turn when there is text **or** tool calls **or**
+ * reasoning, and it is the only thing that decides what reaches disk. This is
+ * the same question asked of what came back, so the two answers have to agree
+ * — and they had drifted apart on exactly the case the recorder added the
+ * `thought` clause for: a turn the user stopped, or a stream that failed,
+ * while the model was still thinking. That turn was rendered live, is on disk,
+ * and is replayed into the resumed session's context, but the client called it
+ * empty and dropped it, so the transcript silently lost a turn the user had
+ * just been reading.
+ *
+ * Attachments are this side's own clause and have no counterpart in `flush`:
+ * they hang off the *opening* turn, which is written unconditionally. A
+ * picture with no words is still the message.
+ *
+ * One predicate, so the next field added to a turn is considered once.
+ */
+function isRenderableTurn(
+  turn: ConversationTurn,
+  toolCalls: ToolCall[],
+  attachments: ChatAttachment[],
+): boolean {
+  return !!turn.text || !!turn.thought || toolCalls.length > 0 || attachments.length > 0;
+}
+
 function turnsToMessages(
   turns: ConversationTurn[],
   conversationId: string,
@@ -347,10 +375,9 @@ function turnsToMessages(
       url: api.attachmentUrl(conversationId, a.id),
       mime: a.mime,
     }));
-    // A turn with no text and no tools is an artifact of a prompt that died
-    // before producing anything; rendering it as an empty bubble is noise —
-    // unless it carried a picture, which *is* the message.
-    if (!turn.text && toolCalls.length === 0 && attachments.length === 0) return;
+    // A turn holding nothing at all is an artifact of a prompt that died
+    // before producing anything; rendering it as an empty bubble is noise.
+    if (!isRenderableTurn(turn, toolCalls, attachments)) return;
     // A handover reads the same after a reload as it did live: the backend
     // records it as a system turn, so there is one source for the divider.
     const role =
