@@ -233,6 +233,26 @@ describe("a per-slot transcript update", () => {
     expect(chat().isSlotStreaming("s2")).toBe(true);
   });
 
+  it("leaves a refused call refused when the prompt ends (CORR-324)", async () => {
+    await arrive();
+    deliver({ event: "text_chunk", slot_id: "s1", text: "working" });
+    // What the permission gate emits when it says no. No further update for
+    // this id ever arrives — the bridge `continue`s past the call.
+    deliver({
+      event: "tool_call",
+      slot_id: "s1",
+      tool_call_id: "t1",
+      title: "create_lp_executor",
+      status: "blocked",
+    });
+
+    deliver({ event: "prompt_done", slot_id: "s1" });
+
+    // The settle pass used to rewrite this to "completed", telling the user a
+    // tool ran that they had explicitly refused.
+    expect(messages("s1")[0].toolCalls[0].status).toBe("blocked");
+  });
+
   it("routes a tool status to the call that owns it, in its own slot", async () => {
     await arrive();
     streamWithPendingCall("s1", "t1");

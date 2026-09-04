@@ -12,6 +12,7 @@ import {
   formatToolName,
   roundToPricePrecision,
   shortBotName,
+  toolCallState,
 } from "./formatters";
 
 // The bug this suite pins (READ-251): the chart Y axes used to carry their own
@@ -476,5 +477,44 @@ describe("formatToolName", () => {
       expect(formatToolName("mcp__condor__")).toBe("condor");
       expect(formatToolName("mcp__condor__run_code__")).toBe("run code");
     });
+  });
+});
+
+// The bug this suite pins (CORR-324): `toolCallState` knew only `completed` and
+// `failed`, so a call the permission gate *refused* — which the bridge reports
+// as `blocked` and then never updates again — classified as "still in flight".
+// Live, the settle pass on `prompt_done` rewrote every in-flight call to
+// `completed`, so a refused call ended the turn showing a green check;
+// reloaded, the transcript kept `blocked` and the strip span "Running 1 tool"
+// forever. Both halves come out of this one classification.
+
+describe("toolCallState", () => {
+  it("keeps the two terminal states the ACP stream actually names", () => {
+    expect(toolCallState("completed")).toBe("ok");
+    expect(toolCallState("failed")).toBe("error");
+  });
+
+  it("is pending only while the call really is in flight", () => {
+    expect(toolCallState("pending")).toBe("pending");
+    expect(toolCallState("in_progress")).toBe("pending");
+    // A word no adapter has invented yet is in flight, not refused: guessing
+    // "error" for the unknown would put an X on a call that is still running.
+    expect(toolCallState("streaming")).toBe("pending");
+    expect(toolCallState("")).toBe("pending");
+  });
+
+  it("reads a refusal as an ending, not as a call still running", () => {
+    // The gate's own word, plus the spellings the rest of the stack uses for
+    // the same fact (see `_REFUSED_STATUSES` in condor/agents/actions.py).
+    for (const refused of [
+      "blocked",
+      "denied",
+      "rejected",
+      "cancelled",
+      "canceled",
+      "error",
+    ]) {
+      expect(toolCallState(refused)).toBe("error");
+    }
   });
 });

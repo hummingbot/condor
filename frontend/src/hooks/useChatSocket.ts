@@ -269,7 +269,13 @@ function closeStream(msgs: ChatMessage[]): ChatMessage[] {
   return msgs.map((m) => (m.open ? { ...m, open: false } : m));
 }
 
-/** Stop every tool call that is still spinning. A prompt that ended, ended. */
+/** Stop every tool call that is still spinning. A prompt that ended, ended.
+ *
+ *  "Still spinning" is `toolCallState`'s answer, not "not `completed`" — and
+ *  the difference is the whole of CORR-324. A call the permission gate refused
+ *  is over: rewriting it to `completed` here told the user a tool ran that they
+ *  had said no to. It reads as terminal there, so it is left exactly as the
+ *  bridge reported it, which is also what the transcript on disk holds. */
 function settleToolCalls(msgs: ChatMessage[]): ChatMessage[] {
   return msgs.map((m) =>
     m.toolCalls.some((tc) => toolCallState(tc.status) === "pending")
