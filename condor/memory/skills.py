@@ -18,12 +18,12 @@ MCP subprocess (the ``manage_skill`` tool) alike.
 Layout on disk — keyed by the assistant only (``agent_slug``), via
 :func:`condor.memory.paths.builtin_skills_root`::
 
-    {assistant_home}/skills/
+    {agent_home}/skills/
         <slug>/
             SKILL.md         # frontmatter + steps
             <companion>.md   # optional attached reference files (templates, etc.)
 
-where ``{assistant_home}`` is ``agents/<slug>`` — ``agents/condor`` for the chat,
+where ``{agent_home}`` is ``<local root>/<slug>`` — the chat's is ``condor`` —
 which a falsy ``agent_slug`` resolves (FEAT-033).
 
 A skill folder may bundle **companion files** beside its ``SKILL.md`` — e.g.
@@ -32,12 +32,19 @@ the injected index shows only the ``SKILL.md`` trigger, the companions stay out
 of context, and the agent pulls one on demand via :meth:`SkillStore.read_file`.
 
 **The published layer (FEAT-031).** Beside the per-agent libraries there is one
-*shared* library — ``agents/_shared/skills``, see
+*shared* library — ``_shared/skills``, see
 :func:`condor.memory.paths.shared_skills_root` — that **every** assistant reads,
 Condor included. Publication is the directory a playbook sits in, not a flag in
 its frontmatter. One rule covers everyone:
 
     every assistant reads its OWN library plus the SHARED one.
+
+**And the shipped layer (FEAT-115).** Each of those two libraries exists in
+*both* agent roots: this install's, which is where every write lands, and the
+one the repo ships. So the store reads four roots in one order — own-local,
+own-stock, shared-local, shared-stock — and the ``seen`` set that already made
+an own playbook shadow a shared one makes a local playbook shadow a shipped one,
+item by item, for free.
 
 with two consequences:
 
