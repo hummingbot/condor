@@ -82,10 +82,10 @@ export function Floor() {
   const groups = useMemo(() => floorTargets(agents, ambient), [agents, ambient]);
   const [byServer, setByServer] = useState<Record<string, FloorSlice>>({});
 
-  // Kept keyed by server, never merged on arrival — `FleetOverview.tsx:94`'s
-  // rule, for the same reason here: a server dropping out of `groups` must take
-  // its numbers with it rather than leave a stale fold under an agent that
-  // moved.
+  // Kept keyed by server, never merged on arrival — the rule the fleet
+  // overview set before it became a panel of the chat's rail (FEAT-114), for
+  // the same reason here: a server dropping out of `groups` must take its
+  // numbers with it rather than leave a stale fold under an agent that moved.
   const report = useCallback(
     (server: string, slice: FloorSlice) =>
       setByServer((prev) =>
