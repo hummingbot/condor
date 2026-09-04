@@ -66,7 +66,12 @@ from condor.agents.actions import (
     MAX_ACTION_LINES,
     read_actions,
 )
-from condor.agents.deeds import CHAT_STRATEGY, DELEGATION_STRATEGY, UI_STRATEGY
+from condor.agents.deeds import (
+    CHAT_STRATEGY,
+    DELEGATION_STRATEGY,
+    UI_STRATEGY,
+    tag_for,
+)
 from condor.agents.ownership import (
     read_ledger_namespace,
     read_owned,
@@ -109,6 +114,17 @@ class DeedIndex:
 
     #: Bot **base** names (no ``-20260731-101500`` deploy suffix) → who made it.
     bots: dict[str, OwnerRef] = field(default_factory=dict)
+    #: Run key → every executor ``controller_id`` tag a run of it could have
+    #: set, sorted (CORR-325). The pseudo-run half of what
+    #: ``sessions_index.enumerate_agent_ids`` already answers for loops, and the
+    #: reason it has to live here: a conversation's tag is
+    #: ``{run_key}_{conversation_id}``, and the conversation ids are only
+    #: discoverable by the walk this index is already doing.
+    #:
+    #: Chats and delegations only. The dashboard is a person pressing a button —
+    #: there is no model to hand a tag to, so it can never have set one, and
+    #: listing a tag it could not have used would invite a match that is a lie.
+    tags: dict[str, list[str]] = field(default_factory=dict)
     #: Epoch seconds of the earliest deed written by a door FEAT-105 wired, or
     #: ``0.0`` when there is none. Before this instant Condor's record of its own
     #: work is incomplete, so an unattributed record cannot be judged; after it,
@@ -117,8 +133,14 @@ class DeedIndex:
     since: float = 0.0
 
     def run_keys(self) -> list[str]:
-        """The runs this index can attribute something to, sorted."""
-        return sorted({ref.run_key for ref in self.bots.values()})
+        """The runs this index can attribute something to, sorted.
+
+        Both halves, because a run that opened an executor and deployed no bot
+        is still a run that owns trading. Deriving this from ``bots`` alone was
+        exactly why such a conversation got no fleet-map owner row at all, and
+        so had nowhere for its executors to hang (CORR-325).
+        """
+        return sorted({ref.run_key for ref in self.bots.values()} | set(self.tags))
 
     def owner_of(self, bot_name: str) -> OwnerRef | None:
         """The run that made this bot, by base name. Deploy suffix tolerated."""
@@ -227,8 +249,30 @@ def _run_key_of(directory: Path, strategy: str) -> str:
     return f"{agent or CHAT_SLUG}.{strategy}"
 
 
+def _note_tag(
+    tags: dict[str, list[str]], strategy: str, run_key: str, run_id: str
+) -> None:
+    """Record the ``controller_id`` a run of this kind could have set.
+
+    Skips the dashboard: its ``run_id`` is the literal ``"ui"`` rather than a
+    reference to anything, which is the same fact
+    :func:`~condor.agents.deeds.attribution_tag` states from the other side by
+    giving a ref-less owner no tag. Kept as one rule read twice rather than a
+    second opinion about who can be tagged.
+    """
+    if strategy == UI_STRATEGY:
+        return
+    tag = tag_for(run_key, run_id)
+    if tag and tag not in tags.setdefault(run_key, []):
+        tags[run_key].append(tag)
+
+
 def _index_pseudo_run(
-    directory: Path, strategy: str, run_id: str, bots: dict[str, OwnerRef]
+    directory: Path,
+    strategy: str,
+    run_id: str,
+    bots: dict[str, OwnerRef],
+    tags: dict[str, list[str]],
 ) -> float:
     """Index one chat/delegation/dashboard run; return its earliest deed.
 
@@ -241,6 +285,7 @@ def _index_pseudo_run(
     owned = read_owned(directory)
     if owned:
         run_key = _run_key_of(directory, strategy)
+        _note_tag(tags, strategy, run_key, run_id)
         for bot in owned:
             _claim(bots, bot.base, OwnerRef(run_key, run_id, bot.since))
         return _earliest(bot.since for bot in owned)
@@ -252,6 +297,20 @@ def _index_pseudo_run(
     # No ledger means no namespace was written down, so the acting agent is
     # unrecoverable and the default one is the honest answer.
     run_key = f"{CHAT_SLUG}.{strategy}"
+    # Before the deploy filter below, deliberately: a run whose only deed was
+    # opening an executor deploys nothing, and it is precisely the run that
+    # needs its tag known.
+    #
+    # The known boundary of this branch: a run with no ledger has no namespace
+    # written down, so a *bound specialist* whose only deed was opening an
+    # executor is indexed under `condor.chat` and its tag spelled with it, while
+    # the tag the chat was actually handed says `brigado.chat` (the conversation
+    # meta knows the binding; this directory does not). That costs a match in
+    # the fleet view and nothing else: a tag carries the conversation id, so the
+    # misspelled one matches no executor at all rather than someone else's. A
+    # miss, never a lie — and the conversation's own ledger route reads the meta
+    # and is exact regardless.
+    _note_tag(tags, strategy, run_key, run_id)
     for row in rows:
         if row.verb == DEPLOY_VERB and row.ok and row.subject:
             _claim(bots, row.subject, OwnerRef(run_key, run_id, row.at))
@@ -260,10 +319,11 @@ def _index_pseudo_run(
 
 def _build() -> DeedIndex:
     bots: dict[str, OwnerRef] = {}
+    tags: dict[str, list[str]] = {}
     firsts: list[float] = []
     for directory, strategy, run_id in _pseudo_runs():
         try:
-            firsts.append(_index_pseudo_run(directory, strategy, run_id, bots))
+            firsts.append(_index_pseudo_run(directory, strategy, run_id, bots, tags))
         except Exception:  # noqa: BLE001 - one unreadable run is not the fleet
             log.debug("deed_index: unreadable run %s", directory, exc_info=True)
     for directory, run_key, run_id in _loop_runs():
@@ -272,7 +332,11 @@ def _build() -> DeedIndex:
                 _claim(bots, bot.base, OwnerRef(run_key, run_id, bot.since))
         except Exception:  # noqa: BLE001
             log.debug("deed_index: unreadable session %s", directory, exc_info=True)
-    return DeedIndex(bots=bots, since=_earliest(firsts))
+    return DeedIndex(
+        bots=bots,
+        tags={key: sorted(values) for key, values in tags.items()},
+        since=_earliest(firsts),
+    )
 
 
 # ── The memo ──

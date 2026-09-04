@@ -17,8 +17,11 @@ from starlette.testclient import TestClient
 
 import condor.web.routes.conversations as routes
 from condor import paths
+from condor.agents import deeds
 from condor.agents.actions import ACTIONS_FILENAME
 from condor.agents.deed_index import reset_deed_index_cache
+from condor.agents.deeds import attribution_tag, for_conversation
+from condor.runtime.context import conversation_attribution
 from condor.runtime.conversations import META_FILENAME, new_conversation
 from condor.web.auth import get_current_user
 from condor.web.models import WebUser
@@ -272,3 +275,110 @@ def test_someone_elses_conversation_is_not_yours_to_read(cm):
 
 def test_an_unknown_conversation_is_a_404(cm):
     assert _client().get("/conversations/nope/deployments").status_code == 404
+
+
+# ── Executors a conversation opened (CORR-325) ──
+
+
+def _opened_executor(conv_id: str):
+    """The one file a chat turn that opens a position leaves.
+
+    No ``owned_bots.json``: nothing was deployed. This is the run that had no
+    record of any kind before — the reason the executor half of the panel was
+    unreachable rather than merely empty.
+    """
+    deeds.record_direct(
+        deeds.for_conversation(USER.id, conv_id),
+        verb="create_position_executor",
+        summary="Open a SOL-USDC position",
+    )
+    reset_deed_index_cache()
+
+
+def _executor(cid: str, *, eid: str = "e1", pnl: float = 0.0, volume: float = 0.0):
+    return {
+        "id": eid,
+        "controller_id": cid,
+        "type": "position_executor",
+        "pair": "SOL-USDC",
+        "connector": "binance",
+        "timestamp": NOW,
+        "close_timestamp": 0,
+        "pnl": pnl,
+        "volume": volume,
+    }
+
+
+def test_an_executor_a_conversation_opened_is_one_of_its_rows(cm, monkeypatch):
+    """The tag the chat was handed is the tag this route asks the API with.
+
+    Both halves of CORR-325 in one assertion: the string
+    ``conversation_attribution`` puts in the prompt is
+    ``deeds.attribution_tag``'s, and so is the ``agent_id`` this route joins on.
+    One rule spelled once — if the two ever drift, the row disappears and this
+    fails.
+    """
+    meta = _conversation()
+    _opened_executor(meta.id)
+    cm.client = object()
+
+    tag = attribution_tag(for_conversation(USER.id, meta.id, meta.agent_slug))
+    assert tag == f"condor.chat_{meta.id}"
+    assert tag in conversation_attribution(tag)
+
+    perf = _Perf()
+    perf.executors = [_executor(tag, pnl=12.5, volume=900)]
+    calls = _with_perf(monkeypatch, perf)
+
+    body = _client().get(f"/conversations/{meta.id}/deployments").json()
+
+    assert calls[0]["agent_id"] == tag
+    assert [r["kind"] for r in body["deployments"]] == ["executor"]
+    row = body["deployments"][0]
+    assert row["label"] == "position SOL-USDC"
+    assert row["detail"] == "binance"
+    assert row["live"] is True
+    assert row["pnl"] == pytest.approx(12.5)
+    assert row["scope"] == "exec:e1"
+
+
+def test_another_conversations_executor_is_not_this_ones(cm, monkeypatch):
+    """The tag carries the conversation id, so two chats can never share a row."""
+    mine = _conversation()
+    _opened_executor(mine.id)
+    theirs = _conversation()
+    cm.client = object()
+
+    mine_tag = attribution_tag(for_conversation(USER.id, mine.id, mine.agent_slug))
+    theirs_tag = attribution_tag(
+        for_conversation(USER.id, theirs.id, theirs.agent_slug)
+    )
+    assert mine_tag != theirs_tag
+
+    perf = _Perf()
+    perf.executors = [_executor(theirs_tag, eid="e9"), _executor(mine_tag, eid="e1")]
+    _with_perf(monkeypatch, perf)
+
+    body = _client().get(f"/conversations/{mine.id}/deployments").json()
+
+    assert [r["scope"] for r in body["deployments"]] == ["exec:e1"]
+
+
+def test_an_untagged_executor_belongs_to_no_conversation(cm, monkeypatch):
+    """The failure this whole item is about, pinned as the behaviour it produces.
+
+    Every executor a chat opened before CORR-325 carries ``controller_id: ""``.
+    Nothing can recover who opened it, and the panel must show nothing rather
+    than sweeping up every untagged position on the server.
+    """
+    meta = _conversation()
+    _opened_executor(meta.id)
+    cm.client = object()
+
+    perf = _Perf()
+    perf.executors = [_executor("", eid="orphan")]
+    _with_perf(monkeypatch, perf)
+
+    body = _client().get(f"/conversations/{meta.id}/deployments").json()
+
+    assert body["deployments"] == []

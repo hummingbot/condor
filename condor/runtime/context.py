@@ -178,6 +178,48 @@ def chat_tool_preload(agent_key: str | None) -> str:
     )
 
 
+def conversation_attribution(tag: str) -> str:
+    """Tell a chat the ``controller_id`` its positions must carry (CORR-325).
+
+    The conversation-shaped sibling of the loop's ``[TICK INFO]`` block
+    (:mod:`condor.agents.prompts`), which is where this instruction lived and
+    only lived. That one is nested inside ``if agent_id:`` and ``agent_id`` is a
+    *session* concept, so a chat never reached it: a conversation was never told
+    to pass a tag and had none to pass, and every executor it opened was born
+    unattributable. The tag comes from
+    :func:`~condor.agents.deeds.attribution_tag`, so the string the model is
+    handed here is byte-for-byte the one the conversation's deployment panel
+    (FEAT-110) later queries the trading API with — the join is one rule stated
+    once, not two that have to be kept in agreement.
+
+    The wording says *conversation*, not *session*. The loop's line says
+    "attributes the position to this session" and for a chat that would name the
+    wrong thing entirely — a reader of this prompt has no session, and telling
+    it otherwise is how a model invents a plausible id instead of using the one
+    it was given.
+
+    Returns ``""`` for a run with no tag, which is a chat with no durable
+    conversation behind it. Silence is right: an instruction to pass a tag that
+    does not exist is worse than no instruction, because a model that is told to
+    tag will tag with something.
+
+    Placed at the one point where both chat branches have converged
+    (``sessions.create_session``), so the coordinator and a bound specialist —
+    which skips :func:`build_initial_context` entirely (CORR-272) — cannot
+    disagree about what a conversation's positions are called.
+    """
+    if not tag:
+        return ""
+    return (
+        "[THIS CONVERSATION]\n"
+        f"Attribution tag: {tag}\n"
+        f'Pass controller_id="{tag}" to every create_*_executor call — it is what '
+        "attributes the position to this conversation. Without it nothing can tell "
+        "that this chat opened it, and it will not appear in what this conversation "
+        "reports having deployed."
+    )
+
+
 def _build_system_prompt(platform: str = "telegram") -> str:
     """Condor's own AGENT.md plus the platform's formatting rules."""
     agent = _chat_agent()

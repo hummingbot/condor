@@ -123,6 +123,10 @@ def ws_env(tmp_path, monkeypatch):
     monkeypatch.setattr(session_module, "_sessions", {})
     monkeypatch.setattr("condor.acp.client.ACPClient", _GatedClient)
     monkeypatch.setattr(session_module, "build_initial_context", lambda *a, **k: "")
+    # This file asserts the opening turn verbatim, so the conversation's
+    # attribution block is blanked alongside the context builder above — it
+    # is covered on its own in tests/runtime/test_conversation_attribution.py
+    monkeypatch.setattr(session_module, "conversation_attribution", lambda *a, **k: "")
     monkeypatch.setattr(
         "condor.runtime.toolsets.build_mcp_servers_for_session", lambda *a, **k: []
     )

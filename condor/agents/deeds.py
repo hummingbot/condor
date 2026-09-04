@@ -157,6 +157,46 @@ def run_key_for(owner: DeedOwner) -> str:
     return f"{owner.agent}.{owner.strategy}"
 
 
+def attribution_tag(owner: DeedOwner) -> str:
+    """The ``controller_id`` this run's executors carry — ``""`` when it has none.
+
+    A loop session tags its positions with ``agent_id =
+    "{agent_slug}.{strategy_slug}_{N}"`` (``engine.py``), and that tag is the key
+    the whole fleet map hangs off: :mod:`condor.agents.fleet_map` matches an
+    executor to its owner by it, and ``fetch_agent_performance`` asks the
+    trading API for exactly it. A conversation had no such tag, so an executor a
+    chat opened was attributable to nothing — not to a bug in the join, but
+    because nobody ever gave the model a string to pass (CORR-325).
+
+    This is that string, and it is deliberately the *same shape*, one rule for
+    both: ``{run_key}_{ref}``, with the conversation id where the session number
+    goes. ``condor.chat_c-4f2a``, ``brigado.chat_c-4f2a``. No consumer has to
+    learn a second format — the run key half is already the scope-tree node id
+    and the join key, and the ref half is already how a deed names its run
+    (:class:`~condor.agents.deed_index.OwnerRef`).
+
+    A run with no ``ref`` — the dashboard, whose deeds are per-user and not
+    per-anything-else — gets ``""``. That is not a tag anything could resolve,
+    and returning it as one would mean asking the API for the empty
+    ``controller_id``, which is every untagged executor on the server. An owner
+    that cannot be named is better named as nothing.
+    """
+    return tag_for(run_key_for(owner), owner.ref)
+
+
+def tag_for(run_key: str, ref: str) -> str:
+    """:func:`attribution_tag`'s rule, over two halves already resolved.
+
+    Separate from the function above because the readers do not have a
+    :class:`DeedOwner` and should not have to fake one:
+    :mod:`condor.agents.deed_index` recovers a run key from a ledger on disk,
+    not from a live owner. Both ends of the join therefore spell the tag with
+    the same call, which is the only way a tag written by one and looked up by
+    the other cannot drift apart.
+    """
+    return f"{run_key}_{ref}" if run_key and ref else ""
+
+
 def deed_dir(owner: DeedOwner) -> Path | None:
     """Where this owner's ``actions.jsonl`` lives, or ``None`` if nowhere.
 

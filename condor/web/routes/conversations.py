@@ -297,19 +297,23 @@ async def get_conversation_deployments(
       asking whether anybody has claimed the base since, which is exactly the
       newest-claim rule FEAT-106's index already applies across every run on
       disk. It reads only the filesystem and is memoised, so this costs nothing.
-    - **A conversation's standalone executors are out of reach.** The executor
-      join is on the ``controller_id`` tag, and only a tick is told to set one
-      (``prompts.py``) — so ``agent_id`` here names this conversation and
-      matches nothing rather than naming the empty tag, which would sweep up
-      every executor nobody has attributed. Bots and their controllers are the
-      whole of what a chat can be credited with today, and that is honest.
+    - **A conversation's standalone executors join on the same tag a loop's
+      do.** The join is on ``controller_id``, and a chat is now told what to put
+      there: :func:`~condor.runtime.context.conversation_attribution` hands the
+      model :func:`~condor.agents.deeds.attribution_tag` at session start, which
+      is the same call this route asks the API with (CORR-325). Before that only
+      a tick was told to set a tag, so this ``agent_id`` named the conversation
+      and matched nothing — bots and their controllers were the whole of what a
+      chat could be credited with. A conversation that predates the instruction
+      still shows only those two, because its executors were born untagged and
+      no tag can be recovered after the fact.
 
     A conversation that recorded nothing costs no Hummingbot API call at all,
     which is what lets the rail badge this without polling the fleet.
     """
     from condor.agents.actions import ACTIONS_FILENAME, MAX_ACTION_LINES, read_actions
     from condor.agents.deed_index import build_deed_index
-    from condor.agents.deeds import for_conversation, run_key_for
+    from condor.agents.deeds import attribution_tag, for_conversation
     from condor.agents.ownership import read_owned
     from condor.agents.performance import AgentPerformance, fetch_agent_performance
     from condor.web.routes.agents import build_deployments
@@ -334,8 +338,9 @@ async def get_conversation_deployments(
             predates_ledger=_predates_ledger(meta, index.since)
         )
 
-    run_key = run_key_for(for_conversation(owner_id, conversation_id, meta.agent_slug))
-    agent_id = f"{run_key}_{conversation_id}"
+    agent_id = attribution_tag(
+        for_conversation(owner_id, conversation_id, meta.agent_slug)
+    )
     # Only the bases nobody has claimed since. A base this conversation deployed
     # and another run redeployed belongs to that run now, and crediting both
     # with the same money is the mistake `current_owner_bases` exists to prevent.

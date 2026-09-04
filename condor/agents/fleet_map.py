@@ -98,7 +98,10 @@ class FleetOwner:
     #: Configured bot names that sit *outside* the namespace (legacy escape
     #: hatch). Matched exactly rather than by prefix.
     declared_bots: list[str] = field(default_factory=list)
-    #: Every ``"{run_key}_{N}"`` on disk — the executor ``controller_id`` tag set.
+    #: The executor ``controller_id`` tag set: every ``"{run_key}_{N}"`` on disk
+    #: for a strategy, and every ``"{run_key}_{conversation_id}"`` for a
+    #: pseudo-run. Two walks, one shape, because the tag rule is one rule
+    #: (:func:`~condor.agents.deeds.tag_for`).
     agent_ids: list[str] = field(default_factory=list)
     live: LiveLoop | None = None
 
@@ -172,11 +175,20 @@ def _pseudo_owners(known: set[str], agents: dict[str, Any]) -> list[FleetOwner]:
     are attributed by an observed record, never by a name, so the prescriptive
     matcher must not be able to claim a bot for one: ``in_namespace`` refuses an
     empty namespace, in Python and in TypeScript alike.
+
+    ``agent_ids`` is *not* empty, though it was until CORR-325. A conversation
+    now carries a ``controller_id`` tag of its own
+    (:func:`~condor.agents.deeds.attribution_tag`), so these owners have a tag
+    set exactly like a strategy's — the deed index's, where a loop's comes from
+    ``enumerate_agent_ids``. The browser's matcher needs no new case for it:
+    ``agentOfControllerId`` is exact-string membership over this list and does
+    not care which walk filled it.
     """
     from condor.agents.deed_index import PSEUDO_STRATEGY_NAMES, build_deed_index
 
+    index = build_deed_index()
     out: list[FleetOwner] = []
-    for run_key in build_deed_index().run_keys():
+    for run_key in index.run_keys():
         if run_key in known:
             continue
         agent_slug, _, strategy_slug = run_key.partition(".")
@@ -189,6 +201,7 @@ def _pseudo_owners(known: set[str], agents: dict[str, Any]) -> list[FleetOwner]:
                 strategy_slug=strategy_slug,
                 strategy_name=PSEUDO_STRATEGY_NAMES.get(strategy_slug, strategy_slug),
                 namespace="",
+                agent_ids=list(index.tags.get(run_key, [])),
             )
         )
     return out

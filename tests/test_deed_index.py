@@ -253,6 +253,11 @@ def test_the_map_appends_pseudo_owners_that_can_never_claim_a_bot_by_name(
     The pseudo-runs are ordinary owners — the tree, the URL and the bubbles all
     join on a run key already — but their namespace is empty, which is what
     keeps the prescriptive matcher from ever claiming a bot for one.
+
+    The two *name*-based routes stay shut: an empty namespace and no declared
+    bots. ``agent_ids`` is deliberately not among them (CORR-325) — a tag is an
+    explicit string the run itself set, not a name it was guessed from, so
+    carrying one takes nothing away from the promise in this test's title.
     """
     _no_engines(monkeypatch)
     _write_agent(tmp_path, "brigado", "Brigado")
@@ -262,9 +267,53 @@ def test_the_map_appends_pseudo_owners_that_can_never_claim_a_bot_by_name(
     assert "brigado.chat" in owners
     pseudo = owners["brigado.chat"]
     assert pseudo.namespace == ""
-    assert pseudo.declared_bots == [] and pseudo.agent_ids == []
+    assert pseudo.declared_bots == []
+    assert pseudo.agent_ids == ["brigado.chat_c_1"]
     assert pseudo.agent_name == "Brigado"
     assert pseudo.strategy_name == "Chat"
+
+
+def test_a_chat_that_only_opened_an_executor_is_still_an_owner(monkeypatch, tmp_path):
+    """The row that did not exist at all before CORR-325.
+
+    ``run_keys()`` was derived from the bots the index could attribute, so a
+    conversation that deployed nothing and merely opened a position produced no
+    owner — and an executor carrying its tag had nowhere in the fleet map to
+    hang even once the tag existed. It is now an owner like any other, carrying
+    the one tag its executors can be spelled with.
+    """
+    _no_engines(monkeypatch)
+    conv = "c_exec_only"
+    deeds.record_direct(
+        deeds.for_conversation(USER, conv),
+        verb="create_position_executor",
+        summary="Open a SOL-USDC position",
+    )
+    reset_deed_index_cache()
+
+    index = build_deed_index()
+    assert index.bots == {}, "nothing was deployed, so nothing is claimed by name"
+    assert index.tags == {"condor.chat": [f"condor.chat_{conv}"]}
+
+    owners = {owner.run_key: owner for owner in build_fleet_map()}
+    assert owners["condor.chat"].agent_ids == [f"condor.chat_{conv}"]
+
+
+def test_the_dashboards_own_deeds_never_get_a_tag(monkeypatch, tmp_path):
+    """A tag names a run a model could have been told about; nobody tells a button.
+
+    ``for_ui`` has no ref, so :func:`deeds.attribution_tag` gives it ``""``. The
+    index has to agree from its side, or the fleet map would advertise
+    ``condor.ui_ui`` as a ``controller_id`` that nothing could ever have set.
+    """
+    _no_engines(monkeypatch)
+    deeds.record_direct(
+        deeds.for_ui(USER), verb=DEPLOY_VERB, summary="Deploy bot ui-bot", subject="x"
+    )
+    reset_deed_index_cache()
+
+    assert deeds.attribution_tag(deeds.for_ui(USER)) == ""
+    assert "condor.ui" not in build_deed_index().tags
 
 
 def test_a_real_strategy_is_never_shadowed_by_a_pseudo_owner(monkeypatch, tmp_path):

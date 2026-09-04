@@ -27,6 +27,7 @@ from condor.runtime.confirmations import get_registry as get_confirmation_regist
 from condor.runtime.context import (
     build_initial_context,
     chat_tool_preload,
+    conversation_attribution,
     platform_formatting,
 )
 from condor.runtime.keys import SessionKey
@@ -805,11 +806,25 @@ async def _spawn_session(
             server_name=bound.server_name or resolved_server,
         )
 
+        # What this conversation's positions are called (CORR-325). Appended
+        # here rather than inside either context builder because this is the
+        # first line at which both branches have converged *and* the
+        # conversation id exists — it is minted just above, and a specialist
+        # skips `build_initial_context` altogether. One statement, so the two
+        # brains cannot end up tagging the same chat differently.
+        attribution = conversation_attribution(
+            deeds.attribution_tag(
+                deeds.for_conversation(
+                    spec.user_id, conversation_id, bound.specialist_slug
+                )
+            )
+        )
+
         # Caller-supplied context (e.g. a switch handoff recap) rides along as
         # spec data, so no caller needs the live session object.
         initial_context = "\n\n".join(
             part
-            for part in (initial_context, replay, spec.extra_context)
+            for part in (initial_context, attribution, replay, spec.extra_context)
             if part and part.strip()
         ).strip()
 
