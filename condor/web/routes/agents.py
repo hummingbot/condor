@@ -724,6 +724,15 @@ class ClaimBotRequest(BaseModel):
     )
 
 
+class UnclaimBotRequest(BaseModel):
+    """Take a bot back off this strategy — the undo of a claim."""
+
+    bot_name: str = Field(
+        description="The bot to unassign. A deploy suffix (-YYYYMMDD-HHMMSS) is "
+        "stripped, so the running instance and its base name both work."
+    )
+
+
 class MuteRequest(BaseModel):
     """Switch one item off for this Agent, or back on (FEAT-090, FEAT-091)."""
 
@@ -3197,6 +3206,49 @@ async def set_restart_on_boot(
     return {"restart_on_boot": req.enabled, "applied_to_running": live}
 
 
+def _live_ledgers(agent_slug: str, strategy_slug: str, session_dir=None) -> list:
+    """The ledgers a *running* loop for this strategy holds in memory.
+
+    An ownership repair written only to disk does not survive the next thing the
+    loop records: a tick engine keeps its ledger in memory and
+    :meth:`BotLedger._save` rewrites the whole file, so the entry a route just
+    deleted comes straight back — and the entry it just added disappears.
+    ``session_dir`` narrows to the one run the write targeted; without it, every
+    run of the strategy is patched, which is what an unassign wants.
+    """
+    out = []
+    try:
+        engines = _get_engines_for(agent_slug, strategy_slug)
+    except Exception:  # noqa: BLE001 - no supervisor is not a failed repair
+        return out
+    for engine in engines:
+        ledger = getattr(engine, "ledger", None)
+        if ledger is None:
+            continue
+        if (
+            session_dir is not None
+            and getattr(engine, "session_dir", None) != session_dir
+        ):
+            continue
+        out.append(ledger)
+    return out
+
+
+def _reset_ownership_caches(who: str) -> None:
+    """Drop the memoised fleet map, so a repair is visible now and not in a minute.
+
+    Best-effort on purpose: a stale cache is a display that lags by up to
+    ``REGISTRY_TTL``, and that must never turn a completed write into a failed
+    request.
+    """
+    try:
+        from condor.agents.fleet_map import reset_fleet_map_cache
+
+        reset_fleet_map_cache()
+    except Exception:  # noqa: BLE001
+        log.debug("%s: could not reset the fleet map cache", who, exc_info=True)
+
+
 @router.post("/{slug}/strategies/{sslug}/claim-bot")
 async def claim_bot(
     slug: str,
@@ -3236,6 +3288,7 @@ async def claim_bot(
         BotLedger,
         bot_namespace,
         declared_names,
+        reown,
         strip_deploy_suffix,
     )
 
@@ -3261,6 +3314,10 @@ async def claim_bot(
             "Start it once, then claim.",
         )
 
+    # A claim is the same authority that disowns, so it outranks a standing
+    # disown rather than being silently skipped by the next adoption pass.
+    reown(strategy.home, base)
+
     namespace = bot_namespace(slug, sslug)
     config = load_full_config(strategy.home, strategy.default_config)
     # ``enforced=False``: the claim is the evidence, and the namespace rule is
@@ -3273,20 +3330,61 @@ async def claim_bot(
         enforced=False,
     )
     ledger.adopt(base, req.since or None)
+    for live in _live_ledgers(slug, sslug, session_dir):
+        live.adopt(base, req.since or None)
 
-    # The fleet map caches its registry; without this the claim is on disk and
-    # invisible until the cache turns over.
-    try:
-        from condor.agents.fleet_map import reset_fleet_map_cache
-
-        reset_fleet_map_cache()
-    except Exception:  # noqa: BLE001 - a stale cache must not fail the claim
-        log.debug("claim_bot: could not reset the fleet map cache", exc_info=True)
+    _reset_ownership_caches("claim_bot")
 
     return {
         "claimed": base,
         "session": session_dir.name,
         "owned": [bot.base for bot in ledger.owned()],
+    }
+
+
+@router.post("/{slug}/strategies/{sslug}/unclaim-bot")
+async def unclaim_bot(
+    slug: str,
+    sslug: str,
+    req: UnclaimBotRequest,
+    user: WebUser = Depends(get_current_user),
+):
+    """Take a bot back off this strategy — the undo of :func:`claim_bot`.
+
+    Claiming was one-way, and that made a misclick permanent in the one place it
+    is least affordable: the claimed window is sliced into the strategy's PnL,
+    so a bot attached to the wrong strategy moves real money onto the wrong
+    book, and the only repair was hand-editing JSON under ``.condor/``.
+
+    Worse, the obvious repair was wrong. Deleting the entry from the newest
+    session looks like it worked and undoes itself on the next restart:
+    ``_adopt_running_bots`` re-derives ownership from the namespace, from every
+    *prior* session's ledger, and from this session's recorded deploys. So this
+    goes through :func:`~condor.agents.ownership.disown`, which clears every
+    session and writes the standing "not ours" that adoption consults first.
+
+    Three surfaces have to agree or the unassign only looks done: the ledgers on
+    disk, the ledger a **running loop** holds in memory (it rewrites the whole
+    file on its next save, restoring exactly what was deleted), and the memoised
+    fleet map the browser reads.
+    """
+    from condor.agents.ownership import disown, strip_deploy_suffix
+
+    strategy = _get_strategy(slug, sslug)
+
+    base = strip_deploy_suffix((req.bot_name or "").strip())
+    if not base:
+        raise HTTPException(status_code=400, detail="No bot name given")
+
+    result = disown(strategy.home, base)
+    live = sum(1 for ledger in _live_ledgers(slug, sslug) if ledger.forget(base))
+
+    _reset_ownership_caches("unclaim_bot")
+
+    return {
+        "unclaimed": base,
+        "sessions": result["sessions"],
+        "live_runs": live,
     }
 
 

@@ -1,8 +1,9 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { ChevronRight, Layers, Server } from "lucide-react";
-import { useMemo } from "react";
+import { ChevronRight, Layers, Server, Unlink } from "lucide-react";
+import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 
+import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
 import {
   BEFORE_LEDGER,
   BEFORE_LEDGER_LABEL,
@@ -153,6 +154,36 @@ export function DeployedFleet({
 
   const scope = `/bots?scope=${encodeURIComponent(`agent:${runKey}`)}`;
 
+  /**
+   * Handing a bot back, which is the half of ownership that was missing.
+   *
+   * Claiming was one-way, so a bot attached to the wrong strategy stayed there:
+   * its whole trading window is sliced into this strategy's PnL, and the only
+   * way out was editing `owned_bots.json` by hand under `.condor/`. Worse, the
+   * obvious hand-edit is wrong — ownership is re-derived on every boot from the
+   * other sessions and from the run's own deploy log, so deleting one entry
+   * looks like it worked and silently comes back on the next restart. The route
+   * clears every session and records the decision; this is just the door to it.
+   *
+   * Confirmed rather than instant, and the dialog says the one thing a reader
+   * needs to be sure of: **nothing stops trading**. This moves a number off a
+   * page. It is also fully reversible — an unassigned bot goes back to the
+   * unowned list below with its Claim button.
+   */
+  const queryClient = useQueryClient();
+  const [unassigning, setUnassigning] = useState<string | null>(null);
+  const unclaim = useMutation({
+    mutationFn: (botName: string) => api.unclaimBot(slug, sslug, botName),
+    onSuccess: () => {
+      // The same three readers the claim invalidates: the ledger decides the
+      // fleet map, the strategy's money and the tree.
+      queryClient.invalidateQueries({ queryKey: ["fleet-map"] });
+      queryClient.invalidateQueries({ queryKey: ["strategy", slug, sslug] });
+      queryClient.invalidateQueries({ queryKey: ["agent", slug] });
+      setUnassigning(null);
+    },
+  });
+
   return (
     <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
@@ -214,14 +245,26 @@ export function DeployedFleet({
         <div className="space-y-3">
           {byBot.map(([botName, controllers]) => (
             <div key={botName}>
-              <Link
-                to={scope}
-                className="mb-1 flex items-center gap-1.5 font-mono text-[11px] text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-primary)]"
-              >
-                <Server className="h-3 w-3 shrink-0" />
-                <span className="truncate">{botName}</span>
-                <span className="opacity-60">· {controllers.length}</span>
-              </Link>
+              <div className="mb-1 flex items-center gap-1.5">
+                <Link
+                  to={scope}
+                  className="flex min-w-0 flex-1 items-center gap-1.5 font-mono text-[11px] text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-primary)]"
+                >
+                  <Server className="h-3 w-3 shrink-0" />
+                  <span className="truncate">{botName}</span>
+                  <span className="opacity-60">· {controllers.length}</span>
+                </Link>
+                <button
+                  type="button"
+                  onClick={() => setUnassigning(botName)}
+                  title={`Stop crediting this strategy with ${botName} — the bot keeps running`}
+                  aria-label={`Unassign ${botName}`}
+                  className="flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-[var(--color-text-muted)] opacity-70 transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-red)] hover:opacity-100"
+                >
+                  <Unlink className="h-3 w-3" />
+                  {!dense && "Unassign"}
+                </button>
+              </div>
               <div className="space-y-0.5">
                 {controllers.map((ctrl) => (
                   <ControllerRow
@@ -238,6 +281,39 @@ export function DeployedFleet({
           ))}
         </div>
       )}
+
+      <ConfirmDialog
+        open={unassigning !== null}
+        title="Unassign this bot?"
+        confirmLabel="Unassign"
+        pendingLabel="Unassigning…"
+        isPending={unclaim.isPending}
+        isError={unclaim.isError}
+        errorText={
+          unclaim.error instanceof Error ? unclaim.error.message : undefined
+        }
+        onConfirm={() => unassigning && unclaim.mutate(unassigning)}
+        onClose={() => {
+          unclaim.reset();
+          setUnassigning(null);
+        }}
+      >
+        <p className="mb-2">
+          <code className="font-mono text-[var(--color-text)]">
+            {unassigning}
+          </code>{" "}
+          stops counting as this strategy's, in every one of its runs. Its PnL
+          and volume leave this page and the agent's totals.
+        </p>
+        <p className="mb-2">
+          <strong className="text-[var(--color-text)]">
+            The bot keeps trading.
+          </strong>{" "}
+          This changes who is credited with it, nothing else — no controller is
+          stopped and no order is touched.
+        </p>
+        <p>It goes back to the unowned list, where you can claim it again.</p>
+      </ConfirmDialog>
     </div>
   );
 }

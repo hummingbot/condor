@@ -3210,6 +3210,25 @@ export const api = {
       { method: "POST", body: JSON.stringify({ bot_name: botName, since }) },
     ),
 
+  /**
+   * Take a bot back off this strategy — the undo of `claimBot`.
+   *
+   * Claiming was one-way, so a misclick put another strategy's trading on this
+   * one's book permanently. It clears the bot from *every* session of the
+   * strategy, not just the newest: ownership is re-derived on each boot from
+   * prior sessions and from recorded deploys, so a single-session delete undoes
+   * itself on the next restart.
+   *
+   * `sessions` names the runs that actually changed and `live_runs` how many
+   * running loops were corrected in memory — an empty pair means the bot was
+   * not this strategy's to begin with.
+   */
+  unclaimBot: (slug: string, sslug: string, botName: string) =>
+    apiFetch<{ unclaimed: string; sessions: string[]; live_runs: number }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/unclaim-bot`,
+      { method: "POST", body: JSON.stringify({ bot_name: botName }) },
+    ),
+
   updateStrategyLearnings: (slug: string, sslug: string, content: string) =>
     apiFetch<{ updated: boolean }>(
       `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/learnings`,

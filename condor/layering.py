@@ -265,6 +265,7 @@ _RUNTIME_NAMES = frozenset(
         "state.json",
         "config.yml",
         "owned_bots.json",
+        "disowned_bots.json",
     }
 )
 

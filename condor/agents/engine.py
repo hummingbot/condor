@@ -860,7 +860,15 @@ class TickEngine:
             log.warning("TickEngine %s: bot adoption deferred (%s)", self.agent_id, e)
             return
 
-        from .ownership import prior_session_bases, strip_deploy_suffix
+        from .ownership import prior_session_bases, read_disowned, strip_deploy_suffix
+
+        # What a person has said is *not* ours, which outranks all three sources
+        # below. Every one of them is an inference from a name or a log, and a
+        # mis-attributed bot is one somebody has to be able to hand back — a
+        # namespace match cannot be argued with, and a recorded deploy is a
+        # permanent fact that would otherwise re-claim the bot on every restart
+        # for the life of the strategy.
+        disowned = read_disowned(getattr(self.strategy, "home", None))
 
         inherited: set[str] = set()
         if not self.ledger.enforced and self.session_dir is not None:
@@ -880,6 +888,8 @@ class TickEngine:
         now = time.time()
         for instance_name in all_perf:
             base = strip_deploy_suffix(instance_name)
+            if base in disowned:
+                continue
             if self.ledger.owns(instance_name) or base in inherited:
                 self.ledger.adopt(instance_name, now)
         self._adoption_done = True

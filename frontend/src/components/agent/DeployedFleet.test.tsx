@@ -52,6 +52,11 @@ let FLEET: {
 vi.mock("@/lib/api", () => ({
   api: {
     claimBot: vi.fn(async () => ({ claimed: "", session: "", owned: [] })),
+    unclaimBot: vi.fn(async () => ({
+      unclaimed: "",
+      sessions: [],
+      live_runs: 0,
+    })),
     stopControllers: vi.fn(async () => ({})),
     startControllers: vi.fn(async () => ({})),
   },
@@ -448,5 +453,100 @@ describe("claiming a bot whose ownership never landed", () => {
     // Claiming another run's trading is a mis-attribution that moves money
     // between two agents' books; it is never offered.
     expect(claim).toBeUndefined();
+  });
+});
+
+describe("handing a bot back", () => {
+  // The suite has no global `clearMocks`, and half of what is asserted here is
+  // that a call did *not* happen — which a call leaked from the previous test
+  // would answer wrongly.
+  beforeEach(() => vi.clearAllMocks());
+
+  /** The panel with one bot this strategy owns, ready to be unassigned. */
+  const owned = async () => {
+    FLEET = {
+      controllers: [controller({ controller_id: "c1" })],
+      owners: [owner()],
+      isLoading: false,
+    };
+    await render(panel());
+  };
+
+  const click = async (label: string) => {
+    await act(async () => {
+      [...host.querySelectorAll("button")]
+        .find((b) => b.textContent?.trim() === label)
+        ?.click();
+    });
+  };
+
+  /**
+   * The dialog's own confirm, which is labelled the same as the row's button.
+   * Located by its Cancel sibling, so this cannot drift into clicking the row
+   * again and asserting on a call the dialog never made.
+   */
+  const confirm = async (label: string) => {
+    await act(async () => {
+      const cancel = [...host.querySelectorAll("button")].find(
+        (b) => b.textContent?.trim() === "Cancel",
+      );
+      [...(cancel?.parentElement?.querySelectorAll("button") ?? [])]
+        .find((b) => b.textContent?.trim() === label)
+        ?.click();
+    });
+  };
+
+  it("asks before it moves the money off the page", async () => {
+    await owned();
+
+    await click("Unassign");
+
+    // Confirmed, not instant: the claimed window is sliced into this
+    // strategy's PnL, so the click that undoes it is worth one question.
+    expect(api.unclaimBot).not.toHaveBeenCalled();
+    expect(host.textContent).toContain("Unassign this bot?");
+    // And the question answers the one that actually frightens a reader.
+    expect(host.textContent).toContain("The bot keeps trading.");
+  });
+
+  it("unassigns the bot the row is for, once confirmed", async () => {
+    await owned();
+
+    await click("Unassign");
+    await confirm("Unassign");
+
+    expect(api.unclaimBot).toHaveBeenCalledWith(
+      "brigado",
+      "fleet_op",
+      "brigado-fleet_op-20260903-181000",
+    );
+  });
+
+  it("does nothing when the question is cancelled", async () => {
+    await owned();
+
+    await click("Unassign");
+    await click("Cancel");
+
+    expect(api.unclaimBot).not.toHaveBeenCalled();
+    expect(host.textContent).not.toContain("Unassign this bot?");
+  });
+
+  it("offers no unassign for a bot this strategy does not own", async () => {
+    // The button hangs off an owned row, so an unowned bot only ever gets the
+    // Claim it already had — there is nothing to hand back.
+    FLEET = {
+      controllers: [
+        controller({ controller_id: "orphan", bot_name: "unowned-bot" }),
+      ],
+      owners: [],
+      isLoading: false,
+    };
+    await render(panel());
+
+    const unassign = [...host.querySelectorAll("button")].find(
+      (b) => b.textContent?.trim() === "Unassign",
+    );
+    expect(unassign).toBeUndefined();
   });
 });
