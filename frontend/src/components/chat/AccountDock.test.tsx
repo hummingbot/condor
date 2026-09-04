@@ -40,6 +40,14 @@ vi.mock("@/lib/api", () => ({
     getPortfolioHistory: (...a: unknown[]) => getPortfolioHistory(...a),
     getBots: (...a: unknown[]) => getBots(...a),
     getExecutors: (...a: unknown[]) => getExecutors(...a),
+    // The execution panel reads its fleet through `useFleetData` (FEAT-114),
+    // under the same keys `/bots` holds.
+    getExecutorsPage: async (...a: unknown[]) => ({
+      executors: (await getExecutors(...a)) ?? [],
+      next_cursor: null,
+    }),
+    getFleetMap: () => Promise.resolve({ owners: [], deeds: { bots: {}, since: 0 } }),
+    getAgents: () => Promise.resolve([]),
     getRates: () => Promise.resolve({ rates: {} }),
   },
 }));
@@ -236,7 +244,15 @@ describe("the account dock", () => {
     expect(tab("Portfolio").getAttribute("aria-pressed")).toBe("true");
     expect(tab("Execution").getAttribute("aria-pressed")).toBe("true");
     expect(getBots).toHaveBeenCalledTimes(1);
-    expect([...subscribed].sort()).toEqual(["bots", "executors:brigado_2"]);
+    // The three channels `/bots` itself holds, because the panel now reads
+    // through the same hook (FEAT-114). The socket is shared and ref-counted
+    // per channel, so a reader with the browser open pays for none of them
+    // twice — and a closed section still subscribes to nothing at all.
+    expect([...subscribed].sort()).toEqual([
+      "bots",
+      "controller_perf",
+      "executors:brigado_2",
+    ]);
 
     // Both open: two panes, each `flex-1 basis-0`, so half and half.
     const open = [...column()!.querySelectorAll("div.flex-1.basis-0")];

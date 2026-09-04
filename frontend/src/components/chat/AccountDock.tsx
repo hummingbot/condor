@@ -51,12 +51,18 @@ export function AccountDock({
   shown,
   onToggle,
   onClose,
+  onOpenAgent,
 }: {
   server: string | null;
   /** The open sections, from {@link useAccountPanels}. */
   shown: PanelId[];
   onToggle: (id: PanelId) => void;
   onClose: () => void;
+  /**
+   * Open an agent's panel in the pane (FEAT-114) — handed straight to the
+   * execution section, whose agent rows are the only thing here that names one.
+   */
+  onOpenAgent?: (slug: string) => void;
 }) {
   if (shown.length === 0 || !server) return null;
 
@@ -95,7 +101,7 @@ export function AccountDock({
             {id === "portfolio" ? (
               <DockPortfolio server={server} />
             ) : (
-              <DockExecution server={server} />
+              <DockExecution server={server} onOpenAgent={onOpenAgent} />
             )}
           </DockSection>
         ))}

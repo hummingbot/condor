@@ -1,28 +1,38 @@
-import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import { ArrowRight } from "lucide-react";
-import { Fragment, useMemo } from "react";
-import { useNavigate } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
+import { ArrowRight, ChevronDown, ChevronRight } from "lucide-react";
+import { Fragment, useMemo, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
 
+import {
+  decisionHref,
+  declaredServerOf,
+  fleetRows,
+  rowHref,
+  dueInSec,
+  type FleetRow,
+} from "@/components/agent/workspace/fleet";
 import { ControllerToggle } from "@/components/perf/ControllerToggle";
-import { useCondorWebSocket } from "@/hooks/useWebSocket";
-import { useRates } from "@/hooks/useRates";
-import { api, type ControllerInfo } from "@/lib/api";
+import {
+  executionCounts,
+  executionRows,
+  openRows,
+  visibleRows,
+  type ExecutionRow,
+} from "@/components/chat/executionTree";
+import { useFleetData } from "@/hooks/useFleetData";
+import { useSeconds } from "@/hooks/useSeconds";
+import { countdown } from "@/lib/agent-attribution";
+import { api } from "@/lib/api";
 import { controllerKey } from "@/lib/controller-identity";
 import {
   formatCompactVolume,
   formatCurrencyPnl,
   formatRuntimeHours,
-  isExecutorActive,
   pnlColor,
   shortBotName,
 } from "@/lib/formatters";
-import {
-  UNATTACHED_BOT,
-  controllerNodeId,
-  leafFromController,
-  type PerfLeaf,
-} from "@/lib/perf-tree";
-import { executorsQuery } from "@/lib/queryClient";
+import { quoteConverter, runningLeaves } from "@/lib/perf-population";
+import { UNATTACHED_BOT, controllerNodeId, type PerfLeaf } from "@/lib/perf-tree";
 
 /**
  * The columns, left to right — the header row and every body row read from it.
@@ -63,11 +73,6 @@ const FIXED_PX = COLUMNS.reduce((sum, c) => sum + (c.width ?? 0), 0);
 const MIN_LABEL_PX = 120;
 export const TABLE_MIN_PX = FIXED_PX + MIN_LABEL_PX;
 
-/** The quote a controller's PnL is denominated in — its pair's, as elsewhere. */
-function quoteOf(pair: string): string {
-  return pair.split("-")[1] || "USDT";
-}
-
 /**
  * How many characters of a bot name a group header keeps.
  *
@@ -99,14 +104,29 @@ function clipBotName(name: string): string {
 }
 
 /**
- * What is trading right now on the server this conversation is about.
+ * What is trading right now on the server this conversation is about — and who
+ * is driving it (FEAT-114).
  *
- * The deployed fleet, in the shape the perf browser folds it: controllers
- * grouped under the bot that deployed them, the executors each is running, and
- * the executors no deployed controller claims. Every row deep-links into
- * `/bots` by the `?scope=` id the browser reads (FEAT-084, FEAT-086) — and
- * builds that id by calling `controllerNodeId` on the same `PerfLeaf` the
- * browser folds, so the two can only drift if the browser's own tree does.
+ * The deployed fleet, in the shape the perf browser folds it, read **owner
+ * first**: one row per agent, each expanding into the bots, controllers and
+ * executors that agent deployed, and then the controllers nobody owns under
+ * *Outside Condor* / *Before the ledger*. Every row deep-links into `/bots` by
+ * the `?scope=` id the browser reads (FEAT-084, FEAT-086) — and builds that id
+ * by calling `controllerNodeId` on the same `PerfLeaf` the browser folds, so
+ * the two can only drift if the browser's own tree does.
+ *
+ * **This is where `/fleet` went.** That page answered *"what is every agent
+ * doing"* on a screen of its own, and a second surface over one fleet is a
+ * second fold of one set of records — the disagreement ARCH-324 exists to
+ * prevent. So the page is gone, its rules (`workspace/fleet.ts`) are read from
+ * here, and the agent is a *level of this tree* rather than a tab of its own:
+ * the panel's selector is still the server, exactly as the rail's docstring
+ * requires, and a level was added to it.
+ *
+ * **The trade-off is one server.** The panel reads `dockServer` — the chat
+ * slot's, falling back to the ambient one — and the sheet's bar names it. An
+ * agent trading somewhere else is named in a line at the foot rather than
+ * shown as a zero.
  *
  * **Running is the kill switch, not `status`.** The `/bots` payload hardcodes
  * `"running"` for every controller it reports; what actually stops one is
@@ -125,115 +145,151 @@ function clipBotName(name: string): string {
  * but takes nothing down and the same click puts it back. Stopping the *bot* is
  * still the browser's, where an armed confirmation has room to say what dies.
  *
- * Mounted only while the section is open (see `DockSection`): closed, neither
- * query nor the socket subscription below exists.
+ * Mounted only while the section is open (see `DockSection`): closed, none of
+ * this is fetched. Open, it costs nothing a reader with `/bots` up was not
+ * already paying — `useFleetData` holds the same query keys, and `history:
+ * false` keeps the performance-history walk out of a panel that draws no curve.
  */
-export function DockExecution({ server }: { server: string }) {
+export function DockExecution({
+  server,
+  onOpenAgent,
+}: {
+  server: string;
+  /**
+   * Open an agent's panel in the pane — the agent this row is about, not the
+   * conversation's. Absent, the row navigates to the agent's own page instead,
+   * which is what a host with no pane can offer.
+   */
+  onOpenAgent?: (slug: string) => void;
+}) {
   const navigate = useNavigate();
 
-  // Live frames, with a relaxed poll behind them — the arrangement `/portfolio`
-  // already uses. The socket is shared and ref-counted per channel, so a second
-  // subscriber to a channel a page already holds costs nothing on the wire.
-  const channels = useMemo(() => ["bots", `executors:${server}`], [server]);
-  useCondorWebSocket(channels, server);
+  // One call, under the keys `/bots` already holds — so the socket, the poll
+  // and the caches are shared rather than doubled, and a reader with the
+  // browser open pays nothing for this panel. No history walk: this folds, it
+  // does not chart, and the walk costs a paged request per controller.
+  const fleet = useFleetData(server, { population: "running", history: false });
 
-  const { data: bots, isLoading, error } = useQuery({
-    queryKey: ["bots", server],
-    queryFn: () => api.getBots(server),
-    refetchInterval: 30_000,
-    placeholderData: keepPreviousData,
+  // Same key and interval `AgentChatTab` and the rail already poll, so the
+  // agent rows' liveness arrives with a request nobody made for them.
+  const { data: agents = [] } = useQuery({
+    queryKey: ["agents"],
+    queryFn: api.getAgents,
+    refetchInterval: 10000,
   });
 
-  const { data: executors } = useQuery({
-    queryKey: executorsQuery(server).queryKey,
-    queryFn: () => api.getExecutors(server),
-    refetchInterval: 60_000,
-    placeholderData: keepPreviousData,
-  });
+  // A clock only while something is looping: the countdown is the one thing in
+  // this panel that moves on its own, and an interval running under a fleet
+  // that is idle is an interval running for nothing.
+  const anyRunning = agents.some((agent) => agent.status === "running");
+  const now = useSeconds(anyRunning);
+  const nowSec = now / 1000;
 
   /**
-   * Every controller the fleet is carrying, quoting or paused, deduped the way
-   * everything that keys a controller has to be: on bot + config id, because
-   * one config deployed to two bots is two independent controllers sharing an
-   * id (CORR-241).
+   * Everything trading, in the browser's one vocabulary and its one attribution.
    *
-   * Sorted by bot then label and *not* by state: a controller keeps its place
-   * in its bot's list when it is paused, so pausing one from this panel does
-   * not make the row jump out from under the cursor that just paused it.
+   * `runningLeaves` rather than a second construction here: it is the same
+   * function `/bots` and the Money view build their populations with, so this
+   * panel cannot disagree with them about who owns what.
+   *
+   * Sorted by bot then label and *not* by state, which is the order this panel
+   * has always drawn: a controller keeps its place in its bot's list when it is
+   * paused, so pausing one from here does not make the row jump out from under
+   * the cursor that just paused it.
    */
-  const deployed = useMemo<PerfLeaf[]>(() => {
-    const seen = new Map<string, ControllerInfo>();
-    for (const c of bots?.controllers ?? []) seen.set(controllerKey(c), c);
-    return [...seen.values()]
-      .map((c) => leafFromController(c))
+  const leaves = useMemo(() => {
+    const all = runningLeaves({
+      controllers: fleet.controllers,
+      executors: fleet.executors,
+      owners: fleet.owners,
+      deeds: fleet.deeds,
+    });
+    const controllers = all
+      .filter((leaf) => leaf.kind === "controller")
       .sort((a, b) => a.bot.localeCompare(b.bot) || a.label.localeCompare(b.label));
-  }, [bots]);
+    return [...controllers, ...all.filter((leaf) => leaf.kind !== "controller")];
+  }, [fleet.controllers, fleet.executors, fleet.owners, fleet.deeds]);
 
-  const paused = useMemo(
-    () => deployed.filter((leaf) => leaf.status === "stopped").length,
-    [deployed],
+  const convert = useMemo(() => quoteConverter(fleet.convert), [fleet.convert]);
+  const currencySymbol = fleet.currencySymbol ?? "$";
+
+  const rows = useMemo(
+    () => executionRows({ leaves, deeds: fleet.deeds, agents, convert, now }),
+    [leaves, fleet.deeds, agents, convert, now],
+  );
+
+  // Only what the reader has actually clicked; the default for everything else
+  // is a question about the fleet's shape, and `openRows` answers it.
+  const [toggled, setToggled] = useState<Record<string, boolean>>({});
+  const open = useMemo(() => openRows(rows, toggled), [rows, toggled]);
+  const shown = useMemo(() => visibleRows(rows, open), [rows, open]);
+  const { controllers: deployedCount, paused } = useMemo(
+    () => executionCounts(rows),
+    [rows],
   );
 
   /**
    * How many live executors each controller is running, and how many nobody
    * claims.
    *
-   * The record carries a `controller_id` and no bot, so the bot is looked up
-   * from the deployed fleet — the same rule `leafFromExecutor` documents,
-   * filing an executor that matches no deployed controller under
-   * `(unattached)`. Paused controllers are in that lookup: one that was paused
-   * while an executor was still winding down owns that executor, and filing it
-   * under Unattached instead would invent an orphan that has a parent.
+   * Keyed on bot + config id, because one config deployed to two bots is two
+   * independent controllers sharing an id (CORR-241). A leaf with no
+   * `controllerId` is one `leafFromExecutor` could not attach to any live
+   * controller — the hand-opened positions and the ones left behind — and they
+   * are counted rather than dropped.
    */
   const { byController, unattached, liveExecutors } = useMemo(() => {
-    const botByController = new Map<string, string>();
-    for (const leaf of deployed) botByController.set(leaf.controllerId, leaf.bot);
-
     const counts = new Map<string, number>();
     let orphans = 0;
     let total = 0;
-    for (const ex of executors ?? []) {
-      if (!isExecutorActive(ex.status)) continue;
+    for (const leaf of leaves) {
+      if (leaf.kind !== "executor") continue;
       total += 1;
-      const bot = botByController.get(ex.controller_id);
-      if (!bot) {
+      if (!leaf.controllerId) {
         orphans += 1;
         continue;
       }
-      const key = controllerKey({ bot_name: bot, controller_id: ex.controller_id });
+      const key = controllerKey({ bot_name: leaf.bot, controller_id: leaf.controllerId });
       counts.set(key, (counts.get(key) ?? 0) + 1);
     }
     return { byController: counts, unattached: orphans, liveExecutors: total };
-  }, [deployed, executors]);
+  }, [leaves]);
+
+  /** The agents' own liveness, from the rules `/fleet` used to be markup over. */
+  const live = useMemo(() => {
+    const by = new Map<string, FleetRow>();
+    for (const row of fleetRows(agents, nowSec)) by.set(row.slug, row);
+    return by;
+  }, [agents, nowSec]);
+  const looping = useMemo(
+    () => [...live.values()].filter((row) => row.live?.status === "running").length,
+    [live],
+  );
 
   /**
-   * The rows, grouped under the bot that deployed them.
+   * The agents that trade somewhere else — named, not shown as a zero.
    *
-   * Grouped rather than flat because a bot name is the long half of a
-   * controller's identity — real ones run to sixty characters — and repeating
-   * it on every row truncates away the config id, which is the only half that
-   * tells two rows apart. A group header spanning the table costs one line per
-   * bot and gives every controller row its full width back.
-   *
-   * Uncapped. The list used to stop at six with a "+N more" line under it,
-   * which was the right trade for a two-line-per-row list in a floating panel
-   * and is the wrong one for a table in a column the reader sized themselves:
-   * the whole point of a table is that row seven costs nothing to scan, and the
-   * pane scrolls.
+   * The desk is one server, deliberately, and an agent whose declared server is
+   * not this one has no records here to fold. A row of dashes would read as *it
+   * made nothing*; a line saying where it does trade is the honest version of
+   * the same fact, and it links out to the page that can answer.
    */
-  const groups = useMemo(() => {
-    const out: { bot: string; leaves: PerfLeaf[] }[] = [];
-    for (const leaf of deployed) {
-      const last = out[out.length - 1];
-      if (last && last.bot === leaf.bot) last.leaves.push(leaf);
-      else out.push({ bot: leaf.bot, leaves: [leaf] });
-    }
-    return out;
-  }, [deployed]);
-
-  const { convert, currencySymbol } = useRates(
-    useMemo(() => deployed.map((leaf) => quoteOf(leaf.pair)), [deployed]),
-  );
+  const elsewhere = useMemo(() => {
+    const here = new Set(
+      rows.flatMap((row) => (row.agent ? [row.agent.slug] : [])),
+    );
+    return agents
+      .filter((agent) => !here.has(agent.slug) && (agent.strategies ?? []).length > 0)
+      .map((agent) => {
+        const row = live.get(agent.slug);
+        const declared = declaredServerOf(agent, row?.strategy ?? null);
+        return { row, declared };
+      })
+      .filter(
+        (entry): entry is { row: FleetRow; declared: string } =>
+          !!entry.row && !!entry.declared && entry.declared !== server,
+      );
+  }, [agents, rows, live, server]);
 
   const footer = (
     <button
@@ -246,7 +302,7 @@ export function DockExecution({ server }: { server: string }) {
     </button>
   );
 
-  if (error) {
+  if (fleet.error) {
     return (
       <div className="flex flex-col">
         <p className="px-3 py-2 text-[11px] text-[var(--color-red)]">
@@ -257,7 +313,7 @@ export function DockExecution({ server }: { server: string }) {
     );
   }
 
-  if (isLoading && !bots) {
+  if (fleet.isLoading && fleet.controllers.length === 0) {
     return (
       <p className="px-3 py-2 text-[11px] text-[var(--color-text-muted)]">
         Reading {server}…
@@ -265,7 +321,7 @@ export function DockExecution({ server }: { server: string }) {
     );
   }
 
-  if (!deployed.length && !unattached) {
+  if (!deployedCount && !unattached) {
     return (
       <div className="flex flex-col">
         <p className="px-3 py-2 text-[11px] text-[var(--color-text-muted)]">
@@ -276,16 +332,21 @@ export function DockExecution({ server }: { server: string }) {
     );
   }
 
+  const toggle = (id: string) =>
+    setToggled((prev) => ({ ...prev, [id]: !open.has(id) }));
+
   return (
     <div className="flex flex-col">
-      {/* What the two figures are counting, kept on screen while the list
-          scrolls — the count is the answer, the rows are the detail. */}
+      {/* The three figures the fleet page uniquely answered, kept on screen
+          while the list scrolls — the counts are the answer, the rows are the
+          detail. */}
       <div
         className="sticky top-0 z-10 flex items-baseline gap-2 bg-[var(--color-bg)] px-3 pb-1 pt-0.5 text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]"
         data-testid="execution-counts"
       >
         <span className="min-w-0 flex-1 truncate">
-          {deployed.length} controller{deployed.length === 1 ? "" : "s"}
+          {looping} looping · {deployedCount} controller
+          {deployedCount === 1 ? "" : "s"}
           {/* Said here rather than left to be counted down the rows: how much
               of a fleet is actually quoting is the first thing this panel is
               read for, and a paused row looks like a quiet one from a distance. */}
@@ -300,12 +361,13 @@ export function DockExecution({ server }: { server: string }) {
 
       {/* A table, not a list of cards. Every controller answers the same eight
           questions, and eight answers per row only stay comparable when they
-          are in eight columns: the two-line row this replaces put volume and
-          PnL on different lines at different widths, so "which of these is
-          losing money" was read by scrolling rather than by looking down a
-          column. It fits whatever width the panel was dragged to and only
-          scrolls sideways below `TABLE_MIN_PX`, where the controller name would
-          otherwise be squeezed out of legibility. */}
+          are in eight columns. The agent and bot rows above them span the whole
+          table instead: they are headings with a fold attached, not eight more
+          numbers, and giving them the controller's columns would have put an
+          agent's total under a heading that says "Controller". It fits whatever
+          width the panel was dragged to and only scrolls sideways below
+          `TABLE_MIN_PX`, where the controller name would otherwise be squeezed
+          out of legibility. */}
       <div className="min-w-0 overflow-x-auto">
         <table
           className="w-full table-fixed border-collapse text-[11px]"
@@ -340,112 +402,42 @@ export function DockExecution({ server }: { server: string }) {
             </tr>
           </thead>
           <tbody>
-            {groups.map((group) => (
-              <Fragment key={group.bot}>
-                {/* The bot, once per group: its whole branch in the browser,
-                    and the level the executors under it are counted at. */}
-                <tr>
-                  <td colSpan={COLUMNS.length} className="p-0">
-                    <button
-                      type="button"
-                      onClick={() => navigate(`/bots?scope=bot:${group.bot}`)}
-                      title={`Everything ${group.bot} is running`}
-                      data-bot-group
-                      className="flex w-full items-baseline gap-2 px-3 pt-1.5 text-left text-[10px] uppercase tracking-wider text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-                    >
-                      <span className="min-w-0 flex-1 truncate">
-                        {clipBotName(group.bot)}
-                      </span>
-                    </button>
-                  </td>
-                </tr>
-                {group.leaves.map((leaf) => {
-                  const quote = quoteOf(leaf.pair);
-                  const money = (val: number) => convert(val, quote).value;
-                  const net = money(leaf.net);
-                  const realized = money(leaf.realized);
-                  const unrealized = money(leaf.unrealized);
-                  const uptime = leaf.startedAt
-                    ? (Date.now() - leaf.startedAt) / 3_600_000
-                    : NaN;
-                  const scope = controllerNodeId(leaf);
-                  const stopped = leaf.status === "stopped";
-                  return (
-                    <tr
-                      key={leaf.id}
-                      data-controller-row
-                      data-paused={stopped ? "" : undefined}
-                      role="button"
-                      tabIndex={0}
-                      title={`${leaf.label} on ${leaf.bot}${stopped ? " — paused" : ""}`}
-                      onClick={() => navigate(`/bots?scope=${scope}`)}
-                      onKeyDown={(e) => {
-                        if (e.key !== "Enter" && e.key !== " ") return;
-                        e.preventDefault();
-                        navigate(`/bots?scope=${scope}`);
-                      }}
-                      className={`cursor-pointer transition-colors hover:bg-[var(--color-surface-hover)] ${
-                        // Paused rows are dimmed rather than tinted: their
-                        // numbers are still true, they are just no longer
-                        // moving, and a row that shouted would compete with the
-                        // PnL colours for the same glance.
-                        stopped ? "opacity-55" : ""
-                      }`}
-                    >
-                      {/* The column that absorbs the slack, and the only one
-                          allowed to truncate: two rows under the same bot are
-                          told apart by nothing else, so it gets every pixel the
-                          numbers do not need — and the row's `title` says it in
-                          full when even that is not enough. */}
-                      <td className="truncate py-0.5 pl-3 pr-1.5">
-                        {leaf.label}
-                      </td>
-                      <td className="whitespace-nowrap px-1.5 py-0.5 text-[var(--color-text-muted)]">
-                        {leaf.pair}
-                      </td>
-                      <td className="px-1.5 py-0.5 text-right font-mono tabular-nums">
-                        {byController.get(leaf.id) ?? 0}
-                      </td>
-                      <td className="whitespace-nowrap px-1.5 py-0.5 text-right font-mono tabular-nums text-[var(--color-text-muted)]">
-                        {formatRuntimeHours(uptime)}
-                      </td>
-                      <td className="whitespace-nowrap px-1.5 py-0.5 text-right font-mono tabular-nums text-[var(--color-text-muted)]">
-                        {formatCompactVolume(money(leaf.volume), currencySymbol)}
-                      </td>
-                      <td
-                        className="whitespace-nowrap px-1.5 py-0.5 text-right font-mono tabular-nums"
-                        style={{ color: pnlColor(realized) }}
-                      >
-                        {formatCurrencyPnl(realized, currencySymbol)}
-                      </td>
-                      <td
-                        className="whitespace-nowrap px-1.5 py-0.5 text-right font-mono tabular-nums"
-                        style={{ color: pnlColor(unrealized) }}
-                      >
-                        {formatCurrencyPnl(unrealized, currencySymbol)}
-                      </td>
-                      <td
-                        className="whitespace-nowrap px-1.5 py-0.5 text-right font-mono font-medium tabular-nums"
-                        style={{ color: pnlColor(net) }}
-                      >
-                        {formatCurrencyPnl(net, currencySymbol)}
-                      </td>
-                      {/* The one cell that acts rather than reports. It stops
-                          the click from reaching the row, because the row
-                          navigates away and a pause that also left the page
-                          would look like it had done something else. */}
-                      <td className="py-0.5 pl-1.5 pr-3 text-right">
-                        <ControllerToggle
-                          server={server}
-                          bot={leaf.bot}
-                          controllerId={leaf.controllerId}
-                          stopped={stopped}
-                          label={leaf.label}
+            {shown.map((row) => (
+              <Fragment key={row.id}>
+                {row.kind === "controller" ? (
+                  <ControllerRow
+                    row={row}
+                    server={server}
+                    executors={byController.get(row.leaves[0].id) ?? 0}
+                    now={now}
+                    convert={convert}
+                    symbol={currencySymbol}
+                    onOpen={(scope) => navigate(`/bots?scope=${scope}`)}
+                  />
+                ) : (
+                  <tr>
+                    <td colSpan={COLUMNS.length} className="p-0">
+                      {row.kind === "agent" ? (
+                        <AgentRow
+                          row={row}
+                          live={row.agent ? live.get(row.agent.slug) ?? null : null}
+                          nowSec={nowSec}
+                          symbol={currencySymbol}
+                          open={open.has(row.id)}
+                          onToggle={() => toggle(row.id)}
+                          onOpenAgent={onOpenAgent}
                         />
-                      </td>
-                    </tr>
-                  );
-                })}
+                      ) : (
+                        <BotRow
+                          row={row}
+                          open={open.has(row.id)}
+                          onToggle={() => toggle(row.id)}
+                          onOpen={() => navigate(`/bots?scope=bot:${row.label}`)}
+                        />
+                      )}
+                    </td>
+                  </tr>
+                )}
               </Fragment>
             ))}
           </tbody>
@@ -468,7 +460,313 @@ export function DockExecution({ server }: { server: string }) {
         </button>
       )}
 
+      {elsewhere.length > 0 && (
+        <div
+          data-execution-elsewhere
+          className="border-t border-[var(--color-border)] px-3 py-1 text-[10px] text-[var(--color-text-muted)]"
+        >
+          {elsewhere.map(({ row, declared }) => (
+            <Link
+              key={row.slug}
+              to={rowHref(row)}
+              title={`${row.name} trades on ${declared}, which this desk is not reading`}
+              className="block truncate transition-colors hover:text-[var(--color-text)]"
+            >
+              {row.name} · trades on {declared}
+            </Link>
+          ))}
+        </div>
+      )}
+
       {footer}
     </div>
+  );
+}
+
+/** The chevron, or the space one would have taken — so nothing shifts sideways. */
+function Twisty({
+  open,
+  onToggle,
+  label,
+}: {
+  open: boolean;
+  onToggle: (() => void) | null;
+  label: string;
+}) {
+  if (!onToggle) return <span className="h-3 w-3 shrink-0" />;
+  const Icon = open ? ChevronDown : ChevronRight;
+  return (
+    <button
+      type="button"
+      data-execution-twisty
+      aria-expanded={open}
+      title={open ? `Collapse ${label}` : `Expand ${label}`}
+      onClick={(e) => {
+        // The row around it opens something; the chevron only unfolds it, and
+        // a click that did both would navigate away from what it just revealed.
+        e.stopPropagation();
+        onToggle();
+      }}
+      className="shrink-0 text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-text)]"
+    >
+      <Icon className="h-3 w-3" />
+    </button>
+  );
+}
+
+/**
+ * One agent, and what its records on this server add up to.
+ *
+ * The money is **the fold** over this row's spine, not the run rollup the
+ * `["agents"]` payload carries: it is the number `/bots` prints for the same
+ * scope, and ARCH-324's rule is that there is one of it. The liveness beside it
+ * — the dot, the last decision, the next tick — is the run's, from `fleetRows`,
+ * because none of the three is a fact about trading records at all.
+ */
+function AgentRow({
+  row,
+  live,
+  nowSec,
+  symbol,
+  open,
+  onToggle,
+  onOpenAgent,
+}: {
+  row: ExecutionRow;
+  /** The agent's own run, or `null` for an owner nothing claims. */
+  live: FleetRow | null;
+  nowSec: number;
+  symbol: string;
+  open: boolean;
+  onToggle: () => void;
+  onOpenAgent?: (slug: string) => void;
+}) {
+  const navigate = useNavigate();
+  const running = live?.live?.status === "running";
+  const due = dueInSec(live?.live ?? null, nowSec);
+  const slug = row.agent?.slug;
+
+  const openIt = () => {
+    if (!slug) return onToggle();
+    if (onOpenAgent) onOpenAgent(slug);
+    else navigate(`/agents/${encodeURIComponent(slug)}`);
+  };
+
+  return (
+    <div data-agent-row={row.id} className="px-3 pt-1.5">
+      <div className="flex items-baseline gap-1.5">
+        <Twisty open={open} onToggle={row.hasChildren ? onToggle : null} label={row.label} />
+        <button
+          type="button"
+          data-agent-open={slug ?? ""}
+          onClick={openIt}
+          title={
+            slug
+              ? `Open ${row.label} — everything it is running on this server`
+              : `${row.label} — records this fleet map does not credit to an agent`
+          }
+          className="flex min-w-0 flex-1 items-baseline gap-1.5 text-left transition-colors hover:text-[var(--color-text)]"
+        >
+          {/* Live, paused, or not looping at all — and never absent: an agent
+              that has stopped is still an agent whose records are on screen. */}
+          <span
+            data-agent-live={running ? "" : undefined}
+            className={`h-1.5 w-1.5 shrink-0 self-center rounded-full ${
+              running
+                ? "bg-emerald-400"
+                : live?.live
+                  ? "bg-amber-400"
+                  : "bg-[var(--color-text-muted)]/40"
+            }`}
+          />
+          <span className="min-w-0 truncate text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
+            {row.label}
+          </span>
+        </button>
+        <span
+          className="shrink-0 font-mono tabular-nums"
+          style={{ color: pnlColor(row.totals.net) }}
+        >
+          {formatCurrencyPnl(row.totals.net, symbol)}
+        </span>
+        <span className="shrink-0 font-mono tabular-nums text-[var(--color-text-muted)]">
+          {formatCompactVolume(row.totals.volume, symbol)}
+        </span>
+      </div>
+
+      {live && (
+        <div className="flex items-baseline gap-1.5 pl-[18px] text-[10px] text-[var(--color-text-muted)]">
+          {due !== null && (
+            <span
+              data-agent-due
+              className={`shrink-0 font-mono ${due <= 0 ? "text-amber-400" : ""}`}
+            >
+              {due > 0 ? `next in ${countdown(due)}` : `overdue ${countdown(-due)}`}
+            </span>
+          )}
+          {live.lastDid ? (
+            <Link
+              to={decisionHref(live)}
+              data-agent-decision
+              title="Read the whole tick this came from"
+              className={`min-w-0 truncate transition-colors hover:underline ${
+                live.lastDid.ok ? "" : "text-[var(--color-red)]"
+              }`}
+            >
+              {live.lastDid.summary}
+            </Link>
+          ) : (
+            live.lastSaid && (
+              <span data-agent-decision className="min-w-0 truncate">
+                {live.lastSaid}
+              </span>
+            )
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * One bot, once per group: its whole branch in the browser, and the level the
+ * executors under it are counted at.
+ *
+ * Drawn only when the agent above it runs more than one — a fleet running a
+ * single bot must not spend a chevron saying so (see `executionTree`).
+ */
+function BotRow({
+  row,
+  open,
+  onToggle,
+  onOpen,
+}: {
+  row: ExecutionRow;
+  open: boolean;
+  onToggle: () => void;
+  onOpen: () => void;
+}) {
+  return (
+    <div className="flex items-baseline gap-1.5 px-3 pt-1">
+      <Twisty open={open} onToggle={row.hasChildren ? onToggle : null} label={row.label} />
+      <button
+        type="button"
+        onClick={onOpen}
+        title={`Everything ${row.label} is running`}
+        data-bot-group
+        className="flex min-w-0 flex-1 items-baseline gap-2 pl-3 text-left text-[10px] uppercase tracking-wider text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-text)]"
+      >
+        <span className="min-w-0 flex-1 truncate">{clipBotName(row.label)}</span>
+      </button>
+    </div>
+  );
+}
+
+/** One controller — the row this panel has always drawn, one level deeper. */
+function ControllerRow({
+  row,
+  server,
+  executors,
+  now,
+  convert,
+  symbol,
+  onOpen,
+}: {
+  row: ExecutionRow;
+  server: string;
+  executors: number;
+  /**
+   * The panel's clock, handed down rather than read here.
+   *
+   * A `Date.now()` in render is what the compiler forbids, and it is the same
+   * clock the fold above measured its runtimes against — so the uptime a row
+   * prints and the hours its totals were computed over cannot disagree.
+   */
+  now: number;
+  convert: (value: number, pair: string) => number;
+  symbol: string;
+  onOpen: (scope: string) => void;
+}) {
+  const leaf: PerfLeaf = row.leaves[0];
+  const money = (val: number) => convert(val, leaf.pair);
+  const net = money(leaf.net);
+  const realized = money(leaf.realized);
+  const unrealized = money(leaf.unrealized);
+  const uptime = leaf.startedAt ? (now - leaf.startedAt) / 3_600_000 : NaN;
+  const scope = controllerNodeId(leaf) ?? row.id;
+  const stopped = leaf.status === "stopped";
+
+  return (
+    <tr
+      data-controller-row
+      data-paused={stopped ? "" : undefined}
+      role="button"
+      tabIndex={0}
+      title={`${leaf.label} on ${leaf.bot}${stopped ? " — paused" : ""}`}
+      onClick={() => onOpen(scope)}
+      onKeyDown={(e) => {
+        if (e.key !== "Enter" && e.key !== " ") return;
+        e.preventDefault();
+        onOpen(scope);
+      }}
+      className={`cursor-pointer transition-colors hover:bg-[var(--color-surface-hover)] ${
+        // Paused rows are dimmed rather than tinted: their numbers are still
+        // true, they are just no longer moving, and a row that shouted would
+        // compete with the PnL colours for the same glance.
+        stopped ? "opacity-55" : ""
+      }`}
+    >
+      {/* The column that absorbs the slack, and the only one allowed to
+          truncate: two rows under the same bot are told apart by nothing else,
+          so it gets every pixel the numbers do not need — and the row's `title`
+          says it in full when even that is not enough. It is indented by its
+          depth, which is what makes the nesting readable without a rule. */}
+      <td
+        className="truncate py-0.5 pr-1.5"
+        style={{ paddingLeft: 12 + row.depth * 10 }}
+      >
+        {leaf.label}
+      </td>
+      <td className="whitespace-nowrap px-1.5 py-0.5 text-[var(--color-text-muted)]">
+        {leaf.pair}
+      </td>
+      <td className="px-1.5 py-0.5 text-right font-mono tabular-nums">{executors}</td>
+      <td className="whitespace-nowrap px-1.5 py-0.5 text-right font-mono tabular-nums text-[var(--color-text-muted)]">
+        {formatRuntimeHours(uptime)}
+      </td>
+      <td className="whitespace-nowrap px-1.5 py-0.5 text-right font-mono tabular-nums text-[var(--color-text-muted)]">
+        {formatCompactVolume(money(leaf.volume), symbol)}
+      </td>
+      <td
+        className="whitespace-nowrap px-1.5 py-0.5 text-right font-mono tabular-nums"
+        style={{ color: pnlColor(realized) }}
+      >
+        {formatCurrencyPnl(realized, symbol)}
+      </td>
+      <td
+        className="whitespace-nowrap px-1.5 py-0.5 text-right font-mono tabular-nums"
+        style={{ color: pnlColor(unrealized) }}
+      >
+        {formatCurrencyPnl(unrealized, symbol)}
+      </td>
+      <td
+        className="whitespace-nowrap px-1.5 py-0.5 text-right font-mono font-medium tabular-nums"
+        style={{ color: pnlColor(net) }}
+      >
+        {formatCurrencyPnl(net, symbol)}
+      </td>
+      {/* The one cell that acts rather than reports. It stops the click from
+          reaching the row, because the row navigates away and a pause that also
+          left the page would look like it had done something else. */}
+      <td className="py-0.5 pl-1.5 pr-3 text-right">
+        <ControllerToggle
+          server={server}
+          bot={leaf.bot}
+          controllerId={leaf.controllerId}
+          stopped={stopped}
+          label={leaf.label}
+        />
+      </td>
+    </tr>
   );
 }
