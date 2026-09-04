@@ -31,6 +31,17 @@ CREATE_EXECUTOR_TOOLS = frozenset(
     }
 )
 
+#: The create tools that take a ``leverage`` parameter, and so the ones a
+#: leverage limit can stand in front of (SEC-558). ``create_lp_executor`` opens
+#: a CLMM position, which is not margined, and takes no leverage at all.
+LEVERAGED_EXECUTOR_TOOLS = CREATE_EXECUTOR_TOOLS - {"create_lp_executor"}
+
+#: The account-wide leverage control. It is scoped to an (account, connector,
+#: trading pair) and to nothing else, so raising leverage with it moves the
+#: liquidation price under *every* position on that pair -- including ones the
+#: caller never opened, and including a human's (SEC-558).
+LEVERAGE_TOOL = "set_account_position_mode_and_leverage"
+
 # Tools that require user confirmation before execution
 DANGEROUS_TOOLS = {
     "place_order",
@@ -47,6 +58,13 @@ DANGEROUS_TOOLS = {
     # executor_defaults) is safe by name and never reaches a human.
     *CREATE_EXECUTOR_TOOLS,
     "stop_executor",
+    # Account-wide leverage. It opens no position of its own, which is exactly
+    # why it was missed: it re-prices the ones already open. A create is gated
+    # on the capital it commits, and leverage is what decides how far the market
+    # has to move before that capital is gone -- so the call that changes it
+    # belongs in front of the same human (SEC-558). Loop mode checks it against
+    # `max_leverage` in condor.agents.risk.
+    LEVERAGE_TOOL,
 }
 
 # Tools that are always blocked (RBAC bypass prevention)
@@ -430,6 +448,7 @@ def is_mutating_tool_call(tool_call: dict[str, Any]) -> bool:
         "place_order",
         "execute_swap",
         "stop_executor",
+        LEVERAGE_TOOL,
     }
 
 
@@ -502,6 +521,25 @@ def format_tool_summary(tool_call: dict[str, Any]) -> str:
             return "Stop executor (id could not be read)"
         suffix = ", keeping the position" if keep else ""
         return f"Stop executor {exec_id[:12]}...{suffix}"
+
+    if tool_name == LEVERAGE_TOOL:
+        # Both halves of the call are named because either can be the one that
+        # matters, and the line says who it lands on: this tool is scoped to an
+        # account and a pair, not to one position.
+        connector = input_data.get("connector_name", "?")
+        pair = input_data.get("trading_pair") or ""
+        leverage = input_data.get("leverage")
+        mode = input_data.get("position_mode")
+        changes = []
+        if leverage is not None:
+            changes.append(f"leverage to {leverage}x")
+        if mode:
+            changes.append(f"position mode to {mode}")
+        what = " and ".join(changes) if changes else "nothing"
+        target = f"{pair} on {connector}" if pair else connector
+        return (
+            f"Set {what} for {target} (every position on it, not just this session's)"
+        )
 
     if tool_name == "manage_bots":
         action = input_data.get("action", "?")

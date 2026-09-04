@@ -35,6 +35,13 @@ class RiskLimitsConfig(BaseModel):
         "controllers may show before new exposure is refused; brakes always "
         "pass. -1 = disabled",
     )
+    max_leverage: float = Field(
+        default=-1.0,
+        description="Most leverage a create may ask for, and the highest this "
+        "session may set on an account. With it enabled, a create that "
+        "declares no leverage is refused (the venue's own default applies to "
+        "an omitted one). -1 = disabled",
+    )
 
 
 class AgentConfig(BaseModel):

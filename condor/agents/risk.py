@@ -18,6 +18,8 @@ from condor.runtime.danger import (
     DANGEROUS_AMM_ACTIONS,
     DANGEROUS_BOT_ACTIONS,
     DANGEROUS_CLMM_ACTIONS,
+    LEVERAGE_TOOL,
+    LEVERAGED_EXECUTOR_TOOLS,
     is_dangerous_tool_call,
     tool_call_input,
     tool_call_name,
@@ -43,6 +45,15 @@ class RiskLimits:
     # in kind, a position closing between the two reads — and an install that
     # blocked on it would be taught to raise this until it never fired).
     max_drift_quote: float = -1.0
+    # The most leverage a create may ask for, and the highest this session may
+    # set on an account ([[SEC-558]]). The other limits bound the capital at
+    # stake; this one bounds how far the market has to move before that capital
+    # is gone -- a 90-quote grid at 1x and at 20x are the same number to
+    # ``max_position_size_quote``. -1 = disabled, the same convention
+    # ``max_drift_quote`` uses, so no existing session changes behavior on
+    # upgrade. Deliberately NOT 1: a strategy whose owner approved a 5x default
+    # at setup would otherwise stop trading the moment this shipped.
+    max_leverage: float = -1.0
 
     @classmethod
     def from_dict(cls, d: dict) -> RiskLimits:
@@ -98,6 +109,9 @@ class RiskState:
             "max_drift_quote": (
                 self._limits.max_drift_quote if hasattr(self, "_limits") else -1
             ),
+            "max_leverage": (
+                self._limits.max_leverage if hasattr(self, "_limits") else -1
+            ),
         }
 
 
@@ -131,6 +145,30 @@ def _is_signing_dex_call(tool_name: str, input_data: dict[str, Any]) -> bool:
 def _dex_call_label(tool_name: str, input_data: dict[str, Any]) -> str:
     """How a refused Gateway call names itself in the reason string."""
     return input_data.get("action", "") or tool_name
+
+
+def _requested_leverage(input_data: dict[str, Any]) -> float | None:
+    """The leverage a call asks for, or ``None`` when it names none.
+
+    Raises ``ValueError`` when the field is there but is not a positive finite
+    number. An unreadable leverage is not read as 1: the module refuses what it
+    cannot value (SEC-093), and reading a malformed field as the safest possible
+    value is how an unparseable call gets approved.
+    """
+    value = input_data.get("leverage")
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"got {value!r}")
+    if isinstance(value, str):
+        value = value.strip().removesuffix("x").removesuffix("X")
+    try:
+        leverage = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"got {value!r}") from exc
+    if not math.isfinite(leverage) or leverage <= 0:
+        raise ValueError(f"got {value!r}")
+    return leverage
 
 
 #: Signing actions that return capital instead of committing it. Allowed even
@@ -217,6 +255,43 @@ class RiskEngine:
 
         return state
 
+    def _leverage_refusal(
+        self, input_data: dict[str, Any], label: str, *, required: bool
+    ) -> tuple[bool, str] | None:
+        """The leverage guard, or ``None`` when this call clears it.
+
+        ``required`` is what separates a create from a leverage-setting call. A
+        create that names no leverage still gets one -- the backend picks its
+        own default, and for a grid that default is 20
+        (mcp_servers/hummingbot_api/server.py:822) -- so on a limit-enabled
+        session an omitted leverage is refused rather than read as 1: an omitted
+        parameter is not a conservative one, and the gate cannot see the number
+        the backend would choose. ``set_account_position_mode_and_leverage``
+        with no ``leverage`` sets none (it only moves the position mode), so
+        there is nothing there to bound.
+        """
+        limit = self.limits.max_leverage
+        if limit < 0:  # disabled: every path behaves exactly as it did
+            return None
+        try:
+            leverage = _requested_leverage(input_data)
+        except ValueError as exc:
+            return False, f"{label}: leverage could not be read ({exc})"
+        if leverage is None:
+            if not required:
+                return None
+            return False, (
+                f"{label}: no leverage declared, so the venue's own default "
+                f"would apply -- declare one at or below the {limit:g}x "
+                "leverage limit"
+            )
+        if leverage > limit:
+            return False, (
+                f"{label}: leverage {leverage:g}x exceeds the "
+                f"{limit:g}x leverage limit"
+            )
+        return None
+
     def check_executor_action(
         self,
         tool_call: dict,
@@ -256,6 +331,17 @@ class RiskEngine:
                 False,
                 f"Max open executors ({self.limits.max_open_executors}) reached",
             )
+
+        # Before the exposure check on purpose, so a leveraged create is
+        # refused for the reason that is actually true of it ([[SEC-558]]):
+        # the quote figure the position limit weighs is the same at 1x and at
+        # 20x, and only this line names the difference.
+        if tool_call_name(tool_call) in LEVERAGED_EXECUTOR_TOOLS:
+            refusal = self._leverage_refusal(
+                input_data, tool_call_name(tool_call), required=True
+            )
+            if refusal:
+                return refusal
 
         if (
             planned_amount_quote is None
@@ -328,6 +414,33 @@ class RiskEngine:
                     f"update_config total_amount_quote ${amount:.2f} exceeds "
                     f"position limit ${self.limits.max_position_size_quote:.2f}"
                 )
+
+        return True, ""
+
+    def check_leverage_action(self, tool_call: dict) -> tuple[bool, str]:
+        """Check a ``set_account_position_mode_and_leverage`` call ([[SEC-558]]).
+
+        The second half of the leverage envelope. A create is gated on the
+        leverage it asks for; this is the call that can raise the leverage on
+        positions that are already open, and it is scoped to an account and a
+        pair rather than to one executor -- so a tick raising it re-prices
+        every position on that pair, including a human's.
+
+        Anything else passes through untouched, and a session with no leverage
+        limit set behaves exactly as it does today.
+
+        Returns (allowed, reason).
+        """
+        input_data = tool_call_input(tool_call)
+        if input_data is None:
+            return False, "Tool arguments could not be read"
+
+        if tool_call_name(tool_call) != LEVERAGE_TOOL:
+            return True, ""
+
+        refusal = self._leverage_refusal(input_data, LEVERAGE_TOOL, required=False)
+        if refusal:
+            return refusal
 
         return True, ""
 
@@ -657,6 +770,16 @@ def auto_approve_with_risk_check(
                     price_client,
                 )
                 if reason:
+                    return deny(tool_name, reason)
+
+            # Account leverage is the one dangerous call that opens no
+            # position of its own: it re-prices the ones already open, and it
+            # is account- and pair-scoped, so a tick can raise the leverage
+            # under a position it never opened (SEC-558). Gated against the
+            # same `max_leverage` the creates above are gated against.
+            if tool_name == LEVERAGE_TOOL:
+                allowed, reason = risk_engine.check_leverage_action(tool_call)
+                if not allowed:
                     return deny(tool_name, reason)
 
             # Bot deploys place real capital via controllers — bound the loss
