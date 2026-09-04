@@ -14,7 +14,7 @@ import {
   KNOWLEDGE_TABS,
   type KnowledgeTabId,
 } from "@/components/agent/knowledgeTabs";
-import { parseRunId, type RunRef } from "@/components/agent/lab/runs";
+import { isLoopRun, parseRunId, type RunRef } from "@/components/agent/lab/runs";
 import type { AgentRunRow, StrategySummary } from "@/lib/api";
 
 /**
@@ -134,6 +134,12 @@ export function pickStrategy(
  * `?run=` naming a run outside the current scope falls back to the newest in
  * scope, which is the Lab's rule verbatim (FEAT-099) — a bare `?view=runs` has
  * to open on something.
+ *
+ * The scope is a *strategy*, so it only bounds the two kinds that have one. A
+ * conversation and a delegation belong to no strategy (FEAT-111), and scoping
+ * them out would make `?run=c:7f3a` unopenable on any agent that also loops —
+ * which is every agent the rail's union exists for. The fallback still comes
+ * from the scope: a chat is addressable, it is never the default selection.
  */
 export function pickRun(
   runs: readonly AgentRunRow[],
@@ -144,12 +150,15 @@ export function pickRun(
     ? runs.filter((r) => r.strategy_slug === strategy)
     : runs;
   if (run) {
-    const match = scoped.find(
-      (r) => r.kind === run.kind && r.number === run.number,
+    const searched = isLoopRun(run.kind) ? scoped : runs;
+    const match = searched.find(
+      (r) =>
+        r.kind === run.kind &&
+        (isLoopRun(run.kind) ? r.number === run.number : r.id === run.id),
     );
     if (match) return match;
   }
-  return scoped[0] ?? null;
+  return scoped.find((r) => isLoopRun(r.kind)) ?? scoped[0] ?? null;
 }
 
 // ── The retired addresses ──

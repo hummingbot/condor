@@ -1278,9 +1278,19 @@ export interface SnapshotSummary {
  * from the strategy's `/performance` query.
  */
 export interface AgentRunRow {
-  /** `s3` | `e1` — the `?run=` value, unique within a strategy. */
+  /**
+   * `s:3` | `e:1` | `d:abc123` | `c:7f3a` — the `?run=` value, unique across
+   * every kind. The pre-FEAT-111 form (`s3`) is still parsed, never written.
+   */
   run_id: string;
-  kind: "session" | "experiment";
+  /**
+   * The two kinds that live under a strategy, and the two that do not: a
+   * delegation's own record and a conversation (FEAT-111).
+   */
+  kind: "session" | "experiment" | "delegation" | "conversation";
+  /** The opaque half of `run_id`: `"3"` for a loop run, an id for the rest. */
+  id: string;
+  /** The ordinal, for the two kinds that have one. `0` otherwise. */
   number: number;
   agent_id: string;
   /** `running|paused|stopped|interrupted|idle|error`. */
@@ -1301,8 +1311,14 @@ export interface AgentRunRow {
    * ticks must read as *unrecorded*, never as ticks that did nothing.
    */
   has_actions_log: boolean;
+  /** Empty for a delegation and a conversation: a strategy is a loop concept. */
   strategy_slug: string;
   strategy_name: string;
+  /**
+   * What this run was about, for the kinds with no strategy to name — a
+   * conversation's title, a delegation's ask. Empty for a loop run.
+   */
+  title: string;
 }
 
 // ── Routines ──
@@ -3122,9 +3138,16 @@ export const api = {
    * The rail's whole query. Like `getFleetMap`, it makes no Hummingbot call —
    * which is what lets the Lab poll it.
    */
-  getAgentRuns: async (slug: string): Promise<AgentRunRow[]> => {
+  /**
+   * Every stretch of work an agent has done, newest first (FEAT-111).
+   *
+   * `limit` is the rail's window and not a filter: a chatty install has
+   * hundreds of conversations, and the rail asks for a bigger page rather than
+   * pulling the archive on every five-second poll.
+   */
+  getAgentRuns: async (slug: string, limit?: number): Promise<AgentRunRow[]> => {
     const data = await apiFetch<{ runs: AgentRunRow[] }>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/runs`,
+      `/api/v1/agents/${encodeURIComponent(slug)}/runs${limit ? `?limit=${limit}` : ""}`,
     );
     return data.runs ?? [];
   },

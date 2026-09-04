@@ -198,8 +198,9 @@ const text = () => container.textContent ?? "";
 /** A live session run of Brigado's loop, as the loop bar hands it over. */
 function session(number: number): AgentRunRow {
   return {
-    run_id: `s${number}`,
+    run_id: `s:${number}`,
     kind: "session",
+    id: String(number),
     number,
     agent_id: `brigado.brl_mm_${number}`,
     status: "running",
@@ -212,6 +213,7 @@ function session(number: number): AgentRunRow {
     has_actions_log: true,
     strategy_slug: "brl_mm",
     strategy_name: "brl_mm",
+    title: "",
   };
 }
 

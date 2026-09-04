@@ -15,35 +15,97 @@
 import type { AgentActionRow } from "@/lib/agent-attribution";
 import type { AgentRunRow } from "@/lib/api";
 
-/** A run's identity in the URL: `s3` is `session_3`, `e1` is `experiment_1`. */
-export interface RunRef {
-  kind: "session" | "experiment";
-  number: number;
-}
+/**
+ * The four kinds of work a run can be (FEAT-111).
+ *
+ * The first two are a sequence of ticks under a strategy. The other two are one
+ * stretch of work each, they belong to no strategy, and they are why an agent
+ * that is only ever chatted with — Condor included — used to have an empty rail.
+ */
+export const RUN_KINDS = ["session", "experiment", "delegation", "conversation"] as const;
 
-/** Parse a `?run=` value. `null` for anything that is not one. */
-export function parseRunId(value: string | null | undefined): RunRef | null {
-  if (!value) return null;
-  const m = /^([se])(\d+)$/.exec(value.trim());
-  if (!m) return null;
-  const number = Number(m[2]);
-  if (!Number.isInteger(number) || number <= 0) return null;
-  return { kind: m[1] === "s" ? "session" : "experiment", number };
-}
+export type RunKind = (typeof RUN_KINDS)[number];
 
-/** The inverse of `parseRunId` — what goes back into the URL. */
-export function formatRunId(ref: RunRef): string {
-  return `${ref.kind === "session" ? "s" : "e"}${ref.number}`;
+/** The letter each kind takes in a `?run=` value. Mirrors `all_runs.py`. */
+const KIND_LETTERS: Record<RunKind, string> = {
+  session: "s",
+  experiment: "e",
+  delegation: "d",
+  conversation: "c",
+};
+
+const KIND_FOR_LETTER: Record<string, RunKind> = {
+  s: "session",
+  e: "experiment",
+  d: "delegation",
+  c: "conversation",
+};
+
+/** Whether this kind is a loop's run — a strategy, an ordinal and ticks. */
+export function isLoopRun(kind: string): boolean {
+  return kind === "session" || kind === "experiment";
 }
 
 /**
- * The short badge on a rail row: `S3`, `D1`, `R1`.
+ * A run's identity in the URL: `s:3` is `session_3`, `c:7f3a` is a conversation.
+ *
+ * `number` is the ordinal for the two kinds that have one and `0` for the two
+ * that do not; `id` is the opaque half, and is the only one of the two that
+ * every kind can be matched on.
+ */
+export interface RunRef {
+  kind: RunKind;
+  number: number;
+  id: string;
+}
+
+/**
+ * Parse a `?run=` value. `null` for anything that is not one.
+ *
+ * Two forms, one written. `s:3` is the grammar since FEAT-111 — a letter, a
+ * colon and an id that does not have to be a number, because a conversation's
+ * is a uuid. `s3` is the form the Lab wrote before that, and it keeps parsing
+ * forever: those links are in bookmarks and in notification payloads, exactly
+ * as `?tab=` keeps parsing as a synonym for `?view=`.
+ */
+export function parseRunId(value: string | null | undefined): RunRef | null {
+  if (!value) return null;
+  const raw = value.trim();
+
+  const scoped = /^([sedc]):(.+)$/.exec(raw);
+  if (scoped) {
+    const kind = KIND_FOR_LETTER[scoped[1]];
+    const id = scoped[2];
+    if (!isLoopRun(kind)) return { kind, number: 0, id };
+    const number = Number(id);
+    if (!/^\d+$/.test(id) || !Number.isInteger(number) || number <= 0) return null;
+    return { kind, number, id };
+  }
+
+  const legacy = /^([se])(\d+)$/.exec(raw);
+  if (!legacy) return null;
+  const number = Number(legacy[2]);
+  if (!Number.isInteger(number) || number <= 0) return null;
+  return { kind: KIND_FOR_LETTER[legacy[1]], number, id: legacy[2] };
+}
+
+/** The inverse of `parseRunId` — what goes back into the URL, always `kind:id`. */
+export function formatRunId(ref: RunRef): string {
+  return `${KIND_LETTERS[ref.kind]}:${ref.id || ref.number}`;
+}
+
+/**
+ * The short badge on a rail row: `S3`, `D1`, `R1`, `C`, `T`.
  *
  * A dry run and a single real tick both land in `dry_runs/` and only one of them
  * can lose money, so they are named apart here the same way `MODE_STYLES` colours
- * them apart.
+ * them apart. The two kinds with no ordinal get a bare letter: `C` for a chat
+ * and `T` for a background task — `D` was already a dry run's, and one letter
+ * meaning two things is how a rail stops being readable.
  */
 export function runLabel(run: Pick<AgentRunRow, "kind" | "number" | "execution_mode">): string {
+  if (run.kind === "conversation") return "C";
+  if (run.kind === "delegation") return "T";
   if (run.kind === "session") return `S${run.number}`;
   if (run.execution_mode === "run_once") return `R${run.number}`;
   if (run.execution_mode === "dry_run") return `D${run.number}`;
@@ -86,10 +148,18 @@ export function formatDuration(seconds: number | null): string {
   return `${s}s`;
 }
 
-/** The rail's second line: `20 ticks · 4h12m`. */
+/**
+ * The rail's second line: `20 ticks · 4h12m`.
+ *
+ * A tick is a loop concept, so the two kinds that have none say only how long
+ * they lasted. Printing `0 ticks` beside a chat would be an assertion about the
+ * chat rather than a fact about it — the same honesty rule the beat states are
+ * built on.
+ */
 export function runFacts(run: AgentRunRow, nowSec: number): string {
-  const ticks = `${run.tick_count} tick${run.tick_count === 1 ? "" : "s"}`;
   const duration = formatDuration(runDurationSec(run, nowSec));
+  if (!isLoopRun(run.kind)) return duration;
+  const ticks = `${run.tick_count} tick${run.tick_count === 1 ? "" : "s"}`;
   return duration ? `${ticks} · ${duration}` : ticks;
 }
 

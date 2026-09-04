@@ -7,6 +7,7 @@ import {
   formatRunId,
   hasPricedMoney,
   isLiveRun,
+  isLoopRun,
   parseRunId,
   runDurationSec,
   runFacts,
@@ -17,8 +18,9 @@ import type { AgentRunRow } from "@/lib/api";
 
 function run(over: Partial<AgentRunRow> = {}): AgentRunRow {
   return {
-    run_id: "s1",
+    run_id: "s:1",
     kind: "session",
+    id: "1",
     number: 1,
     agent_id: "brigado.brl_mm_1",
     status: "stopped",
@@ -31,6 +33,7 @@ function run(over: Partial<AgentRunRow> = {}): AgentRunRow {
     has_actions_log: true,
     strategy_slug: "brl_mm",
     strategy_name: "BRL MM",
+    title: "",
     ...over,
   };
 }
@@ -49,21 +52,62 @@ function deed(over: Partial<AgentActionRow> = {}): AgentActionRow {
 }
 
 describe("run ids round-trip through the URL", () => {
-  it("parses both kinds", () => {
-    expect(parseRunId("s3")).toEqual({ kind: "session", number: 3 });
-    expect(parseRunId("e12")).toEqual({ kind: "experiment", number: 12 });
+  it("parses all four kinds", () => {
+    expect(parseRunId("s:3")).toEqual({ kind: "session", number: 3, id: "3" });
+    expect(parseRunId("e:12")).toEqual({ kind: "experiment", number: 12, id: "12" });
+    expect(parseRunId("d:abc123")).toEqual({
+      kind: "delegation",
+      number: 0,
+      id: "abc123",
+    });
+    expect(parseRunId("c:7f3a-9b")).toEqual({
+      kind: "conversation",
+      number: 0,
+      id: "7f3a-9b",
+    });
+  });
+
+  it("still parses the form the Lab used to write", () => {
+    // Unwritten since FEAT-111 and parsed forever: those links are in
+    // bookmarks and in notification payloads.
+    expect(parseRunId("s3")).toEqual({ kind: "session", number: 3, id: "3" });
+    expect(parseRunId("e12")).toEqual({ kind: "experiment", number: 12, id: "12" });
   });
 
   it("refuses anything that is not one", () => {
-    for (const bad of ["", null, undefined, "s", "3", "x3", "s0", "s-1", "s3x"]) {
+    for (const bad of [
+      "",
+      null,
+      undefined,
+      "s",
+      "3",
+      "x3",
+      "s0",
+      "s-1",
+      "s3x",
+      // A loop run's id is an ordinal in either form; an opaque one is not.
+      "s:",
+      "s:abc",
+      "e:0",
+      "x:1",
+    ]) {
       expect(parseRunId(bad)).toBeNull();
     }
   });
 
-  it("formats back to what it parsed", () => {
-    for (const id of ["s1", "s42", "e7"]) {
+  it("writes the kind:id form, whichever form it read", () => {
+    expect(formatRunId(parseRunId("s1")!)).toBe("s:1");
+    expect(formatRunId(parseRunId("e7")!)).toBe("e:7");
+    for (const id of ["s:42", "e:7", "d:abc123", "c:7f3a"]) {
       expect(formatRunId(parseRunId(id)!)).toBe(id);
     }
+  });
+
+  it("knows which kinds are a loop's", () => {
+    expect(isLoopRun("session")).toBe(true);
+    expect(isLoopRun("experiment")).toBe(true);
+    expect(isLoopRun("delegation")).toBe(false);
+    expect(isLoopRun("conversation")).toBe(false);
   });
 });
 
@@ -77,6 +121,13 @@ describe("a run says what kind it is", () => {
       runLabel(run({ kind: "experiment", number: 2, execution_mode: "run_once" })),
     ).toBe("R2");
     expect(runLabel(run({ kind: "experiment", number: 5, execution_mode: "" }))).toBe("E5");
+  });
+
+  it("badges the two kinds with no ordinal by letter alone", () => {
+    // `D` is already a dry run's, and one letter meaning two things is how a
+    // rail stops being readable — so a background task is `T`.
+    expect(runLabel(run({ kind: "conversation", number: 0 }))).toBe("C");
+    expect(runLabel(run({ kind: "delegation", number: 0 }))).toBe("T");
   });
 
   it("counts running and paused as live", () => {
@@ -114,6 +165,20 @@ describe("duration", () => {
       "20 ticks · 4h12m",
     );
     expect(runFacts(run({ tick_count: 1, started_at: null }), 0)).toBe("1 tick");
+  });
+
+  it("counts no ticks for a kind that has none", () => {
+    // A chat has turns, not ticks. `0 ticks` would be an assertion about the
+    // chat rather than a fact about it.
+    expect(
+      runFacts(
+        run({ kind: "conversation", tick_count: 0, started_at: 100, ended_at: 820 }),
+        0,
+      ),
+    ).toBe("12m");
+    expect(
+      runFacts(run({ kind: "delegation", tick_count: 0, started_at: null }), 0),
+    ).toBe("");
   });
 });
 

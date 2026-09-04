@@ -28,8 +28,9 @@ import {
 
 function run(over: Partial<AgentRunRow> = {}): AgentRunRow {
   return {
-    run_id: "s1",
+    run_id: "s:1",
     kind: "session",
+    id: "1",
     number: 1,
     agent_id: "brigado.brl_mm_1",
     status: "stopped",
@@ -42,6 +43,7 @@ function run(over: Partial<AgentRunRow> = {}): AgentRunRow {
     has_actions_log: true,
     strategy_slug: "brl_mm",
     strategy_name: "BRL MM",
+    title: "",
     ...over,
   };
 }
@@ -96,7 +98,7 @@ describe("parsing the URL", () => {
     expect(parseWorkspace("?view=tick&strategy=brl_mm&run=s3&tick=7")).toEqual({
       view: "tick",
       strategy: "brl_mm",
-      run: { kind: "session", number: 3 },
+      run: { kind: "session", number: 3, id: "3" },
       tick: 7,
     });
   });
@@ -177,7 +179,7 @@ describe("the run in scope", () => {
   ];
 
   it("is the one the URL names", () => {
-    expect(pickRun(runs, "brl_mm", { kind: "session", number: 1 })?.run_id).toBe("s1");
+    expect(pickRun(runs, "brl_mm", { kind: "session", number: 1, id: "1" })?.run_id).toBe("s1");
   });
 
   it("is the newest in scope when the URL names none", () => {
@@ -187,13 +189,66 @@ describe("the run in scope", () => {
   it("is the newest in scope when the URL names one outside it", () => {
     // The Lab's rule verbatim: a pasted `?strategy=` and `?run=` that disagree
     // must still land somewhere rather than on an empty body.
-    expect(pickRun(runs, "brl_mm", { kind: "experiment", number: 1 })?.run_id).toBe(
+    expect(pickRun(runs, "brl_mm", { kind: "experiment", number: 1, id: "1" })?.run_id).toBe(
       "s2",
     );
   });
 
   it("is null for a scope with no runs", () => {
     expect(pickRun(runs, "nothing_here", null)).toBeNull();
+  });
+
+  it("resolves a chat or a task even while a strategy is in scope", () => {
+    // The scope is a *strategy*, and those two kinds have none (FEAT-111) — so
+    // scoping them out would make `?run=c:…` unopenable on any agent that also
+    // loops, which is every agent the union exists for.
+    const withChat = [
+      ...runs,
+      run({
+        run_id: "c:7f3a",
+        kind: "conversation",
+        id: "7f3a",
+        number: 0,
+        strategy_slug: "",
+        strategy_name: "",
+        started_at: 500,
+      }),
+      run({
+        run_id: "d:abc",
+        kind: "delegation",
+        id: "abc",
+        number: 0,
+        strategy_slug: "",
+        strategy_name: "",
+        started_at: 400,
+      }),
+    ];
+    expect(
+      pickRun(withChat, "brl_mm", { kind: "conversation", number: 0, id: "7f3a" })
+        ?.run_id,
+    ).toBe("c:7f3a");
+    expect(
+      pickRun(withChat, "brl_mm", { kind: "delegation", number: 0, id: "abc" })
+        ?.run_id,
+    ).toBe("d:abc");
+  });
+
+  it("never opens on a chat by default", () => {
+    // A chat is addressable, not the default selection: a bare `?view=runs`
+    // opens on the loop, which is what the rest of the workspace is about.
+    const chatFirst = [
+      run({
+        run_id: "c:new",
+        kind: "conversation",
+        id: "new",
+        number: 0,
+        strategy_slug: "",
+        strategy_name: "",
+        started_at: 9_000,
+      }),
+      run({ run_id: "s:2", id: "2", number: 2, started_at: 2_000 }),
+    ];
+    expect(pickRun(chatFirst, null, null)?.run_id).toBe("s:2");
   });
 });
 
@@ -217,7 +272,7 @@ describe("the retired addresses still resolve", () => {
     expect(parseWorkspace(there.slice(there.indexOf("?")))).toEqual({
       view: "runs",
       strategy: "brl_mm",
-      run: { kind: "session", number: 3 },
+      run: { kind: "session", number: 3, id: "3" },
       tick: 7,
     });
   });
