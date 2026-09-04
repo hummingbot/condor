@@ -737,7 +737,10 @@ export function AgentChatTab() {
                   id: "agent",
                   label: "Agent",
                   Icon: Bot,
-                  hint: `Tune ${panelAgent?.name || "Condor"} — read and change what this agent is`,
+                  // What the pane opens is the agent's whole workspace now
+                  // (FEAT-117), not the seven sections it used to be, so the
+                  // hint stops promising only half of it.
+                  hint: `Open ${panelAgent?.name || "Condor"} — what it is doing, and what it is`,
                   // A strategy opened from the panel is still the agent's
                   // subject, and the tile that opened it must not read as off
                   // while it is on screen.

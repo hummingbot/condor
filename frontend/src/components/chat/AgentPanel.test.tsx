@@ -205,7 +205,7 @@ async function renderTune(over: Partial<RailProps> = {}) {
           <RailButton
             label="Agent"
             Icon={Bot}
-            hint="Tune Orca LP Expert — read and change what this agent is"
+            hint="Open Orca LP Expert — what it is doing, and what it is"
             active={false}
             onToggle={() => (opened += 1)}
             {...over}
