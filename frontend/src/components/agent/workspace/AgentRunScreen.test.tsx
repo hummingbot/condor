@@ -1,17 +1,19 @@
 /**
- * The workspace is a shell over bodies, and this pins the shell (FEAT-117).
+ * One screen, and the two promises that make it one (FEAT-119).
  *
- * It used to be `pages/AgentWorkspace.tsx`, welded to `/agents/:slug` by a
- * `useParams()` for the slug and a `useSearchParams()` for everything else. The
- * chat's pane mounts the same component from the home's query string now, so
- * what has to hold is that nothing in here knows which host it is in: the four
- * parameters arrive through an adapter, every other parameter on the string is
- * somebody else's and must survive, and the spine, the loop bar and the body
- * switch behave the same either way.
+ * The first is that the reader gets the answer with no click: the vitals, the
+ * last decision, the chart and the deployed table are on `/agents/:slug`, and
+ * nothing on the page is a link to another view of itself.
+ *
+ * The second is that the evidence costs nothing until it is asked for. That is
+ * the whole difference between this screen and the longer scroll it could have
+ * been: `AgentFleet` pulls the entire fleet and `StrategyWorkbench` mounts two
+ * markdown editors, so a closed disclosure has to mount *nothing* — which is
+ * what the stubs below can prove and a rendered page cannot.
  *
  * The bodies are stubbed. Each has its own tests and each fetches its own
- * world; what is under test here is which one is chosen and what the URL says
- * afterwards.
+ * world; what is under test here is what is on screen, what is mounted, and
+ * what the URL says afterwards.
  *
  * Needs a DOM, so this file overrides vitest's default `node` environment.
  *
@@ -21,14 +23,11 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, useEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import {
-  MemoryRouter,
-  useLocation,
-  useSearchParams,
-} from "react-router-dom";
+import { MemoryRouter, useLocation, useSearchParams } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AgentDetail, AgentRunRow, StrategyDetail } from "@/lib/api";
+import { AGENT_SECTIONS_KEY } from "@/lib/sessionState";
 
 const getAgent = vi.fn();
 const getAgentRuns = vi.fn();
@@ -39,23 +38,29 @@ vi.mock("@/lib/api", () => ({
     getAgent: (...a: unknown[]) => getAgent(...a),
     getAgentRuns: (...a: unknown[]) => getAgentRuns(...a),
     getStrategy: (...a: unknown[]) => getStrategy(...a),
-    getRoutineInstances: () => Promise.resolve([]),
-    getSessionJournal: () => Promise.resolve({ decisions: [] }),
+    getSessionJournal: () => Promise.resolve({ content: "" }),
     getSessionActions: () => Promise.resolve({ actions: [] }),
+    getSessionReport: () => Promise.resolve({ report: null }),
     getStrategySessionExecutors: () => Promise.resolve({ executors: [] }),
   },
   CHAT_SLUG: "condor",
 }));
 
-/** One stub per body, saying its own name and nothing else. */
-const stub = (name: string) => () => <div data-body={name} />;
-vi.mock("@/components/agent/AgentKnowledge", () => ({
-  AgentKnowledge: (props: { tab: string }) => (
-    <div data-body="knowledge" data-tab={props.tab} />
-  ),
-}));
+/**
+ * One stub per body, recording that it was mounted at all.
+ *
+ * `mounted` is the assertion behind "a closed disclosure mounts nothing": the
+ * expensive two are `fleet` and `playbook`, and their queries only exist
+ * because the component does.
+ */
+const mounted: string[] = [];
+const stub = (name: string) => () => {
+  mounted.push(name);
+  return <div data-body={name} />;
+};
+
 vi.mock("@/components/agent/workspace/NowView", () => ({
-  NowView: stub("now"),
+  NowView: stub("answers"),
 }));
 vi.mock("@/components/agent/workspace/MoneyView", () => ({
   MoneyView: stub("money"),
@@ -66,9 +71,9 @@ vi.mock("@/components/agent/workspace/AgentFleet", () => ({
 vi.mock("@/components/agent/StrategyWorkbench", () => ({
   StrategyWorkbench: stub("playbook"),
 }));
-vi.mock("@/components/agent/lab/RunRail", () => ({ RunRail: stub("runs") }));
+vi.mock("@/components/agent/lab/RunRail", () => ({ RunRail: stub("rail") }));
 vi.mock("@/components/agent/lab/RunOverview", () => ({
-  RunOverview: stub("run-overview"),
+  RunOverview: stub("detail"),
   ExperimentDetail: stub("experiment"),
 }));
 vi.mock("@/components/agent/AgentSessionContent", () => ({
@@ -77,11 +82,8 @@ vi.mock("@/components/agent/AgentSessionContent", () => ({
 vi.mock("@/components/agent/DelegationSheet", () => ({
   DelegationSheet: stub("delegation"),
 }));
-vi.mock("@/components/routines/ReportBrowser", () => ({
-  ReportBrowser: stub("reports"),
-}));
 
-const { AgentWorkspaceBody } = await import("./AgentWorkspaceBody");
+const { AgentRunScreen } = await import("./AgentRunScreen");
 const { useWorkspaceUrl } = await import("./workspaceUrl");
 
 declare global {
@@ -130,10 +132,7 @@ async function settle() {
   }
 }
 
-/**
- * The body, bound to a router exactly as either host binds it — which is the
- * point: this harness *is* the host, and it is neither the page nor the pane.
- */
+/** The page, minus the two states only a page can be in. */
 function Host({ header }: { header?: boolean }) {
   const [params, setParams] = useSearchParams();
   const location = useLocation();
@@ -144,7 +143,7 @@ function Host({ header }: { header?: boolean }) {
   }, [location]);
   const adapter = useWorkspaceUrl(params, setParams);
   return (
-    <AgentWorkspaceBody
+    <AgentRunScreen
       slug="brigado"
       adapter={adapter}
       header={
@@ -152,7 +151,6 @@ function Host({ header }: { header?: boolean }) {
           ? ({ strategy }) => <div data-header={strategy?.slug ?? "none"} />
           : undefined
       }
-      onAskAgent={() => {}}
     />
   );
 }
@@ -173,9 +171,12 @@ async function render(entry = "/", header = false) {
   await settle();
 }
 
-const body = () => container.querySelector("[data-body]")?.getAttribute("data-body");
-const spine = (id: string) =>
-  container.querySelector<HTMLButtonElement>(`[data-spine-entry="${id}"]`)!;
+const bodies = () =>
+  Array.from(container.querySelectorAll("[data-body]")).map((el) =>
+    el.getAttribute("data-body"),
+  );
+const section = (id: string) =>
+  container.querySelector<HTMLButtonElement>(`[data-section="${id}"]`)!;
 const search = () => at.split("?")[1] ?? "";
 
 async function click(el: HTMLElement) {
@@ -188,6 +189,8 @@ async function click(el: HTMLElement) {
 beforeEach(() => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   at = "";
+  mounted.length = 0;
+  localStorage.clear();
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -204,65 +207,91 @@ afterEach(() => {
 });
 
 describe("what a bare address opens on", () => {
-  it("is Now — the last decision, not an AGENT.md dump", async () => {
+  it("is the answer stack, with no click and no spine", async () => {
     await render("/");
-    expect(body()).toBe("now");
-    expect(spine("now").getAttribute("aria-current")).toBe("page");
+    expect(bodies()).toEqual(["answers"]);
+    // The spine is gone: nothing on this page is a door to another view of it.
+    expect(container.querySelector("[data-spine-entry]")).toBeNull();
   });
 
-  it("is Now in a host that has other parameters of its own", async () => {
-    // The pane's address. `?panel=` and `?who=` are the home's, not this
-    // component's, and a bare `?panel=agent` is still a bare workspace.
-    await render("/?panel=agent&who=brigado");
-    expect(body()).toBe("now");
+  it("offers all five disclosures, and mounts none of them", async () => {
+    await render("/");
+    for (const id of ["runs", "detail", "money", "fleet", "playbook"]) {
+      expect(section(id).getAttribute("aria-expanded")).toBe("false");
+    }
+    // The whole argument for a disclosure over a band: the fleet browser's
+    // query does not exist until the reader asks for it.
+    expect(mounted).not.toContain("fleet");
+    expect(mounted).not.toContain("playbook");
   });
 });
 
-describe("the spine", () => {
-  it("swaps the body and writes the section", async () => {
+describe("the disclosures", () => {
+  it("open in place — the answer stack stays on screen", async () => {
     await render("/");
-
-    await click(spine("money"));
-    expect(body()).toBe("money");
-    expect(search()).toBe("view=money");
-
-    await click(spine("fleet"));
-    expect(body()).toBe("fleet");
-    expect(search()).toBe("view=fleet");
+    await click(section("money"));
+    expect(bodies()).toEqual(["answers", "money"]);
   });
 
-  it("reaches the Being sections, which render the same component", async () => {
+  it("write which are open, and reading down the page replaces", async () => {
     await render("/");
+    await click(section("money"));
+    expect(search()).toBe("open=money");
 
-    await click(spine("skills"));
-    expect(body()).toBe("knowledge");
-    expect(
-      container.querySelector("[data-body]")!.getAttribute("data-tab"),
-    ).toBe("skills");
+    await click(section("fleet"));
+    expect(new URLSearchParams(search()).get("open")).toBe("money.fleet");
   });
 
-  it("never spells out the default section", async () => {
-    await render("/?view=money");
-    await click(spine("now"));
+  it("come off the URL entirely when the last one shuts", async () => {
+    await render("/?open=money");
+    await click(section("money"));
     expect(search()).toBe("");
+    expect(bodies()).toEqual(["answers"]);
   });
 
-  it("leaves the host's own parameters alone", async () => {
-    // The whole reason the pane can spend this grammar on the home's string.
-    await render("/?panel=agent&who=brigado&desk=execution");
-    await click(spine("money"));
+  it("open on arrival from `?open=`, in the order the screen draws them", async () => {
+    await render("/?open=runs.money");
+    expect(section("runs").getAttribute("aria-expanded")).toBe("true");
+    expect(section("money").getAttribute("aria-expanded")).toBe("true");
+    expect(section("fleet").getAttribute("aria-expanded")).toBe("false");
+    expect(bodies()).toEqual(["answers", "rail", "money"]);
+  });
 
-    const params = new URLSearchParams(search());
-    expect(params.get("panel")).toBe("agent");
-    expect(params.get("who")).toBe("brigado");
-    expect(params.get("desk")).toBe("execution");
-    expect(params.get("view")).toBe("money");
+  it("come back to what this browser last had open, with no `?open=`", async () => {
+    localStorage.setItem(AGENT_SECTIONS_KEY, JSON.stringify(["fleet"]));
+    await render("/");
+    expect(section("fleet").getAttribute("aria-expanded")).toBe("true");
+  });
+
+  it("let the URL win over what the browser recorded", async () => {
+    localStorage.setItem(AGENT_SECTIONS_KEY, JSON.stringify(["fleet"]));
+    await render("/?open=money");
+    expect(section("money").getAttribute("aria-expanded")).toBe("true");
+    expect(section("fleet").getAttribute("aria-expanded")).toBe("false");
+  });
+});
+
+describe("the tick", () => {
+  it("opens over the screen rather than instead of it", async () => {
+    await render("/?tick=40");
+    // The stack is still mounted underneath, which is what makes closing the
+    // overlay a return to the same scroll position rather than a re-render.
+    expect(bodies()).toEqual(["answers", "tick"]);
+  });
+
+  it("closes back to the screen and clears `?tick=`", async () => {
+    await render("/?open=money&tick=40");
+    await click(
+      container.querySelector<HTMLButtonElement>('[aria-label="Close tick"]')!,
+    );
+    expect(bodies()).toEqual(["answers", "money"]);
+    expect(search()).toBe("open=money");
   });
 });
 
 describe("the loop bar", () => {
   it("moves the scope and drops the run and the tick with it", async () => {
-    await render("/?view=money&strategy=brl_mm&run=s:3&tick=40");
+    await render("/?open=money&strategy=brl_mm&run=s:3&tick=40");
 
     const picker = container.querySelector<HTMLSelectElement>("select")!;
     await act(async () => {
@@ -276,8 +305,8 @@ describe("the loop bar", () => {
     // A run of the loop you just left is not a run of the one you picked.
     expect(params.get("run")).toBeNull();
     expect(params.get("tick")).toBeNull();
-    // …and the section you were reading is still the section you are reading.
-    expect(params.get("view")).toBe("money");
+    // …and what you had open is still open.
+    expect(params.get("open")).toBe("money");
   });
 });
 
@@ -289,10 +318,5 @@ describe("the header slot", () => {
     expect(
       container.querySelector("[data-header]")!.getAttribute("data-header"),
     ).toBe("brl_mm");
-  });
-
-  it("is simply absent for a host that draws its own bar", async () => {
-    await render("/");
-    expect(container.querySelector("[data-header]")).toBeNull();
   });
 });

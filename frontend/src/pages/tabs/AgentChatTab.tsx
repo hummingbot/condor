@@ -17,6 +17,10 @@ import {
   deskWasOpen,
   useAccountPanels,
 } from "@/components/chat/accountPanels";
+import {
+  lastKnowledgeTab,
+  rememberKnowledgeTab,
+} from "@/components/agent/knowledgeTabs";
 import { AgentPanel } from "@/components/chat/AgentPanel";
 import {
   BrainPicker,
@@ -140,7 +144,17 @@ export function AgentChatTab() {
 
   const openPane = (next: PaneView) => {
     if (next?.kind === "routines") setLibraryFocus(next.focus);
-    setSearchParams(writePane(searchParams, next));
+    // The agent panel comes back on the section it was left on: which one that
+    // is survives the close in this browser, because closing the pane takes the
+    // whole address — `?tab=` included — with it. A caller that names a section
+    // still wins; this only fills in the ones that do not (the rail's tile, an
+    // Execution row, the strategy sheet handing the pane back).
+    let resolved = next;
+    if (resolved?.kind === "agent") {
+      if (resolved.tab) rememberKnowledgeTab(resolved.tab);
+      else resolved = { ...resolved, tab: lastKnowledgeTab() };
+    }
+    setSearchParams(writePane(searchParams, resolved));
   };
 
   /**

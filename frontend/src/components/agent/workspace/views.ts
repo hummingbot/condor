@@ -1,96 +1,49 @@
-// ── The agent workspace, as rules (FEAT-103) ──
+// ── The agent's run screen, as rules (FEAT-103, FEAT-119) ──
 //
 // One route — `/agents/:slug` — and every state it can be in written down in
-// the URL: which section is open, which strategy is in scope, which run, which
-// tick. Four pages, three tab strips and five URL-less panels collapse onto
-// that grammar, so the rules that read it have to be reachable from a test
-// rather than only from a rendered page. Same split `lab/runs.ts` made, and the
-// same reason: `AgentWorkspace` reads more parameters than any page before it,
-// and none of the reading happens in JSX.
+// the URL: which strategy is in scope, which run, which tick, and which of the
+// screen's disclosures are open. Four pages, three tab strips and five URL-less
+// panels collapsed onto that grammar, so the rules that read it have to be
+// reachable from a test rather than only from a rendered page. Same split
+// `lab/runs.ts` made, and the same reason: this route reads more parameters
+// than any page before it, and none of the reading happens in JSX.
+//
+// `?view=` used to be the first of them and named the body on screen. It is not
+// a grammar any more, only a redirect table (`sections.ts`), because there is
+// no body to name: the seven **Being** sections went to the chat's panel
+// (FEAT-118) and the five **Doing** views became one screen with disclosures on
+// it (FEAT-119). The page reads a legacy `?view=` once, to send it somewhere,
+// and nothing else in the app writes one.
 //
 // Nothing here fetches and nothing here renders.
 
-import {
-  KNOWLEDGE_TABS,
-  type KnowledgeTabId,
-} from "@/components/agent/knowledgeTabs";
 import { isLoopRun, parseRunId, type RunRef } from "@/components/agent/lab/runs";
+import { OPEN_PARAM } from "@/components/agent/workspace/sections";
 import type { AgentRunRow, StrategySummary } from "@/lib/api";
-
-/**
- * What the agent is *doing*, as opposed to what it *is*.
- *
- * The second half of the taxonomy is `KNOWLEDGE_TABS`, imported rather than
- * restated — the sections an agent is read in already have a module, and two
- * lists of the same seven names is how they drift.
- */
-export const DOING_VIEWS = [
-  "now",
-  "runs",
-  "tick",
-  "money",
-  "fleet",
-  "playbook",
-] as const;
-
-export type DoingViewId = (typeof DOING_VIEWS)[number];
-
-/** Every value `?view=` can take. */
-export const WORKSPACE_VIEWS = [...DOING_VIEWS, ...KNOWLEDGE_TABS] as const;
-
-export type WorkspaceViewId = DoingViewId | KnowledgeTabId;
-
-/** The view a bare `/agents/:slug` opens on — never Brain (FEAT-103). */
-export const DEFAULT_VIEW: WorkspaceViewId = "now";
-
-/**
- * Whether a string off a URL names a view, so a hand-typed `?view=` can be
- * trusted. Mirrors `isKnowledgeTab`, which it partly delegates to.
- */
-export function isWorkspaceView(id: string | null | undefined): id is WorkspaceViewId {
-  return !!id && (WORKSPACE_VIEWS as readonly string[]).includes(id);
-}
 
 /** Everything the URL says, once. */
 export interface WorkspaceUrl {
-  view: WorkspaceViewId;
   /** `?strategy=` — the scope, or `null` for "decide from the data". */
   strategy: string | null;
   /** `?run=` as a reference, or `null` for the newest run in scope. */
   run: RunRef | null;
-  /** `?tick=`, or `null` for the run overview. */
+  /** `?tick=`, or `null` when no tick is open over the screen. */
   tick: number | null;
+  /** The raw `?open=`, for {@link useSections} — `null` when it names none. */
+  open: string | null;
 }
 
-/**
- * Read the whole workspace state out of a query string.
- *
- * `?tab=` is honoured as a synonym for `?view=` because it is what the agent
- * page spelled its section as (FEAT-081) and those links are in notification
- * payloads and in bookmarks. It is never *written* — one grammar goes out.
- */
+/** Read the whole screen's state out of a query string. */
 export function parseWorkspace(search: string | URLSearchParams): WorkspaceUrl {
   const params =
     typeof search === "string" ? new URLSearchParams(search) : search;
-  const named = params.get("view") ?? params.get("tab");
   const tickParam = params.get("tick");
   return {
-    view: isWorkspaceView(named) ? named : DEFAULT_VIEW,
     strategy: params.get("strategy") || null,
     run: parseRunId(params.get("run")),
     tick: tickParam && /^\d+$/.test(tickParam) ? Number(tickParam) : null,
+    open: params.get(OPEN_PARAM),
   };
-}
-
-/**
- * Which spine entry reads as current for a view.
- *
- * A tick is not a section, it is a moment of a run — so the spine keeps saying
- * *Runs* while you read one, and going back up is one click on the entry that
- * is already lit rather than a hunt for where you came from.
- */
-export function spineSectionFor(view: WorkspaceViewId): WorkspaceViewId {
-  return view === "tick" ? "runs" : view;
 }
 
 // ── Scope ──
@@ -132,7 +85,7 @@ export function pickStrategy(
  * Which run is selected, given the scope.
  *
  * `?run=` naming a run outside the current scope falls back to the newest in
- * scope, which is the Lab's rule verbatim (FEAT-099) — a bare `?view=runs` has
+ * scope, which is the Lab's rule verbatim (FEAT-099) — a bare `/agents/:slug`
  * to open on something.
  *
  * The scope is a *strategy*, so it only bounds the two kinds that have one. A
@@ -169,12 +122,14 @@ export function pickRun(
  * A redirect and not a deletion: the Lab's address is in notification payloads,
  * in the chat's route facts and in whatever anyone has bookmarked. The whole
  * query string travels with it, which costs nothing because the Lab's grammar
- * (`?strategy=&run=&tick=`) is a subset of the workspace's — that is what made
- * the merge possible at all.
+ * (`?strategy=&run=&tick=`) is a subset of the screen's — that is what made the
+ * merge possible at all. It lands with the Runs disclosure open, which is where
+ * the rail it was addressing lives now (FEAT-119).
  */
 export function runsRedirect(slug: string, search: string): string {
   const params = new URLSearchParams(search);
-  params.set("view", "runs");
+  params.delete("view");
+  params.set(OPEN_PARAM, "runs");
   return `/agents/${encodeURIComponent(slug)}?${params}`;
 }
 
@@ -182,8 +137,9 @@ export function runsRedirect(slug: string, search: string): string {
  * Where `/agents/:slug/strategies/:sslug` goes now.
  *
  * The strategy stops being a path segment and becomes the scope it always was,
- * so the same address lands on the workbench with that strategy selected — and
- * the loop bar above it can then move the scope without another navigation.
+ * so the same address lands on the screen with that strategy in scope and the
+ * Playbook disclosure open — and the loop bar above can then move the scope
+ * without another navigation.
  */
 export function strategyRedirect(
   slug: string,
@@ -191,7 +147,8 @@ export function strategyRedirect(
   search: string,
 ): string {
   const params = new URLSearchParams(search);
-  params.set("view", "playbook");
+  params.delete("view");
+  params.set(OPEN_PARAM, "playbook");
   params.set("strategy", sslug);
   return `/agents/${encodeURIComponent(slug)}?${params}`;
 }

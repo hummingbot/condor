@@ -11,7 +11,7 @@ import {
 } from "react-router-dom";
 
 import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
-import { AgentWorkspaceBody } from "@/components/agent/workspace/AgentWorkspaceBody";
+import { AgentRunScreen } from "@/components/agent/workspace/AgentRunScreen";
 import { WorkspaceHeader } from "@/components/agent/workspace/WorkspaceHeader";
 import {
   runsRedirect,
@@ -124,7 +124,7 @@ export function AgentWorkspace() {
 
   return (
     <>
-      <AgentWorkspaceBody
+      <AgentRunScreen
         slug={slug}
         adapter={adapter}
         /* The loop controls in this header act on the strategy the body
@@ -139,7 +139,6 @@ export function AgentWorkspace() {
             onDelete={() => setShowDeleteConfirm(true)}
           />
         )}
-        onAskAgent={askAgent}
       />
 
       <ConfirmDialog

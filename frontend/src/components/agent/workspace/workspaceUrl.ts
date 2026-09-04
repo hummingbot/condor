@@ -1,36 +1,43 @@
-// ── Moving the workspace's URL, as rules (FEAT-117) ──
+// ── Moving the run screen's URL, as rules (FEAT-117) ──
 //
-// `views.ts` is the *reading* half of the workspace's grammar; this is the
-// writing half. It was nine inline `setParams({…})` calls in
+// `views.ts` is the *reading* half of the screen's grammar; this is the writing
+// half. It was nine inline `setParams({…})` calls in
 // `pages/AgentWorkspace.tsx`, each restating the same two cascades — moving the
 // strategy drops the run and the tick, moving the run drops the tick — and each
 // one a place the next caller could forget them.
 //
-// It becomes a module because the workspace now has two hosts (FEAT-117): the
-// page at `/agents/:slug` and the chat's pane at `/?panel=agent`. Both spend the
-// same four parameters on their own query string, so the cascades have to be
-// written once or they drift apart the first time one host grows a control the
-// other does not have.
+// It stays a module now that there is one host again (FEAT-119), for the reason
+// it became one: the cascades are the rules, they are asserted in this file's
+// own tests, and inlining them back into JSX is how a control grown next year
+// forgets one. What the host supplies is a search string, which is also what
+// lets the screen be rendered in a test with no route around it.
 //
 // Nothing here fetches and nothing here renders.
 
 import { useCallback, useMemo } from "react";
 
+import { OPEN_PARAM } from "@/components/agent/workspace/sections";
 import {
-  DEFAULT_VIEW,
   parseWorkspace,
   type WorkspaceUrl,
-  type WorkspaceViewId,
 } from "@/components/agent/workspace/views";
 
-/** The four keys the workspace spends, wherever it is hosted. */
-export const WORKSPACE_PARAMS = ["view", "strategy", "run", "tick"] as const;
+/** The four keys the screen spends. */
+export const WORKSPACE_PARAMS = [
+  "strategy",
+  "run",
+  "tick",
+  OPEN_PARAM,
+] as const;
 
 /**
- * The legacy synonym for `?view=`, read by {@link parseWorkspace} and never
- * written — one grammar goes out, so any write also retires it.
+ * The two words the retired `?view=` grammar spelled a section with.
+ *
+ * Never written, and cleared by any write: the page answers them once with a
+ * redirect (`sectionForView`) and nothing in the app produces one any more, so
+ * a move that carried one along would put a dead parameter back on a live URL.
  */
-const LEGACY_VIEW_PARAM = "tab";
+const LEGACY_VIEW_PARAMS = ["view", "tab"] as const;
 
 /**
  * A move, as the caller means it: only the keys it names are its business.
@@ -43,18 +50,20 @@ const LEGACY_VIEW_PARAM = "tab";
  * and two forgot to.
  */
 export interface WorkspaceUrlPatch {
-  view?: WorkspaceViewId | null;
   strategy?: string | null;
   run?: string | null;
   tick?: number | null;
+  /** The disclosures, as `sections.ts` serializes them; `null` closes all. */
+  open?: string | null;
 }
 
 /**
  * The query string with this move applied, leaving every other parameter alone.
  *
- * Left alone is the point: on the page the rest of the string is nothing, but
- * in the pane it is `?panel=`, `?who=` and `?desk=` — the home's own state,
- * which a workspace control has no business touching.
+ * Left alone is the point: `?fscope=` is the fleet browser's and `?population=`
+ * is `/bots`' filter, both of them spent on this same string by a disclosure
+ * that has no idea a loop bar exists — and a scope change that wiped them would
+ * reset a reader's fleet from three bands away.
  *
  * Two cascades, and both are "the reader moved up a level, so what was selected
  * below is not selected any more":
@@ -78,7 +87,7 @@ export function applyWorkspacePatch(
     else next.set(key, String(value));
   };
 
-  if ("view" in patch) write("view", patch.view);
+  if ("open" in patch) write(OPEN_PARAM, patch.open);
   if ("strategy" in patch) {
     write("strategy", patch.strategy);
     if (!("run" in patch)) next.delete("run");
@@ -90,63 +99,31 @@ export function applyWorkspacePatch(
   }
   if ("tick" in patch) write("tick", patch.tick);
 
-  // `view=now` is the default, so it is never spelled out: the shortest URL
-  // that lands somewhere is the one people paste.
-  if (next.get("view") === DEFAULT_VIEW) next.delete("view");
-  next.delete(LEGACY_VIEW_PARAM);
+  for (const key of LEGACY_VIEW_PARAMS) next.delete(key);
   return next;
 }
 
 /**
  * Whether this move is a history step or a correction of the current one.
  *
- * Reading down the sections is not nine entries to press Back through, so a
- * move that only changes the section replaces. A scope, a run or a tick pushes,
+ * Reading down a page is not five entries to press Back through, so a move that
+ * only opens or shuts a disclosure replaces. A scope, a run or a tick pushes,
  * which is what makes Back go one level shallower from any depth without ever
- * leaving the agent.
+ * leaving the agent — and, for a tick, what makes Back the way out of the
+ * overlay as well as the close button.
  */
 export function patchReplaces(patch: WorkspaceUrlPatch): boolean {
   const keys = Object.keys(patch);
-  return keys.length === 1 && keys[0] === "view";
+  return keys.length === 1 && keys[0] === "open";
 }
 
 /**
- * Just the workspace's four keys, for a host handing its state to another one.
+ * Everything a host must supply for the screen to read and move its own URL.
  *
- * The pane's full-screen control is the only caller: `/agents/:slug` wants the
- * view, the scope, the run and the tick and none of the home's `?panel=`.
- * Copied off the raw string rather than rebuilt from {@link WorkspaceUrl},
- * because `?run=` has two spellings that both parse (`s:3` and the Lab's `s3`)
- * and the trip through a page should hand back the one that was given.
- */
-export function workspaceSearch(params: URLSearchParams): URLSearchParams {
-  const next = new URLSearchParams();
-  for (const key of WORKSPACE_PARAMS) {
-    const value = params.get(key);
-    if (value) next.set(key, value);
-  }
-  return next;
-}
-
-/** Strip every trace of a workspace from a query string. */
-export function clearWorkspaceSearch(
-  params: URLSearchParams,
-): URLSearchParams {
-  const next = new URLSearchParams(params);
-  for (const key of WORKSPACE_PARAMS) next.delete(key);
-  next.delete(LEGACY_VIEW_PARAM);
-  return next;
-}
-
-/**
- * Everything a host must supply for the body to read and move its own URL.
- *
- * One interface and one implementation for both hosts, rather than a
- * `pageAdapter` and a `paneAdapter`: the page and the pane read the same four
- * keys off the same kind of search string and both must leave the rest of it
- * alone, so two functions would have had one body and would have been the
- * drift this module exists to prevent. What differs between the hosts is the
- * *search string they are handed*, and that is the argument.
+ * An interface rather than a `useSearchParams()` inside the screen, which is
+ * what let the chat's pane host the same component for two features (FEAT-117)
+ * and is what still lets the screen be rendered in a test with a plain
+ * `MemoryRouter` and no `/agents/:slug` route around it.
  */
 export interface WorkspaceUrlAdapter {
   /** What the URL says — {@link parseWorkspace}, memoized. */
@@ -155,13 +132,7 @@ export interface WorkspaceUrlAdapter {
   set: (patch: WorkspaceUrlPatch) => void;
 }
 
-/**
- * Bind the grammar to a host's `useSearchParams`.
- *
- * The page passes the router's pair for `/agents/:slug`; the pane passes the
- * router's pair for `/`. Neither one knows which it is, which is the whole
- * reason `AgentWorkspaceBody` can be hosted by both.
- */
+/** Bind the grammar to a host's `useSearchParams`. */
 export function useWorkspaceUrl(
   params: URLSearchParams,
   setParams: (

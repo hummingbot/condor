@@ -3,26 +3,27 @@
  *
  * Four pages collapsed onto one route (FEAT-103), and what used to be four
  * components' worth of internal state is now four query parameters. Every
- * promise the workspace makes — that a section, a scope, a run and a tick can
- * each be pasted into a new tab and land on the same thing — is a promise about
- * this file, so it is pinned here rather than through a rendered page.
+ * promise the screen makes — that a scope, a run, a tick and a set of open
+ * disclosures can each be pasted into a new tab and land on the same thing — is
+ * a promise about this file, so it is pinned here rather than through a
+ * rendered page.
+ *
+ * `?view=` is not among them any more (FEAT-119). There is no body to name, so
+ * the parameter left the grammar and became a redirect table one module over —
+ * see `sections.test.ts`, which is where the promise that every old address
+ * still resolves is kept.
  */
 
 import { describe, expect, it } from "vitest";
 
-import { KNOWLEDGE_TABS } from "@/components/agent/knowledgeTabs";
 import type { AgentRunRow, StrategySummary } from "@/lib/api";
 import {
-  DEFAULT_VIEW,
   alertsFor,
   journalNamesDeploy,
-  WORKSPACE_VIEWS,
-  isWorkspaceView,
   parseWorkspace,
   pickRun,
   pickStrategy,
   runsRedirect,
-  spineSectionFor,
   strategyRedirect,
 } from "./views";
 
@@ -67,49 +68,34 @@ function strategy(over: Partial<StrategySummary> = {}): StrategySummary {
   };
 }
 
-describe("the views", () => {
-  it("are the loop's own plus the seven sections an agent is read in", () => {
-    // The taxonomy is imported, never restated: two lists of the same seven
-    // names is how they drift apart.
-    for (const tab of KNOWLEDGE_TABS) {
-      expect(WORKSPACE_VIEWS).toContain(tab);
-    }
-    expect(WORKSPACE_VIEWS).toContain("now");
-    expect(WORKSPACE_VIEWS).toContain("tick");
-  });
-
-  it("only accept a name they actually have, off a URL", () => {
-    expect(isWorkspaceView("now")).toBe(true);
-    expect(isWorkspaceView("skills")).toBe(true);
-    expect(isWorkspaceView("lab")).toBe(false);
-    expect(isWorkspaceView(null)).toBe(false);
-  });
-});
-
 describe("parsing the URL", () => {
-  it("opens on Now, never on Brain", () => {
-    expect(parseWorkspace("").view).toBe("now");
-    expect(DEFAULT_VIEW).toBe("now");
-    // A view nobody has is not an error page, it is the default one.
-    expect(parseWorkspace("?view=nonsense").view).toBe("now");
-  });
-
-  it("reads a section, a scope, a run and a tick at once", () => {
-    expect(parseWorkspace("?view=tick&strategy=brl_mm&run=s3&tick=7")).toEqual({
-      view: "tick",
+  it("reads a scope, a run, a tick and the open disclosures at once", () => {
+    expect(
+      parseWorkspace("?open=runs.money&strategy=brl_mm&run=s3&tick=7"),
+    ).toEqual({
       strategy: "brl_mm",
       run: { kind: "session", number: 3, id: "3" },
       tick: 7,
+      open: "runs.money",
     });
   });
 
   it("leaves a selection out rather than inventing one", () => {
-    expect(parseWorkspace("?view=runs")).toEqual({
-      view: "runs",
+    // Every one of these is a real answer downstream: no strategy named means
+    // "decide from the data", and no `?open=` means "whatever this browser had".
+    expect(parseWorkspace("")).toEqual({
       strategy: null,
       run: null,
       tick: null,
+      open: null,
     });
+  });
+
+  it("hands `?open=` on raw, unjudged", () => {
+    // The ids are `sections.ts`' business and it drops the ones it does not
+    // know; parsing them twice is how two answers to one question start.
+    expect(parseWorkspace("?open=lab").open).toBe("lab");
+    expect(parseWorkspace("?open=").open).toBe("");
   });
 
   it("refuses a run id and a tick that are not one", () => {
@@ -118,24 +104,15 @@ describe("parsing the URL", () => {
     expect(parseWorkspace("?tick=-2").tick).toBeNull();
   });
 
-  it("still honours the agent page's `?tab=`, which is in bookmarks", () => {
-    expect(parseWorkspace("?tab=skills").view).toBe("skills");
-    // `?view=` wins when both are there: one grammar goes out, and it is that.
-    expect(parseWorkspace("?view=runs&tab=skills").view).toBe("runs");
-  });
-});
-
-describe("the spine's current section", () => {
-  it("is the view itself for everything that is a section", () => {
-    expect(spineSectionFor("runs")).toBe("runs");
-    expect(spineSectionFor("brain")).toBe("brain");
-    expect(spineSectionFor("now")).toBe("now");
-  });
-
-  it("stays on Runs while a tick of one is open", () => {
-    // A tick is a moment of a run, not a destination — so the entry you came
-    // through is the one still lit, and going back up is a click on it.
-    expect(spineSectionFor("tick")).toBe("runs");
+  it("ignores a legacy `?view=` — the page answers that one with a redirect", () => {
+    // Reading it here as well as there would be two surfaces deciding what an
+    // old address means, and the page is the one that can navigate.
+    expect(parseWorkspace("?view=money&tab=skills")).toEqual({
+      strategy: null,
+      run: null,
+      tick: null,
+      open: null,
+    });
   });
 });
 
@@ -234,8 +211,8 @@ describe("the run in scope", () => {
   });
 
   it("never opens on a chat by default", () => {
-    // A chat is addressable, not the default selection: a bare `?view=runs`
-    // opens on the loop, which is what the rest of the workspace is about.
+    // A chat is addressable, not the default selection: a bare `/agents/:slug`
+    // opens on the loop, which is what the rest of the screen is about.
     const chatFirst = [
       run({
         run_id: "c:new",
@@ -253,32 +230,38 @@ describe("the run in scope", () => {
 });
 
 describe("the retired addresses still resolve", () => {
-  it("sends the Lab's URL to the runs view with its query string intact", () => {
+  it("sends the Lab's URL to the Runs disclosure, query string intact", () => {
     expect(runsRedirect("brigado", "?strategy=brl_mm&run=s3&tick=7")).toBe(
-      "/agents/brigado?strategy=brl_mm&run=s3&tick=7&view=runs",
+      "/agents/brigado?strategy=brl_mm&run=s3&tick=7&open=runs",
     );
     // And a bare one still lands somewhere.
-    expect(runsRedirect("brigado", "")).toBe("/agents/brigado?view=runs");
+    expect(runsRedirect("brigado", "")).toBe("/agents/brigado?open=runs");
+  });
+
+  it("drops a `?view=` it was carrying rather than passing a dead word on", () => {
+    expect(runsRedirect("brigado", "?view=runs&strategy=brl_mm")).toBe(
+      "/agents/brigado?strategy=brl_mm&open=runs",
+    );
   });
 
   it("sends the strategy page's URL to the playbook, scoped to it", () => {
     expect(strategyRedirect("brigado", "brl_mm", "")).toBe(
-      "/agents/brigado?view=playbook&strategy=brl_mm",
+      "/agents/brigado?open=playbook&strategy=brl_mm",
     );
   });
 
   it("round-trips: what the redirect writes is what the parser reads", () => {
     const there = runsRedirect("brigado", "?strategy=brl_mm&run=s3&tick=7");
     expect(parseWorkspace(there.slice(there.indexOf("?")))).toEqual({
-      view: "runs",
       strategy: "brl_mm",
       run: { kind: "session", number: 3, id: "3" },
       tick: 7,
+      open: "runs",
     });
   });
 
   it("escapes a slug that needs it", () => {
-    expect(runsRedirect("my agent", "")).toBe("/agents/my%20agent?view=runs");
+    expect(runsRedirect("my agent", "")).toBe("/agents/my%20agent?open=runs");
   });
 });
 

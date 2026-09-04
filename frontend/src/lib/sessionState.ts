@@ -242,6 +242,25 @@ export const DEX_DEPTH_COLLAPSED_KEY = "condor.dex.depth-collapsed";
  */
 export const BROWSE_HINT_KEY = "condor.market.browse-hint";
 
+/**
+ * Which section the agent panel was last read in — one of the seven ids in
+ * `KNOWLEDGE_TABS` (components/agent/knowledgeTabs).
+ *
+ * The section is in the URL while the pane is open (`?tab=`, see `paneUrl`),
+ * but closing the pane erases the whole address, so re-opening the panel used
+ * to land on Brain however long the reader had been in Strategies. This is what
+ * the re-open reads when the link that opened it did not name a section.
+ *
+ * One value for every agent rather than one per slug, for the reason
+ * `AGENT_SECTIONS_KEY` above gives: which section a reader wants is a habit,
+ * not a property of the agent.
+ *
+ * KEPT, beside the disclosure keys above it: it names a section of a panel, and
+ * the brain, skills and loops behind that section are fetched for whoever is
+ * logged in now.
+ */
+export const KNOWLEDGE_TAB_KEY = "condor.agent.knowledge-tab";
+
 const SESSION_KEYS = [
   ORDER_DEFAULTS_KEY,
   POSITION_DEFAULTS_KEY,
