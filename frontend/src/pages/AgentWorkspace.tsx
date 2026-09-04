@@ -11,13 +11,19 @@ import {
 } from "react-router-dom";
 
 import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
+import { isKnowledgeTab } from "@/components/agent/knowledgeTabs";
 import { AgentRunScreen } from "@/components/agent/workspace/AgentRunScreen";
 import { WorkspaceHeader } from "@/components/agent/workspace/WorkspaceHeader";
+import {
+  OPEN_PARAM,
+  sectionForView,
+} from "@/components/agent/workspace/sections";
 import {
   runsRedirect,
   strategyRedirect,
 } from "@/components/agent/workspace/views";
 import { useWorkspaceUrl } from "@/components/agent/workspace/workspaceUrl";
+import { writePane } from "@/components/chat/paneUrl";
 import { api } from "@/lib/api";
 
 /**
@@ -30,20 +36,17 @@ import { api } from "@/lib/api";
  * "Back to Agents" was a link to a conversation and the Lab had no back control
  * at all.
  *
- * So there is one route now, and every state it can be in is a query parameter:
- * `?view=` names the section, `?strategy=` the scope, `?run=` and `?tick=` the
- * moment. That grammar is not invented here — the Lab already put
+ * So there is one route, and every state it can be in is a query parameter:
+ * `?strategy=` the scope, `?run=` and `?tick=` the moment, `?open=` the
+ * evidence. That grammar is not invented here — the Lab already put
  * `?strategy=&run=&tick=` in the URL (FEAT-099) and defended it in its own
- * docstring; this generalises it upward over the agent so that a tick stays a
- * *selection* rather than becoming a destination you navigate to.
+ * docstring.
  *
  * What is left in this file is the *host*, and only the host: the slug off the
- * path, the two states a page can be in that a pane cannot (failed to load, and
- * a delete this agent is confirming), the header, and the binding of the
- * workspace's grammar to this route's search string. Everything under the
- * header is {@link AgentWorkspaceBody}, which the chat's pane mounts from the
- * home's search string instead (FEAT-117) — so this page and that pane are the
- * same screen at two widths rather than a page and a preview of it.
+ * path, the two states a page can be in that no pane could (failed to load, and
+ * a delete this agent is confirming), the header, the binding of the grammar to
+ * this route's search string — and the guard below, which is where every
+ * address the old `?view=` grammar ever named still lands.
  */
 export function AgentWorkspace() {
   const { slug = "" } = useParams<{ slug: string }>();
@@ -91,6 +94,50 @@ export function AgentWorkspace() {
       ),
     [navigate, slug],
   );
+
+  /**
+   * Where a `?view=` goes now (FEAT-119).
+   *
+   * It named the body on screen for two features and it is spent: the seven
+   * **Being** sections are the chat's panel (FEAT-118) and the five **Doing**
+   * views are one screen with disclosures on it. Neither is a `?view=` any
+   * more, but the parameter is in notification payloads, in the chat's route
+   * facts and in whatever anyone has bookmarked — so every value it can take
+   * has to land somewhere, and this is the one place that decides.
+   *
+   * A Being section leaves this route entirely, for the address FEAT-118 built
+   * — through `writePane`, so the panel's own module keeps spelling it. A Doing
+   * view is rewritten to `?open=` in place, and `now`, `tick` and anything
+   * nobody has simply lose the parameter: the answer stack is Now, and a
+   * `?tick=` opens its overlay on its own.
+   *
+   * Before the two guards below, so a bookmark is answered without waiting on a
+   * fetch. `?tab=` is read as a synonym because that is how the agent page
+   * spelled its section before FEAT-103 (FEAT-081).
+   */
+  const legacyView = searchParams.get("view") || searchParams.get("tab");
+  if (legacyView) {
+    if (isKnowledgeTab(legacyView)) {
+      const pane = writePane(new URLSearchParams(), {
+        kind: "agent",
+        slug,
+        tab: legacyView,
+      });
+      return <Navigate to={`/?${pane}`} replace />;
+    }
+    const params = new URLSearchParams(searchParams);
+    params.delete("view");
+    params.delete("tab");
+    const section = sectionForView(legacyView);
+    if (section) params.set(OPEN_PARAM, section);
+    const query = params.toString();
+    return (
+      <Navigate
+        to={`/agents/${encodeURIComponent(slug)}${query ? `?${query}` : ""}`}
+        replace
+      />
+    );
+  }
 
   if (error && !agent) {
     return (
@@ -163,7 +210,7 @@ export function AgentWorkspace() {
  * A redirect and not a deletion: it is in notification payloads, in the chat's
  * route facts and in whatever anyone has bookmarked. The query string travels
  * with it, so `?strategy=&run=&tick=` lands on exactly the run and the tick it
- * always did — the Lab's grammar is a subset of the workspace's, which is what
+ * always did — the Lab's grammar is a subset of the screen's, which is what
  * made the merge possible at all.
  */
 export function AgentRunsRedirect() {
