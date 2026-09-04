@@ -32,15 +32,6 @@ vi.mock("@/lib/api", () => ({
   },
 }));
 
-// The rollup band is `PerformancePanel` unchanged, and this file is about what
-// surrounds it: a marker keeps the assertion on "the rollup is present, under
-// the heading that says what it is" without dragging in an equity chart.
-vi.mock("@/components/agent/AgentOverviewTab", () => ({
-  PerformancePanel: ({ slug, sslug }: { slug: string; sslug: string }) => (
-    <div data-rollup={`${slug}.${sslug}`} />
-  ),
-}));
-
 const fleetData = vi.fn<() => Partial<FleetData>>();
 vi.mock("@/hooks/useFleetData", () => ({
   useFleetData: () => fleetData(),
@@ -160,7 +151,7 @@ afterEach(() => {
 });
 
 describe("the two numbers", () => {
-  it("leads with the fold and keeps the rollup beside it, labelled", async () => {
+  it("leads with the fold and names the rollup under it, in the same band", async () => {
     fleetData.mockReturnValue(
       fleet([controller({ controller_id: "a", global_pnl_quote: 64 })]),
     );
@@ -170,8 +161,10 @@ describe("the two numbers", () => {
     await settle();
 
     expect(container.querySelector("[data-money-net]")?.textContent).toContain("64");
-    // The rollup is present, under a heading that says it is about runs.
-    expect(container.querySelector("[data-rollup='brigado.brl_mm']")).not.toBeNull();
+    // The rollup is the reconciliation's first line, named as what it is. Its
+    // per-session table came off with the spine (FEAT-119): this is a
+    // disclosure on the run screen now, and the run's own vitals are above it.
+    expect(container.querySelector("[data-money-rollup]")).not.toBeNull();
     expect(container.textContent).toContain("What its runs earned");
     expect(container.textContent).toContain("What its records show");
   });

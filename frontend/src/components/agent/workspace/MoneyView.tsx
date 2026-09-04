@@ -3,7 +3,6 @@ import { ArrowUpRight, Coins, HelpCircle } from "lucide-react";
 import { useMemo } from "react";
 import { Link } from "react-router-dom";
 
-import { PerformancePanel } from "@/components/agent/AgentOverviewTab";
 import {
   recordsHref,
   reconcile,
@@ -33,16 +32,21 @@ import { quoteConverter, runningLeaves } from "@/lib/perf-population";
  *
  * Both are correct. Shown as one number, one of them is a lie by omission — the
  * operator reads `+$64` here, `+$91` on the fleet page, and has no way to know
- * that neither is broken. So there are three bands:
+ * that neither is broken. So there are two bands:
  *
  * 1. **The headline** is the fold, because that is the number an operator acts
  *    on and because matching the fleet page by construction is what makes the
  *    two screens trustworthy together.
  * 2. **The reconciliation** accounts for the difference, and it is the band that
- *    makes the design honest. Every term is a named set of records the reader
- *    can open; anything that cannot be named stays in *unaccounted*, with a
- *    lead, rather than being filed under "other".
- * 3. **What its runs earned** is the rollup, unchanged, labelled as what it is.
+ *    makes the design honest. It opens on *what its runs earned* — the rollup,
+ *    named as what it is — and every term after it is a named set of records
+ *    the reader can open; anything that cannot be named stays in *unaccounted*,
+ *    with a lead, rather than being filed under "other".
+ *
+ * There was a third band: the rollup drawn out per session, `PerformancePanel`.
+ * It came off with the spine (FEAT-119). This is a disclosure on the run
+ * screen now, and the run's own vitals are the first thing above it — so the
+ * per-session table was the same quantity a second time, three inches down.
  *
  * Every judgement is in `reconcile.ts`; this file is markup and three queries.
  *
@@ -96,10 +100,9 @@ export function MoneyView({
   /**
    * The run rollup, over every strategy in scope.
    *
-   * One query per strategy, under `PerformancePanel`'s own key — so the band at
-   * the bottom of this page is served from this cache rather than fetching the
-   * same answer a second time, and no new endpoint is added for a number that
-   * is already computed.
+   * One query per strategy, under the key the strategy workbench's own
+   * performance panel reads — so a reader who opens both is served from one
+   * cache, and no new endpoint is added for a number that is already computed.
    */
   const scoped = useMemo(
     () => (strategy ? strategies.filter((s) => s.slug === strategy) : strategies),
@@ -214,7 +217,11 @@ export function MoneyView({
           </p>
         ) : (
           <ul className="space-y-1.5 text-xs">
+            {/* Per session, sliced to the windows each run actually owned its
+                bots — a historical question about runs, not a present-tense one
+                about records, and not the same quantity as the headline. */}
             <Line
+              data-money-rollup
               label="What its runs earned"
               value={formatCurrencyPnl(r.attributed, symbol)}
               muted
@@ -269,18 +276,6 @@ export function MoneyView({
         )}
       </div>
 
-      {/* ── The rollup, unchanged, under the heading that says what it is ── */}
-      <div>
-        <h3 className="mb-2 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
-          What its runs earned
-        </h3>
-        <p className="mb-2 text-[11px] leading-relaxed text-[var(--color-text-muted)]">
-          Per session, sliced to the windows each run actually owned its bots —
-          a historical question about runs, not a present-tense one about
-          records. It is not the same quantity as the headline above.
-        </p>
-        <PerformancePanel slug={slug} sslug={sslug} dense />
-      </div>
     </div>
   );
 }
