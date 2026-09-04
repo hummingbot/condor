@@ -17,7 +17,9 @@ import { describe, expect, it } from "vitest";
 
 import type { ControllerInfo, ControllerPerformanceSnapshot } from "@/lib/api";
 import {
+  FOCUS_RADIUS_PX,
   mergeOwnerRows,
+  nearestSeries,
   ownerDataKey,
   ownerSeries,
   parseBaseline,
@@ -237,5 +239,68 @@ describe("a floor spanning two servers", () => {
     expect(keys).toEqual(["alpha"]);
     expect(rows[rows.length - 1][ownerDataKey("alpha")]).toBeCloseTo(14, 9);
     expect(rows[rows.length - 1].total).toBeCloseTo(14, 9);
+  });
+});
+
+// ── Which line is the cursor on (FEAT-117) ──
+//
+// A fleet of eighteen controllers draws eighteen lines, and the tooltip used to
+// list every one of them at the hovered instant with nothing saying which one
+// the reader was pointing at. The pick is made in pixels because the two bases
+// this chart draws — absolute quote and percent of capital — have y-axes three
+// orders of magnitude apart, and any threshold in the data's own units is right
+// on one of them and meaningless on the other.
+
+describe("nearestSeries", () => {
+  /** A y-axis where one unit of value is one pixel, counting down from 500. */
+  const scale = (value: number) => 500 - value;
+  const values = new Map([
+    ["total", 100],
+    ["alpha", 60],
+    ["beta", 20],
+  ]);
+
+  it("picks the line under the cursor", () => {
+    // 500 - 60 = 440 is alpha's pixel; two off it is still alpha.
+    expect(nearestSeries(values, 442, scale)).toBe("alpha");
+    expect(nearestSeries(values, 400, scale)).toBe("total");
+    expect(nearestSeries(values, 480, scale)).toBe("beta");
+  });
+
+  it("picks nothing when the cursor is on nothing", () => {
+    // Halfway between beta (480) and alpha (440) is outside both radii.
+    expect(nearestSeries(values, 460, scale)).toBeNull();
+    expect(nearestSeries(values, 10, scale)).toBeNull();
+  });
+
+  it("measures in pixels, so both bases behave the same", () => {
+    // The same picture drawn as percent: values a hundredth the size, and a
+    // scale a hundred times steeper. The answer must not change.
+    const percent = new Map([["alpha", 0.6], ["beta", 0.2]]);
+    const steep = (value: number) => 500 - value * 100;
+    expect(nearestSeries(percent, 442, steep)).toBe("alpha");
+    expect(nearestSeries(percent, 460, steep)).toBeNull();
+  });
+
+  it("has no answer before the chart has measured itself", () => {
+    expect(nearestSeries(values, 440, null)).toBeNull();
+    expect(nearestSeries(values, undefined, scale)).toBeNull();
+    expect(nearestSeries(values, Number.NaN, scale)).toBeNull();
+  });
+
+  it("skips a series the scale cannot place, rather than picking it", () => {
+    const gappy = new Map([["alpha", Number.NaN], ["beta", 20]]);
+    expect(nearestSeries(gappy, 480, scale)).toBe("beta");
+    expect(nearestSeries(gappy, 440, scale)).toBeNull();
+  });
+
+  it("breaks a tie toward the first entry, which is the legend's order", () => {
+    const tied = new Map([["alpha", 60], ["beta", 60]]);
+    expect(nearestSeries(tied, 440, scale)).toBe("alpha");
+  });
+
+  it("states its radius, so the tooltip and the plot agree on 'on a line'", () => {
+    expect(nearestSeries(values, 440 + FOCUS_RADIUS_PX - 1, scale)).toBe("alpha");
+    expect(nearestSeries(values, 440 + FOCUS_RADIUS_PX, scale)).toBeNull();
   });
 });

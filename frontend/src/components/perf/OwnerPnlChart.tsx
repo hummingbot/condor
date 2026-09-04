@@ -1,4 +1,4 @@
-import { useCallback, useId, useMemo, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useState } from "react";
 import {
   Area,
   Bar,
@@ -11,6 +11,7 @@ import {
   Tooltip,
   XAxis,
   YAxis,
+  useYAxisScale,
 } from "recharts";
 import type { SetURLSearchParams } from "react-router-dom";
 
@@ -25,6 +26,7 @@ import {
   pnlTextClass,
 } from "@/lib/formatters";
 import {
+  nearestSeries,
   ownerDataKey,
   parseBaseline,
   parseBasis,
@@ -136,6 +138,21 @@ export function OwnerPnlChart({
   const [drag, setDrag] = useState<TimeRange | null>(null);
   const [scrubbing, setScrubbing] = useState(false);
   const [hidden, setHidden] = useState<ReadonlySet<string>>(new Set());
+  /**
+   * The one series the cursor is on, or `null` when it is on none (FEAT-117).
+   *
+   * A fleet of eighteen controllers draws eighteen lines and the tooltip listed
+   * every one of them at the hovered instant — a wall of numbers in which the
+   * line the reader was actually pointing at was not marked. Which line the
+   * cursor is nearest is a fact the chart already has the geometry to answer,
+   * so it answers it: {@link nearestSeries} picks it in *pixels*, the tooltip
+   * leads with it, and every other line steps back so the picked one is legible
+   * against them.
+   *
+   * State and not a URL parameter: it lives for as long as the cursor is over
+   * the plot, and nobody wants to share a link to a hover.
+   */
+  const [focus, setFocus] = useState<string | null>(null);
 
   const range = drag ?? window.range;
   const [viewStart, viewEnd] = resolveTimeRange(rows as PnlChartPoint[], range);
@@ -289,6 +306,9 @@ export function OwnerPnlChart({
             drawn={totalDrawn}
             strong
             onToggle={() => toggle("total")}
+            onFocus={() => setFocus("total")}
+            onBlur={() => setFocus(null)}
+            focused={focus === "total"}
           />
           {keys.map((key, index) => (
             <LegendChip
@@ -303,6 +323,12 @@ export function OwnerPnlChart({
               }
               drawn={!hidden.has(key) && !muted.has(key)}
               onToggle={() => toggle(key)}
+              // The legend answers "which line is this one" the same way the
+              // plot does, which is the half of the question a reader with
+              // eighteen lines asks first.
+              onFocus={() => setFocus(key)}
+              onBlur={() => setFocus(null)}
+              focused={focus === key}
             />
           ))}
         </div>
@@ -381,6 +407,9 @@ export function OwnerPnlChart({
                 data={drawnRows}
                 margin={{ top: 12, right: PANE_MARGIN_RIGHT, left: 0, bottom: 0 }}
                 syncId={instanceId}
+                // The tooltip reports the focus while the cursor is inside the
+                // plot; nothing reports leaving it, so the chart does.
+                onMouseLeave={() => setFocus(null)}
               >
                 <CartesianGrid
                   strokeDasharray="3 3"
@@ -429,6 +458,7 @@ export function OwnerPnlChart({
                       format={fmt}
                       showTotal={totalDrawn}
                       visible={!scrubbing}
+                      onFocus={setFocus}
                     />
                   }
                 />
@@ -439,11 +469,16 @@ export function OwnerPnlChart({
                     dataKey={ownerDataKey(key)}
                     name={labels.get(key) ?? key}
                     stroke={seriesColor(keys.indexOf(key))}
-                    strokeWidth={1.5}
+                    // Emphasis, never a colour change: the line keeps the colour
+                    // its legend chip carries, or the reader would have to
+                    // re-find it every time the cursor moves.
+                    strokeWidth={focus === key ? 3 : 1.5}
+                    strokeOpacity={focus === null || focus === key ? 1 : 0.2}
                     dot={false}
                     // A gap is the truth for an owner that had not started yet.
                     connectNulls={false}
                     isAnimationActive={false}
+                    activeDot={focus === key ? { r: 3, strokeWidth: 0 } : false}
                   />
                 ))}
                 {totalDrawn && (
@@ -452,10 +487,13 @@ export function OwnerPnlChart({
                     dataKey="total"
                     name="Total"
                     stroke={tc.up}
-                    strokeWidth={2.5}
-                    strokeOpacity={0.75}
+                    strokeWidth={focus === "total" ? 3.5 : 2.5}
+                    strokeOpacity={
+                      focus === null || focus === "total" ? 0.75 : 0.2
+                    }
                     dot={false}
                     isAnimationActive={false}
+                    activeDot={focus === "total" ? { r: 3, strokeWidth: 0 } : false}
                   />
                 )}
               </ComposedChart>
@@ -597,6 +635,9 @@ function LegendChip({
   drawn,
   strong = false,
   onToggle,
+  onFocus,
+  onBlur,
+  focused,
 }: {
   test?: string;
   label: string;
@@ -605,17 +646,24 @@ function LegendChip({
   drawn: boolean;
   strong?: boolean;
   onToggle: () => void;
+  /** Hovering a chip picks the same series pointing at its line does. */
+  onFocus?: () => void;
+  onBlur?: () => void;
+  focused?: boolean;
 }) {
   return (
     <button
       type="button"
       data-owner-legend={test ?? "total"}
       data-drawn={drawn}
+      data-focused={focused ? true : undefined}
       onClick={onToggle}
+      onMouseEnter={onFocus}
+      onMouseLeave={onBlur}
       title={drawn ? `Hide ${label}` : `Show ${label}`}
       className={`flex items-center gap-1.5 rounded px-1 py-0.5 text-[11px] tabular-nums transition-opacity hover:bg-[var(--color-surface-hover)] ${
         drawn ? "" : "opacity-40"
-      }`}
+      } ${focused ? "bg-[var(--color-surface-hover)]" : ""}`}
     >
       <span
         aria-hidden="true"
@@ -666,54 +714,154 @@ interface TooltipPayload {
   value?: number;
 }
 
+/**
+ * How many lines the tooltip lists when the cursor is on none of them.
+ *
+ * A fleet of eighteen controllers made a tooltip taller than the pane it was
+ * drawn over. Ten is enough to read the shape of the field — the leaders and
+ * where the cursor sits in it — and the rest is one line of arithmetic rather
+ * than nine rows nobody reads.
+ */
+const TOOLTIP_ROWS = 10;
+
+/**
+ * The hovered instant, and what the cursor is pointing at (FEAT-117).
+ *
+ * Two readings in one, and which one is drawn is decided by where the cursor
+ * is rather than by a mode the reader has to pick:
+ *
+ * - **On a line** — the cursor is within {@link FOCUS_RADIUS_PX} of one — the
+ *   answer is *that bot*, so it is named, in its own colour, with the Total
+ *   under it for scale and nothing else competing with it. This is the reading
+ *   the eighteen-line pane never had.
+ * - **On none of them**, the tooltip is the field at that instant, ordered by
+ *   value so the rows run top-to-bottom in the same order as the lines they
+ *   name, and cut at {@link TOOLTIP_ROWS} with the remainder counted.
+ *
+ * Which line that is, is also reported *upward* (`onFocus`) rather than kept
+ * here, because the emphasis belongs to the plot: the picked line thickens and
+ * the rest step back, which is what makes it followable across the pane. The
+ * report goes through an effect and not through render, so the parent's state
+ * change and this component's render stay separate events.
+ */
 function OwnerTooltip({
   active,
   payload,
   label,
+  coordinate,
   labels,
   keys,
   format,
   showTotal,
   visible,
+  onFocus,
 }: {
   active?: boolean;
   payload?: TooltipPayload[];
   label?: number;
+  /** Recharts hands the cursor's own y here on a horizontal chart. */
+  coordinate?: { x?: number; y?: number };
   labels: Map<string, string>;
   keys: readonly string[];
   format: (value: number) => string;
   showTotal: boolean;
   visible: boolean;
+  onFocus: (key: string | null) => void;
 }) {
-  if (!active || !visible || !payload || payload.length === 0) return null;
-  const by = new Map<string, number>();
-  for (const entry of payload) {
-    if (typeof entry.value === "number") by.set(String(entry.dataKey), entry.value);
-  }
+  // The chart's own y scale, which is the only thing that can say where a
+  // value is *drawn*. A hook, so it runs before every early return below.
+  const scale = useYAxisScale();
+
+  const by = useMemo(() => {
+    const out = new Map<string, number>();
+    for (const entry of payload ?? []) {
+      if (typeof entry.value === "number") out.set(String(entry.dataKey), entry.value);
+    }
+    return out;
+  }, [payload]);
+
+  // Only the series that are drawn are pickable: a hidden line is not on screen
+  // to be pointed at, and the Total is, so it is in here with them.
+  const pickable = useMemo(() => {
+    const out = new Map<string, number>();
+    if (showTotal) {
+      const total = by.get("total");
+      if (typeof total === "number") out.set("total", total);
+    }
+    for (const key of keys) {
+      const value = by.get(ownerDataKey(key));
+      if (typeof value === "number") out.set(key, value);
+    }
+    return out;
+  }, [by, keys, showTotal]);
+
+  const live = active === true && visible;
+  const focused = live ? nearestSeries(pickable, coordinate?.y, scale) : null;
+  useEffect(() => {
+    onFocus(focused);
+  }, [focused, onFocus]);
+
+  if (!live || pickable.size === 0) return null;
+
   const total = by.get("total");
+  const when = (
+    <p className="mb-0.5 font-mono text-[10px] text-[var(--color-text-muted)]">
+      {typeof label === "number" ? formatDateTime(label) : ""}
+    </p>
+  );
+  const name = (key: string) => (key === "total" ? "Total" : (labels.get(key) ?? key));
+
+  if (focused) {
+    const value = pickable.get(focused)!;
+    return (
+      <div
+        data-owner-tooltip="focused"
+        className="rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-[11px] shadow-lg"
+      >
+        {when}
+        <p data-owner-tooltip-row={focused} className="font-mono font-semibold">
+          <span className="text-[var(--color-text)]">{name(focused)}</span>{" "}
+          <span className={pnlTextClass(value)}>{format(value)}</span>
+        </p>
+        {showTotal && focused !== "total" && typeof total === "number" && (
+          <p className="font-mono text-[10px] text-[var(--color-text-muted)]">
+            Total {format(total)}
+          </p>
+        )}
+      </div>
+    );
+  }
+
+  // Descending, so the rows are in the same order on the card as the lines are
+  // on the pane — the one ordering a reader can check against the picture.
+  const ranked = [...pickable]
+    .filter(([key]) => key !== "total")
+    .sort((a, b) => b[1] - a[1]);
+  const shown = ranked.slice(0, TOOLTIP_ROWS);
+  const rest = ranked.length - shown.length;
 
   return (
-    <div className="rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-[11px] shadow-lg">
-      <p className="mb-0.5 font-mono text-[10px] text-[var(--color-text-muted)]">
-        {typeof label === "number" ? formatDateTime(label) : ""}
-      </p>
-      {showTotal && total !== undefined && (
+    <div
+      data-owner-tooltip="all"
+      className="rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-[11px] shadow-lg"
+    >
+      {when}
+      {showTotal && typeof total === "number" && (
         <p className={`font-mono font-semibold ${pnlTextClass(total)}`}>
           Total {format(total)}
         </p>
       )}
-      {keys.map((key) => {
-        const value = by.get(ownerDataKey(key));
-        if (value === undefined) return null;
-        return (
-          <p key={key} className="font-mono">
-            <span className="text-[var(--color-text-muted)]">
-              {labels.get(key) ?? key}
-            </span>{" "}
-            {format(value)}
-          </p>
-        );
-      })}
+      {shown.map(([key, value]) => (
+        <p key={key} data-owner-tooltip-row={key} className="font-mono">
+          <span className="text-[var(--color-text-muted)]">{name(key)}</span>{" "}
+          {format(value)}
+        </p>
+      ))}
+      {rest > 0 && (
+        <p className="font-mono text-[10px] text-[var(--color-text-muted)]">
+          +{rest} more — point at a line to read it
+        </p>
+      )}
     </div>
   );
 }

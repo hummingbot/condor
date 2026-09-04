@@ -306,3 +306,55 @@ export function rebaseRows(
 export function seriesColor(index: number): string {
   return `var(--chart-series-${(Math.max(0, index) % 8) + 1})`;
 }
+// ── Which line is the cursor on (FEAT-117) ──
+
+/**
+ * How far, in pixels, a cursor may sit from a line and still be *on* it.
+ *
+ * Generous, and deliberately. A reader tracing one bot out of eighteen is
+ * pointing at a 1.5px stroke with a mouse, and the cost of picking the line
+ * one row above the one they meant is that they move the cursor and it
+ * corrects itself; the cost of picking nothing is the wall of numbers this
+ * exists to replace. Twelve is about a third of the gap between two adjacent
+ * lines on a full pane, which is close enough that the answer is stable while
+ * the cursor is still.
+ */
+export const FOCUS_RADIUS_PX = 12;
+
+/**
+ * The series the cursor is on, or `null` for a cursor on none.
+ *
+ * Measured in **pixels and not in values**, which is the whole point: an
+ * absolute chart's y-axis spans hundreds of dollars and a relative one spans
+ * single-digit percent, so any threshold expressed in the data's own units is
+ * right on one of them and nonsense on the other. The caller passes the axis
+ * scale it already has, and this compares where the lines *are drawn*.
+ *
+ * Ties go to the earlier entry, which is the order the legend lists them in, so
+ * two lines that have converged pick the same one on every frame rather than
+ * flickering between them.
+ *
+ * A `null` scale (the chart has not measured itself yet) or a cursor with no
+ * position is not an error: it is a frame with no answer, and `null` says so.
+ */
+export function nearestSeries(
+  values: ReadonlyMap<string, number>,
+  cursorY: number | null | undefined,
+  scale: ((value: number) => number | undefined) | null | undefined,
+  radius: number = FOCUS_RADIUS_PX,
+): string | null {
+  if (typeof cursorY !== "number" || !Number.isFinite(cursorY) || !scale) return null;
+  let best: string | null = null;
+  let bestDistance = radius;
+  for (const [key, value] of values) {
+    if (!Number.isFinite(value)) continue;
+    const y = scale(value);
+    if (typeof y !== "number" || !Number.isFinite(y)) continue;
+    const distance = Math.abs(y - cursorY);
+    if (distance < bestDistance) {
+      best = key;
+      bestDistance = distance;
+    }
+  }
+  return best;
+}
