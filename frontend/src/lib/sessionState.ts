@@ -151,6 +151,21 @@ export const DOCK_WIDTH_KEY = "condor.dock.width";
 export const ACCOUNT_DOCK_KEY = "condor.dock.account";
 
 /**
+ * Which of an agent run screen's disclosures are open, as a JSON array of
+ * section ids — Runs, Detail, Money, Fleet and Playbook (FEAT-119).
+ *
+ * One list for every agent rather than one per slug: what a reader wants to see
+ * about a run is a habit, not a property of the agent, and a key per agent
+ * would make the first visit to each of them a fresh page with everything shut.
+ * `?open=` is what says something different about one particular address.
+ *
+ * KEPT, beside `ACCOUNT_DOCK_KEY` and `DOCK_PANES_KEY` and for the same reason:
+ * which disclosures a reader has open is a fact about this window, and the
+ * runs, money and records behind them are fetched for whoever is logged in now.
+ */
+export const AGENT_SECTIONS_KEY = "condor.agent.sections";
+
+/**
  * Where the reader put the split between the transcript and the workspace
  * pane, as a fraction of the row (ARCH-273, ARCH-291).
  *
