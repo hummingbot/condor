@@ -29,6 +29,6 @@ time_limit_minutes: 720
 
 risk_limits:
   max_position_size_quote: 9
-  max_open_executors: 5
+  max_open_executors: 999
   max_drawdown_pct: -1
   shutdown_drawdown_pct: -1
