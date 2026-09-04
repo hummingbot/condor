@@ -34,6 +34,7 @@ vi.mock("@/lib/api", () => ({
 }));
 
 const { AgentKnowledge } = await import("./AgentKnowledge");
+type KnowledgeTabId = NonNullable<Parameters<typeof AgentKnowledge>[0]["tab"]>;
 
 declare global {
   var IS_REACT_ACT_ENVIRONMENT: boolean;
@@ -102,13 +103,6 @@ async function settle() {
   }
 }
 
-function buttonWith(text: string): HTMLButtonElement {
-  const found = [...container.querySelectorAll("button")].find((b) =>
-    b.textContent?.includes(text),
-  );
-  if (!found) throw new Error(`No button reading "${text}"`);
-  return found as HTMLButtonElement;
-}
 
 /** The row's switch, addressed by the label it exposes to a screen reader. */
 function switchFor(rowTitle: string): HTMLButtonElement {
@@ -128,19 +122,20 @@ async function click(el: HTMLElement) {
   await settle();
 }
 
-async function open(tab: string) {
+/** Mount the panel on a section — a prop, not a click: the panel draws no
+ *  navigation of its own since FEAT-117. */
+async function open(tab: KnowledgeTabId) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 } },
   });
   await act(async () => {
     root.render(
       <QueryClientProvider client={client}>
-        <AgentKnowledge slug="brigado" />
+        <AgentKnowledge slug="brigado" tab={tab} />
       </QueryClientProvider>,
     );
   });
   await settle();
-  await click(buttonWith(tab));
 }
 
 beforeEach(() => {
@@ -163,7 +158,7 @@ afterEach(() => {
 
 describe("muting a playbook", () => {
   it("switches it off through the endpoint, by slug", async () => {
-    await open("Skills");
+    await open("skills");
 
     const toggle = switchFor("lp_rebalance");
     expect(toggle.getAttribute("aria-checked")).toBe("true");
@@ -178,14 +173,14 @@ describe("muting a playbook", () => {
   });
 
   it("is offered on an inherited shared playbook too — a mute is per-agent", async () => {
-    await open("Skills");
+    await open("skills");
     // lp_rebalance is inherited: no edit or delete, but a switch all the same.
     expect(switchFor("lp_rebalance")).toBeTruthy();
   });
 
   it("keeps the muted row listed, flagged and switchable back on", async () => {
     getAgentBrain.mockResolvedValue(brain({ lp: true }));
-    await open("Skills");
+    await open("skills");
 
     expect(container.textContent).toContain("lp_rebalance");
     expect(container.textContent).toContain("muted");
@@ -200,18 +195,11 @@ describe("muting a playbook", () => {
       muted: false,
     });
   });
-
-  it("counts what the agent gets, not what the panel lists", async () => {
-    getAgentBrain.mockResolvedValue(brain({ lp: true }));
-    await open("Skills");
-
-    expect(buttonWith("Skills").textContent).toBe("Skills1/2");
-  });
 });
 
 describe("muting a routine", () => {
   it("switches it off through the endpoint, by name", async () => {
-    await open("Routines");
+    await open("routines");
 
     // The routines tab titles rows through `formatRoutineName`.
     await click(switchFor("Lp Scanner"));
@@ -224,7 +212,7 @@ describe("muting a routine", () => {
   });
 
   it("says the human routines page is unaffected", async () => {
-    await open("Routines");
+    await open("routines");
     expect(container.textContent).toContain(
       "/routines still lists and runs it",
     );

@@ -137,4 +137,43 @@ describe("writing the pane into the URL", () => {
     expect(next.get("panel")).toBe("agent");
     expect(next.get("loop")).toBeNull();
   });
+
+  describe("the agent panel's own contents (FEAT-117)", () => {
+    /** The panel is the whole workspace, so these four are part of what is open. */
+    const OPEN = `?panel=agent&${AGENT_PARAM}=brigado&view=money&strategy=brl_mm&run=s:3&tick=40`;
+
+    it("keeps them while the pane goes on showing the same agent", () => {
+      const next = writePane(q(OPEN), { kind: "agent", slug: "brigado" });
+      expect(next.get("view")).toBe("money");
+      expect(next.get("strategy")).toBe("brl_mm");
+      expect(next.get("run")).toBe("s:3");
+      expect(next.get("tick")).toBe("40");
+    });
+
+    it("drops them when the pane closes", () => {
+      const closed = writePane(q(OPEN), null);
+      for (const key of ["panel", AGENT_PARAM, "view", "strategy", "run", "tick"]) {
+        expect(closed.get(key)).toBeNull();
+      }
+    });
+
+    it("drops them when another panel takes the pane", () => {
+      expect(writePane(q(OPEN), { kind: "desk" }).get("view")).toBeNull();
+    });
+
+    it("drops them when the pane opens a different agent", () => {
+      // A scope and a run that belong to Brigado are not Quiet's, and a Back
+      // through them would restore a pane nobody asked for.
+      const next = writePane(q(OPEN), { kind: "agent", slug: "quiet" });
+      expect(next.get(AGENT_PARAM)).toBe("quiet");
+      expect(next.get("view")).toBeNull();
+      expect(next.get("strategy")).toBeNull();
+    });
+
+    it("drops them when the pane falls back to the conversation's agent", () => {
+      const next = writePane(q(OPEN), { kind: "agent" });
+      expect(next.get(AGENT_PARAM)).toBeNull();
+      expect(next.get("view")).toBeNull();
+    });
+  });
 });

@@ -84,13 +84,6 @@ async function settle() {
   }
 }
 
-function buttonWith(text: string): HTMLButtonElement {
-  const found = [...container.querySelectorAll("button")].find((b) =>
-    b.textContent?.includes(text),
-  );
-  if (!found) throw new Error(`No button reading "${text}"`);
-  return found as HTMLButtonElement;
-}
 
 function rowFor(title: string): HTMLElement {
   const row = [...container.querySelectorAll("div.group")].find((d) =>
@@ -121,12 +114,11 @@ async function openTools() {
   await act(async () => {
     root.render(
       <QueryClientProvider client={client}>
-        <AgentKnowledge slug="brigado" />
+        <AgentKnowledge slug="brigado" tab="tools" />
       </QueryClientProvider>,
     );
   });
   await settle();
-  await click(buttonWith("Tools"));
 }
 
 beforeEach(() => {
@@ -218,12 +210,5 @@ describe("muting a tool", () => {
       name: "manage_clmm",
       muted: false,
     });
-  });
-
-  it("counts what the agent gets, not what the panel lists", async () => {
-    getAgentBrain.mockResolvedValue(brain({ mutedClmm: true }));
-    await openTools();
-
-    expect(buttonWith("Tools").textContent).toBe("Tools3/4");
   });
 });

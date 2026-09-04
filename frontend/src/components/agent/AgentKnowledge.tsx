@@ -1,18 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft,
-  BookOpen,
-  Brain,
   Check,
   ChevronDown,
   ChevronRight,
-  History,
   Loader2,
-  Repeat,
   Sparkles,
-  Wrench,
   X,
-  Zap,
 } from "lucide-react";
 import { useCallback, useState } from "react";
 import ReactMarkdown from "react-markdown";
@@ -21,12 +15,8 @@ import remarkGfm from "remark-gfm";
 import { ActivityFeed } from "@/components/agent/ActivityFeed";
 import { MarkdownEditor } from "@/components/agent/AgentOverviewTab";
 import { AgentStrategies } from "@/components/agent/AgentStrategies";
-import { LoopBanner } from "@/components/agent/LoopBanner";
 import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
-import type {
-  KnowledgeLayout,
-  KnowledgeTabId,
-} from "@/components/agent/knowledgeTabs";
+import type { KnowledgeTabId } from "@/components/agent/knowledgeTabs";
 import {
   BodyReader,
   type Reading,
@@ -72,7 +62,7 @@ import { formatRoutineName } from "@/lib/routineUtils";
  */
 export function AgentKnowledge({
   slug,
-  layout = "rail",
+  dense = false,
   tab,
   onTabChange,
   routinesAction,
@@ -82,8 +72,16 @@ export function AgentKnowledge({
   onDirtyChange,
 }: {
   slug: string;
-  /** How the sections are offered — see {@link KnowledgeLayout}. */
-  layout?: KnowledgeLayout;
+  /**
+   * Whether the host is a column rather than a page.
+   *
+   * All this ever decided was whether the strategy cards lay out as a grid: the
+   * grid's breakpoints are the *viewport's*, so in the chat's 400–700px pane a
+   * wide window put three cards side by side in a column that fits one. It used
+   * to ride on `layout="rail"`, which is gone (FEAT-117) — every host draws its
+   * own navigation now — so the width says so itself.
+   */
+  dense?: boolean;
   /**
    * Which section is open, when the host wants a say. The agent page reads it
    * off `?tab=` so a link can land on Skills; the chat panel holds it in state.
@@ -151,23 +149,6 @@ export function AgentKnowledge({
     // open is what matters; a poll here would walk the skill and memory stores
     // on disk every few seconds for a panel nobody is looking at.
     staleTime: 30_000,
-  });
-
-  /**
-   * The loops, for the banner above the sections.
-   *
-   * The same `["agent", slug]` key `AgentStrategies` reads, so the two share
-   * one set of records through react-query and the banner costs no second
-   * fetch when the Strategies section is open. Same conditional cadence for
-   * the same reason (PERF-305): only a live loop can move a countdown, and an
-   * idle agent should not buy 5s of Hummingbot round-trips to be told so.
-   */
-  const { data: agentDetail } = useQuery({
-    queryKey: ["agent", slug],
-    queryFn: () => api.getAgent(slug),
-    enabled: !!slug && layout === "rail",
-    refetchInterval: (q) =>
-      q.state.data?.strategies.some((s) => s.status === "running") ? 5000 : false,
   });
 
   // One dirty flag for whichever editor is mounted — only ever one is.
@@ -271,167 +252,12 @@ export function AgentKnowledge({
     },
   });
 
-  // A count is what the *agent* gets, because that is the number the tab is
-  // asked for. When something is muted the panel lists more rows than that, so
-  // the count says "7/9" — otherwise the tab would contradict its own list.
-  const counts = {
-    skills: brain?.skills.filter((s) => !s.muted).length ?? 0,
-    memories: brain?.memories.length ?? 0,
-    tools: brain?.tools.filter((t) => !t.muted).length ?? 0,
-    strategies: brain?.strategies.length ?? 0,
-    routines: brain?.routines.filter((r) => !r.muted).length ?? 0,
-  };
-  const totals = {
-    skills: brain?.skills.length ?? 0,
-    routines: brain?.routines.length ?? 0,
-    tools: brain?.tools.length ?? 0,
-  };
-  const withMuted = (live: number, total: number) =>
-    total > live
-      ? { countLabel: `${live}/${total}`, countTitle: `${live} of ${total}` }
-      : {};
-
-  const tabs: {
-    id: KnowledgeTabId;
-    label: string;
-    icon: React.ReactNode;
-    count?: number;
-    countLabel?: string;
-    countTitle?: string;
-  }[] = [
-    { id: "brain", label: "Brain", icon: <Brain className="h-3.5 w-3.5" /> },
-    {
-      id: "skills",
-      label: "Skills",
-      icon: <BookOpen className="h-3.5 w-3.5" />,
-      count: counts.skills,
-      ...withMuted(counts.skills, totals.skills),
-    },
-    {
-      id: "memories",
-      label: "Memories",
-      icon: <Sparkles className="h-3.5 w-3.5" />,
-      count: counts.memories,
-    },
-    {
-      id: "tools",
-      label: "Tools",
-      icon: <Wrench className="h-3.5 w-3.5" />,
-      // The mounted surface, so it counts on every agent now — an allowlist is
-      // a different statement and no longer decides whether there is a number.
-      count: counts.tools,
-      ...withMuted(counts.tools, totals.tools),
-    },
-    {
-      id: "strategies",
-      label: "Strategies",
-      icon: <Repeat className="h-3.5 w-3.5" />,
-      count: counts.strategies,
-    },
-    {
-      id: "routines",
-      label: "Routines",
-      icon: <Zap className="h-3.5 w-3.5" />,
-      count: counts.routines,
-      ...withMuted(counts.routines, totals.routines),
-    },
-    {
-      id: "activity",
-      label: "Activity",
-      // Everything this agent actually did — the tasks handed to it in the
-      // background and the consults it answered — this run's and every earlier
-      // one, read back from disk (FEAT-058).
-      icon: <History className="h-3.5 w-3.5" />,
-    },
-  ];
-
-  const rail = layout === "rail";
-  const bare = layout === "bare";
-
   /** Every section change also leaves whatever drill-down or editor was open. */
   const openTab = (id: KnowledgeTabId) => {
     setTab(id);
     setReading(null);
     leaveEditor();
   };
-
-  // A host that draws its own navigation gets none of ours (FEAT-103).
-  const nav = bare ? null : rail ? (
-    // A column down the *right* edge, because eight tabs wrap to three rows in
-    // a 400px pane — and because in the chat this rail sits against the dock,
-    // where everything else you click to open something already is. Same tabs,
-    // same counts, same order, each still saying its name: an icon alone made
-    // the reader learn seven glyphs to find "Tools".
-    //
-    // The names are set flat rather than turned on their side. Sideways text
-    // buys 30px of width and charges the reader for it — a Latin word is
-    // recognised by its shape, and rotating it makes you decode it letter by
-    // letter — and it charges the column too: `STRATEGIES` on its side is 60px
-    // of height per key, so the seven ran the full height of the pane. Upright
-    // at 10px they are ~36px each, and the whole rail is a third of the column.
-    <div
-      role="tablist"
-      aria-orientation="vertical"
-      aria-label="Sections"
-      className="flex w-20 shrink-0 flex-col items-center gap-1 overflow-y-auto border-l border-[var(--color-border)] px-1 py-2"
-    >
-      {tabs.map((t) => {
-        const name =
-          t.countTitle !== undefined
-            ? `${t.label} (${t.countTitle})`
-            : t.count !== undefined && t.count > 0
-              ? `${t.label} (${t.count})`
-              : t.label;
-        const active = activeTab === t.id;
-        return (
-          /* Each section is its own key rather than a name in a list: a border,
-           a ground of its own and real air between it and its neighbours. The
-           rail was seven words stacked with a hairline of space, which read as
-           one striped column and made the reader parse text to find the thing
-           they wanted to click. The selected one is filled, not underlined —
-           at this width a 2px mark on the outer edge was the only difference
-           between the section you are in and the six you are not. */
-          <button
-            key={t.id}
-            role="tab"
-            aria-selected={active}
-            aria-label={name}
-            onClick={() => openTab(t.id)}
-            title={name}
-            className={`flex w-full shrink-0 flex-col items-center gap-1 rounded-md border px-1 py-2 transition-colors ${
-              active
-                ? "border-[var(--color-primary)]/40 bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
-                : "border-[var(--color-border)] bg-[var(--color-surface)] text-[var(--color-text-muted)] hover:border-[var(--color-primary)]/40 hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-            }`}
-          >
-            {t.icon}
-            {/* The count rides beside the name on the same line: at 10px the
-              longest section still leaves room for it, and a second line would
-              cost every key height for the benefit of two of them. */}
-            <span
-              aria-hidden
-              className={`flex items-baseline gap-1 text-[10px] leading-none ${
-                active ? "font-semibold" : "font-medium"
-              }`}
-            >
-              <span>{t.label}</span>
-              {(t.countLabel || (t.count !== undefined && t.count > 0)) && (
-                <span
-                  className={
-                    active
-                      ? "text-[9px] text-[var(--color-primary)]/70"
-                      : "text-[9px] text-[var(--color-text-muted)]"
-                  }
-                >
-                  {t.countLabel ?? t.count}
-                </span>
-              )}
-            </span>
-          </button>
-        );
-      })}
-    </div>
-  ) : null;
 
   const body = (
     <>
@@ -547,7 +373,7 @@ export function AgentKnowledge({
             {activeTab === "strategies" && (
               <AgentStrategies
                 slug={slug}
-                dense={rail}
+                dense={dense}
                 onOpenStrategy={onOpenStrategy}
               />
             )}
@@ -606,30 +432,12 @@ export function AgentKnowledge({
     </>
   );
 
-  // The rail is beside its body and both scroll independently, so a long
-  // AGENT.md never scrolls the sections out of reach. A bare host draws its own
-  // navigation and gets the bodies alone.
-  // The banner spans the rail as well as the body, and sits outside the
-  // scroller: "there is a loop running" must not be a fact you scroll past.
-  // Only where a host can receive the click — a rail host that passes no
-  // `onOpenStrategy` has nowhere to open the workbench, and a strip that says
-  // something is running but cannot take you to it is worse than none.
-  return rail ? (
-    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-      {onOpenStrategy && (
-        <LoopBanner
-          strategies={agentDetail?.strategies ?? []}
-          onOpenStrategy={onOpenStrategy}
-        />
-      )}
-      <div className="flex min-h-0 flex-1 overflow-hidden">
-        <div className="min-w-0 flex-1 overflow-y-auto px-3 py-2">{body}</div>
-        {nav}
-      </div>
-    </div>
-  ) : (
-    <div>{body}</div>
-  );
+  // Every host draws its own navigation now (FEAT-103, FEAT-117), so this is
+  // the bodies and nothing else: the workspace's spine carries the seven
+  // sections beside the loop's own views, in the page and in the chat's pane
+  // alike, and a strip drawn in here would be a second navigation for one
+  // thing.
+  return <div>{body}</div>;
 }
 
 // ── Tabs ──

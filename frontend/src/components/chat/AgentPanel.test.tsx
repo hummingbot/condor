@@ -11,9 +11,13 @@
  * name, description, model or server restating what the tab and the panel
  * behind it already say; both switches live in the panel's bar and go dead
  * with a reason while a turn is in flight; a pinned server offers no picker;
- * with no session the model field still sets what the next conversation starts
- * on while the server field is a statement rather than a dead control; and the
- * panel keeps no link out of the workspace.
+ * and with no session the model field still sets what the next conversation
+ * starts on while the server field is a statement rather than a dead control.
+ *
+ * The panel's own body is the whole agent workspace since FEAT-117, and it is
+ * stubbed here — it has its own cases. What this file pins about it is the
+ * seam: the slug and the URL adapter it is handed, and the full-screen door
+ * that was deliberately absent until the panel became the page.
  *
  * Needs a DOM, so this file overrides vitest's default `node` environment.
  *
@@ -21,9 +25,9 @@
  */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act } from "react";
+import { act, useEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AgentBrain, ChatAgentOption } from "@/lib/api";
@@ -49,6 +53,22 @@ vi.mock("@/lib/api", () => ({
 // The socket is the shell's; nothing under test opens one of its own.
 vi.mock("@/hooks/useChat", () => ({
   useChat: () => ({ isConnected: true }),
+}));
+
+/**
+ * The workspace body, stubbed: it is the agent's whole screen and it has its
+ * own tests. Here it stands for "the panel is the page", and reports the two
+ * things this seam owes it — whose workspace, and where its URL is kept.
+ */
+let bodyProps: { slug: string; view: string } | null = null;
+vi.mock("@/components/agent/workspace/AgentWorkspaceBody", () => ({
+  AgentWorkspaceBody: (props: {
+    slug: string;
+    adapter: { url: { view: string } };
+  }) => {
+    bodyProps = { slug: props.slug, view: props.adapter.url.view };
+    return <div data-workspace-body={props.slug} />;
+  },
 }));
 
 const { AgentPanel } = await import("./AgentPanel");
@@ -111,6 +131,19 @@ let root: Root;
 let closed: number;
 let opened: number;
 let picked: { model?: string; server?: string };
+/** Wherever the router is, so the full-screen door can be followed. */
+let at = "";
+
+function Probe() {
+  const location = useLocation();
+  // In an effect and not in the render body: recording where the router went
+  // is a side effect, and the rule that forbids it in render is the one worth
+  // keeping even in a probe.
+  useEffect(() => {
+    at = `${location.pathname}${location.search}`;
+  }, [location]);
+  return null;
+}
 
 async function settle() {
   for (let i = 0; i < 10; i++) {
@@ -128,10 +161,13 @@ function client() {
 
 type PanelProps = Parameters<typeof AgentPanel>[0];
 
-async function renderPanel(over: Partial<PanelProps> = {}) {
+async function renderPanel(
+  over: Partial<PanelProps> = {},
+  entry = "/",
+) {
   await act(async () => {
     root.render(
-      <MemoryRouter>
+      <MemoryRouter initialEntries={[entry]}>
         <QueryClientProvider client={client()}>
           <AgentPanel
             slug="orca"
@@ -146,11 +182,11 @@ async function renderPanel(over: Partial<PanelProps> = {}) {
             onSelectBrain={(sel) => (picked.model = sel.agentKey)}
             onSelectServer={(name) => (picked.server = name)}
             onOpenRoutine={() => {}}
-            onOpenStrategy={() => {}}
             onAskAgent={() => {}}
             onClose={() => (closed += 1)}
             {...over}
           />
+          <Probe />
         </QueryClientProvider>
       </MemoryRouter>,
     );
@@ -174,6 +210,7 @@ async function renderTune(over: Partial<RailProps> = {}) {
             onToggle={() => (opened += 1)}
             {...over}
           />
+          <Probe />
         </QueryClientProvider>
       </MemoryRouter>,
     );
@@ -215,6 +252,8 @@ beforeEach(() => {
   closed = 0;
   opened = 0;
   picked = {};
+  at = "";
+  bodyProps = null;
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -347,25 +386,51 @@ describe("with no session yet", () => {
 });
 
 describe("the panel", () => {
-  it("keeps the sections, and no door out of the workspace", async () => {
-    await renderPanel();
+  it("is the agent's whole workspace, on the section the URL names", async () => {
+    // It used to be `AgentKnowledge`'s seven Being sections and nothing of
+    // what the agent was doing, so the question a conversation provokes — "it
+    // says it deployed six controllers, did it?" — was the one it could not
+    // answer.
+    await renderPanel({}, "/?panel=agent&view=money");
 
-    // The sections are a rail of vertical names, not a link to the page that
-    // has them laid out horizontally: everything the agent is stays in here.
-    const sections = [...document.querySelectorAll('[role="tab"]')].map((t) =>
-      t.getAttribute("aria-label"),
-    );
-    expect(sections).toContain("Brain");
-    expect(container.textContent).not.toContain("Full page");
-    expect(container.querySelector("a")).toBeNull();
+    expect(bodyProps).toEqual({ slug: "orca", view: "money" });
+    expect(container.querySelector("[data-workspace-body]")).not.toBeNull();
   });
 
-  it("offers the pane and nothing larger", async () => {
-    await renderPanel();
+  it("opens on Now, not on an AGENT.md dump", async () => {
+    await renderPanel({}, "/?panel=agent");
+    expect(bodyProps!.view).toBe("now");
+  });
 
-    // The panel is worked in while glancing back at the conversation beside
-    // it, so the one outcome a full-screen button had was losing that chat.
-    expect(document.querySelector('button[title^="Full screen"]')).toBeNull();
+  it("draws no navigation of its own — the body's spine is the one", async () => {
+    await renderPanel();
+    expect(document.querySelector('[role="tablist"]')).toBeNull();
+  });
+
+  it("goes full screen to the page, carrying the whole selection", async () => {
+    // The door this panel refused while it was a subset of the page. It is
+    // not an escape hatch now: `/agents/:slug` renders the same component
+    // from the same parameters, so this is a change of width.
+    await renderPanel(
+      {},
+      "/?panel=agent&who=orca&view=runs&strategy=brl_mm&run=s:3&tick=40",
+    );
+
+    const maximize = document.querySelector<HTMLElement>(
+      'button[title^="Full screen"]',
+    )!;
+    expect(maximize.title).toContain("on its own page");
+
+    await click(maximize);
+    // The pane's own `?panel=` and `?who=` stay behind; the workspace's four
+    // travel.
+    expect(at).toBe("/agents/orca?view=runs&strategy=brl_mm&run=s%3A3&tick=40");
+  });
+
+  it("goes to a bare page when nothing is selected", async () => {
+    await renderPanel({}, "/?panel=agent");
+    await click(document.querySelector<HTMLElement>('button[title^="Full screen"]')!);
+    expect(at).toBe("/agents/orca");
   });
 
   it("just closes when nothing is being edited", async () => {

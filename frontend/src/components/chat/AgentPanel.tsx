@@ -1,8 +1,13 @@
 import { useState } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 
-import { AgentKnowledge } from "@/components/agent/AgentKnowledge";
-import type { KnowledgeTabId } from "@/components/agent/knowledgeTabs";
 import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
+import { AgentWorkspaceBody } from "@/components/agent/workspace/AgentWorkspaceBody";
+import { DOING_VIEWS } from "@/components/agent/workspace/views";
+import {
+  useWorkspaceUrl,
+  workspaceSearch,
+} from "@/components/agent/workspace/workspaceUrl";
 import { AgentWiring } from "@/components/chat/AgentWiring";
 import type { BrainSelection } from "@/components/chat/BrainPicker";
 import { WorkspaceSheet } from "@/components/chat/WorkspaceSheet";
@@ -14,45 +19,38 @@ import type {
 } from "@/lib/api";
 
 /**
- * What the agent knows, and what it runs on, beside the conversation you are
- * having with it.
+ * The whole agent, beside the conversation you are having with it.
  *
- * Every section of {@link AgentKnowledge} — AGENT.md, playbooks, memories,
- * tools, strategies, routines and activity — reached through the rail down its
- * right edge, against the dock, so the sections are on the same side of the
- * window as everything else that opens something here. The same component the
- * agent's own page is built from, so anything editable there is editable here
- * (FEAT-081); reading what an agent knows no longer costs you the chat.
+ * This panel used to be half an agent: {@link AgentKnowledge}'s seven **Being**
+ * sections — AGENT.md, playbooks, memories, tools, strategies, routines,
+ * activity — and nothing of what the agent was actually *doing*. Now, Runs,
+ * Playbook, Money and Fleet existed only at `/agents/:slug`, so the question a
+ * conversation most often provokes ("it says it deployed six controllers — did
+ * it?") was the one question this pane could not answer. It is
+ * {@link AgentWorkspaceBody} now: the same loop bar, the same spine, the same
+ * bodies the page renders, from the same four parameters (FEAT-117).
  *
- * The model and server pickers are in the bar at the top of this panel, one
- * line above the sections they apply to, rather than beside the button that
- * opens it — the button is a verb and a door, and the panel is on screen for
- * exactly as long as anyone is thinking about what this agent is made of.
+ * The model and server pickers stay in the bar at the top, one line above the
+ * sections they apply to, rather than beside the button that opens it — the
+ * button is a verb and a door, and the panel is on screen for exactly as long
+ * as anyone is thinking about what this agent is made of.
  *
- * It takes half the pane row and nothing more: no full screen, because this is
- * a panel you work in while glancing back at the conversation, and a
- * full-screen version of it is a second layout to maintain for a gesture whose
- * only outcome is losing the chat. Half rather than a report's two thirds for
- * the same reason — a report is read and the chat behind it merely stays alive,
- * while here both columns are being used in the same minute, and two thirds put
- * the transcript on its 360px floor. The rail folds to a strip as it does for a
- * report; the dock stays, and the door back out is the pressed Tune button in
- * the bar above.
+ * **Two of this panel's decisions are deliberately reversed here, and the
+ * argument for them is worth keeping.** It used to refuse a full-screen control
+ * ("a second layout to maintain for a gesture whose only outcome is losing the
+ * chat") and refuse a door out to the agent's page ("a link out is the easy
+ * answer that stops this panel from ever having to be good enough"). Both were
+ * right *while the panel was a subset of the page*. They stop being right once
+ * the panel **is** the page: there is no second layout, because Maximize
+ * navigates to `/agents/:slug` carrying the view, the strategy, the run and the
+ * tick — the same component, from the same state, at a different width. The
+ * door is not an escape hatch any more, and the panel did have to be good
+ * enough, which is what the extraction made true rather than promised.
  *
- * There is deliberately no door out to the agent's full page. Anything worth
- * doing to an agent should be worth doing here, next to the conversation that
- * made you want to do it — a link out is the easy answer that stops this panel
- * from ever having to be good enough.
- *
- * A routine row hands the pane to the routine library rather than growing a
- * second one, and a strategy row does the same with its workbench — the very
- * component the strategy page renders, so the pane is not a preview of the
- * page. That last one used to be the exception: a strategy navigated, "to the
- * page that owns starting it with real money". But the guard on starting a loop
- * is its own dialog, not the width of the window, and the exception cost you
- * the conversation every time the agent named a strategy you wanted to look at.
- * The page keeps its URL and is one click away through the sheet's full-screen
- * control.
+ * A routine row still hands the pane to the routine library rather than growing
+ * a second one. A strategy row no longer hands it to a sheet: the workbench is
+ * one of this spine's own views, so a strategy is a scope change in place —
+ * which is the same thing the page does, and one fewer surface than before.
  */
 export function AgentPanel({
   slug,
@@ -67,7 +65,6 @@ export function AgentPanel({
   onSelectBrain,
   onSelectServer,
   onOpenRoutine,
-  onOpenStrategy,
   onAskAgent,
   onClose,
 }: {
@@ -87,8 +84,6 @@ export function AgentPanel({
   onSelectServer: (serverName: string) => void;
   /** Hand the pane to the routine library, focused on this routine. */
   onOpenRoutine: (routineName: string) => void;
-  /** Hand the pane to this strategy's workbench, the same one its page hosts. */
-  onOpenStrategy: (strategySlug: string) => void;
   /**
    * Put a request from a brain row to this agent (FEAT-092). Here that is a
    * message into a fresh conversation, which is the better move the chat has
@@ -97,9 +92,16 @@ export function AgentPanel({
   onAskAgent: (text: string) => void;
   onClose: () => void;
 }) {
-  const [tab, setTab] = useState<KnowledgeTabId>("brain");
+  const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [dirty, setDirty] = useState(false);
   const [confirmClose, setConfirmClose] = useState(false);
+
+  // The workspace's grammar, spent on the *home's* query string. Same four
+  // keys, same cascades, same module the page binds — the pane is not a second
+  // vocabulary, which is the whole reason a reader who learns one knows the
+  // other (FEAT-117).
+  const adapter = useWorkspaceUrl(searchParams, setSearchParams);
 
   return (
     <>
@@ -107,7 +109,7 @@ export function AgentPanel({
         title={name}
         // The wiring rides in the bar rather than in the body: it is about the
         // conversation, not about the agent, and it has to stay reachable
-        // whichever of the panel's sections is scrolled to.
+        // whichever of the workspace's views is scrolled to.
         actions={
           <AgentWiring
             slot={slot}
@@ -122,25 +124,42 @@ export function AgentPanel({
           />
         }
         onClose={() => (dirty ? setConfirmClose(true) : onClose())}
-        // No full screen. The panel is a place you change one thing and look
-        // back at what the agent just said — the whole reason it opens beside
-        // the conversation instead of over it — so the one gesture the button
-        // offered was losing the chat it is meant to be read against.
-        fullscreen={false}
-        // An even split, not a report's two thirds: both sides of this seam are
-        // in use at once — you change something here and read what the agent
-        // says about it there — so neither gets to be the margin of the other.
-        paneProfile="tune"
+        // Maximize and `f` go to the page rather than growing the sheet,
+        // because the page renders this exact component — so it is a change of
+        // width, and the state travels with it: whichever view, scope, run and
+        // tick the pane is on is what `/agents/:slug` opens on.
+        onFullscreen={() => {
+          const query = workspaceSearch(searchParams).toString();
+          navigate(
+            `/agents/${encodeURIComponent(slug)}${query ? `?${query}` : ""}`,
+          );
+        }}
+        // Which half of the taxonomy is open decides how much room to ask for,
+        // because the two halves are read differently and the profiles already
+        // exist for exactly this distinction. A **Doing** view is a screen you
+        // read — a run, a fleet, a month of money — and takes the report's
+        // width; a **Being** section is a workbench you keep one hand on while
+        // the agent answers beside it, and takes the even split this panel has
+        // always opened at.
+        paneProfile={
+          (DOING_VIEWS as readonly string[]).includes(adapter.url.view)
+            ? "read"
+            : "tune"
+        }
         bleed
       >
-        <AgentKnowledge
+        <AgentWorkspaceBody
           slug={slug}
-          layout="rail"
-          tab={tab}
-          onTabChange={setTab}
-          onOpenRoutine={onOpenRoutine}
-          onOpenStrategy={onOpenStrategy}
+          adapter={adapter}
+          // A column, not a page: the strategy cards read the viewport's
+          // breakpoints, and on a wide window three of them would land side by
+          // side in a 400px pane.
+          dense
+          // No header: the sheet's own bar already carries this agent's name
+          // and the wiring, and a second identity strip under it is the same
+          // fact twice in a 400px column.
           onAskAgent={onAskAgent}
+          onOpenRoutine={onOpenRoutine}
           onDirtyChange={setDirty}
         />
       </WorkspaceSheet>

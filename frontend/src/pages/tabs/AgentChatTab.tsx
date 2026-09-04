@@ -605,12 +605,6 @@ export function AgentChatTab() {
               onOpenRoutine={(name) =>
                 openPane({ kind: "routines", focus: { source: name } })
               }
-              // The strategy takes the pane and hands it back on close. Not a
-              // navigation: the conversation that named this loop is the
-              // reason you are looking at it.
-              onOpenStrategy={(strategySlug) =>
-                openPane({ kind: "strategy", agentSlug: openSlug, strategySlug })
-              }
               // A revision is its own thread: `fresh`, not `focus`, so the
               // request does not land under whatever unrelated thing this
               // agent was last asked. The workspace itself stays put — the
@@ -622,11 +616,12 @@ export function AgentChatTab() {
             />
           )}
 
-          {/* One of the agent's loops, in the pane the panel just vacated.
-              Closing returns to the panel it was opened from rather than to an
-              empty row: the card you clicked is still the thing you were
-              reading, and a pane that empties itself makes you re-open two
-              things to get back. */}
+          {/* One of the agent's loops, on its own, from a pasted
+              `?panel=strategy&loop=`. The agent panel no longer opens this: a
+              strategy is one of its spine's own views now (FEAT-117), so a
+              card scopes the workspace in place instead of handing the pane to
+              a second surface. The address stays resolvable, and closing it
+              returns to the panel rather than to an empty row. */}
           {pane?.kind === "strategy" && (
             <StrategySheet
               key={`${pane.agentSlug}/${pane.strategySlug}`}

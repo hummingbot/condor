@@ -105,6 +105,7 @@ export function AgentWorkspaceBody({
   slug,
   adapter,
   header,
+  dense = false,
   onAskAgent,
   onOpenRoutine,
   onDirtyChange,
@@ -124,6 +125,15 @@ export function AgentWorkspaceBody({
    * time, and the two answers drifting the first time the rule changed.
    */
   header?: (state: { strategy: StrategyDetail | null }) => React.ReactNode;
+  /**
+   * Whether this host is a column rather than a page.
+   *
+   * The one thing a body below still has to be told about its host's width:
+   * the strategy cards lay out on the *viewport's* breakpoints, so on a wide
+   * window a 400px pane would get three of them side by side. Everything else
+   * on this screen already lays out to the room it is given.
+   */
+  dense?: boolean;
   /**
    * Put a request from a knowledge row to this agent (FEAT-092).
    *
@@ -306,6 +316,12 @@ export function AgentWorkspaceBody({
       key={view}
       slug={agent.slug}
       tab={view}
+      /* A skill row that names a routine jumps to Routines, and with the
+         section in the URL that jump is a `?view=` move like any other. It
+         used to be lost on the page, whose `?tab=` won over the component's
+         own state and had nothing wired to hear about it. */
+      onTabChange={(next) => setParams({ view: next })}
+      dense={dense}
       onAskAgent={onAskAgent}
       onOpenRoutine={onOpenRoutine}
       onDirtyChange={onDirtyChange}

@@ -109,7 +109,8 @@ async function click(text: string) {
   await settle();
 }
 
-/** Render the panel and open the Skills tab, where the card lives. */
+/** Render the panel on Skills, where the card lives. The section is a prop
+ *  and not a click: the panel draws no navigation of its own (FEAT-117). */
 async function open() {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 } },
@@ -117,12 +118,11 @@ async function open() {
   await act(async () => {
     root.render(
       <QueryClientProvider client={client}>
-        <AgentKnowledge slug="brigado" />
+        <AgentKnowledge slug="brigado" tab="skills" />
       </QueryClientProvider>,
     );
   });
   await settle();
-  await click("Skills");
 }
 
 beforeEach(() => {
@@ -154,12 +154,6 @@ describe("the proposed playbook", () => {
     );
     // The steps are behind the expander until asked for.
     expect(container.textContent).not.toContain("Pull the pool state");
-  });
-
-  it("is not counted as a skill, because it is not one yet", async () => {
-    await open();
-
-    expect(buttonWith("Skills").textContent).toBe("Skills1");
   });
 
   it("shows its steps on demand", async () => {

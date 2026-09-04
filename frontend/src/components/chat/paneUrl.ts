@@ -23,6 +23,7 @@
  * would have started anyway.
  */
 
+import { clearWorkspaceSearch } from "@/components/agent/workspace/workspaceUrl";
 import type { LibraryFocus } from "@/components/chat/DockRoutines";
 
 /**
@@ -120,12 +121,27 @@ export function readPane(
   }
 }
 
-/** The query string with this pane in it — or with every trace of one gone. */
+/**
+ * The query string with this pane in it — or with every trace of one gone.
+ *
+ * "Every trace" includes the agent panel's *contents* since FEAT-117: the panel
+ * is the whole workspace now, so `?view=`, `?strategy=`, `?run=` and `?tick=`
+ * are as much a part of what is open as `?panel=` is. They are kept only while
+ * the pane goes on showing the same agent — closing it, or opening a different
+ * agent, leaves a scope and a run that belong to somebody else, and a Back
+ * through them would restore a pane nobody asked for.
+ */
 export function writePane(
   params: URLSearchParams,
   pane: PaneView,
 ): URLSearchParams {
-  const next = new URLSearchParams(params);
+  const sameAgent =
+    pane?.kind === "agent" &&
+    params.get(PANEL_PARAM) === "agent" &&
+    (pane.slug ?? "") === (params.get(AGENT_PARAM) ?? "");
+  const next = sameAgent
+    ? new URLSearchParams(params)
+    : clearWorkspaceSearch(params);
   if (!pane) {
     next.delete(PANEL_PARAM);
     next.delete(LOOP_PARAM);

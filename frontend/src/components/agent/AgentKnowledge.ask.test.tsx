@@ -40,6 +40,7 @@ vi.mock("@/lib/api", () => ({
 }));
 
 const { AgentKnowledge } = await import("./AgentKnowledge");
+type KnowledgeTabId = NonNullable<Parameters<typeof AgentKnowledge>[0]["tab"]>;
 
 declare global {
   var IS_REACT_ACT_ENVIRONMENT: boolean;
@@ -117,13 +118,6 @@ async function settle() {
   }
 }
 
-function buttonWith(text: string): HTMLButtonElement {
-  const found = [...container.querySelectorAll("button")].find((b) =>
-    b.textContent?.includes(text),
-  );
-  if (!found) throw new Error(`No button reading "${text}"`);
-  return found as HTMLButtonElement;
-}
 
 function rowFor(title: string): HTMLElement {
   const row = [...container.querySelectorAll("div.group")].find((d) =>
@@ -147,8 +141,14 @@ async function click(el: HTMLElement) {
   await settle();
 }
 
-/** Mount the panel — with the host callback, or (`false`) without one. */
-async function open(tab: string, withHost = true) {
+/**
+ * Mount the panel on a section — with the host callback, or (`false`) without.
+ *
+ * The section is a prop and not a click since FEAT-117: every host draws its
+ * own navigation now (the workspace's spine), so the panel has no tab strip of
+ * its own to click.
+ */
+async function open(tab: KnowledgeTabId, withHost = true) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 } },
   });
@@ -157,13 +157,13 @@ async function open(tab: string, withHost = true) {
       <QueryClientProvider client={client}>
         <AgentKnowledge
           slug="brigado"
+          tab={tab}
           onAskAgent={withHost ? asked : undefined}
         />
       </QueryClientProvider>,
     );
   });
   await settle();
-  await click(buttonWith(tab));
 }
 
 /** The sentence the row handed the host on the one click it was given. */
@@ -189,7 +189,7 @@ afterEach(() => {
 
 describe("asking the agent about a playbook", () => {
   it("names the playbook by its slug, and the tool that would apply it", async () => {
-    await open("Skills");
+    await open("skills");
 
     await click(askOn("Rebalance an LP position")!);
 
@@ -200,7 +200,7 @@ describe("asking the agent about a playbook", () => {
   });
 
   it("offers an inherited one the action too, pointed at shadowing it", async () => {
-    await open("Skills");
+    await open("skills");
 
     // The shared library's copy: no edit button, because the store refuses the
     // write — but the conversation is exactly where the fix lives.
@@ -219,7 +219,7 @@ describe("asking the agent about a playbook", () => {
 
 describe("asking the agent about a routine", () => {
   it("names it the way manage_routines does, not the way the row reads", async () => {
-    await open("Routines");
+    await open("routines");
 
     // The row is titled "Lp Scanner"; the agent is asked about `lp_scanner`.
     await click(askOn("Lp Scanner")!);
@@ -233,7 +233,7 @@ describe("asking the agent about a routine", () => {
 
 describe("asking the agent about a tool", () => {
   it("asks about the tool rather than offering to rewrite it", async () => {
-    await open("Tools");
+    await open("tools");
 
     await click(askOn("manage_clmm")!);
 
@@ -247,11 +247,12 @@ describe("asking the agent about a tool", () => {
 
 describe("a host that cannot ask", () => {
   it("gets no action at all, on any of the three tabs", async () => {
-    for (const [tab, row] of [
-      ["Skills", "Rebalance an LP position"],
-      ["Routines", "Lp Scanner"],
-      ["Tools", "manage_clmm"],
-    ]) {
+    const cases: [KnowledgeTabId, string][] = [
+      ["skills", "Rebalance an LP position"],
+      ["routines", "Lp Scanner"],
+      ["tools", "manage_clmm"],
+    ];
+    for (const [tab, row] of cases) {
       await open(tab, false);
       expect(askOn(row)).toBeNull();
       // …and the row is otherwise untouched: its switch is still there.
@@ -267,7 +268,7 @@ describe("a host that cannot ask", () => {
 
 describe("the URL the agent page carries the request in", () => {
   it("round-trips an opener through ?ask= unchanged", async () => {
-    await open("Skills");
+    await open("skills");
     await click(askOn("Rebalance an LP position")!);
     const text = saidOnce();
 

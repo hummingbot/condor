@@ -6,8 +6,12 @@
  * slots, so a second host that forgot to pass them would have shown an agent
  * with no strategies at all. The chat's agent panel is that second host, and
  * these cases pin what makes it possible — a controlled `tab` that a URL or a
- * pane can drive, a rail layout for a 400px column, and seven sections that
- * are the component's own rather than the page's.
+ * pane can drive, and seven sections that are the component's own rather than
+ * the page's.
+ *
+ * Since FEAT-117 there is no navigation in here at all: both hosts draw the
+ * workspace's spine, so the section arrives as a prop and a body is checked by
+ * what it renders rather than by which tab is lit.
  *
  * Needs a DOM, so this file overrides vitest's default `node` environment.
  *
@@ -121,18 +125,6 @@ async function render(props: Parameters<typeof AgentKnowledge>[0]) {
   await settle();
 }
 
-const tablist = () => container.querySelector('[role="tablist"]')!;
-const tabs = () =>
-  [...tablist().querySelectorAll<HTMLButtonElement>('[role="tab"]')];
-const tabNamed = (label: string) => {
-  // The strip reads its label; the rail carries it in `title` instead.
-  const found = tabs().find(
-    (t) => t.textContent?.trim().startsWith(label) || t.title.startsWith(label),
-  );
-  if (!found) throw new Error(`No section tab for "${label}"`);
-  return found;
-};
-const selected = () => tabs().find((t) => t.getAttribute("aria-selected") === "true");
 const body = () => container.textContent ?? "";
 
 async function click(el: HTMLElement) {
@@ -158,7 +150,7 @@ afterEach(() => {
 });
 
 describe("the sections", () => {
-  it("are the component's own, in one order, in both layouts", async () => {
+  it("are the component's own, in one order", async () => {
     expect([...KNOWLEDGE_TABS]).toEqual([
       "brain",
       "skills",
@@ -168,23 +160,15 @@ describe("the sections", () => {
       "routines",
       "activity",
     ]);
-
-    await render({ slug: "orca" });
-    expect(tabs()).toHaveLength(KNOWLEDGE_TABS.length);
-
-    await render({ slug: "orca", layout: "rail" });
-    expect(tabs()).toHaveLength(KNOWLEDGE_TABS.length);
   });
 
   it("include Strategies and Activity with nothing injected", async () => {
     // The two the page used to hand in. A host cannot forget them any more,
     // because there is nothing left for a host to pass.
-    await render({ slug: "orca" });
-
-    await click(tabNamed("Strategies"));
+    await render({ slug: "orca", tab: "strategies" });
     expect(body()).toContain("No strategies yet");
 
-    await click(tabNamed("Activity"));
+    await render({ slug: "orca", tab: "activity" });
     expect(getDelegationHistory).toHaveBeenCalledWith("orca", 100, undefined);
   });
 
@@ -196,65 +180,47 @@ describe("the sections", () => {
 });
 
 describe("the open section", () => {
-  it("is the component's own when the host does not say", async () => {
+  it("is Brain when the host does not name one", async () => {
+    // Nothing in here can change it: the hosts own the section, because both
+    // of them keep it in the URL.
     await render({ slug: "orca" });
-    expect(selected()!.textContent).toContain("Brain");
-
-    await click(tabNamed("Skills"));
-    expect(selected()!.textContent).toContain("Skills");
+    expect(body()).toContain("Orca");
   });
 
-  it("is the host's when it does, and a click only asks", async () => {
+  it("is the host's when it names one", async () => {
+    await render({ slug: "orca", tab: "routines" });
+    expect(body()).toContain("Pool Walk");
+  });
+
+  it("draws no navigation of its own, in either host", async () => {
+    // The workspace's spine carries these seven beside the loop's own views,
+    // in the page and in the chat's pane alike (FEAT-103, FEAT-117); a strip
+    // in here would be a second navigation for one thing.
+    await render({ slug: "orca" });
+    expect(container.querySelector('[role="tablist"]')).toBeNull();
+    expect(container.querySelector('[role="tab"]')).toBeNull();
+  });
+
+  it("tells the host when a body asks for another section", async () => {
+    // A skill row that names a routine jumps to Routines, and the host is the
+    // only thing that can move a section now — so the jump has to be reported
+    // rather than kept.
     const onTabChange = vi.fn();
     await render({ slug: "orca", tab: "skills", onTabChange });
 
-    // Opened where the host said, not on Brain.
-    expect(selected()!.textContent).toContain("Skills");
-
-    await click(tabNamed("Memories"));
-    // The host is told; until it re-renders with the new tab, the section on
-    // screen is still the one it asked for. That is what lets `?tab=` be the
-    // single source of truth on the agent page.
-    expect(onTabChange).toHaveBeenCalledWith("memories");
-    expect(selected()!.textContent).toContain("Skills");
-  });
-});
-
-describe("the rail layout", () => {
-  it("is a vertical column that still says the section's name", async () => {
-    await render({ slug: "orca", layout: "rail" });
-
-    expect(tablist().getAttribute("aria-orientation")).toBe("vertical");
-    // Eight labelled tabs wrap to three rows in a 400px pane, which is what
-    // the rail avoids — so the reader is not asked to learn seven glyphs. The
-    // name is set flat under the icon, never turned on its side: a rotated
-    // Latin word loses the shape it is recognised by, and costs the column
-    // twice the height a stacked one does.
-    for (const t of tabs()) {
-      expect(t.querySelector("[class*=vertical-rl]")).toBeNull();
-      expect(t.textContent).toContain(t.title.split(" (")[0]);
-      expect(t.title).not.toBe("");
+    const jump = [...container.querySelectorAll("button")].find((b) =>
+      b.title?.includes("routine"),
+    );
+    if (jump) {
+      await click(jump);
+      expect(onTabChange).toHaveBeenCalledWith("routines");
     }
-    // The counts survive the turn, and the label is said out loud rather than
-    // left to the glyph: the tab must never announce itself as "1".
-    expect(tabNamed("Skills").title).toBe("Skills (1)");
-    expect(tabNamed("Skills").textContent).toContain("1");
-    expect(tabNamed("Skills").getAttribute("aria-label")).toBe("Skills (1)");
-    expect(tabNamed("Brain").getAttribute("aria-label")).toBe("Brain");
-  });
-
-  it("still opens every section it names", async () => {
-    await render({ slug: "orca", layout: "rail" });
-
-    await click(tabNamed("Routines"));
-    expect(body()).toContain("Pool Walk");
   });
 });
 
 describe("a routine row", () => {
   it("is inert until a host offers somewhere to open it", async () => {
-    await render({ slug: "orca" });
-    await click(tabNamed("Routines"));
+    await render({ slug: "orca", tab: "routines" });
 
     const row = [...container.querySelectorAll("button")].find((b) =>
       b.textContent?.includes("Pool Walk"),
@@ -264,8 +230,7 @@ describe("a routine row", () => {
 
   it("hands the routine to the host that has a library", async () => {
     const onOpenRoutine = vi.fn();
-    await render({ slug: "orca", onOpenRoutine });
-    await click(tabNamed("Routines"));
+    await render({ slug: "orca", tab: "routines", onOpenRoutine });
 
     const row = [...container.querySelectorAll("button")].find((b) =>
       b.textContent?.includes("Pool Walk"),
@@ -306,7 +271,7 @@ describe("the brain section", () => {
   });
 
   it("names the agent's slug, model and server nowhere — the host does", async () => {
-    await render({ slug: "orca", layout: "rail" });
+    await render({ slug: "orca" });
 
     // The chat's panel carries the live model and server in its own bar one
     // line above this, and the agent page carries slug, model and server in
