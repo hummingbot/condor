@@ -14,12 +14,18 @@ because step 2's whole definition of "stock" is ``git ls-files``.
 
 from __future__ import annotations
 
+import json
 import subprocess
 
 import pytest
 
 from condor import paths
-from condor.migrations import MARKER_V2_FILENAME, ensure_migrated
+from condor.migrations import (
+    MARKER_FILENAME,
+    MARKER_V2_FILENAME,
+    MARKER_V3_FILENAME,
+    ensure_migrated,
+)
 
 
 def _git(repo, *args):
@@ -245,3 +251,102 @@ def test_v2_runs_on_a_box_that_already_migrated_v1(repo):
 
     assert report.agent_artefacts == 1
     assert (runtime / MARKER_V2_FILENAME).is_file()
+
+
+# ── v3: the delegations v1 walked past ──
+
+
+def _delegations(repo, slug):
+    return repo / "agents" / slug / "delegations"
+
+
+def test_v3_adopts_a_transcript_with_no_status(repo, tmp_path):
+    """The shape v1 could not see: a glob on ``*.status.json`` never visits it."""
+    _write(_delegations(repo, "scout") / "scout-delegate-abc.md", "# what it did\n")
+
+    report = ensure_migrated(repo / "agents")
+
+    assert report.stranded_delegations == 1
+    record = tmp_path / "local" / "scout" / "delegations" / "scout-delegate-abc"
+    assert record.joinpath("transcript.md").read_text("utf-8") == "# what it did\n"
+    # And the tracked tree is clean, which is the point of the sweep.
+    assert not _delegations(repo, "scout").exists()
+
+
+def test_v3_keys_a_record_that_names_a_user_by_its_user(repo, tmp_path):
+    """Ownerless is the fallback, not the destination: a named user still wins.
+
+    On a fresh install v1 gets to this record first and v3 never sees it. The
+    branch under test is the one that matters on a box that has *already* run
+    v1 -- where a status-bearing record can only be there because a v1 move was
+    cut short -- so the earlier markers are in place and v3 runs alone.
+    """
+    runtime = tmp_path / "runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    (runtime / MARKER_FILENAME).write_text("FEAT-051\n")
+    (runtime / MARKER_V2_FILENAME).write_text("FEAT-115\n")
+
+    source = _delegations(repo, "scout")
+    _write(source / "t1.status.json", json.dumps({"user_id": 42, "status": "done"}))
+    _write(source / "t1.md", "transcript\n")
+
+    report = ensure_migrated(repo / "agents")
+
+    assert report.delegations == 0
+    assert report.stranded_delegations == 1
+    record = runtime / "users" / "42" / "delegations" / "t1"
+    assert record.joinpath("status.json").is_file()
+    assert record.joinpath("transcript.md").read_text("utf-8") == "transcript\n"
+
+
+def test_v3_adopts_a_status_that_names_nobody(repo, tmp_path):
+    """v1's "belongs to nobody; read in place, forever" — in place is now dirt."""
+    source = _delegations(repo, "scout")
+    _write(source / "t2.status.json", json.dumps({"status": "done"}))
+    _write(source / "t2.events.json", "[]")
+
+    report = ensure_migrated(repo / "agents")
+
+    assert report.stranded_delegations == 1
+    record = tmp_path / "local" / "scout" / "delegations" / "t2"
+    assert record.joinpath("status.json").is_file()
+    assert record.joinpath("events.json").read_text("utf-8") == "[]"
+    assert not source.exists()
+
+
+def test_v3_leaves_what_is_not_a_delegation_where_it_is(repo, tmp_path):
+    """It empties the directory of delegations, not of an operator's own file."""
+    source = _delegations(repo, "scout")
+    _write(source / "notes.txt", "mine")
+    _write(source / "t3.md", "transcript\n")
+
+    report = ensure_migrated(repo / "agents")
+
+    assert report.stranded_delegations == 1
+    assert source.joinpath("notes.txt").read_text("utf-8") == "mine"
+
+
+def test_v3_is_idempotent_and_marks_itself_done(repo, tmp_path):
+    """Second boot moves nothing, and the marker is written last as ever."""
+    _write(_delegations(repo, "scout") / "t4.md", "transcript\n")
+
+    first = ensure_migrated(repo / "agents")
+    assert (tmp_path / "runtime" / MARKER_V3_FILENAME).is_file()
+
+    _write(_delegations(repo, "scout") / "t5.md", "ignored: the marker is written\n")
+    second = ensure_migrated(repo / "agents")
+
+    assert first.stranded_delegations == 1
+    assert second.stranded_delegations == 0
+
+
+def test_v3_never_overwrites_a_record_already_adopted(repo, tmp_path):
+    """The module's standing rule: the worst outcome is a record left in place."""
+    _write(_delegations(repo, "scout") / "t6.md", "the newer one\n")
+    kept = tmp_path / "local" / "scout" / "delegations" / "t6" / "status.json"
+    _write(kept, json.dumps({"status": "already here"}))
+
+    report = ensure_migrated(repo / "agents")
+
+    assert report.stranded_delegations == 0
+    assert json.loads(kept.read_text("utf-8"))["status"] == "already here"

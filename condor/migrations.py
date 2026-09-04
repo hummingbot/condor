@@ -47,6 +47,26 @@ independently idempotent, a destination never overwritten, the marker last:
 **Not a git checkout?** Steps 2 and 3 are skipped and everything stays stock.
 That install has no update conflict to solve, so it has nothing to migrate --
 and guessing at stock membership without git is the one way to get this wrong.
+
+**v3: the delegations v1 walked past.** v1 drives off the ``.status.json``
+sidecar, because that is the only file recording the ``user_id`` its
+destination is keyed by. Two shapes therefore survived it: a record whose
+status is missing entirely -- transcripts alone, which the glob never visits --
+and one whose status names no user, which v1 skipped on purpose with "belongs
+to nobody; read in place, forever".
+
+"In place" was a fair answer when it was written and stopped being one at v2,
+which made ``agents/`` a library where *a dirty file means somebody edited it
+on purpose*. A leftover there is now permanent untracked noise in every
+``git status`` the operator runs, and it cannot resolve itself: v1's marker is
+long written, so no later boot revisits the directory.
+
+So v3 empties it. A record that does name a user goes where v1 would have put
+it -- that also finishes any v1 run cut short mid-move. One that names nobody
+has no user directory to go to, so it lands in the agent's own runtime tree at
+``.condor/agents/<slug>/delegations/<task_id>/``, in the per-task shape the
+readers already use. Ownerless is not worthless: these are full transcripts,
+tens of kilobytes of real output apiece.
 """
 
 from __future__ import annotations
@@ -73,6 +93,7 @@ log = logging.getLogger(__name__)
 
 MARKER_FILENAME = ".migrated-v1"
 MARKER_V2_FILENAME = ".migrated-v2"
+MARKER_V3_FILENAME = ".migrated-v3"
 
 # Runtime output that lived under a *tracked* agent directory. Everything here
 # was already gitignored, so step 1 is a move with no git in it.
@@ -108,6 +129,8 @@ class MigrationReport:
     agent_artefacts: int = 0
     agent_dirs: int = 0
     agent_forks: int = 0
+    # v3
+    stranded_delegations: int = 0
 
     @property
     def total(self) -> int:
@@ -119,6 +142,7 @@ class MigrationReport:
             + self.agent_artefacts
             + self.agent_dirs
             + self.agent_forks
+            + self.stranded_delegations
         )
 
 
@@ -131,9 +155,9 @@ def ensure_migrated(agents_root: Path | None = None) -> MigrationReport:
     the real ``agents/`` tree and move records out of it. Production passes
     nothing and gets :func:`condor.paths.stock_agents_root`.
 
-    The two markers are independent. A box that already ran v1 still runs v2 on
-    its next boot, and each marker stays a fast path rather than the correctness
-    condition -- a run interrupted halfway finishes on the next boot.
+    The three markers are independent. A box that already ran v1 still runs v2
+    and v3 on its next boot, and each marker stays a fast path rather than the
+    correctness condition -- a run interrupted halfway finishes on the next boot.
     """
     root = paths.runtime_root()
     report = MigrationReport()
@@ -156,15 +180,25 @@ def ensure_migrated(agents_root: Path | None = None) -> MigrationReport:
             return report
         _write_marker(root, MARKER_V2_FILENAME, "FEAT-115")
 
+    if not (root / MARKER_V3_FILENAME).is_file():
+        try:
+            _adopt_stranded_delegations(report, source)
+        except Exception:  # noqa: BLE001 - same rule: never block a boot
+            log.exception("Delegation sweep failed; leaving the records in place")
+            return report
+        _write_marker(root, MARKER_V3_FILENAME, "FEAT-115")
+
     if report.total or report.dropped_stubs:
         log.warning(
             "Runtime migrated to %s: %d conversations, %d delegations, "
+            "%d stranded delegations, "
             "%d state namespaces, %d telemetry files, %d agent artefacts, "
             "%d agent directories, %d hoisted forks "
             "(%d empty conversation stubs dropped, %d already present)",
             root,
             report.conversations,
             report.delegations,
+            report.stranded_delegations,
             report.state,
             report.telemetry,
             report.agent_artefacts,
@@ -349,6 +383,74 @@ def _move_delegation(source: Path, task_id: str, target: Path) -> bool:
         if _move(source / f"{task_id}{suffix}", target / new_name):
             moved = True
     return moved
+
+
+# ── v3: the delegations v1 walked past ──
+
+
+def _stranded_task_ids(source: Path) -> list[str]:
+    """Every task id still holding a file in a legacy ``delegations/`` directory.
+
+    Driven off the files that are *there* rather than off the status sidecar,
+    which is the whole difference from v1: a record whose status is missing is
+    invisible to a ``*.status.json`` glob, and a transcript alone is still a
+    record. Anything not ending in one of the three known suffixes is left
+    where it is -- this empties the directory of delegations, not of whatever
+    else an operator may have put in it.
+    """
+    try:
+        children = sorted(p for p in source.iterdir() if p.is_file())
+    except OSError:
+        return []
+
+    ids: set[str] = set()
+    for child in children:
+        for suffix, _ in _DELEGATION_FILES:
+            if child.name.endswith(suffix):
+                ids.add(child.name[: -len(suffix)])
+                break
+    return sorted(ids)
+
+
+def _adopt_stranded_delegations(
+    report: MigrationReport, agents_root: Path | None = None
+) -> None:
+    """Empty ``agents/{slug}/delegations/`` of everything v1 left behind.
+
+    A record that names a user goes where v1 would have put it, so this doubles
+    as the finish of any v1 run cut short mid-move. One that names nobody -- no
+    status file, or a status with no ``user_id`` -- has no user directory to be
+    keyed by, so it goes to the agent's own runtime tree instead. Both land in
+    the per-task directory shape :mod:`condor.agents.delegation_history` reads.
+    """
+    root = Path(agents_root) if agents_root is not None else paths.stock_agents_root()
+    if not root.is_dir():
+        return
+
+    local_root = paths.local_agents_root()
+    for agent_dir in _agent_dirs(root):
+        source = agent_dir / "delegations"
+        if not source.is_dir():
+            continue
+        for task_id in _stranded_task_ids(source):
+            user_id = _owner_of(source / f"{task_id}{STATUS_SUFFIX}")
+            try:
+                target = (
+                    paths.delegation_dir(user_id, task_id)
+                    if user_id
+                    else local_root
+                    / agent_dir.name
+                    / "delegations"
+                    / paths.safe_id(task_id)
+                )
+            except paths.UnsafeIdError:
+                log.warning("Skipping unrecognisable delegation %s", source / task_id)
+                continue
+            if _move_delegation(source, task_id, target):
+                report.stranded_delegations += 1
+            else:
+                report.skipped += 1
+        _prune_if_empty(source)
 
 
 # ── v2: the agent tree splits in two (FEAT-115) ──

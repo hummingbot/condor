@@ -246,15 +246,27 @@ def test_a_delegation_moves_under_the_user_who_asked(legacy, agents_root):
     assert not (agents_root / "scout" / "delegations").exists()
 
 
-def test_an_unowned_record_is_left_where_it_is(legacy, agents_root):
-    """It belongs to nobody, so there is no user directory to file it under."""
+def test_an_unowned_record_goes_to_the_agent_that_ran_it(legacy, agents_root):
+    """It belongs to nobody, so there is no *user* directory to file it under.
+
+    v1 therefore passes it over -- ``delegations`` stays 0 -- and v3 picks it up
+    instead. Leaving it where it lay was v1's answer and stopped being tenable
+    at v2, which made ``agents/`` a tree where a stray file is permanent noise
+    in the operator's ``git status``. So it lands in the agent's own runtime
+    tree, in the same per-task shape a user-keyed record gets.
+    """
     source = _seed_delegation(agents_root, "scout", "scout-delegate-old", user_id=0)
 
     report = ensure_migrated(agents_root)
 
     assert report.delegations == 0
-    assert (source / "scout-delegate-old.status.json").is_file()
-    assert (source / "scout-delegate-old.md").is_file()
+    assert report.stranded_delegations == 1
+    record = paths.local_agents_root() / "scout" / "delegations" / "scout-delegate-old"
+    assert json.loads((record / "status.json").read_text())["task_id"] == (
+        "scout-delegate-old"
+    )
+    assert (record / "transcript.md").is_file()
+    assert not (source / "scout-delegate-old.status.json").exists()
 
 
 def test_a_record_without_a_sidecar_still_moves(legacy, agents_root):
