@@ -486,6 +486,7 @@ def test_the_current_fields_land_in_the_bucket_they_should():
     assert scrub.TURN_FIELDS["stop_reason"] == scrub.TEXT
     assert scrub.TURN_FIELDS["tool_calls"] == scrub.PAYLOAD
     assert scrub.TURN_FIELDS["attachments"] == scrub.PAYLOAD
+    assert scrub.TURN_FIELDS["events"] == scrub.PAYLOAD
     assert scrub.TURN_FIELDS["ts"] == scrub.SCALAR
 
 
@@ -535,6 +536,35 @@ def test_a_scalar_field_is_left_exactly_as_it_was():
     entry = TurnEntry(role="user", text="hi", ts=1755000000.5)
     turns, _ = scrub.scrub([entry], secret=SECRET, known=KNOWN)
     assert turns[0].ts == 1755000000.5
+
+
+def test_the_run_order_is_scrubbed_like_the_reasoning_it_repeats():
+    """``events`` carries the reasoning a second time (ARCH-330).
+
+    It is a projection of ``thought``, so a corpus in which one of them is
+    clean and the other is not would leak exactly what the scrubber exists to
+    stop — and the field is walked as a payload precisely so no new field has
+    to be named here to be covered.
+    """
+    turns, _ = scrub.scrub(
+        [
+            TurnEntry(
+                role="assistant",
+                thought=f"key {ANTHROPIC_KEY} on prod-hb",
+                tool_calls=[{"id": "t1", "title": "get_prices"}],
+                events=[
+                    {"type": "thought", "text": f"key {ANTHROPIC_KEY} on prod-hb"},
+                    {"type": "tool", "id": "t1"},
+                ],
+            )
+        ],
+        secret=SECRET,
+        known=KNOWN,
+    )
+    reasoning = turns[0].events[0]["text"]
+    assert ANTHROPIC_KEY not in reasoning
+    assert "prod-hb" not in reasoning
+    assert turns[0].events[1] == {"type": "tool", "id": "t1"}
 
 
 def test_an_unclassifiable_field_never_travels(monkeypatch):
