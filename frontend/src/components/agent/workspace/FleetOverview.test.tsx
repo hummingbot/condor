@@ -284,3 +284,28 @@ describe("an agent with no strategies", () => {
     expect(listed[0].textContent).toContain("never run");
   });
 });
+
+describe("the money column says which number it is (FEAT-109)", () => {
+  it("names it as what the runs earned and links to the reconciliation", async () => {
+    await render([
+      agent({
+        slug: "brigado",
+        total_pnl: 64,
+        total_volume: 5_000,
+        strategies: [strategy()],
+      }),
+    ]);
+
+    const money = pick("brigado").querySelector<HTMLAnchorElement>("[data-fleet-money]")!;
+    expect(money.textContent).toContain("its runs earned");
+    expect(money.getAttribute("href")).toBe("/agents/brigado?view=money&strategy=brl_mm");
+  });
+
+  it("keeps the dash rule: a run that claimed nothing shows no number at all", async () => {
+    await render([agent({ slug: "brigado", strategies: [strategy()] })]);
+
+    const money = pick("brigado").querySelector("[data-fleet-money]")!;
+    expect(money.querySelector("[data-fleet-net]")?.textContent).toBe("—");
+    expect(money.textContent).toContain("its runs earned");
+  });
+});

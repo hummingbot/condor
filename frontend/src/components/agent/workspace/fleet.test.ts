@@ -17,6 +17,7 @@ import {
   dueInSec,
   fleetAlerts,
   fleetRows,
+  moneyHref,
   rowHref,
   scopeStrategy,
   strategylessAgents,
@@ -293,5 +294,20 @@ describe("the addresses a row carries", () => {
     expect(decisionHref({ ...row, lastDid: null })).toBe(
       "/agents/brigado?strategy=brl_mm",
     );
+  });
+});
+
+describe("the money column is named, not bare (FEAT-109)", () => {
+  const row = fleetRows(
+    [agent({ slug: "brigado", strategies: [strategy({ slug: "brl_mm" })] })],
+    1_000,
+  )[0];
+
+  it("links the rollup to the screen that reconciles it against the fold", () => {
+    expect(moneyHref(row)).toBe("/agents/brigado?view=money&strategy=brl_mm");
+  });
+
+  it("still has an address for an agent that owns no strategy", () => {
+    expect(moneyHref({ ...row, strategy: null })).toBe("/agents/brigado?view=money");
   });
 });

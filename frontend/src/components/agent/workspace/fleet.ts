@@ -36,11 +36,18 @@ export interface FleetRow {
   /** The engine driving it, or `null` when nothing is looping. */
   live: RunningInstance | null;
   /**
-   * Attributed net, or `null` when nothing has been attributed to this agent
-   * at all — see {@link attributedMoney}. Never `0` standing in for "unknown".
+   * What this agent's **runs** earned, or `null` when nothing has been
+   * attributed to it at all — see {@link attributedMoney}. Never `0` standing
+   * in for "unknown".
+   *
+   * The run rollup, not the fold (FEAT-109): `GET /agents` sums each strategy's
+   * owner-window-tiled session totals, which is a different quantity from the
+   * one `/bots` and the Money view print for the same agent. Both are correct
+   * and they do not agree, so this column says which one it is and links to the
+   * screen that reconciles them.
    */
   net: number | null;
-  /** Attributed volume, on the same rule. */
+  /** Volume from the same rollup, on the same rule. */
   volume: number | null;
   openPositions: number;
   /** How many sessions it has ever run. 0 is "never run". */
@@ -84,7 +91,7 @@ export function scopeStrategy(agent: AgentSummary): {
 }
 
 /**
- * What this agent's fleet made — or nothing, honestly.
+ * What this agent's **runs** earned — or nothing, honestly.
  *
  * The rule FEAT-099 set for fake zeros, applied to the money FEAT-102 made
  * real. An agent whose runs have no trading attributed to them has not made
@@ -97,6 +104,17 @@ export function scopeStrategy(agent: AgentSummary): {
  * Judged as a whole and not field by field on purpose: an agent with real
  * volume and a PNL that happens to be exactly zero *has* made zero, and that
  * is a fact worth printing.
+ *
+ * **This is the run rollup** (FEAT-109). `GET /agents` rolls up
+ * `_compute_strategy_performance`, which tiles each bot's history across the
+ * owner windows its sessions declared — so a bot a chat deployed, and the
+ * history of a bot adopted after it had already traded, are not in it. The
+ * fold the fleet page prints is the other number, and the two are reconciled on
+ * the agent's Money view. This page cannot show the fold: folding needs a
+ * server's records and `AgentSummary` does not say which server an agent trades
+ * on, so a row would have to guess — and a column carrying the fold for some
+ * agents and the rollup for others is exactly the conflation FEAT-109 exists to
+ * end.
  */
 export function attributedMoney(agent: {
   total_pnl: number;
@@ -223,6 +241,20 @@ export function rowHref(row: Pick<FleetRow, "slug" | "strategy">): string {
   const base = `/agents/${encodeURIComponent(row.slug)}`;
   return row.strategy
     ? `${base}?strategy=${encodeURIComponent(row.strategy.slug)}`
+    : base;
+}
+
+/**
+ * Where the two numbers are read side by side.
+ *
+ * The row shows one of them — the rollup — so the figure is a link to the
+ * screen that shows both and accounts for the difference, rather than a number
+ * a reader has to reconcile against `/bots` in their head (FEAT-109).
+ */
+export function moneyHref(row: Pick<FleetRow, "slug" | "strategy">): string {
+  const base = `/agents/${encodeURIComponent(row.slug)}?view=money`;
+  return row.strategy
+    ? `${base}&strategy=${encodeURIComponent(row.strategy.slug)}`
     : base;
 }
 

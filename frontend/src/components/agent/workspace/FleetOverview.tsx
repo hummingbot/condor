@@ -5,6 +5,7 @@ import { Link } from "react-router-dom";
 import {
   decisionHref,
   fleetRows,
+  moneyHref,
   rowHref,
   strategylessAgents,
   dueInSec,
@@ -231,8 +232,19 @@ function Row({ row, nowSec }: { row: FleetRow; nowSec: number }) {
 
         {/* Attributed, not aggregate: a dash where a run has claimed nothing,
             because `$0.00` and "nothing to report" are different statements and
-            only one of them is true. */}
-        <div className="shrink-0 text-right">
+            only one of them is true.
+
+            And *named* (FEAT-109): this is what the agent's runs earned, which
+            is not the same quantity as the fold the fleet page prints for the
+            same agent. Both are correct; shown as a bare number this column
+            would read as a contradiction, so it says which one it is and links
+            to the screen where the two are reconciled. */}
+        <Link
+          to={moneyHref(row)}
+          data-fleet-money
+          className="group shrink-0 text-right"
+          title="What its runs earned — its records show a different number, reconciled on the Money view"
+        >
           <div
             data-fleet-net
             className={`font-mono text-sm font-semibold ${
@@ -248,7 +260,10 @@ function Row({ row, nowSec }: { row: FleetRow; nowSec: number }) {
             {row.volume === null ? "—" : formatCurrencyVolume(row.volume)}{" "}
             vol
           </div>
-        </div>
+          <div className="text-[10px] text-[var(--color-text-muted)] transition-colors group-hover:text-[var(--color-primary)]">
+            its runs earned
+          </div>
+        </Link>
       </div>
     </div>
   );
