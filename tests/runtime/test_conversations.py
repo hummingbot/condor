@@ -115,6 +115,48 @@ def test_list_is_newest_first_and_limited(conv_root):
     assert len(list_conversations(USER, limit=2)) == 2
 
 
+def test_list_parses_only_the_metas_it_returns(conv_root, monkeypatch):
+    """A limited listing costs a stat per conversation, not a parse (PERF-328).
+
+    The store is never pruned, so N grows for the life of the install; the
+    dashboard rail asks for 100 rows and its prewarm for 1, and both used to
+    read and validate every meta on disk to get them.
+    """
+    ids = [new_conversation(USER, WEB).id for _ in range(50)]
+
+    real_read_status = conversations.read_status
+    parsed: list[str] = []
+
+    def counting(session_dir, filename=conversations.META_FILENAME):
+        parsed.append(session_dir.name)
+        return real_read_status(session_dir, filename)
+
+    monkeypatch.setattr(conversations, "read_status", counting)
+
+    parsed.clear()
+    newest = list_conversations(USER, limit=1)
+    assert [m.id for m in newest] == [ids[-1]], "still the newest conversation"
+    assert parsed == [ids[-1]], "exactly one meta.json opened, not fifty"
+
+    parsed.clear()
+    assert len(list_conversations(USER, limit=5)) == 5
+    assert len(parsed) == 5
+
+    parsed.clear()
+    assert len(list_conversations(USER, limit=0)) == 50, "limit=0 still walks all"
+    assert len(parsed) == 50
+
+
+def test_an_unreadable_meta_is_skipped_by_a_limited_listing(conv_root):
+    """The newest conversation being half written must not eat a returned row."""
+    ids = [new_conversation(USER, WEB).id for _ in range(4)]
+    (_conv_dir(USER, ids[-1]) / conversations.META_FILENAME).write_text("{not json")
+
+    listed = [m.id for m in list_conversations(USER, limit=2)]
+
+    assert listed == [ids[-2], ids[-3]], "skipped, and the limit is still filled"
+
+
 def test_delete_removes_the_transcript(conv_root):
     meta = new_conversation(USER, WEB)
     append_turn(USER, meta.id, TurnEntry(role="user", text="hi"))

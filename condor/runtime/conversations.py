@@ -461,9 +461,35 @@ def get_conversation(user_id: int, conv_id: str) -> ConversationMeta | None:
         return None
 
 
+def _meta_mtime(base: Path, name: str) -> int:
+    """When this conversation's meta was last written, in ns, or 0 if unreadable.
+
+    Nanoseconds and not ``st_mtime``: a float epoch loses resolution below a
+    fraction of a microsecond, and conversations minted back to back are that
+    close. A missing or unstatable meta sorts last, which is also where a
+    directory with nothing to parse belongs.
+    """
+    try:
+        return (base / name / META_FILENAME).stat().st_mtime_ns
+    except OSError:
+        return 0
+
+
 def list_conversations(user_id: int, *, limit: int = 100) -> list[ConversationMeta]:
     """This user's conversations, newest first.
 
+    Only as many ``meta.json`` files are parsed as the caller asked for. The
+    store is never pruned, so N grows for the life of the install, and reading
+    every meta to hand back one row is a cost the dashboard rail and its
+    prewarm used to pay on the same event loop as the chat socket (PERF-328).
+    Instead each directory is stat'ed — one syscall, no read, no parse — and
+    the candidates are walked newest ``meta.json`` first, stopping as soon as
+    ``limit`` metas have parsed. ``write_status`` stamps ``updated_at`` in the
+    same breath it renames the file into place, so the mtime order and the
+    ``updated_at`` order are the same order; the result is still sorted on
+    ``updated_at`` so the contract does not lean on the filesystem's clock.
+
+    ``limit=0`` walks everything, which the sharing sweep and reflection need.
     Reads only ``meta.json`` per directory. One without a readable meta (hand
     deleted, half written) is skipped rather than failing the whole listing.
     """
@@ -471,20 +497,32 @@ def list_conversations(user_id: int, *, limit: int = 100) -> list[ConversationMe
     if not base.is_dir():
         return []
 
-    metas: list[ConversationMeta] = []
     try:
-        children = sorted(base.iterdir())
+        with os.scandir(base) as entries:
+            names = [entry.name for entry in entries if entry.is_dir()]
     except OSError:
         return []
-    for child in children:
-        if not child.is_dir():
+
+    if limit:
+        # Name breaks an mtime tie so two metas written inside one filesystem
+        # tick keep the ascending-name order the old full sort gave them.
+        names.sort(key=lambda name: (-_meta_mtime(base, name), name))
+    else:
+        # Every meta is parsed anyway, so a caller asking for all of them
+        # should not also pay for a stat per conversation.
+        names.sort()
+
+    metas: list[ConversationMeta] = []
+    for name in names:
+        meta = get_conversation(user_id, name)
+        if meta is None:
             continue
-        meta = get_conversation(user_id, child.name)
-        if meta is not None:
-            metas.append(meta)
+        metas.append(meta)
+        if limit and len(metas) >= limit:
+            break
 
     metas.sort(key=lambda m: m.updated_at, reverse=True)
-    return metas[:limit] if limit else metas
+    return metas
 
 
 def _iter_lines_reverse(path: Path, *, block: int | None = None) -> Iterator[bytes]:
