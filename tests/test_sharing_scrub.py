@@ -235,6 +235,125 @@ def test_an_ordinary_numeric_array_is_not_a_keypair(survivor):
     assert counts["solana_keypair"] == 0
 
 
+# ── The keypair array as a real list (SEC-336) ───────────────────────────
+
+#: The same 64 bytes as ``KEYPAIR``, but as the list a tool actually returns.
+KEYPAIR_BYTES = [(i * 7 + 3) % 256 for i in range(64)]
+
+
+def _payload(value):
+    """One payload walked, and what the walk counted."""
+    scrubber = scrub.Scrubber(SECRET, KNOWN)
+    return scrubber.payload(value), scrubber.counts
+
+
+@pytest.mark.parametrize(
+    "wrap",
+    [
+        lambda key: key,
+        lambda key: {"keypair": key},
+        lambda key: {"wallet": {"secret": key}},
+        lambda key: [[key]],
+        lambda key: [{"rows": [key]}],
+    ],
+    ids=["bare", "in an object", "deeper in an object", "list of lists", "mixed"],
+)
+def test_a_keypair_arriving_as_a_list_never_leaves(wrap):
+    """SEC-331 closed the text shape; this is the structural one.
+
+    ``payload`` walks a list element by element and returns every non-string
+    leaf unchanged, and every tier-2 pattern reads a string — so a key that
+    reached the transcript as a real JSON array (``json.load`` of an
+    ``id.json``, a tool that returned the bytes rather than printing them) was
+    64 harmless numbers to every gate on the way out.
+    """
+    out, counts = _payload(wrap(list(KEYPAIR_BYTES)))
+    dumped = json.dumps(out)
+    assert counts["solana_keypair"] == 1
+    assert re.search(r"SOLANA_KEYPAIR_[0-9a-f]{6}", dumped)
+    for spelling in (", ", ","):
+        assert spelling.join(str(byte) for byte in KEYPAIR_BYTES) not in dumped
+
+
+@pytest.mark.parametrize(
+    "survivor",
+    [
+        # The shape without the bound: 64 elements, none of them a byte.
+        [300 + i for i in range(64)],
+        # One element out of range is enough — as ``999.1.1.1`` is not an IP.
+        [(i * 7 + 3) % 256 for i in range(63)] + [256],
+        # A series that is merely long, and two that miss the count by one.
+        [i % 256 for i in range(100)],
+        [i % 256 for i in range(63)],
+        [i % 256 for i in range(65)],
+        # Prices and flags, which render as small numbers but are not ints.
+        [float(i % 256) for i in range(64)],
+        [bool(i % 2) for i in range(64)],
+    ],
+    ids=[
+        "no element is a byte",
+        "one element out of range",
+        "merely long",
+        "one short",
+        "one over",
+        "prices",
+        "flags",
+    ],
+)
+def test_an_ordinary_numeric_list_is_left_alone(survivor):
+    """A false positive here does not over-redact a string, it silently
+    corrupts a tool result — an image row, a hash buffer, a sample window —
+    into something no reader can tell was ever data. Both halves of the
+    judgement have to hold, and the survivors are the load-bearing half.
+    """
+    out, counts = _payload({"series": survivor})
+    assert out["series"] == survivor
+    assert counts["solana_keypair"] == 0
+
+
+def test_the_list_leaves_as_a_string_and_the_turn_keeps_its_shape():
+    """The chosen route changes the type on the wire: the array becomes the
+    same tag the text shape already becomes. That is safe exactly here — a
+    payload is schemaless tool JSON — and no declared ``TurnEntry`` field
+    changes type, because ``turn`` splices a top-level payload element by
+    element and the fields themselves stay lists of dicts.
+    """
+    turns, counts = scrub.scrub(
+        [
+            TurnEntry(
+                role="assistant",
+                text="reading the wallet file",
+                tool_calls=[
+                    {
+                        "id": "1",
+                        "title": "read_file",
+                        "input": {"path": "~/.config/solana/id.json"},
+                        "output": {"json": list(KEYPAIR_BYTES), "bytes": 64},
+                    }
+                ],
+            )
+        ],
+        secret=SECRET,
+        known=KNOWN,
+    )
+    call = turns[0].tool_calls[0]
+    assert isinstance(turns[0].tool_calls, list) and isinstance(call, dict)
+    assert isinstance(call["output"]["json"], str)
+    assert call["output"]["json"].startswith("SOLANA_KEYPAIR_")
+    assert call["output"]["bytes"] == 64  # a quantity, not a key
+    assert call["title"] == "read_file"  # the trajectory survives
+    assert counts["solana_keypair"] == 1
+
+
+def test_one_key_is_one_pseudonym_however_often_it_appears():
+    """The list is replaced whole rather than element by element: 64 pseudonyms
+    for one secret would say less than one tag does, and the tag has to be the
+    same tag every time the same key shows up."""
+    out, counts = _payload({"a": list(KEYPAIR_BYTES), "b": list(KEYPAIR_BYTES)})
+    assert out["a"] == out["b"]
+    assert counts["solana_keypair"] == 2
+
+
 def test_every_certain_ingress_kind_has_an_egress_pattern():
     """The gap SEC-331 found was not a missing regex but a missing statement
     that the two modules' notion of a secret has to match.

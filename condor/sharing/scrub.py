@@ -63,7 +63,13 @@ from condor.runtime.secrets import KEYPAIR_ARRAY_RE as _KEYPAIR_RE
 from condor.runtime.secrets import MNEMONIC as _MNEMONIC
 from condor.runtime.secrets import SEED_CANDIDATE_RE as _WORD_RUN_RE
 from condor.runtime.secrets import SOLANA_KEYPAIR as _SOLANA_KEYPAIR
-from condor.runtime.secrets import bip39_words, keypair_array_spans, phrase_spans
+from condor.runtime.secrets import (
+    bip39_words,
+    is_keypair_array,
+    keypair_array_spans,
+    keypair_array_text,
+    phrase_spans,
+)
 
 log = logging.getLogger(__name__)
 
@@ -377,6 +383,18 @@ class Scrubber:
         A key is the tool author's contract — ``_redact`` already replaced the
         credential-shaped ones by name before this ever reached disk. A value is
         what a model or an exchange wrote, so it is what this has to look at.
+
+        One value is judged as a *container* rather than as a leaf: a Solana
+        keypair spelled as a real list of 64 ints. That is a deliberate change
+        of type on the wire — the list leaves as the string
+        ``SOLANA_KEYPAIR_a3f91c``, exactly what the same key pasted as text
+        already becomes — and it is safe here because a payload is
+        schemaless by construction: the walk already rewrites strings in place,
+        every reader of a share is a reader of arbitrary tool JSON, and
+        ``turn`` splices a top-level payload list element by element, so no
+        declared ``TurnEntry`` field can change type. Leaving the list a list
+        would mean either emitting a fake 64-byte array or 64 pseudonyms for
+        one secret, both of which say less than the tag does.
         """
         if depth >= _MAX_DEPTH:
             # Fail closed, like ``_dropped`` and like ``_redact``'s own cap: a
@@ -391,6 +409,16 @@ class Scrubber:
         if isinstance(value, dict):
             return {str(k): self.payload(v, depth + 1) for k, v in value.items()}
         if isinstance(value, (list, tuple)):
+            if is_keypair_array(value):
+                # The one secret that is not a leaf. Every tier-2 pattern reads
+                # a string, so a keypair that arrived as a real JSON array —
+                # ``json.load`` of an ``id.json``, a tool that returned the
+                # bytes rather than printing them — walked out of here as 64
+                # harmless numbers (SEC-336). The list is replaced whole,
+                # because the secret *is* the list: replacing its elements one
+                # by one would either leak the rest or emit 64 pseudonyms for
+                # one key.
+                return self._hit("solana_keypair", keypair_array_text(value))
             return [self.payload(v, depth + 1) for v in value]
         if isinstance(value, str):
             return self.text(value)
