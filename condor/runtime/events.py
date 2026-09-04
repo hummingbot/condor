@@ -119,10 +119,19 @@ class RuntimeEvent(BaseModel):
                 type=EventType.TOOL_UPDATE,
                 session_key=session_key,
                 data={
+                    # ``input`` rides the update for the same reason the
+                    # dataclass has the field at all (FEAT-102): the ACP
+                    # adapter announces a call at ``content_block_start`` with
+                    # ``rawInput: {}`` and supplies the real arguments on the
+                    # following ``tool_call_update``. A projection that drops
+                    # them here loses them for every consumer downstream of
+                    # ``RuntimeEvent`` — which is how the chat transcript came
+                    # to record every ACP-bridged call with ``"input": null``.
                     "tool_call_id": event.tool_call_id,
                     "status": event.status,
                     "title": event.title,
                     "output": event.output,
+                    "input": serialize(event.input),
                 },
             )
         if isinstance(event, Heartbeat):

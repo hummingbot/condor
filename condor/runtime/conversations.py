@@ -41,6 +41,7 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field
 
 from condor import paths
+from condor.acp.client import ToolCallEvent, ToolCallUpdate, fold_tool_call_event
 from condor.fsutil import atomic_write_bytes
 from condor.runtime.events import EventType
 from condor.runtime.registry_file import read_status, write_status
@@ -212,6 +213,18 @@ def _redact(value, depth: int = 0):
     if isinstance(value, (list, tuple)):
         return [_redact(v, depth + 1) for v in value]
     return value
+
+
+def _dict_or_none(raw) -> dict | None:
+    """``raw`` as arguments the shared fold can read, or ``None``.
+
+    ``fold_tool_call_event`` guards ``input`` with a plain truthiness test so a
+    late, fuller payload can fill a field an earlier event left empty. Handing
+    it anything that is not a non-empty dict — a serialized scalar, ``{}`` from
+    an announcement whose input is still streaming — would either be ignored or
+    stored as something a reader of ``input`` cannot use.
+    """
+    return raw if isinstance(raw, dict) and raw else None
 
 
 def _tool_input(raw, limit: int = TOOL_INPUT_MAX_CHARS) -> dict | None:
@@ -908,6 +921,9 @@ class Recorder:
         self._attachments = list(attachments or [])
         self._text: list[str] = []
         self._thought: list[str] = []
+        # Keyed by tool_call_id, in the shape ``fold_tool_call_event`` folds
+        # into — the fold's spelling, not disk's. ``_recorded_calls`` renames
+        # and bounds it on the way out.
         self._tools: dict[str, dict] = {}
         self._error = ""
         # Stays empty unless a DONE arrives: an abandoned generator never
@@ -918,7 +934,24 @@ class Recorder:
             _live_recorders.add(self)
 
     def observe(self, event) -> None:
-        """Accumulate one ``RuntimeEvent``. Never writes."""
+        """Accumulate one ``RuntimeEvent``. Never writes.
+
+        The tool-call reduction is :func:`fold_tool_call_event`, the same one
+        the tick engine, the delegate sink and ``Session.prompt_stream`` run —
+        not a fourth copy of the create/patch rules. The recorder used to fold
+        by hand and disagreed with the shared one on the part that matters: a
+        repeat announcement replaced the entry wholesale, and an update merged
+        only ``status`` and ``output``, so arguments that the ACP adapter
+        supplies late (FEAT-102) never reached disk and every ACP-bridged chat
+        turn was persisted with ``"input": null``.
+
+        What stays the recorder's own business is what disk asks of it, and it
+        happens at :meth:`_recorded_calls` rather than here: redaction and
+        clipping of the arguments, truncation of the output, and the on-disk
+        key naming. Doing it after the fold rather than during is deliberate —
+        redacting on arrival would hand the fold an already-clipped ``input``
+        and a later, fuller one could no longer replace it.
+        """
         if not self.enabled:
             return
         if event.type == EventType.TEXT:
@@ -926,33 +959,59 @@ class Recorder:
         elif event.type == EventType.THOUGHT:
             self._thought.append(event.text)
         elif event.type == EventType.TOOL_CALL:
+            # Not keyed on the id alone: an adapter that does not identify its
+            # calls still gets one entry per call rather than one entry
+            # overwritten N times.
             call_id = str(event.field("tool_call_id") or len(self._tools))
-            self._tools[call_id] = {
-                "id": call_id,
-                "title": str(event.field("title") or ""),
-                "status": str(event.field("status") or ""),
-                "kind": str(event.field("kind") or ""),
-                "input": _tool_input(event.field("input")),
-                "output": "",
-            }
+            fold_tool_call_event(
+                self._tools,
+                ToolCallEvent(
+                    tool_call_id=call_id,
+                    title=str(event.field("title") or ""),
+                    status=str(event.field("status") or ""),
+                    kind=str(event.field("kind") or ""),
+                    input=_dict_or_none(event.field("input")),
+                ),
+            )
         elif event.type == EventType.TOOL_UPDATE:
-            call_id = str(event.field("tool_call_id") or "")
-            call = self._tools.get(call_id)
-            if call:
-                call["status"] = str(event.field("status") or call["status"])
-                # Merge an output only when there is one. The pydantic-ai path
-                # emits a bare "completed" update the moment the call is issued
-                # and carries the real result on the following
-                # ``ModelRequestNode``; on ACP the order is the other way
-                # round. Either way a later empty value must not erase a
-                # result that already arrived.
-                output = _truncate(event.field("output") or "", TOOL_OUTPUT_MAX_CHARS)
-                if output:
-                    call["output"] = output
+            fold_tool_call_event(
+                self._tools,
+                ToolCallUpdate(
+                    tool_call_id=str(event.field("tool_call_id") or ""),
+                    status=str(event.field("status") or ""),
+                    title=str(event.field("title") or ""),
+                    output=str(event.field("output") or ""),
+                    input=_dict_or_none(event.field("input")),
+                ),
+            )
         elif event.type == EventType.ERROR:
             self._error = str(event.field("message", "") or "")
         elif event.type == EventType.DONE:
             self._stop = event.stop_reason
+
+    def _recorded_calls(self) -> list[dict]:
+        """The folded calls in the shape the transcript stores.
+
+        The fold speaks the key names the tick and delegate paths share
+        (``name``); a transcript has always said ``title``, and
+        ``TurnEntry.tool_calls`` documents that spelling to every reader of a
+        share. One rename, in one place, instead of a second fold.
+
+        ``output`` is defaulted to ``""`` rather than omitted so a call that
+        never reported a result still lands on disk with the same key set as
+        one that did.
+        """
+        return [
+            {
+                "id": str(call.get("id") or ""),
+                "title": str(call.get("name") or ""),
+                "status": str(call.get("status") or ""),
+                "kind": str(call.get("kind") or ""),
+                "input": _tool_input(call.get("input")),
+                "output": _truncate(call.get("output") or "", TOOL_OUTPUT_MAX_CHARS),
+            }
+            for call in self._tools.values()
+        ]
 
     def _attribution(self) -> dict:
         """What this recorder knows about who produced the turn.
@@ -988,7 +1047,7 @@ class Recorder:
             )
             append_turn(self.user_id, self.conv_id, opening)
             text = "".join(self._text)
-            tools = list(self._tools.values())
+            tools = self._recorded_calls()
             if text or tools or self._thought:
                 append_turn(
                     self.user_id,

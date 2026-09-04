@@ -135,6 +135,26 @@ def test_a_later_empty_update_does_not_erase_arguments_already_read():
     assert tc_map["1"]["status"] == "failed"
 
 
+# ── The projection ──
+
+
+def test_the_runtime_projection_of_an_update_carries_the_arguments():
+    """``RuntimeEvent`` is the wire every chat surface reads (CORR-326).
+
+    The dataclass having an ``input`` field buys nothing if the canonical event
+    built from it drops the arguments: the transcript, the dashboard and the
+    Telegram stream all see the projection, never the dataclass.
+    """
+    from condor.runtime.events import EventType, RuntimeEvent
+
+    event = RuntimeEvent.from_acp(
+        ToolCallUpdate(tool_call_id="1", status="completed", input={"action": "deploy"})
+    )
+
+    assert event.type is EventType.TOOL_UPDATE
+    assert event.field("input") == {"action": "deploy"}
+
+
 def test_normalize_reads_the_same_key_on_an_update_as_on_a_create():
     """One translation seam, not two spellings (SEC-093)."""
     payload = {"toolCallId": "1", "rawInput": {"action": "delete"}}

@@ -12,7 +12,7 @@ import json
 
 import pytest
 
-from condor.acp.client import PromptDone, TextChunk
+from condor.acp.client import PromptDone, TextChunk, ToolCallEvent, ToolCallUpdate
 from condor.runtime import PromptRequest, SessionKey, SessionSpec
 from condor.runtime import client as runtime
 from condor.runtime import conversations
@@ -425,6 +425,170 @@ def test_recorder_keeps_tool_io_on_the_acp_path(conv_root):
     assert call["kind"] == "read"
     assert call["input"] == {"path": "config.py"}
     assert call["output"] == "PORT = 8080"
+
+
+def test_recorder_persists_arguments_that_arrive_late_on_an_acp_update(conv_root):
+    """The real ACP sequence, through both links of the chat chain (CORR-326).
+
+    ``claude-agent-acp`` announces a call at ``content_block_start`` while the
+    input JSON is still streaming — ``rawInput`` is routinely ``{}`` — and
+    carries the complete arguments on the following ``tool_call_update``
+    (FEAT-102). Built from the dataclasses through ``RuntimeEvent.from_acp``
+    rather than from hand-written payloads, because the projection is the link
+    that used to drop them: a transcript that records that the agent called
+    ``create_position_executor`` but not on what is not a trajectory.
+    """
+    meta = new_conversation(USER, WEB)
+    rec = Recorder(USER, meta.id, "open a position")
+
+    rec.observe(
+        RuntimeEvent.from_acp(
+            ToolCallEvent(
+                tool_call_id="call_1",
+                title="create_position_executor",
+                status="pending",
+                kind="other",
+                input={},  # streaming has not delivered the arguments yet
+            )
+        )
+    )
+    rec.observe(
+        RuntimeEvent.from_acp(
+            ToolCallUpdate(
+                tool_call_id="call_1",
+                status="completed",
+                input={"connector_name": "binance", "trading_pair": "SOL-USDC"},
+                output="executor started",
+            )
+        )
+    )
+    rec.flush()
+
+    call = read_transcript(USER, meta.id)[-1].tool_calls[0]
+    assert call["input"] == {"connector_name": "binance", "trading_pair": "SOL-USDC"}
+    assert call["status"] == "completed"
+    assert call["output"] == "executor started"
+
+
+def test_recorder_redacts_arguments_that_arrive_late(conv_root):
+    """Landing late buys no exemption from the redactor."""
+    meta = new_conversation(USER, WEB)
+    rec = Recorder(USER, meta.id, "connect the server")
+
+    rec.observe(
+        RuntimeEvent.from_acp(
+            ToolCallEvent(
+                tool_call_id="cfg", title="configure_server", status="pending", input={}
+            )
+        )
+    )
+    rec.observe(
+        RuntimeEvent.from_acp(
+            ToolCallUpdate(
+                tool_call_id="cfg",
+                status="completed",
+                input={"host": "localhost", "password": "barabit"},
+            )
+        )
+    )
+    rec.flush()
+
+    raw = (
+        conv_root / str(USER) / "conversations" / meta.id / "transcript.jsonl"
+    ).read_text()
+    assert "barabit" not in raw
+    call = read_transcript(USER, meta.id)[-1].tool_calls[0]
+    assert call["input"]["host"] == "localhost"
+    assert call["input"]["password"] == REDACTED
+
+
+def test_recorder_lets_a_late_update_name_a_call_the_announcement_did_not(conv_root):
+    """A title supplied on the update reaches disk under the on-disk spelling."""
+    meta = new_conversation(USER, WEB)
+    rec = Recorder(USER, meta.id, "what moved?")
+
+    rec.observe(
+        RuntimeEvent.from_acp(
+            ToolCallEvent(tool_call_id="t", title="", status="pending")
+        )
+    )
+    rec.observe(
+        RuntimeEvent.from_acp(
+            ToolCallUpdate(tool_call_id="t", status="completed", title="get_prices")
+        )
+    )
+    rec.flush()
+
+    assert read_transcript(USER, meta.id)[-1].tool_calls[0]["title"] == "get_prices"
+
+
+def test_recorder_does_not_let_a_later_empty_update_erase_what_arrived(conv_root):
+    """The non-erasing guard, on every field a later update can carry."""
+    meta = new_conversation(USER, WEB)
+    rec = Recorder(USER, meta.id, "deploy it")
+
+    rec.observe(
+        RuntimeEvent.from_acp(
+            ToolCallEvent(
+                tool_call_id="d",
+                title="manage_bots",
+                status="pending",
+                input={"action": "deploy"},
+            )
+        )
+    )
+    rec.observe(
+        RuntimeEvent.from_acp(
+            ToolCallUpdate(tool_call_id="d", status="completed", output="deployed")
+        )
+    )
+    rec.observe(RuntimeEvent.from_acp(ToolCallUpdate(tool_call_id="d")))
+    rec.flush()
+
+    call = read_transcript(USER, meta.id)[-1].tool_calls[0]
+    assert call["input"] == {"action": "deploy"}
+    assert call["title"] == "manage_bots"
+    assert call["output"] == "deployed"
+    assert call["status"] == "completed"
+
+
+def test_recorder_patches_a_repeated_announcement_instead_of_replacing_it(conv_root):
+    """One id is one call: a second announcement must not erase its result.
+
+    The recorder used to overwrite ``self._tools[call_id]`` wholesale, so a
+    call announced twice — which is exactly what the ACP adapter does — lost
+    whatever status and output had already been recorded for it.
+    """
+    meta = new_conversation(USER, WEB)
+    rec = Recorder(USER, meta.id, "read it")
+
+    rec.observe(
+        RuntimeEvent.from_acp(
+            ToolCallEvent(tool_call_id="r", title="Read", status="pending", kind="read")
+        )
+    )
+    rec.observe(
+        RuntimeEvent.from_acp(
+            ToolCallUpdate(tool_call_id="r", status="completed", output="PORT = 8080")
+        )
+    )
+    rec.observe(
+        RuntimeEvent.from_acp(
+            ToolCallEvent(
+                tool_call_id="r",
+                title="Read",
+                status="in_progress",
+                kind="read",
+                input={"path": "config.py"},
+            )
+        )
+    )
+    rec.flush()
+
+    calls = read_transcript(USER, meta.id)[-1].tool_calls
+    assert len(calls) == 1, "one tool_call_id is one recorded call"
+    assert calls[0]["output"] == "PORT = 8080"
+    assert calls[0]["input"] == {"path": "config.py"}
 
 
 def test_recorder_keeps_tool_io_on_the_pydantic_ai_path(conv_root):
