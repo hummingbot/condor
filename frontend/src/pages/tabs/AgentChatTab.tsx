@@ -12,7 +12,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { AccountDock } from "@/components/chat/AccountDock";
-import { deskWasOpen, useAccountPanels } from "@/components/chat/accountPanels";
+import {
+  DESK_PARAM,
+  deskWasOpen,
+  useAccountPanels,
+} from "@/components/chat/accountPanels";
 import { AgentPanel } from "@/components/chat/AgentPanel";
 import {
   BrainPicker,
@@ -372,6 +376,17 @@ export function AgentChatTab() {
   const panelSlug = selectedSlug || CHAT_SLUG;
   const panelAgent = agents.find((a) => a.slug === panelSlug);
 
+  /**
+   * Whose panel is actually in the pane (FEAT-114).
+   *
+   * The conversation's, unless `?panel=agent` carries a slug of its own — which
+   * is what an Execution row clicks. `pane.slug ?? panelSlug` is the whole
+   * rule, so every link ever written to a bare `?panel=agent` keeps meaning
+   * "the agent I am talking to".
+   */
+  const openSlug = (pane?.kind === "agent" && pane.slug) || panelSlug;
+  const openAgent = agents.find((a) => a.slug === openSlug);
+
   const runningTasks = (delegationData?.delegations ?? []).filter(
     (d) => d.status === "running",
   ).length;
@@ -395,6 +410,10 @@ export function AgentChatTab() {
   const account = useAccountPanels({
     server: dockServer,
     open: pane?.kind === "desk",
+    // The desk is addressable now: `/fleet` redirects here, and `?desk=` is
+    // what makes that redirect open the Execution section rather than whatever
+    // this browser happened to have recorded (FEAT-114).
+    desk: searchParams.get(DESK_PARAM),
     onOpenChange: (open) => openPane(open ? { kind: "desk" } : null),
   });
   const conversationId = activeSlot?.info.conversation_id || "";
@@ -559,8 +578,8 @@ export function AgentChatTab() {
 
           {pane?.kind === "agent" && (
             <AgentPanel
-              slug={panelSlug}
-              name={panelAgent?.name || "Condor"}
+              slug={openSlug}
+              name={openAgent?.name || "Condor"}
               // What the conversation runs on, in the panel's own bar — the
               // first thing waiting on the other side of the click.
               slot={activeSlot}
@@ -590,14 +609,14 @@ export function AgentChatTab() {
               // navigation: the conversation that named this loop is the
               // reason you are looking at it.
               onOpenStrategy={(strategySlug) =>
-                openPane({ kind: "strategy", agentSlug: panelSlug, strategySlug })
+                openPane({ kind: "strategy", agentSlug: openSlug, strategySlug })
               }
               // A revision is its own thread: `fresh`, not `focus`, so the
               // request does not land under whatever unrelated thing this
               // agent was last asked. The workspace itself stays put — the
               // detail page has to navigate for this, the chat does not.
               onAskAgent={(text) =>
-                talkTo(panelSlug, { intent: "fresh", text })
+                talkTo(openSlug, { intent: "fresh", text })
               }
               onClose={() => openPane(null)}
             />
@@ -613,7 +632,14 @@ export function AgentChatTab() {
               key={`${pane.agentSlug}/${pane.strategySlug}`}
               slug={pane.agentSlug}
               sslug={pane.strategySlug}
-              onClose={() => openPane({ kind: "agent" })}
+              onClose={() =>
+                openPane({
+                  kind: "agent",
+                  // Back to the agent this sheet was opened from, which is not
+                  // necessarily the conversation's since FEAT-114.
+                  ...(pane.agentSlug === panelSlug ? {} : { slug: pane.agentSlug }),
+                })
+              }
             />
           )}
 
@@ -645,6 +671,10 @@ export function AgentChatTab() {
             shown={account.shown}
             onToggle={account.toggle}
             onClose={account.close}
+            // An Execution row names an agent; this is where it opens
+            // (FEAT-114). The desk hands the pane over exactly as the rail's
+            // agent tile does, so the two cannot be on screen at once.
+            onOpenAgent={(slug) => openPane({ kind: "agent", slug })}
           />
 
           <ContextDock
