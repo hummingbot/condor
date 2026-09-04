@@ -403,9 +403,11 @@ async def delegate(
             then draft the summary"). With "resume" you must end your turn after
             starting the task: you will be woken with the answer.
         timeout_sec: Wall-clock budget for the whole background task, in seconds
-            (for start). Omit it (0) for the default of 900s. Raise it when you
-            KNOW the job is long — several routines to build, a research sweep,
-            a multi-step backtest — because a task that outlives its budget is
+            (for start). Omit it (0) for the default of 900s. This knob only
+            goes UP: 900s is also the floor, and a smaller number is raised back
+            to it, so do not try to give a task less. Raise it when you KNOW the
+            job is long — several routines to build, a research sweep, a
+            multi-step backtest — because a task that outlives its budget is
             cut off mid-run and loses whatever it had not finished. The ceiling
             is 1800s: an agent session has its own ~31-minute hard stop, so
             asking for more only delays the same cut-off. For work bigger than

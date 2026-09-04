@@ -12,6 +12,10 @@ place; the route honours a caller's budget, keeps 900s otherwise, and refuses a
 budget that would kill the worker instantly or outlive the agent session's own
 hard ceiling.
 
+The knob only goes UP. A model handed itself 300s for a real background run and
+had the answer cut off, so 900s is a floor as well as the default: a smaller ask
+is raised to it rather than refused.
+
 Sync tests driving coroutines with ``asyncio.run`` (pytest-asyncio is not
 installed in this venv), fakes in the style of test_agents_chat_id_ownership.py.
 """
@@ -30,6 +34,7 @@ from condor.web.routes import agents as agents_routes
 from condor.web.routes.agents import (
     DEFAULT_DELEGATE_TIMEOUT_S,
     MAX_DELEGATE_TIMEOUT_S,
+    MIN_DELEGATE_TIMEOUT_S,
     DelegateRequest,
     delegate_agent,
 )
@@ -99,6 +104,31 @@ def test_a_budget_that_would_kill_the_worker_instantly_is_refused(monkeypatch, b
 
     assert exc.value.status_code == 400
     assert "timeout_s" in exc.value.detail
+
+
+@pytest.mark.parametrize("budget", [1, 300, MIN_DELEGATE_TIMEOUT_S - 1])
+def test_a_budget_under_the_floor_is_raised_to_it(monkeypatch, budget):
+    """The knob only goes up.
+
+    A model guessing 300s once cut a real background run off mid-answer. Nobody
+    asked for a shorter run, so the ask is raised rather than refused: a 400
+    would only buy a retry with the number we already know we want.
+    """
+    started, _ = _delegate(monkeypatch, DelegateRequest(task="t", timeout_s=budget))
+
+    assert started[0]["timeout_s"] == MIN_DELEGATE_TIMEOUT_S
+
+
+def test_the_floor_is_the_default(monkeypatch):
+    """Asking for nothing and asking for less must land on the same budget."""
+    assert MIN_DELEGATE_TIMEOUT_S == DEFAULT_DELEGATE_TIMEOUT_S == 900
+
+
+def test_a_budget_over_the_floor_is_still_the_callers(monkeypatch):
+    """The floor must not flatten the one thing the knob was added for."""
+    started, _ = _delegate(monkeypatch, DelegateRequest(task="t", timeout_s=1200))
+
+    assert started[0]["timeout_s"] == 1200
 
 
 def test_a_budget_past_the_session_ceiling_is_refused_with_the_limit(monkeypatch):
@@ -184,3 +214,5 @@ def test_the_declared_tool_lets_a_model_pass_a_budget():
     # Acceptance criterion: the docstring states the default and the override.
     assert "timeout_sec" in doc
     assert "900" in doc
+    # The floor is only useful to a model that is told it exists.
+    assert "floor" in doc

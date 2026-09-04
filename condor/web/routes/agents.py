@@ -794,6 +794,13 @@ class StartStrategyRequest(BaseModel):
 # nothing but a longer wait for the same cut-off.
 DEFAULT_DELEGATE_TIMEOUT_S = 900  # in sync with delegate.DEFAULT_TIMEOUT_S (pinned)
 MAX_DELEGATE_TIMEOUT_S = 1800
+# ...and 900s is also the FLOOR. Since ARCH-310 a caller can name its own budget,
+# and the caller is usually a model, which guesses: a real run was handed 300s and
+# cut off mid-answer, having been given a third of the budget nobody asked to
+# shorten. Raising the budget is a real need; lowering it below the default never
+# was, so an ask under the floor is quietly raised to it rather than refused --
+# a 400 would only cost the model a turn to retry with the number we already want.
+MIN_DELEGATE_TIMEOUT_S = 900
 
 
 class DelegateRequest(BaseModel):
@@ -2231,7 +2238,8 @@ async def delegate_agent(
     ``/consult``.
 
     ``timeout_s`` is the whole run's wall-clock budget: the default 900s, or
-    whatever the caller asked for within the bounds above (ARCH-310).
+    whatever the caller asked for within the bounds above (ARCH-310) -- an ask
+    below the 900s floor is raised to it.
     """
     from condor.agents.delegate import ON_COMPLETE_CHOICES, start_delegation
     from condor.runtime import wake
@@ -2250,9 +2258,11 @@ async def delegate_agent(
             status_code=400,
             detail=(
                 f"timeout_s must be between 1 and {MAX_DELEGATE_TIMEOUT_S} "
-                f"seconds (default {DEFAULT_DELEGATE_TIMEOUT_S})"
+                f"seconds (default {DEFAULT_DELEGATE_TIMEOUT_S}; anything under "
+                f"{MIN_DELEGATE_TIMEOUT_S} runs for {MIN_DELEGATE_TIMEOUT_S})"
             ),
         )
+    timeout_s = max(req.timeout_s, MIN_DELEGATE_TIMEOUT_S)
 
     # Same server-scope gate as consult: a delegate binds the agent's MCP toolset
     # to ``server_name``'s live credentials, so refuse a server the caller can't access.
@@ -2288,7 +2298,7 @@ async def delegate_agent(
         chat_id=req.chat_id,
         server_name=req.server_name,
         task=req.task,
-        timeout_s=req.timeout_s,
+        timeout_s=timeout_s,
         conversation_id=conversation_id,
         session_key=req.session_key,
         on_complete=on_complete,
