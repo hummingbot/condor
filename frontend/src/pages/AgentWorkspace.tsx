@@ -26,8 +26,8 @@ import { NowView } from "@/components/agent/workspace/NowView";
 import { useWorkspaceAlerts } from "@/components/agent/workspace/useWorkspaceAlerts";
 import { WorkspaceHeader } from "@/components/agent/workspace/WorkspaceHeader";
 import { WorkspaceSpine } from "@/components/agent/workspace/WorkspaceSpine";
+import { useWorkspaceUrl } from "@/components/agent/workspace/workspaceUrl";
 import {
-  parseWorkspace,
   pickRun,
   pickStrategy,
   runsRedirect,
@@ -126,37 +126,15 @@ export function AgentWorkspace() {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [showRoutinesBrowser, setShowRoutinesBrowser] = useState(false);
 
-  const url = useMemo(() => parseWorkspace(searchParams), [searchParams]);
-
-  /**
-   * Write a selection into the URL.
-   *
-   * `replace` for a section change — reading down the sections is not nine
-   * steps of history to press Back through — and a real push for a scope, a run
-   * or a tick, which is what makes Back move one level shallower from any depth
-   * without ever leaving the agent.
-   */
-  const setParams = useCallback(
-    (
-      next: Record<string, string | number | null>,
-      options?: { replace?: boolean },
-    ) => {
-      const params = new URLSearchParams(searchParams);
-      for (const [key, value] of Object.entries(next)) {
-        if (value === null || value === "") params.delete(key);
-        else params.set(key, String(value));
-      }
-      // `view=now` is the default, so it is never spelled out: the shortest URL
-      // that lands somewhere is the one people paste.
-      if (params.get("view") === "now") params.delete("view");
-      params.delete("tab");
-      setSearchParams(params, options);
-    },
-    [searchParams, setSearchParams],
-  );
+  // The grammar's writing half is a module now (FEAT-117): the two cascades —
+  // a strategy change drops the run and the tick, a run change drops the tick —
+  // used to be spelled out at each of the call sites below, and the chat's pane
+  // spends the same four parameters on a different search string. See
+  // `workspace/workspaceUrl.ts`.
+  const { url, set: setParams } = useWorkspaceUrl(searchParams, setSearchParams);
 
   const selectView = useCallback(
-    (view: WorkspaceViewId) => setParams({ view }, { replace: true }),
+    (view: WorkspaceViewId) => setParams({ view }),
     [setParams],
   );
 
@@ -304,8 +282,8 @@ export function AgentWorkspace() {
       }
       setParams(
         isLoopRun(run.kind)
-          ? { strategy: run.strategy_slug, run: run.run_id, tick: null }
-          : { run: run.run_id, tick: null },
+          ? { strategy: run.strategy_slug, run: run.run_id }
+          : { run: run.run_id },
       );
     },
     [navigate, setParams],
@@ -426,7 +404,7 @@ export function AgentWorkspace() {
       runs={runs}
       strategyFilter={url.strategy}
       onStrategyFilter={(next) =>
-        setParams({ strategy: next, run: null, tick: null })
+        setParams({ strategy: next })
       }
       selected={selectedRun}
       onSelectRun={openRun}
@@ -436,7 +414,7 @@ export function AgentWorkspace() {
       controllerIds={instance ? [instance.agent_id] : undefined}
       hasMore={runs.length >= runLimit}
       onShowMore={() => setRunLimit((n) => n + RUN_PAGE)}
-      onClearRun={() => setParams({ run: null, tick: null })}
+      onClearRun={() => setParams({ run: null })}
     />
   ) : view === "now" ? (
     <NowView
@@ -476,11 +454,11 @@ export function AgentWorkspace() {
         strategies={agent.strategies ?? []}
         sslug={sslug}
         onSelectStrategy={(next) =>
-          setParams({ strategy: next, run: null, tick: null })
+          setParams({ strategy: next })
         }
         runs={scopedRuns}
         run={selectedRun && isLoopRun(selectedRun.kind) ? selectedRun : null}
-        onSelectRun={(runId) => setParams({ run: runId, tick: null })}
+        onSelectRun={(runId) => setParams({ run: runId })}
         instance={instance}
         tick={url.tick}
         onSelectTick={(next) => selectTick(next, view)}
