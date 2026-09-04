@@ -148,6 +148,29 @@ export interface PerfLeaf {
   source: ControllerInfo | ExecutorInfo;
 }
 
+/**
+ * The market a record traded, from wherever the record actually says so.
+ *
+ * The top-level `trading_pair` is what upstream reports for a live controller
+ * and what every executor carries, and it is the one to believe. But it is
+ * empty on a controller whose class upstream could not resolve and on a
+ * terminated one whose row was rebuilt from a run, and a leaf with no pair is
+ * both invisible to the pair grouping and folded as though its quote were
+ * dollars. The controller's own **config** declares the pair it was deployed
+ * with — that is the field the deploy was written against — so it answers when
+ * the report does not.
+ *
+ * Read off `config` rather than from a second endpoint because the config is
+ * already on the record: `ControllerInfo.config` is the deployed YAML and
+ * `ExecutorInfo.config` the executor's own, both shipped with the row.
+ */
+export function pairOf(record: { trading_pair?: string; config?: Record<string, unknown> }): string {
+  const reported = (record.trading_pair || "").trim();
+  if (reported) return reported;
+  const declared = record.config?.trading_pair;
+  return typeof declared === "string" ? declared.trim() : "";
+}
+
 function finiteOr(value: unknown, fallback: number): number {
   const n = Number(value);
   return Number.isFinite(n) ? n : fallback;
@@ -184,7 +207,7 @@ export function leafFromController(
     // `fill_classes_from_config` and `controllerClassOf`.
     executorType: c.controller_name || c.controller_type || UNKNOWN_LABEL,
     connector: c.connector || "",
-    pair: c.trading_pair || "",
+    pair: pairOf(c),
     realized: c.realized_pnl_quote,
     unrealized: c.unrealized_pnl_quote,
     net: c.global_pnl_quote,
@@ -245,7 +268,7 @@ export function leafFromTerminatedController(
     // `fill_classes_from_config` and `controllerClassOf`.
     executorType: c.controller_name || c.controller_type || UNKNOWN_LABEL,
     connector: c.connector || "",
-    pair: c.trading_pair || "",
+    pair: pairOf(c),
     realized: c.realized_pnl_quote,
     unrealized: c.unrealized_pnl_quote,
     net: c.global_pnl_quote,
@@ -302,7 +325,7 @@ export function leafFromExecutor(
     controllerId: attached ? e.controller_id || "" : "",
     executorType: e.type || UNKNOWN_LABEL,
     connector: e.connector || "",
-    pair: e.trading_pair || "",
+    pair: pairOf(e),
     realized: running ? 0 : e.pnl,
     unrealized: running ? e.pnl : 0,
     net: e.pnl,

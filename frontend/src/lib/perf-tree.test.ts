@@ -151,6 +151,31 @@ describe("leaf adapters", () => {
     expect(foldLeaves([leaf], identity, NOW).hours).toBe(4);
   });
 
+  // The pair is what the `pair` grouping buckets by and what tells `foldLeaves`
+  // which quote a leaf's numbers are in, so a leaf with none is both invisible
+  // to that reading and folded as though its quote were dollars. Upstream leaves
+  // the reported field empty on more rows than it looks — a terminated
+  // controller rebuilt from a run, for one — and the deployed config always
+  // declares the pair, because that is the field the deploy was written against.
+  it("takes the pair from the deployed config when the record reports none", () => {
+    expect(leafFromController(controller({ trading_pair: "" })).pair).toBe("");
+    expect(
+      leafFromController(controller({ trading_pair: "", config: { trading_pair: "BTC-BRL" } }))
+        .pair,
+    ).toBe("BTC-BRL");
+    expect(
+      leafFromExecutor(executor({ trading_pair: "", config: { trading_pair: "BTC-BRL" } })).pair,
+    ).toBe("BTC-BRL");
+  });
+
+  it("believes the reported pair over the config's, which can be a stale deploy", () => {
+    expect(
+      leafFromController(
+        controller({ trading_pair: "SOL-USDC", config: { trading_pair: "BTC-BRL" } }),
+      ).pair,
+    ).toBe("SOL-USDC");
+  });
+
   it("declares no capital when the controller declares none", () => {
     expect(leafFromController(controller({ config: {} })).capital).toBe(0);
     expect(leafFromController(controller({ config: { total_amount_quote: 0 } })).capital).toBe(0);
