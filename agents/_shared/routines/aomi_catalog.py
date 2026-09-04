@@ -18,8 +18,9 @@ FOOTER = (
     "Reads return state or a quote and stage nothing; run them with the `aomi_read` "
     "routine or as `mode='operation'` dry runs. Execute an operation with "
     "`manage_executors(action='create', executor_type='onchain_executor')`: "
-    "`mode='operation'` with `app` (or `skills=['<skill>']`), `operation` and "
-    "`arguments`; or `mode='calls'` with raw EVM calls. Solana operations need "
+    "`mode='operation'` with `app`, `operation` and `arguments` for a listed builder; "
+    "or `mode='calls'` with raw EVM calls built from a skill's instructions "
+    "(`aomi_skill`) for every other protocol. Solana operations need "
     "`chain='svm'`. Aomi's own chat plumbing (authorization, scheduling, threads) and "
     "its stage/simulate/commit primitives are not listed: the executor owns that lifecycle."
 )
@@ -160,14 +161,23 @@ async def _list_skills(
     if not config.skill:
         lines.append(", ".join(f"`{s}`" for s in skills))
         lines.append(
-            "Pass `skill='<name>'` to list a skill's operations, or `aomi_skill` for its instructions."
+            "Most skills are instructions (contracts, function signatures, rules) for "
+            "`mode='calls'`: run `aomi_skill` (skill='<name>') to read them. "
+            "Pass `skill='<name>'` here to check whether it also injects builders."
         )
         lines.append("")
         return lines
     for skill in skills:
         directory = await client.list_skill_operations(skill)
-        ops = [op for op in directory.names() if policy.is_visible(op)]
-        lines.append(f"### skill `{skill}` ({len(ops)} operations)")
+        ops = [op for op in directory.names() if policy.classify(op) == "executable"]
+        if not ops:
+            lines.append(
+                f"### skill `{skill}` — instructions only: run `aomi_skill` (skill='{skill}') for "
+                "its contracts and function signatures, then execute with `mode='calls'`"
+            )
+            lines.append("")
+            continue
+        lines.append(f"### skill `{skill}` ({len(ops)} builders)")
         for op in ops[: max(config.max_operations, 0)]:
             kind = policy.classify(op)
             chain = policy.chain_family_of(op)

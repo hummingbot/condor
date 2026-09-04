@@ -5,13 +5,15 @@ set of calls to the Aomi Pipeline, which fork-simulates them, and — when
 the transaction hashes on the executor.
 
 Two ways to say what to sign:
-- **`mode="operation"`** — a catalog operation: either an app operation (`app`,
-  `operation`, `arguments`) or a protocol-skill operation (`skills=["aave"]`,
-  `operation`, `arguments` — Aave, Morpho, Compound, Curve, Pendle, Lido and 30+
-  more live under skills). Aomi builds the calls; you never touch calldata.
-  Solana operations (Jupiter, Raydium, Sanctum, deBridge) work here with `chain="svm"`.
-- **`mode="calls"`** — raw EVM calls (`to`, `data`, `value`). For a contract call,
-  a native transfer, or anything the catalog does not cover. EVM only.
+- **`mode="operation"`** — a builder from the catalog (`app`, `operation`,
+  `arguments`): Uniswap V4 swaps, LI.FI swaps/bridges, deBridge orders, Lido and
+  ether.fi withdrawal claims, and the Solana swaps (Jupiter, Raydium, Sanctum) with
+  `chain="svm"`. Aomi builds the calls; you never touch calldata.
+- **`mode="calls"`** — raw EVM calls (`to`, `data`, `value`). This is how every
+  other protocol is reached: Aomi's 40+ **skills** (Aave, Morpho, Compound, Curve,
+  Pendle, Lido, ether.fi, Rocket Pool, ...) are instructions — contract addresses,
+  function signatures and rules — that you read with the `aomi_skill` routine and
+  turn into `data.signature` + `data.args` calls. Simulation still gates the commit.
 
 What the catalog will **not** offer you: Aomi's own chat plumbing
 (`ask_authorization`, `schedule_cron`, `spawn_thread`, `brave_search`, ...) and its
@@ -33,9 +35,9 @@ lifecycle. Passing one of those as `operation` is refused at create time. Reads
 
 #### Setup Workflow
 
-1. **Browse the catalog** — run the `aomi_catalog` routine: apps and their
-   executable operations, reads, and the protocol skills. Pass `skill="aave"` to
-   expand one skill's operations and their arguments (required ones starred).
+1. **Browse the catalog** — run the `aomi_catalog` routine: the builders and reads
+   of each app, and the protocol skills. For a protocol without a builder, run
+   `aomi_skill` (skill="aave") and build `calls` from its contracts and signatures.
 2. **Read state first** — run the `aomi_read` routine (`op="account"` for the
    wallet's balance and nonce, `op="token-holdings"` for an ERC-20 balance,
    `op="contract"` to inspect a target, `op="context"` for block and gas). Do not
@@ -55,7 +57,7 @@ lifecycle. Passing one of those as `operation` is refused at create time. Reads
 |---|---|---|
 | `chain_id` | yes | EVM chain: `8453` Base, `1` Ethereum, `42161` Arbitrum, `10` Optimism |
 | `chain` | no | `evm` (default) or `svm` for Solana operations in `mode=operation` |
-| `skills` | no | Protocol skills to load; with exactly one, a bare `operation` resolves into that skill |
+| `skills` | no | Skills to load alongside the app for a build (rarely needed; skills are read with `aomi_skill`) |
 | `mode` | yes | `calls` (raw `evm_stage_tx` calls) or `operation` (an app operation) |
 | `calls[]` | `mode=calls` | Each `{to, description, data: {signature, args, raw}, value}` — `value` is a **wei string** (`"0"` for none); `data.signature` + `data.args` for an ABI call, or `data.raw` for pre-encoded calldata |
 | `app` / `operation` / `arguments` | `mode=operation` | The catalog entry to execute and its argument map (see `aomi_catalog`) |

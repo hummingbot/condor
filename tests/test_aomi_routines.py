@@ -603,9 +603,9 @@ def test_catalog_lists_skills_and_expands_one(monkeypatch):
 
     expanded = asyncio.run(catalog.run(catalog.Config(skill="aave"), context=None))
     text = expanded.text
-    assert "### skill `aave` (2 operations)" in text
+    assert "### skill `aave` (1 builders)" in text
     assert "- `aave_supply` — Supply an asset to Aave. (args: asset*, amount*)" in text
-    assert "- `aave_get_positions` — read: Read Aave positions." in text
+    assert "aave_get_positions" not in text  # reads are not builders
     assert "## app" not in text
     assert {
         "source": "skill:aave",
@@ -613,3 +613,21 @@ def test_catalog_lists_skills_and_expands_one(monkeypatch):
         "kind": "executable",
         "args": "asset*, amount*",
     } in expanded.table_data
+
+
+def test_catalog_says_when_a_skill_is_instructions_only(monkeypatch):
+    pytest.importorskip("aomi.pipeline.policy")
+    pipeline = FakePipeline(
+        apps={"default": ["call_v4_swap"]},
+        skills=["morpho"],
+        skill_operations={
+            "morpho": ["get_account_info", "evm_stage_tx", "evm_commit_txs"]
+        },
+    )
+    _use(monkeypatch, pipeline)
+
+    result = asyncio.run(catalog.run(catalog.Config(skill="morpho"), context=None))
+
+    assert "### skill `morpho` — instructions only" in result.text
+    assert "aomi_skill" in result.text and "mode='calls'" in result.text
+    assert result.table_data == []
