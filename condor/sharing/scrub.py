@@ -577,6 +577,20 @@ def install_values(user_id: int | str | None = None) -> list[tuple[str, str]]:
     ):
         add(os.environ.get(var, ""), "known_key")
 
+    # This install's VAPID signing key (FEAT-083). Tier 1 and not a tier-2
+    # pattern on purpose: a raw P-256 scalar is 43 base64url characters, which
+    # is also an id, a digest and half the opaque strings in a transcript, so
+    # the shape is not decidable -- but the *value* is one this install knows,
+    # which is exactly what this table is for. It reaches a transcript by one
+    # plausible route, and it is the likeliest one: an operator debugging "push
+    # stopped working" pastes the key file into the chat.
+    try:
+        from condor.push import configured_private_key
+
+        add(configured_private_key(), "known_key")
+    except Exception:  # noqa: BLE001 - no key is the common case, not a failure
+        log.debug("Sharing could not read the VAPID key", exc_info=True)
+
     # This user's own saved endpoints and wallets.
     if user_id is not None:
         try:

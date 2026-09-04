@@ -187,6 +187,35 @@ def routine_hooks_path() -> Path:
     return data_dir() / "routine_hooks.json"
 
 
+def push_subscriptions_path() -> Path:
+    """Per-user Web Push subscriptions (``condor.push``, FEAT-083).
+
+    The third file in :func:`notifications_path`'s shape and for the same
+    reason: one browser's registration has to outlive the tab that made it, or
+    the notification with the window closed -- the whole point -- has nowhere
+    to go.
+    """
+    return data_dir() / "push_subscriptions.json"
+
+
+def vapid_dir() -> Path:
+    """Home of this install's VAPID keypair (``condor.push``, FEAT-083).
+
+    A directory of its own, at ``0700``, rather than a ``0600`` file beside the
+    other stores. Mode on the *file* is not a defence we can rely on here: a
+    ``0600`` file bind-mounted into a container reads fine on macOS and is
+    ``Permission denied`` on every Linux deploy, because the uid inside is not
+    the uid that wrote it. Putting the secret behind a private directory keeps
+    the same reader out and stops the file's own mode from being load-bearing.
+    """
+    return data_dir() / "push_keys"
+
+
+def vapid_key_path() -> Path:
+    """The VAPID keypair itself. Written once; rotating it kills every device."""
+    return vapid_dir() / "vapid.json"
+
+
 def update_run_path() -> Path:
     """The current or last ``/update`` run (``condor.updates.run``).
 

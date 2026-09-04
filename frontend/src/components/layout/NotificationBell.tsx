@@ -9,6 +9,7 @@ import { api, type AppNotification, type NotificationsResponse } from "@/lib/api
 import { setAppBadge } from "@/lib/appBadge";
 import { useAuth } from "@/lib/auth";
 import { formatRelativeTime } from "@/lib/formatters";
+import { onPushNavigate } from "@/lib/push";
 
 const KIND_ICON: Record<string, typeof Bell> = {
   delegation: Workflow,
@@ -73,6 +74,14 @@ export function NotificationBell() {
   // holds, so it cannot drift from what the dropdown shows, and it follows the
   // bell through the poll, a live socket write and marking everything read.
   useEffect(() => setAppBadge(unread), [unread]);
+
+  // A click on an OS notification lands here too (FEAT-083). `sw.js` focuses
+  // the window it found and posts the link rather than calling `openWindow`,
+  // because a second window is a second live chat WebSocket for the same user
+  // — the runtime twin of the manifest's `navigate-existing`. This component is
+  // where it belongs: it is mounted on every route and it already owns what
+  // happens when someone opens a notification.
+  useEffect(() => onPushNavigate((link) => navigate(link)), [navigate]);
 
   const markRead = useMutation({
     mutationFn: (ids?: string[]) => api.markNotificationsRead(ids),

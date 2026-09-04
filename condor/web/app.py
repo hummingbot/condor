@@ -29,6 +29,7 @@ from condor.web.routes import (
     notifications,
     portfolio,
     positions,
+    push,
     reports,
     routines,
     servers,
@@ -113,6 +114,9 @@ def create_app() -> FastAPI:
     app.include_router(dex.router, prefix="/api/v1")
     app.include_router(meta.router, prefix="/api/v1")
     app.include_router(notifications.router, prefix="/api/v1")
+    # Importing this module registered a Web Push sink on the notification
+    # bus (FEAT-083), the same way ``chat_ws`` registers the socket one.
+    app.include_router(push.router, prefix="/api/v1")
     app.include_router(ws.router, prefix="/api/v1")
     app.include_router(agents.router, prefix="/api/v1")
     app.include_router(routines.router, prefix="/api/v1")

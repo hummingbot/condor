@@ -26,6 +26,11 @@ dependencies = [
     "markdown>=3.10.2",
     "bleach>=6.4.0",
     "yfinance>=1.7.0",
+    # Web Push (FEAT-083): VAPID signing + RFC 8291 payload encryption, so a
+    # notification's text is readable only by the browser that subscribed.
+    # Brings py-vapid and http-ece; cryptography was already here via
+    # python-jose[cryptography].
+    "pywebpush>=2.5.0",
 ]
 
 [dependency-groups]

@@ -126,11 +126,24 @@ def test_icons_are_served_directly(client, path):
     assert resp.headers["content-type"] == "image/png"
 
 
-def test_no_service_worker_is_shipped(client):
-    """FEAT-082 registers none; `app.py`'s cache contract stays the only one.
+def test_the_service_worker_does_not_cache(client):
+    """FEAT-082 shipped none. FEAT-083 ships one, and it must stay this narrow.
 
-    FEAT-083 introduces one for Web Push — with no `fetch` handler — and this
-    assertion is expected to be revisited there, deliberately.
+    The revision this assertion was written to expect. There is a worker now,
+    because a `push` handler cannot live anywhere else, but `app.py`'s cache
+    contract is still the only one in the system: no `fetch` handler, no
+    precache, no Workbox. A worker that answered a request would be a second,
+    silently disagreeing answer to "which build is installed".
+
+    The worker's own behaviour is `tests/test_web_push.py`'s subject; what is
+    pinned here is the part that belongs to the shell — nothing about the
+    manifest, the icons or the caching rules changed to accommodate it, and the
+    shell still registers the worker from the app rather than from a script tag.
     """
-    assert not (DIST / "sw.js").exists()
+    body = (DIST / "sw.js").read_text(encoding="utf-8")
+    assert 'addEventListener("push"' in body
+    assert 'addEventListener("fetch"' not in body
+    assert "caches" not in body
+    # Registered by `lib/push.ts` when a user opts in, not eagerly by the shell:
+    # an install nobody has turned notifications on for keeps no worker at all.
     assert b"serviceWorker" not in INDEX_HTML.read_bytes()
