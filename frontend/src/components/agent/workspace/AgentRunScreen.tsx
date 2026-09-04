@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import {
   ChevronRight,
   Coins,
+  ExternalLink,
   Layers,
   ListTree,
   ScrollText,
@@ -9,10 +10,11 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 
 import { DelegationSheet } from "@/components/agent/DelegationSheet";
 import { SnapshotDetail } from "@/components/agent/AgentSessionContent";
+import { DeploymentLedger } from "@/components/agent/lab/DeploymentLedger";
 import { ExperimentDetail, RunOverview } from "@/components/agent/lab/RunOverview";
 import { RunRail } from "@/components/agent/lab/RunRail";
 import { StrategyWorkbench } from "@/components/agent/StrategyWorkbench";
@@ -515,6 +517,60 @@ function Disclosure({
 }
 
 /**
+ * A conversation, as a run: what it deployed, and a door to what it said.
+ *
+ * A chat is one of the four kinds of run this rail lists (FEAT-111) and it is
+ * the one whose *body* lives somewhere else — the transcript is the chat's, and
+ * rebuilding a wide surface inside a disclosure is what FEAT-103's alternative
+ * D argued against. But what it **did** is a ledger in the same shape every
+ * other run's is (FEAT-110), and that is the half this screen can answer: the
+ * row used to say "read it in the chat" and stop, which left the one question
+ * an agent's page exists for unanswered for a quarter of its runs.
+ *
+ * `predates_ledger` is why the empty case is not one sentence. *Deployed
+ * nothing* and *ran before Condor wrote down what a chat deployed* look
+ * identical on screen and are not the same answer, and telling a reader the
+ * first about the second would be a confident lie.
+ */
+function ConversationRun({ run }: { run: AgentRunRow }) {
+  const { data, isLoading } = useQuery({
+    queryKey: ["conversation-deployments", run.id],
+    queryFn: () => api.getConversationDeployments(run.id),
+    enabled: !!run.id,
+  });
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center gap-2 text-sm">
+        <span className="min-w-0 truncate font-medium">
+          {run.title || "This chat"}
+        </span>
+        <Link
+          to={`/?conversation=${encodeURIComponent(run.id)}`}
+          className="inline-flex items-center gap-1 text-xs text-[var(--color-text-muted)] underline-offset-2 transition-colors hover:text-[var(--color-primary)] hover:underline"
+        >
+          Read it in the chat <ExternalLink className="h-3 w-3" />
+        </Link>
+      </div>
+
+      {isLoading ? (
+        <div className="flex h-24 items-center justify-center">
+          <div className="h-5 w-5 animate-spin rounded-full border-2 border-[var(--color-border)] border-t-[var(--color-primary)]" />
+        </div>
+      ) : data?.predates_ledger ? (
+        <p className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4 text-xs text-[var(--color-text-muted)]">
+          This chat ran before Condor recorded what a conversation deployed, so
+          there is nothing to show — which is not the same as it having deployed
+          nothing.
+        </p>
+      ) : (
+        <DeploymentLedger rows={data?.deployments ?? []} />
+      )}
+    </div>
+  );
+}
+
+/**
  * What a rail row opens, for the three kinds that are not this screen.
  *
  * A loop run *is* the screen — selecting one re-scopes everything above — so it
@@ -544,16 +600,7 @@ function RunBody({
     // the fourth caller, not a fourth copy.
     return <DelegationSheet task={delegationTask(run, slug)} onClose={onClearRun} />;
   }
-  if (run.kind === "conversation") {
-    // Only reachable from a hand-typed `?run=c:…`: a chat row navigates to the
-    // chat rather than selecting. The rail still highlights it, so the body
-    // says where its transcript is instead of nothing.
-    return (
-      <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">
-        {run.title || "This chat"} is read in the chat.
-      </p>
-    );
-  }
+  if (run.kind === "conversation") return <ConversationRun run={run} />;
   if (run.kind === "experiment") {
     return (
       <ExperimentDetail slug={slug} sslug={run.strategy_slug} number={run.number} />

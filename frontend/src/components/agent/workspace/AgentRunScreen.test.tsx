@@ -32,12 +32,15 @@ import { AGENT_SECTIONS_KEY } from "@/lib/sessionState";
 const getAgent = vi.fn();
 const getAgentRuns = vi.fn();
 const getStrategy = vi.fn();
+const getConversationDeployments = vi.fn();
 
 vi.mock("@/lib/api", () => ({
   api: {
     getAgent: (...a: unknown[]) => getAgent(...a),
     getAgentRuns: (...a: unknown[]) => getAgentRuns(...a),
     getStrategy: (...a: unknown[]) => getStrategy(...a),
+    getConversationDeployments: (...a: unknown[]) =>
+      getConversationDeployments(...a),
     getSessionJournal: () => Promise.resolve({ content: "" }),
     getSessionActions: () => Promise.resolve({ actions: [] }),
     getSessionReport: () => Promise.resolve({ report: null }),
@@ -117,6 +120,20 @@ const RUN = {
   started_at: 200,
   ended_at: 0,
   agent_id: "a1",
+} as unknown as AgentRunRow;
+
+const CHAT = {
+  id: "7f3a",
+  run_id: "c:7f3a",
+  kind: "conversation",
+  number: 0,
+  strategy_slug: "",
+  strategy_name: "",
+  title: "Deploy a PMM on SOL",
+  status: "done",
+  started_at: 100,
+  ended_at: 150,
+  tick_count: 0,
 } as unknown as AgentRunRow;
 
 let container: HTMLDivElement;
@@ -199,6 +216,9 @@ beforeEach(() => {
   getStrategy
     .mockReset()
     .mockResolvedValue({ slug: "brl_mm", instances: [], config: {} } as unknown as StrategyDetail);
+  getConversationDeployments
+    .mockReset()
+    .mockResolvedValue({ deployments: [], predates_ledger: false });
 });
 
 afterEach(() => {
@@ -286,6 +306,50 @@ describe("the tick", () => {
     );
     expect(bodies()).toEqual(["answers", "money"]);
     expect(search()).toBe("open=money");
+  });
+});
+
+describe("a conversation in the Runs disclosure", () => {
+  it("says what that conversation deployed, not just where to read it", async () => {
+    // The gap FEAT-118 opened: the row said "read it in the chat" and stopped,
+    // which left the one question this page exists for unanswered for a quarter
+    // of an agent's runs (FEAT-110, FEAT-111).
+    getAgentRuns.mockResolvedValue([RUN, CHAT]);
+    getConversationDeployments.mockResolvedValue({
+      deployments: [
+        {
+          kind: "controller",
+          label: "pmm_1",
+          detail: "binance·SOL-USDC",
+          created_tick: null,
+          started_at: 120,
+          ended_at: null,
+          live: true,
+          pnl: 12,
+          volume: 400,
+          scope: "ctrl:pmm_1",
+        },
+      ],
+      predates_ledger: false,
+    });
+
+    await render("/?open=runs&run=c:7f3a");
+    expect(getConversationDeployments).toHaveBeenCalledWith("7f3a");
+    expect(container.textContent).toContain("Deploy a PMM on SOL");
+    expect(container.textContent).toContain("pmm_1");
+  });
+
+  it("tells `deployed nothing` apart from `ran before we recorded it`", async () => {
+    getAgentRuns.mockResolvedValue([RUN, CHAT]);
+    getConversationDeployments.mockResolvedValue({
+      deployments: [],
+      predates_ledger: true,
+    });
+
+    await render("/?open=runs&run=c:7f3a");
+    expect(container.textContent).toContain("before Condor recorded");
+    // Not the ledger's own empty case, which would say it deployed nothing.
+    expect(container.querySelector("table")).toBeNull();
   });
 });
 
