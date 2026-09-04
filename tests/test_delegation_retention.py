@@ -14,6 +14,7 @@ anything still running, and anything past the cap that is not terminal.
 """
 
 import asyncio
+import re
 
 import pytest
 
@@ -231,6 +232,26 @@ def test_the_event_stream_of_one_delegation_is_bounded(tmp_path, monkeypatch):
     wire = events_for_wire(dt.events)
     assert wire[0]["type"] == "text"
     assert str(marker["count"]) in wire[0]["text"]
+
+
+def test_the_cut_marker_states_the_count_without_naming_a_ticket():
+    """Both projections of the marker are read by a user, so neither leaks an id.
+
+    ``events_for_wire`` renders it into the delegation sheet and
+    ``_render_session`` into the transcript on disk. The count is the whole
+    point of the line and has to survive; the backlog id that used to ride
+    along with it (READ-335) means nothing to a reader of either surface.
+    """
+    events = [{"type": delegate_module.DROPPED_EVENT_TYPE, "count": 51}]
+
+    wire_text = events_for_wire(events)[0]["text"]
+    markdown = delegate_module._render_session(events)
+
+    for rendered in (wire_text, markdown):
+        assert "51" in rendered
+        assert "CORR-143" not in rendered
+        # Not just this one id: no ticket-shaped token at all.
+        assert not re.search(r"\b[A-Z]{3,5}-\d+\b", rendered)
 
 
 def test_a_huge_tool_output_is_clipped_in_memory_not_only_on_the_wire(

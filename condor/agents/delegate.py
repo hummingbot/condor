@@ -660,7 +660,7 @@ def _bound_events(events: list[dict]) -> None:
     The head is what gets dropped: a reader of a runaway session cares about how
     it ended, and the tail is also what the completion notice is drawn from. The
     count of dropped events is folded into a leading marker so the cut is
-    visible in the transcript rather than silent.
+    visible in the transcript rather than silent (CORR-143).
     """
     if len(events) <= MAX_EVENTS_PER_DELEGATION:
         return
@@ -673,7 +673,16 @@ def _bound_events(events: list[dict]) -> None:
 
 
 def _dropped_note(count: int) -> str:
-    return f"_… {count} earlier event(s) dropped to bound memory (CORR-143)_"
+    """Render the cut :func:`_bound_events` recorded, for a human to read.
+
+    Not a comment: :func:`events_for_wire` projects this as a plain ``text``
+    event and :func:`_render_session` writes it into the persisted markdown, so
+    it lands mid-narration in the sheet a user reads. It therefore names no
+    ticket -- an internal backlog id means nothing outside this repo, and the
+    bound is already explained as CORR-143 where the explanations belong
+    (:data:`MAX_TOOL_OUTPUT`'s comment and :func:`_bound_events`).
+    """
+    return f"_… {count} earlier event(s) dropped to keep this transcript bounded_"
 
 
 def retire_delegation(dt: "DelegateTask") -> int:
