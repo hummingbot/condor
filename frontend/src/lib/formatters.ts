@@ -61,6 +61,20 @@ export function formatToolName(title?: unknown): string {
 }
 
 /**
+ * Whether a title off the wire actually names a tool, or is the absence of one.
+ *
+ * The same question `formatToolName` already answers, asked before the answer is
+ * rendered: anything it would degrade to the generic fallback names nothing.
+ * Keeping it here rather than at the caller is the point — the vocabulary of
+ * "says nothing" (blank, a stringified `undefined`, a non-string) belongs to one
+ * place, so a caller deciding whether a *late* name is worth keeping cannot grow
+ * a second opinion that drifts from the one the renderer holds.
+ */
+export function namesATool(title?: unknown): boolean {
+  return formatToolName(title) !== UNNAMED_TOOL;
+}
+
+/**
  * A call that never ran because something said no.
  *
  * The permission gate emits `blocked` and then `continue`s — no further update

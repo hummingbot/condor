@@ -10,6 +10,7 @@ import {
   formatRuntimeHours,
   formatTime,
   formatToolName,
+  namesATool,
   roundToPricePrecision,
   shortBotName,
   toolCallState,
@@ -516,5 +517,27 @@ describe("toolCallState", () => {
     ]) {
       expect(toolCallState(refused)).toBe("error");
     }
+  });
+});
+
+// CORR-327: a tool's name can arrive on its update rather than its announcement,
+// so the live handler has to decide whether a late title is worth keeping. It
+// asks this rather than restating the rule, so "says nothing" means the same
+// thing to the handler that patches the name and to the renderer that draws it.
+describe("namesATool", () => {
+  it("is true exactly when the name would render as itself", () => {
+    expect(namesATool("mcp__condor__run_code")).toBe(true);
+    expect(namesATool("ToolSearch")).toBe(true);
+  });
+
+  it("is false for every spelling of an absent name", () => {
+    expect(namesATool(undefined)).toBe(false);
+    expect(namesATool(null)).toBe(false);
+    expect(namesATool("")).toBe(false);
+    expect(namesATool("   ")).toBe(false);
+    expect(namesATool("undefined")).toBe(false);
+    expect(namesATool('"undefined"')).toBe(false);
+    expect(namesATool(42)).toBe(false);
+    expect(namesATool({ name: "run_code" })).toBe(false);
   });
 });
