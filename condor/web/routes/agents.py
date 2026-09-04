@@ -894,13 +894,78 @@ def _strategy_server(strategy_dir: Path, default_config: dict | None) -> str:
         return ""
 
 
-async def _get_client_for_strategy(strategy_dir: Path, default_config: dict | None):
-    """Resolve a Hummingbot API client for a strategy, based on its config.yml."""
+def _strategy_principal(strategy, user: WebUser) -> int:
+    """Whose reach a strategy's stored server name is held to.
+
+    Normally the caller: agents and their strategies are a single global store,
+    not partitioned by owner the way conversations and delegations are, so the
+    only principal these routes resolve is the one holding the JWT.
+
+    The exception is an admin, for whom ``has_server_access`` answers True on
+    any name at all. Reading someone else's strategy is not an administrative
+    act on their behalf, so an admin is held to the *creator's* reach instead —
+    the same subject-not-caller rule ``conversations.py`` applies (SEC-333), and
+    the reason an admin stops seeing a fleet once the user who built the
+    strategy has been cut off from it. A strategy with no recorded creator
+    (``created_by == 0``: everything written before the field existed) has no
+    subject to stand in, so the caller remains the principal.
+    """
+    from config_manager import get_config_manager
+
+    creator = int(getattr(strategy, "created_by", 0) or 0)
+    if creator and get_config_manager().is_admin(user.id):
+        return creator
+    return user.id
+
+
+def _may_use_strategy_server(server_name: str, principal: int) -> bool:
+    """Whether ``principal`` may turn ``server_name`` into credentials.
+
+    Existence *and* reach, in that order of importance: a stored name is not a
+    capability. It was written by whoever created the strategy, it is read now
+    by somebody else, and a share can be withdrawn long after either happened
+    (SEC-334). The level is the TRADER floor ``check_server_access`` applies to
+    every server-scoped web call.
+
+    The existence check is not redundant with the access one:
+    ``has_server_access`` answers True for an admin on an arbitrary string, so
+    without it a name that resolves to nothing today would be honoured the
+    moment a server is created under it — the same reasoning spelled out for
+    SEC-164 in ``_start``.
+    """
+    from config_manager import ServerPermission, get_config_manager
+
+    if not server_name:
+        return False
+    cm = get_config_manager()
+    return bool(cm.get_server(server_name)) and cm.has_server_access(
+        principal, server_name, ServerPermission.TRADER
+    )
+
+
+async def _get_client_for_strategy(
+    strategy_dir: Path, default_config: dict | None, principal: int
+):
+    """Resolve a Hummingbot API client for a strategy, based on its config.yml.
+
+    The single choke point where a strategy's stored server name becomes an
+    authenticated client, and therefore where the name is checked against
+    ``principal`` (SEC-334). Refusal is the state this module already renders —
+    no client, no money — not an error: a strategy the caller cannot price is
+    listed exactly like one whose server is offline or was never configured.
+    """
     from config_manager import get_config_manager
 
     server_name = _strategy_server(strategy_dir, default_config)
     if not server_name:
         return None, ""
+    if not _may_use_strategy_server(server_name, principal):
+        log.warning(
+            "strategy: %s cannot reach server %s; serving it unpriced",
+            principal,
+            server_name,
+        )
+        return None, server_name
     cm = get_config_manager()
     try:
         client = await cm.get_client(server_name)
@@ -919,22 +984,34 @@ async def _get_client_for_strategy(strategy_dir: Path, default_config: dict | No
 
 
 async def _compute_strategy_performance(
-    run_key: str, strategy_dir: Path, default_config: dict | None
+    run_key: str, strategy_dir: Path, default_config: dict | None, principal: int
 ):
     """Return list of AgentPerformanceModel plus rolled-up totals.
 
     The assembled rollup is cached ~30s (``_PERF_CACHE``); underneath, closed
     sessions/experiments are served from ``_CLOSED_PERF_CACHE`` so only active
     ids hit the backend after the TTL expires.
+
+    The rollup cache is bucketed by whether ``principal`` may price this
+    strategy at all, because otherwise the guard in ``_get_client_for_strategy``
+    would hold for 30 seconds and then be handed the money anyway by whoever
+    rendered the page first (SEC-334). ``_CLOSED_PERF_CACHE`` needs no such
+    split: it is only ever read on the branch that already has a client.
     """
     from condor.agents.performance import fetch_agent_performance_batch
 
-    cached = _cache_get(f"perf:{run_key}")
+    priced = _may_use_strategy_server(
+        _strategy_server(strategy_dir, default_config), principal
+    )
+    cache_key = f"perf:{run_key}" if priced else f"perf:{run_key}:unpriced"
+    cached = _cache_get(cache_key)
     if cached is not None:
         return cached
 
     ids = enumerate_agent_ids(run_key, strategy_dir)
-    client, _server = await _get_client_for_strategy(strategy_dir, default_config)
+    client, _server = await _get_client_for_strategy(
+        strategy_dir, default_config, principal
+    )
 
     # An experiment's identity is on disk, not in the backend: a dry run
     # simulates and so books nothing, which is why it used to be dropped twice
@@ -1077,7 +1154,7 @@ async def _compute_strategy_performance(
     }
 
     result = (sessions, totals)
-    _cache_set(f"perf:{run_key}", result)
+    _cache_set(cache_key, result)
     return result
 
 
@@ -1120,14 +1197,22 @@ def _instance_from_engine(engine, perf_by_id: dict) -> RunningInstance:
     )
 
 
-async def _build_strategy_summary(strategy) -> StrategySummary:
-    """Roll up disk + engine + performance state for one strategy."""
+async def _build_strategy_summary(strategy, user: WebUser) -> StrategySummary:
+    """Roll up disk + engine + performance state for one strategy.
+
+    Takes the caller because the rollup is money: the figures come from the
+    strategy's stored server, which is only queried for a principal that can
+    still reach it (SEC-334).
+    """
     run_key = _runkey(strategy.agent_slug, strategy.slug)
     strategy_dir = strategy.home
 
     try:
         sessions_perf, totals = await _compute_strategy_performance(
-            run_key, strategy_dir, strategy.default_config
+            run_key,
+            strategy_dir,
+            strategy.default_config,
+            _strategy_principal(strategy, user),
         )
     except Exception as e:
         log.warning("compute_strategy_performance(%s) failed: %s", run_key, e)
@@ -1198,7 +1283,7 @@ async def list_agents(user: WebUser = Depends(get_current_user)):
     owners: list[str] = []
     for agent in agents:
         for strategy in store.list(agent.slug):
-            coros.append(_build_strategy_summary(strategy))
+            coros.append(_build_strategy_summary(strategy, user))
             owners.append(agent.slug)
 
     summaries = await asyncio.gather(*coros, return_exceptions=True)
@@ -1565,7 +1650,7 @@ async def get_agent(slug: str, user: WebUser = Depends(get_current_user)):
     agent = _get_agent(slug)
     strategies = _strategy_store().list(slug)
     summaries = await asyncio.gather(
-        *[_build_strategy_summary(s) for s in strategies],
+        *[_build_strategy_summary(s, user) for s in strategies],
         return_exceptions=True,
     )
     strat_summaries = [s for s in summaries if isinstance(s, StrategySummary)]
@@ -2379,7 +2464,7 @@ async def list_strategies(slug: str, user: WebUser = Depends(get_current_user)):
     _get_agent(slug)
     strategies = _strategy_store().list(slug)
     summaries = await asyncio.gather(
-        *[_build_strategy_summary(s) for s in strategies],
+        *[_build_strategy_summary(s, user) for s in strategies],
         return_exceptions=True,
     )
     return [s for s in summaries if isinstance(s, StrategySummary)]
@@ -2436,7 +2521,7 @@ async def create_default_strategy(slug: str, user: WebUser = Depends(get_current
         raise HTTPException(
             status_code=500, detail=f"Could not create a default loop for '{slug}'"
         )
-    return await _build_strategy_summary(strategy)
+    return await _build_strategy_summary(strategy, user)
 
 
 @router.get("/{slug}/strategies/{sslug}", response_model=StrategyDetail)
@@ -2460,7 +2545,10 @@ async def get_strategy(
 
     try:
         sessions_perf, _totals = await _compute_strategy_performance(
-            run_key, strategy_dir, strategy.default_config
+            run_key,
+            strategy_dir,
+            strategy.default_config,
+            _strategy_principal(strategy, user),
         )
     except Exception as e:
         log.warning("compute_strategy_performance(%s) failed: %s", run_key, e)
@@ -2563,7 +2651,10 @@ async def get_strategy_performance(
     strategy = _get_strategy(slug, sslug)
     run_key = _runkey(slug, sslug)
     sessions, totals = await _compute_strategy_performance(
-        run_key, strategy.home, strategy.default_config
+        run_key,
+        strategy.home,
+        strategy.default_config,
+        _strategy_principal(strategy, user),
     )
     running_ids = {e.agent_id for e in _get_engines_for(slug, sslug) if e.is_running}
     for s in sessions:
@@ -2720,7 +2811,7 @@ async def get_session_executors(
     strategy = _get_strategy(slug, sslug)
     agent_id = f"{_runkey(slug, sslug)}_{session_num}"
     client, _server = await _get_client_for_strategy(
-        strategy.home, strategy.default_config
+        strategy.home, strategy.default_config, _strategy_principal(strategy, user)
     )
     if client is None:
         return {
