@@ -358,3 +358,51 @@ export function nearestSeries(
   }
   return best;
 }
+
+/**
+ * The stem a set of sibling labels share, and what is left of each without it.
+ *
+ * Controllers in one bot are named by convention rather than by hand —
+ * `pmm_king_btc_brl`, `pmm_king_btc_brl_v1`, `pmm_king_btc_brl_b_v2` — so a
+ * legend that prints them in full spends most of its width printing the same
+ * sixteen characters six times over and wraps into rows the chart then loses.
+ * What tells the lines apart is the tail, so the legend prints the tail and
+ * says the stem once (FEAT-118 follow-up).
+ *
+ * Two rules keep it honest rather than merely short:
+ *
+ * - The cut is on **token boundaries** (`_`, `-`, `.`), never mid-word: half a
+ *   word is not a shorter name, it is a wrong one.
+ * - **No remainder is ever empty.** When the shortest label *is* the common
+ *   prefix — the case above, where `pmm_king_btc_brl` is both a controller and
+ *   the others' stem — the stem backs off a token so that one keeps a name.
+ *
+ * A set with nothing worth taking off gets `{ stem: "", short: labels }`, and
+ * every caller can render that without a special case.
+ */
+export function shortenLabels(labels: readonly string[]): {
+  stem: string;
+  short: string[];
+} {
+  const none = { stem: "", short: [...labels] };
+  if (labels.length < 2 || labels.some((label) => !label)) return none;
+
+  const tokens = labels.map((label) => label.split(/[_\-.]/));
+  let common = 0;
+  const shortest = Math.min(...tokens.map((t) => t.length));
+  while (common < shortest && tokens.every((t) => t[common] === tokens[0][common])) {
+    common += 1;
+  }
+  // Leave the shortest label at least one token of its own.
+  if (common >= shortest) common = shortest - 1;
+  if (common < 1) return none;
+
+  // The separators may differ between labels, so the stem is measured on the
+  // characters of the first one rather than rebuilt from the tokens.
+  const stemLength = tokens[0].slice(0, common).join("_").length;
+  if (stemLength < 4) return none;
+
+  const stem = labels[0].slice(0, stemLength);
+  // The character after the stem is the separator; it goes with the stem.
+  return { stem, short: labels.map((label) => label.slice(stemLength + 1)) };
+}

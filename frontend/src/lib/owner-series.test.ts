@@ -25,6 +25,7 @@ import {
   parseBaseline,
   parseBasis,
   rebaseRows,
+  shortenLabels,
 } from "@/lib/owner-series";
 
 function snap(
@@ -302,5 +303,43 @@ describe("nearestSeries", () => {
   it("states its radius, so the tooltip and the plot agree on 'on a line'", () => {
     expect(nearestSeries(values, 440 + FOCUS_RADIUS_PX - 1, scale)).toBe("alpha");
     expect(nearestSeries(values, 440 + FOCUS_RADIUS_PX, scale)).toBeNull();
+  });
+});
+
+describe("shortenLabels", () => {
+  it("prints only what differs between siblings named by convention", () => {
+    const { stem, short } = shortenLabels([
+      "pmm_king_btc_brl",
+      "pmm_king_btc_brl_v1",
+      "pmm_king_btc_brl_b_v2",
+    ]);
+    expect(stem).toBe("pmm_king_btc");
+    expect(short).toEqual(["brl", "brl_v1", "brl_b_v2"]);
+  });
+
+  it("never leaves the shortest sibling without a name of its own", () => {
+    const { short } = shortenLabels(["alpha_beta", "alpha_beta_v1"]);
+    expect(short).toEqual(["beta", "beta_v1"]);
+  });
+
+  it("cuts on token boundaries, never mid-word", () => {
+    // The two share the characters `market_mak`; only `market` is a token.
+    const { stem, short } = shortenLabels(["market_making_sol", "market_makers_sol"]);
+    expect(stem).toBe("market");
+    expect(short).toEqual(["making_sol", "makers_sol"]);
+  });
+
+  it("leaves labels alone when there is nothing worth taking off", () => {
+    expect(shortenLabels(["sol_usdc", "btc_usdt"])).toEqual({
+      stem: "",
+      short: ["sol_usdc", "btc_usdt"],
+    });
+    expect(shortenLabels(["only_one"])).toEqual({ stem: "", short: ["only_one"] });
+  });
+
+  it("reads a dash-separated set the same way", () => {
+    const { stem, short } = shortenLabels(["hedge-bot-a", "hedge-bot-b"]);
+    expect(stem).toBe("hedge-bot");
+    expect(short).toEqual(["a", "b"]);
   });
 });

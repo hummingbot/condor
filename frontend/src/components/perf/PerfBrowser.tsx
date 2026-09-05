@@ -3043,7 +3043,15 @@ export function PerfBrowser({
                     symbol={currencySymbol}
                     net={totals.net}
                     capital={totals.capital}
-                    title={`${chartTitle} by ${ownerNoun(scope.children[0].kind)}`}
+                    // The header two lines up already names the scope, so
+                    // repeating a 40-character bot name here only crowded the
+                    // legend out of its row: this title says what the *split*
+                    // is. The fleet has no such header, so it keeps its name.
+                    title={
+                      scope.kind === "fleet"
+                        ? `${chartTitle} by ${ownerNoun(scope.children[0].kind)}`
+                        : `PnL by ${ownerNoun(scope.children[0].kind)}`
+                    }
                     height={chartHeight}
                     params={searchParams}
                     setParams={setSearchParams}

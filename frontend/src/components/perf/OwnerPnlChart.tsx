@@ -32,6 +32,7 @@ import {
   parseBasis,
   rebaseRows,
   seriesColor,
+  shortenLabels,
   type FloorChartRow,
 } from "@/lib/owner-series";
 import {
@@ -174,10 +175,24 @@ export function OwnerPnlChart({
   );
   const muted = useMemo(() => new Set(unplottable.map((u) => u.key)), [unplottable]);
 
-  const labels = useMemo(
-    () => new Map(owners.map((owner) => [owner.key, owner.label])),
-    [owners],
-  );
+  /**
+   * What the legend and the tooltip call each line — the part of the name that
+   * is this line's own — and the stem they all share, printed once by the title.
+   *
+   * Six controllers of one bot are six variations on one name, and a legend
+   * that prints all sixteen shared characters six times wraps into rows the
+   * pane below it then loses. `shortenLabels` takes off only what every sibling
+   * has in common and never leaves a line nameless; the full name stays on the
+   * chip's own tooltip, so nothing is hidden, only said once.
+   */
+  const { stem, labels, fullLabels } = useMemo(() => {
+    const { stem, short } = shortenLabels(owners.map((owner) => owner.label));
+    return {
+      stem,
+      labels: new Map(owners.map((owner, index) => [owner.key, short[index]])),
+      fullLabels: new Map(owners.map((owner) => [owner.key, owner.label])),
+    };
+  }, [owners]);
 
   const latest = drawnRows.length > 0 ? drawnRows[drawnRows.length - 1] : null;
   const tc = getThemeColors();
@@ -289,11 +304,54 @@ export function OwnerPnlChart({
       data-owner-chart
       className="h-full overflow-hidden rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]"
     >
-      <div className="flex flex-wrap items-start justify-between gap-2 border-b border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5">
-        <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
-          <p className="text-[10px] font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
+      <div className="border-b border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5">
+        {/* Two rows, and always two: the title and the controls sit on their own
+            line so the legend has the full width of the card to lay N series
+            out in, instead of pushing the controls down every time a name is
+            long. */}
+        <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+          <p className="min-w-0 truncate text-[10px] font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
             {title}
+            {stem && (
+              <span
+                className="ml-2 font-mono text-[10px] normal-case tracking-normal opacity-70"
+                data-owner-stem
+                title="Every line's name starts with this; the legend prints what differs."
+              >
+                {stem}…
+              </span>
+            )}
           </p>
+
+          <div className="flex shrink-0 flex-wrap items-center gap-2">
+            <Toggle
+              options={[
+                { value: "abs", label: "Absolute" },
+                { value: "rel", label: "Relative" },
+              ]}
+              active={basis}
+              onPick={(value) => set("basis", value, "abs")}
+            />
+            <Toggle
+              options={[
+                { value: "inception", label: "Inception" },
+                { value: "window", label: "Window" },
+              ]}
+              active={from}
+              onPick={(value) => set("from", value, "inception")}
+            />
+            <Toggle
+              options={WINDOWS.map((w) => ({ value: w.value, label: w.label }))}
+              active={window.value}
+              onPick={(value) => {
+                setDrag(null);
+                set("range", value, "all");
+              }}
+            />
+          </div>
+        </div>
+
+        <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
           <LegendChip
             label="Total"
             color={tc.up}
@@ -315,6 +373,7 @@ export function OwnerPnlChart({
               key={key}
               test={key}
               label={labels.get(key) ?? key}
+              full={fullLabels.get(key) ?? key}
               color={seriesColor(index)}
               value={
                 latest && typeof latest[ownerDataKey(key)] === "number"
@@ -332,33 +391,6 @@ export function OwnerPnlChart({
             />
           ))}
         </div>
-
-        <div className="flex shrink-0 flex-wrap items-center gap-2">
-          <Toggle
-            options={[
-              { value: "abs", label: "Absolute" },
-              { value: "rel", label: "Relative" },
-            ]}
-            active={basis}
-            onPick={(value) => set("basis", value, "abs")}
-          />
-          <Toggle
-            options={[
-              { value: "inception", label: "Inception" },
-              { value: "window", label: "Window" },
-            ]}
-            active={from}
-            onPick={(value) => set("from", value, "inception")}
-          />
-          <Toggle
-            options={WINDOWS.map((w) => ({ value: w.value, label: w.label }))}
-            active={window.value}
-            onPick={(value) => {
-              setDrag(null);
-              set("range", value, "all");
-            }}
-          />
-        </div>
       </div>
 
       {/* An owner with no declared capital is listed and not drawn. Dividing by
@@ -371,7 +403,7 @@ export function OwnerPnlChart({
         >
           Not plotted in Relative — no declared capital to measure against:{" "}
           {unplottable
-            .map((u) => (u.key === "total" ? "Total" : (labels.get(u.key) ?? u.key)))
+            .map((u) => (u.key === "total" ? "Total" : (fullLabels.get(u.key) ?? u.key)))
             .join(", ")}
           .
         </p>
@@ -630,6 +662,7 @@ export function OwnerPnlChart({
 function LegendChip({
   test,
   label,
+  full,
   color,
   value,
   drawn,
@@ -641,6 +674,8 @@ function LegendChip({
 }: {
   test?: string;
   label: string;
+  /** The name in full — the chip prints only what is its own (see `shortenLabels`). */
+  full?: string;
   color: string;
   value: string;
   drawn: boolean;
@@ -660,7 +695,7 @@ function LegendChip({
       onClick={onToggle}
       onMouseEnter={onFocus}
       onMouseLeave={onBlur}
-      title={drawn ? `Hide ${label}` : `Show ${label}`}
+      title={drawn ? `Hide ${full ?? label}` : `Show ${full ?? label}`}
       className={`flex items-center gap-1.5 rounded px-1 py-0.5 text-[11px] tabular-nums transition-opacity hover:bg-[var(--color-surface-hover)] ${
         drawn ? "" : "opacity-40"
       } ${focused ? "bg-[var(--color-surface-hover)]" : ""}`}
@@ -670,7 +705,7 @@ function LegendChip({
         className="h-0.5 w-3.5 shrink-0 rounded-full"
         style={{ background: color }}
       />
-      <span className={`max-w-[10rem] truncate ${strong ? "font-semibold" : ""}`}>
+      <span className={`max-w-[9rem] truncate ${strong ? "font-semibold" : ""}`}>
         {label}
       </span>
       <span className="font-mono text-[var(--color-text-muted)]">{value}</span>
