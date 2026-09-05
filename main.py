@@ -1097,21 +1097,63 @@ async def _run_dual(application: Application) -> None:
         await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
         await application.start()
 
-    # Create and start the web server. WEB_HOST (utils.config.resolve_web_host)
-    # already resolves to loopback for Tailscale same as it does for local mode
-    # -- here we only have to make sure `tailscale serve` is actually proxying
-    # the tailnet to that loopback bind, or it would be reachable nowhere at
-    # all.
+    # Create and start the web server. With Tailscale on, WEB_HOST
+    # (utils.config.resolve_web_host) is normally this node's own tailnet
+    # address, which needs no proxy: the port is on the tailnet and on no
+    # public interface, full stop.
+    #
+    # `tailscale serve` is only the fallback for when that address could not be
+    # resolved -- daemon not up yet, node not registered -- in which case the
+    # bind failed closed to loopback and a proxy is the only way anything
+    # reaches it. Serve needs the daemon socket, which refuses unprivileged
+    # callers, so this often cannot succeed either; say so plainly rather than
+    # leaving the dashboard silently unreachable.
     web_app = create_app()
-    if USE_TAILSCALE:
-        from utils.tailscale import ensure_serve
+    if USE_TAILSCALE and LOCAL_MODE:
+        # Local mode keeps loopback even with Tailscale on: the dashboard has
+        # no login, and a tailnet is a smaller audience than the internet, not
+        # an authenticated one. Intended, so no proxy and no warning.
+        logger.info(
+            "Dashboard on http://%s:%s — local mode stays on loopback even "
+            "with Tailscale enabled (no login on this dashboard).",
+            WEB_HOST,
+            WEB_PORT,
+        )
+    elif USE_TAILSCALE:
+        from utils.tailscale import is_tailnet_ip
 
-        if not await ensure_serve(WEB_PORT):
-            logger.error(
-                "Dashboard bound to 127.0.0.1 only; tailnet forwarding could "
-                "not be confirmed, so it will NOT be reachable remotely "
-                "until `tailscale serve` is fixed (see error above)."
+        if is_tailnet_ip(WEB_HOST):
+            logger.info(
+                "Dashboard on http://%s:%s — reachable on the tailnet only.",
+                WEB_HOST,
+                WEB_PORT,
             )
+        elif os.environ.get("WEB_HOST", "").strip():
+            # An explicit WEB_HOST is a deliberate opt-out, not a failed
+            # lookup. Warning about a tailnet address we were never asked to
+            # find would report someone's own choice as a fault.
+            logger.info(
+                "Dashboard on http://%s:%s — WEB_HOST was set explicitly.",
+                WEB_HOST,
+                WEB_PORT,
+            )
+        else:
+            from utils.tailscale import ensure_serve
+
+            logger.warning(
+                "USE_TAILSCALE is set but this node's tailnet address could "
+                "not be determined, so the dashboard bound to %s. Falling "
+                "back to `tailscale serve`.",
+                WEB_HOST,
+            )
+            if not await ensure_serve(WEB_PORT):
+                logger.error(
+                    "Dashboard bound to %s; tailnet forwarding could not be "
+                    "confirmed, so it will NOT be reachable remotely. Check "
+                    "`tailscale status`, then restart Condor to pick up the "
+                    "tailnet address.",
+                    WEB_HOST,
+                )
     server = uvicorn.Server(_web_server_config(web_app))
 
     # Start WebSocket manager

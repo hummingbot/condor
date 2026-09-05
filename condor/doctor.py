@@ -351,8 +351,13 @@ def _listening_process(port: int) -> str:
     return ""
 
 
+def _bind_host(addr: str) -> str:
+    """The host half of a ``host:port`` bind, with IPv6 brackets left intact."""
+    return addr.rsplit(":", 1)[0] if re.search(r":\d+$", addr) else addr
+
+
 def _is_public_bind(addr: str) -> bool:
-    host = addr.rsplit(":", 1)[0] if re.search(r":\d+$", addr) else addr
+    host = _bind_host(addr)
     return host in ("0.0.0.0", "*", "::", "[::]", "")
 
 
@@ -377,31 +382,80 @@ def check_dashboard_port() -> list[Check]:
     held_by = f" (held by {owner})" if owner else ""
 
     public = [b for b in binds if _is_public_bind(b)]
-    if USE_TAILSCALE:
+
+    # Local mode stays on loopback whether or not Tailscale is on: the
+    # dashboard has no login, and a tailnet is a smaller audience than the
+    # internet, not an authenticated one. So the Tailscale expectations below
+    # do not apply here -- a loopback bind is the correct end state, not a
+    # fallback that failed.
+    from utils.config import LOCAL_MODE
+
+    if USE_TAILSCALE and not LOCAL_MODE:
         if public:
             return [
                 Check(
                     "Dashboard port",
                     FAIL,
                     f"USE_TAILSCALE=true but {WEB_PORT} is bound to "
-                    f"{public[0]} (all interfaces){held_by} — should be "
-                    "127.0.0.1-only",
+                    f"{public[0]} (all interfaces){held_by} — should be this "
+                    "node's tailnet address only",
+                )
+            ]
+
+        # A tailnet bind is the goal: the port is on the tailnet and on no
+        # public interface. A loopback bind is NOT the same thing and must not
+        # report OK -- that is the fail-closed fallback, and it means the
+        # dashboard is reachable from this machine and nowhere else. Treating
+        # it as success is exactly what hid a dashboard that was reachable
+        # from nowhere for the whole time `tailscale serve` was broken.
+        from utils.tailscale import is_tailnet_ip
+
+        hosts = [_bind_host(b) for b in binds]
+        if any(is_tailnet_ip(h) for h in hosts):
+            tailnet = next(h for h in hosts if is_tailnet_ip(h))
+            return [
+                Check(
+                    "Dashboard port",
+                    OK,
+                    f"{tailnet}:{WEB_PORT} — tailnet only{held_by}",
                 )
             ]
         return [
             Check(
-                "Dashboard port", OK, f"127.0.0.1:{WEB_PORT} only (Tailscale){held_by}"
+                "Dashboard port",
+                WARN,
+                f"USE_TAILSCALE=true but {WEB_PORT} is bound to "
+                f"{hosts[0]}{held_by}, not a tailnet address — reachable from "
+                "this machine only. Condor falls back to loopback when it "
+                "cannot read the tailnet IP: check `tailscale status`, then "
+                "restart Condor.",
             )
         ]
 
     if public:
+        # Local mode has no login, so a public bind there is a different order
+        # of problem -- and it can only happen by setting WEB_HOST explicitly.
+        # "Enable Tailscale" is also the wrong hint when it is already on.
+        remedy = (
+            "unset WEB_HOST to go back to loopback"
+            if LOCAL_MODE
+            else (
+                "firewall it"
+                if USE_TAILSCALE
+                else "Enable Tailscale (`make setup`) or firewall it"
+            )
+        )
         return [
             Check(
                 "Dashboard port",
-                WARN,
-                f"{WEB_PORT} is reachable on all interfaces{held_by} — fine on a "
-                "trusted LAN, risky on a public VPS. Enable Tailscale "
-                "(`make setup`) or firewall it.",
+                FAIL if LOCAL_MODE else WARN,
+                f"{WEB_PORT} is reachable on all interfaces{held_by} — "
+                + (
+                    "local mode has no login at all, so this is open to "
+                    f"anyone who can route to it. {remedy}."
+                    if LOCAL_MODE
+                    else f"fine on a trusted LAN, risky on a public VPS. {remedy}."
+                ),
             )
         ]
     return [Check("Dashboard port", OK, f"127.0.0.1:{WEB_PORT} only{held_by}")]
@@ -478,9 +532,31 @@ async def _probe_and_close(cm, name: str) -> None:
     await client.close()
 
 
-_LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1", "0.0.0.0")
-
 _HB_CONTAINER = "hummingbot-api"
+
+# "hummingbot-api" is the MagicDNS name a co-located API answers to when it has
+# its own tailnet node, so a failure there is very often a local stack problem,
+# not an unreachable remote host. Without it, a co-located API that was down
+# reported "check the host is reachable — firewall, Tailscale status, or the
+# server is down" and never ran _local_stack_diagnosis(), which would have said
+# `docker compose ps` in one line.
+_LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1", "0.0.0.0", _HB_CONTAINER)
+
+
+def _is_local_host(host: str) -> bool:
+    """Whether ``host`` names a service on this machine.
+
+    A tailnet address counts when it is *this node's own* -- reaching the API
+    at the tailnet IP of the box you are standing on is still a local stack.
+    """
+    if host in _LOCAL_HOSTS:
+        return True
+    try:
+        from utils.tailscale import is_tailnet_ip, tailnet_ip
+
+        return is_tailnet_ip(host) and host == tailnet_ip()
+    except Exception:
+        return False
 
 
 def _local_stack_diagnosis() -> list[Check]:
@@ -583,7 +659,7 @@ def check_hummingbot_api() -> list[Check]:
             checks.append(Check(label, OK, "reachable, authenticated"))
         except Exception as e:
             checks.append(Check(label, FAIL, f"{e} — {_connection_hint(host, e)}"))
-            local_failure = local_failure or host in _LOCAL_HOSTS
+            local_failure = local_failure or _is_local_host(host)
 
     if local_failure:
         checks.extend(_local_stack_diagnosis())

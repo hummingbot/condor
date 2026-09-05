@@ -105,21 +105,45 @@ def resolve_use_tailscale(env=None) -> bool:
 def resolve_web_host(env=None) -> str:
     """The address the dashboard binds to.
 
-    Local mode has no login, so it binds loopback only: an unauthenticated
-    dashboard with full trading control must not be one firewall rule away from
-    the internet. Tailscale binds loopback for a related but different reason:
-    ``tailscale serve`` is what actually exposes it, only on the tailnet —
-    binding ``0.0.0.0`` at the same time would put it back on every public
-    interface too. ``WEB_HOST`` is the explicit, documented opt-out (set it to
-    ``0.0.0.0`` and you have chosen to expose it). Otherwise (Telegram mode,
-    Tailscale off), which does authenticate, keeps binding all interfaces.
+    Three deployments, three answers:
+
+    * **Local mode** — ``127.0.0.1``, always, Tailscale or not. This dashboard
+      has no login at all, so it stays on the loopback interface and you browse
+      it at ``localhost:8088``. Tailscale does not change that: a tailnet is a
+      smaller audience than the internet, not an authenticated one, and
+      "everyone on the tailnet" is still more than "nobody".
+    * **Telegram mode, no Tailscale** — ``0.0.0.0``, so ``VPS_IP:8088`` works.
+      This mode authenticates, which is what makes a public bind defensible.
+    * **Telegram mode, Tailscale on** — this node's own tailnet address. The
+      dashboard is reachable at ``<tailnet-ip>:8088`` from anywhere on the
+      tailnet and nowhere else, because a public interface is never bound.
+
+    Binding the tailnet address directly replaced a ``127.0.0.1`` bind plus
+    ``tailscale serve``. Serve needs the daemon socket, which refuses
+    unprivileged callers, so the proxy silently never came up and the
+    dashboard was reachable from nowhere. A bind needs no privilege and no
+    daemon round-trip.
+
+    Fails **closed**: if the tailnet address cannot be determined (daemon not
+    up yet, node not registered) this returns loopback, never ``0.0.0.0``.
+    Falling back to a public bind would invert the guarantee the setting
+    exists to provide.
+
+    ``WEB_HOST`` remains the explicit, documented opt-out and wins over all of
+    it -- set it to ``0.0.0.0`` and you have chosen to expose the dashboard.
     """
     env = os.environ if env is None else env
     explicit = (env.get("WEB_HOST") or "").strip()
     if explicit:
         return explicit
-    if resolve_mode(env) == MODE_LOCAL or resolve_use_tailscale(env):
+    # Local mode is checked BEFORE Tailscale, deliberately: an unauthenticated
+    # dashboard does not go on the tailnet just because a tailnet exists.
+    if resolve_mode(env) == MODE_LOCAL:
         return "127.0.0.1"
+    if resolve_use_tailscale(env):
+        from utils.tailscale import tailnet_ip
+
+        return tailnet_ip() or "127.0.0.1"
     return "0.0.0.0"
 
 
