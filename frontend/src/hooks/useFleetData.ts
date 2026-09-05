@@ -1,0 +1,390 @@
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import { useCallback, useEffect, useMemo, useState } from "react";
+
+import { useRates } from "@/hooks/useRates";
+import { useCondorWebSocket } from "@/hooks/useWebSocket";
+import {
+  api,
+  type BotSummary,
+  type ControllerInfo,
+  type ControllerPerformanceHistoryAllResponse,
+  type ControllerPerformanceSnapshot,
+  type BotRunInfo,
+  type ExecutorInfo,
+} from "@/lib/api";
+import type { DeedIndex, FleetOwner } from "@/lib/agent-attribution";
+import type { ExecutorPaging } from "@/components/perf/PerfBrowser";
+import type { Population } from "@/lib/perf-tree";
+import { controllerKey } from "@/lib/controller-identity";
+import { historyRowBudget } from "@/lib/history-pagination";
+import {
+  HISTORY_REFETCH_MS,
+  TAIL_MAX_PAGES,
+  refreshControllerHistory,
+} from "@/lib/history-refresh";
+import { samplingIntervalSince } from "@/lib/pnl-chart";
+import { controllerPerfHistoryAllQuery } from "@/lib/queryClient";
+import type { ConvertFn } from "@/lib/rates";
+
+const BOTS_WS_CHANNELS = ["bots", "controller_perf"];
+
+/**
+ * The executor walk: 500 a page, four pages by default.
+ *
+ * The same bounded walk `/executors` made, under the same query key, so the
+ * shared socket's live merge and the chat's route facts both still find it
+ * (PERF/FEAT-072). The cap now bounds the *sidebar tree* as well as a table, so
+ * the browser is told where the walk stopped and says so.
+ */
+const EXECUTOR_PAGE_SIZE = 500;
+const EXECUTOR_PAGES = 4;
+
+/** Held still, so a failed or pending fleet map is not a new prop every render. */
+const EMPTY_OWNERS: FleetOwner[] = [];
+
+/** Everything `PerfBrowser` reports on, and the state of fetching it. */
+export interface FleetData {
+  controllers: ControllerInfo[];
+  bots: BotSummary[];
+  executors: ExecutorInfo[];
+  paging: ExecutorPaging;
+  snapshots: ControllerPerformanceSnapshot[];
+  truncated: boolean;
+  runs: BotRunInfo[];
+  terminatedControllers: ControllerInfo[];
+  owners: FleetOwner[];
+  deeds: DeedIndex | null;
+  /** Display-currency conversion over every quote on screen. */
+  convert: ConvertFn;
+  currencySymbol: string;
+  rateFormatPnl: (val: number, quote: string) => string;
+  rateFormatValue: (val: number, quote: string) => string;
+  rateFormatDetailed: (val: number, quote: string) => string;
+  isLoading: boolean;
+  error: unknown;
+  /** `false` only when the server answered and said it could not be reached. */
+  serverOnline: boolean;
+  errorHint?: string;
+}
+
+/**
+ * Everything the fleet browser reports on, fetched once (FEAT-108).
+ *
+ * This was `/bots`'s body: six queries, a paginated executor walk, a sampled
+ * performance-history walk and the WebSocket channels behind them — about 250
+ * lines that have nothing to do with being a page. `PerfBrowser` was already
+ * host-agnostic (every record arrives as a prop); the fetching was not, so a
+ * second host — the agent workspace's Fleet view — could not exist without
+ * copying it.
+ *
+ * The query keys are deliberately unchanged. The shared socket's prefix-matched
+ * live merge finds its caches by key, the chat's route facts read the same
+ * entries, and two hosts mounted over one server share one set of queries
+ * through react-query rather than doubling them.
+ *
+ * `population` is passed in rather than read from the URL: two hosts spell
+ * their parameters differently, and nothing here should know what a URL is.
+ */
+export function useFleetData(
+  server: string | null,
+  {
+    population,
+    enabled = true,
+    history = true,
+  }: {
+    population: Population;
+    enabled?: boolean;
+    /**
+     * Whether to walk the fleet's performance history (ARCH-324).
+     *
+     * On by default, because both pages that fold a whole fleet also chart it.
+     * A host that only wants the *fold* — the home overview's money column,
+     * which folds one population per server and draws nothing — would
+     * otherwise pay a paged request per controller per server for a series it
+     * never reads. Every other query is left exactly as it was, under the same
+     * keys, so a host that turns the walk off still shares its fleet with the
+     * pages that do chart it.
+     */
+    history?: boolean;
+  },
+): FleetData {
+  const on = enabled && !!server;
+
+  // Real-time updates for everything the browser folds: the fleet, its
+  // performance snapshots, and the executors underneath it — the last of which
+  // came with the executors page and has to come with it (FEAT-086).
+  const wsChannels = useMemo(
+    () => (server ? [...BOTS_WS_CHANNELS, `executors:${server}`] : BOTS_WS_CHANNELS),
+    [server],
+  );
+  useCondorWebSocket(wsChannels, server);
+
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["bots", server],
+    queryFn: () => api.getBots(server!),
+    enabled: on,
+    refetchInterval: 30000, // Slower polling since WS handles real-time updates
+  });
+
+  /**
+   * Who owns which of this trading (FEAT-096).
+   *
+   * Its own query rather than a slice of `getAgents`, which fans out a
+   * performance fetch per session of every strategy — this one makes no
+   * Hummingbot call at all, which is what makes a five-second poll sane. Polled
+   * rather than socket-driven because half of what it carries is a *countdown*
+   * (time to the loop's next tick), which no event announces.
+   *
+   * Not server-scoped: an agent owns its namespace wherever its bots run, and
+   * the map is what proves ownership rather than what reports trading.
+   *
+   * On failure the page simply has no agents in it — `owners` is `[]` and the
+   * deed index is empty, every leaf is unattributed, the level collapses, and
+   * `/bots` is byte-identical to what it was before this feature.
+   */
+  const { data: fleet } = useQuery({
+    queryKey: ["fleet-map"],
+    queryFn: () => api.getFleetMap(),
+    refetchInterval: 5000,
+    enabled,
+  });
+
+  // Compute earliest deploy time from active bots for filtering perf history
+  const botList = data?.bots;
+  const earliestDeploy = useMemo(() => {
+    if (!botList?.length) return undefined;
+    let earliest: number | undefined;
+    for (const bot of botList) {
+      if (bot.deployed_at) {
+        const ms = Date.parse(bot.deployed_at);
+        if (!isNaN(ms) && (earliest === undefined || ms < earliest)) earliest = ms;
+      }
+    }
+    return earliest ? new Date(earliest).toISOString() : undefined;
+  }, [botList]);
+
+  // How finely to sample the fleet's history depends on how long the fleet has
+  // actually been running: pinned at 5m, a month-old fleet asked for 8,640
+  // points per controller to draw what 720 hourly ones draw identically — and
+  // since the route caps a page at 1000 rows it got the first 1000 and drew a
+  // truncated history (PERF-238). Derived from the same `earliestDeploy` the
+  // request sends as `start_time`, so the interval always describes the window
+  // actually asked for.
+  const perfInterval = useMemo(() => samplingIntervalSince(earliestDeploy), [earliestDeploy]);
+
+  // Deduplicate controllers by bot_name + controller_id (WS updates can cause duplicates)
+  const controllers = useMemo(() => {
+    const raw = data?.controllers ?? [];
+    const seen = new Map<string, ControllerInfo>();
+    for (const ctrl of raw) {
+      seen.set(controllerKey(ctrl), ctrl); // last wins (most recent data)
+    }
+    return Array.from(seen.values());
+  }, [data?.controllers]);
+
+  // Fetch the fleet's performance history — one controller at a time.
+  //
+  // Not "all controllers at once", which is what this used to do and what the
+  // route appears to offer. Upstream's downsampler buckets by *time only*, so a
+  // request spanning several controllers keeps one row per bucket and silently
+  // drops the rest: measured against a real 12-controller fleet over one
+  // window, `5m` answers with 12 of 12 and `1h` with 11 of 12. Since
+  // `samplingIntervalSince` picks `15m` or coarser for any fleet older than
+  // ~3.5 days (PERF-238), the fleet chart has been missing controllers on every
+  // long-lived fleet — forward-filling whatever it happened to receive, so the
+  // line looked plausible and was short of trading nobody could see was gone
+  // (FEAT-089).
+  //
+  // Binding `controller_id` per request leaves only that controller's rows in
+  // each bucket, so nothing is dropped at any interval. Asking for `5m`
+  // instead would also be complete and would cost ~104k rows for a month-old
+  // fleet against 912; the fan-out is the cheap half of that trade.
+  //
+  // Each walk is still paged, for the reason it always was: a page is capped at
+  // 1000 rows and one controller's month at `5m` is 8,640 (CORR-237).
+  const { data: perfHistory } = useQuery({
+    // Built by the factory, not by hand: the shared socket's prefix-matched
+    // live merge (`mergeIntoMatchingQueries`) only finds this entry while the
+    // key keeps the shape stated on `controllerPerfHistoryAllQuery` (ARCH-285).
+    queryKey: controllerPerfHistoryAllQuery(server, {
+      start: earliestDeploy,
+      interval: perfInterval,
+    }).queryKey,
+    // Full on the first load, a tail on every one after it (PERF-239). The
+    // `controller_perf` channel this page subscribes to writes each fleet
+    // snapshot straight into this cache entry every 30s, so the old 120s poll
+    // re-downloaded a history that had already arrived — and after CORR-237 it
+    // re-downloaded it as up to ten sequential requests. `previous` is read
+    // back under this query's own key, which is what ties the refresh to one
+    // resolution: the key ends with `perfInterval` (PERF-238), so a coarser and
+    // a finer series each extend themselves and never each other.
+    queryFn: ({ signal, queryKey: key, client }) => {
+      // Per controller now, so the budget is per controller too: one series
+      // over a span whose interval was already chosen to fit
+      // `HISTORY_POINT_BUDGET` instants (PERF-238). `historyRowBudget` sized
+      // the *fleet's* rows for the collapsed shape this replaces, so it is what
+      // the whole fan-out costs rather than what each walk asks for.
+      const budget = historyRowBudget(1);
+      const load = (startTime: string | undefined, maxPages?: number) =>
+        api.getControllerPerformanceHistoryByController(
+          server!,
+          controllers,
+          { interval: perfInterval, start_time: startTime },
+          { maxRows: budget, maxPages, signal },
+        );
+      return refreshControllerHistory({
+        previous: client.getQueryData<ControllerPerformanceHistoryAllResponse>(key),
+        interval: perfInterval,
+        full: () => load(earliestDeploy),
+        tail: (from) => load(from, TAIL_MAX_PAGES),
+        maxRows: budget * Math.max(1, controllers.length),
+      });
+    },
+    enabled: on && history && (data?.controllers?.length ?? 0) > 0,
+    // The socket is the update path; this is only the net under it.
+    refetchInterval: HISTORY_REFETCH_MS,
+    staleTime: 60_000,
+  });
+
+  // The order the sidebar draws them in. The table this replaced could sort by
+  // any column and defaulted to this one; the sidebar keeps the default, which
+  // is the ranking the sort was mostly used for.
+  const sortedControllers = useMemo(
+    () => [...controllers].sort((a, b) => b.global_pnl_quote - a.global_pnl_quote),
+    [controllers],
+  );
+
+  // Filter performance snapshots to only active controllers and current run
+  const activeSnapshots = useMemo(() => {
+    if (!perfHistory?.snapshots || controllers.length === 0) return [];
+
+    // Build set of active controller keys and their deploy times. Keyed by
+    // bot + controller, because a bare controller id is a config id two bots
+    // can share: one map entry per id meant last-write-wins on the deploy
+    // time, so an hour-old bot truncated its five-day sibling's history to an
+    // hour of points (CORR-241).
+    const activeControllers = new Map<string, number>(); // key -> deployedAt ms
+    for (const ctrl of controllers) {
+      const deployMs = ctrl.deployed_at ? Date.parse(ctrl.deployed_at) : 0;
+      activeControllers.set(controllerKey(ctrl), deployMs);
+    }
+
+    return perfHistory.snapshots.filter((snap) => {
+      const key = controllerKey(snap);
+      if (!key || !activeControllers.has(key)) return false;
+      const deployMs = activeControllers.get(key)!;
+      if (!deployMs) return true; // no deploy time known, keep it
+      const snapMs = Date.parse(snap.timestamp) || 0;
+      return snapMs >= deployMs;
+    });
+  }, [perfHistory, controllers]);
+
+  // ── The executors the browser hangs under those controllers ──
+
+  const [maxPages, setMaxPages] = useState(EXECUTOR_PAGES);
+  const {
+    data: executorPages,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+  } = useInfiniteQuery({
+    queryKey: ["executors-infinite", server],
+    enabled: on,
+    initialPageParam: "" as string,
+    queryFn: ({ pageParam }) =>
+      api.getExecutorsPage(server!, { cursor: pageParam || undefined, limit: EXECUTOR_PAGE_SIZE }),
+    getNextPageParam: (lastPage) => lastPage.next_cursor ?? undefined,
+    refetchInterval: 60_000, // Slow fallback only — WS handles real-time updates
+    refetchOnWindowFocus: false,
+  });
+
+  // Progressive loading: ask for the next chunk as soon as the current arrives,
+  // up to the cap the reader has allowed.
+  const loadedPages = executorPages?.pages.length ?? 0;
+  useEffect(() => {
+    if (hasNextPage && !isFetchingNextPage && loadedPages < maxPages) {
+      fetchNextPage();
+    }
+  }, [hasNextPage, isFetchingNextPage, loadedPages, maxPages, fetchNextPage]);
+
+  const executors = useMemo(
+    () => (executorPages?.pages.flatMap((p) => p?.executors ?? []) ?? []) as ExecutorInfo[],
+    [executorPages],
+  );
+
+  // The finished runs, which only the Terminated population reports — so the
+  // request is not made at all while the reader is looking at the live fleet.
+  const { data: runsData } = useQuery({
+    queryKey: ["bot-runs", server],
+    queryFn: () => api.getBotRuns(server!, { limit: 200 }),
+    enabled: on && population === "terminated",
+    refetchInterval: 30_000,
+  });
+
+  // The controllers those runs left behind (FEAT-089).
+  //
+  // `controller-performance-latest` is not a live-fleet route: it holds the
+  // final snapshot of every controller of every bot the API has ever
+  // orchestrated, so one call answers for the whole finished population. It is
+  // what gives Terminated real controllers under real bots instead of one
+  // `(unattached)` bucket — and the route serves it warm, so this poll is a
+  // net rather than a cost.
+  const { data: terminatedData } = useQuery({
+    queryKey: ["terminated-controllers", server],
+    queryFn: () => api.getTerminatedControllers(server!),
+    enabled: on && population === "terminated",
+    refetchInterval: 60_000,
+    staleTime: 30_000,
+  });
+
+  const loadMore = useCallback(() => setMaxPages((p) => p + EXECUTOR_PAGES), []);
+  const paging = useMemo(
+    () => ({
+      loaded: executors.length,
+      loading: isFetchingNextPage,
+      done: !hasNextPage && executors.length > 0,
+      capped: loadedPages >= maxPages && !!hasNextPage,
+      loadMore,
+    }),
+    [executors.length, isFetchingNextPage, hasNextPage, loadedPages, maxPages, loadMore],
+  );
+
+  // Currency conversion, over every quote on screen — the controllers' and the
+  // executors' alike, since both are folded into the same totals now.
+  const quoteCurrencies = useMemo(
+    () => [
+      ...controllers.map((c) => c.trading_pair?.split("-")[1] || "USDT"),
+      ...executors.map((ex) => ex.trading_pair?.split("-")[1] || "USDT"),
+    ],
+    [controllers, executors],
+  );
+  const {
+    convert,
+    formatPnlValue,
+    formatValue,
+    formatValueDetailed,
+    resolvedSymbol: currencySymbol,
+  } = useRates(quoteCurrencies);
+
+  return {
+    controllers: sortedControllers,
+    bots: data?.bots ?? [],
+    executors,
+    paging,
+    snapshots: activeSnapshots,
+    truncated: perfHistory?.truncated ?? false,
+    runs: runsData?.runs ?? [],
+    terminatedControllers: terminatedData?.controllers ?? [],
+    owners: fleet?.owners ?? EMPTY_OWNERS,
+    deeds: fleet?.deeds ?? null,
+    convert,
+    currencySymbol,
+    rateFormatPnl: formatPnlValue,
+    rateFormatValue: formatValue,
+    rateFormatDetailed: formatValueDetailed,
+    isLoading,
+    error,
+    serverOnline: data?.server_online !== false,
+    errorHint: data?.error_hint,
+  };
+}

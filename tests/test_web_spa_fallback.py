@@ -60,3 +60,31 @@ def test_deep_link_falls_back_to_index(client):
     resp = client.get("/portfolio/some/deep/route")
     assert resp.status_code == 200
     assert resp.content == INDEX_HTML.read_bytes()
+
+
+def test_shell_is_never_served_from_cache_without_asking(client):
+    """The SPA shell revalidates on every load.
+
+    It names the hashed bundle that *is* the app, so a browser reusing a cached
+    shell reuses a whole stale build — the symptom being a UI from before the
+    last deploy, with no sign that it is old.
+    """
+    for path in ("/", "/index.html", "/portfolio"):
+        resp = client.get(path)
+        assert resp.status_code == 200
+        assert "no-cache" in resp.headers["cache-control"]
+
+
+def test_hashed_assets_are_cacheable_forever(client):
+    """Content-hashed chunks are immutable, so they are cached hard.
+
+    The pair is the point: the shell always revalidates, and the bundles it
+    names never have to, because a new build gives them new names.
+    """
+    import re
+
+    match = re.search(r"/assets/([\w.-]+\.js)", INDEX_HTML.read_text())
+    assert match, "built index.html should reference a hashed asset"
+    resp = client.get(f"/assets/{match.group(1)}")
+    assert resp.status_code == 200
+    assert "immutable" in resp.headers["cache-control"]

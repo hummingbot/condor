@@ -9,7 +9,9 @@ import {
   X,
 } from "lucide-react";
 import { useState } from "react";
+import { useSearchParams } from "react-router-dom";
 
+import { useIsAdmin } from "@/hooks/useIsAdmin";
 import { useServer } from "@/hooks/useServer";
 import { type ServerInfo, api } from "@/lib/api";
 
@@ -22,6 +24,27 @@ interface ServerForm {
 }
 
 const EMPTY_FORM: ServerForm = { name: "", host: "", port: 8000, username: "", password: "" };
+
+/**
+ * The edit form opens with the credential fields blank and both placeholders
+ * promising "(unchanged)", so a blank one means "keep what is stored" — never
+ * "erase it". The backend can only hear that as absence: `modify_server`
+ * applies each field under `if x is not None` (config_manager.py:342), and `""`
+ * is not None, so spreading the whole form wrote empty basic-auth credentials
+ * into config.yml on every host-only edit — silently, for the owner and for
+ * every trader the server is shared with (SEC-229).
+ *
+ * Omitting the key is what makes that safe, rather than round-tripping a
+ * sentinel: nothing about the stored secret has to reach the browser for it to
+ * survive an edit, so "keep what is stored" can never double as a way to read
+ * it back.
+ */
+function buildServerUpdate({ host, port, username, password }: ServerForm) {
+  const patch: Parameters<typeof api.updateServer>[1] = { host, port };
+  if (username) patch.username = username;
+  if (password) patch.password = password;
+  return patch;
+}
 
 export function ServersSettings() {
   const qc = useQueryClient();
@@ -47,7 +70,7 @@ export function ServersSettings() {
   });
 
   const updateMut = useMutation({
-    mutationFn: ({ name, ...data }: ServerForm) => api.updateServer(name, data),
+    mutationFn: (data: ServerForm) => api.updateServer(data.name, buildServerUpdate(data)),
     onSuccess: () => { invalidate(); setEditing(null); setForm(EMPTY_FORM); },
   });
 
@@ -82,6 +105,11 @@ export function ServersSettings() {
   };
 
   const isOwner = (s: ServerInfo) => s.permission === "owner";
+  // The "Shared with" names deep-link into the Admin tab, which only exists for
+  // an admin — a non-admin owner sees the same names as plain text rather than
+  // a control that navigates nowhere.
+  const isAdmin = useIsAdmin();
+  const [, setParams] = useSearchParams();
 
   if (isLoading) {
     return (
@@ -152,7 +180,7 @@ export function ServersSettings() {
                 value={form.username}
                 onChange={(e) => setForm({ ...form, username: e.target.value })}
                 className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-sm text-[var(--color-text)] focus:border-[var(--color-primary)] focus:outline-none"
-                placeholder="admin"
+                placeholder={editing ? "(unchanged)" : "admin"}
               />
             </div>
             <div>
@@ -222,6 +250,33 @@ export function ServersSettings() {
                 <span className="text-xs text-[var(--color-text-muted)]">
                   {s.host}:{s.port}
                 </span>
+                {/* Who else is on this server. Read-only on purpose: grants are
+                    written in one place (the Admin tab), and a second write path
+                    into `server_access` is a second set of rules to keep in
+                    step. The backend only fills this for the owner. */}
+                {isOwner(s) && (s.shared_with?.length ?? 0) > 0 && (
+                  <span className="mt-0.5 block text-xs text-[var(--color-text-muted)]">
+                    Shared with{" "}
+                    {s.shared_with?.map((m, i) => (
+                      <span key={m.user_id}>
+                        {i > 0 && ", "}
+                        {isAdmin ? (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setParams({ tab: "admin", user: String(m.user_id) })
+                            }
+                            className="underline decoration-dotted underline-offset-2 hover:text-[var(--color-text)]"
+                          >
+                            {m.display_name}
+                          </button>
+                        ) : (
+                          m.display_name
+                        )}
+                      </span>
+                    ))}
+                  </span>
+                )}
               </div>
             </div>
 

@@ -29,10 +29,9 @@ from pathlib import Path
 from typing import Any
 
 from condor.fsutil import atomic_write_text
+from condor.paths import local_agents_root
 
 log = logging.getLogger(__name__)
-
-_DATA_ROOT = Path(__file__).parent.parent.parent / "agents"
 
 MAX_LEARNINGS = 20
 
@@ -41,14 +40,17 @@ def _strategy_base_dir(prefix: str) -> Path:
     """Resolve the per-strategy base dir from an agent_id prefix.
 
     New format prefixes are ``"{agent_slug}.{strategy_slug}"`` →
-    ``agents/{agent_slug}/strategies/{strategy_slug}/``. Legacy flat
-    prefixes (no dot) fall back to ``agents/{slug}/`` so old ids still
-    resolve.
+    ``{agent_slug}/strategies/{strategy_slug}/``. Legacy flat prefixes (no dot)
+    fall back to ``{slug}/`` so old ids still resolve.
+
+    Always the **local** root (FEAT-115): a journal is what this install's run
+    produced, so there is no shipped layer to resolve against.
     """
+    root = local_agents_root()
     if "." in prefix:
         agent_slug, sslug = prefix.split(".", 1)
-        return _DATA_ROOT / agent_slug / "strategies" / sslug
-    return _DATA_ROOT / prefix
+        return root / agent_slug / "strategies" / sslug
+    return root / prefix
 
 
 def resolve_agent_dirs(agent_id: str) -> tuple[Path | None, Path | None]:
@@ -362,7 +364,7 @@ class JournalManager:
             # Try to resolve from agent_id before falling back
             resolved_session, resolved_agent = resolve_agent_dirs(agent_id)
             self._session_dir = (
-                resolved_session if resolved_session else _DATA_ROOT / agent_id
+                resolved_session if resolved_session else local_agents_root() / agent_id
             )
             if not agent_dir and resolved_agent:
                 agent_dir = resolved_agent

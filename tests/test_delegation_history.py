@@ -122,7 +122,7 @@ def _run_delegation(monkeypatch, root, slug="scout", task="scan SOL pools"):
 def test_finished_delegation_is_readable_after_the_registry_is_gone(
     tmp_path, monkeypatch
 ):
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     _write_agent(tmp_path, "scout")
 
     dt = _run_delegation(monkeypatch, tmp_path)
@@ -147,7 +147,7 @@ def test_finished_delegation_is_readable_after_the_registry_is_gone(
 
 
 def test_transcript_survives_with_the_same_shape_the_wire_uses(tmp_path, monkeypatch):
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     _write_agent(tmp_path, "scout")
 
     dt = _run_delegation(monkeypatch, tmp_path)
@@ -167,7 +167,7 @@ def test_transcript_survives_with_the_same_shape_the_wire_uses(tmp_path, monkeyp
 
 
 def test_legacy_transcript_without_a_status_file_is_still_listed(tmp_path, monkeypatch):
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     _write_agent(tmp_path, "scout")
     (_delegations_dir(tmp_path, "scout") / "scout-delegate-legacy01.md").write_text(
         LEGACY_MD
@@ -189,7 +189,7 @@ def test_legacy_transcript_without_a_status_file_is_still_listed(tmp_path, monke
 
 
 def test_a_task_the_process_died_on_reads_as_interrupted(tmp_path, monkeypatch):
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     _write_agent(tmp_path, "scout")
     (
         _delegations_dir(tmp_path, "scout") / "scout-delegate-ghost01.status.json"
@@ -215,7 +215,7 @@ def test_a_task_the_process_died_on_reads_as_interrupted(tmp_path, monkeypatch):
 
 
 def test_history_is_newest_first_and_filterable_by_agent(tmp_path, monkeypatch):
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     _write_agent(tmp_path, "scout")
     _write_agent(tmp_path, "quant")
 
@@ -237,7 +237,7 @@ def test_history_is_newest_first_and_filterable_by_agent(tmp_path, monkeypatch):
 def test_a_task_id_can_never_walk_out_of_the_delegations_directory(
     tmp_path, monkeypatch
 ):
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     _write_agent(tmp_path, "scout")
     (tmp_path / "secrets.md").write_text("# Delegation secrets\n\n- **Status:** done\n")
 
@@ -282,7 +282,7 @@ def _clean_markdown_cache():
 
 
 def test_a_current_record_never_opens_its_transcript(tmp_path, monkeypatch):
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     _write_agent(tmp_path, "scout")
 
     dt = _run_delegation(monkeypatch, tmp_path)
@@ -305,7 +305,7 @@ def test_a_pre_feat035_record_still_backfills_from_its_transcript(
     tmp_path, monkeypatch
 ):
     """State and provenance only: the task and the result are in the markdown."""
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     _write_agent(tmp_path, "scout")
     directory = _delegations_dir(tmp_path, "scout")
     (directory / "scout-delegate-legacy02.status.json").write_text(
@@ -336,7 +336,7 @@ def test_a_delegation_that_changed_is_never_served_from_stale_state(
     tmp_path, monkeypatch
 ):
     """The status file is the record, so it is read fresh on every call."""
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     _write_agent(tmp_path, "scout")
 
     dt = _run_delegation(monkeypatch, tmp_path)
@@ -365,7 +365,7 @@ def test_a_delegation_that_changed_is_never_served_from_stale_state(
 
 def test_a_rewritten_legacy_transcript_is_parsed_again(tmp_path, monkeypatch):
     """The parse is memoized on (mtime, size); a changed file is a cache miss."""
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     _write_agent(tmp_path, "scout")
     md = _delegations_dir(tmp_path, "scout") / "scout-delegate-legacy01.md"
     md.write_text(LEGACY_MD)
@@ -389,7 +389,7 @@ def test_a_rewritten_legacy_transcript_is_parsed_again(tmp_path, monkeypatch):
 
 def test_a_listing_hydrates_only_the_page_it_returns(tmp_path, monkeypatch):
     """80 delegations on disk, a page of 5: five transcripts opened, not eighty."""
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     _write_agent(tmp_path, "scout")
 
     legacy = _delegations_dir(tmp_path, "scout")
@@ -432,7 +432,7 @@ def test_a_listing_hydrates_only_the_page_it_returns(tmp_path, monkeypatch):
 
 def test_the_no_server_placeholder_does_not_reach_the_wire(tmp_path, monkeypatch):
     """``- **Server:** -`` means "no server", not a server literally named "-"."""
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     _write_agent(tmp_path, "scout")
     md = _delegations_dir(tmp_path, "scout") / "scout-delegate-legacy03.md"
     md.write_text(LEGACY_MD.replace("- **Server:** local", "- **Server:** -"))

@@ -282,9 +282,14 @@ def agent_turn(
     outcome: str = "done",
     surface: str = "other",
     tools: dict | None = None,
+    secrets: dict | None = None,
 ) -> None:
     """One turn through ``condor.runtime.client.prompt`` — the single funnel
-    Telegram, the dashboard and MCP all cross."""
+    Telegram, the dashboard and MCP all cross.
+
+    ``secrets`` is ``{kind: count}`` for the key-shaped runs the funnel found
+    in the turn (FEAT-056) — how often a paste is caught, never what was in it.
+    """
     _surface_counts[surface] = _surface_counts.get(surface, 0) + 1
     emit(
         "agent_turn",
@@ -296,6 +301,7 @@ def agent_turn(
         outcome=outcome,
         surface=surface,
         tools=tools,
+        secrets=secrets,
     )
 
 

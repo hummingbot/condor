@@ -2,6 +2,7 @@
 Configuration settings for Hummingbot MCP Server
 """
 
+import argparse
 import os
 from pathlib import Path
 
@@ -13,6 +14,44 @@ from mcp_servers.hummingbot_api.exceptions import ConfigurationError
 
 CONFIG_DIR = Path.home() / ".hummingbot_mcp"
 SERVER_CONFIG_PATH = CONFIG_DIR / "server.yml"
+
+#: Default tool profile (FEAT-066). ``full`` on purpose: this server is also run
+#: standalone (the uvx console script, an external MCP host, the checked-in
+#: `.mcp.json`), and a launch with no flag has to keep serving the whole surface.
+DEFAULT_TOOL_PROFILE = "full"
+
+
+def _parse_tool_profile() -> str:
+    """``--profile`` off argv, read at import.
+
+    It has to be resolved *here* rather than in ``server._apply_cli_args``: which
+    tools exist is decided when the module registers them, which is import time,
+    and ``_apply_cli_args`` only runs once ``_run()`` is already starting the
+    stdio loop. ``parse_known_args`` so every other flag the spawner passes
+    (``--url``, ``--server-name``, ``--bot-id``) stays inert here, and so a run
+    under pytest — whose argv is the test runner's — resolves the default.
+    """
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--profile", default=DEFAULT_TOOL_PROFILE)
+    args, _ = parser.parse_known_args()
+    return args.profile
+
+
+def _parse_muted_tools() -> tuple[str, ...]:
+    """``--mute-tools a,b,c`` off argv, read at import (FEAT-091).
+
+    Same timing argument as ``_parse_tool_profile`` above — the mute subtracts
+    from the profile inside ``register_tools``, which runs at import — and the
+    same ``parse_known_args``, so a run under pytest resolves to nothing muted.
+
+    An empty or absent flag is the norm: the spawner only puts it on the line
+    when the operator has actually switched something off, so an uncurated
+    install keeps the argv it always had.
+    """
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--mute-tools", default="")
+    args, _ = parser.parse_known_args()
+    return tuple(n.strip() for n in (args.mute_tools or "").split(",") if n.strip())
 
 
 class ServerConfig(BaseModel):
@@ -65,6 +104,20 @@ class Settings(BaseModel):
     server_name: str = Field(default="default")
     default_account: str = Field(default="master_account")
 
+    # Which slice of the tool surface this process registers (FEAT-066). For an
+    # ACP-driven seat the mounted surface IS the permission model, so this is a
+    # security boundary, not a convenience: see ``server.TOOL_PROFILES``.
+    tool_profile: str = Field(default=DEFAULT_TOOL_PROFILE)
+
+    # Tools the operator switched off for the agent this seat belongs to
+    # (FEAT-091). Subtracted from the profile in ``server.register_tools``, so a
+    # muted tool is never registered and the model is never told it exists — the
+    # only enforcement that also holds on an ACP seat, which cannot be handed an
+    # allowlist. This server knows nothing of ``agents/``: the spawner reads the
+    # mute file and passes the names, which is what keeps a market-data server
+    # free of the agent registry.
+    muted_tools: tuple[str, ...] = Field(default=())
+
     # Connection settings
     connection_timeout: float = Field(default=30.0)
     max_retries: int = Field(default=3)
@@ -113,6 +166,8 @@ def get_settings() -> Settings:
             max_retries=int(os.getenv("HUMMINGBOT_MAX_RETRIES", "3")),
             retry_delay=float(os.getenv("HUMMINGBOT_RETRY_DELAY", "2.0")),
             log_level=os.getenv("HUMMINGBOT_LOG_LEVEL", "INFO"),
+            tool_profile=_parse_tool_profile(),
+            muted_tools=_parse_muted_tools(),
         )
     except Exception as e:
         raise ConfigurationError(f"Failed to load configuration: {e}")

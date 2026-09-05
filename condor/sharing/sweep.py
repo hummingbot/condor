@@ -31,7 +31,7 @@ because the next sweep supersedes the short transcript with the longer one.
 would re-post an unchanged conversation on every tick and spend the rate limit
 on nothing.
 
-**Not excluded.** One click on the header chip sets ``share_excluded``, and it
+**Not excluded.** One click in the share dialog sets ``share_excluded``, and it
 is honoured forever. Per-conversation *exclusion* rather than per-conversation
 *confirmation*: a prompt on every chat would just be FEAT-054 with extra steps,
 and it would train the user to click through it.
@@ -100,7 +100,7 @@ def covered(meta: ConversationMeta, user_id: int | str) -> bool:
     """Would the sweep ever take this conversation?
 
     The standing rules only — consent, forward-only, exclusion, attribution —
-    and deliberately not the timing ones. This is what the header chip renders,
+    and deliberately not the timing ones. This is what the share dialog renders,
     and a chip that appeared only once a conversation went idle would show up
     thirty minutes after the moment the user needed to see it. "This will be
     shared" is true from the first turn; *when* is the sweep's business.
@@ -176,10 +176,11 @@ async def sweep(now: float | None = None) -> int:
 
     Both halves run in a worker thread, and that is a requirement rather than a
     tidiness preference: listing a store reads a ``meta.json`` per conversation
-    and a submit scrubs a whole transcript, both of them blocking. On the
-    explicit path that cost lands inside a request the user is already waiting
-    on. Here there is nobody waiting, so the same work on the event loop would
-    be paid by whoever happens to be mid-answer when the tick fires.
+    and a submit scrubs a whole transcript, both of them blocking. This was once
+    justified here by saying the explicit path can afford the same work inline
+    because the user asked for it — which was wrong, and the routes now use
+    ``asyncio.to_thread`` too. Only the *latency* is the asker's; the *blocking*
+    is the whole install's, because uvicorn shares this loop (PERF-235).
     """
     if not consent.env_allows() or not consent.install_allows():
         return 0

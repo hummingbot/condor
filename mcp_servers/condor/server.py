@@ -4,20 +4,24 @@ Thin wrapper layer: tool registration + docstrings only.
 All business logic lives in mcp_servers.condor.tools.*
 """
 
+from collections.abc import Iterable
+from typing import Any
+
 from mcp.server.fastmcp import FastMCP
 
 from condor.telemetry import taps as telemetry_taps
+from mcp_servers._profiles import make_resolver
+from mcp_servers._profiles import register_tools as _register_tools
+from mcp_servers._profiles import resolve_profiles
 from mcp_servers.condor.middleware import handle_errors
+from mcp_servers.condor.profiles import PROFILE_TOOLS
+from mcp_servers.condor.settings import DEFAULT_TOOL_PROFILE, settings
 from mcp_servers.condor.tools import available_models as available_models_tool
 from mcp_servers.condor.tools import code as code_tool
 from mcp_servers.condor.tools import consult as consult_tool
-from mcp_servers.condor.tools import (
-    context,
-)
 from mcp_servers.condor.tools import delegate as delegate_tool
 from mcp_servers.condor.tools import (
     memory,
-    notes,
     notification,
     routines,
     servers,
@@ -64,7 +68,7 @@ _WORKER_ROUTINES_RULE = (
     'Read `manage_skill(action="read", name="routine_cookbook")` FIRST (and the '
     "companion file for what the routine does), create it into the GLOBAL "
     'routine library with `manage_routines(action="create_routine", name="...", '
-    'code="...")` — no `strategy_id`, so the user and the chat can see it — then '
+    'code="...")` — no `agent`, so the user and the chat can see it — then '
     'TEST it with `manage_routines(action="run", name="...")` and fix it until '
     "the output is clean BEFORE reporting. Reporting an untested routine is a "
     "failed delegation. (RUNNING an existing routine is not authoring — for that "
@@ -114,9 +118,12 @@ def _coordinator_base(routines_rule: str) -> str:
         "instead of reimplementing it by hand.\n"
         "- If a domain AGENT matches, delegate with "
         '`consult(agent="<slug>", task="...", context="...")` and summarize its answer. '
-        "For a long, one-off task you want run in the background until done (it pings "
-        'the user when finished), use `delegate(action="start", agent="<slug>", '
-        'task="...")` instead and poll with `delegate(action="get", task_id="...")`.\n'
+        "For a long, one-off task you want run in the background until done, use "
+        '`delegate(action="start", agent="<slug>", task="...")` instead. It returns a '
+        "task id immediately; say the task is running and END YOUR TURN. When it "
+        "finishes, the result is pushed back into this conversation and to the user on "
+        "its own -- do NOT poll the task you just started. Reach for "
+        '`delegate(action="get"/"list")` only when the user asks about a task later.\n'
         f"{routines_rule}"
         f"{_RUN_CODE_RULE}"
         "- Only fall back to raw tools when nothing matches.\n"
@@ -266,6 +273,21 @@ def _build_instructions() -> str:
     else:
         base = _chat_base()
     sections = [base]
+
+    # The house rules, shared with every loop tick (FEAT-095). Directly under the
+    # seat's framing and above the indexes, because they govern how the indexes
+    # below are used. Built once at import like the rest of this text, so an edit
+    # to core_rules.md reaches this surface on the next server start (ticks get it
+    # immediately).
+    try:
+        from condor.agents.prompts import core_rules_section
+
+        core_rules = core_rules_section(slug or None)
+        if core_rules:
+            sections.append(core_rules)
+    except Exception:
+        pass  # Advisory — never block server startup on the rulebook.
+
     try:
         from condor.memory import SkillStore
 
@@ -303,7 +325,6 @@ def _build_instructions() -> str:
 mcp = FastMCP("condor", instructions=_build_instructions())
 
 
-@mcp.tool()
 @handle_errors("consult agent")
 @telemetry_taps.tracked("consult")
 async def consult(agent: str, task: str, context: str = "") -> dict:
@@ -325,7 +346,6 @@ async def consult(agent: str, task: str, context: str = "") -> dict:
     return await consult_tool.consult(agent, task, context)
 
 
-@mcp.tool()
 @handle_errors("delegate task")
 @telemetry_taps.tracked("delegate")
 async def delegate(
@@ -334,6 +354,7 @@ async def delegate(
     task: str = "",
     task_id: str = "",
     on_complete: str = "notify",
+    timeout_sec: int = 0,
 ) -> dict:
     """Delegate a one-off task to a background agent instance.
 
@@ -345,10 +366,12 @@ async def delegate(
     routine that scans SOL pools"). The agent runs unrestricted with full
     auto-approve, so delegate only to trusted agents/tasks.
 
-    The user tracks a delegation in Telegram with the /delegations command (NOT
-    "/task" — that does not exist) and is pinged automatically when it finishes.
-    Never invent a status command; "start" returns a next_steps hint with the
-    correct wording.
+    The user tracks a delegation on whichever surface they are on — the
+    /delegations command in Telegram, the Tasks list in the chat's context dock
+    on the dashboard — and is pinged automatically when it finishes. Never invent
+    a status command (there is no "/task", and /delegations exists only in
+    Telegram); "start" returns a next_steps hint already worded for this session's
+    surface, so relay that rather than guessing.
 
     Actions:
     - "start": Begin a delegation (requires agent, task). Returns immediately with
@@ -369,20 +392,35 @@ async def delegate(
         task: The one-off task, in plain language (for start).
         task_id: Delegation id returned by start (for get/stop).
         on_complete: What this conversation gets when the task ends (for start).
-            "notify" (default) pings the user with the result and nothing else —
-            the result is FOR THE HUMAN. "resume" additionally hands the result
-            back to you in a new turn of THIS conversation, so use it when you
-            intend to do something with the result yourself ("research X, then
-            draft the summary"). With "resume" you must end your turn after
+            "notify" (default) pings the user with the result AND writes the
+            outcome into THIS conversation — recorded in the transcript and shown
+            in the chat as it lands, so an already-open session sees it without a
+            reload. What it does not do is give you a turn: the result is there
+            for the human to read, not handed back to you. So never tell the user
+            the result will not reach the chat. "resume" additionally hands the
+            result back to you in a new turn of THIS conversation, so use it when
+            you intend to do something with the result yourself ("research X,
+            then draft the summary"). With "resume" you must end your turn after
             starting the task: you will be woken with the answer.
+        timeout_sec: Wall-clock budget for the whole background task, in seconds
+            (for start). Omit it (0) for the default of 900s. This knob only
+            goes UP: 900s is also the floor, and a smaller number is raised back
+            to it, so do not try to give a task less. Raise it when you KNOW the
+            job is long — several routines to build, a research sweep, a
+            multi-step backtest — because a task that outlives its budget is
+            cut off mid-run and loses whatever it had not finished. The ceiling
+            is 1800s: an agent session has its own ~31-minute hard stop, so
+            asking for more only delays the same cut-off. For work bigger than
+            that, split it across delegations.
 
     Returns:
         Action-specific result dict.
     """
-    return await delegate_tool.delegate(action, agent, task, task_id, on_complete)
+    return await delegate_tool.delegate(
+        action, agent, task, task_id, on_complete, timeout_sec
+    )
 
 
-@mcp.tool()
 @handle_errors("send notification")
 @telemetry_taps.tracked("send_notification")
 async def send_notification(
@@ -401,7 +439,6 @@ async def send_notification(
     return await notification.send_notification(text, parse_mode)
 
 
-@mcp.tool()
 @handle_errors("manage routines")
 @telemetry_taps.tracked("manage_routines")
 async def manage_routines(
@@ -410,7 +447,6 @@ async def manage_routines(
     config: dict | None = None,
     agent: str | None = None,
     code: str | None = None,
-    strategy_id: str | None = None,
     shared: bool | None = None,
 ) -> dict:
     """Manage and run Condor routines (auto-discoverable Python scripts).
@@ -422,10 +458,10 @@ async def manage_routines(
       Blocks for up to 120s, so use it only for routines that finish fast.
     - "run_async": Submit a one-shot routine and return its instance_id immediately,
       without waiting (requires name, optional config). Use this for slow work — a
-      backtest, a wide scan — then read the result later with "get_instance" instead
-      of holding up the conversation.
-    - "get_instance": Read a run back by id (requires name=instance_id). Returns
-      status="running" while it is still going, or the finished result and report_id.
+      backtest, a wide scan. The finished run is handed back to you automatically as
+      a new turn, so say it is running and END YOUR TURN. NEVER poll it in a loop.
+    - "get_instance": Read a run back by id (requires name=instance_id). For a user
+      asking about a run later — not for waiting on one you just started.
     - "start": Start a continuous routine as a background task (requires name, optional config)
     - "stop": Stop a running routine instance (requires name=instance_id)
     - "list_instances": List all running/scheduled routine instances
@@ -436,13 +472,16 @@ async def manage_routines(
     - "edit_routine": Update an agent-local routine (requires name, code)
     - "delete_routine": Delete an agent-local routine (requires name)
 
-    Agent-local routines live in agents/{slug}/routines/ and are visible only to
-    that AGENT — they are shared across all of its strategies, there is no
-    per-strategy routine library. They follow the same pattern as global
+    Agent-local routines live in .condor/agents/{slug}/routines/ and are visible
+    only to that AGENT — they are shared across all of its strategies, there is
+    no per-strategy routine library. They follow the same pattern as global
     routines: a Config(BaseModel) class and an async run(config, context) function.
+    Writes always land under .condor/agents/ — never under the tracked agents/
+    library the repo ships, which you read but do not edit.
 
     Beside those per-agent libraries there is ONE shared library
-    (agents/_shared/routines) that every assistant also reads, mirroring
+    (.condor/agents/_shared/routines, layered over the shipped
+    agents/_shared/routines) that every assistant also reads, mirroring
     manage_skill's `shared`. A routine there is listed with scope="shared" and
     runs under its bare name from any seat. Publication is the library it lives
     in, not a flag in the file: `shared=True` on "create_routine" writes there.
@@ -462,9 +501,6 @@ async def manage_routines(
             A run started with it is attributed to that agent. Omit to use
             the current assistant's own library.
         code: Python source code for create_routine / edit_routine.
-        strategy_id: DEPRECATED alias of `agent`, kept for older callers. A
-            composite "agent_slug.strategy_slug" key resolves to its owning
-            agent; prefer passing that agent's slug as `agent`.
         shared: Target the shared library every assistant reads (routine CRUD).
             Condor only, and only without `agent` — for an agent it is ignored
             and the write stays in its own dir.
@@ -472,12 +508,9 @@ async def manage_routines(
     Returns:
         Action-specific result dict.
     """
-    return await routines.manage_routines(
-        action, name, config, agent, code, strategy_id, shared
-    )
+    return await routines.manage_routines(action, name, config, agent, code, shared)
 
 
-@mcp.tool()
 @handle_errors("run code")
 @telemetry_taps.tracked("run_code")
 async def run_code(
@@ -548,17 +581,19 @@ async def run_code(
     return await code_tool.run_code(code, action, label, timeout, run_id, agent, limit)
 
 
-@mcp.tool()
 @handle_errors("manage servers")
 @telemetry_taps.tracked("manage_servers")
 async def manage_servers(
     action: str,
     name: str | None = None,
 ) -> dict:
-    """Manage Hummingbot API servers (list, check status).
+    """Manage Hummingbot API servers — and answer where you are pointed, as whom.
 
     Actions:
-    - "list": List all accessible servers with permissions and active status
+    - "list": List all accessible servers with permissions and active status. Also
+      returns the caller's context: active_server, user_role, is_admin, plus the
+      active_agent_key (the LLM new agents inherit — never invent one) and the
+      custom_llm_endpoints the user has saved.
     - "status": Check if a server is online (optional name, defaults to active server)
 
     Args:
@@ -571,22 +606,6 @@ async def manage_servers(
     return await servers.manage_servers(action, name)
 
 
-@mcp.tool()
-@handle_errors("get user context")
-@telemetry_taps.tracked("get_user_context")
-async def get_user_context() -> dict:
-    """Get the current user's context within Condor.
-
-    Returns:
-        A dict with:
-        - active_server: Currently active Hummingbot server name
-        - user_role: User's role (admin, user, pending, blocked)
-        - is_admin: Whether the user is an admin
-    """
-    return await context.get_user_context()
-
-
-@mcp.tool()
 @handle_errors("get available models")
 @telemetry_taps.tracked("get_available_models")
 async def get_available_models(
@@ -643,12 +662,97 @@ async def get_available_models(
     )
 
 
-@mcp.tool()
-@handle_errors("manage trading agent")
-@telemetry_taps.tracked("manage_trading_agent")
-async def manage_trading_agent(
+@handle_errors("manage agents")
+@telemetry_taps.tracked("manage_agents")
+async def manage_agents(
     action: str,
-    agent_id: str | None = None,
+    agent_slug: str | None = None,
+    name: str | None = None,
+    description: str | None = None,
+    instructions: str | None = None,
+    agent_key: str | None = None,
+    tools: list[str] | None = None,
+    when_to_consult: str | None = None,
+    server_required: bool | None = None,
+    server_name: str | None = None,
+    path: str | None = None,
+) -> dict:
+    """Create and edit agent identities (.condor/agents/{slug}/AGENT.md).
+
+    An *agent* (e.g. "executor_manager", "brigado") is an identity — the brain,
+    and the primary artifact. It is created FIRST; everything else hangs off its
+    slug. From the moment it exists it can be consulted (`consult`), delegated to
+    (`delegate`) and looped (`control_agent(action="start")`) — there is no
+    capability flag and nothing to enable. See `manage_strategies` for the
+    playbooks an agent owns, `control_agent` for its running instances.
+
+    Actions:
+    - "list": All agents with their when_to_consult hint, owned strategies,
+      agent_key and tools. Use this to answer "what agents exist?" — strategies
+      and running instances do NOT show agents that own no loop strategy.
+    - "create": New agent (AGENT.md identity + brain). Requires name. Returns
+      agent_slug — use it for routines and strategies.
+    - "get": Full definition including the AGENT.md body (requires agent_slug).
+    - "update": Change AGENT.md / metadata (requires agent_slug + fields to change).
+    - "delete": Delete an agent (requires agent_slug; refuses if it still owns
+      strategies). Refused outright for an agent the repo ships — mute or edit
+      it instead; an update would bring a deleted one straight back.
+    - "publish": ADMIN ONLY. Copy a local agent into the tracked library the
+      repo ships (requires agent_slug; `path` narrows it to one skill or
+      strategy). Every other write lands under .condor/agents/, so this is the
+      only way to author what other installs receive. It leaves the repo dirty
+      on purpose — review and commit. There is no "install": a shipped agent is
+      present the moment an install pulls.
+
+    Args:
+        action: One of list, create, get, update, delete, publish.
+        agent_slug: The agent to act on (get/update/delete).
+        name: Agent name (create/update).
+        description: Agent description (create/update).
+        instructions: The AGENT.md body — identity + domain knowledge (create/update).
+        agent_key: Default LLM. Examples: "claude-code", "gemini", "copilot",
+            "ollama:llama3.1", "ollama:qwen3:32b", "groq:llama-3.3-70b-versatile".
+            Any model can be consulted; a pydantic-ai key (e.g. "ollama:...")
+            additionally enforces the tools allowlist on consult. Default "claude-code".
+        tools: Tool-name allowlist for the agent. Empty/None = unrestricted.
+        when_to_consult: One-line hint describing when to route work to this agent.
+            Purely for routing — every agent is consultable with or without it; it
+            falls back to the description.
+        server_required: Whether the agent needs a Hummingbot server. Default True.
+        server_name: Pin the agent to a specific hummingbot-api server. LEAVE EMPTY
+            unless the user explicitly asks to pin this agent to one server — empty
+            means follow the ambient chat server, which is what travels to other
+            installs. When set, the agent's mcp-hummingbot subprocess and any
+            strategy it deploys use THIS server regardless of the chat's active
+            server, and on a machine without that server the agent is broken. Do
+            not fill it in with whatever server the chat happens to be on.
+        path: For "publish" only — narrow to one item of the agent, relative to
+            its directory ("skills/lp_rebalance", "strategies/grid", "AGENT.md").
+            Empty publishes the whole agent's library half; its store, journals,
+            mutes and session output are never published.
+
+    Returns:
+        Action-specific result dict.
+    """
+    return trading_agent.manage_agents(
+        action,
+        agent_slug=agent_slug,
+        name=name,
+        description=description,
+        instructions=instructions,
+        agent_key=agent_key,
+        tools=tools,
+        when_to_consult=when_to_consult,
+        server_required=server_required,
+        server_name=server_name,
+        path=path,
+    )
+
+
+@handle_errors("manage strategies")
+@telemetry_taps.tracked("manage_strategies")
+async def manage_strategies(
+    action: str,
     strategy_id: str | None = None,
     agent_slug: str | None = None,
     name: str | None = None,
@@ -657,110 +761,123 @@ async def manage_trading_agent(
     agent_key: str | None = None,
     skills: list[str] | None = None,
     config: dict | None = None,
-    tools: list[str] | None = None,
-    when_to_consult: str | None = None,
-    server_required: bool | None = None,
-    server_name: str | None = None,
 ) -> dict:
-    """Manage trading agents and strategies.
+    """Create and edit strategies — the looping playbooks an agent owns.
 
-    An *agent* (e.g. "executor_manager", "brigado") is an identity defined in
-    agents/{slug}/AGENT.md — the primary artifact and the agent "brain". It is
-    distinct from a *strategy* (a looping playbook it owns) and from a running
-    *instance*. EVERY agent can be consulted (`consult`), delegated to (`delegate`)
-    and looped (`start_agent`) from the moment it is created — there is no
-    capability flag and nothing to enable. An agent that owns no strategy loops a
-    default playbook built from its own identity. Create the agent FIRST, then add
-    its routines and (optionally) a bespoke strategy. ``strategy_id`` is the opaque
-    key returned by list_strategies/create_strategy (form "agent_slug.strategy_slug").
+    A *strategy* is a sub-resource of an agent: the instructions one loop follows,
+    plus its default config. It is an optimization over the default playbook every
+    agent already loops, so an agent needs no strategy to run. ``strategy_id`` is
+    the opaque key returned by list/create, of the form "agent_slug.strategy_slug"
+    — just pass it back. Create the owning agent first (`manage_agents`); start a
+    strategy with `control_agent(action="start")`.
 
-    Actions -- Agents (identities):
-    - "list_agent_definitions": List all agents (AGENT.md identities) with their
-      when_to_consult hint, owned strategies, agent_key and tools. Use this to
-      answer "what agents exist?" — list_strategies and list_agents (instances) do
-      NOT show agents that own no loop strategy.
-    - "create_agent": Create a new agent (AGENT.md identity + brain). Requires name.
-      Optional: description, instructions (the AGENT.md body — identity + domain
-      knowledge), agent_key, tools (tool-name allowlist for pydantic-ai consults),
-      when_to_consult (routing hint), server_required. Returns agent_slug — use it
-      for routines/strategies.
-    - "get_agent": Get full agent definition including the AGENT.md body (requires agent_slug)
-    - "update_agent": Update an agent's AGENT.md / metadata (requires agent_slug, plus fields to change)
-    - "delete_agent": Delete an agent (requires agent_slug; refuses if it still owns strategies)
-
-    Actions -- Strategies:
-    - "list_strategies": List all strategies (across agents)
-    - "get_strategy": Get full strategy details including instructions (requires strategy_id)
-    - "create_strategy": Create a new strategy under an Agent (requires agent_slug, name, instructions)
-    - "update_strategy": Update an existing strategy (requires strategy_id, plus fields to update)
-    - "delete_strategy": Delete a strategy (requires strategy_id)
-
-    Actions -- Lifecycle:
-    - "list_agents": List all running agent instances with status
-    - "start_agent": Start a new agent session (requires strategy_id, optional config
-      overrides). strategy_id may also be a BARE AGENT SLUG — the agent then loops its
-      only strategy, or a default playbook created from its identity on first start.
-    - "stop_agent": Stop a running agent, KEEPING its open positions (requires agent_id)
-    - "shutdown_agent": Emergency stop that WINDS DOWN this session's positions/executors
-      per its shutdown.md policy (closes perp, keeps spot by default) (requires agent_id)
-    - "pause_agent": Pause a running agent (requires agent_id)
-    - "resume_agent": Resume a paused agent (requires agent_id)
-
-    Actions -- Routines (scoped to a strategy):
-    - "list_routines": List global + agent-local routines for a strategy (requires strategy_id)
-    - "run_routine": Execute a one-shot routine (requires strategy_id, name, optional config)
-
-    Journal reads/writes are the dedicated trading_agent_journal_read /
-    trading_agent_journal_write tools, not actions of this tool.
-
-    Actions -- Monitoring:
-    - "agent_tracker": Get the full tracker markdown (tick history, executor ledger, snapshots) (requires agent_id)
-    - "agent_journal": Get recent journal entries and learnings (requires agent_id)
+    Actions:
+    - "list": All strategies across all agents.
+    - "get": Full details including the instructions body (requires strategy_id).
+    - "create": New strategy under an agent (requires agent_slug, name, instructions).
+    - "update": Change an existing strategy (requires strategy_id + fields to change).
+    - "delete": Delete a strategy (requires strategy_id).
 
     Args:
-        action: The action to perform.
-        agent_id: Agent instance ID (for lifecycle/monitoring/journal actions).
-        strategy_id: Strategy key "agent_slug.strategy_slug" (for strategy/routine/start
-            actions). For start_agent a bare agent slug also works — see start_agent.
-        agent_slug: Owning Agent slug — required for create_strategy and for the
-            agent CRUD actions get_agent/update_agent/delete_agent.
-        name: Agent name (create_agent), strategy name (create/update_strategy), or routine name (run_routine).
-        description: Agent or strategy description (for create/update).
-        instructions: AGENT.md body (create/update_agent) or strategy instructions text (create/update_strategy).
-        agent_key: Default LLM. Examples: "claude-code", "gemini", "copilot", "ollama:llama3.1", "ollama:qwen3:32b", "groq:llama-3.3-70b-versatile". Any model can be consulted; a pydantic-ai key (e.g. "ollama:...") additionally enforces the tools allowlist on consult. Default "claude-code".
-        skills: List of optional skill names to enable (for create/update_strategy).
-        config: Agent config overrides (for create/update_strategy/start) or routine config (for run_routine).
-            For start_agent, supports: agent_key (override strategy default), model_base_url (for LM Studio/vLLM),
-            execution_mode, frequency_sec, tick_timeout_sec (wall-clock budget for one tick's
-            agent session; 0 = runtime default of 600s), total_amount_quote, trading_context,
-            risk_limits, server_name, max_ticks.
-        tools: Tool-name allowlist for the agent (create/update_agent). Empty/None = unrestricted.
-        when_to_consult: One-line hint describing when to route work to this agent (create/update_agent). Purely for routing — every agent is consultable with or without it; it falls back to the description.
-        server_required: Whether the agent needs a Hummingbot server (create/update_agent). Default True.
-        server_name: Pin the agent to a specific hummingbot-api server (create/update_agent). LEAVE EMPTY unless the user explicitly asks to pin this agent to one server — empty means follow the ambient chat server, which is what travels to other installs. When set, the agent's mcp-hummingbot subprocess and any strategy it deploys use THIS server regardless of the chat's active server, and on a machine without that server the agent is broken. Do not fill it in with whatever server the chat happens to be on.
+        action: One of list, get, create, update, delete.
+        strategy_id: Strategy key "agent_slug.strategy_slug" (get/update/delete).
+        agent_slug: The owning agent — required to create.
+        name: Strategy name (create/update).
+        description: Strategy description (create/update).
+        instructions: The playbook text the loop follows (create/update).
+        agent_key: Default LLM for this strategy's loop, overriding the owning
+            agent's. Same form as manage_agents.agent_key.
+        skills: Optional skill names to enable for the loop (create/update).
+        config: Default config for the loop (create/update) — the same keys
+            control_agent(action="start") accepts as overrides.
 
     Returns:
         Action-specific result dict.
     """
-    return await trading_agent.manage_trading_agent(
+    return trading_agent.manage_strategies(
         action,
-        agent_id,
-        strategy_id,
-        agent_slug,
-        name,
-        description,
-        instructions,
-        agent_key,
-        skills,
-        config,
-        tools=tools,
-        when_to_consult=when_to_consult,
-        server_required=server_required,
-        server_name=server_name,
+        strategy_id=strategy_id,
+        agent_slug=agent_slug,
+        name=name,
+        description=description,
+        instructions=instructions,
+        agent_key=agent_key,
+        skills=skills,
+        config=config,
     )
 
 
-@mcp.tool()
+@handle_errors("control agent")
+@telemetry_taps.tracked("control_agent")
+async def control_agent(
+    action: str,
+    agent_id: str | None = None,
+    strategy_id: str | None = None,
+    config: dict | None = None,
+    key: str | None = None,
+    value: Any = None,
+    expires_in: int | None = None,
+    clear: bool = False,
+) -> dict:
+    """Run and steer live agent instances (start / stop / pause / resume).
+
+    An *instance* is one running session of an agent's loop, identified by
+    ``agent_id``. Start one from a strategy — or from a bare agent slug, since
+    every agent is loopable. See `manage_agents` for the identities and
+    `manage_strategies` for the playbooks; read what a running instance did with
+    `trading_agent_journal_read`.
+
+    STOP vs SHUTDOWN: "stop" halts the loop and KEEPS its open positions.
+    "shutdown" is the emergency exit — it winds down this session's positions and
+    executors per the agent's shutdown.md policy (closes perp, keeps spot by
+    default). Reach for "stop" unless the user wants to be out of the market.
+
+    Actions:
+    - "list": All running instances with status.
+    - "start": Start a session (requires strategy_id, optional config overrides).
+      strategy_id may be a BARE AGENT SLUG — the agent then loops its only
+      strategy, or a default playbook created from its identity on first start.
+    - "stop": Stop a running instance, keeping positions (requires agent_id).
+    - "shutdown": Stop AND wind down positions/executors (requires agent_id).
+    - "pause": Pause a running instance (requires agent_id).
+    - "resume": Resume a paused instance (requires agent_id).
+    - "get_state" / "set_state": Read/write the instance's own scratch state
+      (requires agent_id; set_state also requires key). State is for cursors and
+      counters a loop would otherwise re-derive every tick — anything worth
+      *remembering* belongs in `manage_memory`. The namespace is derived from
+      agent_id, so an instance only ever sees its own.
+
+    Args:
+        action: One of list, start, stop, shutdown, pause, resume, get_state, set_state.
+        agent_id: The running instance (everything except list and start).
+        strategy_id: Strategy key "agent_slug.strategy_slug", or a bare agent slug
+            (start only).
+        config: Overrides on the strategy's defaults, for "start" only: agent_key,
+            model_base_url (for LM Studio/vLLM), execution_mode, frequency_sec,
+            tick_timeout_sec (wall-clock budget for one tick's agent session;
+            0 = runtime default of 600s), total_amount_quote, trading_context,
+            risk_limits, server_name, max_ticks.
+        key: State key. get_state reads one key, or the whole state if omitted;
+            set_state requires it.
+        value: JSON-serializable value to store (set_state).
+        expires_in: TTL in seconds for the stored value (set_state); None = no expiry.
+        clear: Delete ``key`` instead of writing it (set_state).
+
+    Returns:
+        Action-specific result dict.
+    """
+    return await trading_agent.control_agent(
+        action,
+        agent_id=agent_id,
+        strategy_id=strategy_id,
+        config=config,
+        key=key,
+        value=value,
+        expires_in=expires_in,
+        clear=clear,
+    )
+
+
 @handle_errors("manage memory")
 @telemetry_taps.tracked("manage_memory")
 async def manage_memory(
@@ -814,7 +931,6 @@ async def manage_memory(
     )
 
 
-@mcp.tool()
 @handle_errors("manage skill")
 @telemetry_taps.tracked("manage_skill")
 async def manage_skill(
@@ -827,7 +943,6 @@ async def manage_skill(
     query: str | None = None,
     max_entries: int = 30,
     agent: str | None = None,
-    strategy_id: str | None = None,
     file: str | None = None,
     content: str | None = None,
     shared: bool | None = None,
@@ -894,9 +1009,6 @@ async def manage_skill(
         max_entries: Cap for search results (default 30).
         agent: Slug of the agent whose skill library to target (chat-side
             authoring). Omit to use the current assistant's own library.
-        strategy_id: DEPRECATED alias of `agent`, kept for older callers. A
-            composite "agent_slug.strategy_slug" key resolves to its owning
-            agent; prefer passing that agent's slug as `agent`.
         file: Bare name of a bundled companion file (for read_file/write_file).
         content: Full contents to write to the companion file (for write_file).
         shared: Publish this playbook to every assistant by moving it into the
@@ -916,52 +1028,20 @@ async def manage_skill(
         query=query,
         max_entries=max_entries,
         agent=agent,
-        strategy_id=strategy_id,
         file=file,
         content=content,
         shared=shared,
     )
 
 
-@mcp.tool()
-@handle_errors("manage notes")
-@telemetry_taps.tracked("manage_notes")
-async def manage_notes(
-    action: str,
-    key: str | None = None,
-    value: str | None = None,
-) -> dict:
-    """DEPRECATED — use manage_memory instead.
-
-    Thin alias kept for one release: "set"->write (type="reference"), "get"->read,
-    "list"->list, "delete"->delete. New code should call manage_memory directly.
-
-    Actions:
-    - "list": List all saved notes
-    - "get": Get a specific note (requires key)
-    - "set": Save a note (requires key and value)
-    - "delete": Delete a note (requires key)
-
-    Args:
-        action: The action to perform (list, get, set, delete)
-        key: The note key (required for get, set, delete)
-        value: The note value (required for set)
-
-    Returns:
-        Action-specific result dict.
-    """
-    return await notes.manage_notes(action, key, value)
-
-
 # ---------------------------------------------------------------------------
 # Trading-agent journal tools — the canonical interface live tick prompts call
 # directly (see condor/agents/prompts.py). Kept as dedicated top-level tools
-# rather than manage_trading_agent actions so the agent's ergonomic, oft-used
+# rather than actions of the agent-management tools so the ergonomic, oft-used
 # write path is a single named tool.
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
 @handle_errors("journal read")
 @telemetry_taps.tracked("trading_agent_journal_read")
 async def trading_agent_journal_read(
@@ -980,16 +1060,18 @@ async def trading_agent_journal_read(
                  "state" (alias for summary),
                  "full" (entire journal),
                  "runs" (list recent run snapshots),
-                 "run:N" (read specific run snapshot, e.g. "run:3").
+                 "run:N" (read specific run snapshot, e.g. "run:3"),
+                 "tracker" (full tracker markdown + summary dict: tick history,
+                 executor ledger, snapshots).
         max_entries: Max entries for recent/runs (default 30).
 
     Returns:
-        {"content": "<journal text>"} or {"runs": [...]} for runs listing.
+        {"content": "<journal text>"}, {"runs": [...]} for runs listing, or
+        {"tracker_md": ..., "summary": {...}} for section="tracker".
     """
     return trading_agent.journal_read(agent_id, section, max_entries)
 
 
-@mcp.tool()
 @handle_errors("journal write")
 @telemetry_taps.tracked("trading_agent_journal_write")
 async def trading_agent_journal_write(
@@ -1040,6 +1122,52 @@ async def trading_agent_journal_write(
         category,
         section,
     )
+
+
+# ── Tool profiles (FEAT-066) ─────────────────────────────────────────────────
+#
+# Tool allowlists are only enforced for pydantic-ai model keys; an ACP bridge
+# (claude-code, gemini, copilot) runs unrestricted. For those seats the surface a
+# session MOUNTS is the whole permission model, so which tools this process
+# registers is a security boundary — hence explicit registration below instead of
+# an ``@mcp.tool()`` decorator that fires for every seat at import.
+#
+# The rings themselves — which tool sits in which one, and why — moved to
+# ``profiles.py`` as plain name strings (FEAT-091), because the web process has
+# to read them to draw a switch per tool and cannot import *this* module to ask:
+# importing it parses argv and builds the ``FastMCP`` singleton. Here the names
+# are resolved back into functions, at import, which is what keeps the table and
+# the functions provably in step.
+
+
+#: The tool function a name in ``profiles.PROFILE_TOOLS`` refers to, looked up
+#: in *this* module — or a loud failure at import (ARCH-289: the mechanics are
+#: shared with the hummingbot server, the namespace is not).
+_resolve = make_resolver(globals())
+
+#: profile name → the tools it registers, resolved from ``profiles.PROFILE_TOOLS``
+#: (which carries the prose on what each ring is for).
+TOOL_PROFILES: dict[str, tuple] = resolve_profiles(globals(), PROFILE_TOOLS)
+
+
+def register_tools(
+    server: FastMCP,
+    profile: str = DEFAULT_TOOL_PROFILE,
+    muted: Iterable[str] = (),
+) -> None:
+    """Register this profile's tools on ``server``, minus the muted ones.
+
+    This server's rings and its own default; the rules — unknown profile raises
+    rather than widening to ``full``, ``muted`` only ever subtracts — live once,
+    in ``mcp_servers/_profiles.py``.
+    """
+    _register_tools(server, TOOL_PROFILES, profile, muted)
+
+
+# Registration happens at import: ``mcp`` is a module-level singleton and the
+# profile and the mute list are resolved from argv at import (settings), so the
+# server object is complete for anything that inspects it before startup.
+register_tools(mcp, settings.tool_profile, settings.muted_tools)
 
 
 if __name__ == "__main__":

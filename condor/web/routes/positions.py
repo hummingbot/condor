@@ -5,6 +5,7 @@ import logging
 
 from fastapi import APIRouter, Depends
 
+from condor.fetchers.market_data import fetch_current_price
 from condor.web.auth import require_server_access
 from condor.web.models import WebUser
 from config_manager import get_config_manager
@@ -151,15 +152,13 @@ async def get_consolidated_positions(
         try:
             client = await cm.get_client(name)
             price_tasks = [
-                client.market_data.get_prices(connector_name=conn, trading_pairs=pair)
+                fetch_current_price(client, conn, pair)
                 for conn, pair in pairs_needing_price
             ]
             results = await asyncio.gather(*price_tasks, return_exceptions=True)
-            for (conn, pair), result in zip(pairs_needing_price, results):
-                if isinstance(result, dict):
-                    price = result.get("prices", {}).get(pair)
-                    if price:
-                        pairs_needing_price[(conn, pair)] = float(price)
+            for (conn, pair), price in zip(pairs_needing_price, results):
+                if isinstance(price, (int, float)) and price:
+                    pairs_needing_price[(conn, pair)] = float(price)
 
             for pos in all_positions:
                 if pos["current_price"] == 0:

@@ -39,7 +39,13 @@ from condor.llm.options import (
     RECOMMENDED_AGENT,
     selectable_agent_options,
 )
-from condor.llm.readiness import MISSING, READY, UNVERIFIED, Readiness
+from condor.llm.readiness import (
+    MISSING,
+    READY,
+    UNVERIFIED,
+    Readiness,
+    base_of,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ENV_PATH = REPO_ROOT / ".env"
@@ -128,14 +134,6 @@ def menu_options() -> dict[str, dict]:
     options.update(selectable)
     options["openrouter:"] = AGENT_OPTIONS["openrouter:"]
     return options
-
-
-def base_of(agent_key: str) -> str:
-    """The provider base of an agent key: ``claude-acp:opus`` → ``claude-acp``."""
-    key = (agent_key or "").strip()
-    if key.startswith("custom@"):
-        return "custom"
-    return key.split(":", 1)[0]
 
 
 def is_writable_key(agent_key: str) -> bool:

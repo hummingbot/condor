@@ -14,6 +14,7 @@ import { useDexUpstream } from "@/hooks/useDexUpstream";
 import { useServer } from "@/hooks/useServer";
 import { api, type PoolSummary } from "@/lib/api";
 import { useDexFavorites } from "@/lib/dexFavorites";
+import { DEX_NETWORK_KEY } from "@/lib/sessionState";
 
 /** GeckoTerminal rate-limits per IP across every viewer and every polling chart. */
 const POOL_STALE_MS = 30_000;
@@ -33,9 +34,6 @@ const FAVORITES_BATCH_SIZE = 30;
  * indexes, since a chain missing from either has no pools to browse.
  */
 const DEFAULT_NETWORK = "solana-mainnet-beta";
-
-/** Survives a reload, so the chain you browse is not re-picked on every visit. */
-const NETWORK_KEY = "condor.dex.network";
 
 /** An EVM address or a Solana pubkey — the same guard the backend applies. */
 const ADDRESS_RE = /^(0x[0-9a-fA-F]{40}|[1-9A-HJ-NP-Za-km-z]{32,44})$/;
@@ -61,7 +59,7 @@ export function Dex() {
     view: "trending",
   });
   const [network, setNetwork] = useState<string>(
-    () => localStorage.getItem(NETWORK_KEY) || DEFAULT_NETWORK,
+    () => localStorage.getItem(DEX_NETWORK_KEY) || DEFAULT_NETWORK,
   );
   const [dexes, setDexes] = useState<string[]>([]);
   const [query, setQuery] = useState("");
@@ -86,7 +84,7 @@ export function Dex() {
   }, [source, debouncedQuery, dexes, network]);
 
   useEffect(() => {
-    localStorage.setItem(NETWORK_KEY, network);
+    localStorage.setItem(DEX_NETWORK_KEY, network);
   }, [network]);
 
   const { data: chains = [] } = useQuery({

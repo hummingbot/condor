@@ -38,7 +38,27 @@ COMPACT_CONTEXT_TEMPLATE = (
     "Continue from where we left off. The user compacted the context to free up space."
 )
 
+_PAGE_CONTEXT = (
+    "WHAT THE USER IS LOOKING AT (web dashboard):\n"
+    "- A turn typed in the dashboard may open with a bracketed block headed\n"
+    '  "[What the user is looking at right now, in the Condor dashboard...]",\n'
+    "  listing Screen, About, On screen and URL. That block is real: it is\n"
+    "  read from the page the user has open at the moment they hit send.\n"
+    "- So you DO know what they are looking at. Asked whether you can see\n"
+    "  their screen, say what is true: you get a text summary of the page and\n"
+    "  the figures on it, not an image of it — you cannot see the pixels.\n"
+    "- Read the block before reaching for a tool. If it already answers the\n"
+    '  question ("what am I looking at?", "is this number bad?"), answer from\n'
+    "  it and say which page you are reading. Re-fetch when the user wants\n"
+    "  something the page does not show, or something more current.\n"
+    "- It describes that one moment, not the conversation. Do not carry it\n"
+    "  forward as a standing fact, and never repeat the block back verbatim.\n"
+    "- A turn with no such block means the page contributed nothing (the chat\n"
+    "  workspace itself does not) — then the tools are the only source.\n"
+)
+
 _WEB_FORMATTING = (
+    _PAGE_CONTEXT + "\n"
     "FORMATTING (web dashboard):\n"
     "- Use Markdown freely: tables, headers, bold, code blocks, lists.\n"
     "- No message length limits, but stay concise.\n"
@@ -80,6 +100,126 @@ def platform_formatting(platform: str = "telegram") -> str:
     return _WEB_FORMATTING if platform == "web" else _TELEGRAM_FORMATTING
 
 
+#: The ring the preload names. Attended chat seats mount ``agent`` (a bound
+#: specialist) or ``full`` (the coordinator) — see :func:`toolsets.seat_profile`
+#: — and ``agent`` is the common subset. What ``full`` adds on top is the admin
+#: ring, which is the *server owner's* and which this very prompt goes on to
+#: forbid ("do NOT call configure_server"), so naming it here would advertise
+#: three tools most seats are downgraded out of anyway (SEC-252).
+_CHAT_PRELOAD_PROFILE = "agent"
+
+#: ``(MCP server name, the leaf module that says which tools it mounts)``.
+#: The prefix is the ACP naming convention, ``mcp__<server>__<tool>``; the server
+#: names are the ones :mod:`condor.runtime.toolsets` spawns each subprocess under.
+_CHAT_MCP_SERVERS = ("condor", "mcp-hummingbot")
+
+
+def _chat_mcp_tools() -> tuple[str, ...]:
+    """Every MCP tool an attended chat seat has mounted, as ACP tool names.
+
+    Derived, never restated. Under ACP these tools arrive *deferred*: a session
+    sees only the names it has been told about, so a tool missing from this line
+    is one that seat is unlikely to ever reach for — a keyword ``ToolSearch``
+    could still surface it, but only if the model thinks to run one, and the
+    whole point of the preload is that it does not have to. A hand-kept copy of
+    the list therefore fails quietly and in the expensive direction, which is
+    exactly how the previous two copies rotted: the pre-ARCH-190 list in
+    ``handlers/agents/_shared.py`` still named five tools the servers had already
+    removed, and the tuple this function replaced was missing thirteen it
+    mounted, ``manage_clmm`` and ``list_orphaned_positions`` among them — both
+    called by the ``recover_orphaned_position`` playbook every agent inherits.
+
+    Names come from ``mcp_servers.*.profiles`` for the same reason
+    :func:`toolsets.seat_tools` reads them there: those are leaf string modules,
+    the definition site of each ring, and importing a ``server.py`` to ask would
+    parse argv and build a ``FastMCP`` singleton as a side effect. The import is
+    function-local to keep that dependency off ``context``'s import path.
+
+    The tick seat keeps its own, deliberately narrower list in
+    ``condor/agents/prompts.py`` — a tick must not be able to start or stop the
+    loop it is running inside. Do not unify them.
+    """
+    from mcp_servers.condor import profiles as condor_profiles
+    from mcp_servers.hummingbot_api import profiles as hummingbot_profiles
+
+    return tuple(
+        f"mcp__{server}__{name}"
+        for server, module in zip(
+            _CHAT_MCP_SERVERS, (condor_profiles, hummingbot_profiles)
+        )
+        for name in module.PROFILE_TOOLS[_CHAT_PRELOAD_PROFILE]
+    )
+
+
+def chat_tool_preload(agent_key: str | None) -> str:
+    """The ToolSearch preload line for a chat seat, or ``""`` when it needs none.
+
+    ACP seats (Claude Code and friends) get MCP tools deferred: they must
+    ``ToolSearch`` a name before they can call it. A keyword search can still
+    find a name this line omits, so the preload is not the only route to a
+    mounted tool — what it buys is the round trips, and the far likelier failure
+    that the model never thinks to search at all. Pydantic-ai seats auto-discover
+    their toolset and must never receive the line.
+
+    Public because both chat branches need it: the coordinator's
+    :func:`build_initial_context` and the specialist's ``bound_agent_context``,
+    which skips that builder entirely (CORR-272).
+    """
+    from condor.acp.pydantic_ai_client import is_pydantic_ai_model
+
+    if not agent_key or is_pydantic_ai_model(agent_key):
+        return ""
+    return (
+        "IMPORTANT: At the very start of the session (before your first response), "
+        "load ALL MCP tools in a single ToolSearch call:\n"
+        f'ToolSearch(query="select:{",".join(_chat_mcp_tools())}")\n'
+        "This avoids repeated ToolSearch calls that waste context tokens. "
+        "Do this silently without telling the user."
+    )
+
+
+def conversation_attribution(tag: str) -> str:
+    """Tell a chat the ``controller_id`` its positions must carry (CORR-325).
+
+    The conversation-shaped sibling of the loop's ``[TICK INFO]`` block
+    (:mod:`condor.agents.prompts`), which is where this instruction lived and
+    only lived. That one is nested inside ``if agent_id:`` and ``agent_id`` is a
+    *session* concept, so a chat never reached it: a conversation was never told
+    to pass a tag and had none to pass, and every executor it opened was born
+    unattributable. The tag comes from
+    :func:`~condor.agents.deeds.attribution_tag`, so the string the model is
+    handed here is byte-for-byte the one the conversation's deployment panel
+    (FEAT-110) later queries the trading API with — the join is one rule stated
+    once, not two that have to be kept in agreement.
+
+    The wording says *conversation*, not *session*. The loop's line says
+    "attributes the position to this session" and for a chat that would name the
+    wrong thing entirely — a reader of this prompt has no session, and telling
+    it otherwise is how a model invents a plausible id instead of using the one
+    it was given.
+
+    Returns ``""`` for a run with no tag, which is a chat with no durable
+    conversation behind it. Silence is right: an instruction to pass a tag that
+    does not exist is worse than no instruction, because a model that is told to
+    tag will tag with something.
+
+    Placed at the one point where both chat branches have converged
+    (``sessions.create_session``), so the coordinator and a bound specialist —
+    which skips :func:`build_initial_context` entirely (CORR-272) — cannot
+    disagree about what a conversation's positions are called.
+    """
+    if not tag:
+        return ""
+    return (
+        "[THIS CONVERSATION]\n"
+        f"Attribution tag: {tag}\n"
+        f'Pass controller_id="{tag}" to every create_*_executor call — it is what '
+        "attributes the position to this conversation. Without it nothing can tell "
+        "that this chat opened it, and it will not appear in what this conversation "
+        "reports having deployed."
+    )
+
+
 def _build_system_prompt(platform: str = "telegram") -> str:
     """Condor's own AGENT.md plus the platform's formatting rules."""
     agent = _chat_agent()
@@ -99,7 +239,6 @@ def build_initial_context(
     server_name: str | None = None,
 ) -> str:
     """Build an initial context prompt telling the agent about server, permissions, and formatting rules."""
-    from condor.acp.pydantic_ai_client import is_pydantic_ai_model
     from config_manager import get_config_manager, get_effective_server
 
     cm = get_config_manager()
@@ -130,38 +269,9 @@ def build_initial_context(
         active_perm = cm.get_server_permission(user_id, active_name)
         active_perm_label = active_perm.value.upper() if active_perm else "UNKNOWN"
 
-        # For ACP agents (Claude Code): instruct them to preload MCP tools via ToolSearch
-        # Pydantic-ai agents get tools directly, no preload needed
-        tool_preload_hint = ""
-        if agent_key and not is_pydantic_ai_model(agent_key):
-            mcp_tools = [
-                "mcp__mcp-hummingbot__get_market_data",
-                "mcp__mcp-hummingbot__get_portfolio_overview",
-                "mcp__mcp-hummingbot__manage_executors",
-                "mcp__mcp-hummingbot__manage_bots",
-                "mcp__mcp-hummingbot__manage_controllers",
-                "mcp__mcp-hummingbot__explore_dex_pools",
-                "mcp__mcp-hummingbot__explore_geckoterminal",
-                "mcp__mcp-hummingbot__manage_amm",
-                "mcp__mcp-hummingbot__search_history",
-                "mcp__mcp-hummingbot__set_account_position_mode_and_leverage",
-                "mcp__condor__manage_routines",
-                "mcp__condor__manage_servers",
-                "mcp__condor__get_user_context",
-                "mcp__condor__manage_trading_agent",
-                "mcp__condor__trading_agent_journal_read",
-                "mcp__condor__trading_agent_journal_write",
-                "mcp__condor__send_notification",
-                "mcp__condor__manage_memory",
-                "mcp__condor__manage_skill",
-            ]
-            tool_preload_hint = (
-                "IMPORTANT: At the very start of the session (before your first response), "
-                "load ALL MCP tools in a single ToolSearch call:\n"
-                f'ToolSearch(query="select:{",".join(mcp_tools)}")\n'
-                "This avoids repeated ToolSearch calls that waste context tokens. "
-                "Do this silently without telling the user."
-            )
+        # For ACP agents (Claude Code): instruct them to preload MCP tools via
+        # ToolSearch. Pydantic-ai agents get tools directly, no preload needed.
+        tool_preload_hint = chat_tool_preload(agent_key)
 
         # Build server info section
         server_info = [

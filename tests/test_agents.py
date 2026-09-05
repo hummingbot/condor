@@ -26,8 +26,7 @@ def _write_agent(root, slug, *, body="Body.", **frontmatter):
 
 
 def _patch_roots(monkeypatch, tmp_path):
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
-    monkeypatch.setattr(strategy_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
 
 
 # ── Agent discovery + the index every Agent appears in ──
@@ -131,8 +130,8 @@ def test_strategy_crud_under_agent(tmp_path, monkeypatch):
     )
     assert s.slug == "brl_mm"
     assert s.key == "brigado.brl_mm"
-    assert s.dir == tmp_path / "brigado" / "strategies" / "brl_mm"
-    assert (s.dir / "strategy.md").exists()
+    assert s.home == tmp_path / "brigado" / "strategies" / "brl_mm"
+    assert (s.home / "strategy.md").exists()
 
     # get / get_by_key / list
     assert store.get("brigado", "brl_mm").instructions.strip() == "do the thing"
@@ -179,7 +178,7 @@ def test_agent_with_no_strategy_is_still_loopable(tmp_path, monkeypatch):
     assert resolved is not None
     assert resolved.slug == strategy_module.DEFAULT_STRATEGY_SLUG
     assert resolved.key == "brigado.default"
-    assert (resolved.dir / "strategy.md").exists()
+    assert (resolved.home / "strategy.md").exists()
     assert resolved.instructions.strip()  # a real playbook body, not empty
 
     # Idempotent: a second start reuses the same one instead of piling up.
@@ -212,66 +211,54 @@ def test_resolve_for_loop_unknown_target(tmp_path, monkeypatch):
     assert StrategyStore().resolve_for_loop("nope.also_nope") is None
 
 
-# ── MCP tool: manage_trading_agent agent CRUD (the AGENT.md identity) ──
+# ── MCP tool: manage_agents CRUD (the AGENT.md identity) ──
 
 
-def test_manage_trading_agent_agent_crud(tmp_path, monkeypatch):
-    """create_agent/get_agent/update_agent/delete_agent through the MCP tool."""
+def test_manage_agents_crud(tmp_path, monkeypatch):
+    """create/get/update/delete through the manage_agents tool."""
     from mcp_servers.condor.settings import settings
     from mcp_servers.condor.tools import trading_agent as ta
 
     _patch_roots(monkeypatch, tmp_path)
     monkeypatch.setattr(settings, "user_id", 7, raising=False)
 
-    created = asyncio.run(
-        ta.manage_trading_agent(
-            action="create_agent",
-            name="Risk Sentry",
-            description="watches drawdown",
-            instructions="identity + domain knowledge",
-            agent_key="ollama:qwen3:32b",
-            when_to_consult="when sizing a position",
-            tools=["get_market_data"],
-        )
+    created = ta.manage_agents(
+        action="create",
+        name="Risk Sentry",
+        description="watches drawdown",
+        instructions="identity + domain knowledge",
+        agent_key="ollama:qwen3:32b",
+        when_to_consult="when sizing a position",
+        tools=["get_market_data"],
     )
     assert created["created"] is True
     assert created["agent_slug"] == "risk_sentry"
 
-    got = asyncio.run(
-        ta.manage_trading_agent(action="get_agent", agent_slug="risk_sentry")
-    )
+    got = ta.manage_agents(action="get", agent_slug="risk_sentry")
     assert got["instructions"].strip() == "identity + domain knowledge"
     assert got["tools"] == ["get_market_data"]
 
-    updated = asyncio.run(
-        ta.manage_trading_agent(
-            action="update_agent",
-            agent_slug="risk_sentry",
-            instructions="new body",
-            when_to_consult="",  # clearing the hint must NOT gate anything
-        )
+    updated = ta.manage_agents(
+        action="update",
+        agent_slug="risk_sentry",
+        instructions="new body",
+        when_to_consult="",  # clearing the hint must NOT gate anything
     )
     assert updated["updated"] is True
     assert (
-        asyncio.run(
-            ta.manage_trading_agent(action="get_agent", agent_slug="risk_sentry")
-        )["instructions"].strip()
+        ta.manage_agents(action="get", agent_slug="risk_sentry")["instructions"].strip()
         == "new body"
     )
 
-    listed = asyncio.run(ta.manage_trading_agent(action="list_agent_definitions"))[
-        "agents"
-    ]
+    listed = ta.manage_agents(action="list")["agents"]
     entry = next(a for a in listed if a["slug"] == "risk_sentry")
     # The hint fell back to the description once the trigger was cleared.
     assert entry["when_to_consult"] == "watches drawdown"
 
-    assert asyncio.run(
-        ta.manage_trading_agent(action="delete_agent", agent_slug="risk_sentry")
-    ) == {"deleted": True}
-    assert "error" in asyncio.run(
-        ta.manage_trading_agent(action="get_agent", agent_slug="risk_sentry")
-    )
+    assert ta.manage_agents(action="delete", agent_slug="risk_sentry") == {
+        "deleted": True
+    }
+    assert "error" in ta.manage_agents(action="get", agent_slug="risk_sentry")
 
 
 def test_create_strategy_requires_existing_agent(tmp_path, monkeypatch):
@@ -282,13 +269,11 @@ def test_create_strategy_requires_existing_agent(tmp_path, monkeypatch):
     _patch_roots(monkeypatch, tmp_path)
     monkeypatch.setattr(settings, "user_id", 7, raising=False)
 
-    result = asyncio.run(
-        ta.manage_trading_agent(
-            action="create_strategy",
-            agent_slug="ghost",
-            name="S",
-            instructions="x",
-        )
+    result = ta.manage_strategies(
+        action="create",
+        agent_slug="ghost",
+        name="S",
+        instructions="x",
     )
     assert "error" in result and "not found" in result["error"].lower()
 
@@ -340,17 +325,17 @@ def test_agent_skill_library_read_and_edit(tmp_path):
 
 def test_allowlist_filters_bare_and_namespaced_names():
     client = PydanticAIClient(
-        model="ollama:x", allowed_tools=["manage_executors", "get_market_data"]
+        model="ollama:x", allowed_tools=["create_grid_executor", "get_market_data"]
     )
     defs = [
-        SimpleNamespace(name="manage_executors"),
+        SimpleNamespace(name="create_grid_executor"),
         SimpleNamespace(name="mcp__condor__get_market_data"),
         SimpleNamespace(name="manage_bots"),
         SimpleNamespace(name="place_order"),
     ]
     kept = asyncio.run(client._prepare_tools(None, defs))
     assert sorted(d.name for d in kept) == [
-        "manage_executors",
+        "create_grid_executor",
         "mcp__condor__get_market_data",
     ]
 
@@ -749,6 +734,11 @@ def test_numeric_credentials_reach_the_subprocess_as_strings(monkeypatch):
             # SEC-178: the resolver holds every candidate to reach, not just
             # existence. This double owns the server it hands out.
             return True
+
+        def get_server_permission(self, user_id, server_name):
+            from config_manager import ServerPermission
+
+            return ServerPermission.OWNER
 
     monkeypatch.setattr(
         config_manager, "get_config_manager", lambda: _NumericPasswordServer()

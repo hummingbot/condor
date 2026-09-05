@@ -15,12 +15,16 @@ longer than a conversation turn.
 """
 
 import asyncio
+import logging
+import shutil
 import time
 from pathlib import Path
 
 from mcp_servers.condor.condor_client import call_main_api
 from mcp_servers.condor.exceptions import APIError
 from mcp_servers.condor.settings import caller_slug, settings
+
+log = logging.getLogger(__name__)
 
 # Wall-clock budget for a delegated one-shot run, unchanged from when the tool
 # executed the routine itself, and the granularity we poll the run with.
@@ -34,8 +38,20 @@ _NO_SERVER = (
 )
 
 
+def _shared_roots() -> tuple[Path, ...]:
+    """Both shared routine libraries in read order: this install's, then shipped."""
+    from condor.memory.paths import shared_routines_roots
+
+    return shared_routines_roots()
+
+
 def _shared_root() -> Path:
-    """``agents/_shared/routines`` — the library every assistant reads."""
+    """The **writable** shared library: ``.condor/agents/_shared/routines``.
+
+    Reads also see the shipped ``agents/_shared/routines`` under it; a publish
+    lands local, and a published routine of the same name shadows the shipped
+    one exactly as an agent's own routine shadows a shared one.
+    """
     from condor.memory.paths import shared_routines_root
 
     return shared_routines_root()
@@ -44,14 +60,15 @@ def _shared_root() -> Path:
 def _get_agent_routines_dir(target: str | None, shared: bool = False) -> Path | None:
     """Resolve the routines directory to write to.
 
-    Routines live at the **Agent** level (``agents/<slug>/routines``), shared
+    Routines live at the **Agent** level (``.condor/agents/<slug>/routines`` —
+    always the writable root, never the tracked library), shared
     across all of that agent's strategies — so ``target`` is an *agent* selector:
     a bare agent slug ("agent_slug") is the canonical form. A composite strategy
     key ("agent_slug.strategy_slug") is still accepted and resolves to its
     *owning agent's* dir (the strategy half is discarded — there is no
     per-strategy routines dir). Without a ``target``, the current assistant's own
     dir — the general library (root ``routines/``) for the chat, or the launched
-    Agent's (``agents/<slug>/routines``, ``settings.agent_slug``).
+    Agent's (``.condor/agents/<slug>/routines``, ``settings.agent_slug``).
 
     ``shared=True`` targets the published library every assistant reads
     (:func:`condor.memory.paths.shared_routines_root`), and is honored **only**
@@ -80,6 +97,24 @@ def _get_agent_routines_dir(target: str | None, shared: bool = False) -> Path | 
         return None
 
     return assistant_routines_dir(settings.specialist_slug or None)
+
+
+def _stock_twin(routines_dir: Path, name: str) -> Path | None:
+    """The shipped ``<name>.py`` behind a writable routines dir, if there is one.
+
+    A routine carries no frontmatter, so a fork of one is indistinguishable from
+    a routine authored locally — accepted (FEAT-115), because routines already
+    shadow by name and always have. What this buys is that *editing* a shipped
+    routine works: the file is copied down first and the edit lands on the copy.
+    """
+    from condor.paths import local_agents_root, stock_agents_root
+
+    try:
+        relative = routines_dir.relative_to(local_agents_root())
+    except ValueError:
+        return None  # the chat's general library: tracked, but not an agent root
+    twin = stock_agents_root() / relative / f"{name}.py"
+    return twin if twin.is_file() else None
 
 
 def _own_plus_shared(slug: str | None) -> dict:
@@ -275,9 +310,15 @@ async def _poll_until_done(instance_id: str) -> dict | None:
 
 
 async def _submit_oneshot(
-    name: str, config: dict | None, target: str | None
-) -> tuple[str | None, dict | None]:
-    """Resolve, validate and start a one-shot run. Returns (instance_id, error).
+    name: str, config: dict | None, target: str | None, on_complete: str = "notify"
+) -> tuple[str | None, str, dict | None]:
+    """Resolve, validate and start a one-shot run.
+
+    Returns ``(instance_id, effective_on_complete, error)``. The middle value is
+    what the *route* decided, which is not always what was asked for: a run
+    submitted from inside a wake turn is downgraded to ``notify`` by the depth-1
+    bound. Callers must phrase their instruction from that, not from the
+    request, or they promise a wake nobody will send (CORR-287).
 
     Resolution and config validation stay here — this is the code that knows
     about the agent ``target`` and agent-local dirs, and a bad config field must fail
@@ -286,25 +327,32 @@ async def _submit_oneshot(
     the dock while it runs, fires its post-run hooks, and keeps its result.
 
     Shared by the blocking ``run`` and the fire-and-forget ``run_async`` — the
-    two differ only in whether they then wait for the instance to finish.
+    two differ in whether they then wait for the instance to finish, and
+    therefore in ``on_complete``: a caller that waits reads the outcome itself,
+    a caller that does not is woken with it.
     """
     routine, agent = _resolve_with_owner(name, target)
     if not routine:
-        return None, {"error": f"Routine '{name}' not found"}
+        return None, on_complete, {"error": f"Routine '{name}' not found"}
 
     if routine.is_continuous:
-        return None, {
-            "error": f"Routine '{name}' is continuous — use action='start' to run "
-            "it in the background, and action='stop' with its instance_id to end it."
-        }
+        return (
+            None,
+            on_complete,
+            {
+                "error": f"Routine '{name}' is continuous — use action='start' to run "
+                "it in the background, and action='stop' with its instance_id to "
+                "end it."
+            },
+        )
 
     try:
         routine.config_class(**(config or {}))
     except Exception as e:
-        return None, {"error": f"Invalid config: {e}"}
+        return None, on_complete, {"error": f"Invalid config: {e}"}
 
     if not settings.active_server:
-        return None, {"error": _NO_SERVER}
+        return None, on_complete, {"error": _NO_SERVER}
 
     try:
         started = await call_main_api(
@@ -316,16 +364,93 @@ async def _submit_oneshot(
                     "server_name": settings.active_server,
                     "config": config or {},
                     "attribute_to": agent,
+                    "on_complete": on_complete,
                 }
             ),
         )
     except APIError as e:
-        return None, {"error": f"Routine '{name}' could not be run: {e}"}
+        return None, on_complete, {"error": f"Routine '{name}' could not be run: {e}"}
 
     instance_id = started.get("instance_id") if isinstance(started, dict) else None
     if not instance_id:
-        return None, {"error": f"Routine '{name}' did not start: {started}"}
-    return instance_id, None
+        return (
+            None,
+            on_complete,
+            {"error": f"Routine '{name}' did not start: {started}"},
+        )
+    # A route that does not report the field is an older build (or a test fake):
+    # fall back to what was asked for rather than inventing a downgrade.
+    effective = started.get("on_complete") or on_complete
+    return instance_id, effective, None
+
+
+async def _hand_off(name: str, instance_id: str) -> dict:
+    """Stop waiting on a run and arrange to be woken by it instead.
+
+    Reached when a blocking ``run`` outlives its budget. The run itself is fine —
+    it belongs to the main process — so the only question is how its outcome
+    gets back here, and the answer must not be "poll it": an agent that keeps
+    asking spends a model turn per check and, when the answer finally arrives as
+    a passive note, is no longer listening for it.
+
+    Best-effort by construction. If the hand-off cannot be arranged the caller
+    still gets a usable instruction, just the slower one.
+
+    ``applied`` alone is not enough to promise a wake: the route holds a depth-1
+    bound and answers ``applied: true`` with ``on_complete: "notify"`` when this
+    conversation is already inside a wake turn. Telling the model to end its turn
+    on that answer strands the run — nobody is woken and nobody is polling
+    (CORR-287) — so the promise is made only when the route says ``resume``.
+    """
+    try:
+        handoff = await call_main_api(
+            "POST",
+            f"/routines/instances/{instance_id}/on_complete",
+            {"on_complete": "resume"},
+        )
+    except APIError:
+        handoff = None
+
+    applied = isinstance(handoff, dict) and handoff.get("applied")
+    if applied and handoff.get("on_complete", "resume") == "resume":
+        return {
+            "started": True,
+            "instance_id": instance_id,
+            "routine": name,
+            "note": (
+                f"'{name}' outlived the {int(_RUN_BUDGET)}s wait, so it was handed "
+                "off to the background. Do NOT poll it and do NOT wait: you will "
+                "be given its result automatically when it finishes. Tell the "
+                "user it is running and END YOUR TURN."
+            ),
+        }
+
+    if applied:
+        # Handed off, but downgraded: the run keeps going and its outcome still
+        # lands in the transcript — it just will not wake anyone.
+        return {
+            "started": True,
+            "instance_id": instance_id,
+            "routine": name,
+            "note": (
+                f"'{name}' outlived the {int(_RUN_BUDGET)}s wait and is still "
+                "running in the background. It will NOT wake you — this turn was "
+                "itself started by a wake, and a run may not chain another. Tell "
+                "the user it is running; if they ask later, read it with "
+                f"action='get_instance', name='{instance_id}'."
+            ),
+        }
+
+    # Either it finished while we were arranging the hand-off, or nobody is
+    # listening for a wake on this session. Reading it back is then the honest
+    # instruction — it is one call, not a loop.
+    return {
+        "error": f"Routine '{name}' timed out after {int(_RUN_BUDGET)}s. It is "
+        "still running — read its result later with "
+        f"action='get_instance', name='{instance_id}'. For a routine you "
+        "know is slow, submit it with action='run_async' instead of waiting.",
+        "instance_id": instance_id,
+    }
 
 
 def _result_payload(name: str, instance_id: str, inst: dict) -> dict:
@@ -351,7 +476,7 @@ async def run_routine(
     name: str, config: dict | None, target: str | None = None
 ) -> dict:
     """Run a one-shot routine in the main process and wait for its result."""
-    instance_id, error = await _submit_oneshot(name, config, target)
+    instance_id, _on_complete, error = await _submit_oneshot(name, config, target)
     if error:
         return error
 
@@ -361,13 +486,7 @@ async def run_routine(
         return {"error": f"Routine '{name}' could not be run: {e}"}
 
     if inst is None:
-        return {
-            "error": f"Routine '{name}' timed out after {int(_RUN_BUDGET)}s. It is "
-            "still running — read its result later with "
-            f"action='get_instance', name='{instance_id}'. For a routine you "
-            "know is slow, submit it with action='run_async' instead of waiting.",
-            "instance_id": instance_id,
-        }
+        return await _hand_off(name, instance_id)
     if inst.get("error"):
         return {
             "error": f"Routine '{name}' failed: {inst['error']}",
@@ -385,20 +504,48 @@ async def run_async_routine(
     The counterpart of ``run`` for work that outlives a turn (a backtest, a long
     scan): the run is a normal instance in the main process, so it keeps going,
     fires its post-run hooks and stores its result whether or not anyone is
-    waiting. Read it back later with ``get_instance``.
+    waiting.
+
+    Submitted with ``on_complete="resume"``, so the finished run hands its
+    outcome *back* to this conversation as a turn (see
+    ``RoutineStore._report_run``). That is what makes "do not wait" a real
+    instruction rather than a polite one: before it, the only way an agent could
+    act on a background run was to keep asking whether it was done, which spends
+    a turn per check and still misses the answer, because the completion note
+    was passive and woke nobody.
+
+    ``resume`` is what we *ask* for; the route decides. A submission made from
+    inside a wake turn is bounded back down to ``notify``, and the note below is
+    written from what came back rather than from what was requested — the same
+    way ``get_instance`` reads the stored value (CORR-287).
     """
-    instance_id, error = await _submit_oneshot(name, config, target)
+    instance_id, on_complete, error = await _submit_oneshot(
+        name, config, target, on_complete="resume"
+    )
     if error:
         return error
+
+    if on_complete == "resume":
+        note = (
+            "Running in the background. Do NOT poll it and do NOT wait: you "
+            "will be given its result automatically when it finishes. Tell the "
+            "user it is running and END YOUR TURN. Only if the user asks about "
+            f"it later, read it with action='get_instance', name='{instance_id}'."
+        )
+    else:
+        note = (
+            "Running in the background. It will NOT wake you — this turn was "
+            "itself started by a wake, and a run may not chain another. Do NOT "
+            "poll it: tell the user it is running, and if they ask later read "
+            f"it with action='get_instance', name='{instance_id}'."
+        )
 
     return {
         "started": True,
         "instance_id": instance_id,
         "routine": name,
-        "note": (
-            "Running in the background — do NOT wait for it. Read the result "
-            f"later with action='get_instance', name='{instance_id}'."
-        ),
+        "on_complete": on_complete,
+        "note": note,
     }
 
 
@@ -419,11 +566,19 @@ async def get_instance(instance_id: str) -> dict:
 
     name = inst.get("routine_name") or instance_id
     if inst.get("status") == "running":
+        note = "Still running."
+        if inst.get("on_complete") == "resume":
+            note += (
+                " You will be given its result automatically when it finishes — "
+                "do not check again, just end your turn."
+            )
+        else:
+            note += " Check again later, but not in a loop: report to the user."
         return {
             "name": name,
             "instance_id": instance_id,
             "status": "running",
-            "note": "Still running — check again later.",
+            "note": note,
         }
     if inst.get("error"):
         return {
@@ -565,13 +720,19 @@ def read_routine(name: str, target: str | None, shared: bool = False) -> dict:
         file_path = routines_dir / f"{name}.py"
         if file_path.exists():
             return {"name": name, "code": file_path.read_text(), "scope": "agent"}
+        # ...and the shipped one under it, which an agent can read and edit (the
+        # edit forks it down) but never delete.
+        twin = _stock_twin(routines_dir, name)
+        if twin is not None:
+            return {"name": name, "code": twin.read_text(), "scope": "agent"}
 
     # An assistant can read the source of anything it can run, so the shared
     # library is on the fallback path too — read-only for an agent, which the
     # `scope` says (writes go through _get_agent_routines_dir and never land here).
-    shared_path = _shared_root() / f"{name}.py"
-    if shared_path.exists():
-        return {"name": name, "code": shared_path.read_text(), "scope": "shared"}
+    for shared_path in _shared_roots():
+        candidate = shared_path / f"{name}.py"
+        if candidate.exists():
+            return {"name": name, "code": candidate.read_text(), "scope": "shared"}
 
     global_path = Path("routines") / f"{name}.py"
     if global_path.exists():
@@ -594,9 +755,16 @@ def edit_routine(
 
     file_path = routines_dir / f"{name}.py"
     if not file_path.exists():
-        return {
-            "error": f"Agent routine '{name}' not found. Use action='create_routine' first."
-        }
+        # A shipped routine is forked down and the edit lands on the copy, the
+        # same copy-on-write every other write path does (FEAT-115).
+        twin = _stock_twin(routines_dir, name)
+        if twin is None:
+            return {
+                "error": f"Agent routine '{name}' not found. Use action='create_routine' first."
+            }
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(twin, file_path)
+        log.info("agents: forked %s from stock (routine)", file_path)
 
     if not code:
         return {"error": "code is required"}
@@ -633,6 +801,10 @@ def delete_routine(name: str, target: str | None, shared: bool = False) -> dict:
 
     file_path = routines_dir / f"{name}.py"
     if not file_path.exists():
+        if _stock_twin(routines_dir, name) is not None:
+            from condor.layering import stock_delete_error
+
+            return {"error": stock_delete_error(name, mute_kind="routine")}
         return {"error": f"Agent routine '{name}' not found"}
 
     file_path.unlink()
@@ -645,13 +817,11 @@ async def manage_routines(
     config: dict | None = None,
     agent: str | None = None,
     code: str | None = None,
-    strategy_id: str | None = None,
     shared: bool | None = None,
 ) -> dict:
-    # ``strategy_id`` is the deprecated spelling of ``agent`` — routines live at
-    # the agent level, never per strategy. Kept so existing MCP hosts and the
-    # playbooks that name it keep working.
-    target = agent or strategy_id
+    # Routines live at the agent level, never per strategy — ``agent`` is the
+    # only target selector.
+    target = agent
     # Publish/target the shared library. Chat-only; ignored for an agent, whose
     # writes therefore stay in its own dir (see _get_agent_routines_dir).
     publish = bool(shared)

@@ -117,8 +117,13 @@ def test_acp_deploy_approved_by_a_human_runs():
     channel = _CapturingChannel(answer=True)
     result = _drive_acp(
         _acp_request(
-            "mcp__mcp-hummingbot__manage_executors",
-            {"action": "create", "executor_config": {"controller_id": "c"}},
+            "mcp__mcp-hummingbot__create_grid_executor",
+            {
+                "controller_id": "c",
+                "connector_name": "binance",
+                "trading_pair": "SOL-USDT",
+                "total_amount_quote": 100,
+            },
         ),
         channel,
     )
@@ -233,7 +238,7 @@ def test_acp_deploy_outside_the_namespace_is_cancelled(tmp_path):
 
 
 def test_risk_callback_cancels_unreadable_arguments():
-    call = normalize_tool_call(_acp_request("manage_executors", None))
+    call = normalize_tool_call(_acp_request("create_grid_executor", None))
     result = asyncio.run(_risk_callback()(call, OPTIONS))
     assert result["outcome"]["outcome"] == "cancelled"
 
@@ -251,7 +256,7 @@ def test_dry_run_blocks_an_acp_shaped_deploy():
 # ---------------------------------------------------------------------------
 
 AMM = "mcp__mcp-hummingbot__manage_amm"
-SWAPS = "mcp__mcp-hummingbot__manage_gateway_swaps"
+EXECUTE_SWAP = "mcp__mcp-hummingbot__execute_swap"
 
 
 def test_amm_signing_actions_are_dangerous():
@@ -261,11 +266,16 @@ def test_amm_signing_actions_are_dangerous():
 
 
 def test_swap_signing_action_is_dangerous():
-    """The swap left manage_amm for manage_gateway_swaps, and stayed gated."""
-    call = normalize_tool_call(_acp_request(SWAPS, {"action": "execute"}))
-    assert is_dangerous_tool_call(
-        call
-    ), "manage_gateway_swaps(execute) was auto-approved"
+    """The swap left manage_amm for its own tool, and stayed gated the whole way."""
+    call = normalize_tool_call(_acp_request(EXECUTE_SWAP, {"trading_pair": "SOL-USDC"}))
+    assert is_dangerous_tool_call(call), "execute_swap was auto-approved"
+
+
+def test_swap_reads_are_not_gated():
+    """Only the writer is dangerous by name; a free quote must not need a human."""
+    for name in ("quote_swap", "get_swap_status", "search_swaps"):
+        call = normalize_tool_call(_acp_request(f"mcp__mcp-hummingbot__{name}", {}))
+        assert not is_dangerous_tool_call(call), f"{name} needlessly gated"
 
 
 def test_amm_read_actions_stay_on_the_fast_path():
@@ -292,9 +302,8 @@ def test_a_swap_reaches_a_human_with_a_readable_summary():
     channel = _CapturingChannel(answer=False)
     result = _drive_acp(
         _acp_request(
-            SWAPS,
+            EXECUTE_SWAP,
             {
-                "action": "execute",
                 "connector": "meteora",
                 "side": "SELL",
                 "amount": "12.5",
@@ -347,9 +356,7 @@ def test_amm_summaries_name_what_is_being_moved():
 
 
 def test_dry_run_cancels_a_swap_but_not_a_quote():
-    swap = normalize_tool_call(
-        _acp_request(SWAPS, {"action": "execute", "connector": "meteora"})
-    )
+    swap = normalize_tool_call(_acp_request(EXECUTE_SWAP, {"connector": "meteora"}))
     assert (
         asyncio.run(_risk_callback(execution_mode="dry_run")(swap, OPTIONS))["outcome"][
             "outcome"
@@ -357,7 +364,9 @@ def test_dry_run_cancels_a_swap_but_not_a_quote():
         == "cancelled"
     )
 
-    quote = normalize_tool_call(_acp_request(SWAPS, {"action": "quote"}))
+    quote = normalize_tool_call(
+        _acp_request("mcp__mcp-hummingbot__quote_swap", {"connector": "meteora"})
+    )
     assert asyncio.run(_risk_callback(execution_mode="dry_run")(quote, OPTIONS))[
         "outcome"
     ] == {"outcome": "selected", "optionId": "allow"}
@@ -378,9 +387,7 @@ FUND_MOVING_TOOLS = {
     "manage_amm",
     "manage_bots",
     "manage_clmm",
-    "manage_executors",
     "manage_gateway_config",  # the wallets resource takes a private key
-    "manage_gateway_swaps",
 }
 
 #: Tools that read, or that only write config the trading loop must be told to
@@ -389,15 +396,17 @@ FUND_MOVING_TOOLS = {
 NON_FUND_MOVING_TOOLS = {
     "manage_controllers",  # writes controller templates, never a running bot
     "manage_gateway_container",  # starts and stops Gateway; signs nothing
+    "executor_defaults",  # edits a local preferences file; creates nothing
     "explore_dex_pools",
     "explore_geckoterminal",
 }
 
 #: Verbs that mean "this call changes something out in the world".
 MUTATING_PREFIXES = (
-    # Bare "execute", not "execute_": manage_gateway_swaps names its signing
-    # action `execute`, so the underscore spelling matched nothing on the one
-    # tool whose whole purpose is to sign a swap.
+    # Bare "execute", not "execute_": a tool that names its signing action
+    # `execute` would match nothing under the underscore spelling. The swap that
+    # motivated this is name-gated now (`execute_swap`, FEAT-064) and no longer
+    # enumerated here at all, but the loose prefix stays so the next one is caught.
     "execute",
     "add_",
     "remove_",
@@ -462,7 +471,120 @@ def test_every_mutating_action_of_a_fund_moving_tool_is_dangerous():
                 f"{tool_name}({action}) mutates but is auto-approved; "
                 "add it to the matching DANGEROUS_* set in condor/runtime/danger.py"
             )
-    # 3 AMM + 3 CLMM + 5 bot + 2 executor + 1 swap today: a floor, so a
-    # signature refactor that silently stops yielding actions fails instead of
-    # passing vacuously.
-    assert checked >= 14, f"only {checked} mutating actions found — enumeration broke"
+    # 3 AMM + 3 CLMM + 5 bot today: a floor, so a signature refactor that silently
+    # stops yielding actions fails instead of passing vacuously. Neither the swap
+    # nor the executor family is counted: they have no `action` since FEAT-064 and
+    # FEAT-062 and are gated by name instead (see test_swap_signing_action_is_dangerous
+    # and tests/test_dangerous_gate_names_resolve.py).
+    assert checked >= 11, f"only {checked} mutating actions found — enumeration broke"
+
+
+# ---------------------------------------------------------------------------
+# control_agent(start) launches an unattended loop: it must ask first (SEC-275)
+# ---------------------------------------------------------------------------
+
+CONTROL = "mcp__condor__control_agent"
+
+
+def test_starting_a_loop_asks_a_human_and_names_the_strategy():
+    """Starting a loop opens hundreds of positions; one executor already asks."""
+    channel = _CapturingChannel(answer=False)
+    result = _drive_acp(
+        _acp_request(
+            CONTROL,
+            {
+                "action": "start",
+                "strategy_id": "acme.momentum",
+                "config": {"execution_mode": "loop", "total_amount_quote": 500},
+            },
+        ),
+        channel,
+    )
+
+    assert len(channel.delivered) == 1, "the loop started with no confirmation"
+    assert channel.delivered[0].summary == (
+        "Start a live agent loop on 'acme.momentum' in loop mode, sized 500 quote"
+    )
+    assert result["outcome"]["outcome"] == "cancelled"
+
+
+def test_stopping_a_loop_never_asks():
+    """The brakes stay on the fast path: no prompt between a user and their stop."""
+    for action in ("list", "stop", "pause", "resume", "shutdown"):
+        channel = _CapturingChannel(answer=True)
+        result = _drive_acp(
+            _acp_request(CONTROL, {"action": action, "agent_id": "acme.momentum.1"}),
+            channel,
+        )
+        assert not channel.delivered, f"control_agent({action}) raised a confirmation"
+        assert result["outcome"]["outcome"] == "selected"
+
+
+def test_control_agent_with_unreadable_arguments_fails_closed():
+    for raw in (None, "not json", ["start"], {}, {"action": 7}):
+        call = normalize_tool_call(_acp_request(CONTROL, raw))
+        assert is_dangerous_tool_call(call), f"{raw!r} slipped past the gate"
+
+
+# ---------------------------------------------------------------------------
+# A summary that raises must not become a silent "no" (CORR-294)
+# ---------------------------------------------------------------------------
+
+
+def test_a_dca_with_string_amounts_reaches_a_human():
+    """The regression: rawInput reaches the summary before pydantic coerces it.
+
+    ``amounts_quote: list[float]`` accepts ["100", "100"], so this is a valid
+    create — but summing the raw strings raised inside the callback, the ACP
+    client turned that into a cancellation, and the human never saw the prompt.
+    """
+    channel = _CapturingChannel(answer=True)
+    result = _drive_acp(
+        _acp_request(
+            "mcp__mcp-hummingbot__create_dca_executor",
+            {
+                "controller_id": "c",
+                "connector_name": "binance",
+                "trading_pair": "SOL-USDC",
+                "amounts_quote": ["100", "100"],
+            },
+        ),
+        channel,
+    )
+
+    assert len(channel.delivered) == 1, "the create was denied with no confirmation"
+    assert channel.delivered[0].summary == (
+        "Create dca executor on SOL-USDC for 200 quote over 2 levels"
+    )
+    assert result["outcome"] == {"outcome": "selected", "optionId": "allow"}
+
+
+def test_a_summary_that_raises_still_raises_a_confirmation(monkeypatch):
+    """Belt and braces: no future formatting bug may deny a call unseen.
+
+    The prompt has to degrade to something a human can refuse, and it must not
+    describe a call it could not read — so it names the tool and says plainly
+    that the arguments could not be summarized.
+    """
+
+    def _boom(tool_call):
+        raise TypeError("summary bug")
+
+    monkeypatch.setattr(confirmations_module.danger, "format_tool_summary", _boom)
+
+    channel = _CapturingChannel(answer=False)
+    result = _drive_acp(
+        _acp_request(
+            "mcp__mcp-hummingbot__create_dca_executor",
+            {"trading_pair": "SOL-USDC", "amounts_quote": [100, 100]},
+        ),
+        channel,
+    )
+
+    assert len(channel.delivered) == 1, "a summary bug swallowed the confirmation"
+    summary = channel.delivered[0].summary
+    assert "arguments could not be summarized" in summary
+    assert "mcp__mcp-hummingbot__create_dca_executor" in summary
+    # It must never invent the shape of a call it failed to render.
+    assert "SOL-USDC" not in summary
+    assert result["outcome"]["outcome"] == "cancelled"

@@ -250,7 +250,7 @@ def test_start_refuses_a_foreign_notification_chat(monkeypatch, bot):
     monkeypatch.setattr(config_module, "load_full_config", lambda *a, **kw: {})
     agent = SimpleNamespace(slug="scout")
     strategy = SimpleNamespace(
-        slug="scalp", dir=".", default_config={}, default_trading_context=""
+        slug="scalp", home=".", default_config={}, default_trading_context=""
     )
 
     with pytest.raises(HTTPException) as exc:

@@ -55,8 +55,8 @@ from ._shared import (
     set_controller_config,
 )
 from .controllers import get_controller_info, get_supported_controller_types
+from .controllers._analysis import calculate_natr
 from .controllers.grid_strike.grid_analysis import (
-    calculate_natr,
     generate_theoretical_grid,
     suggest_grid_params,
 )

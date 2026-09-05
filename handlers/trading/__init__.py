@@ -11,14 +11,14 @@ import logging
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
-from handlers import clear_all_input_states, is_gateway_network
-from handlers.cex.trade import handle_trade as cex_handle_trade
-from handlers.config.user_preferences import (
+from condor.preferences import (
     get_clob_order_defaults,
     get_dex_swap_defaults,
     get_last_trade_connector,
     set_last_trade_connector,
 )
+from handlers import clear_all_input_states, is_gateway_network
+from handlers.cex.trade import handle_trade as cex_handle_trade
 from handlers.dex.swap import handle_swap as dex_handle_swap
 from utils.auth import hummingbot_api_required, restricted
 from utils.telegram_formatters import escape_markdown_v2, format_network_display

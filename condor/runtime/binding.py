@@ -14,6 +14,8 @@ reader: it is gone.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from dataclasses import dataclass, field
 
@@ -32,6 +34,26 @@ AGENT_SLUG_ENV = "CONDOR_AGENT_SLUG"
 
 class UnknownAgent(ValueError):
     """Raised when a session is bound to an agent slug that does not exist."""
+
+
+# The parts a session's configuration is fingerprinted in. Named rather than
+# folded into one digest because the name is what the log line and the note in
+# the transcript say: "reloaded (tools)" is diagnosable, "something changed" is
+# not. Order is the order they are reported in.
+CONFIG_PARTS = ("model", "identity", "tools", "libraries", "server")
+
+
+def _digest(part: object) -> str:
+    """Short, stable digest of one configuration part.
+
+    Determinism is load-bearing: a digest that moves on its own would respawn
+    every chat session on every message and truncate each one to the replay
+    budget. ``sort_keys`` settles dict ordering, ``default=str`` keeps an
+    unexpected value from raising mid-turn, and every set fed in here is sorted
+    by its caller.
+    """
+    blob = json.dumps(part, sort_keys=True, default=str)
+    return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
 
 @dataclass
@@ -77,15 +99,70 @@ class SessionBinding:
         """
         return self.agent_slug if self.is_agent else ""
 
+    def fingerprint(self) -> dict[str, str]:
+        """Per-part digests of everything a spawn bakes into the session.
+
+        A chat session holds one subprocess across every turn, and the whole
+        configuration — model, instructions, tool profile, mute list, server —
+        is handed over exactly once, inside ``session/new``. So staleness is not
+        an event anybody can publish: ``manage_agents`` rewrites ``AGENT.md``
+        from the MCP subprocess, the web routes write ``mutes.yml`` from the
+        main process, and no signal reaches from one to the other. It is a
+        *fact to be recomputed*, and this is the recomputation — the filesystem
+        is the channel, this is the read.
+
+        Compared per turn by the session registry (FEAT-093). Because it hashes
+        content rather than counting writes, N changes before the next message
+        coalesce into one reload and a change that is reverted before the next
+        message costs none.
+
+        ``libraries`` is the one part not already resolved onto the binding:
+        skill and routine mutes are read at prompt-build time, not baked into
+        argv, so they are read here. Tool mutes need no such read — they ride
+        into ``mcp_servers`` as ``--mute-tools`` (FEAT-091).
+
+        The **inputs** must never be logged: ``mcp_servers`` carries API keys in
+        its ``env`` entries. The digests are safe to carry and only part *names*
+        are ever rendered.
+        """
+        from condor.memory.mutes import load_mutes
+
+        try:
+            mutes = load_mutes(self.agent_slug)
+        except Exception:  # noqa: BLE001 - an unreadable mute file is "none muted"
+            mutes = {}
+        libraries = {
+            kind: sorted(mutes.get(kind) or ()) for kind in ("skills", "routines")
+        }
+
+        return {
+            "model": _digest(self.agent_key),
+            "identity": _digest([self.label, self.instructions]),
+            # ``mcp_servers`` carries the seat profile and the tool mute list on
+            # argv, so this one part covers both what is mounted and what the
+            # allowlist narrows it to.
+            "tools": _digest([self.tools, self.mcp_servers]),
+            "libraries": _digest(libraries),
+            "server": _digest([self.server_name, self.server_pinned]),
+        }
+
 
 def resolve(
     spec: SessionSpec,
     user_data: dict | None = None,
+    session_key: str = "",
 ) -> SessionBinding:
     """Resolve the binding for ``spec``: one path, one registry.
 
     An empty ``agent_slug`` is not "no agent" — it is the default one, Condor.
     Callers get a fully resolved toolset and identity and never re-derive either.
+
+    ``session_key`` is the seat this binding is for, passed down to the condor
+    MCP subprocess so a tool that reports back to its origin (``delegate``,
+    ``run_code``, ``send_notification``, ``manage_routines``) knows which
+    conversation asked. Only a chat session has one; consult, the delegate
+    worker and the tick engine call :func:`toolsets.build_mcp_servers_for_session`
+    directly and correctly pass none.
     """
     from condor.agents.agent import Agent, AgentStore
 
@@ -123,6 +200,7 @@ def resolve(
         user_data,
         server_name=effective_server if agent.server_required else None,
         agent_slug=agent.slug,
+        session_key=session_key,
     )
 
     return SessionBinding(

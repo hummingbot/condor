@@ -18,11 +18,18 @@ from datetime import datetime, timezone
 from telegram import Bot
 
 from condor.acp import ACPClient, PermissionCallback, PromptDone
+from condor.acp.client import ToolCallEvent, ToolCallUpdate, fold_tool_call_event
 from condor.acp.pydantic_ai_client import PydanticAIClient
+from condor.agents import deeds
 from condor.agents.agent import identity_header as agent_identity_header
 from condor.runtime import binding, conversations
 from condor.runtime.confirmations import get_registry as get_confirmation_registry
-from condor.runtime.context import build_initial_context, platform_formatting
+from condor.runtime.context import (
+    build_initial_context,
+    chat_tool_preload,
+    conversation_attribution,
+    platform_formatting,
+)
 from condor.runtime.keys import SessionKey
 from condor.runtime.models import SessionInfo, SessionSpec
 from condor.runtime.timeouts import TIMEOUTS
@@ -43,6 +50,28 @@ MAX_SESSIONS_PER_USER = 5
 # Module-level session storage keyed by str(SessionKey).
 # Not persisted -- subprocesses can't survive restarts.
 _sessions: dict[str, "AgentSession"] = {}
+
+# The slots whose subprocess went away but whose conversation did not (CORR-265),
+# keyed like ``_sessions``; the value is the last SessionInfo that session
+# reported, with ``alive`` false.
+#
+# "Reaped" and "destroyed" are different answers to "where did my chat go", and
+# only the registry can tell them apart. An idle detach (PERF-226), an LRU
+# eviction and the health monitor's sweep of a dead subprocess all keep the
+# conversation and reattach on the next message, so the slot is remembered here
+# and a frontend can still list it. An explicit destroy -- Telegram /new,
+# ``destroy_session``, the REST endpoint -- means the user asked for it to be
+# gone, so it leaves nothing behind and disappears from every roster.
+#
+# Only slots with a durable conversation to come back to are remembered: without
+# one there is nothing a reattach could resume.
+_detached: dict[str, SessionInfo] = {}
+
+# How many detached slots to remember, per user per surface. The same bound as
+# the live cap, so the registry never remembers more retired slots than it
+# allows running ones -- a long-lived process cannot grow an unbounded tab
+# strip, and a busy Telegram user cannot evict a web tab's memory of itself.
+MAX_DETACHED_PER_USER = MAX_SESSIONS_PER_USER
 
 # Creation serialization (CORR-187). get_or_create_session is a check-then-
 # create that spans many awaits (subprocess spawn, eager context prompt), so
@@ -110,6 +139,26 @@ class AgentSession:
     pending_context: str | None = None  # Lazy context: injected on first prompt
     created_at: datetime = field(default_factory=_utcnow)
     last_prompt_at: datetime | None = None
+    # ── What this session was built from, so it can be rebuilt (FEAT-093) ──
+    #
+    # A chat session is the one runtime that holds a client across turns, so it
+    # is the one that can go stale: the model, instructions, tool profile, mute
+    # list and server are handed to the subprocess once, at ``session/new``, and
+    # there is no re-handshake. ``fingerprint`` is the digest of exactly those
+    # inputs (:meth:`~condor.runtime.binding.SessionBinding.fingerprint`),
+    # recomputed per turn and compared here; the three below are what a respawn
+    # needs so the registry can do it without a caller.
+    #
+    # ``spec`` is kept **verbatim**: a refresh changes the configuration and
+    # nothing else, so ``agent_key=""`` stays "" (it means "inherit whoever is
+    # bound" — filling it in reintroduces FEAT-037) and ``lazy_context`` stays
+    # whatever the surface chose. ``permission_callback`` and ``user_data`` are
+    # already held by the client, so remembering them here is the same
+    # references one level up, not a new lifetime.
+    fingerprint: dict[str, str] = field(default_factory=dict)
+    spec: SessionSpec | None = None
+    permission_callback: PermissionCallback | None = None
+    user_data: dict | None = None
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _abort_event: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -132,7 +181,13 @@ class AgentSession:
             conversation_id=self.conversation_id,
         )
 
-    async def prompt_stream(self, text: str, *, lock_timeout: float | None = None):
+    async def prompt_stream(
+        self,
+        text: str,
+        *,
+        images: list | None = None,
+        lock_timeout: float | None = None,
+    ):
         """Stream a prompt, managing the busy flag and lock.
 
         The lock *is* the queue: ``asyncio.Lock`` is FIFO, so several prompts
@@ -140,6 +195,13 @@ class AgentSession:
         lock-acquisition timeout to avoid waiting forever when a previous
         prompt is stuck, and an overall wall-clock timeout
         (PROMPT_OVERALL_TIMEOUT) to kill runaway prompts.
+
+        ``images`` travels *beside* the text and never inside it, which is why
+        ``text`` is still a plain ``str`` here: the pending-context prepend below
+        and the view block further up are both string surgery, and either would
+        have to learn a content-block format the moment a picture could be in
+        there. A turn with no images calls the client exactly as it always did
+        (FEAT-098).
 
         ``lock_timeout`` defaults to PROMPT_LOCK_TIMEOUT, which guards against a
         *stuck* prompt. A caller that is deliberately waiting its turn passes a
@@ -173,14 +235,33 @@ class AgentSession:
 
         self.is_busy = True
         self.last_prompt_at = _utcnow()
+        # What this turn did to the world, folded as it streams. Turn-local: a
+        # deed belongs to the turn that made it, and a session that lives for a
+        # day must not accumulate one map of everything it ever touched.
+        tc_map: dict[str, dict] = {}
         try:
             loop = asyncio.get_event_loop()
             deadline = loop.time() + PROMPT_OVERALL_TIMEOUT
-            async for event in self.client.prompt_stream(text):
+            # Passed only when there is something to pass, so the text-only
+            # call is byte-for-byte the one this line has always made — and a
+            # client that never learned the keyword (a test double, a future
+            # backend) keeps working until the day it is handed a picture.
+            stream = (
+                self.client.prompt_stream(text, images=images)
+                if images
+                else self.client.prompt_stream(text)
+            )
+            async for event in stream:
                 # Check if abort was requested between events
                 if self._abort_event.is_set():
                     yield PromptDone(stop_reason="cancelled")
                     break
+                if isinstance(event, (ToolCallEvent, ToolCallUpdate)):
+                    # Folded as it passes, never stored anywhere else: this is
+                    # the same reduction the tick engine and the delegate worker
+                    # run, so a chat's record of what it did has exactly the
+                    # shape a loop's does (FEAT-105).
+                    fold_tool_call_event(tc_map, event)
                 yield event
                 if isinstance(event, PromptDone):
                     break
@@ -210,6 +291,18 @@ class AgentSession:
         finally:
             self.is_busy = False
             self._lock.release()
+            # In ``finally`` rather than on ``PromptDone``: a turn that was
+            # cancelled or timed out still deployed whatever it deployed before
+            # it stopped, and a record that only survives the happy path is
+            # exactly the record you cannot trust. ``record_deeds`` writes
+            # nothing — and creates nothing — when the turn mutated nothing,
+            # which is the common case.
+            deeds.record_deeds(
+                deeds.for_conversation(
+                    self.user_id, self.conversation_id, self.agent_slug
+                ),
+                list(tc_map.values()),
+            )
 
     async def abort(self) -> None:
         """Abort the current in-flight prompt, at the agent.
@@ -300,8 +393,10 @@ async def _enforce_session_budget(user_id: int, surface: str | None = None) -> N
         if session.user_id == user_id and not session.client.alive:
             # Dropped straight from the registry rather than through
             # _destroy_session_internal (the subprocess is already gone), so
-            # the sweep it owns has to be repeated here.
+            # the sweeps it owns have to be repeated here -- including
+            # remembering the slot, which a dead subprocess does not end.
             _deny_pending_confirmations(raw_key)
+            _remember_detached(session)
             _sessions.pop(raw_key, None)
 
     while True:
@@ -335,13 +430,16 @@ async def _enforce_session_budget(user_id: int, surface: str | None = None) -> N
             victim.conversation_id or "none",
             ", crossing surfaces" if crossed else "",
         )
-        await _destroy_session_internal(victim.key)
+        await _destroy_session_internal(victim.key, retain=True)
         if crossed:
             await _notify_detached_by_budget(victim.key)
 
 
 def bound_agent_context(
-    bound: binding.SessionBinding, user_id: int, platform: str
+    bound: binding.SessionBinding,
+    user_id: int,
+    platform: str,
+    agent_key: str = "",
 ) -> str:
     """The opening context of a chat bound to a specialist Agent.
 
@@ -352,15 +450,25 @@ def bound_agent_context(
     speaking into renders a reply: no tables and no charts on the dashboard, no
     length rules on Telegram. The formatting section is appended here, at the
     branch that skips the other path, so both teach it exactly once.
+
+    The ToolSearch preload was the second thing stranded on this branch
+    (CORR-272): under ACP the MCP tools are deferred, so a specialist that is
+    never told the names has every orchestration tool mounted and no way to
+    find one — it would read the repo for a way to stop a loop that
+    ``control_agent`` was authorized to stop the whole time. ``agent_key``
+    falls back to the binding's own; the caller passes the resolved key, since
+    a model picked in the UI overrides what the Agent front matter configured.
     """
-    return "\n\n".join(
-        (
-            binding.agent_identity_context(
-                bound.agent_slug, user_id, bound.instructions, bound.label
-            ),
-            platform_formatting(platform),
-        )
-    )
+    sections = [
+        binding.agent_identity_context(
+            bound.agent_slug, user_id, bound.instructions, bound.label
+        ),
+        platform_formatting(platform),
+    ]
+    preload = chat_tool_preload(agent_key or bound.agent_key)
+    if preload:
+        sections.append(preload)
+    return "\n\n".join(sections)
 
 
 def _resolve_conversation(
@@ -475,13 +583,51 @@ async def _get_or_create_session_locked(
         or session
         and session.conversation_id == spec.conversation_id
     )
-    if (
+    # Who is answering, with what tools, memory and server — resolved once here
+    # and handed to ``_spawn_session`` below, so the staleness comparison and
+    # the spawn can never disagree about what the configuration says. Raises
+    # UnknownAgent before anything is destroyed, so a bad slug cannot cost a
+    # caller the session it already had.
+    bound = binding.resolve(spec, user_data, session_key=raw_key)
+    fingerprint = bound.fingerprint()
+    # The third clause of "is the session behind this key still the one this
+    # spec describes" (FEAT-093): the configuration it was built from has moved
+    # on disk since. An empty stored fingerprint means a session this registry
+    # did not build the inputs for, which is nothing to compare against — never
+    # a reason to reload.
+    stale = (
+        [
+            part
+            for part in binding.CONFIG_PARTS
+            if session.fingerprint.get(part) != fingerprint.get(part)
+        ]
+        if session and session.fingerprint
+        else []
+    )
+    reusable = bool(
         session
         and same_model
         and same_conversation
         and session.agent_slug == spec.agent_slug
         and session.client.alive
-    ):
+    )
+    if reusable and not stale:
+        return session
+
+    if reusable and session.is_busy:
+        # Staleness is the *only* thing separating this session from the one
+        # asked for, and a turn is in flight. A background config change did not
+        # ask for the answer in progress to be SIGTERMed, so the swap is
+        # skipped — and deliberately not remembered: the digest is still stale
+        # at the next turn, so the next turn does it. No pending-reload set to
+        # leak, to drop on restart, or to apply to the wrong session. The
+        # deliberate mismatches (a model or identity switch) keep today's
+        # behaviour and replace the busy session, because the user asked for it.
+        log.info(
+            "Session %s is stale (%s) but answering; reloading on the next turn",
+            raw_key,
+            ", ".join(stale),
+        )
         return session
 
     # Destroy old session if exists
@@ -504,7 +650,7 @@ async def _get_or_create_session_locked(
         _pending_creates.setdefault(spec.user_id, set()).add(raw_key)
         try:
             return await _spawn_session(
-                spec, key, raw_key, permission_callback, user_data
+                spec, key, raw_key, permission_callback, user_data, bound, fingerprint
             )
         finally:
             reserved = _pending_creates.get(spec.user_id)
@@ -513,7 +659,9 @@ async def _get_or_create_session_locked(
                 if not reserved:
                     del _pending_creates[spec.user_id]
 
-    return await _spawn_session(spec, key, raw_key, permission_callback, user_data)
+    return await _spawn_session(
+        spec, key, raw_key, permission_callback, user_data, bound, fingerprint
+    )
 
 
 async def _spawn_session(
@@ -522,11 +670,17 @@ async def _spawn_session(
     raw_key: str,
     permission_callback: PermissionCallback | None,
     user_data: dict | None,
+    bound: binding.SessionBinding,
+    fingerprint: dict[str, str],
 ) -> AgentSession:
     """Spawn, contextualize, and register a new session for ``raw_key``.
 
     Runs under the per-key creation lock, with the key's budget slot already
     reserved when the spec names a user.
+
+    ``bound`` and its ``fingerprint`` are resolved by the caller rather than
+    here, so the configuration this session is built from is the very one the
+    reuse predicate compared against (FEAT-093).
     """
     # MCP subprocess env expects a numeric chat id; surfaces without a chat
     # (web, mcp) fall back to the user id. The same pair goes down on argv via
@@ -541,13 +695,20 @@ async def _spawn_session(
         # key does and is stable for the subprocess's whole life — so tools that
         # need conversation provenance (delegate) post the key back and let the
         # route resolve it where the truth lives.
+        #
+        # This env var reaches the *ACP* subprocess. It does not reliably reach
+        # the MCP server the bridge spawns beneath it — a stdio MCP child gets
+        # the ``env`` from its own config, not this process's environment — so
+        # the key also goes down on argv via ``binding.resolve`` below, which is
+        # the channel the subprocess actually reads first. Kept here too because
+        # a run started outside a session has nothing else.
         "CONDOR_SESSION_KEY": raw_key,
     }
 
-    # Who is answering: the bound Agent, or Condor when none is named — with
-    # its model, tool allowlist, server pin and memory scope. Raises UnknownAgent
-    # before anything is spawned, so a bad slug cannot orphan a subprocess.
-    bound = binding.resolve(spec, user_data)
+    # Who is answering: the bound Agent, or Condor when none is named — with its
+    # model, tool allowlist, server pin and memory scope. Resolved by the caller
+    # (which needs it to decide whether a live session is still current), and
+    # raising UnknownAgent there — before anything is spawned or destroyed.
     extra_env.update(bound.mcp_env)
     mcp_servers = bound.mcp_servers
     agent_key = bound.agent_key or spec.agent_key
@@ -595,7 +756,9 @@ async def _spawn_session(
         # the chat's — that is what makes it a different brain, not a skin.
         initial_context = ""
         if bound.is_agent and spec.user_id:
-            initial_context = bound_agent_context(bound, spec.user_id, spec.platform)
+            initial_context = bound_agent_context(
+                bound, spec.user_id, spec.platform, agent_key
+            )
         elif spec.user_id:
             initial_context = build_initial_context(
                 spec.user_id,
@@ -643,11 +806,25 @@ async def _spawn_session(
             server_name=bound.server_name or resolved_server,
         )
 
+        # What this conversation's positions are called (CORR-325). Appended
+        # here rather than inside either context builder because this is the
+        # first line at which both branches have converged *and* the
+        # conversation id exists — it is minted just above, and a specialist
+        # skips `build_initial_context` altogether. One statement, so the two
+        # brains cannot end up tagging the same chat differently.
+        attribution = conversation_attribution(
+            deeds.attribution_tag(
+                deeds.for_conversation(
+                    spec.user_id, conversation_id, bound.specialist_slug
+                )
+            )
+        )
+
         # Caller-supplied context (e.g. a switch handoff recap) rides along as
         # spec data, so no caller needs the live session object.
         initial_context = "\n\n".join(
             part
-            for part in (initial_context, replay, spec.extra_context)
+            for part in (initial_context, attribution, replay, spec.extra_context)
             if part and part.strip()
         ).strip()
 
@@ -670,6 +847,13 @@ async def _spawn_session(
             label=bound.label,
             conversation_id=conversation_id,
             pending_context=initial_context or None,
+            fingerprint=fingerprint,
+            # Verbatim, minus the conversation: the id is minted above, and a
+            # spec that carried none must come back to *this* transcript rather
+            # than opening another one on the next refresh.
+            spec=spec.model_copy(update={"conversation_id": conversation_id}),
+            permission_callback=permission_callback,
+            user_data=user_data,
         )
     except Exception:
         # Something failed after start -- stop client to prevent orphan subprocess
@@ -677,6 +861,9 @@ async def _spawn_session(
         raise
 
     _sessions[raw_key] = session
+    # The slot is running again, so the memory of it being reaped is stale --
+    # and leaving it would list the slot twice on the next roster.
+    _detached.pop(raw_key, None)
     log.info("Created agent session %s: %s (%s)", raw_key, agent_key, bound.label)
     return session
 
@@ -686,25 +873,166 @@ def get_session(key: SessionKey) -> AgentSession | None:
     return _sessions.get(str(key))
 
 
-def list_sessions(user_id: int | None = None) -> list[SessionInfo]:
-    """List every registered session, optionally filtered by owning user."""
+async def refresh_if_stale(key: SessionKey) -> list[str]:
+    """Rebuild the session behind ``key`` if its configuration moved. FEAT-093.
+
+    Returns the names of the parts that changed — ``["tools"]``, ``["model",
+    "libraries"]`` — and an empty list when nothing did, which is the normal
+    answer and the cheap one: a resolve and five hashes, no spawn.
+
+    Called once per turn from :func:`condor.runtime.client.prompt`, the one code
+    path every surface takes. That is the moment a change can still matter and
+    the moment no turn is in flight, which is what makes an operator flipping a
+    playbook off in the panel reach the chat they already have open rather than
+    the next one they start.
+
+    The rebuild itself is not implemented here: the stored spec goes back
+    through :func:`get_or_create_session`, whose reuse predicate finds the same
+    mismatch and does the destroy-and-respawn it already knows how to do. One
+    predicate, one destroy path, no second implementation of "swap this
+    session".
+
+    A session with no remembered spec (nothing this registry spawned) or one
+    that is mid-answer is left alone. Neither is remembered as pending: the
+    digest is still stale next turn.
+    """
+    session = _sessions.get(str(key))
+    if session is None or session.spec is None or not session.fingerprint:
+        return []
+    if session.is_busy or not session.client.alive:
+        return []
+
+    try:
+        bound = binding.resolve(session.spec, session.user_data, session_key=str(key))
+        fingerprint = bound.fingerprint()
+    except Exception:  # noqa: BLE001 - a chat must not die on an unreadable config
+        log.warning("Could not re-resolve the binding for %s", key, exc_info=True)
+        return []
+
+    # Part *names* only, here and everywhere downstream: the inputs behind the
+    # ``tools`` digest carry the MCP servers' env, API keys included.
+    stale = [
+        part
+        for part in binding.CONFIG_PARTS
+        if session.fingerprint.get(part) != fingerprint.get(part)
+    ]
+    if not stale:
+        return []
+
+    log.info("Reloading session %s to apply new %s", key, ", ".join(stale))
+    await get_or_create_session(
+        session.spec,
+        permission_callback=session.permission_callback,
+        user_data=session.user_data,
+    )
+    return stale
+
+
+def _remember_detached(session: "AgentSession") -> None:
+    """File a reaped session under ``_detached`` so its slot can still be listed.
+
+    Only a session with an owner and a durable conversation is worth
+    remembering: a reattach resumes the transcript, so without one there is
+    nothing for the slot to come back to.
+    """
+    if session.user_id is None or not session.conversation_id:
+        return
+    _detached[str(session.key)] = session.info().model_copy(
+        update={"alive": False, "is_busy": False}
+    )
+    _trim_detached(session.user_id, session.key.surface)
+
+
+def _trim_detached(user_id: int, surface: str) -> None:
+    """Keep only the most recent MAX_DETACHED_PER_USER slots for one surface."""
+    mine = [
+        (raw_key, info)
+        for raw_key, info in _detached.items()
+        if info.user_id == user_id and info.surface == surface
+    ]
+    if len(mine) <= MAX_DETACHED_PER_USER:
+        return
+    mine.sort(key=lambda pair: pair[1].last_prompt_at or pair[1].created_at)
+    for raw_key, _ in mine[: len(mine) - MAX_DETACHED_PER_USER]:
+        _detached.pop(raw_key, None)
+
+
+def _detached_infos(user_id: int | None) -> list[SessionInfo]:
+    """The remembered slots that are still resumable, dropping the ones that aren't.
+
+    A conversation deleted since the reap (from the dashboard, from Telegram, by
+    hand on disk) has nothing to resume, and listing it would put a tab on
+    screen whose first message could only fail. The check doubles as the
+    garbage collection for this dict: there is no delete hook to subscribe to,
+    and the read is the moment the truth is needed.
+    """
+    infos: list[SessionInfo] = []
+    for raw_key, info in list(_detached.items()):
+        if user_id is not None and info.user_id != user_id:
+            continue
+        if str(raw_key) in _sessions:  # respawned; the live entry is the truth
+            continue
+        try:
+            alive_conversation = (
+                conversations.get_conversation(info.user_id, info.conversation_id)
+                is not None
+            )
+        except Exception:  # noqa: BLE001 - an unreadable id is a gone conversation
+            alive_conversation = False
+        if not alive_conversation:
+            _detached.pop(raw_key, None)
+            continue
+        infos.append(info)
+    return infos
+
+
+def list_sessions(
+    user_id: int | None = None, *, include_detached: bool = False
+) -> list[SessionInfo]:
+    """List every registered session, optionally filtered by owning user.
+
+    ``include_detached`` widens the answer from "the subprocesses running right
+    now" to "the slots this user has on the surface", adding the reaped ones
+    with ``alive`` false (CORR-265). It is opt-in because the two are genuinely
+    different questions: the REST session list and the teardown that walks live
+    sessions want the narrow one, and a frontend rebuilding its tab strip wants
+    the wide one.
+    """
     infos: list[SessionInfo] = []
     for session in list(_sessions.values()):
         if user_id is not None and session.user_id != user_id:
             continue
         infos.append(session.info())
+    if include_detached:
+        infos.extend(_detached_infos(user_id))
     return infos
 
 
 async def destroy_session(key: SessionKey) -> bool:
-    """Destroy the session for a key. Returns True if a session existed."""
+    """Destroy the session for a key. Returns True if a live session existed.
+
+    Destroying is the deliberate one: it also forgets any memory of the slot, so
+    the tab disappears from every roster instead of coming back as resumable.
+    """
     return await _destroy_session_internal(key)
 
 
-async def _destroy_session_internal(key: SessionKey) -> bool:
+async def _destroy_session_internal(key: SessionKey, *, retain: bool = False) -> bool:
+    """Tear down one session; ``retain`` remembers the slot as resumable.
+
+    Every teardown funnels through here, and ``retain`` is what tells them
+    apart: the reaps that keep the conversation (idle detach, LRU eviction, a
+    dead subprocess swept up) pass True, and everything that means "this chat is
+    over" leaves the default False, which also clears any earlier memory of the
+    slot.
+    """
     raw_key = str(key)
     _deny_pending_confirmations(raw_key)
     session = _sessions.pop(raw_key, None)
+    if retain and session is not None:
+        _remember_detached(session)
+    elif not retain:
+        _detached.pop(raw_key, None)
     if session:
         try:
             await session.client.stop()
@@ -720,6 +1048,9 @@ async def destroy_all_sessions() -> None:
     keys = [session.key for session in list(_sessions.values())]
     for key in keys:
         await _destroy_session_internal(key)
+    # Nothing survives the process, so nothing is resumable on the other side of
+    # this call either.
+    _detached.clear()
     log.info("Destroyed all %d agent session(s)", len(keys))
 
 
@@ -772,7 +1103,9 @@ async def _sweep_sessions() -> None:
     reattaches — silently, like the LRU's same-surface detach.
 
     Both go out through ``_destroy_session_internal``, the one funnel that also
-    denies whatever the session was still asking a human to approve.
+    denies whatever the session was still asking a human to approve — and both
+    ``retain`` the slot, because neither is the user saying the chat is over: a
+    frontend can still list it, and the next message reattaches it (CORR-265).
     """
     ttl = TIMEOUTS.session_idle
     now = _utcnow()
@@ -804,7 +1137,7 @@ async def _sweep_sessions() -> None:
 
     for key in dead_keys:
         log.warning("Health monitor: dead session %s, cleaning up", key)
-        await _destroy_session_internal(key)
+        await _destroy_session_internal(key, retain=True)
         # Only Telegram sessions have a chat to notify.
         chat_id = key.telegram_chat_id
         if _health_bot and chat_id is not None:
@@ -825,4 +1158,4 @@ async def _sweep_sessions() -> None:
             ttl,
             conversation_id or "none",
         )
-        await _destroy_session_internal(key)
+        await _destroy_session_internal(key, retain=True)

@@ -14,6 +14,7 @@ anything still running, and anything past the cap that is not terminal.
 """
 
 import asyncio
+import re
 
 import pytest
 
@@ -89,7 +90,7 @@ def _run_delegation(monkeypatch, task="scan SOL pools", emit=None, result="done 
 def test_finished_delegations_are_bounded_and_evicted_oldest_first(
     tmp_path, monkeypatch
 ):
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     _write_agent(tmp_path, "scout")
 
     ids = [
@@ -106,7 +107,7 @@ def test_finished_delegations_are_bounded_and_evicted_oldest_first(
 
 
 def test_an_evicted_delegation_is_still_readable_from_disk(tmp_path, monkeypatch):
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     _write_agent(tmp_path, "scout")
 
     from condor.acp.client import ThoughtChunk
@@ -132,7 +133,7 @@ def test_an_evicted_delegation_is_still_readable_from_disk(tmp_path, monkeypatch
 
 def test_a_recent_delegation_is_still_fully_retrievable(tmp_path, monkeypatch):
     """The collect-later contract: a poll right after completion hits memory."""
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     _write_agent(tmp_path, "scout")
 
     from condor.acp.client import ToolCallEvent, ToolCallUpdate
@@ -160,7 +161,7 @@ def test_a_recent_delegation_is_still_fully_retrievable(tmp_path, monkeypatch):
 
 
 def test_an_in_flight_delegation_is_never_evicted(tmp_path, monkeypatch):
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     _write_agent(tmp_path, "scout")
 
     running = DelegateTask(
@@ -201,7 +202,7 @@ def test_retiring_a_dropped_delegation_does_not_resurrect_it():
 
 
 def test_the_event_stream_of_one_delegation_is_bounded(tmp_path, monkeypatch):
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     _write_agent(tmp_path, "scout")
 
     from condor.acp.client import ToolCallEvent
@@ -233,10 +234,30 @@ def test_the_event_stream_of_one_delegation_is_bounded(tmp_path, monkeypatch):
     assert str(marker["count"]) in wire[0]["text"]
 
 
+def test_the_cut_marker_states_the_count_without_naming_a_ticket():
+    """Both projections of the marker are read by a user, so neither leaks an id.
+
+    ``events_for_wire`` renders it into the delegation sheet and
+    ``_render_session`` into the transcript on disk. The count is the whole
+    point of the line and has to survive; the backlog id that used to ride
+    along with it (READ-335) means nothing to a reader of either surface.
+    """
+    events = [{"type": delegate_module.DROPPED_EVENT_TYPE, "count": 51}]
+
+    wire_text = events_for_wire(events)[0]["text"]
+    markdown = delegate_module._render_session(events)
+
+    for rendered in (wire_text, markdown):
+        assert "51" in rendered
+        assert "CORR-143" not in rendered
+        # Not just this one id: no ticket-shaped token at all.
+        assert not re.search(r"\b[A-Z]{3,5}-\d+\b", rendered)
+
+
 def test_a_huge_tool_output_is_clipped_in_memory_not_only_on_the_wire(
     tmp_path, monkeypatch
 ):
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     _write_agent(tmp_path, "scout")
 
     from condor.acp.client import ToolCallEvent, ToolCallUpdate
@@ -269,7 +290,7 @@ def test_a_huge_tool_output_is_clipped_in_memory_not_only_on_the_wire(
 def test_a_long_reasoning_run_rolls_into_new_events_instead_of_one_string(
     tmp_path, monkeypatch
 ):
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     _write_agent(tmp_path, "scout")
 
     from condor.acp.client import ThoughtChunk
@@ -402,7 +423,7 @@ def test_retention_can_be_turned_off(monkeypatch):
 
 def test_finishing_a_delegation_sweeps_its_own_owners_directory(tmp_path, monkeypatch):
     """The end-to-end bound: a listing never walks more than the cap again."""
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     _write_agent(tmp_path, "scout")
     monkeypatch.setattr(delegate_module, "MAX_DELEGATION_RECORDS", 3)
 
@@ -423,7 +444,7 @@ def test_finishing_a_delegation_sweeps_its_own_owners_directory(tmp_path, monkey
 def test_a_retention_failure_does_not_break_the_final_status_write(
     tmp_path, monkeypatch
 ):
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     _write_agent(tmp_path, "scout")
 
     def boom(*a, **kw):

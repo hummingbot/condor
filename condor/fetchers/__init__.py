@@ -63,15 +63,26 @@ from condor.fetchers.market_data import (
     fetch_tickers,
 )
 from condor.fetchers.orders import fetch_active_orders
+from condor.fetchers.performance_history import (
+    PerformanceHistoryUnsupported,
+)
+from condor.fetchers.performance_history import extract_rows as extract_performance_rows
+from condor.fetchers.performance_history import (
+    fetch_performance_history,
+    probe_performance_history,
+    reject_foreign_filters,
+)
 from condor.fetchers.portfolio import fetch_portfolio, fetch_portfolio_history
 from condor.fetchers.positions import fetch_positions
 from condor.fetchers.server_status import fetch_server_status
+from condor.fetchers.tracked_positions import fetch_tracked_positions
 from condor.fetchers.trading_rules import fetch_trading_rules
 
 __all__ = [
     "fetch_portfolio",
     "fetch_portfolio_history",
     "fetch_positions",
+    "fetch_tracked_positions",
     "fetch_active_orders",
     "fetch_trading_rules",
     "fetch_connectors",
@@ -98,4 +109,9 @@ __all__ = [
     "fetch_ticker_pool",
     "fetch_tickers",
     "fetch_server_status",
+    "fetch_performance_history",
+    "probe_performance_history",
+    "extract_performance_rows",
+    "reject_foreign_filters",
+    "PerformanceHistoryUnsupported",
 ]

@@ -14,7 +14,7 @@ Assemble a concise status of the LP slots.
 
 ## Gather
 - `get_portfolio_overview(include_lp_positions=True)` → wallet balances + live LP positions (real-time fees, token amounts).
-- `manage_executors(action="search", executor_types=["lp_executor"])` → running + recently closed slots.
+- `list_executors(executor_types=["lp_executor"])` → running + recently closed slots.
 - Optionally `search_history` for realized PnL of closed slots this session.
 
 ## Report format

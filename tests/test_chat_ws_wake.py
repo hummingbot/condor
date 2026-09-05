@@ -62,6 +62,10 @@ def ws_env(tmp_path, monkeypatch):
     monkeypatch.setattr(session_module, "_sessions", {})
     monkeypatch.setattr("condor.acp.client.ACPClient", _EchoClient)
     monkeypatch.setattr(session_module, "build_initial_context", lambda *a, **k: "")
+    # This file asserts the opening turn verbatim, so the conversation's
+    # attribution block is blanked alongside the context builder above — it
+    # is covered on its own in tests/runtime/test_conversation_attribution.py
+    monkeypatch.setattr(session_module, "conversation_attribution", lambda *a, **k: "")
     monkeypatch.setattr(
         "condor.runtime.toolsets.build_mcp_servers_for_session", lambda *a, **k: []
     )
@@ -236,3 +240,130 @@ def test_the_sink_is_only_offered_while_a_socket_is_attached(ws_env):
     assert chat_ws._wake_sink(key, USER) is not None
     # An unauthenticated/unknown owner never resolves to someone else's tabs.
     assert chat_ws._wake_sink(key, None) is None
+
+
+def test_a_note_still_reaches_the_tab_after_the_session_is_reaped(ws_env):
+    """The gate CORR-263 removed: the tab is open, the note was not shown.
+
+    A note is not a turn — it needs a socket, not a subprocess — but it used to
+    require the originating session to still be registered and alive. The idle
+    reaper, the per-user cap and a client that simply died all leave the tab on
+    screen with the socket still attached, which is why the bell for the very
+    same event arrived while the chat note did not.
+    """
+
+    async def scenario():
+        opener = _FakeWS()
+        slot_id = await _start(opener)
+        watcher = _FakeWS()
+        _attach(watcher)
+        # What the idle reaper leaves behind: socket attached, session gone.
+        session_module._sessions.clear()
+        reaped = await wake.deliver_note(
+            session_key=str(SessionKey.web(USER, slot_id)),
+            conversation_id=slot_id,
+            text="✅ scout finished: 3 pools",
+            kind="delegation",
+            user_id=USER,
+        )
+        return reaped, watcher, slot_id
+
+    reaped, watcher, slot_id = asyncio.run(scenario())
+
+    assert reaped is True
+    assert watcher.sent == [
+        {
+            "event": "system_note",
+            "slot_id": slot_id,
+            "text": "✅ scout finished: 3 pools",
+            "kind": "delegation",
+        }
+    ]
+
+
+def test_a_note_for_a_dead_session_still_reaches_the_tab(ws_env):
+    """The same sweep drops a session whose client stopped answering; the tab
+    it belonged to is still open and still wants the line."""
+
+    async def scenario():
+        opener = _FakeWS()
+        slot_id = await _start(opener)
+        watcher = _FakeWS()
+        _attach(watcher)
+        _EchoClient.last.alive = False
+        shown = await wake.deliver_note(
+            session_key=str(SessionKey.web(USER, slot_id)),
+            conversation_id=slot_id,
+            text="done",
+            kind="delegation",
+            user_id=USER,
+        )
+        return shown, watcher, slot_id
+
+    shown, watcher, slot_id = asyncio.run(scenario())
+
+    assert shown is True
+    assert [e["event"] for e in watcher.sent] == ["system_note"]
+    assert watcher.sent[0]["slot_id"] == slot_id
+
+
+def test_a_reaped_session_with_no_tab_open_pushes_nothing_and_raises_nothing(ws_env):
+    """The transcript turn stays the only record when nobody is watching."""
+
+    async def scenario():
+        opener = _FakeWS()
+        slot_id = await _start(opener)
+        before = len(opener.sent)
+        session_module._sessions.clear()
+        # Nobody attached — the state after the last tab closed.
+        await wake.deliver_note(
+            session_key=str(SessionKey.web(USER, slot_id)),
+            conversation_id=slot_id,
+            text="done",
+            kind="delegation",
+            user_id=USER,
+        )
+        return opener, before
+
+    opener, before = asyncio.run(scenario())
+
+    assert opener.sent[before:] == []
+    assert chat_ws._attached_sockets == {}
+
+
+def test_the_conversation_guard_survives_on_telegram(ws_env, monkeypatch):
+    """``tg:{chat_id}`` is stable but the conversation behind it is not, so a
+    task started before ``/new`` must still stay quiet there — the check that
+    the web surface no longer needs, because there the slot *is* the
+    conversation.
+
+    Driven through the *registered* Telegram sink (CORR-266): this used to have
+    to inject ``_note_sinks["tg"]`` by hand, because production registered only
+    the wake half — so the note it asserted was never delivered was being
+    dropped for the wrong reason. The guard now has to be what stops it.
+    """
+    from condor.agents import delegate as delegate_module
+    from handlers.agents import wake as tg_wake
+
+    assert wake._note_sinks.get("tg") is tg_wake._deliver_note
+
+    delivered: list[dict] = []
+
+    class _Recorder:
+        async def send_message(self, **kw):
+            delivered.append(kw)
+            return None
+
+    monkeypatch.setattr(delegate_module, "resolve_bot", lambda b=None: _Recorder())
+
+    async def scenario():
+        return await wake.deliver_note(
+            session_key="tg:42",
+            conversation_id="a-conversation-that-chat-has-left",
+            text="done",
+            kind="delegation",
+            user_id=USER,
+        )
+
+    assert asyncio.run(scenario()) is False
+    assert delivered == []

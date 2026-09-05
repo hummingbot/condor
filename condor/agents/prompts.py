@@ -7,29 +7,60 @@ pre-computed core data, and journal context (learnings + recent decisions).
 
 from __future__ import annotations
 
+import json
+import logging
 from typing import Any
+
+from condor.frontmatter import parse_frontmatter
+from condor.runtime.state import MAX_STATE_VALUE_CHARS
 
 from .agent import Agent
 from .strategy import Strategy
 
+log = logging.getLogger(__name__)
+
+# The [LOOP STATE] block is re-rendered on every tick, so it is bounded like
+# the canvas that sits beside it in the same prompt (canvas.MAX_SECTION_CHARS).
+# set_state is the primary bound; these are the backstop for a state file
+# written before that cap existed or edited by hand. Roughly three full-size
+# values, ~1.5k tokens of input.
+MAX_STATE_SECTION_CHARS = 3 * MAX_STATE_VALUE_CHARS
+
+# How many of last tick's refusals the prompt shows. The whole point is the
+# correction, and the newest few carry it; a tick that got refused twenty times
+# has a problem no prompt block is going to fix.
+MAX_REFUSALS_SHOWN = 5
+
+# What a clipped value says about itself, so a truncated blob is never mistaken
+# for the whole value (consult._clip uses the same marker).
+TRUNCATION_MARKER = "… (truncated)"
+
+
+def _clip(text: str, limit: int) -> str:
+    """``text`` cut to ``limit`` chars, saying so whenever it had to cut."""
+    return text if len(text) <= limit else text[:limit] + TRUNCATION_MARKER
+
+
 # Two live base prompts, one per execution surface. A session either spawns
 # standalone executors or steers a bot's controllers (see _build_controller_mode_section);
-# stating "trade ONLY via manage_executors" to a controller-mode agent contradicts the
+# stating "trade ONLY via the create_*_executor tools" to a controller-mode agent contradicts the
 # [CONTROLLER MODE] block later in the same prompt, so the surface is chosen once here.
 BASE_PROMPT_LIVE_EXECUTORS = """\
 You are an autonomous trading agent running inside Condor.
 
 RULES:
-- Trade ONLY via manage_executors(action="create"). NEVER use place_order.
+- Trade ONLY via the create_*_executor tools — create_position_executor,
+  create_grid_executor, create_dca_executor, create_order_executor,
+  create_lp_executor. NEVER use place_order.
 - If your strategy deploys a controller-based bot, manage_bots(action="deploy")
   MUST include max_global_drawdown_quote within your risk limits — deploys
   without a declared loss cap are blocked by the risk engine.
 - Be conservative. When in doubt, hold and journal why.
 
 ERROR RECOVERY:
-- If manage_executors(action="create") fails, call manage_executors(executor_type="<type>") \
-to fetch the full config schema, compare it against what you sent, fix the missing/wrong \
-fields, and retry ONCE. Journal the error and fix as a learning.
+- If a create_*_executor call fails, re-read the tool's signature: every field it \
+accepts is a typed parameter with its units in the description. Fix the wrong field and \
+retry ONCE. Journal the error and fix as a learning.
 """
 
 BASE_PROMPT_LIVE_CONTROLLER = """\
@@ -40,7 +71,7 @@ RULES:
   below for which bot and the exact call sequence. NEVER use place_order.
 - manage_bots(action="deploy") MUST include max_global_drawdown_quote within your risk
   limits — deploys without a declared loss cap are blocked by the risk engine.
-- Standalone executors (manage_executors(action="create")) are a fallback, used ONLY
+- Standalone executors (the create_*_executor tools) are a fallback, used ONLY
   when the strategy instructions explicitly ask for them.
 - Be conservative. When in doubt, hold and journal why.
 
@@ -49,8 +80,8 @@ ERROR RECOVERY:
 manage_controllers(action="describe", controller_name="<name>") to fetch the parameter \
 template, compare it against what you sent, fix the missing/wrong fields, and retry ONCE. \
 Journal the error and fix as a learning.
-- If you do fall back to manage_executors(action="create") and it fails, fetch its schema \
-with manage_executors(executor_type="<type>") and retry ONCE the same way.
+- If you do fall back to a create_*_executor tool and it fails, re-read that tool's \
+signature and retry ONCE the same way.
 """
 
 BASE_PROMPT_DRY_RUN = """\
@@ -60,8 +91,10 @@ RULES:
 - This is OBSERVATION ONLY. Do NOT create or stop executors, and do NOT deploy,
   stop, or update a controller-based bot (manage_bots with action="deploy",
   "stop_bot", "stop_controllers", "start_controllers", or "update_config").
-- manage_executors and manage_bots are available for read-only queries
-  (performance_report; status/logs/get_config).
+- The read-only executor tools are available (list_executors, get_executor,
+  get_performance_report, list_positions_held), as is manage_bots for
+  status/logs/get_config. The create_*_executor tools and stop_executor are not
+  loaded this tick.
 - Analyze the market and describe what you WOULD do, but take NO trading action.
 
 DRY RUN MESSAGING:
@@ -70,11 +103,44 @@ DRY RUN MESSAGING:
 - End with: "No executors were created (dry run)"
 """
 
+# What authorizes a live tick to act. The house rules shared with the
+# chat say to confirm before moving money, and they are right *there* — a chat
+# has a user in it. This seat does not: the approval happened once, when the user
+# approved `control_agent(action="start")` with this session's execution mode,
+# capital and risk limits, and the runtime enforces that envelope on every call
+# (condor.agents.risk). Without this block the agent reads the shared rule
+# literally, holds a valid in-limit trade for a confirmation nobody will send,
+# and journals the hold as "awaiting approval" — a loop that cannot trade.
+#
+# Live modes only. A dry run must not read any of this as licence to act; its
+# own base prompt already tells it to take no action at all.
+AUTHORIZATION_LIVE_UNATTENDED = """\
+[AUTHORIZATION — this seat is unattended and already approved]
+- Nobody is watching this tick. A question asked here is never answered: the
+  tick ends, the loop moves on, and the market does not wait.
+- Your authorization is the launch the user already approved: this strategy,
+  this execution mode, this capital, and the limits in [RISK STATE] below. The
+  house rule about confirming before you move money is the ATTENDED rule — it
+  governs a chat with a human in it, not this loop.
+- Inside that envelope, ACT: create, stop and replace your own executors (or
+  steer your own bot's controllers) without asking. Never hold a trade that is
+  within your limits to wait for a confirmation, and never journal a hold as
+  "pending approval".
+- The envelope is enforced by the runtime, not by you. Every call is checked
+  against those limits before it runs, and one that breaches them comes back
+  CANCELLED. That is the guard deciding — not a missing approval. Read the
+  reason, then resize, change tack, or stop. Do not resend the same call.
+"""
+
 BASE_PROMPT_COMMON = """\
 GENERAL:
 - The mcp-hummingbot server is pre-configured. Do NOT call configure_server.
 - Keep tool chains short (1-5 calls per tick).
 - Your executor state and positions are pre-loaded in [CORE DATA] below — no need to query them.
+- [CORE DATA - drift] is your book checked against the exchange itself. A MISMATCH,
+  GHOST or ORPHAN row means your book is wrong about a live position: say so and size
+  down or reconcile before adding to it. UNANSWERED means the venue did not reply — do
+  not read it as "flat".
 
 SKILLS & ROUTINES:
 - [AVAILABLE SKILLS & ROUTINES] below lists SKILLS (playbooks — know-how: when to
@@ -148,12 +214,21 @@ def _build_tool_preload(
 ) -> str:
     """ToolSearch preload line for ACP sessions.
 
-    Dry-run omits manage_executors (read-only). Experiment modes (dry_run /
-    run_once) omit trading_agent_journal_write since they have no journal.
-    Controller mode preloads the bot/controller tools it actually trades with —
-    otherwise the agent burns a tick discovering them.
+    Dry-run preloads only the read-only executor tools, so the create/stop names are
+    not even in the session (FEAT-062) — the permission layer still blocks them, but
+    an agent that cannot see them does not spend a tick reaching for one. Experiment
+    modes (dry_run / run_once) omit trading_agent_journal_write since they have no
+    journal. Controller mode preloads the bot/controller tools it actually trades with
+    — otherwise the agent burns a tick discovering them.
     """
-    tools = ["mcp__mcp-hummingbot__get_market_data"]
+    tools = [
+        "mcp__mcp-hummingbot__get_prices",
+        # The candle, order book and funding readers are not mounted any more
+        # (ARCH-308): market data a tick computes on is read as structured rows
+        # with ``client.market_data.*`` inside run_code, so run_code is what a
+        # tick has to arrive holding.
+        "mcp__condor__run_code",
+    ]
     if is_controller_mode:
         # Read-only bot/controller queries stay available in dry-run; the
         # permission layer, not the tool list, is what blocks mutation there.
@@ -161,8 +236,20 @@ def _build_tool_preload(
             "mcp__mcp-hummingbot__manage_bots",
             "mcp__mcp-hummingbot__manage_controllers",
         ]
+    tools += [
+        "mcp__mcp-hummingbot__list_executors",
+        "mcp__mcp-hummingbot__get_executor",
+        "mcp__mcp-hummingbot__get_performance_report",
+    ]
     if not is_dry_run:
-        tools.append("mcp__mcp-hummingbot__manage_executors")
+        tools += [
+            "mcp__mcp-hummingbot__create_position_executor",
+            "mcp__mcp-hummingbot__create_grid_executor",
+            "mcp__mcp-hummingbot__create_dca_executor",
+            "mcp__mcp-hummingbot__create_order_executor",
+            "mcp__mcp-hummingbot__create_lp_executor",
+            "mcp__mcp-hummingbot__stop_executor",
+        ]
     tools += [
         "mcp__mcp-hummingbot__search_history",
         "mcp__mcp-hummingbot__explore_geckoterminal",
@@ -271,6 +358,53 @@ def _build_controller_mode_section(bot_name: str, ledger: Any | None) -> str:
     return "\n".join(lines)
 
 
+# Behavioural rules shared by every agent and every surface (FEAT-095). They
+# live on disk rather than in a constant here for the same reason ``shutdown.md``
+# and ``reflect.md`` do: the operator writes a rule once and it reaches all the
+# agents without a deploy.
+CORE_RULES_FILENAME = "core_rules.md"
+
+# The label the rules arrive under, identical at both surfaces so an agent reads
+# the same block whether it is ticking or answering a chat.
+CORE_RULES_HEADER = "[CORE RULES — apply to every session]"
+
+
+def load_core_rules(agent_slug: str | None = None) -> str:
+    """The shared behavioural rules for this agent: its own, else the default.
+
+    Resolved exactly like :func:`condor.agents.reflection.load_policy` —
+    ``<slug>/core_rules.md`` then ``_defaults/core_rules.md``, each consulted in
+    both roots (local before stock), so an install that dropped its own house
+    rules in shadows the shipped ones without losing them. A falsy slug reads
+    only the default, which is what the chat seat wants.
+
+    Read on every call, never cached: editing the file is meant to be visible on
+    the next tick. Returns ``""`` when nothing is on disk or the file is
+    unreadable — a missing rulebook must never be what breaks a tick.
+    """
+    from condor.memory.paths import agent_home_layers, defaults_layers
+
+    candidates = [home / CORE_RULES_FILENAME for home in agent_home_layers(agent_slug)]
+    candidates += [d / CORE_RULES_FILENAME for d in defaults_layers()]
+    for path in candidates:
+        try:
+            if not path.is_file():
+                continue
+            _, body = parse_frontmatter(path.read_text(encoding="utf-8"))
+            body = body.strip()
+            if body:
+                return body
+        except Exception:  # noqa: BLE001 - an unreadable rulebook is not a crash
+            log.warning("Could not read %s", path, exc_info=True)
+    return ""
+
+
+def core_rules_section(agent_slug: str | None = None) -> str:
+    """:func:`load_core_rules` under its header, or ``""`` when there are none."""
+    rules = load_core_rules(agent_slug)
+    return f"{CORE_RULES_HEADER}\n{rules}" if rules else ""
+
+
 def build_tick_prompt(
     agent: Agent,
     strategy: Strategy,
@@ -288,6 +422,8 @@ def build_tick_prompt(
     ledger: Any | None = None,
     canvas: str = "",
     canvas_nudge: str = "",
+    loop_state: dict[str, Any] | None = None,
+    refusals: list[dict[str, Any]] | None = None,
 ) -> str:
     """Build the full prompt for one agent tick.
 
@@ -327,6 +463,18 @@ def build_tick_prompt(
     )
     sections: list[str] = [base_prompt, journal_section, BASE_PROMPT_COMMON]
 
+    # Shared behavioural rules, above the agent's own identity: an agent does not
+    # get to override the house rules, but the mode-specific base prompt still
+    # frames them (FEAT-095).
+    core_rules = core_rules_section(getattr(agent, "slug", "") or None)
+    if core_rules:
+        sections.append(core_rules)
+
+    # Directly under the house rules, because it says which of them apply to an
+    # unattended seat that is already approved. Live modes only.
+    if not is_dry_run:
+        sections.append(AUTHORIZATION_LIVE_UNATTENDED)
+
     # Tool preload is ACP-specific (ToolSearch); pydantic-ai auto-discovers MCP tools
     if not use_pydantic_ai:
         sections.append(
@@ -347,7 +495,7 @@ def build_tick_prompt(
     if agent_id:
         tick_info += f"\nAgent ID: {agent_id}"
         if not is_dry_run and not is_controller_mode:
-            tick_info += f'\nPass controller_id="{agent_id}" as a TOP-LEVEL arg to manage_executors (not inside executor_config).'
+            tick_info += f'\nPass controller_id="{agent_id}" to every create_*_executor call — it is what attributes the position to this session.'
     sections.append(tick_info)
 
     # Run-once mode note
@@ -367,9 +515,10 @@ def build_tick_prompt(
         sections.append(f"[AGENT — domain identity & knowledge]\n{agent.instructions}")
     sections.append(f"[STRATEGY INSTRUCTIONS]\n{strategy.instructions}")
 
-    # Available skills (playbooks) + routines, unified under one header. Skills
-    # are read fresh each tick (the agent may create its own mid-session), so
-    # they arrive via skills_index; routine discovery is cached (it's expensive).
+    # Available skills (playbooks) + routines, unified under one header. Both are
+    # read fresh each tick — the agent may create a skill mid-session, and an
+    # operator may switch a routine off for it (FEAT-090) — so they arrive
+    # already built from the caller and are only discovered here as a fallback.
     routines_section = cached_routines_section
     if routines_section is None:
         try:
@@ -435,9 +584,58 @@ def build_tick_prompt(
         f"Position Size: ${rs.get('total_exposure', 0):.2f} / ${rs.get('max_position_size', 500):.2f} limit",
         f"Open Executors: {rs.get('executor_count', 0)} / {rs.get('max_open_executors', 5)} limit",
         f"Drawdown: {dd_display}",
-        f"Status: {'BLOCKED - ' + rs.get('block_reason', '') if rs.get('is_blocked') else 'ACTIVE'}",
     ]
+    # Only when one is set: a leverage limit is off by default ([[SEC-558]]),
+    # and a line reading "disabled" invites the agent to go looking for the
+    # ceiling. When it IS set, it has to be here — a limit the agent is not
+    # told about is a limit it will trip, and every create it makes on a perp
+    # has to declare a leverage at or under it.
+    max_leverage = rs.get("max_leverage", -1)
+    if max_leverage >= 0:
+        risk_lines.append(
+            f"Max Leverage: {max_leverage:g}x "
+            "(declare `leverage` on every create; omitting it is refused)"
+        )
+    risk_lines.append(
+        f"Status: {'BLOCKED - ' + rs.get('block_reason', '') if rs.get('is_blocked') else 'ACTIVE'}"
+    )
     sections.append("\n".join(risk_lines))
+
+    # What the gate refused last tick, and why. The permission response the model
+    # saw carried no reason (see condor.agents.risk.RefusalLog), so this block is
+    # the only place the correction can reach it — and an agent that never learns
+    # why a call was cancelled either repeats it or mistakes it for a missing
+    # human approval and stops trading.
+    if refusals:
+        refusal_lines = [
+            "[REFUSED LAST TICK — the runtime gate decided this, not a missing approval]"
+        ]
+        refusal_lines += [
+            f"- {entry.get('tool') or 'a call'}: {entry.get('reason') or 'no reason recorded'}"
+            for entry in refusals[-MAX_REFUSALS_SHOWN:]
+        ]
+        refusal_lines.append(
+            "Do not resend a refused call unchanged and do not wait for approval: "
+            "act on the reason, or journal why you are standing down."
+        )
+        sections.append("\n".join(refusal_lines))
+
+    # Loop state -- the scratch cursors this (agent, strategy) has persisted
+    # (condor.runtime.state): a last-processed executor id, a cooldown deadline.
+    # Written from the dashboard or an attended session; the tick only reads
+    # them, since nothing in TOOL_PROFILES["tick"] can write the store. Omitted
+    # when the namespace is empty rather than teaching the model about a store
+    # it has no keys in.
+    if loop_state:
+        state_lines = [
+            "[LOOP STATE — scratch values persisted for this strategy; read-only this tick]"
+        ]
+        for key, value in sorted(loop_state.items()):
+            rendered = (
+                value if isinstance(value, str) else json.dumps(value, default=str)
+            )
+            state_lines.append(f"{key}: {_clip(rendered, MAX_STATE_VALUE_CHARS)}")
+        sections.append(_clip("\n".join(state_lines), MAX_STATE_SECTION_CHARS))
 
     # Core skill data (pre-computed)
     for name, data_summary in core_data.items():

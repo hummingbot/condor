@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 
+import { DEX_FAVORITES_KEY } from "@/lib/sessionState";
+
 /**
  * Starred pools, kept in localStorage.
  *
@@ -8,10 +10,10 @@ import { useCallback, useEffect, useState } from "react";
  * favourites view re-reads them by address rather than replaying a copy taken
  * whenever the star was clicked.
  *
- * Per browser rather than per account, like the theme and the display currency —
- * the pools you are watching are a workspace preference, not server state.
+ * Per browser, but not a device preference: the pools you are watching describe
+ * the person trading, so the session boundary clears them (lib/sessionState.ts).
  */
-const STORAGE_KEY = "condor_dex_favorites";
+const STORAGE_KEY = DEX_FAVORITES_KEY;
 
 export interface FavoritePool {
   network: string;

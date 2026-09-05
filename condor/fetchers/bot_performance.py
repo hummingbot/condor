@@ -366,7 +366,7 @@ def resolve_bots(all_bot_perf: dict[str, dict], bases: list[str]) -> dict[str, d
 # instance, and changes only when a bot is stopped — a short TTL is plenty and
 # keeps the per-tick rollup from re-listing on every call.
 _ARCHIVED_TTL = 60.0
-_archived_cache: dict[str, tuple[float, list[str]]] = {}
+_archived_cache: dict[str, tuple[float, dict[str, str]]] = {}
 
 
 def _archived_name(db_path: str) -> str:
@@ -378,12 +378,21 @@ def _archived_name(db_path: str) -> str:
     return name
 
 
-async def fetch_archived_instances(client: Any) -> list[str]:
-    """Names of stopped/archived bot instances on this server.
+async def fetch_archived_paths(client: Any) -> dict[str, str]:
+    """Instance name -> archived database path for every stopped bot on this server.
+
+    The instance name *is* the join key back to a ``bot_runs`` row: a deployment
+    writes ``bot_name == instance_name`` (hummingbot-api
+    ``routers/bot_orchestration.py``) and archives the instance directory under
+    that same name, so the two surfaces address the same run by the same string.
 
     Best-effort: a backend without the archived-bots endpoint, or one that errors,
-    yields ``[]`` and the caller falls back to live-only discovery — which
+    yields ``{}`` and the caller falls back to live-only discovery — which
     under-reports stopped bots but is never wrong about running ones.
+
+    Cheap by construction — the upstream listing is a directory walk that opens no
+    database — so this is safe to call on a polling route. The short TTL only keeps
+    a per-tick rollup from re-listing on every call.
     """
     key = _server_key(client)
     entry = _archived_cache.get(key) if key else None
@@ -392,9 +401,9 @@ async def fetch_archived_instances(client: Any) -> list[str]:
     try:
         databases = await client.archived_bots.list_databases()
     except Exception as e:
-        logger.debug("fetch_archived_instances failed: %s", e)
-        return []
-    names: list[str] = []
+        logger.debug("fetch_archived_paths failed: %s", e)
+        return {}
+    paths: dict[str, str] = {}
     for db in databases or []:
         if isinstance(db, str):
             path = db
@@ -406,11 +415,15 @@ async def fetch_archived_instances(client: Any) -> list[str]:
             continue
         name = _archived_name(path)
         if name:
-            names.append(name)
-    names = sorted(set(names))
+            paths.setdefault(name, path)
     if key:
-        _archived_cache[key] = (time.monotonic(), names)
-    return names
+        _archived_cache[key] = (time.monotonic(), paths)
+    return paths
+
+
+async def fetch_archived_instances(client: Any) -> list[str]:
+    """Names of stopped/archived bot instances on this server."""
+    return sorted(await fetch_archived_paths(client))
 
 
 def clear_archived_cache() -> None:

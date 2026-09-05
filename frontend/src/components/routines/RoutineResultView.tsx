@@ -1,7 +1,7 @@
 import { ChevronDown, ChevronRight } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useState } from "react";
+import { useAuthedImage } from "@/hooks/useAuthedImage";
 import type { RoutineInstance } from "@/lib/api";
-import { authFetch } from "@/lib/auth-token";
 
 interface Props {
   instance: RoutineInstance;
@@ -15,40 +15,24 @@ interface KpiSection {
   trend?: string;
 }
 
+/** The routine's chart, off a bearer-guarded route. The fetching lives in the
+ *  hook; what belongs here is the chart's own shape — a reserved 2:1 box while
+ *  the render is in flight, so the content below does not shift. */
 function AuthImage({ src, alt, className }: { src: string; alt: string; className?: string }) {
-  // Result is keyed by src so a src change derives back to "loading" without
-  // resetting state inside the effect. blobUrl === null means the fetch failed.
-  const [result, setResult] = useState<{ src: string; blobUrl: string | null } | null>(null);
+  const image = useAuthedImage(src);
 
-  useEffect(() => {
-    let revoke: string | null = null;
-    authFetch(src)
-      .then((res) => (res.ok ? res.blob() : Promise.reject()))
-      .then((blob) => {
-        const url = URL.createObjectURL(blob);
-        revoke = url;
-        setResult({ src, blobUrl: url });
-      })
-      .catch(() => setResult({ src, blobUrl: null }));
-    return () => {
-      if (revoke) URL.revokeObjectURL(revoke);
-    };
-  }, [src]);
-
-  const settled = result?.src === src ? result : null;
-  // Reserve the image box while loading so content below doesn't shift (CLS)
-  if (!settled) {
+  if (image.status === "loading") {
     return (
       <div
         className={`aspect-[2/1] animate-pulse bg-[var(--color-border)]/30 ${className ?? ""}`}
       />
     );
   }
-  // Failed fetch: collapse like before, only after the request settles
-  if (!settled.blobUrl) return null;
+  // Failed fetch: collapse, only after the request settles
+  if (!image.src) return null;
   return (
     <img
-      src={settled.blobUrl}
+      src={image.src}
       alt={alt}
       className={`aspect-[2/1] object-contain ${className ?? ""}`}
     />

@@ -70,6 +70,51 @@ def test_list_filters_by_agent_and_honors_limit(store):
     assert len(store.list()) == 3
 
 
+# ── the owner filter (FEAT-061) ──
+
+
+def test_list_filters_by_owner(store):
+    store.save(_run("code_1_a", user_id=7))
+    store.save(_run("code_2_a", user_id=9))
+    store.save(_run("code_3_a", user_id=7))
+
+    assert [e["id"] for e in store.list(user_id=7)] == ["code_3_a", "code_1_a"]
+    assert [e["id"] for e in store.list(user_id=9)] == ["code_2_a"]
+
+
+def test_an_unowned_run_is_dropped_by_any_owner_filter(store):
+    """Unowned means *unknown*, and a store of snippet output fails closed."""
+    store.save(_run("code_legacy_a"))  # written before the field existed
+    store.save(_run("code_mine_a", user_id=7))
+
+    assert [e["id"] for e in store.list(user_id=7)] == ["code_mine_a"]
+    assert store.list(user_id=0) == [], "0 is not an owner, it is the absence of one"
+
+
+def test_no_filter_still_sees_everything(store):
+    """The admin scope and the MCP subprocess's own reads pass no owner."""
+    store.save(_run("code_legacy_a"))
+    store.save(_run("code_mine_a", user_id=7))
+
+    assert {e["id"] for e in store.list()} == {"code_legacy_a", "code_mine_a"}
+
+
+def test_the_owner_rides_in_the_index_so_a_listing_never_opens_a_file(store):
+    store.save(_run("code_1_a", user_id=7, code="x = 1"))
+
+    entry = store.list()[0]
+    assert entry["user_id"] == 7
+    assert "code" not in entry
+
+
+def test_the_owner_filter_composes_with_the_agent_filter(store):
+    store.save(_run("code_1_a", agent="quant", user_id=7))
+    store.save(_run("code_2_a", agent="quant", user_id=9))
+    store.save(_run("code_3_a", agent="scout", user_id=7))
+
+    assert [e["id"] for e in store.list(agent="quant", user_id=7)] == ["code_1_a"]
+
+
 def test_cap_evicts_the_oldest_file_and_its_index_entry(store, tmp_path, monkeypatch):
     monkeypatch.setattr("condor.code_runs.MAX_RUNS", 3)
     for i in range(5):

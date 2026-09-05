@@ -3,9 +3,9 @@ import { useEffect } from "react";
 
 import { useServer } from "@/hooks/useServer";
 import { api } from "@/lib/api";
-import { candlesQuery } from "@/lib/queryClient";
+import { candlesQuery, executorsQuery } from "@/lib/queryClient";
+import { GRID_STORAGE_KEY } from "@/lib/sessionState";
 
-const GRID_STORAGE_KEY = "condor_grid_defaults";
 const DEFAULT_CONNECTOR = "binance_perpetual";
 const DEFAULT_PAIR = "BTC-USDT";
 const DEFAULT_INTERVAL = "5m";
@@ -45,7 +45,7 @@ export function usePrefetchData() {
 
     // Core data
     queryClient.prefetchQuery({
-      queryKey: ["executors", server, ""],
+      queryKey: executorsQuery(server).queryKey,
       queryFn: () => api.getExecutors(server),
     });
 

@@ -20,6 +20,14 @@ that must survive a restart to be worth promising. A user who pressed Unshare
 and then lost the network has still revoked; the revocation is in this file
 with its delete token, and the next flush completes it.
 
+**The queue has two writers, so it is never rewritten from a snapshot.** The
+sweep appends from a worker thread (``asyncio.to_thread``) while the web routes
+append from the event loop, and a flush of a full queue can spend minutes in
+``await post(...)``. So every record carries a local-only ``id``, every
+read-modify-write goes through :func:`_rewrite` under one lock, and removals are
+by identity: whatever arrived while a POST was in flight is still queued when it
+lands. Nothing is posted with the lock held (CORR-232).
+
 The collector address is compiled in, like telemetry's, and no environment
 variable redirects it. Whether anything is sent at all is decided by
 :mod:`condor.sharing.consent` and by the user pressing a button.
@@ -27,10 +35,15 @@ variable redirects it. Whether anything is sent at all is decided by
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import re
+import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
+from uuid import uuid4
 
 from condor.fsutil import atomic_write_text
 
@@ -40,14 +53,33 @@ COLLECTOR_URL = "https://telemetry.hummingbot.org/v1/conversations"
 POST_TIMEOUT_S = 10
 
 # An install that never reaches a collector accumulates a bounded file and then
-# quietly drops the oldest excess. That is the intended behaviour, not a bug —
-# same contract as telemetry's outbox, with a count low enough that the file
-# stays small even though each record is a whole transcript.
+# quietly drops the oldest excess *share*. That is the intended behaviour, not a
+# bug — same contract as telemetry's outbox, with a count low enough that the
+# file stays small even though each record is a whole transcript. Queued
+# unshares are exempt and uncapped: see :func:`_retain`.
 MAX_QUEUED_SHARES = 50
 MAX_QUEUE_AGE_S = 14 * 24 * 3600
 
 OP_SHARE = "share"
 OP_UNSHARE = "unshare"
+
+# Every read-modify-write of the queue file runs under this lock. "Read it,
+# decide, write it back" is not safe on its own here: there are two genuine
+# producers — the sweep's worker thread and the web routes on the event loop —
+# and ``atomic_write_text``'s rename would erase whatever either of them
+# appended in between.
+#
+# Reentrant because ``enqueue`` appends and then trims, and both take it. It is
+# **never held across an ``await``**: a POST can take ``POST_TIMEOUT_S``, and
+# blocking every producer for that long would be its own bug.
+_QUEUE_LOCK = threading.RLock()
+
+# Set while a flush is posting. The flush job fires every 300s, and a full queue
+# of ``POST_TIMEOUT_S`` timeouts can outlast that, so two flushes can overlap.
+# The second stands down rather than re-posting records the first still owns —
+# a share sent twice is a duplicate row, a revocation sent twice is a 4xx that
+# ``post`` treats as terminal.
+_flushing = False
 
 
 def root() -> Path:
@@ -94,15 +126,178 @@ def _read() -> list[dict]:
 
 
 def _write(records: list[dict]) -> None:
+    _write_lines([json.dumps(r, separators=(",", ":")) for r in records])
+
+
+def _write_lines(lines: list[str]) -> None:
+    """Put the queue back, one record per line, exactly as given.
+
+    The kept lines are written verbatim rather than re-serialised, so a trim
+    that drops nothing but the oldest leaves every survivor byte-identical to
+    what was appended (PERF-237).
+    """
     path = queue_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_text(
-            path,
-            "".join(json.dumps(r, separators=(",", ":")) + "\n" for r in records),
-        )
+        atomic_write_text(path, "".join(line + "\n" for line in lines))
     except OSError:
         log.warning("Sharing could not write its queue", exc_info=True)
+
+
+# The two ends of a record, as :func:`enqueue` writes it: ``id`` and ``op``
+# open the object and ``queued_at`` closes it, with the transcript in between.
+# Both patterns are anchored — ``_HEAD_RE`` at the start of the line, and
+# ``_TAIL_RE`` inside a short window off its end — so neither can be fooled by
+# a transcript that happens to quote one of these keys at itself. Anything they
+# do not both match is parsed the slow, certain way instead.
+_HEAD_RE = re.compile(r'^\{"id":"[^"]*","op":"([^"]*)"')
+_TAIL_RE = re.compile(r',"queued_at":(-?[0-9]+(?:\.[0-9]+)?(?:[eE][-+]?[0-9]+)?)\}$')
+_TAIL_WINDOW = 80
+
+
+def _probe(line: str) -> dict | None:
+    """The two fields the retention policy reads, without parsing the body.
+
+    A queued record is a whole scrubbed transcript — up to ``MAX_SHARE_BYTES``
+    — and :func:`_retained` looks at ``op`` and ``queued_at`` and at nothing
+    else. So the count-shaped paths lift those two off the line's ends in
+    constant time instead of building the megabyte of dicts in the middle
+    (PERF-237). ``None`` for a line that is not a record at all: a torn last
+    line from a killed process, skipped here exactly as :func:`_read` skips it.
+    """
+    head = _HEAD_RE.match(line)
+    tail = _TAIL_RE.search(line[-_TAIL_WINDOW:])
+    if head and tail:
+        return {"op": head.group(1), "queued_at": float(tail.group(1))}
+    try:
+        record = json.loads(line)
+    except ValueError:
+        return None
+    if not isinstance(record, dict):
+        return None
+    return {"op": record.get("op"), "queued_at": record.get("queued_at")}
+
+
+def _read_probes() -> list[tuple[str, dict]]:
+    """Every queued record as ``(raw line, probe)``, oldest first.
+
+    The line-oriented twin of :func:`_read`: same file, same order, and the
+    same lines skipped — blank ones, and the torn last line a killed process
+    leaves — so ``len(_read_probes())`` is ``len(_read())`` and :func:`count`
+    can answer for :func:`pending`. A line that parses but is not an object is
+    skipped here too; :func:`_read` would hand it to the policy to trip over.
+    """
+    path = queue_path()
+    if not path.is_file():
+        return []
+    probed: list[tuple[str, dict]] = []
+    try:
+        with path.open(encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                probe = _probe(line)
+                if probe is not None:
+                    probed.append((line, probe))
+    except OSError:
+        log.debug("Sharing could not read %s", path, exc_info=True)
+    return probed
+
+
+def _read_lines() -> list[str]:
+    """The queued records as they sit on disk, oldest first."""
+    return [line for line, _ in _read_probes()]
+
+
+def _rewrite(select: Callable[[list[dict]], list[dict]]) -> int:
+    """Remove records from the queue. The one guarded read-modify-write.
+
+    Every path that drops records comes through here — :func:`trim`, the scoped
+    withdrawal, and the flush retiring what it delivered. It re-reads the file
+    *under the lock*, so anything appended since the caller last looked is in
+    the list ``select`` sees and stays in the file; and it rewrites only when
+    something was actually dropped, so a no-op costs no rename.
+
+    ``select`` picks the survivors out of that fresh list. It must only drop
+    records and must never reorder them: a share and the unshare that revokes it
+    must not be able to swap. It runs with the lock held, so it must not block
+    and must not await.
+
+    Returns how many records were dropped.
+    """
+    with _QUEUE_LOCK:
+        records = _read()
+        kept = select(records)
+        dropped = len(records) - len(kept)
+        if dropped:
+            _write(kept)
+        return dropped
+
+
+def _rewrite_lines(select: Callable[[list[dict]], set[int]]) -> int:
+    """Remove records without parsing them. The line-oriented :func:`_rewrite`.
+
+    The same guarded read-modify-write under the same lock, for the paths that
+    decide by counting rather than by reading a record's contents. ``select``
+    sees one probe per queued record — ``op`` and ``queued_at``, and no body
+    (see :func:`_probe`) — and answers with the *indices* it keeps, so the
+    survivors are picked out of the file's own order and reordering a share
+    past the unshare that revokes it is not expressible here. As in
+    :func:`_rewrite`, the file is re-read under the lock so a concurrent append
+    survives, it runs with the lock held so it must not block or await, and it
+    rewrites only when something was actually dropped.
+
+    Returns how many records were dropped.
+    """
+    with _QUEUE_LOCK:
+        probed = _read_probes()
+        keep = select([probe for _, probe in probed])
+        kept = [line for i, (line, _) in enumerate(probed) if i in keep]
+        dropped = len(probed) - len(kept)
+        if dropped:
+            _write_lines(kept)
+        return dropped
+
+
+def _retained(records: list[dict]) -> set[int]:
+    """The retention policy: which queued records survive the cap, by index.
+
+    Split out of :func:`trim` so *what survives* is one function to read and to
+    change, separate from the locking that makes changing it safe. It reads
+    ``op`` and ``queued_at`` and nothing else, which is what lets :func:`trim`
+    run it over probes instead of over parsed transcripts (PERF-237).
+
+    **The cap is scoped to shares.** It exists to bound the disk cost of queued
+    *transcripts*, and an unshare is not one: it is a URL and a 64-character
+    delete token, so thousands of them are a few hundred kB. Dropping one is not
+    a delayed revocation, it is a destroyed capability — ``share.unshare``
+    clears ``share_delete_token`` from the meta the moment it queues, so this
+    file holds the only copy, and evicting it leaves the transcript on the
+    collector with nothing on the box able to take it back. That is not
+    hypothetical: ``unshare_all`` enqueues one record per shared conversation
+    with no flush in between, so a user with sixty of them used to lose the
+    first ten and be told it worked (CORR-234).
+
+    So the count cap and the age cutoff apply to ``OP_SHARE`` records; anything
+    else is kept. **Order is never disturbed** — answering with indices into
+    ``records`` rather than with a rebuilt list means the survivors can only
+    come back in the order they were queued in, because a share and the unshare
+    that revokes it swapping would be its own bug.
+    """
+    cutoff = time.time() - MAX_QUEUE_AGE_S
+    fresh = [
+        i
+        for i, record in enumerate(records)
+        if record.get("op") == OP_SHARE
+        and float(record.get("queued_at") or 0) >= cutoff
+    ]
+    kept = set(fresh[-MAX_QUEUED_SHARES:])
+    return {
+        i
+        for i, record in enumerate(records)
+        if record.get("op") != OP_SHARE or i in kept
+    }
 
 
 def enqueue(
@@ -121,8 +316,13 @@ def enqueue(
     :func:`purge_user_shares` can find exactly the records a withdrawal is
     entitled to destroy — this user's, produced without them looking — and leave
     everything else alone (FEAT-055).
+
+    ``id`` is local-only in the same way. It is how :func:`flush` retires
+    exactly the records it delivered instead of rewriting the file from the list
+    it read before the first POST (CORR-232).
     """
     record = {
+        "id": uuid4().hex,
         "op": op,
         "url": url,
         "share_id": share_id,
@@ -132,14 +332,15 @@ def enqueue(
         "queued_at": time.time(),
     }
     path = queue_path()
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(record, separators=(",", ":")) + "\n")
-    except OSError:
-        log.warning("Sharing could not queue a %s", op, exc_info=True)
-        return record
-    trim()
+    with _QUEUE_LOCK:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, separators=(",", ":")) + "\n")
+        except OSError:
+            log.warning("Sharing could not queue a %s", op, exc_info=True)
+            return record
+        trim()
     return record
 
 
@@ -147,22 +348,47 @@ def pending() -> list[dict]:
     return _read()
 
 
+def count() -> int:
+    """How many requests are queued. The answer without the transcripts.
+
+    ``len(pending())`` costs one ``json.loads`` per queued record, bodies and
+    all, to produce a number — tens of milliseconds on a full queue, and on the
+    event loop when a settings page asks (PERF-237).
+    """
+    return len(_read_lines())
+
+
 def trim() -> None:
-    """Enforce the cap, oldest first."""
-    records = _read()
-    cutoff = time.time() - MAX_QUEUE_AGE_S
-    kept = [r for r in records if float(r.get("queued_at") or 0) >= cutoff]
-    kept = kept[-MAX_QUEUED_SHARES:]
-    if len(kept) != len(records):
-        _write(kept)
+    """Enforce the cap, oldest first. See :func:`_retained` for the policy.
+
+    Called on every enqueue — three times a sweep tick, and once per
+    conversation inside ``unshare_all`` — so it decides by line rather than by
+    record. The policy needs ``op`` and ``queued_at``; parsing the megabytes of
+    transcript between them to enforce a count cap was the whole cost of the
+    call, and dropping the oldest re-serialised every survivor to write back
+    what was already on disk (PERF-237).
+    """
+    _rewrite_lines(_retained)
 
 
-def purge() -> None:
-    """Delete everything queued. The off switch's counterpart."""
-    try:
-        queue_path().unlink()
-    except OSError:
-        pass
+def purge_shares() -> int:
+    """Destroy every undelivered share. The off switch's counterpart.
+
+    Shares only, never the pending unshares. A veto is the install being
+    forbidden to *send* a conversation; a queued unshare is the install still
+    owing the collector a *deletion* it already promised a user, and the delete
+    token lives nowhere else once ``unshare`` has cleared it from the meta
+    (CORR-232). Turning sharing off must not strand somebody with a transcript
+    they can no longer take back — which is the same reason the unshare route is
+    deliberately ungated.
+
+    So this deletes records rather than the file: a bare ``unlink`` would take
+    every revocation with it. Returns how many shares were dropped.
+    """
+    dropped = _rewrite(lambda records: [r for r in records if r.get("op") != OP_SHARE])
+    if dropped:
+        log.info("Dropped %d undelivered share(s) on veto", dropped)
+    return dropped
 
 
 def purge_user_shares(user_id: int | str, *, kind: str) -> int:
@@ -172,44 +398,100 @@ def purge_user_shares(user_id: int | str, *, kind: str) -> int:
     withdrawing consent destroys what was collected but unsent rather than
     merely deciding not to send it, so a later bug has nothing left to deliver.
 
-    It is scoped rather than a bare :func:`purge` because this queue is not one
-    user's. A single file holds every share on the install **and every pending
-    unshare** — the record that carries a delete token for something already
-    revoked. Emptying it to honour one user turning Always off would silently
-    un-revoke somebody else's withdrawal and throw away a conversation a third
-    person deliberately pressed Share on. So a withdrawal takes what it is owed:
-    the passive shares this user never looked at, still sitting in the queue.
+    It is scoped to one user rather than the install-wide :func:`purge_shares`
+    because this queue is not one user's. A single file holds every share on the
+    install, and emptying it to honour one user turning Always off would throw
+    away a conversation a second person deliberately pressed Share on. So a
+    withdrawal takes what it is owed and no more: the passive shares this user
+    never looked at, still sitting in the queue.
     """
-    records = _read()
-    if not records:
-        return 0
     wanted = str(user_id)
-    kept = [
-        r
-        for r in records
-        if not (
-            r.get("op") == OP_SHARE
-            and str(r.get("user_id") or "") == wanted
-            and str(r.get("kind") or "") == kind
-        )
-    ]
-    dropped = len(records) - len(kept)
+
+    def _keep(records: list[dict]) -> list[dict]:
+        return [
+            r
+            for r in records
+            if not (
+                r.get("op") == OP_SHARE
+                and str(r.get("user_id") or "") == wanted
+                and str(r.get("kind") or "") == kind
+            )
+        ]
+
+    dropped = _rewrite(_keep)
     if dropped:
-        _write(kept)
         log.info("Dropped %d undelivered %s share(s) on withdrawal", dropped, kind)
     return dropped
+
+
+def _dialable(url: str) -> bool:
+    """Is this a URL an HTTP client can actually send a request to?
+
+    Deliberately a shape check and not an allow-list of the collector: the
+    question here is "can this be attempted", not "should it be". A record
+    aimed somewhere unexpected is still a record ``post`` should try and let
+    the answer decide, but one that is not an absolute http(s) URL with a host
+    can only ever raise, and :func:`flush` must not mistake that for an outage.
+    """
+    try:
+        from urllib.parse import urlsplit
+
+        parts = urlsplit(url)
+    except ValueError:
+        return False
+    return parts.scheme in ("http", "https") and bool(parts.netloc)
+
+
+async def _collector_refused(response) -> bool:
+    """Did the collector refuse this, or did something in front of it?
+
+    Every refusal the collector issues is one JSON object with an ``error``
+    string. An edge — a WAF, a corporate proxy, a captive portal — answers 4xx
+    with HTML it wrote itself, which is not a verdict on this record at all: it
+    is the request never reaching the door. The distinction decides whether a
+    queued transcript is dropped, so anything that cannot be positively
+    identified as the collector speaking is treated as *not* the collector.
+
+    Being wrong in that direction costs a retry. Being wrong in the other
+    direction costs the share, and the queue's own age and size caps already
+    retire a record nothing will ever accept.
+    """
+    try:
+        body = await response.json(content_type=None)
+    except Exception:
+        return False
+    return isinstance(body, dict) and isinstance(body.get("error"), str)
 
 
 async def post(record: dict) -> bool:
     """Deliver one queued request.
 
-    A 4xx other than 429 is *terminal*: the collector refused this share's shape
-    and re-posting it forever would only keep a permanently-rejected record at
-    the head of the queue. It is reported as delivered so the queue drains, and
-    the refusal is logged. 5xx and transport failures stay queued.
+    A 4xx other than 429 is *terminal*, but only when the collector is the one
+    that said it: re-posting a permanently-rejected record forever would keep it
+    at the head of the queue. It is reported as delivered so the queue drains,
+    and the refusal is logged. 5xx, transport failures, and a 4xx from anything
+    that is not the collector stay queued.
+
+    A record whose ``url`` is not one an HTTP client can even dial is terminal
+    for the same reason, and it is the only failure here that no outage can
+    turn into a success. ``aiohttp`` raises for it, the exception handler at the
+    bottom is indistinguishable from a transport failure, and :func:`flush`
+    preserves order — so one such record stops *every* record behind it,
+    forever, at ``log.debug``. That is not hypothetical: a test run that escaped
+    its tmpdir put twenty-six records with ``"url": "u"`` at the head of a live
+    queue, and the fifty genuine shares queued behind them over the next eight
+    days never left the box while the UI told the user each one had been shared.
     """
     url = record.get("url") or ""
     if not url:
+        return True
+    if not _dialable(url):
+        log.error(
+            "Sharing cannot dial %r for a queued %s; dropping it so the queue "
+            "behind it can drain",
+            url[:200],
+            record.get("op") or "?",
+        )
         return True
     try:
         import aiohttp
@@ -221,15 +503,108 @@ async def post(record: dict) -> bool:
                     return True
                 if response.status == 429 or response.status >= 500:
                     return False
-                log.warning(
-                    "The collector refused a %s share (%s); dropping it",
-                    record.get("op"),
-                    response.status,
-                )
+                if not await _collector_refused(response):
+                    # Not this record's shape being rejected — the request never
+                    # arrived. Dropping a transcript over an edge that is down,
+                    # or a path a WAF has not been told about yet, would destroy
+                    # what the user consented to send for an outage that ends.
+                    log.warning(
+                        "A %s for %s came from something that is not the "
+                        "collector; the record stays queued",
+                        response.status,
+                        record.get("op") or "?",
+                    )
+                    return False
+                if record.get("op") == OP_UNSHARE:
+                    # A refused revocation is not a dropped share. The delete
+                    # token lives nowhere else once ``unshare`` cleared it from
+                    # the meta, so giving up here leaves the transcript on the
+                    # collector with nothing able to ask again — an operator
+                    # should see that, not find it in a debug log (CORR-234).
+                    log.error(
+                        "The collector refused an unshare of %s (%s); the "
+                        "transcript stays there and the delete token is gone",
+                        record.get("share_id") or "?",
+                        response.status,
+                    )
+                else:
+                    log.warning(
+                        "The collector refused a share (%s); dropping it",
+                        response.status,
+                    )
                 return True
     except Exception:
         log.debug("Sharing POST failed; the record stays queued", exc_info=True)
         return False
+
+
+def _ensure_ids() -> list[dict]:
+    """Read the queue, stamping an ``id`` on anything queued before ids existed.
+
+    The queue survives restarts and lives for up to ``MAX_QUEUE_AGE_S``, so an
+    upgrade can find records written by a version that removed them by rewriting
+    a snapshot. They are given an identity here, once, so :func:`flush` can
+    retire them the same way as everything else rather than guessing by
+    position.
+    """
+    with _QUEUE_LOCK:
+        records = _read()
+        anonymous = [r for r in records if not r.get("id")]
+        if anonymous:
+            for record in anonymous:
+                record["id"] = uuid4().hex
+            _write(records)
+        return records
+
+
+def _share_vetoed() -> bool:
+    """May this install still send a *share* right now?
+
+    Consulted per record on the send path, not only when the share was created:
+    a queue survives restarts and lives for ``MAX_QUEUE_AGE_S``, so consent
+    checked once at creation would let an operator export ``CONDOR_SHARING=off``
+    and still watch every transcript queued before the switch was flipped go out
+    (CORR-233). Re-read each time and never cached, for the reason
+    :func:`condor.sharing.consent.env_allows` gives: the operator should not have
+    to restart to be obeyed. Both reads are in-memory and neither blocks.
+
+    Imported lazily to keep this module free of a cycle through ``consent``.
+    """
+    from condor.sharing import consent
+
+    return not consent.env_allows() or not consent.install_allows()
+
+
+# How long the head of the queue may fail before a stall stops being an outage
+# and starts being a bug worth an operator's attention. A blip between two
+# five-minute flushes is not news; nothing having left the box since yesterday
+# is, and used to be visible only as ``log.debug``.
+STALL_WARN_AFTER_S = 6 * 3600
+
+
+def _warn_if_stuck(record: dict, behind: int) -> None:
+    """Say so when the record that stalled the flush has been stalling it for days.
+
+    :func:`flush` preserves order, so a record that never posts holds back every
+    record behind it — which is the right behaviour for an outage and a silent
+    failure for anything else. The queue's own age cap eventually retires a
+    stuck *share*, but a queued unshare is exempt from it and would wait
+    forever, so the only thing that ever surfaced a wedged queue was somebody
+    reading the file.
+    """
+    try:
+        waiting = time.time() - float(record.get("queued_at") or 0)
+    except (TypeError, ValueError):
+        return
+    if waiting < STALL_WARN_AFTER_S:
+        return
+    log.warning(
+        "Sharing has not delivered a %s queued %.1fh ago; %d record(s) are "
+        "waiting behind it",
+        record.get("op") or "?",
+        waiting / 3600,
+        behind,
+    )
 
 
 async def flush() -> tuple[int, int]:
@@ -237,20 +612,80 @@ async def flush() -> tuple[int, int]:
 
     Order is preserved and a failure does not skip ahead: a share and the
     unshare that revokes it must not be able to arrive out of order.
-    """
-    records = _read()
-    if not records:
-        return 0, 0
 
-    delivered = 0
-    remaining: list[dict] = []
-    for record in records:
-        if remaining:
-            remaining.append(record)  # keep order once something has stalled
-            continue
-        if await post(record):
-            delivered += 1
-        else:
-            remaining.append(record)
-    _write(remaining)
-    return delivered, len(remaining)
+    Consent is a *send*-time gate as well as a creation-time one. A share the
+    install is no longer allowed to make is dropped here rather than held: the
+    kill switch says nothing on this box can share, and leaving it queued only
+    postpones the leak to whenever the switch is flipped back. An unshare is
+    delivered under both vetoes — an admin turning sharing off must not strand a
+    user with a transcript they can no longer take back.
+
+    Delivery is by identity, not by snapshot. Posting the whole queue can take
+    ``MAX_QUEUED_SHARES`` × ``POST_TIMEOUT_S``, and the sweep and the web routes
+    keep appending throughout, so the file is not rewritten from the list read
+    before the first POST — the delivered ids are collected and handed to
+    :func:`_rewrite`, which re-reads under the lock. Whatever arrived meanwhile
+    is still queued afterwards, in order. Losing one of those would usually cost
+    a share; once, it cost the only copy of a delete token (CORR-232).
+
+    **Nothing that touches the file runs on the loop.** This coroutine is a PTB
+    job on the loop that also polls Telegram and serves the dashboard, and every
+    read here walks up to ``MAX_QUEUED_SHARES`` whole transcripts:
+    :func:`_ensure_ids` and :func:`_rewrite` parse every one of them, and
+    :func:`count` reads every line even though it parses none. PERF-235 only
+    swapped two ``len(_read())`` counts for :func:`count`; the parsed
+    read-modify-writes stayed inline and were the expensive half. They all go
+    through ``asyncio.to_thread`` now, the convention the HTTP surface next door
+    already follows (PERF-280).
+
+    The hop is only ever taken with the lock released. ``_QUEUE_LOCK`` is a
+    ``threading.RLock`` and the helpers take it themselves in the worker, so
+    nothing new is shared across the hop — but the flag guarding an overlapping
+    flush is in-memory and is still read and set on the loop, because the lock
+    is never held across an await (CORR-232).
+
+    One thread hop per step, sequentially, never gathered: the queue is up to
+    ``MAX_QUEUED_SHARES`` × ``MAX_SHARE_BYTES`` of transcript and overlapping
+    reads of it would trade a stall for the memory.
+    """
+    global _flushing
+    with _QUEUE_LOCK:
+        stand_down = _flushing
+        if not stand_down:
+            _flushing = True
+    if stand_down:
+        # A flush already in flight owns these records; posting them from here
+        # too would duplicate the share, or the revocation.
+        return 0, await asyncio.to_thread(count)
+    try:
+        records = await asyncio.to_thread(_ensure_ids)
+        if not records:
+            return 0, 0
+
+        delivered: set[str] = set()
+        vetoed: set[str] = set()
+        stalled = False
+        for i, record in enumerate(records):
+            if record.get("op") == OP_SHARE and _share_vetoed():
+                # Checked ahead of the stall: a share this install is forbidden
+                # to send should not survive because something ahead of it in
+                # the queue could not reach the collector.
+                vetoed.add(record["id"])
+                continue
+            if stalled:
+                continue  # keep order once something has stalled
+            if await post(record):
+                delivered.add(record["id"])
+            else:
+                stalled = True
+                _warn_if_stuck(record, len(records) - i - 1)
+
+        if vetoed:
+            log.info("Sharing is off; dropped %d queued share(s) unsent", len(vetoed))
+        retired = delivered | vetoed
+        await asyncio.to_thread(
+            _rewrite, lambda queued: [r for r in queued if r.get("id") not in retired]
+        )
+        return len(delivered), await asyncio.to_thread(count)
+    finally:
+        _flushing = False

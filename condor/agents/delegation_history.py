@@ -1,4 +1,4 @@
-"""Delegations that outlived the process that ran them (FEAT-035).
+"""Agent runs that outlived the process that ran them (FEAT-035, FEAT-058).
 
 The live registry in :mod:`condor.agents.delegate` is in-memory and per-process
 by design: membership there means "this can still be running". A restart
@@ -17,6 +17,14 @@ answering "what did this user delegate" is opening one directory, and reading
 someone else's is not a check a caller could forget to make -- it is a path they
 cannot name. ``user_id=None`` means "every user" and is reachable only from an
 admin path or the boot reconciler.
+
+Since FEAT-058 a record is one of two *kinds*. A **delegation** is the shape
+described below, in full. A **consult** is the same ``status.json`` and nothing
+else: it streams its answer straight back to the caller, so there is no
+transcript and no event stream to persist, and its record carries a ``caller``
+(the agent that asked) where a delegation carries a tool count. A record written
+before that field existed has no ``kind``, and it was a delegation -- so the
+default here is a fact about the past, not a guess.
 
 Four shapes of record exist on disk, and all four are readable here:
 
@@ -51,6 +59,7 @@ from pathlib import Path
 from typing import Any
 
 from condor import paths
+from condor.agents.run_records import DEFAULT_KIND, KIND_CONSULT
 
 log = logging.getLogger(__name__)
 
@@ -107,7 +116,7 @@ def _legacy_dirs(agent_slug: str | None = None):
         agents = store.list_all()
 
     for agent in agents:
-        d = agent.agent_dir / "delegations"
+        d = agent.home / "delegations"
         if d.is_dir():
             yield agent.slug, d
 
@@ -226,11 +235,17 @@ def _parse_markdown(md_path: Path) -> dict[str, Any]:
 
 
 def _from_markdown(md_path: Path, agent_slug: str, task_id: str) -> dict[str, Any]:
-    """A record rebuilt from the transcript alone."""
+    """A record rebuilt from the transcript alone.
+
+    Always a delegation: only a delegation ever wrote a transcript, and these
+    shapes predate there being a second kind at all.
+    """
     parsed = _parse_markdown(md_path)
     return {
         "task_id": task_id,
         "agent": parsed["agent"] or agent_slug,
+        "kind": DEFAULT_KIND,
+        "caller": "",
         **{k: v for k, v in parsed.items() if k != "agent"},
     }
 
@@ -247,7 +262,14 @@ _CONTENT_KEYS = frozenset({"state", "task", "result", "error", "tool_count"})
 
 
 def _needs_markdown(data: dict[str, Any]) -> bool:
-    """Whether this status file is missing content only the transcript has."""
+    """Whether this status file is missing content only the transcript has.
+
+    A consult never has one -- it streams its answer straight back to the caller
+    and writes a ledger entry, not a tape (FEAT-058) -- so it is answered by
+    kind rather than by the field set it deliberately does not carry.
+    """
+    if data.get("kind") == KIND_CONSULT:
+        return False
     return not _CONTENT_KEYS <= data.keys()
 
 
@@ -313,6 +335,14 @@ def _from_status(
     return {
         "task_id": task_id,
         "agent": data.get("agent_slug") or md.get("agent") or agent_slug,
+        # A record written before FEAT-058 carries no kind, and it was a
+        # delegation -- because that is the only thing that wrote one. So the
+        # default is not a guess, and the whole back-compatibility story is this
+        # line.
+        "kind": data.get("kind") or DEFAULT_KIND,
+        # Who asked. Only a consult records it (the delegate path has no such
+        # notion yet), so "" means "not recorded", never "nobody".
+        "caller": data.get("caller") or "",
         "user_id": data.get("user_id") or md.get("user_id") or 0,
         "chat_id": data.get("chat_id") or md.get("chat_id") or 0,
         "server_name": data.get("server_name") or md.get("server_name") or None,
@@ -402,7 +432,7 @@ def _entries_of(user_id: int | str) -> Iterator[Entry]:
 
 
 def terminal_record_dirs(
-    user_id: int | str, states: Collection[str]
+    user_id: int | str, states: Collection[str], kind: str | None = None
 ) -> list[tuple[float, str, Path]]:
     """This owner's records whose status file reports one of ``states``, oldest first.
 
@@ -417,11 +447,19 @@ def terminal_record_dirs(
     left out entirely: it is neither evictable nor counted towards a cap. Sorted
     by the key :func:`list_history` orders on, so the first record here is the
     row that listing would have shown last.
+
+    ``kind`` narrows the candidates to one channel, which is how retention keeps
+    a per-kind cap (FEAT-058). It costs nothing: the status dict is already
+    parsed here to read the state.
     """
     from condor.runtime.registry_file import read_status
 
     try:
-        children = paths.delegations_dir(user_id).iterdir()
+        # Materialised inside the guard on purpose: ``iterdir`` is a generator,
+        # so a missing (or unreadable) directory raises on the first *step*, not
+        # on the call -- the guard was catching nothing and the walk raised
+        # through its caller.
+        children = list(paths.delegations_dir(user_id).iterdir())
     except (OSError, paths.UnsafeIdError):
         return []
 
@@ -434,6 +472,8 @@ def terminal_record_dirs(
             continue
         data = read_status(child, DELEGATION_STATUS_FILENAME) or {}
         if data.get("state") not in states:
+            continue
+        if kind is not None and (data.get("kind") or DEFAULT_KIND) != kind:
             continue
         key = _status_sort_key(data, child / DELEGATION_TRANSCRIPT_FILENAME)
         records.append((key, child.name, child))
@@ -480,14 +520,17 @@ def list_history(
     *,
     user_id: int | str | None = None,
     agent_slug: str | None = None,
+    kind: str | None = None,
     limit: int = 100,
 ) -> list[dict[str, Any]]:
-    """Recorded delegations, newest first.
+    """Recorded agent runs, newest first.
 
     Scoped to one person unless ``user_id`` is None, which is admin-only and
     also picks up the unowned legacy records. Filtering by agent is a filter,
     not a lookup: the store is keyed by user now, and the agent-first view is
-    the rarer one (it reads the same status files either way).
+    the rarer one (it reads the same status files either way). ``kind`` is the
+    same shape of filter: ``None`` is every channel (the Activity tab), a kind
+    is one of them (the chat dock, which is about background tasks only).
 
     Reads only what is on disk -- the caller merges in the live registry, which
     is the authority for anything still running in this process.
@@ -526,6 +569,8 @@ def list_history(
         if record is None:
             continue
         if agent_slug and record.get("agent") != agent_slug:
+            continue
+        if kind and (record.get("kind") or DEFAULT_KIND) != kind:
             continue
         records.append(record)
     return records

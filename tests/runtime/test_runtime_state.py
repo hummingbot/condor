@@ -12,8 +12,10 @@ import time
 
 import pytest
 
+from condor.agents.prompts import MAX_STATE_SECTION_CHARS, TRUNCATION_MARKER
 from condor.runtime import state as state_module
 from condor.runtime.state import (
+    MAX_STATE_VALUE_CHARS,
     BoundState,
     NamespaceError,
     cleanup_orphans,
@@ -34,7 +36,7 @@ OTHER = "brigado.other"
 @pytest.fixture
 def state_root(tmp_path, monkeypatch):
     """Isolated on-disk root and a clean in-memory cache."""
-    monkeypatch.setattr("condor.agents.agent._DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     monkeypatch.setattr(state_module, "_cache", {})
     monkeypatch.setattr(state_module, "_last_write", {})
     monkeypatch.setattr(state_module, "_dirty", set())
@@ -189,6 +191,112 @@ def test_namespace_for_uses_agent_and_strategy():
         session_num=7,
     )
     assert namespace_for(engine) == "brigado.mm"
+
+
+# ── The tick reads the store (ARCH-276) ──
+
+
+def _tick_prompt(**kwargs):
+    """A minimal tick prompt, so the [LOOP STATE] block is what varies."""
+    from types import SimpleNamespace
+
+    from condor.agents.prompts import build_tick_prompt
+
+    return build_tick_prompt(
+        agent=SimpleNamespace(instructions="", agent_key="claude-code", slug="brigado"),
+        strategy=SimpleNamespace(
+            instructions="Do the thing.",
+            agent_key="claude-code",
+            slug="mm",
+            agent_slug="brigado",
+            dir=None,
+        ),
+        config={"execution_mode": "loop"},
+        core_data={},
+        learnings="",
+        summary="",
+        recent_decisions="",
+        risk_state={},
+        agent_id="brigado.mm_1",
+        **kwargs,
+    )
+
+
+def test_tick_prompt_shows_the_keys_in_its_namespace(state_root):
+    """What the dashboard or an attended session wrote is visible to the tick."""
+    set_state(NS, "last_executor_id", "exec-42")
+    set_state(NS, "cooldown_until", 1730000000)
+    set_state(NS, "seen", {"pairs": ["SOL-USDC"]})
+
+    prompt = _tick_prompt(loop_state=BoundState(NS).list())
+
+    assert "[LOOP STATE" in prompt
+    assert "last_executor_id: exec-42" in prompt
+    assert "cooldown_until: 1730000000" in prompt
+    # Structured values stay machine-readable rather than Python-repr'd.
+    assert 'seen: {"pairs": ["SOL-USDC"]}' in prompt
+
+
+def test_an_empty_namespace_renders_no_section(state_root):
+    """No keys means no block at all -- not an empty header."""
+    assert BoundState(NS).list() == {}
+
+    assert "[LOOP STATE" not in _tick_prompt(loop_state=BoundState(NS).list())
+    assert "[LOOP STATE" not in _tick_prompt(loop_state={})
+    assert "[LOOP STATE" not in _tick_prompt()  # engine passing nothing at all
+
+
+def test_an_oversize_value_is_refused_at_write_time(state_root):
+    """A 50 kB blob never enters the store, so no tick ever pays for it."""
+    blob = "x" * 50_000
+
+    with pytest.raises(ValueError) as exc:
+        set_state(NS, "candles", blob)
+
+    assert str(MAX_STATE_VALUE_CHARS) in str(exc.value)
+    assert "candles" in str(exc.value)
+    assert list_state(NS) == {}
+    # A value just inside the cap is still ordinary state.
+    set_state(NS, "cursor", "x" * (MAX_STATE_VALUE_CHARS - 2))
+    assert len(get_state(NS, "cursor")) == MAX_STATE_VALUE_CHARS - 2
+
+
+def test_an_oversize_value_renders_truncated_and_says_so(state_root):
+    """A file written before the cap existed cannot blow up the tick prompt."""
+    # Bypass set_state the way a hand-edited state.json would.
+    prompt = _tick_prompt(loop_state={"candles": "x" * 50_000})
+
+    assert "[LOOP STATE" in prompt
+    assert TRUNCATION_MARKER in prompt
+    assert "x" * (MAX_STATE_VALUE_CHARS + 1) not in prompt
+    assert "x" * MAX_STATE_VALUE_CHARS in prompt
+
+
+def test_the_loop_state_section_is_bounded_as_a_whole(state_root):
+    """Many legal-sized values still cannot add up to an unbounded section."""
+    loop_state = {f"k{i:02d}": "x" * (MAX_STATE_VALUE_CHARS - 10) for i in range(50)}
+
+    prompt = _tick_prompt(loop_state=loop_state)
+
+    section = next(s for s in prompt.split("\n\n") if s.startswith("[LOOP STATE"))
+    assert section.endswith(TRUNCATION_MARKER)
+    assert len(section) <= MAX_STATE_SECTION_CHARS + len(TRUNCATION_MARKER)
+
+
+def test_the_tick_feeds_the_prompt_from_its_own_bound_state():
+    """TickEngine.state is genuinely read by the tick, not just constructed."""
+    import inspect
+
+    from condor.agents import engine
+
+    tick_src = inspect.getsource(engine.TickEngine._tick)
+    assert "self.state.list()" in tick_src
+    assert "loop_state=loop_state" in tick_src
+
+
+# The other half of ARCH-276 -- that wiring the read side did not widen the
+# tick's tool profile -- is pinned by test_the_tick_seat_cannot_reach_control_agent
+# in tests/test_dangerous_gate_names_resolve.py.
 
 
 # ── Timeout policy ──

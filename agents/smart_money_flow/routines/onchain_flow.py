@@ -30,8 +30,12 @@ logger = logging.getLogger(__name__)
 
 CATEGORY = "Analysis"
 
-# Keyless endpoints (CoinGecko + GeckoTerminal free tier, public Solana RPC).
-CG = "https://api.coingecko.com/api/v3"
+# Keyless by default (CoinGecko + GeckoTerminal free tier, public Solana RPC).
+# An Analyst key is optional here and only makes these three fetches dependable:
+# keyless /api/v3 throttles hard and answers 429, which this routine degrades past
+# silently — so a tick quietly loses the regime read rather than failing.
+# The hosts themselves live in ``pool_data`` (see ``_cg`` below), which owns the
+# plan resolution for every CoinGecko surface.
 XRPL_NODES = [
     "https://xrplcluster.com/",
     "https://s1.ripple.com:51234",
@@ -74,12 +78,30 @@ class Config(BaseModel):
 # ── helpers ────────────────────────────────────────────────────────────────
 
 
-async def _get_json(url: str, timeout: float = 12) -> "dict | list | None":
+def _cg() -> "tuple[str, dict[str, str]]":
+    """The CoinGecko base URL and auth headers for the configured plan.
+
+    Defers to ``pool_data`` so one key configures both surfaces — including its
+    fallback, so a key the paid host rejected stops being sent here too, and so
+    any later change to *how* the key is sent lands here without being mirrored by
+    hand. The ``"market"`` surface is the ordinary market endpoints these three
+    fetches use, one level up from the ``/onchain`` ones the pool browser reads.
+    """
+    from condor.pool_data import coingecko_access
+
+    return coingecko_access("market")
+
+
+async def _get_json(
+    url: str, timeout: float = 12, headers: "dict | None" = None
+) -> "dict | list | None":
     import httpx
 
     try:
         async with httpx.AsyncClient(timeout=timeout) as http:
-            resp = await http.get(url, headers={"User-Agent": "Mozilla/5.0"})
+            resp = await http.get(
+                url, headers={"User-Agent": "Mozilla/5.0", **(headers or {})}
+            )
             if resp.status_code != 200:
                 logger.warning("flow: %s -> HTTP %s", url, resp.status_code)
                 return None
@@ -87,6 +109,12 @@ async def _get_json(url: str, timeout: float = 12) -> "dict | list | None":
     except Exception as exc:  # never raise into a tick
         logger.warning("flow: fetch failed %s: %s", url, type(exc).__name__)
         return None
+
+
+async def _cg_json(path: str) -> "dict | list | None":
+    """One CoinGecko market-endpoint call, keyed if a key is configured."""
+    base, headers = _cg()
+    return await _get_json(f"{base}{path}", headers=headers)
 
 
 async def _gecko_json(path: str, params: dict | None = None) -> "dict | None":
@@ -120,11 +148,11 @@ def _num(v) -> float:
 
 
 async def fetch_global() -> "dict | list | None":
-    return await _get_json(f"{CG}/global")
+    return await _cg_json("/global")
 
 
 async def fetch_trending(top_n: int = 7) -> list:
-    data = await _get_json(f"{CG}/search/trending")
+    data = await _cg_json("/search/trending")
     if not data:
         return []
     coins = data.get("coins", [])[:top_n]
@@ -133,8 +161,8 @@ async def fetch_trending(top_n: int = 7) -> list:
 
 async def fetch_markets(ids: list[str]) -> "dict | list | None":
     id_str = "%2C".join(ids)
-    return await _get_json(
-        f"{CG}/coins/markets?vs_currency=usd&ids={id_str}"
+    return await _cg_json(
+        f"/coins/markets?vs_currency=usd&ids={id_str}"
         f"&order=market_cap_desc&per_page=50&page=1&sparkline=false"
     )
 
