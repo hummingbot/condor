@@ -1328,12 +1328,17 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
                 # success. The Makefile also picks the Tailscale overlay itself
                 # from TAILSCALE_ENABLED, so the compose-file juggling that
                 # used to live here is upstream's job now.
-                _deploy_cmd="make deploy"
+                # No fallback to raw `docker compose up -d`. That is exactly
+                # the bug described above: it bypasses emqx-auth and produces
+                # a broker with authentication enabled and no accounts, which
+                # the HTTP health check cannot see. If make is missing, the
+                # honest outcome is a configured API that has not been
+                # started, not a started one that cannot authenticate.
                 if ! command_exists make; then
-                    msg_warn "make not found — falling back to docker compose"
-                    _deploy_cmd="docker compose up -d"
-                fi
-                if (cd "$HB_API_DIR" && eval "$_deploy_cmd"); then
+                    msg_warn "make is not installed, and the API deploy needs it:"
+                    msg_info "it runs the emqx-auth step that seeds the broker's account."
+                    msg_info "Install make, then: cd $HB_API_DIR && make deploy"
+                elif (cd "$HB_API_DIR" && make deploy); then
                     msg_ok "Hummingbot API stack started"
 
                     # Wait for API to be healthy
@@ -1352,10 +1357,10 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
                     fi
                 else
                     msg_error "Failed to start Hummingbot API stack"
-                    msg_info "Try manually: cd $HB_API_DIR && docker compose up -d"
+                    msg_info "Try manually: cd $HB_API_DIR && make deploy"
                 fi
             else
-                msg_info "Start API later: cd $HB_API_DIR && docker compose up -d"
+                msg_info "Start API later: cd $HB_API_DIR && make deploy"
             fi
 
             # hb_api_deployed means CONFIGURED, and drives the config.yml
