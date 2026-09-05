@@ -113,12 +113,13 @@ async def web_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 ]
             ]
         )
-    elif button_url:
-        keyboard = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("🌐 Open Dashboard", url=button_url)]]
-        )
     else:
-        keyboard = None
+        # A loopback URL button is rejected by Telegram and only opens on the
+        # machine running the bot anyway, so local hosts get the copy control
+        # alone — it works everywhere.
+        keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("📋 Copy Link", copy_text=CopyTextButton(text=url))]]
+        )
 
     if is_localhost:
         # A loopback button only opens on the machine running the bot, so the
