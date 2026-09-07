@@ -534,13 +534,32 @@ async def _probe_and_close(cm, name: str) -> None:
 
 _HB_CONTAINER = "hummingbot-api"
 
-# "hummingbot-api" is the MagicDNS name a co-located API answers to when it has
-# its own tailnet node, so a failure there is very often a local stack problem,
-# not an unreachable remote host. Without it, a co-located API that was down
-# reported "check the host is reachable — firewall, Tailscale status, or the
-# server is down" and never ran _local_stack_diagnosis(), which would have said
-# `docker compose ps` in one line.
-_LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1", "0.0.0.0", _HB_CONTAINER)
+_LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1", "0.0.0.0")
+
+# Where a co-located hummingbot-api would be, relative to Condor's own root.
+_HB_API_DIR = Path(__file__).resolve().parent.parent.parent / "hummingbot-api"
+
+
+def _hb_api_is_here() -> bool:
+    """Is there a hummingbot-api install on THIS machine?
+
+    ``hummingbot-api`` is also the MagicDNS name a co-located API answers to
+    when it has its own tailnet node, and treating that name as local is what
+    makes a down co-located stack report `docker compose ps` instead of
+    "check the host is reachable".
+
+    But it is equally the name Condor writes for a *remote* API over Tailscale
+    -- that is the default in its own installer -- and there the local-stack
+    advice names a directory that does not exist and a stack that was never
+    supposed to be here. The name alone cannot tell the two apart; whether the
+    install is on this disk can.
+    """
+    try:
+        return (_HB_API_DIR / ".env").is_file() or (
+            _HB_API_DIR / "docker-compose.yml"
+        ).is_file()
+    except OSError:
+        return False
 
 
 def _is_local_host(host: str) -> bool:
@@ -550,6 +569,8 @@ def _is_local_host(host: str) -> bool:
     at the tailnet IP of the box you are standing on is still a local stack.
     """
     if host in _LOCAL_HOSTS:
+        return True
+    if host == _HB_CONTAINER and _hb_api_is_here():
         return True
     try:
         from utils.tailscale import is_tailnet_ip, tailnet_ip

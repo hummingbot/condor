@@ -94,6 +94,40 @@ def test_connection_hint_auth_failure_still_wins_when_tailscale_is_enabled(monke
     assert "username/password" in hint
 
 
+# ── "hummingbot-api" is local only when the install is actually here ────────
+#
+# The name is both the MagicDNS name of a co-located API with its own tailnet
+# node AND the host Condor writes for a REMOTE API over Tailscale (its own
+# installer default). Classifying it local either way sent remote installs the
+# advice "cd ../hummingbot-api && make deploy" — a directory that is not there,
+# for a stack that was never meant to be.
+
+
+def test_hummingbot_api_name_is_local_when_the_install_is_on_this_machine(monkeypatch):
+    monkeypatch.setattr(doctor, "_hb_api_is_here", lambda: True)
+    assert doctor._is_local_host("hummingbot-api") is True
+
+
+def test_hummingbot_api_name_is_remote_when_nothing_is_installed_here(monkeypatch):
+    monkeypatch.setattr(doctor, "_hb_api_is_here", lambda: False)
+    assert doctor._is_local_host("hummingbot-api") is False
+
+
+def test_loopback_names_are_local_regardless_of_any_install(monkeypatch):
+    monkeypatch.setattr(doctor, "_hb_api_is_here", lambda: False)
+    for host in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+        assert doctor._is_local_host(host) is True
+
+
+def test_hb_api_is_here_follows_the_sibling_checkout(tmp_path, monkeypatch):
+    api_dir = tmp_path / "hummingbot-api"
+    api_dir.mkdir()
+    monkeypatch.setattr(doctor, "_HB_API_DIR", api_dir)
+    assert doctor._hb_api_is_here() is False
+    (api_dir / "docker-compose.yml").write_text("services: {}\n")
+    assert doctor._hb_api_is_here() is True
+
+
 # ── Dashboard port: nothing listening is normal, not a warning ──────────────
 
 
