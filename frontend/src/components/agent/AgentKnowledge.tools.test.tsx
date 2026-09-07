@@ -59,7 +59,7 @@ function brain(
     server_required: false,
     server_name: "",
     tools: [
-      tool("consult", "condor", "Ask a specialist agent a question"),
+      tool("delegate", "condor", "Hand a long task to a background agent instance"),
       tool("run_code", "condor", "Run a Python snippet inside Condor"),
       tool("get_candles", "hummingbot", "OHLCV candles for a pair"),
       tool("manage_clmm", "hummingbot", "Direct CLMM position operations"),
@@ -143,7 +143,7 @@ describe("the tools tab", () => {
   it("lists every mounted tool, grouped by its server", async () => {
     await openTools();
 
-    for (const name of ["consult", "run_code", "get_candles", "manage_clmm"]) {
+    for (const name of ["delegate", "run_code", "get_candles", "manage_clmm"]) {
       expect(rowFor(name)).toBeTruthy();
     }
     expect(container.textContent).toContain("Condor");
@@ -167,7 +167,7 @@ describe("the tools tab", () => {
     await openTools();
 
     expect(rowFor("get_candles").textContent).toContain("allowlisted");
-    expect(rowFor("consult").textContent).not.toContain("allowlisted");
+    expect(rowFor("delegate").textContent).not.toContain("allowlisted");
     // …and the tab still lists the whole surface, not just the allowlist.
     expect(rowFor("manage_clmm")).toBeTruthy();
     expect(container.textContent).toContain("Edit it in the Brain tab");

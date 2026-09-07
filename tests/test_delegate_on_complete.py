@@ -13,7 +13,7 @@ from fastapi import HTTPException
 
 from condor import paths
 from condor.agents import agent as agent_module
-from condor.agents import consult as consult_module
+from condor.agents import agent_run as agent_run_module
 from condor.agents import delegate as delegate_module
 from condor.agents.delegate import start_delegation
 from condor.runtime import wake
@@ -88,7 +88,7 @@ def test_on_complete_and_session_key_round_trip_into_the_status_file(
     tmp_path, monkeypatch, wakes
 ):
     agent_dir = _agent_root(tmp_path, monkeypatch)
-    monkeypatch.setattr(consult_module, "_run_agent_to_completion", _answer())
+    monkeypatch.setattr(agent_run_module, "run_agent_to_completion", _answer())
 
     async def scenario():
         dt = await start_delegation(
@@ -120,7 +120,7 @@ def test_on_complete_defaults_to_notify_and_is_exposed_but_session_key_is_not(
     """``to_dict`` is polled straight into a chat agent's context: it may carry
     the one-word intent, never the plumbing."""
     _agent_root(tmp_path, monkeypatch)
-    monkeypatch.setattr(consult_module, "_run_agent_to_completion", _answer())
+    monkeypatch.setattr(agent_run_module, "run_agent_to_completion", _answer())
 
     async def scenario():
         dt = await start_delegation(
@@ -144,7 +144,7 @@ def test_on_complete_defaults_to_notify_and_is_exposed_but_session_key_is_not(
 def test_an_unknown_on_complete_degrades_to_notify(tmp_path, monkeypatch, wakes):
     """The edges reject it; a delegation must not fail to *start* over a flag."""
     _agent_root(tmp_path, monkeypatch)
-    monkeypatch.setattr(consult_module, "_run_agent_to_completion", _answer())
+    monkeypatch.setattr(agent_run_module, "run_agent_to_completion", _answer())
 
     async def scenario():
         dt = await start_delegation(
@@ -172,7 +172,7 @@ def test_an_unknown_on_complete_degrades_to_notify(tmp_path, monkeypatch, wakes)
 
 def test_a_finished_resume_task_wakes_its_conversation(tmp_path, monkeypatch, wakes):
     _agent_root(tmp_path, monkeypatch)
-    monkeypatch.setattr(consult_module, "_run_agent_to_completion", _answer())
+    monkeypatch.setattr(agent_run_module, "run_agent_to_completion", _answer())
     bot = _FakeBot()
 
     async def scenario():
@@ -207,7 +207,7 @@ def test_a_finished_resume_task_wakes_its_conversation(tmp_path, monkeypatch, wa
 
 def test_the_default_behaves_exactly_as_before(tmp_path, monkeypatch, wakes):
     _agent_root(tmp_path, monkeypatch)
-    monkeypatch.setattr(consult_module, "_run_agent_to_completion", _answer())
+    monkeypatch.setattr(agent_run_module, "run_agent_to_completion", _answer())
     bot = _FakeBot()
 
     async def scenario():
@@ -238,7 +238,7 @@ def test_a_failed_task_never_resumes(tmp_path, monkeypatch, wakes):
     async def boom(**kw):
         raise RuntimeError("agent exploded")
 
-    monkeypatch.setattr(consult_module, "_run_agent_to_completion", boom)
+    monkeypatch.setattr(agent_run_module, "run_agent_to_completion", boom)
 
     async def scenario():
         dt = await start_delegation(
@@ -268,7 +268,7 @@ def test_a_stopped_task_never_resumes(tmp_path, monkeypatch, wakes):
         await asyncio.sleep(30)
         return "never"
 
-    monkeypatch.setattr(consult_module, "_run_agent_to_completion", hang)
+    monkeypatch.setattr(agent_run_module, "run_agent_to_completion", hang)
 
     async def scenario():
         dt = await start_delegation(
@@ -300,7 +300,7 @@ def test_a_timed_out_task_never_resumes(tmp_path, monkeypatch, wakes):
         await asyncio.sleep(30)
         return "never"
 
-    monkeypatch.setattr(consult_module, "_run_agent_to_completion", hang)
+    monkeypatch.setattr(agent_run_module, "run_agent_to_completion", hang)
 
     async def scenario():
         dt = await start_delegation(
@@ -325,9 +325,9 @@ def test_a_timed_out_task_never_resumes(tmp_path, monkeypatch, wakes):
 
 
 def test_a_resume_without_provenance_is_a_no_op(tmp_path, monkeypatch, wakes):
-    """A consult- or tick-started delegation has no conversation to wake."""
+    """A tick-started delegation has no conversation to wake."""
     _agent_root(tmp_path, monkeypatch)
-    monkeypatch.setattr(consult_module, "_run_agent_to_completion", _answer())
+    monkeypatch.setattr(agent_run_module, "run_agent_to_completion", _answer())
 
     async def scenario():
         dt = await start_delegation(
@@ -354,7 +354,7 @@ def test_a_resume_without_provenance_is_a_no_op(tmp_path, monkeypatch, wakes):
 def route(tmp_path, monkeypatch):
     """The delegate route with the runtime lookup stubbed to one conversation."""
     _agent_root(tmp_path, monkeypatch)
-    monkeypatch.setattr(consult_module, "_run_agent_to_completion", _answer())
+    monkeypatch.setattr(agent_run_module, "run_agent_to_completion", _answer())
     monkeypatch.setattr(wake, "_in_flight", {})
 
     async def fake_conversation_for_session(session_key):
@@ -426,7 +426,7 @@ def test_a_wake_that_blows_up_does_not_cost_the_notification(
     tmp_path, monkeypatch, wakes
 ):
     _agent_root(tmp_path, monkeypatch)
-    monkeypatch.setattr(consult_module, "_run_agent_to_completion", _answer())
+    monkeypatch.setattr(agent_run_module, "run_agent_to_completion", _answer())
 
     async def boom(**kwargs):
         raise RuntimeError("runtime unreachable")

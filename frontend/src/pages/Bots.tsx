@@ -1,10 +1,11 @@
-import { Bot, Rocket } from "lucide-react";
+import { Bot, Rocket, TerminalSquare } from "lucide-react";
 import { useState } from "react";
 import { Navigate, useSearchParams } from "react-router-dom";
 
 import { NoServerCard } from "@/components/NoServerCard";
 import { PerfBrowser } from "@/components/perf/PerfBrowser";
 import { DeployBotDialog } from "@/components/bots/DeployBotDialog";
+import { EditorModal } from "@/components/editor/EditorModal";
 import { FallbackSpinner } from "@/components/ui/FallbackSpinner";
 import { useFleetData } from "@/hooks/useFleetData";
 import { useServer } from "@/hooks/useServer";
@@ -39,8 +40,12 @@ export function Bots() {
   const tab = searchParams.get("tab");
   const legacyRunsTab = tab === "runs" || tab === "archived";
   // Deploy lives in the browser's fleet-scope header — except when there is no
-  // fleet to scope, which is exactly when it is needed most (see below).
+  // fleet to scope, which is exactly when it is needed most (see below). The
+  // Editor sits beside it there and is stranded the same way: writing the
+  // controller you are about to deploy is the *first* thing an empty fleet
+  // needs, not something reachable only once a bot is already running.
   const [showDeploy, setShowDeploy] = useState(false);
+  const [showEditor, setShowEditor] = useState(false);
 
   const fleet = useFleetData(server, { population });
 
@@ -117,14 +122,25 @@ export function Bots() {
             </p>
           </div>
         )}
-        <button
-          onClick={() => setShowDeploy(true)}
-          className="flex items-center gap-2 rounded-lg bg-[var(--color-primary)] px-5 py-2 text-sm font-medium text-white transition-all hover:shadow-lg hover:shadow-[var(--color-primary)]/20"
-        >
-          <Rocket className="h-4 w-4" />
-          Deploy Bot
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowDeploy(true)}
+            className="flex items-center gap-2 rounded-lg bg-[var(--color-primary)] px-5 py-2 text-sm font-medium text-white transition-all hover:shadow-lg hover:shadow-[var(--color-primary)]/20"
+          >
+            <Rocket className="h-4 w-4" />
+            Deploy Bot
+          </button>
+          <button
+            onClick={() => setShowEditor(true)}
+            className="flex items-center gap-2 rounded-lg border border-[var(--color-border)] px-5 py-2 text-sm font-medium text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+            title="Open the controller & config editor"
+          >
+            <TerminalSquare className="h-4 w-4" />
+            Editor
+          </button>
+        </div>
         <DeployBotDialog open={showDeploy} onClose={() => setShowDeploy(false)} server={server} />
+        {showEditor && <EditorModal open onClose={() => setShowEditor(false)} />}
       </div>
     );
   }

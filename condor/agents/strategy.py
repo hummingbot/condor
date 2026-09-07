@@ -20,7 +20,7 @@ key ``"{agent_slug}.{slug}"`` is what MCP tools pass around as ``strategy_id``.
 Authoring one is optional: an Agent that owns none still loops, on the *default*
 playbook :func:`StrategyStore.ensure_default` materializes from its identity.
 The Agent's memory/skills/routines (the "brain") are shared across all of its
-strategies and its consults — they live one level up, at
+strategies and its delegated runs — they live one level up, at
 ``{agent_slug}/``.
 
 A strategy directory is a **mixed node** since FEAT-115: ``strategy.md`` is

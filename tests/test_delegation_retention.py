@@ -19,7 +19,7 @@ import re
 import pytest
 
 from condor.agents import agent as agent_module
-from condor.agents import consult as consult_module
+from condor.agents import agent_run as agent_run_module
 from condor.agents import delegate as delegate_module
 from condor.agents.delegate import (
     MAX_EVENTS_PER_DELEGATION,
@@ -67,7 +67,7 @@ def _run_delegation(monkeypatch, task="scan SOL pools", emit=None, result="done 
             emit(event_sink)
         return result
 
-    monkeypatch.setattr(consult_module, "_run_agent_to_completion", fake_run)
+    monkeypatch.setattr(agent_run_module, "run_agent_to_completion", fake_run)
 
     async def scenario():
         dt = await start_delegation(

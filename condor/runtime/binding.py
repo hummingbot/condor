@@ -5,7 +5,7 @@ under ``agents/``. Empty means Condor — the **default** agent (``CHAT_SLUG``),
 not the absence of one (FEAT-033). Whoever it names supplies the identity, the
 model, the toolset, the server pin and the memory scope. Everything that needs
 to know which brain is on the other end asks this module, so an Agent behaves
-the same whether it is consulted once, looped, or chatted with.
+the same whether it is delegated to, looped, or chatted with.
 
 There used to be a second dimension — a ``mode`` selecting an assistant persona
 under ``assistants/`` — but it had a single value from FEAT-004 onward and no
@@ -160,9 +160,9 @@ def resolve(
     ``session_key`` is the seat this binding is for, passed down to the condor
     MCP subprocess so a tool that reports back to its origin (``delegate``,
     ``run_code``, ``send_notification``, ``manage_routines``) knows which
-    conversation asked. Only a chat session has one; consult, the delegate
-    worker and the tick engine call :func:`toolsets.build_mcp_servers_for_session`
-    directly and correctly pass none.
+    conversation asked. Only a chat session has one; the delegate worker and the
+    tick engine call :func:`toolsets.build_mcp_servers_for_session` directly and
+    correctly pass none.
     """
     from condor.agents.agent import Agent, AgentStore
 
@@ -220,7 +220,7 @@ def remember_model_choice(user_id: int | None, agent_slug: str, agent_key: str) 
     """Persist a deliberate model pick where the *next* session will find it.
 
     A specialist's model lives in its own AGENT.md, so picking one in the chat
-    moves the Agent itself — chat, consult, delegate and loop all read that
+    moves the Agent itself — chat, delegate and loop all read that
     record. Condor's does not: ``DEFAULT_AGENT`` is read from condor/AGENT.md at
     import and is everyone's default, so an unbound pick is the *user's*, and
     goes to the same preference Telegram's Change LLM writes.
@@ -267,9 +267,9 @@ def agent_identity_context(
     """Identity + domain memory/skills the bound Agent opens the chat with.
 
     Shares its domain memory/skills sections with ``build_agent_context`` (used
-    by consult) via :func:`~condor.memory.domain_context`, and differs from it
-    only by the identity header in front and the absent consult request behind —
-    so a chatted Agent starts from the same self-knowledge a consulted one does.
+    by a delegated run) via :func:`~condor.memory.domain_context`, and differs
+    from it only by the identity header in front and the absent task behind — so
+    a chatted Agent starts from the same self-knowledge a delegated one does.
 
     Leads with :func:`~condor.agents.agent.identity_header` — the same line the
     condor MCP server puts in the system prompt — because AGENT.md describes the

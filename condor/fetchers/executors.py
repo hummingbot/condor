@@ -223,7 +223,16 @@ def build_executor_row(ex: Dict[str, Any]) -> Dict[str, Any]:
         "amount": amount,
         "timestamp": float(cfg.get("timestamp") or ex.get("timestamp") or 0),
         "close_timestamp": float(ex.get("close_timestamp") or 0),
-        "controller_id": str(cfg.get("controller_id") or ex.get("controller_id") or ""),
+        # Top-level first, and that is not a style choice. The creator's
+        # ``controller_id`` -- the tag the risk gate attributed the position to --
+        # is stored on the executor *record*; the MCP create path pops it out of
+        # the config precisely so it "never travels inside the config"
+        # (``executor_create.create_executor``). What is left in ``config`` is the
+        # backend schema's own default, "main". Reading the config first made an
+        # agent's own executor come back owned by "main", which dropped it from
+        # the session ledger and made the run warn that it had deployed something
+        # it did not own (CORR: unledgered deployment).
+        "controller_id": str(ex.get("controller_id") or cfg.get("controller_id") or ""),
         "custom_info": custom_info,
         "config": config if isinstance(config, dict) else {},
     }

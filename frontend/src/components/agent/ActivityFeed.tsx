@@ -27,9 +27,13 @@ const KIND: Record<DelegationKind, { icon: typeof Send; label: string }> = {
  * The channels a reader can narrow to, in the order they are worth scanning.
  *
  * The filter exists because a code run is a tool call *inside* another run: one
- * chatty consult can fire twenty snippets, and a feed where the cheap plentiful
+ * chatty run can fire twenty snippets, and a feed where the cheap plentiful
  * kind buries the expensive rare one has stopped answering its own question
  * (FEAT-061).
+ *
+ * "Consults" are the blocking asks one agent makes of another
+ * (`delegate(action="ask")`) — the cheap plentiful kind, kept apart from the
+ * background tasks for the same reason code runs are.
  */
 const FILTERS: { id: DelegationKind | undefined; label: string }[] = [
   { id: undefined, label: "All" },
@@ -100,7 +104,7 @@ function emptyMessage(kind: DelegationKind | undefined, agent?: string): string 
       : "No delegated tasks recorded yet.";
   if (kind === "consult")
     return agent
-      ? "This agent has not been consulted yet."
+      ? "No agent has asked this one a question yet."
       : "No consults recorded yet.";
   // A code run is also the one kind a reader can be unable to see at all, so the
   // message names the possibility rather than implying the agent never computed.
@@ -123,10 +127,9 @@ function emptyMessage(kind: DelegationKind | undefined, agent?: string): string 
  *
  * `kind` pins the feed to one channel — the chat dock passes `"delegate"`,
  * because it is about background tasks for this conversation and every consult
- * the conversation made would drown the thing it exists to show. A pinned feed
- * shows no filter row: the pin is the answer, not a default the reader may
- * change. `agent` scopes it to one agent's page; without it the feed is
- * fleet-wide.
+ * it made would drown the thing it exists to show. A pinned feed shows no
+ * filter row: the pin is the answer, not a default the reader may change.
+ * `agent` scopes it to one agent's page; without it the feed is fleet-wide.
  */
 export function ActivityFeed({
   agent,
@@ -153,8 +156,8 @@ export function ActivityFeed({
   const summary = summarize(rows);
 
   // Filtering server-side rather than over the fetched page is the honest
-  // choice: narrowing a hundred mixed rows client-side would show three
-  // consults and imply that is all there ever were — the same dishonesty the
+  // choice: narrowing a hundred mixed rows client-side would show three of a
+  // kind and imply that is all there ever were — the same dishonesty the
   // summary caption exists to avoid.
   const filters = kind ? null : (
     <div

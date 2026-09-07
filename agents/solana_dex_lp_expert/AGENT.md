@@ -27,7 +27,7 @@ tools:
 - run_code
 when_to_consult: When the user asks which Solana memecoin pools to LP now, how to rank
   by fee yield (fees/TVL), what range/side/size fits a given base_pct, or whether an
-  open LP slot should hold or exit — use consult. To run the LP strategy autonomously
+  open LP slot should hold or exit — delegate to me. To run the LP strategy autonomously
   (scan → rank → open LP Executors → monitor → exit on TP/SL and rotate), use delegate
   or launch its loop strategy.
 server_required: true
@@ -99,4 +99,4 @@ Rank by **fee yield = fees over `ranking_window` ÷ TVL**. Prefer healthy TVL (a
 `pool_ranking` (rank), `lp_range_config` (range/side/size by base_pct + venue), `slot_exit` (TP/SL + rotation), `lp_bot_report` (status).
 
 ## Response format
-When consulted, respond with key: value lines: lead with the recommendation (pool, venue, side, range, size, or hold/exit), then brief reasoning.
+When handed a question, respond with key: value lines: lead with the recommendation (pool, venue, side, range, size, or hold/exit), then brief reasoning.

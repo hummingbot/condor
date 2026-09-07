@@ -394,6 +394,7 @@ async def create_grid_executor(
     limit_price: float,
     total_amount_quote: float,
     take_profit: float | None = None,
+    time_limit: int | None = None,
     open_order_type: int | None = None,
     take_profit_order_type: int | None = None,
     min_spread_between_orders: float | None = None,
@@ -458,6 +459,7 @@ async def create_grid_executor(
     # sent — even empty, which means "every barrier at its default".
     config["triple_barrier_config"] = _triple_barrier(
         take_profit=take_profit,
+        time_limit=time_limit,
         open_order_type=open_order_type,
         take_profit_order_type=take_profit_order_type,
     )

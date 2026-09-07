@@ -1,7 +1,7 @@
 """MCP toolset builders for agent sessions (ARCH-190).
 
 Builds the per-session MCP server configs (condor + hummingbot subprocesses)
-that every surface — Telegram, web dashboard, consult/delegate, the tick
+that every surface — Telegram, web dashboard, delegate, the tick
 engine — hands to its client. Platform-neutral runtime foundation: this used
 to live in ``handlers/agents/_shared.py``, which the runtime could only reach
 via lazy imports; ``handlers`` now re-exports from here instead.
@@ -86,7 +86,7 @@ def seat_profile(agent_slug: str | None, tick: bool) -> str:
       repointing the API server, no direct liquidity moves outside an executor,
       and none of the orchestration family that starts and stops the very loop it
       is running inside.
-    - ``agent`` — an attended specialist (a consult, a chat bound to an agent, a
+    - ``agent`` — an attended specialist (a chat bound to an agent, a
       background copy of one). Keeps its domain tools: the LP experts name
       ``manage_amm``, the shared ``recover_orphaned_position`` playbook closes a
       stranded position with ``manage_clmm``, and ``strategy_builder`` — shared,
@@ -95,7 +95,7 @@ def seat_profile(agent_slug: str | None, tick: bool) -> str:
     - ``full`` — the chat coordinator, where a human confirms every dangerous
       call, and any launch with no seat at all.
 
-    Note the axis is attendance, not identity: a specialist consulted with a user
+    Note the axis is attendance, not identity: a specialist chatted with by a user
     watching and the same specialist ticking unattended are different seats, and
     neither ``agent_slug`` nor ``--delegate-worker`` tells them apart, which is
     why ``tick`` is passed in rather than derived.
@@ -173,6 +173,7 @@ def _condor_mcp_args(
     agent_slug: str | None = None,
     server_name: str | None = None,
     delegate_worker: bool = False,
+    ask_target: bool = False,
     profile: str = "full",
     session_key: str = "",
     muted_tools: Sequence[str] = (),
@@ -182,6 +183,11 @@ def _condor_mcp_args(
     ``delegate_worker`` marks a *background Condor worker* — the detached session
     ``delegate`` starts (FEAT-032). The chat and that worker share one agent
     record, so the flag is what tells the subprocess which seat it is sitting in.
+
+    ``ask_target`` marks the other unattended seat: a run already answering
+    someone's ``delegate(action="ask")``. It is what bounds ask depth at one —
+    the guard lives in ``tools/delegate.py``, and this is how the subprocess
+    learns it is sitting in that seat.
 
     ``session_key`` is the seat's canonical key, and it rides argv for the same
     reason the ids do (SEC-180): env is not a channel we control end to end. The
@@ -212,6 +218,8 @@ def _condor_mcp_args(
         args.extend(["--server-name", str(server_name)])
     if delegate_worker:
         args.append("--delegate-worker")
+    if ask_target:
+        args.append("--ask-target")
     if session_key:
         args.extend(["--session-key", str(session_key)])
     args.extend(["--profile", profile])
@@ -259,6 +267,7 @@ def build_mcp_servers_for_session(
     server_name: str | None = None,
     agent_slug: str | None = None,
     delegate_worker: bool = False,
+    ask_target: bool = False,
     tick: bool = False,
     session_key: str = "",
 ) -> list[dict[str, Any]]:
@@ -277,19 +286,24 @@ def build_mcp_servers_for_session(
     ``agent_slug`` scopes the condor MCP tools' memory/skills to that Agent's
     own stores (``agents/{slug}/``). Without it the tools target the chat
     condor's stores — correct for chat sessions, wrong for an Agent run: a
-    serverless consult/tick would silently read and write the CHAT's memory
+    serverless delegation/tick would silently read and write the CHAT's memory
     and skills instead of the Agent's own (e.g. an agent unable to find its
     inherited ``routine_cookbook`` skill).
 
     ``delegate_worker`` marks a background Condor delegation (FEAT-032) so the
     subprocess picks up the worker framing and refuses to delegate again.
 
+    ``ask_target`` marks a run answering someone's ``delegate(action="ask")``, so
+    the subprocess refuses to ask onward and ask depth stays bounded at one.
+
     ``tick`` marks the unattended loop seat, which mounts the narrowest tool
     profile on both subprocesses (FEAT-066). See :func:`seat_profile`.
 
     ``session_key`` is the chat seat's canonical key, and only a chat has one:
-    a consult, a delegate worker and a tick run for nobody's conversation and
-    pass nothing, which is what keeps their provenance honestly empty. See
+    an ask target, a delegate worker and a tick run for nobody's conversation and
+    pass nothing, which is what keeps their provenance honestly empty. It is also
+    why ``delegate(action="ask")`` exists at all: with no session there is no
+    turn for ``on_complete="resume"`` to wake. See
     :func:`_condor_mcp_args` for why it travels on argv.
     """
     from condor.memory.mutes import load_mutes
@@ -360,6 +374,7 @@ def build_mcp_servers_for_session(
             agent_slug,
             server_name=server_name,
             delegate_worker=delegate_worker,
+            ask_target=ask_target,
             profile=profile,
             session_key=session_key,
             muted_tools=muted_tools,

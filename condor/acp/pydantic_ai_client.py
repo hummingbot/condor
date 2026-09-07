@@ -469,7 +469,7 @@ class PydanticAIClient:
         self.base_url = base_url
         self.api_key = api_key
         # When set, the agent only sees tools whose name is in this allowlist
-        # (used by domain-expert consults to scope an agent to one domain).
+        # (used by delegated domain agents to scope an agent to one domain).
         self.allowed_tools = set(allowed_tools) if allowed_tools else None
         # Auto-detect filter mode based on model if not explicitly set
         self.tool_filter_mode = tool_filter_mode or _infer_tool_filter_mode(model)

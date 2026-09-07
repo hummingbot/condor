@@ -340,23 +340,27 @@ def build_initial_context(
     except Exception:
         pass  # Skills are advisory — never block session start on them.
 
-    # Agents index — domain Agents condor can consult (FEAT: coordinator model).
-    # condor delegates domain work via consult(...) instead of holding the domain's
-    # tools/context itself. EVERY agent is listed: one missing from this index can
-    # never be routed to. Nothing injected only when none exist.
+    # Agents index — domain Agents condor can hand work to (FEAT: coordinator
+    # model). condor delegates domain work via delegate(...) instead of holding the
+    # domain's tools/context itself. EVERY agent is listed: one missing from this
+    # index can never be routed to. Nothing injected only when none exist.
     try:
         from condor.agents.agent import AgentStore
 
-        # The coordinator is not among its own consultees (FEAT-033).
+        # The coordinator is not among its own delegates (FEAT-033).
         agents_index = AgentStore().list_index(exclude={CHAT_SLUG})
         if agents_index:
             sections.append(
-                "[AGENTS — consult these BEFORE doing domain work with raw tools]\n"
+                "[AGENTS — hand domain work to these BEFORE reaching for raw "
+                "tools]\n"
                 "You are a coordinator. If a request falls in an agent's domain "
-                "below, delegate it with "
-                'consult(agent="<slug>", task="...", context="...") instead of '
+                "below, hand it over with "
+                'delegate(action="start", agent="<slug>", task="...") instead of '
                 "driving the domain's raw tools yourself — the agent has the focused "
-                "tools and domain memory. Relay a concise summary of its answer.\n\n"
+                "tools and domain memory. It runs in the background and reports "
+                "back on its own, so say the task is running and END YOUR TURN; add "
+                'on_complete="resume" when you need its answer to carry on with, '
+                "and you will be woken with it.\n\n"
                 f"{agents_index}"
             )
     except Exception:
@@ -371,17 +375,17 @@ def build_agent_context(
     task: str,
     context: str = "",
 ) -> str:
-    """Assemble the prompt for an Agent consult.
+    """Assemble the prompt for a delegated Agent run.
 
     Mirrors :func:`build_initial_context` but for a worker run: the Agent's own
     instructions become the system prompt, its domain-scoped memory/skills indexes
     are injected (keyed by the Agent slug, FEAT-003 — the shared brain), and the
-    consult task is appended last. Read on demand via manage_memory/manage_skill
+    delegated task is appended last. Read on demand via manage_memory/manage_skill
     inside the run.
 
     Those indexes come from :func:`~condor.memory.domain_context`, the same
     builder ``binding.agent_identity_context`` composes, so this Agent carries
-    identical instructions about its own memory whether it is consulted or
+    identical instructions about its own memory whether it is delegated to or
     chatted with (ARCH-099).
     """
     from condor.memory import domain_context
@@ -389,9 +393,9 @@ def build_agent_context(
     sections: list[str] = [agent.instructions]
     sections.extend(domain_context(agent.slug, user_id))
 
-    consult = f"[CONSULT REQUEST]\n{task}"
+    request = f"[TASK]\n{task}"
     if context:
-        consult += f"\n\n[CONTEXT FROM CONDOR]\n{context}"
-    sections.append(consult)
+        request += f"\n\n[CONTEXT FROM CONDOR]\n{context}"
+    sections.append(request)
 
     return "\n\n".join(sections)

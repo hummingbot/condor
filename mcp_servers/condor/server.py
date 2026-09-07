@@ -18,7 +18,6 @@ from mcp_servers.condor.profiles import PROFILE_TOOLS
 from mcp_servers.condor.settings import DEFAULT_TOOL_PROFILE, settings
 from mcp_servers.condor.tools import available_models as available_models_tool
 from mcp_servers.condor.tools import code as code_tool
-from mcp_servers.condor.tools import consult as consult_tool
 from mcp_servers.condor.tools import delegate as delegate_tool
 from mcp_servers.condor.tools import (
     memory,
@@ -99,7 +98,13 @@ def _worker_base() -> str:
         "You must NEVER start another delegation: "
         '`delegate(action="start", ...)` is refused for you in code. Finish the '
         "task in this session (polling with "
-        '`delegate(action="get"/"list")` is fine).\n\n'
+        '`delegate(action="get"/"list")` is fine).\n'
+        "You MAY still ASK a specialist a question when you need its domain's "
+        'answer to carry on: `delegate(action="ask", agent="<slug>", '
+        'task="...")` blocks and returns the answer to you. That is not fanning '
+        "out work — nothing is left running behind you — and it is the only way "
+        "an answer can reach you here, because you have no conversation for "
+        '`on_complete="resume"` to wake.\n\n'
     ) + _coordinator_base(_WORKER_ROUTINES_RULE)
 
 
@@ -107,7 +112,8 @@ def _coordinator_base(routines_rule: str) -> str:
     """The coordinator routing text, parameterized on its ROUTINES branch."""
     return (
         "Condor exposes reusable **skills** (playbooks, some linked to a runnable "
-        "routine) and consultable **domain agents** on top of these tools.\n\n"
+        "routine) and **domain agents** you can hand work to, on top of these "
+        "tools.\n\n"
         "ROUTING RULE — before handling a request with raw tools (including tools "
         "from other connected MCP servers such as mcp-hummingbot), apply this "
         "priority: (1) a matching SKILL, (2) a matching AGENT, (3) raw tools only "
@@ -116,14 +122,21 @@ def _coordinator_base(routines_rule: str) -> str:
         'and follow its steps. When it links a routine (shown as "→ routine: X"), '
         'run that routine via `manage_routines(action="run", name="X", config={})` '
         "instead of reimplementing it by hand.\n"
-        "- If a domain AGENT matches, delegate with "
-        '`consult(agent="<slug>", task="...", context="...")` and summarize its answer. '
-        "For a long, one-off task you want run in the background until done, use "
-        '`delegate(action="start", agent="<slug>", task="...")` instead. It returns a '
-        "task id immediately; say the task is running and END YOUR TURN. When it "
-        "finishes, the result is pushed back into this conversation and to the user on "
-        "its own -- do NOT poll the task you just started. Reach for "
-        '`delegate(action="get"/"list")` only when the user asks about a task later.\n'
+        "- If a domain AGENT matches, hand the work to it with "
+        '`delegate(action="start", agent="<slug>", task="...")` instead of driving '
+        "the domain's raw tools yourself. It returns a task id immediately; say the "
+        "task is running and END YOUR TURN. When it finishes, the result is pushed "
+        "back into this conversation and to the user on its own -- do NOT poll the "
+        'task you just started. Add `on_complete="resume"` when you need the '
+        'answer yourself to carry on with ("ask the LP agent, then draft the '
+        'summary"): you are woken with it in a new turn, so end your turn and '
+        "continue then. Reach for "
+        '`delegate(action="get"/"list")` only when the user asks about a task '
+        "later. For a quick factual question whose answer is a step in your own "
+        "reasoning rather than the thing the user is waiting for, "
+        '`delegate(action="ask", agent="<slug>", task="...")` blocks and hands '
+        "it straight back — but prefer `start` whenever the user is waiting on "
+        "the result itself, so they get progress instead of a frozen turn.\n"
         f"{routines_rule}"
         f"{_RUN_CODE_RULE}"
         "- Only fall back to raw tools when nothing matches.\n"
@@ -139,7 +152,7 @@ def _agent_base(slug: str, name: str, worker: bool = False) -> str:
 
     Same three-tier priority, read from the specialist's seat: its skills are
     its own playbooks (plus the ones Condor publishes), routine authoring is its
-    own work, and consulting a PEER is for work outside its domain.
+    own work, and delegating to a PEER is for work outside its domain.
 
     An agent may also start a fresh BACKGROUND session of *itself* (FEAT-041).
     That is not handing the work to someone else — the copy carries the same
@@ -184,6 +197,22 @@ def _agent_base(slug: str, name: str, worker: bool = False) -> str:
         'the background. Add `on_complete="resume"` to be handed the result in a '
         "new turn here — then end your turn and continue when it arrives.\n"
     )
+    # ``resume`` wakes the *conversation* that asked for the work. A background
+    # worker is not one — it is a detached session whose prompt returning IS the
+    # done signal — so offering it the flag would tell it to end its turn and
+    # wait for a turn that can never arrive. ``ask`` is what serves that seat,
+    # and it is offered to both; only the ``start``/``resume`` half is withheld.
+    peer_ask_clause = (
+        '`delegate(action="ask", agent="<slug>", task="...")` when you need its '
+        "answer to carry on with — it blocks and hands the answer straight back"
+        + (
+            ""
+            if worker
+            else ', or `delegate(action="start", agent="<slug>", task="...", '
+            'on_complete="resume")` when the job is long enough that the user '
+            "should see it running"
+        )
+    )
     worker_framing = (
         f"You are a BACKGROUND WORKER instance of {name}: a detached session that "
         "`delegate` started to carry ONE task to completion, unattended. There is "
@@ -208,11 +237,9 @@ def _agent_base(slug: str, name: str, worker: bool = False) -> str:
         f"{routines_rule}"
         f"{_RUN_CODE_RULE}"
         f"{'' if worker else self_delegation_rule}"
-        "- You MAY consult a PEER agent listed below for work outside your own "
-        'domain (`consult(agent="<slug>", task="...", context="...")`, or '
-        '`delegate(action="start", agent="<slug>", task="...")` for a long '
-        "background task). Say plainly that you are handing it over rather than "
-        "answering outside your competence.\n"
+        "- You MAY hand work outside your own domain to a PEER agent listed below: "
+        f"{peer_ask_clause}. Say plainly that you are handing it over rather "
+        "than answering outside your competence.\n"
         "- Only fall back to raw tools when nothing matches.\n"
         'Discover your own playbooks anytime with `manage_skill(action="list")`.'
     )
@@ -306,14 +333,14 @@ def _build_instructions() -> str:
 
         # Never a peer of itself (the bug this fixes), and never a peer of the
         # coordinator: Condor is in the registry now (FEAT-033), and a
-        # specialist offered it could consult back into the chat.
+        # specialist offered it could delegate back into the chat.
         exclude = {CHAT_SLUG} | ({agent.slug} if agent else set())
         agents_index = AgentStore().list_index(exclude=exclude)
         if agents_index:
             header = (
-                "[PEER AGENTS — consult for work outside your domain]"
+                "[PEER AGENTS — delegate work outside your domain to one of these]"
                 if agent
-                else "[AGENTS — consult for domain work]"
+                else "[AGENTS — delegate domain work to one of these]"
             )
             sections.append(f"{header}\n{agents_index}")
     except Exception:
@@ -325,27 +352,6 @@ def _build_instructions() -> str:
 mcp = FastMCP("condor", instructions=_build_instructions())
 
 
-@handle_errors("consult agent")
-@telemetry_taps.tracked("consult")
-async def consult(agent: str, task: str, context: str = "") -> dict:
-    """Consult a specialized domain agent and get its answer.
-
-    Use this to delegate domain work instead of doing it yourself: the agent runs
-    with its own focused tools and domain memory, then returns an answer you can
-    summarize for the user. Available agents are listed in your [AGENTS] section.
-    The agent may execute actions (gated by the user's confirmation).
-
-    Args:
-        agent: Agent slug (e.g. "executor_manager").
-        task: The question or task for the agent, in plain language.
-        context: Optional extra context (relevant numbers, the user's intent).
-
-    Returns:
-        {"agent": "...", "answer": "..."} or {"error": "..."}.
-    """
-    return await consult_tool.consult(agent, task, context)
-
-
 @handle_errors("delegate task")
 @telemetry_taps.tracked("delegate")
 async def delegate(
@@ -355,16 +361,31 @@ async def delegate(
     task_id: str = "",
     on_complete: str = "notify",
     timeout_sec: int = 0,
+    context: str = "",
 ) -> dict:
-    """Delegate a one-off task to a background agent instance.
+    """Hand work to another agent — detached, or blocking for an answer.
 
-    DELEGATE is the async, unattended sibling of CONSULT. Where ``consult`` blocks
-    and returns an answer now (mutations human-gated), ``delegate`` hands a
-    goal-oriented task to a DETACHED agent that works autonomously until done, then
-    notifies the user with the result — while you stay free to do other things. Use
-    it for "go build/scan/produce X and ping me when finished" (e.g. "create a
-    routine that scans SOL pools"). The agent runs unrestricted with full
-    auto-approve, so delegate only to trusted agents/tasks.
+    DELEGATE is the ONLY way to reach another agent, and it has two shapes:
+
+    - **"start"** hands a goal-oriented task to a DETACHED agent that works
+      autonomously until done, then notifies the user — while you stay free to do
+      other things. Use it for "go build/scan/produce X and ping me when
+      finished" (e.g. "create a routine that scans SOL pools"). Add
+      ``on_complete="resume"`` when you want the answer yourself, then end your
+      turn: you are woken with it.
+    - **"ask"** BLOCKS and returns the agent's answer as text. Use it when you
+      need another domain's answer to carry on with your own reasoning right now
+      ("what range should this LP use?") and the answer is not itself the
+      deliverable the user is waiting on.
+
+    Prefer "start" whenever there is a user watching: they get a task id, a
+    progress list and a transcript instead of a frozen turn. Prefer "ask" when
+    there is not — a tick or a background worker runs for nobody's conversation,
+    so "resume" has nothing to wake and "notify" would send the answer to the
+    user instead of to you.
+
+    Either way the agent runs unrestricted with full auto-approve, so reach for
+    another agent only when you trust it with the task.
 
     The user tracks a delegation on whichever surface they are on — the
     /delegations command in Telegram, the Tasks list in the chat's context dock
@@ -376,6 +397,9 @@ async def delegate(
     Actions:
     - "start": Begin a delegation (requires agent, task). Returns immediately with
       {"task_id", "status": "running", "next_steps"} — does NOT wait for completion.
+    - "ask": Ask an agent and WAIT for its answer (requires agent, task). Returns
+      {"agent", "answer"}. Refused if you are yourself answering an ask (depth
+      stops at one) or if you name your own slug.
     - "list": List in-flight/finished delegations (task_id, agent, status).
     - "get": Get a delegation's status + result/error (requires task_id).
     - "stop": Cancel a running delegation (requires task_id).
@@ -386,10 +410,12 @@ async def delegate(
     of itself; the recursion stops at depth one.
 
     Args:
-        action: start | list | get | stop.
-        agent: Agent slug to delegate to (for start). Your own slug is allowed and
-            means "a background session of me".
-        task: The one-off task, in plain language (for start).
+        action: start | ask | list | get | stop.
+        agent: Agent slug to reach (for start/ask). For "start" your own slug is
+            allowed and means "a background session of me"; for "ask" it is
+            refused, because asking yourself is a round trip through your own
+            brain.
+        task: The one-off task or question, in plain language (for start/ask).
         task_id: Delegation id returned by start (for get/stop).
         on_complete: What this conversation gets when the task ends (for start).
             "notify" (default) pings the user with the result AND writes the
@@ -412,12 +438,14 @@ async def delegate(
             is 1800s: an agent session has its own ~31-minute hard stop, so
             asking for more only delays the same cut-off. For work bigger than
             that, split it across delegations.
+        context: Extra context for the agent — relevant numbers, the user's
+            intent (for ask).
 
     Returns:
         Action-specific result dict.
     """
     return await delegate_tool.delegate(
-        action, agent, task, task_id, on_complete, timeout_sec
+        action, agent, task, task_id, on_complete, timeout_sec, context
     )
 
 
@@ -681,7 +709,7 @@ async def manage_agents(
 
     An *agent* (e.g. "executor_manager", "brigado") is an identity — the brain,
     and the primary artifact. It is created FIRST; everything else hangs off its
-    slug. From the moment it exists it can be consulted (`consult`), delegated to
+    slug. From the moment it exists it can be delegated to
     (`delegate`) and looped (`control_agent(action="start")`) — there is no
     capability flag and nothing to enable. See `manage_strategies` for the
     playbooks an agent owns, `control_agent` for its running instances.
@@ -712,11 +740,11 @@ async def manage_agents(
         instructions: The AGENT.md body — identity + domain knowledge (create/update).
         agent_key: Default LLM. Examples: "claude-code", "gemini", "copilot",
             "ollama:llama3.1", "ollama:qwen3:32b", "groq:llama-3.3-70b-versatile".
-            Any model can be consulted; a pydantic-ai key (e.g. "ollama:...")
-            additionally enforces the tools allowlist on consult. Default "claude-code".
+            Any model can run an agent; a pydantic-ai key (e.g. "ollama:...")
+            additionally enforces the tools allowlist. Default "claude-code".
         tools: Tool-name allowlist for the agent. Empty/None = unrestricted.
         when_to_consult: One-line hint describing when to route work to this agent.
-            Purely for routing — every agent is consultable with or without it; it
+            Purely for routing — every agent is delegable with or without it; it
             falls back to the description.
         server_required: Whether the agent needs a Hummingbot server. Default True.
         server_name: Pin the agent to a specific hummingbot-api server. LEAVE EMPTY
@@ -1101,7 +1129,9 @@ async def trading_agent_journal_write(
             be a short paragraph, truncated past ~1200 chars).
         reasoning: One-sentence reasoning (for actions only).
         risk_note: Optional risk note (for actions only).
-        tick: Current tick number (for actions and canvas revisions).
+        tick: Current tick number (for actions and canvas revisions). REQUIRED for
+            those two — an entry with no tick is refused, not silently filed under
+            tick 0.
         category: Learning category: "market" (observations, patterns, volatility)
             or "execution" (errors, fills, timing). Only used when entry_type="learning".
             Defaults to "market".

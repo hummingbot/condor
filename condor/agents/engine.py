@@ -559,7 +559,7 @@ class TickEngine:
             from condor.memory import MemoryStore, SkillStore
 
             # Per-Agent memory (FEAT-003): the Agent's shared brain, keyed by the
-            # *Agent* slug — shared across all its strategies and consults, not by
+            # *Agent* slug — shared across all its strategies and runs, not by
             # the per-strategy run.
             slug = self.agent.slug
             user_memory = MemoryStore(self.user_id, slug).list_index()
@@ -1042,7 +1042,7 @@ class TickEngine:
         # Shared factory (ARCH-192). Engine specifics: an explicit model_base_url
         # in the run config still wins over the owner's saved custom endpoint,
         # and the run config's tool_filter_mode beats the env fallback. Same
-        # allowlist the agent gets on consult; empty => unrestricted.
+        # allowlist the agent gets when delegated to; empty => unrestricted.
         from condor.runtime.llm_client import build_llm_client
 
         return build_llm_client(

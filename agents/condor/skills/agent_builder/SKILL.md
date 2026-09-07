@@ -1,7 +1,7 @@
 ---
 name: agent_builder
-description: Create and operate autonomous trading agents the minimal way — create the agent from just its role + purpose, prove it's alive by consulting it, then progressively improve it with routines and (optionally) a loop strategy.
-when_to_use: The user wants to create, edit, dry-run, launch, monitor, or delete an autonomous trading agent — whether it's used purely by consulting it or also runs a strategy on a loop.
+description: Create and operate autonomous trading agents the minimal way — create the agent from just its role + purpose, prove it's alive by delegating it a question, then progressively improve it with routines and (optionally) a loop strategy.
+when_to_use: The user wants to create, edit, dry-run, launch, monitor, or delete an autonomous trading agent — whether it's used purely by asking it things or also runs a strategy on a loop.
 created: 2026-06-18
 source: builtin
 ---
@@ -9,28 +9,28 @@ source: builtin
 You are helping the user build or operate an **autonomous trading agent**. Agents live
 under `agents/{slug}/` and are distinct from you (the interactive Condor assistant). You
 drive them via `manage_agents`, `manage_strategies`, `control_agent`, `manage_routines`,
-`trading_agent_journal_read` and `consult`.
+`trading_agent_journal_read` and `delegate`.
 
 ## Mental model — start minimal, improve in layers
 
 An **Agent** is a specialist with an **essence**: a domain it understands and a role it
 plays. It is defined in `agents/{slug}/AGENT.md` (its brain/system prompt). There is only
 ONE kind of thing — an Agent. "Expert" is not a separate type; it's just an agent being
-consulted.
+asked something.
 
-**Every agent can do all three things from the moment it exists** — be consulted
-(`consult`), be delegated a background task (`delegate`), and run on a loop
+**Every agent can do both things from the moment it exists** — be delegated a task
+(`delegate`, whether that is a one-line question or a multi-step build) and run on a loop
 (`control_agent(action="start")`). There is no capability flag, nothing to enable, and
-no such thing as a "consult-only" or "loop-only" agent. The layers below add *quality*, never capability.
+no such thing as an "advisory-only" or "loop-only" agent. The layers below add *quality*, never capability.
 
 The whole point of this skill is to build the agent in the **smallest useful step first,
 then layer capability on only when the user wants it.** Do NOT front-load routines,
 strategies, executors, or model questions. The progression is:
 
 1. **Create the agent from just its role + what it's for.** Nothing else required. The
-   moment it exists it can already be consulted, delegated to, and looped.
-2. **Consult it to prove it's alive.** Ask it something inside its specialty and show the
-   answer. This is the agent working end-to-end.
+   moment it exists it can already be delegated to and looped.
+2. **Delegate it a question to prove it's alive.** Ask it something inside its specialty
+   and show the answer. This is the agent working end-to-end.
 3. **Improve it with routines** — give it structured market data of its own. Define one,
    create it, run it, look at the output together. This is what turns a guessing LLM into
    a real specialist.
@@ -40,8 +40,8 @@ strategies, executors, or model questions. The progression is:
    loop does NOT have to trade: it can read a routine's output and decide to trade, send
    a report, or do nothing — at a frequency the user sets.
 
-Each layer is independently valuable. Most agents are worth creating and consulting long
-before they ever get a routine, and many never need a loop at all.
+Each layer is independently valuable. Most agents are worth creating and asking things
+long before they ever get a routine, and many never need a loop at all.
 
 ```
 agents/{slug}/
@@ -53,14 +53,14 @@ agents/{slug}/
   sessions/session_N/              # run journals/snapshots (created at runtime)
 ```
 
-Label each message with the current step, e.g. `[Step 2 — Consult it]`.
+Label each message with the current step, e.g. `[Step 2 — Ask it something]`.
 
 ## Step 1 — Create the agent (minimal)
 
 When the user asks to create an agent, do NOT open with a config questionnaire
 (exchange, pair, strategy, model…). In a sentence, frame how agents work here (create →
-consult → improve with routines → optionally loop), then settle just two things in a
-short conversation:
+ask it something → improve with routines → optionally loop), then settle just two
+things in a short conversation:
 
 - **Role / domain** — what is this agent the specialist in? (e.g. "spread & inventory
   judgment for BRL market making", "executor selection for a given regime")
@@ -86,7 +86,7 @@ manage_agents(
 
 > **Never invent an `agent_key`.** You cannot tell which backends are installed,
 > running, or authenticated — a guessed key names a model that may not exist, and it
-> only fails on the first consult, long after creation "succeeded". Pass one *only*
+> only fails on its first run, long after creation "succeeded". Pass one *only*
 > when the user named a specific model. `manage_servers(action="list")` reports the
 > user's `active_agent_key` and their saved `custom_llm_endpoints` if you need to show
 > or confirm the choice.
@@ -113,24 +113,26 @@ recommendation, key: value not prose). You can keep it short now and enrich it l
 
 `manage_agents(action="create")` returns `agent_slug` — use it for everything after.
 
-Then tell the user plainly: **the agent is created. Now let's consult it to check it's
-alive.**
+Then tell the user plainly: **the agent is created. Now let's ask it something to check
+it's alive.**
 
-## Step 2 — Consult it to prove it's alive
+## Step 2 — Ask it something to prove it's alive
 
-Test it the way Condor will use it:
+Test it the way another agent will use it. This is the one case where blocking is
+right: the answer IS the check, it should be short, and the user is watching for it.
 
 ```
-consult(agent="<agent_slug>", task="…a real question in its specialty…", context="…")
+delegate(action="ask", agent="<agent_slug>",
+         task="…a real question in its specialty…", context="…")
 ```
 
 Show the answer. This proves the agent runs end-to-end. If the persona or answer is off,
 fix the AGENT.md with `manage_agents(action="update", agent_slug=…, instructions=…)` and
-consult again.
+ask again.
 
-When the consult looks good, **stop and tell the user the agent already works as a
-consultable expert** — and that the next way to make it sharper is to give it routines so
-it reasons over real structured data instead of guessing.
+When the answer looks good, **stop and tell the user the agent already works as an
+expert they can hand work to** — and that the next way to make it sharper is to give it
+routines so it reasons over real structured data instead of guessing.
 
 ## Step 3 — Improve it with routines
 
@@ -143,7 +145,7 @@ as the upgrade, then guide the user through it one routine at a time:
    (`delegate(action="start", agent="condor", task="...")`); it follows the
    `routine_cookbook` playbook and tests the routine before reporting. Tell it the
    target agent so it passes the right `agent`. Routines live at the agent level
-   and are shared across consults and any future loop — pass the **agent slug**:
+   and are shared across every run and any future loop — pass the **agent slug**:
    ```
    manage_routines(action="create_routine", agent="<agent_slug>",
                    name="band_scanner", code="<python>")
@@ -156,7 +158,7 @@ as the upgrade, then guide the user through it one routine at a time:
    ```
 
 Then update the AGENT.md so the agent knows to call the routine by name and how to read
-it, and consult it again to confirm it now reasons over that data. Repeat for each
+it, and ask it again to confirm it now reasons over that data. Repeat for each
 routine the agent needs. **Stop here unless the user wants the agent to act on its own on
 a loop.**
 
@@ -213,8 +215,8 @@ restate its mechanics here; your job at this step is only to:
 - then run `strategy_builder` for the agent you just created.
 
 If the agent is capable enough to author its own loop, prefer handing it the job:
-`consult(agent="<agent_slug>", task="give yourself a loop that …")`. It reads the same
-shared playbook and knows its own domain better than you do.
+`delegate(action="start", agent="<agent_slug>", task="give yourself a loop that …")`. It
+reads the same shared playbook and knows its own domain better than you do.
 
 ## Monitoring existing agents
 1. `manage_agents(action="list")` — all agents, with their
@@ -224,11 +226,13 @@ shared playbook and knows its own domain better than you do.
 
 ## Reference
 
-**Capability rule:** there isn't one. Every agent is consultable, delegable and loopable
-on any model; `when_to_consult` and owning a strategy are quality, not permission. The
-model only changes *how* a run executes: a pydantic-ai key (`ollama:…`/`openai:…`/
-`groq:…`/`lmstudio:…`) enforces the `tools` allowlist; an ACP key (`claude-code`/`gemini`/
-`copilot`) runs unrestricted, with mutations still confirmation-gated.
+**Capability rule:** there isn't one. Every agent is delegable and loopable on any
+model; `when_to_consult` and owning a strategy are quality, not permission. The model
+only changes *how* a run executes: a pydantic-ai key (`ollama:…`/`openai:…`/`groq:…`/
+`lmstudio:…`) enforces the `tools` allowlist; an ACP key (`claude-code`/`gemini`/
+`copilot`) runs unrestricted. Every run reached through `delegate` — `start` or `ask` —
+is unattended: nobody is asked to approve its tool calls, so only hand work to agents
+and tasks you trust.
 
 **Writing the `when_to_consult` hint:** it never gates anything — it is how Condor
 *picks* this agent over another, and it falls back to the description when unset. A vague
@@ -291,7 +295,7 @@ it into a questionnaire — it's the easiest thing to change later.
 - SPECIFIC: pair/connector baked into the instructions (e.g. an ETH/BTC ratio play).
 
 **Agent tools, memory & skills:** `tools` on the AGENT.md is a tool-name allowlist
-enforced on pydantic-ai consults and loops (empty = unrestricted; not enforceable on ACP
+enforced on pydantic-ai runs and loops (empty = unrestricted; not enforceable on ACP
 keys). **A non-empty allowlist must include `run_code`** if the agent reads a market at
 all: there is no candle, order book or funding tool to name any more (ARCH-308), so
 `get_prices` plus `run_code` over `client.market_data.*` is the whole market data
@@ -312,10 +316,10 @@ strategies — delete those first (`manage_strategies(action="delete", strategy_
 ## Rules
 - **Minimal first.** Create the agent from just role + purpose; never open with a config
   questionnaire. Layer routines and loops on only when the user wants them.
-- After creating, immediately steer to a **consult** to prove it's alive before anything
-  else.
+- After creating, immediately steer to a **`delegate(action="ask")`** to prove it's
+  alive before anything else.
 - Only the step label as a header. Be direct; status as key: value.
-- Every agent is consultable (always set `when_to_consult`).
+- Every agent is delegable (always set `when_to_consult` — it is the routing hint).
 - **Never invent an `agent_key` or a `server_name`.** Both default to "follow the
   operator" — pass either one only when the user named it. A guessed model or a
   helpfully-filled server pin fails on someone else's install, long after creation

@@ -1203,7 +1203,7 @@ def resolve_custom_endpoint(
     Returns ``(None, None)`` for any key that isn't a custom-endpoint key, so
     callers can pass this through unconditionally.
 
-    Every surface that builds a model — chat sessions, consult, delegate, the
+    Every surface that builds a model — chat sessions, delegate, the
     trading-agent engine — needs this. Without it a custom key resolves to
     nothing and dies with "No base URL configured", which is exactly what
     happens when only the chat path knows how to look endpoints up.
@@ -1215,7 +1215,7 @@ def resolve_custom_endpoint(
     when the key *names* an endpoint that isn't saved, instead of logging a
     warning and falling back to the ``CUSTOM_LLM_*`` env vars. Interactive
     surfaces (chat sessions) want the loud failure; background surfaces
-    (consult, engine) keep the lenient default.
+    (delegate, engine) keep the lenient default.
     """
     provider_name, model_id = parse_custom_agent_key(agent_key)
     if not model_id:

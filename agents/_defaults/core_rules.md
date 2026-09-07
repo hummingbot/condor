@@ -1,8 +1,8 @@
 ---
 # Shared behavioural rules, injected into EVERY agent session (FEAT-095):
-# loop ticks, chats, consults and background workers alike. Edit this file and
+# loop ticks, chats and background workers alike. Edit this file and
 # the change lands on the next TICK with no restart — the tick prompt is built
-# fresh each time. The chat / consult / worker surface builds its instructions
+# fresh each time. The chat / agent / worker surface builds its instructions
 # once at MCP import, so those seats pick an edit up on the next MCP server
 # start (same asymmetry the skills index already has).
 #

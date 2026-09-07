@@ -140,7 +140,7 @@ export function BrainMenuBody({
   if (submenu === null) {
     return (
       <>
-        {/* An Agent's model is global — it reaches consult, delegate
+        {/* An Agent's model is global — it reaches delegate
             and its loops — so the consequence of picking one here is
             stated, never a silent side effect. */}
         {boundAgent &&
@@ -317,7 +317,7 @@ export function BrainMenuBody({
  * "What's answering" — the model, and only the model.
  *
  * This picks the LLM, which for a bound Agent *is* its `agent_key` in AGENT.md:
- * the backend persists the pick there, so it reaches consult, delegate and its
+ * the backend persists the pick there, so it reaches delegate and its
  * loops too. It does not bind or unbind an Agent — that is a different question
  * with a different answer ("who am I talking to"), and it belongs to the rail,
  * which can also switch conversations and start one. Offering it here as well

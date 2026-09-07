@@ -851,7 +851,7 @@ export interface AgentSummary {
   slug: string;
   name: string;
   description: string;
-  /** Routing hint only — every Agent is consultable, delegable and loopable. */
+  /** Routing hint only — every Agent is delegable and loopable. */
   when_to_consult: string;
   agent_key: string;
   strategy_count: number;
@@ -1024,7 +1024,7 @@ export interface ExperimentInfo {
   error?: boolean;
 }
 
-// Agent = identity + brain (AGENT.md, tools, consult capability) that owns strategies.
+// Agent = identity + brain (AGENT.md, tools) that owns strategies.
 export interface AgentDetail {
   slug: string;
   name: string;
@@ -1187,10 +1187,10 @@ export type DelegationStatus =
  * Which channel a run came through (FEAT-058).
  *
  * `delegate` — a fire-and-forget background task handed to a detached Agent
- * instance. `consult` — the synchronous channel every other agent, the bot and
- * this dashboard use, which records a ledger entry and no transcript. `code` —
- * a snippet the agent ran (FEAT-061); it comes from its own store and the
- * history route merges it in, so a row is a row whichever store answered.
+ * instance. `consult` — the blocking ask one agent makes of another
+ * (`delegate(action="ask")`), which records a ledger entry and no transcript.
+ * `code` — a snippet the agent ran (FEAT-061); it comes from its own store and
+ * the history route merges it in, so a row is a row whichever store answered.
  *
  * The name on the wire (and the route, and the directory) stays "delegation"
  * for both: it is where these records already lived, and splitting the store

@@ -39,7 +39,7 @@ def test_the_condor_subprocess_is_told_which_seat_it_is_sitting_in():
 
 
 def test_a_seat_with_no_conversation_behind_it_says_so():
-    """A consult, a delegate worker and a tick have no key, and must not fake one."""
+    """A delegate worker and a tick have no key, and must not fake one."""
     args = toolsets._condor_mcp_args(42, 42, "condor")
     assert "--session-key" not in args
 

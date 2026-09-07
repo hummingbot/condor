@@ -132,7 +132,7 @@ def for_conversation(
 def for_delegation(
     user_id: int | str | None, task_id: str, agent_slug: str = ""
 ) -> DeedOwner:
-    """The owner of a delegation's or consult's deeds."""
+    """The owner of an agent run's deeds."""
     return DeedOwner(
         kind=KIND_DELEGATION,
         user_id=user_id,

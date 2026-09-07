@@ -36,12 +36,17 @@ class Settings:
     # refuse to recurse. Every agent has this seat now, not just Condor, since an
     # agent can start a delegation of itself (FEAT-041).
     delegate_worker: bool = False
+    # Marks a run already answering someone's ``delegate(action="ask")``. Ask
+    # depth is bounded at one: an ask is auto-approved and its caller is blocked
+    # waiting on it, so a target free to ask onward would nest blocked callers
+    # with nobody watching any of them. Enforced in ``tools/delegate.py``.
+    ask_target: bool = False
     # Which slice of the tool surface this process registers (FEAT-066). An ACP
     # bridge runs unrestricted, so for those seats the mounted surface IS the
     # permission model: see ``server.TOOL_PROFILES``. It is a separate flag from
     # the two above rather than derived from them, because the seat it narrows is
     # the *tick*, and neither ``agent_slug`` nor ``delegate_worker`` tells an
-    # unattended loop apart from an attended consult of the same specialist.
+    # unattended loop apart from an attended chat with the same specialist.
     tool_profile: str = DEFAULT_TOOL_PROFILE
     # Tools the operator switched off for this agent (FEAT-091), arriving as
     # ``--mute-tools a,b,c``. Subtracted from the profile in
@@ -121,6 +126,7 @@ def _parse_settings() -> Settings:
     parser.add_argument("--server-name", default=None)
     parser.add_argument("--session-key", default=None)
     parser.add_argument("--delegate-worker", action="store_true", default=False)
+    parser.add_argument("--ask-target", action="store_true", default=False)
     parser.add_argument("--profile", default=DEFAULT_TOOL_PROFILE)
     parser.add_argument("--mute-tools", default="")
     args, _ = parser.parse_known_args()
@@ -142,6 +148,7 @@ def _parse_settings() -> Settings:
         agent_slug=args.agent_slug or os.environ.get("CONDOR_AGENT_SLUG", ""),
         active_server=args.server_name or os.environ.get("CONDOR_SERVER_NAME", ""),
         session_key=args.session_key or os.environ.get("CONDOR_SESSION_KEY", ""),
+        ask_target=(args.ask_target or os.environ.get("CONDOR_ASK_TARGET", "") == "1"),
         delegate_worker=(
             args.delegate_worker or os.environ.get("CONDOR_DELEGATE_WORKER", "") == "1"
         ),

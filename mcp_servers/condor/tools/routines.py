@@ -5,7 +5,7 @@ process does. Execution is not: a routine *run* is a live object (an instance in
 ``RoutineStore``, an asyncio task, post-run hooks) that must outlive the MCP
 subprocess to show up in the dashboard and be stoppable from it. So run/start/
 stop/list_instances delegate to the main process over ``call_main_api``, the
-same crossing ``consult`` and ``delegate`` already make.
+same crossing ``delegate`` already makes.
 
 That crossing is also what makes a run survive the caller: the instance belongs
 to the main process, not to the turn that asked for it. ``run`` waits on it for

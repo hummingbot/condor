@@ -8,7 +8,7 @@ of them, and is Condor — had **no runs**: its entire history of work was
 invisible on the one screen built to show an agent's history of work.
 
 Two more kinds were already on disk and simply never enumerated. A
-**delegation** (or a consult) writes a ``status.json`` per run under
+**delegation** writes a ``status.json`` per run under
 ``.condor/users/{u}/delegations/{run_id}/`` (FEAT-058). A **conversation**
 writes a ``meta.json`` beside its transcript. This module is the union of the
 four, and nothing else.

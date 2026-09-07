@@ -2,7 +2,7 @@
 
 The rules an operator wants to hold for *all* agents ("read the playbook before
 you act on it") used to have twelve places to live: each AGENT.md, plus a Python
-constant for ticks and three hand-written base strings for the chat, consult and
+constant for ticks and three hand-written base strings for the chat, agent and
 worker seats. This pins the one file instead — that it is read at both prompt
 surfaces, that an agent may shadow it, and that its absence is silent rather
 than a broken tick.
@@ -135,7 +135,7 @@ def test_a_tick_without_a_rulebook_still_builds():
     assert CORE_RULES_HEADER not in _tick_prompt()
 
 
-# ── Surface 2: chat / consult / worker ──
+# ── Surface 2: chat / agent / worker ──
 
 
 def _instructions(monkeypatch, slug: str) -> str:

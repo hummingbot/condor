@@ -97,7 +97,7 @@ async def conversation_for_session(session_key: str) -> str:
     mints it after the client is up) — by call time it is settled.
 
     A missing, malformed or dead key is not an error: it means "no conversation
-    behind this call", which is the truth for a consult-, tick- or
+    behind this call", which is the truth for a tick- or
     scheduler-started run and for anything predating this provenance.
     """
     if not session_key:

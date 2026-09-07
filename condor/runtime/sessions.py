@@ -316,7 +316,7 @@ class AgentSession:
         instantly on a promise it could not keep.
 
         Abort is a session-level concept: prompts driven straight at a client
-        (consult, the strategy engine) run outside this lock and outside this.
+        (a delegation, the strategy engine) run outside this lock and outside this.
         """
         # Signal prompt_stream to stop iterating
         self._abort_event.set()
@@ -731,7 +731,7 @@ async def _spawn_session(
         mcp_servers=mcp_servers,
         permission_callback=permission_callback,
         # A bound Agent's allowlist is enforced here exactly as it is on
-        # consult and loop, so an Agent has the same reach in every mode.
+        # delegate and loop, so an Agent has the same reach in every mode.
         allowed_tools=bound.tools or None,
         extra_env=extra_env,
         system_prompt=(

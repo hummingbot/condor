@@ -4,7 +4,7 @@
 engine config, and ``TickEngine._resolve_server`` trades on its ``server_name``,
 so before the gate any approved user could POST a foreign server name and run a
 live loop on someone else's stored API credentials. The sibling routes in the
-same file (config pin, consult, delegate) always checked ``has_server_access``;
+same file (config pin, delegate) always checked ``has_server_access``;
 only the start path did not.
 """
 

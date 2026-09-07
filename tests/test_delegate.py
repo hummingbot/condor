@@ -1,7 +1,7 @@
 """Unit tests for DELEGATE -- fire-and-forget background agent tasks (FEAT-006).
 
 Covers the lifecycle (running -> done/error/stopped), result capture, transcript
-persistence, completion notification, and that the runner drives the shared consult
+persistence, completion notification, and that the runner drives the shared agent
 engine with ``permission_callback=None`` (auto-approve).
 """
 
@@ -11,7 +11,7 @@ import pytest
 
 from condor import paths
 from condor.agents import agent as agent_module
-from condor.agents import consult as consult_module
+from condor.agents import agent_run as agent_run_module
 from condor.agents import delegate as delegate_module
 from condor.agents.delegate import (
     get_all_delegations,
@@ -65,12 +65,11 @@ def test_delegation_runs_to_done_and_persists(tmp_path, monkeypatch):
 
     seen = {}
 
-    async def fake_run(*, permission_callback, **kw):
+    async def fake_run(**kw):
         seen.update(kw)
-        seen["permission_callback"] = permission_callback
         return "scan complete: 3 pools"
 
-    monkeypatch.setattr(consult_module, "_run_agent_to_completion", fake_run)
+    monkeypatch.setattr(agent_run_module, "run_agent_to_completion", fake_run)
     bot = _FakeBot()
 
     async def scenario():
@@ -93,8 +92,16 @@ def test_delegation_runs_to_done_and_persists(tmp_path, monkeypatch):
     # Lifecycle + result capture.
     assert dt.status == "done"
     assert dt.result == "scan complete: 3 pools"
-    # Auto-approve: the runner drives consult with NO permission callback.
-    assert seen["permission_callback"] is None
+    # Auto-approve, by construction: the shared engine takes no permission
+    # callback at all, so a delegation cannot accidentally be handed one.
+    import inspect
+
+    from condor.agents import agent_run
+
+    assert (
+        "permission_callback"
+        not in inspect.signature(agent_run.run_agent_to_completion).parameters
+    )
     assert seen["task"] == "scan SOL pools"
     # Transcript written under the user who asked, not under the agent.
     transcript = paths.delegation_dir(1, dt.task_id) / "transcript.md"
@@ -111,7 +118,7 @@ def test_delegation_captures_error(tmp_path, monkeypatch):
     async def boom(**kw):
         raise RuntimeError("model exploded")
 
-    monkeypatch.setattr(consult_module, "_run_agent_to_completion", boom)
+    monkeypatch.setattr(agent_run_module, "run_agent_to_completion", boom)
     bot = _FakeBot()
 
     async def scenario():
@@ -141,7 +148,7 @@ def test_stop_cancels_running_delegation(tmp_path, monkeypatch):
         await asyncio.sleep(60)
         return "never"
 
-    monkeypatch.setattr(consult_module, "_run_agent_to_completion", slow)
+    monkeypatch.setattr(agent_run_module, "run_agent_to_completion", slow)
     bot = _FakeBot()
 
     async def scenario():
@@ -189,7 +196,7 @@ def test_delegation_carries_conversation_provenance(tmp_path, monkeypatch):
     async def fake_run(**kw):
         return "ok"
 
-    monkeypatch.setattr(consult_module, "_run_agent_to_completion", fake_run)
+    monkeypatch.setattr(agent_run_module, "run_agent_to_completion", fake_run)
 
     async def scenario():
         dt = await start_delegation(
@@ -218,7 +225,7 @@ def test_delegation_carries_conversation_provenance(tmp_path, monkeypatch):
 
 
 def test_delegation_without_conversation_is_empty_not_error():
-    """A consult- or tick-started delegation has no conversation; that is honest."""
+    """A tick-started delegation has no conversation; that is honest."""
     from condor.agents.delegate import DelegateTask
 
     dt = DelegateTask(
@@ -248,7 +255,7 @@ def _run_delegation(monkeypatch, *, conversation_id, result=None, boom=None):
             raise RuntimeError(boom)
         return result
 
-    monkeypatch.setattr(consult_module, "_run_agent_to_completion", fake_run)
+    monkeypatch.setattr(agent_run_module, "run_agent_to_completion", fake_run)
     bot = _FakeBot()
 
     async def scenario():
@@ -295,7 +302,7 @@ def test_completed_delegation_lands_in_its_conversation(tmp_path, monkeypatch):
 
 
 def test_delegation_without_conversation_records_nothing(tmp_path, monkeypatch):
-    """A consult- or tick-started task has no conversation: no write, no raise."""
+    """A tick-started task has no conversation: no write, no raise."""
     monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path / "agents"))
     _write_agent(tmp_path / "agents", "scout")
     _isolate_conversations(tmp_path, monkeypatch)
@@ -338,7 +345,7 @@ def test_stopped_delegation_records_nothing(tmp_path, monkeypatch):
     async def hang(**kw):
         await asyncio.sleep(60)
 
-    monkeypatch.setattr(consult_module, "_run_agent_to_completion", hang)
+    monkeypatch.setattr(agent_run_module, "run_agent_to_completion", hang)
     bot = _FakeBot()
 
     async def scenario():
@@ -425,7 +432,7 @@ def test_delegation_persists_full_session_transcript(tmp_path, monkeypatch):
         event_sink(TextChunk(text="Done: 3 pools."))
         return "Done: 3 pools."
 
-    monkeypatch.setattr(consult_module, "_run_agent_to_completion", fake_run)
+    monkeypatch.setattr(agent_run_module, "run_agent_to_completion", fake_run)
 
     async def scenario():
         dt = await start_delegation(
@@ -500,7 +507,7 @@ def test_delegation_transcript_redacts_credential_arguments(tmp_path, monkeypatc
         event_sink(ToolCallUpdate(tool_call_id="t1", status="completed", output="ok"))
         return "configured"
 
-    monkeypatch.setattr(consult_module, "_run_agent_to_completion", fake_run)
+    monkeypatch.setattr(agent_run_module, "run_agent_to_completion", fake_run)
 
     async def scenario():
         dt = await start_delegation(
@@ -850,7 +857,7 @@ def test_events_route_shows_a_running_delegation_live(tmp_path, monkeypatch):
         )
         return "done"
 
-    monkeypatch.setattr(consult_module, "_run_agent_to_completion", fake_run)
+    monkeypatch.setattr(agent_run_module, "run_agent_to_completion", fake_run)
 
     async def scenario():
         dt = await start_delegation(

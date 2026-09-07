@@ -28,7 +28,6 @@ ORCHESTRATION_TOOLS = (
     "mcp__condor__manage_agents",
     "mcp__condor__manage_strategies",
     "mcp__condor__get_available_models",
-    "mcp__condor__consult",
     "mcp__condor__delegate",
     "mcp__condor__run_code",
 )

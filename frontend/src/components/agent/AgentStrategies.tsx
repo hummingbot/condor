@@ -135,7 +135,7 @@ export function AgentStrategies({
             No strategies yet
           </p>
           <p className="mb-4 max-w-md text-center text-xs text-[var(--color-text-muted)]">
-            This agent can already be consulted and delegated to. To let it run on a
+            This agent can already be delegated to. To let it run on a
             loop, start from its default playbook — its own brain drives each tick —
             or write a dedicated one.
           </p>

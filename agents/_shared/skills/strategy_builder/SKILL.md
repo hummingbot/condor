@@ -1,6 +1,6 @@
 ---
 name: strategy_builder
-description: Give YOURSELF a loop — write a tick playbook (a strategy) under your own slug, dry-run it, and start it. The shared contract for how a strategy is authored, validated and launched; read by any agent that wants to act autonomously instead of only being consulted.
+description: Give YOURSELF a loop — write a tick playbook (a strategy) under your own slug, dry-run it, and start it. The shared contract for how a strategy is authored, validated and launched; read by any agent that wants to act autonomously instead of only answering what it is handed.
 when_to_use: You are an agent and the user wants you to act on a loop — run every N seconds, watch a condition, report on a schedule, or trade autonomously. Also read this before editing or re-launching a strategy you already own. NOT for creating or deleting other agents (that is Condor's agent_builder).
 created: '2026-08-11T00:00:00Z'
 source: chat
@@ -8,7 +8,7 @@ source: chat
 
 # Strategy Builder
 
-You are an **agent**. You can already be consulted, delegated to, and looped — from the
+You are an **agent**. You can already be delegated to and looped — from the
 moment you existed. This playbook covers the last of those: giving your loop a **specific
 tick playbook** instead of the generic default.
 

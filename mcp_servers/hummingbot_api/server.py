@@ -753,6 +753,7 @@ async def create_grid_executor(
     limit_price: float,
     total_amount_quote: float,
     take_profit: float | None = None,
+    time_limit: int | None = None,
     open_order_type: Literal[1, 2, 3] | None = None,
     take_profit_order_type: Literal[1, 2, 3] | None = None,
     min_spread_between_orders: float | None = None,
@@ -806,6 +807,9 @@ async def create_grid_executor(
         total_amount_quote: Capital allocated, in QUOTE currency.
         take_profit: Distance for the opposite order on each fill, as a decimal
             fraction, e.g. 0.0002 = 0.02%.
+        time_limit: Maximum grid lifetime in SECONDS, after which the grid closes on
+            its own — the dead-man switch an unattended run needs. OMIT for a grid
+            that runs until `limit_price` or an explicit stop. e.g. 43200 = 12h.
         open_order_type: 1=MARKET, 2=LIMIT, 3=LIMIT_MAKER. 3 is recommended — post-only
             orders earn maker fees.
         take_profit_order_type: Same enum; 3 recommended.
@@ -850,6 +854,7 @@ async def create_grid_executor(
         limit_price=limit_price,
         total_amount_quote=total_amount_quote,
         take_profit=take_profit,
+        time_limit=time_limit,
         open_order_type=open_order_type,
         take_profit_order_type=take_profit_order_type,
         min_spread_between_orders=min_spread_between_orders,

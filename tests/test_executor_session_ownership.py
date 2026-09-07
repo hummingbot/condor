@@ -154,6 +154,30 @@ def test_a_top_level_controller_id_attributes_the_executor_too():
     assert result["outcome"]["outcome"] == "selected"
 
 
+def test_the_record_beats_the_configs_default_main():
+    """The shape HAPI actually returns for an executor this session created.
+
+    ``create_executor`` pops ``controller_id`` out of the config on purpose, so
+    the tag the gate attributed the position to sits on the record and the config
+    keeps the backend default, "main". Read config-first, this refused a session's
+    stop of an executor it had opened moments earlier in the same tick — a
+    risk-reducing call blocked as somebody else's.
+    """
+    client = _Client(
+        {
+            "id": "fresh-4",
+            "status": "RUNNING",
+            "controller_id": AGENT_ID,
+            "config": {"controller_id": "main"},
+        }
+    )
+    gate = _gate(client=client)
+
+    result = asyncio.run(gate(_stop_call("fresh-4"), OPTIONS))
+
+    assert result["outcome"]["outcome"] == "selected"
+
+
 # ── An id nothing can place ──
 
 
@@ -201,7 +225,7 @@ def test_a_stop_with_no_executor_id_is_refused():
 
 
 def test_an_attended_seat_stops_any_executor_as_before():
-    """Empty agent_id — chat, consults, tests — where a human confirms the stop."""
+    """Empty agent_id — chat, tests — where a human confirms the stop."""
     client = _Client({"id": "theirs-9", "config": {"controller_id": "other_agent.3"}})
     gate = _gate(client=client, agent_id="", owners=None)
 

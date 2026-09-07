@@ -17,8 +17,8 @@ async def call_main_api(
     main process so they survive beyond the MCP subprocess lifecycle.
 
     ``timeout`` defaults to the shared policy (condor.runtime.timeouts) but
-    callers that block on the main process (e.g. a consult that awaits a user
-    confirmation) should pass a larger value.
+    callers that block on the main process (e.g. a routine run waited on inline)
+    should pass a larger value.
 
     Raises APIError on failure instead of returning {"error": ...}.
     """

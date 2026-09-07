@@ -395,7 +395,7 @@ export function SessionOverview(props: {
 // ── Session Activity ──
 
 export function SessionActivity({ journal }: { journal: ParsedJournal }) {
-  const { decisions } = journal;
+  const { decisions, decisionsArchived } = journal;
 
   if (decisions.length === 0) {
     return <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">No decisions yet.</p>;
@@ -403,6 +403,12 @@ export function SessionActivity({ journal }: { journal: ParsedJournal }) {
 
   return (
     <div className="space-y-2">
+      {/* Said at the boundary, where the list stops: a run past the cap shows its
+          newest decisions only, and without this the missing tick-1 deploy reads
+          as a decision never made rather than one moved to the archive. */}
+      {decisionsArchived && (
+        <p className="px-1 text-xs italic text-[var(--color-text-muted)]">{decisionsArchived}</p>
+      )}
       {decisions.map((d, i) => (
         <div key={i} className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3">
           <div className="flex items-start gap-3">

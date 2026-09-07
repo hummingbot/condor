@@ -1,28 +1,29 @@
 """One agent run, recorded — whichever channel asked for it (FEAT-058).
 
-An Agent's brain runs to completion through exactly two doors, and until now
-only one of them left a trace. DELEGATE — the rare, deliberate one — wrote a
-whole record directory: a status file at start and at the end, an events
-sidecar, a transcript. CONSULT — the one every other agent, the Telegram bot and
-the dashboard actually use, dozens of times where a delegation happens once —
-returned a string and wrote nothing, anywhere. So the dashboard could say what
-an agent had been handed in the background and nothing at all about what it had
-actually spent its day doing.
+This module is the one place a run becomes files: a status record at start and
+another at the end, keyed by the person who owns the run.
 
-This module is the one place a run becomes files. It is deliberately *not* a
-function in :mod:`condor.agents.delegate`: that module imports
-:mod:`condor.agents.consult` for the shared engine, so a consult reaching back
-into ``delegate`` to record itself would close an import cycle. A third module
-both can import is the smaller answer than a lazy import in a hot function.
+An Agent's brain runs to completion through two doors, and only one of them used
+to leave a trace. ``delegate(action="start")`` — the rare, deliberate one — wrote
+a whole record directory: status files, an events sidecar, a transcript. The
+blocking ask — the one every other agent reaches for, dozens of times where a
+delegation happens once — returned a string and wrote nothing, anywhere. So the
+dashboard could say what an agent had been handed in the background and nothing
+at all about what it had actually spent its day doing.
 
-**The record is the ledger, not the tape.** A consult writes one small
+It is a module rather than a function in :mod:`condor.agents.delegate` because
+both doors write through it: an ask reaching back into ``delegate`` to record
+itself would close an import cycle, and a leaf both can import is smaller than a
+lazy import in a hot function.
+
+**The record is the ledger, not the tape.** An ask writes one small
 ``status.json`` and nothing else — no events sidecar, no transcript. Its answer
-streams straight back to the caller through the cheaper one-shot
+goes straight back to the caller through the cheaper one-shot
 ``client.prompt()``, and flipping the hottest agent path onto ``prompt_stream``
-to persist a transcript would be a behaviour change paid on every consult for a
-file almost nobody opens. The seam stays open: ``_run_agent_to_completion``
-already takes an ``event_sink``, so a later feature that wants consult
-transcripts passes one.
+to persist a transcript would be a behaviour change paid on every ask for a file
+almost nobody opens. The seam stays open:
+:func:`~condor.agents.agent_run.run_agent_to_completion` already takes an
+``event_sink``, so a later feature that wants ask transcripts passes one.
 
 **The directory name is historical.** Records live under
 ``.condor/users/{user_id}/delegations/{run_id}/`` because that is where
@@ -43,6 +44,12 @@ log = logging.getLogger(__name__)
 # The two channels a run can arrive through. ``kind`` is absent from every
 # record written before this feature, and those were all delegations — so the
 # default is not a guess, it is what they were.
+#
+# ``KIND_CONSULT`` is spelled "consult" and reached as ``delegate(action="ask")``:
+# the door was renamed, the thing recorded was not. Keeping the value is what
+# holds an install's history in ONE filter — every ask an agent ever answered
+# under either name lists together, instead of splitting across two kinds that
+# mean the same thing and would each need their own retention cap and UI chip.
 KIND_DELEGATE = "delegate"
 KIND_CONSULT = "consult"
 DEFAULT_KIND = KIND_DELEGATE

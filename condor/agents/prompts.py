@@ -32,7 +32,7 @@ MAX_STATE_SECTION_CHARS = 3 * MAX_STATE_VALUE_CHARS
 MAX_REFUSALS_SHOWN = 5
 
 # What a clipped value says about itself, so a truncated blob is never mistaken
-# for the whole value (consult._clip uses the same marker).
+# for the whole value.
 TRUNCATION_MARKER = "… (truncated)"
 
 

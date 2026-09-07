@@ -485,7 +485,15 @@ export function ChatInput({
               placeholder={placeholder}
               disabled={disabled}
               rows={1}
-              className="flex-1 resize-none bg-transparent px-2 py-1.5 text-sm text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:outline-none disabled:opacity-50"
+              // `min-w-0` is load-bearing, not tidying. A textarea's min-content
+              // width is its `cols` default (~20 chars), and a flex item will not
+              // shrink below that on its own — so in the bubble's 380px shell,
+              // once the mic, the paperclip and Send have taken their ~144px, the
+              // field refuses to fit and shoves the controls out of the box. The
+              // composer reads as skewed; it is really just overflowing. The
+              // rail is wide enough to hide it, which is why it only ever showed
+              // up in the bubble.
+              className="min-w-0 flex-1 resize-none break-words bg-transparent px-2 py-1.5 text-sm text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:outline-none disabled:opacity-50"
             />
           )}
 

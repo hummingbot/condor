@@ -62,7 +62,6 @@ HB_PROFILES = {
 }
 
 CONDOR_COMMON = {
-    "consult",
     "delegate",
     "send_notification",
     "manage_routines",

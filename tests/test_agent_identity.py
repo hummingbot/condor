@@ -1,7 +1,7 @@
 """A bound Agent is told, at system level, that it is not Condor (FEAT-025).
 
 The bug these cover: a chat bound to ``backpack_mm`` answered "I'm Condor — the
-backpack_mm agent is a specialist I can consult", which was a faithful reading
+backpack_mm agent is a specialist I can hand work to", which was a faithful reading
 of its own instructions. Identity lives in two places now (the condor MCP
 server's ``instructions`` — the only system-level channel ACP v1 gives us — and
 the session's opening context) and both must say the same thing.
@@ -85,8 +85,8 @@ def test_identity_header_does_not_forbid_delegating_to_yourself(slug, name):
     per-seat question, answered by `_agent_base`/`_chat_base`/`_worker_base`.
     """
     header = identity_header(slug, name)
-    assert f"never consult `{slug}`" in header.lower()
-    assert "never consult or delegate" not in header.lower()
+    assert "never delegate" not in header.lower()
+    assert f"delegating to `{slug}` is delegating to yourself" in header.lower()
     assert "background session of you" in header
 
 
@@ -113,7 +113,7 @@ def test_agent_identity_context_leads_with_the_header(three_agents, monkeypatch)
     assert ctx.startswith(identity_header("backpack_mm", "Backpack MM"))
     assert "Domain knowledge." in ctx
     # None of the coordinator persona leaks into a bound Agent's opening context.
-    assert "consultable **domain agents**" not in ctx
+    assert "**domain agents** you can hand work to" not in ctx
 
 
 # ── _build_instructions(): one rule, three sections ──
@@ -130,7 +130,7 @@ def _instructions(monkeypatch, slug: str) -> str:
 def test_instructions_unbound_are_the_coordinator_text(three_agents, monkeypatch):
     text = _instructions(monkeypatch, "")
     assert text.startswith("Condor exposes reusable **skills**")
-    assert "[AGENTS — consult for domain work]" in text
+    assert "[AGENTS — delegate domain work to one of these]" in text
     # The full roster, self included — the coordinator has no self to exclude.
     for slug in ("backpack_mm", "brigado", "executor_manager"):
         assert f"- [{slug}]" in text
@@ -141,7 +141,7 @@ def test_instructions_bound_assert_identity_and_drop_self(three_agents, monkeypa
     assert identity_header("backpack_mm", "Backpack MM") in text
     assert "Condor exposes reusable **skills**" not in text
     assert "- [backpack_mm]" not in text
-    assert "[PEER AGENTS — consult for work outside your domain]" in text
+    assert "[PEER AGENTS — delegate work outside your domain to one of these]" in text
     assert "- [brigado] BRL market making" in text
     # FEAT-031: routine authoring stays with the agent — it inherits the cookbook.
     assert "ROUTINE AUTHORING IS YOURS" in text
@@ -166,7 +166,7 @@ def test_unknown_slug_degrades_to_the_coordinator_text(three_agents, monkeypatch
     """An agent that vanished from the store falls back to today's behavior."""
     text = _instructions(monkeypatch, "ghost")
     assert text.startswith("Condor exposes reusable **skills**")
-    assert "[AGENTS — consult for domain work]" in text
+    assert "[AGENTS — delegate domain work to one of these]" in text
 
 
 # ── the ACP system-prompt channel ──

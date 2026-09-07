@@ -51,7 +51,7 @@ manage_bots(action="status")   # no bot_name — returns all active bots
 and cannot be recovered later.
 
 For a single lightweight controller, an executor may fit better than a bot —
-consult the `executor_manager` agent.
+delegate to the `executor_manager` agent.
 
 ## Step 3 — Early monitoring
 

@@ -569,6 +569,13 @@ async def _fetch_controller_id(client: Any, executor_id: str) -> str:
     those apart. Returns ``""`` when the id resolves to nothing — an unknown id,
     an unreachable API, or an executor carrying no tag at all — which the caller
     reads as "unattributable", never as "mine".
+
+    Same precedence as :func:`condor.fetchers.executors.build_executor_row`, for
+    the same reason: the creator's tag lives on the executor record, and the
+    ``controller_id`` left inside ``config`` is the backend default "main". Read
+    the other way round, this refused a session's request to stop an executor it
+    had opened moments earlier in the same tick — a risk-reducing call blocked as
+    if it belonged to somebody else.
     """
     if client is None or not executor_id:
         return ""
@@ -582,7 +589,7 @@ async def _fetch_controller_id(client: Any, executor_id: str) -> str:
         return ""
     config = detail.get("config")
     cfg = config if isinstance(config, dict) else detail
-    return str(cfg.get("controller_id") or detail.get("controller_id") or "")
+    return str(detail.get("controller_id") or cfg.get("controller_id") or "")
 
 
 async def _stop_refusal(
@@ -634,14 +641,14 @@ def auto_approve_with_risk_check(
 
     ``ledger`` (FEAT-017) scopes bot ownership: with one, a ``manage_bots`` action
     that deploys or mutates a bot outside the session's namespace is cancelled and
-    recorded. ``None`` (consults, delegations, chat, executor-mode agents) keeps
+    recorded. ``None`` (delegations, chat, executor-mode agents) keeps
     today's behavior exactly.
 
     ``agent_id``, when given, is the session's own ``controller_id`` tag and an
     executor create must carry exactly it. The tag is model-supplied (the prompt
     merely asks for it) and is the sole link between a real position and the
     session that opened it, so checking only that *some* tag is present lets a
-    mistyped one open a live position no session can ever claim. Empty (consults,
+    mistyped one open a live position no session can ever claim. Empty (
     chat, tests) keeps the presence-only check.
 
     ``refusals`` collects why each cancelled call was cancelled. Without it a
@@ -760,7 +767,7 @@ def auto_approve_with_risk_check(
             # *its own* executors, and those stay ungated — resolved from the
             # snapshot, no round trip, no risk check. What is refused is one
             # session braking for another, which is not a brake but a
-            # liquidation. Attended seats (empty `agent_id`: chat, consults,
+            # liquidation. Attended seats (empty `agent_id`: chat,
             # tests) keep today's behavior, where a human confirms the stop.
             if tool_name == "stop_executor" and agent_id:
                 reason = await _stop_refusal(

@@ -224,9 +224,9 @@ async def test_a_delegation_records_its_deeds_under_its_own_record(monkeypatch):
 
     # Drive the runner's completion path with the agent stubbed out. Through
     # ``monkeypatch`` so nothing leaks into the rest of the suite.
-    import condor.agents.consult as consult_mod
+    import condor.agents.agent_run as agent_run_mod
 
-    monkeypatch.setattr(consult_mod, "_run_agent_to_completion", _noop)
+    monkeypatch.setattr(agent_run_mod, "run_agent_to_completion", _noop)
     for name in (
         "_persist_transcript",
         "_record_delegation_status",

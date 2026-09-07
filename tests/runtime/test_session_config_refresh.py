@@ -1,8 +1,7 @@
 """A config change reaches the chat that is already open (FEAT-093).
 
 A chat session is the only runtime that holds one client across turns: the tick
-engine builds a fresh client every tick and ``consult``/``delegate`` are
-one-shot. ``ACPClient`` sends ``mcpServers`` and the system prompt exactly once,
+engine builds a fresh client every tick and ``delegate`` is one-shot. ``ACPClient`` sends ``mcpServers`` and the system prompt exactly once,
 inside ``session/new``, and MCP tools register at subprocess import off argv —
 so a mute switched on in the brain panel used to reach the *next* chat and never
 this one.
@@ -446,9 +445,9 @@ def test_a_running_delegation_keeps_the_seat_it_started_with(registry):
     out of *reach* because it never enters the session registry, which is the
     only thing ``refresh_if_stale`` can act on.
     """
-    from condor.agents import consult
+    from condor.agents import agent_run
 
-    source = inspect.getsource(consult)
+    source = inspect.getsource(agent_run)
     assert "runtime.prompt" not in source
     assert "get_or_create_session" not in source
 

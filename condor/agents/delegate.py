@@ -1,15 +1,23 @@
 """DELEGATE -- fire-and-forget background agent tasks.
 
-DELEGATE is the async, *unattended* sibling of CONSULT
-(:mod:`condor.agents.consult`). Where CONSULT runs an Agent's brain to completion
-and blocks until it can return an answer (mutations human-gated), DELEGATE hands a
-one-off, goal-oriented task to a *detached* Agent instance that works autonomously
-until ``client.prompt()`` returns -- the natural "task done" signal -- then notifies
-the user with the result.
+This is ``delegate(action="start")``: a one-off, goal-oriented task handed to a
+*detached* Agent instance that works autonomously until ``client.prompt()``
+returns -- the natural "task done" signal -- then notifies the user with the
+result. A caller that wants the answer for itself rather than only for the user
+asks for ``on_complete="resume"`` and is handed it in a new turn.
 
-It is NOT a new engine. It reuses 100% of consult's client/toolset/prompt wiring
-via :func:`condor.agents.consult._run_agent_to_completion`, passing
-``permission_callback=None`` so an ACP agent auto-approves its own tool calls
+Its synchronous sibling is ``delegate(action="ask")``
+(:func:`condor.agents.agent_run.run_ask`), which blocks and returns the answer as
+a string. Same tool, same engine; the difference is who waits. An attended seat
+should prefer this one -- the user gets a task id, a progress list and a
+transcript instead of a frozen turn. An *unattended* seat cannot: a tick and a
+background worker run for nobody's conversation and pass no ``session_key``, so
+``resume`` has nothing to wake and ``notify`` would send the answer to the user
+rather than to the agent that needed it. That is what ``ask`` is for.
+
+It is NOT a new engine. It reuses 100% of the shared client/toolset/prompt wiring
+in :func:`condor.agents.agent_run.run_agent_to_completion`, which builds no
+permission callback, so an ACP agent auto-approves its own tool calls
 (:meth:`condor.acp.client.ACPClient._on_request_permission`). This is the user's
 chosen authorization model: full auto-approve, no sandbox (see FEAT-006 Risks).
 
@@ -39,7 +47,7 @@ delegation sweeps its own owner's directory
 so neither the disk nor the walk a history listing does grows with the age of
 the install. Nothing still running is ever a candidate.
 
-Since FEAT-058 that directory is no longer only delegations: a *consult* records
+Since FEAT-058 that directory is no longer only delegations: an *ask* records
 itself there too, discriminated by a ``kind`` field, so an agent's page can list
 every run it performed rather than only the rare ones handed to the background.
 The writing lives in :mod:`condor.agents.run_records`; what stays here is what a
@@ -137,10 +145,10 @@ MAX_FINISHED_DELEGATIONS = 25
 MAX_DELEGATION_RECORDS = int(os.environ.get("CONDOR_MAX_DELEGATION_RECORDS", "") or 500)
 
 # The same bound for the *other* kind of run in the same directory (FEAT-058).
-# Separate, and swept separately, because the two kinds are nothing alike: a
-# consult happens whenever one agent asks another a question, a delegation is a
+# Separate, and swept separately, because the two kinds are nothing alike: an ask
+# happens whenever one agent asks another a question, a delegation is a
 # deliberate act that cost minutes of unattended work and carries a transcript
-# nothing can rebuild. Sharing one budget would let a busy afternoon of consults
+# nothing can rebuild. Sharing one budget would let a busy afternoon of asks
 # evict every delegation an owner has. 300 is what ``CodeRunStore.MAX_RUNS``
 # already settled on for a high-frequency run ledger.
 MAX_CONSULT_RECORDS = int(os.environ.get("CONDOR_MAX_CONSULT_RECORDS", "") or 300)
@@ -175,8 +183,8 @@ class DelegateTask:
     result: str = ""  # final answer text once done
     error: str = ""
     # The conversation that started this task, when there was one. Empty for
-    # delegations with no conversation behind them (a consult, a tick engine, or
-    # anything started before provenance existed) -- honest rather than guessed.
+    # delegations with no conversation behind them (a tick engine, or anything
+    # started before provenance existed) -- honest rather than guessed.
     conversation_id: str = ""
     # The session that asked, and what it wants when the task ends. The
     # conversation id alone cannot *prompt* anything -- the runtime is addressed
@@ -299,8 +307,8 @@ def _record_delegation_status(dt: "DelegateTask") -> None:
 
     This function is now only *which fields a delegation has*: the writing, the
     end stamp and the retention sweep moved to
-    :func:`condor.agents.run_records.record_run`, which a consult reaches too
-    (FEAT-058), so a run becomes files in exactly one place.
+    :func:`condor.agents.run_records.record_run` (FEAT-058), so a run becomes
+    files in exactly one place.
     """
     record_run(
         user_id=dt.user_id,
@@ -397,7 +405,7 @@ def prune_delegation_records(user_id: int | str, kind: str | None = None) -> int
     # is one of this owner's record directories, so a directory *count* at or
     # under the cap rules an eviction out without opening a single status file.
     # Worth a syscall because of who pays: this runs at the end of every
-    # consult -- the plentiful kind -- and the walk it guards reads one
+    # ask -- the plentiful kind -- and the walk it guards reads one
     # ``status.json`` per record of *either* kind (``kind`` is only knowable
     # after parsing), up to both caps together. A store below the cap, which is
     # every install for most of its life, now pays one ``scandir`` instead of
@@ -503,18 +511,17 @@ def _make_event_sink(dt: DelegateTask):
 
 async def _run(dt: DelegateTask, bot, timeout_s: int) -> None:
     """Background runner: drive the agent to completion, persist, notify."""
-    from condor.agents.consult import _run_agent_to_completion
+    from condor.agents.agent_run import run_agent_to_completion
 
     try:
         dt.result = await asyncio.wait_for(
-            _run_agent_to_completion(
+            run_agent_to_completion(
                 slug=dt.agent_slug,
                 user_id=dt.user_id,
                 chat_id=dt.chat_id,
                 server_name=dt.server_name,
                 task=dt.task,
                 context="",
-                permission_callback=None,  # unattended -> ACP auto-approves
                 event_sink=_make_event_sink(dt),
                 delegate_worker=True,  # background seat: worker framing, no recursion
             ),
@@ -869,7 +876,7 @@ def _record_completion_turn(dt: DelegateTask) -> None:
     session the same false story. Recorded as a ``system`` turn so the replay
     reads it as a parenthetical note rather than as the agent's own words.
 
-    A delegation with no conversation behind it (consult- or tick-started) is a
+    A delegation with no conversation behind it (tick-started, say) is a
     no-op: ``record_system`` already ignores an empty id. Imported lazily like
     the rest of this module's runtime touchpoints, and never allowed to raise --
     a failed note must not cost the user their notification.
@@ -950,7 +957,7 @@ async def _show_completion(dt: DelegateTask) -> None:
 
     Fires only where the resume turn does not -- the caller picks one -- so a
     ``resume`` task is never woken twice for one outcome. A delegation with no
-    session or no conversation behind it (consult- or tick-started) is a no-op,
+    session or no conversation behind it (tick-started, say) is a no-op,
     and nothing here may raise: by now the user has already been notified and
     the transcript already carries the outcome.
 

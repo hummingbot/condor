@@ -164,7 +164,7 @@ async def session_options(user: WebUser = Depends(get_current_user)):
             for p in providers
         ],
         "servers": cm.get_accessible_servers(user.id),
-        # Every Agent is chattable for the same reason it is consultable: it has
+        # Every Agent is chattable for the same reason it is delegable: it has
         # an identity and a toolset. No separate flag (FEAT-004 rule).
         #
         # Condor is the exception the picker already has a row for: it answers
@@ -379,7 +379,7 @@ async def _respawn(
         raise HTTPException(status_code=403, detail="Session has no owner")
 
     # The new session's tools are built against this server's credentials, so
-    # gate it exactly like consult/delegate do — otherwise a switch would be a
+    # gate it exactly like delegate does — otherwise a switch would be a
     # way to reach a server the caller was never granted (IDOR). The subject is
     # the *caller*, never the session's owner (SEC-167): an admin acting on
     # someone else's session must be held to their own reach, not licensed by

@@ -1,6 +1,6 @@
 """Unit tests for the unified Agent model: AgentStore + Strategy sub-resource.
 
-Covers the universal capabilities (every Agent is consultable, delegable and
+Covers the universal capabilities (every Agent is delegable and
 loopable — no flags, no gating), the strategy CRUD scoped under an Agent, the
 default playbook that makes a strategy-less Agent loopable, the shared per-Agent
 skill library, and the pydantic-ai tool allowlist.
@@ -43,7 +43,7 @@ def test_agent_discovery_and_index(tmp_path, monkeypatch):
         agent_key="ollama:qwen3:32b",
         body="Body for executor_manager.",
     )
-    # No consult trigger — still a first-class agent, just described by its
+    # No routing hint — still a first-class agent, just described by its
     # description in the index. Filtering it out would make it unroutable.
     _write_agent(
         tmp_path,
@@ -66,7 +66,7 @@ def test_agent_discovery_and_index(tmp_path, monkeypatch):
 
 
 def test_consult_hint_falls_back(tmp_path, monkeypatch):
-    """The hint degrades description -> name; it never gates consultability."""
+    """The hint degrades description -> name; it never gates anything."""
     _patch_roots(monkeypatch, tmp_path)
     _write_agent(
         tmp_path, "with_trigger", name="A", description="d", when_to_consult="t"
@@ -320,7 +320,7 @@ def test_agent_skill_library_read_and_edit(tmp_path):
     assert "stop_or_widen" not in store.list_index()
 
 
-# ── pydantic-ai tool allowlist (enforced on consult) ──
+# ── pydantic-ai tool allowlist (enforced on a delegated run) ──
 
 
 def test_allowlist_filters_bare_and_namespaced_names():
@@ -604,33 +604,37 @@ def test_claude_acp_takes_acp_path_not_pydantic_ai():
     assert is_pydantic_ai_model("ollama:qwen3:32b") is True
 
 
-# ── consult endpoint authorization (SEC-035) ──
+# ── delegate endpoint authorization (SEC-035) ──
+#
+# These pinned the consult endpoint until that channel was removed. Delegate is
+# the only door left and carries the same two gates, so the coverage moved with
+# them rather than going away with the route.
 
 
-def _consult_request(**kw):
-    from condor.web.routes.agents import ConsultRequest
+def _delegate_request(**kw):
+    from condor.web.routes.agents import DelegateRequest
 
     kw.setdefault("task", "what's my balance?")
-    return ConsultRequest(**kw)
+    return DelegateRequest(**kw)
 
 
 def _web_user(uid):
     return SimpleNamespace(id=uid, username="", first_name="", role="user")
 
 
-def test_consult_denies_server_without_access(monkeypatch):
-    """A user without access to server 'X' gets 403 and run_consult is not called."""
-    import config_manager
-    from condor.agents import consult as consult_module
+def test_delegate_denies_server_without_access(monkeypatch):
+    """A user without access to server 'X' gets 403 and no delegation starts."""
+    from condor.agents import delegate as delegate_module
     from condor.web.routes import agents as agents_module
 
     called = {"run": False}
 
-    async def _fail_run_consult(**kw):  # pragma: no cover - must not be reached
+    async def _fail_start(**kw):  # pragma: no cover - must not be reached
         called["run"] = True
-        return "should not run"
+        raise AssertionError("should not run")
 
-    monkeypatch.setattr(consult_module, "run_consult", _fail_run_consult)
+    monkeypatch.setattr(agents_module, "_get_agent", lambda slug: SimpleNamespace())
+    monkeypatch.setattr(delegate_module, "start_delegation", _fail_start)
     monkeypatch.setattr(
         "condor.web.auth.get_config_manager",
         lambda: SimpleNamespace(has_server_access=lambda uid, name: False),
@@ -638,44 +642,48 @@ def test_consult_denies_server_without_access(monkeypatch):
 
     from fastapi import HTTPException
 
-    req = _consult_request(server_name="X", user_id=999)
+    req = _delegate_request(server_name="X", user_id=999)
     try:
-        asyncio.run(agents_module.consult_agent("em", req, user=_web_user(42)))
+        asyncio.run(agents_module.delegate_agent("em", req, user=_web_user(42)))
         assert False, "expected 403"
     except HTTPException as exc:
         assert exc.status_code == 403
     assert called["run"] is False  # no MCP client built for X
 
 
-def test_consult_forces_caller_user_id(monkeypatch):
-    """An accessible-server consult runs, but user_id is forced to the caller's."""
-    import config_manager
-    from condor.agents import consult as consult_module
+def test_delegate_forces_caller_user_id(monkeypatch):
+    """An accessible-server delegation runs, but user_id is forced to the caller's."""
+    from condor.agents import delegate as delegate_module
     from condor.web.routes import agents as agents_module
 
     seen = {}
 
-    async def _capture_run_consult(**kw):
+    async def _capture_start(**kw):
         seen.update(kw)
-        return "ok"
+        return SimpleNamespace(task_id="em-delegate-1", status="running")
 
-    monkeypatch.setattr(consult_module, "run_consult", _capture_run_consult)
+    async def _no_conversation(session_key):
+        return ""
+
+    monkeypatch.setattr(agents_module, "_get_agent", lambda slug: SimpleNamespace())
+    monkeypatch.setattr(agents_module, "_conversation_for_session", _no_conversation)
+    monkeypatch.setattr(delegate_module, "start_delegation", _capture_start)
     monkeypatch.setattr(
         "condor.web.auth.get_config_manager",
         lambda: SimpleNamespace(has_server_access=lambda uid, name: True),
     )
 
     # Caller is 42 but tries to impersonate user 999.
-    req = _consult_request(server_name="X", user_id=999)
-    result = asyncio.run(agents_module.consult_agent("em", req, user=_web_user(42)))
+    req = _delegate_request(server_name="X", user_id=999)
+    result = asyncio.run(agents_module.delegate_agent("em", req, user=_web_user(42)))
 
-    assert result["answer"] == "ok"
+    assert result["task_id"] == "em-delegate-1"
     assert seen["user_id"] == 42  # caller's id, not the 999 override
     assert seen["server_name"] == "X"
 
 
 def test_session_mcp_servers_carry_agent_slug(monkeypatch):
-    """Serverless agent runs (consult/tick without server_name) must scope the
+    """Serverless agent runs (delegate/tick without server_name) must scope the
     condor MCP tools to the agent's own memory/skills via --agent-slug —
     without it, an agent silently reads/writes the CHAT's stores (e.g. its
     routines land in the global library instead of its own dir)."""

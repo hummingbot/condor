@@ -313,7 +313,7 @@ async def _run_llm_cleanup(
     if not body or agent is None:
         return
     try:
-        from .consult import _run_agent_to_completion
+        from .agent_run import run_agent_to_completion
 
         running = await _get_running_executors(engine, client)
         positions = await _fetch_positions(client, engine.agent_id)
@@ -322,14 +322,13 @@ async def _run_llm_cleanup(
             strategy=engine.config.get("tick_timeout_sec")
         )
         async with asyncio.timeout(cleanup_timeout):
-            await _run_agent_to_completion(
+            await run_agent_to_completion(
                 slug=agent.slug,
                 user_id=engine.user_id,
                 chat_id=engine.chat_id,
                 server_name=engine.config.get("server_name"),
                 task=body,
                 context=context,
-                permission_callback=None,  # unattended auto-approve, like DELEGATE
             )
     except asyncio.TimeoutError:
         log.warning(

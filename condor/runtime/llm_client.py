@@ -1,16 +1,16 @@
 """One factory for the PydanticAI-vs-ACP client split (ARCH-192).
 
-Every surface that talks to a model — chat sessions, consult, the trading-agent
+Every surface that talks to a model — chat sessions, delegations, the trading-agent
 engine — needs the same decision: a pydantic-ai key (ollama/lmstudio/openai/
 custom/...) gets an in-process :class:`PydanticAIClient`, anything else gets an
 :class:`ACPClient` subprocess. That branch used to live in three drifted copies
-(``runtime/sessions.py``, ``agents/consult.py``, ``agents/engine.py``); it now
+(``runtime/sessions.py``, ``agents/agent_run.py``, ``agents/engine.py``); it now
 lives here, and each surface passes only its own specifics:
 
 - chat sessions: ``extra_env`` (CONDOR_* ids), the bound-Agent ``system_prompt``,
   ``strict_custom_endpoint=True`` (loud, actionable error for a missing saved
   endpoint) and the LM Studio pref as ``default_base_url``.
-- consult: nothing extra — it healthchecks the backend *before* calling this.
+- delegate: nothing extra — it healthchecks the backend *before* calling this.
 - engine: the run config's ``model_base_url`` as ``base_url_override``.
 
 The client classes are read as module attributes at call time so tests keep

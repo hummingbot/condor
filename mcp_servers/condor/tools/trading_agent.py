@@ -133,7 +133,7 @@ def _list_agent_definitions() -> dict:
     An *agent* (e.g. ``executor_manager``, ``brigado``) is distinct from a
     *strategy* (a looping playbook it owns) and from a running *instance*. This
     surfaces agents that ``list_strategies`` / ``list_agents`` (instances) never
-    show. No capability flags: every agent listed here can be consulted,
+    show. No capability flags: every agent listed here can be delegated to,
     delegated to and looped.
     """
     from condor.agents.agent import AgentStore
@@ -165,7 +165,7 @@ def _list_agent_definitions() -> dict:
 #
 # An Agent is the brain/identity. It is created FIRST; routines and strategies
 # are sub-resources that hang off an existing agent_slug. There are no capability
-# flags: the moment an agent exists it can be consulted, delegated to and looped.
+# flags: the moment an agent exists it can be delegated to and looped.
 # ``when_to_consult`` is a routing hint; a bespoke strategy is an optimization
 # over the default playbook every agent already loops.
 # ---------------------------------------------------------------------------
@@ -240,7 +240,7 @@ def _manage_agent(
         # Default to the model the creator is actually running. Guessing here
         # produces agents pinned to a backend the user never configured — the
         # coordinator has no way to know which models are reachable, so an
-        # invented agent_key is a coin flip that only surfaces on first consult.
+        # invented agent_key is a coin flip that only surfaces on the first run.
         resolved_key = agent_key or _creator_agent_key()
         agent = store.create(
             name=name,
@@ -377,7 +377,7 @@ async def _agent_lifecycle(
                 config_dict.update(config)
             if not config or "server_name" not in config:
                 # A server pinned on the owning Agent wins over the ambient chat
-                # server, mirroring consult/delegate resolution.
+                # server, mirroring delegate's resolution.
                 from condor.agents.agent import AgentStore
 
                 owner = AgentStore().get(strategy.agent_slug)
@@ -548,6 +548,18 @@ def journal_write(
         return {"error": "agent_id is required"}
     if not text:
         return {"error": "text is required"}
+    # An action and a canvas revision are both *dated* by their tick, and the
+    # default of 0 is not a date. Written through, it reached the journal as
+    # "**#0**" -- which the Decisions panel renders as ERR, so a perfectly good
+    # decision looked like a failed one and the visible tick sequence broke --
+    # and it disabled the canvas's per-tick revision cap, which is written
+    # `if tick and ...`. A retry that drops the argument is exactly how this
+    # happens, so it is refused here where the caller can still pass the tick.
+    if entry_type in ("action", "canvas") and tick < 1:
+        return {
+            "error": f"tick must be the current tick number (>= 1) for a "
+            f"{entry_type} entry, got {tick}"
+        }
 
     from condor.agents.engine import get_engine
     from condor.agents.journal import JournalManager

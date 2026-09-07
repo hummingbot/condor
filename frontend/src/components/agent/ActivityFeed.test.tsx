@@ -3,7 +3,7 @@
  *
  * Four things are load-bearing and none of them are visual: every kind of run
  * appears in one timeline and they are told apart; each row says the one thing
- * its kind actually knows (who asked, for a consult; how much work it did, for
+ * its kind actually knows (who asked, for an archived consult; how much work it did, for
  * a background task; how long it took, for a code run) and invents nothing for
  * the others; the summary strip names the sample it measured rather than
  * implying it speaks for the whole history; and a record written before kinds
@@ -11,11 +11,11 @@
  *
  * The fifth is the filter's, and it is the reason the filter is server-side: a
  * narrowed feed must *re-ask*, because filtering the page already fetched would
- * show three consults and imply that is all there ever were.
+ * show three of a kind and imply that is all there ever were.
  *
  * The sixth is the dock's: it asks for background tasks only, which is the
  * regression these features could most easily have introduced — filling the
- * chat dock with every consult the conversation made, or every snippet it ran.
+ * chat dock with the conversation's older consult rows, or every snippet it ran.
  *
  * Needs a DOM, so this file overrides vitest's default `node` environment.
  *
@@ -134,7 +134,7 @@ afterEach(() => {
 });
 
 describe("one timeline, three kinds", () => {
-  it("lists background tasks and consults together, told apart by kind", async () => {
+  it("lists background tasks and archived consults together, told apart by kind", async () => {
     ROWS = [
       run({ task_id: "a", kind: "delegate", task: "back-test the SOL grid" }),
       run({ task_id: "b", kind: "consult" }),
@@ -144,7 +144,7 @@ describe("one timeline, three kinds", () => {
     expect(kinds()).toEqual(["delegate", "consult"]);
   });
 
-  it("names the caller on a consult and the tool count on a background task", async () => {
+  it("names the caller on an archived consult and the tool count on a background task", async () => {
     ROWS = [
       run({ task_id: "a", kind: "delegate", tool_count: 22, caller: "" }),
       run({ task_id: "b", kind: "consult", caller: "condor", tool_count: undefined }),
@@ -159,7 +159,7 @@ describe("one timeline, three kinds", () => {
     expect(consult.querySelector("[data-tool-count]")).toBeNull();
   });
 
-  it("says a consult with no caller was asked by you, not by nobody", async () => {
+  it("says an archived consult with no caller was asked by you, not by nobody", async () => {
     ROWS = [run({ task_id: "a", kind: "consult", caller: "" })];
     await render({ agent: "scout" });
 

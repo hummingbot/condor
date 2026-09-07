@@ -171,7 +171,7 @@ def test_a_mute_for_a_tool_this_seat_never_mounts_is_a_no_op(module, profiles):
 @pytest.mark.parametrize("module,profiles", MODULES)
 def test_muting_still_refuses_an_unknown_profile(module, profiles):
     with pytest.raises(ValueError, match="Unknown tool profile"):
-        module.register_tools(FastMCP("probe"), "trading", ["consult"])
+        module.register_tools(FastMCP("probe"), "trading", ["delegate"])
 
 
 def test_muting_cannot_widen_a_seat():
@@ -187,9 +187,9 @@ def test_seat_tools_describes_both_servers(tmp_path):
     rows = seat_tools("perps")
     by_name = {row["name"]: row for row in rows}
 
-    assert by_name["consult"]["server"] == "condor"
+    assert by_name["delegate"]["server"] == "condor"
     assert by_name["get_prices"]["server"] == "hummingbot"
-    assert by_name["consult"]["description"]
+    assert by_name["delegate"]["description"]
     assert all(row["muted"] is False for row in rows)
     # An attended specialist is the ``agent`` ring on both servers.
     assert set(by_name) == set(condor_profiles.PROFILE_TOOLS["agent"]) | set(
@@ -200,7 +200,7 @@ def test_seat_tools_describes_both_servers(tmp_path):
 def test_seat_tools_narrows_for_a_tick(tmp_path):
     tick = {row["name"] for row in seat_tools("perps", tick=True)}
     assert "manage_agents" not in tick and "manage_clmm" not in tick
-    assert "get_prices" in tick and "consult" in tick
+    assert "get_prices" in tick and "delegate" in tick
 
 
 def test_seat_tools_marks_what_the_operator_switched_off(tmp_path):

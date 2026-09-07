@@ -17,7 +17,7 @@ import asyncio
 import pytest
 
 from condor.agents import agent as agent_module
-from condor.agents import consult as consult_module
+from condor.agents import agent_run as agent_run_module
 from condor.agents import delegate as delegate_module
 from condor.agents.delegate import start_delegation
 from condor.runtime import wake
@@ -235,7 +235,7 @@ def test_a_finished_notify_task_pushes_its_outcome_into_the_live_session(
 ):
     notes, resumes = deliveries
     _agent_root(tmp_path, monkeypatch)
-    monkeypatch.setattr(consult_module, "_run_agent_to_completion", _answer())
+    monkeypatch.setattr(agent_run_module, "run_agent_to_completion", _answer())
 
     dt = _run_delegation(conversation_id="conv-1", session_key="web:1:conv-1")
 
@@ -257,7 +257,7 @@ def test_a_failed_notify_task_is_shown_too(tmp_path, monkeypatch, deliveries):
     async def boom(**kw):
         raise RuntimeError("agent exploded")
 
-    monkeypatch.setattr(consult_module, "_run_agent_to_completion", boom)
+    monkeypatch.setattr(agent_run_module, "run_agent_to_completion", boom)
 
     dt = _run_delegation(conversation_id="conv-1", session_key="web:1:conv-1")
 
@@ -270,7 +270,7 @@ def test_a_resuming_task_is_not_woken_twice(tmp_path, monkeypatch, deliveries):
     """The resume turn already carries the outcome; a note would repeat it."""
     notes, resumes = deliveries
     _agent_root(tmp_path, monkeypatch)
-    monkeypatch.setattr(consult_module, "_run_agent_to_completion", _answer())
+    monkeypatch.setattr(agent_run_module, "run_agent_to_completion", _answer())
 
     _run_delegation(
         conversation_id="conv-1", session_key="web:1:conv-1", on_complete="resume"
@@ -291,7 +291,7 @@ def test_a_resume_that_never_happens_still_shows_the_outcome(
     async def boom(**kw):
         raise RuntimeError("agent exploded")
 
-    monkeypatch.setattr(consult_module, "_run_agent_to_completion", boom)
+    monkeypatch.setattr(agent_run_module, "run_agent_to_completion", boom)
 
     _run_delegation(
         conversation_id="conv-1", session_key="web:1:conv-1", on_complete="resume"
@@ -309,7 +309,7 @@ def test_a_stopped_task_shows_nothing(tmp_path, monkeypatch, deliveries):
         await asyncio.sleep(30)
         return "never"
 
-    monkeypatch.setattr(consult_module, "_run_agent_to_completion", hang)
+    monkeypatch.setattr(agent_run_module, "run_agent_to_completion", hang)
 
     async def scenario():
         dt = await start_delegation(
@@ -346,7 +346,7 @@ def test_a_delegation_without_provenance_is_a_silent_no_op(
     """Consult- and tick-started delegations have no conversation to show."""
     notes, _ = deliveries
     _agent_root(tmp_path, monkeypatch)
-    monkeypatch.setattr(consult_module, "_run_agent_to_completion", _answer())
+    monkeypatch.setattr(agent_run_module, "run_agent_to_completion", _answer())
 
     _run_delegation(**provenance)
 
@@ -356,7 +356,7 @@ def test_a_delegation_without_provenance_is_a_silent_no_op(
 def test_a_push_that_blows_up_costs_the_user_nothing(tmp_path, monkeypatch, deliveries):
     """By then they have been notified and the transcript holds the outcome."""
     _agent_root(tmp_path, monkeypatch)
-    monkeypatch.setattr(consult_module, "_run_agent_to_completion", _answer())
+    monkeypatch.setattr(agent_run_module, "run_agent_to_completion", _answer())
 
     async def boom(**kwargs):
         raise RuntimeError("runtime unreachable")
@@ -396,7 +396,7 @@ def test_a_finished_task_shows_itself_after_its_session_was_reaped(
             self.sent.append(json.loads(raw))
 
     _agent_root(tmp_path, monkeypatch)
-    monkeypatch.setattr(consult_module, "_run_agent_to_completion", _answer())
+    monkeypatch.setattr(agent_run_module, "run_agent_to_completion", _answer())
     monkeypatch.setattr(session_module, "_sessions", {})
     ws = _FakeWS()
     monkeypatch.setattr(chat_ws, "_attached_sockets", {1: {ws}})
@@ -426,7 +426,7 @@ def test_notify_does_exactly_what_the_docstring_now_promises(
     """
     notes, resumes = deliveries
     _agent_root(tmp_path, monkeypatch)
-    monkeypatch.setattr(consult_module, "_run_agent_to_completion", _answer())
+    monkeypatch.setattr(agent_run_module, "run_agent_to_completion", _answer())
 
     recorded: list[tuple] = []
 
@@ -461,7 +461,7 @@ def test_a_telegram_delegation_is_shown_once_not_twice(
     """
     notes, resumes = deliveries
     _agent_root(tmp_path, monkeypatch)
-    monkeypatch.setattr(consult_module, "_run_agent_to_completion", _answer())
+    monkeypatch.setattr(agent_run_module, "run_agent_to_completion", _answer())
     bot = _FakeBot()
 
     dt = _run_delegation(bot=bot, conversation_id="conv-1", session_key="tg:42")
@@ -476,7 +476,7 @@ def test_a_web_delegation_still_shows_its_note(tmp_path, monkeypatch, deliveries
     """The Telegram exception above must not cost the web surface its note."""
     notes, _ = deliveries
     _agent_root(tmp_path, monkeypatch)
-    monkeypatch.setattr(consult_module, "_run_agent_to_completion", _answer())
+    monkeypatch.setattr(agent_run_module, "run_agent_to_completion", _answer())
 
     _run_delegation(conversation_id="conv-1", session_key="web:1:conv-1")
 

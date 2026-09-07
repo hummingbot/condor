@@ -22,7 +22,7 @@ tools:
 when_to_consult: When the user asks whether a freshly-graduated Meteora DAMM v2 pool
   is worth LPing, how to size/enter an early position, which established DAMM v2 pool
   has the best fee yield, or whether an open AMM position should hold or exit — use
-  consult. To run the launch-LP loop autonomously (detect graduations → gate → early
+  delegate to me. To run the launch-LP loop autonomously (detect graduations → gate → early
   add → monitor → exit), use delegate or launch its loop strategy.
 server_required: true
 server_name: local

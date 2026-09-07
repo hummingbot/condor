@@ -21,7 +21,6 @@ from __future__ import annotations
 #: the docstring: the panel has one line of room and the docstring's first line
 #: is written for the model.
 TOOL_DESCRIPTIONS: dict[str, str] = {
-    "consult": "Ask a specialist agent a question and get its answer",
     "delegate": "Hand a long task to a background agent instance",
     "send_notification": "Send the user a Telegram message",
     "manage_routines": "List, run, schedule and edit routines",
@@ -39,12 +38,11 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
 
 #: Everything a session needs whoever is sitting in it: its own memory and
 #: playbooks, its routines, a scratch interpreter, the journal it writes each
-#: tick, and the peers it may consult. ``consult``/``delegate`` stay even in the
-#: narrowest profile — a peer consult and a background copy of oneself are
-#: designed behaviour, and a worker already has ``delegate(action="start")``
-#: refused in code rather than by omission.
+#: tick, and the peers it may hand work to. ``delegate`` stays even in the
+#: narrowest profile — handing work to a peer and starting a background copy of
+#: oneself are designed behaviour, and a worker already has
+#: ``delegate(action="start")`` refused in code rather than by omission.
 COMMON_TOOLS: tuple[str, ...] = (
-    "consult",
     "delegate",
     "send_notification",
     "manage_routines",

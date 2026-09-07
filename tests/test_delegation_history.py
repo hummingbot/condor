@@ -19,7 +19,7 @@ import pytest
 
 from condor import paths
 from condor.agents import agent as agent_module
-from condor.agents import consult as consult_module
+from condor.agents import agent_run as agent_run_module
 from condor.agents import delegate as delegate_module
 from condor.agents import delegation_history as history_module
 from condor.agents.delegate import start_delegation
@@ -102,7 +102,7 @@ def _run_delegation(monkeypatch, root, slug="scout", task="scan SOL pools"):
         event_sink(ToolCallUpdate(tool_call_id="tc-1", status="completed", output="ok"))
         return "three pools worth watching"
 
-    monkeypatch.setattr(consult_module, "_run_agent_to_completion", fake_run)
+    monkeypatch.setattr(agent_run_module, "run_agent_to_completion", fake_run)
 
     async def scenario():
         dt = await start_delegation(

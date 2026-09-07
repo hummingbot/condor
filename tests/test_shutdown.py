@@ -6,6 +6,7 @@ verify/alert on residual), and the engine wrapper's idempotency guard.
 """
 
 import asyncio
+import inspect
 from contextlib import contextmanager
 from types import SimpleNamespace
 
@@ -472,7 +473,7 @@ def _engine_with_llm(running, positions_seq, tmp_path, monkeypatch, body):
 
 
 def test_llm_cleanup_invoked_with_body(tmp_path, monkeypatch):
-    from condor.agents import consult as consult_module
+    from condor.agents import agent_run as agent_run_module
 
     running = [{"id": "e1", "connector": "binance_perpetual"}]
     engine, client, notes = _engine_with_llm(
@@ -484,15 +485,22 @@ def test_llm_cleanup_invoked_with_body(tmp_path, monkeypatch):
         seen.update(kwargs)
         return "done"
 
-    monkeypatch.setattr(consult_module, "_run_agent_to_completion", fake_complete)
+    monkeypatch.setattr(agent_run_module, "run_agent_to_completion", fake_complete)
     asyncio.run(run_shutdown(engine, "breach"))
     assert seen["task"] == "Do cleanup."
     assert seen["slug"] == "acme"
-    assert seen["permission_callback"] is None
+    # Unattended by construction: the shared engine builds no permission callback
+    # at all any more, so there is no argument here that could re-attend the run.
+    from condor.agents import agent_run
+
+    assert (
+        "permission_callback"
+        not in inspect.signature(agent_run.run_agent_to_completion).parameters
+    )
 
 
 def test_llm_cleanup_failure_does_not_block_winddown(tmp_path, monkeypatch):
-    from condor.agents import consult as consult_module
+    from condor.agents import agent_run as agent_run_module
 
     running = [{"id": "e1", "connector": "binance_perpetual"}]
     engine, client, notes = _engine_with_llm(
@@ -502,7 +510,7 @@ def test_llm_cleanup_failure_does_not_block_winddown(tmp_path, monkeypatch):
     async def boom(**kwargs):
         raise RuntimeError("model exploded")
 
-    monkeypatch.setattr(consult_module, "_run_agent_to_completion", boom)
+    monkeypatch.setattr(agent_run_module, "run_agent_to_completion", boom)
     asyncio.run(run_shutdown(engine, "breach"))
     # The deterministic floor still ran and the winddown completed cleanly.
     assert dict(client.executors.stop_calls) == {"e1": False}

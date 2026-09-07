@@ -1,12 +1,13 @@
 """Trading Agents API routes.
 
 An **Agent** is the top-level unit: identity + shared brain (memory/skills) that
-``condor`` can *consult*. An Agent **owns strategies** — playbooks that loop via
-``TickEngine``. So the route shape is::
+``condor`` can hand work to. An Agent **owns strategies** — playbooks that loop
+via ``TickEngine``. So the route shape is::
 
     /agents                                  -> list Agents (+ their strategies)
     /agents/{slug}                           -> Agent detail
-    /agents/{slug}/consult                   -> run the Agent's brain to completion
+    /agents/{slug}/ask                       -> run the Agent's brain, return the answer
+    /agents/{slug}/delegate                  -> run the Agent's brain in the background
     /agents/{slug}/strategies                -> CRUD strategies under an Agent
     /agents/{slug}/strategies/{sslug}/...    -> per-strategy run/journal/perf
 
@@ -691,7 +692,7 @@ class AgentConfigRequest(BaseModel):
     agent_key: str | None = Field(
         default=None,
         description="The model this Agent answers on, everywhere it runs — "
-        "chat, consult, delegate and loops. Empty string clears it, falling "
+        "chat, delegate and loops. Empty string clears it, falling "
         "back to the chat's default model.",
     )
 
@@ -773,13 +774,13 @@ class SetStateRequest(BaseModel):
     clear: bool = False
 
 
-class ConsultRequest(BaseModel):
+class AskRequest(BaseModel):
     task: str
     context: str = ""
     chat_id: int = 0
     user_id: int | None = None
     server_name: str | None = None
-    # Which agent is asking, for the consult's record (FEAT-058). "" is a person
+    # Which agent is asking, for the ask's record (FEAT-058). "" is a person
     # asking directly. A label on a record the caller already owns, so there is
     # nothing here a web caller could spoof it into meaning.
     caller: str = ""
@@ -1378,8 +1379,8 @@ def _code_run_row(entry: dict) -> dict:
     delegations and gains nothing by learning.
 
     The fields a code run has no answer for (a caller, a conversation, a tool
-    count) carry the empty value the wire already uses for "not recorded", the
-    same way a consult carries no tool count. ``ended_at`` is derived from a
+    count) carry the empty value the wire already uses for "not recorded".
+    ``ended_at`` is derived from a
     duration the store actually measured, so the feed's median is a real number
     rather than a stand-in.
     """
@@ -1506,12 +1507,12 @@ async def list_delegation_history(
     Registered above ``/delegations/{task_id}`` so the literal path wins, for the
     same reason the whole block sits above ``/{slug}``.
 
-    The path name is historical, like the directory it reads: since FEAT-058 a
-    *consult* records itself in the same store, so this route answers "what did
-    this agent do" and not only "what was it handed in the background". ``kind``
-    picks a channel — ``""`` is all of them (an agent's Activity tab),
-    ``"delegate"`` is today's behaviour exactly (the chat dock, which is about
-    background tasks and would drown in consults).
+    The path name is historical, like the directory it reads: since FEAT-058 the
+    store holds more than delegations, so this route answers "what did this agent
+    do" and not only "what was it handed in the background". ``kind`` picks a
+    channel — ``""`` is all of them (an agent's Activity tab, which still lists
+    which lists the consults an agent answered alongside its background tasks),
+    ``"delegate"`` is background tasks only (the chat dock).
 
     Since FEAT-061 a third channel merges in from a different store: ``"code"``
     is a snippet the agent ran, read from :class:`condor.code_runs.CodeRunStore`
@@ -1532,8 +1533,8 @@ async def list_delegation_history(
     from condor.code_runs import get_code_run_store
     from condor.web.routes.code import _may_run_code
 
-    # Everything in the registry is a delegation by construction, so a consult
-    # filter simply excludes it rather than needing a field to test.
+    # Everything in the registry is a delegation by construction, so any other
+    # kind filter simply excludes it rather than needing a field to test.
     live = (
         {
             dt.task_id: dt.to_dict()
@@ -2267,33 +2268,38 @@ async def _check_chat_access(user_id: int, chat_id: int) -> None:
         )
 
 
-@router.post("/{slug}/consult")
-async def consult_agent(
-    slug: str, req: ConsultRequest, user: WebUser = Depends(get_current_user)
+@router.post("/{slug}/ask")
+async def ask_agent(
+    slug: str, req: AskRequest, user: WebUser = Depends(get_current_user)
 ):
-    """Run an Agent consult (its brain to completion) and return the answer."""
-    from condor.agents.consult import run_consult
-    from config_manager import get_config_manager
+    """Run an Agent's brain to completion and return the answer to a waiting caller.
+
+    The blocking half of ``delegate`` (``action="ask"``) -- inter-agent
+    communication. Its detached sibling is ``/delegate``, which an attended
+    caller should prefer; this exists for the unattended seats, which have no
+    conversation for ``on_complete="resume"`` to wake.
+    """
+    from condor.agents.agent_run import run_ask
 
     if not req.task:
         raise HTTPException(status_code=400, detail="task is required")
 
-    # The consult binds the agent's MCP toolset to ``server_name``'s live
+    # The run binds the agent's MCP toolset to ``server_name``'s live
     # credentials, so gate it on server access exactly like the portfolio/bots
-    # routes do — otherwise any session could consult against a server it was
+    # routes do -- otherwise any session could run against a server it was
     # never granted (IDOR). Only enforce when a server is actually requested;
-    # serverless consults need no server scope.
+    # a serverless ask needs no server scope.
     if req.server_name:
         check_server_access(user.id, req.server_name)
 
-    # The chat is where the consult's notifications land — same ownership rule
-    # as the push target on /notify (SEC-198).
+    # The chat is where anything this run pushes would land -- same ownership
+    # rule as the push target on /notify (SEC-198).
     await _check_chat_access(user.id, req.chat_id)
 
     # Web callers always act as themselves; the ``user_id`` override is reserved
     # for trusted internal/MCP callers and must not let a session impersonate
     # another user's memory/skill scope.
-    answer = await run_consult(
+    answer = await run_ask(
         slug=slug,
         user_id=user.id,
         chat_id=req.chat_id,
@@ -2329,7 +2335,8 @@ async def delegate_agent(
 
     Returns immediately with a ``task_id``; the agent runs unattended (ACP
     auto-approve) until done, then notifies the user. The async sibling of
-    ``/consult``.
+    ``/ask``, and what an attended caller should prefer -- a caller that wants
+    the answer itself asks for ``on_complete="resume"``.
 
     ``timeout_s`` is the whole run's wall-clock budget: the default 900s, or
     whatever the caller asked for within the bounds above (ARCH-310) -- an ask
@@ -2358,7 +2365,7 @@ async def delegate_agent(
         )
     timeout_s = max(req.timeout_s, MIN_DELEGATE_TIMEOUT_S)
 
-    # Same server-scope gate as consult: a delegate binds the agent's MCP toolset
+    # Server-scope gate: a delegate binds the agent's MCP toolset
     # to ``server_name``'s live credentials, so refuse a server the caller can't access.
     if req.server_name:
         check_server_access(user.id, req.server_name)
@@ -2383,9 +2390,9 @@ async def delegate_agent(
         )
         on_complete = "notify"
 
-    # Web callers always act as themselves (mirror consult): honoring
-    # ``req.user_id`` here would let any authenticated session run a delegation
-    # under another user's memory scope and server grants.
+    # Web callers always act as themselves: honoring ``req.user_id`` here would
+    # let any authenticated session run a delegation under another user's memory
+    # scope and server grants.
     dt = await start_delegation(
         agent_slug=slug,
         user_id=user.id,
@@ -2423,7 +2430,7 @@ async def notify_user(req: NotifyRequest, user: WebUser = Depends(get_current_us
     # (SEC-198).
     await _check_chat_access(user.id, req.chat_id)
 
-    # The caller is the JWT, never ``req.user_id``: mirror consult/delegate so an
+    # The caller is the JWT, never ``req.user_id``: mirror delegate so an
     # authenticated session cannot write into another user's transcript.
     conversation_id = await _conversation_for_session(req.session_key)
     recorded = False
@@ -2965,7 +2972,7 @@ async def _start(agent, strategy, req: StartStrategyRequest, user_id: int) -> di
     # ``TickEngine._resolve_server`` trades on ``config["server_name"]`` and the
     # request body is a free-form dict, so without this gate any authenticated
     # user could start a live loop on another user's stored credentials — the
-    # same check the config pin and consult/delegate already apply. A name the
+    # same check the config pin and delegate already apply. A name the
     # body asked for is held to it strictly; an inherited one (strategy default,
     # or the "local" that AgentConfig fills in) only matters when it resolves to
     # a real server, since otherwise the engine falls through to the caller's
@@ -2991,7 +2998,7 @@ async def _start(agent, strategy, req: StartStrategyRequest, user_id: int) -> di
     elif not config_dict.get("trading_context") and strategy.default_trading_context:
         config_dict["trading_context"] = strategy.default_trading_context
 
-    # Web callers always act as themselves (mirror consult): honoring
+    # Web callers always act as themselves (mirror delegate): honoring
     # ``req.user_id`` would let any authenticated session start the engine
     # under another user's memory scope and accessible-servers fallback.
     new_engine = TickEngine(

@@ -19,12 +19,12 @@ cannot name. ``user_id=None`` means "every user" and is reachable only from an
 admin path or the boot reconciler.
 
 Since FEAT-058 a record is one of two *kinds*. A **delegation** is the shape
-described below, in full. A **consult** is the same ``status.json`` and nothing
-else: it streams its answer straight back to the caller, so there is no
-transcript and no event stream to persist, and its record carries a ``caller``
-(the agent that asked) where a delegation carries a tool count. A record written
-before that field existed has no ``kind``, and it was a delegation -- so the
-default here is a fact about the past, not a guess.
+described below, in full. A **consult** -- what ``delegate(action="ask")`` writes
+-- is the same ``status.json`` and nothing else: it returns its answer straight to
+the caller, so there is no transcript and no event stream to persist, and its
+record carries a ``caller`` (the agent that asked) where a delegation carries a
+tool count. A record written before that field existed has no ``kind``, and it was
+a delegation -- so the default here is a fact about the past, not a guess.
 
 Four shapes of record exist on disk, and all four are readable here:
 
@@ -264,9 +264,9 @@ _CONTENT_KEYS = frozenset({"state", "task", "result", "error", "tool_count"})
 def _needs_markdown(data: dict[str, Any]) -> bool:
     """Whether this status file is missing content only the transcript has.
 
-    A consult never has one -- it streams its answer straight back to the caller
-    and writes a ledger entry, not a tape (FEAT-058) -- so it is answered by
-    kind rather than by the field set it deliberately does not carry.
+    A consult never has one -- it returns its answer straight to the caller and
+    writes a ledger entry, not a tape (FEAT-058) -- so it is answered by kind
+    rather than by the field set it deliberately does not carry.
     """
     if data.get("kind") == KIND_CONSULT:
         return False

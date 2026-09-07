@@ -23,7 +23,7 @@ import { CHAT_SLUG, api, type AgentDetail, type StrategyDetail } from "@/lib/api
  * Which server this Agent's tools trade on, wherever it runs.
  *
  * A pin beats the chat's ambient selection everywhere the Agent is used —
- * chatted, consulted or looped — so it is the Agent's decision, and this is the
+ * chatted with, delegated to or looped — so it is the Agent's decision, and this is the
  * surface that owns it. Before this it could only be changed by hand-editing
  * AGENT.md front matter, which is why a locked chat chip links here.
  */

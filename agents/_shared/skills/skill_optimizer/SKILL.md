@@ -18,7 +18,7 @@ source: chat
 Runs a background optimization loop for any skill:
 1. Reads the current skill
 2. Generates realistic test scenarios
-3. Evaluates each scenario against the skill (via consult)
+3. Evaluates each scenario against the skill, in the worker's own reasoning
 4. Synthesizes targeted improvements
 5. Edits the skill in-place
 6. Repeats up to `max_optimizations` rounds, then stops
@@ -40,13 +40,14 @@ If missing, tell the user and stop.
 - `requirements` — what the skill must reliably do (success criteria, in plain language)
 - `max_optimizations` — rounds (default: 3)
 - `scenarios_per_round` — test cases per round (default: 3)
-- `agent` — which agent evaluates scenarios (default: "condor")
+- `agent` — whose seat runs the loop, and therefore who evaluates the scenarios
+  (default: "condor")
 
 **Step 3 — Build and start the delegation:**
 ```
 delegate(
   action="start",
-  agent="condor",
+  agent="{agent}",
   on_complete="notify",
   timeout_sec=1800,
   task=<see template below, with all params interpolated>
@@ -81,26 +82,36 @@ Stop early if a round produces no changes.
    manage_skill(action="read", name="{skill_name}")
    Save the body as `current_body`.
 
-2. GENERATE test scenarios:
-   consult(
-     agent="{agent}",
-     task="You are a skill tester. Read this skill and generate {scenarios_per_round} concrete, realistic test scenarios. Each scenario is a specific user request that an agent would need to handle using this skill. Number them. Be adversarial — include edge cases and ambiguous inputs.\n\nRequirements: {requirements}\n\nSkill:\n{current_body}"
-   )
-   Parse the numbered scenarios from the response.
+   Steps 2-4 are YOUR OWN reasoning, not tool calls. You are the evaluating agent —
+   you are running in a background session of "{agent}", with its identity, memory and
+   playbooks — so there is nobody to ask: `delegate(action="ask", agent="{agent}")`
+   is your own slug and is refused as a self-ask. Do each step in your own head and
+   write the result down before moving on, so a later step has something concrete to
+   work from. (If a scenario genuinely needs ANOTHER domain's judgement, that is a
+   real peer — `delegate(action="ask", agent="<other-slug>", task="...")` blocks and
+   returns its answer.)
 
-3. EVALUATE each scenario (run sequentially, one consult per scenario):
-   For each scenario N:
-   consult(
-     agent="{agent}",
-     task="You are evaluating a skill. Imagine a user just said this to you: '{scenario}'. Follow the skill's guidance as closely as possible to handle it. Then report:\n(a) What steps the skill directed you to take\n(b) What worked well\n(c) What was incomplete, ambiguous, or forced you to improvise OUTSIDE the skill\n(d) Specific gaps or missing steps\n\nSkill:\n{current_body}"
-   )
-   Collect all evaluation reports.
+2. GENERATE test scenarios:
+   Acting as a skill tester, read the skill and write {scenarios_per_round} concrete,
+   realistic test scenarios. Each scenario is a specific user request an agent would
+   need to handle using this skill. Number them. Be adversarial — include edge cases
+   and ambiguous inputs. Hold them against: Requirements: {requirements}
+
+3. EVALUATE each scenario, one at a time, in order:
+   For each scenario N, imagine a user just said it to you. Follow the skill's guidance
+   as closely as you can to handle it. Then write down:
+   (a) What steps the skill directed you to take
+   (b) What worked well
+   (c) What was incomplete, ambiguous, or forced you to improvise OUTSIDE the skill
+   (d) Specific gaps or missing steps
+   Keep every evaluation report; the next step reads all of them together.
 
 4. SYNTHESIZE improvement:
-   consult(
-     agent="condor",
-     task="You are a skill editor. Given these evaluation reports, identify recurring gaps and improve the skill body. Rules: make surgical edits only — add missing steps, clarify ambiguous ones, remove what caused failures. Do NOT bloat the skill. Do NOT change the description, when_to_use, or name fields — only the body. Return the COMPLETE improved body (full markdown, ready to write).\n\nRequirements: {requirements}\n\nEvaluation reports:\n{all_evals}\n\nCurrent skill body:\n{current_body}"
-   )
+   Acting as a skill editor over the evaluation reports, identify recurring gaps and
+   improve the skill body. Rules: make surgical edits only — add missing steps, clarify
+   ambiguous ones, remove what caused failures. Do NOT bloat the skill. Do NOT change
+   the description, when_to_use, or name fields — only the body. Produce the COMPLETE
+   improved body (full markdown, ready to write).
 
 5. APPLY the update (only if body meaningfully changed):
    If the improved body differs from current_body:
@@ -138,9 +149,9 @@ send_notification(
 - **Read the skill at the start of every round** — not once before the loop; previous rounds change it
 - **Never change `description`, `when_to_use`, or `name`** — optimizer touches only `body`
 - **Never delete the skill** — only edit
-- **Skip failed consults** — log the failure in the notification but continue the round
+- **Skip a scenario you cannot evaluate** — log it in the notification but continue the round
 - **Stop early on convergence** — a round with no edits means the skill is stable against this scenario set; stop rather than burning more credits
-- **Budget awareness** — 3 rounds × 3 scenarios × ~30s per consult ≈ 5 min; well inside the 30 min worker budget
+- **Budget awareness** — 3 rounds × 3 scenarios ≈ a few minutes of reasoning; well inside the 30 min worker budget
 - **One optimization at a time** — don't start a second loop on the same skill while one is running
 
 ---

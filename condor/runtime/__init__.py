@@ -2,7 +2,7 @@
 
 ``condor/runtime/`` owns things whose lifetime is the process: chat sessions
 today, and later loops, state and confirmations. ``condor/agents/`` owns the
-*domain* model (Agent, strategies, journal, consult/delegate). Keeping the two
+*domain* model (Agent, strategies, journal, delegate). Keeping the two
 apart is deliberate — merging them is what produces an unmaintainable runtime
 god-module.
 

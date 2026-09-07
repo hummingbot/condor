@@ -345,8 +345,8 @@ export function AgentKnowledge({
       id: "activity",
       label: "Activity",
       // Everything this agent actually did — the tasks handed to it in the
-      // background and the consults it answered — this run's and every earlier
-      // one, read back from disk (FEAT-058).
+      // background, this run's and every earlier one, read back from disk
+      // (FEAT-058).
       icon: <History className="h-3.5 w-3.5" />,
     },
   ];

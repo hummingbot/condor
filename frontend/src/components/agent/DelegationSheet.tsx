@@ -14,7 +14,7 @@ import { api, type Delegation, type DelegationSummary } from "@/lib/api";
 /** A consult has no transcript to fetch, and the sheet says why rather than
  *  showing an empty one — the record is a ledger entry, not a tape (FEAT-058). */
 const NO_TRANSCRIPT =
-  "A consult streams its answer straight back to the caller; only background tasks record a transcript.";
+  "A consult returns its answer straight to the caller; only background tasks record a transcript.";
 
 /**
  * One delegation, opened: the ask, then its transcript or its result.

@@ -98,7 +98,7 @@ def test_chat_instructions_are_the_coordinator_text(registry, monkeypatch, slug)
     text = _instructions(monkeypatch, slug)
     assert text.startswith("Condor exposes reusable **skills**")
     assert "You are NOT Condor" not in text
-    assert "[AGENTS — consult for domain work]" in text
+    assert "[AGENTS — delegate domain work to one of these]" in text
 
 
 def test_specialist_instructions_still_assert_their_own_identity(registry, monkeypatch):
@@ -141,7 +141,8 @@ def test_condor_is_a_real_record_in_the_agent_store(monkeypatch):
     assert agent.name == "Condor"
     assert agent.source == _REPO_ROOT / "agents" / CHAT_SLUG / "AGENT.md"
     assert agent.instructions, "AGENT.md body is the chat's system prompt"
-    # Not consulted by specialists: it is the coordinator, not a domain expert.
+    # Not a routing target for specialists: it is the coordinator, not a domain
+    # expert.
     assert agent.when_to_consult == ""
 
 

@@ -21,7 +21,6 @@ tools:
 - manage_strategies
 - control_agent
 - get_available_models
-- consult
 - delegate
 - send_notification
 - manage_memory

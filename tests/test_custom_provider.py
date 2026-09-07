@@ -171,7 +171,7 @@ def test_picker_sentinels_are_flagged_not_shape_inferred():
 
 def test_resolve_custom_endpoint():
     # Every surface that builds a model needs this, not just chat sessions —
-    # consult/delegate/engine previously had no way to reach a saved endpoint.
+    # delegate/engine previously had no way to reach a saved endpoint.
     user_data = {}
     save_custom_provider(user_data, "Venice", "https://x.example/v1", "sk-1")
     key = build_custom_agent_key("Venice", "claude-sonnet-4-6")
