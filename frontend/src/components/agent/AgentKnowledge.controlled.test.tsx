@@ -6,7 +6,7 @@
  * slots, so a second host that forgot to pass them would have shown an agent
  * with no strategies at all. The chat's agent panel is that second host, and
  * these cases pin what makes it possible — a controlled `tab` that a URL or a
- * pane can drive, a rail down the right edge of a 400px column, and seven
+ * pane can drive, a strip of section keys across the top, and seven
  * sections that
  * are the component's own rather than the page's.
  *
@@ -130,7 +130,7 @@ const tablist = () => container.querySelector('[role="tablist"]')!;
 const tabs = () =>
   [...tablist().querySelectorAll<HTMLButtonElement>('[role="tab"]')];
 const tabNamed = (label: string) => {
-  // The strip reads its label; the rail carries it in `title` instead.
+  // A key says its name, and carries the name with its count in `title`.
   const found = tabs().find(
     (t) => t.textContent?.trim().startsWith(label) || t.title.startsWith(label),
   );
@@ -163,7 +163,7 @@ afterEach(() => {
 });
 
 describe("the sections", () => {
-  it("are the component's own, in one order, and the rail names all seven", async () => {
+  it("are the component's own, in one order, and the strip names all seven", async () => {
     expect([...KNOWLEDGE_TABS]).toEqual([
       "brain",
       "skills",
@@ -176,7 +176,7 @@ describe("the sections", () => {
 
     await render({ slug: "orca" });
     expect(tabs()).toHaveLength(KNOWLEDGE_TABS.length);
-    // Seven keys and nothing else. The rail is the Being taxonomy, so an
+    // Seven keys and nothing else. The strip is the Being taxonomy, so an
     // eighth key that is not a section — a Now, a Deployed — is the drift
     // FEAT-118 took the pane back from (see its Alternative D).
     expect(tabs().map((t) => t.title.split(" (")[0])).toEqual([
@@ -234,16 +234,16 @@ describe("the open section", () => {
   });
 });
 
-describe("the rail layout", () => {
-  it("is a vertical column that still says the section's name", async () => {
+describe("the section strip", () => {
+  it("is a horizontal strip that still says the section's name", async () => {
     await render({ slug: "orca" });
 
-    expect(tablist().getAttribute("aria-orientation")).toBe("vertical");
-    // Eight labelled tabs wrap to three rows in a 400px pane, which is what
-    // the rail avoids — so the reader is not asked to learn seven glyphs. The
-    // name is set flat under the icon, never turned on its side: a rotated
-    // Latin word loses the shape it is recognised by, and costs the column
-    // twice the height a stacked one does.
+    // Across the top, not down the right edge: a column here stood beside the
+    // dock's own vertical rail in the same shape, and the reader had to tell
+    // "which surface am I on" from "which part of this agent am I reading" by
+    // position alone. Every key still says its name — an icon alone would ask
+    // the reader to learn seven glyphs to find "Tools".
+    expect(tablist().getAttribute("aria-orientation")).toBe("horizontal");
     for (const t of tabs()) {
       expect(t.querySelector("[class*=vertical-rl]")).toBeNull();
       expect(t.textContent).toContain(t.title.split(" (")[0]);

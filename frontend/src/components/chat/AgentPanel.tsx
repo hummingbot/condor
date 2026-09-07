@@ -20,11 +20,16 @@ import type {
  * having with it.
  *
  * Every section of {@link AgentKnowledge} — AGENT.md, playbooks, memories,
- * tools, strategies, routines and activity — reached through the rail down its
- * right edge, against the dock, so the sections are on the same side of the
- * window as everything else that opens something here. The same component the
- * agent's own page is built from, so anything editable there is editable here
- * (FEAT-081); reading what an agent knows no longer costs you the chat.
+ * tools, strategies, routines and activity — reached through the strip across
+ * the top of the panel, under this bar. It used to be a column down the right
+ * edge, which put it shoulder to shoulder with the dock's own vertical rail in
+ * the same icon-over-name shape: two stacks saying two different kinds of thing
+ * — which surface you are on, and which part of this agent you are reading —
+ * told apart only by which one was further right. Laid flat it reads as this
+ * panel's navigation, and the dock keeps the vertical form to itself. The same
+ * component the agent's own page is built from, so anything editable there is
+ * editable here (FEAT-081); reading what an agent knows no longer costs you
+ * the chat.
  *
  * The model and server pickers are in the bar at the top of this panel, one
  * line above the sections they apply to, rather than beside the button that
@@ -37,9 +42,8 @@ import type {
  * only outcome is losing the chat. Half rather than a report's two thirds for
  * the same reason — a report is read and the chat behind it merely stays alive,
  * while here both columns are being used in the same minute, and two thirds put
- * the transcript on its 360px floor. The rail folds to a strip as it does for a
- * report; the dock stays, and the door back out is the pressed Tune button in
- * the bar above.
+ * the transcript on its 360px floor. The dock stays, and the door back out is
+ * the pressed Tune button in the bar above.
  *
  * A routine row hands the pane to the routine library rather than growing a
  * second one, and a strategy row does the same with its workbench — the very

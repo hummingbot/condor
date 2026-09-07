@@ -358,24 +358,32 @@ export function AgentKnowledge({
     leaveEditor();
   };
 
-  // A column down the *right* edge, because eight tabs wrap to three rows in a
-  // 400px pane — and because in the chat this rail sits against the dock, where
-  // everything else you click to open something already is. Same tabs, same
-  // counts, same order, each still saying its name: an icon alone made the
-  // reader learn seven glyphs to find "Tools".
+  // A strip across the *top*, not a column down the right edge.
   //
-  // The names are set flat rather than turned on their side. Sideways text buys
-  // 30px of width and charges the reader for it — a Latin word is recognised by
-  // its shape, and rotating it makes you decode it letter by letter — and it
-  // charges the column too: `STRATEGIES` on its side is 60px of height per key,
-  // so the seven ran the full height of the pane. Upright at 10px they are
-  // ~36px each, and the whole rail is a third of the column.
+  // The column read as a second workspace rail. In the chat pane it stood right
+  // beside the dock's own vertical rail — AGENT, PORTFOLIO, EXECUTION — two
+  // stacks of icon-over-name a few pixels apart, in the same shape, saying two
+  // different kinds of thing: one switches *what surface you are looking at*,
+  // this one switches *which part of this agent you are reading*. Reading the
+  // panel meant telling two identical rails apart by position. Laid flat at the
+  // head of the panel it belongs to, it reads as this panel's own navigation —
+  // the same relationship a page's tabs have to the page — and the outer rail
+  // keeps the vertical form to itself.
+  //
+  // Names still ride beside their icons: an icon alone made the reader learn
+  // seven glyphs to find "Tools". They sit on one line with the icon rather
+  // than under it, because a strip pays for a second line in the body's height
+  // on every screen, where the column paid in width it had spare.
+  //
+  // The keys share the width evenly (`flex-1 basis-0`) and stop shrinking at
+  // the longest name, so the strip fills a wide page and scrolls sideways in a
+  // 400px pane rather than wrapping into two rows that shift the body down.
   const nav = (
     <div
       role="tablist"
-      aria-orientation="vertical"
+      aria-orientation="horizontal"
       aria-label="Sections"
-      className="flex w-20 shrink-0 flex-col items-center gap-1 overflow-y-auto border-l border-[var(--color-border)] px-1 py-2"
+      className="flex shrink-0 items-stretch gap-1 overflow-x-auto border-b border-[var(--color-border)] px-2 py-1.5"
     >
       {tabs.map((t) => {
         const name =
@@ -388,11 +396,9 @@ export function AgentKnowledge({
         return (
           /* Each section is its own key rather than a name in a list: a border,
            a ground of its own and real air between it and its neighbours. The
-           rail was seven words stacked with a hairline of space, which read as
-           one striped column and made the reader parse text to find the thing
-           they wanted to click. The selected one is filled, not underlined —
-           at this width a 2px mark on the outer edge was the only difference
-           between the section you are in and the six you are not. */
+           selected one is filled, not underlined — the fill is what carried the
+           selection in the column and it survives the turn unchanged, so the
+           section you are in is legible at a glance rather than by a hairline. */
           <button
             key={t.id}
             role="tab"
@@ -400,19 +406,19 @@ export function AgentKnowledge({
             aria-label={name}
             onClick={() => openTab(t.id)}
             title={name}
-            className={`flex w-full shrink-0 flex-col items-center gap-1 rounded-md border px-1 py-2 transition-colors ${
+            className={`flex min-w-fit flex-1 shrink-0 basis-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-md border px-2 py-1.5 transition-colors ${
               active
                 ? "border-[var(--color-primary)]/40 bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
                 : "border-[var(--color-border)] bg-[var(--color-surface)] text-[var(--color-text-muted)] hover:border-[var(--color-primary)]/40 hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
             }`}
           >
             {t.icon}
-            {/* The count rides beside the name on the same line: at 10px the
-              longest section still leaves room for it, and a second line would
-              cost every key height for the benefit of two of them. */}
+            {/* The count rides beside the name on the same line, as it did in
+              the column: a strip has the width for it and no second line to
+              spend. */}
             <span
               aria-hidden
-              className={`flex items-baseline gap-1 text-[10px] leading-none ${
+              className={`flex items-baseline gap-1 text-[11px] leading-none ${
                 active ? "font-semibold" : "font-medium"
               }`}
             >
@@ -608,19 +614,20 @@ export function AgentKnowledge({
     </>
   );
 
-  // The rail is beside its body and both scroll independently, so a long
-  // AGENT.md never scrolls the sections out of reach.
+  // The strip sits above its body and outside the scroller, so a long AGENT.md
+  // never scrolls the sections out of reach.
   //
   // There used to be a second arrangement — the bodies with no chrome at all,
   // for a host that drew its own navigation. The agent page was that host and
-  // its spine was that navigation, and both went with FEAT-119; the rail is the
-  // only way these sections are offered now, so it is not a prop any more.
+  // its spine was that navigation, and both went with FEAT-119; the strip is
+  // the only way these sections are offered now, so it is not a prop any more.
   //
-  // The banner spans the rail as well as the body, and sits outside the
-  // scroller: "there is a loop running" must not be a fact you scroll past.
-  // Only where a host can receive the click — a host that passes no
-  // `onOpenStrategy` has nowhere to open the workbench, and a strip that says
-  // something is running but cannot take you to it is worse than none.
+  // The loop banner stays above the strip, and sits outside the scroller:
+  // "there is a loop running" must not be a fact you scroll past, nor one the
+  // section you happen to be reading can push off the top. Only where a host
+  // can receive the click — a host that passes no `onOpenStrategy` has nowhere
+  // to open the workbench, and a banner that says something is running but
+  // cannot take you to it is worse than none.
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
       {onOpenStrategy && (
@@ -629,10 +636,8 @@ export function AgentKnowledge({
           onOpenStrategy={onOpenStrategy}
         />
       )}
-      <div className="flex min-h-0 flex-1 overflow-hidden">
-        <div className="min-w-0 flex-1 overflow-y-auto px-3 py-2">{body}</div>
-        {nav}
-      </div>
+      {nav}
+      <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2">{body}</div>
     </div>
   );
 }
