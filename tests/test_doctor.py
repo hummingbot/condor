@@ -94,6 +94,40 @@ def test_connection_hint_auth_failure_still_wins_when_tailscale_is_enabled(monke
     assert "username/password" in hint
 
 
+# ── "hummingbot-api" is local only when the install is actually here ────────
+#
+# The name is both the MagicDNS name of a co-located API with its own tailnet
+# node AND the host Condor writes for a REMOTE API over Tailscale (its own
+# installer default). Classifying it local either way sent remote installs the
+# advice "cd ../hummingbot-api && make deploy" — a directory that is not there,
+# for a stack that was never meant to be.
+
+
+def test_hummingbot_api_name_is_local_when_the_install_is_on_this_machine(monkeypatch):
+    monkeypatch.setattr(doctor, "_hb_api_is_here", lambda: True)
+    assert doctor._is_local_host("hummingbot-api") is True
+
+
+def test_hummingbot_api_name_is_remote_when_nothing_is_installed_here(monkeypatch):
+    monkeypatch.setattr(doctor, "_hb_api_is_here", lambda: False)
+    assert doctor._is_local_host("hummingbot-api") is False
+
+
+def test_loopback_names_are_local_regardless_of_any_install(monkeypatch):
+    monkeypatch.setattr(doctor, "_hb_api_is_here", lambda: False)
+    for host in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+        assert doctor._is_local_host(host) is True
+
+
+def test_hb_api_is_here_follows_the_sibling_checkout(tmp_path, monkeypatch):
+    api_dir = tmp_path / "hummingbot-api"
+    api_dir.mkdir()
+    monkeypatch.setattr(doctor, "_HB_API_DIR", api_dir)
+    assert doctor._hb_api_is_here() is False
+    (api_dir / "docker-compose.yml").write_text("services: {}\n")
+    assert doctor._hb_api_is_here() is True
+
+
 # ── Dashboard port: nothing listening is normal, not a warning ──────────────
 
 
@@ -353,13 +387,60 @@ def test_local_stack_diagnosis_is_ok_when_the_container_is_up(monkeypatch):
 
 
 def test_dashboard_port_names_the_holding_process(monkeypatch):
+    # LOCAL_MODE is pinned, not inherited: a public bind is a WARN in Telegram
+    # mode (which authenticates) and a FAIL in local mode (which does not), so
+    # leaving it to whatever .env happens to be on disk makes this test's
+    # result depend on the developer's working tree.
     monkeypatch.setattr(config_module, "USE_TAILSCALE", False)
+    monkeypatch.setattr(config_module, "LOCAL_MODE", False)
     monkeypatch.setattr(doctor, "_listening_binds", lambda port: ["0.0.0.0:8088"])
     monkeypatch.setattr(doctor, "_listening_process", lambda port: "python3, pid 5011")
 
     checks = doctor.check_dashboard_port()
     assert checks[0].state == doctor.WARN
     assert "python3, pid 5011" in checks[0].detail
+
+
+def test_public_bind_in_local_mode_is_a_failure(monkeypatch):
+    """Local mode has no login, so every interface is not a warning."""
+    monkeypatch.setattr(config_module, "USE_TAILSCALE", False)
+    monkeypatch.setattr(config_module, "LOCAL_MODE", True)
+    monkeypatch.setattr(doctor, "_listening_binds", lambda port: ["0.0.0.0:8088"])
+    monkeypatch.setattr(doctor, "_listening_process", lambda port: "")
+
+    checks = doctor.check_dashboard_port()
+
+    assert checks[0].state == doctor.FAIL
+    assert "no login" in checks[0].detail
+    # The remedy must not tell someone to enable Tailscale to fix a bind they
+    # chose explicitly.
+    assert "WEB_HOST" in checks[0].detail
+
+
+def test_loopback_under_tailscale_is_ok_in_local_mode_only(monkeypatch):
+    """Local mode's loopback is the intended end state; Telegram's is a fallback."""
+    monkeypatch.setattr(config_module, "USE_TAILSCALE", True)
+    monkeypatch.setattr(doctor, "_listening_binds", lambda port: ["127.0.0.1:8088"])
+    monkeypatch.setattr(doctor, "_listening_process", lambda port: "")
+
+    monkeypatch.setattr(config_module, "LOCAL_MODE", True)
+    assert doctor.check_dashboard_port()[0].state == doctor.OK
+
+    monkeypatch.setattr(config_module, "LOCAL_MODE", False)
+    assert doctor.check_dashboard_port()[0].state == doctor.WARN
+
+
+def test_tailnet_bind_under_tailscale_is_ok(monkeypatch):
+    """The goal state: on the tailnet, on no public interface."""
+    monkeypatch.setattr(config_module, "USE_TAILSCALE", True)
+    monkeypatch.setattr(config_module, "LOCAL_MODE", False)
+    monkeypatch.setattr(doctor, "_listening_binds", lambda port: ["100.101.1.5:8088"])
+    monkeypatch.setattr(doctor, "_listening_process", lambda port: "")
+
+    check = doctor.check_dashboard_port()[0]
+
+    assert check.state == doctor.OK
+    assert "100.101.1.5" in check.detail
 
 
 def test_listening_process_parses_the_ss_users_field(monkeypatch):

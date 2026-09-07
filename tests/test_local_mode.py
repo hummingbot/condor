@@ -145,6 +145,89 @@ def test_web_host_is_the_explicit_opt_out(mode):
     assert resolve_web_host(env) == "10.0.0.5"
 
 
+# ── Bind address under Tailscale ──
+#
+# Three deployments, three answers: loopback for local mode, every interface
+# for a Telegram-mode VPS that authenticates, and this node's tailnet address
+# when Tailscale is on -- reachable across the tailnet and on no public
+# interface. The dashboard used to bind loopback and rely on `tailscale
+# serve`, which needs the daemon socket and so refused unprivileged callers:
+# the proxy never came up and the dashboard was reachable from nowhere at all.
+
+
+def test_tailscale_binds_this_nodes_tailnet_address(monkeypatch):
+    """CONTROL (b) under Tailscale: on the tailnet, and nowhere else."""
+    import utils.tailscale as ts
+
+    monkeypatch.setattr(ts, "tailnet_ip", lambda timeout=5: "100.101.1.5")
+    env = {"CONDOR_MODE": "telegram", "USE_TAILSCALE": "true"}
+
+    host = resolve_web_host(env)
+
+    assert host == "100.101.1.5"
+    assert not ipaddress.ip_address(host).is_loopback
+
+
+def test_local_mode_keeps_loopback_even_with_tailscale(monkeypatch):
+    """CONTROL (b). A tailnet is a smaller audience, not an authenticated one.
+
+    Local mode has no login at all, so it must not go onto the tailnet just
+    because a tailnet is available — "everyone on the tailnet" is still more
+    than "nobody". The mode check therefore runs *before* the Tailscale one.
+    """
+    import utils.tailscale as ts
+
+    monkeypatch.setattr(ts, "tailnet_ip", lambda timeout=5: "100.101.1.5")
+
+    host = resolve_web_host({"CONDOR_MODE": "local", "USE_TAILSCALE": "true"})
+
+    assert ipaddress.ip_address(host).is_loopback
+    assert host == "127.0.0.1"
+
+
+def test_tailscale_fails_closed_when_the_address_is_unknown(monkeypatch):
+    """CONTROL (b). Unresolvable must narrow to loopback, never widen to 0.0.0.0.
+
+    The daemon may not be up yet, or the node may not be registered. Falling
+    back to a public bind would invert the guarantee the setting exists for.
+    """
+    import utils.tailscale as ts
+
+    monkeypatch.setattr(ts, "tailnet_ip", lambda timeout=5: None)
+
+    host = resolve_web_host({"CONDOR_MODE": "telegram", "USE_TAILSCALE": "true"})
+
+    assert ipaddress.ip_address(host).is_loopback
+
+
+def test_web_host_still_overrides_tailscale(monkeypatch):
+    """The documented opt-out outranks the tailnet address too."""
+    import utils.tailscale as ts
+
+    monkeypatch.setattr(ts, "tailnet_ip", lambda timeout=5: "100.101.1.5")
+    env = {"CONDOR_MODE": "telegram", "USE_TAILSCALE": "true", "WEB_HOST": "0.0.0.0"}
+
+    assert resolve_web_host(env) == "0.0.0.0"
+
+
+@pytest.mark.parametrize(
+    "addr,expected",
+    [
+        ("100.64.0.1", True),  # first address in the CGNAT range
+        ("100.127.255.9", True),  # last
+        ("100.128.0.1", False),  # just outside
+        ("100.63.255.1", False),  # just below
+        ("10.0.0.1", False),
+        ("127.0.0.1", False),
+    ],
+)
+def test_is_tailnet_ip_matches_the_cgnat_range(addr, expected):
+    """Tailscale allocates from 100.64.0.0/10 -- the doctor keys off this."""
+    from utils.tailscale import is_tailnet_ip
+
+    assert is_tailnet_ip(addr) is expected
+
+
 def test_uvicorn_binds_the_resolved_host(monkeypatch):
     """CONTROL (b) is wired, not just computed: uvicorn gets WEB_HOST."""
     import main
