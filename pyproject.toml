@@ -13,6 +13,12 @@ dependencies = [
     "kaleido",
     "plotly",
     "pandas",
+    # Technical analysis. Pinned to the same floor Hummingbot core and the
+    # hummingbot-api image use (setup.py / environment.yml: pandas-ta>=0.4.71b),
+    # so a routine's indicators match what a controller or a backtest computes.
+    # It pins numba==0.61.2, which caps numpy at <2.3 — that is also the numpy
+    # the API container runs (2.2.6), so the two environments stay aligned.
+    "pandas-ta>=0.4.71b",
     "geckoterminal-py",
     "mcp",
     "fastapi",
