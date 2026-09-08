@@ -61,7 +61,7 @@ from .market_data import (
 )
 
 # Portfolio formatters
-from .portfolio import format_portfolio_as_table
+from .portfolio import format_lp_positions_table, format_portfolio_as_table
 
 # Table builder for creating consistent tables
 from .table_builder import ColumnDef, TableBuilder, create_simple_table
@@ -105,6 +105,7 @@ __all__ = [
     "format_controller_state",
     # Portfolio formatters
     "format_portfolio_as_table",
+    "format_lp_positions_table",
     # Executor formatters
     "format_executor_types_table",
     "format_executors_table",
