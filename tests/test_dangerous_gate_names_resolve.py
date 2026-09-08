@@ -26,20 +26,25 @@ from handlers.agents._shared import (
     DANGEROUS_TOOLS,
     is_dangerous_tool_call,
 )
+from mcp_servers.condor import server as condor_mcp_server
 from mcp_servers.hummingbot_api import server as mcp_server
 
-# Gate names that belong to a different MCP server than hummingbot_api.
-# ``control_agent`` is on the condor orchestration server, and gets its own
-# resolution test below rather than this file's Literal-reading one — its
-# actions are a dict in the tool module, not an annotation.
-_FOREIGN_TOOLS = {"place_order", "control_agent"}
+# Gate names that no MCP server registers as a tool of its own.
+# ``place_order`` is gated by name without a tool behind it.
+_FOREIGN_TOOLS = {"place_order"}
 
 
 def _registered_tools() -> dict:
-    """Every function the hummingbot_api MCP server registers as a tool."""
+    """Every function either MCP server registers as a tool.
+
+    Both are read because the gate spans them: ``control_agent`` lives on the
+    condor orchestration server and the rest on hummingbot_api. The two share
+    no tool name, so one flat mapping resolves every gated name.
+    """
     return {
         name: obj.fn if hasattr(obj, "fn") else obj
-        for name, obj in vars(mcp_server).items()
+        for server in (mcp_server, condor_mcp_server)
+        for name, obj in vars(server).items()
         if callable(obj) and not name.startswith("_")
     }
 
@@ -302,20 +307,13 @@ def test_gateway_config_fails_closed_on_an_unreadable_resource():
 def _control_actions() -> set[str]:
     """Every action string ``control_agent`` actually accepts.
 
-    Its actions are not a ``Literal`` on the signature — the tool takes a bare
-    ``str`` and resolves it through ``_resolve_action``, which accepts both the
-    short spelling (``start``) and the legacy internal one (``start_agent``).
-    Both reach the same lifecycle call, so the gate has to know both.
+    Read off the signature like every other gated tool (ARCH-568). The
+    ``Literal`` carries both the short spelling (``start``) and the legacy
+    internal one (``start_agent``), because ``_resolve_action`` still answers
+    to both and they reach the same lifecycle call — so the gate has to know
+    both, and the schema has to advertise both.
     """
-    from mcp_servers.condor.tools import trading_agent
-
-    accepted = set(trading_agent._CONTROL_ACTIONS)
-    accepted.update(
-        action
-        for action, (owner, _call) in trading_agent._ACTION_OWNER.items()
-        if owner == "control_agent"
-    )
-    return accepted
+    return _action_literals("control_agent")
 
 
 def test_control_agent_is_registered_by_the_condor_server():

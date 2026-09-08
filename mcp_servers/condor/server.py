@@ -5,7 +5,7 @@ All business logic lives in mcp_servers.condor.tools.*
 """
 
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, Literal
 
 from mcp.server.fastmcp import FastMCP
 
@@ -355,11 +355,11 @@ mcp = FastMCP("condor", instructions=_build_instructions())
 @handle_errors("delegate task")
 @telemetry_taps.tracked("delegate")
 async def delegate(
-    action: str,
+    action: Literal["start", "ask", "list", "get", "stop"],
     agent: str = "",
     task: str = "",
     task_id: str = "",
-    on_complete: str = "notify",
+    on_complete: Literal["notify", "resume"] = "notify",
     timeout_sec: int = 0,
     context: str = "",
 ) -> dict:
@@ -410,7 +410,7 @@ async def delegate(
     of itself; the recursion stops at depth one.
 
     Args:
-        action: start | ask | list | get | stop.
+        action: What to do with the agent or the delegation.
         agent: Agent slug to reach (for start/ask). For "start" your own slug is
             allowed and means "a background session of me"; for "ask" it is
             refused, because asking yourself is a round trip through your own
@@ -453,13 +453,13 @@ async def delegate(
 @telemetry_taps.tracked("send_notification")
 async def send_notification(
     text: str,
-    parse_mode: str = "Markdown",
+    parse_mode: Literal["Markdown", "HTML"] = "Markdown",
 ) -> dict:
     """Send a Telegram message to the user.
 
     Args:
         text: Message text to send.
-        parse_mode: Telegram parse mode ("Markdown" or "HTML"). Default: "Markdown".
+        parse_mode: Telegram parse mode. Default: "Markdown".
 
     Returns:
         {"sent": true} on success, {"error": "..."} on failure.
@@ -470,7 +470,20 @@ async def send_notification(
 @handle_errors("manage routines")
 @telemetry_taps.tracked("manage_routines")
 async def manage_routines(
-    action: str,
+    action: Literal[
+        "list",
+        "describe",
+        "run",
+        "run_async",
+        "get_instance",
+        "start",
+        "stop",
+        "list_instances",
+        "create_routine",
+        "read_routine",
+        "edit_routine",
+        "delete_routine",
+    ],
     name: str | None = None,
     config: dict | None = None,
     agent: str | None = None,
@@ -543,7 +556,7 @@ async def manage_routines(
 @telemetry_taps.tracked("run_code")
 async def run_code(
     code: str | None = None,
-    action: str = "run",
+    action: Literal["run", "history", "get"] = "run",
     label: str = "",
     timeout: int | None = None,
     run_id: str | None = None,
@@ -591,7 +604,7 @@ async def run_code(
       (requires run_id)
 
     Args:
-        action: run | history | get.
+        action: What to do — execute a snippet or read past ones.
         code: The Python snippet to execute (for "run").
         label: Short purpose of the run ("returns of SOL 1h"), shown in history
             and used as the report source name.
@@ -612,7 +625,7 @@ async def run_code(
 @handle_errors("manage servers")
 @telemetry_taps.tracked("manage_servers")
 async def manage_servers(
-    action: str,
+    action: Literal["list", "status"],
     name: str | None = None,
 ) -> dict:
     """Manage Hummingbot API servers — and answer where you are pointed, as whom.
@@ -625,7 +638,7 @@ async def manage_servers(
     - "status": Check if a server is online (optional name, defaults to active server)
 
     Args:
-        action: The action to perform (list, status)
+        action: The action to perform.
         name: Server name (optional for status)
 
     Returns:
@@ -693,7 +706,21 @@ async def get_available_models(
 @handle_errors("manage agents")
 @telemetry_taps.tracked("manage_agents")
 async def manage_agents(
-    action: str,
+    action: Literal[
+        "list",
+        "create",
+        "get",
+        "update",
+        "delete",
+        "publish",
+        # Legacy funnel-era spellings this family still answers to.
+        "list_agent_definitions",
+        "create_agent",
+        "get_agent",
+        "update_agent",
+        "delete_agent",
+        "publish_agent",
+    ],
     agent_slug: str | None = None,
     name: str | None = None,
     description: str | None = None,
@@ -733,7 +760,7 @@ async def manage_agents(
       present the moment an install pulls.
 
     Args:
-        action: One of list, create, get, update, delete, publish.
+        action: What to do with the agent definition.
         agent_slug: The agent to act on (get/update/delete).
         name: Agent name (create/update).
         description: Agent description (create/update).
@@ -780,7 +807,19 @@ async def manage_agents(
 @handle_errors("manage strategies")
 @telemetry_taps.tracked("manage_strategies")
 async def manage_strategies(
-    action: str,
+    action: Literal[
+        "list",
+        "get",
+        "create",
+        "update",
+        "delete",
+        # Legacy funnel-era spellings this family still answers to.
+        "list_strategies",
+        "get_strategy",
+        "create_strategy",
+        "update_strategy",
+        "delete_strategy",
+    ],
     strategy_id: str | None = None,
     agent_slug: str | None = None,
     name: str | None = None,
@@ -807,7 +846,7 @@ async def manage_strategies(
     - "delete": Delete a strategy (requires strategy_id).
 
     Args:
-        action: One of list, get, create, update, delete.
+        action: What to do with the strategy.
         strategy_id: Strategy key "agent_slug.strategy_slug" (get/update/delete).
         agent_slug: The owning agent — required to create.
         name: Strategy name (create/update).
@@ -838,7 +877,23 @@ async def manage_strategies(
 @handle_errors("control agent")
 @telemetry_taps.tracked("control_agent")
 async def control_agent(
-    action: str,
+    action: Literal[
+        "list",
+        "start",
+        "stop",
+        "pause",
+        "resume",
+        "shutdown",
+        "get_state",
+        "set_state",
+        # Legacy funnel-era spellings this family still answers to.
+        "list_agents",
+        "start_agent",
+        "stop_agent",
+        "pause_agent",
+        "resume_agent",
+        "shutdown_agent",
+    ],
     agent_id: str | None = None,
     strategy_id: str | None = None,
     config: dict | None = None,
@@ -876,7 +931,7 @@ async def control_agent(
       agent_id, so an instance only ever sees its own.
 
     Args:
-        action: One of list, start, stop, shutdown, pause, resume, get_state, set_state.
+        action: The lifecycle action to take on the loop.
         agent_id: The running instance (everything except list and start).
         strategy_id: Strategy key "agent_slug.strategy_slug", or a bare agent slug
             (start only).
@@ -909,11 +964,11 @@ async def control_agent(
 @handle_errors("manage memory")
 @telemetry_taps.tracked("manage_memory")
 async def manage_memory(
-    action: str,
+    action: Literal["write", "read", "search", "list", "delete", "audit"],
     name: str | None = None,
     content: str | None = None,
     description: str | None = None,
-    type: str = "fact",
+    type: Literal["preference", "fact", "feedback", "reference"] = "fact",
     query: str | None = None,
     max_entries: int = 30,
 ) -> dict:
@@ -943,11 +998,11 @@ async def manage_memory(
     - "audit": Recent write/delete events (who changed what).
 
     Args:
-        action: write | read | search | list | delete | audit
+        action: What to do with the memory store.
         name: Short kebab/snake name for the memory (e.g. "report-in-usd").
         content: The full fact/body (required for write).
         description: One-line summary shown in the index (required for write).
-        type: preference | fact | feedback | reference (default "fact").
+        type: What kind of memory this is (default "fact").
         query: Search string (for search).
         max_entries: Cap for search/audit results (default 30).
 
@@ -962,7 +1017,16 @@ async def manage_memory(
 @handle_errors("manage skill")
 @telemetry_taps.tracked("manage_skill")
 async def manage_skill(
-    action: str,
+    action: Literal[
+        "list",
+        "read",
+        "search",
+        "create",
+        "edit",
+        "delete",
+        "read_file",
+        "write_file",
+    ],
     name: str | None = None,
     description: str | None = None,
     when_to_use: str | None = None,
@@ -1027,7 +1091,7 @@ async def manage_skill(
     - "delete": Remove a skill (requires name).
 
     Args:
-        action: read | read_file | write_file | search | list | create | edit | delete
+        action: What to do with the skills library.
         name: Short kebab/snake name (e.g. "grid-en-band-walk").
         description: One-line summary (create/edit).
         when_to_use: The trigger/condition for the playbook (create/edit).
