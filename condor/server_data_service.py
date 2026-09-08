@@ -22,7 +22,7 @@ from enum import Enum
 from functools import partial
 from typing import Any, Callable, Dict, FrozenSet, List, Optional, Tuple
 
-from condor.asyncutil import TaskSet
+from condor.asyncutil import SingleFlight, TaskSet
 
 logger = logging.getLogger(__name__)
 
@@ -309,8 +309,9 @@ class ServerDataService:
         self._rate_limiters: Dict[str, RateLimiter] = {}
         self._fetch_registry: Dict[ServerDataType, FetchSpec] = {}
         self._poll_task: Optional[asyncio.Task] = None
-        # In-flight fetches per key (single-flight coalescing)
-        self._inflight: Dict[CacheKey, asyncio.Task] = {}
+        # In-flight fetches per key (single-flight coalescing). Per-instance, so
+        # a second ServerDataService in a test never shares one.
+        self._inflight = SingleFlight()
         self._running = False
         self._last_cleanup = time.time()
         # Sync listeners (e.g. WebSocketManager broadcasts)
@@ -746,12 +747,7 @@ class ServerDataService:
         starting a duplicate backend request. The in-flight entry is cleared
         when the fetch settles, so a failure never poisons subsequent fetches.
         """
-        task = self._inflight.get(key)
-        if task is None:
-            task = asyncio.ensure_future(self._do_fetch_and_cache(key))
-            self._inflight[key] = task
-            task.add_done_callback(lambda _t, k=key: self._inflight.pop(k, None))
-        return await task
+        return await self._inflight.run(key, lambda: self._do_fetch_and_cache(key))
 
     async def _do_fetch_and_cache(self, key: CacheKey) -> Optional[Any]:
         """Fetch data and update cache. Returns the fetched value."""

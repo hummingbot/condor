@@ -28,6 +28,7 @@ from glom import glom
 
 import utils.config  # noqa: F401  (imported for its load_dotenv() side effect)
 from condor import orca_api
+from condor.asyncutil import SingleFlight
 
 logger = logging.getLogger(__name__)
 
@@ -697,27 +698,12 @@ _GECKO_BACKOFF = (0.4, 1.0)
 # air, so every one of them misses the cache and opens its own gecko request — the
 # fastest way there is to spend the minute's budget. This collapses concurrent
 # callers of the same key onto one upstream request.
-_gecko_inflight: Dict[Tuple, "asyncio.Task"] = {}
+_gecko_inflight = SingleFlight()
 
 
 async def _single_flight(key: Tuple, factory) -> Any:
-    """Run ``factory()`` once per key, sharing its result with every concurrent caller.
-
-    The work runs as a detached task and awaiters ``shield`` it, so the very thing
-    that causes the stampede — a viewer navigating away and cancelling their
-    request — cannot also cancel the fetch the remaining viewers are waiting on.
-    """
-    task = _gecko_inflight.get(key)
-    if task is None or task.done():
-        task = asyncio.ensure_future(factory())
-        _gecko_inflight[key] = task
-
-        def _clear(finished: "asyncio.Task", _key: Tuple = key) -> None:
-            if _gecko_inflight.get(_key) is finished:
-                _gecko_inflight.pop(_key, None)
-
-        task.add_done_callback(_clear)
-    return await asyncio.shield(task)
+    """Run ``factory()`` once per key, sharing its result with every concurrent caller."""
+    return await _gecko_inflight.run(key, factory)
 
 
 # ── Small TTL caches for token lookups ──

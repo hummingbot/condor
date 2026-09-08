@@ -41,6 +41,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
+from condor.asyncutil import SingleFlight
 from condor.fetchers._pagination import collect_pages
 from condor.fetchers.bot_performance import extract_snapshots
 from condor.fetchers.models import BotRunInfo, ControllerInfo
@@ -505,10 +506,8 @@ class RunHistory:
 
 
 # Single-flight, keyed like the store, so concurrent cold-cache readers of one
-# run share a walk instead of each paying for their own. Same idiom as
-# ``archived_run.py``: the fetch is a detached task and awaiters ``shield`` it,
-# so one reader navigating away cannot cancel the walk the others are waiting on.
-_inflight: dict[str, "asyncio.Task[RunHistory]"] = {}
+# run share a walk instead of each paying for their own.
+_inflight = SingleFlight()
 
 
 async def fetch_run_history(
@@ -543,28 +542,19 @@ async def fetch_run_history(
             cached=True,
         )
 
-    task = _inflight.get(key)
-    if task is None or task.done():
-        task = asyncio.ensure_future(
-            _build(
-                client,
-                server,
-                key=key,
-                bot_name=bot_name,
-                deployed_at=deployed_at,
-                stopped_at=stopped_at,
-                controller_ids=list(controller_ids),
-                db_path=db_path,
-            )
-        )
-        _inflight[key] = task
-
-        def _clear(finished: "asyncio.Task", _key: str = key) -> None:
-            if _inflight.get(_key) is finished:
-                _inflight.pop(_key, None)
-
-        task.add_done_callback(_clear)
-    return await asyncio.shield(task)
+    return await _inflight.run(
+        key,
+        lambda: _build(
+            client,
+            server,
+            key=key,
+            bot_name=bot_name,
+            deployed_at=deployed_at,
+            stopped_at=stopped_at,
+            controller_ids=list(controller_ids),
+            db_path=db_path,
+        ),
+    )
 
 
 async def _build(

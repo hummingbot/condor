@@ -24,6 +24,7 @@ from collections import Counter, OrderedDict
 from functools import partial
 from typing import Any, Iterable
 
+from condor.asyncutil import SingleFlight
 from condor.fetchers._pagination import collect_pages
 from condor.fetchers.executors import normalize_executor_side
 
@@ -190,7 +191,7 @@ def _aggregate_by_bot(snapshots: list[dict]) -> dict[str, dict]:
 # the agents route already tolerates above this call.
 _SNAPSHOT_TTL = 5.0
 _snapshot_cache: dict[str, tuple[float, dict[str, dict]]] = {}
-_snapshot_inflight: dict[str, tuple[Any, asyncio.Task]] = {}
+_snapshot_inflight = SingleFlight()
 
 
 def _server_key(client: Any) -> str:
@@ -237,17 +238,7 @@ async def fetch_all_bot_performance(client: Any) -> dict[str, dict]:
     if entry is not None and time.monotonic() - entry[0] <= _SNAPSHOT_TTL:
         return entry[1]
 
-    # Reuse an in-flight fetch only from the loop that created it: a task is
-    # bound to its loop and awaiting it from another one raises.
-    loop = asyncio.get_running_loop()
-    inflight = _snapshot_inflight.get(key)
-    task = inflight[1] if inflight is not None and inflight[0] is loop else None
-    if task is None:
-        task = asyncio.ensure_future(_fetch_and_aggregate(client))
-        _snapshot_inflight[key] = (loop, task)
-        task.add_done_callback(lambda _t, k=key: _snapshot_inflight.pop(k, None))
-
-    agg = await task
+    agg = await _snapshot_inflight.run(key, lambda: _fetch_and_aggregate(client))
     _snapshot_cache[key] = (time.monotonic(), agg)
     return agg
 
@@ -505,7 +496,7 @@ _HISTORY_CACHE_MAX = 256
 _history_cache: OrderedDict[
     tuple, tuple[float, list[tuple[float, float, float, float, float]]]
 ] = OrderedDict()
-_history_inflight: dict[tuple, tuple[Any, asyncio.Task]] = {}
+_history_inflight = SingleFlight()
 
 
 def clear_history_cache() -> None:
@@ -585,20 +576,13 @@ async def fetch_instance_history(
         _history_cache.move_to_end(key)
         return entry[1]
 
-    # Reuse an in-flight walk only from the loop that created it: a task is
-    # bound to its loop and awaiting it from another one raises.
-    loop = asyncio.get_running_loop()
-    inflight = _history_inflight.get(key)
-    task = inflight[1] if inflight is not None and inflight[0] is loop else None
-    if task is None:
-        task = asyncio.ensure_future(
-            _walk_instance_history(client, instance_name, interval, limit, max_rows)
-        )
-        _history_inflight[key] = (loop, task)
-        task.add_done_callback(lambda _t, k=key: _history_inflight.pop(k, None))
-
     try:
-        rows = await task
+        rows = await _history_inflight.run(
+            key,
+            lambda: _walk_instance_history(
+                client, instance_name, interval, limit, max_rows
+            ),
+        )
     except Exception as e:
         logger.debug("fetch_instance_history(%s) failed: %s", instance_name, e)
         return []

@@ -29,6 +29,7 @@ import os
 from collections import OrderedDict
 from typing import Any
 
+from condor.asyncutil import SingleFlight
 from condor.fetchers.executors import normalize_executor_side
 from condor.fetchers.models import (
     ArchivedBotPerformance,
@@ -59,11 +60,8 @@ _PERFORMANCE_CACHE_MAX = 32
 _performance_cache: OrderedDict[tuple[str, str], ArchivedBotPerformance] = OrderedDict()
 
 # In-flight fetches keyed like the cache, so concurrent cold-cache requests for
-# the same archived bot share one backend walk (same idiom as
-# condor.pool_data._single_flight).
-_performance_inflight: dict[tuple[str, str], "asyncio.Task[ArchivedBotPerformance]"] = (
-    {}
-)
+# the same archived bot share one backend walk.
+_performance_inflight = SingleFlight()
 
 # Attempts per page of the archived trade walk. A run with tens of thousands of
 # trades needs dozens of round trips, and one transient failure must not decide
@@ -236,17 +234,9 @@ async def fetch_archived_run(
     if cached is not None:
         return cached
 
-    task = _performance_inflight.get(cache_key)
-    if task is None or task.done():
-        task = asyncio.ensure_future(_fetch_performance(client, name, db_path))
-        _performance_inflight[cache_key] = task
-
-        def _clear(finished: "asyncio.Task", _key: tuple[str, str] = cache_key) -> None:
-            if _performance_inflight.get(_key) is finished:
-                _performance_inflight.pop(_key, None)
-
-        task.add_done_callback(_clear)
-    return await asyncio.shield(task)
+    return await _performance_inflight.run(
+        cache_key, lambda: _fetch_performance(client, name, db_path)
+    )
 
 
 async def _fetch_performance(
