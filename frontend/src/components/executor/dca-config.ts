@@ -13,6 +13,7 @@ import {
   barrierPct,
   barrierPrice,
 } from "./barriers";
+import { loadPersistedDefaults, savePersistedDefaults } from "./persisted-defaults";
 import { getThemeColors } from "@/lib/theme-colors";
 import { DCA_DEFAULTS_KEY } from "@/lib/sessionState";
 
@@ -73,32 +74,18 @@ const PERSISTED_FIELDS: (keyof DCAState)[] = [
 ];
 
 export function loadSavedDefaults(): DCAState {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return DCA_DEFAULTS;
-    const saved = JSON.parse(raw);
-    // `prices` is not persisted, so the shallow copy would hand back the
-    // constant's own array — and the resize below would push/pop DCA_DEFAULTS
-    // itself, leaving every later load with more prices than amounts.
-    const merged = { ...DCA_DEFAULTS, prices: [...DCA_DEFAULTS.prices] };
-    for (const key of PERSISTED_FIELDS) {
-      if (key in saved && saved[key] !== undefined) {
-        (merged as Record<string, unknown>)[key] = saved[key];
-      }
-    }
-    // Ensure prices array matches amounts length
-    while (merged.prices.length < merged.amounts_quote.length) merged.prices.push(0);
-    while (merged.prices.length > merged.amounts_quote.length) merged.prices.pop();
-    return merged;
-  } catch {
-    return DCA_DEFAULTS;
-  }
+  const merged = loadPersistedDefaults(STORAGE_KEY, DCA_DEFAULTS, PERSISTED_FIELDS);
+  // `prices` is not persisted — it is per-trade — so it arrives at the default
+  // length while `amounts_quote` may not have. The two are read pairwise by
+  // index, so reconcile them here; the loader's copy is structured, so this
+  // resizes the loaded object's own array and never DCA_DEFAULTS' (CORR-308).
+  while (merged.prices.length < merged.amounts_quote.length) merged.prices.push(0);
+  while (merged.prices.length > merged.amounts_quote.length) merged.prices.pop();
+  return merged;
 }
 
 function saveDefaults(state: DCAState) {
-  const toSave: Record<string, unknown> = {};
-  for (const key of PERSISTED_FIELDS) toSave[key] = state[key];
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
+  savePersistedDefaults(STORAGE_KEY, state, PERSISTED_FIELDS);
 }
 
 /**

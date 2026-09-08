@@ -14,6 +14,7 @@ import {
   barrierPct,
   barrierPrice,
 } from "./barriers";
+import { loadPersistedDefaults, savePersistedDefaults } from "./persisted-defaults";
 import { getThemeColors } from "@/lib/theme-colors";
 import { POSITION_DEFAULTS_KEY } from "@/lib/sessionState";
 
@@ -83,26 +84,11 @@ const PERSISTED_FIELDS: (keyof PositionState)[] = [
 ];
 
 function loadSavedDefaults(): PositionState {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return POSITION_DEFAULTS;
-    const saved = JSON.parse(raw);
-    const merged = { ...POSITION_DEFAULTS };
-    for (const key of PERSISTED_FIELDS) {
-      if (key in saved && saved[key] !== undefined) {
-        (merged as Record<string, unknown>)[key] = saved[key];
-      }
-    }
-    return merged;
-  } catch {
-    return POSITION_DEFAULTS;
-  }
+  return loadPersistedDefaults(STORAGE_KEY, POSITION_DEFAULTS, PERSISTED_FIELDS);
 }
 
 function saveDefaults(state: PositionState) {
-  const toSave: Record<string, unknown> = {};
-  for (const key of PERSISTED_FIELDS) toSave[key] = state[key];
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
+  savePersistedDefaults(STORAGE_KEY, state, PERSISTED_FIELDS);
 }
 
 export function positionReducer(state: PositionState, action: PositionAction): PositionState {

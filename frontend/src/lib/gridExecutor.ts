@@ -1,6 +1,7 @@
 // ── Grid executor state machine (shared by CreateExecutor, GridConfigPanel and DexPool) ──
 
 import { roundToPricePrecision } from "@/lib/formatters";
+import { loadPersistedDefaults, savePersistedDefaults } from "@/components/executor/persisted-defaults";
 import { GRID_STORAGE_KEY, LAST_MARKET_KEY } from "@/lib/sessionState";
 
 export interface GridState {
@@ -91,31 +92,18 @@ export const GRID_PERSISTED_FIELDS: (keyof GridState)[] = [
  *   CreateExecutor page so the connector/pair persists across executor types.
  */
 export function loadGridDefaults(applyLastMarket = false): GridState {
-  try {
-    const raw = localStorage.getItem(GRID_STORAGE_KEY);
-    const merged = { ...GRID_DEFAULTS };
-    if (raw) {
-      const saved = JSON.parse(raw);
-      for (const key of GRID_PERSISTED_FIELDS) {
-        if (key in saved && saved[key] !== undefined) {
-          (merged as Record<string, unknown>)[key] = saved[key];
-        }
+  const merged = loadPersistedDefaults(GRID_STORAGE_KEY, GRID_DEFAULTS, GRID_PERSISTED_FIELDS);
+  if (applyLastMarket) {
+    try {
+      const market = localStorage.getItem(LAST_MARKET_KEY);
+      if (market) {
+        const { connector, pair } = JSON.parse(market);
+        if (connector) merged.connector = connector;
+        if (pair) merged.pair = pair;
       }
-    }
-    if (applyLastMarket) {
-      try {
-        const market = localStorage.getItem(LAST_MARKET_KEY);
-        if (market) {
-          const { connector, pair } = JSON.parse(market);
-          if (connector) merged.connector = connector;
-          if (pair) merged.pair = pair;
-        }
-      } catch { /* ok */ }
-    }
-    return merged;
-  } catch {
-    return GRID_DEFAULTS;
+    } catch { /* ok */ }
   }
+  return merged;
 }
 
 /**
@@ -139,11 +127,7 @@ export function hasRememberedMarket(): boolean {
 }
 
 export function saveGridDefaults(state: GridState) {
-  const toSave: Record<string, unknown> = {};
-  for (const key of GRID_PERSISTED_FIELDS) {
-    toSave[key] = state[key];
-  }
-  localStorage.setItem(GRID_STORAGE_KEY, JSON.stringify(toSave));
+  savePersistedDefaults(GRID_STORAGE_KEY, state, GRID_PERSISTED_FIELDS);
 }
 
 export function isSpotConnector(connector: string): boolean {
