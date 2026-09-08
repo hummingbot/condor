@@ -23,7 +23,7 @@ import { MarketBrowser, type MarketPick } from "@/components/market/MarketBrowse
 import { FavoritesStrip } from "@/components/market/FavoritesStrip";
 import { StarMarketButton } from "@/components/market/StarMarketButton";
 import { TradeChart } from "@/components/trade/TradeChart";
-import { GridConfigPanel, useGridValidation } from "@/components/grid/GridConfigPanel";
+import { GridConfigPanel } from "@/components/grid/GridConfigPanel";
 import {
   ErrorToast,
   ExecutorSuccessModal,
@@ -36,6 +36,7 @@ import { DCAConfigPanel } from "@/components/executor/DCAConfigPanel";
 import { useDCAConfig } from "@/components/executor/dca-config";
 import { LPConfigPanel } from "@/components/executor/LPConfigPanel";
 import { LP_SIDE_RANGE, useLpConfig } from "@/components/executor/lp-config";
+import { useGridConfig } from "@/components/executor/grid-config";
 import { HintBubble } from "@/components/ui/HintBubble";
 import { useOneTimeHint } from "@/hooks/useOneTimeHint";
 import { TradeBottomPane } from "@/components/trade/TradeBottomPane";
@@ -51,16 +52,10 @@ import { candleStore } from "@/lib/candle-store";
 import { connectorCapabilities, orderBookVenues } from "@/lib/connector-capabilities";
 import { executorsQuery } from "@/lib/queryClient";
 import { BROWSE_HINT_KEY } from "@/lib/sessionState";
-import { isChartLineSlot } from "@/components/executor/types";
 import type { ChartPriceMapping, ExecutorType, PickSlot } from "@/components/executor/types";
 import {
-  clampGridPrice,
-  gridLineLabels,
-  gridReducer,
   hasRememberedMarket,
   isSpotConnector,
-  loadGridDefaults,
-  saveGridDefaults,
   LAST_MARKET_KEY,
   INTERVALS,
   LOOKBACK_OPTIONS,
@@ -105,11 +100,13 @@ export function CreateExecutor() {
     setSearchParams({ type }, { replace: true });
   };
 
-  // ── Grid state (always initialized for hooks rules) ──
-  const [gridState, gridDispatch] = React.useReducer(gridReducer, undefined, () => loadGridDefaults(true));
-  const gridValidation = useGridValidation(gridState);
-
-  // ── Other executor configs ──
+  // ── Executor configs (all initialized for hooks rules) ──
+  //
+  // The grid's is destructured as well: its state carries the page's market
+  // (connector, pair, interval, lookback), which every tab reads and several
+  // effects dispatch into, so those two stay in scope under their own names.
+  const gridConfig = useGridConfig();
+  const { state: gridState, dispatch: gridDispatch } = gridConfig;
   const positionConfig = usePositionConfig();
   const orderConfig = useOrderConfig();
   const dcaConfig = useDCAConfig();
@@ -259,7 +256,10 @@ export function CreateExecutor() {
     if (!server) return;
     const newLookback = Math.ceil(Date.now() / 1000 - startTime) + 3600; // +1h padding
     gridDispatch({ type: "SET_FIELD", field: "lookbackSeconds", value: newLookback });
-  }, [server]);
+    // `gridDispatch` is the reducer's own dispatch, stable for the page's life;
+    // it is named because it now arrives through `gridConfig` rather than
+    // straight out of a `useReducer` the compiler can see.
+  }, [server, gridDispatch]);
 
   // Persist last-used connector/pair to localStorage. The executor selection is
   // not cleared here -- it expires on its own, see `selection` above.
@@ -376,7 +376,7 @@ export function CreateExecutor() {
       gridDispatch({ type: "SET_PAIR", value: market.pair });
       setBrowserOpen(false);
     },
-    [connector],
+    [connector, gridDispatch],
   );
 
   // A shortcut nobody can see. The chip used to carry a bare `<kbd>/</kbd>`,
@@ -414,13 +414,13 @@ export function CreateExecutor() {
   // ── Active config derived values ──
   const activeValidation = useMemo(() => {
     switch (executorType) {
-      case "grid": return gridValidation;
+      case "grid": return gridConfig.validation;
       case "position": return positionConfig.validation;
       case "order": return orderConfig.validation;
       case "dca": return dcaConfig.validation;
       case "lp": return lpConfig.validation;
     }
-  }, [executorType, gridValidation, positionConfig.validation, orderConfig.validation, dcaConfig.validation, lpConfig.validation]);
+  }, [executorType, gridConfig.validation, positionConfig.validation, orderConfig.validation, dcaConfig.validation, lpConfig.validation]);
 
   // What the form currently says, for the chat bubble (FEAT-060/FEAT-072).
   //
@@ -502,22 +502,13 @@ export function CreateExecutor() {
   // Chart props depend on active type
   const chartProps = useMemo((): ChartPriceMapping => {
     switch (executorType) {
-      case "grid":
-        return {
-          startPrice: gridState.start_price,
-          endPrice: gridState.end_price,
-          limitPrice: gridState.limit_price,
-          side: gridState.side,
-          minSpread: gridState.min_spread_between_orders,
-          activePickField: gridState.activePickField,
-          lineLabels: gridLineLabels(gridState.side),
-        };
+      case "grid": return gridConfig.chartProps;
       case "position": return positionConfig.chartProps;
       case "order": return orderConfig.chartProps;
       case "dca": return dcaConfig.chartProps;
       case "lp": return lpConfig.chartProps;
     }
-  }, [executorType, gridState, positionConfig.chartProps, orderConfig.chartProps, dcaConfig.chartProps, lpConfig.chartProps]);
+  }, [executorType, gridConfig.chartProps, positionConfig.chartProps, orderConfig.chartProps, dcaConfig.chartProps, lpConfig.chartProps]);
 
   // Chart price set handler.
   //
@@ -527,9 +518,9 @@ export function CreateExecutor() {
   // bought that stability with a stale closure -- the callback kept calling
   // whichever `handleChartPriceSet` existed when the type last changed, not the
   // current one. A latest-value ref gives the stability without the staleness.
-  const priceSetTargets = useRef({ positionConfig, orderConfig, dcaConfig, lpConfig, gridState, pricePrecision });
+  const priceSetTargets = useRef({ gridConfig, positionConfig, orderConfig, dcaConfig, lpConfig, pricePrecision });
   useEffect(() => {
-    priceSetTargets.current = { positionConfig, orderConfig, dcaConfig, lpConfig, gridState, pricePrecision };
+    priceSetTargets.current = { gridConfig, positionConfig, orderConfig, dcaConfig, lpConfig, pricePrecision };
   });
 
   const handlePriceSet = useCallback(
@@ -537,19 +528,10 @@ export function CreateExecutor() {
       const targets = priceSetTargets.current;
       switch (executorType) {
         case "grid":
-          // The grid owns exactly the chart's own three lines; any other slot
-          // belongs to a panel that draws its own and would name a grid field
-          // that does not exist.
-          if (!isChartLineSlot(field)) break;
-          // Bound the picked price against the two the user already set, so a
-          // click (and, later, a drag) cannot write a price the form will only
-          // reject afterwards. The chart stays ignorant of grid semantics.
-          gridDispatch({
-            type: "SET_FIELD",
-            field: `${field}_price`,
-            value: clampGridPrice(field, price, targets.gridState, targets.pricePrecision),
-          });
-          gridDispatch({ type: "SET_FIELD", field: "activePickField", value: null });
+          // The only arm that takes a third argument: the grid clamps the picked
+          // price onto the venue's tick grid, and the precision is read off
+          // trading rules queried for the market this very state holds.
+          targets.gridConfig.handleChartPriceSet(field, price, targets.pricePrecision);
           break;
         case "position":
           targets.positionConfig.handleChartPriceSet(field, price);
@@ -582,32 +564,7 @@ export function CreateExecutor() {
 
       switch (executorType) {
         case "grid":
-          payload = {
-            executor_type: "grid_executor",
-            config: {
-              connector_name: connector,
-              trading_pair: pair,
-              side: gridState.side,
-              start_price: gridState.start_price,
-              end_price: gridState.end_price,
-              limit_price: gridState.limit_price,
-              total_amount_quote: gridState.total_amount_quote,
-              min_order_amount_quote: gridState.min_order_amount_quote,
-              min_spread_between_orders: gridState.min_spread_between_orders,
-              max_open_orders: gridState.max_open_orders,
-              max_orders_per_batch: gridState.max_orders_per_batch,
-              order_frequency: gridState.order_frequency,
-              leverage: isSpot ? 1 : gridState.leverage,
-              activation_bounds: gridState.activation_bounds,
-              keep_position: gridState.keep_position,
-              coerce_tp_to_step: gridState.coerce_tp_to_step,
-              triple_barrier_config: {
-                take_profit: gridState.take_profit,
-                open_order_type: gridState.open_order_type,
-                take_profit_order_type: gridState.take_profit_order_type,
-              },
-            },
-          };
+          payload = gridConfig.buildPayload(connector, pair, isSpot);
           break;
         case "position":
           payload = positionConfig.buildPayload(connector, pair, isSpot);
@@ -629,7 +586,7 @@ export function CreateExecutor() {
     onSuccess: (data) => {
       // Save defaults for the active type
       switch (executorType) {
-        case "grid": saveGridDefaults(gridState); break;
+        case "grid": gridConfig.save(); break;
         case "position": positionConfig.save(); break;
         case "order": orderConfig.save(); break;
         case "dca": dcaConfig.save(); break;

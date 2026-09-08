@@ -462,10 +462,3 @@ export function GridConfigPanel({ state, dispatch, currentPrice, isSpot = false,
     </div>
   );
 }
-
-export function useGridValidation(state: GridState) {
-  return useMemo(() => {
-    const errors = gridConfigErrors(state);
-    return { valid: errors.length === 0, errors };
-  }, [state]);
-}
