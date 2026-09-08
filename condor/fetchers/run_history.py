@@ -43,13 +43,13 @@ from typing import Any, Iterable
 
 from condor.fetchers._pagination import collect_pages
 from condor.fetchers.bot_performance import extract_snapshots
+from condor.fetchers.models import BotRunInfo, ControllerInfo
 from condor.run_history_store import (
     RunHistoryEntry,
     get_run_history_store,
     is_settled,
     run_key,
 )
-from condor.web.models import BotRunInfo, ControllerInfo
 
 logger = logging.getLogger(__name__)
 

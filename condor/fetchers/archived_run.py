@@ -12,9 +12,11 @@ It lives here rather than in the route that used to own it because the routine
 is now one of its callers, and a routine published to ``agents/_shared/routines``
 must not reach into the web package to read an archive.
 
-The one thing this module borrows from ``condor.web`` is ``models`` — the
-pydantic wire shapes, which import nothing from condor and so introduce no cycle
-the package's no-web rule exists to prevent. It raises
+The shapes it returns live in :mod:`condor.fetchers.models` and are re-exported
+by ``condor.web.models``, so the direction stays one-way: this module borrows
+nothing from ``condor.web``. It used to import those shapes from there, which
+was a real cycle — ``condor.web.models`` calls into ``condor.fetchers.executors``
+— masked only by a function-local import on the other side. It raises
 :class:`ArchivedRunUnavailable` rather than ``HTTPException``; mapping that to a
 status code is the route's job.
 """
@@ -28,7 +30,11 @@ from collections import OrderedDict
 from typing import Any
 
 from condor.fetchers.executors import normalize_executor_side
-from condor.web.models import ArchivedBotPerformance, NormalizedExecutor, PnlPoint
+from condor.fetchers.models import (
+    ArchivedBotPerformance,
+    NormalizedExecutor,
+    PnlPoint,
+)
 
 logger = logging.getLogger(__name__)
 
