@@ -26,6 +26,7 @@ from .client import (
     PermissionCallback,
     PromptDone,
     TextChunk,
+    ThoughtChunk,
     ToolCallEvent,
     ToolCallUpdate,
 )
@@ -921,7 +922,12 @@ class PydanticAIClient:
 
             try:
                 from pydantic_ai.agent import CallToolsNode, ModelRequestNode
-                from pydantic_ai.messages import TextPart, ToolCallPart, ToolReturnPart
+                from pydantic_ai.messages import (
+                    TextPart,
+                    ThinkingPart,
+                    ToolCallPart,
+                    ToolReturnPart,
+                )
                 from pydantic_graph import End
 
                 self._permission_gate.reset()
@@ -984,6 +990,17 @@ class PydanticAIClient:
                             for part in node.model_response.parts:
                                 if isinstance(part, TextPart) and part.content:
                                     yield TextChunk(text=part.content)
+
+                                elif isinstance(part, ThinkingPart) and part.content:
+                                    # Reasoning models (deepseek-r1/qwq via ollama,
+                                    # gpt-oss via openrouter) return their thinking
+                                    # as a third part type. The ACP path already
+                                    # translates the same thing from
+                                    # ``agent_thought_chunk``; without this branch
+                                    # the thinking stream is silently dropped and
+                                    # the dashboard/Telegram thought panel stays
+                                    # empty for every pydantic-ai model (ARCH-333).
+                                    yield ThoughtChunk(text=part.content)
 
                                 elif isinstance(part, ToolCallPart):
                                     tool_id = part.tool_call_id or uuid.uuid4().hex[:12]
