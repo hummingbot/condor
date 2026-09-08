@@ -68,7 +68,7 @@ def _get_agent_routines_dir(target: str | None, shared: bool = False) -> Path | 
     *owning agent's* dir (the strategy half is discarded — there is no
     per-strategy routines dir). Without a ``target``, the current assistant's own
     dir — the general library (root ``routines/``) for the chat, or the launched
-    Agent's (``.condor/agents/<slug>/routines``, ``settings.agent_slug``).
+    Agent's (``.condor/agents/<slug>/routines``, ``settings.specialist_slug``).
 
     ``shared=True`` targets the published library every assistant reads
     (:func:`condor.memory.paths.shared_routines_root`), and is honored **only**
@@ -135,9 +135,10 @@ def _own_plus_shared(slug: str | None) -> dict:
 def _resolve_routine(name: str):
     """Look up a routine in the current assistant's scope.
 
-    A domain expert/trading agent (``settings.agent_slug`` set) resolves its own
-    routines plus the shared library, its own shadowing a shared name. The chat
-    ``condor`` resolves the general library (root ``routines/`` + shared).
+    A domain expert/trading agent (``settings.specialist_slug`` set) resolves
+    its own routines plus the shared library, its own shadowing a shared name.
+    The chat ``condor`` resolves the general library (root ``routines/`` +
+    shared).
     """
     return _own_plus_shared(settings.specialist_slug).get(name)
 
