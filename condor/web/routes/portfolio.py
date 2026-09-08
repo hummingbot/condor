@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from condor.fetchers.portfolio import (
     PORTFOLIO_HISTORY_RANGES,
     UNIFIED_ACCOUNT_NOTE,
+    balance_value,
     dedupe_unified_accounts,
 )
 from condor.web.auth import require_server_access
@@ -102,7 +103,7 @@ async def get_portfolio(
                             "available_units", item.get("available_balance", total_bal)
                         )
                     )
-                    usd_val = float(item.get("value", item.get("usd_value", 0)))
+                    usd_val = balance_value(item)
 
                     if not token:
                         continue
@@ -338,7 +339,7 @@ def _extract_token_values(data: object) -> dict[str, float]:
                     for item in inner:
                         if isinstance(item, dict):
                             token = item.get("token", item.get("asset", ""))
-                            usd = float(item.get("value", item.get("usd_value", 0)))
+                            usd = balance_value(item)
                             if token and usd > 0:
                                 tokens[token] = tokens.get(token, 0) + usd
     return tokens
@@ -357,7 +358,7 @@ def _extract_connector_totals(data: object) -> dict[str, float]:
                     s = 0.0
                     for item in inner:
                         if isinstance(item, dict):
-                            s += float(item.get("value", item.get("usd_value", 0)))
+                            s += balance_value(item)
                     totals[key] = s
                 elif isinstance(inner, (int, float)):
                     totals[key] = float(inner)
