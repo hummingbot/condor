@@ -16,7 +16,7 @@ import logging
 import os
 import time
 import uuid
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Iterator
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
@@ -922,12 +922,6 @@ class PydanticAIClient:
 
             try:
                 from pydantic_ai.agent import CallToolsNode, ModelRequestNode
-                from pydantic_ai.messages import (
-                    TextPart,
-                    ThinkingPart,
-                    ToolCallPart,
-                    ToolReturnPart,
-                )
                 from pydantic_graph import End
 
                 self._permission_gate.reset()
@@ -936,20 +930,9 @@ class PydanticAIClient:
                 # event the dashboard already received.
                 blocked_ids: set[str] = set()
 
-                user_prompt: Any = text
-                if images:
-                    from pydantic_ai.messages import BinaryContent
-
-                    user_prompt = [
-                        *(
-                            BinaryContent(data=image.data, media_type=image.mime)
-                            for image in images
-                        ),
-                        text,
-                    ]
-
                 async with self._agent.iter(
-                    user_prompt, message_history=self._message_history
+                    self._build_user_prompt(text, images),
+                    message_history=self._message_history,
                 ) as run:
                     async for node in run:
                         if self._abort_requested:
@@ -967,142 +950,12 @@ class PydanticAIClient:
                         if isinstance(node, ModelRequestNode):
                             elapsed = time.monotonic() - start_time
                             yield Heartbeat(elapsed_seconds=elapsed)
-                            # Extract tool return results from request parts
-                            if hasattr(node, "request") and node.request:
-                                for part in node.request.parts:
-                                    if isinstance(part, ToolReturnPart):
-                                        if (part.tool_call_id or "") in blocked_ids:
-                                            continue
-                                        content = part.content
-                                        output_str = (
-                                            content
-                                            if isinstance(content, str)
-                                            else str(content)
-                                        )
-                                        yield ToolCallUpdate(
-                                            tool_call_id=part.tool_call_id or "",
-                                            status="completed",
-                                            output=output_str,
-                                        )
+                            for event in self._tool_return_events(node, blocked_ids):
+                                yield event
 
                         elif isinstance(node, CallToolsNode):
-                            # Emit text and tool-call events from model response
-                            for part in node.model_response.parts:
-                                if isinstance(part, TextPart) and part.content:
-                                    yield TextChunk(text=part.content)
-
-                                elif isinstance(part, ThinkingPart) and part.content:
-                                    # Reasoning models (deepseek-r1/qwq via ollama,
-                                    # gpt-oss via openrouter) return their thinking
-                                    # as a third part type. The ACP path already
-                                    # translates the same thing from
-                                    # ``agent_thought_chunk``; without this branch
-                                    # the thinking stream is silently dropped and
-                                    # the dashboard/Telegram thought panel stays
-                                    # empty for every pydantic-ai model (ARCH-333).
-                                    yield ThoughtChunk(text=part.content)
-
-                                elif isinstance(part, ToolCallPart):
-                                    tool_id = part.tool_call_id or uuid.uuid4().hex[:12]
-                                    tool_name = part.tool_name
-
-                                    # Risk check via permission callback
-                                    if self.permission_callback:
-                                        # Unparseable args stay None rather than
-                                        # collapsing to {}: the gate reads that
-                                        # as "unknown" and fails closed, where
-                                        # an empty dict would have read as a
-                                        # harmless no-argument call (SEC-093).
-                                        tool_call_info = {
-                                            "tool": tool_name,
-                                            "title": tool_name,
-                                            "input": _tool_args_to_dict(part.args),
-                                        }
-                                        options = [
-                                            {"optionId": "allow", "kind": "allow_once"},
-                                            {"optionId": "deny", "kind": "deny"},
-                                        ]
-                                        # Don't hold the per-server slot while a
-                                        # human decides — release it for the wait
-                                        # so other sessions/ticks on this backend
-                                        # aren't blocked (PERF-029).
-                                        # Fail closed: only an explicit "selected"
-                                        # outcome allows the call. A check that
-                                        # raises or times out is a denial, never
-                                        # a pass (SEC-080).
-                                        reason = ""
-                                        try:
-                                            async with self._release_request_slot():
-                                                result = await self.permission_callback(
-                                                    tool_call_info, options
-                                                )
-                                            outcome = (
-                                                result.get("outcome", {})
-                                                if isinstance(result, dict)
-                                                else {}
-                                            )
-                                            approved = (
-                                                isinstance(outcome, dict)
-                                                and outcome.get("outcome") == "selected"
-                                            )
-                                            if not approved:
-                                                # The gate says why when it can
-                                                # (condor.agents.risk attaches a
-                                                # ``reason``); an agent told only
-                                                # "denied" reads its own refusal
-                                                # as a missing approval and waits
-                                                # for a human it may not have.
-                                                reason = (
-                                                    (
-                                                        result.get("reason")
-                                                        if isinstance(result, dict)
-                                                        else ""
-                                                    )
-                                                    or "denied by the risk/confirmation gate"
-                                                )
-                                        except Exception as exc:
-                                            log.exception(
-                                                "Permission check failed for %s — "
-                                                "blocking the call",
-                                                tool_name,
-                                            )
-                                            approved = False
-                                            reason = f"permission check failed ({exc})"
-
-                                        # Record before the node runs: the tool
-                                        # executes on the next graph step, where
-                                        # the gated toolset consumes this.
-                                        self._permission_gate.record(
-                                            part.tool_call_id,
-                                            tool_name,
-                                            approved,
-                                            reason,
-                                        )
-
-                                        if not approved:
-                                            if part.tool_call_id:
-                                                blocked_ids.add(part.tool_call_id)
-                                            yield ToolCallEvent(
-                                                tool_call_id=tool_id,
-                                                title=tool_name,
-                                                status="blocked",
-                                                kind="mcp",
-                                                input=_tool_args_to_dict(part.args),
-                                            )
-                                            continue
-
-                                    yield ToolCallEvent(
-                                        tool_call_id=tool_id,
-                                        title=tool_name,
-                                        status="in_progress",
-                                        kind="mcp",
-                                        input=_tool_args_to_dict(part.args),
-                                    )
-
-                                    yield ToolCallUpdate(
-                                        tool_call_id=tool_id,
-                                        status="completed",
-                                    )
+                            async for event in self._response_events(node, blocked_ids):
+                                yield event
 
                     # Accumulate messages so the next prompt_stream() call sees
                     # this turn's context via message_history. An aborted run
@@ -1122,6 +975,172 @@ class PydanticAIClient:
                 log.exception("PydanticAI prompt error: %s", e)
                 yield TextChunk(text=self._format_error(e))
                 yield PromptDone(stop_reason="error")
+
+    def _build_user_prompt(self, text: str, images: list | None) -> Any:
+        """Assemble the user turn: images first, then the text.
+
+        Plain text when there are no images, so the common path stays the shape
+        pydantic-ai documents.
+        """
+        if not images:
+            return text
+
+        from pydantic_ai.messages import BinaryContent
+
+        return [
+            *(
+                BinaryContent(data=image.data, media_type=image.mime)
+                for image in images
+            ),
+            text,
+        ]
+
+    def _tool_return_events(
+        self, node: Any, blocked_ids: set[str]
+    ) -> Iterator[ACPEvent]:
+        """Project a model request's tool results as ``completed`` updates.
+
+        A refused call still produces a (synthetic) refusal result on the next
+        request; projecting it would paint "completed" over the "blocked" event
+        the dashboard already has, so ``blocked_ids`` filters those out.
+        """
+        from pydantic_ai.messages import ToolReturnPart
+
+        request = getattr(node, "request", None)
+        if not request:
+            return
+
+        for part in request.parts:
+            if not isinstance(part, ToolReturnPart):
+                continue
+            if (part.tool_call_id or "") in blocked_ids:
+                continue
+            content = part.content
+            yield ToolCallUpdate(
+                tool_call_id=part.tool_call_id or "",
+                status="completed",
+                output=content if isinstance(content, str) else str(content),
+            )
+
+    async def _response_events(
+        self, node: Any, blocked_ids: set[str]
+    ) -> AsyncIterator[ACPEvent]:
+        """Project one model response into text, thought and tool-call events.
+
+        Tool calls are authorized here, one graph step before pydantic-graph
+        executes them; ``blocked_ids`` collects the refused ones so their
+        refusal result is not later reported as a completion.
+        """
+        from pydantic_ai.messages import TextPart, ThinkingPart, ToolCallPart
+
+        for part in node.model_response.parts:
+            if isinstance(part, TextPart) and part.content:
+                yield TextChunk(text=part.content)
+
+            elif isinstance(part, ThinkingPart) and part.content:
+                # Reasoning models (deepseek-r1/qwq via ollama, gpt-oss via
+                # openrouter) return their thinking as a third part type. The
+                # ACP path already translates the same thing from
+                # ``agent_thought_chunk``; without this branch the thinking
+                # stream is silently dropped and the dashboard/Telegram thought
+                # panel stays empty for every pydantic-ai model (ARCH-333).
+                yield ThoughtChunk(text=part.content)
+
+            elif isinstance(part, ToolCallPart):
+                approved = True
+                if self.permission_callback:
+                    approved, _reason = await self._authorize(part)
+                    if not approved and part.tool_call_id:
+                        blocked_ids.add(part.tool_call_id)
+                for event in self._tool_events(part, approved):
+                    yield event
+
+    async def _authorize(self, part: Any) -> tuple[bool, str]:
+        """Decide whether a tool call may run, and record the decision.
+
+        Fail closed: only an explicit "selected" outcome approves the call. A
+        callback that raises, times out or answers in any other shape is a
+        denial, never a pass (SEC-080).
+
+        The decision is recorded on ``self._permission_gate`` *before* this
+        returns, because the tool itself executes on the next graph step, where
+        the gated toolset consumes exactly that record. Moving the record after
+        the caller's event projection would let the tool run undecided.
+
+        Returns ``(approved, reason)``; ``reason`` is empty when approved.
+        """
+        tool_name = part.tool_name
+        # Unparseable args stay None rather than collapsing to {}: the gate
+        # reads that as "unknown" and fails closed, where an empty dict would
+        # have read as a harmless no-argument call (SEC-093).
+        tool_call_info = {
+            "tool": tool_name,
+            "title": tool_name,
+            "input": _tool_args_to_dict(part.args),
+        }
+        options = [
+            {"optionId": "allow", "kind": "allow_once"},
+            {"optionId": "deny", "kind": "deny"},
+        ]
+
+        reason = ""
+        try:
+            # Don't hold the per-server slot while a human decides — release it
+            # for the wait so other sessions/ticks on this backend aren't
+            # blocked (PERF-029).
+            async with self._release_request_slot():
+                result = await self.permission_callback(tool_call_info, options)
+            outcome = result.get("outcome", {}) if isinstance(result, dict) else {}
+            approved = (
+                isinstance(outcome, dict) and outcome.get("outcome") == "selected"
+            )
+            if not approved:
+                # The gate says why when it can (condor.agents.risk attaches a
+                # ``reason``); an agent told only "denied" reads its own refusal
+                # as a missing approval and waits for a human it may not have.
+                given = result.get("reason") if isinstance(result, dict) else ""
+                reason = given or "denied by the risk/confirmation gate"
+        except Exception as exc:
+            log.exception(
+                "Permission check failed for %s — blocking the call", tool_name
+            )
+            approved = False
+            reason = f"permission check failed ({exc})"
+
+        self._permission_gate.record(part.tool_call_id, tool_name, approved, reason)
+        return approved, reason
+
+    def _tool_events(self, part: Any, approved: bool) -> list[ACPEvent]:
+        """Project one tool call into the events the UI shows.
+
+        A refused call gets a single terminal ``blocked`` event; an approved one
+        opens ``in_progress`` and closes ``completed`` right away, with the real
+        output arriving later as the ``ToolReturnPart`` update for the same id.
+        """
+        tool_id = part.tool_call_id or uuid.uuid4().hex[:12]
+        args = _tool_args_to_dict(part.args)
+
+        if not approved:
+            return [
+                ToolCallEvent(
+                    tool_call_id=tool_id,
+                    title=part.tool_name,
+                    status="blocked",
+                    kind="mcp",
+                    input=args,
+                )
+            ]
+
+        return [
+            ToolCallEvent(
+                tool_call_id=tool_id,
+                title=part.tool_name,
+                status="in_progress",
+                kind="mcp",
+                input=args,
+            ),
+            ToolCallUpdate(tool_call_id=tool_id, status="completed"),
+        ]
 
     def _format_error(self, e: Exception) -> str:
         """Translate provider HTTP errors into actionable user-facing text.
