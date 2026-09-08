@@ -5,7 +5,6 @@ import {
   CartesianGrid,
   ComposedChart,
   Line,
-  Rectangle,
   ReferenceLine,
   ResponsiveContainer,
   Tooltip,
@@ -40,17 +39,12 @@ import {
   PANE_MARGIN_RIGHT,
   PANE_PAD_X,
   PNL_SERIES_COLORS,
-  chartBucketMs,
-  formatBucketLabel,
-  positionAreaExtent,
-  positionAxisDomain,
   resolveTimeRange,
   sliceToRange,
-  volumeBarWidth,
-  zeroGradientOffset,
   type PnlChartPoint,
   type TimeRange,
 } from "@/lib/pnl-chart";
+import { useActivityPane } from "@/lib/pnl-chart-pane";
 import { getThemeColors } from "@/lib/theme-colors";
 
 /**
@@ -216,46 +210,18 @@ export function OwnerPnlChart({
   const fmtTimeAxis = useCallback((v: number) => formatAxisTime(v, spanMs), [spanMs]);
 
   // ── The activity pane (step 6) ──
-  const [activityWidth, setActivityWidth] = useState(0);
-  const onActivityResize = useCallback((width: number) => setActivityWidth(width), []);
-  const bucketMs = useMemo(() => chartBucketMs(visible as PnlChartPoint[]), [visible]);
-  const bucketLabel = useMemo(() => formatBucketLabel(bucketMs), [bucketMs]);
-  const barWidth = volumeBarWidth(
-    activityWidth - 2 * AXIS_WIDTH - PANE_MARGIN_RIGHT,
-    spanMs,
-    bucketMs,
-  );
-  // recharts sizes a bar on a numeric axis from the *smallest* gap between two
-  // points, and this series always has one far smaller than the rest — the live
-  // "now" point lands a fraction of a bucket after the last snapshot. Left
-  // alone every bar thins to a hairline and thickens again as snapshots land.
-  const volumeBar = useCallback(
-    (props: { x: number; y: number; width: number; height: number; fill?: string }) => {
-      const width = barWidth ?? props.width;
-      return (
-        <Rectangle
-          x={props.x + props.width / 2 - width / 2}
-          y={props.y}
-          width={width}
-          height={props.height}
-          fill={props.fill}
-          fillOpacity={0.45}
-          radius={[2, 2, 0, 0]}
-          stroke="none"
-        />
-      );
-    },
-    [barWidth],
-  );
+  //
+  // Its geometry is the same geometry PnlEvolutionChart's activity pane draws
+  // with — the measured width, the bucket, the re-centring bar shape, the
+  // zero-pinned position axis — so both read it from one hook (ARCH-341).
+  const {
+    onActivityResize,
+    bucketLabel,
+    volumeBar,
+    positionDomain,
+    positionZeroOffset,
+  } = useActivityPane(visible as PnlChartPoint[], spanMs);
   const hasPosition = rows.some((row) => row.position !== 0);
-  const positionDomain = useMemo(
-    () => positionAxisDomain(visible as PnlChartPoint[]),
-    [visible],
-  );
-  const positionZeroOffset = useMemo(
-    () => zeroGradientOffset(positionAreaExtent(visible as PnlChartPoint[])),
-    [visible],
-  );
 
   // ── The stated gap between the chart and the strip ──
   //
@@ -596,6 +562,8 @@ export function OwnerPnlChart({
                   dataKey="volumeDelta"
                   name={bucketLabel ? `Traded / ${bucketLabel}` : "Traded"}
                   fill={PNL_SERIES_COLORS.volume}
+                  fillOpacity={0.45}
+                  radius={[2, 2, 0, 0]}
                   shape={volumeBar}
                   isAnimationActive={false}
                 />
