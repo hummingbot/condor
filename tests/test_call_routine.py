@@ -83,10 +83,7 @@ def no_side_effects(monkeypatch, store):
 
 @pytest.fixture
 def reports_dir(tmp_path, monkeypatch):
-    monkeypatch.setattr(reports, "CHARTS_DIR", tmp_path / "reports")
-    monkeypatch.setattr(
-        reports, "INDEX_FILE", tmp_path / "reports" / "reports_index.json"
-    )
+    monkeypatch.setenv("CONDOR_REPORTS_DIR", str(tmp_path / "reports"))
     monkeypatch.setattr(
         rendering,
         "plotly_bundle",

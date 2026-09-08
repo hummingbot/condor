@@ -18,8 +18,7 @@ from condor.agents.session_report import SessionReport
 
 @pytest.fixture
 def reports_dir(tmp_path, monkeypatch):
-    monkeypatch.setattr(rep, "CHARTS_DIR", tmp_path / "reports")
-    monkeypatch.setattr(rep, "INDEX_FILE", tmp_path / "reports" / "reports_index.json")
+    monkeypatch.setenv("CONDOR_REPORTS_DIR", str(tmp_path / "reports"))
     return tmp_path
 
 

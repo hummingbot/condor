@@ -52,7 +52,7 @@ def _reset_gecko_throttle():
 
 @pytest.fixture(autouse=True)
 def _isolated_runtime_root(tmp_path, monkeypatch):
-    """Keep all three durable roots out of the developer's live install.
+    """Keep every durable root out of the developer's live install.
 
     For as long as every store derived its own root there was nothing to
     repoint, so four test modules each had to remember to monkeypatch a private
@@ -81,6 +81,11 @@ def _isolated_runtime_root(tmp_path, monkeypatch):
     wants the shipped tree names it (``load_shared_routine`` above, and the few
     that assert on ``agents/condor/AGENT.md``).
 
+    The last line covers ``reports/``, the root that arrived last (ARCH-605).
+    It used to be a module constant in ``condor/reports/store.py``, so the only
+    way to isolate it was to monkeypatch a *pair* of names -- and eighteen test
+    modules did, by hand. One env var replaces all thirty-six.
+
     ``tmp_path / "agents"`` and not ``condor-agents`` for the writable root:
     ``tmp_path`` stands in for the repo root in the agent tests, so the registry
     and the stores stay one tree.
@@ -91,3 +96,4 @@ def _isolated_runtime_root(tmp_path, monkeypatch):
     monkeypatch.setenv(paths.DATA_DIR_ENV, str(tmp_path / "condor-data"))
     monkeypatch.setenv(paths.AGENTS_ROOT_ENV, str(tmp_path / "agents"))
     monkeypatch.setenv(paths.STOCK_AGENTS_ROOT_ENV, str(tmp_path / "stock-agents"))
+    monkeypatch.setenv(paths.REPORTS_DIR_ENV, str(tmp_path / "reports"))

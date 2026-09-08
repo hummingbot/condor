@@ -13,7 +13,6 @@ import json
 
 import pytest
 
-import condor.reports as reports
 from condor.reports import ReportBuilder, store, subjects
 
 RUN = subjects.bot_run("brigado", "/data/bots/archive/run.sqlite")
@@ -22,8 +21,7 @@ CONTROLLER = subjects.bot_run("brigado", "/data/bots/archive/run.sqlite", "pmm_1
 
 @pytest.fixture
 def reports_dir(tmp_path, monkeypatch):
-    monkeypatch.setattr(reports, "CHARTS_DIR", tmp_path)
-    monkeypatch.setattr(reports, "INDEX_FILE", tmp_path / "reports_index.json")
+    monkeypatch.setenv("CONDOR_REPORTS_DIR", str(tmp_path))
     return tmp_path
 
 

@@ -14,7 +14,6 @@ from types import SimpleNamespace
 
 import pytest
 
-import condor.reports as rep
 import condor.routine_hooks as routine_hooks
 import handlers.routines as hr
 from condor.reports import rendering
@@ -68,8 +67,7 @@ def reports_dir(tmp_path, monkeypatch):
         ),
         encoding="utf-8",
     )
-    monkeypatch.setattr(rep, "CHARTS_DIR", directory)
-    monkeypatch.setattr(rep, "INDEX_FILE", index)
+    monkeypatch.setenv("CONDOR_REPORTS_DIR", str(directory))
     return directory
 
 

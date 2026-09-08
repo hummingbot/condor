@@ -27,8 +27,7 @@ from routines.base import RoutineResult
 
 @pytest.fixture
 def reports_dir(tmp_path, monkeypatch):
-    monkeypatch.setattr(rep, "CHARTS_DIR", tmp_path)
-    monkeypatch.setattr(rep, "INDEX_FILE", tmp_path / "reports_index.json")
+    monkeypatch.setenv("CONDOR_REPORTS_DIR", str(tmp_path))
     return tmp_path
 
 

@@ -70,8 +70,7 @@ def reports_dir(tmp_path, monkeypatch):
         ),
         encoding="utf-8",
     )
-    monkeypatch.setattr(rep, "CHARTS_DIR", directory)
-    monkeypatch.setattr(rep, "INDEX_FILE", index)
+    monkeypatch.setenv("CONDOR_REPORTS_DIR", str(directory))
     monkeypatch.setattr(routes, "get_config_manager", lambda: FakeConfigManager())
     return directory
 
@@ -162,8 +161,7 @@ def test_missing_report_is_404_not_403(reports_dir):
 
 
 def test_save_records_the_owner_from_attribute_owner(tmp_path, monkeypatch):
-    monkeypatch.setattr(rep, "CHARTS_DIR", tmp_path)
-    monkeypatch.setattr(rep, "INDEX_FILE", tmp_path / "reports_index.json")
+    monkeypatch.setenv("CONDOR_REPORTS_DIR", str(tmp_path))
 
     async def go():
         with rep.attribute_owner(USER.id):
@@ -184,8 +182,7 @@ def test_save_records_the_owner_from_attribute_owner(tmp_path, monkeypatch):
 
 
 def test_list_reports_owner_filter_drops_foreign_and_ownerless(tmp_path, monkeypatch):
-    monkeypatch.setattr(rep, "CHARTS_DIR", tmp_path)
-    monkeypatch.setattr(rep, "INDEX_FILE", tmp_path / "reports_index.json")
+    monkeypatch.setenv("CONDOR_REPORTS_DIR", str(tmp_path))
 
     async def go():
         for owner, title in ((USER.id, "Mine"), (OTHER.id, "Theirs"), (None, "Old")):
@@ -205,8 +202,7 @@ def test_list_reports_owner_filter_drops_foreign_and_ownerless(tmp_path, monkeyp
 
 def test_live_report_update_preserves_the_owner(tmp_path, monkeypatch):
     """An in-place update keeps the user_id stamped at first save."""
-    monkeypatch.setattr(rep, "CHARTS_DIR", tmp_path)
-    monkeypatch.setattr(rep, "INDEX_FILE", tmp_path / "reports_index.json")
+    monkeypatch.setenv("CONDOR_REPORTS_DIR", str(tmp_path))
 
     async def go():
         live = rep.LiveReport("Live", source_name="loop")
