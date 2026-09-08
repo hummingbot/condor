@@ -461,6 +461,7 @@ class PydanticAIClient:
         allowed_tools: (
             list[str] | None
         ) = None,  # restrict the agent to these tool names
+        system_prompt: str = "",
     ):
         self.model_name = model
         self.mcp_server_configs = mcp_servers or []
@@ -468,6 +469,11 @@ class PydanticAIClient:
         self.extra_env = extra_env
         self.base_url = base_url
         self.api_key = api_key
+        # Who the model is told it is, delivered at system level as pydantic-ai
+        # ``instructions``. The twin of ACPClient's ``_meta.systemPrompt.append``
+        # (client.py): without it a bound Agent answers as the host instead of
+        # as itself, and the weaker channels do not fix that (FEAT-025).
+        self.system_prompt = system_prompt
         # When set, the agent only sees tools whose name is in this allowlist
         # (used by delegated domain agents to scope an agent to one domain).
         self.allowed_tools = set(allowed_tools) if allowed_tools else None
@@ -724,6 +730,10 @@ class PydanticAIClient:
                 args=args,
                 env=env,
                 timeout=30,
+                # pydantic-ai drops a server's ``instructions`` by default; the
+                # ACP host forwards them, so ask for them here too or the condor
+                # server's routing rules never reach a pydantic-ai model.
+                include_instructions=True,
             )
 
             toolsets.append(mcp_server)
@@ -732,7 +742,10 @@ class PydanticAIClient:
         model = self._build_model()
         prepare = self._prepare_tools if self.allowed_tools else None
         self._agent = Agent(
-            model, toolsets=self._gate_toolsets(toolsets), prepare_tools=prepare
+            model,
+            instructions=self.system_prompt or None,
+            toolsets=self._gate_toolsets(toolsets),
+            prepare_tools=prepare,
         )
 
         # Resolve the global semaphore for this server's base URL so all client

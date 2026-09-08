@@ -63,9 +63,10 @@ def build_llm_client(
     ``PYDANTIC_AI_TOOL_FILTER`` env > ``None`` (auto-detect by model size).
 
     ``extra_env``, ``system_prompt`` and ``allowed_tools`` are forwarded to
-    whichever client understands them: the ACP subprocess takes the env and the
-    system prompt but cannot enforce an allowlist; PydanticAI enforces the
-    allowlist (and takes the env for its MCP subprocesses).
+    whichever client understands them. Both clients take the env and the system
+    prompt — each over its own system-level channel (``_meta.systemPrompt`` for
+    ACP, ``instructions`` for pydantic-ai), so a bound Agent keeps its identity
+    on either backend (ARCH-331). Only PydanticAI enforces the tool allowlist.
     """
     if pydantic_ai.is_pydantic_ai_model(agent_key):
         custom_url, api_key = resolve_custom_endpoint(
@@ -85,6 +86,7 @@ def build_llm_client(
                 tool_filter_mode or os.environ.get("PYDANTIC_AI_TOOL_FILTER") or None
             ),
             allowed_tools=allowed_tools,
+            system_prompt=system_prompt,
         )
 
     # ACP subprocess models: claude-code, gemini, codex. A Claude model can be

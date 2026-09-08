@@ -7,6 +7,8 @@ server's ``instructions`` — the only system-level channel ACP v1 gives us — 
 the session's opening context) and both must say the same thing.
 """
 
+import asyncio
+
 import pytest
 
 from condor.agents import agent as agent_module
@@ -196,3 +198,88 @@ def test_session_new_appends_the_system_prompt():
 def test_session_new_omits_meta_when_unbound():
     """The Condor chat sends exactly what it sends today — no `_meta` at all."""
     assert _session_new_params() == {"cwd": "/tmp", "mcpServers": []}
+
+
+# --- The same identity, on the pydantic-ai backend (ARCH-331) --------------
+#
+# ACP is only half the fleet: ollama:/lmstudio:/openrouter:/custom@ models run
+# in-process through PydanticAIClient, which used to build its Agent with no
+# system prompt at all. A bound Agent on those backends was therefore anonymous
+# — the identity header the caller had already computed was dropped on the floor
+# by the factory. pydantic-ai's system-level channel is `instructions=`.
+
+
+def _make_client(**kwargs):
+    from condor.acp.pydantic_ai_client import PydanticAIClient
+
+    return PydanticAIClient("openai:gpt-4o", **kwargs)
+
+
+async def _instructions_on_the_wire(client) -> str | None:
+    """Run one turn against a stub model and report what it was instructed."""
+    from pydantic_ai.messages import ModelResponse, TextPart
+    from pydantic_ai.models.function import FunctionModel
+
+    seen: dict = {}
+
+    def respond(messages, info):
+        seen["instructions"] = messages[0].instructions
+        return ModelResponse(parts=[TextPart("ok")])
+
+    client._build_model = lambda: FunctionModel(respond)
+    await client.start()
+    try:
+        await client._agent.run("who are you?")
+    finally:
+        await client.stop()
+    return seen["instructions"]
+
+
+def test_pydantic_ai_agent_is_instructed_with_the_system_prompt():
+    header = identity_header("backpack_mm", "Backpack MM")
+    client = _make_client(system_prompt=header)
+    assert client.system_prompt == header
+    assert asyncio.run(_instructions_on_the_wire(client)) == header
+
+
+def test_pydantic_ai_agent_unbound_carries_no_instructions():
+    """The Condor chat is unchanged: an empty prompt must not become a blank one."""
+    assert asyncio.run(_instructions_on_the_wire(_make_client())) is None
+
+
+def test_pydantic_ai_mcp_servers_ask_for_their_instructions():
+    """The second system-level channel: pydantic-ai drops MCP `instructions`
+    unless asked, so the condor server's routing rules never reached these
+    models either."""
+    import pydantic_ai.mcp as mcp_module
+
+    class _Stop(Exception):
+        pass
+
+    seen: dict = {}
+
+    def _record(command, **kwargs):
+        seen.update(kwargs)
+        raise _Stop  # abort start() before anything is spawned
+
+    original = mcp_module.MCPServerStdio
+    mcp_module.MCPServerStdio = _record
+    try:
+        client = _make_client(mcp_servers=[{"command": "condor-mcp", "args": []}])
+        with pytest.raises(_Stop):
+            asyncio.run(client.start())
+    finally:
+        mcp_module.MCPServerStdio = original
+
+    assert seen["include_instructions"] is True
+
+
+def test_factory_forwards_the_system_prompt_to_both_backends():
+    """`build_llm_client` used to hand `system_prompt` to ACP only."""
+    from condor.runtime.llm_client import build_llm_client
+
+    header = identity_header("brigado", "Brigado")
+    assert build_llm_client("ollama:llama3.1", system_prompt=header).system_prompt == (
+        header
+    )
+    assert build_llm_client("claude-code", system_prompt=header).system_prompt == header
