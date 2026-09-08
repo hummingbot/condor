@@ -9,7 +9,7 @@ import yaml
 from fastapi import APIRouter, Depends, HTTPException
 
 from condor.controller_configs import clean_config_for_save
-from condor.fetchers.bots import build_bots_page, extract_bots_list
+from condor.fetchers.bots import BotsEnrichment, build_bots_page, extract_bots_list
 from condor.web.auth import require_server_access
 from condor.web.models import (
     AvailableControllersResponse,
@@ -30,11 +30,6 @@ from config_manager import get_config_manager
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["bots"])
-
-# Per-call budget for the optional enrichment fetches on the bots page. The
-# page renders without them (no age / config / DB perf), so a slow server
-# should cost us those columns, never the whole response.
-ENRICHMENT_TIMEOUT = 15.0
 
 # ── Transitional state store ──
 # Tracks bots/controllers that have been sent a stop command but haven't
@@ -187,55 +182,39 @@ def _parse_bot(bot: dict) -> BotInfo:
     )
 
 
-def _extract_perf_snapshots(result: Any) -> list[dict]:
-    """Normalize controller performance API response into a list of snapshot dicts."""
-    if isinstance(result, list):
-        return [s for s in result if isinstance(s, dict)]
-    if isinstance(result, dict):
-        data = result.get("data", result.get("snapshots", result.get("records", [])))
-        if isinstance(data, list):
-            return [s for s in data if isinstance(s, dict)]
-        if isinstance(data, dict):
-            out = []
-            for key, val in data.items():
-                if isinstance(val, dict):
-                    val.setdefault("controller_id", key)
-                    out.append(val)
-                elif isinstance(val, list):
-                    for item in val:
-                        if isinstance(item, dict):
-                            item.setdefault("controller_id", key)
-                            out.append(item)
-            return out
-    return []
+async def enriched_bots_page(name: str, raw_status: Any) -> dict:
+    """Build the bots page for a server from raw status plus cached enrichment.
 
+    The one place the two delivery paths meet: the REST route and every WS
+    ``bots:<server>`` frame render through this, so a frame carries the same
+    ``config``, ``deployed_at``, ``controller_id`` and connector/trading pair as
+    the REST body for the same raw payload — no client-side repair needed.
 
-def _collect_bot_runs(result: Any, runs: dict[str, str]) -> None:
-    """Merge a bot-runs API response into ``runs`` (bot_name -> deployed_at)."""
-    if not isinstance(result, dict):
-        return
-    runs_data = result.get("data", result)
-    if isinstance(runs_data, dict):
-        for bot_name, run_info in runs_data.items():
-            if isinstance(run_info, dict):
-                deployed = run_info.get("deployed_at") or run_info.get("created_at")
-                if deployed:
-                    runs[bot_name] = str(deployed)
-            elif isinstance(run_info, str):
-                runs[bot_name] = run_info
-    elif isinstance(runs_data, list):
-        for run in runs_data:
-            if isinstance(run, dict):
-                bn = run.get("bot_name", "")
-                deployed = run.get("deployed_at") or run.get("created_at")
-                if bn and deployed:
-                    runs[bn] = str(deployed)
+    The enrichment is read through ServerDataService, which holds it for a
+    minute: the 5s bots frame costs an extra Hummingbot round-trip only when
+    that cached answer has gone stale.
+    """
+    from condor.server_data_service import ServerDataType, get_server_data_service
+
+    try:
+        enrichment = await get_server_data_service().get_or_fetch(
+            name, ServerDataType.BOTS_ENRICHMENT
+        )
+    except Exception as e:
+        logger.debug("Bots enrichment unavailable for '%s': %s", name, e)
+        enrichment = None
+
+    ctrl_configs, bot_runs, latest_perf = enrichment or BotsEnrichment.empty()
+    return build_bots_page(
+        raw_status,
+        ctrl_configs=ctrl_configs,
+        bot_runs=bot_runs,
+        latest_perf=latest_perf,
+    )
 
 
 @router.get("/servers/{name}/bots", response_model=BotsPageResponse)
 async def list_bots(name: str, user: WebUser = Depends(require_server_access)):
-    cm = get_config_manager()
-
     from condor.server_data_service import ServerDataType, get_server_data_service
 
     try:
@@ -255,136 +234,10 @@ async def list_bots(name: str, user: WebUser = Depends(require_server_access)):
             error_hint="Unable to reach server",
         )
 
-    # Get client for enrichment calls
-    try:
-        client = await cm.get_client(name)
-    except Exception:
-        client = None
-
     bots_list = extract_bots_list(result)
     logger.info("Server '%s': found %d bot(s)", name, len(bots_list))
 
-    # Pre-fetch controller configs, bot runs, AND latest controller performance concurrently
-    ctrl_configs: dict[str, dict] = {}
-    bot_runs: dict[str, str] = {}
-    latest_perf: dict[str, dict] = {}  # keyed by controller_id
-
-    if client is not None:
-        import asyncio
-
-        async def _fetch_ctrl_configs() -> dict[str, dict]:
-            configs_map: dict[str, dict] = {}
-            bot_names = [b.get("bot_name", "") for b in bots_list if b.get("bot_name")]
-            if not bot_names:
-                return configs_map
-
-            async def _get_one(bn: str):
-                try:
-                    configs = await client.controllers.get_bot_controller_configs(bn)
-                    if isinstance(configs, list):
-                        for cfg in configs:
-                            cid = cfg.get("id") or cfg.get("controller_id", "")
-                            if cid:
-                                configs_map[cid] = cfg
-                            cname = cfg.get("controller_name", "")
-                            if cname and cname != cid:
-                                configs_map[cname] = cfg
-                except Exception:
-                    pass
-
-            await asyncio.gather(*[_get_one(bn) for bn in bot_names])
-            return configs_map
-
-        async def _fetch_bot_runs() -> dict[str, str]:
-            """Deployed-at timestamps keyed by bot name, for the Age column.
-
-            Filtered to DEPLOYED on purpose: the unfiltered listing also returns
-            ARCHIVED runs, each carrying a multi-KB ``final_status`` blob. On a
-            remote server that is a multi-MB, multi-minute response that stalls
-            the whole page (brigado: 4.5 MB / 274s unfiltered vs 121 KB / 5s
-            filtered), leaving every bot without an age.
-            """
-            runs: dict[str, str] = {}
-            try:
-                _collect_bot_runs(
-                    await client.bot_orchestration.get_bot_runs(
-                        deployment_status="DEPLOYED"
-                    ),
-                    runs,
-                )
-            except Exception:
-                logger.debug("Bot runs not available for '%s'", name)
-
-            # Any active bot the filtered listing missed gets a targeted lookup
-            # (~1 KB each) rather than falling back to the unfiltered listing.
-            missing = [
-                bn
-                for b in bots_list
-                if (bn := b.get("bot_name", "")) and bn not in runs
-            ]
-            if missing:
-
-                async def _get_one_run(bn: str):
-                    try:
-                        _collect_bot_runs(
-                            await client.bot_orchestration.get_bot_runs(
-                                bot_name=bn, limit=1
-                            ),
-                            runs,
-                        )
-                    except Exception:
-                        pass
-
-                await asyncio.gather(*[_get_one_run(bn) for bn in missing])
-            return runs
-
-        async def _fetch_latest_perf() -> dict[str, dict]:
-            """Fetch latest controller performance snapshots from DB."""
-            perf_map: dict[str, dict] = {}
-            try:
-                perf_result = (
-                    await client.bot_orchestration.get_latest_controller_performance()
-                )
-                snapshots = _extract_perf_snapshots(perf_result)
-                for snap in snapshots:
-                    cid = snap.get("controller_id", "")
-                    if cid:
-                        perf_map[cid] = snap
-            except Exception:
-                logger.debug(
-                    "Latest controller performance not available for '%s'", name
-                )
-            return perf_map
-
-        async def _with_timeout(coro, label: str, default: Any) -> Any:
-            """Cap one enrichment call so a slow server degrades instead of hanging.
-
-            Each fetcher gets its own budget: one slow endpoint must not cost us
-            the other two.
-            """
-            try:
-                return await asyncio.wait_for(coro, timeout=ENRICHMENT_TIMEOUT)
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "Enrichment '%s' timed out after %.0fs for server '%s'",
-                    label,
-                    ENRICHMENT_TIMEOUT,
-                    name,
-                )
-                return default
-
-        ctrl_configs, bot_runs, latest_perf = await asyncio.gather(
-            _with_timeout(_fetch_ctrl_configs(), "controller configs", {}),
-            _with_timeout(_fetch_bot_runs(), "bot runs", {}),
-            _with_timeout(_fetch_latest_perf(), "latest performance", {}),
-        )
-
-    page = build_bots_page(
-        result,
-        ctrl_configs=ctrl_configs,
-        bot_runs=bot_runs,
-        latest_perf=latest_perf,
-    )
+    page = await enriched_bots_page(name, result)
 
     # Overlay transitional "stopping" state
     overlay_stopping_state(name, page["controllers"], page["bots"])

@@ -475,21 +475,16 @@ class WebSocketManager(CandleStreamsMixin, HummingbotStreamsMixin):
             if task and not task.done():
                 return
 
-        # Transform raw data to match REST endpoint response shapes
+        # Bots frames are enriched (an await) and carry the transitional
+        # "stopping" overlay, so they are built inside the broadcast task
+        # rather than here — this listener is synchronous.
         if dt_name == "BOTS_STATUS":
-            try:
-                value = self._transform_bots(value)
-                # Overlay transitional "stopping" state from Condor's in-memory store
-                self._overlay_stopping_state(server_name, value)
-            except Exception as e:
-                logger.debug("Failed to transform bots data for WS: %s", e)
-                return
+            coro = self._broadcast_bots_update(channel, server_name, value)
+        else:
+            coro = self._broadcast_update(channel, value)
 
         self._oneshot_tasks.track(
-            asyncio.create_task(
-                self._broadcast_update(channel, value),
-                name=f"broadcast:{channel}",
-            )
+            asyncio.create_task(coro, name=f"broadcast:{channel}")
         )
 
     async def _broadcast_update(self, channel: str, data: Any) -> None:

@@ -65,11 +65,32 @@ class HummingbotStreamsMixin:
         return result
 
     @staticmethod
-    def _transform_bots(raw_data: Any) -> dict:
-        """Transform raw BOTS_STATUS data to BotsPageResponse-compatible dict for WS broadcast."""
-        from condor.fetchers.bots import build_bots_page
+    async def _transform_bots(server_name: str, raw_data: Any) -> dict:
+        """Transform raw BOTS_STATUS data to a BotsPageResponse-compatible dict.
 
-        return build_bots_page(raw_data)
+        Shares the REST route's builder *and* its enrichment: a frame that
+        omitted the controller configs, deploy timestamps and DB performance
+        left the client patching every row back out of the last REST payload.
+        """
+        from condor.web.routes.bots import enriched_bots_page
+
+        return await enriched_bots_page(server_name, raw_data)
+
+    async def _broadcast_bots_update(
+        self, channel: str, server_name: str, raw_data: Any
+    ) -> None:
+        """Enrich a raw BOTS_STATUS payload and broadcast it, if it changed.
+
+        Enrichment is an await, so every bots frame is built inside a task —
+        including the ones triggered by the synchronous SDS cache listener.
+        """
+        try:
+            data = await self._transform_bots(server_name, raw_data)
+            self._overlay_stopping_state(server_name, data)
+        except Exception as e:
+            logger.debug("Failed to transform bots data for WS: %s", e)
+            return
+        await self._broadcast_update(channel, data)
 
     @staticmethod
     def _transform_controller_perf(raw_data: Any) -> list[dict]:
@@ -481,7 +502,7 @@ class HummingbotStreamsMixin:
             cached = sds.get(server_name, ServerDataType.BOTS_STATUS)
             if cached is not None:
                 try:
-                    data = self._transform_bots(cached)
+                    data = await self._transform_bots(server_name, cached)
                     await self.broadcast(channel, data)
                 except Exception as e:
                     logger.debug("Failed to send initial bots snapshot: %s", e)
@@ -502,12 +523,7 @@ class HummingbotStreamsMixin:
             get_server_data_service().put(
                 server_name, ServerDataType.BOTS_STATUS, raw_data
             )
-            try:
-                data = self._transform_bots(raw_data)
-                self._overlay_stopping_state(server_name, data)
-                await self._broadcast_update(channel, data)
-            except Exception as e:
-                logger.debug("Failed to transform bots WS data: %s", e)
+            await self._broadcast_bots_update(channel, server_name, raw_data)
 
         await self._run_ws_stream(
             channel,

@@ -43,6 +43,10 @@ class ServerDataType(Enum):
     TRADING_RULES = "trading_rules"
     CONNECTORS = "connectors"
     BOTS_STATUS = "bots_status"
+    #: The controller configs, deploy timestamps and DB performance the
+    #: bots page is enriched with — fetched as one unit so the REST route
+    #: and every WS bots frame render from the same answer.
+    BOTS_ENRICHMENT = "bots_enrichment"
     EXECUTORS = "executors"
     BOT_RUNS = "bot_runs"
     CANDLE_CONNECTORS = "candle_connectors"
@@ -110,6 +114,11 @@ _DEFAULTS: Dict[ServerDataType, DataTypeDefaults] = {
     ServerDataType.TRADING_RULES: DataTypeDefaults(interval=300, ttl=600),
     ServerDataType.CONNECTORS: DataTypeDefaults(interval=300, ttl=600),
     ServerDataType.BOTS_STATUS: DataTypeDefaults(interval=5, ttl=30),
+    # Enrichment moves far slower than status: a controller config, a deploy
+    # timestamp and a DB performance snapshot do not change between two 5s
+    # frames, and the fetch costs one call per bot. A minute of staleness
+    # buys eleven of every twelve frames a free, warm read.
+    ServerDataType.BOTS_ENRICHMENT: DataTypeDefaults(interval=30, ttl=60),
     ServerDataType.EXECUTORS: DataTypeDefaults(interval=2, ttl=30),
     ServerDataType.BOT_RUNS: DataTypeDefaults(interval=30, ttl=120),
     ServerDataType.CANDLE_CONNECTORS: DataTypeDefaults(interval=300, ttl=600),
@@ -887,6 +896,7 @@ def register_default_fetches() -> None:
         fetch_active_orders,
         fetch_available_cex_connectors,
         fetch_bot_runs,
+        fetch_bots_enrichment,
         fetch_bots_status,
         fetch_candle_connectors,
         fetch_connectors,
@@ -924,6 +934,7 @@ def register_default_fetches() -> None:
     sds.register_fetch(ServerDataType.ALL_CONNECTORS, fetch_connectors)
     sds.register_fetch(ServerDataType.VENUES, partial(fetch_venues, strict=True))
     sds.register_fetch(ServerDataType.BOTS_STATUS, fetch_bots_status)
+    sds.register_fetch(ServerDataType.BOTS_ENRICHMENT, fetch_bots_enrichment)
     sds.register_fetch(ServerDataType.EXECUTORS, fetch_executors)
     sds.register_fetch(ServerDataType.BOT_RUNS, fetch_bot_runs)
     sds.register_fetch(ServerDataType.CANDLE_CONNECTORS, fetch_candle_connectors)

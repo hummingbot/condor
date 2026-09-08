@@ -34,7 +34,11 @@ Importing:
     façade consumer; they are not the package's public surface.
 """
 
-from condor.fetchers.bots import fetch_bot_runs, fetch_bots_status
+from condor.fetchers.bots import (
+    fetch_bot_runs,
+    fetch_bots_enrichment,
+    fetch_bots_status,
+)
 from condor.fetchers.connectors import (
     fetch_available_cex_connectors,
     fetch_connectors,
@@ -101,6 +105,7 @@ __all__ = [
     "get_executor_fees",
     "extract_executors_list",
     "fetch_bots_status",
+    "fetch_bots_enrichment",
     "fetch_bot_runs",
     "fetch_current_price",
     "fetch_candles",
