@@ -421,13 +421,21 @@ tailnet_node_name() {
 }
 
 # Peers on this tailnet whose name looks like a hummingbot-api node, newline
-# separated. Matches the requested name and the -1/-2 suffixes Tailscale adds,
-# so the machine we are looking for is found under whichever one it got.
+# separated.
+#
+# The suffix is deliberately `-.+` and not `-[0-9]+`. Tailscale's own
+# de-duplication only ever appends numbers, but TAILSCALE_HOSTNAME is a
+# setting, and a deployment that names its API per desk -- hummingbot-api-cornell,
+# hummingbot-api-eu -- is the normal way to run more than one. Matching only
+# numbers found nothing for those, and "nothing" is the branch that warns
+# "deploy it on that machine first" about a node sitting right there in
+# `tailscale status`, then asks the operator to type the name it just declined
+# to recognise.
 tailnet_api_peers() {
     local want="${1:-hummingbot-api}"
     tailscale status --peers 2>/dev/null \
         | awk '{print $2}' \
-        | grep -E "^${want}(-[0-9]+)?$" || true
+        | grep -E "^${want}(-.+)?$" || true
 }
 
 # Make sure a tailscaled is running, then `tailscale up`.
