@@ -488,7 +488,7 @@ class ACPClient:
         self.accepts_images = False
         self._read_task: asyncio.Task | None = None
         self._stderr_task: asyncio.Task | None = None
-        self._event_queue: asyncio.Queue[ACPEvent | None] = asyncio.Queue()
+        self._event_queue: asyncio.Queue[ACPEvent] = asyncio.Queue()
         self._current_req_id: int | None = None  # tracks in-flight prompt request
         # A turn the agent has not settled and that nobody is streaming any
         # more: one that ignored ``session/cancel``, or one whose consumer
@@ -1009,8 +1009,6 @@ class ACPClient:
                         break
                     yield Heartbeat(elapsed_seconds=elapsed)
                     continue
-                if event is None:
-                    break
                 yield event
                 if isinstance(event, PromptDone):
                     break
