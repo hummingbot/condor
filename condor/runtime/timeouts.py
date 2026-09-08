@@ -61,6 +61,20 @@ class TimeoutPolicy:
     # 0 disables the sweep. 1 hour.
     session_idle: int = 3600
 
+    @property
+    def prompt_hard_stop(self) -> int:
+        """The ACP stream's own ceiling: one minute above the turn budget.
+
+        ``prompt_overall`` is the deadline the *session* enforces; this is the
+        backstop under it inside ``ACPClient.prompt_stream``, so a subprocess
+        that stops answering ends even when nobody is watching the session.
+        Derived rather than stored so that raising
+        ``CONDOR_TIMEOUT_PROMPT_OVERALL`` moves both together — a stored copy
+        is exactly how a ``1860`` literal in the ACP client drifted out of
+        reach of this policy in the first place.
+        """
+        return self.prompt_overall + 60
+
     @classmethod
     def load(cls) -> "TimeoutPolicy":
         """Build the policy, applying CONDOR_TIMEOUT_* overrides.

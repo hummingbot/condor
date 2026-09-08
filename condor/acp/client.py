@@ -983,11 +983,16 @@ class ACPClient:
 
         future.add_done_callback(_on_response)
 
+        # Imported here, not at module scope: condor.runtime.events imports
+        # condor.acp, so a top-level import would close the cycle.
+        from condor.runtime.timeouts import TIMEOUTS
+
         loop = asyncio.get_event_loop()
         start_time = loop.time()
-        max_duration = (
-            1860  # 31 min hard ceiling (slightly above session-level timeout)
-        )
+        # Hard ceiling for this stream, kept slightly above the session-level
+        # budget by the policy itself so a deployment that raises
+        # CONDOR_TIMEOUT_PROMPT_OVERALL is not silently cut short here.
+        max_duration = TIMEOUTS.prompt_hard_stop
 
         try:
             while True:
