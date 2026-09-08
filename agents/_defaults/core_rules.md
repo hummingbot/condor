@@ -17,6 +17,10 @@
   instead of reimplementing what it already does by hand.
 - **Short tool chains.** 1–5 calls per response or tick. One skill-driven flow
   beats a long chain of raw calls that reconstructs what the playbook says.
+- **Never end a turn with a background task outstanding.** If you launch a Bash
+  command with `run_in_background`, collect its output before you answer. Prefer
+  a foreground command with a generous `timeout` — a task that finishes after
+  your turn ends will interrupt the user's *next* question with stale work.
 - **Confirm before you move money.** Orders, swaps, LP mutations and anything
   destructive get confirmed with the user first. The rule is the guard, not the
   prompt you happen to be in.
