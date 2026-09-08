@@ -22,7 +22,6 @@ from condor.runtime.wake import (
 from condor.web.auth import (
     check_server_access,
     get_current_user,
-    require_server_access_by_server_name,
     require_server_access_query,
 )
 from condor.web.models import WebUser
@@ -33,15 +32,6 @@ router = APIRouter(prefix="/routines", tags=["routines"])
 
 
 # ── Request / Response Models ──
-
-
-class RunRequest(BaseModel):
-    config: dict = {}
-
-
-class ScheduleRequest(BaseModel):
-    config: dict = {}
-    interval_sec: int = 300
 
 
 class RunRequestV2(BaseModel):
@@ -173,49 +163,6 @@ async def get_instance_image(
     if not result or not result.chart_image:
         raise HTTPException(404, "No chart image available")
     return Response(content=result.chart_image, media_type="image/png")
-
-
-@router.post("/servers/{server_name}/{routine_name}/run")
-async def run_routine(
-    server_name: str,
-    routine_name: str,
-    body: RunRequest,
-    user: WebUser = Depends(require_server_access_by_server_name),
-):
-    """Execute a one-shot routine. Returns instance_id for polling."""
-    store = get_routine_store()
-    try:
-        instance_id = await store.execute(
-            routine_name=routine_name,
-            config=body.config,
-            server_name=server_name,
-            user_id=user.id,
-        )
-    except ValueError as e:
-        raise HTTPException(404, str(e))
-    return {"instance_id": instance_id}
-
-
-@router.post("/servers/{server_name}/{routine_name}/schedule")
-async def schedule_routine(
-    server_name: str,
-    routine_name: str,
-    body: ScheduleRequest,
-    user: WebUser = Depends(require_server_access_by_server_name),
-):
-    """Schedule a routine at an interval. Returns instance_id."""
-    store = get_routine_store()
-    try:
-        instance_id = await store.schedule(
-            routine_name=routine_name,
-            config=body.config,
-            server_name=server_name,
-            interval_sec=body.interval_sec,
-            user_id=user.id,
-        )
-    except ValueError as e:
-        raise HTTPException(404, str(e))
-    return {"instance_id": instance_id}
 
 
 @router.post("/run")

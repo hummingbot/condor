@@ -216,14 +216,6 @@ async def require_server_access(
     return user
 
 
-async def require_server_access_by_server_name(
-    server_name: str, user: WebUser = Depends(get_current_user)
-) -> WebUser:
-    """Same as :func:`require_server_access` for a ``{server_name}`` path param."""
-    check_server_access(user.id, server_name)
-    return user
-
-
 async def require_server_access_query(
     server: str = Query(...), user: WebUser = Depends(get_current_user)
 ) -> WebUser:
