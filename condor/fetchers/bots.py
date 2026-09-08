@@ -4,6 +4,8 @@ import asyncio
 import logging
 from typing import Any, NamedTuple, Optional
 
+from condor.fetchers.bot_performance import extract_snapshots as _extract_perf_snapshots
+
 logger = logging.getLogger(__name__)
 
 # Per-call budget for one of the optional enrichment fetches below. The bots
@@ -250,29 +252,6 @@ class BotsEnrichment(NamedTuple):
     def empty(cls) -> "BotsEnrichment":
         """A fresh, empty enrichment — what a caller falls back to on failure."""
         return cls({}, {}, {})
-
-
-def _extract_perf_snapshots(result: Any) -> list[dict]:
-    """Normalize controller performance API response into a list of snapshot dicts."""
-    if isinstance(result, list):
-        return [s for s in result if isinstance(s, dict)]
-    if isinstance(result, dict):
-        data = result.get("data", result.get("snapshots", result.get("records", [])))
-        if isinstance(data, list):
-            return [s for s in data if isinstance(s, dict)]
-        if isinstance(data, dict):
-            out = []
-            for key, val in data.items():
-                if isinstance(val, dict):
-                    val.setdefault("controller_id", key)
-                    out.append(val)
-                elif isinstance(val, list):
-                    for item in val:
-                        if isinstance(item, dict):
-                            item.setdefault("controller_id", key)
-                            out.append(item)
-            return out
-    return []
 
 
 def _collect_bot_runs(result: Any, runs: dict[str, str]) -> None:
