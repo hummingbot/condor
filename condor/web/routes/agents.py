@@ -2649,7 +2649,19 @@ async def delete_strategy(
             status_code=400,
             detail="Cannot delete a running strategy. Stop all instances first.",
         )
-    _strategy_store().delete(slug, sslug)
+    try:
+        removed = _strategy_store().delete(slug, sslug)
+    except ValueError as exc:
+        # A strategy whose ``strategy.md`` is still the shipped one is refused
+        # by the store (layering.stock_delete_error). Unhandled here that
+        # refusal reached the browser as a 500, which the delete dialog reports
+        # as "it may be running" — the one thing it certainly was not.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not removed:
+        raise HTTPException(
+            status_code=500,
+            detail="Could not remove the strategy folder — see the server log.",
+        )
     return {"deleted": True}
 
 

@@ -504,7 +504,11 @@ export function StrategyWorkbench({
         title="Delete Strategy"
         isPending={deleteMutation.isPending}
         isError={deleteMutation.isError}
-        errorText="Failed to delete strategy. It may be running."
+        errorText={
+          deleteMutation.error instanceof Error
+            ? deleteMutation.error.message
+            : "Failed to delete strategy. It may be running."
+        }
         onConfirm={() => deleteMutation.mutate()}
         onClose={() => setShowDeleteConfirm(false)}
       >
