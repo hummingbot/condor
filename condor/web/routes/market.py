@@ -18,8 +18,14 @@ _CANDLE_CACHE_TTL = 30.0  # seconds
 _CANDLE_CACHE_MAX = 50  # hard cap on entries (keys rotate every minute per chart)
 
 
-def _candle_cache_put(key: tuple, value: list, now: float) -> None:
-    """Insert into the candle cache, evicting expired entries and capping size."""
+def _candle_cache_put(key: tuple, value: list) -> None:
+    """Insert into the candle cache, evicting expired entries and capping size.
+
+    The stamp is taken here, at insert time, not at the start of the request:
+    a slow upstream fetch would otherwise write an entry already aged by its
+    own duration, and a fetch longer than the TTL would cache nothing at all.
+    """
+    now = time.monotonic()
     expired = [
         k for k, (ts, _) in _candle_cache.items() if now - ts >= _CANDLE_CACHE_TTL
     ]
@@ -549,7 +555,7 @@ async def get_candles(
             pool_address,
         ),
     )
-    _candle_cache_put(cache_key, candles, now)
+    _candle_cache_put(cache_key, candles)
     return candles
 
 
