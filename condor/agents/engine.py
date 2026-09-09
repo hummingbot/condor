@@ -1115,14 +1115,16 @@ class TickEngine:
         Falls back to the subject's accessible servers, as before, so a run
         with no server configured still works.
         """
-        from config_manager import get_config_manager, get_effective_server
+        from config_manager import (
+            get_config_manager,
+            get_effective_server,
+            may_use_stored_server,
+        )
 
         cm = get_config_manager()
 
         def usable(name: str | None) -> bool:
-            return bool(name and cm.get_server(name)) and cm.has_server_access(
-                self.user_id, name
-            )
+            return may_use_stored_server(cm, self.user_id, name)
 
         server_name = self.config.get("server_name")
         if not usable(server_name):

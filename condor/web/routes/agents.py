@@ -931,26 +931,16 @@ def _strategy_principal(strategy, user: WebUser) -> int:
 def _may_use_strategy_server(server_name: str, principal: int) -> bool:
     """Whether ``principal`` may turn ``server_name`` into credentials.
 
-    Existence *and* reach, in that order of importance: a stored name is not a
-    capability. It was written by whoever created the strategy, it is read now
-    by somebody else, and a share can be withdrawn long after either happened
-    (SEC-334). The level is the TRADER floor ``check_server_access`` applies to
-    every server-scoped web call.
-
-    The existence check is not redundant with the access one:
-    ``has_server_access`` answers True for an admin on an arbitrary string, so
-    without it a name that resolves to nothing today would be honoured the
-    moment a server is created under it — the same reasoning spelled out for
-    SEC-164 in ``_start``.
+    The stored-name predicate (SEC-334), which lives on the ConfigManager
+    beside ``has_server_access`` because four other callers — the tick engine,
+    session and toolset resolvers, and ``conversations.py`` — need the same
+    rule and cannot import the web layer (ARCH-587). The level it applies is
+    the TRADER floor ``check_server_access`` applies to every server-scoped web
+    call.
     """
-    from config_manager import ServerPermission, get_config_manager
+    from config_manager import get_config_manager, may_use_stored_server
 
-    if not server_name:
-        return False
-    cm = get_config_manager()
-    return bool(cm.get_server(server_name)) and cm.has_server_access(
-        principal, server_name, ServerPermission.TRADER
-    )
+    return may_use_stored_server(get_config_manager(), principal, server_name)
 
 
 async def _get_client_for_strategy(

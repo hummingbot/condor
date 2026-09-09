@@ -311,6 +311,7 @@ def build_mcp_servers_for_session(
         ServerPermission,
         get_config_manager,
         get_effective_server,
+        may_use_stored_server,
     )
 
     cm = get_config_manager()
@@ -330,9 +331,7 @@ def build_mcp_servers_for_session(
     # is always ``user_id``, the authenticated owner of the run; the same
     # predicate guards TickEngine._resolve_server.
     def usable(name: str | None) -> bool:
-        return bool(name and cm.get_server(name)) and cm.has_server_access(
-            user_id, name
-        )
+        return may_use_stored_server(cm, user_id, name)
 
     def candidates():
         # Lazy on purpose: resolving the chat default writes back into

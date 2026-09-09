@@ -775,15 +775,17 @@ async def _spawn_session(
         # *and* reach, subjected on the run's own principal — the same id the
         # MCP toolset is built for, so the label and the credentials downstream
         # can never disagree about who this session belongs to.
-        from config_manager import get_config_manager, get_effective_server
+        from config_manager import (
+            get_config_manager,
+            get_effective_server,
+            may_use_stored_server,
+        )
 
         cm = get_config_manager()
         subject_id, _ = spec.effective_ids()
 
         def usable(name: str | None) -> bool:
-            return bool(name and cm.get_server(name)) and cm.has_server_access(
-                subject_id, name
-            )
+            return may_use_stored_server(cm, subject_id, name)
 
         resolved_server = spec.server_name
         if not usable(resolved_server):

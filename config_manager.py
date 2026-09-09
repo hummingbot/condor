@@ -1396,6 +1396,42 @@ def get_config_manager() -> ConfigManager:
     return ConfigManager.instance()
 
 
+def may_use_stored_server(cm, user_id: int, server_name: Optional[str]) -> bool:
+    """Whether ``user_id`` may turn a **stored** ``server_name`` into credentials.
+
+    Existence *and* reach, in that order of importance: a stored name is not a
+    capability. It was written earlier — by whoever created the strategy,
+    conversation, agent or session, often from an unvalidated request body — it
+    is read now by somebody else, and a share can be withdrawn long after
+    either happened.
+
+    The existence half is not redundant with the access half:
+    ``has_server_access`` answers True for an admin on an arbitrary string, so
+    without it a name that resolves to nothing today would be honoured the
+    moment a server is created under it. That is the SEC-164 shape, and it is
+    why SEC-178, SEC-333 and SEC-334 each landed another hand-written copy of
+    these four lines — five in all, until ARCH-587 gave them one home.
+
+    The level is the TRADER floor ``check_server_access`` applies to every
+    server-scoped web call; a caller needing OWNER layers ``require_owner`` on
+    top, as it already does over that floor.
+
+    Lives here rather than in ``condor/web/auth.py`` beside
+    ``check_server_access`` because three of the five callers — the tick
+    engine, the session resolver and the toolset builder — sit below the web
+    layer and cannot import from it without inverting the layering. ``cm`` is
+    passed in rather than resolved, matching ``require_owner``: every caller
+    already holds the manager it means.
+
+    ``check_server_access`` remains the reach-only line for a name the *caller*
+    just supplied and a route is about to act on. This is the line for a name
+    the caller merely inherited.
+    """
+    if not server_name or not cm.get_server(server_name):
+        return False
+    return cm.has_server_access(user_id, server_name)
+
+
 def get_effective_server(chat_id: int, user_data: dict = None) -> str | None:
     """Get the effective default server for a chat, checking both user_data and config.yml.
 

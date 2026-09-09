@@ -30,7 +30,7 @@ from condor.runtime.conversations import ConversationIdError, ConversationMeta
 from condor.web.auth import get_current_user
 from condor.web.models import WebUser
 from condor.web.routes.agents import DeploymentRow
-from config_manager import get_config_manager
+from config_manager import get_config_manager, may_use_stored_server
 
 log = logging.getLogger(__name__)
 
@@ -391,9 +391,7 @@ async def _client_for(meta: ConversationMeta, subject_id: int):
     if not meta.server_name:
         return None
     cm = get_config_manager()
-    if not cm.get_server(meta.server_name) or not cm.has_server_access(
-        subject_id, meta.server_name
-    ):
+    if not may_use_stored_server(cm, subject_id, meta.server_name):
         log.warning(
             "deployments: %s cannot reach server %s; listing without money",
             subject_id,
