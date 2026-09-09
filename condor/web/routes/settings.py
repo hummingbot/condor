@@ -144,6 +144,14 @@ async def set_default_server(name: str, user: WebUser = Depends(get_current_user
 
 # ── Gateway ──
 
+#: Last `running` state observed per server, so `gateway_status` can detect the
+#: false → true transition — the only moment Gateway can actually answer
+#: `list_networks()`, which decides VENUES' `clmm_lp` trait and half of its
+#: `credentialed` trait (condor/fetchers/connectors.py:47, CORR-614). Invalidating
+#: on `gateway_start`/`gateway_restart`'s 200 instead would refetch mid-boot and
+#: cache a gateway-less answer for a fresh 600s.
+_gateway_was_running: dict[str, bool] = {}
+
 
 @router.get("/gateway/status")
 async def gateway_status(
@@ -162,8 +170,12 @@ async def gateway_status(
             result["image"] = info.get("image", None)
             result["created_at"] = info.get("created", info.get("created_at", None))
             result["container_status"] = info.get("status", None)
+        if is_running and not _gateway_was_running.get(server, False):
+            get_server_data_service().invalidate(server, ServerDataType.VENUES)
+        _gateway_was_running[server] = is_running
         return result
     except Exception:
+        _gateway_was_running[server] = False
         return {"running": False, "info": None}
 
 
@@ -216,6 +228,11 @@ async def gateway_start(
     # host. That is the owner's decision, not a shared trader's.
     _require_owner(cm, user.id, server)
     client = await _get_client(cm, server)
+    # Deliberately does not invalidate VENUES here: this returns right after a
+    # detached `containers.run` with no readiness wait, so a refetch triggered
+    # now lands mid-boot, `list_networks` 503s, and `fetch_venues` would cache
+    # a gateway-less list for a fresh 600s. `gateway_status` invalidates once
+    # Gateway is actually observed running (CORR-614).
     try:
         result = await client.gateway.start(
             {
@@ -241,10 +258,14 @@ async def gateway_stop(
     client = await _get_client(cm, server)
     try:
         result = await client.gateway.stop()
-        return {"stopped": True, "result": result}
     except Exception as e:
         logger.exception("Failed to stop gateway on '%s'", server)
         raise upstream_error("Failed to stop gateway", e)
+    # Outside the try: the stop already succeeded — `container.stop()` blocks,
+    # so the new answer (no venues) is already true — and an invalidation
+    # error here must not be reported as a failed stop (CORR-614).
+    get_server_data_service().invalidate(server, ServerDataType.VENUES)
+    return {"stopped": True, "result": result}
 
 
 @router.post("/gateway/restart")
@@ -256,6 +277,8 @@ async def gateway_restart(
     # A restart drops in-flight DEX orders for everyone on the server.
     _require_owner(cm, user.id, server)
     client = await _get_client(cm, server)
+    # Same reasoning as gateway_start: no invalidation here, `gateway_status`
+    # catches the real transition once the container is back up (CORR-614).
     try:
         result = await client.gateway.restart()
         return {"restarted": True, "result": result}
