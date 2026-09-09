@@ -97,3 +97,27 @@ def _isolated_runtime_root(tmp_path, monkeypatch):
     monkeypatch.setenv(paths.AGENTS_ROOT_ENV, str(tmp_path / "agents"))
     monkeypatch.setenv(paths.STOCK_AGENTS_ROOT_ENV, str(tmp_path / "stock-agents"))
     monkeypatch.setenv(paths.REPORTS_DIR_ENV, str(tmp_path / "reports"))
+
+
+@pytest.fixture
+def ws_access_granted(monkeypatch):
+    """Let every WS connection reach every server, for the duration of a test.
+
+    Since SEC-592 ``WebSocketManager.broadcast`` re-reads the subscriber's
+    server access on every frame, so that revoking a share takes effect on an
+    open socket instead of at the next tab reload. A module whose
+    ``_Connection`` is a bare stand-in (``user_id=1``, no entry in any config)
+    would otherwise have its subscription revoked mid-test. These modules
+    exercise the fan-out and the stream lifecycle, not the gate — the gate has
+    its own module, ``test_ws_broadcast_access_revocation``.
+    """
+    import config_manager
+
+    class _PermissiveCM:
+        def get_user_role(self, user_id):
+            return config_manager.UserRole.USER
+
+        def has_server_access(self, *_args, **_kwargs):
+            return True
+
+    monkeypatch.setattr(config_manager, "get_config_manager", lambda: _PermissiveCM())
