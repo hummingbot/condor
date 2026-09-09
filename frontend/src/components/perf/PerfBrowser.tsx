@@ -835,6 +835,33 @@ export function PerfBrowser({
   }, [runs]);
 
   /**
+   * The instant a terminated fold reaches back to, hoisted out of `leavesFor`
+   * and quantised to the hour (PERF-339).
+   *
+   * The clock above ticks once a minute so that `totals` divides by a runtime
+   * that is not stale. But the window edge is the *only* thing in the leaf
+   * pipeline that reads it — the running branch never asks the time at all —
+   * and while the cutoff was computed inside the callback, `now` was one of
+   * the callback's dependencies, so once a minute `leavesFor` got a new
+   * identity and `rawLeaves` → `leaves` → `tree` → `nodes` → `scope` and every
+   * fold hanging off them were rebuilt from scratch, in both populations, for
+   * an answer that is identical unless a record crossed the edge in that
+   * minute. `ScopeRow`'s per-row `foldLeaves` memos, keyed on `node.leaves`,
+   * missed with them.
+   *
+   * Held to the hour so the edge still advances on its own — a window called
+   * "the last week" is never more than an hour wider than a week — while the
+   * pipeline behind it is rebuilt sixty times less often to do it. Nothing
+   * that reports elapsed time reads this: `totals`, `ownerLines`, the
+   * breakdown spines and `ScopeRow` all keep taking `now` itself, so every
+   * runtime and rate on screen still moves each minute.
+   */
+  const windowCutoff = useMemo(() => {
+    const days = PERIODS[period];
+    return days > 0 ? Math.floor(now / 3_600_000) * 3_600_000 - days * 86_400_000 : 0;
+  }, [period, now]);
+
+  /**
    * What is in scope, which is the *only* thing the population toggle changes.
    *
    * Running is the live fleet: every controller, with the executors currently
@@ -894,15 +921,13 @@ export function PerfBrowser({
         // The window applies to what has finished, and is measured from each
         // record's *end*: a period called "the last week" is the trading that
         // stopped in it, not the trading that started in it.
-        const days = PERIODS[period];
-        const cutoff = days > 0 ? now - days * 86_400_000 : 0;
         for (const ex of executors) {
           if (isExecutorActive(ex.status)) continue;
           const started = ex.timestamp > 0 ? toMs(ex.timestamp) : null;
           const bot = closedBotOf(ex, started);
           const att = agentOf(bot, ex.controller_id);
           const leaf = leafFromExecutor(ex, bot, att.runKey, att.how);
-          if (cutoff && leaf.endedAt !== null && leaf.endedAt < cutoff) continue;
+          if (windowCutoff && leaf.endedAt !== null && leaf.endedAt < windowCutoff) continue;
           all.push(leaf);
         }
         // The controllers those runs left behind. This is the spine of the
@@ -919,7 +944,7 @@ export function PerfBrowser({
             att.runKey,
             att.how,
           );
-          if (cutoff && leaf.endedAt !== null && leaf.endedAt < cutoff) continue;
+          if (windowCutoff && leaf.endedAt !== null && leaf.endedAt < windowCutoff) continue;
           all.push(leaf);
         }
       }
@@ -935,8 +960,7 @@ export function PerfBrowser({
       attribute,
       owners,
       deeds,
-      period,
-      now,
+      windowCutoff,
     ],
   );
 
