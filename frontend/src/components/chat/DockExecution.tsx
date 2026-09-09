@@ -696,13 +696,22 @@ function ControllerRow({
   const scope = controllerNodeId(leaf) ?? row.id;
   const stopped = leaf.status === "stopped";
 
+  /** The row said in full — its cell's tooltip, and its accessible name. */
+  const described = `${leaf.label} on ${leaf.bot}${stopped ? " — paused" : ""}`;
+
   return (
     <tr
       data-controller-row
       data-paused={stopped ? "" : undefined}
       role="button"
       tabIndex={0}
-      title={`${leaf.label} on ${leaf.bot}${stopped ? " — paused" : ""}`}
+      // Named rather than titled. A `title` here was a tooltip the browser
+      // anchored to the *row* — and a focusable `<tr>` inside a scrolled table
+      // is the one box Chrome gets wrong: clicking a row put a wrapped bubble
+      // up at the table's top corner, hundreds of pixels from what it
+      // described. The name is what a `role="button"` actually needs; the
+      // tooltip belongs to the cell that truncates, one line down.
+      aria-label={described}
       onClick={() => onOpen(scope)}
       onKeyDown={(e) => {
         if (e.key !== "Enter" && e.key !== " ") return;
@@ -718,10 +727,11 @@ function ControllerRow({
     >
       {/* The column that absorbs the slack, and the only one allowed to
           truncate: two rows under the same bot are told apart by nothing else,
-          so it gets every pixel the numbers do not need — and the row's `title`
+          so it gets every pixel the numbers do not need — and its own `title`
           says it in full when even that is not enough. It is indented by its
           depth, which is what makes the nesting readable without a rule. */}
       <td
+        title={described}
         className="truncate py-0.5 pr-1.5"
         style={{ paddingLeft: 12 + row.depth * 10 }}
       >
