@@ -244,6 +244,68 @@ const UNOWNED: Attribution = { runKey: "", how: "none" };
 export const DEED_TITLE = "attributed by a recorded deed, not by name";
 
 /**
+ * The rule of {@link attributionOf}, with the owner list already prepared.
+ *
+ * Ask a fold for this once and call it per record; ask {@link attributionOf}
+ * for a single answer.
+ */
+export type Attributor = (botName: string, controllerId?: string) => Attribution;
+
+/**
+ * {@link attributionOf} with its loop-invariant half hoisted out (PERF-331).
+ *
+ * `owners` does not change while a population is being folded, but the rule
+ * asks the same two questions of it per record: an ordering by namespace
+ * length, and whether any owner's `agentIds` contains a tag. Both were paid per
+ * record — an array copy, a sort, and an `Array.includes` scan across every
+ * owner — inside loops that run over every executor the fleet has ever had, and
+ * re-run whenever the executors socket frame lands. So the preparation happens
+ * here, once, and the closure below does the matching and nothing else.
+ *
+ * **The answers are identical, not merely equivalent.** The comparator, the
+ * array it sorts and the sort's stability are the same, so `byLength` is the
+ * same order the per-record sort produced; and the id map is filled in owner
+ * order keeping the first writer, which is the owner the linear scan in
+ * {@link agentOfControllerId} returned. The rule order — namespace, declared,
+ * controller-id tag, deed chain — is unchanged.
+ */
+export function attributionIndex(
+  owners: FleetOwner[],
+  deeds: DeedIndex | null | undefined,
+): Attributor {
+  const byLength = [...owners].sort((a, b) => b.namespace.length - a.namespace.length);
+  // First writer wins, mirroring the first-match linear scan it replaces.
+  const runByAgentId = new Map<string, string>();
+  for (const owner of owners) {
+    for (const id of owner.agentIds) {
+      if (!runByAgentId.has(id)) runByAgentId.set(id, owner.runKey);
+    }
+  }
+  const bots = deeds?.bots;
+  return (botName: string, controllerId: string = ""): Attribution => {
+    const name = stripDeploySuffix((botName || "").trim());
+    if (name) {
+      for (const owner of byLength) {
+        if (inNamespace(name, owner.namespace)) return { runKey: owner.runKey, how: "namespace" };
+      }
+      for (const owner of byLength) {
+        if (owner.declaredBots.some((declared) => inNamespace(name, declared))) {
+          return { runKey: owner.runKey, how: "declared" };
+        }
+      }
+    }
+    const id = (controllerId || "").trim();
+    const tagged = id ? (runByAgentId.get(id) ?? "") : "";
+    if (tagged) return { runKey: tagged, how: "namespace" };
+    for (const candidate of deployNameChain(botName)) {
+      const deed = bots?.[candidate];
+      if (deed) return { runKey: deed.runKey, how: "deed" };
+    }
+    return UNOWNED;
+  };
+}
+
+/**
  * The run that owns this record, and how we know — namespace, declared, deed.
  *
  * **The order is the whole rule.** Both enforced rules are tried before the
@@ -255,6 +317,9 @@ export const DEED_TITLE = "attributed by a recorded deed, not by name";
  * The deed lookup is last and cheapest: one object lookup per name in the
  * bot's deploy chain (see {@link deployNameChain}), and a chain is two names long
  * on every bot that was deployed once.
+ *
+ * One record, one index: a caller with a loop wants {@link attributionIndex}
+ * instead, which is where the rule now lives.
  */
 export function attributionOf(
   owners: FleetOwner[],
@@ -262,25 +327,7 @@ export function attributionOf(
   botName: string,
   controllerId: string = "",
 ): Attribution {
-  const name = stripDeploySuffix((botName || "").trim());
-  if (name) {
-    const byLength = [...owners].sort((a, b) => b.namespace.length - a.namespace.length);
-    for (const owner of byLength) {
-      if (inNamespace(name, owner.namespace)) return { runKey: owner.runKey, how: "namespace" };
-    }
-    for (const owner of byLength) {
-      if (owner.declaredBots.some((declared) => inNamespace(name, declared))) {
-        return { runKey: owner.runKey, how: "declared" };
-      }
-    }
-  }
-  const tagged = agentOfControllerId(owners, controllerId);
-  if (tagged) return { runKey: tagged, how: "namespace" };
-  for (const candidate of deployNameChain(botName)) {
-    const deed = deeds?.bots?.[candidate];
-    if (deed) return { runKey: deed.runKey, how: "deed" };
-  }
-  return UNOWNED;
+  return attributionIndex(owners, deeds)(botName, controllerId);
 }
 
 /**

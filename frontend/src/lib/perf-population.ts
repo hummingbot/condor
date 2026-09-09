@@ -14,7 +14,7 @@
 //
 // Nothing here fetches and nothing here renders (the ARCH-300 split).
 
-import { attributionOf, type DeedIndex, type FleetOwner } from "@/lib/agent-attribution";
+import { attributionIndex, type DeedIndex, type FleetOwner } from "@/lib/agent-attribution";
 import type { ControllerInfo, ExecutorInfo } from "@/lib/api";
 import { isExecutorActive } from "@/lib/formatters";
 import {
@@ -91,14 +91,18 @@ export function runningLeaves({
   botByController?: Map<string, string | null>;
 }): PerfLeaf[] {
   const all: PerfLeaf[] = [];
+  // Prepared once for the whole fold, not once per record: `owners` cannot
+  // change while this runs, and both loops below ask it the same two
+  // loop-invariant questions (PERF-331).
+  const agentOf = attributionIndex(owners, deeds);
   for (const c of controllers) {
-    const att = attributionOf(owners, deeds, c.bot_name, "");
+    const att = agentOf(c.bot_name, "");
     all.push(leafFromController(c, att.runKey, att.how));
   }
   for (const ex of executors) {
     if (!isExecutorActive(ex.status)) continue;
     const bot = botByController.get(ex.controller_id) ?? UNATTACHED_BOT;
-    const att = attributionOf(owners, deeds, bot, ex.controller_id);
+    const att = agentOf(bot, ex.controller_id);
     all.push(leafFromExecutor(ex, bot, att.runKey, att.how));
   }
   return all;

@@ -120,7 +120,7 @@ import { dropDeletedRunQueries } from "@/lib/run-deletion";
 import type { ConvertFn } from "@/lib/rates";
 import { useViewFacts } from "@/lib/viewFacts";
 import {
-  attributionOf,
+  attributionIndex,
   loopFacts,
   loopStatus,
   ownerOf,
@@ -860,9 +860,12 @@ export function PerfBrowser({
        * executor working under one inherits that answer, so the `controller_id`
        * fallback is left to the executor nobody claims — which is exactly the
        * agent-created one, whose `controller_id` *is* its session's agent id.
+       *
+       * Built once per fold rather than per record (PERF-331): the owner list
+       * is fixed for the whole call, and the terminated population below walks
+       * every executor the fleet has ever had.
        */
-      const agentOf = (bot: string, controllerId: string) =>
-        attributionOf(owners, deeds, bot, controllerId);
+      const agentOf = attributionIndex(owners, deeds);
       /**
        * The bot a *closed* executor hung under, by the run that opened it.
        *
