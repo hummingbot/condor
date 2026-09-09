@@ -23,13 +23,13 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 from condor import paths
+from condor.agents.attribution import DeploymentRow, build_deployments
 from condor.runtime import attachments
 from condor.runtime import client as runtime
 from condor.runtime import conversations
 from condor.runtime.conversations import ConversationIdError, ConversationMeta
 from condor.web.auth import get_current_user
 from condor.web.models import WebUser
-from condor.web.routes.agents import DeploymentRow
 from config_manager import get_config_manager, may_use_stored_server
 
 log = logging.getLogger(__name__)
@@ -316,7 +316,6 @@ async def get_conversation_deployments(
     from condor.agents.deeds import attribution_tag, for_conversation
     from condor.agents.ownership import read_owned
     from condor.agents.performance import AgentPerformance, fetch_agent_performance
-    from condor.web.routes.agents import build_deployments
 
     owner_id = _owner(user, user_id)
     meta = _meta_or_404(owner_id, conversation_id)

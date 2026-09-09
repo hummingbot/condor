@@ -366,7 +366,7 @@ def test_the_existing_readers_work_on_a_conversation_with_no_changes():
     """
     from types import SimpleNamespace
 
-    from condor.web.routes.agents import build_deployments
+    from condor.agents.attribution import build_deployments
 
     owner = deeds.for_conversation(USER, "conv1")
     deeds.record_deeds(owner, _deploy_calls("pmm-king-btcbrl"))
