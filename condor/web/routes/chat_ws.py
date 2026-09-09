@@ -13,6 +13,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
 
+from condor.asyncutil import TaskSet
 from condor.llm.openrouter_models import fetch_models
 from condor.llm.options import DEFAULT_AGENT
 from condor.notifications import Notification, register_push_sink
@@ -436,17 +437,24 @@ async def chat_websocket(ws: WebSocket, token: str | None = Query(default=None))
     sessions = await _get_user_sessions(user_id)
     await _send(ws, {"event": "sessions_list", "sessions": sessions})
 
-    # Background tasks so long-running operations don't block the receive loop
-    bg_tasks: set[asyncio.Task] = set()
+    # Background tasks so long-running operations don't block the receive loop.
+    #
+    # Tracked by the shared helper rather than by a hand-rolled set (CORR-583):
+    # the old tracker attached only ``discard``, so nobody ever read the task's
+    # exception and a handler that raised — a disk error minting a conversation,
+    # a dead subprocess on abort — surfaced only as asyncio's GC-time "Task
+    # exception was never retrieved", on no logger and naming no action. TaskSet
+    # logs it here, named by the action that failed. Cancellation is not a
+    # failure and stays silent, which is what the disconnect below does to every
+    # task that is not a turn.
+    bg_tasks = TaskSet(log, f"Chat WS handler %s failed for user {user_id}: %s")
     # The subset of those that are a *turn*. A turn is the one piece of work
     # here that belongs to the conversation rather than to this connection, so
     # it is the one thing a disconnect must not cancel.
     turn_tasks: set[asyncio.Task] = set()
 
-    def _run_bg(coro, *, is_turn: bool = False):
-        task = asyncio.create_task(coro)
-        bg_tasks.add(task)
-        task.add_done_callback(bg_tasks.discard)
+    def _run_bg(coro, action: str, *, is_turn: bool = False):
+        task = bg_tasks.track(asyncio.create_task(coro), action)
         if is_turn:
             turn_tasks.add(task)
             task.add_done_callback(turn_tasks.discard)
@@ -463,20 +471,20 @@ async def chat_websocket(ws: WebSocket, token: str | None = Query(default=None))
             action = msg.get("action")
 
             if action == "start_session":
-                _run_bg(_handle_start_session(ws, user_id, msg))
+                _run_bg(_handle_start_session(ws, user_id, msg), action)
             elif action == "resume_conversation":
-                _run_bg(_handle_resume_conversation(ws, user_id, msg))
+                _run_bg(_handle_resume_conversation(ws, user_id, msg), action)
             elif action == "send_message":
-                _run_bg(_handle_send_message(ws, user_id, msg), is_turn=True)
+                _run_bg(_handle_send_message(ws, user_id, msg), action, is_turn=True)
             elif action == "destroy_session":
-                _run_bg(_handle_destroy_session(ws, user_id, msg))
+                _run_bg(_handle_destroy_session(ws, user_id, msg), action)
             elif action == "list_sessions":
                 sessions = await _get_user_sessions(user_id)
                 await _send(ws, {"event": "sessions_list", "sessions": sessions})
             elif action == "resolve_permission":
                 await _handle_resolve_permission(user_id, msg)
             elif action == "abort_prompt":
-                _run_bg(_handle_abort_prompt(ws, user_id, msg))
+                _run_bg(_handle_abort_prompt(ws, user_id, msg), action)
             else:
                 await _send(
                     ws, {"event": "error", "message": f"Unknown action: {action}"}
