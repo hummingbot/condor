@@ -7,6 +7,8 @@ import json
 import logging
 from typing import Any, Callable
 
+from condor.asyncutil import TaskSet
+
 log = logging.getLogger(__name__)
 
 
@@ -48,6 +50,10 @@ class JSONRPCPeer:
         # loop swept the pending table -- fails with the same real error
         # instead of parking on a future nobody will ever settle (CORR-329).
         self._failure: BaseException | None = None
+        # Reverse-RPC handlers that suspend (``session/request_permission``
+        # waits on a human) run here rather than inline in the caller's read
+        # loop, which must get back to ``readline()`` immediately (PERF-330).
+        self._handler_tasks = TaskSet(log, "Reverse-RPC handler %s crashed: %s")
 
     def register_handler(self, method: str, handler: Callable) -> None:
         self._handlers[method] = handler
@@ -143,6 +149,27 @@ class JSONRPCPeer:
         await writer.drain()
         log.debug("-> %s (notification)", method)
 
+    async def send_response(
+        self,
+        msg_id: Any,
+        body: dict[str, Any],
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        """Write one JSON-RPC response frame for ``msg_id``.
+
+        ``body`` is the ``{"result": …}`` or ``{"error": …}`` member. The
+        response seam, sibling of :meth:`begin_request`: a handler that answers
+        from its own task (see :meth:`handle_line`) no longer has the read
+        loop's inlined write to fall back on, and all three answer sites — a
+        result, a handler failure, an unknown method — frame it here.
+
+        One ``write`` per frame, so two answers racing on the same writer
+        interleave whole lines and never halves of one.
+        """
+        resp = {"jsonrpc": "2.0", **body, "id": msg_id}
+        writer.write((json.dumps(resp) + "\n").encode())
+        await writer.drain()
+
     async def handle_line(self, line: str, writer: asyncio.StreamWriter) -> None:
         """Process one line of JSON from the subprocess stdout."""
         try:
@@ -184,41 +211,88 @@ class JSONRPCPeer:
         if handler is None:
             log.warning("No handler for reverse-RPC method: %s", method)
             if msg_id is not None:
-                resp = {
-                    "jsonrpc": "2.0",
-                    "error": {
-                        "code": METHOD_NOT_FOUND,
-                        "message": f"Method not found: {method}",
+                await self.send_response(
+                    msg_id,
+                    {
+                        "error": {
+                            "code": METHOD_NOT_FOUND,
+                            "message": f"Method not found: {method}",
+                        }
                     },
-                    "id": msg_id,
-                }
-                writer.write((json.dumps(resp) + "\n").encode())
-                await writer.drain()
+                    writer,
+                )
+            return
+
+        # An async handler is dispatched as its own task and we return to the
+        # caller's ``readline()`` at once (PERF-330). Awaiting it here made the
+        # whole stdout stream hostage to the slowest handler:
+        # ``session/request_permission`` waits on a human, so for the two
+        # minutes a confirmation dialog was open nothing at all was read from
+        # the child -- a second dangerous call in the same turn could not even
+        # raise its prompt, notifications behind it went unseen, the answer to
+        # our own ``session/cancel`` could not arrive, and the pipe eventually
+        # backpressured the agent process itself. JSON-RPC correlates answers
+        # by ``id``, so replying out of order is legal.
+        #
+        # Sync handlers stay inline: ``session/update`` is one, and the order
+        # it feeds the event queue in is the order of the turn's own chunks.
+        if asyncio.iscoroutinefunction(handler):
+            self._handler_tasks.track(
+                asyncio.get_event_loop().create_task(
+                    self._run_handler(method, handler, params, msg_id, writer)
+                ),
+                label=method,
+            )
             return
 
         try:
-            result = (
-                handler(**params)
-                if not asyncio.iscoroutinefunction(handler)
-                else await handler(**params)
-            )
+            result = handler(**params)
         except Exception as e:
             log.exception("Handler error for %s", method)
             if msg_id is not None:
-                resp = {
-                    "jsonrpc": "2.0",
-                    "error": {"code": INTERNAL_ERROR, "message": str(e)},
-                    "id": msg_id,
-                }
-                writer.write((json.dumps(resp) + "\n").encode())
-                await writer.drain()
+                await self.send_response(
+                    msg_id,
+                    {"error": {"code": INTERNAL_ERROR, "message": str(e)}},
+                    writer,
+                )
             return
 
         # Send response only for requests (not notifications)
         if msg_id is not None:
-            resp = {"jsonrpc": "2.0", "result": result, "id": msg_id}
-            writer.write((json.dumps(resp) + "\n").encode())
-            await writer.drain()
+            await self.send_response(msg_id, {"result": result}, writer)
+
+    async def _run_handler(
+        self,
+        method: str,
+        handler: Callable,
+        params: dict[str, Any],
+        msg_id: Any,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        """Await one async reverse-RPC handler and answer it, off the read loop.
+
+        A handler that raises fails *its own* request and nothing else: the
+        error response goes out here, and the read loop that dispatched it is
+        long gone back to reading. Cancellation (teardown, see
+        :meth:`cancel_all`) is not a failure and sends nothing -- the writer is
+        on its way out with us.
+        """
+        try:
+            result = await handler(**params)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.exception("Handler error for %s", method)
+            if msg_id is not None:
+                await self.send_response(
+                    msg_id,
+                    {"error": {"code": INTERNAL_ERROR, "message": str(e)}},
+                    writer,
+                )
+            return
+
+        if msg_id is not None:
+            await self.send_response(msg_id, {"result": result}, writer)
 
     def cancel_all(self) -> None:
         """Cancel all pending futures (used during our own shutdown)."""
@@ -226,6 +300,10 @@ class JSONRPCPeer:
             if not future.done():
                 future.cancel()
         self._pending.clear()
+        # In-flight reverse-RPC handlers go too: a confirmation still waiting
+        # on a human outlives the subprocess otherwise, and asyncio would
+        # report it at GC time as "Task was destroyed but it is pending".
+        self._handler_tasks.cancel_all()
 
     def fail_all(self, exc: BaseException) -> None:
         """Settle every pending future with ``exc``: the connection is gone.
