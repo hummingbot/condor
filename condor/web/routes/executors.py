@@ -10,6 +10,7 @@ from condor.server_data_service import ServerDataType, get_server_data_service
 logger = logging.getLogger(__name__)
 
 
+from condor.asyncutil import SingleFlight
 from condor.fetchers.executors import EXECUTORS_POLL_MAX, MAX_EXECUTORS_FETCH
 from condor.fetchers.executors import extract_executors_list as _extract_executors_list
 from condor.fetchers.executors import fetch_all_executors, summarize_executors_by_quote
@@ -43,6 +44,15 @@ _PERIOD_TTLS: dict[str, int] = {"1D": 60, "1W": 300, "1M": 900}
 
 # (server, period) -> (computed_at, summary). Bounded by servers x periods.
 _summary_cache: dict[tuple[str, str], tuple[float, ExecutorPeriodSummary]] = {}
+
+# One executor walk per server at a time, shared by every concurrent caller
+# (PERF-580). The TTL cache above only helps a request that arrives *after* an
+# answer has landed; the KPI strip refetches on a 60s interval against a 60s TTL
+# for 1D, so two open tabs used to fire two concurrent walks of up to
+# MAX_EXECUTORS_FETCH / EXECUTORS_PAGE_SIZE sequential cursor pages each.
+# Keyed by server, not by (server, period): the walk is identical for all three
+# windows, which are filtered out of the same rows client-side.
+_summary_walks = SingleFlight()
 
 
 @router.get("/servers/{name}/executors", response_model=list[ExecutorInfo])
@@ -254,6 +264,37 @@ async def _usd_summary(
     )
 
 
+async def _walk_and_summarize(server: str, client) -> dict[str, ExecutorPeriodSummary]:
+    """Walk a server's executor history once and total *every* window from it.
+
+    The walk is the expensive part — up to ``MAX_EXECUTORS_FETCH /
+    EXECUTORS_PAGE_SIZE`` sequential cursor pages the SDS rate limiter never
+    sees — and it does not depend on the period: ``summarize_executors_by_quote``
+    filters on the executor's start timestamp client-side, so the 1M window's
+    rows are a strict superset of 1W's and 1D's. Computing the three totals in
+    one pass is therefore exactly the arithmetic the three separate requests
+    performed, over the same rows in the same order, and costs one walk instead
+    of three (PERF-580).
+
+    Each total is stamped into ``_summary_cache`` here, so the per-period TTLs
+    stay the read gate: a 1D request re-walks after 60s, but the 1W total it
+    also refreshed is still served from cache for its own 300s.
+    """
+    now = time.time()
+    executors = await fetch_all_executors(client)
+
+    summaries: dict[str, ExecutorPeriodSummary] = {}
+    for window_period, window in _PERIOD_SECONDS.items():
+        summary = await _usd_summary(
+            server,
+            window_period,
+            summarize_executors_by_quote(executors, now - window),
+        )
+        summaries[window_period] = summary
+        _summary_cache[(server, window_period)] = (now, summary)
+    return summaries
+
+
 @router.get("/servers/{name}/executors/summary", response_model=ExecutorPeriodSummary)
 async def executors_summary(
     name: str,
@@ -271,6 +312,11 @@ async def executors_summary(
     A period total belongs here, over the full history: this walks it with
     ``fetch_all_executors``, on demand and cached per period, leaving the 2s poll
     at its one request per tick.
+
+    The walk itself is shared (PERF-580). It is single-flighted per server, so
+    two tabs missing a cold cache at the same instant wait on one walk rather
+    than racing two, and one walk totals all three windows — switching the
+    strip's period no longer re-reads a history the previous period already had.
     """
     cm = get_config_manager()
 
@@ -290,16 +336,14 @@ async def executors_summary(
 
     client = await cm.get_client(name)
     try:
-        executors = await fetch_all_executors(client)
+        summaries = await _summary_walks.run(
+            name, lambda: _walk_and_summarize(name, client)
+        )
     except Exception as e:
         logger.exception("Failed to summarize executors for server %s", name)
         raise upstream_error("Failed to fetch executors", e)
 
-    summary = await _usd_summary(
-        name, period, summarize_executors_by_quote(executors, now - window)
-    )
-    _summary_cache[(name, period)] = (now, summary)
-    return summary
+    return summaries[period]
 
 
 async def _ensure_dex_tokens_listed(client, config: dict) -> None:
