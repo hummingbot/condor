@@ -4,6 +4,9 @@ Gateway formatters for the Hummingbot MCP server.
 
 from typing import Any
 
+from .base import format_number, format_timestamp, truncate_address
+from .table_builder import ColumnDef, TableBuilder
+
 
 def format_gateway_container_result(result: dict[str, Any]) -> str:
     """Format gateway container action results into a human-readable string."""
@@ -111,20 +114,68 @@ def format_gateway_config_result(result: dict[str, Any]) -> str:
     return f"Gateway Configuration Result: {result}"
 
 
+def _format_swap_amount(value: Any) -> str:
+    """Format a swap amount or price without K/M compaction."""
+    return format_number(value, decimals=4, compact=False)
+
+
+SWAP_SEARCH_COLUMNS = [
+    ColumnDef(
+        name="time",
+        key=["timestamp", "created_at"],
+        width=11,
+        formatter=format_timestamp,
+    ),
+    ColumnDef(name="connector", key="connector", width=14),
+    ColumnDef(name="network", key="network", width=19),
+    ColumnDef(name="pair", key="trading_pair", width=13),
+    ColumnDef(name="side", key="side", width=4),
+    ColumnDef(
+        name="in",
+        key="input_amount",
+        width=10,
+        align="right",
+        formatter=_format_swap_amount,
+    ),
+    ColumnDef(
+        name="out",
+        key="output_amount",
+        width=10,
+        align="right",
+        formatter=_format_swap_amount,
+    ),
+    ColumnDef(
+        name="price",
+        key="price",
+        width=10,
+        align="right",
+        formatter=_format_swap_amount,
+    ),
+    ColumnDef(name="status", key="status", width=9),
+    ColumnDef(
+        name="tx",
+        key="transaction_hash",
+        width=17,
+        formatter=lambda tx_hash: truncate_address(str(tx_hash)),
+    ),
+]
+
+
 def format_gateway_swap_result(action: str, result: dict[str, Any]) -> str:
     """Format gateway swap action results into a human-readable string."""
     if action == "search" and isinstance(result, dict):
         filters = result.get("filters", {})
         pagination = result.get("pagination", {})
-        swaps = result.get("result", {}).get("data", [])
+        swaps = result.get("result", {}).get("data", []) or []
 
-        return (
+        header = (
             f"Gateway Swaps Search Result:\n"
-            f"Total Swaps Found: {len(swaps)}\n"
+            f"Swaps Returned: {len(swaps)}\n"
             f"Limit: {pagination.get('limit', 'N/A')}, Offset: {pagination.get('offset', 'N/A')}\n"
-            f"Filters: {filters if filters else 'None'}\n\n"
-            f"Swaps: {swaps}"
+            f"Filters: {filters if filters else 'None'}"
         )
+        builder = TableBuilder(SWAP_SEARCH_COLUMNS, empty_message="No swaps found.")
+        return builder.build_with_title(swaps, header)
 
     return f"Gateway Swap Result: {result}"
 
