@@ -10,12 +10,28 @@
  * The production contract is the other half: one backfill per distinct set of
  * the effect's six dependencies, and no refetch when the props do not change.
  *
+ * The same double mount fires the chart-init effect twice in one tick, so
+ * `import("lightweight-charts")` is requested twice concurrently — and Vitest's
+ * mocker answers the stub to the first request and raw-imports the real library
+ * for the second. It is the concurrency, not StrictMode: two plain mounts in one
+ * `act()` split the same way, and neither a static nor an awaited warm-up import
+ * of the module changes it. The real `ChartWidget` then builds against a jsdom
+ * that has no 2D canvas and schedules a draw frame, which fired after teardown,
+ * outside every test, and exited the whole suite 1 with "2 unhandled errors"
+ * while every test reported green (CORR-360).
+ *
+ * So this file owns the two things the chart library needs and jsdom does not
+ * have: the frame queue — nothing runs unless we run it, and teardown proves no
+ * frame outlived the tree — and a 2D context. Whichever module answers the
+ * import, it can no longer leave anything behind.
+ *
  * @vitest-environment jsdom
  */
 
+import * as charts from "lightweight-charts";
 import { act, StrictMode, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 
 import { TradeChart } from "./TradeChart";
 
@@ -93,6 +109,27 @@ declare global {
   var IS_REACT_ACT_ENVIRONMENT: boolean;
 }
 
+/** The stub's factory, read back to prove the component got the stub. */
+const createChartStub = charts.createChart as unknown as Mock;
+
+/** Frames the render scheduled, so teardown can prove none outlive the tree. */
+const pendingFrames = new Map<number, FrameRequestCallback>();
+
+/**
+ * jsdom ships no canvas backend, and asking it for one only prints
+ * "Not implemented: HTMLCanvasElement's getContext()" and answers null — which a
+ * real chart widget dereferences. The calls just have to answer; this window
+ * belongs to this file alone, so it is patched once and never restored.
+ */
+HTMLCanvasElement.prototype.getContext = (() =>
+  new Proxy({} as Record<string, unknown>, {
+    get(target, prop) {
+      if (typeof prop !== "string") return undefined;
+      if (!(prop in target)) target[prop] = vi.fn(() => ({ width: 0 }));
+      return target[prop];
+    },
+  })) as unknown as typeof HTMLCanvasElement.prototype.getContext;
+
 let container: HTMLDivElement;
 let root: Root;
 
@@ -122,15 +159,45 @@ async function render(strict: boolean, extra: Partial<ComponentProps<typeof Trad
     await Promise.resolve();
     await Promise.resolve();
   });
+  // The chart's own dynamic import settles a few hops further out, so give the
+  // whole chain a macrotask: the chart is then built and read inside the test
+  // rather than somewhere after it.
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  // A single mount asks for the chart library once, so the stub is what must
+  // have answered — the module identity is a result here, not an assumption.
+  // The StrictMode path asks twice at once, which Vitest's mocker cannot serve
+  // (see the docblock); the doubles above are what make that harmless.
+  if (!strict) {
+    expect(createChartStub).toHaveBeenCalled();
+    expect(container.querySelector("canvas")).toBeNull();
+  }
 }
 
 beforeEach(() => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  globalThis.ResizeObserver = class {
-    observe() {}
-    unobserve() {}
-    disconnect() {}
-  } as unknown as typeof ResizeObserver;
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
+  );
+  // Own the frame queue instead of letting jsdom fire it off a timer: a frame
+  // that runs after its test is an exception belonging to no test at all.
+  let nextFrame = 1;
+  pendingFrames.clear();
+  vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
+    const id = nextFrame++;
+    pendingFrames.set(id, cb);
+    return id;
+  });
+  vi.stubGlobal("cancelAnimationFrame", (id: number) => {
+    pendingFrames.delete(id);
+  });
+  createChartStub.mockClear();
   store.mergeCandles.mockClear();
   store.setDuration.mockClear();
   apiState.getCandles.mockReset();
@@ -143,6 +210,12 @@ beforeEach(() => {
 afterEach(async () => {
   await act(async () => root.unmount());
   container.remove();
+  // Unmounting destroys the chart, which cancels its own frame, so the queue has
+  // to be empty. Drain it either way, then report what was still queued.
+  const queued = [...pendingFrames.keys()];
+  pendingFrames.clear();
+  expect(queued).toEqual([]);
+  vi.unstubAllGlobals();
   vi.useRealTimers();
 });
 
