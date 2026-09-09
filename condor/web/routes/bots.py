@@ -773,6 +773,11 @@ async def stop_controllers_endpoint(
             controller_names=body.controller_names,
         )
     except Exception as e:
+        # Nothing was stopped, so the kill switch will never flip and the overlay
+        # would show these controllers as "stopping" until the TTL expires —
+        # blocking a retry from the UI. Mirror stop_bot_endpoint and undo the mark.
+        for controller_id in body.controller_names:
+            clear_controller_stopping(name, bot_name, controller_id)
         logger.exception(
             "Failed to stop controllers on bot '%s' of '%s'", bot_name, name
         )
