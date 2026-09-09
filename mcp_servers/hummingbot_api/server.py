@@ -226,7 +226,9 @@ async def get_portfolio_overview(
        - Includes real-time fees and token amounts
     4. Active Orders - Currently open orders across all exchanges
 
-    NOTE: This only shows ACTIVE/OPEN positions. For historical data, use search_history() instead.
+    NOTE: This only shows ACTIVE/OPEN positions. For historical data, use
+    search_history(data_type="orders") — note that search_history's perp_positions
+    reads this same open book, not a closed-position history.
 
     Args:
         account_names: List of account names to filter by (optional). If empty, returns all accounts.
@@ -324,18 +326,22 @@ async def search_history(
 
     Data Types:
     - orders: Historical order data (filled, cancelled, failed)
-    - perp_positions: Perpetual positions (both open and closed)
+    - perp_positions: The CURRENT open perpetual book, NOT a history. The backend
+      has no closed-position endpoint, so there is no closed perp history to search;
+      get_portfolio_overview() returns the same positions. For a time-windowed
+      record of perp activity use data_type="orders".
     - clmm_positions: CLMM LP positions (both open and closed)
 
-    Common Filters (apply to all data types):
-        account_names: Filter by account names (optional)
-        connector_names: Filter by connector names (optional)
-        trading_pairs: Filter by trading pairs (optional)
-        status: Filter by status (optional, e.g., 'OPEN', 'CLOSED', 'FILLED', 'CANCELED')
-        start_time: Start timestamp in seconds (optional)
-        end_time: End timestamp in seconds (optional)
-        limit: Maximum number of results (default: 50, max: 1000)
-        offset: Pagination offset (default: 0)
+    Filters (only the ones listed for a data type are honoured; passing any other
+    filter raises an error instead of silently ignoring it):
+        account_names: All data types (optional)
+        connector_names: All data types (optional)
+        limit: All data types (default: 50, max: 1000)
+        trading_pairs: orders, clmm_positions (optional)
+        status: orders, clmm_positions (optional, e.g., 'FILLED', 'CANCELED')
+        start_time: orders only, timestamp in seconds (optional)
+        end_time: orders only, timestamp in seconds (optional)
+        offset: clmm_positions only, pagination offset (default: 0)
 
     CLMM-Specific Filters:
         network: Network filter for CLMM positions (optional)
@@ -344,7 +350,8 @@ async def search_history(
 
     Examples:
     - Search filled orders: search_history("orders", status="FILLED", limit=100)
-    - Search closed perp positions: search_history("perp_positions", status="CLOSED")
+    - Orders in a time window: search_history("orders", start_time=..., end_time=...)
+    - Current perp book: search_history("perp_positions", account_names=["master"])
     - Search all CLMM positions: search_history("clmm_positions", limit=100)
     """
     client = await hummingbot_client.get_client()

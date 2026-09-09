@@ -10,12 +10,52 @@ Provides access to historical data:
 import logging
 from typing import Any, Literal
 
+from mcp_servers.hummingbot_api.exceptions import ToolError
 from mcp_servers.hummingbot_api.hummingbot_client import HummingbotClient
 
 from . import gateway_clmm as gateway_clmm_tools
 from . import trading as trading_tools
 
 logger = logging.getLogger("hummingbot-mcp")
+
+
+# Filters that each data_type can actually forward to the backend. Anything else
+# in the shared signature is refused instead of being silently dropped.
+_UNSUPPORTED_FILTERS: dict[str, tuple[str, ...]] = {
+    # The trading router has no closed-position history endpoint: get_positions
+    # POSTs /trading/positions with only account_names/connector_names/limit.
+    # orders and clmm_positions forward their filters, so only the perp branch
+    # needs a guard. (The orders branch's offset pagination hint is CORR-569's.)
+    "perp_positions": ("trading_pairs", "status", "start_time", "end_time", "offset"),
+}
+
+_FILTER_ALTERNATIVES: dict[str, str] = {
+    "perp_positions": (
+        "perp_positions returns the CURRENT open book (the backend has no closed "
+        'position history endpoint). Use data_type="orders" for a time-windowed '
+        "history, or get_portfolio_overview() for the same open positions."
+    ),
+}
+
+
+def _reject_unsupported_filters(data_type: str, **filters: Any) -> None:
+    """Raise ToolError naming any filter the given data_type cannot honour.
+
+    ``offset`` is only a filter when it is non-zero, since it defaults to 0.
+    """
+    unsupported = _UNSUPPORTED_FILTERS.get(data_type, ())
+    # A falsy value (None, [], the default offset=0) means "not supplied".
+    supplied = [name for name in unsupported if filters.get(name)]
+    if not supplied:
+        return
+
+    names = ", ".join(supplied)
+    plural = "s" if len(supplied) > 1 else ""
+    raise ToolError(
+        f"search_history(data_type={data_type!r}) cannot filter by {names}: "
+        f"the parameter{plural} would be silently ignored. "
+        f"{_FILTER_ALTERNATIVES.get(data_type, '')}".strip()
+    )
 
 
 async def search_history(
@@ -44,27 +84,45 @@ async def search_history(
 
     Data Types:
     - orders: Historical order data (filled, cancelled, failed)
-    - perp_positions: Perpetual positions (both open and closed)
+    - perp_positions: The CURRENT open perpetual book. The backend has no closed
+      position history endpoint, so this cannot be filtered by pair, status or
+      time; use get_portfolio_overview() for the same data, or data_type="orders"
+      for a time-windowed history.
     - clmm_positions: CLMM LP positions (both open and closed)
 
     Args:
         client: Hummingbot client instance
         data_type: Type of historical data to search
-        account_names: Filter by account names (optional)
-        connector_names: Filter by connector names (optional)
-        trading_pairs: Filter by trading pairs (optional)
-        status: Filter by status (optional, e.g., 'OPEN', 'CLOSED', 'FILLED', 'CANCELED')
-        start_time: Start timestamp in seconds (optional)
-        end_time: End timestamp in seconds (optional)
-        limit: Maximum number of results (default: 50, max: 1000)
-        offset: Pagination offset (default: 0)
+        account_names: Filter by account names (all data types, optional)
+        connector_names: Filter by connector names (all data types, optional)
+        trading_pairs: Filter by trading pairs (orders, clmm_positions; optional)
+        status: Filter by status (orders, clmm_positions; optional, e.g., 'FILLED')
+        start_time: Start timestamp in seconds (orders only, optional)
+        end_time: End timestamp in seconds (orders only, optional)
+        limit: Maximum number of results (all data types, default: 50, max: 1000)
+        offset: Pagination offset (clmm_positions only, default: 0)
         network: Network filter for CLMM positions (optional)
         wallet_address: Wallet address filter for CLMM positions (optional)
         position_addresses: Specific position addresses for CLMM (optional)
 
     Returns:
         Dictionary containing search results with formatted output
+
+    Raises:
+        ToolError: If a filter is supplied that the chosen data_type cannot honour
     """
+    # Fail loudly rather than silently dropping filters the branch cannot apply.
+    # Raised before the try/except below, which would flatten it into a generic
+    # Exception, and before any request reaches the client.
+    _reject_unsupported_filters(
+        data_type,
+        trading_pairs=trading_pairs,
+        status=status,
+        start_time=start_time,
+        end_time=end_time,
+        offset=offset,
+    )
+
     try:
         # ============================================
         # ORDERS - Historical order data
@@ -101,7 +159,8 @@ async def search_history(
         # PERP POSITIONS - Perpetual positions
         # ============================================
         elif data_type == "perp_positions":
-            # Use existing trading_tools.get_positions function
+            # The backend exposes no closed-position history: this is the current
+            # open book. Unsupported filters were already refused above.
             result = await trading_tools.get_positions(
                 client=client,
                 account_names=account_names,
@@ -109,7 +168,10 @@ async def search_history(
                 limit=min(limit, 1000),
             )
 
-            formatted_output = f"Perpetual Positions History\n{'=' * 100}\n\n{result['positions_table']}"
+            formatted_output = (
+                f"Perpetual Positions (current open book)\n{'=' * 100}\n\n"
+                f"{result['positions_table']}"
+            )
 
             return {
                 "data_type": "perp_positions",
