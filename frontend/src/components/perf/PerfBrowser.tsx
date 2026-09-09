@@ -105,7 +105,11 @@ import {
   type GroupAxis,
 } from "@/lib/perf-grouping";
 import { GroupByPicker } from "@/components/perf/GroupByPicker";
-import { resolvePerfSeries, scopeInterval } from "@/lib/perf-history";
+import {
+  resolvePerfSeries,
+  scopeInterval,
+  type PerfSeriesResult,
+} from "@/lib/perf-history";
 import { chartNotice } from "@/lib/perf-notices";
 import { buildPositionRows, parseSide, type PositionRow } from "@/lib/perf-positions";
 import { groupSpine } from "@/components/agent/floor/floor";
@@ -194,6 +198,15 @@ const FLEET_SCOPE = "all";
 
 /** Held still, so an absent fleet map is not a new array on every render. */
 const EMPTY_OWNERS: FleetOwner[] = [];
+
+/**
+ * The series a splitting scope does not have.
+ *
+ * `unsupported` is `false` because nothing reads it: the flag exists so the
+ * chart's notice can say *why* a fallback was taken, and at a splitting scope
+ * neither the notice nor the chart it belongs to is rendered (PERF-338).
+ */
+const EMPTY_SERIES: PerfSeriesResult = { points: [], source: "none", unsupported: false };
 
 /**
  * How many finished runs are warmed when the reader switches to Terminated,
@@ -1869,6 +1882,14 @@ export function PerfBrowser({
 
   /** The controller-history candidate: what this scope drew before FEAT-087. */
   const controllerPoints = useMemo(() => {
+    // This scope splits, so the chart on screen is `OwnerPnlChart` (the JSX
+    // below tests `ownerChart` first) and this candidate is never read. It is
+    // also the *same fold*: `ownerSeries` already ran `aggregatePnlSeries` over
+    // the union of the children's spine keys, which `buildTree` guarantees
+    // partitions this scope's own — so computing it here re-folded the entire
+    // performance history on every WS frame and threw the answer away
+    // (PERF-338).
+    if (ownerChart) return [];
     // A *live* controller draws its own finer series (see `ControllerPnlChart`).
     // A finished one does not: its curve is already in the run's cached history,
     // over the run's real window rather than deploy-to-now, and folding it here
@@ -1907,7 +1928,7 @@ export function PerfBrowser({
     }
     return aggregatePnlSeries(snapshots, scopedKeys, scopedControllers, convert);
   }, [
-    activeCtrl, population, snapshots, scopedKeys, scopedControllers,
+    ownerChart, activeCtrl, population, snapshots, scopedKeys, scopedControllers,
     convert, runHistory, scopeRun, archiveOnlyController,
   ]);
 
@@ -1921,19 +1942,28 @@ export function PerfBrowser({
    */
   const series = useMemo(
     () =>
-      resolvePerfSeries({
-        snapshots: execHistory?.supported === false ? undefined : execHistory?.snapshots,
-        controllerPoints,
-        // Only the terminated population has closes to fold. A running scope
-        // whose executors have all closed is a contradiction the tree does not
-        // produce, and offering the fold there would draw a "closed outcomes"
-        // curve under a live controller.
-        outcomes: population === "terminated" ? scope.leaves : undefined,
-        supported: perfCapability?.supported,
-        convert,
-        cv,
-      }),
-    [execHistory, controllerPoints, population, scope, perfCapability, convert, cv],
+      // Same gate as `controllerPoints` above, and for the same reason: when
+      // this scope splits, neither `chartData` nor `notice` reaches the render.
+      // Stopping at the candidates would still leave `resolvePerfSeries` to
+      // fold `scope.leaves` through `executorSeries` in the terminated
+      // population — a second discarded walk. Nothing is resolved instead
+      // (PERF-338).
+      ownerChart
+        ? EMPTY_SERIES
+        : resolvePerfSeries({
+            snapshots:
+              execHistory?.supported === false ? undefined : execHistory?.snapshots,
+            controllerPoints,
+            // Only the terminated population has closes to fold. A running
+            // scope whose executors have all closed is a contradiction the tree
+            // does not produce, and offering the fold there would draw a
+            // "closed outcomes" curve under a live controller.
+            outcomes: population === "terminated" ? scope.leaves : undefined,
+            supported: perfCapability?.supported,
+            convert,
+            cv,
+          }),
+    [ownerChart, execHistory, controllerPoints, population, scope, perfCapability, convert, cv],
   );
   const chartData = series.points;
 
