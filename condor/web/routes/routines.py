@@ -133,7 +133,16 @@ def _authorized_instance(instance_id: str, user: WebUser) -> dict:
 
 @router.get("")
 async def list_routines(user: WebUser = Depends(get_current_user)):
-    """List all discovered routines with their fields."""
+    """List all discovered routines with their fields.
+
+    Deliberately every routine the install has, agent-prefixed ones included,
+    for any approved user (SEC-617). Routine *definitions* are install-wide
+    because the whole agent layer is: ``GET /agents`` lists them unscoped and
+    ``_strategy_principal`` in ``routes/agents.py`` records that agents and
+    strategies are one global store. The owner filter below reaches only the
+    ``report_count`` on each row — the per-user part of this response — exactly
+    as ``GET /reports`` scopes the same tally (SEC-593).
+    """
     store = get_routine_store()
     return store.list_routines(owner_id=report_owner_filter(user))
 
@@ -350,7 +359,17 @@ async def get_routine_source(
     routine_name: str,
     user: WebUser = Depends(get_current_user),
 ):
-    """Return the source code of a routine."""
+    """Return the source code of a routine.
+
+    Readable by any approved user, for every agent's routines as well as the
+    general and ``_shared`` libraries (SEC-617). That follows from routine
+    definitions being install-wide — see ``list_routines`` above and the
+    ``routine_store`` module docstring — and not from the confinement below,
+    which answers a different question: ``routine_source_roots()`` is a *path*
+    allowlist stopping ``..`` and symlink escapes out of the dirs discovery
+    reads, never an authorization check. Agent homes stay out of those roots,
+    so a journal or memory store next door is not in scope either way.
+    """
     store = get_routine_store()
     all_routines = store._discover_all()
     routine = all_routines.get(routine_name)

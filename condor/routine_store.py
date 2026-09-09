@@ -2,6 +2,27 @@
 
 Bridges Telegram handler and web API so both can see
 the same instances, schedule runs, and read results.
+
+**Routine definitions are install-wide, not per-user (SEC-617).** One Condor
+install is a single shared agent workspace, not a set of tenants: every
+approved user sees every agent (``GET /agents`` calls ``list_all()`` unscoped)
+and ``_strategy_principal`` in ``web/routes/agents.py`` states it outright —
+agents and their strategies "are a single global store, not partitioned by
+owner the way conversations and delegations are". So a routine's *definition* —
+its name, description, ``fields`` schema and source — is readable by any
+approved user, including the agent-prefixed ones, and that is the design rather
+than a gap in it. Scoping the routine slice alone would make the model
+incoherent in the other direction: you could not read the source of a routine
+belonging to an agent you can already list and inspect.
+
+What *is* per-user is the activity on top of those definitions, and that
+partitioning has shipped: reports (SEC-196, SEC-593), conversations, sessions,
+delegations, and the instances below, which ``routes/routines.py`` filters with
+``_owns``. The line to hold when editing this module is therefore: a definition
+is public to the install, a *run* and its output belong to whoever made it.
+Promoting definitions to per-user is a tenancy decision for the whole agent
+layer — ``GET /agents`` and the strategy routes first — not something to
+retrofit here.
 """
 
 from __future__ import annotations
@@ -348,6 +369,14 @@ class RoutineStore:
             return {}
 
     def list_routines(self, owner_id: int | None = None) -> list[dict]:
+        """Every discovered routine, with the caller's report tally on each.
+
+        ``owner_id`` scopes the ``report_count`` only — it is the report filter
+        of :meth:`_get_report_counts`, not a visibility filter on the rows. The
+        row set is deliberately the whole install's: see the module docstring
+        (SEC-617) for why definitions are install-wide while the runs counted
+        beside them are per-user.
+        """
         all_routines = self._discover_all()
         report_counts = self._get_report_counts(owner_id)
         out = []
