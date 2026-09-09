@@ -124,6 +124,28 @@ lp_executor:
 """
 
 
+def _merge_one_level(
+    defaults: dict[str, Any], overrides: dict[str, Any]
+) -> dict[str, Any]:
+    """Merge ``overrides`` over ``defaults``, descending one level into nested blocks.
+
+    A plain ``{**defaults, **overrides}`` replaces a nested block wholesale, so a
+    create that sends ``triple_barrier_config={}`` (the grid tool always sends the
+    block, because the backend schema requires it) or only ``{"take_profit": ...}``
+    silently wiped every other barrier the user had saved — deploying a different
+    strategy from the one on file, with no message saying so. Where a key is a dict
+    on BOTH sides the two are merged instead, with the override still winning
+    key-by-key. Scalars and lists keep replace semantics: a saved list is a whole
+    value, not something to append to.
+    """
+    merged = {**defaults, **overrides}
+    for key, default_value in defaults.items():
+        override_value = overrides.get(key)
+        if isinstance(default_value, dict) and isinstance(override_value, dict):
+            merged[key] = {**default_value, **override_value}
+    return merged
+
+
 class ExecutorPreferencesManager:
     """Manager for executor preferences stored in markdown format."""
 
@@ -217,7 +239,8 @@ class ExecutorPreferencesManager:
         """Update default configuration for an executor type.
 
         Merges new config with existing defaults so that only the provided
-        keys are updated while previously saved keys are preserved.
+        keys are updated while previously saved keys are preserved — a partial
+        nested block updates that block rather than truncating it.
 
         Args:
             executor_type: The executor type to update
@@ -227,7 +250,7 @@ class ExecutorPreferencesManager:
 
         # Merge with existing defaults so we don't lose previously saved keys
         existing_defaults = self.get_defaults(executor_type)
-        merged_config = {**existing_defaults, **config}
+        merged_config = _merge_one_level(existing_defaults, config)
 
         # Create the new YAML block
         new_yaml = yaml.dump(
@@ -285,7 +308,9 @@ class ExecutorPreferencesManager:
     ) -> dict[str, Any]:
         """Merge user configuration with stored defaults.
 
-        User-provided values take precedence over defaults.
+        User-provided values take precedence over defaults, key by key — including
+        inside a nested block such as ``triple_barrier_config``, which is merged
+        rather than replaced (see :func:`_merge_one_level`).
 
         Args:
             executor_type: The executor type
@@ -295,8 +320,7 @@ class ExecutorPreferencesManager:
             Merged configuration with defaults filled in
         """
         defaults = self.get_defaults(executor_type)
-        merged = {**defaults, **user_config}
-        return merged
+        return _merge_one_level(defaults, user_config)
 
     def get_raw_content(self) -> str:
         """Get the raw markdown content of the preferences file.
