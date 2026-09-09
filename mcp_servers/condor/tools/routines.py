@@ -16,6 +16,7 @@ longer than a conversation turn.
 
 import asyncio
 import logging
+import re
 import shutil
 import time
 from pathlib import Path
@@ -36,6 +37,61 @@ _NO_SERVER = (
     "registered. Ask the user to select a server (/servers in Telegram, or the "
     "server selector in the dashboard) and try again."
 )
+
+# A routine name is a bare Python module stem and nothing else. Anchored with
+# ``\Z`` rather than ``$`` because ``$`` also matches before a trailing newline,
+# which would admit "foo\n". The class carries no ".", no "/" or "\", no NUL and
+# no ":", and cannot start with one either, so ``routines_dir / f"{name}.py"`` is
+# provably a direct child of ``routines_dir``: there is no spelling of ``name``
+# — traversal, absolute, encoded, or Windows-style — that leaves the directory.
+_ROUTINE_NAME = re.compile(r"[a-z][a-z0-9_]*\Z")
+
+
+def _bad_name(name: str | None) -> dict | None:
+    """The invalid-name error, or ``None`` when ``name`` may be joined onto a dir.
+
+    One spelling of the rule for all four CRUD actions (SEC-577): ``create_routine``
+    checked it and read/edit/delete did not, so a ``name`` of "../../_shared/routines/x"
+    reached ``unlink()`` outside the caller's writable library. Deliberately *not*
+    hoisted into the ``manage_routines`` dispatcher — ``name`` carries an
+    instance_id for ``stop``/``get_instance``, which is not a routine name.
+    """
+    if not name or not _ROUTINE_NAME.match(name):
+        return {
+            "error": "name must be lowercase alphanumeric with underscores (e.g. 'my_scanner')"
+        }
+    return None
+
+
+def _confined(path: Path, base: Path | None = None) -> bool:
+    """Is ``path`` really inside a directory routine source may be read from?
+
+    Defense in depth on the read path only (CORR-585's ``routine_source_roots``):
+    ``_bad_name`` already makes traversal via ``name`` unreachable, but
+    ``read_routine`` returns *file contents*, and its last fallback joins onto a
+    cwd-relative ``Path("routines")`` that need not be this install's library at
+    all. Everything is compared **resolved** and with ``is_relative_to``, so
+    neither a symlink pointing out of a library nor a prefix sibling such as
+    ``routines_backup/`` is mistaken for it — which a string prefix would be.
+
+    ``base`` is the directory this very call derived from an anchored resolver
+    (``_get_agent_routines_dir``, ``_shared_roots``, ``_stock_twin``); it is
+    trusted as a root of its own because ``routine_source_roots`` enumerates
+    *existing* dirs, so a library that is legitimate but not yet enumerated must
+    not read as an escape. It is never caller-controlled, and admitting it still
+    rejects a symlinked file inside it.
+
+    Not used on the write paths: there the name rule is already total, and an
+    allowlist built by enumeration would refuse a first ``create_routine`` into
+    an agent home that has yet to be written.
+    """
+    from condor.routine_store import routine_source_roots
+
+    roots = list(routine_source_roots())
+    if base is not None:
+        roots.append(base.resolve())
+    resolved = path.resolve()
+    return any(resolved.is_relative_to(root) for root in roots)
 
 
 def _shared_roots() -> tuple[Path, ...]:
@@ -662,12 +718,8 @@ def create_routine(
     ``shared=True`` publishes it to every assistant — chat only, see
     :func:`_get_agent_routines_dir`.
     """
-    import re
-
-    if not name or not re.match(r"^[a-z][a-z0-9_]*$", name):
-        return {
-            "error": "name must be lowercase alphanumeric with underscores (e.g. 'my_scanner')"
-        }
+    if bad := _bad_name(name):
+        return bad
     if not code:
         return {"error": "code is required"}
 
@@ -716,15 +768,18 @@ def create_routine(
 
 def read_routine(name: str, target: str | None, shared: bool = False) -> dict:
     """Read the source code of a routine."""
+    if bad := _bad_name(name):
+        return bad
+
     routines_dir = _get_agent_routines_dir(target, shared)
     if routines_dir:
         file_path = routines_dir / f"{name}.py"
-        if file_path.exists():
+        if file_path.exists() and _confined(file_path, routines_dir):
             return {"name": name, "code": file_path.read_text(), "scope": "agent"}
         # ...and the shipped one under it, which an agent can read and edit (the
         # edit forks it down) but never delete.
         twin = _stock_twin(routines_dir, name)
-        if twin is not None:
+        if twin is not None and _confined(twin, twin.parent):
             return {"name": name, "code": twin.read_text(), "scope": "agent"}
 
     # An assistant can read the source of anything it can run, so the shared
@@ -732,11 +787,11 @@ def read_routine(name: str, target: str | None, shared: bool = False) -> dict:
     # `scope` says (writes go through _get_agent_routines_dir and never land here).
     for shared_path in _shared_roots():
         candidate = shared_path / f"{name}.py"
-        if candidate.exists():
+        if candidate.exists() and _confined(candidate, shared_path):
             return {"name": name, "code": candidate.read_text(), "scope": "shared"}
 
     global_path = Path("routines") / f"{name}.py"
-    if global_path.exists():
+    if global_path.exists() and _confined(global_path):
         return {"name": name, "code": global_path.read_text(), "scope": "global"}
 
     return {"error": f"Routine '{name}' not found"}
@@ -746,6 +801,9 @@ def edit_routine(
     name: str, code: str, target: str | None, shared: bool = False
 ) -> dict:
     """Update the source code of a routine in the caller's writable library."""
+    if bad := _bad_name(name):
+        return bad
+
     routines_dir = _get_agent_routines_dir(target, shared)
     if not routines_dir:
         return {
@@ -792,6 +850,9 @@ def edit_routine(
 
 def delete_routine(name: str, target: str | None, shared: bool = False) -> dict:
     """Delete a routine from the caller's writable library."""
+    if bad := _bad_name(name):
+        return bad
+
     routines_dir = _get_agent_routines_dir(target, shared)
     if not routines_dir:
         return {
