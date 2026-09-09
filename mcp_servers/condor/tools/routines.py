@@ -179,13 +179,14 @@ def _own_plus_shared(slug: str | None) -> dict:
     One call for both seats (FEAT-038): a domain expert/trading agent gets
     ``agents/<slug>/routines`` over ``agents/_shared/routines``, the chat gets
     the general library — which ``discover_routines`` already merges the shared
-    root into. The chat re-scans on every call because it is the library's
-    author and its edits must be visible immediately; an agent rides the mtime
-    cache.
+    root into. Both seats ride the mtime cache: discovery re-imports an edited
+    file, loads a new one and drops a deleted one on every call (PERF-572), so
+    the chat's own edits to its library are visible immediately without paying
+    a full re-import of every routine per tool call.
     """
     from routines.base import assistant_routines
 
-    return assistant_routines(slug, force_reload=not slug)
+    return assistant_routines(slug)
 
 
 def _resolve_routine(name: str):
@@ -223,7 +224,7 @@ def list_routines(target: str | None = None) -> dict:
         return {"routines": result}
 
     # Chat condor: the general library (root routines/).
-    for name, routine in sorted(discover_routines(force_reload=True).items()):
+    for name, routine in sorted(discover_routines().items()):
         result.append(
             {
                 "name": name,
