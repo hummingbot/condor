@@ -1,3 +1,8 @@
+> Automatic agents may currently create only explicit `commit: false` dry runs.
+> Agent-declared notional and native value do not bound arbitrary contract effects.
+> Committing creates are refused until the API can enforce verified bundle exposure.
+> `max_gas_quote` is denominated in USDT; missing gas pricing blocks a budgeted commit.
+
 ### Onchain Executor
 **This is the way to sign arbitrary EVM transactions from a strategy.** It hands a
 set of calls to the Aomi Pipeline, which fork-simulates them, and — when
@@ -48,10 +53,10 @@ lifecycle. Passing one of those as `operation` is refused at create time. Reads
    `op="contract"` to inspect a target, `op="context"` for block and gas). Do not
    sign into a wallet whose balance you have not read.
 3. **Decide the mode** — an app operation when the catalog has one; raw calls otherwise.
-4. **Declare the bound** — set `notional_quote` to the value at risk in quote
-   terms. **Required for agents**: the risk gate values the create with it (plus
-   any native `value` the calls carry, priced through the CEX feed, plus
-   `max_gas_quote`). A create with no bound is refused.
+4. **Use a dry run** — set `commit: false`. Automatic execution is blocked
+   because declared `notional_quote` does not enforce a spending limit.
+   Gas budgets use USDT and fail closed when pricing is unavailable.
+
 5. **Create** — `manage_executors(action="create", executor_type="onchain_executor", executor_config={...})`.
 6. **Read the result** — poll the executor (`action="search"`, `executor_id=...`)
    until `status == "TERMINATED"`, then read `close_type` and `custom_info`.
@@ -66,8 +71,8 @@ lifecycle. Passing one of those as `operation` is refused at create time. Reads
 | `mode` | yes | `calls` (raw `evm_stage_tx` calls) or `operation` (an app operation) |
 | `calls[]` | `mode=calls` | Each `{to, description, data: {signature, args, raw}, value}` — `value` is a **wei string** (`"0"` for none); `data.signature` + `data.args` for an ABI call, or `data.raw` for pre-encoded calldata |
 | `app` / `operation` / `arguments` | `mode=operation` | The catalog entry to execute and its argument map (see `aomi_catalog`) |
-| `notional_quote` | agents: yes | Value at risk in quote terms; the risk gate values the create with it |
-| `max_gas_quote` | no | Gas ceiling in quote terms; added to the valuation |
+| `notional_quote` | agents: yes | Informational USDT estimate; never authorizes an automatic commit |
+| `max_gas_quote` | no | Gas ceiling in USDT; missing pricing blocks budgeted commits |
 | `commit` | no | Default `true`. `false` = simulate only — nothing is signed |
 | `controller_id` | yes | Your session's agent id; attributes the executor to you |
 
