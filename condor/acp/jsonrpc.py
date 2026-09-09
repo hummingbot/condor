@@ -92,6 +92,11 @@ class JSONRPCPeer:
             if future and not future.done():
                 if "error" in data:
                     err = data["error"]
+                    if not isinstance(err, dict):
+                        # The spec says an object; a peer that sends a bare
+                        # string still has to settle the future, not blow up
+                        # the caller's read loop (CORR-328).
+                        err = {"message": str(err)}
                     future.set_exception(
                         JSONRPCError(
                             err.get("code", -1), err.get("message", ""), err.get("data")

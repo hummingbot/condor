@@ -488,6 +488,9 @@ class ACPClient:
         self.accepts_images = False
         self._read_task: asyncio.Task | None = None
         self._stderr_task: asyncio.Task | None = None
+        # Set once _read_loop is over: the process may still be up, but
+        # nothing it says will ever reach us again (see :attr:`alive`).
+        self._read_loop_ended = False
         self._event_queue: asyncio.Queue[ACPEvent] = asyncio.Queue()
         self._current_req_id: int | None = None  # tracks in-flight prompt request
         # A turn the agent has not settled and that nobody is streaming any
@@ -552,6 +555,7 @@ class ACPClient:
             limit=10 * 1024 * 1024,
             start_new_session=True,  # Own process group so we can kill all children
         )
+        self._read_loop_ended = False
         self._read_task = asyncio.create_task(self._read_loop())
         self._stderr_task = asyncio.create_task(self._drain_stderr())
 
@@ -694,8 +698,18 @@ class ACPClient:
 
     @property
     def alive(self) -> bool:
-        """Check if the subprocess is still running."""
-        return self._process is not None and self._process.returncode is None
+        """Check if the subprocess can still answer us.
+
+        A running subprocess is not enough: once the read loop is over nothing
+        it writes will ever be read again, so the client is deaf even though
+        the process is up. Saying True there would have the session cache hand
+        the client another prompt (CORR-328).
+        """
+        return (
+            self._process is not None
+            and self._process.returncode is None
+            and not self._read_loop_ended
+        )
 
     # --- Read loop ---
 
@@ -703,16 +717,33 @@ class ACPClient:
         assert self._process and self._process.stdout
         try:
             while True:
-                line = await self._process.stdout.readline()
+                try:
+                    line = await self._process.stdout.readline()
+                except ValueError:
+                    # Line longer than the stream limit. readline() drops it
+                    # from the buffer before raising, so the next one still
+                    # parses -- one oversized line must not deafen us.
+                    log.warning("ACP line over the stream limit; skipped")
+                    continue
                 if not line:
                     break
-                await self._peer.handle_line(line.decode(), self._process.stdin)
+                try:
+                    # errors="replace", like _drain_stderr: one non-UTF-8 byte
+                    # in a tool result is not a reason to lose the connection.
+                    await self._peer.handle_line(
+                        line.decode(errors="replace"), self._process.stdin
+                    )
+                except Exception:
+                    # Isolate the failure at the line, not at the connection.
+                    log.exception("ACP dropped a bad line")
         except asyncio.CancelledError:
             return  # Intentional shutdown via stop() -- skip sentinel
         except Exception:
             log.exception("ACP read loop error")
 
-        # Subprocess died or stream ended -- unblock any consumer waiting on _event_queue
+        # Subprocess died or stream ended -- unblock any consumer waiting on
+        # _event_queue, and stop claiming to be alive: we can no longer hear.
+        self._read_loop_ended = True
         self._peer.cancel_all()
         self._event_queue.put_nowait(PromptDone(stop_reason="disconnected"))
 
