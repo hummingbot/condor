@@ -485,15 +485,30 @@ class ConfigManager:
         return secret
 
     def _invalidate_server_caches(self, name: str):
-        """Drop the pooled client and memoized status for a server.
+        """Drop every cached artefact of a server: the pooled client, the memoized
+        status, and the whole SDS data cache for that name.
 
         Called whenever the server's credentials or existence change, so a
         cached client or status can never outlive the config it was built from.
+
+        The data cache is keyed by server *name* (CacheKey, server_data_service.py),
+        never by host, so repointing a server at a different host/port would
+        otherwise keep serving the previous host's answers under the same name
+        until each type's TTL expires on its own.
         """
         self._clients.pop(name, None)
         self._status_cache.pop(name, None)
         # New credentials deserve a real attempt, not the old failure's cooldown.
         self._client_failures.pop(name, None)
+        try:
+            # Lazy, mirroring the direction SDS already imports this module in
+            # (server_data_service.py) — no cycle, and a cache layer must never
+            # be able to fail a config write.
+            from condor.server_data_service import get_server_data_service
+
+            get_server_data_service().invalidate_server(name)
+        except Exception:
+            logger.debug("SDS invalidation skipped for '%s'", name, exc_info=True)
 
     async def get_client(self, name: str = None):
         """Get or create API client for a server."""
