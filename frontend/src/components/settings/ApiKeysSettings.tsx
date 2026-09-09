@@ -16,7 +16,7 @@ import { useServer } from "@/hooks/useServer";
 import { OWNER_ONLY_HINT, useServerPermission } from "@/hooks/useServerPermission";
 import { type ConnectorInfo, type CredentialInfo, type GatewayWalletGroup, api } from "@/lib/api";
 import { CREDENTIAL_FIELD_PATTERNS } from "@/lib/credential-fields";
-import { credentialsQuery, gatewayWalletsQuery } from "@/lib/queryClient";
+import { credentialsQuery, gatewayWalletsQuery, invalidateCredentialQueries } from "@/lib/queryClient";
 import { ConnectHyperliquid } from "./ConnectHyperliquid";
 import { ImportGatewayWallet, type WalletChain } from "./ImportGatewayWallet";
 
@@ -125,8 +125,10 @@ export function ApiKeysSettings() {
     [qc, server],
   );
 
-  const invalidate = () =>
-    qc.invalidateQueries({ queryKey: credentialsQuery(server).queryKey });
+  // Adding, deleting or (via ConnectHyperliquid, below) connecting a credential
+  // has to invalidate more than the credential list itself — see
+  // invalidateCredentialQueries (CORR-353).
+  const invalidate = () => invalidateCredentialQueries(qc, server);
 
   const addMut = useMutation({
     mutationFn: () =>

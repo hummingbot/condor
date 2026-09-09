@@ -18,9 +18,18 @@ import type { VenueTraits } from "@/lib/connector-capabilities";
  * so callers can tell "no venues yet" apart from "no venues at all" instead
  * of flashing every venue as view-only while the query is in flight.
  */
+/**
+ * The `["venues", server]` key, single-sourced (ARCH-355) so a caller that
+ * only needs to invalidate the entry — a credential mutation, not a render —
+ * does not have to copy the literal (CORR-353).
+ */
+export function venuesQueryKey(server: string | null | undefined) {
+  return ["venues", server] as const;
+}
+
 export function useVenues(server: string | null | undefined) {
   const { data: venues = [], isPending } = useQuery<VenueTraits[]>({
-    queryKey: ["venues", server],
+    queryKey: venuesQueryKey(server),
     queryFn: () => api.getVenues(server!),
     enabled: !!server,
     staleTime: 5 * 60 * 1000,

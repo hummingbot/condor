@@ -1,5 +1,7 @@
 import { QueryClient } from "@tanstack/react-query";
 
+import { venuesQueryKey } from "@/components/market/useVenues";
+
 /**
  * App-wide TanStack Query cache.
  *
@@ -362,4 +364,28 @@ export function gatewayWalletsQuery(server: string | null | undefined) {
     queryKey: ["gateway-wallets", server] as ["gateway-wallets", string | null | undefined],
     staleTime: CREDENTIALS_STALE_MS,
   };
+}
+
+/**
+ * Invalidates every cached answer a credential mutation (add/delete a CEX
+ * key, or the Hyperliquid connect flow) can change: the credential list
+ * itself, the venue traits the Trade page's `credentialed` gate reads
+ * (`useVenues` -> `caps.canTrade` in lib/connector-capabilities.ts), and the
+ * connected-exchange list `usePrefetchData` warms. All three are held at a
+ * multi-minute `staleTime`, so without this the Trade page kept rendering the
+ * view-only overlay for a venue whose keys were just saved — up to 5 minutes
+ * after the save, because only `["settings-credentials", server]` was
+ * invalidated and TanStack matches by prefix, so it provably cannot touch the
+ * other two (CORR-353, issue #238).
+ *
+ * One shared call rather than each caller hand-listing the keys: a second
+ * hand-written list is exactly how this drifted in the first place.
+ */
+export function invalidateCredentialQueries(
+  client: QueryClient,
+  server: string | null | undefined,
+) {
+  client.invalidateQueries({ queryKey: credentialsQuery(server).queryKey });
+  client.invalidateQueries({ queryKey: venuesQueryKey(server) });
+  client.invalidateQueries({ queryKey: ["connected-exchanges", server] });
 }

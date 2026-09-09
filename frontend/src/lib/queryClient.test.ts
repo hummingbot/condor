@@ -16,12 +16,14 @@
 import { QueryClient, QueryObserver } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { venuesQueryKey } from "@/components/market/useVenues";
 import {
   CONTROLLER_PERF_ROOTS,
   controllerPerfHistoryAllQuery,
   controllerPerfHistoryQuery,
   credentialsQuery,
   executorsQuery,
+  invalidateCredentialQueries,
   invalidateServerScopedQueries,
   parseControllerPerfHistoryKey,
   parseExecutorsKey,
@@ -160,6 +162,52 @@ describe("invalidateServerScopedQueries", () => {
 
     for (const key of SERVER_INDEPENDENT) {
       expect(isInvalidated(key), JSON.stringify(key)).toBe(false);
+    }
+  });
+});
+
+/**
+ * Guards the credential-mutation invalidation set (CORR-353).
+ *
+ * `["settings-credentials", server]` used to be the only key a credential
+ * mutation invalidated. TanStack matches invalidation keys by prefix, so that
+ * provably could not reach `["venues", server]` or
+ * `["connected-exchanges", server]` — both held at a multi-minute staleTime —
+ * and the Trade page kept its pre-credential view-only verdict for up to 5
+ * minutes after a save. This pins all three keys to one shared call so a
+ * caller cannot invalidate only part of the set again.
+ */
+describe("invalidateCredentialQueries", () => {
+  const SERVER = "prod";
+  const KEYS = () => [
+    credentialsQuery(SERVER).queryKey,
+    venuesQueryKey(SERVER),
+    ["connected-exchanges", SERVER],
+  ];
+
+  it("invalidates the credential list, venues and connected-exchanges together", () => {
+    for (const key of KEYS()) client.setQueryData(key, "cached");
+
+    invalidateCredentialQueries(client, SERVER);
+
+    for (const key of KEYS()) {
+      expect(isInvalidated(key as unknown[]), JSON.stringify(key)).toBe(true);
+    }
+  });
+
+  it("does not touch another server's entries", () => {
+    for (const key of KEYS()) client.setQueryData(key, "cached");
+    const otherKeys = [
+      credentialsQuery(NEXT).queryKey,
+      venuesQueryKey(NEXT),
+      ["connected-exchanges", NEXT],
+    ];
+    for (const key of otherKeys) client.setQueryData(key, "cached");
+
+    invalidateCredentialQueries(client, SERVER);
+
+    for (const key of otherKeys) {
+      expect(isInvalidated(key as unknown[]), JSON.stringify(key)).toBe(false);
     }
   });
 });
