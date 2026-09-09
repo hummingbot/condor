@@ -15,7 +15,7 @@ either side fails here instead of in production.
 import inspect
 import typing
 
-from condor.runtime.danger import is_mutating_tool_call
+from condor.runtime.danger import READ_ONLY_CONFIG_ACTIONS, is_mutating_tool_call
 from handlers.agents._shared import (
     CREATE_EXECUTOR_TOOLS,
     DANGEROUS_AMM_ACTIONS,
@@ -74,6 +74,11 @@ def test_gated_actions_exist_on_their_tools():
         ("manage_amm", DANGEROUS_AMM_ACTIONS),
         ("manage_bots", DANGEROUS_BOT_ACTIONS),
         ("manage_gateway_container", DANGEROUS_CONTAINER_ACTIONS),
+        # SEC-566 gates manage_gateway_config on a resource *and* an action: the
+        # exemption is spelled out as the read-only actions, so a rename of `get`
+        # would silently start prompting on every read rather than silently stop
+        # gating — but both halves have to keep resolving, so both are pinned.
+        ("manage_gateway_config", READ_ONLY_CONFIG_ACTIONS),
     ):
         available = _action_literals(tool_name)
         unknown = actions - available
@@ -262,37 +267,87 @@ def test_gated_calls_render_a_specific_confirmation_summary():
         assert summary != tool_name
 
 
-def test_gateway_config_gates_nothing_now_that_wallets_are_read_only():
-    """manage_gateway_config is gated on resource_type, not action — and gates nothing.
-
-    `wallets` was the one gated resource because `add` took a private key; that path
-    is gone (wallets are read-only over MCP, FEAT-065). Everything the tool still
-    edits is Gateway's own symbol/address mapping — deleting a token moves no funds
-    and changes nothing on-chain, so gating it would stop a config edit while leaving
-    the trades it enables ungated.
-    """
+def _config_resource_literals() -> set[str]:
+    """Every ``resource_type`` ``manage_gateway_config`` actually accepts."""
     fn = _registered_tools()["manage_gateway_config"]
-    resources = {
+    return {
         str(v)
         for v in typing.get_args(
             inspect.signature(fn).parameters["resource_type"].annotation
         )
         if isinstance(v, str)
     }
+
+
+def test_gateway_config_gates_the_funds_path_resources_and_nothing_else():
+    """SEC-566: a write to `networks`/`connectors` asks; a token or pool edit does not.
+
+    The gate used to be an empty resource set, justified by "everything this tool
+    touches is Gateway's own symbol/address mapping". Two of the four resources are
+    not: a network config carries `nodeURL`, the RPC every transaction is broadcast
+    through, and a connector config carries the slippage every later swap inherits.
+    The dashboard already demands OWNER for exactly that write; the MCP path asked
+    nobody. `tokens` and `pools` really are a mapping and stay ungated, so a human is
+    not put in front of a config edit while the trades it enables run unattended.
+    """
+    resources = _config_resource_literals()
     assert DANGEROUS_CONFIG_RESOURCES <= resources, (
         f"gated resource(s) the tool has no such value for: "
         f"{sorted(DANGEROUS_CONFIG_RESOURCES - resources)}"
     )
-    assert DANGEROUS_CONFIG_RESOURCES == set()
+    assert DANGEROUS_CONFIG_RESOURCES == {"networks", "connectors"}
+
+    for resource in DANGEROUS_CONFIG_RESOURCES:
+        for action in _action_literals("manage_gateway_config") - (
+            READ_ONLY_CONFIG_ACTIONS
+        ):
+            assert is_dangerous_tool_call(
+                {
+                    "tool": "manage_gateway_config",
+                    "input": {"resource_type": resource, "action": action},
+                }
+            ), f"{resource}/{action} repoints the funds path with no confirmation"
 
     for resource in resources - DANGEROUS_CONFIG_RESOURCES:
-        for action in ("list", "add", "delete"):
+        for action in _action_literals("manage_gateway_config"):
             assert not is_dangerous_tool_call(
                 {
                     "tool": "manage_gateway_config",
                     "input": {"resource_type": resource, "action": action},
                 }
             ), f"{resource}/{action} should not need confirmation"
+
+
+def test_gateway_config_reads_stay_on_the_fast_path():
+    """Reading a gated resource is how a failed swap gets diagnosed (SEC-566).
+
+    The gate is resource *and* action for this reason alone: a prompt in front of
+    `get networks` would put one in front of finding out which RPC a chain is on.
+    """
+    for resource in DANGEROUS_CONFIG_RESOURCES:
+        for action in READ_ONLY_CONFIG_ACTIONS:
+            assert not is_dangerous_tool_call(
+                {
+                    "tool": "manage_gateway_config",
+                    "input": {"resource_type": resource, "action": action},
+                }
+            ), f"{resource}/{action} raised a confirmation for a read"
+
+
+def test_gateway_config_fails_closed_on_an_unreadable_action():
+    """SEC-566: on a gated resource, an action we cannot read is a write.
+
+    The resource half is not enough on its own — once the gate started reading an
+    action, an unparseable one would otherwise fall through the read-only test and
+    be waved past.
+    """
+    for bad in ({}, {"action": None}, {"action": 7}, {"action": ""}):
+        for resource in DANGEROUS_CONFIG_RESOURCES:
+            call = {
+                "tool": "manage_gateway_config",
+                "input": {"resource_type": resource, **bad},
+            }
+            assert is_dangerous_tool_call(call), f"{resource}/{bad} slipped past"
 
 
 def test_gateway_config_fails_closed_on_an_unreadable_resource():
@@ -601,7 +656,7 @@ def test_the_ungated_brakes_are_recorded():
 
 
 def test_an_ungated_config_edit_is_recorded():
-    """``DANGEROUS_CONFIG_RESOURCES`` is empty on purpose; the log is not."""
+    """A token edit is ungated on purpose (SEC-566); the log keeps it anyway."""
     for action in ("add", "delete", "update", "save"):
         call = _call("manage_gateway_config", action=action, resource_type="tokens")
         assert not is_dangerous_tool_call(call)
@@ -658,8 +713,14 @@ def _every_plausible_call() -> list[dict]:
         for action in _action_literals(tool):
             calls.append(_call(tool, action=action, resource_type="tokens"))
             calls.append(_call(tool, action=action))
-    for resource in _action_literals("manage_gateway_config"):
+    for resource in _config_resource_literals():
         calls.append(_call("manage_gateway_config", resource_type=resource))
+        # Every real (resource, action) pair, so the SEC-566 gate's own combinations
+        # — not just the fail-closed ones — are held to `dangerous ⊆ mutating`.
+        for action in _action_literals("manage_gateway_config"):
+            calls.append(
+                _call("manage_gateway_config", resource_type=resource, action=action)
+            )
     for action in _control_actions():
         calls.append(_call("control_agent", action=action, agent_id="a.b_1"))
     for tool in sorted(DANGEROUS_TOOLS | {"manage_bots"}):

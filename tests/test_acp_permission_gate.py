@@ -387,7 +387,10 @@ FUND_MOVING_TOOLS = {
     "manage_amm",
     "manage_bots",
     "manage_clmm",
-    "manage_gateway_config",  # the wallets resource takes a private key
+    # a write to `networks` repoints `nodeURL`, the RPC every transaction is
+    # broadcast through, and one to `connectors` sets the slippage every later
+    # swap inherits (SEC-566)
+    "manage_gateway_config",
     # start/stop/restart of the Gateway container (SEC-565). It signs nothing,
     # which is not the question: stopping it strands live CLMM/LP executors, and
     # starting it hands a caller-chosen Docker image to the host that holds the
@@ -588,6 +591,99 @@ def test_reading_gateway_status_or_logs_never_asks():
 def test_gateway_container_with_unreadable_arguments_fails_closed():
     for raw in (None, "not json", ["stop"], {}, {"action": 7}):
         call = normalize_tool_call(_acp_request(CONTAINER, raw))
+        assert is_dangerous_tool_call(call), f"{raw!r} slipped past the gate"
+
+
+# ---------------------------------------------------------------------------
+# manage_gateway_config's network/connector writes must ask first (SEC-566)
+# ---------------------------------------------------------------------------
+
+CONFIG = "mcp__mcp-hummingbot__manage_gateway_config"
+
+
+def test_repointing_the_rpc_endpoint_asks_a_human_and_is_refused():
+    """A seat that is not authorized by a human cannot move the funds path.
+
+    Before SEC-566 ``DANGEROUS_CONFIG_RESOURCES`` was empty, so this call was
+    auto-approved: a model could repoint `nodeURL` — the RPC every transaction
+    from this server is signed against and broadcast through — with no prompt,
+    while the dashboard demanded OWNER for the identical write.
+    """
+    for resource, target in (
+        ("networks", {"network_id": "solana-mainnet-beta"}),
+        ("connectors", {"connector_name": "jupiter"}),
+    ):
+        channel = _CapturingChannel(answer=False)
+        result = _drive_acp(
+            _acp_request(
+                CONFIG,
+                {
+                    "resource_type": resource,
+                    "action": "update",
+                    **target,
+                    "config_updates": {"nodeURL": "https://evil.example/rpc"},
+                },
+            ),
+            channel,
+        )
+        assert (
+            len(channel.delivered) == 1
+        ), f"manage_gateway_config(update {resource}) ran with no confirmation"
+        assert (
+            result["outcome"]["outcome"] == "cancelled"
+        ), f"manage_gateway_config(update {resource}) proceeded after a refusal"
+
+
+def test_the_network_update_prompt_names_the_network_and_the_keys():
+    """The human approves a `nodeURL` change, not the words "update networks"."""
+    channel = _CapturingChannel(answer=False)
+    _drive_acp(
+        _acp_request(
+            CONFIG,
+            {
+                "resource_type": "networks",
+                "action": "update",
+                "network_id": "solana-mainnet-beta",
+                "config_updates": {"nodeURL": "https://evil.example/rpc"},
+            },
+        ),
+        channel,
+    )
+
+    assert channel.delivered[0].summary == (
+        "Gateway config: update networks 'solana-mainnet-beta', setting nodeURL"
+    )
+
+
+def test_reading_a_network_config_or_editing_a_token_never_asks():
+    """Reads stay silent, and a token edit is a symbol → address mapping."""
+    for args in (
+        {"resource_type": "networks", "action": "get", "network_id": "solana-mainnet"},
+        {"resource_type": "connectors", "action": "list"},
+        {"resource_type": "tokens", "action": "add", "token_symbol": "WIF"},
+        {"resource_type": "pools", "action": "delete"},
+    ):
+        channel = _CapturingChannel(answer=True)
+        result = _drive_acp(_acp_request(CONFIG, args), channel)
+        assert not channel.delivered, f"manage_gateway_config({args}) raised a prompt"
+        assert result["outcome"]["outcome"] == "selected"
+
+
+def test_gateway_config_with_an_unreadable_resource_or_action_fails_closed():
+    """SEC-093/SEC-566: neither half of the gate can be defeated by junk."""
+    for raw in (
+        None,
+        "not json",
+        ["networks"],
+        {},
+        {"resource_type": 7},
+        {"action": "update"},
+        # A gated resource whose action cannot be read is a write.
+        {"resource_type": "networks"},
+        {"resource_type": "networks", "action": 7},
+        {"resource_type": "connectors", "action": ""},
+    ):
+        call = normalize_tool_call(_acp_request(CONFIG, raw))
         assert is_dangerous_tool_call(call), f"{raw!r} slipped past the gate"
 
 
