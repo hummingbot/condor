@@ -171,13 +171,65 @@ def test_an_unpriceable_quote_is_reported_not_hidden(summary_env):
 
 def test_a_rate_lookup_failure_still_returns_the_totals(summary_env, monkeypatch):
     """Rates down is not a reason to blank the tile; it is a reason to flag it."""
-    rows = [_executor(0, pnl=6.0)]
-    summary_env(rows, {"USDT-USDT": 1.0})
+    rows = [_executor(0, pair="BTC-BRL", pnl=6.0)]
+    summary_env(rows, {"BRL-USDT": 0.2})
 
     async def _boom(server, pairs, connector=None):
         raise RuntimeError("ticker pool unreachable")
 
     monkeypatch.setattr("condor.market_rates.get_rates", _boom)
+
+    result = _summary("1D")
+
+    assert result.pnl == pytest.approx(6.0)
+    assert result.converted is False
+
+
+# ── CORR-602: stablecoin quotes price off the shared helper, not a market ──
+
+
+def test_a_stablecoin_quote_prices_without_a_market(summary_env):
+    """DAI is a dollar even on a server whose pool lists no DAI market.
+
+    The KPI strip used to resolve rates itself and ask the pool for ``DAI-USDT``;
+    a server without that market got ``converted: false`` here while the
+    archived-run path — which has always gone through ``resolve_usd_rates`` —
+    called the same history converted. Both now short-circuit the stablecoin.
+    """
+    rows = [_executor(0, pair="ETH-DAI", pnl=4.0, volume=9.0)]
+    summary_env(rows, {})  # no DAI-USDT market anywhere in the pool
+
+    result = _summary("1D")
+
+    assert result.pnl == pytest.approx(4.0), "a DAI dollar is a dollar"
+    assert result.volume == pytest.approx(9.0)
+    assert result.converted is True, "a stablecoin total is exact, not approximate"
+
+
+def test_a_stablecoin_total_survives_a_rate_outage(summary_env, monkeypatch):
+    """No quote needs a lookup, so an unreachable pool cannot make it approximate."""
+    rows = [_executor(0, pair="SOL-USDC", pnl=5.0, volume=11.0)]
+    summary_env(rows, {})
+
+    async def _boom(server, pairs, connector=None):
+        raise RuntimeError("ticker pool unreachable")
+
+    monkeypatch.setattr("condor.market_rates.get_rates", _boom)
+
+    result = _summary("1D")
+
+    assert result.pnl == pytest.approx(5.0)
+    assert result.volume == pytest.approx(11.0)
+    assert result.converted is True
+
+
+def test_a_mixed_total_flags_only_the_quote_that_failed(summary_env):
+    """A resolvable stable plus an unpriceable quote: dollars right, flag honest."""
+    rows = [
+        _executor(0, pair="ETH-DAI", pnl=4.0, volume=9.0),
+        _executor(1, pair="FOO-XYZ", pnl=2.0, volume=3.0),
+    ]
+    summary_env(rows, {})
 
     result = _summary("1D")
 

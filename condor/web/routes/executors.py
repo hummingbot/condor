@@ -224,33 +224,33 @@ async def _usd_summary(
     ticker pool. A quote with no path to USD is added at face value and flips
     ``converted`` — the same fallback the strip's client-side ``convert()`` made,
     but reported instead of silent.
-    """
-    from condor.market_rates import get_rates
 
-    rates: dict[str, float | None] = {}
-    if by_quote:
-        try:
-            rates = await get_rates(server, [f"{q}-USDT" for q in by_quote])
-        except Exception as e:
-            logger.warning(
-                "Rates unavailable while summarizing executors for %s: %s", server, e
-            )
+    The resolution itself belongs to :func:`condor.quote_conversion.resolve_usd_rates`,
+    which the archived-run path already uses (CORR-602). The copy that used to live
+    here asked the pool for ``DAI-USDT`` and called the total "approximate" on a
+    server with no such market, while the same history read as converted elsewhere —
+    the shared helper short-circuits every stablecoin quote to 1.0 instead, so the
+    two surfaces agree on both the dollars and the confidence flag.
+    """
+    from condor.quote_conversion import resolve_usd_rates
+
+    quote_rates = await resolve_usd_rates(server, set(by_quote))
 
     pnl = 0.0
     volume = 0.0
     count = 0
-    converted = True
     for quote, totals in by_quote.items():
-        rate = rates.get(f"{quote}-USDT")
-        if not rate or rate <= 0:
-            converted = False
-            rate = 1.0
+        rate = quote_rates.rates.get(quote, 1.0)
         pnl += totals["pnl"] * rate
         volume += totals["volume"] * rate
         count += int(totals["count"])
 
     return ExecutorPeriodSummary(
-        period=period, pnl=pnl, volume=volume, count=count, converted=converted
+        period=period,
+        pnl=pnl,
+        volume=volume,
+        count=count,
+        converted=quote_rates.converted,
     )
 
 
