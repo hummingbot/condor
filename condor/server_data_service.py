@@ -142,6 +142,21 @@ _DEFAULTS: Dict[ServerDataType, DataTypeDefaults] = {
 }
 
 
+#: Everything computed from an account's credential list. Adding or removing a
+#: key changes all of it at once: CONNECTORS *is* the credentialed list, VENUES
+#: derives its `credentialed` trait from that same list (fetch_venues calls
+#: fetch_available_cex_connectors, condor/fetchers/connectors.py:173), and
+#: PORTFOLIO is the balances of those accounts. VENUES is the one nothing
+#: re-polls — it is not in auto_subscribe_servers' core_types — so forgetting it
+#: here strands the trade panel behind a stale view-only overlay for a full
+#: 600s TTL, in every browser (issue #238).
+CREDENTIAL_DERIVED: Tuple[ServerDataType, ...] = (
+    ServerDataType.CONNECTORS,
+    ServerDataType.VENUES,
+    ServerDataType.PORTFOLIO,
+)
+
+
 # ============================================
 # CACHE KEY & ENTRY
 # ============================================

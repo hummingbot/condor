@@ -77,8 +77,9 @@ class FakeSDS:
     def __init__(self):
         self.invalidated = []
 
-    def invalidate(self, server, data_type):
-        self.invalidated.append((server, data_type))
+    def invalidate(self, server, *data_types):
+        for data_type in data_types:
+            self.invalidated.append((server, data_type))
 
 
 @pytest.fixture
@@ -122,6 +123,29 @@ def test_owner_can_add_and_delete_credentials(env):
     assert delete_credential(as_user(app, OWNER)).status_code == 200
     assert client.accounts.deleted == [("master_account", "binance")]
     assert (SERVER, ServerDataType.PORTFOLIO) in sds.invalidated
+
+
+def test_add_and_delete_invalidate_the_same_credential_derived_set(env):
+    """CORR-613: VENUES' `credentialed` trait derives from the same credential
+    list as CONNECTORS, but nothing re-polls it — the writers must invalidate
+    it explicitly, on both add and delete, or the trade panel serves a stale
+    view-only overlay for up to 600s (issue #238)."""
+    app, client, sds = env
+    expected = {
+        ServerDataType.CONNECTORS,
+        ServerDataType.VENUES,
+        ServerDataType.PORTFOLIO,
+    }
+
+    assert post_credential(as_user(app, OWNER)).status_code == 200
+    added_types = {dt for (srv, dt) in sds.invalidated if srv == SERVER}
+    assert added_types == expected
+
+    sds.invalidated.clear()
+
+    assert delete_credential(as_user(app, OWNER)).status_code == 200
+    deleted_types = {dt for (srv, dt) in sds.invalidated if srv == SERVER}
+    assert deleted_types == expected
 
 
 def test_shared_trader_cannot_add_or_delete_credentials(env):

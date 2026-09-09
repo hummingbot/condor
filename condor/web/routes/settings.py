@@ -6,7 +6,11 @@ from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from condor.server_data_service import ServerDataType, get_server_data_service
+from condor.server_data_service import (
+    CREDENTIAL_DERIVED,
+    ServerDataType,
+    get_server_data_service,
+)
 from condor.web.auth import (
     get_current_user,
     require_owner,
@@ -690,14 +694,15 @@ async def add_credential(
             connector_name=req.connector_name,
             credentials=req.credentials,
         )
-        # Invalidate configured connectors cache
-        get_server_data_service().invalidate(server, ServerDataType.CONNECTORS)
-        return {"added": True, "result": result}
     except Exception as e:
         logger.exception(
             "Failed to add credentials for '%s' on '%s'", req.connector_name, server
         )
         raise upstream_error("Failed to add credentials", e)
+    # Outside the try: the credential write already succeeded, and an
+    # exception here must not be swallowed and re-reported as a failed add.
+    get_server_data_service().invalidate(server, *CREDENTIAL_DERIVED)
+    return {"added": True, "result": result}
 
 
 @router.delete("/credentials/{connector}")
@@ -715,10 +720,9 @@ async def delete_credential(
             account_name="master_account",
             connector_name=connector,
         )
-        # Invalidate configured connectors + portfolio caches so the removed key disappears immediately
-        sds = get_server_data_service()
-        sds.invalidate(server, ServerDataType.CONNECTORS)
-        sds.invalidate(server, ServerDataType.PORTFOLIO)
+        # Invalidate every credential-derived cache so the removed key
+        # disappears immediately (including VENUES' `credentialed` trait).
+        get_server_data_service().invalidate(server, *CREDENTIAL_DERIVED)
         return {"deleted": True, "result": result}
     except Exception as e:
         logger.exception(
