@@ -242,6 +242,20 @@ READ_ONLY_CONTAINER_ACTIONS = {"get_status", "get_logs"}
 #: no trace at all. Recording them is the log's question, not the gate's.
 MUTATING_CONTROLLER_ACTIONS = {"upsert", "delete"}
 READ_ONLY_CONTROLLER_ACTIONS = {"list", "describe"}
+#: The snippet runner. Deliberately *not* in ``DANGEROUS_TOOLS`` and not to be
+#: added: since ARCH-308 a tick reads a market it can compute on only through
+#: ``client.market_data.*`` inside a snippet, so a name gate here would put a
+#: confirmation in front of every tick's candle read (SEC-616). What it does get
+#: is a log row, and a refusal in the one mode that promises nothing mutates.
+CODE_RUN_TOOL = "run_code"
+#: ``run_code``'s three actions split by what they touch: ``run`` executes a
+#: snippet holding the unrestricted API client, and the other two only read runs
+#: already stored.
+MUTATING_CODE_RUN_ACTIONS = {"run"}
+READ_ONLY_CODE_RUN_ACTIONS = {"history", "get"}
+#: How much of a snippet's first line the log row carries. A summary is one line
+#: on a page, and the whole source is in the code-run store anyway.
+MAX_SNIPPET_HEAD_CHARS = 80
 #: `manage_gateway_config` is recorded on its *action*, not its resource type:
 #: what it edits is what the gate weighs, and whether it edited at all is what
 #: the log weighs.
@@ -520,6 +534,25 @@ def is_mutating_tool_call(tool_call: dict[str, Any]) -> bool:
     }
 
 
+def is_code_execution_call(tool_call: dict[str, Any]) -> bool:
+    """Does this call *execute* a snippet? (SEC-616)
+
+    ``run_code(action="run")`` hands arbitrary Python the unrestricted API
+    client, so it can do anything any other tool can do and several things none
+    of them can. ``history`` and ``get`` only read runs already stored.
+
+    True on an action this module cannot read, which is both the fail-open rule
+    its siblings follow *and* the tool's own default: ``action`` omitted means
+    ``run``. The log uses this as an extra row; the unattended gate uses it to
+    refuse in dry-run, where failing this way is failing closed.
+    """
+    if tool_call_name(tool_call) != CODE_RUN_TOOL:
+        return False
+    return _is_mutating_action(
+        tool_call, MUTATING_CODE_RUN_ACTIONS, READ_ONLY_CODE_RUN_ACTIONS
+    )
+
+
 def is_recordable_tool_call(tool_call: dict[str, Any]) -> bool:
     """Should the action log keep a row for this call? (FEAT-102)
 
@@ -529,11 +562,14 @@ def is_recordable_tool_call(tool_call: dict[str, Any]) -> bool:
     functions answering nearly the same question will drift, and this shape
     makes the gate's set structurally a subset that cannot fall behind.
 
-    Its one extra today is ``manage_controllers``. The gate excludes that tool
-    entirely and should keep excluding it — widening the gate would put a new
-    confirmation prompt in front of a running fleet — but a bot's controllers
-    are *written* by exactly these calls, so a log that drops them cannot say
-    how a fleet was built or which of its config writes were rejected.
+    Its extras are ``manage_controllers`` and ``run_code``. The gate excludes
+    both tools entirely and should keep excluding them — widening the gate would
+    put a new confirmation prompt in front of a running fleet, and in front of
+    every tick's market read — but a bot's controllers are *written* by exactly
+    these calls, so a log that drops them cannot say how a fleet was built or
+    which of its config writes were rejected, and a snippet can change anything
+    at all, so a log that drops it is silent about the one tool that can
+    (SEC-616).
 
     Fails open the same way its siblings do: an action this module has not heard
     of is recorded rather than dropped.
@@ -546,7 +582,7 @@ def is_recordable_tool_call(tool_call: dict[str, Any]) -> bool:
             tool_call, MUTATING_CONTROLLER_ACTIONS, READ_ONLY_CONTROLLER_ACTIONS
         )
 
-    return False
+    return is_code_execution_call(tool_call)
 
 
 def format_tool_summary(tool_call: dict[str, Any]) -> str:
@@ -728,6 +764,23 @@ def format_tool_summary(tool_call: dict[str, Any]) -> str:
             or "?"
         )
         return f"Controller {target}: {action} '{name}'"
+
+    if tool_name == CODE_RUN_TOOL:
+        # Never gated either, so this line is written for the log (SEC-616). The
+        # label is what the caller said the snippet was for and the first line is
+        # what it actually starts doing — enough to tell a candle read from a
+        # `client.gateway.start(...)` without carrying a whole script into the
+        # log; the full source is in the code-run store (`condor/code_runs.py`).
+        action = input_data.get("action") or "run"
+        if action not in MUTATING_CODE_RUN_ACTIONS:
+            return f"Code run: {action}"
+        label = str(input_data.get("label") or "").strip()
+        code = str(input_data.get("code") or "")
+        head = next((line.strip() for line in code.splitlines() if line.strip()), "")
+        if len(head) > MAX_SNIPPET_HEAD_CHARS:
+            head = head[:MAX_SNIPPET_HEAD_CHARS] + "…"
+        what = f"Run snippet '{label}'" if label else "Run snippet"
+        return f"{what}: {head}" if head else f"{what} (no code)"
 
     # Generic fallback
     return tool_name

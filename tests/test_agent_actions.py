@@ -7,6 +7,7 @@ tick, and it never deletes a row.
 """
 
 import json
+import typing
 
 import pytest
 
@@ -553,6 +554,94 @@ def test_the_confirmation_gate_is_untouched_by_the_log_growing():
     assert (
         is_dangerous_tool_call({"tool": "manage_controllers", "input": None}) is False
     )
+
+
+# ── The snippet that can change anything (SEC-616) ──
+
+
+def test_a_snippet_a_tick_ran_is_recorded_with_its_label():
+    """``run_code`` is outside the gate on purpose and was outside the log too.
+
+    The one tool that can do anything any other tool can — it holds the
+    unrestricted API client — left the log that answers "what changed the world"
+    completely silent.
+    """
+    calls = [
+        folded(
+            "mcp__condor__run_code",
+            label="open a CLMM on SOL-USDC",
+            code="pos = await client.gateway.clmm_open(...)\nprint(pos)",
+        )
+    ]
+
+    (action,) = actions_from_tool_calls(calls, tick=4, at=1.0)
+
+    assert action.tool == "run_code"
+    assert action.verb == "run_code"
+    assert action.ok is True
+    assert action.summary == (
+        "Run snippet 'open a CLMM on SOL-USDC': "
+        "pos = await client.gateway.clmm_open(...)"
+    )
+
+
+def test_a_failed_snippet_is_recorded_with_its_error():
+    calls = [folded("run_code", status="failed", code="await client.boom()")]
+    calls[0]["output"] = "AttributeError: boom"
+
+    (action,) = actions_from_tool_calls(calls, tick=4, at=1.0)
+
+    assert action.ok is False
+    assert action.error == "AttributeError: boom"
+    assert action.summary == "Run snippet: await client.boom()"
+
+
+def test_reading_past_runs_back_is_not_recorded():
+    """``history`` and ``get`` read the store; they execute nothing."""
+    calls = [
+        folded("run_code", action="history", limit=20),
+        folded("run_code", action="get", run_id="cr_1"),
+    ]
+    assert actions_from_tool_calls(calls, tick=1, at=1.0) == []
+
+
+def test_the_snippet_predicate_fails_open_and_matches_the_tool_default():
+    """An unreadable action is recorded — and ``action`` omitted *is* a run."""
+    from condor.runtime.danger import is_recordable_tool_call
+
+    assert is_recordable_tool_call({"tool": "run_code", "input": None})
+    assert is_recordable_tool_call({"tool": "run_code", "input": {"code": "1"}})
+    assert is_recordable_tool_call({"tool": "run_code", "input": {"action": "sudo"}})
+
+
+def test_the_snippet_runner_is_still_not_gated():
+    """Criterion: no confirmation is introduced on the tick path.
+
+    Since ARCH-308 a snippet is how a tick reads a market, so a name gate here
+    would prompt a human on every candle read.
+    """
+    from condor.runtime.danger import DANGEROUS_TOOLS, is_dangerous_tool_call
+
+    assert "run_code" not in DANGEROUS_TOOLS
+    for action in ("run", "history", "get", "something_new"):
+        call = {"tool": "run_code", "input": {"action": action, "code": "x"}}
+        assert is_dangerous_tool_call(call) is False, action
+    assert is_dangerous_tool_call({"tool": "run_code", "input": None}) is False
+
+
+def test_the_snippet_action_sets_match_the_registered_tool():
+    """Every action literal the tool accepts is classified, or the fail-open
+    rule would record a read of the run history as a change to the world."""
+    from condor.runtime.danger import (
+        MUTATING_CODE_RUN_ACTIONS,
+        READ_ONLY_CODE_RUN_ACTIONS,
+    )
+    from mcp_servers.condor.server import run_code
+
+    fn = getattr(run_code, "fn", run_code)
+    literals = set(typing.get_args(fn.__annotations__["action"]))
+    assert MUTATING_CODE_RUN_ACTIONS | READ_ONLY_CODE_RUN_ACTIONS == literals
+    assert not (MUTATING_CODE_RUN_ACTIONS & READ_ONLY_CODE_RUN_ACTIONS)
 
 
 def test_the_controller_action_sets_match_the_registered_tool():

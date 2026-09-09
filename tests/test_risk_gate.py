@@ -11,6 +11,7 @@ import asyncio
 import pytest
 
 from condor.agents.risk import (
+    RefusalLog,
     RiskEngine,
     RiskLimits,
     RiskState,
@@ -735,3 +736,71 @@ def test_amm_guide_load_is_not_risk_checked():
 
     assert result["outcome"]["outcome"] == "selected"
     assert state.total_exposure == 0
+
+
+# ---------------------------------------------------------------------------
+# run_code is ungated by name on purpose (it is how a tick reads a market since
+# ARCH-308), which left one way to mutate the world from inside a dry run: a
+# snippet holding the unrestricted API client (SEC-616).
+# ---------------------------------------------------------------------------
+
+
+def _code_call(**args) -> dict:
+    return {"tool": "mcp__condor__run_code", "input": args}
+
+
+def test_a_dry_run_cannot_execute_a_snippet():
+    engine = RiskEngine(RiskLimits())
+    refusals = RefusalLog()
+    callback = auto_approve_with_risk_check(
+        engine, RiskState(), execution_mode="dry_run", refusals=refusals
+    )
+
+    result = asyncio.run(
+        callback(
+            _code_call(code="await client.gateway.start({'image': 'x'})"), _OPTIONS
+        )
+    )
+
+    assert result["outcome"]["outcome"] == "cancelled"
+    (noted,) = refusals.drain()
+    assert noted["tool"] == "run_code"
+    assert "dry-run" in noted["reason"]
+
+
+def test_a_dry_run_refuses_a_snippet_whose_action_cannot_be_read():
+    """The tool's own default is ``run``, so an absent action is an execution."""
+    callback = auto_approve_with_risk_check(
+        RiskEngine(RiskLimits()), RiskState(), execution_mode="dry_run"
+    )
+
+    for call in (
+        _code_call(code="print(1)"),
+        {"tool": "run_code", "input": None},
+        _code_call(action=None, code="print(1)"),
+    ):
+        result = asyncio.run(callback(call, _OPTIONS))
+        assert result["outcome"]["outcome"] == "cancelled", call
+
+
+def test_a_dry_run_still_reads_its_past_runs():
+    callback = auto_approve_with_risk_check(
+        RiskEngine(RiskLimits()), RiskState(), execution_mode="dry_run"
+    )
+
+    for call in (_code_call(action="history"), _code_call(action="get", run_id="cr_1")):
+        result = asyncio.run(callback(call, _OPTIONS))
+        assert result["outcome"]["outcome"] == "selected", call
+
+
+def test_a_live_loop_still_runs_snippets_without_a_confirmation():
+    """The refusal is dry-run's, not a new gate: loop mode is unchanged."""
+    callback = auto_approve_with_risk_check(
+        RiskEngine(RiskLimits()), RiskState(), execution_mode="loop"
+    )
+
+    result = asyncio.run(
+        callback(_code_call(code="await client.market_data.candles(...)"), _OPTIONS)
+    )
+
+    assert result["outcome"]["outcome"] == "selected"
