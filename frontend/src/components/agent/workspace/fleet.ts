@@ -22,7 +22,7 @@ import {
   alertsFor,
   type WorkspaceAlert,
 } from "@/components/agent/workspace/views";
-import type { AgentActionRow } from "@/lib/agent-attribution";
+import { countdown, type AgentActionRow } from "@/lib/agent-attribution";
 import type {
   AgentSummary,
   RunningInstance,
@@ -198,6 +198,15 @@ export function dueInSec(
 ): number | null {
   if (!live || live.last_tick_at <= 0 || live.frequency_sec <= 0) return null;
   return live.last_tick_at + live.frequency_sec - nowSec;
+}
+
+/**
+ * The words that go with `dueInSec`, so the four surfaces that print a
+ * countdown cannot word the same state differently. A tick due exactly now is
+ * overdue, not "next in 0s" — the beat has already slipped.
+ */
+export function tickCountdownLabel(due: number): string {
+  return due > 0 ? `next in ${countdown(due)}` : `overdue ${countdown(-due)}`;
 }
 
 /** Running, then paused, then everything idle — the sort's first key. */

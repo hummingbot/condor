@@ -2,6 +2,7 @@ import { ChevronRight, FlaskConical, Trash2, type LucideIcon } from "lucide-reac
 
 import { deriveAgentStatus } from "@/components/agent/agentStatus";
 import { StatusBadge } from "@/components/agent/StatusBadge";
+import { dueInSec } from "@/components/agent/workspace/fleet";
 import { useSeconds } from "@/hooks/useSeconds";
 import { countdown } from "@/lib/agent-attribution";
 import type { RunningInstance } from "@/lib/api";
@@ -65,8 +66,7 @@ export function EntityCard({
 
   const ticks = live?.tick_count ?? entity.tick_count ?? 0;
   const lastTickAt = live?.last_tick_at ?? 0;
-  const dueIn =
-    live && lastTickAt > 0 ? lastTickAt + live.frequency_sec - now / 1000 : null;
+  const dueIn = dueInSec(live, now / 1000);
 
   return (
     <button
