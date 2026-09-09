@@ -112,7 +112,7 @@ import {
 } from "@/lib/perf-history";
 import { chartNotice } from "@/lib/perf-notices";
 import { buildPositionRows, parseSide, type PositionRow } from "@/lib/perf-positions";
-import { groupSpine } from "@/components/agent/floor/floor";
+import { groupSpine, type FloorBucket } from "@/components/agent/floor/floor";
 import { mergeOwnerRows, ownerSeries } from "@/lib/owner-series";
 import { aggregatePnlSeries, snapshotsFromRunHistory } from "@/lib/pnl-chart";
 import { buildAttributor, runWindows } from "@/lib/run-attribution";
@@ -207,6 +207,15 @@ const EMPTY_OWNERS: FleetOwner[] = [];
  * neither the notice nor the chart it belongs to is rendered (PERF-338).
  */
 const EMPTY_SERIES: PerfSeriesResult = { points: [], source: "none", unsupported: false };
+
+/**
+ * The cuts a shut Breakdown band does not have.
+ *
+ * Held still for the same reason `EMPTY_OWNERS` is: the gate below returns it
+ * on every render where the band is closed, and a fresh `[]` each time would
+ * make the memo a no-op (PERF-340).
+ */
+const EMPTY_BUCKETS: FloorBucket[] = [];
 
 /**
  * How many finished runs are warmed when the reader switches to Terminated,
@@ -1848,13 +1857,28 @@ export function PerfBrowser({
   // cut it: `leaf.connector` is on the leaf but is deliberately not a
   // `GroupAxis` (see `groupSpine`), and an instrument breakdown at a scope
   // already grouped by pair is still the honest answer for that scope.
+  //
+  // Both are gated on the band being open (PERF-340). Each `groupSpine` is a
+  // second and third full pass over the scope's spine — bucket, then
+  // `readSpine` per bucket — and the band is shut on arrival every time and
+  // deliberately not remembered, so for the whole of a typical session the two
+  // cuts were folded and thrown away on every WS frame and every clock tick.
+  // Nothing but `<ScopeBreakdowns>` reads them, and it only renders under the
+  // same guard, so the gate is invisible to the numbers.
+  const showBreakdown = band === "breakdown";
   const byPair = useMemo(
-    () => groupSpine(scopedLeaves, (leaf) => leaf.pair || UNKNOWN_LABEL, cv, now),
-    [scopedLeaves, cv, now],
+    () =>
+      showBreakdown
+        ? groupSpine(scopedLeaves, (leaf) => leaf.pair || UNKNOWN_LABEL, cv, now)
+        : EMPTY_BUCKETS,
+    [showBreakdown, scopedLeaves, cv, now],
   );
   const byVenue = useMemo(
-    () => groupSpine(scopedLeaves, (leaf) => leaf.connector || UNKNOWN_LABEL, cv, now),
-    [scopedLeaves, cv, now],
+    () =>
+      showBreakdown
+        ? groupSpine(scopedLeaves, (leaf) => leaf.connector || UNKNOWN_LABEL, cv, now)
+        : EMPTY_BUCKETS,
+    [showBreakdown, scopedLeaves, cv, now],
   );
 
   /**
