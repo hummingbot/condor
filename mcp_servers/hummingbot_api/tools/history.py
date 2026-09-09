@@ -10,6 +10,7 @@ Provides access to historical data:
 import logging
 from typing import Any, Literal
 
+from condor.fetchers._pagination import next_cursor
 from mcp_servers.hummingbot_api.exceptions import ToolError
 from mcp_servers.hummingbot_api.hummingbot_client import HummingbotClient
 
@@ -22,18 +23,40 @@ logger = logging.getLogger("hummingbot-mcp")
 # Filters that each data_type can actually forward to the backend. Anything else
 # in the shared signature is refused instead of being silently dropped.
 _UNSUPPORTED_FILTERS: dict[str, tuple[str, ...]] = {
+    # The three branches paginate three different ways, and the shared signature
+    # offers both spellings, so each one has to refuse the spelling it drops
+    # (CORR-569). POST /trading/orders/search is cursor-only — it has no offset
+    # parameter at all — while gateway_clmm.search_positions is offset-only.
+    "orders": ("offset",),
     # The trading router has no closed-position history endpoint: get_positions
-    # POSTs /trading/positions with only account_names/connector_names/limit.
-    # orders and clmm_positions forward their filters, so only the perp branch
-    # needs a guard. (The orders branch's offset pagination hint is CORR-569's.)
-    "perp_positions": ("trading_pairs", "status", "start_time", "end_time", "offset"),
+    # POSTs /trading/positions with only account_names/connector_names/limit. The
+    # route accepts a cursor but our wrapper (tools/trading.py:get_positions)
+    # neither takes nor forwards one, so cursor is refused here too rather than
+    # accepted and dropped.
+    "perp_positions": (
+        "trading_pairs",
+        "status",
+        "start_time",
+        "end_time",
+        "offset",
+        "cursor",
+    ),
+    "clmm_positions": ("cursor",),
 }
 
 _FILTER_ALTERNATIVES: dict[str, str] = {
+    "orders": (
+        "orders is cursor-paginated: pass the cursor printed at the end of the "
+        "previous page back as cursor=, rather than an offset."
+    ),
     "perp_positions": (
         "perp_positions returns the CURRENT open book (the backend has no closed "
         'position history endpoint). Use data_type="orders" for a time-windowed '
         "history, or get_portfolio_overview() for the same open positions."
+    ),
+    "clmm_positions": (
+        "clmm_positions is offset-paginated: use offset= (the value printed at "
+        "the end of the previous page) rather than a cursor."
     ),
 }
 
@@ -71,6 +94,7 @@ async def search_history(
     # Pagination
     limit: int = 50,
     offset: int = 0,
+    cursor: str | None = None,
     # CLMM-specific filters
     network: str | None = None,
     wallet_address: str | None = None,
@@ -101,6 +125,7 @@ async def search_history(
         end_time: End timestamp in seconds (orders only, optional)
         limit: Maximum number of results (all data types, default: 50, max: 1000)
         offset: Pagination offset (clmm_positions only, default: 0)
+        cursor: Pagination cursor from the previous page (orders only, optional)
         network: Network filter for CLMM positions (optional)
         wallet_address: Wallet address filter for CLMM positions (optional)
         position_addresses: Specific position addresses for CLMM (optional)
@@ -121,6 +146,7 @@ async def search_history(
         start_time=start_time,
         end_time=end_time,
         offset=offset,
+        cursor=cursor,
     )
 
     try:
@@ -138,14 +164,24 @@ async def search_history(
                 start_time=start_time,
                 end_time=end_time,
                 limit=min(limit, 1000),
-                cursor=None,  # We use offset instead for pagination
+                cursor=cursor,
             )
 
             formatted_output = f"Order History\n{'=' * 100}\n\n{result['orders_table']}"
 
-            if result["pagination"].get("has_more"):
+            # The backend paginates this route by opaque cursor. The hint used to
+            # print `use offset=N`, which search_orders has no parameter for, so a
+            # model that followed it re-fetched page one forever and read the
+            # identical rows as fresh history (CORR-569).
+            following = next_cursor(result)
+            if following:
                 formatted_output += (
-                    f"\n\n... and more (use offset={offset + limit} to see more)"
+                    f'\n\n... and more (use cursor="{following}" to see the next page)'
+                )
+            elif result["pagination"].get("has_more"):
+                formatted_output += (
+                    "\n\n... and more, but the backend returned no next cursor: "
+                    "narrow the search with start_time/end_time to reach the rest."
                 )
 
             return {

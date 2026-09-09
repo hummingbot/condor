@@ -315,6 +315,7 @@ async def search_history(
     end_time: int | None = None,
     limit: int = 50,
     offset: int = 0,
+    cursor: str | None = None,
     network: str | None = None,
     wallet_address: str | None = None,
     position_addresses: list[str] | None = None,
@@ -342,6 +343,9 @@ async def search_history(
         start_time: orders only, timestamp in seconds (optional)
         end_time: orders only, timestamp in seconds (optional)
         offset: clmm_positions only, pagination offset (default: 0)
+        cursor: orders only, the cursor printed at the end of the previous page
+            (optional). orders is cursor-paginated and has no offset at all;
+            clmm_positions is offset-paginated and takes no cursor.
 
     CLMM-Specific Filters:
         network: Network filter for CLMM positions (optional)
@@ -351,6 +355,7 @@ async def search_history(
     Examples:
     - Search filled orders: search_history("orders", status="FILLED", limit=100)
     - Orders in a time window: search_history("orders", start_time=..., end_time=...)
+    - Next page of orders: search_history("orders", cursor="<cursor from last page>")
     - Current perp book: search_history("perp_positions", account_names=["master"])
     - Search all CLMM positions: search_history("clmm_positions", limit=100)
     """
@@ -367,6 +372,7 @@ async def search_history(
         end_time=end_time,
         limit=limit,
         offset=offset,
+        cursor=cursor,
         network=network,
         wallet_address=wallet_address,
         position_addresses=position_addresses,
