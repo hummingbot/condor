@@ -30,7 +30,7 @@ import {
   type PortfolioHistoryResponse,
 } from "@/lib/api";
 import { formatCurrency, formatCurrencyPnl, formatCurrencyVolume, isExecutorActive } from "@/lib/formatters";
-import { executorsQuery } from "@/lib/queryClient";
+import { EXECUTORS_REFETCH_MS, executorsQuery } from "@/lib/queryClient";
 import { getThemeColors } from "@/lib/theme-colors";
 
 // ── Formatters ──
@@ -809,7 +809,7 @@ export function Portfolio() {
     queryKey: executorsQuery(server).queryKey,
     queryFn: () => api.getExecutors(server!),
     enabled: !!server,
-    refetchInterval: 60000,
+    refetchInterval: EXECUTORS_REFETCH_MS,
     placeholderData: keepPreviousData,
   });
 

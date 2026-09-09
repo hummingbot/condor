@@ -130,6 +130,19 @@ export type ExecutorsQueryKey = [
   pair: string,
 ];
 
+/**
+ * Poll cadence for an executors entry that the socket already feeds.
+ *
+ * The `executors:<server>` frame is the update path — `shared-socket.ts` writes
+ * every one of them (~2s) straight into the unfiltered key — so REST is only
+ * the net underneath it. It has to be one constant because react-query drives a
+ * shared key at the *shortest* interval any of its observers asks for: while a
+ * hook polling that key at 10s was mounted, it pulled Portfolio's deliberate
+ * 60s down with it and the whole newest-500 list was re-downloaded six times a
+ * minute to overwrite data two seconds old (PERF-336).
+ */
+export const EXECUTORS_REFETCH_MS = 60_000;
+
 export function executorsQuery(
   server: string | null | undefined,
   opts: { controllerId?: string; pair?: string } = {},
