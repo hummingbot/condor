@@ -763,7 +763,14 @@ class ACPClient:
         # Subprocess died or stream ended -- unblock any consumer waiting on
         # _event_queue, and stop claiming to be alive: we can no longer hear.
         self._read_loop_ended = True
-        self._peer.cancel_all()
+        # Fail the pending futures rather than cancelling them: the handshake
+        # in start() and any in-flight turn are parked on them, and a
+        # CancelledError there is a BaseException that start()'s
+        # `except Exception` guard cannot catch -- so a command that cannot run
+        # left its subprocess orphaned on exactly the path that guard was
+        # written for, and the caller saw a cancellation instead of a broken
+        # agent (CORR-329).
+        self._peer.fail_all(ConnectionError(f"ACP agent exited: {self.command}"))
         self._event_queue.put_nowait(PromptDone(stop_reason="disconnected"))
 
     async def _drain_stderr(self) -> None:

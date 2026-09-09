@@ -43,6 +43,11 @@ class JSONRPCPeer:
         self._next_id = 1
         self._pending: dict[int, asyncio.Future] = {}
         self._handlers: dict[str, Callable] = {}
+        # Set by :meth:`fail_all` when the connection dies for good. Sticky, so
+        # a request that races the EOF -- registered a moment *after* the read
+        # loop swept the pending table -- fails with the same real error
+        # instead of parking on a future nobody will ever settle (CORR-329).
+        self._failure: BaseException | None = None
 
     def register_handler(self, method: str, handler: Callable) -> None:
         self._handlers[method] = handler
@@ -62,6 +67,9 @@ class JSONRPCPeer:
         request must not leak a future that only ``cancel_all`` would ever
         clear -- and :class:`asyncio.TimeoutError` propagates to the caller.
         """
+        if self._failure is not None:
+            raise self._failure
+
         req_id = self._next_id
         self._next_id += 1
 
@@ -72,6 +80,11 @@ class JSONRPCPeer:
         log.debug("-> %s (id=%d)", method, req_id)
 
         future: asyncio.Future[Any] = asyncio.get_event_loop().create_future()
+        # Checked again after the drain above: the peer can die while we are
+        # writing, and a future registered after that sweep would wait out the
+        # whole timeout for an answer that can never come.
+        if self._failure is not None:
+            raise self._failure
         self._pending[req_id] = future
         if timeout is None:
             return await future
@@ -169,8 +182,34 @@ class JSONRPCPeer:
             await writer.drain()
 
     def cancel_all(self) -> None:
-        """Cancel all pending futures (used during shutdown)."""
+        """Cancel all pending futures (used during our own shutdown)."""
         for future in self._pending.values():
             if not future.done():
                 future.cancel()
+        self._pending.clear()
+
+    def fail_all(self, exc: BaseException) -> None:
+        """Settle every pending future with ``exc``: the connection is gone.
+
+        Not :meth:`cancel_all`. A cancelled future raises ``CancelledError``
+        into whoever awaits it, and that is a ``BaseException`` that every
+        ``except Exception`` between here and the user walks straight past --
+        asyncio and the callers alike read it as "this task was cancelled"
+        rather than "the agent died", so a launch that failed surfaced as a
+        silent cancellation and the caller's cleanup never ran (CORR-329).
+        An exception says what happened and is catchable.
+
+        Use it when the peer stopped being able to answer (EOF on stdout);
+        ``cancel_all`` stays for the shutdown *we* initiate, where a
+        cancellation is the truth.
+        """
+        self._failure = exc
+        for future in self._pending.values():
+            if not future.done():
+                future.set_exception(exc)
+                # Retrieve it here so a future nobody awaits any more -- a
+                # stale prompt settled only by its done-callback -- does not
+                # log "exception was never retrieved" when it is collected.
+                # A real awaiter still gets it raised.
+                future.exception()
         self._pending.clear()
