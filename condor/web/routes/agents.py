@@ -50,7 +50,11 @@ from condor.agents.sessions_index import (
 )
 from condor.fsutil import atomic_write_text
 from condor.layering import fork_if_stock
-from condor.web.auth import check_server_access, get_current_user
+from condor.web.auth import (
+    check_server_access,
+    get_current_user,
+    report_owner_filter,
+)
 from condor.web.models import ReportSummary, WebUser
 
 # ── Simple in-memory TTL cache for performance data ──
@@ -3429,7 +3433,12 @@ async def get_session_report(
 
     run_key = _runkey(slug, sslug)
     source = f"{run_key}/session_{session_num}"
-    reports, _total = list_reports(source_type="routine", search=run_key, limit=100)
+    reports, _total = list_reports(
+        source_type="routine",
+        search=run_key,
+        limit=100,
+        owner_id=report_owner_filter(user),
+    )
     matched = [r for r in reports if r.get("source_name", "") == source]
     return {"report": ReportSummary(**matched[0]).model_dump() if matched else None}
 
@@ -3545,7 +3554,7 @@ async def get_strategy_routines(
     from condor.routine_store import get_routine_store
 
     store = get_routine_store()
-    all_routines = store.list_routines()
+    all_routines = store.list_routines(owner_id=report_owner_filter(user))
     prefix = f"{slug}/"
     return [r for r in all_routines if r.get("name", "").startswith(prefix)]
 
@@ -3563,7 +3572,12 @@ async def get_strategy_reports(
 
     run_key = _runkey(slug, sslug)
     prefix = f"{run_key}/"
-    reports, _total = list_reports(source_type="routine", search=run_key, limit=limit)
+    reports, _total = list_reports(
+        source_type="routine",
+        search=run_key,
+        limit=limit,
+        owner_id=report_owner_filter(user),
+    )
     matched = [r for r in reports if r.get("source_name", "").startswith(prefix)]
     return {
         "reports": [ReportSummary(**r).model_dump() for r in matched],

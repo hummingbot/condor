@@ -14,23 +14,11 @@ from condor.reports import (
     list_reports_grouped,
     resolve_report_asset,
 )
-from condor.web.auth import get_current_user
+from condor.web.auth import get_current_user, report_owner_filter
 from condor.web.models import ReportsListResponse, ReportSummary, WebUser
 from config_manager import get_config_manager
 
 router = APIRouter(prefix="/reports", tags=["reports"])
-
-
-def _owner_filter(user: WebUser) -> int | None:
-    """Whose reports a listing may show: everyone's for admins, own otherwise.
-
-    ``None`` disables the store's owner filter — the admin override the other
-    server-data surfaces already grant (``_owner`` in conversations,
-    ``_require_ownership`` in sessions). Anyone else is scoped to entries
-    stamped with their own id; legacy entries with no owner are dropped for
-    them (fail closed, SEC-196).
-    """
-    return None if get_config_manager().is_admin(user.id) else user.id
 
 
 def _authorized_entry(report_id: str, user: WebUser) -> dict:
@@ -69,7 +57,7 @@ async def get_reports(
         agent=agent,
         limit=limit,
         offset=offset,
-        owner_id=_owner_filter(user),
+        owner_id=report_owner_filter(user),
     )
     return ReportsListResponse(
         reports=[ReportSummary(**e) for e in entries],
@@ -79,7 +67,7 @@ async def get_reports(
 
 @router.get("/latest-by-source")
 async def get_reports_grouped(user: WebUser = Depends(get_current_user)):
-    return list_reports_grouped(owner_id=_owner_filter(user))
+    return list_reports_grouped(owner_id=report_owner_filter(user))
 
 
 @router.get("/assets/{filename}")

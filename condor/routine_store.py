@@ -326,12 +326,18 @@ class RoutineStore:
 
         return all_routines
 
-    def _get_report_counts(self) -> dict[str, int]:
-        """Get report count per routine source_name."""
+    def _get_report_counts(self, owner_id: int | None = None) -> dict[str, int]:
+        """Get report count per routine source_name.
+
+        ``owner_id`` scopes the tally the way ``list_reports`` does (SEC-593):
+        an unscoped count is still a read on another user's reports — it says
+        how many they ran — so the web callers pass the caller's filter and
+        only an admin (or an internal, already-per-user caller) gets ``None``.
+        """
         try:
             from condor.reports import list_reports
 
-            reports, _ = list_reports(limit=1000)
+            reports, _ = list_reports(limit=1000, owner_id=owner_id)
             counts: dict[str, int] = {}
             for r in reports:
                 sn = r.get("source_name", "")
@@ -341,9 +347,9 @@ class RoutineStore:
         except Exception:
             return {}
 
-    def list_routines(self) -> list[dict]:
+    def list_routines(self, owner_id: int | None = None) -> list[dict]:
         all_routines = self._discover_all()
-        report_counts = self._get_report_counts()
+        report_counts = self._get_report_counts(owner_id)
         out = []
         for name, info in all_routines.items():
             out.append(

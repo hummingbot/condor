@@ -152,6 +152,23 @@ def require_admin(user: WebUser) -> None:
         )
 
 
+def report_owner_filter(user: WebUser) -> int | None:
+    """Whose reports a listing may show: everyone's for admins, own otherwise.
+
+    ``None`` disables the store's owner filter — the admin override the other
+    server-data surfaces already grant (``_owner`` in conversations,
+    ``_require_ownership`` in sessions). Anyone else is scoped to entries
+    stamped with their own id; legacy entries with no owner are dropped for
+    them (fail closed, SEC-196).
+
+    Lives here rather than in ``routes/reports.py`` (SEC-593) because the
+    per-routine, per-strategy and per-session report listings need the same
+    line, and ``require_admin`` above records what happens when a gate is
+    imported privately across route modules instead: it grows copies.
+    """
+    return None if get_config_manager().is_admin(user.id) else user.id
+
+
 # ── Server-scoped access (SEC-147) ──
 
 

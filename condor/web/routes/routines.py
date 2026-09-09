@@ -22,6 +22,7 @@ from condor.runtime.wake import (
 from condor.web.auth import (
     check_server_access,
     get_current_user,
+    report_owner_filter,
     require_server_access_query,
 )
 from condor.web.models import WebUser
@@ -134,7 +135,7 @@ def _authorized_instance(instance_id: str, user: WebUser) -> dict:
 async def list_routines(user: WebUser = Depends(get_current_user)):
     """List all discovered routines with their fields."""
     store = get_routine_store()
-    return store.list_routines()
+    return store.list_routines(owner_id=report_owner_filter(user))
 
 
 @router.get("/instances")
@@ -379,7 +380,12 @@ async def get_routine_reports(
     # Agent routines are prefixed (e.g. "agent_slug/routine_name") but reports
     # may be saved with just the base name. Match both.
     base_name = routine_name.split("/")[-1] if "/" in routine_name else routine_name
-    reports, total = list_reports(search=base_name, limit=limit)
+    # SEC-593: scope to the caller before matching. The routine name is a free
+    # string anyone may spell, so this listing is only as private as its owner
+    # filter — the same one ``GET /reports`` applies.
+    reports, total = list_reports(
+        search=base_name, limit=limit, owner_id=report_owner_filter(user)
+    )
     # Filter to exact source_name match (full prefixed or base name)
     exact = [r for r in reports if r.get("source_name") in (routine_name, base_name)]
     return {"reports": exact, "total": len(exact)}

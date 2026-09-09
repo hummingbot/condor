@@ -16,6 +16,7 @@ import pytest
 from starlette.testclient import TestClient
 
 import condor.reports as rep
+import condor.web.auth as web_auth
 import condor.web.routes.reports as routes
 from condor.web.app import create_app
 from condor.web.auth import get_current_user
@@ -72,6 +73,10 @@ def reports_dir(tmp_path, monkeypatch):
     )
     monkeypatch.setenv("CONDOR_REPORTS_DIR", str(directory))
     monkeypatch.setattr(routes, "get_config_manager", lambda: FakeConfigManager())
+    # The listing gate moved to condor.web.auth (SEC-593), where the routine and
+    # strategy listings reach it too; the id-addressed reads still resolve theirs
+    # in routes/reports.py, so both namespaces are faked.
+    monkeypatch.setattr(web_auth, "get_config_manager", lambda: FakeConfigManager())
     return directory
 
 
@@ -108,6 +113,70 @@ def test_grouped_listing_is_scoped_the_same_way(reports_dir):
     with _client(ADMIN) as client:
         groups = client.get("/api/v1/reports/latest-by-source").json()
     assert sorted(g["source_name"] for g in groups) == ["legacy", "mine", "theirs"]
+
+
+# ── Per-routine listing (SEC-593) ──
+
+
+def test_routine_reports_listing_hides_another_users_reports(reports_dir):
+    """The one reports surface SEC-196 left unfiltered.
+
+    ``GET /routines/{name}/reports`` matched on the routine name alone, so any
+    approved user could spell a colleague's routine and read the index entries
+    of its runs — id, title, tags, subject and owner. The name is not a secret
+    and never was ownership-checked, so the owner filter is the whole gate.
+    """
+    with _client(USER) as client:
+        payload = client.get("/api/v1/routines/theirs/reports").json()
+    assert payload == {"reports": [], "total": 0}
+
+
+def test_routine_reports_listing_still_returns_your_own(reports_dir):
+    with _client(USER) as client:
+        payload = client.get("/api/v1/routines/mine/reports").json()
+    assert [r["id"] for r in payload["reports"]] == ["mine01"]
+
+
+def test_routine_reports_listing_hides_ownerless_entries_from_non_admins(reports_dir):
+    """Fail closed, exactly as the id-addressed reads do."""
+    with _client(USER) as client:
+        payload = client.get("/api/v1/routines/legacy/reports").json()
+    assert payload == {"reports": [], "total": 0}
+
+
+def test_an_agent_prefixed_name_does_not_widen_the_scope(reports_dir):
+    """The handler also matches the base name after the last ``/``.
+
+    That fallback is what makes the route enumerable — ``x/theirs`` reaches the
+    same entries as ``theirs`` — so the filter has to sit in the store call,
+    ahead of the name match, rather than in the caller's spelling of the name.
+    """
+    with _client(USER) as client:
+        payload = client.get("/api/v1/routines/someagent/theirs/reports").json()
+    assert payload == {"reports": [], "total": 0}
+
+
+def test_admin_still_sees_every_owner_on_the_routine_listing(reports_dir):
+    with _client(ADMIN) as client:
+        theirs = client.get("/api/v1/routines/theirs/reports").json()
+        legacy = client.get("/api/v1/routines/legacy/reports").json()
+    assert [r["id"] for r in theirs["reports"]] == ["their1"]
+    assert [r["id"] for r in legacy["reports"]] == ["legacy"]
+
+
+def test_report_counts_do_not_tally_another_users_runs(reports_dir):
+    """``report_count`` on the routines list was the same leak as a number.
+
+    An unfiltered tally still answers "how many times did they run this", so the
+    store takes the caller's filter and the web routes pass it.
+    """
+    from condor.routine_store import RoutineStore
+
+    store = RoutineStore()
+    assert store._get_report_counts(owner_id=USER.id) == {"mine": 1}
+    assert store._get_report_counts(owner_id=OTHER.id) == {"theirs": 1}
+    # An admin (owner_id None) keeps the whole tally.
+    assert store._get_report_counts() == {"mine": 1, "theirs": 1, "legacy": 1}
 
 
 # ── Id-addressed reads and deletes ──
