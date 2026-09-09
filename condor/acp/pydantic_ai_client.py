@@ -18,7 +18,6 @@ import time
 import uuid
 from typing import Any, AsyncIterator, Iterator
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
 
 from .client import (
     ACPEvent,
@@ -439,8 +438,13 @@ class PydanticAIClient:
         # so cancelling the run *is* the cancel.
         self._abort_requested = False
 
-    def _build_model(self) -> Any:
+    async def _build_model(self) -> Any:
         """Build the pydantic-ai model object with sensible defaults.
+
+        Async because a bare local key ("ollama:" / "lmstudio:") has to ask the
+        local backend which model it serves, and that probe must not park the
+        one event loop that also runs Telegram polling, the dashboard and every
+        other session.
 
         All local providers (ollama, lmstudio) are routed through OpenAI-compatible
         endpoints so we control the base_url explicitly. This avoids requiring
@@ -532,7 +536,7 @@ class PydanticAIClient:
         if prefix in DEFAULT_BASE_URLS:
             base_url = base_url or DEFAULT_BASE_URLS[prefix]
             if not model_id:
-                model_id = self._resolve_default_local_model(
+                model_id = await self._resolve_default_local_model(
                     prefix=prefix, base_url=base_url
                 )
             openai_client = AsyncOpenAI(
@@ -560,7 +564,7 @@ class PydanticAIClient:
 
         return infer_model(self.model_name)
 
-    def _resolve_default_local_model(self, prefix: str, base_url: str) -> str:
+    async def _resolve_default_local_model(self, prefix: str, base_url: str) -> str:
         """Resolve a usable default model for local providers.
 
         For ollama/lmstudio with model strings like "ollama:" (no explicit model),
@@ -572,12 +576,12 @@ class PydanticAIClient:
         if env_override:
             return env_override
 
-        model_id = self._fetch_openai_compatible_model(base_url)
+        model_id = await self._fetch_openai_compatible_model(base_url)
         if model_id:
             return model_id
 
         if prefix == "ollama":
-            model_id = self._fetch_ollama_native_model(base_url)
+            model_id = await self._fetch_ollama_native_model(base_url)
             if model_id:
                 return model_id
 
@@ -587,18 +591,34 @@ class PydanticAIClient:
             "or set CONDOR_DEFAULT_LOCAL_MODEL."
         )
 
-    def _fetch_openai_compatible_model(self, base_url: str) -> str | None:
+    async def _probe_json(self, url: str) -> Any:
+        """GET ``url`` off the event loop and return the decoded JSON, or None.
+
+        Uses the same async client ``healthcheck_local_backend`` uses. The old
+        stdlib ``urlopen`` here was synchronous, so a local backend that was
+        down or hung froze the single loop that also runs Telegram polling, the
+        dashboard and every other session for the whole timeout (PERF-331).
+        """
+        import httpx
+
+        from condor.runtime.timeouts import TIMEOUTS
+
+        budget = TIMEOUTS.local_model_probe
+        timeout = httpx.Timeout(connect=budget, read=budget, write=budget, pool=budget)
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.get(url)
+            if resp.status_code != 200:
+                return None
+            return resp.json()
+        except Exception:
+            return None
+
+    async def _fetch_openai_compatible_model(self, base_url: str) -> str | None:
         """Try GET {base_url}/models and return the first model id."""
         url = f"{base_url.rstrip('/')}/models"
-        try:
-            req = Request(url, method="GET")
-            with urlopen(req, timeout=2) as resp:
-                if resp.status != 200:
-                    return None
-                import json
-
-                payload = json.loads(resp.read().decode("utf-8"))
-        except Exception:
+        payload = await self._probe_json(url)
+        if not isinstance(payload, dict):
             return None
 
         data = payload.get("data")
@@ -610,21 +630,14 @@ class PydanticAIClient:
                     return model_id.strip()
         return None
 
-    def _fetch_ollama_native_model(self, base_url: str) -> str | None:
+    async def _fetch_ollama_native_model(self, base_url: str) -> str | None:
         """Try GET /api/tags from the Ollama host and return first model name."""
         parsed = urlparse(base_url)
         if not parsed.scheme or not parsed.netloc:
             return None
         native_url = f"{parsed.scheme}://{parsed.netloc}/api/tags"
-        try:
-            req = Request(native_url, method="GET")
-            with urlopen(req, timeout=2) as resp:
-                if resp.status != 200:
-                    return None
-                import json
-
-                payload = json.loads(resp.read().decode("utf-8"))
-        except Exception:
+        payload = await self._probe_json(native_url)
+        if not isinstance(payload, dict):
             return None
 
         models = payload.get("models")
@@ -673,7 +686,7 @@ class PydanticAIClient:
             toolsets.append(mcp_server)
             self._mcp_servers.append(mcp_server)
 
-        model = self._build_model()
+        model = await self._build_model()
         prepare = self._prepare_tools if self.allowed_tools else None
         self._agent = Agent(
             model,

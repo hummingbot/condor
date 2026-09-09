@@ -50,6 +50,11 @@ class TimeoutPolicy:
     sse_stream: int = 1800
     # Budget for one MCP tool call.
     mcp_call: float = 15.0
+    # How long to probe a local inference server for the model it serves, when
+    # a bare "ollama:" / "lmstudio:" key leaves the model id to us. Short: it
+    # is a localhost request on the session-start path, and a backend that is
+    # down should fall through to the explicit-key error quickly.
+    local_model_probe: float = 2.0
     # How long an agent client may take to become usable: the ACP
     # ``initialize`` + ``session/new`` handshake, and the pydantic-ai wait for
     # its MCP servers to come up. Generous because a cold start can include an

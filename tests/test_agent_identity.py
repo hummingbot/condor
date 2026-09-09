@@ -226,7 +226,10 @@ async def _instructions_on_the_wire(client) -> str | None:
         seen["instructions"] = messages[0].instructions
         return ModelResponse(parts=[TextPart("ok")])
 
-    client._build_model = lambda: FunctionModel(respond)
+    async def _stub_model():
+        return FunctionModel(respond)
+
+    client._build_model = _stub_model
     await client.start()
     try:
         await client._agent.run("who are you?")
