@@ -5,6 +5,7 @@ This module provides the core business logic for managing controllers and their
 configurations, including exploration, modification, and bot deployment.
 """
 
+import asyncio
 from typing import Any, Literal
 
 # Internal/auto-managed fields that should be skipped during schema validation
@@ -15,6 +16,36 @@ _SKIP_FIELDS = {
     "candles_config",
     "initial_positions",
 }
+
+
+async def _gather_calls(*awaitables: Any) -> list[Any]:
+    """Await independent API calls concurrently, preserving sequential failure.
+
+    ``return_exceptions=True`` rather than gather's default: with the default,
+    the first failure propagates immediately while its siblings keep running
+    unawaited, so a second failure surfaces later as asyncio's "Task exception
+    was never retrieved" with nothing naming it. Here every leg settles first
+    and the first exception *in call order* is re-raised, which is exactly the
+    error the sequential code produced.
+
+    A ``CancelledError`` handed back as a *result* means some other party
+    cancelled that leg -- not that this task is shutting down. Re-raising it
+    verbatim would make our caller read a leg's cancellation as its own
+    (CORR-332), so it is only propagated when this task is genuinely being
+    cancelled (CORR-601's ``cancelling()`` check); otherwise it is reported as
+    the plain failure it is. Our own cancellation still arrives the normal way:
+    ``gather`` cancels the legs and re-raises out of the ``await`` below.
+    """
+    results = await asyncio.gather(*awaitables, return_exceptions=True)
+    for result in results:
+        if isinstance(result, asyncio.CancelledError):
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                raise result
+            raise RuntimeError("Controller API call was cancelled") from result
+        if isinstance(result, BaseException):
+            raise result
+    return list(results)
 
 
 def _validate_config_against_template(
@@ -147,9 +178,27 @@ async def explore_controllers(
     Returns:
         Dictionary containing exploration results and formatted output
     """
-    # List all controllers and their configs
-    controllers = await client.controllers.list_controllers()
-    configs = await client.controllers.list_controller_configs()
+    # Wave 1: everything that depends on nothing. Both lists are independent
+    # of each other, and the named config only feeds controller_name resolution
+    # in the describe branch below, so all three travel together instead of
+    # costing three serial round trips to a usually remote API host.
+    wants_config = action == "describe" and bool(config_name)
+    wave_1: list[Any] = [
+        client.controllers.list_controllers(),
+        client.controllers.list_controller_configs(),
+    ]
+    if wants_config:
+        wave_1.append(client.controllers.get_controller_config(config_name))
+
+    wave_1_results = await _gather_calls(*wave_1)
+    controllers = wave_1_results[0]
+    configs = wave_1_results[1]
+    config = wave_1_results[2] if wants_config else None
+
+    # One pass over the configs instead of one rescan per controller below.
+    configs_by_controller: dict[Any, list[dict[str, Any]]] = {}
+    for cfg in configs:
+        configs_by_controller.setdefault(cfg.get("controller_name"), []).append(cfg)
 
     if action == "list":
         result = "Available Controllers:\n\n"
@@ -158,9 +207,7 @@ async def explore_controllers(
                 continue
             result += f"Controller Type: {c_type}\n"
             for controller in controller_list:
-                controller_configs = [
-                    c for c in configs if c.get("controller_name") == controller
-                ]
+                controller_configs = configs_by_controller.get(controller, [])
                 result += f"- {controller} ({len(controller_configs)} configs)\n"
                 if len(controller_configs) > 0:
                     for config in controller_configs:
@@ -175,11 +222,9 @@ async def explore_controllers(
 
     elif action == "describe":
         result = ""
-        config = None
 
-        # Get config if specified — show config details directly
+        # Config details (fetched in wave 1) — show them directly
         if config_name:
-            config = await client.controllers.get_controller_config(config_name)
             if config:
                 if controller_name and controller_name != config.get("controller_name"):
                     controller_name = config.get("controller_name")
@@ -212,22 +257,31 @@ async def explore_controllers(
                 "formatted_output": f"Controller '{controller_name}' not found.",
             }
 
-        # Get config template (lightweight — just parameter schema)
-        controller_configs = [
-            c.get("id") for c in configs if c.get("controller_name") == controller_name
+        # Wave 2: the template (lightweight — just the parameter schema) and,
+        # only when explicitly requested, the full source. Both need
+        # found_controller_type, and neither needs the other.
+        wave_2: list[Any] = [
+            client.controllers.get_controller_config_template(
+                found_controller_type, controller_name
+            )
         ]
-        template = await client.controllers.get_controller_config_template(
-            found_controller_type, controller_name
-        )
+        if include_code:
+            wave_2.append(
+                client.controllers.get_controller(
+                    found_controller_type, controller_name
+                )
+            )
+        wave_2_results = await _gather_calls(*wave_2)
+        template = wave_2_results[0]
+        controller_code_content = wave_2_results[1] if include_code else None
+
+        controller_configs = [
+            c.get("id") for c in configs_by_controller.get(controller_name, [])
+        ]
 
         result += f"Controller: {controller_name} ({found_controller_type})\n\n"
 
-        # Only fetch and include full source code when explicitly requested
-        controller_code_content = None
         if include_code:
-            controller_code_content = await client.controllers.get_controller(
-                found_controller_type, controller_name
-            )
             result += f"Controller Code:\n{controller_code_content}\n\n"
 
         # Format config template parameters as table
