@@ -5,6 +5,8 @@ import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from condor.server_data_service import ServerDataType, get_server_data_service
+
 logger = logging.getLogger(__name__)
 
 
@@ -59,8 +61,6 @@ async def list_executors(
     user: WebUser = Depends(require_server_access),
 ):
     cm = get_config_manager()
-
-    from condor.server_data_service import ServerDataType, get_server_data_service
 
     # For filtered queries or when a custom limit is requested, go direct to API.
     # For unfiltered default requests, use the SDS cache.
@@ -154,8 +154,6 @@ async def list_executors_page(
             offset = int(cursor[len(_SDS_OFFSET_PREFIX) :] or 0)
 
     if offset is not None:
-        from condor.server_data_service import ServerDataType, get_server_data_service
-
         cached = get_server_data_service().get(name, ServerDataType.EXECUTORS)
         cached_rows = _extract_executors_list(cached) if cached is not None else []
         # The poll caps its walk at EXECUTORS_POLL_MAX, so a cache of exactly

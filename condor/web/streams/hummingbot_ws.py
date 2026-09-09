@@ -18,6 +18,8 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 import aiohttp
 
+from condor.server_data_service import ServerDataType, get_server_data_service
+
 logger = logging.getLogger(__name__)
 
 # What a stream should do about the error that broke it.
@@ -372,8 +374,6 @@ class HummingbotStreamsMixin:
         cm = get_config_manager()
 
         # Try SDS cache first (pre-warmed by auto_subscribe_servers or REST prefetch)
-        from condor.server_data_service import ServerDataType, get_server_data_service
-
         if channel not in self._last_data:
             sds = get_server_data_service()
             cached = sds.get(server_name, ServerDataType.EXECUTORS)
@@ -493,11 +493,6 @@ class HummingbotStreamsMixin:
 
         # Send SDS-cached bots data as initial snapshot
         if channel not in self._last_data:
-            from condor.server_data_service import (
-                ServerDataType,
-                get_server_data_service,
-            )
-
             sds = get_server_data_service()
             cached = sds.get(server_name, ServerDataType.BOTS_STATUS)
             if cached is not None:
@@ -515,11 +510,6 @@ class HummingbotStreamsMixin:
                 return
             raw_data = msg.get("data", {})
             # Update SDS cache so REST and Telegram benefit
-            from condor.server_data_service import (
-                ServerDataType,
-                get_server_data_service,
-            )
-
             get_server_data_service().put(
                 server_name, ServerDataType.BOTS_STATUS, raw_data
             )
@@ -551,11 +541,6 @@ class HummingbotStreamsMixin:
                 return
             raw_data = msg.get("data", [])
             # Update SDS cache
-            from condor.server_data_service import (
-                ServerDataType,
-                get_server_data_service,
-            )
-
             get_server_data_service().put(
                 server_name, ServerDataType.POSITIONS, raw_data
             )

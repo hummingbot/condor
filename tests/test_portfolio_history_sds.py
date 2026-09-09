@@ -111,9 +111,8 @@ def env(monkeypatch):
     def _bind(delay: float = 0.0):
         client = FakeClient(delay=delay)
         sds = _make_sds(client)
-        monkeypatch.setattr(
-            "condor.server_data_service.get_server_data_service", lambda: sds
-        )
+        for module in ("condor.web.routes.portfolio", "condor.web.ws_manager"):
+            monkeypatch.setattr(f"{module}.get_server_data_service", lambda: sds)
         monkeypatch.setattr(
             "condor.web.routes.portfolio.get_config_manager", lambda: _FakeCM()
         )

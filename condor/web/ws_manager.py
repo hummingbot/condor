@@ -13,7 +13,7 @@ import asyncio
 import json
 import logging
 import time
-from typing import TYPE_CHECKING, Any, Optional
+from typing import Any, Optional
 
 from fastapi import WebSocket
 
@@ -21,6 +21,8 @@ from fastapi import WebSocket
 # (and patch ``ws_manager.dex_candles``) through this module.
 from condor import dex_candles  # noqa: F401
 from condor.asyncutil import TaskSet
+from condor.fetchers.portfolio import PORTFOLIO_HISTORY_RANGES
+from condor.server_data_service import CacheKey, ServerDataType, get_server_data_service
 from condor.web.auth import decode_jwt
 from condor.web.streams.candles import (  # noqa: F401
     CandleStreamsMixin,
@@ -29,9 +31,6 @@ from condor.web.streams.candles import (  # noqa: F401
     parse_candle_channel,
 )
 from condor.web.streams.hummingbot_ws import HummingbotStreamsMixin
-
-if TYPE_CHECKING:
-    from condor.server_data_service import CacheKey
 
 logger = logging.getLogger(__name__)
 
@@ -157,8 +156,6 @@ class WebSocketManager(CandleStreamsMixin, HummingbotStreamsMixin):
     def start(self) -> None:
         if self._sds_listener_registered:
             return
-        from condor.server_data_service import get_server_data_service
-
         sds = get_server_data_service()
         sds.add_listener(self._on_data_update)
         self._sds_listener_registered = True
@@ -169,8 +166,6 @@ class WebSocketManager(CandleStreamsMixin, HummingbotStreamsMixin):
 
     def stop(self) -> None:
         if self._sds_listener_registered:
-            from condor.server_data_service import get_server_data_service
-
             sds = get_server_data_service()
             sds.remove_listener(self._on_data_update)
             self._sds_listener_registered = False
@@ -205,8 +200,6 @@ class WebSocketManager(CandleStreamsMixin, HummingbotStreamsMixin):
 
     def _cleanup_sds_subscriptions(self) -> None:
         """Remove all SDS subscriptions."""
-        from condor.server_data_service import get_server_data_service
-
         sds = get_server_data_service()
         sds.unsubscribe_all("ws_manager")
         self._sds_subscriptions.clear()
@@ -257,8 +250,6 @@ class WebSocketManager(CandleStreamsMixin, HummingbotStreamsMixin):
         self._last_data.pop(channel, None)
 
         if channel in self._sds_subscriptions:
-            from condor.server_data_service import get_server_data_service
-
             sds = get_server_data_service()
             cache_key = self._sds_subscriptions.pop(channel)
             sds.unsubscribe(cache_key, "ws_manager")
@@ -350,8 +341,6 @@ class WebSocketManager(CandleStreamsMixin, HummingbotStreamsMixin):
         if not sdt_name:
             return
 
-        from condor.server_data_service import ServerDataType, get_server_data_service
-
         sds = get_server_data_service()
         data_type = ServerDataType[sdt_name]
 
@@ -402,9 +391,6 @@ class WebSocketManager(CandleStreamsMixin, HummingbotStreamsMixin):
         while the priming is in flight, unsubscribe again — otherwise the poll
         would outlive its last subscriber.
         """
-        from condor.fetchers.portfolio import PORTFOLIO_HISTORY_RANGES
-        from condor.server_data_service import ServerDataType, get_server_data_service
-
         sds = get_server_data_service()
 
         async def _sub(range_key: str) -> None:
@@ -434,13 +420,6 @@ class WebSocketManager(CandleStreamsMixin, HummingbotStreamsMixin):
         SDS stops polling a key once it has no subscribers left, so this is what
         ends the history refresh.
         """
-        from condor.fetchers.portfolio import PORTFOLIO_HISTORY_RANGES
-        from condor.server_data_service import (
-            CacheKey,
-            ServerDataType,
-            get_server_data_service,
-        )
-
         sds = get_server_data_service()
         for range_key in PORTFOLIO_HISTORY_RANGES:
             sds.unsubscribe(

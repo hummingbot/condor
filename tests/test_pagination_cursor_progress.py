@@ -77,7 +77,7 @@ class _FakeSDS:
 
 def test_ws_executor_prefetch_stops_when_the_cursor_does_not_advance(monkeypatch):
     """The pre-fetch must not re-page, or duplicates land in the SDS cache."""
-    import condor.server_data_service as sds_module
+    import condor.web.streams.hummingbot_ws as executor_stream_module
     import config_manager as cm_module
 
     client = EchoingCursorClient(
@@ -90,7 +90,7 @@ def test_ws_executor_prefetch_stops_when_the_cursor_does_not_advance(monkeypatch
         async def get_client(self, server_name):
             return client
 
-    monkeypatch.setattr(sds_module, "get_server_data_service", lambda: sds)
+    monkeypatch.setattr(executor_stream_module, "get_server_data_service", lambda: sds)
     monkeypatch.setattr(cm_module, "get_config_manager", lambda: _FakeCM())
 
     manager = WebSocketManager()

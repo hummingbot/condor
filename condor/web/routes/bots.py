@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from condor.controller_configs import clean_config_for_save
 from condor.fetchers.bots import BotsEnrichment, build_bots_page, extract_bots_list
+from condor.server_data_service import ServerDataType, get_server_data_service
 from condor.web.auth import require_server_access
 from condor.web.models import (
     AvailableControllersResponse,
@@ -194,8 +195,6 @@ async def enriched_bots_page(name: str, raw_status: Any) -> dict:
     minute: the 5s bots frame costs an extra Hummingbot round-trip only when
     that cached answer has gone stale.
     """
-    from condor.server_data_service import ServerDataType, get_server_data_service
-
     try:
         enrichment = await get_server_data_service().get_or_fetch(
             name, ServerDataType.BOTS_ENRICHMENT
@@ -215,8 +214,6 @@ async def enriched_bots_page(name: str, raw_status: Any) -> dict:
 
 @router.get("/servers/{name}/bots", response_model=BotsPageResponse)
 async def list_bots(name: str, user: WebUser = Depends(require_server_access)):
-    from condor.server_data_service import ServerDataType, get_server_data_service
-
     try:
         result = await get_server_data_service().get_or_fetch(
             name, ServerDataType.BOTS_STATUS

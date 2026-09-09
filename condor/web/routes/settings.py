@@ -6,6 +6,7 @@ from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from condor.server_data_service import ServerDataType, get_server_data_service
 from condor.web.auth import (
     get_current_user,
     require_owner,
@@ -626,8 +627,6 @@ async def list_connectors(
     user: WebUser = Depends(require_server_access_query),
 ):
 
-    from condor.server_data_service import ServerDataType, get_server_data_service
-
     sds = get_server_data_service()
     raw = await sds.get_or_fetch(server, ServerDataType.ALL_CONNECTORS)
     if raw is None:
@@ -692,8 +691,6 @@ async def add_credential(
             credentials=req.credentials,
         )
         # Invalidate configured connectors cache
-        from condor.server_data_service import ServerDataType, get_server_data_service
-
         get_server_data_service().invalidate(server, ServerDataType.CONNECTORS)
         return {"added": True, "result": result}
     except Exception as e:
@@ -719,8 +716,6 @@ async def delete_credential(
             connector_name=connector,
         )
         # Invalidate configured connectors + portfolio caches so the removed key disappears immediately
-        from condor.server_data_service import ServerDataType, get_server_data_service
-
         sds = get_server_data_service()
         sds.invalidate(server, ServerDataType.CONNECTORS)
         sds.invalidate(server, ServerDataType.PORTFOLIO)

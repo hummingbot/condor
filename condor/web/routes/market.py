@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from condor import dex_candles
 from condor.asyncutil import SingleFlight
+from condor.server_data_service import ServerDataType, get_server_data_service
 from config_manager import get_config_manager
 
 logger = logging.getLogger(__name__)
@@ -83,8 +84,6 @@ async def _fetch_dex_candles(
 @router.get("/servers/{name}/market/connectors")
 async def get_connectors(name: str, user: WebUser = Depends(require_server_access)):
 
-    from condor.server_data_service import ServerDataType, get_server_data_service
-
     try:
         result = await get_server_data_service().get_or_fetch(
             name, ServerDataType.CANDLE_CONNECTORS
@@ -100,8 +99,6 @@ async def get_connected_exchanges(
     name: str, user: WebUser = Depends(require_server_access)
 ):
     """Get connectors that have credentials configured (accounts connected)."""
-
-    from condor.server_data_service import ServerDataType, get_server_data_service
 
     try:
         result = await get_server_data_service().get_or_fetch(
@@ -139,8 +136,6 @@ async def get_venues(name: str, user: WebUser = Depends(require_server_access)):
     so that failure is never cached; a gateway- or candle-only failure degrades
     inside the fetcher and still reports the venues the other sources supplied.
     """
-
-    from condor.server_data_service import ServerDataType, get_server_data_service
 
     try:
         result = await get_server_data_service().get_or_fetch(
@@ -224,8 +219,6 @@ async def get_price(
     user: WebUser = Depends(require_server_access),
 ):
 
-    from condor.server_data_service import ServerDataType, get_server_data_service
-
     try:
         result = await get_server_data_service().get_or_fetch(
             name,
@@ -288,7 +281,6 @@ async def get_trading_rules(
 ):
 
     from condor.fetchers._identifiers import IdentifierError, validate_identifier
-    from condor.server_data_service import ServerDataType, get_server_data_service
 
     # Rejected here, not in the fetcher: SDS records a failed fetch as an
     # error-only cache entry, so a bad connector would still mint a key.

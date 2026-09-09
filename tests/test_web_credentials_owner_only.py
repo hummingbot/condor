@@ -89,7 +89,7 @@ def env(monkeypatch):
     monkeypatch.setattr(settings_routes, "get_config_manager", lambda: cm)
     monkeypatch.setattr("condor.web.auth.get_config_manager", lambda: cm)
     monkeypatch.setattr(
-        "condor.server_data_service.get_server_data_service", lambda: sds
+        "condor.web.routes.settings.get_server_data_service", lambda: sds
     )
     app = FastAPI()
     app.include_router(settings_routes.router)

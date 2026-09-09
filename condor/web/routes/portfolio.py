@@ -12,6 +12,7 @@ from condor.fetchers.portfolio import (
     balance_value,
     dedupe_unified_accounts,
 )
+from condor.server_data_service import ServerDataType, get_server_data_service
 from condor.web.auth import require_server_access
 from condor.web.models import (
     BalanceItem,
@@ -35,8 +36,6 @@ async def get_portfolio(
     user: WebUser = Depends(require_server_access),
 ):
     cm = get_config_manager()
-
-    from condor.server_data_service import ServerDataType, get_server_data_service
 
     try:
         if refresh:
@@ -148,8 +147,6 @@ async def get_portfolio_history(
     breakdown: bool = Query(False),
     user: WebUser = Depends(require_server_access),
 ):
-
-    from condor.server_data_service import ServerDataType, get_server_data_service
 
     # The raw snapshots are the same regardless of *breakdown* (parsing happens
     # below), so the cache key is the range alone. SDS coalesces concurrent
