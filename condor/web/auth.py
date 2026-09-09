@@ -227,28 +227,6 @@ async def require_server_access_query(
 # ── One-time login tokens (generated from Telegram /web command) ──
 
 
-def create_login_token(user_id: int, username: str = "", first_name: str = "") -> str:
-    """Create a one-time login token for a Telegram user."""
-    # Clean up expired tokens
-    now = time.time()
-    expired = [
-        k
-        for k, v in _pending_login_tokens.items()
-        if now - v["created_at"] > _LOGIN_TOKEN_TTL
-    ]
-    for k in expired:
-        _pending_login_tokens.pop(k, None)
-
-    token = secrets.token_urlsafe(32)
-    _pending_login_tokens[token] = {
-        "user_id": user_id,
-        "username": username,
-        "first_name": first_name,
-        "created_at": now,
-    }
-    return token
-
-
 def _gc_expired_login_tokens(now: float) -> None:
     """Remove expired one-time login tokens from the in-memory store."""
     expired = [
@@ -258,6 +236,21 @@ def _gc_expired_login_tokens(now: float) -> None:
     ]
     for k in expired:
         _pending_login_tokens.pop(k, None)
+
+
+def create_login_token(user_id: int, username: str = "", first_name: str = "") -> str:
+    """Create a one-time login token for a Telegram user."""
+    now = time.time()
+    _gc_expired_login_tokens(now)
+
+    token = secrets.token_urlsafe(32)
+    _pending_login_tokens[token] = {
+        "user_id": user_id,
+        "username": username,
+        "first_name": first_name,
+        "created_at": now,
+    }
+    return token
 
 
 def redeem_login_token(token: str) -> Optional[dict]:
@@ -276,10 +269,6 @@ def redeem_login_token(token: str) -> Optional[dict]:
 
     info = _pending_login_tokens.pop(token, None)
     if info is None:
-        return None
-
-    # Reject expired tokens (already popped above).
-    if now - info["created_at"] > _LOGIN_TOKEN_TTL:
         return None
 
     return info
