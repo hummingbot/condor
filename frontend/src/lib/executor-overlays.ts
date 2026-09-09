@@ -787,3 +787,79 @@ export function renderOverlayTooltipHtml(
           ${detailRows ? `<div style="border-top:1px solid ${border};margin-top:4px;padding-top:6px;font-size:11px;display:flex;flex-direction:column;gap:3px">${detailRows}</div>` : ""}
         `;
 }
+
+/**
+ * The tooltip element as the crosshair handlers drive it: show it over an
+ * overlay, or hide it (PERF-348).
+ *
+ * `renderOverlayTooltipHtml` above is a ~100-line string build that reads the
+ * theme, `JSON.parse`s a config and escapes a dozen rows, and both charts used
+ * to run it — plus the `innerHTML` reparse of ~20 nodes and the forced layout
+ * of the `offsetHeight` read that follows it — on *every* crosshair move, i.e.
+ * ~60/s for as long as the pointer sits anywhere inside an executor box. The
+ * card is a pure function of its arguments, so all but the first of those are
+ * identical work.
+ *
+ * `show()` therefore rewrites the DOM only when one of the three arguments
+ * that produced the current card changed identity, and otherwise reuses the
+ * height it measured then, leaving only the `left`/`top` writes per move.
+ *
+ * Staleness is bounded by that key being the render's *whole* input:
+ *
+ *  - the overlay object — rebuilt by `computeMultiOverlays` on each executors
+ *    refetch, and react-query's structural sharing gives it a new identity
+ *    exactly when one of its values (PnL included) actually changed, so a new
+ *    PnL repaints the card on the first move after it lands;
+ *  - both formatters — a display-currency switch mints new ones, so the card
+ *    reprints in the new currency.
+ *
+ * `hide()` forgets the card as well, so re-entering the same overlay draws a
+ * fresh one rather than trusting markup left over from before.
+ */
+export interface OverlayTooltipView {
+  /** Draw `o` in `el` (rebuilding only if needed) and return the card's height. */
+  show(el: HTMLElement, o: ExecutorOverlay, formatters: OverlayTooltipFormatters): number;
+  /** Hide `el` and forget what was drawn in it. */
+  hide(el: HTMLElement): void;
+}
+
+export function createOverlayTooltipView(): OverlayTooltipView {
+  let el: HTMLElement | null = null;
+  let overlay: ExecutorOverlay | null = null;
+  let formatValue: OverlayTooltipFormatters["formatValue"] | null = null;
+  let formatPnl: OverlayTooltipFormatters["formatPnl"] | null = null;
+  let height = 0;
+
+  return {
+    show(nextEl, nextOverlay, formatters) {
+      if (
+        nextEl !== el ||
+        nextOverlay !== overlay ||
+        formatters.formatValue !== formatValue ||
+        formatters.formatPnl !== formatPnl
+      ) {
+        nextEl.innerHTML = renderOverlayTooltipHtml(nextOverlay, formatters);
+        el = nextEl;
+        overlay = nextOverlay;
+        formatValue = formatters.formatValue;
+        formatPnl = formatters.formatPnl;
+        height = 0;
+      }
+      nextEl.style.display = "block";
+      // Measured only after the card is displayed — `offsetHeight` is 0 while
+      // it is `display:none`, which is what the 200 fallback is for.
+      if (!height) height = nextEl.offsetHeight || 200;
+      return height;
+    },
+    hide(nextEl) {
+      nextEl.style.display = "none";
+      if (nextEl === el) {
+        el = null;
+        overlay = null;
+        formatValue = null;
+        formatPnl = null;
+        height = 0;
+      }
+    },
+  };
+}

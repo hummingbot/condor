@@ -7,10 +7,10 @@ import { useRates } from "@/hooks/useRates";
 import { api, type ExecutorInfo } from "@/lib/api";
 import {
   computeMultiOverlays,
+  createOverlayTooltipView,
   getExecutorColor,
   getOverlayTimeRange,
   getPoolAddress,
-  renderOverlayTooltipHtml,
   type ExecutorOverlay,
 } from "@/lib/executor-overlays";
 import { tsToSeconds } from "@/lib/formatters";
@@ -123,10 +123,21 @@ export function ExecutorChart({
   const quoteCurrency = tradingPair.split("-")[1] || "USDT";
   const quoteCurrencies = useMemo(() => [quoteCurrency], [quoteCurrency]);
   const { formatPnlValue, formatValue } = useRates(quoteCurrencies);
+  // Both are memoized, not minted per render: the cached tooltip card keys on
+  // the formatter identities, so a fresh closure each render would rebuild the
+  // card each render without changing a character of it.
+  const convertValue = useMemo(
+    () => (val: number) => formatValue(val, quoteCurrency),
+    [formatValue, quoteCurrency],
+  );
+  const convertPnl = useMemo(
+    () => (val: number) => formatPnlValue(val, quoteCurrency),
+    [formatPnlValue, quoteCurrency],
+  );
   const convertValueRef = useRef<(val: number) => string>(() => "");
   const convertPnlRef = useRef<(val: number) => string>(() => "");
-  convertValueRef.current = (val: number) => formatValue(val, quoteCurrency);
-  convertPnlRef.current = (val: number) => formatPnlValue(val, quoteCurrency);
+  convertValueRef.current = convertValue;
+  convertPnlRef.current = convertPnl;
 
   // Compute overlays
   const overlays = useMemo(() => computeMultiOverlays(executors), [executors]);
@@ -217,19 +228,22 @@ export function ExecutorChart({
       });
       seriesRef.current = series;
 
+      // One cached tooltip card per chart instance, torn down with the chart.
+      const tooltipView = createOverlayTooltipView();
+
       // Crosshair tooltip handler
       chart.subscribeCrosshairMove((param) => {
         const tooltip = tooltipRef.current;
         if (!tooltip || !containerRef.current) return;
 
         if (!param.time || !param.point || param.point.x < 0 || param.point.y < 0) {
-          tooltip.style.display = "none";
+          tooltipView.hide(tooltip);
           return;
         }
 
         const crosshairTime = typeof param.time === "number" ? param.time : 0;
         if (!crosshairTime) {
-          tooltip.style.display = "none";
+          tooltipView.hide(tooltip);
           return;
         }
 
@@ -278,20 +292,20 @@ export function ExecutorChart({
         }
 
         if (!bestOverlay) {
-          tooltip.style.display = "none";
+          tooltipView.hide(tooltip);
           return;
         }
 
-        tooltip.innerHTML = renderOverlayTooltipHtml(bestOverlay, {
+        // Rebuilds the card only when the hovered overlay or a formatter
+        // changed; otherwise this is the cached height and two style writes.
+        const tooltipH = tooltipView.show(tooltip, bestOverlay, {
           formatValue: convertValueRef.current,
           formatPnl: convertPnlRef.current,
         });
-        tooltip.style.display = "block";
 
         // Position tooltip on opposite side of cursor (fixed/viewport coords)
         const containerRect = containerRef.current.getBoundingClientRect();
         const tooltipW = 280;
-        const tooltipH = tooltip.offsetHeight || 200;
         const cursorInRightHalf = param.point.x > containerRect.width / 2;
         let left = cursorInRightHalf
           ? containerRect.left + param.point.x - tooltipW - 16

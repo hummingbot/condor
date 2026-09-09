@@ -6,7 +6,7 @@ import { useRates } from "@/hooks/useRates";
 import { api, type ConsolidatedPosition } from "@/lib/api";
 import { candleChannelKey, candleStore } from "@/lib/candle-store";
 import type { ChartLineSlot, ExtraLine, PickSlot } from "@/components/executor/types";
-import { getExecutorColor, renderOverlayTooltipHtml, type ExecutorOverlay } from "@/lib/executor-overlays";
+import { createOverlayTooltipView, getExecutorColor, type ExecutorOverlay } from "@/lib/executor-overlays";
 import { getThemeColors, pnlHexColor } from "@/lib/theme-colors";
 import { roundToPricePrecision } from "@/lib/formatters";
 import { createDragHitPrimitive, type DragTarget } from "./priceLineDrag";
@@ -158,9 +158,17 @@ export function TradeChart({
     () => (val: number) => formatPnlValue(val, quoteCurrency),
     [formatPnlValue, quoteCurrency],
   );
+  // `convertValue` is memoized for the same reason `convertPnl` is, plus one:
+  // the tooltip view below keys its cached card on the formatter identities, so
+  // a closure minted fresh on every render would rebuild the card on every
+  // render for no change in what it says.
+  const convertValue = useMemo(
+    () => (val: number) => formatValue(val, quoteCurrency),
+    [formatValue, quoteCurrency],
+  );
   const convertValueRef = useRef<(val: number) => string>(() => "");
   const convertPnlRef = useRef<(val: number) => string>(() => "");
-  convertValueRef.current = (val: number) => formatValue(val, quoteCurrency);
+  convertValueRef.current = convertValue;
   convertPnlRef.current = convertPnl;
   const [chartReady, setChartReady] = useState(false);
 
@@ -286,11 +294,14 @@ export function TradeChart({
 
       // Track the pointer's price/time for click-to-set, the measure tool and
       // the executor tooltip
+      // One cached tooltip card per chart instance, torn down with the chart.
+      const tooltipView = createOverlayTooltipView();
+
       chart.subscribeCrosshairMove((param) => {
         if (!param.point || !param.seriesData) {
           cursorPriceRef.current = null;
           crosshairTimeRef.current = null;
-          if (tooltipRef.current) tooltipRef.current.style.display = "none";
+          if (tooltipRef.current) tooltipView.hide(tooltipRef.current);
           // Leave the measure box/badge frozen at their last position — a
           // measurement persists until cleared (click / Esc), so moving off
           // the pane edge doesn't make it vanish.
@@ -369,7 +380,7 @@ export function TradeChart({
 
         const crosshairTime = typeof param.time === "number" ? param.time : 0;
         if (!crosshairTime || !param.point || param.point.x < 0 || param.point.y < 0) {
-          tooltip.style.display = "none";
+          tooltipView.hide(tooltip);
           return;
         }
 
@@ -413,20 +424,20 @@ export function TradeChart({
         }
 
         if (!bestOverlay) {
-          tooltip.style.display = "none";
+          tooltipView.hide(tooltip);
           return;
         }
 
-        tooltip.innerHTML = renderOverlayTooltipHtml(bestOverlay, {
+        // Rebuilds the card only when the hovered overlay or a formatter
+        // changed; otherwise this is the cached height and two style writes.
+        const tooltipH = tooltipView.show(tooltip, bestOverlay, {
           formatValue: convertValueRef.current,
           formatPnl: convertPnlRef.current,
         });
-        tooltip.style.display = "block";
 
         // Position tooltip using viewport-fixed coords (rendered via portal)
         const containerRect = containerRef.current.getBoundingClientRect();
         const tooltipW = 280;
-        const tooltipH = tooltip.offsetHeight || 200;
         const cursorInRightHalf = param.point.x > containerRect.width / 2;
         let left = cursorInRightHalf
           ? containerRect.left + param.point.x - tooltipW - 16
