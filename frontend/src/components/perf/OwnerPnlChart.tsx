@@ -21,18 +21,24 @@ import {
   formatAxisCurrency,
   formatAxisTime,
   formatCurrencyPnl,
+  formatCurrencyVolume,
   formatDateTime,
   pnlTextClass,
 } from "@/lib/formatters";
 import {
+  alignedZeroDomains,
   nearestSeries,
+  niceTicks,
   ownerDataKey,
+  ownerPositionKey,
+  ownerVolumeKey,
   parseBaseline,
   parseBasis,
   rebaseRows,
   seriesColor,
   shortenLabels,
   type FloorChartRow,
+  type SeriesScale,
 } from "@/lib/owner-series";
 import {
   AXIS_WIDTH,
@@ -67,7 +73,23 @@ import { getThemeColors } from "@/lib/theme-colors";
  * The one contract that must not be broken: **both panes reserve `AXIS_WIDTH`
  * on the left and on the right**, or their plot areas differ and the synced
  * cursor in one points at a different instant than the other. Nothing throws
- * when that happens.
+ * when that happens. The right-hand gutter is where the Total's own axis went
+ * (FEAT-119) — it was reserved and empty before, so the second axis costs no
+ * width and breaks no alignment.
+ *
+ * **Two axes, one zero.** A Total of twelve controllers is twelve controllers
+ * tall, so one shared axis draws the lines the reader came for as a flat braid
+ * across the middle of the pane. The Total therefore has its own scale, and
+ * `alignedZeroDomains` chooses the two so that a single dashed line at zero is
+ * true of both — a chart about whether a number is above or below zero cannot
+ * afford two different zeros.
+ *
+ * **The pane below stays fleet-level.** Volume and the book are drawn once,
+ * for the whole scope, because twelve bar series and twelve areas is not a
+ * picture anyone reads. The per-line answer is attached to the *question*
+ * instead: point at a line (or its legend chip) and that line's share of each
+ * bar is filled in inside it, its own book is drawn over the fleet's, and the
+ * tooltip prints both as numbers.
  *
  * The Total line is not asserted to equal the sum of the owner lines — it is
  * folded by the same function over the union of their keys, and
@@ -209,6 +231,28 @@ export function OwnerPnlChart({
     visible.length > 1 ? visible[visible.length - 1].time - visible[0].time : 0;
   const fmtTimeAxis = useCallback((v: number) => formatAxisTime(v, spanMs), [spanMs]);
 
+  /**
+   * The picked line's share of each volume bar, in the line's own colour
+   * (FEAT-119).
+   *
+   * The pane below draws the *fleet's* flow and the fleet's book, because
+   * twelve bar series and twelve areas would be a pane nobody can read. What a
+   * reader actually asks is narrower than that and only while they are asking
+   * it: *how much of this trading is the bot I am pointing at?* So the answer
+   * is drawn where the question is asked — inside the bar already on screen,
+   * for the one series the cursor (or a legend chip) has picked, and nowhere at
+   * all the rest of the time.
+   */
+  const highlight = useCallback(
+    (row: PnlChartPoint) => {
+      if (!focus || focus === "total") return null;
+      const share = (row as FloorChartRow)[ownerVolumeKey(focus)];
+      if (typeof share !== "number") return null;
+      return { value: share, color: seriesColor(keys.indexOf(focus)) };
+    },
+    [focus, keys],
+  );
+
   // ── The activity pane (step 6) ──
   //
   // Its geometry is the same geometry PnlEvolutionChart's activity pane draws
@@ -220,7 +264,7 @@ export function OwnerPnlChart({
     volumeBar,
     positionDomain,
     positionZeroOffset,
-  } = useActivityPane(visible as PnlChartPoint[], spanMs);
+  } = useActivityPane(visible as PnlChartPoint[], spanMs, highlight);
   const hasPosition = rows.some((row) => row.position !== 0);
 
   // ── The stated gap between the chart and the strip ──
@@ -258,6 +302,40 @@ export function OwnerPnlChart({
 
   const drawn = keys.filter((key) => !hidden.has(key) && !muted.has(key));
   const totalDrawn = !hidden.has("total") && !muted.has("total");
+
+  /**
+   * The two y domains, sharing a zero (FEAT-119).
+   *
+   * The Total of twelve controllers is twelve controllers tall, so one axis
+   * scaled to it draws the lines the reader came for as a flat braid — the
+   * whole pane spent on a series whose shape is already legible at a twelfth of
+   * the height. It moves to its own axis on the right, in the gutter the pane
+   * was already reserving for the activity pane's position axis, so the two
+   * panes' plot areas stay identical and their synced cursors keep pointing at
+   * the same instant.
+   *
+   * `null` — nothing finite to measure, or the Total hidden — leaves both
+   * domains to recharts, which is the single-axis picture this chart had.
+   */
+  const scales = useMemo(() => {
+    if (!totalDrawn) return null;
+    const lines: number[] = [];
+    const totals: number[] = [];
+    for (const row of drawnRows) {
+      for (const key of drawn) {
+        const value = row[ownerDataKey(key)];
+        if (typeof value === "number") lines.push(value);
+      }
+      if (typeof row.total === "number") totals.push(row.total);
+    }
+    const domains = alignedZeroDomains(lines, totals);
+    if (!domains) return null;
+    return {
+      ...domains,
+      lineTicks: niceTicks(domains.owner),
+      totalTicks: niceTicks(domains.total),
+    };
+  }, [drawnRows, drawn, totalDrawn]);
 
   // The same 65/35 split `PnlEvolutionChart` takes, off the same measured box,
   // so switching between the aggregate chart and this one does not resize the
@@ -329,6 +407,7 @@ export function OwnerPnlChart({
             }
             drawn={totalDrawn}
             strong
+            note="drawn on the right-hand axis, which shares this pane's zero"
             onToggle={() => toggle("total")}
             onFocus={() => setFocus("total")}
             onBlur={() => setFocus(null)}
@@ -425,6 +504,8 @@ export function OwnerPnlChart({
                   height={1}
                 />
                 <YAxis
+                  domain={scales?.owner ?? ["auto", "auto"]}
+                  ticks={scales?.lineTicks}
                   tickFormatter={fmtAxis}
                   tick={{ fontSize: 10, fill: "var(--color-text-muted)" }}
                   stroke="var(--color-border)"
@@ -432,16 +513,29 @@ export function OwnerPnlChart({
                   axisLine={false}
                   width={AXIS_WIDTH}
                 />
-                {/* The mirror of the activity pane's position axis. Both panes
-                    must reserve the same gutters or they desync. */}
+                {/* The Total's own axis, in the gutter the pane reserves either
+                    way — the mirror of the activity pane's position axis, which
+                    both panes must reserve or their plot areas differ and the
+                    synced cursors point at different instants. Its ticks are
+                    the Total's colour: an axis nobody can attribute to a series
+                    is worse than no second axis at all. */}
                 <YAxis
-                  yAxisId="spacer"
+                  yAxisId="total"
                   orientation="right"
-                  tick={false}
+                  domain={scales?.total ?? ["auto", "auto"]}
+                  ticks={scales?.totalTicks}
+                  tickFormatter={fmtAxis}
+                  tick={
+                    totalDrawn ? { fontSize: 10, fill: tc.up } : false
+                  }
+                  stroke="var(--color-border)"
                   tickLine={false}
                   axisLine={false}
                   width={AXIS_WIDTH}
                 />
+                {/* One line for both axes: `alignedZeroDomains` is what makes
+                    that true, and without it this line would mean one thing for
+                    the lines and another for the Total. */}
                 <ReferenceLine
                   y={0}
                   stroke="var(--color-text-muted)"
@@ -454,6 +548,9 @@ export function OwnerPnlChart({
                       labels={labels}
                       keys={drawn}
                       format={fmt}
+                      symbol={symbol}
+                      bucketLabel={bucketLabel}
+                      hasPosition={hasPosition}
                       showTotal={totalDrawn}
                       visible={!scrubbing}
                       onFocus={setFocus}
@@ -481,6 +578,7 @@ export function OwnerPnlChart({
                 ))}
                 {totalDrawn && (
                   <Line
+                    yAxisId="total"
                     type="monotone"
                     dataKey="total"
                     name="Total"
@@ -591,6 +689,23 @@ export function OwnerPnlChart({
                     strokeDasharray="4 4"
                   />
                 )}
+                {/* The picked line's own book over the fleet's, on the fleet's
+                    axis so the two are read against each other — the position
+                    half of what the bar highlight says about volume, and drawn
+                    for exactly as long as the same question is being asked. */}
+                {hasPosition && focus !== null && focus !== "total" && (
+                  <Line
+                    yAxisId="pos"
+                    type="monotone"
+                    dataKey={ownerPositionKey(focus)}
+                    name="Its book"
+                    stroke={seriesColor(keys.indexOf(focus))}
+                    strokeWidth={1.5}
+                    dot={false}
+                    connectNulls={false}
+                    isAnimationActive={false}
+                  />
+                )}
               </ComposedChart>
             </ResponsiveContainer>
           </div>
@@ -609,6 +724,11 @@ export function OwnerPnlChart({
           )}
 
           <p className="border-t border-[var(--color-border)] px-3 py-1 text-[10px] text-[var(--color-text-muted)]">
+            {/* One line, and it has to stay one line: the card is `h-full
+                overflow-hidden` over a height that accounts for the two panes
+                and not for this, so a second line is a clipped line. What the
+                second line would have said — point at a line for its share of
+                the bars — the tooltip says instead, where it is being asked. */}
             {bucketLabel ? `Bars are volume traded per ${bucketLabel} bucket. ` : ""}
             The lines are folded from controller performance history, one call per
             line — the same fold this page draws when you walk into one of them
@@ -636,6 +756,7 @@ function LegendChip({
   drawn,
   strong = false,
   onToggle,
+  note,
   onFocus,
   onBlur,
   focused,
@@ -649,6 +770,8 @@ function LegendChip({
   drawn: boolean;
   strong?: boolean;
   onToggle: () => void;
+  /** Anything else true of this series — which axis it is on, in the Total's case. */
+  note?: string;
   /** Hovering a chip picks the same series pointing at its line does. */
   onFocus?: () => void;
   onBlur?: () => void;
@@ -663,7 +786,7 @@ function LegendChip({
       onClick={onToggle}
       onMouseEnter={onFocus}
       onMouseLeave={onBlur}
-      title={drawn ? `Hide ${full ?? label}` : `Show ${full ?? label}`}
+      title={`${drawn ? "Hide" : "Show"} ${full ?? label}${note ? ` — ${note}` : ""}`}
       className={`flex items-center gap-1.5 rounded px-1 py-0.5 text-[11px] tabular-nums transition-opacity hover:bg-[var(--color-surface-hover)] ${
         drawn ? "" : "opacity-40"
       } ${focused ? "bg-[var(--color-surface-hover)]" : ""}`}
@@ -715,6 +838,8 @@ function Toggle<T extends string>({
 interface TooltipPayload {
   dataKey?: string | number;
   value?: number;
+  /** The whole row the entry was read from — every field, drawn or not. */
+  payload?: FloorChartRow;
 }
 
 /**
@@ -755,6 +880,9 @@ function OwnerTooltip({
   labels,
   keys,
   format,
+  symbol,
+  bucketLabel,
+  hasPosition,
   showTotal,
   visible,
   onFocus,
@@ -767,13 +895,25 @@ function OwnerTooltip({
   labels: Map<string, string>;
   keys: readonly string[];
   format: (value: number) => string;
+  /** For the two figures that are never a percentage: volume and the book. */
+  symbol: string;
+  /** How long one bar is, so "traded" is a quantity and not a mystery. */
+  bucketLabel?: string;
+  hasPosition: boolean;
   showTotal: boolean;
   visible: boolean;
   onFocus: (key: string | null) => void;
 }) {
-  // The chart's own y scale, which is the only thing that can say where a
-  // value is *drawn*. A hook, so it runs before every early return below.
+  // Where a value is *drawn* — the only thing that can answer which line the
+  // cursor is on. Two scales because the Total has an axis of its own, and a
+  // hook each, so both run before every early return below.
   const scale = useYAxisScale();
+  const totalScale = useYAxisScale("total");
+  const scales = useMemo(() => {
+    const by = new Map<string, SeriesScale>([["total", totalScale]]);
+    for (const key of keys) by.set(key, scale);
+    return by;
+  }, [keys, scale, totalScale]);
 
   const by = useMemo(() => {
     const out = new Map<string, number>();
@@ -799,7 +939,7 @@ function OwnerTooltip({
   }, [by, keys, showTotal]);
 
   const live = active === true && visible;
-  const focused = live ? nearestSeries(pickable, coordinate?.y, scale) : null;
+  const focused = live ? nearestSeries(pickable, coordinate?.y, scales) : null;
   useEffect(() => {
     onFocus(focused);
   }, [focused, onFocus]);
@@ -807,6 +947,10 @@ function OwnerTooltip({
   if (!live || pickable.size === 0) return null;
 
   const total = by.get("total");
+  // Every entry carries the whole row, which is where the fields nothing in
+  // this pane draws — the bucket's volume, the book, and each owner's share of
+  // them — are read from.
+  const row = payload?.find((entry) => entry.payload)?.payload;
   const when = (
     <p className="mb-0.5 font-mono text-[10px] text-[var(--color-text-muted)]">
       {typeof label === "number" ? formatDateTime(label) : ""}
@@ -826,6 +970,19 @@ function OwnerTooltip({
           <span className="text-[var(--color-text)]">{name(focused)}</span>{" "}
           <span className={pnlTextClass(value)}>{format(value)}</span>
         </p>
+        {/* What the pane below is showing about this one line, said in
+            numbers: its share of the bar the cursor is over, and its own
+            book inside the fleet's (FEAT-119). Only for a real owner — the
+            Total's share of the fleet is the fleet. */}
+        {focused !== "total" && (
+          <Attribution
+            row={row}
+            owner={focused}
+            symbol={symbol}
+            bucketLabel={bucketLabel}
+            hasPosition={hasPosition}
+          />
+        )}
         {showTotal && focused !== "total" && typeof total === "number" && (
           <p className="font-mono text-[10px] text-[var(--color-text-muted)]">
             Total {format(total)}
@@ -862,10 +1019,82 @@ function OwnerTooltip({
       ))}
       {rest > 0 && (
         <p className="font-mono text-[10px] text-[var(--color-text-muted)]">
-          +{rest} more — point at a line to read it
+          +{rest} more — point at a line to read it and its share of the bars
         </p>
       )}
     </div>
+  );
+}
+
+/**
+ * One line's share of the pane below it, at the hovered instant (FEAT-119).
+ *
+ * The activity pane is fleet-level and stays fleet-level: twelve bar series and
+ * twelve areas is not a picture. What the reader wants instead is an
+ * attribution of the *one* bar and the *one* book they can already see, to the
+ * *one* line they are pointing at — so it is printed here, beside that line's
+ * PnL, and the bar highlights its share at the same moment.
+ *
+ * A share is only stated where it means something. Volume is a non-negative
+ * flow, so a percentage of the bucket is a fact; the book is signed, and "15%
+ * of a fleet that is net flat" is a number with no meaning, so the position row
+ * prints the two quantities and lets them be compared.
+ *
+ * Nothing is printed for a bucket in which this owner did not trade — a row of
+ * zeroes reads as a measurement, and the interesting silence is the same
+ * silence the bar shows by not being highlighted.
+ */
+function Attribution({
+  row,
+  owner,
+  symbol,
+  bucketLabel,
+  hasPosition,
+}: {
+  row: FloorChartRow | undefined;
+  owner: string;
+  symbol: string;
+  bucketLabel?: string;
+  hasPosition: boolean;
+}) {
+  if (!row) return null;
+  const traded = row[ownerVolumeKey(owner)];
+  const bucket = row.volumeDelta;
+  const book = row[ownerPositionKey(owner)];
+
+  const share =
+    typeof traded === "number" && typeof bucket === "number" && bucket > 0
+      ? Math.round((traded / bucket) * 100)
+      : null;
+
+  return (
+    <>
+      {typeof traded === "number" && traded > 0 && (
+        <p data-owner-tooltip-volume className="font-mono text-[10px] text-[var(--color-text-muted)]">
+          Traded{bucketLabel ? ` ${bucketLabel}` : ""}{" "}
+          <span style={{ color: PNL_SERIES_COLORS.volume }}>
+            {formatCurrencyVolume(traded, symbol)}
+          </span>
+          {share !== null && (
+            <>
+              {" · "}
+              {share}% of {formatCurrencyVolume(bucket, symbol)}
+            </>
+          )}
+        </p>
+      )}
+      {hasPosition && typeof book === "number" && book !== 0 && (
+        <p data-owner-tooltip-position className="font-mono text-[10px] text-[var(--color-text-muted)]">
+          Book{" "}
+          <span style={{ color: PNL_SERIES_COLORS.position }}>
+            {formatCurrencyVolume(book, symbol)}
+          </span>
+          {typeof row.position === "number" && row.position !== 0 && (
+            <> of {formatCurrencyVolume(row.position, symbol)}</>
+          )}
+        </p>
+      )}
+    </>
   );
 }
 

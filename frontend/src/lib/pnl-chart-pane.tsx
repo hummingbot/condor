@@ -27,6 +27,18 @@ import {
   type SamplingInterval,
 } from "@/lib/pnl-chart";
 
+/**
+ * The part of one bar that belongs to the series the reader is pointing at.
+ *
+ * `value` is in the bar's own units — a slice of the same bucket, not a
+ * fraction of it — because that is what the caller holds and what keeps the
+ * arithmetic here to one division against the bar recharts already sized.
+ */
+export interface BarHighlight {
+  value: number;
+  color: string;
+}
+
 export interface ActivityPane {
   /** Hand to the pane's `<ResponsiveContainer onResize>`; sizes the bars. */
   onActivityResize: (width: number) => void;
@@ -48,8 +60,13 @@ export interface ActivityPane {
  *
  * @param visible the points currently on screen
  * @param spanMs  the window's time span, `last.time - first.time`
+ * @param highlight what part of each bar belongs to the picked series, if any
  */
-export function useActivityPane(visible: PnlChartPoint[], spanMs: number): ActivityPane {
+export function useActivityPane(
+  visible: PnlChartPoint[],
+  spanMs: number,
+  highlight?: (row: PnlChartPoint) => BarHighlight | null,
+): ActivityPane {
   // The measurement comes from the pane's own ResponsiveContainer, which is
   // already observing its size, rather than from a second observer of ours. It
   // is 0 until the first callback — and stays 0 where there is no layout at all
@@ -87,7 +104,8 @@ export function useActivityPane(visible: PnlChartPoint[], spanMs: number): Activ
     (props: BarShapeProps) => {
       const width = barWidth ?? props.width;
       const x = props.x + props.width / 2 - width / 2;
-      return (
+      const share = highlight?.(props.payload as PnlChartPoint) ?? null;
+      const bar = (
         <Rectangle
           x={x}
           y={props.y}
@@ -95,12 +113,40 @@ export function useActivityPane(visible: PnlChartPoint[], spanMs: number): Activ
           height={props.height}
           radius={props.radius}
           fill={props.fill}
-          fillOpacity={props.fillOpacity}
+          // The rest of the bucket steps back while one series is picked, the
+          // same way the unpicked lines do in the pane above. Opacity and not a
+          // second colour: a series whose own colour is near the volume blue
+          // would otherwise fill in invisibly.
+          fillOpacity={share ? Number(props.fillOpacity ?? 1) * 0.35 : props.fillOpacity}
           stroke="none"
         />
       );
+      // The picked series' share, drawn *inside* the bar from the baseline up
+      // rather than beside it or stacked on it: this is a part of the bucket
+      // already drawn, so the bar must keep its height and only fill in.
+      //
+      // In pixels by proportion, which is exact because this axis starts at
+      // zero — recharts has already mapped the whole bucket to `height`, and no
+      // second scale lookup can disagree with it.
+      const whole = Array.isArray(props.value) ? props.value[1] - props.value[0] : props.value;
+      if (!share || !(whole > 0) || !(share.value > 0)) return bar;
+      const height = props.height * Math.min(1, share.value / whole);
+      return (
+        <g>
+          {bar}
+          <Rectangle
+            x={x}
+            y={props.y + props.height - height}
+            width={width}
+            height={height}
+            fill={share.color}
+            fillOpacity={0.9}
+            stroke="none"
+          />
+        </g>
+      );
     },
-    [barWidth],
+    [barWidth, highlight],
   );
 
   // The position axis is pinned across zero rather than left to recharts, so
