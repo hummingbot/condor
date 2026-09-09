@@ -343,6 +343,26 @@ function nowTs(): number {
   return Date.now() / 1000;
 }
 
+/**
+ * One system entry, ready to append — a reload, a routine's note, an error, a
+ * handover divider.
+ *
+ * Every one of them is the same shape, so the shape lives here alone: callers
+ * say the words and the kind, and the id and the timestamp are minted at the
+ * moment the note is made. Anything `ChatMessage` later grows for system
+ * entries is added once, here, instead of being hunted through the file.
+ */
+function systemNote(text: string, kind?: string): ChatMessage {
+  return {
+    id: nextMsgId(),
+    role: "system",
+    text,
+    kind,
+    toolCalls: [],
+    ts: nowTs(),
+  };
+}
+
 let clientRefCounter = 0;
 /** Local handle for a tab that has no conversation id yet. Echoed by the
  *  backend on `session_started`, which is how the two are reconciled. */
@@ -704,17 +724,7 @@ export function useChatSocket() {
    */
   const appendSystemNote = useCallback(
     (slotId: string, text: string, kind?: string) => {
-      updateSlotMessages(slotId, (msgs) => [
-        ...msgs,
-        {
-          id: nextMsgId(),
-          role: "system" as const,
-          text,
-          kind,
-          toolCalls: [],
-          ts: nowTs(),
-        },
-      ]);
+      updateSlotMessages(slotId, (msgs) => [...msgs, systemNote(text, kind)]);
     },
     [updateSlotMessages],
   );
@@ -1000,17 +1010,11 @@ export function useChatSocket() {
           );
           ids = stored.map((a) => a.id);
         } catch (e) {
-          updateSlotMessages(slotId, (msgs) => [
-            ...msgs,
-            {
-              id: nextMsgId(),
-              role: "system" as const,
-              kind: "error",
-              text: e instanceof Error ? e.message : "Could not attach that image",
-              toolCalls: [],
-              ts: nowTs(),
-            },
-          ]);
+          appendSystemNote(
+            slotId,
+            e instanceof Error ? e.message : "Could not attach that image",
+            "error",
+          );
           return;
         }
       }
@@ -1022,7 +1026,7 @@ export function useChatSocket() {
         ...(ids.length ? { attachments: ids } : {}),
       });
     },
-    [send, updateSlotMessages],
+    [appendSystemNote, send],
   );
 
   /**
@@ -1789,21 +1793,10 @@ export function useChatSocket() {
             setSlots((prev) =>
               prev.map((s) => {
                 if (s.info.slot_id !== errSlotId) return s;
-                const id = nextMsgId();
                 return {
                   ...s,
                   pending: false,
-                  messages: [
-                    ...s.messages,
-                    {
-                      id,
-                      role: "system" as const,
-                      kind: "error",
-                      text: errMsg,
-                      toolCalls: [],
-                      ts: nowTs(),
-                    },
-                  ],
+                  messages: [...s.messages, systemNote(errMsg, "error")],
                 };
               }),
             );
@@ -1932,6 +1925,37 @@ export function useChatSocket() {
   );
 
   /**
+   * Repoint one slot, and mark the scrollback if the move is worth marking.
+   *
+   * A brain switch and a server switch are the same edit — merge the session's
+   * new fields into the slot's `info`, then append a divider — and differ only
+   * in which fields move and in when the move earns a divider at all. Both
+   * answers are read off the *previous* info (a server switch is suppressed by
+   * comparing the old server name against the new one), so the caller hands in
+   * a function of it rather than a finished pair.
+   */
+  const applySwitch = useCallback(
+    (
+      slotId: string,
+      compute: (prev: SlotInfo) => { info: SlotInfo; divider?: string },
+    ) => {
+      setSlots((prev) =>
+        prev.map((s) => {
+          if (s.info.slot_id !== slotId) return s;
+          const { info, divider } = compute(s.info);
+          if (!divider) return { ...s, info };
+          return {
+            ...s,
+            info,
+            messages: [...s.messages, systemNote(divider, "switch")],
+          };
+        }),
+      );
+    },
+    [],
+  );
+
+  /**
    * Rebind the chat to a different brain, mid-conversation.
    *
    * The subprocess is replaced — ACP has no identity hot-swap — but the
@@ -1949,42 +1973,27 @@ export function useChatSocket() {
       // The outgoing brain's last words belong above the divider that retires
       // it, not in a new bubble underneath it.
       flushChunks();
-      setSlots((prev) =>
-        prev.map((s) => {
-          if (s.info.slot_id !== slotId) return s;
-          const info: SlotInfo = {
-            ...s.info,
-            agent_key: session.agent_key,
-            // A brain switch can move the server too: binding to an Agent that
-            // pins one overrides the chat's ambient choice, and unbinding
-            // hands it back. Both are read off the respawned session.
-            server_name: session.server_name || undefined,
-            server_pinned: session.server_pinned,
-            agent_slug: session.agent_slug,
-            label: session.label,
-          };
-          // Only a change of *who* divides the scrollback; a model swap under
-          // the same identity is not a handover the reader needs marked.
-          if (selection.agentSlug === undefined) return { ...s, info };
-          return {
-            ...s,
-            info,
-            messages: [
-              ...s.messages,
-              {
-                id: nextMsgId(),
-                role: "system" as const,
-                text: `Switched to ${session.label}`,
-                kind: "switch",
-                toolCalls: [],
-                ts: nowTs(),
-              },
-            ],
-          };
-        }),
-      );
+      applySwitch(slotId, (prev) => ({
+        info: {
+          ...prev,
+          agent_key: session.agent_key,
+          // A brain switch can move the server too: binding to an Agent that
+          // pins one overrides the chat's ambient choice, and unbinding
+          // hands it back. Both are read off the respawned session.
+          server_name: session.server_name || undefined,
+          server_pinned: session.server_pinned,
+          agent_slug: session.agent_slug,
+          label: session.label,
+        },
+        // Only a change of *who* divides the scrollback; a model swap under
+        // the same identity is not a handover the reader needs marked.
+        divider:
+          selection.agentSlug === undefined
+            ? undefined
+            : `Switched to ${session.label}`,
+      }));
     },
-    [flushChunks, user],
+    [applySwitch, flushChunks, user],
   );
 
   /**
@@ -2004,36 +2013,21 @@ export function useChatSocket() {
       // Same ordering rule as the brain switch: buffered text first, divider
       // after it.
       flushChunks();
-      setSlots((prev) =>
-        prev.map((s) => {
-          if (s.info.slot_id !== slotId) return s;
-          const info: SlotInfo = {
-            ...s.info,
-            server_name: session.server_name || undefined,
-            server_pinned: session.server_pinned,
-          };
-          // Only an actual move divides the scrollback. A pinned Agent ignores
-          // the request, and a divider claiming otherwise would be a lie.
-          if (session.server_name === s.info.server_name) return { ...s, info };
-          return {
-            ...s,
-            info,
-            messages: [
-              ...s.messages,
-              {
-                id: nextMsgId(),
-                role: "system" as const,
-                text: `Now using server ${session.server_name}`,
-                kind: "switch",
-                toolCalls: [],
-                ts: nowTs(),
-              },
-            ],
-          };
-        }),
-      );
+      applySwitch(slotId, (prev) => ({
+        info: {
+          ...prev,
+          server_name: session.server_name || undefined,
+          server_pinned: session.server_pinned,
+        },
+        // Only an actual move divides the scrollback. A pinned Agent ignores
+        // the request, and a divider claiming otherwise would be a lie.
+        divider:
+          session.server_name === prev.server_name
+            ? undefined
+            : `Now using server ${session.server_name}`,
+      }));
     },
-    [flushChunks, user],
+    [applySwitch, flushChunks, user],
   );
 
   const destroySession = useCallback(
