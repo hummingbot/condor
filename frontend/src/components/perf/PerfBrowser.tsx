@@ -199,6 +199,18 @@ const FLEET_SCOPE = "all";
 /** Held still, so an absent fleet map is not a new array on every render. */
 const EMPTY_OWNERS: FleetOwner[] = [];
 
+/** Held still, so an unpassed `snapshots` prop is not a new array on every render. */
+const EMPTY_SNAPSHOTS: ControllerPerformanceSnapshot[] = [];
+
+/** Held still, so an unpassed `executors` prop is not a new array on every render. */
+const EMPTY_EXECUTORS: ExecutorInfo[] = [];
+
+/** Held still, so an unpassed `runs` prop is not a new array on every render. */
+const EMPTY_RUNS: BotRunInfo[] = [];
+
+/** Held still, so an unpassed `terminatedControllers` prop is not a new array on every render. */
+const EMPTY_TERMINATED: ControllerInfo[] = [];
+
 /**
  * The series a splitting scope does not have.
  *
@@ -537,12 +549,12 @@ export function PerfBrowser({
   server,
   convert,
   currencySymbol,
-  snapshots = [],
+  snapshots = EMPTY_SNAPSHOTS,
   truncated = false,
-  executors = [],
+  executors = EMPTY_EXECUTORS,
   paging,
-  runs = [],
-  terminatedControllers = [],
+  runs = EMPTY_RUNS,
+  terminatedControllers = EMPTY_TERMINATED,
   owners = EMPTY_OWNERS,
   deeds = null,
   rateFormatPnl,

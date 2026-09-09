@@ -43,6 +43,15 @@ const EXECUTOR_PAGES = 4;
 /** Held still, so a failed or pending fleet map is not a new prop every render. */
 const EMPTY_OWNERS: FleetOwner[] = [];
 
+/** Held still, so the disabled Running-population runs query is not a new array every render. */
+const EMPTY_RUNS: BotRunInfo[] = [];
+
+/** Held still, so the disabled Running-population terminated-controllers query is not a new array every render. */
+const EMPTY_TERMINATED: ControllerInfo[] = [];
+
+/** Held still, so a not-yet-loaded bot list is not a new array every render. */
+const EMPTY_BOTS: BotSummary[] = [];
+
 /** Everything `PerfBrowser` reports on, and the state of fetching it. */
 export interface FleetData {
   controllers: ControllerInfo[];
@@ -352,13 +361,13 @@ export function useFleetData(
 
   return {
     controllers: sortedControllers,
-    bots: data?.bots ?? [],
+    bots: data?.bots ?? EMPTY_BOTS,
     executors,
     paging,
     snapshots: activeSnapshots,
     truncated: perfHistory?.truncated ?? false,
-    runs: runsData?.runs ?? [],
-    terminatedControllers: terminatedData?.controllers ?? [],
+    runs: runsData?.runs ?? EMPTY_RUNS,
+    terminatedControllers: terminatedData?.controllers ?? EMPTY_TERMINATED,
     owners: fleet?.owners ?? EMPTY_OWNERS,
     deeds: fleet?.deeds ?? null,
     convert,
