@@ -697,18 +697,48 @@ class PydanticAIClient:
         self._lifecycle_error = None
         self._mcp_task = asyncio.create_task(self._run_mcp_lifecycle())
 
-        await self._ready_event.wait()
-        if self._startup_error is not None:
-            self._mcp_task = None
-            self._mcp_servers.clear()
-            self._agent = None
-            raise self._startup_error
+        await self._await_ready()
 
         log.info(
             "PydanticAI client ready: model=%s, mcp_servers=%d",
             self.model_name,
             len(self._mcp_servers),
         )
+
+    async def _await_ready(self) -> None:
+        """Wait for the MCP lifecycle task to come up, under a deadline.
+
+        The wait used to be a bare ``self._ready_event.wait()`` -- the same
+        unbounded shape as the ACP handshake, with the same failure: an MCP
+        stdio server that spawns and never finishes its own init parks
+        ``start()`` forever, and with it the per-key session-creation lock the
+        caller holds (CORR-333). On expiry the lifecycle task is cancelled so
+        no MCP subprocess is left behind, and the client is left visibly dead.
+        """
+        from condor.runtime.timeouts import TIMEOUTS
+
+        try:
+            await asyncio.wait_for(
+                self._ready_event.wait(), timeout=TIMEOUTS.agent_handshake
+            )
+        except asyncio.TimeoutError:
+            task, self._mcp_task = self._mcp_task, None
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
+            self._mcp_servers.clear()
+            self._agent = None
+            raise TimeoutError(
+                f"MCP servers for {self.model_name} did not become ready within "
+                f"{TIMEOUTS.agent_handshake}s; the agent was not started."
+            ) from None
+
+        if self._startup_error is not None:
+            self._mcp_task = None
+            self._mcp_servers.clear()
+            self._agent = None
+            raise self._startup_error
 
     def _gate_toolsets(self, toolsets: list) -> list:
         """Wrap toolsets so a denied call never reaches the tool (SEC-080).

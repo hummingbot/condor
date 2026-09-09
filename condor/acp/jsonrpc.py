@@ -48,9 +48,20 @@ class JSONRPCPeer:
         self._handlers[method] = handler
 
     async def send_request(
-        self, method: str, params: dict[str, Any], writer: asyncio.StreamWriter
+        self,
+        method: str,
+        params: dict[str, Any],
+        writer: asyncio.StreamWriter,
+        timeout: float | None = None,
     ) -> Any:
-        """Send a JSON-RPC request and wait for the response."""
+        """Send a JSON-RPC request and wait for the response.
+
+        ``timeout`` bounds that wait: nothing else in the peer does, so a child
+        that reads our line and never answers parks the caller forever
+        (CORR-333). On expiry the pending entry is dropped -- an abandoned
+        request must not leak a future that only ``cancel_all`` would ever
+        clear -- and :class:`asyncio.TimeoutError` propagates to the caller.
+        """
         req_id = self._next_id
         self._next_id += 1
 
@@ -62,7 +73,13 @@ class JSONRPCPeer:
 
         future: asyncio.Future[Any] = asyncio.get_event_loop().create_future()
         self._pending[req_id] = future
-        return await future
+        if timeout is None:
+            return await future
+        try:
+            return await asyncio.wait_for(future, timeout)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            self._pending.pop(req_id, None)
+            raise
 
     async def send_notification(
         self, method: str, params: dict[str, Any], writer: asyncio.StreamWriter

@@ -50,6 +50,13 @@ class TimeoutPolicy:
     sse_stream: int = 1800
     # Budget for one MCP tool call.
     mcp_call: float = 15.0
+    # How long an agent client may take to become usable: the ACP
+    # ``initialize`` + ``session/new`` handshake, and the pydantic-ai wait for
+    # its MCP servers to come up. Generous because a cold start can include an
+    # ``npx`` fetch of the bridge, but bounded: a child that spawns and never
+    # answers used to park the caller forever, holding a per-user session slot
+    # and the session-creation lock behind it (CORR-333).
+    agent_handshake: int = 120
     # Wall-clock budget for one agent session: a strategy tick's LLM turn, and
     # the shutdown cleanup pass that runs under the same ceiling. 10 minutes.
     tick_default: int = 600

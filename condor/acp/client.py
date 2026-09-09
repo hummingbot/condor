@@ -559,6 +559,16 @@ class ACPClient:
         self._read_task = asyncio.create_task(self._read_loop())
         self._stderr_task = asyncio.create_task(self._drain_stderr())
 
+        # Deferred like the other TIMEOUTS uses in this file: importing the
+        # runtime package at module scope closes an import cycle.
+        from condor.runtime.timeouts import TIMEOUTS
+
+        # ONE deadline across both steps, not one each: what the caller is
+        # owed is a bounded ``start()``. A child that spawns but never answers
+        # -- an npx fetch that stalls, a CLI waiting on an interactive prompt,
+        # a bridge blocked on auth -- used to park it forever, and every call
+        # site opens its own budget only after we return (CORR-333).
+        deadline = time.monotonic() + TIMEOUTS.agent_handshake
         try:
             handshake = await self._peer.send_request(
                 "initialize",
@@ -568,12 +578,21 @@ class ACPClient:
                     "clientInfo": {"name": "condor", "version": "0.1.0"},
                 },
                 self._process.stdin,
+                timeout=max(0.0, deadline - time.monotonic()),
             )
             result = await self._peer.send_request(
                 "session/new",
                 self._session_new_params(),
                 self._process.stdin,
+                timeout=max(0.0, deadline - time.monotonic()),
             )
+        except asyncio.TimeoutError:
+            await self.stop()
+            raise TimeoutError(
+                f"The agent did not complete the ACP handshake within "
+                f"{TIMEOUTS.agent_handshake}s and was killed (cmd={self.command}). "
+                f"Check that the command runs and speaks ACP on stdio."
+            ) from None
         except Exception:
             # Handshake failed -- kill the subprocess to prevent orphan
             await self.stop()
