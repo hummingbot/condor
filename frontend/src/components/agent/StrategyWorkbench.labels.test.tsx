@@ -82,7 +82,7 @@ vi.mock("@/hooks/useFleetData", () => ({
     runs: [],
     terminatedControllers: [],
     deeds: null,
-    convert: (v: number) => v,
+    convert: (v: number) => ({ value: v, converted: true }),
     currencySymbol: "$",
     rateFormatPnl: String,
     rateFormatValue: String,

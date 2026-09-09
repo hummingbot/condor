@@ -61,7 +61,7 @@ vi.mock("@/hooks/useWebSocket", () => ({ useCondorWebSocket: () => {} }));
 vi.mock("@/hooks/useRates", () => ({
   useRates: () => ({
     rates: {},
-    convert: (v: number) => v,
+    convert: (v: number) => ({ value: v, converted: true }),
     formatValue: (v: number) => `$${v}`,
     formatPnlValue: (v: number) => `$${v}`,
     formatValueDetailed: (v: number) => `$${v}`,
@@ -198,6 +198,11 @@ describe("/bots with no live fleet", () => {
     expect(text()).toContain("mm-sol-1");
     expect(text()).toContain("grid-alpha");
     expect(text()).not.toContain("No bots running");
+    // Locks the fix in: with a correctly-shaped `convert` mock, the folded
+    // Realized ($12 → "+$12.00") and Volume ($5,000 → "$5.0K") tiles are real
+    // money, not `NaN`.
+    expect(text()).toContain("+$12.00");
+    expect(text()).toContain("$5.0K");
   });
 
   it("keeps the population toggle reachable when the terminated set is empty too", async () => {
