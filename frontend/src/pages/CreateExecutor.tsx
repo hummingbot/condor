@@ -17,6 +17,7 @@ import {
 
 import { NoServerCard } from "@/components/NoServerCard";
 import { useTradingRules } from "@/components/market/useTradingRules";
+import { useVenues } from "@/components/market/useVenues";
 import { PriceTicker } from "@/components/market/PriceTicker";
 import { MarketDepthPanel } from "@/components/market/MarketDepthPanel";
 import { MarketBrowser, type MarketPick } from "@/components/market/MarketBrowser";
@@ -196,14 +197,9 @@ export function CreateExecutor() {
   });
 
   // One query, one answer: every venue the panel can offer, each with the traits
-  // the UI decisions below rest on. The server dedups (a venue in both of its input
-  // lists is a Hummingbot connector), so there is no merge to get wrong here.
-  const { data: venues = [], isPending: venuesPending } = useQuery({
-    queryKey: ["venues", server],
-    queryFn: () => api.getVenues(server!),
-    enabled: !!server,
-    staleTime: 5 * 60 * 1000,
-  });
+  // the UI decisions below rest on. Shared with DexPool through `useVenues`, so
+  // both pages read the same cached request instead of hand-copying the query.
+  const { venues, isPending: venuesPending } = useVenues(server);
 
   // The list has to be in before the panel may *correct* a selection: judging a
   // persisted venue against an empty list would bounce it on every reload and
