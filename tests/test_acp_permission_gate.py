@@ -388,6 +388,11 @@ FUND_MOVING_TOOLS = {
     "manage_bots",
     "manage_clmm",
     "manage_gateway_config",  # the wallets resource takes a private key
+    # start/stop/restart of the Gateway container (SEC-565). It signs nothing,
+    # which is not the question: stopping it strands live CLMM/LP executors, and
+    # starting it hands a caller-chosen Docker image to the host that holds the
+    # exchange API keys and the Gateway wallet keys.
+    "manage_gateway_container",
 }
 
 #: Tools that read, or that only write config the trading loop must be told to
@@ -395,7 +400,6 @@ FUND_MOVING_TOOLS = {
 #: ``test_every_action_gated_tool_is_classified`` below.
 NON_FUND_MOVING_TOOLS = {
     "manage_controllers",  # writes controller templates, never a running bot
-    "manage_gateway_container",  # starts and stops Gateway; signs nothing
     "executor_defaults",  # edits a local preferences file; creates nothing
     "explore_dex_pools",
     "explore_geckoterminal",
@@ -471,12 +475,15 @@ def test_every_mutating_action_of_a_fund_moving_tool_is_dangerous():
                 f"{tool_name}({action}) mutates but is auto-approved; "
                 "add it to the matching DANGEROUS_* set in condor/runtime/danger.py"
             )
-    # 3 AMM + 3 CLMM + 5 bot today: a floor, so a signature refactor that silently
-    # stops yielding actions fails instead of passing vacuously. Neither the swap
-    # nor the executor family is counted: they have no `action` since FEAT-064 and
-    # FEAT-062 and are gated by name instead (see test_swap_signing_action_is_dangerous
-    # and tests/test_dangerous_gate_names_resolve.py).
-    assert checked >= 11, f"only {checked} mutating actions found — enumeration broke"
+    # 3 AMM + 3 CLMM + 5 bot + container `stop` today: a floor, so a signature
+    # refactor that silently stops yielding actions fails instead of passing
+    # vacuously. Only `stop` of the container tool is counted here — `start` and
+    # `restart` match no MUTATING_PREFIXES entry ("start_" has the underscore), which
+    # is why test_stopping_or_restarting_gateway_asks_a_human below names all three.
+    # Neither the swap nor the executor family is counted: they have no `action` since
+    # FEAT-064 and FEAT-062 and are gated by name instead (see
+    # test_swap_signing_action_is_dangerous and tests/test_dangerous_gate_names_resolve.py).
+    assert checked >= 12, f"only {checked} mutating actions found — enumeration broke"
 
 
 # ---------------------------------------------------------------------------
@@ -523,6 +530,64 @@ def test_stopping_a_loop_never_asks():
 def test_control_agent_with_unreadable_arguments_fails_closed():
     for raw in (None, "not json", ["start"], {}, {"action": 7}):
         call = normalize_tool_call(_acp_request(CONTROL, raw))
+        assert is_dangerous_tool_call(call), f"{raw!r} slipped past the gate"
+
+
+# ---------------------------------------------------------------------------
+# manage_gateway_container's lifecycle actions must ask first (SEC-565)
+# ---------------------------------------------------------------------------
+
+CONTAINER = "mcp__mcp-hummingbot__manage_gateway_container"
+
+
+def test_stopping_or_restarting_gateway_asks_a_human():
+    """A seat that is not authorized by a human cannot take Gateway down.
+
+    Before SEC-565 this tool reached no gate at all: ``is_dangerous_tool_call``
+    fell through to ``return False`` and the ACP callback auto-approved, so a
+    stop under a live CLMM position was neither confirmed nor logged.
+    """
+    for action in ("stop", "restart", "start"):
+        channel = _CapturingChannel(answer=False)
+        result = _drive_acp(_acp_request(CONTAINER, {"action": action}), channel)
+        assert (
+            len(channel.delivered) == 1
+        ), f"manage_gateway_container({action}) ran with no confirmation"
+        assert (
+            result["outcome"]["outcome"] == "cancelled"
+        ), f"manage_gateway_container({action}) proceeded after a refusal"
+
+
+def test_the_gateway_start_prompt_names_the_image():
+    """`start` hands a caller-chosen image to the host holding the keys."""
+    channel = _CapturingChannel(answer=False)
+    _drive_acp(
+        _acp_request(
+            CONTAINER,
+            {"action": "start", "config": {"image": "evil/gateway:latest"}},
+        ),
+        channel,
+    )
+
+    assert channel.delivered[0].summary == (
+        "Start the Gateway container with image evil/gateway:latest"
+    )
+
+
+def test_reading_gateway_status_or_logs_never_asks():
+    """`get_logs` is the escape hatch every opaque Gateway failure points at."""
+    for action in ("get_status", "get_logs"):
+        channel = _CapturingChannel(answer=True)
+        result = _drive_acp(_acp_request(CONTAINER, {"action": action}), channel)
+        assert (
+            not channel.delivered
+        ), f"manage_gateway_container({action}) raised a confirmation"
+        assert result["outcome"]["outcome"] == "selected"
+
+
+def test_gateway_container_with_unreadable_arguments_fails_closed():
+    for raw in (None, "not json", ["stop"], {}, {"action": 7}):
+        call = normalize_tool_call(_acp_request(CONTAINER, raw))
         assert is_dangerous_tool_call(call), f"{raw!r} slipped past the gate"
 
 

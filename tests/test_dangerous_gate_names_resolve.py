@@ -22,6 +22,7 @@ from handlers.agents._shared import (
     DANGEROUS_BOT_ACTIONS,
     DANGEROUS_CLMM_ACTIONS,
     DANGEROUS_CONFIG_RESOURCES,
+    DANGEROUS_CONTAINER_ACTIONS,
     DANGEROUS_CONTROL_ACTIONS,
     DANGEROUS_TOOLS,
     is_dangerous_tool_call,
@@ -72,6 +73,7 @@ def test_gated_actions_exist_on_their_tools():
         ("manage_clmm", DANGEROUS_CLMM_ACTIONS),
         ("manage_amm", DANGEROUS_AMM_ACTIONS),
         ("manage_bots", DANGEROUS_BOT_ACTIONS),
+        ("manage_gateway_container", DANGEROUS_CONTAINER_ACTIONS),
     ):
         available = _action_literals(tool_name)
         unknown = actions - available
@@ -610,6 +612,18 @@ def test_an_ungated_config_edit_is_recorded():
         )
 
 
+def test_a_gateway_container_lifecycle_call_is_gated_and_recorded():
+    """SEC-565: the three lifecycle actions; the two reads stay off both lists."""
+    for action in ("start", "stop", "restart"):
+        call = _call("manage_gateway_container", action=action)
+        assert is_dangerous_tool_call(call), f"{action} is auto-approved"
+        assert is_mutating_tool_call(call), f"{action} leaves no row"
+    for action in ("get_status", "get_logs"):
+        call = _call("manage_gateway_container", action=action)
+        assert not is_dangerous_tool_call(call), f"{action} raised a confirmation"
+        assert not is_mutating_tool_call(call), f"{action} was recorded as a write"
+
+
 def test_the_log_fails_open_where_the_gate_fails_closed():
     """An action nobody has heard of is recorded, not dropped."""
     assert is_mutating_tool_call({"tool": "manage_bots", "input": None})
@@ -634,7 +648,13 @@ def _every_plausible_call() -> list[dict]:
     action added to a gated tool lands in the subset assertion below on its own.
     """
     calls: list[dict] = []
-    for tool in ("manage_bots", "manage_clmm", "manage_amm", "manage_gateway_config"):
+    for tool in (
+        "manage_bots",
+        "manage_clmm",
+        "manage_amm",
+        "manage_gateway_config",
+        "manage_gateway_container",
+    ):
         for action in _action_literals(tool):
             calls.append(_call(tool, action=action, resource_type="tokens"))
             calls.append(_call(tool, action=action))
