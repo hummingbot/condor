@@ -421,7 +421,14 @@ class ServerDataService:
     # ------ Read API ------
 
     def get(self, server: str, data_type: ServerDataType, **params) -> Optional[Any]:
-        """Read from cache only (hot path). Returns None if not cached or expired."""
+        """Read from cache only (hot path). Returns None if not cached or expired.
+
+        ``None`` means "nothing usable in cache", never "the server is fine": a
+        failing fetch leaves the previous value in place (see
+        :meth:`get_or_fetch`) and the entry only disappears once it expires and
+        :meth:`_cleanup_stale` is allowed to evict it. Use :meth:`get_entry` for
+        the error/age metadata behind a ``None``.
+        """
         key = CacheKey.make(server, data_type, **params)
         entry = self._cache.get(key)
         if entry is None:
@@ -436,7 +443,24 @@ class ServerDataService:
     async def get_or_fetch(
         self, server: str, data_type: ServerDataType, **params
     ) -> Optional[Any]:
-        """Return cached data if fresh, otherwise fetch. For REST/one-shot reads."""
+        """Return cached data if fresh, otherwise fetch. For REST/one-shot reads.
+
+        Three outcomes, indistinguishable from the return value alone:
+
+        1. a cache hit within the key's TTL;
+        2. a successful fetch, just written to the cache;
+        3. a *failed* fetch, which returns the previous value at whatever age it
+           has — or ``None`` if there never was one.
+
+        The third case is silent and unbounded: nothing here caps how old the
+        returned value may be, and a key with a live subscriber is never evicted
+        by :meth:`_cleanup_stale`, so with the API server down this keeps handing
+        out the last good snapshot for as long as the subscriber stays attached.
+
+        The value carries no age of its own. When freshness is load-bearing,
+        read :meth:`get_entry` alongside it for ``fetched_at``,
+        ``consecutive_errors`` and ``last_error_at``.
+        """
         key = CacheKey.make(server, data_type, **params)
 
         # Check cache
@@ -450,7 +474,13 @@ class ServerDataService:
     def get_entry(
         self, server: str, data_type: ServerDataType, **params
     ) -> Optional[CacheEntry]:
-        """Get the full cache entry (for age/metadata checks)."""
+        """Get the full cache entry (for age/metadata checks).
+
+        This is the sanctioned way to age-check a :meth:`get_or_fetch` result:
+        that call can return a value of any age when the fetch failed, and only
+        the entry's ``fetched_at`` / ``consecutive_errors`` / ``last_error_at``
+        say so.
+        """
         key = CacheKey.make(server, data_type, **params)
         return self._cache.get(key)
 
@@ -826,7 +856,13 @@ class ServerDataService:
                     self._callback_tasks.track(task, sub.subscriber_id)
 
     def _cleanup_stale(self) -> None:
-        """Remove cache entries with no subscribers and expired TTL."""
+        """Remove cache entries with no subscribers and expired TTL.
+
+        A key with at least one live subscriber is exempt: it is kept no matter
+        how old it is. That is what makes :meth:`get_or_fetch`'s stale-on-error
+        window unbounded for the subscribed keys (portfolio, bot status,
+        executors) while a subscriber is attached.
+        """
         now = time.time()
         stale = []
         for key, entry in self._cache.items():
