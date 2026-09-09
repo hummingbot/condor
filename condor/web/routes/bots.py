@@ -737,11 +737,10 @@ async def stop_bot_endpoint(
     # Mark as stopping immediately so UI reflects it
     mark_bot_stopping(name, bot_name)
 
-    client = await cm.get_client(name)
-
     from mcp_servers.hummingbot_api.tools.bot_management import manage_bot_execution
 
     try:
+        client = await cm.get_client(name)
         result = await manage_bot_execution(
             client=client,
             bot_name=bot_name,
@@ -770,11 +769,10 @@ async def stop_controllers_endpoint(
     # Mark controllers as stopping immediately
     mark_controllers_stopping(name, bot_name, body.controller_names)
 
-    client = await cm.get_client(name)
-
     from mcp_servers.hummingbot_api.tools.bot_management import manage_bot_execution
 
     try:
+        client = await cm.get_client(name)
         result = await manage_bot_execution(
             client=client,
             bot_name=bot_name,
@@ -791,6 +789,14 @@ async def stop_controllers_endpoint(
             "Failed to stop controllers on bot '%s' of '%s'", bot_name, name
         )
         raise upstream_error("Failed to stop controllers", e)
+
+    # manage_bot_execution can return 200 with a partial failure (some
+    # controllers' config writes rejected) — it only raises when *nothing*
+    # succeeded. Those failed ids never flip manual_kill_switch, so without
+    # this the overlay would keep painting them "stopping" for the full TTL,
+    # locking the retry control out from under the operator.
+    for controller_id in result.get("failed", {}):
+        clear_controller_stopping(name, bot_name, controller_id)
 
     record_ui_deed(
         user,

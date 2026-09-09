@@ -38,7 +38,9 @@ CONTROLLERS = ["pmm_sol", "pmm_eth"]
 class _Controllers:
     """The controllers sub-API ``_set_kill_switches`` actually drives."""
 
-    def __init__(self, update_error: Exception | None):
+    def __init__(self, update_error: Exception | dict[str, Exception] | None):
+        # A plain Exception fails every controller (total failure); a dict
+        # fails only the controllers named as keys (partial failure).
         self._update_error = update_error
         self.updated: list[str] = []
 
@@ -49,8 +51,11 @@ class _Controllers:
         ]
 
     async def update_bot_controller_config(self, _bot_name, config_name, _update):
-        if self._update_error is not None:
-            raise self._update_error
+        error = self._update_error
+        if isinstance(error, dict):
+            error = error.get(config_name)
+        if error is not None:
+            raise error
         self.updated.append(config_name)
         return {"updated": True}
 
@@ -177,6 +182,57 @@ def test_a_successful_stop_keeps_the_marks(bind_client):
 def test_the_bot_and_controller_failure_paths_agree(bind_client):
     """Symmetry with ``stop_bot_endpoint``, whose failure path already cleared."""
     bind_client(_FakeClient(RuntimeError("backend down")))
+
+    with pytest.raises(HTTPException):
+        asyncio.run(
+            bots_module.stop_bot_endpoint(name=SERVER, bot_name=BOT, user=_USER)
+        )
+    assert get_stopping_bots(SERVER) == set()
+
+    with pytest.raises(HTTPException):
+        _stop_controllers()
+    assert get_stopping_controllers(SERVER) == set()
+
+
+def test_a_partial_failure_clears_only_the_failed_marks(bind_client):
+    """CORR-619: manage_bot_execution returns 200 with a non-empty ``failed``
+    when at least one controller succeeded — the ``except`` branch never
+    runs, so the success-path cleanup must clear the failed ids itself while
+    leaving the succeeded ones marked stopping.
+    """
+    failing, ok = CONTROLLERS[0], CONTROLLERS[1]
+    client = bind_client(_FakeClient({failing: RuntimeError("backend rejected")}))
+
+    result = _stop_controllers()
+
+    assert result["succeeded"] == [ok]
+    assert result["failed"] == {failing: "backend rejected"}
+
+    stopping = get_stopping_controllers(SERVER)
+    assert stopping == {f"{BOT}:{ok}"}, (
+        "the succeeded controller must stay marked stopping and the failed "
+        f"one must not; got {stopping}"
+    )
+    assert client.controllers.updated == [ok]
+
+
+def test_a_client_resolution_failure_leaves_no_marks(monkeypatch):
+    """cm.get_client failing (outside the upstream call) must not leak marks
+    for either endpoint — it now happens inside the ``try`` block.
+    """
+
+    class _FailingCM:
+        def has_server_access(self, *_args, **_kwargs):
+            return True
+
+        async def get_client(self, _name):
+            raise RuntimeError("server unreachable")
+
+    monkeypatch.setattr(bots_module, "get_config_manager", lambda: _FailingCM())
+
+    bots_module.clear_bot_stopping(SERVER, BOT)
+    for cid in CONTROLLERS:
+        bots_module.clear_controller_stopping(SERVER, BOT, cid)
 
     with pytest.raises(HTTPException):
         asyncio.run(
