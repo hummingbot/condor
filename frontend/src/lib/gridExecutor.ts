@@ -26,7 +26,13 @@ export interface GridState {
   activation_bounds: number;
   keep_position: boolean;
   coerce_tp_to_step: boolean;
-  activePickField: "start" | "end" | "limit" | null;
+  /**
+   * The price field whose crosshair is armed, named for the field itself —
+   * `PriceField` in the shared kit dispatches the same name it writes to. The
+   * chart speaks in slots (`start`/`end`/`limit`), so `useGridConfig` maps
+   * across the two.
+   */
+  activePickField: "start_price" | "end_price" | "limit_price" | null;
   showAdvanced: boolean;
   /**
    * Whether this market's price has already been offered to the three prices.

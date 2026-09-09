@@ -120,7 +120,7 @@ describe("useGridConfig().buildPayload", () => {
 
 describe("useGridConfig().handleChartPriceSet", () => {
   it("writes the picked price into the slot's field and disarms the picker", () => {
-    setField("activePickField", "start");
+    setField("activePickField", "start_price");
 
     act(() => {
       latest.handleChartPriceSet("start", 123.45);
@@ -143,7 +143,7 @@ describe("useGridConfig().handleChartPriceSet", () => {
   });
 
   it("ignores a slot the grid does not own", () => {
-    setField("activePickField", "start");
+    setField("activePickField", "start_price");
 
     act(() => {
       latest.handleChartPriceSet("take_profit", 500);
@@ -152,6 +152,6 @@ describe("useGridConfig().handleChartPriceSet", () => {
     // Not the grid's line: nothing written, and the grid's own armed picker is
     // left alone for the panel that does own the slot.
     expect(latest.state.start_price).toBe(0);
-    expect(latest.state.activePickField).toBe("start");
+    expect(latest.state.activePickField).toBe("start_price");
   });
 });

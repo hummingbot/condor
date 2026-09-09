@@ -1,14 +1,14 @@
-import { useEffect, useId, useMemo, useRef, useState } from "react";
-import {
-  AlertTriangle,
-  Check,
-  ChevronDown,
-  ChevronUp,
-  Crosshair,
-  Sparkles,
-} from "lucide-react";
+import { useEffect, useMemo } from "react";
+import { AlertTriangle, ChevronDown, ChevronUp, Sparkles } from "lucide-react";
 
-import { LeverageField, SelectField, ToggleField } from "@/components/executor/fields";
+import {
+  LeverageField,
+  NumberField,
+  PriceField,
+  SectionHeader,
+  SelectField,
+  ToggleField,
+} from "@/components/executor/fields";
 import { ORDER_TYPE_OPTIONS } from "@/components/executor/field-options";
 import { autoFillGridPrices, gridConfigErrors, gridPriceFieldValid } from "@/lib/gridExecutor";
 import type { GridState, GridAction } from "@/lib/gridExecutor";
@@ -19,155 +19,6 @@ interface GridConfigPanelProps {
   currentPrice: number | null;
   isSpot?: boolean;
   quoteCurrency?: string;
-}
-
-function PriceField({
-  label,
-  value,
-  field,
-  activePickField,
-  dispatch,
-  valid,
-  hint,
-}: {
-  label: string;
-  value: number;
-  field: "start" | "end" | "limit";
-  activePickField: "start" | "end" | "limit" | null;
-  dispatch: React.Dispatch<GridAction>;
-  valid: boolean;
-  hint?: string;
-}) {
-  const isActive = activePickField === field;
-  const id = useId();
-  const inputRef = useRef<HTMLInputElement>(null);
-  const [localValue, setLocalValue] = useState(value === 0 ? "" : String(value));
-
-  // Sync from parent when value changes externally (e.g. auto-fill, chart pick)
-  useEffect(() => {
-    if (document.activeElement !== inputRef.current) {
-      setLocalValue(value === 0 ? "" : String(value));
-    }
-  }, [value]);
-
-  return (
-    <div>
-      <label htmlFor={id} className="mb-1 flex items-center gap-1.5 text-xs text-[var(--color-text-muted)]">
-        {label}
-        {value > 0 && (
-          valid
-            ? <Check className="h-3 w-3 text-[var(--color-green)]" />
-            : <AlertTriangle className="h-3 w-3 text-[var(--color-red)]" />
-        )}
-      </label>
-      <div className="flex gap-1">
-        <input
-          id={id}
-          ref={inputRef}
-          type="number"
-          step="any"
-          value={localValue}
-          onChange={(e) => {
-            setLocalValue(e.target.value);
-            const num = parseFloat(e.target.value);
-            dispatch({ type: "SET_FIELD", field: `${field}_price`, value: isNaN(num) ? 0 : num });
-          }}
-          onBlur={() => setLocalValue(value === 0 ? "" : String(value))}
-          placeholder="0.00"
-          className={`flex-1 rounded border bg-[var(--color-bg)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-text)] placeholder:text-[var(--color-text-muted)]/40 focus:outline-none ${
-            isActive
-              ? "border-[var(--color-primary)] ring-1 ring-[var(--color-primary)]"
-              : "border-[var(--color-border)] focus:border-[var(--color-primary)]"
-          }`}
-        />
-        <button
-          onClick={() =>
-            dispatch({
-              type: "SET_FIELD",
-              field: "activePickField",
-              value: isActive ? null : field,
-            })
-          }
-          className={`flex items-center rounded border px-2 transition-colors ${
-            isActive
-              ? "border-[var(--color-primary)] bg-[var(--color-primary)]/20 text-[var(--color-primary)]"
-              : "border-[var(--color-border)] bg-[var(--color-surface)] text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
-          }`}
-          title="Pick from chart"
-        >
-          <Crosshair className="h-3.5 w-3.5" />
-        </button>
-      </div>
-      {hint && <p className="mt-0.5 text-[10px] text-[var(--color-text-muted)]">{hint}</p>}
-    </div>
-  );
-}
-
-function NumberField({
-  label,
-  value,
-  field,
-  dispatch,
-  step = 1,
-  min,
-  suffix,
-  isPercent = false,
-}: {
-  label: string;
-  value: number;
-  field: string;
-  dispatch: React.Dispatch<GridAction>;
-  step?: number;
-  min?: number;
-  suffix?: string;
-  isPercent?: boolean;
-}) {
-  const displayValue = isPercent ? value * 100 : value;
-  const id = useId();
-  const inputRef = useRef<HTMLInputElement>(null);
-  const [localValue, setLocalValue] = useState(displayValue === 0 ? "" : String(displayValue));
-
-  useEffect(() => {
-    if (document.activeElement !== inputRef.current) {
-      setLocalValue(displayValue === 0 ? "" : String(displayValue));
-    }
-  }, [displayValue]);
-
-  return (
-    <div className="min-w-0">
-      <label htmlFor={id} className="mb-1 block truncate text-xs text-[var(--color-text-muted)]">{label}</label>
-      <div className="flex min-w-0 items-center gap-1">
-        <input
-          id={id}
-          ref={inputRef}
-          type="number"
-          step={isPercent ? step * 100 : step}
-          min={min !== undefined ? (isPercent ? min * 100 : min) : undefined}
-          value={localValue}
-          onChange={(e) => {
-            setLocalValue(e.target.value);
-            const raw = parseFloat(e.target.value);
-            dispatch({ type: "SET_FIELD", field, value: isPercent ? (isNaN(raw) ? 0 : raw / 100) : (isNaN(raw) ? 0 : raw) });
-          }}
-          onBlur={() => setLocalValue(displayValue === 0 ? "" : String(displayValue))}
-          placeholder="0"
-          className="w-full min-w-0 flex-1 rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-text)] placeholder:text-[var(--color-text-muted)]/40 focus:border-[var(--color-primary)] focus:outline-none"
-        />
-        {suffix && (
-          <span className="shrink-0 text-[10px] text-[var(--color-text-muted)]">{suffix}</span>
-        )}
-      </div>
-    </div>
-  );
-}
-
-
-function SectionHeader({ children }: { children: React.ReactNode }) {
-  return (
-    <span className="text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
-      {children}
-    </span>
-  );
 }
 
 export function GridConfigPanel({ state, dispatch, currentPrice, isSpot = false, quoteCurrency = "USDT" }: GridConfigPanelProps) {
@@ -270,7 +121,7 @@ export function GridConfigPanel({ state, dispatch, currentPrice, isSpot = false,
         <PriceField
           label="Lower Price (grid start)"
           value={state.start_price}
-          field="start"
+          field="start_price"
           activePickField={state.activePickField}
           dispatch={dispatch}
           valid={gridPriceFieldValid("start", state)}
@@ -278,7 +129,7 @@ export function GridConfigPanel({ state, dispatch, currentPrice, isSpot = false,
         <PriceField
           label="Upper Price (grid end)"
           value={state.end_price}
-          field="end"
+          field="end_price"
           activePickField={state.activePickField}
           dispatch={dispatch}
           valid={gridPriceFieldValid("end", state)}
@@ -286,7 +137,7 @@ export function GridConfigPanel({ state, dispatch, currentPrice, isSpot = false,
         <PriceField
           label={`${state.side === 1 ? "Lower" : "Upper"} Limit (stop-loss)`}
           value={state.limit_price}
-          field="limit"
+          field="limit_price"
           activePickField={state.activePickField}
           dispatch={dispatch}
           valid={gridPriceFieldValid("limit", state)}

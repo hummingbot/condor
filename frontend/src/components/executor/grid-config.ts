@@ -26,6 +26,15 @@ import {
 } from "@/lib/gridExecutor";
 import type { GridState } from "@/lib/gridExecutor";
 
+// ── Chart pick slots ──
+// The panel arms the picker by field name; the chart draws its three lines under
+// its own slot names. One map across, the way `lp-config` does it.
+const PICK_SLOT: Record<string, PickSlot> = {
+  start_price: "start",
+  end_price: "end",
+  limit_price: "limit",
+};
+
 // ── Validation ──
 
 export function useGridValidation(state: GridState): ExecutorValidation {
@@ -50,7 +59,7 @@ export function useGridConfig() {
     limitPrice: state.limit_price,
     side: state.side,
     minSpread: state.min_spread_between_orders,
-    activePickField: state.activePickField,
+    activePickField: PICK_SLOT[state.activePickField ?? ""] ?? null,
     lineLabels: gridLineLabels(state.side),
   }), [
     state.start_price,
