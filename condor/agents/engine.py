@@ -1040,9 +1040,8 @@ class TickEngine:
         )
 
         # Shared factory (ARCH-192). Engine specifics: an explicit model_base_url
-        # in the run config still wins over the owner's saved custom endpoint,
-        # and the run config's tool_filter_mode beats the env fallback. Same
-        # allowlist the agent gets when delegated to; empty => unrestricted.
+        # in the run config still wins over the owner's saved custom endpoint.
+        # Same allowlist the agent gets when delegated to; empty => unrestricted.
         from condor.runtime.llm_client import build_llm_client
 
         return build_llm_client(
@@ -1052,7 +1051,6 @@ class TickEngine:
             allowed_tools=self.agent.tools or None,
             user_id=self.user_id,
             base_url_override=self.config.get("model_base_url") or None,
-            tool_filter_mode=self.config.get("tool_filter_mode"),
         )
 
     # ------------------------------------------------------------------

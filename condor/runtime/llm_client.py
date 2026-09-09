@@ -21,7 +21,6 @@ at once.
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 from condor.acp import client as acp_client
@@ -42,7 +41,6 @@ def build_llm_client(
     user_id: int | None = None,
     base_url_override: str | None = None,
     default_base_url: str | None = None,
-    tool_filter_mode: str | None = None,
     strict_custom_endpoint: bool = False,
 ) -> acp_client.ACPClient | pydantic_ai.PydanticAIClient:
     """Build (but do not start) the right client for ``agent_key``.
@@ -58,9 +56,6 @@ def build_llm_client(
     the engine's ``model_base_url``) beats the resolved custom endpoint, which
     beats ``default_base_url`` (a generic preference, e.g. the saved LM Studio
     URL — deliberately last so it cannot shadow a named custom endpoint).
-
-    ``tool_filter_mode`` resolves as: explicit value (a user/config pref) >
-    ``PYDANTIC_AI_TOOL_FILTER`` env > ``None`` (auto-detect by model size).
 
     ``extra_env``, ``system_prompt`` and ``allowed_tools`` are forwarded to
     whichever client understands them. Both clients take the env and the system
@@ -82,9 +77,6 @@ def build_llm_client(
             extra_env=extra_env,
             base_url=base_url_override or custom_url or default_base_url or None,
             api_key=api_key,
-            tool_filter_mode=(
-                tool_filter_mode or os.environ.get("PYDANTIC_AI_TOOL_FILTER") or None
-            ),
             allowed_tools=allowed_tools,
             system_prompt=system_prompt,
         )

@@ -13,7 +13,6 @@ from aiohttp import web
 
 from condor.acp.pydantic_ai_client import (
     PydanticAIClient,
-    _infer_tool_filter_mode,
     is_pydantic_ai_model,
     model_prefix,
 )
@@ -65,14 +64,6 @@ def test_model_prefix_strips_endpoint_name():
     assert model_prefix("custom:llama-3.3-70b") == "custom"
     assert model_prefix("openrouter:anthropic/claude-sonnet-4.5") == "openrouter"
     assert model_prefix("claude-code") == ""
-
-
-def test_custom_tool_filter_follows_the_model_not_the_prefix():
-    # "custom:" says nothing about capability — a 4B model behind a local vLLM
-    # would choke on the full toolset, so the size heuristics still apply.
-    assert _infer_tool_filter_mode("custom:qwen3-4b") == "essential"
-    assert _infer_tool_filter_mode("custom@local:qwen3-14b") == "moderate"
-    assert _infer_tool_filter_mode("custom@together:llama-3.3-70b") == "full"
 
 
 # -- agent key composition --

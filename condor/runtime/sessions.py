@@ -744,7 +744,6 @@ async def _spawn_session(
         default_base_url=(
             agent_prefs.get("base_url") or os.environ.get("LMSTUDIO_BASE_URL") or None
         ),
-        tool_filter_mode=agent_prefs.get("tool_filter_mode"),
         strict_custom_endpoint=True,
     )
 

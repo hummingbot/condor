@@ -34,77 +34,6 @@ from .client import (
 log = logging.getLogger(__name__)
 
 
-def _infer_tool_filter_mode(model_name: str) -> str:
-    """Automatically detect the best tool filter mode based on model name.
-
-    Analyzes model size and family to determine capability:
-    - Small models (≤8B): essential (minimal tools)
-    - Medium models (9B-32B): moderate (common operations)
-    - Large models (>32B) or cloud APIs: full (all tools)
-
-    Args:
-        model_name: Model identifier like "ollama:llama3.1:8b" or "lmstudio:qwen-14b"
-
-    Returns:
-        "essential", "moderate", or "full"
-    """
-    import re
-
-    model_lower = model_name.lower()
-
-    # Cloud providers always get full access (they're powerful enough).
-    # Custom endpoints are deliberately absent: "custom:" says nothing about
-    # the model behind it — it's just as likely a 4B model on a local vLLM as
-    # a frontier model on Together — so those fall through to the size
-    # heuristics below like any other unknown backend.
-    if any(
-        provider in model_lower
-        for provider in [
-            "openai:",
-            "anthropic:",
-            "groq:",
-            "google:",
-            "openrouter:",
-        ]
-    ):
-        log.info("Auto-detected cloud provider → tool_filter_mode=full")
-        return "full"
-
-    # Extract parameter count (e.g., "7b", "14b", "72b", "32b")
-    # Matches patterns like: 7b, 8b, 14b, 32b, 72b, 1.5b, 2.7b, etc.
-    size_match = re.search(r"(\d+(?:\.\d+)?)\s*[bB](?![a-z])", model_lower)
-
-    if size_match:
-        size = float(size_match.group(1))
-
-        if size <= 8.0:
-            mode = "essential"
-            log.info(f"Auto-detected {size}B model → tool_filter_mode=essential")
-        elif size <= 32.0:
-            mode = "moderate"
-            log.info(f"Auto-detected {size}B model → tool_filter_mode=moderate")
-        else:
-            mode = "full"
-            log.info(f"Auto-detected {size}B model → tool_filter_mode=full")
-
-        return mode
-
-    # Model name-based heuristics (if no size found)
-    # Small models
-    if any(name in model_lower for name in ["gemma", "phi", "tiny", "mini", "small"]):
-        log.info(f"Auto-detected small model family → tool_filter_mode=essential")
-        return "essential"
-
-    # Large models
-    if any(name in model_lower for name in ["deepseek", "mixtral", "command-r", "gpt"]):
-        log.info(f"Auto-detected large model family → tool_filter_mode=full")
-        return "full"
-
-    # Default to moderate for unknown models
-    log.info(f"Unknown model size, defaulting → tool_filter_mode=moderate")
-    return "moderate"
-
-
 # Model prefix → pydantic-ai model string mapping
 # Users set agent_key like "ollama:llama3.1:70b" or "openai:gpt-4o"
 # which maps directly to pydantic-ai model identifiers.
@@ -456,9 +385,6 @@ class PydanticAIClient:
         extra_env: dict[str, str] | None = None,
         base_url: str | None = None,
         api_key: str | None = None,
-        tool_filter_mode: (
-            str | None
-        ) = None,  # "essential", "moderate", "full", or None for auto-detect
         allowed_tools: (
             list[str] | None
         ) = None,  # restrict the agent to these tool names
@@ -478,8 +404,6 @@ class PydanticAIClient:
         # When set, the agent only sees tools whose name is in this allowlist
         # (used by delegated domain agents to scope an agent to one domain).
         self.allowed_tools = set(allowed_tools) if allowed_tools else None
-        # Auto-detect filter mode based on model if not explicitly set
-        self.tool_filter_mode = tool_filter_mode or _infer_tool_filter_mode(model)
         self._mcp_servers: list[Any] = []
         self._agent: Any = None
         # Carries each tool call's permission decision from prompt_stream (where
