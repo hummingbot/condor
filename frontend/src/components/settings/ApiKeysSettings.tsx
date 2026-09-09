@@ -9,7 +9,7 @@ import {
   Star,
   Wallet,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 
 import { InlineConfirm } from "@/components/ui/InlineConfirm";
 import { useServer } from "@/hooks/useServer";
@@ -107,18 +107,22 @@ export function ApiKeysSettings() {
     staleTime: 30 * 60 * 1000,
   });
 
-  // Prefetch config-maps for all connectors when the exchange list loads
-  useEffect(() => {
-    const connectors: ConnectorInfo[] = connectorsData?.connectors ?? [];
-    if (!server || connectors.length === 0) return;
-    for (const c of connectors) {
+  // Warm the config-map cache for the ONE connector the pointer/focus is on, rather
+  // than every connector in the list (PERF-349): /settings/connectors/{name}/config-map
+  // is uncached on the backend, so a whole-list prefetch was 30-40 fresh round trips
+  // for a config map the user was never going to open. Same key and staleTime as the
+  // real query below, so a click after a hover still hits a warm cache.
+  const prefetchConfigMap = useCallback(
+    (name: string) => {
+      if (!server) return;
       qc.prefetchQuery({
-        queryKey: ["settings-config-map", server, c.name],
-        queryFn: () => api.getConnectorConfigMap(server, c.name),
+        queryKey: ["settings-config-map", server, name],
+        queryFn: () => api.getConnectorConfigMap(server, name),
         staleTime: 30 * 60 * 1000,
       });
-    }
-  }, [connectorsData, server, qc]);
+    },
+    [qc, server],
+  );
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ["settings-credentials", server] });
 
@@ -369,6 +373,8 @@ export function ApiKeysSettings() {
                 <button
                   key={c.name}
                   disabled={alreadyConnected}
+                  onMouseEnter={alreadyConnected ? undefined : () => prefetchConfigMap(c.name)}
+                  onFocus={alreadyConnected ? undefined : () => prefetchConfigMap(c.name)}
                   onClick={() =>
                     setFlow({
                       ...flow,
