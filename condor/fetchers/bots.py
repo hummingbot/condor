@@ -2,9 +2,15 @@
 
 import asyncio
 import logging
+import time
 from typing import Any, NamedTuple, Optional
 
-from condor.fetchers.bot_performance import fetch_latest_snapshots
+from condor.asyncutil import SingleFlight
+
+# ``_server_key`` is the package's one rule for "which server does this client
+# talk to" (base_url, never id(client), whose reuse after GC would hand one
+# server's answer to another); shared rather than re-derived here.
+from condor.fetchers.bot_performance import _server_key, fetch_latest_snapshots
 
 logger = logging.getLogger(__name__)
 
@@ -291,6 +297,95 @@ async def _with_enrichment_timeout(coro, label: str, default: Any) -> Any:
         return default
 
 
+# ── Controller-config cache (PERF-578) ──
+#
+# One entry per (server, bot) — never per batch: the fan-out below is re-run
+# whenever the fleet changes, and a batch key would make a single newly deployed
+# bot invalidate every other bot's configs (PERF-600).
+#
+# A bot's controller configs are near-static — they change only when someone
+# edits a config — while this fan-out runs on every BOTS_ENRICHMENT refresh (SDS
+# polls it every 30s per server), costing one upstream request per bot each
+# time. The TTL is the real freshness bound rather than the invalidation below,
+# because the same configs are also mutated from Telegram (handlers/bots/menu.py)
+# and MCP (mcp_servers/hummingbot_api/tools/bot_management.py), which cannot call
+# in here; 60s matches the ttl ServerDataService already applies to the whole
+# enrichment, so the read path is no staler than it already was, and it halves
+# the request volume of a 30s poll. Stamped at insert, after the await, so a
+# round-trip slower than the TTL cannot write an already-stale entry (CORR-584).
+#
+# The fan-out itself is deliberately unbounded, as it was before: it is one
+# gather of small GETs already capped by ENRICHMENT_TIMEOUT, and bounding it
+# would serialise the *cold* path — the one case where the page has nothing to
+# render — to save requests the cache now removes anyway.
+_CTRL_CONFIGS_TTL = 60.0
+_ctrl_configs_cache: dict[tuple[str, str], tuple[float, list[dict]]] = {}
+_ctrl_configs_inflight = SingleFlight()
+
+
+def clear_ctrl_configs_cache() -> None:
+    """Drop every cached bot controller-config list (tests, reconfiguration)."""
+    _ctrl_configs_cache.clear()
+    _ctrl_configs_inflight.clear()
+
+
+def invalidate_ctrl_configs(client, bot_name: Optional[str] = None) -> None:
+    """Forget cached controller configs for one bot, or for the whole server.
+
+    Called by the routes that edit a controller config so an edit made in the
+    UI shows up on the next bots page instead of after the TTL. ``bot_name`` is
+    optional because a *saved* config is edited by id, with no bot attached: the
+    server's entries are dropped wholesale in that case.
+    """
+    server = _server_key(client)
+    if not server:
+        return
+    for key in [
+        k
+        for k in _ctrl_configs_cache
+        if k[0] == server and (bot_name is None or k[1] == bot_name)
+    ]:
+        _ctrl_configs_cache.pop(key, None)
+
+
+async def _fetch_one_bot_configs(client, bot_name: str) -> list[dict]:
+    """The raw upstream call for one bot's controller configs."""
+    configs = await client.controllers.get_bot_controller_configs(bot_name)
+    if not isinstance(configs, list):
+        return []
+    return [cfg for cfg in configs if isinstance(cfg, dict)]
+
+
+async def _get_bot_configs(client, bot_name: str) -> list[dict]:
+    """One bot's controller configs, TTL-cached per server and coalesced.
+
+    A call that raises propagates and is never cached: the next caller retries.
+    A client with no ``base_url`` (test doubles) cannot be told apart from any
+    other server's, so it is not cached at all. The returned list is shared
+    between callers and must be treated as read-only.
+    """
+    server = _server_key(client)
+    if not server:
+        return await _fetch_one_bot_configs(client, bot_name)
+
+    key = (server, bot_name)
+    entry = _ctrl_configs_cache.get(key)
+    if entry is not None and time.monotonic() - entry[0] <= _CTRL_CONFIGS_TTL:
+        return entry[1]
+
+    configs = await _ctrl_configs_inflight.run(
+        key, lambda: _fetch_one_bot_configs(client, bot_name)
+    )
+    _ctrl_configs_cache[key] = (time.monotonic(), configs)
+    return configs
+
+
+def _prune_ctrl_configs(server: str, live: set[str]) -> None:
+    """Forget cached configs for bots that have left the fleet."""
+    for key in [k for k in _ctrl_configs_cache if k[0] == server and k[1] not in live]:
+        _ctrl_configs_cache.pop(key, None)
+
+
 async def _fetch_ctrl_configs(client, bot_names: list[str]) -> dict[str, dict]:
     """Controller configs for the given bots, keyed by config id and by name."""
     configs_map: dict[str, dict] = {}
@@ -299,19 +394,18 @@ async def _fetch_ctrl_configs(client, bot_names: list[str]) -> dict[str, dict]:
 
     async def _get_one(bn: str):
         try:
-            configs = await client.controllers.get_bot_controller_configs(bn)
-            if isinstance(configs, list):
-                for cfg in configs:
-                    cid = cfg.get("id") or cfg.get("controller_id", "")
-                    if cid:
-                        configs_map[cid] = cfg
-                    cname = cfg.get("controller_name", "")
-                    if cname and cname != cid:
-                        configs_map[cname] = cfg
+            for cfg in await _get_bot_configs(client, bn):
+                cid = cfg.get("id") or cfg.get("controller_id", "")
+                if cid:
+                    configs_map[cid] = cfg
+                cname = cfg.get("controller_name", "")
+                if cname and cname != cid:
+                    configs_map[cname] = cfg
         except Exception:
             pass
 
     await asyncio.gather(*[_get_one(bn) for bn in bot_names])
+    _prune_ctrl_configs(_server_key(client), set(bot_names))
     return configs_map
 
 

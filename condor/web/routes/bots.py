@@ -9,7 +9,12 @@ import yaml
 from fastapi import APIRouter, Depends, HTTPException
 
 from condor.controller_configs import clean_config_for_save
-from condor.fetchers.bots import BotsEnrichment, build_bots_page, extract_bots_list
+from condor.fetchers.bots import (
+    BotsEnrichment,
+    build_bots_page,
+    extract_bots_list,
+    invalidate_ctrl_configs,
+)
 from condor.server_data_service import ServerDataType, get_server_data_service
 from condor.web.auth import require_server_access
 from condor.web.models import (
@@ -439,6 +444,10 @@ async def update_controller_config(
         )
         raise upstream_error("Failed to save controller config", e)
 
+    # A saved config is edited by id, with no bot attached, so drop this
+    # server's whole controller-config cache rather than guess the holder.
+    invalidate_ctrl_configs(client)
+
     record_ui_deed(
         user,
         verb="manage_controllers:upsert",
@@ -866,6 +875,10 @@ async def update_bot_controller_config_endpoint(
             name,
         )
         raise upstream_error("Failed to save controller config", e)
+
+    # The edit lands in this bot's live configs: re-fetch them on the next
+    # bots page instead of serving the pre-edit copy until the TTL expires.
+    invalidate_ctrl_configs(client, bot_name)
 
     record_ui_deed(
         user,

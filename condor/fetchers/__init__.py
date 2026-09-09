@@ -19,7 +19,16 @@ Rules:
       depend on who asks) or its subject is immutable. Every such cache must be
       keyed so one server's — or one Gateway network's — answer can never be
       served for another, carry a comment saying why the caller cannot hold it
-      instead, and be listed here. There are seven today:
+      instead, and be listed here. There are eight today:
+
+        * ``bots._ctrl_configs_cache`` — one bot's controller configs as fetched,
+          keyed ``(server, bot_name)`` so a new bot invalidates nothing else,
+          ``_CTRL_CONFIGS_TTL`` 60s, in-flight coalesced, never caching a
+          failure. Pruned of departed bots on every fan-out;
+          ``clear_ctrl_configs_cache()`` / ``invalidate_ctrl_configs(client,
+          bot_name=None)``, which the two config-editing bots routes call so a
+          UI edit does not wait out the TTL. The TTL, not that hook, is the
+          freshness bound: Telegram and MCP edit the same configs.
 
         * ``bot_performance._raw_snapshot_cache`` — the whole-server
           controller-performance rows as fetched (``fetch_latest_snapshots``),
