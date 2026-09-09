@@ -12,6 +12,7 @@ surface is pinned here.
 import asyncio
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -555,3 +556,27 @@ def test_read_routine_refuses_a_routine_file_that_symlinks_out(sandboxed_library
 
     assert "a secret" not in str(result)
     assert result.get("error") == "Routine 'leak' not found"
+
+
+def test_importing_the_server_does_not_drag_in_handlers_or_telegram():
+    """PERF-571: every MCP subprocess spawn pays for this import graph.
+
+    ``tools/available_models`` used to reach ``condor.llm.readiness`` through the
+    ``handlers.agents`` alias shims (ARCH-190), which forced the whole
+    ``handlers`` package __init__ — telegram, condor.acp, utils.auth — into a
+    server that never touches any of it (~230 ms, ~310 modules). Asserted in a
+    fresh interpreter because this module already imports the server in-process.
+    """
+    probe = (
+        "import sys, mcp_servers.condor.server;"
+        "print(int(any(m == 'handlers' or m.startswith('handlers.') "
+        "or m == 'telegram' or m.startswith('telegram.') for m in sys.modules)))"
+    )
+    done = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert done.stdout.strip() == "0", "handlers/telegram imported by the MCP server"
