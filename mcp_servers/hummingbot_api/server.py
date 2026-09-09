@@ -15,14 +15,12 @@ from mcp_servers._profiles import make_resolver
 from mcp_servers._profiles import register_tools as _register_tools
 from mcp_servers._profiles import resolve_profiles
 from mcp_servers.hummingbot_api.formatters import (
-    format_active_bots_as_table,
     format_amm_result,
-    format_bot_logs_as_table,
     format_clmm_result,
     format_gateway_clmm_pool_result,
     format_gateway_config_result,
+    format_gateway_container_result,
     format_gateway_swap_result,
-    format_portfolio_as_table,
 )
 from mcp_servers.hummingbot_api.hummingbot_client import hummingbot_client
 from mcp_servers.hummingbot_api.middleware import GATEWAY_LOG_HINT, handle_errors
@@ -46,6 +44,9 @@ from mcp_servers.hummingbot_api.tools import portfolio as portfolio_tools
 from mcp_servers.hummingbot_api.tools import trading as trading_tools
 from mcp_servers.hummingbot_api.tools.gateway import (
     manage_gateway_config as manage_gateway_config_impl,
+)
+from mcp_servers.hummingbot_api.tools.gateway import (
+    manage_gateway_container as manage_gateway_container_impl,
 )
 from mcp_servers.hummingbot_api.tools.gateway_amm import manage_amm_impl
 from mcp_servers.hummingbot_api.tools.gateway_clmm import (
