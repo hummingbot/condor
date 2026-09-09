@@ -581,6 +581,78 @@ def test_pool_by_address_failure_is_none_and_not_cached(fake_gecko):
     assert run(pool_data.fetch_pool_by_address("solana", POOL)) is not None
 
 
+# ── a listing seeds the by-address cache (PERF-600) ──
+#
+# Clicking a row you can already see is the primary navigation path, and it used
+# to cost a fresh single-pool request against the shared budget seconds after the
+# identical row had arrived in the listing.
+
+
+def test_opening_a_listed_pool_costs_no_upstream_request(fake_gecko):
+    client = fake_gecko(pd.DataFrame([gecko_row()]))
+    run(pool_data.list_gecko_pools("solana-mainnet-beta"))
+    listing_calls = len(client.calls)
+
+    pool = run(pool_data.fetch_pool_by_address("solana-mainnet-beta", POOL))
+
+    assert pool["address"] == POOL
+    assert len(client.calls) == listing_calls
+    assert not [c for c in client.calls if c[0] == "address"]
+
+
+def test_opening_a_favourite_costs_no_upstream_request(fake_gecko):
+    client = fake_gecko(pd.DataFrame([gecko_row()]))
+    run(pool_data.fetch_pools_by_addresses("solana-mainnet-beta", [POOL]))
+    batch_calls = len(client.calls)
+
+    pool = run(pool_data.fetch_pool_by_address("solana-mainnet-beta", POOL))
+
+    assert pool["address"] == POOL
+    assert len(client.calls) == batch_calls
+    assert not [c for c in client.calls if c[0] == "address"]
+
+
+def test_a_listing_seeded_pool_equals_the_one_fetched_by_address(fake_gecko):
+    fake_gecko(pd.DataFrame([gecko_row()]))
+    run(pool_data.fetch_pools_by_addresses("solana-mainnet-beta", [POOL]))
+    seeded = run(pool_data.fetch_pool_by_address("solana-mainnet-beta", POOL))
+
+    pool_data._pool_by_address_cache.clear()
+    pool_data._multi_pool_cache.clear()
+    fetched = run(pool_data.fetch_pool_by_address("solana-mainnet-beta", POOL))
+
+    assert seeded == fetched
+
+
+def test_a_listing_row_a_caller_mutates_cannot_poison_the_pool_cache(fake_gecko):
+    fake_gecko(pd.DataFrame([gecko_row()]))
+    rows = run(pool_data.list_gecko_pools("solana-mainnet-beta"))
+    rows[0]["address"] = "mutated"
+    rows[0]["volume_24h"] = -1
+
+    pool = run(pool_data.fetch_pool_by_address("solana-mainnet-beta", POOL))
+    assert pool["address"] == POOL
+    assert pool["volume_24h"] == 4_200_000.0
+    # And the copy this call handed out is not the cached one either.
+    pool["address"] = "mutated again"
+    assert (
+        run(pool_data.fetch_pool_by_address("solana-mainnet-beta", POOL))["address"]
+        == POOL
+    )
+
+
+def test_a_pool_absent_from_a_listing_is_still_fetched_on_demand(fake_gecko):
+    """A listing must never write the negative entry: absent is not known-missing."""
+    listed, other = addr(1), addr(2)
+    client = fake_gecko(pd.DataFrame([gecko_row(address=listed)]))
+    run(pool_data.list_gecko_pools("solana-mainnet-beta"))
+
+    assert run(pool_data.fetch_pool_by_address("solana-mainnet-beta", other))
+    assert [c for c in client.calls if c[0] == "address"] == [
+        ("address", "solana", other)
+    ]
+
+
 # ── the route (condor/web/routes/dex.py) ──
 
 
