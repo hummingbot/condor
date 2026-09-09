@@ -105,13 +105,32 @@ def normalize_tool_call(payload: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+def _descendants_in(root: int, children: dict[int, list[int]]) -> set[int]:
+    """Every transitive child of ``root`` in an already-built ``children`` map.
+
+    The traversal is factored out so a caller that already holds a process-table
+    snapshot (the startup reaper) walks *that* one instead of forking another
+    ``ps`` per root — which also kept the walked snapshot from disagreeing with
+    the one the rest of the caller reasons about (PERF-333).
+    """
+    found: set[int] = set()
+    stack = [root]
+    while stack:
+        for child in children.get(stack.pop(), []):
+            if child not in found:
+                found.add(child)
+                stack.append(child)
+    return found
+
+
 def _descendant_pids(root: int) -> set[int]:
     """Every transitive child PID of ``root``, from a single ``ps`` snapshot.
 
     Used at teardown to find MCP server subprocesses that ``claude`` spawns in
     their OWN process groups (so ``killpg`` of our group misses them). Must be
     called BEFORE the parent dies — once it exits the children reparent to init
-    and the ppid links that identify them are gone.
+    and the ppid links that identify them are gone. Each call deliberately takes
+    a FRESH snapshot: ``stop()`` re-scans after SIGTERM to see what survived.
     """
     try:
         out = subprocess.run(
@@ -129,14 +148,7 @@ def _descendant_pids(root: int) -> set[int]:
         except ValueError:
             continue
         children.setdefault(ppid, []).append(pid)
-    found: set[int] = set()
-    stack = [root]
-    while stack:
-        for child in children.get(stack.pop(), []):
-            if child not in found:
-                found.add(child)
-                stack.append(child)
-    return found
+    return _descendants_in(root, children)
 
 
 def _alive(pid: int) -> bool:
@@ -252,9 +264,17 @@ def reap_stale_acp_trees(token: str, *, wait_s: float = 2.0) -> int:
             root = cur = p
         roots.add(root)
 
+    # Walk the snapshot already in hand rather than forking a fresh ``ps`` per
+    # root: N roots used to mean N extra full process-table scans on the boot
+    # path, and a pid seen only by one of those later scans had no entry in
+    # ``args_of`` — so it slipped past the ``_protected`` filter below unread.
+    children: dict[int, list[int]] = {}
+    for pid, ppid in parent_of.items():
+        children.setdefault(ppid, []).append(pid)
+
     targets: set[int] = set()
     for root in roots:
-        targets |= _descendant_pids(root)
+        targets |= _descendants_in(root, children)
         targets.add(root)
     targets = {p for p in targets if not _protected(args_of.get(p, ""))}
     if not targets:
