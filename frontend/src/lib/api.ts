@@ -2264,6 +2264,16 @@ export async function fetchPerformanceHistoryAll(
 
 // ── API functions ──
 
+/** One approval still waiting on this user, as `GET /api/v1/confirmations` lists it. */
+export interface PendingConfirmation {
+  id: string;
+  /** The conversation that asked, so the prompt renders where the click belongs. */
+  slot_id: string;
+  summary: string;
+  origin: string;
+  expires_at: number;
+}
+
 export const api = {
   getServers: () => apiFetch<ServerInfo[]>("/api/v1/servers"),
 
@@ -3918,6 +3928,19 @@ export const api = {
       `/api/v1/settings/custom-providers/${encodeURIComponent(name)}`,
       { method: "DELETE" },
     ),
+
+  // ── Pending approvals (FEAT-010) ──
+
+  /**
+   * Approvals this user has not answered yet, scoped to the JWT server-side.
+   *
+   * The WS `permission_request` event is the low-latency path and dies with the
+   * socket that carried it; this is how a page that just reloaded mid-approval
+   * finds out an agent is still waiting on it. Answering still goes over the
+   * socket — the registry is the same one either way.
+   */
+  getPendingConfirmations: () =>
+    apiFetch<PendingConfirmation[]>("/api/v1/confirmations"),
 
   // ── Notifications (FEAT-048) ──
 

@@ -29,6 +29,7 @@ from condor.runtime import client as runtime
 from condor.runtime import (
     conversations,
     secrets,
+    slot_of,
 )
 from condor.runtime.binding import remember_model_choice
 from condor.runtime.confirmations import (
@@ -239,19 +240,6 @@ def _to_ws_message(event: RuntimeEvent, slot_id: str) -> dict | None:
     return None
 
 
-def _slot_of(session_key: str) -> str:
-    """The slot a registry entry belongs to, or "" if the key is not canonical.
-
-    Never raises: a confirmation that cannot be attributed is still worth
-    delivering unaddressed, which is what the dashboard did for all of them
-    before this became a field.
-    """
-    try:
-        return SessionKey.parse(session_key).slot
-    except ValueError:
-        return ""
-
-
 async def _send(ws: WebSocket, event: dict) -> None:
     """Send a JSON event to the client, ignoring closed connections."""
     try:
@@ -288,14 +276,21 @@ class WebSocketChannel:
     now the registry's id rather than a locally-minted one, which is what lets
     the same request also be answered from Telegram or over HTTP after a page
     reload kills this socket.
+
+    Addressed like a turn's events rather than pinned to the socket that asked:
+    the request outlives its connection, so when that socket is gone the prompt
+    goes to whichever tabs the user still has open. With none open it is a
+    no-op and the entry stays pending in the registry, which is what the next
+    page load reads back over ``GET /api/v1/confirmations``.
     """
 
     def __init__(self, ws: WebSocket):
         self._ws = ws
 
     async def deliver(self, pending: PendingConfirmation) -> None:
-        await _send(
+        await _send_turn(
             self._ws,
+            pending.user_id,
             {
                 "event": "permission_request",
                 # Addressed like every other chat event (CORR-101). One socket
@@ -303,7 +298,7 @@ class WebSocketChannel:
                 # slot the dashboard can only render the approval in whichever
                 # one is on screen — and a click meant for one agent, on one
                 # trading server, authorizes a live tool call in another.
-                "slot_id": _slot_of(pending.session_key),
+                "slot_id": slot_of(pending.session_key),
                 "request_id": pending.id,
                 "summary": pending.summary,
                 # Which agent, on which server, is asking. The slot addresses

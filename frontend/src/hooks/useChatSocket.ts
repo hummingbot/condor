@@ -1025,6 +1025,44 @@ export function useChatSocket() {
     [send, updateSlotMessages],
   );
 
+  /**
+   * Re-read the approvals this user has not answered yet (FEAT-010).
+   *
+   * `permission_request` is a fire-and-forget push: a reload mid-approval
+   * killed the socket it was addressed to, and nothing re-sent it, so the
+   * agent sat waiting behind a page that showed no prompt until its TTL denied
+   * the call two minutes later. The registry outlives the connection, so every
+   * socket open asks it what is still pending.
+   *
+   * Merged, never assigned: an approval this session already has on screen is
+   * left exactly as it is, and one answered between the read going out and
+   * coming back is simply absent from the reply. A failed read is silent —
+   * the socket is up and the live path still works.
+   */
+  const replayPendingConfirmations = useCallback(async () => {
+    try {
+      const pending = await api.getPendingConfirmations();
+      if (pending.length === 0) return;
+      setPermissionRequests((prev) => {
+        const next = { ...prev };
+        let added = false;
+        for (const p of pending) {
+          const slot = p.slot_id || UNATTRIBUTED;
+          if (next[slot]) continue;
+          next[slot] = {
+            request_id: p.id,
+            summary: p.summary,
+            origin: p.origin || "",
+          };
+          added = true;
+        }
+        return added ? next : prev;
+      });
+    } catch {
+      /* the live path is unaffected; the next connect asks again */
+    }
+  }, []);
+
   // Drop the current socket without letting its asynchronous `onclose` speak
   // for a connection we already decided to abandon.
   const closeSocket = useCallback(() => {
@@ -1075,6 +1113,9 @@ export function useChatSocket() {
       const queued = unsent.current;
       unsent.current = [];
       for (const msg of queued) ws.send(JSON.stringify(msg));
+      // The roster that follows says which conversations are alive; it says
+      // nothing about which of them is holding a tool call waiting on a click.
+      void replayPendingConfirmations();
     };
     ws.onclose = () => {
       // A socket we replaced or closed on purpose still fires `onclose`, long
@@ -1096,7 +1137,7 @@ export function useChatSocket() {
         /* ignore */
       }
     };
-  }, [token, closeSocket]);
+  }, [token, closeSocket, replayPendingConfirmations]);
 
   const disconnect = useCallback(() => {
     shouldConnect.current = false;
