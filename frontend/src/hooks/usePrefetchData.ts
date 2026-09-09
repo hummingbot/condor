@@ -3,36 +3,21 @@ import { useEffect } from "react";
 
 import { useServer } from "@/hooks/useServer";
 import { api } from "@/lib/api";
-import { candlesQuery, executorsQuery } from "@/lib/queryClient";
-import { GRID_STORAGE_KEY } from "@/lib/sessionState";
-
-const DEFAULT_CONNECTOR = "binance_perpetual";
-const DEFAULT_PAIR = "BTC-USDT";
-const DEFAULT_INTERVAL = "5m";
-const DEFAULT_LOOKBACK = 3 * 86400; // 3 days
-
-function getTradeDefaults() {
-  try {
-    const raw = localStorage.getItem(GRID_STORAGE_KEY);
-    if (!raw) return { connector: DEFAULT_CONNECTOR, pair: DEFAULT_PAIR, interval: DEFAULT_INTERVAL, lookback: DEFAULT_LOOKBACK };
-    const saved = JSON.parse(raw);
-    return {
-      connector: saved.connector || DEFAULT_CONNECTOR,
-      pair: saved.pair || DEFAULT_PAIR,
-      interval: saved.interval || DEFAULT_INTERVAL,
-      lookback: saved.lookbackSeconds || DEFAULT_LOOKBACK,
-    };
-  } catch {
-    return { connector: DEFAULT_CONNECTOR, pair: DEFAULT_PAIR, interval: DEFAULT_INTERVAL, lookback: DEFAULT_LOOKBACK };
-  }
-}
+import { executorsQuery } from "@/lib/queryClient";
 
 /**
  * Prefetches core data when the app loads so pages render instantly
  * instead of showing a loading state on first visit.
  *
- * Executors, bots, connectors, trading rules, and default candles
- * are all fetched eagerly as soon as a server is selected.
+ * Every prefetch here must warm a key some component actually observes,
+ * otherwise it is a request whose only destination is the garbage collector.
+ * Two used not to (PERF-335): a 5,000-row candles fetch keyed with a null
+ * `endTime`, which no `candlesQuery` caller ever asks for (ExecutorChart always
+ * passes both bounds, and TradeChart bypasses react-query entirely, fetching
+ * straight into `candleStore`), and `["connectors", server]`, which no
+ * component declares. Warming the /trade chart, if ever wanted again, has to go
+ * through `candleStore.mergeCandles` under `candleChannelKey(...)` — the path
+ * that chart actually reads.
  */
 export function usePrefetchData() {
   const { server } = useServer();
@@ -40,8 +25,6 @@ export function usePrefetchData() {
 
   useEffect(() => {
     if (!server) return;
-
-    const defaults = getTradeDefaults();
 
     // Core data
     queryClient.prefetchQuery({
@@ -52,13 +35,6 @@ export function usePrefetchData() {
     queryClient.prefetchQuery({
       queryKey: ["bots", server],
       queryFn: () => api.getBots(server),
-    });
-
-    // Prefetch candle connectors list (for market data dropdowns)
-    queryClient.prefetchQuery({
-      queryKey: ["connectors", server],
-      queryFn: () => api.getConnectors(server),
-      staleTime: 5 * 60 * 1000,
     });
 
     // Prefetch trading rules only for connected exchanges (with credentials),
@@ -80,28 +56,6 @@ export function usePrefetchData() {
         }
       })
       .catch(() => {});
-
-    // Prefetch candles for the default trade pair. The key carries this
-    // window, so it only ever serves a chart asking for the same range.
-    const candles = candlesQuery(
-      server,
-      defaults.connector,
-      defaults.pair,
-      defaults.interval,
-      Math.floor(Date.now() / 1000) - defaults.lookback,
-    );
-    queryClient.prefetchQuery({
-      queryKey: candles.queryKey,
-      queryFn: () =>
-        api.getCandles(
-          server,
-          defaults.connector,
-          defaults.pair,
-          defaults.interval,
-          5000,
-          candles.startTime,
-        ),
-    });
 
     // Prefetch settings data so Settings page loads instantly
     queryClient.prefetchQuery({

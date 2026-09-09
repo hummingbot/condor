@@ -2630,11 +2630,6 @@ export const api = {
       `/api/v1/servers/${encodeURIComponent(server)}/positions`,
     ),
 
-  getConnectors: (server: string) =>
-    apiFetch<string[]>(
-      `/api/v1/servers/${encodeURIComponent(server)}/market/connectors`,
-    ),
-
   getConnectedExchanges: (server: string) =>
     apiFetch<string[]>(
       `/api/v1/servers/${encodeURIComponent(server)}/market/connected-exchanges`,
