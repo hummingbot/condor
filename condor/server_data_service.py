@@ -721,7 +721,26 @@ class ServerDataService:
                     self._cleanup_stale()
                     self._last_cleanup = now
             except asyncio.CancelledError:
-                break
+                # Two very different events arrive here as the same exception:
+                # *this* task being cancelled (stop(), shutdown), and something
+                # this tick awaited being cancelled — a shared single-flight
+                # fetch killed by one of its own dependencies. Only the first
+                # ends the loop, and it is re-raised rather than swallowed so
+                # the task genuinely finishes cancelled.
+                #
+                # The second must not end it. ``break`` here left ``_running``
+                # True, and start() returns early on that, so one stray
+                # cancellation silently retired the poller for the lifetime of
+                # the process and every surface served the last cached value
+                # until Condor was restarted.
+                task = asyncio.current_task()
+                if not self._running or (task is not None and task.cancelling()):
+                    raise
+                logger.error(
+                    "SDS poll loop absorbed a cancellation it did not request; "
+                    "continuing to poll"
+                )
+                continue
             except Exception as e:
                 logger.error("SDS poll loop error: %s", e, exc_info=True)
                 await asyncio.sleep(5)
@@ -765,6 +784,22 @@ class ServerDataService:
                 return
             try:
                 await self._fetch_and_cache(key)
+            except asyncio.CancelledError:
+                # ``except Exception`` never caught this: CancelledError is a
+                # BaseException. Ours — the poll task was cancelled and gather
+                # cancelled this child with it — must propagate so stop() really
+                # stops. A cancellation that came out of the shared fetch is not
+                # ours, and must not travel up through gather into _poll_loop,
+                # where it is indistinguishable from a shutdown.
+                task = asyncio.current_task()
+                if task is not None and task.cancelling():
+                    raise
+                logger.warning(
+                    "SDS: fetch for %s:%s was cancelled by something it awaited; "
+                    "skipping it this tick",
+                    key.server,
+                    key.data_type.value,
+                )
             except Exception:
                 pass  # Error already recorded in _fetch_and_cache
 
