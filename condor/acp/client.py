@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
-import json
 import logging
 import os
 import signal
@@ -817,11 +816,11 @@ class ACPClient:
         live = req_id == self._current_req_id
         if live:
             self._current_req_id = None
-        future = self._peer._pending.get(req_id)
+        future = self._peer.pending(req_id)
         if future is not None and not future.done():
             self._unsettled_req = req_id
         else:
-            self._peer._pending.pop(req_id, None)
+            self._peer.discard(req_id)
         if not live:
             return
         self._drain_events()
@@ -868,11 +867,11 @@ class ACPClient:
             return
 
         self._current_req_id = None
-        future = self._peer._pending.get(req_id)
+        future = self._peer.pending(req_id)
         if future is None or future.done() or not self.alive:
             # Nothing still generating: a dead subprocess emits nothing, and
             # the read loop cancels every pending future on its way out.
-            self._peer._pending.pop(req_id, None)
+            self._peer.discard(req_id)
             self._unsettled_req = None
             return
 
@@ -902,7 +901,7 @@ class ACPClient:
             pass
 
         self._unsettled_req = None
-        self._peer._pending.pop(req_id, None)
+        self._peer.discard(req_id)
 
     async def abort_prompt(self) -> None:
         """Cancel the in-flight prompt at the agent, not just locally.
@@ -922,7 +921,7 @@ class ACPClient:
         if req_id is None:
             return
 
-        future = self._peer._pending.get(req_id)
+        future = self._peer.pending(req_id)
         if future is None or future.done() or not self.alive:
             self._cancel_locally(req_id)
             return
@@ -992,14 +991,12 @@ class ACPClient:
         # produced by the turn below.
         self._drain_events()
 
-        # Send request without awaiting so read loop can dispatch notifications
-        req_id = self._peer._next_id
-        self._peer._next_id += 1
-        self._current_req_id = req_id
-        msg = {
-            "jsonrpc": "2.0",
-            "method": "session/prompt",
-            "params": {
+        # Sent through the peer like every other request, but with the future
+        # handed back instead of awaited: this turn's answer only arrives after
+        # a stream of notifications, which the loop below is what reads.
+        req_id, future = await self._peer.begin_request(
+            "session/prompt",
+            {
                 "sessionId": self._session_id,
                 "prompt": [
                     *(
@@ -1013,13 +1010,9 @@ class ACPClient:
                     {"type": "text", "text": text},
                 ],
             },
-            "id": req_id,
-        }
-        self._process.stdin.write((json.dumps(msg) + "\n").encode())
-        await self._process.stdin.drain()
-
-        future: asyncio.Future[Any] = asyncio.get_event_loop().create_future()
-        self._peer._pending[req_id] = future
+            self._process.stdin,
+        )
+        self._current_req_id = req_id
 
         def _on_response(fut: asyncio.Future) -> None:
             # Only enqueue PromptDone if this is still the current prompt
@@ -1101,7 +1094,7 @@ class ACPClient:
             # still generating and nothing ever telling it to stop.
             if self._current_req_id == req_id:
                 self._current_req_id = None
-                unfinished = self._peer._pending.get(req_id)
+                unfinished = self._peer.pending(req_id)
                 if unfinished is not None and not unfinished.done():
                     self._unsettled_req = req_id
                     # Not awaited: under GeneratorExit there may be no one left

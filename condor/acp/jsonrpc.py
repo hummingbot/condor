@@ -52,6 +52,63 @@ class JSONRPCPeer:
     def register_handler(self, method: str, handler: Callable) -> None:
         self._handlers[method] = handler
 
+    def pending(self, req_id: int) -> asyncio.Future | None:
+        """The still-unsettled future for ``req_id``, or None.
+
+        The peer owns the pending table; callers that need to know whether a
+        request is still in flight ask here rather than reading the dict
+        (ARCH-332).
+        """
+        return self._pending.get(req_id)
+
+    def discard(self, req_id: int) -> None:
+        """Forget ``req_id``: nobody is waiting on its answer any more."""
+        self._pending.pop(req_id, None)
+
+    async def begin_request(
+        self,
+        method: str,
+        params: dict[str, Any],
+        writer: asyncio.StreamWriter,
+    ) -> tuple[int, asyncio.Future]:
+        """Send a request and hand back its id and its unsettled future.
+
+        The seam for callers that cannot simply await the answer inline --
+        ``session/prompt`` streams notifications for the whole turn and only
+        settles at the end -- so that every request still goes out through the
+        peer's own framing, id allocation and logging (ARCH-332).
+
+        The future is registered *before* the write, not after: ``drain`` is a
+        yield point, so a child that answers fast used to have its response hit
+        an empty pending table and be dropped on the floor.
+        """
+        if self._failure is not None:
+            raise self._failure
+
+        req_id = self._next_id
+        self._next_id += 1
+
+        future: asyncio.Future[Any] = asyncio.get_event_loop().create_future()
+        self._pending[req_id] = future
+
+        msg = {"jsonrpc": "2.0", "method": method, "params": params, "id": req_id}
+        line = json.dumps(msg) + "\n"
+        try:
+            writer.write(line.encode())
+            await writer.drain()
+        except BaseException:
+            self.discard(req_id)
+            raise
+        log.debug("-> %s (id=%d)", method, req_id)
+
+        # Checked again after the drain above: the peer can die while we are
+        # writing, and a caller left holding a future the death sweep already
+        # settled should see the real error now rather than at its own timeout.
+        if self._failure is not None:
+            self.discard(req_id)
+            raise self._failure
+        return req_id, future
+
     async def send_request(
         self,
         method: str,
@@ -67,31 +124,13 @@ class JSONRPCPeer:
         request must not leak a future that only ``cancel_all`` would ever
         clear -- and :class:`asyncio.TimeoutError` propagates to the caller.
         """
-        if self._failure is not None:
-            raise self._failure
-
-        req_id = self._next_id
-        self._next_id += 1
-
-        msg = {"jsonrpc": "2.0", "method": method, "params": params, "id": req_id}
-        line = json.dumps(msg) + "\n"
-        writer.write(line.encode())
-        await writer.drain()
-        log.debug("-> %s (id=%d)", method, req_id)
-
-        future: asyncio.Future[Any] = asyncio.get_event_loop().create_future()
-        # Checked again after the drain above: the peer can die while we are
-        # writing, and a future registered after that sweep would wait out the
-        # whole timeout for an answer that can never come.
-        if self._failure is not None:
-            raise self._failure
-        self._pending[req_id] = future
+        req_id, future = await self.begin_request(method, params, writer)
         if timeout is None:
             return await future
         try:
             return await asyncio.wait_for(future, timeout)
         except (asyncio.TimeoutError, asyncio.CancelledError):
-            self._pending.pop(req_id, None)
+            self.discard(req_id)
             raise
 
     async def send_notification(
