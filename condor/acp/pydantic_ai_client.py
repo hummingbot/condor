@@ -414,6 +414,12 @@ class PydanticAIClient:
         # are serialized. Stays None for natively-resolved cloud providers
         # (anthropic/groq/default openai/google), which handle concurrency fine.
         self._request_semaphore: asyncio.Semaphore | None = None
+        # Whether *this* client currently owns a permit of that semaphore. The
+        # slot changes hands twice per confirmation (released for the human
+        # wait, re-acquired after), and a cancellation can land in either gap —
+        # so ownership is tracked explicitly rather than inferred from nesting,
+        # and only the owner ever releases (CORR-330).
+        self._slot_held = False
         # Background task that owns the MCP server cancel scopes.
         # anyio requires cancel scopes to be entered/exited in the same task,
         # so we can't close them from an arbitrary caller task.
@@ -844,6 +850,32 @@ class PydanticAIClient:
         return self._agent is not None
 
     @contextlib.asynccontextmanager
+    async def _hold_request_slot(self) -> AsyncIterator[None]:
+        """Hold the per-server request slot for the duration of one turn.
+
+        Deliberately not ``async with sem``: the slot is handed back and taken
+        again mid-turn by :meth:`_release_request_slot`, so a context manager
+        that releases unconditionally on exit would hand back a permit this
+        client no longer owns whenever the turn ends inside that window —
+        permanently widening concurrency against the shared, process-global
+        semaphore. ``_slot_held`` is the single source of truth (CORR-330).
+
+        No-op for cloud providers, whose semaphore is None (PERF-038).
+        """
+        sem = self._request_semaphore
+        if sem is None:
+            yield
+            return
+        await sem.acquire()
+        self._slot_held = True
+        try:
+            yield
+        finally:
+            if self._slot_held:
+                self._slot_held = False
+                sem.release()
+
+    @contextlib.asynccontextmanager
     async def _release_request_slot(self) -> AsyncIterator[None]:
         """Temporarily release the per-server request slot for a blocking wait.
 
@@ -857,16 +889,33 @@ class PydanticAIClient:
         Releases the slot on entry and re-acquires it before returning, so model
         HTTP work stays serialized. No-op for cloud providers, whose semaphore is
         None (PERF-038).
+
+        When the wait is *cancelled* the slot is deliberately not re-acquired
+        (CORR-330). Web Stop cancels the prompt task outright, which lands in
+        this window by construction; queueing for a slot we would immediately
+        hand back would park the turn's teardown — and the session lock it
+        carries — behind another session's inference. ``_slot_held`` stays
+        False so :meth:`_hold_request_slot` skips a release it does not own.
         """
         sem = self._request_semaphore
         if sem is None:
             yield
             return
+        self._slot_held = False
         sem.release()
+        cancelled = False
         try:
             yield
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
         finally:
-            await sem.acquire()
+            if not cancelled:
+                # A cancellation landing here instead raises out of acquire()
+                # without taking a permit, leaving _slot_held False — which is
+                # exactly the state the outer guard needs to stay balanced.
+                await sem.acquire()
+                self._slot_held = True
 
     async def prompt(self, text: str) -> str:
         """One-shot prompt: send text, return response."""
@@ -910,8 +959,8 @@ class PydanticAIClient:
         # one request at a time. Without this, concurrent ticks race to connect
         # and the losing ticks ConnectTimeout against a busy server. Cloud
         # providers leave the semaphore None (see start()) so concurrent prompts
-        # run in parallel; nullcontext() makes the guard a no-op for them.
-        async with self._request_semaphore or contextlib.nullcontext():
+        # run in parallel; the guard is a no-op for them.
+        async with self._hold_request_slot():
             start_time = time.monotonic()
             self._abort_requested = False
             aborted = False
