@@ -16,8 +16,11 @@
  * was gone with the browser and the history was reachable only by editing the
  * URL — and because the running population counts active *executors* besides
  * controllers, a standalone executor holding open capital was drawn as "No bots
- * running". So the browser is now the page in both populations, and the only
- * thing the page still says for itself is the broker diagnostic below.
+ * running". So the browser is now the page in both populations, and the page
+ * itself says nothing: both answers an empty live fleet is owed — "No bots
+ * running" and the broker diagnostic — are the browser's own, drawn in its
+ * report pane (CORR-356), which is the one part of it a collapsed sidebar and a
+ * rooted host both still have.
  *
  * Needs a DOM, so this file overrides vitest's default `node` environment.
  *
@@ -242,6 +245,30 @@ function button(label: string): HTMLButtonElement | undefined {
   ) as HTMLButtonElement | undefined;
 }
 
+/** An icon-only button, which is named by its tooltip. */
+function titled(title: string): HTMLButtonElement {
+  const found = [...container.querySelectorAll("button")].find(
+    (b) => b.getAttribute("title") === title,
+  );
+  if (!found) throw new Error(`no button titled ${title}`);
+  return found as HTMLButtonElement;
+}
+
+/** The browser's pair filter, the cheapest way to empty a tree on purpose. */
+function pairFilter(): HTMLInputElement {
+  const found = container.querySelector('input[placeholder="Filter pair…"]');
+  if (!found) throw new Error("no pair filter");
+  return found as HTMLInputElement;
+}
+
+/** React tracks its own value, so a typed character has to go in through the
+ *  native setter before the input event it listens for. */
+function type(input: HTMLInputElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+  setter.call(input, value);
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
 describe("/bots with no live fleet", () => {
   it("draws the terminated population instead of the empty state", async () => {
     getTerminatedControllers.mockResolvedValue({
@@ -286,6 +313,44 @@ describe("/bots with no live fleet", () => {
     // browser's own header has them, lowercase.
     expect(button("Deploy bot")).toBeTruthy();
     expect(button("Editor")).toBeTruthy();
+    // The answer the old page carried, now the browser's and in the report pane
+    // rather than only the sidebar's 10px "Nothing in scope." (CORR-356): an
+    // empty fleet is an absence, not the strip of $0.00 tiles beside it.
+    expect(text()).toContain("No bots running");
+  });
+
+  it("states the empty answer with the sidebar collapsed", async () => {
+    await render("");
+
+    // `ScopeTree` draws nothing at all in compact mode, so a reader who has
+    // collapsed the sidebar is the case the sidebar's sentence cannot answer.
+    await act(async () => {
+      titled("Collapse sidebar").click();
+    });
+
+    expect(text()).not.toContain("Nothing in scope.");
+    expect(text()).toContain("No bots running");
+  });
+
+  it("keeps a filter-emptied tree a narrowing, not an empty fleet", async () => {
+    // A real live controller, hidden by a pair nobody trades. The tree is empty
+    // for a reason the reader chose, and the raw population is not — so the
+    // answer is the sidebar's, and "No bots running" would be a lie.
+    getBots.mockResolvedValue({
+      bots: [botOf({ num_controllers: 1 })],
+      controllers: [terminatedControllerOf({ status: "running" })],
+      server_online: true,
+    });
+
+    await render("");
+    expect(text()).not.toContain("No bots running");
+
+    await act(async () => {
+      type(pairFilter(), "zzz-nothing");
+    });
+
+    expect(text()).toContain("Nothing in scope.");
+    expect(text()).not.toContain("No bots running");
   });
 
   it("reaches the terminated tree from an empty running fleet in one click", async () => {
@@ -322,8 +387,9 @@ describe("/bots with no live fleet", () => {
 
   it("keeps the broker diagnostic and the population toggle together", async () => {
     // A bot the server can see, reporting no controller, means the MQTT reports
-    // are not arriving. That diagnostic is the one thing the page still says for
-    // itself — and it now says it *over* the browser rather than instead of it.
+    // are not arriving. The browser says that in its report pane now (CORR-356),
+    // beside the toggle rather than instead of it — and it says it there rather
+    // than "No bots running", because which of the two it is is the question.
     getBots.mockResolvedValue({
       bots: [botOf()],
       controllers: [],
@@ -334,6 +400,7 @@ describe("/bots with no live fleet", () => {
 
     expect(text()).toContain("mm-sol-1 is running but reporting no controllers");
     expect(text()).toContain("make doctor");
+    expect(text()).not.toContain("No bots running");
     expect(button("Terminated")).toBeTruthy();
   });
 });

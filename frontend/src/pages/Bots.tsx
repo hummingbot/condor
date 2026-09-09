@@ -72,60 +72,31 @@ export function Bots() {
     );
   }
 
-  // "No controllers" and "no bots" are not the same thing, and saying the first
-  // as the second is how a broker outage reads as an empty fleet. A controller
-  // is reported over the server's MQTT broker; the bot list is not (Docker
-  // answers that one). So a bot the server can see, reporting no controller,
-  // means the reports are not arriving — and that is worth naming here, on the
-  // screen where the bot is missing, rather than leaving it to be found in the
-  // API's logs.
-  //
-  // A banner over the browser, not a page instead of it (CORR-357). The browser
-  // *is* the page in both populations: it carries the population toggle, the
-  // group-by picker, the filter bubbles and the terminated drill-in, so swapping
-  // it out on an empty live fleet left the run history reachable only by hand-
-  // editing the URL — and hid the active executors that the running population
-  // counts besides controllers, i.e. open capital, behind "No bots running".
-  const silentBots = population === "running" && fleet.controllers.length === 0 ? fleet.bots : [];
-
+  // Nothing is said here about an empty fleet or a silent bot: both are the
+  // browser's sentences now, drawn in its report pane where the records they are
+  // about would be (CORR-356). The page owning them is what made an empty live
+  // fleet a page *instead of* the browser, which stranded the whole terminated
+  // drill-in behind a hand-edited URL (CORR-357).
   return (
-    <div className="flex h-full min-h-0 flex-col">
-      {silentBots.length > 0 && (
-        <div className="border-b border-[var(--color-yellow)]/40 bg-[var(--color-yellow)]/10 px-4 py-2">
-          <p className="text-sm font-medium text-[var(--color-yellow)]">
-            {silentBots.length === 1
-              ? `${silentBots[0].bot_name} is running but reporting no controllers`
-              : `${silentBots.length} bots are running but reporting no controllers`}
-          </p>
-          <p className="text-xs text-[var(--color-text-muted)] mt-1">
-            Controller reports reach the API over its MQTT broker. Check that the broker is
-            up and that the API is connected to it — on the server,{" "}
-            <code className="font-mono">make doctor</code> names it.
-          </p>
-        </div>
-      )}
-      <div className="min-h-0 flex-1">
-        <PerfBrowser
-          controllers={fleet.controllers}
-          bots={fleet.bots}
-          server={server}
-          convert={fleet.convert}
-          currencySymbol={fleet.currencySymbol}
-          // The fleet history the hook walked: the browser's combined scopes fold
-          // these rows rather than issuing a second walk of their own.
-          snapshots={fleet.snapshots}
-          truncated={fleet.truncated}
-          executors={fleet.executors}
-          paging={fleet.paging}
-          runs={fleet.runs}
-          terminatedControllers={fleet.terminatedControllers}
-          owners={fleet.owners}
-          deeds={fleet.deeds}
-          rateFormatPnl={fleet.rateFormatPnl}
-          rateFormatValue={fleet.rateFormatValue}
-          rateFormatDetailed={fleet.rateFormatDetailed}
-        />
-      </div>
-    </div>
+    <PerfBrowser
+      controllers={fleet.controllers}
+      bots={fleet.bots}
+      server={server}
+      convert={fleet.convert}
+      currencySymbol={fleet.currencySymbol}
+      // The fleet history the hook walked: the browser's combined scopes fold
+      // these rows rather than issuing a second walk of their own.
+      snapshots={fleet.snapshots}
+      truncated={fleet.truncated}
+      executors={fleet.executors}
+      paging={fleet.paging}
+      runs={fleet.runs}
+      terminatedControllers={fleet.terminatedControllers}
+      owners={fleet.owners}
+      deeds={fleet.deeds}
+      rateFormatPnl={fleet.rateFormatPnl}
+      rateFormatValue={fleet.rateFormatValue}
+      rateFormatDetailed={fleet.rateFormatDetailed}
+    />
   );
 }
