@@ -189,9 +189,20 @@ def _aggregate_by_bot(snapshots: list[dict]) -> dict[str, dict]:
 # in-flight coalescing collapses that burst into one round-trip and one
 # aggregation shared by every caller, while staying far fresher than the 30s TTL
 # the agents route already tolerates above this call.
+#
+# Two layers over the one round-trip, because the callers want two different
+# shapes of the same payload: the web routes and streams want the raw snapshot
+# rows, the agents rollup wants them aggregated by bot. Caching only the raw
+# rows would re-run the aggregation on every ``fetch_all_bot_performance`` hit,
+# and caching only the aggregate is what left the raw callers issuing their own
+# byte-identical whole-server request (PERF-579). Both layers are stamped when
+# the value is *inserted*, never before the fetch starts, so a round-trip slower
+# than the TTL cannot write an entry that is already stale (CORR-584).
 _SNAPSHOT_TTL = 5.0
 _snapshot_cache: dict[str, tuple[float, dict[str, dict]]] = {}
 _snapshot_inflight = SingleFlight()
+_raw_snapshot_cache: dict[str, tuple[float, list[dict]]] = {}
+_raw_snapshot_inflight = SingleFlight()
 
 
 def _server_key(client: Any) -> str:
@@ -206,14 +217,55 @@ def _server_key(client: Any) -> str:
 
 
 def clear_snapshot_cache() -> None:
-    """Drop every cached whole-server snapshot (tests, server reconfiguration)."""
+    """Drop every cached whole-server snapshot (tests, server reconfiguration).
+
+    Empties both layers — the raw rows and the aggregate built from them — so a
+    test that clears the cache cannot have one layer serve the other's stale
+    answer.
+    """
     _snapshot_cache.clear()
     _snapshot_inflight.clear()
+    _raw_snapshot_cache.clear()
+    _raw_snapshot_inflight.clear()
+
+
+async def _fetch_snapshots(client: Any) -> list[dict]:
+    result = await client.bot_orchestration.get_latest_controller_performance()
+    return extract_snapshots(result)
+
+
+async def fetch_latest_snapshots(client: Any) -> list[dict]:
+    """Return the latest controller-performance snapshot rows for the whole server.
+
+    One row per controller of every bot the API has ever orchestrated — the
+    finished ones included, since the rows outlive the bot. No filter argument:
+    this is the whole-server call whose payload is identical for every caller,
+    which is exactly what makes it cacheable. A caller that needs one bot's rows
+    must issue its own filtered request rather than take this cache.
+
+    Cached per server for ``_SNAPSHOT_TTL`` seconds and coalesced while in
+    flight, so the bots-page enrichment, the ``/controller-performance/latest``
+    route, the terminated-controllers route and the WS poller share one
+    round-trip instead of issuing four. A fetch that raises is never cached: the
+    exception propagates to every waiter and the next call retries — this cache
+    never hands back a previous value to paper over a failure. The returned list
+    is shared between callers and must be treated as read-only.
+    """
+    key = _server_key(client)
+    if not key:
+        return await _fetch_snapshots(client)
+
+    entry = _raw_snapshot_cache.get(key)
+    if entry is not None and time.monotonic() - entry[0] <= _SNAPSHOT_TTL:
+        return entry[1]
+
+    snapshots = await _raw_snapshot_inflight.run(key, lambda: _fetch_snapshots(client))
+    _raw_snapshot_cache[key] = (time.monotonic(), snapshots)
+    return snapshots
 
 
 async def _fetch_and_aggregate(client: Any) -> dict[str, dict]:
-    result = await client.bot_orchestration.get_latest_controller_performance()
-    return _aggregate_by_bot(extract_snapshots(result))
+    return _aggregate_by_bot(await fetch_latest_snapshots(client))
 
 
 async def fetch_all_bot_performance(client: Any) -> dict[str, dict]:

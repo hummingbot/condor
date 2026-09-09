@@ -19,10 +19,16 @@ Rules:
       depend on who asks) or its subject is immutable. Every such cache must be
       keyed so one server's — or one Gateway network's — answer can never be
       served for another, carry a comment saying why the caller cannot hold it
-      instead, and be listed here. There are six today:
+      instead, and be listed here. There are seven today:
 
-        * ``bot_performance._snapshot_cache`` — whole-server controller
-          performance, ``_SNAPSHOT_TTL`` 5s, in-flight coalesced,
+        * ``bot_performance._raw_snapshot_cache`` — the whole-server
+          controller-performance rows as fetched (``fetch_latest_snapshots``),
+          ``_SNAPSHOT_TTL`` 5s, in-flight coalesced, ``clear_snapshot_cache()``.
+          Shared by the bots-page enrichment, both controller-performance routes
+          and the WS poller, which used to issue the same request four times over.
+        * ``bot_performance._snapshot_cache`` — those same rows aggregated by bot
+          (``fetch_all_bot_performance``), memoised on top of the raw layer so a
+          hit re-runs neither the round-trip nor the aggregation. Same TTL and
           ``clear_snapshot_cache()``.
         * ``bot_performance._archived_cache`` — the archived-database listing,
           ``_ARCHIVED_TTL`` 60s, ``clear_archived_cache()``.

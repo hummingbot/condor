@@ -4,7 +4,7 @@ import asyncio
 import logging
 from typing import Any, NamedTuple, Optional
 
-from condor.fetchers.bot_performance import extract_snapshots as _extract_perf_snapshots
+from condor.fetchers.bot_performance import fetch_latest_snapshots
 
 logger = logging.getLogger(__name__)
 
@@ -352,11 +352,17 @@ async def _fetch_deployed_runs(client, bot_names: list[str]) -> dict[str, str]:
 
 
 async def _fetch_latest_perf(client) -> dict[str, dict]:
-    """Latest controller performance snapshots from the DB, keyed by controller id."""
+    """Latest controller performance snapshots from the DB, keyed by controller id.
+
+    Read through the shared whole-server cache: this runs on every 30s bots poll
+    of every open tab, against the same payload the ``/controller-performance``
+    routes and the WS poller ask for. The join is safe under the enrichment
+    ``wait_for`` because the shared fetch is shielded — a timeout here abandons
+    this caller, never the round-trip the other waiters are on.
+    """
     perf_map: dict[str, dict] = {}
     try:
-        perf_result = await client.bot_orchestration.get_latest_controller_performance()
-        for snap in _extract_perf_snapshots(perf_result):
+        for snap in await fetch_latest_snapshots(client):
             cid = snap.get("controller_id", "")
             if cid:
                 perf_map[cid] = snap

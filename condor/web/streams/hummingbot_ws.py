@@ -590,6 +590,7 @@ class HummingbotStreamsMixin:
             return
         server_name = parts[1]
 
+        from condor.fetchers.bot_performance import fetch_latest_snapshots
         from config_manager import get_config_manager
 
         cm = get_config_manager()
@@ -606,9 +607,11 @@ class HummingbotStreamsMixin:
                     return
 
                 client = await cm.get_client(server_name)
-                result = (
-                    await client.bot_orchestration.get_latest_controller_performance()
-                )
+                # Shared whole-server cache: this 30s poll asks for the very
+                # payload the bots-page enrichment and the controller-performance
+                # routes ask for, so a poll that coincides with one of them costs
+                # no round-trip at all.
+                result = await fetch_latest_snapshots(client)
 
                 snapshots = self._transform_controller_perf(result)
 
