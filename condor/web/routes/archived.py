@@ -8,6 +8,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from condor.archived_controllers import group_by_controller
+from condor.fetchers._identifiers import IdentifierError, validate_db_path
 from condor.fetchers.archived_run import (
     ArchivedRunUnavailable,
     cached_run,
@@ -32,6 +33,22 @@ from config_manager import get_config_manager
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["archived"])
+
+
+def _checked_db_path(db_path: str) -> str:
+    """The database to read, or a 400 for a value that is not a database path.
+
+    ``db_path`` arrives as a *query* parameter — so unlike a path parameter it
+    still carries ``/``, ``..``, ``?`` and ``#`` — and ends up interpolated raw
+    into the upstream URL (``f"/archived-bots/{db_path}/summary"``), where yarl
+    parses rather than escapes it. Refused here, before a client is built, so a
+    rejected value never becomes an authenticated GET against some other backend
+    endpoint (SEC-591, the SEC-115 class).
+    """
+    try:
+        return validate_db_path(db_path)
+    except IdentifierError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 async def _load_run(client: Any, name: str, db_path: str) -> ArchivedBotPerformance:
@@ -114,6 +131,8 @@ async def get_archived_performance(
     ),
     user: WebUser = Depends(require_server_access),
 ):
+    db_path = _checked_db_path(db_path)
+
     cm = get_config_manager()
 
     client = await cm.get_client(name)
@@ -135,6 +154,8 @@ async def get_archived_executors(
     limit: int = Query(50, ge=1, le=200),
     user: WebUser = Depends(require_server_access),
 ):
+    db_path = _checked_db_path(db_path)
+
     cm = get_config_manager()
 
     # Page out of the cached performance entry; on a miss, trigger the full
@@ -166,6 +187,8 @@ async def get_archived_controllers(
     Reads the same cached performance object the run's header and executor
     pages come from, so expanding a row costs nothing once the run is warm.
     """
+    db_path = _checked_db_path(db_path)
+
     perf = cached_run(name, db_path)
     if perf is None:
         client = await get_config_manager().get_client(name)
@@ -196,6 +219,8 @@ async def get_archived_report(
     report index has since been pruned past it — so it answers 200 with a null
     id rather than a 404.
     """
+    db_path = _checked_db_path(db_path)
+
     entries, _ = list_reports(
         subject=subjects.bot_run(name, db_path, controller_id),
         owner_id=user.id,

@@ -671,6 +671,18 @@ async def get_run_history(
     of this run" is a true statement about a run that really happened — which is
     a better thing to draw than a fabricated single step.
     """
+    # The same guard the archived routes apply to the same value, for the same
+    # reason: it is interpolated raw into an upstream URL path, and a query
+    # parameter (unlike a path one) still carries "/", "..", "?" and "#". A bad
+    # value is refused here, before a client exists (SEC-591).
+    from condor.fetchers._identifiers import IdentifierError, validate_db_path
+
+    if db_path is not None:
+        try:
+            validate_db_path(db_path)
+        except IdentifierError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
     cm = get_config_manager()
     client = await cm.get_client(name)
 
