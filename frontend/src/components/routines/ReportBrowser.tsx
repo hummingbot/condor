@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { InlineConfirm } from "@/components/ui/InlineConfirm";
 import { type RoutineInstance, api } from "@/lib/api";
 import { toMs } from "@/lib/formatters";
 import {
@@ -828,31 +829,20 @@ export function ReportBrowser({
             )}
             {/* Delete */}
             {view === "report" && selectedReport && (
-              confirmDelete ? (
-                <div className="flex items-center gap-1 ml-2">
-                  <span className="text-xs text-[var(--color-red)]">Delete?</span>
-                  <button
-                    onClick={() => { deleteMutation.mutate(selectedReport.id); setConfirmDelete(false); }}
-                    className="rounded px-2 py-1 text-xs font-semibold text-white bg-[var(--color-red)] hover:bg-[var(--color-red)]/80"
-                  >
-                    Yes
-                  </button>
-                  <button
-                    onClick={() => setConfirmDelete(false)}
-                    className="rounded px-2 py-1 text-xs text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
-                  >
-                    No
-                  </button>
-                </div>
-              ) : (
-                <button
-                  onClick={() => setConfirmDelete(true)}
-                  className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-red)]/10 hover:text-[var(--color-red)]"
-                  title="Delete report"
-                >
-                  <Trash2 className="h-4 w-4" />
-                </button>
-              )
+              <InlineConfirm
+                confirming={confirmDelete}
+                onRequest={() => setConfirmDelete(true)}
+                onConfirm={() => {
+                  deleteMutation.mutate(selectedReport.id);
+                  setConfirmDelete(false);
+                }}
+                onCancel={() => setConfirmDelete(false)}
+                pending={deleteMutation.isPending}
+                triggerLabel="Delete report"
+                confirmLabel="Confirm delete report"
+                cancelLabel="Cancel delete report"
+                size="md"
+              />
             )}
             {/* Close — the sheet's header has one when hosted, and the page
                 is a nav destination rather than something you dismiss. */}

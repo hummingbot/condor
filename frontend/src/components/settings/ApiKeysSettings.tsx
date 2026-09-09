@@ -7,12 +7,11 @@ import {
   Loader2,
   Plus,
   Star,
-  Trash2,
   Wallet,
-  X,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
+import { InlineConfirm } from "@/components/ui/InlineConfirm";
 import { useServer } from "@/hooks/useServer";
 import { OWNER_ONLY_HINT, useServerPermission } from "@/hooks/useServerPermission";
 import { type ConnectorInfo, type CredentialInfo, type GatewayWalletGroup, api } from "@/lib/api";
@@ -566,35 +565,15 @@ export function ApiKeysSettings() {
                       </span>
                     </div>
 
-                    {confirmDelete === c.connector_name ? (
-                      <div className="flex items-center gap-1">
-                        <button
-                          onClick={() => deleteMut.mutate(c.connector_name)}
-                          disabled={deleteMut.isPending}
-                          className="rounded p-1.5 text-[var(--color-red)] hover:bg-red-500/10"
-                          title="Confirm delete"
-                        >
-                          <Check className="h-3.5 w-3.5" />
-                        </button>
-                        <button
-                          onClick={() => setConfirmDelete(null)}
-                          className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
-                          title="Cancel delete"
-                          aria-label="Cancel delete"
-                        >
-                          <X className="h-3.5 w-3.5" />
-                        </button>
-                      </div>
-                    ) : (
-                      <button
-                        onClick={() => setConfirmDelete(c.connector_name)}
-                        disabled={!isOwner}
-                        className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-red)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-[var(--color-text-muted)]"
-                        title={isOwner ? "Delete credential" : OWNER_ONLY_HINT}
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
-                    )}
+                    <InlineConfirm
+                      confirming={confirmDelete === c.connector_name}
+                      onRequest={() => setConfirmDelete(c.connector_name)}
+                      onConfirm={() => deleteMut.mutate(c.connector_name)}
+                      onCancel={() => setConfirmDelete(null)}
+                      pending={deleteMut.isPending}
+                      disabled={!isOwner}
+                      triggerLabel={isOwner ? "Delete credential" : OWNER_ONLY_HINT}
+                    />
                   </div>
                 ))}
               </div>
@@ -669,37 +648,21 @@ export function ApiKeysSettings() {
                         <Star className="h-3.5 w-3.5" />
                       </button>
                     )}
-                    {confirmDeleteWallet === walletKey ? (
-                      <>
-                        <button
-                          onClick={() =>
-                            deleteWalletMut.mutate({ chain: w.chain, address: w.address })
-                          }
-                          disabled={deleteWalletMut.isPending}
-                          className="rounded p-1.5 text-[var(--color-red)] hover:bg-red-500/10"
-                          title="Confirm remove"
-                        >
-                          <Check className="h-3.5 w-3.5" />
-                        </button>
-                        <button
-                          onClick={() => setConfirmDeleteWallet(null)}
-                          className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
-                          title="Cancel remove"
-                          aria-label="Cancel remove"
-                        >
-                          <X className="h-3.5 w-3.5" />
-                        </button>
-                      </>
-                    ) : (
-                      <button
-                        onClick={() => setConfirmDeleteWallet(walletKey)}
-                        disabled={!isOwner}
-                        className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-red)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-[var(--color-text-muted)]"
-                        title={isOwner ? "Remove wallet from Gateway" : OWNER_ONLY_HINT}
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
-                    )}
+                    <InlineConfirm
+                      confirming={confirmDeleteWallet === walletKey}
+                      onRequest={() => setConfirmDeleteWallet(walletKey)}
+                      onConfirm={() =>
+                        deleteWalletMut.mutate({ chain: w.chain, address: w.address })
+                      }
+                      onCancel={() => setConfirmDeleteWallet(null)}
+                      pending={deleteWalletMut.isPending}
+                      disabled={!isOwner}
+                      triggerLabel={
+                        isOwner ? "Remove wallet from Gateway" : OWNER_ONLY_HINT
+                      }
+                      confirmLabel="Confirm remove"
+                      cancelLabel="Cancel remove"
+                    />
                   </div>
                 </div>
               );

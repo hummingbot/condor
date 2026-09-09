@@ -4,12 +4,12 @@ import {
   Layers,
   Maximize2,
   Minimize2,
-  Trash2,
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
 import { ReportFrame } from "@/components/routines/ReportFrame";
+import { InlineConfirm } from "@/components/ui/InlineConfirm";
 import { type ReportSummary } from "@/lib/api";
 
 interface ReportViewerProps {
@@ -133,31 +133,19 @@ export function ReportViewer({
             </button>
           )}
           {onDelete && (
-            confirmDelete ? (
-              <div className="flex items-center gap-1">
-                <span className="text-xs text-[var(--color-red)]">Delete?</span>
-                <button
-                  onClick={() => { onDelete(report.id); setConfirmDelete(false); }}
-                  className="rounded px-2 py-1 text-xs font-semibold text-white bg-[var(--color-red)] hover:bg-[var(--color-red)]/80"
-                >
-                  Yes
-                </button>
-                <button
-                  onClick={() => setConfirmDelete(false)}
-                  className="rounded px-2 py-1 text-xs text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
-                >
-                  No
-                </button>
-              </div>
-            ) : (
-              <button
-                onClick={() => setConfirmDelete(true)}
-                className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-red)]/10 hover:text-[var(--color-red)]"
-                title="Delete report"
-              >
-                <Trash2 className="h-4 w-4" />
-              </button>
-            )
+            <InlineConfirm
+              confirming={confirmDelete}
+              onRequest={() => setConfirmDelete(true)}
+              onConfirm={() => {
+                onDelete(report.id);
+                setConfirmDelete(false);
+              }}
+              onCancel={() => setConfirmDelete(false)}
+              triggerLabel="Delete report"
+              confirmLabel="Confirm delete report"
+              cancelLabel="Cancel delete report"
+              size="md"
+            />
           )}
           {fullscreen && onClose && (
             <button
