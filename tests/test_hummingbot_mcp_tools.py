@@ -46,6 +46,53 @@ class FakeControllerClient:
         self.controllers = FakeControllers()
 
 
+class FakeConfigControllers:
+    """Only the config endpoints a delete legitimately needs."""
+
+    def __init__(self):
+        self.deleted = []
+
+    async def delete_controller_config(self, config_name):
+        self.deleted.append(config_name)
+        return {"message": f"Config {config_name} deleted"}
+
+
+class NoOrchestrationClient:
+    """A config delete must never reach bot_orchestration at all."""
+
+    def __init__(self):
+        self.controllers = FakeConfigControllers()
+
+    @property
+    def bot_orchestration(self):
+        raise AssertionError(
+            "deleting a controller config must not touch bot_orchestration"
+        )
+
+
+def test_deleting_a_config_does_not_redeploy_controllers():
+    """The delete endpoint stands alone; a redeploy after it only ever raised.
+
+    The stray ``deploy_v2_controllers()`` here was called with zero arguments
+    against a three-required-argument signature, so it raised TypeError *after*
+    the config was already deleted: the tool mutated and then reported failure.
+    """
+    client = NoOrchestrationClient()
+    result = asyncio.run(
+        modify_controllers(
+            client,
+            action="delete",
+            target="config",
+            config_name="ema_trend_v1_sol",
+        )
+    )
+
+    assert client.controllers.deleted == ["ema_trend_v1_sol"]
+    assert result["action"] == "delete"
+    assert result["config_name"] == "ema_trend_v1_sol"
+    assert result["message"].startswith("Config deleted:")
+
+
 def test_controller_upload_sends_a_controller_object_not_a_bare_string():
     """POST /controllers/{type}/{name} takes {"content": ...}; a raw string is a 422."""
     client = FakeControllerClient()
