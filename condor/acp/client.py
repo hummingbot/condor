@@ -1025,6 +1025,22 @@ class ACPClient:
         # CONDOR_TIMEOUT_PROMPT_OVERALL is not silently cut short here.
         max_duration = TIMEOUTS.prompt_hard_stop
 
+        async def _hard_stop(elapsed: float) -> None:
+            """End the turn at the agent, not merely here.
+
+            Breaking out of the loop only stops us *relaying*: the turn would
+            keep generating and keep running tools against a permission
+            callback nobody is watching, and the next prompt would overlap it
+            at the subprocess. Same reasoning — and the same bounded
+            ``abort_prompt`` — as the session-level budget in ``sessions.py``
+            (CORR-140).
+            """
+            log.warning("Prompt hard timeout after %.0fs", elapsed)
+            try:
+                await self.abort_prompt()
+            except Exception:  # noqa: BLE001 - never mask the timeout
+                log.warning("Could not cancel timed-out prompt", exc_info=True)
+
         try:
             while True:
                 try:
@@ -1035,13 +1051,22 @@ class ACPClient:
                         yield PromptDone(stop_reason="disconnected")
                         break
                     if elapsed > max_duration:
-                        log.warning("Prompt hard timeout after %.0fs", elapsed)
+                        await _hard_stop(elapsed)
                         yield PromptDone(stop_reason="timeout")
                         break
                     yield Heartbeat(elapsed_seconds=elapsed)
                     continue
                 yield event
                 if isinstance(event, PromptDone):
+                    break
+                # The ceiling is wall-clock, so it has to be evaluated on the
+                # event path too: an agent stuck in a tool-call loop, or a
+                # model that keeps narrating, never leaves the queue idle for
+                # 30s and used to run forever past this budget.
+                elapsed = loop.time() - start_time
+                if elapsed > max_duration:
+                    await _hard_stop(elapsed)
+                    yield PromptDone(stop_reason="timeout")
                     break
         finally:
             # Reached on every way out, including the one that used to leak:
