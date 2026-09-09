@@ -157,7 +157,8 @@ def test_a_run_that_declared_nothing_records_the_interval_it_actually_asked_for(
     client = FakeClient(TWO)
     history = asyncio.run(_fetch(client, controller_ids=()))
 
-    assert rh.pick_interval(90 * 3_600_000) == "15m"  # what the span alone says
+    # what the span alone says
+    assert rh.pick_sampling_interval(90 * 3_600_000) == "15m"
     assert {c["interval"] for c in client.calls} == {"5m"}
     assert history.interval == "5m"
 
@@ -369,12 +370,12 @@ def test_the_interval_ladder_only_ever_offers_values_upstream_accepts():
     a value outside it turns a chart into an error rather than a coarser chart."""
     accepted = {"5m", "15m", "30m", "1h", "4h", "12h", "1d"}
     for hours in (0, 1, 24, 24 * 30, 24 * 365, 24 * 3650):
-        assert rh.pick_interval(hours * 3_600_000) in accepted
+        assert rh.pick_sampling_interval(hours * 3_600_000) in accepted
 
 
 def test_an_unknown_span_falls_back_to_the_finest_interval():
-    assert rh.pick_interval(0) == "5m"
-    assert rh.pick_interval(-1) == "5m"
+    assert rh.pick_sampling_interval(0) == "5m"
+    assert rh.pick_sampling_interval(-1) == "5m"
 
 
 # ── The archive fallback, for a run older than the snapshot table ──

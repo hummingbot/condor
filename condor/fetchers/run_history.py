@@ -370,7 +370,7 @@ _INTERVAL_MS = {
 }
 
 
-def pick_interval(span_ms: float, budget: int = HISTORY_POINT_BUDGET) -> str:
+def pick_sampling_interval(span_ms: float, budget: int = HISTORY_POINT_BUDGET) -> str:
     """The finest interval whose point count over ``span_ms`` fits the budget.
 
     The same ladder the client uses (``pickSamplingInterval``), and it means the
@@ -383,6 +383,10 @@ def pick_interval(span_ms: float, budget: int = HISTORY_POINT_BUDGET) -> str:
     Upstream validates the parameter against exactly this set and answers 422
     for anything else, so a value outside it turns a chart into an error rather
     than a coarser chart.
+
+    Not to be confused with :func:`condor.archived_chart_series.
+    pick_candle_interval`, which takes **seconds** and returns an ``Interval``
+    NamedTuple whose ladder starts at ``1m`` — a rung this endpoint rejects.
     """
     if not span_ms or span_ms <= 0:
         return _ORDER[0]
@@ -571,7 +575,7 @@ async def _build(
     start_ms = _to_ms(deployed_at) or 0.0
     end_ms = _to_ms(stopped_at) if stopped_at else None
     span = (end_ms or time.time() * 1000) - start_ms
-    interval = pick_interval(span)
+    interval = pick_sampling_interval(span)
 
     # The window is widened by one bucket at each end. A run's first dump lands
     # a moment after its deploy row is written and its last a moment after the
@@ -591,7 +595,7 @@ async def _build(
         # so it asks at the finest rung and accepts the cost.
         #
         # Bound to a name rather than passed as a literal because the interval
-        # is also *recorded*: this path asks finer than ``pick_interval`` chose
+        # is also *recorded*: this path asks finer than ``pick_sampling_interval`` chose
         # for the span, and an entry that claims the coarser rung is a lie
         # frozen into a cache that is never rewritten.
         walked_interval = "5m"
