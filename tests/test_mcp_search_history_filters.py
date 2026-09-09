@@ -51,9 +51,21 @@ class RecordingTrading:
         return {"data": [], "pagination": {"has_more": False}}
 
 
+class RecordingGatewayClmm:
+    """Records every outgoing gateway_clmm.search_positions call."""
+
+    def __init__(self):
+        self.search_calls = []
+
+    async def search_positions(self, **kwargs):
+        self.search_calls.append(kwargs)
+        return {"data": []}
+
+
 class RecordingClient:
     def __init__(self):
         self.trading = RecordingTrading()
+        self.gateway_clmm = RecordingGatewayClmm()
 
 
 @pytest.fixture
@@ -68,24 +80,45 @@ def client_calls(monkeypatch):
     return client.trading
 
 
+@pytest.fixture
+def clmm_calls(monkeypatch):
+    """Drive the server-level tool against a recording client, gateway_clmm side."""
+    client = RecordingClient()
+
+    async def fake_get_client():
+        return client
+
+    monkeypatch.setattr(hb_server.hummingbot_client, "get_client", fake_get_client)
+    return client.gateway_clmm
+
+
 @pytest.mark.parametrize(
-    "filters, expected_names",
+    "data_type, filters, expected_names",
     [
-        ({"status": "CLOSED"}, ["status"]),
+        ("perp_positions", {"status": "CLOSED"}, ["status"]),
         (
+            "perp_positions",
             {"start_time": 1757000000, "end_time": 1757600000},
             ["start_time", "end_time"],
         ),
-        ({"trading_pairs": ["SOL-USDT"]}, ["trading_pairs"]),
-        ({"offset": 50}, ["offset"]),
+        ("perp_positions", {"trading_pairs": ["SOL-USDT"]}, ["trading_pairs"]),
+        ("perp_positions", {"offset": 50}, ["offset"]),
+        # CORR-618: gateway_clmm.search_positions has no time-window parameter at
+        # any layer, so clmm_positions must refuse start_time/end_time rather than
+        # silently returning the unfiltered newest-50 positions.
+        (
+            "clmm_positions",
+            {"start_time": 1757000000, "end_time": 1757600000},
+            ["start_time", "end_time"],
+        ),
     ],
 )
-def test_perp_positions_refuses_filters_it_cannot_honour(
-    client_calls, filters, expected_names
+def test_positions_branches_refuse_filters_they_cannot_honour(
+    client_calls, data_type, filters, expected_names
 ):
     """The tool raises naming the parameter, and no request is sent."""
     with pytest.raises(ToolError) as excinfo:
-        asyncio.run(hb_server.search_history(data_type="perp_positions", **filters))
+        asyncio.run(hb_server.search_history(data_type=data_type, **filters))
 
     message = str(excinfo.value)
     for name in expected_names:
@@ -95,7 +128,7 @@ def test_perp_positions_refuses_filters_it_cannot_honour(
     # into "Failed to search history: ...".
     assert "silently ignored" in message
 
-    # Acceptance criterion: the perp branch never reaches the positions endpoint.
+    # Acceptance criterion: neither branch reaches its backend endpoint.
     assert client_calls.position_calls == []
 
 
@@ -119,6 +152,35 @@ def test_perp_positions_still_works_with_supported_filters(client_calls):
     ]
     assert "History" not in output
     assert "current open book" in output
+
+
+def test_clmm_positions_still_reaches_search_positions_with_supported_filters(
+    clmm_calls,
+):
+    """CORR-618: refusing start_time/end_time must not touch the supported filters."""
+    output = asyncio.run(
+        hb_server.search_history(
+            data_type="clmm_positions",
+            network="mainnet-beta",
+            connector_names=["raydium"],
+            trading_pairs=["SOL-USDC"],
+            status="OPEN",
+            offset=10,
+        )
+    )
+
+    assert clmm_calls.search_calls == [
+        {
+            "limit": 50,
+            "offset": 10,
+            "refresh": False,
+            "network": "mainnet-beta",
+            "connector": "raydium",
+            "trading_pair": "SOL-USDC",
+            "status": "OPEN",
+        }
+    ]
+    assert "No CLMM positions found" in output
 
 
 def test_orders_branch_still_forwards_every_filter(client_calls):

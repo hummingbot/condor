@@ -41,7 +41,10 @@ _UNSUPPORTED_FILTERS: dict[str, tuple[str, ...]] = {
         "offset",
         "cursor",
     ),
-    "clmm_positions": ("cursor",),
+    # gateway_clmm.search_positions has no time-window parameter at any layer
+    # (CORR-618): forwarding start_time/end_time would silently return the
+    # unfiltered newest-50 positions while looking like a time-windowed history.
+    "clmm_positions": ("cursor", "start_time", "end_time"),
 }
 
 _FILTER_ALTERNATIVES: dict[str, str] = {
@@ -56,7 +59,9 @@ _FILTER_ALTERNATIVES: dict[str, str] = {
     ),
     "clmm_positions": (
         "clmm_positions is offset-paginated: use offset= (the value printed at "
-        "the end of the previous page) rather than a cursor."
+        "the end of the previous page) rather than a cursor. The CLMM position "
+        "store has no time-window filter either: read created_at/closed_at on "
+        'the returned rows, or use data_type="orders" for time-windowed history.'
     ),
 }
 
