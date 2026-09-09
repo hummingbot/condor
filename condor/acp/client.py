@@ -1172,6 +1172,19 @@ class ACPClient:
         _meta: dict | None = None,
         **kw: Any,
     ) -> None:
+        # Only a turn someone is streaming owns the queue. With no
+        # ``_current_req_id`` there is no consumer these notifications could
+        # ever reach: an abandoned turn (a WS drop, a page reload, a cancelled
+        # prompt) keeps generating, and the next prompt drains the queue before
+        # it reads a single event — as does ``_cancel_locally``. Buffering it
+        # would only park the tail of a dead answer, tool outputs and all, in
+        # RAM until the idle sweep detaches the session an hour later
+        # (PERF-332). Terminal events never come through here, so a parked
+        # consumer is still unblocked: the read loop, ``_cancel_locally`` and
+        # ``_on_response`` put their ``PromptDone`` on the queue directly.
+        if self._current_req_id is None:
+            return
+
         kind = update.get("sessionUpdate")
         if kind == "agent_message_chunk":
             content = update.get("content", {})

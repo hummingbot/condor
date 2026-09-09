@@ -146,6 +146,7 @@ def test_read_only_acp_call_still_takes_the_fast_path():
 def test_session_update_records_the_arguments():
     """Transcripts recorded ``"input": null`` for all 123 ACP tool calls."""
     client = ACPClient(command="true")
+    client._current_req_id = 1  # a turn is being streamed (PERF-332)
     client._on_session_update(
         "s",
         {

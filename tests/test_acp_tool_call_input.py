@@ -33,6 +33,9 @@ def _client():
 
     client = ACPClient.__new__(ACPClient)
     client._event_queue = asyncio.Queue()
+    # A turn is being streamed: notifications are only relayed for one that is
+    # (PERF-332).
+    client._current_req_id = 1
     return client
 
 
