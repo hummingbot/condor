@@ -421,6 +421,9 @@ class PydanticAIClient:
         self._ready_event: asyncio.Event | None = None
         self._shutdown_event: asyncio.Event | None = None
         self._startup_error: BaseException | None = None
+        # Set when the MCP context collapses *after* startup; the agent is
+        # dropped alongside it so ``alive`` reports False (CORR-332).
+        self._lifecycle_error: BaseException | None = None
         # Accumulated turn history — grows with each prompt_stream() call so
         # the model sees prior turns. A fresh client is created per session/tick,
         # so history is reset by recreating the client rather than in-place.
@@ -691,6 +694,7 @@ class PydanticAIClient:
         self._ready_event = asyncio.Event()
         self._shutdown_event = asyncio.Event()
         self._startup_error = None
+        self._lifecycle_error = None
         self._mcp_task = asyncio.create_task(self._run_mcp_lifecycle())
 
         await self._ready_event.wait()
@@ -744,15 +748,46 @@ class PydanticAIClient:
         return kept
 
     async def _run_mcp_lifecycle(self) -> None:
-        """Background task that holds the MCP server context open."""
+        """Background task that holds the MCP server context open.
+
+        A failure *before* ready is handed to ``start()`` through
+        ``_startup_error``. A failure *after* ready means an MCP server died
+        under us (subprocess crash, host restart, OOM): log it and tear the
+        agent down so ``alive`` reports False and the session layer builds a
+        fresh client, instead of quietly handing prompts to a toolless one
+        (CORR-332). ``CancelledError`` is never converted into a normal return.
+        """
         try:
             async with self._agent.run_mcp_servers():
                 self._ready_event.set()
                 await self._shutdown_event.wait()
+        except asyncio.CancelledError as exc:
+            # Unblock start() if we were cancelled before ready, then stay
+            # visibly cancelled rather than completing "successfully".
+            if not self._ready_event.is_set():
+                self._startup_error = exc
+                self._ready_event.set()
+            else:
+                self._lifecycle_error = exc
+                self._teardown_after_lifecycle_failure()
+            raise
         except BaseException as exc:
             if not self._ready_event.is_set():
                 self._startup_error = exc
                 self._ready_event.set()
+                return
+            log.exception(
+                "MCP server lifecycle failed after startup (model=%s); "
+                "marking client dead so a new one is built",
+                self.model_name,
+            )
+            self._lifecycle_error = exc
+            self._teardown_after_lifecycle_failure()
+
+    def _teardown_after_lifecycle_failure(self) -> None:
+        """Drop the agent so ``alive`` cannot report a toolless client healthy."""
+        self._agent = None
+        self._mcp_servers.clear()
 
     async def stop(self) -> None:
         """Signal the MCP lifecycle task to shut down and wait for it."""
@@ -760,6 +795,13 @@ class PydanticAIClient:
             self._shutdown_event.set()
             try:
                 await asyncio.wait_for(self._mcp_task, timeout=10)
+            except asyncio.CancelledError:
+                # The lifecycle task now propagates its own cancellation
+                # (CORR-332). That is its shutdown, not ours -- only re-raise
+                # when it is *this* task being cancelled.
+                if not self._mcp_task.cancelled():
+                    raise
+                log.warning("MCP server task was cancelled during shutdown")
             except Exception:
                 log.exception("Error stopping MCP server task")
                 self._mcp_task.cancel()
