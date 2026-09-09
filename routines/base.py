@@ -27,6 +27,16 @@ logger = logging.getLogger(__name__)
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
+def library_dir() -> Path:
+    """The general routine library on disk: the directory this module lives in.
+
+    Anchored at the module, never at the working directory: a process started
+    outside the repo still resolves the same ``routines/`` discovery imports
+    from, which a cwd-relative ``Path("routines")`` does not.
+    """
+    return Path(__file__).resolve().parent
+
+
 def assistant_routines_dir(agent_slug: str | None) -> Path:
     """The **writable** routines dir of an assistant — the one it owns.
 
@@ -210,7 +220,7 @@ def discover_routines(force_reload: bool = False) -> dict[str, RoutineInfo]:
     prev_routines = {} if fresh_start else _routines_cache
     prev_mtimes = {} if fresh_start else _routines_mtimes
 
-    routines_dir = Path(__file__).parent
+    routines_dir = library_dir()
     routines = {}
     scanned_mtimes: dict[str, float | None] = {}
 

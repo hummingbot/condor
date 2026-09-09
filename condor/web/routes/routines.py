@@ -12,7 +12,7 @@ from pydantic import BaseModel
 
 from condor import routine_hooks
 from condor.reports import list_reports
-from condor.routine_store import get_routine_store
+from condor.routine_store import get_routine_store, routine_source_roots
 from condor.runtime import client, wake
 from condor.runtime.wake import (
     ON_COMPLETE_CHOICES,
@@ -358,8 +358,10 @@ async def get_routine_source(
     try:
         source_file = inspect.getfile(routine.run_fn)
         source_path = Path(source_file).resolve()
-        routines_dir = Path("routines").resolve()
-        if not str(source_path).startswith(str(routines_dir)):
+        # CORR-585: confine to the roots discovery actually reads — the general
+        # library, the shared one and each agent's own routines/ — not just a
+        # cwd-relative "routines", which 403'd every agent routine above.
+        if not any(source_path.is_relative_to(r) for r in routine_source_roots()):
             raise HTTPException(403, "Source not available")
         source = source_path.read_text()
         return {"filename": source_path.name, "source": source}

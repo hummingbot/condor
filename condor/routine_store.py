@@ -17,13 +17,18 @@ from typing import Any
 
 import condor.reports as reports
 from condor import primitives, routine_hooks
-from condor.memory.paths import agent_home_layers, iter_agent_slugs
+from condor.memory.paths import (
+    agent_home_layers,
+    iter_agent_slugs,
+    shared_routines_roots,
+)
 from condor.telemetry import taps as telemetry_taps
 from routines.base import (
     RoutineResult,
     _merged_from,
     discover_routines,
     get_routine,
+    library_dir,
     normalize_result,
 )
 
@@ -33,6 +38,32 @@ logger = logging.getLogger(__name__)
 def _agent_routine_dirs(slug: str) -> tuple:
     """An agent's routine dirs in read order: local first, then shipped."""
     return tuple(home / "routines" for home in agent_home_layers(slug))
+
+
+def routine_source_roots() -> tuple[Path, ...]:
+    """Every directory :meth:`RoutineStore._discover_all` imports routine files from.
+
+    The allowlist a reader of routine source confines itself to (CORR-585): the
+    general library, the shared library in both layers, and each agent's own
+    ``routines/`` dir in both layers — the agent *homes* themselves stay out, so
+    a journal or a memory store next door is never in scope. ``_shared`` is
+    named explicitly because ``iter_agent_slugs`` skips the ``_``-prefixed
+    library dirs.
+
+    Every root comes back resolved, so a caller comparing with
+    :meth:`pathlib.Path.is_relative_to` against an equally resolved path admits
+    neither ``..`` nor a symlink out of one, and (unlike a string prefix) never
+    mistakes a sibling like ``routines_backup/`` for the library.
+    """
+    roots = [library_dir(), *shared_routines_roots()]
+    for slug in iter_agent_slugs():
+        roots.extend(_agent_routine_dirs(slug))
+    resolved: list[Path] = []
+    for root in roots:
+        candidate = root.resolve()
+        if candidate not in resolved:
+            resolved.append(candidate)
+    return tuple(resolved)
 
 
 class _HttpBot:
