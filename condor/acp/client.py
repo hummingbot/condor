@@ -14,6 +14,7 @@ import os
 import signal
 import subprocess
 import time
+from collections import deque
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Awaitable, Callable
 
@@ -27,6 +28,21 @@ log = logging.getLogger(__name__)
 #: the JSON and Python spellings of the same absence. Compared case-folded, and
 #: only after a JSON-quoted scalar has been unwrapped.
 _ABSENT_TOOL_NAMES = frozenset({"undefined", "null", "none"})
+
+#: How much of the child's stderr is kept for the error message that reports
+#: its death. Stderr is the only place a failed launch says *why* -- "command
+#: not found", a node version error, "Claude Code cannot be launched inside
+#: another Claude Code session" -- and it is the last lines that carry the
+#: cause, so a short bounded tail is all that is worth holding (READ-337).
+_STDERR_TAIL_LINES = 20
+#: Each kept line is truncated to this: the read limit on the pipe is 10MB, so
+#: a chatty agent must not be able to turn a 20-line tail into 200MB.
+_STDERR_LINE_CHARS = 500
+#: How long the death path waits for the drain task to reach EOF before
+#: quoting the tail. A dying child's stdout and stderr hit EOF in the same
+#: breath and the read loop can get there first, so the lines that explain the
+#: death may still be in the pipe when we are asked for them.
+_STDERR_SETTLE_TIMEOUT = 0.5
 
 
 def normalize_tool_title(value: Any) -> str:
@@ -487,6 +503,10 @@ class ACPClient:
         self.accepts_images = False
         self._read_task: asyncio.Task | None = None
         self._stderr_task: asyncio.Task | None = None
+        # The child's last words. Kept because stderr is the only text that
+        # explains a failed launch, and the DEBUG line _drain_stderr writes is
+        # off in every normal deployment (READ-337).
+        self._stderr_tail: deque[str] = deque(maxlen=_STDERR_TAIL_LINES)
         # Set once _read_loop is over: the process may still be up, but
         # nothing it says will ever reach us again (see :attr:`alive`).
         self._read_loop_ended = False
@@ -555,6 +575,7 @@ class ACPClient:
             start_new_session=True,  # Own process group so we can kill all children
         )
         self._read_loop_ended = False
+        self._stderr_tail.clear()
         self._read_task = asyncio.create_task(self._read_loop())
         self._stderr_task = asyncio.create_task(self._drain_stderr())
 
@@ -586,15 +607,24 @@ class ACPClient:
                 timeout=max(0.0, deadline - time.monotonic()),
             )
         except asyncio.TimeoutError:
+            detail = await self._stderr_detail()
             await self.stop()
             raise TimeoutError(
                 f"The agent did not complete the ACP handshake within "
                 f"{TIMEOUTS.agent_handshake}s and was killed (cmd={self.command}). "
-                f"Check that the command runs and speaks ACP on stdio."
+                f"Check that the command runs and speaks ACP on stdio.{detail}"
             ) from None
-        except Exception:
+        except Exception as exc:
             # Handshake failed -- kill the subprocess to prevent orphan
+            detail = await self._stderr_detail()
             await self.stop()
+            if detail and detail not in str(exc):
+                # Rewritten in place rather than re-raised as a new class: the
+                # type is load-bearing -- a dead child is a ConnectionError
+                # (CORR-329) and a bridge that answered with an error is a
+                # JSONRPCError -- while the message is what actually reaches
+                # the user, verbatim, in the chat (READ-337).
+                exc.args = (f"{exc}{detail}", *exc.args[1:])
             raise
 
         self._session_id = result["sessionId"]
@@ -769,11 +799,22 @@ class ACPClient:
         # left its subprocess orphaned on exactly the path that guard was
         # written for, and the caller saw a cancellation instead of a broken
         # agent (CORR-329).
-        self._peer.fail_all(ConnectionError(f"ACP agent exited: {self.command}"))
+        # The stderr tail rides along: this error is what a racing request and
+        # an in-flight turn are handed, and for a child that could not run at
+        # all it is the ONLY evidence of why (READ-337).
+        detail = await self._stderr_detail()
+        self._peer.fail_all(
+            ConnectionError(f"ACP agent exited: {self.command}{detail}")
+        )
         self._event_queue.put_nowait(PromptDone(stop_reason="disconnected"))
 
     async def _drain_stderr(self) -> None:
-        """Read and log stderr to prevent pipe buffer from filling up and blocking the subprocess."""
+        """Read stderr to keep the pipe from filling up and blocking the subprocess.
+
+        What it reads is also kept, bounded, in :attr:`_stderr_tail`: the DEBUG
+        line below is off in every normal deployment, and stderr is where every
+        diagnosable launch failure writes its reason (READ-337).
+        """
         assert self._process and self._process.stderr
         try:
             while True:
@@ -783,10 +824,25 @@ class ACPClient:
                 text = line.decode(errors="replace").rstrip()
                 if text:
                     log.debug("ACP stderr: %s", text)
+                    self._stderr_tail.append(text[:_STDERR_LINE_CHARS])
         except asyncio.CancelledError:
             return
         except Exception:
             log.exception("ACP stderr drain error")
+
+    async def _stderr_detail(self) -> str:
+        """The child's stderr tail, formatted for an exception message.
+
+        Empty when it said nothing -- a healthy session pays for none of this.
+        """
+        task = self._stderr_task
+        if task is not None and not task.done():
+            # Bounded, and never re-raises what the drain task raised: this is
+            # already an error path and must not be turned into another one.
+            await asyncio.wait({task}, timeout=_STDERR_SETTLE_TIMEOUT)
+        if not self._stderr_tail:
+            return ""
+        return "\nAgent stderr:\n" + "\n".join(self._stderr_tail)
 
     # --- Prompt ---
 
