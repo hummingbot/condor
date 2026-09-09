@@ -22,12 +22,50 @@ _MARKER = "condor-read337-marker: command not found"
 async def test_a_child_that_dies_talking_to_stderr_says_so_in_the_error():
     client = ACPClient(command=f"echo '{_MARKER}' >&2; exit 127")
 
-    with pytest.raises(ConnectionError) as excinfo:
+    # The type stays the one CORR-329 established (ConnectionResetError from a
+    # stdin write racing the child's own exit still qualifies -- it subclasses
+    # ConnectionError). The exact *message* -- whether it carries the stderr
+    # tail, whether it carries the command -- depends on which of several
+    # concurrent tasks reading/writing this dying child's pipes asyncio
+    # happens to schedule first, so it is not asserted on here; the
+    # deterministic test below exercises that same message-building code
+    # without racing anything (CORR-621).
+    with pytest.raises(ConnectionError):
         await asyncio.wait_for(client.start(), timeout=30)
 
-    # The type stays the one CORR-329 established; only the message grew.
-    assert _MARKER in str(excinfo.value)
-    assert client.command in str(excinfo.value)
+
+@pytest.mark.asyncio
+async def test_the_dead_childs_stderr_tail_reaches_the_disconnect_error():
+    """Same message-building code as above, minus the settle-window race.
+
+    ``_read_loop``'s EOF handling and ``_drain_stderr`` are created together in
+    :meth:`ACPClient.start` and race each other against two independent pipes
+    of the same dying child, so under heavy load the drain can lose and
+    ``test_a_child_that_dies_talking_to_stderr_says_so_in_the_error`` would red
+    a suite in which nothing is broken (CORR-621). Make the assertion
+    independent of that race instead of widening ``_STDERR_SETTLE_TIMEOUT``:
+    feed the drain deterministically, like
+    ``test_the_kept_tail_is_bounded_in_lines_and_in_width`` already does, then
+    run the exact same disconnect path ``start()`` runs on a dead child.
+    """
+    client = ACPClient(command="true")
+    stdout = asyncio.StreamReader()
+    stdout.feed_eof()
+    stderr = asyncio.StreamReader()
+    stderr.feed_data(f"{_MARKER}\n".encode())
+    stderr.feed_eof()
+    client._process = type("_P", (), {"stdout": stdout, "stderr": stderr})()  # type: ignore[assignment]
+
+    # Drained to completion -- and to a done task -- before the read loop ever
+    # looks at it, so _stderr_detail's settle wait is never even reached, let
+    # alone raced.
+    client._stderr_task = asyncio.create_task(client._drain_stderr())
+    await client._stderr_task
+    await client._read_loop()
+
+    assert client._peer._failure is not None
+    assert _MARKER in str(client._peer._failure)
+    assert client.command in str(client._peer._failure)
 
 
 @pytest.mark.asyncio
