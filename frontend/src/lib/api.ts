@@ -23,6 +23,27 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json();
 }
 
+/**
+ * The query string for a set of optional parameters, `?` included — or `""`
+ * when none of them is set.
+ *
+ * Every optional query parameter in this file is skipped and stringified here,
+ * so a field added to an endpoint's parameter type is carried without a second
+ * edit. Spelling each name a second time in a `qs.set` line is what let a
+ * filter compile cleanly and never reach the server (READ-333).
+ *
+ * `undefined`, `null` and `""` are omitted; everything else is `String()`d, so
+ * a deliberate `0` is sent rather than dropped.
+ */
+function query(params: object): string {
+  const qs = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null && value !== "") qs.set(key, String(value));
+  }
+  const q = qs.toString();
+  return q ? `?${q}` : "";
+}
+
 /** A finished background task, addressed to the user rather than to a chat. */
 export interface AppNotification {
   id: string;
@@ -1983,17 +2004,8 @@ function fetchControllerPerformanceHistoryPage(
   } = {},
   init?: RequestInit,
 ) {
-  const qs = new URLSearchParams();
-  if (params.bot_name) qs.set("bot_name", params.bot_name);
-  if (params.controller_id) qs.set("controller_id", params.controller_id);
-  if (params.start_time) qs.set("start_time", params.start_time);
-  if (params.end_time) qs.set("end_time", params.end_time);
-  if (params.interval) qs.set("interval", params.interval);
-  if (params.limit) qs.set("limit", String(params.limit));
-  if (params.cursor) qs.set("cursor", params.cursor);
-  const q = qs.toString();
   return apiFetch<ControllerPerformanceHistoryResponse>(
-    `/api/v1/servers/${encodeURIComponent(server)}/controller-performance/history${q ? `?${q}` : ""}`,
+    `/api/v1/servers/${encodeURIComponent(server)}/controller-performance/history${query(params)}`,
     init,
   );
 }
@@ -2192,12 +2204,8 @@ function fetchPerformanceHistoryPage(
   params: PerformanceHistoryQuery & { limit?: number; cursor?: string },
   init?: RequestInit,
 ) {
-  const qs = new URLSearchParams();
-  for (const [key, value] of Object.entries(params)) {
-    if (value !== undefined && value !== null && value !== "") qs.set(key, String(value));
-  }
   return apiFetch<PerformanceHistoryResponse>(
-    `/api/v1/servers/${encodeURIComponent(server)}/performance/history?${qs.toString()}`,
+    `/api/v1/servers/${encodeURIComponent(server)}/performance/history${query(params)}`,
     init,
   );
 }
@@ -2494,16 +2502,8 @@ export const api = {
       offset?: number;
     } = {},
   ) => {
-    const qs = new URLSearchParams();
-    if (params.bot_name) qs.set("bot_name", params.bot_name);
-    if (params.run_status) qs.set("run_status", params.run_status);
-    if (params.deployment_status)
-      qs.set("deployment_status", params.deployment_status);
-    if (params.limit) qs.set("limit", String(params.limit));
-    if (params.offset) qs.set("offset", String(params.offset));
-    const q = qs.toString();
     return apiFetch<BotRunsResponse>(
-      `/api/v1/servers/${encodeURIComponent(server)}/bot-runs${q ? `?${q}` : ""}`,
+      `/api/v1/servers/${encodeURIComponent(server)}/bot-runs${query(params)}`,
     );
   },
 
@@ -2559,15 +2559,8 @@ export const api = {
       limit?: number;
     },
   ) => {
-    const qs = new URLSearchParams();
-    if (params?.executor_type) qs.set("executor_type", params.executor_type);
-    if (params?.trading_pair) qs.set("trading_pair", params.trading_pair);
-    if (params?.status) qs.set("status", params.status);
-    if (params?.controller_id) qs.set("controller_id", params.controller_id);
-    if (params?.limit) qs.set("limit", String(params.limit));
-    const q = qs.toString();
     return apiFetch<ExecutorInfo[]>(
-      `/api/v1/servers/${encodeURIComponent(server)}/executors${q ? `?${q}` : ""}`,
+      `/api/v1/servers/${encodeURIComponent(server)}/executors${query(params ?? {})}`,
     );
   },
 
@@ -2587,15 +2580,8 @@ export const api = {
       controller_id?: string;
     } = {},
   ) => {
-    const qs = new URLSearchParams();
-    if (params.cursor) qs.set("cursor", params.cursor);
-    qs.set("limit", String(params.limit ?? 50));
-    if (params.executor_type) qs.set("executor_type", params.executor_type);
-    if (params.trading_pair) qs.set("trading_pair", params.trading_pair);
-    if (params.status) qs.set("status", params.status);
-    if (params.controller_id) qs.set("controller_id", params.controller_id);
     return apiFetch<{ executors: ExecutorInfo[]; next_cursor: string | null }>(
-      `/api/v1/servers/${encodeURIComponent(server)}/executors/page?${qs.toString()}`,
+      `/api/v1/servers/${encodeURIComponent(server)}/executors/page${query({ ...params, limit: params.limit ?? 50 })}`,
     );
   },
 
@@ -3367,15 +3353,9 @@ export const api = {
     limit?: number;
     offset?: number;
   }) => {
-    const qs = new URLSearchParams();
-    if (params?.source_type) qs.set("source_type", params.source_type);
-    if (params?.tag) qs.set("tag", params.tag);
-    if (params?.search) qs.set("search", params.search);
-    if (params?.agent) qs.set("agent", params.agent);
-    if (params?.limit) qs.set("limit", String(params.limit));
-    if (params?.offset) qs.set("offset", String(params.offset));
-    const q = qs.toString();
-    return apiFetch<ReportsListResponse>(`/api/v1/reports${q ? `?${q}` : ""}`);
+    return apiFetch<ReportsListResponse>(
+      `/api/v1/reports${query(params ?? {})}`,
+    );
   },
 
   getReport: (id: string) =>
