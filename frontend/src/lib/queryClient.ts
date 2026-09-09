@@ -328,3 +328,38 @@ export function parseControllerPerfHistoryKey(
   if (interval !== undefined && typeof interval !== "string") return null;
   return { server, botName, controllerId, start: start as string | null | undefined, interval };
 }
+
+/**
+ * Freshness for the two lists that describe "what this server can trade with":
+ * the CEX credentials and the Gateway wallets.
+ *
+ * Both only ever change through this app's own mutations — adding, deleting or
+ * re-defaulting a key or a wallet — and every one of those paths invalidates
+ * the key explicitly, so nothing outside the tab can make the cache wrong. That
+ * is what lets the policy be minutes rather than seconds.
+ *
+ * It has to be one constant for the same reason `EXECUTORS_REFETCH_MS` does:
+ * `staleTime` is per-observer, and the *shortest* one governs refetch-on-mount
+ * and refetch-on-focus for the whole shared key. `useCredentials` is mounted
+ * app-wide by `AppShell`, so when Settings -> Keys declared the same key again
+ * with no `staleTime`, its 5s client default dragged the shared query down with
+ * it and both lists were re-fetched on every window refocus, discarding the
+ * 5-minute prefetch `usePrefetchData` had already paid for (PERF-351).
+ */
+export const CREDENTIALS_STALE_MS = 5 * 60 * 1000;
+
+/** The CEX credential list for a server. */
+export function credentialsQuery(server: string | null | undefined) {
+  return {
+    queryKey: ["settings-credentials", server] as ["settings-credentials", string | null | undefined],
+    staleTime: CREDENTIALS_STALE_MS,
+  };
+}
+
+/** The Gateway (Solana/Ethereum) wallets for a server. */
+export function gatewayWalletsQuery(server: string | null | undefined) {
+  return {
+    queryKey: ["gateway-wallets", server] as ["gateway-wallets", string | null | undefined],
+    staleTime: CREDENTIALS_STALE_MS,
+  };
+}

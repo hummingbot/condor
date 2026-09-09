@@ -16,6 +16,7 @@ import { useServer } from "@/hooks/useServer";
 import { OWNER_ONLY_HINT, useServerPermission } from "@/hooks/useServerPermission";
 import { type ConnectorInfo, type CredentialInfo, type GatewayWalletGroup, api } from "@/lib/api";
 import { CREDENTIAL_FIELD_PATTERNS } from "@/lib/credential-fields";
+import { credentialsQuery, gatewayWalletsQuery } from "@/lib/queryClient";
 import { ConnectHyperliquid } from "./ConnectHyperliquid";
 import { ImportGatewayWallet, type WalletChain } from "./ImportGatewayWallet";
 
@@ -71,14 +72,14 @@ export function ApiKeysSettings() {
   const [confirmDeleteWallet, setConfirmDeleteWallet] = useState<string | null>(null);
 
   const { data: credsData, isLoading: loadingCreds } = useQuery({
-    queryKey: ["settings-credentials", server],
+    ...credentialsQuery(server),
     queryFn: () => api.getCredentials(server!),
     enabled: !!server,
   });
 
   // Gateway wallets — an error (e.g. Gateway not running) renders as a muted note, not a failure.
   const { data: walletsData, error: walletsError } = useQuery({
-    queryKey: ["gateway-wallets", server],
+    ...gatewayWalletsQuery(server),
     queryFn: () => api.getGatewayWallets(server!),
     enabled: !!server,
     retry: false,
@@ -124,7 +125,8 @@ export function ApiKeysSettings() {
     [qc, server],
   );
 
-  const invalidate = () => qc.invalidateQueries({ queryKey: ["settings-credentials", server] });
+  const invalidate = () =>
+    qc.invalidateQueries({ queryKey: credentialsQuery(server).queryKey });
 
   const addMut = useMutation({
     mutationFn: () =>
@@ -140,7 +142,8 @@ export function ApiKeysSettings() {
     onSuccess: () => { invalidate(); setConfirmDelete(null); },
   });
 
-  const invalidateWallets = () => qc.invalidateQueries({ queryKey: ["gateway-wallets", server] });
+  const invalidateWallets = () =>
+    qc.invalidateQueries({ queryKey: gatewayWalletsQuery(server).queryKey });
 
   const defaultWalletMut = useMutation({
     mutationFn: (w: { chain: string; address: string }) => api.setDefaultGatewayWallet(server!, w),

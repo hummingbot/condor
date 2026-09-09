@@ -3,7 +3,7 @@ import { useEffect } from "react";
 
 import { useServer } from "@/hooks/useServer";
 import { api } from "@/lib/api";
-import { executorsQuery } from "@/lib/queryClient";
+import { credentialsQuery, executorsQuery } from "@/lib/queryClient";
 
 /**
  * Prefetches core data when the app loads so pages render instantly
@@ -64,9 +64,8 @@ export function usePrefetchData() {
       staleTime: 60 * 1000,
     });
     queryClient.prefetchQuery({
-      queryKey: ["settings-credentials", server],
+      ...credentialsQuery(server),
       queryFn: () => api.getCredentials(server),
-      staleTime: 5 * 60 * 1000,
     });
     queryClient.prefetchQuery({
       queryKey: ["settings-connectors", server, "spot"],
