@@ -22,6 +22,7 @@ from condor.web.models import (
     PortfolioResponse,
     WebUser,
 )
+from condor.web.routes._errors import upstream_error
 from config_manager import get_config_manager
 
 logger = logging.getLogger(__name__)
@@ -51,8 +52,8 @@ async def get_portfolio(
                 name, ServerDataType.PORTFOLIO
             )
     except Exception as e:
-        logger.warning("Portfolio fetch exception for %s: %s", name, e)
-        raise HTTPException(status_code=502, detail=f"Failed to get portfolio: {e}")
+        logger.exception("Portfolio fetch failed for '%s'", name)
+        raise upstream_error("Failed to get portfolio", e)
 
     if state is None:
         # Check if fetch is registered

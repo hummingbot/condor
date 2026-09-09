@@ -26,6 +26,7 @@ from condor.web.models import (
     PaginatedExecutors,
     WebUser,
 )
+from condor.web.routes._errors import upstream_error
 from config_manager import get_config_manager
 
 logger = logging.getLogger(__name__)
@@ -72,7 +73,8 @@ async def list_archived_bots(name: str, user: WebUser = Depends(require_server_a
     try:
         databases = await client.archived_bots.list_databases()
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Failed to list databases: {e}")
+        logger.exception("Failed to list archived databases on '%s'", name)
+        raise upstream_error("Failed to list databases", e)
 
     if not databases or not isinstance(databases, list):
         return {"bots": []}

@@ -30,7 +30,10 @@ from collections import OrderedDict
 from typing import Any
 
 from condor.asyncutil import SingleFlight
-from condor.fetchers.executors import normalize_executor_side
+from condor.fetchers.executors import (
+    describe_executor_error,
+    normalize_executor_side,
+)
 from condor.fetchers.models import (
     ArchivedBotPerformance,
     NormalizedExecutor,
@@ -249,7 +252,15 @@ async def _fetch_performance(
     try:
         summary = await client.archived_bots.get_database_summary(db_path)
     except Exception as e:
-        raise ArchivedRunUnavailable(f"Failed to fetch summary: {e}")
+        # ``str(e)`` on an aiohttp client error carries the backend's host and
+        # port, and this detail is handed straight to the browser by the route.
+        # The operator keeps the address in the log; the caller gets the API's
+        # own reason (SEC-590).
+        logger.exception(
+            "Failed to fetch archived summary for %s on '%s'", db_path, name
+        )
+        _status, message = describe_executor_error(e)
+        raise ArchivedRunUnavailable(f"Failed to fetch summary: {message}")
 
     if not summary or not isinstance(summary, dict):
         raise ArchivedRunUnavailable("Database not found", missing=True)
