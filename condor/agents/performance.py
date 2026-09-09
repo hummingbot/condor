@@ -15,6 +15,7 @@ from functools import partial
 from typing import Any
 
 from condor.fetchers._pagination import walk_pages
+from condor.fetchers.executors import EXECUTORS_PAGE_SIZE
 
 log = logging.getLogger(__name__)
 
@@ -376,10 +377,14 @@ async def fetch_agent_performance_batch(
     # the backend sometimes returned partial data for some controller_ids,
     # causing sessions with many executors to appear as zero in the rollup
     # while the per-session endpoint showed the correct numbers.
-    PAGE_SIZE = 50
+    # The page size belongs to the layer that owns this endpoint, not to this
+    # call site: asking for 50 where ``fetchers.executors`` asks 500 of the same
+    # ``search_executors`` cost 10x the sequential round trips for the same rows.
+    PAGE_SIZE = EXECUTORS_PAGE_SIZE
     # Safety cap, expressed in rows: the walker counts what it accumulated, not
     # how many times it looped, and its own terminal guards end a stalled walk.
-    MAX_PAGES = 200  # → 10,000 executors per agent
+    # Stated as rows so it stays put when the page size moves.
+    MAX_ROWS = 10_000  # executors per agent
 
     async def _fetch_rows(aid: str) -> list[dict]:
         rows: list[dict] = []
@@ -388,7 +393,7 @@ async def fetch_agent_performance_batch(
                 partial(client.executors.search_executors, controller_ids=[aid]),
                 _extract_executors_list,
                 page_size=PAGE_SIZE,
-                max_items=MAX_PAGES * PAGE_SIZE,
+                max_items=MAX_ROWS,
             ):
                 for ex in page:
                     if isinstance(ex, dict):
