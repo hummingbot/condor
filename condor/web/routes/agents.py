@@ -2027,6 +2027,16 @@ async def create_agent(
     """Create a new Agent (identity + brain; strategies are added separately)."""
     from condor.preferences import get_active_agent_key
 
+    # The pin is the same field ``update_agent_config`` gates below, so it is
+    # gated identically here: creating an Agent already pinned to a server the
+    # caller cannot reach is the edit they are not allowed to make afterwards.
+    # Credentials never actually leak — every resolution site re-checks reach —
+    # but ``SessionBinding.server_name`` reports the stored pin verbatim, so an
+    # ungated create leaves an Agent naming a foreign account in the chat header
+    # and in ``AgentSummary`` (SEC-594). An empty pin needs no access at all.
+    if req.server_name:
+        check_server_access(user.id, req.server_name)
+
     # Same rule as the Telegram/MCP path: an unspecified model inherits the
     # creator's active one rather than defaulting to a guess.
     agent = _agent_store().create(
