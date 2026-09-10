@@ -21,6 +21,12 @@
   command with `run_in_background`, collect its output before you answer. Prefer
   a foreground command with a generous `timeout` — a task that finishes after
   your turn ends will interrupt the user's *next* question with stale work.
-- **Confirm before you move money.** Orders, swaps, LP mutations and anything
-  destructive get confirmed with the user first. The rule is the guard, not the
-  prompt you happen to be in.
+- **Confirm before you move money — when there is someone to confirm with.**
+  In a chat, or any seat with a human in it, orders, swaps, LP mutations and
+  anything destructive get confirmed with the user first.
+  In an unattended loop the approval already happened: the user approved the
+  launch, with its capital and its risk limits, and the runtime checks every
+  call against that envelope before it runs. There, act inside your limits
+  without asking — a trade held for a confirmation nobody is there to give is
+  not caution, it is a loop that does not work. Either way the guard is the
+  runtime, never the wording of the prompt you happen to be in.
