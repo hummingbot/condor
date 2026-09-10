@@ -404,10 +404,27 @@ class PerformanceCapabilityResponse(BaseModel):
 
 
 class CreateExecutorRequest(BaseModel):
+    """The browser's create body — and deliberately no ``controller_id``.
+
+    It carried one, defaulting to ``"main"``, which read as the attribution hook
+    and was not: the route passes only these three fields to
+    :func:`condor.fetchers.executors.create_executor`, whose signature has no
+    such argument, so nothing could have honoured it. The ``main`` a
+    browser-made executor comes back under is the trading API's own server-side
+    default, applied because the client omits the field entirely — not something
+    this model set.
+
+    Attribution is the MCP path's: ``executor_create.py`` passes an agent's
+    ``controller_id`` straight to ``client.executors.create_executor``. Putting
+    the field back here without threading it through the fetcher would only look
+    like it worked. Note also that the dashboard's own executor views query
+    ``controller_ids=["main"]``, so a browser-stamped executor would vanish from
+    the page that created it — wiring this is a feature decision, not a typo fix.
+    """
+
     executor_type: str
     config: dict[str, Any]
     account_name: str = "master_account"
-    controller_id: str = "main"
 
 
 class ExecutorInfo(BaseModel):

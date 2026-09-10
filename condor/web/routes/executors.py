@@ -398,6 +398,8 @@ async def create_executor_endpoint(
     from condor.fetchers.executors import create_executor
 
     try:
+        # No controller_id: the fetcher takes none, so the trading API applies its
+        # own ``main`` default. See ``CreateExecutorRequest`` before adding one.
         result = await create_executor(client, config, account_name=body.account_name)
     except Exception as e:
         raise upstream_error("Failed to create executor", e)
