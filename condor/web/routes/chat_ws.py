@@ -231,6 +231,10 @@ def _to_ws_message(event: RuntimeEvent, slot_id: str) -> dict | None:
             "event": "prompt_done",
             "slot_id": slot_id,
             "stop_reason": event.stop_reason,
+            # What this turn cost (FEAT-120), added to the total the dashboard
+            # seeded from the conversation's meta. An added key: absent (null)
+            # on a DONE the funnel did not charge, which the client skips.
+            "usage": event.field("usage"),
         }
     if event.type == EventType.ERROR:
         return {

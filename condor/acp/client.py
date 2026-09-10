@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from typing import Any, AsyncIterator, Awaitable, Callable
 
 from .jsonrpc import JSONRPCPeer
+from .usage import TokenUsage
 
 log = logging.getLogger(__name__)
 
@@ -532,6 +533,11 @@ class ACPClient:
         self._read_loop_ended = False
         self._event_queue: asyncio.Queue[ACPEvent] = asyncio.Queue()
         self._current_req_id: int | None = None  # tracks in-flight prompt request
+        # Everything the agent has reported spending, for this client's whole
+        # life (FEAT-120): cancelled and stale turns included, since tokens
+        # burned for an answer nobody read are still burned. The session takes
+        # per-turn deltas of it; nothing here knows what a turn is.
+        self.usage = TokenUsage()
         # A turn the agent has not settled and that nobody is streaming any
         # more: one that ignored ``session/cancel``, or one whose consumer
         # walked away (a WS drop, a page reload, a cancelled prompt task).
@@ -1091,6 +1097,11 @@ class ACPClient:
         self._current_req_id = req_id
 
         def _on_response(fut: asyncio.Future) -> None:
+            # Counted before the stale check: a turn we cancelled locally is
+            # still settled by the adapter with its usage, and those tokens
+            # were spent whether or not anyone is left to read the answer.
+            if not fut.cancelled() and fut.exception() is None:
+                self._fold_prompt_usage(fut.result())
             # Only enqueue PromptDone if this is still the current prompt
             if self._current_req_id != req_id:
                 return  # stale response from an aborted prompt — ignore
@@ -1202,10 +1213,18 @@ class ACPClient:
         # (PERF-332). Terminal events never come through here, so a parked
         # consumer is still unblocked: the read loop, ``_cancel_locally`` and
         # ``_on_response`` put their ``PromptDone`` on the queue directly.
+        #
+        # ``usage_update`` is the exception, and so it is read first: it
+        # reaches no consumer, it only moves the counter, and the adapter
+        # sends one for a background task's result after the turn has settled
+        # — exactly when there is no ``_current_req_id`` (FEAT-120).
+        kind = update.get("sessionUpdate")
+        if kind == "usage_update":
+            self._note_usage_update(update)
+            return
         if self._current_req_id is None:
             return
 
-        kind = update.get("sessionUpdate")
         if kind == "agent_message_chunk":
             content = update.get("content", {})
             text = content.get("text", "")
@@ -1250,6 +1269,42 @@ class ACPClient:
                     input=normalize_tool_call(update)["input"],
                 )
             )
+
+    def _fold_prompt_usage(self, result: Any) -> None:
+        """Add a ``session/prompt`` response's per-turn ``usage`` to the counter.
+
+        Runs inside a future's done callback, where an exception would be
+        logged by asyncio and the ``PromptDone`` after it never enqueued —
+        leaving the consumer parked until its timeout. So it cannot raise.
+        """
+        try:
+            if isinstance(result, dict):
+                self.usage = self.usage + TokenUsage.from_acp(result.get("usage"))
+        except Exception:  # noqa: BLE001 - see docstring
+            log.warning("Could not count prompt usage", exc_info=True)
+
+    def _note_usage_update(self, update: dict[str, Any]) -> None:
+        """Take the context reading and the cost from a ``usage_update``.
+
+        ``used`` is the context occupancy after the last assistant message and
+        ``size`` the window; both are latest values. ``cost.amount`` is the
+        SDK's ``total_cost_usd``, which is cumulative for the Claude process —
+        one process per client — so it is *assigned*, through ``max`` to keep
+        it monotonic, never added. Its tokens are not here: they arrive on the
+        prompt response (and a background task's never do; see
+        :class:`TokenUsage`).
+        """
+        used = update.get("used")
+        size = update.get("size")
+        if isinstance(used, int) and not isinstance(used, bool):
+            self.usage.context_used = used
+        if isinstance(size, int) and not isinstance(size, bool) and size > 0:
+            self.usage.context_size = size
+        cost = update.get("cost")
+        if isinstance(cost, dict) and cost.get("currency", "USD") == "USD":
+            amount = cost.get("amount")
+            if isinstance(amount, (int, float)) and not isinstance(amount, bool):
+                self.usage.cost_usd = max(self.usage.cost_usd, float(amount))
 
     async def _on_request_permission(
         self,

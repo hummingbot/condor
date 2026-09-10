@@ -29,6 +29,7 @@ from .client import (
     ToolCallEvent,
     ToolCallUpdate,
 )
+from .usage import TokenUsage
 
 log = logging.getLogger(__name__)
 
@@ -437,6 +438,10 @@ class PydanticAIClient:
         # There is no protocol to notify here (the "agent" is a library call),
         # so cancelling the run *is* the cancel.
         self._abort_requested = False
+        # Everything this client's runs have read and written, for its whole
+        # life (FEAT-120). The session takes per-turn deltas of it; nothing
+        # here knows what a turn is.
+        self.usage = TokenUsage()
 
     async def _build_model(self) -> Any:
         """Build the pydantic-ai model object with sensible defaults.
@@ -988,10 +993,13 @@ class PydanticAIClient:
                 # event the dashboard already received.
                 blocked_ids: set[str] = set()
 
-                async with self._agent.iter(
-                    self._build_user_prompt(text, images),
-                    message_history=self._message_history,
-                ) as run:
+                async with (
+                    self._agent.iter(
+                        self._build_user_prompt(text, images),
+                        message_history=self._message_history,
+                    ) as run,
+                    self._usage_counted(run),
+                ):
                     async for node in run:
                         if self._abort_requested:
                             aborted = True
@@ -1033,6 +1041,85 @@ class PydanticAIClient:
                 log.exception("PydanticAI prompt error: %s", e)
                 yield TextChunk(text=self._format_error(e))
                 yield PromptDone(stop_reason="error")
+
+    @contextlib.asynccontextmanager
+    async def _usage_counted(self, run: Any) -> AsyncIterator[None]:
+        """Count the run's usage however its block is left.
+
+        On the way out of the run, not beside the history accumulation: a
+        finished run, a stopped one and one that raised all spent their
+        requests, and so does one whose consumer walked away mid-answer (a WS
+        drop, a page reload), which closes this generator at a ``yield`` and
+        never reaches the lines after the node loop. The run is still open
+        here, so ``PromptDone`` — yielded after this exits — already sees the
+        turn's tokens.
+        """
+        try:
+            yield
+        finally:
+            self._fold_usage(run)
+
+    def _fold_usage(self, run: Any) -> None:
+        """Add one run's tokens, price and context reading to :attr:`usage`.
+
+        pydantic-ai's ``input_tokens`` is already inclusive of cache, which is
+        the shape :class:`TokenUsage` stores, so the counters go in unconverted.
+
+        The price is all or nothing per run: one response the bundled
+        ``genai_prices`` table cannot price (every local model, a brand-new
+        id) makes the run's cost unknown rather than understated, and it is
+        counted in ``unpriced_turns`` instead.
+
+        Never raises: accounting must not cost the user their answer.
+        """
+        try:
+            from pydantic_ai.messages import ModelResponse
+
+            ru = run.usage()
+            new_messages = (
+                run.result.new_messages()
+                if run.result is not None
+                else run.new_messages()
+            )
+            responses = [m for m in new_messages if isinstance(m, ModelResponse)]
+            cost = 0.0
+            priced = True
+            for response in responses:
+                try:
+                    cost += float(response.cost().total_price)
+                except Exception:  # noqa: BLE001 - LookupError, the model_name assert
+                    priced = False
+                    break
+            context_used = None
+            if responses:
+                last = responses[-1].usage
+                context_used = (last.input_tokens + last.output_tokens) or None
+            self.usage = self.usage + TokenUsage(
+                input_tokens=ru.input_tokens,
+                output_tokens=ru.output_tokens,
+                cache_read_tokens=ru.cache_read_tokens,
+                cache_write_tokens=ru.cache_write_tokens,
+                cost_usd=cost if priced else 0.0,
+                unpriced_turns=0 if priced else 1,
+                context_used=context_used,
+                context_size=self._context_size(),
+            )
+        except Exception:  # noqa: BLE001 - see docstring
+            log.warning("Could not count usage for %s", self.model_name, exc_info=True)
+
+    def _context_size(self) -> int | None:
+        """The model's context window, when it is known without a request.
+
+        Only OpenRouter publishes one in a catalog Condor already fetches; a
+        local server or a natively resolved provider reports none, and the
+        readout then shows occupancy without a denominator.
+        """
+        prefix, _, model_id = self.model_name.partition(":")
+        if prefix != "openrouter" or not model_id:
+            return None
+        from condor.llm.openrouter_models import cached_context_length
+
+        return cached_context_length(model_id)
 
     def _build_user_prompt(self, text: str, images: list | None) -> Any:
         """Assemble the user turn: images first, then the text.
