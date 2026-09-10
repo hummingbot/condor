@@ -13,7 +13,7 @@ import {
 import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
 import { DeployedFleet } from "@/components/agent/DeployedFleet";
 import { LoopPulse } from "@/components/agent/LoopPulse";
-import { isLiveRun, runFacts, runLabel } from "@/components/agent/lab/runs";
+import { formatRunId, isLiveRun, runFacts, runLabel } from "@/components/agent/lab/runs";
 import { DiscardChangesDialog } from "@/components/editor/EditorDialogs";
 import { ReportBrowser } from "@/components/routines/ReportBrowser";
 import { ExecutorChart } from "@/components/charts/ExecutorChart";
@@ -239,6 +239,9 @@ export function StrategyWorkbench({
   }
 
   const liveInstance = instances.find((i) => i.status === "running") ?? instances[0] ?? null;
+  const newestDryRun = strategy.experiments.length
+    ? Math.max(...strategy.experiments.map((e) => e.number))
+    : 0;
 
   const actionClass =
     "flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] transition-all hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]";
@@ -339,15 +342,39 @@ export function StrategyWorkbench({
 
       {/* Meta strip */}
       <div className="mb-4 flex flex-wrap items-center gap-2 text-xs text-[var(--color-text-muted)]">
-        <span className="rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1">
-          {strategy.sessions.length} session{strategy.sessions.length !== 1 ? "s" : ""}
-        </span>
+        {/* A door to the newest session, as the dry-run count beside it is to
+            the newest dry run. Only that one used to be, so two counts in one
+            strip answered a click differently. */}
+        {strategy.sessions.length > 0 ? (
+          <Link
+            to={labUrl({
+              run: formatRunId({
+                kind: "session",
+                number: latestSessionNum,
+                id: String(latestSessionNum),
+              }),
+            })}
+            className="rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1 transition-colors hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
+          >
+            {strategy.sessions.length} session{strategy.sessions.length !== 1 ? "s" : ""}
+          </Link>
+        ) : (
+          <span className="rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1">
+            0 sessions
+          </span>
+        )}
         {/* Said beside the sessions rather than only behind a button: a
             strategy whose whole history is one dry run used to read as one
             that had never run. */}
         {strategy.experiments.length > 0 && (
           <Link
-            to={labUrl({ run: `e${Math.max(...strategy.experiments.map((e) => e.number))}` })}
+            to={labUrl({
+              run: formatRunId({
+                kind: "experiment",
+                number: newestDryRun,
+                id: String(newestDryRun),
+              }),
+            })}
             className="flex items-center gap-1 rounded border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-amber-400 transition-colors hover:bg-amber-500/20"
           >
             <FlaskConical className="h-3 w-3" />

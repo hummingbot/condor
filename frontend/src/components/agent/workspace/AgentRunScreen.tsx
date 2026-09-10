@@ -17,6 +17,7 @@ import { PlaybookView } from "@/components/agent/workspace/PlaybookView";
 import { SectionRail } from "@/components/agent/workspace/SectionRail";
 import { SECTION_META } from "@/components/agent/workspace/sectionMeta";
 import {
+  serializeSections,
   useSections,
   type SectionId,
 } from "@/components/agent/workspace/sections";
@@ -276,11 +277,7 @@ export function AgentRunScreen({
     if (!id) return;
     pendingScroll.current = null;
     if (!open.includes(id)) return;
-    bodyRef.current
-      ?.querySelector(`[data-section-body="${id}"]`)
-      // Guarded: jsdom has no layout, so it implements no `scrollIntoView`,
-      // and a rail click in a test must not throw for want of a viewport.
-      ?.scrollIntoView?.({ block: "start", behavior: "smooth" });
+    scrollToSection(bodyRef.current, id);
   }, [open]);
 
   // The same action as the band's own header, reached from the index: one rule
@@ -292,6 +289,33 @@ export function AgentRunScreen({
       pendingScroll.current = id;
     },
     [toggle],
+  );
+
+  /**
+   * A run named from inside a band — the Playbook's session and dry-run counts.
+   *
+   * The selection a rail row makes, plus two things a door from further down
+   * the page owes the reader. It opens Runs *beside* the band it was clicked
+   * from, because `?open=` is a set and the old link replaced it, closing the
+   * Playbook under the reader's cursor. And it brings Runs on screen, because
+   * the band draws above the Playbook: opened from there, it grows the page
+   * out of sight and the click looks like it did nothing.
+   *
+   * Scrolls now when Runs is already open — `open` will not change, so the
+   * effect above would never spend the request.
+   */
+  const showRun = useCallback(
+    (run: string) => {
+      const runsOpen = open.includes("runs");
+      setParams({
+        strategy: sslug,
+        run,
+        open: serializeSections([...open, "runs"]),
+      });
+      if (runsOpen) scrollToSection(bodyRef.current, "runs");
+      else pendingScroll.current = "runs";
+    },
+    [open, setParams, sslug],
   );
 
   // The page has already guarded this by the time it mounts the screen — the
@@ -498,6 +522,7 @@ export function AgentRunScreen({
                       sslug={sslug}
                       strategy={strategy}
                       onDeleted={() => setParams({ strategy: null })}
+                      onOpenRun={showRun}
                     />
                   ) : (
                     <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">
@@ -543,6 +568,15 @@ export function AgentRunScreen({
         )}
     </div>
   );
+}
+
+/** Bring one band's top to the top of the screen's own scroller. */
+function scrollToSection(body: HTMLElement | null, id: SectionId): void {
+  body
+    ?.querySelector(`[data-section-body="${id}"]`)
+    // Guarded: jsdom has no layout, so it implements no `scrollIntoView`,
+    // and a rail click in a test must not throw for want of a viewport.
+    ?.scrollIntoView?.({ block: "start", behavior: "smooth" });
 }
 
 /**

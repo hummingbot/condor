@@ -12,12 +12,12 @@ import {
   X,
 } from "lucide-react";
 import { useMemo, useState } from "react";
-import { Link } from "react-router-dom";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import { MarkdownEditor } from "@/components/agent/AgentOverviewTab";
 import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
+import { formatRunId } from "@/components/agent/lab/runs";
 import { DiscardChangesDialog } from "@/components/editor/EditorDialogs";
 import { ReportBrowser } from "@/components/routines/ReportBrowser";
 import { countdown } from "@/lib/agent-attribution";
@@ -55,6 +55,7 @@ export function PlaybookView({
   sslug,
   strategy,
   onDeleted,
+  onOpenRun,
 }: {
   slug: string;
   sslug: string;
@@ -62,6 +63,8 @@ export function PlaybookView({
   strategy: StrategyDetail;
   /** The host's move after a delete: the run screen drops `?strategy=`. */
   onDeleted: () => void;
+  /** Select a run of this strategy (`s:3`, `e:1`) and bring Runs on screen. */
+  onOpenRun: (run: string) => void;
 }) {
   const queryClient = useQueryClient();
   const [showRoutines, setShowRoutines] = useState(false);
@@ -83,6 +86,10 @@ export function PlaybookView({
     refetchInterval: 5000,
   });
 
+  const sessions = strategy.sessions.length;
+  const newestSession = sessions
+    ? Math.max(...strategy.sessions.map((s) => s.number))
+    : 0;
   const dryRuns = strategy.experiments.length;
   const newestDryRun = dryRuns
     ? Math.max(...strategy.experiments.map((e) => e.number))
@@ -106,22 +113,49 @@ export function PlaybookView({
             </p>
           )}
           <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px] text-[var(--color-text-muted)]">
-            <Chip>
-              {strategy.sessions.length} session
-              {strategy.sessions.length === 1 ? "" : "s"}
-            </Chip>
+            {/* Both counts are doors to the newest run of their kind. Only the
+                dry-run one used to be, so a pair of counts read as one link and
+                one label. They are buttons and not links because the move is a
+                selection on this screen: it opens the Runs band *beside* this
+                one and scrolls to it, which only the screen knows how to do. */}
+            {sessions > 0 ? (
+              <button
+                type="button"
+                onClick={() =>
+                  onOpenRun(
+                    formatRunId({
+                      kind: "session",
+                      number: newestSession,
+                      id: String(newestSession),
+                    }),
+                  )
+                }
+                className="rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-0.5 transition-colors hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
+              >
+                {sessions} session{sessions === 1 ? "" : "s"}
+              </button>
+            ) : (
+              <Chip>0 sessions</Chip>
+            )}
             {/* A strategy whose whole history is one dry run used to read as
-                one that had never run, so the count is a link and not a note. */}
+                one that had never run, so the count is a door and not a note. */}
             {dryRuns > 0 && (
-              <Link
-                to={`/agents/${encodeURIComponent(slug)}?open=runs&strategy=${encodeURIComponent(
-                  sslug,
-                )}&run=e${newestDryRun}`}
+              <button
+                type="button"
+                onClick={() =>
+                  onOpenRun(
+                    formatRunId({
+                      kind: "experiment",
+                      number: newestDryRun,
+                      id: String(newestDryRun),
+                    }),
+                  )
+                }
                 className="flex items-center gap-1 rounded border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-amber-500 transition-colors hover:bg-amber-500/20"
               >
                 <FlaskConical className="h-3 w-3" />
                 {dryRuns} dry run{dryRuns === 1 ? "" : "s"}
-              </Link>
+              </button>
             )}
             <Chip mono>{strategy.slug}</Chip>
             {strategy.agent_id && <Chip mono>{strategy.agent_id}</Chip>}

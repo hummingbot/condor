@@ -69,6 +69,7 @@ vi.mock("@/hooks/useAgentExecutors", () => ({
 }));
 
 const { StrategyWorkbench } = await import("./StrategyWorkbench");
+const { api } = await import("@/lib/api");
 
 vi.mock("@/hooks/useFleetData", () => ({
   useFleetData: () => ({
@@ -202,5 +203,48 @@ describe("in the chat's pane", () => {
       const hasLabel = !!button.getAttribute("aria-label");
       expect(hasText || hasLabel).toBe(true);
     }
+  });
+});
+
+/**
+ * The meta strip's two counts answer a click the same way.
+ *
+ * Only the dry-run count used to be a link. The session count beside it was a
+ * label in the same pill, so a reader who tried it first learned that neither
+ * one went anywhere.
+ */
+describe("the meta strip's counts", () => {
+  let base: Awaited<ReturnType<typeof api.getStrategy>>;
+  beforeEach(async () => {
+    base = await api.getStrategy("brigado", "fleet_op");
+  });
+  afterEach(() => {
+    vi.mocked(api.getStrategy).mockImplementation(async () => base);
+  });
+
+  const linkTo = (text: string) =>
+    [...host.querySelectorAll("a")].find((a) => a.textContent?.includes(text));
+  const params = (link: HTMLAnchorElement | undefined) =>
+    new URL(link?.getAttribute("href") ?? "", "http://condor").searchParams;
+
+  it("open the newest session and the newest dry run", async () => {
+    vi.mocked(api.getStrategy).mockResolvedValue({
+      ...base,
+      sessions: [{ number: 1 }, { number: 4 }],
+      experiments: [{ number: 2 }],
+    } as typeof base);
+    await render(false);
+
+    const sessions = params(linkTo("2 sessions"));
+    expect(sessions.get("run")).toBe("s:4");
+    expect(sessions.get("strategy")).toBe("fleet_op");
+    expect(sessions.get("open")).toBe("runs");
+    expect(params(linkTo("1 dry run")).get("run")).toBe("e:2");
+  });
+
+  it("leave zero sessions a label — there is no session to open", async () => {
+    await render(false);
+    expect(linkTo("session")).toBeUndefined();
+    expect(host.textContent).toContain("0 sessions");
   });
 });
