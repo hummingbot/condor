@@ -104,11 +104,21 @@ function subtitle(node: PerfNode, showBot: boolean): string {
     }
     case "bot":
       return `${n} controller${n !== 1 ? "s" : ""}`;
-    // Counted by dead controller id rather than by executor: that is the
-    // number a reader who opens this row is actually choosing between, and it
-    // is usually far smaller than the executor count folded beneath it.
-    case "orphans":
-      return `${n} controller${n !== 1 ? "s" : ""} left no record`;
+    // Counted in executors, and credited to no controller, because that is the
+    // whole of what this row can prove. Its buckets are keyed by the
+    // `controller_id` the executor record carries, and that id is not a
+    // controller: `main` is the trading API's own default, stamped on every
+    // position opened through the browser — which never sends one — and an
+    // MCP-created position carries the calling agent's session id instead.
+    // Neither names a deployment, so the row cannot say a controller existed,
+    // let alone that it lost its record; the earlier wording sent the reader
+    // hunting a deployment that never happened. The executor count is the one
+    // number it can stand behind, and it is the number the buckets below add
+    // up to.
+    case "orphans": {
+      const execs = node.leaves.length;
+      return `${execs} executor${execs !== 1 ? "s" : ""} · under no controller`;
+    }
     // Counted in executors, because that is all a group ever holds: it exists
     // precisely for the leaves no controller claims, so the bot row's wording
     // would name a level that is not there.

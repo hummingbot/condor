@@ -5,9 +5,8 @@
  * executor no controller claims — is a thing the reader compares against its
  * siblings, and draws semibold in full-contrast text. A controller or an
  * executor is a detail *of* one of those, and draws medium-weight muted — and
- * so, now, is the per-dead-controller-id bucket nested under the gathering
- * row: it is a detail of *that* row, the same way a controller is a detail of
- * a bot.
+ * so, now, is the per-controller-id bucket nested under the gathering row: it
+ * is a detail of *that* row, the same way a controller is a detail of a bot.
  *
  * The gathering row is why this file exists: an earlier shape arrived after
  * the predicate was written and was left out of it, so the one row
@@ -142,9 +141,9 @@ describe("ScopeTree row emphasis", () => {
   });
 
   it("still lets the rows nested under them recede", () => {
-    // "main" is now a detail *of* the "Unattached" row — one dead controller
-    // id among the several it may gather — rather than a fleet child in its
-    // own right, so it recedes exactly as a controller under a bot does.
+    // "main" is now a detail *of* the "Unattached" row — one of the
+    // `controller_id`s it may gather — rather than a fleet child in its own
+    // right, so it recedes exactly as a controller under a bot does.
     for (const nested of ["main", "pmm_1", "exec-a"]) {
       expect(nameClass(nested)).toContain("font-medium");
       expect(nameClass(nested)).toContain("text-[var(--color-text-muted)]");
