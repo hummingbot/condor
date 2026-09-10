@@ -54,7 +54,7 @@ HB_TRADING = {
     "explore_geckoterminal",
 }
 HB_LIQUIDITY = {"manage_amm", "manage_clmm"}
-HB_ADMIN = {"configure_server", "manage_gateway_config", "manage_gateway_container"}
+HB_ADMIN = {"configure_server", "manage_gateway_config"}
 
 HB_PROFILES = {
     "tick": HB_TRADING,
@@ -133,7 +133,6 @@ def test_every_tool_the_module_defines_lands_in_some_profile(module):
     [
         "configure_server",
         "manage_gateway_config",
-        "manage_gateway_container",
         "manage_amm",
         "manage_clmm",
     ],

@@ -344,8 +344,8 @@ def build_mcp_servers_for_session(
     server_name = next((name for name in candidates() if usable(name)), None)
 
     # The admin ring belongs to the server's owner (SEC-252). ``full`` is the
-    # only profile that mounts ADMIN_TOOLS on mcp-hummingbot — configure_server,
-    # manage_gateway_config, manage_gateway_container — and those act on the
+    # only profile that mounts ADMIN_TOOLS on mcp-hummingbot — configure_server
+    # and manage_gateway_config — and those act on the
     # resolved server with the OWNER's credentials, injected into the env below,
     # while enforcing no permission of their own: the subprocess has no notion of
     # the calling user, so nothing downstream can. Every other surface already

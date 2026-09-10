@@ -6,67 +6,9 @@ import logging
 from typing import Any
 
 from mcp_servers.hummingbot_api.exceptions import ToolError
-from mcp_servers.hummingbot_api.schemas import (
-    GatewayConfigRequest,
-    GatewayContainerRequest,
-)
+from mcp_servers.hummingbot_api.schemas import GatewayConfigRequest
 
 logger = logging.getLogger("hummingbot-mcp")
-
-
-async def manage_gateway_container(
-    client: Any, request: GatewayContainerRequest
-) -> dict[str, Any]:
-    """Manage Gateway container lifecycle operations.
-
-    Supports:
-    - get_status: Check Gateway container status
-    - start: Start Gateway with configuration
-    - stop: Stop Gateway container
-    - restart: Restart Gateway (optionally with new config)
-    - get_logs: Get container logs
-    """
-    if request.action == "get_status":
-        result = await client.gateway.get_status()
-        return {"action": "get_status", "status": result}
-
-    elif request.action == "start":
-        if not request.config:
-            raise ToolError(
-                "Configuration is required to start Gateway. "
-                "Provide 'config' with at least 'image' and optionally 'port' and 'environment'."
-            )
-
-        result = await client.gateway.start(request.config)
-        return {
-            "action": "start",
-            "message": "Gateway started successfully",
-            "result": result,
-        }
-
-    elif request.action == "stop":
-        result = await client.gateway.stop()
-        return {
-            "action": "stop",
-            "message": "Gateway stopped successfully",
-            "result": result,
-        }
-
-    elif request.action == "restart":
-        result = await client.gateway.restart(request.config)
-        return {
-            "action": "restart",
-            "message": "Gateway restarted successfully",
-            "result": result,
-            "config_updated": request.config is not None,
-        }
-
-    elif request.action == "get_logs":
-        result = await client.gateway.get_logs(tail=request.tail or 100)
-        return {"action": "get_logs", "tail": request.tail or 100, "logs": result}
-
-    else:
-        raise ToolError(f"Unknown action: {request.action}")
 
 
 async def manage_gateway_config(

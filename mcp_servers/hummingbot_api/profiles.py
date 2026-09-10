@@ -51,7 +51,6 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "manage_clmm": "Direct CLMM position operations",
     "configure_server": "Repoint this seat at another Hummingbot API server",
     "manage_gateway_config": "Read and edit Gateway's chains, tokens and wallets",
-    "manage_gateway_container": "Gateway container status, start, stop and logs",
 }
 
 #: The trading surface: everything an autonomous tick needs to read a market,
@@ -113,14 +112,17 @@ LIQUIDITY_TOOLS: tuple[str, ...] = (
     "manage_clmm",
 )
 
-#: Infrastructure. Repointing the API server, rewriting Gateway's config and
-#: restarting its container are operator actions with a human in front of them:
-#: the chat, or a standalone host. No agent's tool list names one, and the chat's
-#: own context prompt already says not to call ``configure_server``.
+#: Infrastructure. Repointing the API server and rewriting Gateway's config are
+#: operator actions with a human in front of them: the chat, or a standalone
+#: host. No agent's tool list names one, and the chat's own context prompt
+#: already says not to call ``configure_server``.
+#:
+#: The Gateway container has no tool at all. Starting, stopping, restarting it
+#: and reading its logs happen in the dashboard (Settings → Gateway), behind the
+#: server-owner check, and nowhere a model can reach.
 ADMIN_TOOLS: tuple[str, ...] = (
     "configure_server",
     "manage_gateway_config",
-    "manage_gateway_container",
 )
 
 #: profile name → the tools it registers. ``full`` is the default because this

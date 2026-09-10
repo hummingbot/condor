@@ -8,39 +8,6 @@ from .base import format_number, format_timestamp, truncate_address
 from .table_builder import ColumnDef, TableBuilder
 
 
-def format_gateway_container_result(result: dict[str, Any]) -> str:
-    """Format gateway container action results into a human-readable string."""
-    result_action = result.get("action", "")
-
-    if result_action == "get_status":
-        status = result.get("status", {})
-        running = status.get("running", False)
-        container_id = status.get("container_id")
-        created_at = status.get("created_at")
-
-        container_id_display = f"{container_id[:12]}..." if container_id else "None"
-        created_at_display = created_at[:19] if created_at else "None"
-
-        return (
-            f"Gateway Container Status:\n\n"
-            f"Status: {'Running ✓' if running else 'Stopped ✗'}\n"
-            f"Container ID: {container_id_display}\n"
-            f"Image: {status.get('image') or 'None'}\n"
-            f"Port: {status.get('port') or 'None'}\n"
-            f"Created: {created_at_display}"
-        )
-
-    elif result_action == "get_logs":
-        logs = result.get("logs", "No logs available")
-        return f"Gateway Container Logs:\n\n{logs}"
-
-    elif result_action in ["start", "stop", "restart"]:
-        message = result.get("message", "")
-        return f"Gateway Container: {message}"
-
-    return f"Gateway Container Result: {result}"
-
-
 def format_gateway_config_result(result: dict[str, Any]) -> str:
     """Format gateway config action results into a human-readable string."""
     result_resource_type = result.get("resource_type", "")

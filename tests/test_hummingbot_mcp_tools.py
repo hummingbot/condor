@@ -124,6 +124,22 @@ def test_the_backtesting_tools_are_gone():
         import mcp_servers.hummingbot_api.tools.backtesting  # noqa: F401
 
 
+def test_the_gateway_container_tool_is_gone():
+    """The dashboard (Settings → Gateway) is the one place to run the container.
+
+    It already did every action the tool had, logs included, behind the
+    server-owner check. So the hint on a failed Gateway call points the user
+    there instead of at a tool.
+    """
+    import mcp_servers.hummingbot_api.server as server
+    from mcp_servers.hummingbot_api.middleware import GATEWAY_LOG_HINT
+    from mcp_servers.hummingbot_api.profiles import TOOL_DESCRIPTIONS
+
+    assert not hasattr(server, "manage_gateway_container")
+    assert "manage_gateway_container" not in TOOL_DESCRIPTIONS
+    assert "manage_gateway_container" not in GATEWAY_LOG_HINT
+
+
 POOL_LATENCY = 0.05
 
 
@@ -287,94 +303,6 @@ def test_lp_branch_is_skipped_when_not_requested():
 
     assert clmm.max_in_flight == 0
     assert not any(s["title"] == "LP Positions (CLMM)" for s in result["sections"])
-
-
-class FakeGatewayContainerApi:
-    """The three ``client.gateway`` calls the container tool's branches make."""
-
-    def __init__(self):
-        self.calls = []
-
-    async def get_status(self):
-        self.calls.append("get_status")
-        return {
-            "running": True,
-            "container_id": "abc123def4567890",
-            "image": "hummingbot/gateway:latest",
-            "port": 15888,
-            "created_at": "2026-09-08T12:00:00.000000Z",
-        }
-
-    async def get_logs(self, tail):
-        self.calls.append(("get_logs", tail))
-        return "gateway | ERROR the swap reverted"
-
-    async def restart(self, config):
-        self.calls.append(("restart", config))
-        return {"ok": True}
-
-
-class FakeGatewayContainerClient:
-    def __init__(self, gateway):
-        self.gateway = gateway
-
-
-class FakeClientHolder:
-    """Stands in for the ``hummingbot_client`` singleton server.py awaits."""
-
-    def __init__(self, client):
-        self._client = client
-
-    async def get_client(self):
-        return self._client
-
-
-def _stub_gateway_container(monkeypatch):
-    from mcp_servers.hummingbot_api import server as hb_server
-
-    gateway = FakeGatewayContainerApi()
-    monkeypatch.setattr(
-        hb_server,
-        "hummingbot_client",
-        FakeClientHolder(FakeGatewayContainerClient(gateway)),
-    )
-    return hb_server, gateway
-
-
-def test_manage_gateway_container_get_status_reaches_the_impl_and_formatter():
-    """CORR-561: the wrapper's body called two names server.py never imported.
-
-    Registration succeeded (the tool is in ADMIN_TOOLS and the resolver only
-    needs the wrapper), so nothing caught it until a call ran the body and
-    @handle_errors reformatted the NameError into "Failed to manage Gateway
-    container: name 'manage_gateway_container_impl' is not defined".
-    """
-    monkeypatch = pytest.MonkeyPatch()
-    try:
-        hb_server, gateway = _stub_gateway_container(monkeypatch)
-        output = asyncio.run(hb_server.manage_gateway_container(action="get_status"))
-    finally:
-        monkeypatch.undo()
-
-    assert gateway.calls == ["get_status"], "the impl branch never ran"
-    assert "Gateway Container Status" in output
-    assert "Running" in output
-    assert "abc123def456" in output
-
-
-def test_manage_gateway_container_get_logs_is_a_working_escape_hatch():
-    """GATEWAY_LOG_HINT points every opaque swap/LP failure at this action."""
-    monkeypatch = pytest.MonkeyPatch()
-    try:
-        hb_server, gateway = _stub_gateway_container(monkeypatch)
-        output = asyncio.run(
-            hb_server.manage_gateway_container(action="get_logs", tail=25)
-        )
-    finally:
-        monkeypatch.undo()
-
-    assert gateway.calls == [("get_logs", 25)]
-    assert "the swap reverted" in output
 
 
 if __name__ == "__main__":

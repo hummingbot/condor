@@ -47,7 +47,6 @@ from .gateway import (
     format_clmm_result,
     format_gateway_clmm_pool_result,
     format_gateway_config_result,
-    format_gateway_container_result,
     format_gateway_swap_result,
 )
 
@@ -67,7 +66,6 @@ from .trading import format_orders_as_table, format_positions_as_table
 
 __all__ = [
     # Gateway formatters
-    "format_gateway_container_result",
     "format_gateway_config_result",
     "format_gateway_swap_result",
     "format_gateway_clmm_pool_result",

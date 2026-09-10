@@ -49,7 +49,6 @@ DANGEROUS_TOOLS = {
     "manage_clmm",  # every action that moves liquidity
     "manage_amm",  # every action that moves liquidity
     "manage_gateway_config",  # only writes to networks/connectors; see below
-    "manage_gateway_container",  # only the lifecycle actions; see below
     "control_agent",  # only `start`, which launches an unattended trading loop
     # The executor family is gated by NAME (FEAT-062), the same way the swap family
     # is: a create and a stop each have their own tool, so there is no `action` to
@@ -126,29 +125,6 @@ DANGEROUS_AMM_ACTIONS = {"add_liquidity", "remove_liquidity", "create_pool"}
 # so the gate has to know both or `start_agent` walks straight past it.
 DANGEROUS_CONTROL_ACTIONS = {"start", "start_agent"}
 
-# Actions within manage_gateway_container that require confirmation (SEC-565).
-# This is the only registered tool that controls a container lifecycle, and the
-# gate weighs what a call does rather than whether it signs: `manage_gateway_config`
-# is gated while signing nothing, and toolsets.py already calls container control an
-# owner-only operator action.
-#
-# `stop` and `restart` take Gateway down underneath any live CLMM/LP executor that
-# needs it to manage or close a position. `start` is the wider one: the impl passes
-# the caller's `config` dict straight to the API host (tools/gateway.py), and that
-# dict names the Docker `image` — so an ungated `start` lets a model whose input
-# includes untrusted tool output (pool names, bot logs, GeckoTerminal rows) choose
-# what runs on the host holding the exchange API keys and the Gateway wallet keys.
-#
-# `get_status` and `get_logs` stay on the fast path. `get_logs` in particular is the
-# escape hatch every opaque Gateway failure points at (middleware.GATEWAY_LOG_HINT),
-# and putting a prompt in front of reading a log would put one in front of diagnosis.
-#
-# Unlike control_agent there is no second spelling to cover: the action is a plain
-# five-member Literal validated by pydantic (schemas.GatewayContainerRequest) and the
-# impl dispatches on it directly, with no alias resolver. An unreadable or missing
-# action still fails closed.
-DANGEROUS_CONTAINER_ACTIONS = {"start", "stop", "restart"}
-
 # Resource types within manage_gateway_config whose *writes* require confirmation
 # (SEC-566). This set used to be empty, justified by "everything it touches is
 # Gateway's own symbol/address mapping". That is true of two of the four resources
@@ -214,10 +190,6 @@ MUTATING_CONTROL_ACTIONS = {
     "set_state",
 }
 
-#: `manage_gateway_container`'s writes. Identical to its confirmation set: the
-#: three lifecycle actions are everything it can change, and the other two read.
-MUTATING_CONTAINER_ACTIONS = DANGEROUS_CONTAINER_ACTIONS
-
 # The reads of each dispatch tool, named explicitly. They are what keeps the
 # fail-open rule below from recording a `manage_bots(action="status")`: an
 # action in neither set is one this module has not heard of, and *that* is what
@@ -232,9 +204,6 @@ READ_ONLY_LIQUIDITY_ACTIONS = {
     "quote_liquidity",
 }
 READ_ONLY_CONTROL_ACTIONS = {"list", "list_agents", "get_state"}
-#: `manage_gateway_container`'s reads, named so the fail-open rule below does not
-#: record a status poll or a log tail as a change to the world.
-READ_ONLY_CONTAINER_ACTIONS = {"get_status", "get_logs"}
 #: `manage_controllers`' writes and reads. The tool is outside the *gate*
 #: entirely and stays there (it writes controller templates and saved configs,
 #: never a running bot), but a fleet is *built* out of these calls: the twelve
@@ -491,9 +460,6 @@ def is_dangerous_tool_call(tool_call: dict[str, Any]) -> bool:
         if tool_name == "manage_gateway_config":
             return _is_dangerous_config_call(tool_call)
 
-        if tool_name == "manage_gateway_container":
-            return _has_dangerous_action(tool_call, DANGEROUS_CONTAINER_ACTIONS)
-
         if tool_name == "control_agent":
             return _has_dangerous_action(tool_call, DANGEROUS_CONTROL_ACTIONS)
 
@@ -561,11 +527,6 @@ def is_mutating_tool_call(tool_call: dict[str, Any]) -> bool:
     if tool_name == "control_agent":
         return _is_mutating_action(
             tool_call, MUTATING_CONTROL_ACTIONS, READ_ONLY_CONTROL_ACTIONS
-        )
-
-    if tool_name == "manage_gateway_container":
-        return _is_mutating_action(
-            tool_call, MUTATING_CONTAINER_ACTIONS, READ_ONLY_CONTAINER_ACTIONS
         )
 
     if tool_name == "manage_gateway_config":
@@ -836,20 +797,6 @@ def format_tool_summary(tool_call: dict[str, Any]) -> str:
             )
             return f"Gateway config: {action} {resource} '{target}', setting {keys}"
         return f"Gateway config: {action} {resource}"
-
-    if tool_name == "manage_gateway_container":
-        # `start` and `restart` hand a caller-chosen Docker image to the API host,
-        # so the line names the image: the human is approving what will run on the
-        # box that holds the exchange and wallet keys, not the word "start".
-        action = input_data.get("action", "?")
-        config = input_data.get("config")
-        image = config.get("image") if isinstance(config, dict) else None
-        if action in ("start", "restart"):
-            what = "Start" if action == "start" else "Restart"
-            return f"{what} the Gateway container with image {image or 'default'}"
-        if action == "stop":
-            return "Stop the Gateway container (live LP positions lose their manager)"
-        return f"Gateway container: {action}"
 
     if tool_name in ("manage_clmm", "manage_amm"):
         action = input_data.get("action", "?")

@@ -19,7 +19,6 @@ from mcp_servers.hummingbot_api.formatters import (
     format_clmm_result,
     format_gateway_clmm_pool_result,
     format_gateway_config_result,
-    format_gateway_container_result,
     format_gateway_swap_result,
 )
 from mcp_servers.hummingbot_api.hummingbot_client import hummingbot_client
@@ -30,7 +29,6 @@ from mcp_servers.hummingbot_api.schemas import (
     CLMMRequest,
     GatewayCLMMRequest,
     GatewayConfigRequest,
-    GatewayContainerRequest,
     GatewaySwapRequest,
 )
 from mcp_servers.hummingbot_api.settings import DEFAULT_TOOL_PROFILE, settings
@@ -44,9 +42,6 @@ from mcp_servers.hummingbot_api.tools import portfolio as portfolio_tools
 from mcp_servers.hummingbot_api.tools import trading as trading_tools
 from mcp_servers.hummingbot_api.tools.gateway import (
     manage_gateway_config as manage_gateway_config_impl,
-)
-from mcp_servers.hummingbot_api.tools.gateway import (
-    manage_gateway_container as manage_gateway_container_impl,
 )
 from mcp_servers.hummingbot_api.tools.gateway_amm import manage_amm_impl
 from mcp_servers.hummingbot_api.tools.gateway_clmm import (
@@ -1666,29 +1661,6 @@ async def manage_gateway_config(
     client = await hummingbot_client.get_client()
     result = await manage_gateway_config_impl(client, request)
     return format_gateway_config_result(result)
-
-
-@handle_errors("manage Gateway container")
-async def manage_gateway_container(
-    action: Literal["get_status", "start", "stop", "restart", "get_logs"],
-    config: dict[str, Any] | None = None,
-    tail: int = 100,
-) -> str:
-    """Gateway container lifecycle — status, start, stop, restart, and logs.
-
-    `get_logs` is what the hint on a failed Gateway call points at: when a swap or an LP
-    action fails with an error that does not say why, the container log usually does.
-
-    Args:
-        action: get_status | start | stop | restart | get_logs.
-        config: Gateway configuration. Used by 'start', optional for 'restart'.
-        tail: Log lines to retrieve for 'get_logs' (1-200, default 100).
-    """
-    request = GatewayContainerRequest(action=action, config=config, tail=tail)
-
-    client = await hummingbot_client.get_client()
-    result = await manage_gateway_container_impl(client, request)
-    return format_gateway_container_result(result)
 
 
 @handle_errors("manage AMM", GATEWAY_LOG_HINT)

@@ -15,45 +15,6 @@ from pydantic import BaseModel, Field
 # ==============================================================================
 
 
-class GatewayContainerRequest(BaseModel):
-    """Request model for Gateway container management with progressive disclosure.
-
-    This model supports container lifecycle management:
-    - get_status: Check if Gateway is running and get container details
-    - start: Start Gateway container with configuration
-    - stop: Stop Gateway container
-    - restart: Restart Gateway (optionally with new configuration)
-    - get_logs: Retrieve Gateway container logs
-    """
-
-    action: Literal["get_status", "start", "stop", "restart", "get_logs"] = Field(
-        description="Action to perform on Gateway container"
-    )
-
-    config: dict[str, Any] | None = Field(
-        default=None,
-        description="Gateway configuration (used for 'start', optional for 'restart'). "
-        "The Hummingbot API runs Gateway secured (TLS + mTLS) and manages the "
-        "certificates/passphrase itself using its own CONFIG_PASSWORD (hummingbot-api "
-        "SEC-048), so no passphrase is needed here. "
-        "Fields: image (Docker image, default: hummingbot/gateway:development), "
-        "port (exposed port, default: 15888).",
-        examples=[
-            {
-                "image": "hummingbot/gateway:development",
-                "port": 15888,
-            }
-        ],
-    )
-
-    tail: int | None = Field(
-        default=100,
-        ge=1,
-        le=200,
-        description="Number of log lines to retrieve (only for 'get_logs' action, default: 100, max: 200)",
-    )
-
-
 class GatewayConfigRequest(BaseModel):
     """Request model for Gateway configuration management.
 

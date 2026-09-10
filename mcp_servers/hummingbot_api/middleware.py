@@ -17,7 +17,10 @@ logger = logging.getLogger("hummingbot-mcp")
 
 T = TypeVar("T")
 
-GATEWAY_LOG_HINT = "\n\n💡 Check gateway logs for more details: manage_gateway_container(action='get_logs')"
+GATEWAY_LOG_HINT = (
+    "\n\n💡 Gateway's logs usually say why. They are in the Condor dashboard "
+    "(Settings → Gateway → Logs); point the user there."
+)
 
 
 def handle_errors(
