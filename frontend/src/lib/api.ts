@@ -1746,6 +1746,31 @@ export interface ConversationMeta {
   share_id?: string;
   share_revision?: number;
   shared_at?: string | null;
+  /** Running token total (FEAT-120). `{}` or absent on a conversation older
+   *  than the measurement, which reads as "not measured", not as zero. */
+  usage?: Partial<TokenUsage>;
+}
+
+/**
+ * What a model read and wrote — the backend's `TokenUsage.to_dict()`.
+ *
+ * `input_tokens` is inclusive of cache on every backend, so `total_tokens` is
+ * everything read and written; the two `cache_*` counters are subsets of it.
+ * `cost_usd` is an estimate at API prices, never a spend — a Claude
+ * subscription is not billed per token — and `unpriced_turns` counts the runs
+ * no price was known for (a local model), which makes the cost a lower bound.
+ * The `context_*` pair is the latest reading, not a sum.
+ */
+export interface TokenUsage {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  cost_usd: number;
+  unpriced_turns: number;
+  context_used: number | null;
+  context_size: number | null;
+  total_tokens: number;
 }
 
 export interface ConversationTurn {

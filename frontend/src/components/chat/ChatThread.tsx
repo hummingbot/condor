@@ -7,6 +7,7 @@ import { speakerNames } from "@/lib/agentColor";
 import { ApprovalPrompt } from "./ApprovalPrompt";
 import { ChatInput } from "./ChatInput";
 import { ChatMessageView } from "./ChatMessage";
+import { ConversationUsage } from "./ConversationUsage";
 import { Starters, type Starter } from "./Starters";
 
 /** How close to the end still counts as "following the answer", in pixels. */
@@ -218,6 +219,8 @@ export function ChatThread({
           </button>
         </div>
       )}
+
+      <ConversationUsage usage={slot?.usage} />
 
       {/* Messages area */}
       <div ref={scrollAreaRef} className="flex-1 overflow-y-auto px-4 py-4">

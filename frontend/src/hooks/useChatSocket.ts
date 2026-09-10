@@ -7,8 +7,10 @@ import {
   type AppNotification,
   type ConversationTurn,
   type NotificationsResponse,
+  type TokenUsage,
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+import { addUsage } from "@/lib/usage";
 import { namesATool, toolCallState } from "@/lib/formatters";
 import { collectViewFacts, renderViewBlock } from "@/lib/viewFacts";
 import { WS_AUTH_SUBPROTOCOL } from "@/lib/websocket";
@@ -252,6 +254,12 @@ export interface ChatSlot {
    * lands, which is what makes a new chat feel warm instead of loading.
    */
   pending?: boolean;
+  /**
+   * What this conversation has cost so far (FEAT-120): seeded from the stored
+   * total on hydrate and advanced by each `prompt_done`. Absent until the
+   * backend has measured something.
+   */
+  usage?: TokenUsage;
 }
 
 let msgIdCounter = 0;
@@ -1207,6 +1215,16 @@ export function useChatSocket() {
         : null;
       try {
         const detail = await api.getConversation(conversationId);
+        // The stored total, not a sum of what this tab happened to see: a
+        // resync re-seeds, so a turn answered from Telegram or another tab
+        // converges here. Before the empty-transcript return below, which is
+        // about messages only.
+        const usage = addUsage(undefined, detail.meta?.usage);
+        if (usage && usage.total_tokens > 0) {
+          setSlots((prev) =>
+            prev.map((s) => (s.info.slot_id === slotId ? { ...s, usage } : s)),
+          );
+        }
         const restored = turnsToMessages(detail.turns, conversationId);
         // An empty transcript never wipes the screen: on a resync that would
         // trade a missed note for a lost conversation.
@@ -1796,6 +1814,19 @@ export function useChatSocket() {
             // mid-answer, and its composer stays locked until its own turn is
             // done.
             stopStreaming(slotId);
+            // What the turn cost, onto the total (FEAT-120). A frame without
+            // it — an older backend, a DONE the funnel did not charge — leaves
+            // the total where it was.
+            const turnUsage = data.usage as Partial<TokenUsage> | null | undefined;
+            if (turnUsage) {
+              setSlots((prev) =>
+                prev.map((s) =>
+                  s.info.slot_id === slotId
+                    ? { ...s, usage: addUsage(s.usage, turnUsage) }
+                    : s,
+                ),
+              );
+            }
           }
           break;
 
