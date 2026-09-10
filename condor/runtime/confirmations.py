@@ -89,12 +89,22 @@ class PendingConfirmation:
             "user_id": self.user_id,
             "summary": self.summary,
             "origin": self.origin,
+            # The call itself, normalized once here so every surface previews
+            # the same thing the gate judged: the bare tool name and its
+            # arguments, or ``None`` when they could not be read. A summary line
+            # alone is what made the prompt read like a notice rather than a
+            # command waiting to run.
+            "tool": danger.tool_call_name(self.tool_call),
+            "input": danger.tool_call_input(self.tool_call),
             "tool_call": self.tool_call,
             "options": self.options,
             "status": self.status.value,
             "selected_option_id": self.selected_option_id,
             "created_at": self.created_at,
             "expires_at": self.expires_at,
+            # Relative, so a surface can count down without trusting its own
+            # clock to agree with this one about what ``expires_at`` means.
+            "expires_in": max(0.0, self.expires_at - time.time()),
         }
 
 

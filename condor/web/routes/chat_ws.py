@@ -289,6 +289,7 @@ class WebSocketChannel:
         self._ws = ws
 
     async def deliver(self, pending: PendingConfirmation) -> None:
+        wire = pending.to_wire()
         await _send_turn(
             self._ws,
             pending.user_id,
@@ -305,6 +306,12 @@ class WebSocketChannel:
                 # Which agent, on which server, is asking. The slot addresses
                 # the request; this says out loud what the user is authorizing.
                 "origin": pending.origin,
+                # The call itself and the time left to answer it, so the prompt
+                # previews a command that is paused rather than reading like a
+                # notice the user can leave for later.
+                "tool": wire["tool"],
+                "input": wire["input"],
+                "expires_in": wire["expires_in"],
             },
         )
 

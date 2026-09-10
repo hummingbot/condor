@@ -2280,6 +2280,12 @@ export interface PendingConfirmation {
   summary: string;
   origin: string;
   expires_at: number;
+  /** Seconds until the runtime denies it, measured on the server's clock. */
+  expires_in?: number;
+  /** The bare tool name the gate judged. */
+  tool?: string;
+  /** Its arguments, or null when they could not be read. */
+  input?: Record<string, unknown> | null;
 }
 
 export const api = {

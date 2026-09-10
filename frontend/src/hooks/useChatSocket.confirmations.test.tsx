@@ -148,6 +148,21 @@ describe("re-reading pending approvals on a socket open", () => {
     });
   });
 
+  it("carries the call and a local deadline, so the prompt can preview and count down", async () => {
+    getPendingConfirmations.mockResolvedValue([
+      { ...stranded, tool: "place_order", input: { amount: 1 }, expires_in: 90 },
+    ]);
+    const before = Date.now() / 1000;
+
+    await arrive();
+
+    const req = chat().permissionRequests.s1;
+    expect(req.tool).toBe("place_order");
+    expect(req.input).toEqual({ amount: 1 });
+    expect(req.deadline).toBeGreaterThanOrEqual(before + 90);
+    expect(req.deadline).toBeLessThanOrEqual(Date.now() / 1000 + 90);
+  });
+
   it("files an approval with no slot where an unaddressed one goes", async () => {
     getPendingConfirmations.mockResolvedValue([{ ...stranded, slot_id: "" }]);
 

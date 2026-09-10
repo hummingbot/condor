@@ -216,6 +216,21 @@ export interface PermissionRequest {
   summary: string;
   /** Which agent, on which server, raised it. Empty when unattributable. */
   origin?: string;
+  /** The bare tool name, previewed like the command it is. */
+  tool?: string;
+  /** Its arguments; null when the backend could not read them. */
+  input?: Record<string, unknown> | null;
+  /**
+   * When the runtime denies it unanswered, in *this* browser's epoch seconds —
+   * derived from the server's relative `expires_in` on arrival, so a skewed
+   * local clock cannot make the countdown lie. Absent from an older backend.
+   */
+  deadline?: number;
+}
+
+/** A relative `expires_in` from the wire, as a local deadline. */
+export function deadlineFrom(expiresIn: unknown): number | undefined {
+  return typeof expiresIn === "number" ? Date.now() / 1000 + expiresIn : undefined;
 }
 
 /**
@@ -1057,6 +1072,9 @@ export function useChatSocket() {
             request_id: p.id,
             summary: p.summary,
             origin: p.origin || "",
+            tool: p.tool,
+            input: p.input,
+            deadline: deadlineFrom(p.expires_in),
           };
           added = true;
         }
@@ -1666,6 +1684,9 @@ export function useChatSocket() {
               request_id: data.request_id as string,
               summary: data.summary as string,
               origin: (data.origin as string) || "",
+              tool: typeof data.tool === "string" ? data.tool : undefined,
+              input: (data.input as Record<string, unknown> | null | undefined) ?? null,
+              deadline: deadlineFrom(data.expires_in),
             },
           }));
           break;
@@ -1677,6 +1698,15 @@ export function useChatSocket() {
           // answer that trailed off — the alternative the old dead composer
           // avoided by never letting this happen at all.
           if (!slotId) break;
+          // Steering denies whatever the turn was waiting on
+          // (`condor.runtime.client.prompt`), so an approval still on screen
+          // would offer an Allow that can no longer do anything.
+          setPermissionRequests((prev) => {
+            if (!(slotId in prev)) return prev;
+            const next = { ...prev };
+            delete next[slotId];
+            return next;
+          });
           flushChunks(slotId);
           updateSlotMessages(slotId, (prev) => {
             const msgs = settleToolCalls(prev);
