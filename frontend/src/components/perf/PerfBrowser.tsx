@@ -33,6 +33,7 @@ import {
   agentBucketLabel,
   agentOptions,
   inRun,
+  isAgentBucket,
   matchesAgents,
   parseRunParam,
   runChipLabel,
@@ -1314,6 +1315,22 @@ export function PerfBrowser({
     [owners, scopeAgentKey],
   );
   /**
+   * What this scope's owner is called in prose (CORR-363).
+   *
+   * `ownerTitle` for a run, because a sentence has room for the map's
+   * spelled-out words. For the two agent-axis nodes that are *not* runs it has
+   * no answer at all: their keys are unspellable sentinels with a leading
+   * space, which `ownerTitle` misses in the map and falls through to the
+   * run-key namer, which hands a dotless key straight back — so the sentence
+   * the model was given read "operated by agent  outside", with the sentinel
+   * and its space in it.
+   */
+  const scopeAgentName = !scopeAgentKey
+    ? ""
+    : isAgentBucket(scopeAgentKey)
+      ? agentBucketLabel(scopeAgentKey)
+      : ownerTitle(owners, scopeAgentKey);
+  /**
    * The declared legacy bases actually folded into this scope.
    *
    * Only these, not every name the strategy declares: the note is about what
@@ -2171,7 +2188,11 @@ export function PerfBrowser({
         : activeRun
           ? `the finished run of bot ${activeRun.bot_name}`
           : scopeAgentKey && scope.kind === "agent"
-            ? `${plural(scope.leaves.length, scopeNoun)} operated by agent ${ownerTitle(owners, scopeAgentKey)}`
+            ? isAgentBucket(scopeAgentKey)
+              ? // Not "operated by agent X": nothing here is credited to anyone,
+                // and the bucket names why rather than who.
+                `${plural(scope.leaves.length, scopeNoun)} no run owns (${scopeAgentName})`
+              : `${plural(scope.leaves.length, scopeNoun)} operated by agent ${scopeAgentName}`
             : scopeBotName
               ? `${plural(scope.leaves.length, scopeNoun)} of bot ${scopeBotName}`
               : scope.kind === "fleet"
@@ -2193,12 +2214,16 @@ export function PerfBrowser({
         scope: effectiveScopeId,
         // Named rather than left as a `agent:` id, and with the one fact only
         // this scope carries: whether the loop behind these numbers is alive.
-        agent: scopeAgentKey
-          ? `${ownerTitle(owners, scopeAgentKey)} (${[
-              loopStatus(activeAgent?.live),
-              ...loopFacts(activeAgent?.live, Date.now()),
-            ].join(", ")})`
-          : undefined,
+        agent: !scopeAgentKey
+          ? undefined
+          : isAgentBucket(scopeAgentKey)
+            ? // No loop stands behind a bucket, so the parenthetical every run
+              // gets would be an "idle" invented for a thing that cannot tick.
+              scopeAgentName
+            : `${scopeAgentName} (${[
+                loopStatus(activeAgent?.live),
+                ...loopFacts(activeAgent?.live, Date.now()),
+              ].join(", ")})`,
         // Said either way round: "none" is a fact about the tree, and leaving
         // it out reads as "filters unknown" rather than "showing everything".
         filters: chips.length ? chips.join(", ") : "none",
@@ -2646,6 +2671,7 @@ export function PerfBrowser({
               // produced these numbers is still alive, and what it last said.
               <AgentScopeHeader
                 runKey={scopeAgentKey}
+                owners={owners}
                 owner={activeAgent}
                 legacyBots={scopeLegacyBots}
                 botName={scopeBotName ?? undefined}

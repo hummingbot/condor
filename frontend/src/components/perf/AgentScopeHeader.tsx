@@ -2,8 +2,9 @@ import { Bot, ExternalLink, Server, Zap } from "lucide-react";
 import { type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 
+import { agentBucketLabel, isAgentBucket } from "@/components/perf/agentFilter";
 import { agentColor } from "@/lib/agentColor";
-import { loopFacts, loopStatus, runKeyLabel, type FleetOwner } from "@/lib/agent-attribution";
+import { loopFacts, loopStatus, type FleetOwner } from "@/lib/agent-attribution";
 import { shortBotName } from "@/lib/formatters";
 import { useSeconds } from "@/hooks/useSeconds";
 
@@ -35,8 +36,27 @@ import { StatusDot } from "./ScopeTree";
  */
 
 interface AgentScopeHeaderProps {
-  /** The run key of the scope. Named even when the map no longer holds it. */
+  /**
+   * The agent-axis key of the scope: a run key, or one of the two buckets.
+   *
+   * Named even when the map no longer holds it — and named *through
+   * `agentBucketLabel`*, because the agent axis carries two nodes that are not
+   * runs (CORR-363). `OUTSIDE` and `BEFORE_LEDGER` are deliberately unspellable
+   * run keys with a leading space, so the run-key namer hands them straight
+   * back and the `<h2>` beside the glyph becomes one whitespace character. The
+   * row in the sidebar this header was opened from already asks that module;
+   * asking it here is what stops the two saying different things about one
+   * click.
+   */
   runKey: string;
+  /**
+   * The fleet map, for the pseudo-runs whose words only it holds.
+   *
+   * A chat, a delegation and the dashboard are run keys whose slugs name
+   * nothing a reader has seen (`ownerRowLabel`), so without the map this header
+   * would say `condor / ui` under a sidebar row reading *Condor / Dashboard*.
+   */
+  owners?: readonly FleetOwner[];
   owner?: FleetOwner;
   /**
    * The declared legacy bases actually present in this scope.
@@ -63,12 +83,18 @@ interface AgentScopeHeaderProps {
 
 export function AgentScopeHeader({
   runKey,
+  owners = [],
   owner,
   legacyBots = [],
   botName,
   children,
 }: AgentScopeHeaderProps) {
   const navigate = useNavigate();
+  // A bucket is a leftover, not an owner: there is no loop behind it to report
+  // on and no key to mint a colour from, so it gets the name and the fold and
+  // none of the affordances that only mean something for a run.
+  const bucket = isAgentBucket(runKey);
+  const label = agentBucketLabel(runKey, owners);
   const live = owner?.live ?? null;
   const status = loopStatus(live);
   const running = status === "running";
@@ -102,16 +128,19 @@ export function AgentScopeHeader({
   return (
     <div className="min-w-0">
       <h2 className="flex items-center gap-2 text-sm font-semibold">
-        <Bot className="h-3.5 w-3.5 shrink-0" style={{ color: agentColor(runKey) }} />
+        <Bot
+          className="h-3.5 w-3.5 shrink-0"
+          style={bucket ? undefined : { color: agentColor(runKey) }}
+        />
         <span
           className="truncate"
           title={
             owner
               ? `${owner.agentName || owner.agentSlug} / ${owner.strategyName || owner.strategySlug}`
-              : runKey
+              : label
           }
         >
-          {runKeyLabel(runKey)}
+          {label}
         </span>
         {botName && (
           <span
@@ -122,10 +151,15 @@ export function AgentScopeHeader({
             {shortBotName(botName)}
           </span>
         )}
-        <span className="flex shrink-0 items-center gap-1.5 font-normal">
-          <StatusDot status={status} />
-          <span className="text-xs capitalize text-[var(--color-text-muted)]">{status}</span>
-        </span>
+        {/* Only a run can be idle. A bucket has no loop to be between ticks of,
+            and saying "idle" beside it would answer a question nobody asked
+            with a fact about a thing that does not exist (CORR-363). */}
+        {!bucket && (
+          <span className="flex shrink-0 items-center gap-1.5 font-normal">
+            <StatusDot status={status} />
+            <span className="text-xs capitalize text-[var(--color-text-muted)]">{status}</span>
+          </span>
+        )}
         {facts.length > 0 && (
           <span className="shrink-0 text-[10px] tabular-nums text-[var(--color-text-muted)]">
             {facts.join(" · ")}

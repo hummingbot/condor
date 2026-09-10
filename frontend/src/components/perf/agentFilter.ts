@@ -100,6 +100,18 @@ export function agentBucket(leaf: PerfLeaf, deeds: DeedIndex | null | undefined)
 const NO_OWNERS: readonly FleetOwner[] = [];
 
 /**
+ * Whether a value is one of the two buckets rather than a run key.
+ *
+ * Asked by every surface that offers something a *run* has and a bucket does
+ * not — a loop's status, the button that opens its session, the colour minted
+ * off its key. The sentinels are unspellable on purpose, so this is total: a
+ * real run key can never answer `true`.
+ */
+export function isAgentBucket(value: string): boolean {
+  return value === OUTSIDE || value === BEFORE_LEDGER;
+}
+
+/**
  * **What a bucket value is called on screen** — every surface's one namer.
  *
  * Two fixed labels for the two things that are not a run, and
@@ -145,12 +157,11 @@ export function agentOptions(
     const value = agentBucket(leaf, deeds);
     counts.set(value, (counts.get(value) ?? 0) + 1);
   }
-  const unowned = new Set<string>([OUTSIDE, BEFORE_LEDGER]);
   // Through the same namer as the sidebar row, so a bubble and the row it
   // ticks cannot read as two different owners — and sorted on what it *says*,
   // which is the order a reader scans.
   const named = [...counts]
-    .filter(([value]) => !unowned.has(value))
+    .filter(([value]) => !isAgentBucket(value))
     .map(([value, count]) => ({ value, label: agentBucketLabel(value, owners), count }))
     .sort((a, b) => a.label.localeCompare(b.label));
   const tail = [OUTSIDE, BEFORE_LEDGER]
