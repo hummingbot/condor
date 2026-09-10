@@ -94,6 +94,27 @@ declare global {
 /** The tick the clock is quantised to, and the window it used to drag with it. */
 const CLOCK_TICK_MS = 60_000;
 const DAY_MS = 86_400_000;
+const HOUR_MS = 3_600_000;
+
+/**
+ * The instant every clock in this file starts from, and why it is pinned.
+ *
+ * `windowCutoff` is floored to the *hour* while the clock ticks every *minute*,
+ * so a bare tick moves the cutoff — and with it `leavesFor`, `rawLeaves` and
+ * the tree — on exactly one minute in sixty: the one that crosses an hour
+ * boundary. Left on the ambient wall clock this file therefore asserted "a tick
+ * rebuilds nothing" while standing, once an hour, on the one tick that
+ * legitimately rebuilds everything, and failed for ~61 s in every hour.
+ *
+ * Landing on minute 00 leaves the whole hour between the start and the next
+ * boundary, so the `shouldAdvanceTime` drift below — real seconds, not minutes —
+ * cannot walk the test into that minute. The crossing itself is not left
+ * untested: `HOUR_EDGE` pins it deliberately.
+ */
+const NOW = Date.parse("2026-09-04T12:00:00Z");
+
+/** A minute before the next hour: the one tick that *must* move the window. */
+const HOUR_EDGE = NOW + 59 * CLOCK_TICK_MS;
 
 function controller(over: Partial<ControllerInfo>): ControllerInfo {
   return {
@@ -111,7 +132,7 @@ function controller(over: Partial<ControllerInfo>): ControllerInfo {
     volume_traded: 0,
     close_type_counts: {},
     positions_summary: [],
-    deployed_at: new Date(Date.now() - 3 * 3_600_000).toISOString(),
+    deployed_at: new Date(NOW - 3 * HOUR_MS).toISOString(),
     config: {},
     ...over,
   } as ControllerInfo;
@@ -119,7 +140,7 @@ function controller(over: Partial<ControllerInfo>): ControllerInfo {
 
 /** A closed executor that stopped `daysAgo` ago — the only thing the window cuts. */
 function closed(id: string, daysAgo: number): ExecutorInfo {
-  const endedAt = Date.now() - daysAgo * DAY_MS;
+  const endedAt = NOW - daysAgo * DAY_MS;
   return {
     id,
     type: "position_executor",
@@ -172,8 +193,9 @@ let root: Root;
 
 beforeEach(() => {
   // `shouldAdvanceTime` keeps the `setTimeout(0)` pumping below working while
-  // still letting the test drive the clock's own interval by hand.
-  vi.useFakeTimers({ shouldAdvanceTime: true });
+  // still letting the test drive the clock's own interval by hand. `now` pins
+  // where in the hour that drift starts — see `NOW`.
+  vi.useFakeTimers({ shouldAdvanceTime: true, now: NOW });
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   Element.prototype.scrollIntoView = () => {};
   container = document.createElement("div");
@@ -268,6 +290,21 @@ describe("a bare clock tick", () => {
     await tick();
 
     expect(spy.trees).toEqual([]);
+  });
+
+  // The other three tests in this describe are only worth anything if a tick
+  // *can* rebuild the tree — otherwise they would still pass against a browser
+  // that had stopped tracking the window at all. This is the tick that must,
+  // and it is also the one this file used to land on by accident once an hour.
+  it("does rebuild when the tick crosses an hour, where the cutoff moves", async () => {
+    vi.setSystemTime(HOUR_EDGE);
+    await draw("/bots?population=terminated");
+    spy.populations = 0;
+    spy.trees = [];
+
+    await tick();
+
+    expect(spy.trees.length).toBeGreaterThan(0);
   });
 });
 
