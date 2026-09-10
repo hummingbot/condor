@@ -49,12 +49,18 @@ export const BEFORE_LEDGER_LABEL = "Before the ledger";
 /**
  * Which bucket an unowned leaf falls in: the cut is one timestamp.
  *
- * `deeds.since` is the earliest deed Condor recorded through the doors that
- * record *everything* (FEAT-105). A record older than that predates the ledger
- * and cannot be judged; a record newer than it, with no deed, was made by
- * something that is not Condor. That is an inference from a fact, not a
- * time-window guess — the guess this page has refused in writing since
- * FEAT-101.
+ * `deeds.since` is the instant from which this install has been recording at
+ * *every* door — the chat, a delegation, the dashboard and Telegram (FEAT-105,
+ * finished by CORR-622). A record older than that predates the ledger and
+ * cannot be judged; a record newer than it, with no deed, was made by something
+ * that is not Condor. That is an inference from a fact, not a time-window guess
+ * — the guess this page has refused in writing since FEAT-101.
+ *
+ * The cut is stamped by the build and not read off the oldest deed on disk,
+ * because a deed proves only that the door *it* came through was recording. For
+ * as long as the Telegram door was unwired, the oldest chat deed dated a
+ * completeness the log did not have, and every bot a person deployed from the
+ * chat after it was told it came from outside Condor.
  *
  * Two ways to end up unjudgeable, and both read *Before the ledger*: an install
  * whose log has never been complete (`since` is 0), and a record that does not

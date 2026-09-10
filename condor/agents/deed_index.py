@@ -7,8 +7,9 @@ bot you asked Condor for in the chat under a name you chose, so everything a
 human asked Condor to do arrived at ``/bots`` as one dishonest word,
 ``Unattributed`` — a bucket doing the work of three unrelated facts.
 
-FEAT-105 made the missing half exist: every door Condor's work leaves by now
-writes the same two files a tick writes, ``actions.jsonl`` and
+FEAT-105 made the missing half exist, and CORR-622 finished it: every door
+Condor's work leaves by -- the chat, a delegation, the dashboard and Telegram --
+now writes the same two files a tick writes, ``actions.jsonl`` and
 ``owned_bots.json``, in the run's own directory. This module is the reader. It
 turns those records into one map, ``bot base → OwnerRef``, and the fleet map
 carries it out beside the rules it supplements.
@@ -38,24 +39,26 @@ registry it rides beside, and it makes **no Hummingbot API call** — the promis
 that licenses the five-second poll of ``/bots`` is not weakened by an index that
 never leaves the filesystem.
 
-**Two sources, and only one of them can date the ledger.** The bot map reads
-every run's ledger — a chat's, a delegation's, the dashboard's, *and* a loop
-session's, because a session ledger is the same file recording the same deed and
-it is the only record of a bot a session deployed outside its own namespace
-(``ema_trend_loop``, on this install, owned by ``directional_trader`` and
-provable no other way). But :attr:`DeedIndex.since` — the instant before which
-Condor did *not* write down everything it did — is computed from the
-FEAT-105 doors alone. A session ledger predates complete coverage by months, so
-letting it set the cut would rename every unrecorded chat deploy of that era
-"outside Condor", which is a lie. When no such deed exists yet, ``since`` is
-``0.0`` and the honest reading is that nothing can be called outside.
+**Two sources, and neither of them dates the ledger.** The bot map reads every
+run's ledger — a chat's, a delegation's, Telegram's, the dashboard's, *and* a
+loop session's, because a session ledger is the same file recording the same
+deed and it is the only record of a bot a session deployed outside its own
+namespace (``ema_trend_loop``, on this install, owned by ``directional_trader``
+and provable no other way). But :attr:`DeedIndex.since` — the instant before
+which Condor did *not* write down everything it did — is **not** read off these
+rows at all. A row proves a deed happened; nothing in it proves that the door
+next to it was recording too, and the oldest row on disk is therefore an
+*over*-claim of coverage exactly when a door was wired late (CORR-622: the
+Telegram one, for a year). Coverage is a fact about the running build, so
+:func:`~condor.agents.deeds.coverage_since` stamps it instead, and this module
+reports what that stamp says.
 """
 
 from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -69,7 +72,9 @@ from condor.agents.actions import (
 from condor.agents.deeds import (
     CHAT_STRATEGY,
     DELEGATION_STRATEGY,
+    TELEGRAM_STRATEGY,
     UI_STRATEGY,
+    coverage_since,
     tag_for,
 )
 from condor.agents.ownership import (
@@ -92,7 +97,14 @@ PSEUDO_STRATEGY_NAMES = {
     CHAT_STRATEGY: "Chat",
     DELEGATION_STRATEGY: "Delegation",
     UI_STRATEGY: "Dashboard",
+    TELEGRAM_STRATEGY: "Telegram",
 }
+
+#: The pseudo-runs with no reference of their own: one directory per person,
+#: not one per conversation or task. They are the two that can never carry an
+#: attribution tag (:func:`~condor.agents.deeds.attribution_tag` gives a
+#: ref-less owner ``""``), and the two whose ``run_id`` is their own slug.
+REFLESS_STRATEGIES = frozenset({UI_STRATEGY, TELEGRAM_STRATEGY})
 
 
 @dataclass(frozen=True)
@@ -101,7 +113,8 @@ class OwnerRef:
 
     #: ``"condor.chat"``, ``"brigado.delegation"``, ``"directional_trader.ema_trend_loop"``.
     run_key: str
-    #: The conversation id, the delegation task id, ``"ui"``, or ``"s3"``.
+    #: The conversation id, the delegation task id, ``"ui"``, ``"telegram"``
+    #: or ``"s3"``.
     run_id: str
     #: Epoch seconds the deed happened. Also how a name reused by a second run
     #: is resolved: the newest claim wins.
@@ -121,15 +134,21 @@ class DeedIndex:
     #: ``{run_key}_{conversation_id}``, and the conversation ids are only
     #: discoverable by the walk this index is already doing.
     #:
-    #: Chats and delegations only. The dashboard is a person pressing a button —
-    #: there is no model to hand a tag to, so it can never have set one, and
-    #: listing a tag it could not have used would invite a match that is a lie.
+    #: Chats and delegations only. The dashboard and Telegram are a person
+    #: pressing a button — there is no model to hand a tag to, so neither can
+    #: ever have set one, and listing a tag it could not have used would invite
+    #: a match that is a lie.
     tags: dict[str, list[str]] = field(default_factory=dict)
-    #: Epoch seconds of the earliest deed written by a door FEAT-105 wired, or
-    #: ``0.0`` when there is none. Before this instant Condor's record of its own
-    #: work is incomplete, so an unattributed record cannot be judged; after it,
-    #: an unattributed record was made by something that is not Condor. One
+    #: Epoch seconds from which this install has been recording at *every*
+    #: door (:func:`~condor.agents.deeds.coverage_since`), or ``0.0`` when that
+    #: is unknown. Before this instant Condor's record of its own work is
+    #: incomplete, so an unattributed record cannot be judged; after it, an
+    #: unattributed record was made by something that is not Condor. One
     #: timestamp, and it is the whole difference between the two honest buckets.
+    #:
+    #: It is the *stamp* and not the oldest deed on disk, because those two
+    #: answer different questions: a deed says something was recorded, only the
+    #: stamp says everything was (CORR-622).
     since: float = 0.0
 
     def run_keys(self) -> list[str]:
@@ -151,12 +170,6 @@ class DeedIndex:
 # ── The walk ──
 
 
-def _earliest(values: Iterable[float]) -> float:
-    """The smallest positive value, or ``0.0`` — "nothing said when"."""
-    positive = [float(v) for v in values if v and float(v) > 0]
-    return min(positive) if positive else 0.0
-
-
 def _claim(bots: dict[str, OwnerRef], base: str, ref: OwnerRef) -> None:
     """Record a run's claim on a bot base, newest deed winning.
 
@@ -174,11 +187,12 @@ def _claim(bots: dict[str, OwnerRef], base: str, ref: OwnerRef) -> None:
 
 
 def _pseudo_runs() -> Iterator[tuple[Path, str, str]]:
-    """Every chat, delegation and dashboard run on disk: dir, slug, run id.
+    """Every chat, delegation, Telegram and dashboard run on disk: dir, slug, id.
 
-    The three doors FEAT-105 wired, and the only ones whose records prove *when*
-    Condor's log became complete. One ``iterdir`` per user per kind; the runs
-    themselves are not opened here.
+    Every door outside a loop, which is the set that has to stay whole: a door
+    missing from this walk is a door whose deeds are on disk and attributed to
+    nobody. One ``iterdir`` per user per kind; the runs themselves are not
+    opened here.
     """
     for user_id in paths.iter_user_ids():
         try:
@@ -186,7 +200,10 @@ def _pseudo_runs() -> Iterator[tuple[Path, str, str]]:
                 (paths.conversations_dir(user_id), CHAT_STRATEGY),
                 (paths.delegations_dir(user_id), DELEGATION_STRATEGY),
             )
-            ui_dir = paths.ui_dir(user_id)
+            refless = (
+                (paths.ui_dir(user_id), UI_STRATEGY),
+                (paths.telegram_dir(user_id), TELEGRAM_STRATEGY),
+            )
         except Exception:  # noqa: BLE001 - an unsafe id indexes nothing
             log.debug("deed_index: skipping user %r", user_id, exc_info=True)
             continue
@@ -198,7 +215,8 @@ def _pseudo_runs() -> Iterator[tuple[Path, str, str]]:
             for child in children:
                 if child.is_dir():
                     yield child, strategy, child.name
-        yield ui_dir, UI_STRATEGY, UI_STRATEGY
+        for directory, strategy in refless:
+            yield directory, strategy, strategy
 
 
 def _loop_runs() -> Iterator[tuple[Path, str, str]]:
@@ -254,13 +272,14 @@ def _note_tag(
 ) -> None:
     """Record the ``controller_id`` a run of this kind could have set.
 
-    Skips the dashboard: its ``run_id`` is the literal ``"ui"`` rather than a
-    reference to anything, which is the same fact
+    Skips the ref-less doors, the dashboard and Telegram: their ``run_id`` is
+    their own slug rather than a reference to anything, which is the same fact
     :func:`~condor.agents.deeds.attribution_tag` states from the other side by
     giving a ref-less owner no tag. Kept as one rule read twice rather than a
-    second opinion about who can be tagged.
+    second opinion about who can be tagged. There is also nobody to hand a tag
+    to at either door — a button press has no model in it.
     """
-    if strategy == UI_STRATEGY:
+    if strategy in REFLESS_STRATEGIES:
         return
     tag = tag_for(run_key, run_id)
     if tag and tag not in tags.setdefault(run_key, []):
@@ -273,14 +292,14 @@ def _index_pseudo_run(
     run_id: str,
     bots: dict[str, OwnerRef],
     tags: dict[str, list[str]],
-) -> float:
-    """Index one chat/delegation/dashboard run; return its earliest deed.
+) -> None:
+    """Index one chat/delegation/Telegram/dashboard run.
 
     Ledger first, and for a run that has one that is the only file opened. The
-    fallback below is for the run that has deeds and *no* ledger — a turn that
-    stopped a bot rather than deploying one (nothing to own, but it still dates
-    the log), or the narrow window in which a deed's rows landed and its ledger
-    write did not.
+    fallback below is for the run that has deeds and *no* ledger — a turn whose
+    rows name a bot nothing claimed, or the narrow window in which a deed's rows
+    landed and its ledger write did not. A run that only stopped things owns
+    nothing and is indexed as nothing.
     """
     owned = read_owned(directory)
     if owned:
@@ -288,12 +307,12 @@ def _index_pseudo_run(
         _note_tag(tags, strategy, run_key, run_id)
         for bot in owned:
             _claim(bots, bot.base, OwnerRef(run_key, run_id, bot.since))
-        return _earliest(bot.since for bot in owned)
+        return
     if not (directory / ACTIONS_FILENAME).exists():
-        return 0.0
+        return
     rows = read_actions(directory, limit=MAX_ACTION_LINES)
     if not rows:
-        return 0.0
+        return
     # No ledger means no namespace was written down, so the acting agent is
     # unrecoverable and the default one is the honest answer.
     run_key = f"{CHAT_SLUG}.{strategy}"
@@ -314,16 +333,14 @@ def _index_pseudo_run(
     for row in rows:
         if row.verb == DEPLOY_VERB and row.ok and row.subject:
             _claim(bots, row.subject, OwnerRef(run_key, run_id, row.at))
-    return _earliest(row.at for row in rows)
 
 
 def _build() -> DeedIndex:
     bots: dict[str, OwnerRef] = {}
     tags: dict[str, list[str]] = {}
-    firsts: list[float] = []
     for directory, strategy, run_id in _pseudo_runs():
         try:
-            firsts.append(_index_pseudo_run(directory, strategy, run_id, bots, tags))
+            _index_pseudo_run(directory, strategy, run_id, bots, tags)
         except Exception:  # noqa: BLE001 - one unreadable run is not the fleet
             log.debug("deed_index: unreadable run %s", directory, exc_info=True)
     for directory, run_key, run_id in _loop_runs():
@@ -335,7 +352,7 @@ def _build() -> DeedIndex:
     return DeedIndex(
         bots=bots,
         tags={key: sorted(values) for key, values in tags.items()},
-        since=_earliest(firsts),
+        since=coverage_since(),
     )
 
 

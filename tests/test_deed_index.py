@@ -4,9 +4,11 @@ The index turns FEAT-105's deeds into an answer to *"whose trading is this?"*,
 and every case here is a way that answer could be wrong or expensive: a chat's
 deploy left unattributed, a bound specialist's work credited to Condor, a stale
 record outranking an enforced rule, a name reused by a second run, an install
-whose conversations hold no deeds paying to find that out — and, the one that
-would be a *lie* rather than a miss, a loop session's months-old ledger dating
-the log and so renaming every unrecorded chat deploy "outside Condor".
+whose conversations hold no deeds paying to find that out — and, the ones that
+would be a *lie* rather than a miss, anything on disk dating the log and so
+renaming every unrecorded deploy "outside Condor": a loop session's months-old
+ledger, or the oldest row from a door that was recording while another was not
+(CORR-622).
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ from condor.agents.actions import DEPLOY_VERB
 from condor.agents.deed_index import build_deed_index, reset_deed_index_cache
 from condor.agents.fleet_map import build_fleet_map, reset_fleet_map_cache
 from condor.agents.ownership import BotLedger, bot_namespace
+from condor.fsutil import atomic_write_json
 
 USER = 4242
 
@@ -148,6 +151,32 @@ def test_a_delegation_and_the_dashboard_get_their_own_run_keys():
     assert index.bots["pressed-bot"].run_id == "ui"
 
 
+def test_a_telegram_deploy_is_attributed_to_the_telegram_door():
+    """`condor.telegram`, its own run key — not the dashboard's and not nobody's."""
+    deeds.record_direct(
+        deeds.for_telegram(USER),
+        verb=DEPLOY_VERB,
+        summary="Deploy bot tg-bot",
+        subject="tg-bot",
+    )
+
+    index = build_deed_index()
+    assert index.bots["tg-bot"].run_key == "condor.telegram"
+    assert index.bots["tg-bot"].run_id == "telegram"
+
+
+def test_the_telegram_doors_deeds_never_get_a_tag():
+    """Ref-less, like the dashboard: ``condor.telegram_telegram`` names nothing."""
+    deeds.record_direct(
+        deeds.for_telegram(USER),
+        verb="create_grid_executor",
+        summary="Create grid executor on SOL-USDC",
+    )
+    reset_deed_index_cache()
+
+    assert "condor.telegram" not in build_deed_index().tags
+
+
 def test_a_deploy_instance_is_indexed_under_its_base():
     """`-20260731-101500` is a sibling of the name that was asked for, not a bot."""
     _chat_deploy("c_s", "chat-bot-20260731-101500")
@@ -157,17 +186,20 @@ def test_a_deploy_instance_is_indexed_under_its_base():
     assert index.owner_of("chat-bot-20260901-000000").run_key == "condor.chat"
 
 
-def test_a_run_with_deeds_but_no_ledger_still_dates_the_log():
-    """A turn that stopped a bot owns nothing — and still proves when this began."""
+def test_a_run_that_only_stopped_something_owns_nothing():
+    """A turn that stopped a bot deployed none, so it claims none.
+
+    It used to *date* the log as well. It does not any more: a row proves what
+    one door recorded and never that the others were, which is how the Telegram
+    door stayed silent under a cut that claimed to cover it (CORR-622).
+    """
     deeds.record_direct(
         deeds.for_conversation(USER, "c_stop"),
         verb="manage_bots:stop",
         summary="Stop bot someone-elses-bot",
     )
 
-    index = build_deed_index()
-    assert index.bots == {}
-    assert index.since > 0
+    assert build_deed_index().bots == {}
 
 
 def test_a_deploy_whose_ledger_write_was_lost_is_recovered_from_the_log():
@@ -206,8 +238,9 @@ def test_an_install_with_no_deeds_reads_nothing_and_judges_nothing(monkeypatch):
 
     index = build_deed_index()
     assert index.bots == {}
-    # Nothing recorded means nothing can be called "outside Condor" yet.
-    assert index.since == 0.0
+    # The cut is the build's own stamp, so it stands whether or not anything
+    # has been recorded yet: every door in this build records.
+    assert index.since == deeds.coverage_since()
 
 
 def test_a_loop_sessions_ledger_names_its_bot_but_does_not_date_the_log(
@@ -219,7 +252,8 @@ def test_a_loop_sessions_ledger_names_its_bot_but_does_not_date_the_log(
     outside the namespace and never declared, which is the real shape on this
     install — is still attributable, because the ledger is a record of a deed.
     But letting it set ``since`` would rename every chat deploy of that era
-    "outside Condor", so the cut is computed from FEAT-105's doors alone.
+    "outside Condor" — and so would the oldest row of a door that was recording
+    while another was not. The cut is stamped by the build instead (CORR-622).
     """
     _write_agent(tmp_path, "directional_trader", "Directional Trader")
     sdir = _write_strategy(tmp_path, "directional_trader", "ema_trend_loop")
@@ -235,10 +269,32 @@ def test_a_loop_sessions_ledger_names_its_bot_but_does_not_date_the_log(
     index = build_deed_index()
     assert index.bots["ema_trend_loop"].run_key == "directional_trader.ema_trend_loop"
     assert index.bots["ema_trend_loop"].run_id == "s2"
-    assert index.since == 0.0
+    assert index.since > 1_000.0
 
+    # Nor does a chat deed of that era, for the same reason: no row on disk
+    # dates the log, because no row can speak for the door beside it.
     _chat_deploy("c_later", "chat-bot", at=5_000.0)
-    assert build_deed_index().since == 5_000.0
+    assert build_deed_index().since > 5_000.0
+
+
+def test_a_late_wired_door_moves_the_cut_off_the_oldest_deed():
+    """The bug this item closed, seen from the index (CORR-622).
+
+    An install that has been recording its chat since ``1_000`` and only began
+    recording Telegram when this build arrived has covered nothing in between.
+    The cut used to be the oldest deed, ``1_000``, and every bot deployed from
+    Telegram since — on this product, most of them — was newer than it and had
+    no deed, which the browser reads as "made by something that is not Condor".
+    """
+    atomic_write_json(
+        paths.deed_coverage_path(),
+        {"doors": ["conversation", "delegation", "ui"], "since": 1_000.0},
+    )
+    _chat_deploy("c_ancient", "old-chat-bot", at=1_000.0)
+
+    index = build_deed_index()
+    assert index.bots["old-chat-bot"].at == 1_000.0, "the deed is still attributed"
+    assert index.since > 1_000.0, "but it no longer dates a coverage it cannot prove"
 
 
 # ── What the map ships ──

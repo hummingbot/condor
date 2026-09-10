@@ -14,7 +14,9 @@ apart) and the line between them is *who writes and when*:
     ├── users/{user_id}/               # the runtime store: one conversation's
     │   ├── conversations/{conv_id}/   # worth of thinking, written turn by turn
     │   ├── delegations/{task_id}/     # by a live session
-    │   └── ui/                        # ...and what they did to the world by hand
+    │   ├── ui/                        # ...and what they did to the world by
+    │   └── telegram/                  # hand, from the dashboard and from chat
+    ├── deed_coverage.json
     ├── state/{namespace}/
     └── telemetry/
 
@@ -144,6 +146,7 @@ USERS_DIRNAME = "users"
 CONVERSATIONS_DIRNAME = "conversations"
 DELEGATIONS_DIRNAME = "delegations"
 UI_DIRNAME = "ui"
+TELEGRAM_DIRNAME = "telegram"
 
 # Every id here becomes a directory name, so none of them may escape one.
 _SAFE_ID = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -375,6 +378,29 @@ def ui_dir(user_id: int | str) -> Path:
     rather than a field in a row, which is a claim a route cannot forget to make.
     """
     return user_dir(user_id) / UI_DIRNAME
+
+
+def telegram_dir(user_id: int | str) -> Path:
+    """What this person did to the world straight from Telegram (CORR-622).
+
+    The fifth door, and on this product the busiest one: ``CLAUDE.md`` opens
+    with "Condor is a Telegram bot". It is shaped like :func:`ui_dir` and for
+    the same reason -- a Deploy pressed in ``/executors`` belongs to no
+    conversation and no task, so its deeds accumulate per *person* -- and it is
+    kept apart from ``ui/`` because "somebody pressed Deploy in the dashboard"
+    and "somebody pressed Deploy in the chat" are different answers to the same
+    question.
+    """
+    return user_dir(user_id) / TELEGRAM_DIRNAME
+
+
+def deed_coverage_path() -> Path:
+    """When this install began recording at *every* door (CORR-622).
+
+    Not under ``users/``: it is a fact about the build, not about a person.
+    :func:`condor.agents.deeds.coverage_since` owns what goes in it.
+    """
+    return runtime_root() / "deed_coverage.json"
 
 
 def state_dir(namespace: str) -> Path:

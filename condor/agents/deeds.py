@@ -7,10 +7,19 @@ into ``owned_bots.json``. Both files live in the run's own directory, and every
 attribution surface in the codebase reads them.
 
 Until this module, ``append_actions`` had **exactly one caller** — the tick
-engine — so three of the five doors Condor's work leaves by wrote nothing at
+engine — so four of the five doors Condor's work leaves by wrote nothing at
 all: a bot you asked for in the chat, an executor a delegation opened, a Deploy
-pressed on ``/bots``. The attribution surfaces were not broken; they were
-reporting, accurately, that nothing had told them anything.
+pressed on ``/bots``, and a Deploy pressed in Telegram. The attribution
+surfaces were not broken; they were reporting, accurately, that nothing had
+told them anything.
+
+FEAT-105 wired the first three of those; the Telegram one stayed unwired
+(CORR-622), which on a product whose ``CLAUDE.md`` opens with "Condor is a
+Telegram bot for monitoring and trading" was the largest hole of the four. It
+is wired here, and :func:`coverage_since` is the other half of that fix: what
+the log covers is a fact about *this build's* doors, and a reader that computes
+it from the recorded rows alone cannot tell a door that recorded nothing from a
+door that was never asked to.
 
 This module is the missing half, and it is deliberately thin. It adds no file,
 no filename and no row shape: a deed log *is* an action log, so
@@ -41,6 +50,7 @@ never cost a deploy, so every entry point swallows its own failures the way
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from dataclasses import dataclass
@@ -56,6 +66,7 @@ from condor.agents.actions import (
     deployed_bot_names,
 )
 from condor.agents.ownership import BotLedger, bot_namespace
+from condor.fsutil import atomic_write_json
 from condor.memory.paths import CHAT_SLUG
 
 log = logging.getLogger(__name__)
@@ -68,27 +79,45 @@ log = logging.getLogger(__name__)
 CHAT_STRATEGY = "chat"
 DELEGATION_STRATEGY = "delegation"
 UI_STRATEGY = "ui"
+TELEGRAM_STRATEGY = "telegram"
 
 #: Slugs a user-created strategy may not take, or its run key would collide
 #: with a pseudo-run's and the two would report as one.
-RESERVED_STRATEGY_SLUGS = frozenset({CHAT_STRATEGY, DELEGATION_STRATEGY, UI_STRATEGY})
+RESERVED_STRATEGY_SLUGS = frozenset(
+    {CHAT_STRATEGY, DELEGATION_STRATEGY, UI_STRATEGY, TELEGRAM_STRATEGY}
+)
 
 # The kinds of run this module knows how to find a directory for.
 KIND_CONVERSATION = "conversation"
 KIND_DELEGATION = "delegation"
 KIND_UI = "ui"
+KIND_TELEGRAM = "telegram"
 
 _STRATEGY_FOR_KIND = {
     KIND_CONVERSATION: CHAT_STRATEGY,
     KIND_DELEGATION: DELEGATION_STRATEGY,
     KIND_UI: UI_STRATEGY,
+    KIND_TELEGRAM: TELEGRAM_STRATEGY,
 }
+
+#: Every door a deed can be recorded at, in this build. Written to disk by
+#: :func:`coverage_since`, so an install that *gains* a door can tell that it
+#: did -- which is the only way the coverage claim can be checked against
+#: something rather than assumed.
+DOORS = tuple(sorted(_STRATEGY_FOR_KIND))
 
 # Outside a loop there is no tick. Zero is the honest value rather than a
 # fabricated number: every reader already treats the tick column as allowed to
 # say nothing (``build_deployments``: "the tick column is the one heuristic, and
 # it is allowed to say nothing").
 NO_TICK = 0
+
+#: When this process started. The earliest instant a build that records at every
+#: door could have been recording, and so what :func:`coverage_since` stamps
+#: with: dating coverage from the first time something *asked* would put every
+#: deed done between the boot and that question before the cut, and a
+#: conversation a minute old would be told it predates the log.
+_PROCESS_START = time.time()
 
 
 @dataclass(frozen=True)
@@ -150,6 +179,19 @@ def for_ui(user_id: int | str | None) -> DeedOwner:
     supply it.
     """
     return DeedOwner(kind=KIND_UI, user_id=user_id)
+
+
+def for_telegram(user_id: int | str | None) -> DeedOwner:
+    """The owner of a mutation made straight from Telegram (CORR-622).
+
+    :func:`for_ui`'s twin, and ref-less for the same reason: a ``/executors``
+    deploy belongs to no conversation and no task, so the acting person is the
+    directory the record lands in. Kept apart from ``ui`` rather than folded
+    into it because the two are different answers to the same question -- the
+    dashboard and the chat are different rooms, and a surface that cannot tell
+    them apart is back to guessing which one deployed this.
+    """
+    return DeedOwner(kind=KIND_TELEGRAM, user_id=user_id)
 
 
 def run_key_for(owner: DeedOwner) -> str:
@@ -218,6 +260,8 @@ def deed_dir(owner: DeedOwner) -> Path | None:
             return paths.delegation_dir(owner.user_id, owner.ref)
         if owner.kind == KIND_UI:
             return paths.ui_dir(owner.user_id)
+        if owner.kind == KIND_TELEGRAM:
+            return paths.telegram_dir(owner.user_id)
     except Exception:  # noqa: BLE001 - an unsafe id means no record, not a 500
         log.debug("deeds: no directory for %r", owner, exc_info=True)
     return None
@@ -301,3 +345,47 @@ def _write(owner: DeedOwner, actions: list[AgentAction], deployed: list[str]) ->
     )
     for name in deployed:
         ledger.note_deploy(name)
+
+
+# ── What the log covers ──
+
+
+def coverage_since(now: float | None = None) -> float:
+    """The instant from which this build has been recording at **every** door.
+
+    Completeness is a property of the *code*, not of the rows: the log covers
+    everything from the moment a build that records at every door started
+    running, and no row can say when that was. The first reading of this fact
+    computed it from the rows -- the earliest deed any wired door had written --
+    which was true only while every door was wired at once. It stopped being
+    true the moment one was not: an install whose chat has been recording since
+    March and whose Telegram door only began today would read March, and every
+    Telegram deploy in between -- on this product, most of them -- was then
+    "made by something that is not Condor" (CORR-622).
+
+    So the fact is stamped rather than inferred. The first time this build sees
+    its own :data:`DOORS` set, it writes down when; a build that *changes* that
+    set restamps, because a door that was not recording yesterday cannot have
+    been covered yesterday. The cut therefore only ever moves forward, and the
+    era before it is unjudgeable rather than accused -- the conservative
+    direction, and the one every reader of ``since`` already takes.
+
+    Never raises, and answers ``0.0`` when it cannot write the stamp down: a
+    cut nothing remembers would be re-dated by every boot, and "no cut" is what
+    every consumer already reads as "judge nothing".
+    """
+    stamp = _PROCESS_START if now is None else now
+    doors = list(DOORS)
+    path = paths.deed_coverage_path()
+    try:
+        record = json.loads(path.read_text())
+        if list(record.get("doors") or ()) == doors and float(record["since"]) > 0:
+            return float(record["since"])
+    except (OSError, ValueError, TypeError, KeyError):
+        pass  # no stamp yet, an unreadable one, or one from a different build
+    try:
+        atomic_write_json(path, {"doors": doors, "since": stamp})
+    except Exception:  # noqa: BLE001 - an undatable cut judges nothing
+        log.debug("deeds: could not stamp deed coverage", exc_info=True)
+        return 0.0
+    return stamp
