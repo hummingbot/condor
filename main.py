@@ -1,5 +1,6 @@
 import asyncio
 import importlib
+import ipaddress
 import logging
 import os
 import sys
@@ -7,7 +8,7 @@ from functools import partial
 from pathlib import Path
 from urllib.parse import urlparse
 
-from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import BotCommand, CopyTextButton, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest, NetworkError
 from telegram.ext import (
     Application,
@@ -66,6 +67,23 @@ def _get_start_menu_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard)
 
 
+def _is_loopback_host(host: str) -> bool:
+    """True when the host is only reachable from the machine running the bot.
+
+    Covers ``localhost``, the whole 127.0.0.0/8 loopback range and IPv6
+    loopback (``::1``). A bare dotless LAN name has no public TLD either, so
+    it is treated the same way — Telegram rejects it in a URL button.
+    """
+    if not host:
+        return False
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return "." not in host
+
+
 def _dashboard_button_url(url: str) -> str | None:
     """The dashboard link Telegram will accept in an inline URL button, if any.
 
@@ -94,19 +112,30 @@ async def web_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     token = create_login_token(user.id, user.username or "", user.first_name or "")
 
     url = f"{WEB_URL}/login?token={token}"
+
+    # Telegram rejects URL buttons pointing at localhost/loopback hosts, so the
+    # Open Dashboard button is only emitted for a reachable host. The Copy Link
+    # button (plain text copy) and the monospace URL work everywhere.
     _hostname = urlparse(WEB_URL).hostname or ""
-    is_localhost = (
-        "localhost" in WEB_URL or "127.0.0.1" in WEB_URL or "." not in _hostname
-    )
+    is_localhost = _is_loopback_host(_hostname)
 
     button_url = _dashboard_button_url(url)
-    keyboard = (
-        InlineKeyboardMarkup(
-            [[InlineKeyboardButton("🌐 Open Dashboard", url=button_url)]]
+    if button_url and not is_localhost:
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("🌐 Open Dashboard", url=button_url),
+                    InlineKeyboardButton("📋 Copy Link", copy_text=CopyTextButton(text=url)),
+                ]
+            ]
         )
-        if button_url
-        else None
-    )
+    else:
+        # A loopback URL button is rejected by Telegram and only opens on the
+        # machine running the bot anyway, so local hosts get the copy control
+        # alone — it works everywhere.
+        keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("📋 Copy Link", copy_text=CopyTextButton(text=url))]]
+        )
 
     if is_localhost:
         # A loopback button only opens on the machine running the bot, so the
