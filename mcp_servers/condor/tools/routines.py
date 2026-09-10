@@ -746,14 +746,16 @@ def create_routine(
     routines_dir.mkdir(parents=True, exist_ok=True)
     file_path.write_text(code)
 
-    from routines.base import discover_routines_from_path
+    from routines.base import discover_routines_from_path, load_error
 
     loaded = discover_routines_from_path(routines_dir)
     if name not in loaded:
+        # The reason discovery recorded, not a guess: a routine refused for a
+        # credential-shaped Config default (SEC-627) is not a syntax error, and
+        # telling the author so is the only feedback that door gives.
+        reason = load_error(file_path) or "check for syntax errors"
         file_path.unlink()
-        return {
-            "error": "Routine file was created but failed to load. Check for syntax errors."
-        }
+        return {"error": f"Routine file was created but failed to load: {reason}"}
 
     routine = loaded[name]
     result = {
@@ -832,13 +834,15 @@ def edit_routine(
     old_code = file_path.read_text()
     file_path.write_text(code)
 
-    from routines.base import discover_routines_from_path
+    from routines.base import discover_routines_from_path, load_error
 
     loaded = discover_routines_from_path(routines_dir)
     if name not in loaded:
+        reason = load_error(file_path) or "check for syntax errors"
         file_path.write_text(old_code)
         return {
-            "error": "Updated code failed to load (syntax error?). Reverted to previous version."
+            "error": f"Updated code failed to load: {reason}. "
+            "Reverted to previous version."
         }
 
     routine = loaded[name]

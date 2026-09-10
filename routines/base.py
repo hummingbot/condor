@@ -9,6 +9,7 @@ Routine Types:
 
 import importlib
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -99,6 +100,207 @@ def normalize_result(result) -> RoutineResult:
     return RoutineResult(text=str(result) if result else "Completed")
 
 
+# ── Secret-shaped Config defaults (SEC-627) ──────────────────────────────────
+#
+# A routine's *definition* is install-public: name, description, the ``fields``
+# schema below and the source file are readable by every approved user
+# (SEC-617, and the ``condor.routine_store`` module docstring for why). So a
+# credential typed as a ``Field(default=...)`` is published the moment the file
+# lands. The guard therefore sits at **discovery** — in ``RoutineInfo`` — not on
+# any one route: every surface that can show a default (``get_fields`` for the
+# web list, the MCP schema and ``condor.primitives.describe``; the default
+# config in the Telegram editor; and ``GET /routines/{name}/source``, which
+# resolves through ``_discover_all`` before it reads the file) is downstream of
+# a ``RoutineInfo`` existing. A routine that trips the guard is not published,
+# so it appears on none of them — and refusing is the only response that also
+# covers the source route, where redacting a value is impossible without
+# mangling the file.
+
+# Literal shapes that are a credential nearly wherever they appear: the value is
+# its own evidence, so these fire whatever the field is called.
+_SECRET_VALUE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("an OpenAI/Anthropic-style secret key", re.compile(r"\bsk-[A-Za-z0-9_-]{16,}")),
+    ("a Stripe-style key", re.compile(r"\b[rs]k_(?:live|test)_[A-Za-z0-9]{16,}")),
+    (
+        "a GitHub token",
+        re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,})"),
+    ),
+    ("a Slack token", re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}")),
+    ("an AWS access key id", re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b")),
+    ("a Google API key", re.compile(r"\bAIza[A-Za-z0-9_-]{30,}")),
+    (
+        "a JSON Web Token",
+        re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+"),
+    ),
+    ("a PEM private key", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
+    (
+        "a credential in a URL query string",
+        re.compile(
+            r"[?&](?:api[-_]?key|apikey|access[-_]?token|auth[-_]?token"
+            r"|secret|password|passwd|pwd)=[^&\s\"\']{8,}",
+            re.I,
+        ),
+    ),
+    ("a password in a URL", re.compile(r"://[^/\s:@]+:[^/\s:@]{6,}@")),
+)
+
+# Field names that declare a credential on their own. Bare ``token`` is absent
+# on purpose: in this codebase a token is usually a coin, and ``token="USDC"``
+# is the single most common field a routine has.
+_SECRET_NAME_PARTS = (
+    "password",
+    "passwd",
+    "passphrase",
+    "secret",
+    "api_key",
+    "apikey",
+    "private_key",
+    "privkey",
+    "mnemonic",
+    "seed_phrase",
+    "credential",
+    "access_token",
+    "auth_token",
+    "api_token",
+    "bearer",
+)
+
+# Substrings that mark a value as a stand-in rather than a live credential.
+_PLACEHOLDER_MARKERS = (
+    "your",
+    "changeme",
+    "change_me",
+    "placeholder",
+    "example",
+    "sample",
+    "dummy",
+    "fake",
+    "redacted",
+    "xxxx",
+    "todo",
+    "${",
+    "{{",
+    "<",
+)
+_PLACEHOLDER_VALUES = frozenset({"none", "null", "n/a", "unset", "disabled", "todo"})
+
+# A live credential is essentially never this short, and short strings ("spot",
+# "SOL-USDC") are what routine configs are mostly made of.
+_MIN_SECRET_LEN = 8
+
+# Defaults can be nested (a dict of settings, a sub-model); walk them, but stop
+# well before anything pathological.
+_MAX_DEFAULT_DEPTH = 3
+_MAX_DEFAULT_ITEMS = 50
+
+
+class SecretDefaultError(ValueError):
+    """A routine ``Config`` ships a credential-shaped default or description."""
+
+
+def _is_placeholder(text: str) -> bool:
+    """True when the value reads as a stand-in rather than a live credential."""
+    lowered = text.strip().lower()
+    if len(lowered) < _MIN_SECRET_LEN or lowered in _PLACEHOLDER_VALUES:
+        return True
+    return any(marker in lowered for marker in _PLACEHOLDER_MARKERS)
+
+
+def _names_a_secret(path: str) -> bool:
+    """True when any segment of a field path names a credential."""
+    lowered = path.lower().replace("-", "_")
+    return any(part in lowered for part in _SECRET_NAME_PARTS)
+
+
+def _iter_default_strings(path: str, value: Any, depth: int = 0):
+    """Yield ``(field path, text)`` for every string reachable in a default."""
+    if isinstance(value, str):
+        yield path, value
+        return
+    if depth >= _MAX_DEFAULT_DEPTH:
+        return
+    if isinstance(value, BaseModel):
+        value = vars(value)
+    if isinstance(value, dict):
+        for key, sub in list(value.items())[:_MAX_DEFAULT_ITEMS]:
+            yield from _iter_default_strings(f"{path}.{key}", sub, depth + 1)
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        for index, sub in enumerate(list(value)[:_MAX_DEFAULT_ITEMS]):
+            yield from _iter_default_strings(f"{path}[{index}]", sub, depth + 1)
+
+
+def _value_reason(text: str) -> str | None:
+    """The credential shape this literal matches, if any.
+
+    A match that is itself a placeholder (``sk-your-key-here``, the AWS docs'
+    ``AKIAIOSFODNN7EXAMPLE``) does not count: documentation strings carry those
+    on purpose and refusing to publish over one would be a false positive.
+    """
+    for label, pattern in _SECRET_VALUE_PATTERNS:
+        match = pattern.search(text)
+        if match and not _is_placeholder(match.group(0)):
+            return label
+    return None
+
+
+def secret_default_reasons(config_class: type[BaseModel]) -> list[str]:
+    """Why this ``Config`` must not be published — one line per offending field.
+
+    Two independent signals, both deliberately biased towards precision (a false
+    positive silently removes a working routine from the catalog):
+
+    - **the value**: a literal matching a known credential shape — an ``sk-``
+      key, a GitHub/Slack/AWS/Google key, a JWT, a PEM block, a URL carrying
+      ``api-key=`` or ``user:password@`` — wherever it appears, including in a
+      field ``description`` and the ``Config`` docstring;
+    - **the name**: a field whose path names a credential (``password``,
+      ``api_key``, ``private_key``, …) carrying a non-empty, non-placeholder
+      string default of at least 8 characters.
+
+    Nested defaults are walked, so ``Field(default={"api_key": "sk-…"})`` is
+    caught too. Never echoes the offending value — the reason names the field.
+
+    What it does **not** see: a ``default_factory`` (its value is not computed
+    here, on purpose: discovery must not run authors' code beyond the import),
+    a credential with no recognisable shape in a field with an innocuous name
+    (``rpc_url="https://…/9f3c…"``), a non-string default, and anything the
+    routine's ``run()`` prints or returns. It is a tripwire for the obvious
+    mistake, not a secret scanner.
+    """
+    reasons: list[str] = []
+    for field_name, field_info in config_class.model_fields.items():
+        if field_info.is_required():
+            continue
+        for path, text in _iter_default_strings(field_name, field_info.default):
+            label = _value_reason(text)
+            if label:
+                reasons.append(f"default of '{path}' looks like {label}")
+            elif _names_a_secret(path) and not _is_placeholder(text):
+                reasons.append(f"'{path}' is a credential field with a live default")
+        description = field_info.description or ""
+        label = _value_reason(description)
+        if label:
+            reasons.append(f"description of '{field_name}' contains {label}")
+    label = _value_reason(config_class.__doc__ or "")
+    if label:
+        reasons.append(f"the Config docstring contains {label}")
+    return reasons
+
+
+def check_config_defaults(config_class: type[BaseModel]) -> None:
+    """Raise :class:`SecretDefaultError` if this ``Config`` must not be published."""
+    reasons = secret_default_reasons(config_class)
+    if reasons:
+        raise SecretDefaultError(
+            "refusing to publish a credential-shaped Config — "
+            + "; ".join(reasons)
+            + ". Routine definitions are readable by every user of this install "
+            "(SEC-617), so a Config default is published the moment the file "
+            "lands — read credentials inside run() from the environment or "
+            "config.yml instead, never as a Field default."
+        )
+
+
 _routines_cache: dict[str, "RoutineInfo"] | None = None
 
 # {stem: mtime} of every file seen on the last scan of routines/ — including
@@ -112,6 +314,22 @@ _path_caches: dict[
     tuple[str, str | None],
     tuple[dict[str, float | None], dict[str, "RoutineInfo"]],
 ] = {}
+
+# {resolved file path: why it last failed to load}. Discovery only logs the
+# failure and moves on, so a write path (``manage_routines`` create/edit) has no
+# other way to tell an author *why* their file did not appear — and answering
+# "syntax error?" to a routine rejected for a secret-shaped default would send
+# them hunting for the wrong bug.
+_load_errors: dict[str, str] = {}
+
+
+def load_error(file_path: Path | str) -> str | None:
+    """The reason the routine file last failed to load, or None if it loaded."""
+    try:
+        key = str(Path(file_path).resolve())
+    except OSError:  # pragma: no cover - unresolvable path
+        return None
+    return _load_errors.get(key)
 
 
 def _safe_mtime(file_path: Path) -> float | None:
@@ -139,6 +357,12 @@ class RoutineInfo:
         source: str = "global",
         last_modified: float | None = None,
     ):
+        # Before anything else: a Config that would publish a credential is not
+        # allowed to become a RoutineInfo at all (SEC-627). Both discovery loops
+        # already treat a raising constructor as a failed load, so the routine
+        # is skipped and reaches no surface.
+        check_config_defaults(config_class)
+
         self.name = name
         self.config_class = config_class
         self.run_fn = run_fn
@@ -166,7 +390,15 @@ class RoutineInfo:
         return self.config_class()
 
     def get_fields(self) -> dict[str, dict]:
-        """Get field metadata for UI display."""
+        """Get field metadata for UI display.
+
+        **This output is install-public.** It is what ``GET /routines`` returns
+        to every approved user (SEC-617), what the MCP schema and
+        ``condor.primitives.describe`` print, and what the Telegram config
+        editor pre-fills — so a default here is a published value. Authors never
+        put a credential in one; :func:`secret_default_reasons` refuses to
+        publish a routine whose ``Config`` obviously does.
+        """
         fields = {}
         for name, field_info in self.config_class.model_fields.items():
             annotation = field_info.annotation
@@ -274,11 +506,13 @@ def discover_routines(force_reload: bool = False) -> dict[str, RoutineInfo]:
                 source="global",
                 last_modified=_safe_mtime(file_path),
             )
+            _load_errors.pop(str(file_path.resolve()), None)
             logger.debug(
                 f"Discovered routine: {file_path.stem} (continuous={is_continuous})"
             )
 
         except Exception as e:
+            _load_errors[str(file_path.resolve())] = str(e)
             logger.error(f"Failed to load routine {file_path.stem}: {e}")
 
     shared = _merged_from(shared_routines_roots(), force_reload=force_reload)
@@ -404,9 +638,11 @@ def discover_routines_from_path(
                 source=source,
                 last_modified=_safe_mtime(file_path),
             )
+            _load_errors.pop(str(file_path.resolve()), None)
             logger.debug(f"Discovered agent routine: {file_path.stem}")
 
         except Exception as e:
+            _load_errors[str(file_path.resolve())] = str(e)
             logger.error(f"Failed to load agent routine {file_path.stem}: {e}")
 
     _path_caches[cache_key] = (scanned_mtimes, routines)
