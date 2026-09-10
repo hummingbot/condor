@@ -2585,13 +2585,15 @@ export const api = {
     );
   },
 
+  // No `controller_id`: the create route reads only these three fields, so an
+  // id sent here would be dropped and the executor would come back under the
+  // trading API's `main` default anyway. See `run-attribution.ts`.
   createExecutor: (
     server: string,
     data: {
       executor_type: string;
       config: Record<string, unknown>;
       account_name?: string;
-      controller_id?: string;
     },
   ) =>
     apiFetch<{ status: string; executor_id: string }>(
