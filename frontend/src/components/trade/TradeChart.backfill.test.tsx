@@ -11,28 +11,28 @@
  * the effect's six dependencies, and no refetch when the props do not change.
  *
  * The same double mount fires the chart-init effect twice in one tick, so
- * `import("lightweight-charts")` is requested twice concurrently — and Vitest's
- * mocker answers the stub to the first request and raw-imports the real library
- * for the second. It is the concurrency, not StrictMode: two plain mounts in one
- * `act()` split the same way, and neither a static nor an awaited warm-up import
- * of the module changes it. The real `ChartWidget` then builds against a jsdom
- * that has no 2D canvas and schedules a draw frame, which fired after teardown,
- * outside every test, and exited the whole suite 1 with "2 unhandled errors"
- * while every test reported green (CORR-360).
+ * `import("lightweight-charts")` is requested twice concurrently — and a
+ * per-file `vi.mock` answered the stub to the first request and raw-imported
+ * the real library for the second. It is the concurrency, not StrictMode: two
+ * plain mounts in one `act()` split the same way, and neither a static nor an
+ * awaited warm-up import of the module changes it. The real `ChartWidget` then
+ * builds against a jsdom that has no 2D canvas and schedules a draw frame,
+ * which fired after teardown, outside every test, and exited the whole suite 1
+ * with "2 unhandled errors" while every test reported green (CORR-360).
  *
- * So this file owns the two things the chart library needs and jsdom does not
- * have: the frame queue — nothing runs unless we run it, and teardown proves no
- * frame outlived the tree — and a 2D context. Whichever module answers the
- * import, it can no longer leave anything behind.
+ * The library is now substituted at the resolver, so both requests get the same
+ * double and no real widget can be built at all (CORR-368). This file keeps its
+ * own frame queue and 2D context anyway: they are what proves the StrictMode
+ * mount leaves nothing behind, and they cost nothing.
  *
  * @vitest-environment jsdom
  */
 
-import * as charts from "lightweight-charts";
 import { act, StrictMode, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 
+import { chartDouble, createChart } from "@/test/lightweight-charts-double";
 import { TradeChart } from "./TradeChart";
 
 const CANDLES = [
@@ -48,37 +48,6 @@ const store = vi.hoisted(() => ({
 const apiState = vi.hoisted(() => ({
   getCandles: vi.fn(),
 }));
-
-vi.mock("lightweight-charts", () => {
-  /** Only the shape the component walks matters here; the rest answers no-ops. */
-  const stub = (own: Record<string, unknown>) =>
-    new Proxy(own, {
-      get(target, prop) {
-        if (typeof prop !== "string" || prop === "then") return undefined;
-        if (!(prop in target)) target[prop] = vi.fn();
-        return target[prop];
-      },
-    });
-
-  const series = stub({
-    coordinateToPrice: vi.fn(() => 100),
-    priceToCoordinate: vi.fn(() => 0),
-    createPriceLine: vi.fn(() => ({})),
-  });
-  const chart = stub({
-    addSeries: vi.fn(() => series),
-    timeScale: vi.fn(() => stub({})),
-  });
-
-  return {
-    createChart: vi.fn(() => chart),
-    CandlestickSeries: {},
-    LineSeries: {},
-    ColorType: { Solid: "solid" },
-    CrosshairMode: { Normal: 0 },
-    LineStyle: { Solid: 0, Dotted: 1, Dashed: 2 },
-  };
-});
 
 vi.mock("@/hooks/useCandleStore", () => ({
   useCandleStore: () => ({
@@ -109,8 +78,8 @@ declare global {
   var IS_REACT_ACT_ENVIRONMENT: boolean;
 }
 
-/** The stub's factory, read back to prove the component got the stub. */
-const createChartStub = charts.createChart as unknown as Mock;
+/** The double's factory, read back to prove the component reached the chart. */
+const createChartStub = createChart as unknown as Mock;
 
 /** Frames the render scheduled, so teardown can prove none outlive the tree. */
 const pendingFrames = new Map<number, FrameRequestCallback>();
@@ -165,14 +134,12 @@ async function render(strict: boolean, extra: Partial<ComponentProps<typeof Trad
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
-  // A single mount asks for the chart library once, so the stub is what must
-  // have answered — the module identity is a result here, not an assumption.
-  // The StrictMode path asks twice at once, which Vitest's mocker cannot serve
-  // (see the docblock); the doubles above are what make that harmless.
-  if (!strict) {
-    expect(createChartStub).toHaveBeenCalled();
-    expect(container.querySelector("canvas")).toBeNull();
-  }
+  // Both paths ask for the chart library — the StrictMode one twice at once —
+  // and the resolver hands the double to every request, so the component got a
+  // chart and jsdom got no canvas. The module identity is a result here, not an
+  // assumption, and it holds on the concurrent path too.
+  expect(createChartStub).toHaveBeenCalled();
+  expect(container.querySelector("canvas")).toBeNull();
 }
 
 beforeEach(() => {
@@ -197,7 +164,8 @@ beforeEach(() => {
   vi.stubGlobal("cancelAnimationFrame", (id: number) => {
     pendingFrames.delete(id);
   });
-  createChartStub.mockClear();
+  // Discards the charts the last test built and reinstates the price scale.
+  chartDouble.reset({ toPrice: () => 100 });
   store.mergeCandles.mockClear();
   store.setDuration.mockClear();
   apiState.getCandles.mockReset();
