@@ -16,7 +16,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { EditorModal } from "@/components/editor/EditorModal";
@@ -58,6 +58,7 @@ import {
   type ControllerPerformanceSnapshot,
   type ExecutorInfo,
 } from "@/lib/api";
+import { useCoarseClock } from "@/hooks/useCoarseClock";
 import { controllerKey } from "@/lib/controller-identity";
 import {
   formatCurrencyVolume,
@@ -414,30 +415,6 @@ export interface ExecutorPaging {
   loadMore: () => void;
 }
 
-// ── A coarse wall clock ──
-//
-// The runtime figure and every per-hour pace derived from it are elapsed time,
-// so they have to advance on their own — read once during render they would sit
-// frozen until a socket frame happened to re-render the browser, and a pace
-// whose divisor is stale is wrong rather than merely old.
-//
-// Subscribed to rather than sampled, so the read stays pure. The snapshot is
-// quantised to the tick because `useSyncExternalStore` compares snapshots with
-// `Object.is`: a raw `Date.now()` returns a new value on every call, including
-// the several React makes within one render pass, which it answers by
-// re-rendering forever.
-
-const CLOCK_TICK_MS = 60_000;
-
-function subscribeToClock(onChange: () => void) {
-  const id = setInterval(onChange, CLOCK_TICK_MS);
-  return () => clearInterval(id);
-}
-
-function clockSnapshot() {
-  return Math.floor(Date.now() / CLOCK_TICK_MS) * CLOCK_TICK_MS;
-}
-
 // ── Chart sizing ──
 
 /**
@@ -723,7 +700,7 @@ export function PerfBrowser({
    */
   const [execChart, setExecChart] = useState<"price" | "pnl">("price");
 
-  const now = useSyncExternalStore(subscribeToClock, clockSnapshot, clockSnapshot);
+  const now = useCoarseClock();
 
   // The scope lives in the URL, so `?scope=ctrl:<bot>:<config id>` is a link to
   // one controller and a reload lands back on it. Written with `replace` — the

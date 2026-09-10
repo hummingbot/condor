@@ -9,6 +9,7 @@ import {
   fleetRows,
   rowHref,
   dueInSec,
+  tickCountdownLabel,
   type FleetRow,
 } from "@/components/agent/workspace/fleet";
 import { ControllerToggle } from "@/components/perf/ControllerToggle";
@@ -19,9 +20,9 @@ import {
   visibleRows,
   type ExecutionRow,
 } from "@/components/chat/executionTree";
+import { useCoarseClock } from "@/hooks/useCoarseClock";
 import { useFleetData } from "@/hooks/useFleetData";
 import { useSeconds } from "@/hooks/useSeconds";
-import { countdown } from "@/lib/agent-attribution";
 import { api } from "@/lib/api";
 import { controllerKey } from "@/lib/controller-identity";
 import {
@@ -182,8 +183,24 @@ export function DockExecution({
   // this panel that moves on its own, and an interval running under a fleet
   // that is idle is an interval running for nothing.
   const anyRunning = agents.some((agent) => agent.status === "running");
-  const now = useSeconds(anyRunning);
-  const nowSec = now / 1000;
+  const nowSec = useSeconds(anyRunning) / 1000;
+
+  /**
+   * The clock the *fold* measures runtimes against — a minute, not a second.
+   *
+   * Two clocks rather than one, because the panel asks two different questions
+   * of the time. The countdown above is "how long until the next tick", which
+   * is a number that has to move every second to be worth printing. This one is
+   * "how long has this been running", which reaches the screen only through
+   * `formatRuntimeHours` — 0.1h above an hour, whole minutes below it — so a
+   * per-second value prints the same characters for sixty consecutive renders.
+   *
+   * They used to be the same clock, and `now` is a dependency of the `rows`
+   * memo: the panel rebuilt the whole tree and re-folded every agent, bot and
+   * controller once a second to arrive at a byte-identical fold (PERF-342).
+   * The tree build now runs on data changes and once a minute.
+   */
+  const now = useCoarseClock();
 
   /**
    * Everything trading, in the browser's one vocabulary and its one attribution.
@@ -601,7 +618,7 @@ function AgentRow({
               data-agent-due
               className={`shrink-0 font-mono ${due <= 0 ? "text-amber-400" : ""}`}
             >
-              {due > 0 ? `next in ${countdown(due)}` : `overdue ${countdown(-due)}`}
+              {tickCountdownLabel(due)}
             </span>
           )}
           {live.lastDid ? (
