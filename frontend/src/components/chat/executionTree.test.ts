@@ -19,6 +19,7 @@ import {
   openRows,
   visibleRows,
 } from "./executionTree";
+import type { FleetOwner } from "@/lib/agent-attribution";
 import type { AgentSummary, ControllerInfo } from "@/lib/api";
 import type { ConvertQuote, PerfLeaf } from "@/lib/perf-tree";
 
@@ -68,12 +69,35 @@ function agent(slug: string, name: string): AgentSummary {
   } as unknown as AgentSummary;
 }
 
-const rowsOf = (leaves: PerfLeaf[], agents: AgentSummary[] = []) =>
-  executionRows({ leaves, deeds: null, agents, convert, now: NOW });
+/**
+ * The dashboard door as the fleet map ships it: an empty namespace, and the
+ * word in `strategyName` (`PSEUDO_STRATEGY_NAMES`, never copied into the browser).
+ */
+const CONDOR_UI: FleetOwner = {
+  runKey: "condor.ui",
+  agentSlug: "condor",
+  agentName: "Condor",
+  strategySlug: "ui",
+  strategyName: "Dashboard",
+  namespace: "",
+  declaredBots: [],
+  agentIds: [],
+  live: null,
+};
+
+const rowsOf = (
+  leaves: PerfLeaf[],
+  agents: AgentSummary[] = [],
+  owners: FleetOwner[] = [CONDOR_UI],
+) => executionRows({ leaves, deeds: null, agents, owners, convert, now: NOW });
 
 /** Everything on screen with every row expanded — what the assertions read. */
-const allOpen = (leaves: PerfLeaf[], agents: AgentSummary[] = []) => {
-  const rows = rowsOf(leaves, agents);
+const allOpen = (
+  leaves: PerfLeaf[],
+  agents: AgentSummary[] = [],
+  owners: FleetOwner[] = [CONDOR_UI],
+) => {
+  const rows = rowsOf(leaves, agents, owners);
   return visibleRows(rows, new Set(rows.map((r) => r.id)));
 };
 
@@ -114,6 +138,19 @@ describe("the agent rows", () => {
     expect(row.label).toBe("Brigado / brl_mm");
   });
 
+  it("says the dashboard's word rather than its slug on a pseudo-run row", () => {
+    // `condor.ui` is a run with no strategy, built with an empty namespace — no
+    // `condor-ui-…` bot can exist, so `ui` is a slug naming nothing the reader
+    // has ever seen. The word comes off the map, and the row must say what the
+    // sidebar and its filter bubble say for the same key (READ-364).
+    const leaves = [leaf({ id: "c1", bot: "sol_scalper", agent: "condor.ui", how: "deed", net: 9 })];
+    const [row] = allOpen(leaves, [agent("condor", "Condor")]);
+
+    expect(row.label).toBe("Condor / Dashboard");
+    // The id is untouched: same row, same scope, same link.
+    expect(row.id).toBe("agent:condor.ui");
+  });
+
   it("keeps a residual run key named, and gives it no slug to open", () => {
     // Attributed — so it is in neither unowned bucket — but no listed agent
     // answers to it. Sweeping it away would lose money out of the total; a row
@@ -137,6 +174,7 @@ describe("the agent rows", () => {
       leaves: [started, ancient],
       deeds: deeds as never,
       agents: [],
+      owners: [],
       convert,
       now: NOW,
     });

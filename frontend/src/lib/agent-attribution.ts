@@ -345,8 +345,44 @@ export function provenanceOf(leaves: readonly { how?: Provenance }[]): Provenanc
 }
 
 /** The owner a run key names, or `undefined` when the map does not know it. */
-export function ownerOf(owners: FleetOwner[], runKey: string): FleetOwner | undefined {
+export function ownerOf(
+  owners: readonly FleetOwner[],
+  runKey: string,
+): FleetOwner | undefined {
   return owners.find((owner) => owner.runKey === runKey);
+}
+
+/**
+ * The three pseudo-strategies, in the order they became possible.
+ *
+ * `condor/agents/deeds.py`'s `RESERVED_STRATEGY_SLUGS`, mirrored — a chat, a
+ * delegation and the dashboard are runs without a strategy, but a run key needs
+ * two halves, so each gets a reserved slug of its own. They are named apart
+ * rather than lumped into one "not-a-loop" bucket for the reason Python names
+ * them apart: *"the chat deployed it"* and *"somebody pressed Deploy"* are
+ * different answers to the same question.
+ *
+ * A user-created strategy may not take these slugs, so a run key ending in one
+ * is a pseudo-run with certainty rather than by convention. That certainty is
+ * why this can stay a list of **slugs**: the *words* for a pseudo-run are not
+ * here and must not be, because they already ship on the wire — see
+ * {@link ownerRowLabel}.
+ */
+export const PSEUDO_STRATEGIES = ["chat", "delegation", "ui"] as const;
+
+const PSEUDO_SLUGS: ReadonlySet<string> = new Set<string>(PSEUDO_STRATEGIES);
+
+/** `"brigado.brl_mm"` → `{ agent: "brigado", strategy: "brl_mm" }`. */
+export function splitRunKey(runKey: string): { agent: string; strategy: string } {
+  const dot = runKey.indexOf(".");
+  return dot < 0
+    ? { agent: runKey, strategy: "" }
+    : { agent: runKey.slice(0, dot), strategy: runKey.slice(dot + 1) };
+}
+
+/** Whether a run key names a chat, a delegation or the dashboard. */
+export function isPseudoRunKey(runKey: string): boolean {
+  return PSEUDO_SLUGS.has(splitRunKey(runKey).strategy);
 }
 
 /**
@@ -373,10 +409,42 @@ export function runKeyLabel(runKey: string): string {
  * Falls back to the label itself for an owner the map no longer holds, so a
  * stale deep link still names something rather than nothing.
  */
-export function ownerTitle(owners: FleetOwner[], runKey: string): string {
+export function ownerTitle(owners: readonly FleetOwner[], runKey: string): string {
   const owner = ownerOf(owners, runKey);
   if (!owner) return runKeyLabel(runKey);
   return `${owner.agentName || owner.agentSlug} / ${owner.strategyName || owner.strategySlug}`;
+}
+
+/**
+ * **The one place a run key's owner row is named**: slugs for a strategy, the
+ * fleet map's words for a pseudo-run.
+ *
+ * {@link runKeyLabel}'s reason for preferring slugs is precise, and for a real
+ * strategy it is right — the rows beneath the agent are bot names built out of
+ * exactly those two slugs, so the slug form is the one a reader matches by eye.
+ * **That rationale cannot reach a pseudo-run.** A pseudo-owner is built with an
+ * empty namespace and the emptiness is load-bearing
+ * (`condor/agents/fleet_map.py:_pseudo_owners`): `inNamespace` refuses an empty
+ * namespace in both languages, so a `condor-ui-…` bot name can never exist to
+ * be matched against. `ui` is then a slug naming nothing the reader has ever
+ * seen, and *the dashboard* and *the chat* read as two unrelated systems rather
+ * than two doors of the same one.
+ *
+ * The words are **not** minted here, and there is deliberately no TS copy of
+ * `PSEUDO_STRATEGY_NAMES`: `condor/agents/deed_index.py` maps `ui → "Dashboard"`,
+ * `chat → "Chat"` and `delegation → "Delegation"`, and the map already ships
+ * them as every pseudo-owner's `strategyName`. A second copy in the browser
+ * would be exactly the Python/TS drift this chain suffers from elsewhere.
+ *
+ * An owner the map no longer holds falls back to slugs through
+ * {@link ownerTitle}, so a stale deep link names something rather than nothing.
+ *
+ * A caller that also has the two unowned buckets in hand wants
+ * `agentBucketLabel` (`components/perf/agentFilter`), which is this plus those
+ * two fixed labels — and nothing else names an owner row.
+ */
+export function ownerRowLabel(owners: readonly FleetOwner[], runKey: string): string {
+  return isPseudoRunKey(runKey) ? ownerTitle(owners, runKey) : runKeyLabel(runKey);
 }
 
 

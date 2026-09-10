@@ -19,9 +19,10 @@ import type { BubbleOption } from "@/components/perf/FilterBubbles";
 import type { DeploymentRow } from "@/lib/api";
 import {
   inNamespace,
-  runKeyLabel,
+  ownerRowLabel,
   stripDeploySuffix,
   type DeedIndex,
+  type FleetOwner,
 } from "@/lib/agent-attribution";
 import type { PerfLeaf } from "@/lib/perf-tree";
 
@@ -68,11 +69,30 @@ export function agentBucket(leaf: PerfLeaf, deeds: DeedIndex | null | undefined)
   return leaf.startedAt >= since * 1000 ? OUTSIDE : BEFORE_LEDGER;
 }
 
-/** What a bucket value is called on screen, run keys included. */
-export function agentBucketLabel(value: string): string {
+/** No fleet map in hand. Shared so a default argument is not a new array a poll. */
+const NO_OWNERS: readonly FleetOwner[] = [];
+
+/**
+ * **What a bucket value is called on screen** — every surface's one namer.
+ *
+ * Two fixed labels for the two things that are not a run, and
+ * {@link ownerRowLabel} for everything that is: slugs for a strategy, the fleet
+ * map's own words for a chat, a delegation or the dashboard. The sidebar row,
+ * its filter bubble, the chat's filter chip and the Dock's execution rows all
+ * come through here, which is what stops them saying four different things
+ * about one run key.
+ *
+ * `owners` is optional and defaults to *no map*, which degrades to slugs — the
+ * same honest fallback `ownerTitle` makes for an owner the map no longer holds.
+ * A caller that has the map should pass it.
+ */
+export function agentBucketLabel(
+  value: string,
+  owners: readonly FleetOwner[] = NO_OWNERS,
+): string {
   if (value === OUTSIDE) return OUTSIDE_LABEL;
   if (value === BEFORE_LEDGER) return BEFORE_LEDGER_LABEL;
-  return runKeyLabel(value);
+  return ownerRowLabel(owners, value);
 }
 
 /**
@@ -91,6 +111,7 @@ export function agentBucketLabel(value: string): string {
 export function agentOptions(
   leaves: readonly PerfLeaf[],
   deeds: DeedIndex | null | undefined = null,
+  owners: readonly FleetOwner[] = NO_OWNERS,
 ): BubbleOption[] {
   const counts = new Map<string, number>();
   for (const leaf of leaves) {
@@ -98,13 +119,16 @@ export function agentOptions(
     counts.set(value, (counts.get(value) ?? 0) + 1);
   }
   const unowned = new Set<string>([OUTSIDE, BEFORE_LEDGER]);
+  // Through the same namer as the sidebar row, so a bubble and the row it
+  // ticks cannot read as two different owners — and sorted on what it *says*,
+  // which is the order a reader scans.
   const named = [...counts]
     .filter(([value]) => !unowned.has(value))
-    .map(([value, count]) => ({ value, label: runKeyLabel(value), count }))
+    .map(([value, count]) => ({ value, label: agentBucketLabel(value, owners), count }))
     .sort((a, b) => a.label.localeCompare(b.label));
   const tail = [OUTSIDE, BEFORE_LEDGER]
     .filter((value) => counts.has(value))
-    .map((value) => ({ value, label: agentBucketLabel(value), count: counts.get(value)! }));
+    .map((value) => ({ value, label: agentBucketLabel(value, owners), count: counts.get(value)! }));
   return [...named, ...tail];
 }
 

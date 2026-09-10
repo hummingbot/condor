@@ -17,9 +17,13 @@
 // key belongs to — is reachable from a test rather than only from a rendered
 // panel.
 
-import { splitRunKey } from "@/components/agent/workspace/reconcile";
 import { agentBucketLabel } from "@/components/perf/agentFilter";
-import type { DeedIndex } from "@/lib/agent-attribution";
+import {
+  isPseudoRunKey,
+  splitRunKey,
+  type DeedIndex,
+  type FleetOwner,
+} from "@/lib/agent-attribution";
 import type { AgentSummary } from "@/lib/api";
 import { distinguishes } from "@/lib/perf-grouping";
 import {
@@ -76,6 +80,14 @@ export interface ExecutionInput {
   deeds: DeedIndex | null;
   /** `["agents"]`, for turning a run key into an agent somebody can open. */
   agents: readonly AgentSummary[];
+  /**
+   * The fleet map, for naming a pseudo-run's row.
+   *
+   * A chat, a delegation and the dashboard have no strategy to spell out, and
+   * the words for them ship on the wire rather than living in the browser —
+   * `ownerRowLabel` is where that is decided, and it needs the map.
+   */
+  owners: readonly FleetOwner[];
   convert: ConvertQuote;
   /** The clock a fold measures a runtime against. */
   now: number;
@@ -93,7 +105,7 @@ const AGENT_PREFIX = AXIS_PREFIX.agent;
  * {@link visibleRows} does the trimming, and both are as testable as this is.
  */
 export function executionRows(input: ExecutionInput): ExecutionRow[] {
-  const { leaves, deeds, agents, convert, now } = input;
+  const { leaves, deeds, agents, owners, convert, now } = input;
   const tree = buildTree([...leaves], "All", { grouping: [...GROUPING], deeds });
   const bySlug = new Map(agents.map((agent) => [agent.slug, agent]));
   const fold = (node: PerfNode) => foldLeaves(node.leaves, convert, now);
@@ -175,9 +187,16 @@ export function executionRows(input: ExecutionInput): ExecutionRow[] {
     rows.push({
       id: agentNode.id,
       kind: "agent",
-      // An attributed run key no listed agent claims keeps the label the key
-      // itself carries: the residual stays named rather than swept away.
-      label: claimed && strategy ? `${claimed.name} / ${strategy}` : agentBucketLabel(key),
+      // A real strategy is said as the agent's name over the strategy's slug:
+      // the bot rows beneath it are built out of that slug, so it is the half a
+      // reader matches by eye. A pseudo-run has no such bot name — and no
+      // strategy — so it is named the one way an owner row is ever named
+      // elsewhere, and so is an attributed run key no listed agent claims: the
+      // residual stays named rather than swept away.
+      label:
+        claimed && strategy && !isPseudoRunKey(key)
+          ? `${claimed.name} / ${strategy}`
+          : agentBucketLabel(key, owners),
       depth: 0,
       parentId: null,
       hasChildren: under.length > 0,

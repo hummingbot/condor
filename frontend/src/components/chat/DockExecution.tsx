@@ -214,8 +214,8 @@ export function DockExecution({
   const currencySymbol = fleet.currencySymbol ?? "$";
 
   const rows = useMemo(
-    () => executionRows({ leaves, deeds: fleet.deeds, agents, convert, now }),
-    [leaves, fleet.deeds, agents, convert, now],
+    () => executionRows({ leaves, deeds: fleet.deeds, agents, owners: fleet.owners, convert, now }),
+    [leaves, fleet.deeds, agents, fleet.owners, convert, now],
   );
 
   // Only what the reader has actually clicked; the default for everything else

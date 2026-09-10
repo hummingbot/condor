@@ -125,7 +125,6 @@ import {
   loopStatus,
   ownerOf,
   ownerTitle,
-  runKeyLabel,
   type DeedIndex,
   type FleetOwner,
 } from "@/lib/agent-attribution";
@@ -138,9 +137,11 @@ import { AgentScopeHeader } from "./AgentScopeHeader";
  * deployed nothing — so there is no label from `buildTree` to borrow and the id
  * is the only name there is.
  */
-function rootScopeLabel(id: string): string {
+function rootScopeLabel(id: string, owners: readonly FleetOwner[]): string {
   const agent = agentOfNodeId(id);
-  if (agent) return runKeyLabel(agent);
+  // Through the sidebar's own namer, so an agent with nothing deployed is
+  // called what it would be called the moment it deployed something.
+  if (agent) return agentBucketLabel(agent, owners);
   return botOfNodeId(id) ?? id;
 }
 
@@ -1105,9 +1106,9 @@ export function PerfBrowser({
       // Every leaf, controller and executor alike: the question is "whose is
       // this", and a leaf's owner is a fact about it rather than about its
       // class, so there is no double-counting to avoid here.
-      agents: agentOptions(rawLeaves, deeds),
+      agents: agentOptions(rawLeaves, deeds, owners),
     };
-  }, [rawLeaves, classOf, deeds]);
+  }, [rawLeaves, classOf, deeds, owners]);
 
   const filtersActive =
     !!filters.pair.trim() ||
@@ -1257,8 +1258,8 @@ export function PerfBrowser({
    */
   const rootNode = useMemo(() => {
     if (rootScope === FLEET_SCOPE) return tree;
-    return nodes.get(rootScope) ?? emptyScopeNode(rootScope, rootScopeLabel(rootScope));
-  }, [rootScope, nodes, tree]);
+    return nodes.get(rootScope) ?? emptyScopeNode(rootScope, rootScopeLabel(rootScope, owners));
+  }, [rootScope, nodes, tree, owners]);
 
   const scope = useMemo(
     () => nodes.get(effectiveScopeId) ?? rootNode,
@@ -2156,7 +2157,7 @@ export function PerfBrowser({
       // reader ticked rather than the run keys underneath them.
       picked(
         "agent",
-        filters.agents.map((value) => agentBucketLabel(value).toLowerCase()),
+        filters.agents.map((value) => agentBucketLabel(value, owners).toLowerCase()),
       ),
       // The run is a filter like any other, and one the reader did not tick —
       // it arrived in a link — so it is the one that most needs saying.
@@ -2479,6 +2480,7 @@ export function PerfBrowser({
             activeId={effectiveScopeId}
             open={openRows}
             showBot={!soloBot && !groupByBot}
+            owners={owners}
             onSelect={setScope}
             onToggleOpen={toggleOpen}
             cv={cv}

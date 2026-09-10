@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   agentBucket,
+  agentBucketLabel,
   agentOptions,
   BEFORE_LEDGER,
   BEFORE_LEDGER_LABEL,
@@ -15,7 +16,7 @@ import {
   runParam,
   runRecords,
 } from "./agentFilter";
-import type { DeedIndex } from "@/lib/agent-attribution";
+import type { DeedIndex, FleetOwner } from "@/lib/agent-attribution";
 import type { DeploymentRow } from "@/lib/api";
 import type { PerfLeaf } from "@/lib/perf-tree";
 
@@ -67,6 +68,49 @@ function row(over: Partial<DeploymentRow> = {}): DeploymentRow {
   };
 }
 
+/** The map as the wire ships it: a real strategy, and the dashboard door. */
+const OWNERS: FleetOwner[] = [
+  {
+    runKey: "brigado.brl_mm",
+    agentSlug: "brigado",
+    agentName: "Brigado",
+    strategySlug: "brl_mm",
+    strategyName: "BRL MM",
+    namespace: "brigado-brl_mm",
+    declaredBots: [],
+    agentIds: [],
+    live: null,
+  },
+  {
+    runKey: "condor.ui",
+    agentSlug: "condor",
+    agentName: "Condor",
+    strategySlug: "ui",
+    // `PSEUDO_STRATEGY_NAMES` puts the word here; the browser keeps no copy.
+    strategyName: "Dashboard",
+    namespace: "",
+    declaredBots: [],
+    agentIds: [],
+    live: null,
+  },
+];
+
+describe("agentBucketLabel", () => {
+  it("says the two fixed labels for the two things that are not a run", () => {
+    expect(agentBucketLabel(OUTSIDE, OWNERS)).toBe(OUTSIDE_LABEL);
+    expect(agentBucketLabel(BEFORE_LEDGER, OWNERS)).toBe(BEFORE_LEDGER_LABEL);
+  });
+
+  it("says a pseudo-run's words and a strategy's slugs", () => {
+    expect(agentBucketLabel("condor.ui", OWNERS)).toBe("Condor / Dashboard");
+    expect(agentBucketLabel("brigado.brl_mm", OWNERS)).toBe("brigado / brl_mm");
+  });
+
+  it("degrades to slugs with no map in hand", () => {
+    expect(agentBucketLabel("condor.ui")).toBe("condor / ui");
+  });
+});
+
 describe("agentOptions", () => {
   it("offers one bubble per attributed owner, with its count", () => {
     const options = agentOptions([
@@ -102,6 +146,25 @@ describe("agentOptions", () => {
 
   it("is empty for an empty population", () => {
     expect(agentOptions([])).toEqual([]);
+  });
+
+  it("labels a bubble with the words its sidebar row uses, and sorts on them", () => {
+    // The bubble's *value* is the run key either way — only what it says
+    // changes — so the URL and the tick it writes are byte-identical.
+    const options = agentOptions(
+      [
+        leaf({ agent: "condor.ui", how: "deed" }),
+        leaf({ agent: "brigado.brl_mm" }),
+        leaf({ agent: "", how: "none", startedAt: 2_000_000 }),
+      ],
+      LEDGER,
+      OWNERS,
+    );
+    expect(options.map((o) => [o.value, o.label])).toEqual([
+      ["brigado.brl_mm", "brigado / brl_mm"],
+      ["condor.ui", "Condor / Dashboard"],
+      [OUTSIDE, OUTSIDE_LABEL],
+    ]);
   });
 });
 
