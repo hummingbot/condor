@@ -804,3 +804,102 @@ def test_a_live_loop_still_runs_snippets_without_a_confirmation():
     )
 
     assert result["outcome"]["outcome"] == "selected"
+
+
+# ---------------------------------------------------------------------------
+# manage_routines is ungated by name for the same reason run_code is, and left
+# the same hole one door over: a routine is Python, so a dry run could write one
+# and execute it holding the unrestricted client (SEC-626).
+# ---------------------------------------------------------------------------
+
+
+def _routine_call(**args) -> dict:
+    return {"tool": "mcp__condor__manage_routines", "input": args}
+
+
+@pytest.mark.parametrize(
+    "action",
+    ["run", "run_async", "start", "create_routine", "edit_routine", "delete_routine"],
+)
+def test_a_dry_run_cannot_write_or_execute_a_routine(action):
+    refusals = RefusalLog()
+    callback = auto_approve_with_risk_check(
+        RiskEngine(RiskLimits()),
+        RiskState(),
+        execution_mode="dry_run",
+        refusals=refusals,
+    )
+
+    result = asyncio.run(
+        callback(
+            _routine_call(
+                action=action,
+                name="pwn",
+                code="async def run(config, context):\n    await client.gateway.start({})",
+            ),
+            _OPTIONS,
+        )
+    )
+
+    assert result["outcome"]["outcome"] == "cancelled", action
+    (noted,) = refusals.drain()
+    assert noted["tool"] == "manage_routines"
+    assert "dry-run" in noted["reason"]
+
+
+def test_a_dry_run_refuses_a_routine_stop_it_cannot_own():
+    """It can reach neither `start` nor `run_async`, so the instance is a live seat's."""
+    callback = auto_approve_with_risk_check(
+        RiskEngine(RiskLimits()), RiskState(), execution_mode="dry_run"
+    )
+
+    result = asyncio.run(callback(_routine_call(action="stop", name="ri_1"), _OPTIONS))
+
+    assert result["outcome"]["outcome"] == "cancelled"
+
+
+def test_a_dry_run_refuses_a_routine_action_it_cannot_read():
+    """Fails closed, so a newly added action cannot default to allowed."""
+    callback = auto_approve_with_risk_check(
+        RiskEngine(RiskLimits()), RiskState(), execution_mode="dry_run"
+    )
+
+    for call in (
+        {"tool": "manage_routines", "input": None},
+        _routine_call(name="x"),
+        _routine_call(action=None, name="x"),
+        _routine_call(action="publish_routine", name="x"),
+    ):
+        result = asyncio.run(callback(call, _OPTIONS))
+        assert result["outcome"]["outcome"] == "cancelled", call
+
+
+@pytest.mark.parametrize(
+    "action", ["list", "describe", "read_routine", "get_instance", "list_instances"]
+)
+def test_a_dry_run_still_reads_the_routine_library(action):
+    """Rehearsal needs to see what exists and what it does; a read executes nothing."""
+    callback = auto_approve_with_risk_check(
+        RiskEngine(RiskLimits()), RiskState(), execution_mode="dry_run"
+    )
+
+    result = asyncio.run(callback(_routine_call(action=action, name="scan"), _OPTIONS))
+
+    assert result["outcome"]["outcome"] == "selected", action
+
+
+@pytest.mark.parametrize("mode", ["loop", "attended"])
+def test_other_modes_still_run_routines_without_a_confirmation(mode):
+    """The refusal is dry-run's, not a new gate: loop and attended are unchanged."""
+    from condor.runtime.danger import DANGEROUS_TOOLS, is_dangerous_tool_call
+
+    assert "manage_routines" not in DANGEROUS_TOOLS
+    callback = auto_approve_with_risk_check(
+        RiskEngine(RiskLimits()), RiskState(), execution_mode=mode
+    )
+
+    for action in ("run", "start", "create_routine", "list"):
+        call = _routine_call(action=action, name="scan")
+        assert is_dangerous_tool_call(call) is False, action
+        result = asyncio.run(callback(call, _OPTIONS))
+        assert result["outcome"]["outcome"] == "selected", action

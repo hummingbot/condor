@@ -20,7 +20,7 @@ from condor.runtime.danger import (
     DANGEROUS_CLMM_ACTIONS,
     LEVERAGE_TOOL,
     LEVERAGED_EXECUTOR_TOOLS,
-    is_code_execution_call,
+    dry_run_refusal,
     is_dangerous_tool_call,
     tool_call_input,
     tool_call_name,
@@ -856,23 +856,24 @@ def auto_approve_with_risk_check(
                     "create_*_executor tool instead",
                 )
 
-        # A snippet is not in `DANGEROUS_TOOLS` and must not be — it is how a
-        # tick reads a market (ARCH-308), and gating it by name would put a
-        # confirmation in front of every candle read. But it runs arbitrary
-        # Python holding the unrestricted API client, so in dry-run it is the one
-        # remaining way to mutate the world for real: every *named* write above
-        # is refused there, and `await client.gateway.start(...)` inside a
-        # snippet was not (SEC-616). Dry-run's promise is that nothing mutates,
-        # so the tool that can mutate anything does not auto-approve there.
-        # Reading past runs (`history`, `get`) changes nothing and stays free.
-        if execution_mode == "dry_run" and is_code_execution_call(tool_call):
-            return deny(
-                tool_call_name(tool_call),
-                "this session runs in dry-run mode, where nothing mutates, and a "
-                "snippet holds the unrestricted API client — read what you need "
-                "with the read-only tools instead",
-                level=logging.INFO,
-            )
+        # Neither `run_code` nor `manage_routines` is in `DANGEROUS_TOOLS`, and
+        # neither must be — a snippet is how a tick reads a market (ARCH-308)
+        # and a routine is ordinary tick work, so gating either by name would
+        # put a confirmation in front of every candle read. But both run
+        # arbitrary Python holding the unrestricted API client, which makes them
+        # the ways to mutate the world for real from inside a dry run: every
+        # *named* write above is refused there, `await client.gateway.start(...)`
+        # inside a snippet was not (SEC-616), and neither was writing that same
+        # line into a routine and running it (SEC-626).
+        #
+        # Which calls those are is `danger.py`'s policy and not this gate's, so
+        # a third such tool never has to reach this file. Reads on both tools —
+        # past runs, the routine list, a routine's source — change nothing and
+        # stay free.
+        if execution_mode == "dry_run":
+            refusal = dry_run_refusal(tool_call)
+            if refusal:
+                return deny(tool_call_name(tool_call), refusal, level=logging.INFO)
 
         # Auto-approve everything else
         for opt in options:
