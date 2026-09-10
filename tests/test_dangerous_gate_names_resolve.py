@@ -21,7 +21,6 @@ from handlers.agents._shared import (
     DANGEROUS_AMM_ACTIONS,
     DANGEROUS_BOT_ACTIONS,
     DANGEROUS_CLMM_ACTIONS,
-    DANGEROUS_CONFIG_RESOURCES,
     DANGEROUS_CONTROL_ACTIONS,
     DANGEROUS_TOOLS,
     is_dangerous_tool_call,
@@ -72,10 +71,8 @@ def test_gated_actions_exist_on_their_tools():
         ("manage_clmm", DANGEROUS_CLMM_ACTIONS),
         ("manage_amm", DANGEROUS_AMM_ACTIONS),
         ("manage_bots", DANGEROUS_BOT_ACTIONS),
-        # SEC-566 gates manage_gateway_config on a resource *and* an action: the
-        # exemption is spelled out as the read-only actions, so a rename of `get`
-        # would silently start prompting on every read rather than silently stop
-        # gating — but both halves have to keep resolving, so both are pinned.
+        # Not a gate but the log's read set: a rename of `get` would record every
+        # config read as a write, so the reads have to keep resolving too.
         ("manage_gateway_config", READ_ONLY_CONFIG_ACTIONS),
     ):
         available = _action_literals(tool_name)
@@ -277,36 +274,19 @@ def _config_resource_literals() -> set[str]:
     }
 
 
-def test_gateway_config_gates_the_funds_path_resources_and_nothing_else():
-    """SEC-566: a write to `networks`/`connectors` asks; a token or pool edit does not.
+def test_gateway_config_has_no_write_left_that_needs_a_human():
+    """The funds-path writes are gone from the tool rather than gated on it.
 
-    The gate used to be an empty resource set, justified by "everything this tool
-    touches is Gateway's own symbol/address mapping". Two of the four resources are
-    not: a network config carries `nodeURL`, the RPC every transaction is broadcast
-    through, and a connector config carries the slippage every later swap inherits.
-    The dashboard already demands OWNER for exactly that write; the MCP path asked
-    nobody. `tokens` and `pools` really are a mapping and stay ungated, so a human is
-    not put in front of a config edit while the trades it enables run unattended.
+    `networks` and `connectors` used to be gated on `update` (SEC-566): a network
+    config carries `nodeURL`, the RPC every transaction is broadcast through, and
+    a connector config the slippage every swap inherits. Those writes now belong
+    to the server owner in Condor and the tool cannot name them, so every call it
+    accepts is a read or a token/pool mapping edit, and none of them asks.
     """
-    resources = _config_resource_literals()
-    assert DANGEROUS_CONFIG_RESOURCES <= resources, (
-        f"gated resource(s) the tool has no such value for: "
-        f"{sorted(DANGEROUS_CONFIG_RESOURCES - resources)}"
-    )
-    assert DANGEROUS_CONFIG_RESOURCES == {"networks", "connectors"}
+    assert "update" not in _action_literals("manage_gateway_config")
+    assert "manage_gateway_config" not in DANGEROUS_TOOLS
 
-    for resource in DANGEROUS_CONFIG_RESOURCES:
-        for action in _action_literals("manage_gateway_config") - (
-            READ_ONLY_CONFIG_ACTIONS
-        ):
-            assert is_dangerous_tool_call(
-                {
-                    "tool": "manage_gateway_config",
-                    "input": {"resource_type": resource, "action": action},
-                }
-            ), f"{resource}/{action} repoints the funds path with no confirmation"
-
-    for resource in resources - DANGEROUS_CONFIG_RESOURCES:
+    for resource in _config_resource_literals():
         for action in _action_literals("manage_gateway_config"):
             assert not is_dangerous_tool_call(
                 {
@@ -314,44 +294,6 @@ def test_gateway_config_gates_the_funds_path_resources_and_nothing_else():
                     "input": {"resource_type": resource, "action": action},
                 }
             ), f"{resource}/{action} should not need confirmation"
-
-
-def test_gateway_config_reads_stay_on_the_fast_path():
-    """Reading a gated resource is how a failed swap gets diagnosed (SEC-566).
-
-    The gate is resource *and* action for this reason alone: a prompt in front of
-    `get networks` would put one in front of finding out which RPC a chain is on.
-    """
-    for resource in DANGEROUS_CONFIG_RESOURCES:
-        for action in READ_ONLY_CONFIG_ACTIONS:
-            assert not is_dangerous_tool_call(
-                {
-                    "tool": "manage_gateway_config",
-                    "input": {"resource_type": resource, "action": action},
-                }
-            ), f"{resource}/{action} raised a confirmation for a read"
-
-
-def test_gateway_config_fails_closed_on_an_unreadable_action():
-    """SEC-566: on a gated resource, an action we cannot read is a write.
-
-    The resource half is not enough on its own — once the gate started reading an
-    action, an unparseable one would otherwise fall through the read-only test and
-    be waved past.
-    """
-    for bad in ({}, {"action": None}, {"action": 7}, {"action": ""}):
-        for resource in DANGEROUS_CONFIG_RESOURCES:
-            call = {
-                "tool": "manage_gateway_config",
-                "input": {"resource_type": resource, **bad},
-            }
-            assert is_dangerous_tool_call(call), f"{resource}/{bad} slipped past"
-
-
-def test_gateway_config_fails_closed_on_an_unreadable_resource():
-    """SEC-093: a call whose resource_type cannot be read is treated as dangerous."""
-    for bad in ({}, {"resource_type": None}, {"resource_type": 7}, {"action": "add"}):
-        assert is_dangerous_tool_call({"tool": "manage_gateway_config", "input": bad})
 
 
 # ---------------------------------------------------------------------------
@@ -654,8 +596,8 @@ def test_the_ungated_brakes_are_recorded():
 
 
 def test_an_ungated_config_edit_is_recorded():
-    """A token edit is ungated on purpose (SEC-566); the log keeps it anyway."""
-    for action in ("add", "delete", "update", "save"):
+    """A token edit is ungated on purpose; the log keeps it anyway."""
+    for action in ("add", "delete", "save"):
         call = _call("manage_gateway_config", action=action, resource_type="tokens")
         assert not is_dangerous_tool_call(call)
         assert is_mutating_tool_call(call)
@@ -700,8 +642,7 @@ def _every_plausible_call() -> list[dict]:
             calls.append(_call(tool, action=action))
     for resource in _config_resource_literals():
         calls.append(_call("manage_gateway_config", resource_type=resource))
-        # Every real (resource, action) pair, so the SEC-566 gate's own combinations
-        # — not just the fail-closed ones — are held to `dangerous ⊆ mutating`.
+        # Every real (resource, action) pair, held to `dangerous ⊆ mutating`.
         for action in _action_literals("manage_gateway_config"):
             calls.append(
                 _call("manage_gateway_config", resource_type=resource, action=action)

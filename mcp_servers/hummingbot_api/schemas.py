@@ -22,17 +22,20 @@ class GatewayConfigRequest(BaseModel):
 
     Resource Types:
     - chains: Blockchain chains (get all chains)
-    - networks: Network configurations (list, get, update) - format: 'chain-network'
+    - networks: Network configurations (list, get) - format: 'chain-network'
     - tokens: Token configurations (list, add, delete, save) per network
-    - connectors: DEX connector configurations (list, get, update)
+    - connectors: DEX connector configurations (list, get)
     - pools: Liquidity pools (list, add, delete, save) per connector/network
     - wallets: Configured wallets per chain (list only — a wallet is added or
       removed in the Condor dashboard, never through an agent)
 
+    Networks and connectors are read-only here. Their config holds the RPC every
+    transaction is broadcast through and the slippage every swap inherits, so it
+    is changed by the server owner in Condor, never through an agent.
+
     Actions:
     - list: List available resources
     - get: Get specific resource configuration
-    - update: Update resource configuration
     - add: Add new resource (tokens, pools) - requires full details
     - delete: Delete resource (tokens, pools)
     - save: Save resource by address only (tokens, pools) - auto-fetches details
@@ -42,7 +45,7 @@ class GatewayConfigRequest(BaseModel):
         "chains", "networks", "tokens", "connectors", "pools", "wallets"
     ] = Field(description="Type of resource to manage")
 
-    action: Literal["list", "get", "update", "add", "delete", "save"] = Field(
+    action: Literal["list", "get", "add", "delete", "save"] = Field(
         description="Action to perform on the resource"
     )
 
@@ -59,18 +62,6 @@ class GatewayConfigRequest(BaseModel):
         description="DEX connector name (e.g., 'meteora', 'raydium', 'orca', 'uniswap'). "
         "Required for connector operations and pool list operations",
         examples=["meteora", "raydium", "orca", "uniswap", "pancakeswap"],
-    )
-
-    # Configuration data
-    config_updates: dict[str, Any] | None = Field(
-        default=None,
-        description="Configuration updates as key-value pairs. "
-        "Keys can be in snake_case or camelCase. "
-        "Required for 'update' action",
-        examples=[
-            {"slippage_pct": 0.5, "timeout": 30000},
-            {"node_url": "https://api.mainnet-beta.solana.com"},
-        ],
     )
 
     # Token-specific fields

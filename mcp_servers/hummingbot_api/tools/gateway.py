@@ -18,9 +18,9 @@ async def manage_gateway_config(
 
     Resource Types:
     - chains: Get all blockchain chains
-    - networks: List/get/update network configurations (format: 'chain-network')
+    - networks: List/get network configurations (format: 'chain-network'), read-only
     - tokens: List/add/delete tokens per network
-    - connectors: List/get/update DEX connector configurations
+    - connectors: List/get DEX connector configurations, read-only
     - pools: List/add liquidity pools per connector/network
     - wallets: List the configured wallets per chain (read-only)
     """
@@ -56,28 +56,11 @@ async def manage_gateway_config(
                 "result": result,
             }
 
-        elif request.action == "update":
-            if not request.network_id:
-                raise ToolError("network_id is required for 'update' network action")
-            if not request.config_updates:
-                raise ToolError(
-                    "config_updates is required for 'update' network action"
-                )
-
-            result = await client.gateway.update_network_config(
-                request.network_id, request.config_updates
-            )
-            return {
-                "resource_type": "networks",
-                "action": "update",
-                "network_id": request.network_id,
-                "result": result,
-            }
-
         else:
             raise ToolError(
                 f"Action '{request.action}' not supported for networks. "
-                f"Supported: list, get, update"
+                "Supported: list, get. A network's config, its RPC endpoint "
+                "included, is changed in the Condor dashboard (Settings → Gateway)."
             )
 
     # ============================================
@@ -193,30 +176,11 @@ async def manage_gateway_config(
                 "result": result,
             }
 
-        elif request.action == "update":
-            if not request.connector_name:
-                raise ToolError(
-                    "connector_name is required for 'update' connector action"
-                )
-            if not request.config_updates:
-                raise ToolError(
-                    "config_updates is required for 'update' connector action"
-                )
-
-            result = await client.gateway.update_connector_config(
-                request.connector_name, request.config_updates
-            )
-            return {
-                "resource_type": "connectors",
-                "action": "update",
-                "connector_name": request.connector_name,
-                "result": result,
-            }
-
         else:
             raise ToolError(
                 f"Action '{request.action}' not supported for connectors. "
-                f"Supported: list, get, update"
+                "Supported: list, get. A connector's settings are changed by the "
+                "server owner in Condor, not over MCP."
             )
 
     # ============================================

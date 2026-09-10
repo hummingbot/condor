@@ -140,6 +140,30 @@ def test_the_gateway_container_tool_is_gone():
     assert "manage_gateway_container" not in GATEWAY_LOG_HINT
 
 
+def test_no_agent_can_write_a_network_or_connector_config():
+    """The RPC and a connector's slippage are the server owner's, set in Condor.
+
+    A write there repoints every later transaction, so it is not something a
+    model may do even behind a confirmation. The tool cannot name it at all.
+    The action and the payload that carried it are both gone.
+    """
+    import inspect
+
+    import pydantic
+
+    import mcp_servers.hummingbot_api.server as server
+    from mcp_servers.hummingbot_api.schemas import GatewayConfigRequest
+
+    params = inspect.signature(server.manage_gateway_config).parameters
+    assert "config_updates" not in params
+    assert "update" not in str(params["action"].annotation)
+    assert "config_updates" not in GatewayConfigRequest.model_fields
+
+    for resource in ("networks", "connectors"):
+        with pytest.raises(pydantic.ValidationError):
+            GatewayConfigRequest(resource_type=resource, action="update")
+
+
 POOL_LATENCY = 0.05
 
 

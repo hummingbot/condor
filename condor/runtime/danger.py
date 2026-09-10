@@ -48,7 +48,6 @@ DANGEROUS_TOOLS = {
     "execute_swap",  # every call signs; quote/status/search are separate tools
     "manage_clmm",  # every action that moves liquidity
     "manage_amm",  # every action that moves liquidity
-    "manage_gateway_config",  # only writes to networks/connectors; see below
     "control_agent",  # only `start`, which launches an unattended trading loop
     # The executor family is gated by NAME (FEAT-062), the same way the swap family
     # is: a create and a stop each have their own tool, so there is no `action` to
@@ -125,40 +124,20 @@ DANGEROUS_AMM_ACTIONS = {"add_liquidity", "remove_liquidity", "create_pool"}
 # so the gate has to know both or `start_agent` walks straight past it.
 DANGEROUS_CONTROL_ACTIONS = {"start", "start_agent"}
 
-# Resource types within manage_gateway_config whose *writes* require confirmation
-# (SEC-566). This set used to be empty, justified by "everything it touches is
-# Gateway's own symbol/address mapping". That is true of two of the four resources
-# and false of the other two, which is the correction:
-#
-# - `tokens` and `pools` stay ungated. Adding or deleting one edits a symbol →
-#   address mapping. It moves no funds and changes nothing on-chain, so gating it
-#   would put a human in front of a config edit while the trades that edit enables
-#   stay where they are. `chains` and `wallets` stay ungated too — both are
-#   read-only over MCP since FEAT-065 (a wallet is imported in the dashboard, and
-#   `add` no longer takes a private key anywhere the model can reach).
-# - `networks` and `connectors` are gated, because an `update` there is not a
-#   mapping: a network config carries `nodeURL`, the RPC endpoint every transaction
-#   from this server is signed against and broadcast through, and a connector config
-#   carries settings such as allowed slippage that every later swap inherits. The
-#   dashboard already treats exactly this write as privileged — the web route calls
-#   it "a server-wide change" and demands OWNER (condor/web/routes/settings.py) —
-#   while the MCP path let a model repoint it with no human in the loop. Tool output
-#   is untrusted input, so "the prompt says don't call this" is not a control
-#   (SEC-253).
-#
-# The gate is resource *and* action: `list`/`get` on a gated resource stay on the
-# fast path, because reading which RPC a chain is on is how a model diagnoses a
-# failed swap, and a prompt in front of a read buys nothing. An unreadable
-# `resource_type` — and, on a gated resource, an unreadable `action` — still fails
-# closed. See :func:`_is_dangerous_config_call`.
-DANGEROUS_CONFIG_RESOURCES: set[str] = {"networks", "connectors"}
+# There is no gate on `manage_gateway_config`. Its `networks` and `connectors`
+# are read-only over MCP: a network config carries `nodeURL`, the RPC every
+# transaction is broadcast through, and a connector config the slippage every
+# swap inherits, so those writes belong to the server owner in Condor and the
+# tool takes no `update` action or payload at all. What is left to write is the
+# `tokens` and `pools` symbol → address mapping, which moves no funds and needs
+# no human. The same goes for `chains` and `wallets`, both read-only since FEAT-065.
 
 
 # ── What changed the world (FEAT-097) ──
 #
 # The sets above answer "should a human approve this". The log asks a different
 # question — "did this change anything" — and the two deliberately differ:
-# `manage_gateway_config` gates only its two funds-path resources (SEC-566), and
+# `manage_gateway_config`'s token and pool edits are never gated, and
 # the brakes (`stop`, `pause`, `resume`, `shutdown`) are ungated on purpose. A
 # log built on the confirmation predicate would therefore be silent about every
 # config edit and every brake, which is the exact silence the log exists to end.
@@ -281,9 +260,8 @@ READ_ONLY_MARKET_DATA_ACTIONS = {"candles", "historical_candles", "connectors"}
 #: How much of a snippet's first line the log row carries. A summary is one line
 #: on a page, and the whole source is in the code-run store anyway.
 MAX_SNIPPET_HEAD_CHARS = 80
-#: `manage_gateway_config` is recorded on its *action*, not its resource type:
-#: what it edits is what the gate weighs, and whether it edited at all is what
-#: the log weighs.
+#: `manage_gateway_config` is recorded on its *action*: whether it edited a token
+#: or a pool at all is what the log weighs.
 READ_ONLY_CONFIG_ACTIONS = {"list", "get"}
 
 
@@ -413,37 +391,6 @@ def _executor_amount(tool_name: str, input_data: dict[str, Any]) -> str:
     return f" of {amount}" if amount is not None else ""
 
 
-def _is_dangerous_config_call(tool_call: dict[str, Any]) -> bool:
-    """Whether a ``manage_gateway_config`` call writes a funds-path resource (SEC-566).
-
-    Resource *and* action, because neither half alone is the right gate. Resource
-    alone would prompt on `get networks`, the read a model does to diagnose a
-    failed swap; action alone would prompt on `add tokens`, a symbol → address
-    mapping that moves nothing. What needs a human is a *write* to `networks` or
-    `connectors`: the RPC every transaction is broadcast through, and the slippage
-    every later swap inherits.
-
-    Fails closed twice over (SEC-093). Unreadable arguments, or a missing or
-    non-string ``resource_type``, are dangerous whatever the action claims to be —
-    a call we cannot classify is never let through on the strength of the half of
-    it we can read. On a resource we *can* read and that is gated, a missing or
-    non-string ``action`` is dangerous too, so a write cannot hide behind an
-    unparseable action string.
-    """
-    input_data = tool_call_input(tool_call)
-    if input_data is None:
-        return True
-    resource = input_data.get("resource_type")
-    if not isinstance(resource, str) or not resource:
-        return True
-    if resource not in DANGEROUS_CONFIG_RESOURCES:
-        return False
-    action = input_data.get("action")
-    if not isinstance(action, str) or not action:
-        return True
-    return action not in READ_ONLY_CONFIG_ACTIONS
-
-
 def is_dangerous_tool_call(tool_call: dict[str, Any]) -> bool:
     """Check if a tool call requires user confirmation."""
     tool_name = tool_call_name(tool_call)
@@ -456,9 +403,6 @@ def is_dangerous_tool_call(tool_call: dict[str, Any]) -> bool:
 
         if tool_name == "manage_amm":
             return _has_dangerous_action(tool_call, DANGEROUS_AMM_ACTIONS)
-
-        if tool_name == "manage_gateway_config":
-            return _is_dangerous_config_call(tool_call)
 
         if tool_name == "control_agent":
             return _has_dangerous_action(tool_call, DANGEROUS_CONTROL_ACTIONS)
@@ -530,15 +474,8 @@ def is_mutating_tool_call(tool_call: dict[str, Any]) -> bool:
         )
 
     if tool_name == "manage_gateway_config":
-        # Recorded unless it is one of the two reads. The resource type is read
-        # only to stay a superset of the gate, which fails closed on a missing
-        # one: a call neither of us can parse is recorded rather than dropped.
-        input_data = tool_call_input(tool_call)
-        if input_data is None:
-            return True
-        resource = input_data.get("resource_type")
-        if not isinstance(resource, str) or not resource:
-            return True
+        # Recorded unless it is one of the two reads: a token or pool edit is a
+        # write to Gateway's config even though nothing gates it.
         return _is_mutating_action(tool_call, set(), READ_ONLY_CONFIG_ACTIONS)
 
     # Gated by name, and every one of them writes: an order, a signature, an
@@ -776,26 +713,10 @@ def format_tool_summary(tool_call: dict[str, Any]) -> str:
         return f"Swap {side} {amount} {pair}"
 
     if tool_name == "manage_gateway_config":
-        # The wallet import/remove summaries lived here until the tool stopped
-        # accepting a private key at all (FEAT-065); wallets are read-only now.
+        # Never gated, so this line is written for the log. Wallets went read-only
+        # in FEAT-065, and networks and connectors went the same way after SEC-566.
         resource = input_data.get("resource_type", "?")
         action = input_data.get("action", "?")
-        if resource in DANGEROUS_CONFIG_RESOURCES and action not in (
-            READ_ONLY_CONFIG_ACTIONS
-        ):
-            # The gated half (SEC-566). "update networks" is not what the human is
-            # approving — the target and the keys are, because one of those keys is
-            # `nodeURL`, the RPC every later transaction is broadcast through.
-            target = (
-                input_data.get("network_id") or input_data.get("connector_name") or "?"
-            )
-            updates = input_data.get("config_updates")
-            keys = (
-                ", ".join(str(key) for key in updates)
-                if isinstance(updates, dict) and updates
-                else "?"
-            )
-            return f"Gateway config: {action} {resource} '{target}', setting {keys}"
         return f"Gateway config: {action} {resource}"
 
     if tool_name in ("manage_clmm", "manage_amm"):

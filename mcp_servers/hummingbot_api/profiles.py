@@ -50,7 +50,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "manage_amm": "Direct AMM pool operations and pool creation",
     "manage_clmm": "Direct CLMM position operations",
     "configure_server": "Repoint this seat at another Hummingbot API server",
-    "manage_gateway_config": "Read and edit Gateway's chains, tokens and wallets",
+    "manage_gateway_config": "Read Gateway's config; edit its tokens and pools",
 }
 
 #: The trading surface: everything an autonomous tick needs to read a market,

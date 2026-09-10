@@ -1586,10 +1586,9 @@ async def manage_gateway_config(
     resource_type: Literal[
         "chains", "networks", "tokens", "connectors", "pools", "wallets"
     ],
-    action: Literal["list", "get", "update", "add", "delete", "save"],
+    action: Literal["list", "get", "add", "delete", "save"],
     network_id: str | None = None,
     connector_name: str | None = None,
-    config_updates: dict[str, Any] | None = None,
     token_address: str | None = None,
     token_symbol: str | None = None,
     token_decimals: int | None = None,
@@ -1602,7 +1601,7 @@ async def manage_gateway_config(
     network: str | None = None,
     chain: str | None = None,
 ) -> str:
-    """Read and edit Gateway's own configuration — chains, networks, tokens, connectors, pools, wallets.
+    """Read Gateway's own configuration, and edit the tokens and pools it knows.
 
     This is Gateway's config, not the chain. Adding or deleting a token here changes the
     symbol -> address mapping Gateway resolves against; it moves no funds and touches
@@ -1614,19 +1613,21 @@ async def manage_gateway_config(
 
     Resource types:
     - chains: every blockchain Gateway knows
-    - networks: network config, ids in 'chain-network' form ('solana-mainnet-beta')
-    - tokens: the per-network symbol/address/decimals mapping (list, add, delete)
-    - connectors: DEX connector config
-    - pools: the named pool registry (list, add)
+    - networks: list/get only, ids in 'chain-network' form ('solana-mainnet-beta').
+      The RPC endpoint and the rest of a network's config are changed by the user
+      in the Condor dashboard (Settings → Gateway), never by an agent.
+    - tokens: the per-network symbol/address/decimals mapping (list, add, delete, save)
+    - connectors: list/get only. A connector's settings (slippage and the like) are
+      changed by the server owner in Condor, never by an agent.
+    - pools: the named pool registry (list, add, delete, save)
     - wallets: list only. Add or remove wallets in the Condor dashboard
       (Settings → Gateway) — a private key must never be sent through chat.
 
     Args:
         resource_type: Which part of Gateway's config to act on.
-        action: list | get | update | add | delete | save.
+        action: list | get | add | delete | save.
         network_id: Network id in 'chain-network' form. Required for token and pool actions.
         connector_name: DEX connector name ('meteora', 'raydium', 'uniswap').
-        config_updates: Key-value updates for 'update'/'save'.
         token_address: Token contract address. Required to add or delete a token.
         token_symbol: Token symbol. Required to add a token.
         token_decimals: Token decimals (6 for USDC, 18 for WETH). Required to add a token.
@@ -1644,7 +1645,6 @@ async def manage_gateway_config(
         action=action,
         network_id=network_id,
         connector_name=connector_name,
-        config_updates=config_updates,
         token_address=token_address,
         token_symbol=token_symbol,
         token_decimals=token_decimals,

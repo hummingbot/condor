@@ -71,7 +71,7 @@ def format_gateway_config_result(result: dict[str, Any]) -> str:
                 output += f"- {chain_name}: {address}\n"
             return output
 
-    elif result_action in ["add", "delete", "update"]:
+    elif result_action in ["add", "delete"]:
         message = result.get("result", {}).get("message", "")
         return f"Gateway Config {result_action.title()}: {message}"
 
