@@ -166,8 +166,8 @@ describe("the agent rows", () => {
   it("files what nobody owns under a named bucket rather than dropping it", () => {
     const started = leaf({ id: "c1", bot: "outside-1", startedAt: NOW, net: 11 });
     const ancient = leaf({ id: "c2", bot: "old-1", startedAt: null, net: 2 });
-    // `since` is epoch seconds: anything newer than it and unattributed was
-    // made by something that is not Condor.
+    // `since` is epoch seconds: anything newer than it and unattributed is a
+    // record the log has no answer for.
     const deeds = { since: Math.floor((NOW - 86_400_000) / 1000), byBot: {}, byController: {} };
 
     const rows = executionRows({
@@ -180,7 +180,7 @@ describe("the agent rows", () => {
     });
     const labels = rows.filter((r) => r.kind === "agent").map((r) => r.label);
 
-    expect(labels).toEqual(["Outside Condor", "Before the ledger"]);
+    expect(labels).toEqual(["No record found", "Before the ledger"]);
   });
 });
 

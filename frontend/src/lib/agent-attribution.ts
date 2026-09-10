@@ -215,7 +215,9 @@ export interface DeedIndex {
    *
    * The one timestamp that splits the old `Unattributed` bucket in two: a
    * record older than this predates the ledger and cannot be judged; a record
-   * newer than it, with no deed, was made by something that is not Condor.
+   * newer than it, with no deed the join can reach, is one Condor's log has no
+   * answer for. Not the same as one Condor did not make — see `agentBucket`
+   * for the doors that record a deed and leave nothing to join on.
    */
   since: number;
 }

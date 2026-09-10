@@ -284,7 +284,8 @@ def test_a_late_wired_door_moves_the_cut_off_the_oldest_deed():
     recording Telegram when this build arrived has covered nothing in between.
     The cut used to be the oldest deed, ``1_000``, and every bot deployed from
     Telegram since — on this product, most of them — was newer than it and had
-    no deed, which the browser reads as "made by something that is not Condor".
+    no deed, which the browser then read as "made by something that is not
+    Condor" (it says "No record found" now, READ-365).
     """
     atomic_write_json(
         paths.deed_coverage_path(),

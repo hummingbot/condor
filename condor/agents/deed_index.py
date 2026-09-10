@@ -143,8 +143,16 @@ class DeedIndex:
     #: door (:func:`~condor.agents.deeds.coverage_since`), or ``0.0`` when that
     #: is unknown. Before this instant Condor's record of its own work is
     #: incomplete, so an unattributed record cannot be judged; after it, an
-    #: unattributed record was made by something that is not Condor. One
-    #: timestamp, and it is the whole difference between the two honest buckets.
+    #: unattributed record is one the log has no answer for. One timestamp, and
+    #: it is the whole difference between the two honest buckets.
+    #:
+    #: Note what the second half does *not* say. Every door records, but not
+    #: every door leaves a mark the join can follow: :data:`REFLESS_STRATEGIES`
+    #: get ``""`` from :func:`~condor.agents.deeds.attribution_tag`, and only a
+    #: deploy claims a bot name, so an executor opened from the dashboard or
+    #: from Telegram is written down here and still joins to nothing. The
+    #: browser therefore reads this bucket as *No record found* rather than as
+    #: an author (READ-365).
     #:
     #: It is the *stamp* and not the oldest deed on disk, because those two
     #: answer different questions: a deed says something was recorded, only the

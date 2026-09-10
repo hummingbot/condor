@@ -383,7 +383,7 @@ export function foldTargets(
  * an overview row *is about* one strategy and links into it. A floor row is
  * about the agent, and using the scoped rule here would be a silent loss:
  * records belonging to an agent's other strategies are **attributed** — so
- * they are in neither *Outside Condor* nor *Before the ledger* — and no row
+ * they are in neither *No record found* nor *Before the ledger* — and no row
  * would claim them. They would vanish out of a total whose entire job is to be
  * complete.
  *

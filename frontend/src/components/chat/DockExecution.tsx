@@ -109,8 +109,8 @@ function clipBotName(name: string): string {
  *
  * The deployed fleet, in the shape the perf browser folds it, read **owner
  * first**: one row per agent, each expanding into the bots, controllers and
- * executors that agent deployed, and then the controllers nobody owns under
- * *Outside Condor* / *Before the ledger*. Every row deep-links into `/bots` by
+ * executors that agent deployed, and then the records nobody owns under
+ * *No record found* / *Before the ledger*. Every row deep-links into `/bots` by
  * the `?scope=` id the browser reads (FEAT-084, FEAT-086) — and builds that id
  * by calling `controllerNodeId` on the same `PerfLeaf` the browser folds, so
  * the two can only drift if the browser's own tree does.

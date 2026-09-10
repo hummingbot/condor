@@ -8,7 +8,7 @@
 //
 // The level itself is not new: `buildTree(leaves, "All", { grouping: ["agent",
 // "bot"] })` is the same call `/bots` makes, and `keyFor(leaf, "agent")` never
-// returns `""` — an unowned leaf is bucketed into *Outside Condor* or *Before
+// returns `""` — an unowned leaf is bucketed into *No record found* or *Before
 // the ledger* rather than dropped. So the agent rows partition the panel's
 // total by construction, which is the property the fold discipline rests on.
 //

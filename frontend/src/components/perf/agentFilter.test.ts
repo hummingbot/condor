@@ -101,6 +101,19 @@ describe("agentBucketLabel", () => {
     expect(agentBucketLabel(BEFORE_LEDGER, OWNERS)).toBe(BEFORE_LEDGER_LABEL);
   });
 
+  it("claims a missing record, never an author (READ-365)", () => {
+    // Pinned as words rather than through the constants: the point of the
+    // bucket is what it *says*. A deed written at a ref-less door joins to
+    // nothing, so a record landing here can still be Condor's own.
+    expect(OUTSIDE_LABEL).toBe("No record found");
+    expect(BEFORE_LEDGER_LABEL).toBe("Before the ledger");
+  });
+
+  it("keeps the bucket values every saved filter URL carries", () => {
+    expect(OUTSIDE).toBe(" outside");
+    expect(BEFORE_LEDGER).toBe(" pre");
+  });
+
   it("says a pseudo-run's words and a strategy's slugs", () => {
     expect(agentBucketLabel("condor.ui", OWNERS)).toBe("Condor / Dashboard");
     expect(agentBucketLabel("brigado.brl_mm", OWNERS)).toBe("brigado / brl_mm");
