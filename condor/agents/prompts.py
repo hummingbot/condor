@@ -223,11 +223,18 @@ def _build_tool_preload(
     """
     tools = [
         "mcp__mcp-hummingbot__get_prices",
-        # The candle, order book and funding readers are not mounted any more
-        # (ARCH-308): market data a tick computes on is read as structured rows
-        # with ``client.market_data.*`` inside run_code, so run_code is what a
-        # tick has to arrive holding.
+        # The table-rendering candle, order book and funding readers are not
+        # mounted any more (ARCH-308): market data a tick computes on is read as
+        # structured rows with ``client.market_data.*`` inside run_code, so
+        # run_code is what a tick has to arrive holding.
         "mcp__condor__run_code",
+        # …except in a dry run, where a snippet is refused for holding the
+        # unrestricted client (SEC-616) and so is a routine (SEC-626), which
+        # between them left a rehearsal with no candle read at all. Preloaded in
+        # every mode rather than only that one: it is the cheaper read wherever
+        # the candles are the answer, and a tick should not have to know which
+        # mode it is in to reach for it (CORR-625).
+        "mcp__mcp-hummingbot__get_market_data",
     ]
     if is_controller_mode:
         # Read-only bot/controller queries stay available in dry-run; the

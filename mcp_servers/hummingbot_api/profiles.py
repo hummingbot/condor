@@ -24,6 +24,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "set_account_position_mode_and_leverage": "Set position mode and leverage",
     "search_history": "Search historical trades, orders and funding",
     "get_prices": "Latest price for one or more pairs",
+    "get_market_data": "OHLCV candles as rows — the read a dry run can make",
     "manage_controllers": "Controller templates and saved configs (design-time)",
     "manage_bots": "Deploy, monitor and control controller-based bots",
     "create_position_executor": "Open a directional position with SL/TP — spends funds",
@@ -57,20 +58,26 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
 #: size a position, run it and report on it. This is the whole surface minus the
 #: two rings below.
 #:
-#: No raw candle, order book or funding-rate reader is in it (ARCH-308). Those
-#: three returned a rendered table — a string a model can read and cannot compute
-#: on — so reaching for one bought a number that then had to be re-fetched through
-#: ``run_code`` to be averaged, charted or compared across venues. The structured
-#: equivalents are one ``run_code`` snippet away (``client.market_data.*``, which
-#: returns dicts and takes an ``asyncio.gather`` across venues), and a tool absent
-#: from the list is the only form of that advice a model cannot skip. ``get_prices``
-#: stays: a single quote, read once and not computed on, is the one case the text
-#: answers completely.
+#: No *table-rendering* market reader is in it (ARCH-308). ``get_candles``,
+#: ``get_order_book`` and ``get_funding_rate`` returned a string a model can read
+#: and cannot compute on, so reaching for one bought a number that then had to be
+#: re-fetched through ``run_code`` to be averaged, charted or compared across
+#: venues. That path is still the one for anything with arithmetic in it
+#: (``client.market_data.*`` returns dicts and takes an ``asyncio.gather`` across
+#: venues), and a table tool absent from the list is the only form of that advice
+#: a model cannot skip.
+#:
+#: ``get_prices`` stays: a single quote, read once and not computed on, is the one
+#: case the text answers completely. ``get_market_data`` joins it for the other
+#: (CORR-625): it answers candles in rows rather than prose, so it buys no second
+#: read, and it is the only candle path left in a dry run, where a snippet and a
+#: routine are both refused for holding the unrestricted client.
 TRADING_TOOLS: tuple[str, ...] = (
     "get_portfolio_overview",
     "set_account_position_mode_and_leverage",
     "search_history",
     "get_prices",
+    "get_market_data",
     "manage_controllers",
     "manage_bots",
     "create_position_executor",

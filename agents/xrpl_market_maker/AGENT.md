@@ -5,6 +5,7 @@ description: On-ledger market making specialist for the XRPL CLOB — reference 
 agent_key: claude-acp:sonnet
 tools:
 - get_prices
+- get_market_data
 - get_portfolio_overview
 - explore_geckoterminal
 - create_order_executor

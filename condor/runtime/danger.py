@@ -289,6 +289,26 @@ READ_ONLY_ROUTINE_ACTIONS = {
     "get_instance",
     "list_instances",
 }
+#: The candle reader, and the answer to what refusing the two tools above costs
+#: a rehearsal (CORR-625). Both of those are refused in dry-run for holding the
+#: unrestricted API client, and since ARCH-308 they were between them the only
+#: structured market read a tick had — so a dry run could not rehearse a
+#: candle-driven decision at all, which is the whole point of one.
+#:
+#: This tool is the read-only path back. It takes parameters rather than code,
+#: so unlike a snippet there is nothing in it to write with, and it is listed
+#: here rather than left unnamed for one reason: an *unclassified* action on it
+#: is refused in dry-run. A future action that does more than read cannot become
+#: callable in a rehearsal by being added to the tool and forgotten here.
+MARKET_DATA_TOOL = "get_market_data"
+#: Empty on purpose, and the assertion this whole entry exists to make: the tool
+#: has no write half. It is kept as a name rather than inlined as ``set()`` so
+#: that the day one is added, there is somewhere obvious to put it.
+MUTATING_MARKET_DATA_ACTIONS: set[str] = set()
+#: Reading candles, reading a candle range, and asking which connectors serve
+#: OHLCV at all. Pinned against the tool's registered ``Literal`` by a test, the
+#: same way the routine and snippet sets are.
+READ_ONLY_MARKET_DATA_ACTIONS = {"candles", "historical_candles", "connectors"}
 #: How much of a snippet's first line the log row carries. A summary is one line
 #: on a page, and the whole source is in the code-run store anyway.
 MAX_SNIPPET_HEAD_CHARS = 80
@@ -625,15 +645,18 @@ def dry_run_refusal(tool_call: dict[str, Any]) -> str | None:
 
     The refusal is per *action*, not per tool, so what a dry run needs in order
     to rehearse at all — listing routines, reading their source and their config
-    schema, reading back a past run or a past snippet — stays free. Widening
-    that read-only half is how a dry run gets a new capability without getting
-    the ability to write.
+    schema, reading back a past run or a past snippet, reading candles — stays
+    free. Widening that read-only half is how a dry run gets a new capability
+    without getting the ability to write, and ``get_market_data`` below is that
+    widening rather than an exception to it (CORR-625): it appears here not to
+    be allowed — an unnamed tool is already allowed — but so that an action
+    added to it later has to be classified before a rehearsal can call it.
     """
     if is_code_execution_call(tool_call):
         return (
             "this session runs in dry-run mode, where nothing mutates, and a "
-            "snippet holds the unrestricted API client — read what you need "
-            "with the read-only tools instead"
+            "snippet holds the unrestricted API client — read the market with "
+            "get_market_data and the other read-only tools instead"
         )
 
     if is_mutating_routine_call(tool_call):
@@ -641,6 +664,19 @@ def dry_run_refusal(tool_call: dict[str, Any]) -> str | None:
             "this session runs in dry-run mode, where nothing mutates, and a "
             "routine is Python holding the same unrestricted API client as a "
             "snippet — 'list', 'describe' and 'read_routine' still work"
+        )
+
+    if tool_call_name(tool_call) == MARKET_DATA_TOOL and _is_mutating_action(
+        tool_call, MUTATING_MARKET_DATA_ACTIONS, READ_ONLY_MARKET_DATA_ACTIONS
+    ):
+        # Every action this module knows on this tool reads, so reaching here at
+        # all means an action it does *not* know — a new one, or an unreadable
+        # argument. Fails closed like its siblings: the cost is a rehearsal that
+        # says so, against a write that a rehearsal promised could not happen.
+        return (
+            "this session runs in dry-run mode, and get_market_data was asked "
+            "for something this build does not know is a read — use "
+            "'candles', 'historical_candles' or 'connectors'"
         )
 
     return None

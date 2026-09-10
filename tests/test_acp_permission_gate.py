@@ -407,6 +407,12 @@ NON_FUND_MOVING_TOOLS = {
     "executor_defaults",  # edits a local preferences file; creates nothing
     "explore_dex_pools",
     "explore_geckoterminal",
+    # Reads candles and nothing else, which is the whole reason it exists: a dry
+    # run may call neither a snippet nor a routine, so this is the market read
+    # left to a rehearsal (CORR-625). Its mutating half in danger.py is empty,
+    # and an action added to it without landing in the read-only set there is
+    # refused in dry-run rather than waved through.
+    "get_market_data",
 }
 
 #: Verbs that mean "this call changes something out in the world".

@@ -383,13 +383,22 @@ async def search_history(
 
 # Market Data Tools
 #
-# One tool, on purpose (ARCH-308). The candle, order book and funding-rate
-# readers that used to sit here returned a rendered table, so anything computed
-# from one — a spread, an indicator, three venues compared — had to be fetched a
-# second time through ``run_code`` to get numbers back. That is now the only
-# path: ``client.market_data.*`` inside a snippet returns dicts and gathers
-# across venues in one round trip. ``get_prices`` survives because a quote read
-# once and not computed on is answered completely by its own text.
+# Two tools, and neither renders a series (ARCH-308). The candle, order book and
+# funding-rate readers that used to sit here returned a rendered *table*, so
+# anything computed from one — a spread, an indicator, three venues compared —
+# had to be fetched a second time through ``run_code`` to get numbers back. That
+# objection was to prose, not to a tool: ``client.market_data.*`` inside a
+# snippet stays the path for anything with arithmetic in it, and ``get_prices``
+# survives because a quote read once and not computed on is answered completely
+# by its own text.
+#
+# ``get_market_data`` is the third case, and it exists because of dry-run
+# (CORR-625). A snippet holds the unrestricted API client and so does a routine,
+# so a rehearsal auto-approves neither (SEC-616, SEC-626) — which left a dry run
+# with no structured candle read at all, unable to rehearse the very decision the
+# shared playbooks teach. It answers in rows, so nothing read from it is read
+# twice, and it takes parameters instead of code, so there is nothing in it to
+# write with.
 
 
 @handle_errors("get prices")
@@ -414,6 +423,68 @@ async def get_prices(connector_name: str, trading_pairs: list[str]) -> str:
         f"Latest Prices for {result['connector_name']}:\n"
         f"Timestamp: {result['timestamp']}\n\n"
         f"{result['prices_table']}"
+    )
+
+
+@handle_errors("get market data")
+async def get_market_data(
+    action: Literal["candles", "historical_candles", "connectors"],
+    connector_name: str = "",
+    trading_pair: str = "",
+    interval: str = "1m",
+    max_records: int = 200,
+    start_time: int | None = None,
+    end_time: int | None = None,
+) -> dict[str, Any]:
+    """Read OHLCV candles back as rows, without writing any code.
+
+    Returns numbers, not a table: `candles` is a list of
+    `{timestamp, open, high, low, close, volume}` floats, ready to be read off
+    or handed to a snippet.
+
+    WHEN TO USE THIS INSTEAD OF `run_code`: when the candles ARE the answer —
+    the last N bars of one pair, the range they cover, whether a connector even
+    serves OHLCV. When you are going to *compute* on them — an indicator, a
+    regime, a spread across three venues, anything with pandas in it — write the
+    snippet instead: `client.market_data.*` inside `run_code` gathers venues in
+    one round trip and does the arithmetic where the data already is.
+
+    IN A DRY RUN THIS IS THE ONLY CANDLE READ. A snippet and a routine both hold
+    the unrestricted API client, so neither runs in a rehearsal; this tool has no
+    write path at all and runs in every mode.
+
+    Actions:
+    - "candles": the most recent `max_records` candles (needs connector_name,
+      trading_pair)
+    - "historical_candles": a unix time range (needs start_time; end_time
+      optional)
+    - "connectors": which connectors serve OHLCV at all — check before asking a
+      DEX connector for candles, because most do not serve them
+
+    Args:
+        action: What to read.
+        connector_name: Exchange connector, e.g. 'binance_perpetual'.
+        trading_pair: Pair to read, e.g. 'SOL-USDT'.
+        interval: Candle interval — '1m', '5m', '1h', '4h', '1d'.
+        max_records: Rows to return (default 200, max 1000).
+        start_time: Range start, unix epoch seconds (historical_candles).
+        end_time: Range end, unix epoch seconds. Defaults to now.
+
+    Example:
+    - get_market_data("candles", "binance_perpetual", "SOL-USDT", interval="1h",
+      max_records=168)
+    """
+    client = await hummingbot_client.get_client()
+
+    return await market_data_tools.get_market_data(
+        client=client,
+        action=action,
+        connector_name=connector_name,
+        trading_pair=trading_pair,
+        interval=interval,
+        max_records=max_records,
+        start_time=start_time,
+        end_time=end_time,
     )
 
 

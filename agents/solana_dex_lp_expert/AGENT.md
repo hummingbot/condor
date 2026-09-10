@@ -16,6 +16,7 @@ tools:
 - resolve_orphaned_position
 - get_portfolio_overview
 - get_prices
+- get_market_data
 - search_history
 - manage_routines
 - manage_agents

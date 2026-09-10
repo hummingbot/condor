@@ -10,6 +10,7 @@ tools:
 - explore_dex_pools
 - get_portfolio_overview
 - get_prices
+- get_market_data
 - send_notification
 - manage_routines
 - manage_agents

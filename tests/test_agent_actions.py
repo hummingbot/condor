@@ -644,6 +644,45 @@ def test_the_snippet_action_sets_match_the_registered_tool():
     assert not (MUTATING_CODE_RUN_ACTIONS & READ_ONLY_CODE_RUN_ACTIONS)
 
 
+def test_the_market_data_action_sets_match_the_registered_tool():
+    """The candle reader has no write half, and this is what keeps it that way.
+
+    ``get_market_data`` exists so a dry run can read a market at all (CORR-625),
+    and it earns that by taking parameters rather than code. Its mutating set is
+    empty, so an action added to the tool and not classified here is refused in
+    dry-run rather than waved through — but only as long as the two sets still
+    partition what the tool actually accepts.
+    """
+    from condor.runtime.danger import (
+        MUTATING_MARKET_DATA_ACTIONS,
+        READ_ONLY_MARKET_DATA_ACTIONS,
+    )
+    from mcp_servers.hummingbot_api.server import get_market_data
+
+    fn = getattr(get_market_data, "fn", get_market_data)
+    literals = set(typing.get_args(fn.__annotations__["action"]))
+    assert MUTATING_MARKET_DATA_ACTIONS == set()
+    assert READ_ONLY_MARKET_DATA_ACTIONS == literals
+
+
+def test_the_candle_reader_is_neither_gated_nor_logged_as_a_change():
+    """It reads. A confirmation in front of it, or a row in the action log
+    claiming it changed something, would both be wrong."""
+    from condor.runtime.danger import (
+        DANGEROUS_TOOLS,
+        is_dangerous_tool_call,
+        is_mutating_tool_call,
+        is_recordable_tool_call,
+    )
+
+    assert "get_market_data" not in DANGEROUS_TOOLS
+    for action in ("candles", "historical_candles", "connectors"):
+        call = {"tool": "get_market_data", "input": {"action": action}}
+        assert is_dangerous_tool_call(call) is False, action
+        assert is_mutating_tool_call(call) is False, action
+        assert is_recordable_tool_call(call) is False, action
+
+
 def folded_routine(**args):
     """A folded ``manage_routines`` call.
 

@@ -16,6 +16,7 @@ tools:
 - list_positions_held
 - get_portfolio_overview
 - get_prices
+- get_market_data
 - search_history
 - manage_agents
 - manage_strategies

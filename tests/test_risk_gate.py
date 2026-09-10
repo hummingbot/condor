@@ -903,3 +903,75 @@ def test_other_modes_still_run_routines_without_a_confirmation(mode):
         assert is_dangerous_tool_call(call) is False, action
         result = asyncio.run(callback(call, _OPTIONS))
         assert result["outcome"]["outcome"] == "selected", action
+
+
+# ---------------------------------------------------------------------------
+# Refusing both doors onto arbitrary Python left a rehearsal unable to read a
+# candle. `get_market_data` is the way back: parameters, not code (CORR-625).
+# ---------------------------------------------------------------------------
+
+
+def _market_call(**args) -> dict:
+    return {"tool": "mcp__mcp-hummingbot__get_market_data", "input": args}
+
+
+@pytest.mark.parametrize("action", ["candles", "historical_candles", "connectors"])
+def test_a_dry_run_reads_candles_without_a_refusal(action):
+    """The point of the item: a rehearsal reads a market with no `run_code`."""
+    refusals = RefusalLog()
+    callback = auto_approve_with_risk_check(
+        RiskEngine(RiskLimits()),
+        RiskState(),
+        execution_mode="dry_run",
+        refusals=refusals,
+    )
+
+    result = asyncio.run(
+        callback(
+            _market_call(
+                action=action,
+                connector_name="binance_perpetual",
+                trading_pair="SOL-USDT",
+                interval="1h",
+                start_time=1_757_000_000,
+            ),
+            _OPTIONS,
+        )
+    )
+
+    assert result["outcome"]["outcome"] == "selected", action
+    assert refusals.drain() == []
+
+
+def test_a_dry_run_refuses_a_market_data_action_it_cannot_read():
+    """The read-only path stays read-only: an action nobody classified is not a
+    read this build can vouch for, so it fails closed like its siblings."""
+    callback = auto_approve_with_risk_check(
+        RiskEngine(RiskLimits()), RiskState(), execution_mode="dry_run"
+    )
+
+    for call in (
+        {"tool": "get_market_data", "input": None},
+        _market_call(trading_pair="SOL-USDT"),
+        _market_call(action=None),
+        _market_call(action="subscribe"),
+    ):
+        result = asyncio.run(callback(call, _OPTIONS))
+        assert result["outcome"]["outcome"] == "cancelled", call
+
+
+@pytest.mark.parametrize("mode", ["loop", "attended", "run_once"])
+def test_the_candle_reader_needs_no_confirmation_in_any_mode(mode):
+    """It is a read, so it is never a prompt — dry-run included."""
+    from condor.runtime.danger import DANGEROUS_TOOLS, is_dangerous_tool_call
+
+    assert "get_market_data" not in DANGEROUS_TOOLS
+    callback = auto_approve_with_risk_check(
+        RiskEngine(RiskLimits()), RiskState(), execution_mode=mode
+    )
+
+    call = _market_call(
+        action="candles", connector_name="binance", trading_pair="SOL-USDC"
+    )
+    assert is_dangerous_tool_call(call) is False
+    assert asyncio.run(callback(call, _OPTIONS))["outcome"]["outcome"] == "selected"
