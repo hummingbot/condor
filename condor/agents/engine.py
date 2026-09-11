@@ -497,6 +497,10 @@ class TickEngine:
             self._last_skill_data.get("total_exposure", 0.0) or 0.0
         )
 
+        defi_result = skill_results.get("defi_positions")
+        if defi_result:
+            self.risk.include_lending(risk_state, defi_result.data)
+
         # Hard kill-switch: escalate to an emergency winddown before the soft
         # pause below. Experiments never trade for real, so they never shut down.
         if risk_state.should_shutdown and not self.is_experiment:

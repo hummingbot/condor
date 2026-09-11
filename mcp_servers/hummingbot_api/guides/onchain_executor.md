@@ -1,6 +1,6 @@
-> Automatic agents may currently create only explicit `commit: false` dry runs.
-> Agent-declared notional and native value do not bound arbitrary contract effects.
-> Committing creates are refused until the API can enforce verified bundle exposure.
+> Automatic raw-call and catalog-operation creates require explicit `commit: false`.
+> Exact lending commits require an operator-owned API grant and `require_lending_policy: true`.
+> Agent-declared notional and native value never authorize arbitrary contract effects.
 > `max_gas_quote` is denominated in USDT; missing gas pricing blocks a budgeted commit.
 
 ### Onchain Executor
@@ -54,9 +54,7 @@ lifecycle. Passing one of those as `operation` is refused at create time. Reads
    `op="contract"` to inspect a target, `op="context"` for block and gas). Do not
    sign into a wallet whose balance you have not read.
 3. **Decide the mode** — an app operation when the catalog has one; raw calls otherwise.
-4. **Use a dry run** — set `commit: false`. Automatic execution is blocked
-   because declared `notional_quote` does not enforce a spending limit.
-   Gas budgets use USDT and fail closed when pricing is unavailable.
+4. **Preview first** — set `commit: false`. To execute lending automatically, the operator must configure `AOMI_LENDING_POLICY_FILE` on the API with your exact current agent ID, account, signing wallet, and contribution/gas limits. Use `mode: "lending"`, `require_lending_policy: true`, and the approved plan. Condor reads the grant, durable contributions and a USDC/USDT quote; the API rechecks and reserves capacity atomically at creation. Other automatic modes remain dry-run only. Gas budgets use USDT and fail closed without pricing.
 
 5. **Create** — `manage_executors(action="create", executor_type="onchain_executor", executor_config={...})`.
 6. **Read the result** — poll the executor (`action="search"`, `executor_id=...`)
@@ -125,4 +123,10 @@ manage_executors(
   commit. Otherwise the executor ends `FAILED` with `reason: awaiting_wallet`
   — the transaction was staged but nobody signed it.
 - One executor groups one intended action. Multiple wallet transactions are not necessarily atomic: an approval may succeed before a later call fails. Reconcile actual receipts before retrying.
-- `defi_positions` reads the full durable lending ledger independently of the recent-transaction window. Controller contributions and wallet-wide receipt balances are separate; unresolved actions or unavailable reads must not be treated as zero exposure. This is evidence for reconciliation, not an automatic spending policy.
+- `defi_positions` reads the full durable lending ledger independently of the recent-transaction window. Controller contributions and wallet-wide receipt balances are separate; unresolved actions or unavailable reads must not be treated as zero exposure. The data is evidence for reconciliation. Automatic spending additionally requires the API grant and database admission check; the provider alone cannot authorize it.
+
+#### Automatic lending limits
+
+The operator policy supports Base USDC/Aave V3 and reserves contributions plus pending supplies across controllers. Condor uses the API account specified in the tool call (default `master_account`) and requires both controller fields, when present, to match the current agent. It values the exact USDC amount with the server’s Binance USDC/USDT quote, independently of `trading_pair` and `notional_quote`. Completed contributions remain in the next tick’s risk state. Missing history or pricing pauses automatic decisions. Withdrawals cannot consume another controller’s contributions or pending deposits; confirmed withdrawals release capacity, not a request or simulation.
+
+Limits apply to recorded contributions, not external deposits, interest or a guarantee of USDC’s peg. Policy edits govern new admissions. Unknown outcomes stay reserved until reconciled. The API’s `require_lending_policy` field prevents a grant removed between checks and creation from reverting to unrestricted manual mode. Current automatic validation must still be paired with a configured Aomi signer; a local test-wallet demo does not prove production signing.

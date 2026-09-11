@@ -46,6 +46,7 @@ class RiskLimits:
 class RiskState:
     total_exposure: float = 0.0
     executor_count: int = 0
+    lending_exposure_quote: float = 0.0
     drawdown_pct: float = 0.0
     is_blocked: bool = False
     block_reason: str = ""
@@ -151,11 +152,30 @@ class RiskEngine:
 
         return state
 
+    def include_lending(self, state: RiskState, data: dict) -> None:
+        """Carry durable positions into each tick, including after executor completion."""
+        lending = data.get("lending")
+        if lending is None and not data.get("error"):
+            return  # Provider found no on-chain history and was not opted in.
+        exposure = lending.get("exposure_quote") if isinstance(lending, dict) else None
+        if (
+            type(exposure) not in (int, float)
+            or not math.isfinite(exposure)
+            or exposure < 0
+        ):
+            state.is_blocked = True
+            state.block_reason = "Durable lending exposure is unavailable"
+            return
+        increase = max(0.0, exposure - state.lending_exposure_quote)
+        state.total_exposure += increase
+        state.lending_exposure_quote += increase
+
     def check_executor_action(
         self,
         tool_call: dict,
         current_state: RiskState,
         planned_amount_quote: float | None = None,
+        verified_lending: str = "",
     ) -> tuple[bool, str]:
         """Check if an executor creation is within risk limits.
 
@@ -189,7 +209,7 @@ class RiskEngine:
             or config.get("executor_type")
         )
         dry_run = executor_type == "onchain_executor" and config.get("commit") is False
-        if executor_type == "onchain_executor" and not dry_run:
+        if executor_type == "onchain_executor" and not dry_run and not verified_lending:
             return (
                 False,
                 "On-chain exposure cannot be verified; automatic execution requires commit=false",
@@ -200,13 +220,20 @@ class RiskEngine:
             or not math.isfinite(planned_amount_quote)
             or (
                 planned_amount_quote <= 0
-                and not (dry_run and planned_amount_quote == 0)
+                and not (
+                    (dry_run or verified_lending == "withdraw")
+                    and planned_amount_quote == 0
+                )
             )
         ):
             return False, "Planned quote exposure is unavailable"
         amount = planned_amount_quote
 
-        if current_state.total_exposure + amount > self.limits.max_position_size_quote:
+        if (
+            verified_lending != "withdraw"
+            and current_state.total_exposure + amount
+            > self.limits.max_position_size_quote
+        ):
             return False, (
                 f"Would exceed position limit: ${current_state.total_exposure + amount:.2f} > "
                 f"${self.limits.max_position_size_quote:.2f}"
@@ -216,6 +243,8 @@ class RiskEngine:
         # tick is gated against the running totals, not the pre-tick numbers.
         current_state.executor_count += 1
         current_state.total_exposure += amount
+        if verified_lending == "supply":
+            current_state.lending_exposure_quote += amount
 
         return True, ""
 
@@ -407,17 +436,42 @@ def auto_approve_with_risk_check(
                         return {"outcome": {"outcome": "cancelled"}}
 
                 planned_amount_quote = None
+                verified_lending = ""
                 if action == "create":
                     try:
-                        planned_amount_quote = await _planned_amount_quote(
-                            input_data, price_client
+                        cfg = input_data.get("executor_config") or {}
+                        kind = (
+                            input_data.get("executor_type")
+                            or cfg.get("type")
+                            or cfg.get("executor_type")
                         )
+                        if (
+                            kind == "onchain_executor"
+                            and cfg.get("commit") is not False
+                        ):
+                            from .lending import lending_grant
+
+                            verified_lending, planned_amount_quote, durable_exposure = (
+                                await lending_grant(input_data, price_client, agent_id)
+                            )
+                            # Keep old positions in this tick's risk state. Approvals already
+                            # reserved locally are not counted again when they appear in history.
+                            increase = max(
+                                0.0,
+                                durable_exposure - risk_state.lending_exposure_quote,
+                            )
+                            risk_state.total_exposure += increase
+                            risk_state.lending_exposure_quote += increase
+                        else:
+                            planned_amount_quote = await _planned_amount_quote(
+                                input_data, price_client
+                            )
                     except Exception as exc:
                         log.warning("Blocked executor create: %s", exc)
                         return {"outcome": {"outcome": "cancelled"}}
 
                 allowed, reason = risk_engine.check_executor_action(
-                    tool_call, risk_state, planned_amount_quote
+                    tool_call, risk_state, planned_amount_quote, verified_lending
                 )
                 if not allowed:
                     log.warning("Risk engine blocked tool call: %s", reason)

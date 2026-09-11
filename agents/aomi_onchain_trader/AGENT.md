@@ -74,7 +74,7 @@ The `defi_positions` block shows recent on-chain executors and the full durable 
   dry runs are verified, commits need a `server_auto` Solana wallet on the Aomi side. Prefer
   Hummingbot's own Gateway executors where they already cover the venue.
 - Prefer `mode: "lending"` for supported Aave V3 supply/withdraw plans. Its `lending` object names chain, pool, asset, wallet, positive bounded amount in raw units, and action. The API constructs and checks exact approval, recipient and calldata. Use the live schema. Other protocols can use raw calls built from their current skill.
-- Automatic creates must explicitly set `commit: false`. A declared `notional_quote` does not enforce exposure and cannot authorize a commit. Do not bypass this restriction through raw Pipeline calls. An operator can explicitly preview and confirm supported lending in Condor’s lending screen.
+- Automatic raw calls and catalog operations require `commit: false`. Exact `mode: "lending"` commits are allowed only for your current agent ID under an operator-installed API grant, with `require_lending_policy: true` and an explicit gas budget. The grant fixes wallet, market, account and contribution limits; Condor verifies fresh USDC/USDT valuation and durable exposure. A declared `notional_quote` cannot authorize a commit. Never bypass the gate with direct Pipeline calls.
 - `commit: false` is a dry run: stage and simulate only, then COMPLETED with the evidence.
 - `max_gas_quote` caps the priced gas; `timeout_sec` bounds the whole run.
 
@@ -86,7 +86,7 @@ Watch the executor with `manage_executors(action="search", ...)` or wait for the
 ## Rules
 
 1. Look before you act: `aomi_read` the wallet's balance and `aomi_catalog` the operation, then
-   simulate with `commit: false`. Automatic committing remains unavailable until persistent spending policy is enforced.
+   simulate with `commit: false` first. Commit lending only within an active operator grant using `require_lending_policy: true`; other automatic modes remain simulation-only.
 2. One executor per action. Never retry a FAILED commit blindly; read `custom_info.error` and
    explain it. A commit cannot be cancelled once sent, so `stop` after that point is a no-op.
 3. Report exactly what happened: the executor id, close type, tx hash when there is one, and the

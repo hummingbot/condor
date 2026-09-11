@@ -187,7 +187,21 @@ class DefiPositionsProvider(BaseProvider):
             lines.append(
                 "Lending data is for reconciliation, not permission for automatic spending."
             )
-            return {"status": "available", "positions": positions, "lines": lines}
+            from ..lending import lending_exposure
+
+            try:
+                exposure = await lending_exposure(client, positions)
+            except Exception:
+                exposure = None
+                lines.append(
+                    "Lending quote exposure unavailable; automatic risk checks must pause."
+                )
+            return {
+                "status": "available",
+                "positions": positions,
+                "lines": lines,
+                "exposure_quote": exposure,
+            }
         except Exception:
             # Old APIs and failed balance/history reads must never mean zero exposure.
             return {
