@@ -2143,11 +2143,12 @@ async def explore_geckoterminal(
 
 # ── Tool profiles (FEAT-066) ─────────────────────────────────────────────────
 #
-# Tool allowlists are only enforced for pydantic-ai model keys; an ACP bridge
-# (claude-code, gemini, copilot) runs unrestricted. For those seats the surface a
-# session MOUNTS is the whole permission model, so which tools this process
-# registers is a security boundary — hence explicit registration below instead of
-# an ``@mcp.tool()`` decorator that fires for everyone at import.
+# An ACP bridge (claude-code, gemini, copilot) filters no tool itself, so the
+# surface a session MOUNTS is the whole permission model — the profile, minus the
+# operator's mutes and whatever the Agent's allowlist leaves out, both arriving
+# as ``--mute-tools``. Which tools this process registers is a security boundary
+# — hence explicit registration below instead of an ``@mcp.tool()`` decorator
+# that fires for everyone at import.
 #
 # The rings themselves — which tool sits in which one, and why — moved to
 # ``profiles.py`` as plain name strings (FEAT-091), because the web process has

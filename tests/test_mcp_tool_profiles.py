@@ -1,10 +1,10 @@
 """What each seat mounts (FEAT-066).
 
-Tool allowlists are only enforced for pydantic-ai model keys; an ACP bridge
-(claude-code, gemini, copilot) runs unrestricted. For those seats the surface a
-session MOUNTS is the whole permission model, so every profile's tool set is
-pinned here as a golden list: a tool added to the wrong ring fails a test rather
-than quietly widening the seat that trades with real capital.
+An ACP bridge (claude-code, gemini, copilot) filters no tool itself, so the
+surface a session MOUNTS is the whole permission model — the profile, minus the
+operator's mutes and the Agent's allowlist complement — and every profile's tool
+set is pinned here as a golden list: a tool added to the wrong ring fails a test
+rather than quietly widening the seat that trades with real capital.
 """
 
 import asyncio
@@ -262,6 +262,23 @@ def test_the_tick_preload_carries_a_market_read_a_dry_run_can_actually_make(
     for action in ("candles", "historical_candles", "connectors"):
         call = {"tool": name, "input": {"action": action, "trading_pair": "SOL-USDC"}}
         assert dry_run_refusal(call) is None, action
+
+
+def test_the_tick_preload_drops_what_the_seat_never_mounts():
+    """An allowlisted agent's tick must not be told of tools its seat never
+    registers — naming one spends the tick discovering it cannot call it."""
+    from condor.agents.prompts import _build_tool_preload
+
+    line = _build_tool_preload(
+        is_dry_run=False,
+        is_experiment=False,
+        muted={"create_grid_executor", "send_notification"},
+    )
+    names = set(re.search(r'select:([^"]+)"', line).group(1).split(","))
+
+    assert "mcp__mcp-hummingbot__create_grid_executor" not in names
+    assert "mcp__condor__send_notification" not in names
+    assert "mcp__mcp-hummingbot__create_lp_executor" in names
 
 
 def test_the_manage_trading_agent_funnel_is_in_no_profile():

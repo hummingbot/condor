@@ -1069,12 +1069,11 @@ export interface AgentDetail {
  * `getAgentMemory`), so opening the panel never pulls the whole library.
  */
 /**
- * One tool this agent's seat actually mounts (FEAT-091).
+ * One tool of this agent's seat's ring (FEAT-091).
  *
- * Not the AGENT.md allowlist: that is only enforced for pydantic-ai model keys,
- * and an ACP bridge (claude-code, gemini, copilot) runs unrestricted — so for
- * most seats the list is decoration and this row is the real surface. Switching
- * one off means the next session does not register it at all.
+ * Two things keep it from being mounted, on every backend alike: `muted`, and —
+ * when the agent names an allowlist (`tools_unrestricted` false) — `allowlisted`
+ * being false. Either way the next session does not register it at all.
  */
 export interface ToolCard {
   name: string;
@@ -1083,7 +1082,7 @@ export interface ToolCard {
   description: string;
   /** Switched off by the operator — the next session never mounts it. */
   muted: boolean;
-  /** The AGENT.md allowlist names it (the pydantic-ai filter, not the mount). */
+  /** The AGENT.md allowlist names it. Under an allowlist, a row it omits is never mounted. */
   allowlisted: boolean;
 }
 

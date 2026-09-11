@@ -16,7 +16,10 @@ tools:
 - manage_agents
 - manage_strategies
 - control_agent
+- get_available_models
+- delegate
 - trading_agent_journal_read
+- trading_agent_journal_write
 - manage_memory
 - manage_skill
 - run_code

@@ -61,7 +61,10 @@ def build_llm_client(
     whichever client understands them. Both clients take the env and the system
     prompt — each over its own system-level channel (``_meta.systemPrompt`` for
     ACP, ``instructions`` for pydantic-ai), so a bound Agent keeps its identity
-    on either backend (ARCH-331). Only PydanticAI enforces the tool allowlist.
+    on either backend (ARCH-331). Only PydanticAI takes ``allowed_tools`` as a
+    client filter; ACP filters nothing, so for both the allowlist is enforced
+    where the MCP servers are built — :func:`condor.runtime.toolsets.seat_mutes`
+    keeps what it leaves out from ever being mounted.
     """
     if pydantic_ai.is_pydantic_ai_model(agent_key):
         custom_url, api_key = resolve_custom_endpoint(

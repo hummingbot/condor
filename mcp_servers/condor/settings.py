@@ -44,8 +44,8 @@ class Settings:
     # with nobody watching any of them. Enforced in ``tools/delegate.py``.
     ask_target: bool = False
     # Which slice of the tool surface this process registers (FEAT-066). An ACP
-    # bridge runs unrestricted, so for those seats the mounted surface IS the
-    # permission model: see ``server.TOOL_PROFILES``. It is a separate flag from
+    # bridge filters no tool itself, so the mounted surface IS the permission
+    # model: see ``server.TOOL_PROFILES``. It is a separate flag from
     # the two above rather than derived from them, because the seat it narrows is
     # the *tick*, and neither ``agent_slug`` nor ``delegate_worker`` tells an
     # unattended loop apart from an attended chat with the same specialist.

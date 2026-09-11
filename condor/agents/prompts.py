@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Collection
 from pathlib import Path
 from typing import Any
 
@@ -211,7 +212,11 @@ JOURNAL:
 
 
 def _build_tool_preload(
-    *, is_dry_run: bool, is_experiment: bool, is_controller_mode: bool = False
+    *,
+    is_dry_run: bool,
+    is_experiment: bool,
+    is_controller_mode: bool = False,
+    muted: Collection[str] = (),
 ) -> str:
     """ToolSearch preload line for ACP sessions.
 
@@ -221,6 +226,10 @@ def _build_tool_preload(
     modes (dry_run / run_once) omit trading_agent_journal_write since they have no
     journal. Controller mode preloads the bot/controller tools it actually trades with
     — otherwise the agent burns a tick discovering them.
+
+    ``muted`` is what the seat never mounts (``toolsets.seat_mutes``: operator
+    mutes plus whatever the Agent's allowlist leaves out), dropped from the line so
+    it names only tools the tick can actually call.
     """
     tools = [
         "mcp__mcp-hummingbot__get_prices",
@@ -270,6 +279,7 @@ def _build_tool_preload(
         "mcp__condor__manage_skill",
         "mcp__condor__manage_routines",
     ]
+    tools = [t for t in tools if t.rsplit("__", 1)[-1] not in muted]
     return (
         "IMPORTANT: At the very start, load ALL MCP tools in a single ToolSearch call:\n"
         f'ToolSearch(query="select:{",".join(tools)}")\n'
@@ -525,11 +535,14 @@ def build_tick_prompt(
 
     # Tool preload is ACP-specific (ToolSearch); pydantic-ai auto-discovers MCP tools
     if not use_pydantic_ai:
+        from condor.runtime.toolsets import seat_mutes
+
         sections.append(
             _build_tool_preload(
                 is_dry_run=is_dry_run,
                 is_experiment=is_experiment,
                 is_controller_mode=is_controller_mode,
+                muted=seat_mutes(getattr(agent, "slug", "") or None),
             )
         )
     else:

@@ -12,8 +12,11 @@ tools:
 - list_executors
 - get_executor
 - stop_executor
+- list_positions_held
 - list_orphaned_positions
 - resolve_orphaned_position
+- manage_clmm
+- manage_bots
 - get_portfolio_overview
 - get_prices
 - get_market_data
@@ -22,7 +25,11 @@ tools:
 - manage_agents
 - manage_strategies
 - control_agent
+- get_available_models
+- delegate
+- send_notification
 - trading_agent_journal_read
+- trading_agent_journal_write
 - manage_memory
 - manage_skill
 - run_code

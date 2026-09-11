@@ -484,6 +484,7 @@ def bound_agent_context(
     ``control_agent`` was authorized to stop the whole time. ``agent_key``
     falls back to the binding's own; the caller passes the resolved key, since
     a model picked in the UI overrides what the Agent front matter configured.
+    The slug narrows the line to what this Agent's seat actually mounts.
     """
     sections = [
         binding.agent_identity_context(
@@ -491,7 +492,7 @@ def bound_agent_context(
         ),
         platform_formatting(platform),
     ]
-    preload = chat_tool_preload(agent_key or bound.agent_key)
+    preload = chat_tool_preload(agent_key or bound.agent_key, bound.agent_slug)
     if preload:
         sections.append(preload)
     return "\n\n".join(sections)
@@ -756,8 +757,10 @@ async def _spawn_session(
         agent_key,
         mcp_servers=mcp_servers,
         permission_callback=permission_callback,
-        # A bound Agent's allowlist is enforced here exactly as it is on
-        # delegate and loop, so an Agent has the same reach in every mode.
+        # The client-side filter, which only pydantic-ai applies. On every
+        # backend the allowlist is also enforced one level down: the MCP
+        # subprocesses never mount what it leaves out (toolsets.seat_mutes), so
+        # an Agent has the same reach in every mode and on every model.
         allowed_tools=bound.tools or None,
         extra_env=extra_env,
         system_prompt=(

@@ -695,8 +695,8 @@ async def get_available_models(
     model (a capable OpenRouter model when its key is set, or a subscription ACP
     bridge the user confirms is signed in); simple
     report/watch loops or privacy/offline needs → a loaded local model or a cheap
-    OpenRouter one. Only pydantic-ai keys (openrouter:/ollama:/lmstudio:/openai:/
-    groq:) enforce an agent's ``tools`` allowlist; ACP bridges run unrestricted.
+    OpenRouter one. An agent's ``tools`` allowlist binds on every model, ACP
+    bridges included: a tool it leaves out is never mounted.
     """
     return await available_models_tool.get_available_models(
         openrouter_query, openrouter_limit
@@ -767,9 +767,15 @@ async def manage_agents(
         instructions: The AGENT.md body — identity + domain knowledge (create/update).
         agent_key: Default LLM. Examples: "claude-code", "gemini", "copilot",
             "ollama:llama3.1", "ollama:qwen3:32b", "groq:llama-3.3-70b-versatile".
-            Any model can run an agent; a pydantic-ai key (e.g. "ollama:...")
-            additionally enforces the tools allowlist. Default "claude-code".
-        tools: Tool-name allowlist for the agent. Empty/None = unrestricted.
+            Any model can run an agent, and every one is held to the tools
+            allowlist. Default "claude-code".
+        tools: Tool-name allowlist for the agent. Empty/None = unrestricted. A
+            tool it omits is never mounted on any model, so keep the family the
+            inherited framework playbooks call — delegate, send_notification,
+            run_code, manage_memory, manage_skill, manage_routines,
+            trading_agent_journal_read, trading_agent_journal_write,
+            manage_agents, manage_strategies, control_agent,
+            get_available_models — plus every tool the agent's own playbooks name.
         when_to_consult: One-line hint describing when to route work to this agent.
             Purely for routing — every agent is delegable with or without it; it
             falls back to the description.
@@ -1220,11 +1226,12 @@ async def trading_agent_journal_write(
 
 # ── Tool profiles (FEAT-066) ─────────────────────────────────────────────────
 #
-# Tool allowlists are only enforced for pydantic-ai model keys; an ACP bridge
-# (claude-code, gemini, copilot) runs unrestricted. For those seats the surface a
-# session MOUNTS is the whole permission model, so which tools this process
-# registers is a security boundary — hence explicit registration below instead of
-# an ``@mcp.tool()`` decorator that fires for every seat at import.
+# An ACP bridge (claude-code, gemini, copilot) filters no tool itself, so the
+# surface a session MOUNTS is the whole permission model — the profile, minus the
+# operator's mutes and whatever the Agent's allowlist leaves out, both arriving
+# as ``--mute-tools``. Which tools this process registers is a security boundary
+# — hence explicit registration below instead of an ``@mcp.tool()`` decorator
+# that fires for every seat at import.
 #
 # The rings themselves — which tool sits in which one, and why — moved to
 # ``profiles.py`` as plain name strings (FEAT-091), because the web process has

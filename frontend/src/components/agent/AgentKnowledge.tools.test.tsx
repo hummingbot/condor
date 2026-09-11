@@ -1,11 +1,9 @@
 /**
  * The Tools tab is the seat's real mounted surface, with a switch (FEAT-091).
  *
- * It used to echo the AGENT.md allowlist, which only binds pydantic-ai model
- * keys — an ACP bridge runs unrestricted — so for most agents here the tab was
- * telling the reader something untrue about what the model can reach. What is
- * pinned here is the replacement: rows grouped by MCP server, the allowlist
- * shown as one flag among the rows rather than as the whole list, the switch
+ * What is pinned here: rows grouped by MCP server, the allowlist shown as one
+ * flag among the rows rather than as the whole list, a row the allowlist leaves
+ * out dimmed with no switch (it is never mounted, on any backend), the switch
  * reaching the endpoint with `kind: "tool"`, and the muted row still visible so
  * the curation can be undone.
  *
@@ -171,6 +169,23 @@ describe("the tools tab", () => {
     // …and the tab still lists the whole surface, not just the allowlist.
     expect(rowFor("manage_clmm")).toBeTruthy();
     expect(container.textContent).toContain("Edit it in the Brain tab");
+  });
+
+  it("dims what an allowlist leaves out, flagged and with no switch", async () => {
+    getAgentBrain.mockResolvedValue(brain({ allowlist: ["get_candles"] }));
+    await openTools();
+
+    // Left out of the list means never mounted: nothing to switch.
+    expect(rowFor("delegate").textContent).toContain("not in allowlist");
+    expect(rowFor("delegate").querySelector('button[role="switch"]')).toBeNull();
+    expect(rowFor("get_candles").textContent).not.toContain("not in allowlist");
+    expect(switchFor("get_candles")).toBeTruthy();
+  });
+
+  it("flags nothing as left out when no allowlist is written", async () => {
+    await openTools();
+    expect(container.textContent).not.toContain("not in allowlist");
+    expect(switchFor("delegate")).toBeTruthy();
   });
 
   it("points at the Brain tab when no allowlist is written", async () => {

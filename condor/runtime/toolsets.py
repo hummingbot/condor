@@ -77,10 +77,11 @@ def _env_entries(**values: Any) -> list[dict[str, str]]:
 def seat_profile(agent_slug: str | None, tick: bool) -> str:
     """Which tool profile a seat mounts (FEAT-066).
 
-    Tool allowlists are only enforced for pydantic-ai model keys; an ACP bridge
-    runs unrestricted, so for those seats the surface a session MOUNTS *is* the
-    permission model. One rule, in one place, for both subprocesses — they share
-    a profile vocabulary precisely so a seat is described here and nowhere else.
+    An ACP bridge filters no tool itself, so the surface a session MOUNTS *is*
+    the permission model: this ring, minus what :func:`seat_mutes` subtracts (the
+    operator's mutes and whatever the Agent's ``tools:`` allowlist leaves out).
+    One rule, in one place, for both subprocesses — they share a profile
+    vocabulary precisely so a seat is described here and nowhere else.
 
     - ``tick`` — the unattended loop. No Gateway config or container control, no
       repointing the API server, no direct liquidity moves outside an executor,
@@ -153,12 +154,65 @@ def seat_tools(agent_slug: str | None, tick: bool = False) -> list[dict[str, Any
     ]
 
 
+def _every_tool_name() -> set[str]:
+    """Every tool name any ring of either server can mount."""
+    from mcp_servers.condor import profiles as condor_profiles
+    from mcp_servers.hummingbot_api import profiles as hummingbot_profiles
+
+    return {
+        name
+        for module in (condor_profiles, hummingbot_profiles)
+        for ring in module.PROFILE_TOOLS.values()
+        for name in ring
+    }
+
+
+def allowlist_mutes(agent_slug: str | None) -> set[str]:
+    """What an Agent's ``tools:`` allowlist leaves out, as mute names.
+
+    Only pydantic-ai's ``_prepare_tools`` reads ``allowed_tools``; an ACP bridge
+    filters nothing, so on every Claude seat the list used to be decoration — the
+    seat mounted the whole ring and its preload named all of it, ~39k tokens of
+    schemas for tools the Agent was never meant to reach. Turning the complement
+    into mutes enforces the list at the one layer every backend shares: the
+    subprocess never registers what the list omits, so the model is never told
+    the tool exists.
+
+    An empty list means unrestricted, as it always has; so does an unknown slug.
+    Names may be namespaced (``mcp__condor__delegate``), the form pydantic-ai
+    also accepts, and match on their last segment.
+    """
+    if not agent_slug:
+        return set()
+    from condor.agents.agent import AgentStore
+
+    agent = AgentStore().get(agent_slug)
+    if agent is None or not agent.tools:
+        return set()
+    allowed = {str(name).rsplit("__", 1)[-1] for name in agent.tools}
+    return _every_tool_name() - allowed
+
+
+def seat_mutes(agent_slug: str | None) -> list[str]:
+    """Every tool this agent's seats must not mount, sorted.
+
+    The operator's mutes (FEAT-091) plus what its allowlist leaves out. The one
+    answer to "what is subtracted", read by the spawner that builds argv and by
+    both preloads that name tools to the model: a preload naming a tool the
+    subprocess never registered spends a ToolSearch on nothing, and a spawner
+    and a preload that disagree are how the allowlist stopped meaning anything.
+    """
+    from condor.memory.mutes import load_mutes
+
+    return sorted(load_mutes(agent_slug)["tools"] | allowlist_mutes(agent_slug))
+
+
 def _muted_tool_args(muted_tools: Sequence[str]) -> list[str]:
     """``--mute-tools a,b,c`` — or nothing at all when nothing is muted.
 
-    Nothing on the line is the point: an install where no operator has switched
-    a tool off spawns byte-identical argv to before FEAT-091 existed, so the flag
-    can never be blamed for a session that behaves differently.
+    Nothing on the line is the point: an agent nobody has curated and that names
+    no allowlist spawns byte-identical argv to before FEAT-091 existed, so the
+    flag can never be blamed for a session that behaves differently.
 
     Both servers are handed the *same* list, and each ignores the names it does
     not mount. A mute is one fact about one agent; splitting it per server would
@@ -306,7 +360,6 @@ def build_mcp_servers_for_session(
     turn for ``on_complete="resume"`` to wake. See
     :func:`_condor_mcp_args` for why it travels on argv.
     """
-    from condor.memory.mutes import load_mutes
     from config_manager import (
         ServerPermission,
         get_config_manager,
@@ -316,11 +369,13 @@ def build_mcp_servers_for_session(
 
     cm = get_config_manager()
     profile = seat_profile(agent_slug, tick)
-    # Read once, for both subprocesses: a mute is one fact about one agent, and
-    # reading the file twice is two answers to the same question. Sorted so the
+    # Read once, for both subprocesses: what an agent must not mount is one fact
+    # about one agent — its operator mutes plus whatever its allowlist leaves out
+    # — and reading it twice is two answers to the same question. Sorted so the
     # spawn line is stable between restarts, and empty for every agent nobody has
-    # curated — in which case neither builder puts a flag on the line at all.
-    muted_tools = sorted(load_mutes(agent_slug)["tools"])
+    # curated that names no allowlist — in which case neither builder puts a flag
+    # on the line at all.
+    muted_tools = seat_mutes(agent_slug)
 
     # Resolve which hummingbot server to use (explicit override > user
     # preferences). Every candidate is held to existence *and* reach, because

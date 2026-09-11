@@ -351,17 +351,15 @@ class StrategyCard(BaseModel):
 
 
 class ToolCard(BaseModel):
-    """One tool this Agent's seat actually mounts (FEAT-091).
+    """One tool of this Agent's seat's ring (FEAT-091), and what takes it away.
 
-    Not the AGENT.md allowlist: that list is only enforced for pydantic-ai model
-    keys, and an ACP bridge (claude-code, gemini, copilot) runs unrestricted, so
-    for most seats here the list is decoration. What the model is really handed
-    is what the two MCP subprocesses register — which is what this row is, and
-    what its switch turns off.
-
-    ``allowlisted`` keeps the other statement visible instead of conflating the
-    two: it says the AGENT.md list names this tool, which is a pydantic-ai fact
-    about *filtering*, while ``muted`` is an operator fact about *mounting*.
+    Every row of the ring is listed, so a tool switched off can be switched back
+    on. Two things keep a row from being mounted, on every backend alike, since
+    the spawner turns both into ``--mute-tools`` (``toolsets.seat_mutes``):
+    ``muted`` is the operator's switch, and — when the Agent names an allowlist
+    (``AgentBrain.tools_unrestricted`` false) — ``allowlisted`` false means the
+    AGENT.md list leaves it out. What the model is handed is the rows that
+    neither removes.
     """
 
     name: str
