@@ -187,6 +187,7 @@ def test_config_defaults_and_descriptions():
         "include_skills": True,
     }
     assert read.Config().model_dump() == {
+        "chain": "evm",
         "op": "context",
         "chain_id": 8453,
         "address": "",
@@ -280,6 +281,30 @@ def test_catalog_listing_failure_is_one_line_not_a_raise(monkeypatch):
 
 
 # ── aomi_read ────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "op,key",
+    [("account", "pubkey"), ("program", "program_id"), ("token-holdings", "owner")],
+)
+def test_solana_read_routes_through_shared_client(monkeypatch, op, key):
+    pipeline = _use(monkeypatch, FakePipeline(read_result={"cluster": "mainnet-beta"}))
+    result = asyncio.run(
+        read.run(read.Config(chain="svm", op=op, address="test-address"), context=None)
+    )
+    assert pipeline.calls == [("read", "svm", op, {key: "test-address"})]
+    assert result.text.startswith(f"# Aomi svm/{op}")
+    assert pipeline.closed
+
+
+@pytest.mark.parametrize("args", [{"chain_id": 1}, {"cluster": "devnet"}])
+def test_solana_read_refuses_ignored_network_override(monkeypatch, args):
+    pipeline = _use(monkeypatch, FakePipeline())
+    result = asyncio.run(
+        read.run(read.Config(chain="svm", args_json=json.dumps(args)), context=None)
+    )
+    assert "connected wallet's cluster" in result
+    assert pipeline.calls == []
 
 
 def test_read_builds_args_and_renders_json(monkeypatch):

@@ -1,4 +1,4 @@
-"""Read EVM chain state through the Aomi Pipeline (account, contract, holdings, context)."""
+"""Read EVM or Solana accounts, interfaces, holdings and context through Aomi."""
 
 CATEGORY = "DeFi"
 
@@ -12,16 +12,21 @@ from routines.base import RoutineResult
 
 logger = logging.getLogger(__name__)
 
-READ_OPS = ("account", "contract", "token-holdings", "context")
+READ_OPS = {
+    "evm": ("account", "contract", "token-holdings", "context"),
+    "svm": ("account", "program", "token-holdings", "context"),
+}
 MAX_JSON_CHARS = 6000
 
 
 class Config(BaseModel):
-    """Read EVM state via Aomi: an account, a contract, token holdings or the chain context."""
+    """Read EVM or Solana state via Aomi's shared Pipeline."""
+
+    chain: str = Field(default="evm", description="evm or svm (Solana)")
 
     op: str = Field(
         default="context",
-        description="One of: account, contract, token-holdings, context",
+        description="account, token-holdings, context; contract for EVM or program for Solana",
     )
     chain_id: int = Field(default=8453, description="EVM chain id (8453 = Base)")
     address: str = Field(
@@ -30,7 +35,7 @@ class Config(BaseModel):
     )
     args_json: str = Field(
         default="{}",
-        description="Extra arguments as JSON (token-holdings needs token_address)",
+        description="Extra arguments as JSON (EVM holdings needs token_address; Solana optionally takes mint)",
     )
 
 
@@ -40,14 +45,35 @@ def build_args(config: Config) -> dict[str, Any]:
     Raises ``ValueError`` on an unknown op or unreadable JSON so the caller can
     render one ``Invalid config`` line instead of a failed request.
     """
-    if config.op not in READ_OPS:
-        raise ValueError(f"op must be one of {', '.join(READ_OPS)}, got {config.op!r}")
+    if config.chain not in READ_OPS:
+        raise ValueError("chain must be evm or svm")
+    allowed = READ_OPS[config.chain]
+    if config.op not in allowed:
+        raise ValueError(f"op must be one of {', '.join(allowed)}, got {config.op!r}")
     try:
         extra = json.loads(config.args_json or "{}")
     except json.JSONDecodeError as e:
         raise ValueError(f"args_json is not valid JSON: {e}") from e
     if not isinstance(extra, dict):
         raise ValueError("args_json must decode to a JSON object")
+
+    if config.chain == "svm":
+        if "chain_id" in extra or "cluster" in extra:
+            raise ValueError(
+                "Solana reads use the connected wallet's cluster; check context first"
+            )
+        args = dict(extra)
+        address = config.address.strip()
+        if address and config.op != "context":
+            key = {
+                "account": "pubkey",
+                "program": "program_id",
+                "token-holdings": "owner",
+            }[config.op]
+            args[key] = address
+        if config.op == "account" and not args.get("pubkey"):
+            raise ValueError("Solana account needs an address")
+        return args
 
     if config.op == "context":
         # The context tool takes no arguments: it reports the wallet's active chain and
@@ -66,7 +92,7 @@ def build_args(config: Config) -> dict[str, Any]:
     return args
 
 
-def render(op: str, args: dict[str, Any], result: Any) -> str:
+def render(op: str, args: dict[str, Any], result: Any, chain: str = "evm") -> str:
     body = json.dumps(result, indent=2, default=str)
     if len(body) > MAX_JSON_CHARS:
         body = body[:MAX_JSON_CHARS] + "\n… (truncated)"
@@ -76,7 +102,11 @@ def render(op: str, args: dict[str, Any], result: Any) -> str:
             "- note: context reports the wallet's active chain; every usable chain is "
             "listed under supported_chains (chain_id is not an input here)"
         )
-    return f"# Aomi evm/{op}\n\n{arg_lines}\n\n```json\n{body}\n```"
+        if chain == "svm":
+            arg_lines = (
+                "- note: Solana reads use the connected wallet's cluster shown below"
+            )
+    return f"# Aomi {chain}/{op}\n\n{arg_lines}\n\n```json\n{body}\n```"
 
 
 async def run(config: Config, context: Any) -> str | RoutineResult:
@@ -91,10 +121,10 @@ async def run(config: Config, context: Any) -> str | RoutineResult:
     if client is None:
         return MISSING_TOKEN_MESSAGE
     try:
-        result = await client.read("evm", config.op, args)
+        result = await client.read(config.chain, config.op, args)
     except Exception as e:  # noqa: BLE001 - a routine reports, it never raises
         logger.warning("Aomi read %s failed: %s", config.op, e)
         return f"Aomi read failed: {e}"
     finally:
         await client.close()
-    return RoutineResult(text=render(config.op, args, result))
+    return RoutineResult(text=render(config.op, args, result, config.chain))

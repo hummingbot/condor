@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import logging
 import time
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, ConfigDict, Field
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +25,28 @@ from condor.web.routes._errors import upstream_error
 from config_manager import get_config_manager
 
 router = APIRouter(tags=["executors"])
+
+
+class OnchainPreparationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    operation: Literal["venues", "market", "prepare", "position"]
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+@router.post("/servers/{name}/executors/onchain/prepare")
+async def onchain_preparation(
+    name: str,
+    request: OnchainPreparationRequest,
+    user: WebUser = Depends(require_server_access),
+):
+    """Read or prepare through Aomi; execution remains a separate confirmed executor request."""
+    client = await get_config_manager().get_client(name)
+    try:
+        return await client.executors._post(
+            "/executors/onchain/prepare", json=request.model_dump()
+        )
+    except Exception as exc:
+        raise upstream_error("Aomi market preparation failed", exc)
 
 
 # Cursor scheme for pages served as an offset into the executor stream rather
@@ -469,7 +493,9 @@ async def lending_positions(name: str, user: WebUser = Depends(require_server_ac
     try:
         # Use the SDK's authenticated router transport until it exposes this new route.
         result = await client.executors._get("/executors/lending/positions")
-        if not isinstance(result, dict) or not isinstance(result.get("positions"), list):
+        if not isinstance(result, dict) or not isinstance(
+            result.get("positions"), list
+        ):
             raise ValueError("Invalid lending positions response")
         return result
     except Exception as e:

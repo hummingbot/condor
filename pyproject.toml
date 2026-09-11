@@ -46,7 +46,7 @@ dependencies = [
 dev = ["pytest", "pytest-asyncio", "black", "isort", "pre-commit"]
 
 # Optional on-chain routines/provider use the public Pipeline client:
-# uv pip install "aomi @ git+https://github.com/aomi-labs/aomi-python@b108c2d5399ac1d3a31a98f4b6668b3b20233d8e"
+# uv pip install "aomi @ git+https://github.com/aomi-labs/aomi-python@caa72d5225dd60e482835e0341a91293d7549dd3"
 
 [tool.isort]
 profile = "black"

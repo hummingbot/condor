@@ -17,6 +17,7 @@ import { BotDetail } from "@/pages/BotDetail";
 import { Bots } from "@/pages/Bots";
 import { CreateExecutor } from "@/pages/CreateExecutor";
 import { Lending } from "@/pages/Lending";
+import { UniversalExecution } from "@/pages/UniversalExecution";
 import { Dex } from "@/pages/Dex";
 import { DexPool } from "@/pages/DexPool";
 import { Login } from "@/pages/Login";
@@ -116,6 +117,7 @@ export default function App() {
                   element={<Navigate to="/bots?population=terminated&groupBy=ctrlType" replace />}
                 />
                 <Route path="/executors/lending" element={<Lending />} />
+                <Route path="/executors/onchain" element={<UniversalExecution />} />
                 <Route path="/executors/new" element={<Navigate to="/trade" replace />} />
                 <Route path="/executors/new-grid" element={<Navigate to="/trade?type=grid" replace />} />
                 <Route

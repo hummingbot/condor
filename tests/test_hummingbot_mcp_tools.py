@@ -254,7 +254,12 @@ def test_onchain_tools_expose_typed_plan_and_calldata_schemas():
     )
     assert lending["properties"]["action"]["enum"] == ["supply", "withdraw"]
     raw = tools["create_onchain_executor"]
-    assert raw["properties"]["mode"]["enum"] == ["calls", "operation"]
+    assert raw["properties"]["mode"]["enum"] == ["calls", "operation", "instructions"]
+    assert {
+        "instructions",
+        "reviewed_svm_plan_hash",
+        "max_svm_network_fee_lamports",
+    } <= set(raw["properties"])
     assert "EvmCall" in str(raw) and "executor_config" not in raw["properties"]
 
 

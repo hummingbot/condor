@@ -2598,6 +2598,10 @@ export const api = {
       balance_status: string; unresolved_executor_ids: string[];
     }> }>(`/api/v1/servers/${encodeURIComponent(server)}/executors/lending/positions`),
 
+  prepareOnchain: (server: string, operation: "venues" | "market" | "prepare" | "position", args: Record<string, unknown> = {}) =>
+    apiFetch<import("./universal").DefiResponse>(`/api/v1/servers/${encodeURIComponent(server)}/executors/onchain/prepare`,
+      { method: "POST", body: JSON.stringify({ operation, arguments: args }) }),
+
   getExecutor: (server: string, executorId: string) =>
     apiFetch<ExecutorInfo>(
       `/api/v1/servers/${encodeURIComponent(server)}/executors/${encodeURIComponent(executorId)}`,

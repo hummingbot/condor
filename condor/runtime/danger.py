@@ -513,14 +513,23 @@ def format_tool_summary(tool_call: dict[str, Any]) -> str:
 
     if tool_name in {"create_onchain_executor", "create_lending_executor"}:
         verb = "Simulate" if input_data.get("commit") is False else "Execute"
-        chain = input_data.get("chain_id", "?")
+        chain = (
+            f"Solana ({input_data.get('cluster', 'mainnet-beta')})"
+            if input_data.get("chain") == "svm"
+            else input_data.get("chain_id", "?")
+        )
         if tool_name == "create_lending_executor":
             return (
                 f"{verb} lending {input_data.get('action', '?')}: "
                 f"{input_data.get('amount', '?')} raw units of {input_data.get('asset', '?')} "
                 f"on chain {chain}, wallet {input_data.get('wallet', '?')}"
             )
-        return f"{verb} on-chain {input_data.get('operation') or 'raw calls'} on chain {chain}"
+        operation = input_data.get("operation") or (
+            "instruction bundle"
+            if input_data.get("mode") == "instructions"
+            else "raw calls"
+        )
+        return f"{verb} on-chain {operation} on chain {chain}"
 
     if tool_name in CREATE_EXECUTOR_TOOLS:
         # The typed tools put the numbers the human is approving at the top level,

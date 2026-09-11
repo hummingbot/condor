@@ -15,6 +15,9 @@ def client(monkeypatch):
         lambda kind, config: {
             "operation": "old",
             "calls": [{"to": "old"}],
+            "instructions": [{"instructions": ["old"]}],
+            "max_svm_network_fee_lamports": 123,
+            "reviewed_svm_plan_hash": "a" * 64,
             "controller_id": "someone-else",
             **config,
         },
@@ -57,6 +60,8 @@ async def test_typed_lending_preserves_exact_plan_authority_and_policy(client):
         action="supply",
     )
     assert config["commit"] is True and config["require_lending_policy"] is True
+    assert config["max_svm_network_fee_lamports"] is None
+    assert config["reviewed_svm_plan_hash"] is None
     assert (
         config["calls"] is None
         and config["operation"] is None
@@ -79,6 +84,8 @@ async def test_typed_raw_call_keeps_calldata_and_explicit_dry_run(client):
     )
     config = client.executors.create_executor.call_args.kwargs["executor_config"]
     assert config["calls"][0]["data"]["raw"] == "0x1234"
+    assert config["instructions"] is None
+    assert config["max_svm_network_fee_lamports"] is None
     assert (
         config["commit"] is False
         and config["operation"] is None
@@ -107,3 +114,63 @@ def test_unknown_raw_transaction_fields_are_rejected():
         onchain.EvmCall(
             to="wallet", value="0", data=onchain.EvmCalldata(), spender="other"
         )
+
+
+@pytest.mark.asyncio
+async def test_solana_batches_preserve_lookup_tables_and_clear_saved_calls(client):
+    batches = [
+        {
+            "description": "deposit",
+            "address_lookup_tables": ["lookup"],
+            "instructions": [
+                {"program_id": "program", "data_base64": "AA==", "accounts": []}
+            ],
+        }
+    ]
+    await onchain.create_onchain_executor(
+        client,
+        chain_id=1,
+        chain="svm",
+        mode="instructions",
+        instructions=batches,
+        commit=False,
+        max_svm_network_fee_lamports=5000,
+        reviewed_svm_plan_hash="b" * 64,
+    )
+    config = client.executors.create_executor.call_args.kwargs["executor_config"]
+    assert config["instructions"] == batches
+    assert config["calls"] is None and config["operation"] is None
+    assert config["chain"] == "svm" and config["commit"] is False
+    assert config["max_svm_network_fee_lamports"] == 5000
+    assert config["reviewed_svm_plan_hash"] == "b" * 64
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "chain,limit", [("evm", 5000), ("svm", -1), ("svm", True), ("svm", 0.5)]
+)
+async def test_invalid_svm_fee_limit_is_rejected_before_api(client, chain, limit):
+    with pytest.raises(ValueError, match="network fee limit"):
+        await onchain.create_onchain_executor(
+            client,
+            chain_id=1,
+            chain=chain,
+            mode="operation",
+            operation="deposit",
+            commit=True,
+            max_svm_network_fee_lamports=limit,
+        )
+    client.executors.create_executor.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "overrides", [{"chain": "evm"}, {"instructions": []}, {"operation": "swap"}]
+)
+async def test_invalid_solana_bundles_do_not_reach_api(client, overrides):
+    values = dict(
+        chain_id=1, chain="svm", mode="instructions", instructions=[{}], commit=True
+    )
+    with pytest.raises(ValueError):
+        await onchain.create_onchain_executor(client, **{**values, **overrides})
+    client.executors.create_executor.assert_not_awaited()

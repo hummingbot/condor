@@ -42,6 +42,7 @@ export const NAV_ITEMS = [
   { to: "/trade", icon: Swords, label: "Trade" },
   { to: "/dex", icon: Droplets, label: "DEX" },
   { to: "/executors/lending", icon: Landmark, label: "Lending" },
+  { to: "/executors/onchain", icon: Zap, label: "Aomi execution" },
   { to: "/bots", icon: Bot, label: "Bots" },
   { to: "/routines", icon: Zap, label: "Routines" },
   { to: "/settings", icon: Settings, label: "Settings" },

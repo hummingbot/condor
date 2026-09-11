@@ -75,7 +75,7 @@ function AppShellBody() {
   // Aomi owns its signer on the API server. Its lending form and executor
   // history must remain accessible without an exchange/Gateway credential.
   const params = new URLSearchParams(search);
-  const isOnchainSurface = pathname === "/executors/lending" ||
+  const isOnchainSurface = pathname === "/executors/lending" || pathname === "/executors/onchain" ||
     (pathname === "/bots" && params.get("population") === "terminated" && params.get("groupBy") === "ctrlType");
   const showKeysOverlay =
     server && !keysLoading && !hasKeys && pathname !== "/" && !isOnchainSurface &&

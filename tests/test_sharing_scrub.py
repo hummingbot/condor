@@ -764,6 +764,8 @@ def test_an_unset_aomi_bearer_adds_nothing(monkeypatch):
     monkeypatch.delenv("AOMI_TOKEN", raising=False)
 
     assert not any(v == "" for v, _ in scrub.install_values())
+
+
 def test_a_shared_attachment_is_an_inert_reference():
     """What a share carries when the turn had a picture on it (FEAT-098).
 

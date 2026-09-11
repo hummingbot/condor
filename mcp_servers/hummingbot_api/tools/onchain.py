@@ -54,12 +54,15 @@ async def create_lending_executor(
             "action": action,
         },
         "calls": None,
+        "instructions": None,
         "operation": None,
         "arguments": None,
         "require_lending_policy": (
             require_lending_policy if require_lending_policy is not None else False
         ),
         "max_gas_quote": max_gas_quote,
+        "max_svm_network_fee_lamports": None,
+        "reviewed_svm_plan_hash": None,
     }
     if timeout_sec is not None:
         config["timeout_sec"] = timeout_sec
@@ -76,9 +79,10 @@ async def create_onchain_executor(
     client: Any,
     *,
     chain_id: int,
-    mode: Literal["calls", "operation"],
+    mode: Literal["calls", "operation", "instructions"],
     commit: bool,
     calls: list[EvmCall] | None = None,
+    instructions: list[dict[str, Any]] | None = None,
     operation: str | None = None,
     arguments: dict[str, Any] | None = None,
     app: str | None = None,
@@ -88,9 +92,26 @@ async def create_onchain_executor(
     account_name: str | None = None,
     controller_id: str | None = None,
     max_gas_quote: str | None = None,
+    max_svm_network_fee_lamports: int | None = None,
+    reviewed_svm_plan_hash: str | None = None,
     timeout_sec: int | None = None,
 ) -> dict[str, Any]:
-    """Create a catalog operation or typed raw EVM bundle; unattended commits are refused."""
+    """Create a catalog operation, EVM calls or Solana instructions; commits require confirmation."""
+    if max_svm_network_fee_lamports is not None and (
+        chain != "svm"
+        or type(max_svm_network_fee_lamports) is not int
+        or max_svm_network_fee_lamports < 0
+    ):
+        raise ValueError(
+            "Solana network fee limit requires svm and non-negative integer lamports"
+        )
+    if mode == "instructions":
+        if chain != "svm" or not instructions:
+            raise ValueError("Instructions mode requires non-empty instructions on svm")
+        if any(value is not None for value in (calls, operation, arguments)):
+            raise ValueError("Instructions mode takes only instruction batches")
+    elif instructions is not None:
+        raise ValueError("Instruction batches require instructions mode")
     if mode == "calls" and (
         not calls or operation is not None or arguments is not None
     ):
@@ -102,12 +123,15 @@ async def create_onchain_executor(
         "mode": mode,
         "commit": commit,
         "lending": None,
+        "instructions": instructions,
         "calls": (
             [call.model_dump(exclude_none=True) for call in calls] if calls else None
         ),
         "operation": operation,
         "arguments": arguments,
         "max_gas_quote": max_gas_quote,
+        "max_svm_network_fee_lamports": max_svm_network_fee_lamports,
+        "reviewed_svm_plan_hash": reviewed_svm_plan_hash,
     }
     config.update(
         {

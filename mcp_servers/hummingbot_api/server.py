@@ -792,9 +792,10 @@ async def create_lending_executor(
 @handle_errors("create onchain executor")
 async def create_onchain_executor(
     chain_id: int,
-    mode: Literal["calls", "operation"],
+    mode: Literal["calls", "operation", "instructions"],
     commit: bool,
     calls: list[EvmCall] | None = None,
+    instructions: list[dict[str, Any]] | None = None,
     operation: str | None = None,
     arguments: dict[str, Any] | None = None,
     app: str | None = None,
@@ -804,15 +805,22 @@ async def create_onchain_executor(
     account_name: str | None = None,
     controller_id: str | None = None,
     max_gas_quote: str | None = None,
+    max_svm_network_fee_lamports: int | None = None,
+    reviewed_svm_plan_hash: str | None = None,
     timeout_sec: int | None = None,
 ) -> str:
-    """Preview or execute a typed EVM bundle or an Aomi catalog operation.
+    """Preview or execute EVM calls, Solana instructions or an Aomi catalog operation.
 
     commit=False stages and simulates without signing; commit=True requires human
     confirmation for this unrestricted surface. For automatically granted Aave actions
     use create_lending_executor. Raw calls carry decimal native value, typed calldata
     and optional chain id; catalog arguments are operation-defined. Discover supported
-    operations with the aomi_catalog routine. max_gas_quote is in USDT and excludes
+    operations with the aomi_catalog routine. Solana instructions mode requires
+    chain=svm and svm_stage_ix argument batches, each with description and instructions;
+    instructions carry program_id, accounts and either encode or data_base64.
+    max_svm_network_fee_lamports is a Solana simulation ceiling in integer lamports,
+    excluding rent, protocol and signing-provider costs. Missing fees refuse submission.
+    max_gas_quote is in USDT and excludes
     rollup data fees. Default app is default, chain is evm, account is master_account.
     Set controller_id to the owning agent and inspect get_executor for confirmation."""
     client = await hummingbot_client.get_client()
@@ -822,6 +830,7 @@ async def create_onchain_executor(
         mode=mode,
         commit=commit,
         calls=calls,
+        instructions=instructions,
         operation=operation,
         arguments=arguments,
         app=app,
@@ -831,6 +840,8 @@ async def create_onchain_executor(
         account_name=account_name,
         controller_id=controller_id,
         max_gas_quote=max_gas_quote,
+        max_svm_network_fee_lamports=max_svm_network_fee_lamports,
+        reviewed_svm_plan_hash=reviewed_svm_plan_hash,
         timeout_sec=timeout_sec,
     )
     return result.get("formatted_output", str(result))
