@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from condor.fetchers.executors import build_executor_row, get_executor_type
 from condor.fetchers.models import (
@@ -741,6 +741,13 @@ class GatewayNetworkUpdateRequest(BaseModel):
     # Partial network config (snake_case keys, e.g. {"node_url": "https://..."}).
     # The Gateway validates values against its own JSON schema.
     config: dict[str, Any]
+
+    @field_validator("config")
+    @classmethod
+    def _strip_string_values(cls, v: dict[str, Any]) -> dict[str, Any]:
+        # Gateway stores strings verbatim, so a pasted " https://..." nodeURL
+        # saves fine and then breaks every Solana call (hummingbot-api#233).
+        return {k: val.strip() if isinstance(val, str) else val for k, val in v.items()}
 
 
 class GatewayWalletAddRequest(BaseModel):
