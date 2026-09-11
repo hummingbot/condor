@@ -441,6 +441,19 @@ async def clear_position_held(
     return {"status": "ok", "result": result}
 
 
+@router.get("/servers/{name}/executors/lending/positions")
+async def lending_positions(name: str, user: WebUser = Depends(require_server_access)):
+    client = await get_config_manager().get_client(name)
+    try:
+        # Use the SDK's authenticated router transport until it exposes this new route.
+        result = await client.executors._get("/executors/lending/positions")
+        if not isinstance(result, dict) or not isinstance(result.get("positions"), list):
+            raise ValueError("Invalid lending positions response")
+        return result
+    except Exception as e:
+        raise upstream_error("Failed to fetch lending positions", e)
+
+
 @router.get("/servers/{name}/executors/{executor_id}", response_model=ExecutorInfo)
 async def executor_detail(
     name: str,

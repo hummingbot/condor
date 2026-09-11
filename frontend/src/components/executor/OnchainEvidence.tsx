@@ -36,7 +36,9 @@ export function OnchainEvidence({ executor }: { executor: ExecutorInfo }) {
   return <section aria-label="On-chain execution evidence" className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4 space-y-4 text-sm">
     <div>
       <h3 className="font-semibold">{result}</h3>
-      <p className="text-xs text-[var(--color-text-muted)] mt-1">A transaction receipt confirms execution. Deposits and withdrawals are position changes, not trading profit.</p>
+      <p className="text-xs text-[var(--color-text-muted)] mt-1">{info.committed === true
+        ? "Execution confirmed. Deposits and withdrawals are position changes, not trading profit."
+        : "Execution is not confirmed. A simulation alone does not move funds."}</p>
     </div>
     <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-2 text-xs">
       <dt>Network</dt><dd>{text(info.chain)} · {text(info.chain_id)}</dd>

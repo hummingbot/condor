@@ -4,6 +4,7 @@ import { Link } from "react-router-dom";
 
 import { NoServerCard } from "@/components/NoServerCard";
 import { OnchainEvidence } from "@/components/executor/OnchainEvidence";
+import { LendingPositions } from "@/components/executor/LendingPositions";
 import { useServer } from "@/hooks/useServer";
 import { api } from "@/lib/api";
 import { BASE_USDC, lendingConfig } from "@/lib/lending";
@@ -111,5 +112,6 @@ function LendingForm({ server }: { server: string }) {
         <p className="text-xs text-[var(--color-text-muted)]">Lending rates vary. Withdrawals depend on available liquidity and your collateral obligations. Keep reserves for trading and fees; a completed supply is an open lending position, not realized profit.</p>
       </div>
     </div>
+    <LendingPositions server={server} />
   </div>;
 }

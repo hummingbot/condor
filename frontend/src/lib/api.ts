@@ -1521,6 +1521,15 @@ export const api = {
     );
   },
 
+  getLendingPositions: (server: string) =>
+    apiFetch<{ positions: Array<{
+      account_name: string; controller_id: string; chain_id: number;
+      wallet: string; pool: string; asset: string;
+      net_contributed_raw: string; pending_supply_raw: string; pending_withdraw_raw: string;
+      wallet_receipt_balance_raw?: string; decimals?: number; symbol?: string;
+      balance_status: string; unresolved_executor_ids: string[];
+    }> }>(`/api/v1/servers/${encodeURIComponent(server)}/executors/lending/positions`),
+
   getExecutor: (server: string, executorId: string) =>
     apiFetch<ExecutorInfo>(
       `/api/v1/servers/${encodeURIComponent(server)}/executors/${encodeURIComponent(executorId)}`,

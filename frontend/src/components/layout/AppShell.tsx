@@ -72,8 +72,11 @@ function AppShellBody() {
   // overlay would otherwise be the first thing every unconfigured user hits —
   // on the one surface that can talk them through connecting.
   const exemptRoutes = ["/routines", "/settings"];
+  // Aomi owns its signer on the API server. Its lending form and executor
+  // history must remain accessible without an exchange/Gateway credential.
+  const isOnchainSurface = pathname === "/executors" || pathname === "/executors/lending";
   const showKeysOverlay =
-    server && !keysLoading && !hasKeys && !isChatWorkspace &&
+    server && !keysLoading && !hasKeys && !isChatWorkspace && !isOnchainSurface &&
     !exemptRoutes.some((r) => pathname.startsWith(r));
 
   // ⌘K used to toggle the overlay panel. It now goes to the chat, so the
