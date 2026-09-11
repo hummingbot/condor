@@ -63,7 +63,7 @@ export function ApprovalPrompt({
       role="region"
       aria-label="Approval needed"
       aria-live="assertive"
-      className="mx-3 mb-2 overflow-hidden rounded-lg border-2 border-[var(--color-primary)] bg-[var(--color-surface)] shadow-lg"
+      className="mb-2 overflow-hidden rounded-lg border-2 border-[var(--color-primary)] bg-[var(--color-surface)] shadow-lg"
     >
       <header className="flex items-center gap-2 border-b border-[var(--chat-rule)] px-3 py-2">
         {!expired && (

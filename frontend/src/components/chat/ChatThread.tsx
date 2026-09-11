@@ -305,45 +305,49 @@ export function ChatThread({
         </div>
       </div>
 
-      {/* Input */}
+      {/* Input — the same `px-4` as the transcript's scroll area, so the box
+          lines up with the turns above it at every width instead of running
+          to the pane's edges on a narrow one. */}
       {slot && (
-        <div className={columnClassName}>
-          {/* On the composer, not above the transcript: the paused call sits
-              where the user is already looking and cannot scroll away. */}
-          {permissionRequest && (
-            <ApprovalPrompt
-              // One mount per request, so each counts down from its own clock.
-              key={permissionRequest.request_id}
-              request={permissionRequest}
-              onResolve={onResolvePermission}
+        <div className="px-4 pb-4 pt-1">
+          <div className={columnClassName}>
+            {/* On the composer, not above the transcript: the paused call sits
+                where the user is already looking and cannot scroll away. */}
+            {permissionRequest && (
+              <ApprovalPrompt
+                // One mount per request, so each counts down from its own clock.
+                key={permissionRequest.request_id}
+                request={permissionRequest}
+                onResolve={onResolvePermission}
+              />
+            )}
+            <ChatInput
+              onSend={onSend}
+              // Deliberately not `disabled={isStreaming}`. The composer stays
+              // live while the agent answers: sending mid-answer is how the user
+              // redirects it, and a dead input was the reason the correction had
+              // nowhere to go (FEAT-030).
+              isStreaming={isStreaming}
+              onAbort={onAbort}
+              autoFocus={autoFocus}
+              // The composer names whoever is bound: a chat with Backpack MM is
+              // not a chat with Condor, and the placeholder was the last place
+              // the UI still said otherwise (FEAT-025).
+              // While a call is paused the box says what it is waiting on:
+              // a reply sent now steers the agent and denies that call.
+              placeholder={
+                permissionRequest
+                  ? "Allow or deny the call above first — a message here cancels it"
+                  : `Ask ${(slot.info.agent_slug && slot.info.label) || "Condor"}...`
+              }
+              leading={composerLeading}
+              // Half-written words survive leaving the page, per conversation.
+              // Keyed on the conversation rather than the slot: a session that is
+              // reaped and respawned is the same chat to the person writing in
+              // it, and the slot id it comes back under is not the one they left.
+              draftKey={slot.info.conversation_id || slot.info.slot_id}
             />
-          )}
-          <ChatInput
-            onSend={onSend}
-            // Deliberately not `disabled={isStreaming}`. The composer stays
-            // live while the agent answers: sending mid-answer is how the user
-            // redirects it, and a dead input was the reason the correction had
-            // nowhere to go (FEAT-030).
-            isStreaming={isStreaming}
-            onAbort={onAbort}
-            autoFocus={autoFocus}
-            // The composer names whoever is bound: a chat with Backpack MM is
-            // not a chat with Condor, and the placeholder was the last place
-            // the UI still said otherwise (FEAT-025).
-            // While a call is paused the box says what it is waiting on:
-            // a reply sent now steers the agent and denies that call.
-            placeholder={
-              permissionRequest
-                ? "Allow or deny the call above first — a message here cancels it"
-                : `Ask ${(slot.info.agent_slug && slot.info.label) || "Condor"}...`
-            }
-            leading={composerLeading}
-            // Half-written words survive leaving the page, per conversation.
-            // Keyed on the conversation rather than the slot: a session that is
-            // reaped and respawned is the same chat to the person writing in
-            // it, and the slot id it comes back under is not the one they left.
-            draftKey={slot.info.conversation_id || slot.info.slot_id}
-          />
+          </div>
         </div>
       )}
     </>

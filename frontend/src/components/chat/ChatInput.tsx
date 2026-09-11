@@ -62,13 +62,6 @@ interface ChatInputProps {
    * call sites that have no conversation to hang a draft on want.
    */
   draftKey?: string;
-  /**
-   * Drop the deck — the hairline, the surface and its padding — and render only
-   * the box. For a composer that sits in an empty state rather than under a
-   * transcript: there the deck is not the floor of a column but a slab of a
-   * different colour laid across the middle of the hero.
-   */
-  bare?: boolean;
 }
 
 type RecordingState = "idle" | "recording" | "transcribing";
@@ -82,7 +75,6 @@ export function ChatInput({
   placeholder = "Ask Condor...",
   leading,
   draftKey,
-  bare,
 }: ChatInputProps) {
   const [value, setValue] = useState(() => readDraft(draftKey));
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -377,17 +369,13 @@ export function ChatInput({
   const isTranscribing = recordingState === "transcribing";
 
   return (
-    // The composer is a deck the transcript sits on, not a card floating over
-    // it: a hairline the width of the column, its own surface below it, and the
-    // field recessed into that surface. Only the ring is gold, and only on
-    // focus. A `bare` composer has no transcript to sit on, so no deck.
-    <div
-      className={
-        bare
-          ? undefined
-          : "border-t border-[var(--chat-rule)] bg-[var(--color-surface)] p-3"
-      }
-    >
+    // No deck of its own: the box stands on the same ground as the transcript
+    // above it, so the chat reads as one surface with a field at its foot. The
+    // deck it used to sit on was a hairline and a strip of `--color-surface`
+    // only as wide as the text column — a slab laid across the bottom of the
+    // pane rather than the floor of it. Only the ring is gold, and only on
+    // focus.
+    <div>
       {voiceError && <p className="mb-2 text-xs text-red-400">{voiceError}</p>}
       {fileError && <p className="mb-2 text-xs text-red-400">{fileError}</p>}
       {/* One composer chrome, owned here — the hero and the thread both get this
@@ -415,7 +403,10 @@ export function ChatInput({
           acceptFiles(e.dataTransfer?.files ?? null);
         }}
         data-testid="composer-box"
-        className={`@container flex flex-col gap-1.5 rounded-xl border bg-[var(--chat-inset)] px-2 py-1.5 transition-colors ${
+        // Raised one step off the ground, not recessed into it: with no deck
+        // around it the box is the only chrome here, and a surface card is
+        // what says "type here" on the page ground in both themes.
+        className={`@container flex flex-col gap-1.5 rounded-xl border bg-[var(--color-surface)] px-2 py-1.5 shadow-sm transition-colors ${
           focused || dragging
             ? "border-[var(--color-primary)]/40 ring-1 ring-[var(--color-primary)]/20"
             : "border-[var(--color-border)]"

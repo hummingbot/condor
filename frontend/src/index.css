@@ -47,7 +47,7 @@
   /* Chat surfaces.
 
      `--chat-inset` is the recessed ground *inside* an answer: code fences,
-     table headers, the composer's field. It is defined per theme rather than
+     table headers. It is defined per theme rather than
      reused from `--color-bg` because the answer itself now sits on the page
      ground, and "one step off the page" points in opposite directions by
      theme — down in light, up in dark, where `--color-bg` is already all but
@@ -58,7 +58,7 @@
      the cards that also render `.chat-markdown`.
 
      `--chat-rule` is the hairline: the h2 underline, the fence border, the
-     composer's top edge, the gutter of a turn nobody is speaking in.
+     gutter of a turn nobody is speaking in.
 
      `--on-primary` is what may be written on `--color-primary`. White on the
      gold is 2.22:1 here and 3.26:1 in light — both under the 4.5:1 floor,
