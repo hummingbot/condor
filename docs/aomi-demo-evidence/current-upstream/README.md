@@ -46,4 +46,4 @@ Use the repository's [operator guide](../../../mcp_servers/hummingbot_api/guides
 - Condor full Python suite: 5,231 passed, three live skips. Frontend: 1,852 passed; build and upstream lint gate passed on Node 22.22.2 before final display/navigation correction.
 - Public client: 139 passed, one live skip; wheel and source distribution built.
 - Para transaction-envelope regressions: eight passed, including empty calldata and missing/zero fee rejection before HTTP. Live provider signing remains a separate deployment check.
-- Final accounting/display regressions are reported in the PR validation section.
+- Final API suite: 928 passed, eight integration cases deselected. All 43 lifecycle/gas regressions pass. Final frontend suite: 1,853 passed; production build and lint gate pass. A fresh UI preview on the accounting correction was stopped with a positive estimate, zero incurred fees and no commit attempt; see [final-refusal.json](final-refusal.json). History navigation was checked against the current fleet browser.

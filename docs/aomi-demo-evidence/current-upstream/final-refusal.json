@@ -1,0 +1,14 @@
+{
+  "executor_id": "GuVj4YMPQTxDRYXuxD5xc4D8s5hKGtaxCehtKt41Q5cL",
+  "status": "TERMINATED",
+  "cum_fees_quote": 0.0,
+  "estimated_gas_quote": "0.5377363371900052314000",
+  "fees_quote_source": "unavailable",
+  "reason": "gas_over_budget",
+  "commit_attempted": false,
+  "committed": false,
+  "api_commit": "adfd446deda1bd0ef89b69c8856f3afeb29f6f9b",
+  "condor_commit": "f884411a69396c60d830bb4c29ffa5dbca9271b5",
+  "wallet_action_count": 8,
+  "wallet_receipt_count": 12
+}
