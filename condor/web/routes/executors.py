@@ -439,3 +439,20 @@ async def clear_position_held(
         logger.exception("Failed to clear held position on server %s", name)
         raise upstream_error("Failed to clear position", e)
     return {"status": "ok", "result": result}
+
+
+@router.get("/servers/{name}/executors/{executor_id}", response_model=ExecutorInfo)
+async def executor_detail(
+    name: str,
+    executor_id: str,
+    user: WebUser = Depends(require_server_access),
+):
+    client = await get_config_manager().get_client(name)
+    try:
+        raw = await client.executors.get_executor(executor_id=executor_id)
+    except Exception as e:
+        raise upstream_error("Failed to fetch executor", e)
+    info = ExecutorInfo.from_raw(raw)
+    if info is None:
+        raise HTTPException(status_code=502, detail="Invalid executor response")
+    return info

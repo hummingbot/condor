@@ -586,6 +586,12 @@ export function Executors() {
         </button>
         <div className="ml-auto flex items-center gap-2">
           <button
+            onClick={() => navigate("/executors/lending")}
+            className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-xs font-medium hover:border-[var(--color-primary)]"
+          >
+            On-chain lending
+          </button>
+          <button
             onClick={() => navigate("/trade")}
             className="flex items-center gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-medium text-[var(--color-text-muted)] hover:border-[var(--color-primary)] hover:text-[var(--color-primary)] hover:bg-[var(--color-primary)]/10 transition-colors"
           >

@@ -1521,6 +1521,11 @@ export const api = {
     );
   },
 
+  getExecutor: (server: string, executorId: string) =>
+    apiFetch<ExecutorInfo>(
+      `/api/v1/servers/${encodeURIComponent(server)}/executors/${encodeURIComponent(executorId)}`,
+    ),
+
   createExecutor: (
     server: string,
     data: { executor_type: string; config: Record<string, unknown>; account_name?: string; controller_id?: string },
