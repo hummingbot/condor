@@ -124,7 +124,6 @@ export function TradeChart({
   const chartModuleRef = useRef<typeof import("lightweight-charts") | null>(null);
   const chartRef = useRef<import("lightweight-charts").IChartApi | null>(null);
   const seriesRef = useRef<import("lightweight-charts").ISeriesApi<"Candlestick"> | null>(null);
-  const initializedRef = useRef(false);
   // Exact price under the pointer, never snapped to the hovered candle's close:
   // the crosshair is free vertically, so this is the price the axis label shows
   // and the only one a click or a measurement may report.
@@ -201,13 +200,26 @@ export function TradeChart({
   });
 
   // ── Candle data from the singleton store (WS live + cached) ──
-  const { candles, mergeCandles, setDuration } = useCandleStore(
+  const { candles: storedCandles, mergeCandles, setDuration } = useCandleStore(
     server,
     connector,
     pair,
     interval,
     poolAddress,
   );
+
+  // ── Only the picked range is drawn ──
+  // The store keeps every candle any chart on this channel has loaded — a
+  // longer range picked earlier, or another chart's — and never trims to one
+  // chart's range. So the chart draws the tail its own picker names, measured
+  // back from the newest candle rather than the clock, which would make render
+  // impure.
+  const candles = useMemo(() => {
+    if (!storedCandles.length) return storedCandles;
+    const cutoff = storedCandles[storedCandles.length - 1].timestamp - lookbackSeconds;
+    const start = storedCandles.findIndex((c) => c.timestamp >= cutoff);
+    return start <= 0 ? storedCandles : storedCandles.slice(start);
+  }, [storedCandles, lookbackSeconds]);
 
   // ── Filter executor overlays to those within candle time range ──
   // Depend on the earliest candle timestamp (not the candles array, whose reference
@@ -541,10 +553,10 @@ export function TradeChart({
     return () => observer.disconnect();
   }, [chartReady]);
 
-  // Signature of the last full setData() render: channel key + earliest
-  // timestamp + count. Lets us tell a wholesale change (first load, pair/
-  // interval switch, history backfill/prepend) apart from a live tick, where
-  // the listener below already applied a cheap series.update().
+  // Signature of the last full setData() render: channel key + range +
+  // earliest timestamp + count. Lets us tell a wholesale change (first load,
+  // pair/interval/range switch, history backfill/prepend) apart from a live
+  // tick, where the listener below already applied a cheap series.update().
   const lastSetDataSigRef = useRef<string>("");
 
   // ── Push candle data to chart (full setData only on structural changes) ──
@@ -554,7 +566,7 @@ export function TradeChart({
     const key = candleChannelKey(server, connector, pair, interval, poolAddress);
     const first = candles[0].timestamp;
     const prevSig = lastSetDataSigRef.current;
-    const [prevKey, prevFirstStr, prevLenStr] = prevSig.split("|");
+    const [prevKey, prevRangeStr, prevFirstStr, prevLenStr] = prevSig.split("|");
     const prevFirst = Number(prevFirstStr);
     const prevLen = Number(prevLenStr);
 
@@ -562,6 +574,8 @@ export function TradeChart({
     // newer appended bar. So a full setData() is only required when:
     //   • first load for this chart instance (no prior signature), or
     //   • the channel key changed (pair/interval/connector/server switch), or
+    //   • the range changed — a shorter one drops bars from the front, which
+    //     update() can't do any more than it can insert them, or
     //   • the earliest candle moved back in time, i.e. older history was
     //     prepended (REST backfill) — update() can't insert before the data.
     // A plain live tick keeps the same key and earliest timestamp (last-bar
@@ -570,10 +584,11 @@ export function TradeChart({
     // expensive map + setData over the whole array on every tick.
     const isFirstLoad = prevSig === "";
     const keyChanged = prevKey !== key;
+    const rangeChanged = Number(prevRangeStr) !== lookbackSeconds;
     const historyPrepended = candles.length > prevLen && first < prevFirst;
-    const needsFullReset = isFirstLoad || keyChanged || historyPrepended;
+    const needsFullReset = isFirstLoad || keyChanged || rangeChanged || historyPrepended;
 
-    lastSetDataSigRef.current = `${key}|${first}|${candles.length}`;
+    lastSetDataSigRef.current = `${key}|${lookbackSeconds}|${first}|${candles.length}`;
 
     if (!needsFullReset) return;
 
@@ -586,11 +601,10 @@ export function TradeChart({
     }));
     seriesRef.current.setData(mapped);
 
-    if (!initializedRef.current) {
-      chartRef.current?.timeScale().fitContent();
-      initializedRef.current = true;
-    }
-  }, [candles, chartReady, server, connector, pair, interval, poolAddress]);
+    // Every full render is a new picture — a market, a range, or the history a
+    // backfill just brought in — so the view fits it. Live ticks never get here.
+    chartRef.current?.timeScale().fitContent();
+  }, [candles, chartReady, server, connector, pair, interval, poolAddress, lookbackSeconds]);
 
   // ── Real-time last candle update via candle store listener ──
   useEffect(() => {
@@ -611,11 +625,6 @@ export function TradeChart({
 
     return removeListener;
   }, [chartReady, server, connector, pair, interval, poolAddress]);
-
-  // ── Reset auto-fit on pair/interval/range change ──
-  useEffect(() => {
-    initializedRef.current = false;
-  }, [pair, interval, lookbackSeconds]);
 
   // ── Update price precision ──
   useEffect(() => {
