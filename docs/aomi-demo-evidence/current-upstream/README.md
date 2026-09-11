@@ -47,3 +47,9 @@ Use the repository's [operator guide](../../../mcp_servers/hummingbot_api/guides
 - Public client: 139 passed, one live skip; wheel and source distribution built.
 - Para transaction-envelope regressions: eight passed, including empty calldata and missing/zero fee rejection before HTTP. Live provider signing remains a separate deployment check.
 - Final API suite: 928 passed, eight integration cases deselected. All 43 lifecycle/gas regressions pass. Final frontend suite: 1,853 passed; production build and lint gate pass. A fresh UI preview on the accounting correction was stopped with a positive estimate, zero incurred fees and no commit attempt; see [final-refusal.json](final-refusal.json). History navigation was checked against the current fleet browser.
+
+## Automated review follow-up
+
+Two final review findings were corrected after the recording: an empty recent-executor search no longer bypasses the durable lending ledger, and the lending form offers **Start another action** after a confirmed result (or a terminal result that never attempted commit). An uncertain accepted request remains locked to prevent duplicate submission. New provider/risk and browser-component regressions cover these boundaries. The video remains accurate for the recorded executions; it does not demonstrate the later reset control.
+
+Final review validation: 5,233 Python tests passed (three live skips), 1,855 frontend tests passed, production build and upstream lint gate passed. Backend CI run 34591678160 passed at 2439db38 after its current-upstream merge.

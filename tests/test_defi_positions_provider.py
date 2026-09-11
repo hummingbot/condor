@@ -188,10 +188,13 @@ def test_none_and_no_flag_is_one_line_and_never_touches_aomi(monkeypatch):
     calls = _aomi(monkeypatch, _Pipeline())
     client = _Client({"data": []})
 
+    _ledger(client, {"positions": []})
     result = _run(client)
 
     assert result.summary == "DeFi Positions [agent: agent-a]: none"
-    assert result.data == {"executors": [], "wallet": None}
+    assert result.data["executors"] == []
+    assert result.data["wallet"] is None
+    assert result.data["lending"]["exposure_quote"] == 0
     assert calls["n"] == 0
 
 
@@ -436,3 +439,25 @@ def test_empty_ledger_is_distinct_from_unavailable_balance(monkeypatch):
     result = _run(client)
     assert "net contribution=100000000 raw units" in result.summary
     assert "wallet-wide receipt balance=unavailable" in result.summary
+
+
+def test_empty_recent_history_still_reads_durable_exposure(monkeypatch):
+    _aomi(monkeypatch, None)
+    client = _Client({"data": []})
+    _ledger(client, {"positions": [_position()]})
+    result = _run(client)
+    assert len(result.data["lending"]["positions"]) == 1
+    assert "net contribution=100" in result.summary
+
+
+def test_empty_recent_history_with_unavailable_ledger_blocks_risk(monkeypatch):
+    from condor.agents.risk import RiskEngine, RiskState
+
+    _aomi(monkeypatch, None)
+    client = _Client({"data": []})
+    _ledger(client, fail=True)
+    result = _run(client)
+    state = RiskState()
+    RiskEngine().include_lending(state, result.data)
+    assert state.is_blocked
+    assert "unavailable" in state.block_reason

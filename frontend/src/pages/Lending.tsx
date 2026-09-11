@@ -37,6 +37,8 @@ function LendingForm({ server }: { server: string }) {
   const previewPassed = !!executor && executor.status === "terminated" &&
     executor.close_type === "completed" && executor.config?.commit === false &&
     executor.custom_info?.simulation_passed === true && !executor.custom_info?.error;
+  const settled = executor?.status === "terminated" &&
+    (executor.custom_info?.committed === true || executor.custom_info?.commit_attempted === false);
   const locked = pending || (!!executorId && executor?.status !== "terminated") || committing;
 
   async function submit(commit: boolean) {
@@ -71,6 +73,9 @@ function LendingForm({ server }: { server: string }) {
   }
 
   function edit() {
+    if (committing && !settled) return;
+    setCommitting(false);
+    commitSent.current = false;
     setExecutorId("");
     setPlan(null);
     setError("");
@@ -100,6 +105,7 @@ function LendingForm({ server }: { server: string }) {
           <button disabled={!previewPassed || pending} onClick={() => void submit(true)} className="rounded-lg bg-[var(--color-primary)] px-4 py-2 text-sm font-medium disabled:opacity-50">Confirm {plan.lending.action}</button>
           <button disabled={locked} onClick={edit} className="rounded-lg border border-[var(--color-border)] px-4 py-2 text-sm disabled:opacity-50">Edit / refresh preview</button>
         </div>}
+        {committing && settled && <button onClick={edit} className="rounded-lg border border-[var(--color-border)] px-4 py-2 text-sm">Start another action</button>}
         {plan && <p className="text-xs">Execution uses the reviewed amount, pool and recipient with a fresh simulation. Market state can change after preview.</p>}
         {error && <p role="alert" className="text-sm text-red-400">{error}</p>}
       </section>

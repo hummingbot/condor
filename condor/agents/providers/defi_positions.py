@@ -6,9 +6,8 @@ close type, tx hashes, the error that ended it) and the wallet it signed from
 (native balance, nonce). Both land here, in the same shape the other core
 providers use, so the agent reads its DeFi footprint next to its CEX positions.
 
-Aomi is only touched once there is something to look at: a session that never
-created an on-chain executor and has not opted in (``defi_positions`` in its
-config) gets a one-line ``none`` and no network call.
+The durable lending ledger is checked independently of recent executor history.
+Direct Aomi wallet reads remain optional when both histories are empty.
 """
 
 from __future__ import annotations
@@ -96,10 +95,16 @@ class DefiPositionsProvider(BaseProvider):
         executors = [
             ex for ex in extract_executors_list(result) if isinstance(ex, dict)
         ]
-        if not executors and not config.get("defi_positions"):
+        lending = await self._lending_positions(client, agent_id)
+        if (
+            not executors
+            and not config.get("defi_positions")
+            and lending.get("status") == "available"
+            and not lending["positions"]
+        ):
             return ProviderResult(
                 name=self.name,
-                data={"executors": [], "wallet": None},
+                data={"executors": [], "wallet": None, "lending": lending},
                 summary=f"DeFi Positions{label}: none",
             )
 
@@ -109,7 +114,6 @@ class DefiPositionsProvider(BaseProvider):
         if len(executors) > MAX_LISTED:
             lines.append(f"  … {len(executors) - MAX_LISTED} more not shown")
 
-        lending = await self._lending_positions(client, agent_id)
         lines.extend(lending["lines"])
         wallet = await self._wallet(config, executors)
         lines.append(wallet["line"])
