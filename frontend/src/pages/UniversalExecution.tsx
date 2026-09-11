@@ -13,7 +13,7 @@ export function UniversalExecution() {
 }
 
 function ExecutionForm({ server }: { server: string }) {
-  const catalog = useQuery({ queryKey: ["aomi-venues", server], queryFn: () => api.prepareOnchain(server, "venues"), retry: false });
+  const catalog = useQuery({ queryKey: ["aomi-venues", server], queryFn: () => api.prepareOnchain(server, "venues"), refetchOnWindowFocus: false, refetchOnReconnect: false, retry: false });
   const [venue, setVenue] = useState("jupiter-lend");
   const [market, setMarket] = useState("");
   const [target, setTarget] = useState<{ venue: string; market: string } | null>(null);
@@ -33,7 +33,7 @@ function ExecutionForm({ server }: { server: string }) {
   const selected = catalog.data?.result.venues?.find(item => item.id === venue);
   const effectiveMarket = market.trim() || selected?.example_market || "";
   const inspection = useQuery({ queryKey: ["aomi-market", server, target],
-    queryFn: () => api.prepareOnchain(server, "market", { ...target }), enabled: !!target, retry: false });
+    queryFn: () => api.prepareOnchain(server, "market", { ...target }), enabled: !!target, refetchOnWindowFocus: false, refetchOnReconnect: false, retry: false });
   const detail = useQuery({ queryKey: ["aomi-execution", server, executorId],
     queryFn: () => api.getExecutor(server, executorId), enabled: !!executorId,
     refetchInterval: q => q.state.data?.status === "terminated" ? false : 1500, retry: 2 });
@@ -49,7 +49,7 @@ function ExecutionForm({ server }: { server: string }) {
   const marketInfo = display?.result.market;
   const positions = useQuery({ queryKey: ["aomi-position", server, target, executor?.custom_info?.committed === true],
     queryFn: () => api.prepareOnchain(server, "position", { ...target }),
-    enabled: !!target && executor?.custom_info?.committed === true, retry: false });
+    enabled: !!target && executor?.custom_info?.committed === true, refetchOnWindowFocus: false, refetchOnReconnect: false, retry: false });
   const position = positions.data?.result.position ?? display?.result.position;
 
   async function preview() {

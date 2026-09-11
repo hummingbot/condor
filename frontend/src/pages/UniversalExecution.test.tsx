@@ -1,5 +1,5 @@
 /** @vitest-environment jsdom */
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { focusManager, onlineManager, QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter } from "react-router-dom";
@@ -96,4 +96,24 @@ it("rejects an expired prepared action even if the executor preview remains fres
   await click("Confirm execution");
   expect(host.textContent).toContain("Preview expired");
   expect(createExecutor).toHaveBeenCalledTimes(1);
+});
+
+
+it("does not refetch prepared market reads on window focus or reconnect", async () => {
+  await preview();
+  const calls = prepareOnchain.mock.calls.length;
+  await act(async () => { focusManager.setFocused(false); onlineManager.setOnline(false); });
+  await act(async () => { focusManager.setFocused(true); onlineManager.setOnline(true);
+    await new Promise(resolve => setTimeout(resolve, 30)); });
+  expect(prepareOnchain).toHaveBeenCalledTimes(calls);
+  await click("Confirm execution");
+  getExecutor.mockResolvedValue({ status: "terminated", custom_info: { committed: true } });
+  await act(async () => { await query.invalidateQueries({ queryKey: ["aomi-execution"] }); });
+  await waitFor(() => expect(prepareOnchain.mock.calls.some(call => call[1] === "position")).toBe(true));
+  const afterPosition = prepareOnchain.mock.calls.length;
+  await act(async () => { focusManager.setFocused(false); onlineManager.setOnline(false); });
+  await act(async () => { focusManager.setFocused(true); onlineManager.setOnline(true);
+    await new Promise(resolve => setTimeout(resolve, 30)); });
+  expect(prepareOnchain).toHaveBeenCalledTimes(afterPosition);
+  focusManager.setFocused(undefined);
 });
