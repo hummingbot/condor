@@ -1,4 +1,6 @@
-# Universal execution V2 — verified UI flows
+# Universal execution V2 — video and execution evidence
+
+**[Finished 2:30 V2 video, narration and fresh receipts](recording-20260912/README.md).** The table and receipts below document the earlier verification take; the final recording has a separate complete receipt set.
 
 All three venues completed entry and exit through Condor, Aomi preparation and the same Hummingbot executor. Six independently fetched local-chain receipts match the UI confirmations, reviewed transaction plans and final wallet balances.
 
@@ -24,10 +26,10 @@ These were real transactions on an isolated local Solana mirror using a substitu
 
 ## Shipping status
 
-UI execution proof is complete. Code is published for review in [API #230](https://github.com/hummingbot/hummingbot-api/pull/230), [Condor #232](https://github.com/hummingbot/condor/pull/232), [backend #1070](https://github.com/aomi-labs/product-mono/pull/1070), and [SDK app #117](https://github.com/aomi-labs/aomi-sdk/pull/117). The Python client is published as [v0.1.3](https://github.com/aomi-labs/aomi-python/tree/v0.1.3). Final CI checks, hosted app activation and the new recording/video publication remain outstanding. This directory is execution evidence and a draft narration, not a completed video. Earlier failed environment/preflight attempts are preserved in the progress log and are excluded from this successful take.
+UI execution proof is complete. Code is published for review in [API #230](https://github.com/hummingbot/hummingbot-api/pull/230), [Condor #232](https://github.com/hummingbot/condor/pull/232), [backend #1070](https://github.com/aomi-labs/product-mono/pull/1070), and [SDK app #117](https://github.com/aomi-labs/aomi-sdk/pull/117). The Python client is published as [v0.1.3](https://github.com/aomi-labs/aomi-python/tree/v0.1.3). Backend and SDK CI passed, and both integration code reviews passed. The finished video and final narration are linked above. Hosted app activation and production deployment were not performed; the code remains in open PRs for review. Earlier failed environment/preflight attempts are preserved in the progress log and are excluded from this successful take.
 
 ## Narration and connector scope
 
-[Draft narration V2](narration-v2.md) and [research](research.md). The [fresh connector check](connector-recheck.json) inspected upstream Gateway `f090f4ab7a8159b85fca2f3d4467970a5231cf5f` on 12 September 2026 (Asia/Shanghai). Jupiter Lend proposal #672 and PumpSwap request #570 remain open; PumpAmm PR #575 is closed without merge. Existing Jupiter swap routing is separate from lending and direct LP actions. These claims concern upstream connectors, not every custom integration or fork.
+[Final narration V2](recording-20260912/narration-v2.md) and [research](research.md). The [fresh connector check](connector-recheck.json) inspected upstream Gateway `f090f4ab7a8159b85fca2f3d4467970a5231cf5f` on 12 September 2026 (Asia/Shanghai). Jupiter Lend proposal #672 and PumpSwap request #570 remain open; PumpAmm PR #575 is closed without merge. Existing Jupiter swap routing is separate from lending and direct LP actions. These claims concern upstream connectors, not every custom integration or fork.
 
 The API market-policy review correction requires every top-level instruction for the selected protocol to reference the selected market. [A check of all six archived receipts](market-policy-receipt-recheck.json) confirms these demonstrated transactions satisfy the stricter rule. This is an offline receipt check, not a new execution or recording.

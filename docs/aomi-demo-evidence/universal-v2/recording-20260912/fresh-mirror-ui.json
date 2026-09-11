@@ -1,0 +1,14 @@
+{
+  "created_at": 1789154050.352072,
+  "local_test_only": true,
+  "version": {
+    "surfnet-version": "1.0.0",
+    "solana-core": "3.1.6",
+    "feature-set": 2086771155
+  },
+  "wallet": "HQXTpSdMnY1WgyoAXgczyBmwkmajQVUdSe6fpraNaG1F",
+  "funded_lamports": 10000000000,
+  "funded_usdc_raw": "100000000",
+  "initial_jupiter_share_account": null,
+  "slot": 446233607
+}
