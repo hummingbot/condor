@@ -18,8 +18,10 @@ real controller failure (schema reject, deploy/status error, or no on-ledger ord
 1. **Pair quality** — `explore_geckoterminal(action="top_pools", network="xrpl")`. Need
    real depth *and* turnover. RLUSD/XRP is currently the only pair with both.
 2. **Issuer transfer fee = 0%** — non-zero fees can erase the whole spread.
-3. **XRPL credentials configured** — without them the keyless connector has empty trading
-   rules and nothing can size. Stop and tell the user; executor mode will not rescue this.
+3. **XRPL credentials configured** — as a Hummingbot connector key (Settings → Keys), not a
+   Gateway wallet: `xrpl` never goes through Gateway. Without them the keyless connector has
+   empty trading rules and nothing can size. Stop and tell the user; executor mode will not
+   rescue this.
 4. **Balances** — `get_portfolio_overview()`. Need free XRP for reserves (1 + 0.2×offers),
    a trustline for the issued asset, and inventory on both sides.
 

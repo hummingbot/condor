@@ -52,7 +52,8 @@ If you are reading this because a market data request just came in, do this chec
 | Indicators (RSI / EMA / ATR / VWAP) | `run_code` → `get_candles_last_days` + pandas_ta | varies |
 | All tickers for a connector | `run_code` → `get_tickers` | 300 |
 | Multi-venue anything with math | `run_code` + `asyncio.gather` | ~500 |
-| DEX candles | GeckoTerminal — DEX connectors don't serve OHLCV | varies |
+| AMM/CLMM DEX candles (Gateway: meteora, raydium, orca, uniswap…) | GeckoTerminal — Gateway connectors don't serve OHLCV | varies |
+| CLOB DEX candles (`hyperliquid_perpetual`, …) | `get_candles*` like any CEX — CLOB DEXs are Hummingbot connectors, not Gateway; check the candle list (`xrpl` has no feed) | varies |
 
 ---
 
@@ -164,7 +165,8 @@ vol   = await client.market_data.get_quote_volume_for_price("binance_perpetual",
 
 **Utilities**
 ```python
-# Check which connectors serve OHLCV before using candles on a DEX connector
+# Check which connectors serve OHLCV before relying on one — Gateway AMM/CLMM
+# connectors never do; CLOB DEXs vary (hyperliquid_perpetual yes, xrpl no)
 candle_connectors = await client.market_data.get_available_candle_connectors()
 # → ["binance_perpetual", "binance", "okx_perpetual", ...]
 ```

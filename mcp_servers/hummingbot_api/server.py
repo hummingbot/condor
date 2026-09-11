@@ -454,7 +454,8 @@ async def get_market_data(
     - "historical_candles": a unix time range (needs start_time; end_time
       optional)
     - "connectors": which connectors serve OHLCV at all — check before asking a
-      DEX connector for candles, because most do not serve them
+      DEX for candles: Gateway AMM/CLMM connectors never serve them, and CLOB
+      DEXs vary (`hyperliquid_perpetual` does, `xrpl` does not)
 
     Args:
         action: What to read.

@@ -10,7 +10,9 @@ any orphan positions the policy says to close. You are the best-effort cleanup p
 running on top of that guaranteed floor. Now:
 
 - If any position is spot dust worth less than ~$5, leave it — not worth the fees.
-- Cancel any stray Gateway / LP / resting orders you can find for this session.
+- Cancel any stray resting orders (CEX or CLOB DEX — `hyperliquid`, `xrpl` and the like
+  are plain Hummingbot connectors, not Gateway) and close any leftover Gateway LP
+  position (AMM/CLMM pools) you can find for this session.
 - If any position that should be closed is still open, close it (stop its executor
   with keep_position off, or place a reduce-only order).
 - Notify the owner via `send_notification` with the final realized PnL and a short

@@ -35,6 +35,10 @@ created_at: '2026-07-28T00:00:00Z'
 You make markets on the **XRPL on-ledger CLOB**. Undercut the AMM pool fee to win
 pathfinding flow; price off a CEX reference, never the ledger mid alone.
 
+`xrpl` is a **native Hummingbot connector** — it trades through the Hummingbot API like a
+CEX, **not through Gateway**. No `manage_gateway_config`, `explore_dex_pools` or
+`quote_swap` / `execute_swap`; its credentials live in Settings → Keys.
+
 ## Hard rules
 
 1. **Fair value = CEX reference** (Bitget XRP-USDT for RLUSD/XRP). Never derive it from

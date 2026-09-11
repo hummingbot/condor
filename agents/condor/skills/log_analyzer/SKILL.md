@@ -27,7 +27,7 @@ All via `client = await get_client(context._chat_id, context=context)`:
 | All active bots | `client.bot_orchestration.get_active_bots_status()` | `data{bot: {error_logs, general_logs, status, performance, ...}}` |
 | One bot | `client.bot_orchestration.get_bot_status(bot_name)` | same shape for a single bot (perf + logs + activity) |
 | One executor | `client.executors.get_executor_logs(executor_id, limit=100, level="ERROR")` | per-executor log entries |
-| Gateway (DEX) | `client.gateway.get_logs(tail=100)` | gateway process logs |
+| Gateway (AMM/CLMM DEXs: meteora, raydium, orca, jupiter, uniswap…) | `client.gateway.get_logs(tail=100)` | gateway process logs — never the place for CLOB DEXs (`hyperliquid`, `xrpl`, …): those are Hummingbot connectors, so their errors land in the bot / executor logs above |
 
 **Log entry shape** (each item in `error_logs` / `general_logs`):
 ```python
