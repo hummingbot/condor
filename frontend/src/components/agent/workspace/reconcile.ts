@@ -34,7 +34,15 @@
 //
 // Nothing here fetches and nothing here renders (the ARCH-300 split).
 
-import type { DeedIndex, Provenance } from "@/lib/agent-attribution";
+import { agentBucketLabel } from "@/components/perf/agentFilter";
+import {
+  PSEUDO_STRATEGIES,
+  isPseudoRunKey,
+  splitRunKey,
+  type DeedIndex,
+  type FleetOwner,
+  type Provenance,
+} from "@/lib/agent-attribution";
 import {
   AXIS_PREFIX,
   DEFAULT_GROUPING,
@@ -45,41 +53,6 @@ import {
   type PerfLeaf,
   type PerfTotals,
 } from "@/lib/perf-tree";
-
-/**
- * The three pseudo-strategies, and what each one is called on screen.
- *
- * `condor/agents/deeds.py`'s `RESERVED_STRATEGY_SLUGS`, mirrored — a chat, a
- * delegation and the dashboard are runs without a strategy, but a run key needs
- * two halves, so each gets a reserved slug of its own. They are named apart
- * rather than lumped into one "not-a-loop" bucket for the reason Python names
- * them apart: *"the chat deployed it"* and *"somebody pressed Deploy"* are
- * different answers to the same question.
- *
- * A user-created strategy may not take these slugs, so a run key ending in one
- * is a pseudo-run with certainty rather than by convention.
- */
-export const PSEUDO_LABELS: Record<string, string> = {
-  chat: "Deployed from chat",
-  delegation: "Deployed by a delegation",
-  ui: "Deployed from the dashboard",
-};
-
-/** The order the pseudo-runs are listed in — the order they became possible. */
-export const PSEUDO_STRATEGIES = ["chat", "delegation", "ui"] as const;
-
-/** `"brigado.brl_mm"` → `{ agent: "brigado", strategy: "brl_mm" }`. */
-export function splitRunKey(runKey: string): { agent: string; strategy: string } {
-  const dot = runKey.indexOf(".");
-  return dot < 0
-    ? { agent: runKey, strategy: "" }
-    : { agent: runKey.slice(0, dot), strategy: runKey.slice(dot + 1) };
-}
-
-/** Whether a run key names a chat, a delegation or the dashboard. */
-export function isPseudoRunKey(runKey: string): boolean {
-  return PSEUDO_LABELS[splitRunKey(runKey).strategy] !== undefined;
-}
 
 /** The fleet scope that opens exactly one run key's records. */
 export function agentScope(runKey: string): string {
@@ -219,6 +192,14 @@ export interface ReconcileInput {
   /** The live fleet, as leaves — `runningLeaves` (lib/perf-population). */
   leaves: PerfLeaf[];
   deeds: DeedIndex | null;
+  /**
+   * The fleet map, for naming a term's records.
+   *
+   * A pseudo-run's *words* live on the wire and nowhere else in the browser
+   * (`ownerRowLabel`), so a term that could not reach the map would have to
+   * mint a second vocabulary — which is exactly what this line replaced.
+   */
+  owners: readonly FleetOwner[];
   /** Display-currency conversion, the same one `/bots` folds with. */
   convert: ConvertQuote;
   /** Epoch ms, for the fold's measured runtime. */
@@ -241,7 +222,7 @@ const ADOPTED: readonly Provenance[] = ["declared", "deed"];
  * built, and the same nodes `?scope=agent:{runKey}` selects are the ones folded.
  */
 export function reconcile(input: ReconcileInput): Reconciliation {
-  const { slug, strategy, leaves, deeds, convert, now, attributed } = input;
+  const { slug, strategy, leaves, deeds, owners, convert, now, attributed } = input;
 
   const tree = buildTree(leaves, "All", { grouping: DEFAULT_GROUPING, deeds });
   const nodes = indexTree(tree);
@@ -276,7 +257,9 @@ export function reconcile(input: ReconcileInput): Reconciliation {
   const terms: Term[] = pseudoKeys.map((runKey) => {
     const spine = spineOf(runKey);
     return {
-      label: PSEUDO_LABELS[splitRunKey(runKey).strategy],
+      // Named by the same rule as the row this term links to, so the line and
+      // the scope it opens cannot call one set of records two things.
+      label: agentBucketLabel(runKey, owners),
       runKey,
       delta: foldLeaves(spine, convert, now).net,
       scope: agentScope(runKey),

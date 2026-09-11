@@ -16,7 +16,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { EditorModal } from "@/components/editor/EditorModal";
@@ -33,6 +33,7 @@ import {
   agentBucketLabel,
   agentOptions,
   inRun,
+  isAgentBucket,
   matchesAgents,
   parseRunParam,
   runChipLabel,
@@ -57,6 +58,7 @@ import {
   type ControllerPerformanceSnapshot,
   type ExecutorInfo,
 } from "@/lib/api";
+import { useCoarseClock } from "@/hooks/useCoarseClock";
 import { controllerKey } from "@/lib/controller-identity";
 import {
   formatCurrencyVolume,
@@ -105,10 +107,14 @@ import {
   type GroupAxis,
 } from "@/lib/perf-grouping";
 import { GroupByPicker } from "@/components/perf/GroupByPicker";
-import { resolvePerfSeries, scopeInterval } from "@/lib/perf-history";
+import {
+  resolvePerfSeries,
+  scopeInterval,
+  type PerfSeriesResult,
+} from "@/lib/perf-history";
 import { chartNotice } from "@/lib/perf-notices";
 import { buildPositionRows, parseSide, type PositionRow } from "@/lib/perf-positions";
-import { groupSpine } from "@/components/agent/floor/floor";
+import { groupSpine, type FloorBucket } from "@/components/agent/floor/floor";
 import { mergeOwnerRows, ownerSeries } from "@/lib/owner-series";
 import { aggregatePnlSeries, snapshotsFromRunHistory } from "@/lib/pnl-chart";
 import { buildAttributor, runWindows } from "@/lib/run-attribution";
@@ -116,12 +122,11 @@ import { dropDeletedRunQueries } from "@/lib/run-deletion";
 import type { ConvertFn } from "@/lib/rates";
 import { useViewFacts } from "@/lib/viewFacts";
 import {
-  attributionOf,
+  attributionIndex,
   loopFacts,
   loopStatus,
   ownerOf,
   ownerTitle,
-  runKeyLabel,
   type DeedIndex,
   type FleetOwner,
 } from "@/lib/agent-attribution";
@@ -134,9 +139,11 @@ import { AgentScopeHeader } from "./AgentScopeHeader";
  * deployed nothing — so there is no label from `buildTree` to borrow and the id
  * is the only name there is.
  */
-function rootScopeLabel(id: string): string {
+function rootScopeLabel(id: string, owners: readonly FleetOwner[]): string {
   const agent = agentOfNodeId(id);
-  if (agent) return runKeyLabel(agent);
+  // Through the sidebar's own namer, so an agent with nothing deployed is
+  // called what it would be called the moment it deployed something.
+  if (agent) return agentBucketLabel(agent, owners);
   return botOfNodeId(id) ?? id;
 }
 
@@ -194,6 +201,39 @@ const FLEET_SCOPE = "all";
 
 /** Held still, so an absent fleet map is not a new array on every render. */
 const EMPTY_OWNERS: FleetOwner[] = [];
+
+/** Held still, so an unpassed `snapshots` prop is not a new array on every render. */
+const EMPTY_SNAPSHOTS: ControllerPerformanceSnapshot[] = [];
+
+/** Held still, so an unpassed `executors` prop is not a new array on every render. */
+const EMPTY_EXECUTORS: ExecutorInfo[] = [];
+
+/** Held still, so an unpassed `runs` prop is not a new array on every render. */
+const EMPTY_RUNS: BotRunInfo[] = [];
+
+/** Held still, so an unpassed `terminatedControllers` prop is not a new array on every render. */
+const EMPTY_TERMINATED: ControllerInfo[] = [];
+
+/** Held still, so "no bot is silent" is not a new array on every render. */
+const EMPTY_BOTS: BotSummary[] = [];
+
+/**
+ * The series a splitting scope does not have.
+ *
+ * `unsupported` is `false` because nothing reads it: the flag exists so the
+ * chart's notice can say *why* a fallback was taken, and at a splitting scope
+ * neither the notice nor the chart it belongs to is rendered (PERF-338).
+ */
+const EMPTY_SERIES: PerfSeriesResult = { points: [], source: "none", unsupported: false };
+
+/**
+ * The cuts a shut Breakdown band does not have.
+ *
+ * Held still for the same reason `EMPTY_OWNERS` is: the gate below returns it
+ * on every render where the band is closed, and a fresh `[]` each time would
+ * make the memo a no-op (PERF-340).
+ */
+const EMPTY_BUCKETS: FloorBucket[] = [];
 
 /**
  * How many finished runs are warmed when the reader switches to Terminated,
@@ -375,30 +415,6 @@ export interface ExecutorPaging {
   loadMore: () => void;
 }
 
-// ── A coarse wall clock ──
-//
-// The runtime figure and every per-hour pace derived from it are elapsed time,
-// so they have to advance on their own — read once during render they would sit
-// frozen until a socket frame happened to re-render the browser, and a pace
-// whose divisor is stale is wrong rather than merely old.
-//
-// Subscribed to rather than sampled, so the read stays pure. The snapshot is
-// quantised to the tick because `useSyncExternalStore` compares snapshots with
-// `Object.is`: a raw `Date.now()` returns a new value on every call, including
-// the several React makes within one render pass, which it answers by
-// re-rendering forever.
-
-const CLOCK_TICK_MS = 60_000;
-
-function subscribeToClock(onChange: () => void) {
-  const id = setInterval(onChange, CLOCK_TICK_MS);
-  return () => clearInterval(id);
-}
-
-function clockSnapshot() {
-  return Math.floor(Date.now() / CLOCK_TICK_MS) * CLOCK_TICK_MS;
-}
-
 // ── Chart sizing ──
 
 /**
@@ -515,12 +531,12 @@ export function PerfBrowser({
   server,
   convert,
   currencySymbol,
-  snapshots = [],
+  snapshots = EMPTY_SNAPSHOTS,
   truncated = false,
-  executors = [],
+  executors = EMPTY_EXECUTORS,
   paging,
-  runs = [],
-  terminatedControllers = [],
+  runs = EMPTY_RUNS,
+  terminatedControllers = EMPTY_TERMINATED,
   owners = EMPTY_OWNERS,
   deeds = null,
   rateFormatPnl,
@@ -684,7 +700,7 @@ export function PerfBrowser({
    */
   const [execChart, setExecChart] = useState<"price" | "pnl">("price");
 
-  const now = useSyncExternalStore(subscribeToClock, clockSnapshot, clockSnapshot);
+  const now = useCoarseClock();
 
   // The scope lives in the URL, so `?scope=ctrl:<bot>:<config id>` is a link to
   // one controller and a reload lands back on it. Written with `replace` — the
@@ -813,6 +829,33 @@ export function PerfBrowser({
   }, [runs]);
 
   /**
+   * The instant a terminated fold reaches back to, hoisted out of `leavesFor`
+   * and quantised to the hour (PERF-339).
+   *
+   * The clock above ticks once a minute so that `totals` divides by a runtime
+   * that is not stale. But the window edge is the *only* thing in the leaf
+   * pipeline that reads it — the running branch never asks the time at all —
+   * and while the cutoff was computed inside the callback, `now` was one of
+   * the callback's dependencies, so once a minute `leavesFor` got a new
+   * identity and `rawLeaves` → `leaves` → `tree` → `nodes` → `scope` and every
+   * fold hanging off them were rebuilt from scratch, in both populations, for
+   * an answer that is identical unless a record crossed the edge in that
+   * minute. `ScopeRow`'s per-row `foldLeaves` memos, keyed on `node.leaves`,
+   * missed with them.
+   *
+   * Held to the hour so the edge still advances on its own — a window called
+   * "the last week" is never more than an hour wider than a week — while the
+   * pipeline behind it is rebuilt sixty times less often to do it. Nothing
+   * that reports elapsed time reads this: `totals`, `ownerLines`, the
+   * breakdown spines and `ScopeRow` all keep taking `now` itself, so every
+   * runtime and rate on screen still moves each minute.
+   */
+  const windowCutoff = useMemo(() => {
+    const days = PERIODS[period];
+    return days > 0 ? Math.floor(now / 3_600_000) * 3_600_000 - days * 86_400_000 : 0;
+  }, [period, now]);
+
+  /**
    * What is in scope, which is the *only* thing the population toggle changes.
    *
    * Running is the live fleet: every controller, with the executors currently
@@ -838,9 +881,12 @@ export function PerfBrowser({
        * executor working under one inherits that answer, so the `controller_id`
        * fallback is left to the executor nobody claims — which is exactly the
        * agent-created one, whose `controller_id` *is* its session's agent id.
+       *
+       * Built once per fold rather than per record (PERF-331): the owner list
+       * is fixed for the whole call, and the terminated population below walks
+       * every executor the fleet has ever had.
        */
-      const agentOf = (bot: string, controllerId: string) =>
-        attributionOf(owners, deeds, bot, controllerId);
+      const agentOf = attributionIndex(owners, deeds);
       /**
        * The bot a *closed* executor hung under, by the run that opened it.
        *
@@ -869,15 +915,13 @@ export function PerfBrowser({
         // The window applies to what has finished, and is measured from each
         // record's *end*: a period called "the last week" is the trading that
         // stopped in it, not the trading that started in it.
-        const days = PERIODS[period];
-        const cutoff = days > 0 ? now - days * 86_400_000 : 0;
         for (const ex of executors) {
           if (isExecutorActive(ex.status)) continue;
           const started = ex.timestamp > 0 ? toMs(ex.timestamp) : null;
           const bot = closedBotOf(ex, started);
           const att = agentOf(bot, ex.controller_id);
           const leaf = leafFromExecutor(ex, bot, att.runKey, att.how);
-          if (cutoff && leaf.endedAt !== null && leaf.endedAt < cutoff) continue;
+          if (windowCutoff && leaf.endedAt !== null && leaf.endedAt < windowCutoff) continue;
           all.push(leaf);
         }
         // The controllers those runs left behind. This is the spine of the
@@ -894,7 +938,7 @@ export function PerfBrowser({
             att.runKey,
             att.how,
           );
-          if (cutoff && leaf.endedAt !== null && leaf.endedAt < cutoff) continue;
+          if (windowCutoff && leaf.endedAt !== null && leaf.endedAt < windowCutoff) continue;
           all.push(leaf);
         }
       }
@@ -910,8 +954,7 @@ export function PerfBrowser({
       attribute,
       owners,
       deeds,
-      period,
-      now,
+      windowCutoff,
     ],
   );
 
@@ -1041,15 +1084,45 @@ export function PerfBrowser({
       // Every leaf, controller and executor alike: the question is "whose is
       // this", and a leaf's owner is a fact about it rather than about its
       // class, so there is no double-counting to avoid here.
-      agents: agentOptions(rawLeaves, deeds),
+      agents: agentOptions(rawLeaves, deeds, owners),
     };
-  }, [rawLeaves, classOf, deeds]);
+  }, [rawLeaves, classOf, deeds, owners]);
 
   const filtersActive =
     !!filters.pair.trim() ||
     filters.ctrlTypes.length > 0 ||
     filters.execTypes.length > 0 ||
     filters.agents.length > 0;
+
+  /**
+   * The bots the server can see that are reporting no controller at all.
+   *
+   * "No controllers" and "no bots" are not the same thing, and saying the first
+   * as the second is how a broker outage reads as an empty fleet. A controller
+   * is reported over the server's MQTT broker; the bot list is not (Docker
+   * answers that one). So a bot that is up while no controller report arrives
+   * means the reports are not arriving — worth naming on the screen where the
+   * controller is missing, rather than leaving it to be found in the API's logs.
+   *
+   * This used to be the page's sentence, drawn beside `/bots` instead of in the
+   * browser (CORR-357); it belongs here, where the records it is about are.
+   */
+  const silentBots = population === "running" && controllers.length === 0 ? bots : EMPTY_BOTS;
+
+  /**
+   * Nothing in the live population at all — and therefore an absence to state,
+   * not a fold of zeros to draw (CORR-356).
+   *
+   * Read off `rawLeaves`, the population *before* the filters and the grain. A
+   * tree emptied by a pair filter or by `Controllers`-only granularity is a
+   * narrowing the reader performed and `ScopeTree` already has the sentence for
+   * it ("Nothing in scope."); only the raw population can say the server is not
+   * running anything. `rawLeaves` is also the right count rather than
+   * `controllers.length`: `runningLeaves` pushes a leaf per active executor too,
+   * and an unclaimed executor is open capital, so a fleet with one of those is
+   * not empty however few controllers report it (CORR-357).
+   */
+  const emptyPopulation = population === "running" && rawLeaves.length === 0;
 
   /**
    * The one bot every row on screen belongs to, when there is one.
@@ -1163,8 +1236,8 @@ export function PerfBrowser({
    */
   const rootNode = useMemo(() => {
     if (rootScope === FLEET_SCOPE) return tree;
-    return nodes.get(rootScope) ?? emptyScopeNode(rootScope, rootScopeLabel(rootScope));
-  }, [rootScope, nodes, tree]);
+    return nodes.get(rootScope) ?? emptyScopeNode(rootScope, rootScopeLabel(rootScope, owners));
+  }, [rootScope, nodes, tree, owners]);
 
   const scope = useMemo(
     () => nodes.get(effectiveScopeId) ?? rootNode,
@@ -1218,6 +1291,22 @@ export function PerfBrowser({
     () => (scopeAgentKey ? ownerOf(owners, scopeAgentKey) : undefined),
     [owners, scopeAgentKey],
   );
+  /**
+   * What this scope's owner is called in prose (CORR-363).
+   *
+   * `ownerTitle` for a run, because a sentence has room for the map's
+   * spelled-out words. For the two agent-axis nodes that are *not* runs it has
+   * no answer at all: their keys are unspellable sentinels with a leading
+   * space, which `ownerTitle` misses in the map and falls through to the
+   * run-key namer, which hands a dotless key straight back — so the sentence
+   * the model was given read "operated by agent  outside", with the sentinel
+   * and its space in it.
+   */
+  const scopeAgentName = !scopeAgentKey
+    ? ""
+    : isAgentBucket(scopeAgentKey)
+      ? agentBucketLabel(scopeAgentKey)
+      : ownerTitle(owners, scopeAgentKey);
   /**
    * The declared legacy bases actually folded into this scope.
    *
@@ -1835,13 +1924,28 @@ export function PerfBrowser({
   // cut it: `leaf.connector` is on the leaf but is deliberately not a
   // `GroupAxis` (see `groupSpine`), and an instrument breakdown at a scope
   // already grouped by pair is still the honest answer for that scope.
+  //
+  // Both are gated on the band being open (PERF-340). Each `groupSpine` is a
+  // second and third full pass over the scope's spine — bucket, then
+  // `readSpine` per bucket — and the band is shut on arrival every time and
+  // deliberately not remembered, so for the whole of a typical session the two
+  // cuts were folded and thrown away on every WS frame and every clock tick.
+  // Nothing but `<ScopeBreakdowns>` reads them, and it only renders under the
+  // same guard, so the gate is invisible to the numbers.
+  const showBreakdown = band === "breakdown";
   const byPair = useMemo(
-    () => groupSpine(scopedLeaves, (leaf) => leaf.pair || UNKNOWN_LABEL, cv, now),
-    [scopedLeaves, cv, now],
+    () =>
+      showBreakdown
+        ? groupSpine(scopedLeaves, (leaf) => leaf.pair || UNKNOWN_LABEL, cv, now)
+        : EMPTY_BUCKETS,
+    [showBreakdown, scopedLeaves, cv, now],
   );
   const byVenue = useMemo(
-    () => groupSpine(scopedLeaves, (leaf) => leaf.connector || UNKNOWN_LABEL, cv, now),
-    [scopedLeaves, cv, now],
+    () =>
+      showBreakdown
+        ? groupSpine(scopedLeaves, (leaf) => leaf.connector || UNKNOWN_LABEL, cv, now)
+        : EMPTY_BUCKETS,
+    [showBreakdown, scopedLeaves, cv, now],
   );
 
   /**
@@ -1869,6 +1973,14 @@ export function PerfBrowser({
 
   /** The controller-history candidate: what this scope drew before FEAT-087. */
   const controllerPoints = useMemo(() => {
+    // This scope splits, so the chart on screen is `OwnerPnlChart` (the JSX
+    // below tests `ownerChart` first) and this candidate is never read. It is
+    // also the *same fold*: `ownerSeries` already ran `aggregatePnlSeries` over
+    // the union of the children's spine keys, which `buildTree` guarantees
+    // partitions this scope's own — so computing it here re-folded the entire
+    // performance history on every WS frame and threw the answer away
+    // (PERF-338).
+    if (ownerChart) return [];
     // A *live* controller draws its own finer series (see `ControllerPnlChart`).
     // A finished one does not: its curve is already in the run's cached history,
     // over the run's real window rather than deploy-to-now, and folding it here
@@ -1907,7 +2019,7 @@ export function PerfBrowser({
     }
     return aggregatePnlSeries(snapshots, scopedKeys, scopedControllers, convert);
   }, [
-    activeCtrl, population, snapshots, scopedKeys, scopedControllers,
+    ownerChart, activeCtrl, population, snapshots, scopedKeys, scopedControllers,
     convert, runHistory, scopeRun, archiveOnlyController,
   ]);
 
@@ -1921,19 +2033,28 @@ export function PerfBrowser({
    */
   const series = useMemo(
     () =>
-      resolvePerfSeries({
-        snapshots: execHistory?.supported === false ? undefined : execHistory?.snapshots,
-        controllerPoints,
-        // Only the terminated population has closes to fold. A running scope
-        // whose executors have all closed is a contradiction the tree does not
-        // produce, and offering the fold there would draw a "closed outcomes"
-        // curve under a live controller.
-        outcomes: population === "terminated" ? scope.leaves : undefined,
-        supported: perfCapability?.supported,
-        convert,
-        cv,
-      }),
-    [execHistory, controllerPoints, population, scope, perfCapability, convert, cv],
+      // Same gate as `controllerPoints` above, and for the same reason: when
+      // this scope splits, neither `chartData` nor `notice` reaches the render.
+      // Stopping at the candidates would still leave `resolvePerfSeries` to
+      // fold `scope.leaves` through `executorSeries` in the terminated
+      // population — a second discarded walk. Nothing is resolved instead
+      // (PERF-338).
+      ownerChart
+        ? EMPTY_SERIES
+        : resolvePerfSeries({
+            snapshots:
+              execHistory?.supported === false ? undefined : execHistory?.snapshots,
+            controllerPoints,
+            // Only the terminated population has closes to fold. A running
+            // scope whose executors have all closed is a contradiction the tree
+            // does not produce, and offering the fold there would draw a
+            // "closed outcomes" curve under a live controller.
+            outcomes: population === "terminated" ? scope.leaves : undefined,
+            supported: perfCapability?.supported,
+            convert,
+            cv,
+          }),
+    [ownerChart, execHistory, controllerPoints, population, scope, perfCapability, convert, cv],
   );
   const chartData = series.points;
 
@@ -2030,7 +2151,7 @@ export function PerfBrowser({
       // reader ticked rather than the run keys underneath them.
       picked(
         "agent",
-        filters.agents.map((value) => agentBucketLabel(value).toLowerCase()),
+        filters.agents.map((value) => agentBucketLabel(value, owners).toLowerCase()),
       ),
       // The run is a filter like any other, and one the reader did not tick —
       // it arrived in a link — so it is the one that most needs saying.
@@ -2044,7 +2165,11 @@ export function PerfBrowser({
         : activeRun
           ? `the finished run of bot ${activeRun.bot_name}`
           : scopeAgentKey && scope.kind === "agent"
-            ? `${plural(scope.leaves.length, scopeNoun)} operated by agent ${ownerTitle(owners, scopeAgentKey)}`
+            ? isAgentBucket(scopeAgentKey)
+              ? // Not "operated by agent X": nothing here is credited to anyone,
+                // and the bucket names why rather than who.
+                `${plural(scope.leaves.length, scopeNoun)} no run owns (${scopeAgentName})`
+              : `${plural(scope.leaves.length, scopeNoun)} operated by agent ${scopeAgentName}`
             : scopeBotName
               ? `${plural(scope.leaves.length, scopeNoun)} of bot ${scopeBotName}`
               : scope.kind === "fleet"
@@ -2066,12 +2191,16 @@ export function PerfBrowser({
         scope: effectiveScopeId,
         // Named rather than left as a `agent:` id, and with the one fact only
         // this scope carries: whether the loop behind these numbers is alive.
-        agent: scopeAgentKey
-          ? `${ownerTitle(owners, scopeAgentKey)} (${[
-              loopStatus(activeAgent?.live),
-              ...loopFacts(activeAgent?.live, Date.now()),
-            ].join(", ")})`
-          : undefined,
+        agent: !scopeAgentKey
+          ? undefined
+          : isAgentBucket(scopeAgentKey)
+            ? // No loop stands behind a bucket, so the parenthetical every run
+              // gets would be an "idle" invented for a thing that cannot tick.
+              scopeAgentName
+            : `${scopeAgentName} (${[
+                loopStatus(activeAgent?.live),
+                ...loopFacts(activeAgent?.live, Date.now()),
+              ].join(", ")})`,
         // Said either way round: "none" is a fact about the tree, and leaving
         // it out reads as "filters unknown" rather than "showing everything".
         filters: chips.length ? chips.join(", ") : "none",
@@ -2353,6 +2482,7 @@ export function PerfBrowser({
             activeId={effectiveScopeId}
             open={openRows}
             showBot={!soloBot && !groupByBot}
+            owners={owners}
             onSelect={setScope}
             onToggleOpen={toggleOpen}
             cv={cv}
@@ -2518,6 +2648,7 @@ export function PerfBrowser({
               // produced these numbers is still alive, and what it last said.
               <AgentScopeHeader
                 runKey={scopeAgentKey}
+                owners={owners}
                 owner={activeAgent}
                 legacyBots={scopeLegacyBots}
                 botName={scopeBotName ?? undefined}
@@ -2823,6 +2954,52 @@ export function PerfBrowser({
               a short one the reader can reach the rows that no longer do rather
               than have them hang off the bottom of the screen. */}
           <div className="flex flex-1 flex-col min-w-0 min-h-0 gap-3 overflow-y-auto scrollbar-thin p-4">
+            {/* What an empty live population *means*, said before any number is
+                drawn (CORR-356). Without it a server that has never run a bot
+                reads as a measurement of zero: a strip of `$0.00` tiles and "No
+                performance history available", with a 10px muted "Nothing in
+                scope." in the sidebar as the only hint — and that line is
+                written for a different case (every filter ticked off, a window
+                with nothing in it) and is not drawn at all once the sidebar is
+                collapsed. So it goes in the report pane, which every reader has.
+
+                The broker diagnostic wins where it applies, because telling an
+                outage apart from an empty fleet is the higher-value half, and it
+                is drawn *over* the numbers rather than instead of them: a silent
+                bot can sit beside a live unattached executor, and that executor's
+                money is real. */}
+            {silentBots.length > 0 ? (
+              <div className="shrink-0 rounded-lg border border-[var(--color-yellow)]/40 bg-[var(--color-yellow)]/10 px-4 py-3">
+                <p className="text-sm font-medium text-[var(--color-yellow)]">
+                  {silentBots.length === 1
+                    ? `${silentBots[0].bot_name} is running but reporting no controllers`
+                    : `${silentBots.length} bots are running but reporting no controllers`}
+                </p>
+                <p className="text-xs text-[var(--color-text-muted)] mt-1">
+                  Controller reports reach the API over its MQTT broker. Check that the broker is
+                  up and that the API is connected to it — on the server,{" "}
+                  <code className="font-mono">make doctor</code> names it.
+                </p>
+              </div>
+            ) : emptyPopulation ? (
+              <div className="shrink-0 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3">
+                <p className="text-sm font-medium">No bots running</p>
+                <p className="mt-1 text-xs text-[var(--color-text-muted)]">
+                  Nothing is deployed on this server and no executor is open, so the figures below
+                  are an absence rather than a result. What has already run is under Terminated.
+                </p>
+                {scope.kind === "fleet" && (
+                  <button
+                    onClick={() => setShowDeploy(true)}
+                    className="mt-3 flex items-center gap-1.5 rounded border border-[var(--color-primary)]/40 px-3 py-1.5 text-xs font-medium text-[var(--color-primary)] transition-colors hover:bg-[var(--color-primary)]/10"
+                    title="Deploy a new bot"
+                  >
+                    <Rocket className="h-3.5 w-3.5" />
+                    Deploy bot
+                  </button>
+                )}
+              </div>
+            ) : null}
             {/* Headline numbers first: the chart below is the shape of these. */}
             <div className="shrink-0 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3">
               {/* A fixed set of tiles, not a set that depends on what the scope

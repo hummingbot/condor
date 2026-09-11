@@ -5,6 +5,7 @@ description: Market making specialist — regime detection, spread calibration, 
 agent_key: claude-acp:sonnet
 tools:
 - get_prices
+- get_market_data
 - get_portfolio_overview
 - list_executors
 - get_executor
@@ -16,7 +17,11 @@ tools:
 - manage_agents
 - manage_strategies
 - control_agent
+- get_available_models
+- delegate
+- send_notification
 - trading_agent_journal_read
+- trading_agent_journal_write
 - manage_memory
 - manage_skill
 - run_code

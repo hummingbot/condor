@@ -523,13 +523,8 @@ async def delete_server(
             # Invalidate cache if we deleted the server that was in use
             if was_current:
                 invalidate_cache(context.user_data, "all")
-                # Also invalidate SDS (server-scoped)
-                try:
-                    from condor.server_data_service import get_server_data_service
-
-                    get_server_data_service().invalidate_server(server_name)
-                except Exception:
-                    pass
+                # SDS is invalidated by ConfigManager.delete_server itself now
+                # (config_manager.py _invalidate_server_caches).
                 logger.info(
                     f"Cache invalidated after deleting current server '{server_name}'"
                 )

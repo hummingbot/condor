@@ -13,7 +13,7 @@ import asyncio
 import json
 import logging
 import time
-from typing import TYPE_CHECKING, Any, Optional
+from typing import Any, Optional
 
 from fastapi import WebSocket
 
@@ -21,6 +21,8 @@ from fastapi import WebSocket
 # (and patch ``ws_manager.dex_candles``) through this module.
 from condor import dex_candles  # noqa: F401
 from condor.asyncutil import TaskSet
+from condor.fetchers.portfolio import PORTFOLIO_HISTORY_RANGES
+from condor.server_data_service import CacheKey, ServerDataType, get_server_data_service
 from condor.web.auth import decode_jwt
 from condor.web.streams.candles import (  # noqa: F401
     CandleStreamsMixin,
@@ -29,9 +31,6 @@ from condor.web.streams.candles import (  # noqa: F401
     parse_candle_channel,
 )
 from condor.web.streams.hummingbot_ws import HummingbotStreamsMixin
-
-if TYPE_CHECKING:
-    from condor.server_data_service import CacheKey
 
 logger = logging.getLogger(__name__)
 
@@ -157,8 +156,6 @@ class WebSocketManager(CandleStreamsMixin, HummingbotStreamsMixin):
     def start(self) -> None:
         if self._sds_listener_registered:
             return
-        from condor.server_data_service import get_server_data_service
-
         sds = get_server_data_service()
         sds.add_listener(self._on_data_update)
         self._sds_listener_registered = True
@@ -169,8 +166,6 @@ class WebSocketManager(CandleStreamsMixin, HummingbotStreamsMixin):
 
     def stop(self) -> None:
         if self._sds_listener_registered:
-            from condor.server_data_service import get_server_data_service
-
             sds = get_server_data_service()
             sds.remove_listener(self._on_data_update)
             self._sds_listener_registered = False
@@ -205,8 +200,6 @@ class WebSocketManager(CandleStreamsMixin, HummingbotStreamsMixin):
 
     def _cleanup_sds_subscriptions(self) -> None:
         """Remove all SDS subscriptions."""
-        from condor.server_data_service import get_server_data_service
-
         sds = get_server_data_service()
         sds.unsubscribe_all("ws_manager")
         self._sds_subscriptions.clear()
@@ -241,11 +234,22 @@ class WebSocketManager(CandleStreamsMixin, HummingbotStreamsMixin):
             self._connections.remove(conn)
             logger.info("WS disconnected: user %s", conn.user_id)
             for channel in list(conn.channels):
-                prefix = channel.split(":", 1)[0]
-                if prefix in self._stream_registry():
-                    self._maybe_stop_stream(prefix, channel)
-                else:
-                    self._maybe_unsub_sds(channel)
+                self._drop_subscription(conn, channel)
+
+    def _drop_subscription(self, conn: _Connection, channel: str) -> None:
+        """Unsubscribe one connection from one channel and tear the stream down.
+
+        The three ways a subscription ends — the client unsubscribes, the socket
+        goes away, or the user's access to the server is revoked (SEC-592) —
+        must all release the upstream stream, or a channel nobody is listening
+        to any more keeps its poller alive.
+        """
+        conn.channels.discard(channel)
+        prefix = channel.split(":", 1)[0]
+        if prefix in self._stream_registry():
+            self._maybe_stop_stream(prefix, channel)
+        else:
+            self._maybe_unsub_sds(channel)
 
     def _maybe_unsub_sds(self, channel: str) -> None:
         """Unsubscribe from SDS if no WS clients remain for this channel."""
@@ -257,8 +261,6 @@ class WebSocketManager(CandleStreamsMixin, HummingbotStreamsMixin):
         self._last_data.pop(channel, None)
 
         if channel in self._sds_subscriptions:
-            from condor.server_data_service import get_server_data_service
-
             sds = get_server_data_service()
             cache_key = self._sds_subscriptions.pop(channel)
             sds.unsubscribe(cache_key, "ws_manager")
@@ -320,12 +322,7 @@ class WebSocketManager(CandleStreamsMixin, HummingbotStreamsMixin):
                 await self._subscribe_sds(channel)
 
         elif action == "unsubscribe" and channel:
-            conn.channels.discard(channel)
-            prefix = channel.split(":", 1)[0]
-            if prefix in self._stream_registry():
-                self._maybe_stop_stream(prefix, channel)
-            else:
-                self._maybe_unsub_sds(channel)
+            self._drop_subscription(conn, channel)
 
         elif action == "set_candle_duration" and channel:
             # Frontend changed duration without re-subscribing
@@ -349,8 +346,6 @@ class WebSocketManager(CandleStreamsMixin, HummingbotStreamsMixin):
         sdt_name = _CHANNEL_TO_SDT.get(prefix)
         if not sdt_name:
             return
-
-        from condor.server_data_service import ServerDataType, get_server_data_service
 
         sds = get_server_data_service()
         data_type = ServerDataType[sdt_name]
@@ -402,9 +397,6 @@ class WebSocketManager(CandleStreamsMixin, HummingbotStreamsMixin):
         while the priming is in flight, unsubscribe again — otherwise the poll
         would outlive its last subscriber.
         """
-        from condor.fetchers.portfolio import PORTFOLIO_HISTORY_RANGES
-        from condor.server_data_service import ServerDataType, get_server_data_service
-
         sds = get_server_data_service()
 
         async def _sub(range_key: str) -> None:
@@ -434,13 +426,6 @@ class WebSocketManager(CandleStreamsMixin, HummingbotStreamsMixin):
         SDS stops polling a key once it has no subscribers left, so this is what
         ends the history refresh.
         """
-        from condor.fetchers.portfolio import PORTFOLIO_HISTORY_RANGES
-        from condor.server_data_service import (
-            CacheKey,
-            ServerDataType,
-            get_server_data_service,
-        )
-
         sds = get_server_data_service()
         for range_key in PORTFOLIO_HISTORY_RANGES:
             sds.unsubscribe(
@@ -475,21 +460,16 @@ class WebSocketManager(CandleStreamsMixin, HummingbotStreamsMixin):
             if task and not task.done():
                 return
 
-        # Transform raw data to match REST endpoint response shapes
+        # Bots frames are enriched (an await) and carry the transitional
+        # "stopping" overlay, so they are built inside the broadcast task
+        # rather than here — this listener is synchronous.
         if dt_name == "BOTS_STATUS":
-            try:
-                value = self._transform_bots(value)
-                # Overlay transitional "stopping" state from Condor's in-memory store
-                self._overlay_stopping_state(server_name, value)
-            except Exception as e:
-                logger.debug("Failed to transform bots data for WS: %s", e)
-                return
+            coro = self._broadcast_bots_update(channel, server_name, value)
+        else:
+            coro = self._broadcast_update(channel, value)
 
         self._oneshot_tasks.track(
-            asyncio.create_task(
-                self._broadcast_update(channel, value),
-                name=f"broadcast:{channel}",
-            )
+            asyncio.create_task(coro, name=f"broadcast:{channel}")
         )
 
     async def _broadcast_update(self, channel: str, data: Any) -> None:
@@ -499,11 +479,68 @@ class WebSocketManager(CandleStreamsMixin, HummingbotStreamsMixin):
 
     # -- Broadcasting --
 
-    async def broadcast(self, channel: str, data: Any) -> None:
-        self._last_data[channel] = data
+    def _authorized_subscribers(self, channel: str) -> list[_Connection]:
+        """Subscribers of ``channel`` whose access to its server still holds.
+
+        ``handle_message`` gates a subscription once, at subscribe time, but a
+        dashboard socket is long-lived and auto-reconnecting: an owner can
+        revoke a share — or an admin block the user — hours after the tab was
+        opened, and until SEC-592 that connection kept receiving the server's
+        frames until the tab reloaded. Every REST route re-checks per request
+        (``check_server_access``); this is the socket's equivalent, applied to
+        the subscriber walk ``broadcast`` already does.
+
+        A revoked subscriber is *unsubscribed*, not disconnected: its other
+        channels are still legitimate. Dropping it runs the same teardown as an
+        explicit unsubscribe, so it stops holding the upstream stream open.
+
+        Cost: ``ConfigManager`` is in memory, so the check is a handful of dict
+        lookups, and it is memoised per user for the duration of the frame —
+        one lookup per *distinct* user, not per connection, and no extra pass
+        over the connection list.
+        """
+        from config_manager import UserRole, get_config_manager
+
         subscribers = [
             conn for conn in list(self._connections) if channel in conn.channels
         ]
+        server_name = self._server_from_channel(channel)
+        if server_name is None or not subscribers:
+            # Nothing to authorize against: a channel with no server segment is
+            # rejected at subscribe time and cannot have subscribers anyway.
+            return subscribers
+
+        cm = get_config_manager()
+        allowed: dict[int, bool] = {}
+        live: list[_Connection] = []
+        revoked: list[_Connection] = []
+        for conn in subscribers:
+            ok = allowed.get(conn.user_id)
+            if ok is None:
+                # Both halves of the gate the connection passed on the way in:
+                # the role ``connect`` checked, and the per-server share
+                # ``handle_message`` checked. A blocked user keeps their
+                # ``shared_with`` entry, so the role half is not redundant.
+                ok = cm.get_user_role(conn.user_id) in (
+                    UserRole.USER,
+                    UserRole.ADMIN,
+                ) and cm.has_server_access(conn.user_id, server_name)
+                allowed[conn.user_id] = ok
+            (live if ok else revoked).append(conn)
+
+        for conn in revoked:
+            logger.warning(
+                "WS subscription revoked: user=%s channel=%s server=%s (access lost)",
+                conn.user_id,
+                channel,
+                server_name,
+            )
+            self._drop_subscription(conn, channel)
+        return live
+
+    async def broadcast(self, channel: str, data: Any) -> None:
+        self._last_data[channel] = data
+        subscribers = self._authorized_subscribers(channel)
         if not subscribers:
             return
         # The frame is identical for every subscriber (no per-connection state

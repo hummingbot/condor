@@ -12,6 +12,7 @@ surface is pinned here.
 import asyncio
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -357,3 +358,225 @@ def test_no_condor_skill_names_a_funnel_era_action_as_a_tool():
         "these are actions on manage_agents/manage_strategies/control_agent, "
         "not tools: " + "; ".join(offenders)
     )
+
+
+# ── SEC-577: a routine name is joined onto a directory, so it must be a name ──
+
+# Every shape of "not a bare name" that has ever been used to leave a directory:
+# relative traversal, traversal buried mid-path, an absolute path, the
+# URL-encoded and double-encoded spellings (the name reaches the tool over an
+# MCP/HTTP hop, so a decoding layer must not be able to hand back a separator),
+# a NUL truncator, Windows separators, a prefix-sibling of the library, and the
+# trailing newline that a ``$``-anchored regex would have let through.
+ESCAPING_NAMES = [
+    "../../_shared/routines/some_playbook",
+    "../main",
+    "..",
+    ".",
+    "sub/../../main",
+    "/etc/passwd",
+    "/tmp/evil",
+    "%2e%2e%2fmain",
+    "%252e%252e%252fmain",
+    "..%2fmain",
+    "main\x00.py",
+    "..\\..\\main",
+    "..\\outside\\main",
+    "../library_backup/x",
+    "main\n",
+    "Main",
+    "main.py",
+    "main routine",
+    "_private",
+    "1main",
+    "",
+]
+
+_ROUTINE_SRC = '''"""A routine used by the tests."""
+
+from pydantic import BaseModel, Field
+
+
+class Config(BaseModel):
+    """Test routine"""
+
+    pair: str = Field(default="SOL-USDC", description="pair")
+
+
+async def run(config, context) -> str:
+    return "ok"
+'''
+
+
+@pytest.fixture
+def sandboxed_library(tmp_path, monkeypatch):
+    """A writable routines dir with a victim file just outside it.
+
+    ``library_backup`` is a *prefix sibling*: a confinement check written as a
+    string ``startswith`` would admit it.
+    """
+    from mcp_servers.condor.tools import routines as routines_tool
+
+    library = tmp_path / "library"
+    library.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "main.py").write_text("# the victim\n")
+    sibling = tmp_path / "library_backup"
+    sibling.mkdir()
+    (sibling / "x.py").write_text("# the sibling victim\n")
+
+    monkeypatch.setattr(
+        routines_tool, "_get_agent_routines_dir", lambda *a, **k: library
+    )
+    monkeypatch.chdir(tmp_path)
+    return library, outside
+
+
+@pytest.mark.parametrize("name", ESCAPING_NAMES)
+def test_routine_crud_refuses_every_name_that_is_not_a_bare_name(
+    name, sandboxed_library
+):
+    """read/edit/delete validate the name create_routine always did (SEC-577).
+
+    Before the guard, ``delete_routine("../main")`` reached ``file_path.unlink()``
+    after nothing but an ``exists()`` check and removed a file outside the
+    caller's writable library; ``edit_routine`` wrote outside it and only then
+    reverted, and ``read_routine`` returned the source of any reachable ``.py``.
+    """
+    from mcp_servers.condor.tools import routines as routines_tool
+
+    victim = sandboxed_library[1] / "main.py"
+    before = victim.read_text()
+
+    for result in (
+        routines_tool.read_routine(name, None),
+        routines_tool.edit_routine(name, _ROUTINE_SRC, None),
+        routines_tool.delete_routine(name, None),
+        routines_tool.create_routine(name, _ROUTINE_SRC, None),
+    ):
+        assert "lowercase alphanumeric" in result.get("error", ""), (name, result)
+        assert "code" not in result
+
+    # Nothing outside the library was read, written, or unlinked.
+    assert victim.exists() and victim.read_text() == before
+    assert (sandboxed_library[1].parent / "library_backup" / "x.py").exists()
+    assert not list(sandboxed_library[0].iterdir())
+
+
+def test_an_ordinary_routine_name_still_round_trips(sandboxed_library):
+    """The guard must not cost a legitimate create → read → edit → delete."""
+    from mcp_servers.condor.tools import routines as routines_tool
+
+    library = sandboxed_library[0]
+
+    created = routines_tool.create_routine("my_scanner", _ROUTINE_SRC, None)
+    assert created.get("created") is True
+    assert (library / "my_scanner.py").is_file()
+
+    read = routines_tool.read_routine("my_scanner", None)
+    assert read.get("code") == _ROUTINE_SRC
+
+    edited = routines_tool.edit_routine(
+        "my_scanner", _ROUTINE_SRC.replace("SOL-USDC", "BTC-USDT"), None
+    )
+    assert edited.get("updated") is True
+    assert "BTC-USDT" in (library / "my_scanner.py").read_text()
+
+    deleted = routines_tool.delete_routine("my_scanner", None)
+    assert deleted.get("deleted") is True
+    assert not (library / "my_scanner.py").exists()
+
+
+def test_instance_actions_still_accept_an_instance_id_in_name(monkeypatch):
+    """``name`` is overloaded: for stop/get_instance it carries an instance_id.
+
+    That is why the guard lives in the three CRUD functions and not in the
+    ``manage_routines`` dispatcher — an instance_id is not a routine name.
+    """
+    from mcp_servers.condor.tools import routines as routines_tool
+
+    seen = []
+
+    async def _fake_call(method, path, *args, **kwargs):
+        seen.append(path)
+        return {"status": "completed", "routine_name": "x", "result_text": "done"}
+
+    monkeypatch.setattr(routines_tool, "call_main_api", _fake_call)
+
+    instance_id = "3f7A-21b0_ID"
+    got = asyncio.run(routines_tool.manage_routines("get_instance", name=instance_id))
+    assert "lowercase alphanumeric" not in got.get("error", "")
+    stopped = asyncio.run(routines_tool.manage_routines("stop", name=instance_id))
+    assert stopped.get("stopped") is True
+    assert all(instance_id in path for path in seen)
+
+
+def test_reading_routine_source_stays_inside_the_discovery_roots(tmp_path):
+    """The second layer: a resolved path outside every source root is not read.
+
+    ``_bad_name`` already makes traversal via ``name`` unreachable, so this pins
+    the two escapes a name rule cannot see — a symlink pointing out of the
+    library, and a prefix sibling of it.
+    """
+    from condor.routine_store import routine_source_roots
+    from mcp_servers.condor.tools import routines as routines_tool
+    from routines.base import library_dir
+
+    library = library_dir()
+    assert library.resolve() in routine_source_roots()
+    assert routines_tool._confined(library / "some_routine.py")
+
+    assert not routines_tool._confined(tmp_path / "elsewhere.py")
+    assert not routines_tool._confined(library.parent / "routines_backup" / "x.py")
+
+    secret = tmp_path / "secret.py"
+    secret.write_text("# not a routine\n")
+    link = library / "_sec577_link.py"
+    link.symlink_to(secret)
+    try:
+        assert not routines_tool._confined(link)
+    finally:
+        link.unlink()
+
+
+def test_read_routine_refuses_a_routine_file_that_symlinks_out(sandboxed_library):
+    """A valid name over a symlinked file still does not leak what it points at.
+
+    ``_confined`` trusts the library the call derived, so this pins that the
+    trust is of the *directory* and not of whatever a file inside it resolves to.
+    """
+    from mcp_servers.condor.tools import routines as routines_tool
+
+    library, outside = sandboxed_library
+    (outside / "secret.py").write_text("# a secret\n")
+    (library / "leak.py").symlink_to(outside / "secret.py")
+
+    result = routines_tool.read_routine("leak", None)
+
+    assert "a secret" not in str(result)
+    assert result.get("error") == "Routine 'leak' not found"
+
+
+def test_importing_the_server_does_not_drag_in_handlers_or_telegram():
+    """PERF-571: every MCP subprocess spawn pays for this import graph.
+
+    ``tools/available_models`` used to reach ``condor.llm.readiness`` through the
+    ``handlers.agents`` alias shims (ARCH-190), which forced the whole
+    ``handlers`` package __init__ — telegram, condor.acp, utils.auth — into a
+    server that never touches any of it (~230 ms, ~310 modules). Asserted in a
+    fresh interpreter because this module already imports the server in-process.
+    """
+    probe = (
+        "import sys, mcp_servers.condor.server;"
+        "print(int(any(m == 'handlers' or m.startswith('handlers.') "
+        "or m == 'telegram' or m.startswith('telegram.') for m in sys.modules)))"
+    )
+    done = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert done.stdout.strip() == "0", "handlers/telegram imported by the MCP server"

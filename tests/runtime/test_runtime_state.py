@@ -327,6 +327,35 @@ def test_timeout_bad_override_is_ignored(monkeypatch):
     assert TimeoutPolicy.load().prompt_overall == 1800
 
 
+def test_the_stream_hard_stop_sits_just_above_the_turn_budget():
+    """The ACP stream's backstop is a minute past the session's own deadline."""
+    assert TimeoutPolicy().prompt_hard_stop == 1860
+    assert TimeoutPolicy().prompt_hard_stop == TimeoutPolicy().prompt_overall + 60
+
+
+def test_the_stream_hard_stop_follows_the_turn_budget_override(monkeypatch):
+    """A deployment that buys a longer turn must not be cut short by the stream.
+
+    ``prompt_stream`` used to carry its own ``1860`` literal, so raising
+    ``CONDOR_TIMEOUT_PROMPT_OVERALL`` to an hour moved the session deadline and
+    left the stream cutting the answer at 31 minutes.
+    """
+    monkeypatch.setenv("CONDOR_TIMEOUT_PROMPT_OVERALL", "3600")
+
+    assert TimeoutPolicy.load().prompt_hard_stop == 3660
+
+
+def test_prompt_stream_has_no_hardcoded_ceiling():
+    """The deadline the stream enforces is the policy's, not a copy of it."""
+    import inspect
+
+    from condor.acp.client import ACPClient
+
+    src = inspect.getsource(ACPClient.prompt_stream)
+    assert "TIMEOUTS.prompt_hard_stop" in src
+    assert "1860" not in src
+
+
 def test_resolve_tick_timeout_precedence():
     """Caller override beats strategy config beats the default."""
     assert resolve_tick_timeout("loop", caller=42, strategy=99) == 42

@@ -73,6 +73,32 @@ def test_get_returns_meta_and_transcript(store):
     assert body["turns"][0]["text"] == "what is my pnl?"
 
 
+def test_the_running_token_total_rides_the_meta(store):
+    """FEAT-120: no route change — the total is on the model both routes dump."""
+    from condor.acp.usage import TokenUsage
+
+    meta = new_conversation(USER.id, "web", agent_key="claude-code")
+    append_turn(USER.id, meta.id, TurnEntry(role="user", text="hello"))
+    append_turn(
+        USER.id,
+        meta.id,
+        TurnEntry(
+            role="assistant",
+            text="hi back",
+            usage=TokenUsage(
+                input_tokens=1200, output_tokens=30, cost_usd=0.02
+            ).to_dict(),
+        ),
+    )
+
+    body = _client(USER).get(f"/conversations/{meta.id}").json()
+    assert body["meta"]["usage"]["total_tokens"] == 1230
+    assert body["meta"]["usage"]["cost_usd"] == 0.02
+    assert body["turns"][-1]["usage"]["input_tokens"] == 1200
+    listed = _client(USER).get("/conversations").json()
+    assert listed[0]["usage"]["input_tokens"] == 1200
+
+
 def test_unknown_conversation_is_404(store):
     assert _client(USER).get("/conversations/nope").status_code == 404
 

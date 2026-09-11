@@ -98,3 +98,16 @@ class SessionKey:
             return int(self.owner)
         except ValueError:
             return None
+
+
+def slot_of(session_key: str) -> str:
+    """The slot a session key belongs to, or "" if the key is not canonical.
+
+    Never raises: a confirmation that cannot be attributed is still worth
+    delivering unaddressed, which is what the dashboard did for all of them
+    before this became a field.
+    """
+    try:
+        return SessionKey.parse(session_key).slot
+    except ValueError:
+        return ""

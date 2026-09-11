@@ -32,8 +32,6 @@ import {
   queryClient,
 } from "./queryClient";
 import type {
-  BotsPageResponse,
-  ControllerInfo,
   ControllerPerformanceHistoryResponse,
   ControllerPerformanceSnapshot,
 } from "./api";
@@ -287,41 +285,10 @@ export function handleMessage(channel: string, data: unknown): void {
   if (prefix === "portfolio") {
     queryClient.setQueryData(["portfolio", server], data);
   } else if (prefix === "bots") {
-    queryClient.setQueryData(["bots", server], (old: BotsPageResponse | undefined) => {
-      const incoming = data as BotsPageResponse;
-      if (!incoming?.controllers) return old ?? data;
-      if (!old?.controllers?.length) return incoming;
-
-      // Key by bot + controller_id (stable) — controller_name may differ
-      // between REST and WS, and the id alone is shared by every bot running
-      // the same controller config (CORR-241).
-      const oldMap = new Map<string, ControllerInfo>();
-      for (const c of old.controllers) {
-        oldMap.set(controllerKey(c), c);
-      }
-      const oldBotMap = new Map(old.bots.map((b) => [b.bot_name, b]));
-
-      return {
-        ...incoming,
-        controllers: incoming.controllers.map((c) => {
-          const prev = oldMap.get(controllerKey(c));
-          if (!prev) return c;
-          return {
-            ...c,
-            config: Object.keys(c.config || {}).length ? c.config : prev.config,
-            deployed_at: c.deployed_at ?? prev.deployed_at,
-            connector: c.connector || prev.connector,
-            trading_pair: c.trading_pair || prev.trading_pair,
-            controller_name: prev.controller_name || c.controller_name,
-            controller_id: prev.controller_id || c.controller_id,
-          };
-        }),
-        bots: incoming.bots.map((b) => {
-          const prev = oldBotMap.get(b.bot_name);
-          return { ...b, deployed_at: b.deployed_at ?? prev?.deployed_at ?? null };
-        }),
-      };
-    });
+    // A plain replace: the WS frame is enriched server-side (ARCH-586), so it
+    // carries the same config / deployed_at / ids / pair as the REST body and
+    // needs no field-by-field repair from the previous payload.
+    queryClient.setQueryData(["bots", server], data);
   } else if (prefix === "executors") {
     const unfiltered = executorsQuery(server);
     queryClient.setQueryData(unfiltered.queryKey, data);

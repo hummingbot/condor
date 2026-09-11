@@ -5,6 +5,7 @@ description: Expert in multi-timeframe adaptive grid trading with safety-first o
 agent_key: claude-acp:opus
 tools:
 - get_prices
+- get_market_data
 - get_portfolio_overview
 - create_grid_executor
 - list_executors

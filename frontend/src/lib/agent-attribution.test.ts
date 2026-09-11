@@ -16,9 +16,12 @@ import {
   inNamespace,
   loopFacts,
   loopStatus,
+  isPseudoRunKey,
   ownerOf,
+  ownerRowLabel,
   ownerTitle,
   runKeyLabel,
+  splitRunKey,
   stripDeploySuffix,
   type FleetOwner,
   type LiveLoop,
@@ -148,6 +151,49 @@ describe("labels", () => {
   it("fall back to slugs when the map carries no names", () => {
     const bare = [owner({ agentName: "", strategyName: "" })];
     expect(ownerTitle(bare, "brigado.brl_mm")).toBe("brigado / brl_mm");
+  });
+
+  // ── Naming an owner row: the one rule, and its two halves (READ-364) ──
+  //
+  // A pseudo-owner is built with an empty namespace and is attributed by an
+  // observed record, never by a name — so no `condor-ui-…` bot can exist for
+  // its slugs to be matched against, and the slug form's whole justification
+  // is absent. The words come off the wire (`strategyName`), never from a TS
+  // copy of `PSEUDO_STRATEGY_NAMES`.
+  const pseudo = (strategySlug: string, strategyName: string) =>
+    owner({
+      agentSlug: "condor",
+      agentName: "Condor",
+      strategySlug,
+      strategyName,
+      namespace: "",
+    });
+
+  const doors = [pseudo("ui", "Dashboard"), pseudo("chat", "Chat"), pseudo("delegation", "Delegation")];
+
+  it("know which run keys are the three doors rather than a strategy", () => {
+    expect(isPseudoRunKey("condor.ui")).toBe(true);
+    expect(isPseudoRunKey("condor.chat")).toBe(true);
+    expect(isPseudoRunKey("brigado.delegation")).toBe(true);
+    expect(isPseudoRunKey("brigado.brl_mm")).toBe(false);
+    expect(splitRunKey("brigado.brl_mm")).toEqual({ agent: "brigado", strategy: "brl_mm" });
+    expect(splitRunKey("nonsense")).toEqual({ agent: "nonsense", strategy: "" });
+  });
+
+  it("name a pseudo-run row with the map's words, not its slugs", () => {
+    expect(ownerRowLabel(doors, "condor.ui")).toBe("Condor / Dashboard");
+    expect(ownerRowLabel(doors, "condor.chat")).toBe("Condor / Chat");
+    expect(ownerRowLabel(doors, "condor.delegation")).toBe("Condor / Delegation");
+  });
+
+  it("keep a real strategy in slugs, which is what its bot names are built from", () => {
+    expect(ownerRowLabel([...owners, ...doors], "brigado.brl_mm")).toBe("brigado / brl_mm");
+  });
+
+  it("fall back to slugs for a pseudo-run the map no longer holds", () => {
+    // A stale deep link names something rather than nothing.
+    expect(ownerRowLabel([], "condor.ui")).toBe("condor / ui");
+    expect(ownerRowLabel(doors, "retired.chat")).toBe("retired / chat");
   });
 
   it("find the owner behind a run key", () => {

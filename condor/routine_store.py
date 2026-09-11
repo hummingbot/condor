@@ -2,6 +2,27 @@
 
 Bridges Telegram handler and web API so both can see
 the same instances, schedule runs, and read results.
+
+**Routine definitions are install-wide, not per-user (SEC-617).** One Condor
+install is a single shared agent workspace, not a set of tenants: every
+approved user sees every agent (``GET /agents`` calls ``list_all()`` unscoped)
+and ``_strategy_principal`` in ``web/routes/agents.py`` states it outright —
+agents and their strategies "are a single global store, not partitioned by
+owner the way conversations and delegations are". So a routine's *definition* —
+its name, description, ``fields`` schema and source — is readable by any
+approved user, including the agent-prefixed ones, and that is the design rather
+than a gap in it. Scoping the routine slice alone would make the model
+incoherent in the other direction: you could not read the source of a routine
+belonging to an agent you can already list and inspect.
+
+What *is* per-user is the activity on top of those definitions, and that
+partitioning has shipped: reports (SEC-196, SEC-593), conversations, sessions,
+delegations, and the instances below, which ``routes/routines.py`` filters with
+``_owns``. The line to hold when editing this module is therefore: a definition
+is public to the install, a *run* and its output belong to whoever made it.
+Promoting definitions to per-user is a tenancy decision for the whole agent
+layer — ``GET /agents`` and the strategy routes first — not something to
+retrofit here.
 """
 
 from __future__ import annotations
@@ -17,13 +38,18 @@ from typing import Any
 
 import condor.reports as reports
 from condor import primitives, routine_hooks
-from condor.memory.paths import agent_home_layers, iter_agent_slugs
+from condor.memory.paths import (
+    agent_home_layers,
+    iter_agent_slugs,
+    shared_routines_roots,
+)
 from condor.telemetry import taps as telemetry_taps
 from routines.base import (
     RoutineResult,
     _merged_from,
     discover_routines,
     get_routine,
+    library_dir,
     normalize_result,
 )
 
@@ -33,6 +59,32 @@ logger = logging.getLogger(__name__)
 def _agent_routine_dirs(slug: str) -> tuple:
     """An agent's routine dirs in read order: local first, then shipped."""
     return tuple(home / "routines" for home in agent_home_layers(slug))
+
+
+def routine_source_roots() -> tuple[Path, ...]:
+    """Every directory :meth:`RoutineStore._discover_all` imports routine files from.
+
+    The allowlist a reader of routine source confines itself to (CORR-585): the
+    general library, the shared library in both layers, and each agent's own
+    ``routines/`` dir in both layers — the agent *homes* themselves stay out, so
+    a journal or a memory store next door is never in scope. ``_shared`` is
+    named explicitly because ``iter_agent_slugs`` skips the ``_``-prefixed
+    library dirs.
+
+    Every root comes back resolved, so a caller comparing with
+    :meth:`pathlib.Path.is_relative_to` against an equally resolved path admits
+    neither ``..`` nor a symlink out of one, and (unlike a string prefix) never
+    mistakes a sibling like ``routines_backup/`` for the library.
+    """
+    roots = [library_dir(), *shared_routines_roots()]
+    for slug in iter_agent_slugs():
+        roots.extend(_agent_routine_dirs(slug))
+    resolved: list[Path] = []
+    for root in roots:
+        candidate = root.resolve()
+        if candidate not in resolved:
+            resolved.append(candidate)
+    return tuple(resolved)
 
 
 class _HttpBot:
@@ -295,12 +347,18 @@ class RoutineStore:
 
         return all_routines
 
-    def _get_report_counts(self) -> dict[str, int]:
-        """Get report count per routine source_name."""
+    def _get_report_counts(self, owner_id: int | None = None) -> dict[str, int]:
+        """Get report count per routine source_name.
+
+        ``owner_id`` scopes the tally the way ``list_reports`` does (SEC-593):
+        an unscoped count is still a read on another user's reports — it says
+        how many they ran — so the web callers pass the caller's filter and
+        only an admin (or an internal, already-per-user caller) gets ``None``.
+        """
         try:
             from condor.reports import list_reports
 
-            reports, _ = list_reports(limit=1000)
+            reports, _ = list_reports(limit=1000, owner_id=owner_id)
             counts: dict[str, int] = {}
             for r in reports:
                 sn = r.get("source_name", "")
@@ -310,9 +368,17 @@ class RoutineStore:
         except Exception:
             return {}
 
-    def list_routines(self) -> list[dict]:
+    def list_routines(self, owner_id: int | None = None) -> list[dict]:
+        """Every discovered routine, with the caller's report tally on each.
+
+        ``owner_id`` scopes the ``report_count`` only — it is the report filter
+        of :meth:`_get_report_counts`, not a visibility filter on the rows. The
+        row set is deliberately the whole install's: see the module docstring
+        (SEC-617) for why definitions are install-wide while the runs counted
+        beside them are per-user.
+        """
         all_routines = self._discover_all()
-        report_counts = self._get_report_counts()
+        report_counts = self._get_report_counts(owner_id)
         out = []
         for name, info in all_routines.items():
             out.append(

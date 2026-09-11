@@ -151,6 +151,21 @@ export const DOCK_WIDTH_KEY = "condor.dock.width";
 export const ACCOUNT_DOCK_KEY = "condor.dock.account";
 
 /**
+ * Where the reader put the seam between the desk's two sections, as the
+ * fraction of the panel the top one (Portfolio) keeps.
+ *
+ * The sections opened at an even split and could only ever be even: a reader
+ * who wanted the execution table tall had to collapse the portfolio away
+ * entirely, which is a different question than "give me more of it". So the
+ * boundary is theirs to drag, and remembered per browser like every other
+ * geometry here.
+ *
+ * KEPT, for the reason `DOCK_WIDTH_KEY` and `PANE_FRAC_KEY` are: it says how
+ * this screen is divided and nothing about whose balances were behind it.
+ */
+export const DESK_SPLIT_KEY = "condor.dock.account.split";
+
+/**
  * Which of an agent run screen's disclosures are open, as a JSON array of
  * section ids — Runs, Detail, Money, Fleet and Playbook (FEAT-119).
  *

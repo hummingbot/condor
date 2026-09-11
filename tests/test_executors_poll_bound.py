@@ -125,7 +125,7 @@ def page_env(monkeypatch):
     """Wire ``list_executors_page`` to a fresh SDS and a fake API client."""
     sds = ServerDataService()
     monkeypatch.setattr(
-        "condor.server_data_service.get_server_data_service", lambda: sds
+        "condor.web.routes.executors.get_server_data_service", lambda: sds
     )
 
     def _bind(client):

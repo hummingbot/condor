@@ -1,11 +1,7 @@
-import { Bot, Rocket, TerminalSquare } from "lucide-react";
-import { useState } from "react";
 import { Navigate, useSearchParams } from "react-router-dom";
 
 import { NoServerCard } from "@/components/NoServerCard";
 import { PerfBrowser } from "@/components/perf/PerfBrowser";
-import { DeployBotDialog } from "@/components/bots/DeployBotDialog";
-import { EditorModal } from "@/components/editor/EditorModal";
 import { FallbackSpinner } from "@/components/ui/FallbackSpinner";
 import { useFleetData } from "@/hooks/useFleetData";
 import { useServer } from "@/hooks/useServer";
@@ -19,7 +15,7 @@ import { parsePopulation } from "@/lib/perf-tree";
  * sidebar (fleet → bot → controller) *is* the page, and every bot-level action
  * that lived in the accordion is reachable from the scope it belongs to.
  *
- * What is left here is a *host*: the empty states, and the browser over
+ * What is left here is a *host*: the no-data guards, and the browser over
  * `useFleetData` (FEAT-108). The fleet query and the performance-history walk
  * that used to live in this file are in that hook now, unchanged and under the
  * same query keys — so the agent workspace can mount the same browser over the
@@ -39,13 +35,6 @@ export function Bots() {
   // old links land on the scope that answers them (FEAT-086).
   const tab = searchParams.get("tab");
   const legacyRunsTab = tab === "runs" || tab === "archived";
-  // Deploy lives in the browser's fleet-scope header — except when there is no
-  // fleet to scope, which is exactly when it is needed most (see below). The
-  // Editor sits beside it there and is stranded the same way: writing the
-  // controller you are about to deploy is the *first* thing an empty fleet
-  // needs, not something reachable only once a bot is already running.
-  const [showDeploy, setShowDeploy] = useState(false);
-  const [showEditor, setShowEditor] = useState(false);
 
   const fleet = useFleetData(server, { population });
 
@@ -83,68 +72,11 @@ export function Bots() {
     );
   }
 
-  // Nothing to scope: the browser draws nothing without controllers, and the
-  // fleet header that carries Deploy is part of the browser — so the empty
-  // state has to carry the one action that gets out of it.
-  //
-  // Only for the *live* fleet, though. An empty fleet is exactly the state in
-  // which the Terminated population is worth reading — the run history, the
-  // closed executors and the archive drill-in all live there, and their queries
-  // above have already fetched them — so answering "No bots running" for
-  // `?population=terminated` strands the reader on the one screen that still
-  // has something to say (CORR-297).
-  //
-  // "No controllers" and "no bots" are not the same thing, and saying the first
-  // as the second is how a broker outage reads as an empty fleet. A controller
-  // is reported over the server's MQTT broker; the bot list is not (Docker
-  // answers that one). So a bot the server can see, reporting no controller,
-  // means the reports are not arriving — and that is worth naming here, on the
-  // screen where the bot is missing, rather than leaving it to be found in the
-  // API's logs.
-  const silentBots = fleet.bots;
-  if (population === "running" && fleet.controllers.length === 0) {
-    return (
-      <div className="flex h-full flex-col items-center justify-center gap-3 text-[var(--color-text-muted)]">
-        <Bot className="h-10 w-10" />
-        {silentBots.length === 0 ? (
-          <p>No bots running</p>
-        ) : (
-          <div className="max-w-md space-y-1 text-center">
-            <p className="text-[var(--color-yellow)]">
-              {silentBots.length === 1
-                ? `${silentBots[0].bot_name} is running but reporting no controllers`
-                : `${silentBots.length} bots are running but reporting no controllers`}
-            </p>
-            <p className="text-xs">
-              Controller reports reach the API over its MQTT broker. Check that the broker
-              is up and that the API is connected to it — on the server,{" "}
-              <code className="font-mono">make doctor</code> names it.
-            </p>
-          </div>
-        )}
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => setShowDeploy(true)}
-            className="flex items-center gap-2 rounded-lg bg-[var(--color-primary)] px-5 py-2 text-sm font-medium text-white transition-all hover:shadow-lg hover:shadow-[var(--color-primary)]/20"
-          >
-            <Rocket className="h-4 w-4" />
-            Deploy Bot
-          </button>
-          <button
-            onClick={() => setShowEditor(true)}
-            className="flex items-center gap-2 rounded-lg border border-[var(--color-border)] px-5 py-2 text-sm font-medium text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-            title="Open the controller & config editor"
-          >
-            <TerminalSquare className="h-4 w-4" />
-            Editor
-          </button>
-        </div>
-        <DeployBotDialog open={showDeploy} onClose={() => setShowDeploy(false)} server={server} />
-        {showEditor && <EditorModal open onClose={() => setShowEditor(false)} />}
-      </div>
-    );
-  }
-
+  // Nothing is said here about an empty fleet or a silent bot: both are the
+  // browser's sentences now, drawn in its report pane where the records they are
+  // about would be (CORR-356). The page owning them is what made an empty live
+  // fleet a page *instead of* the browser, which stranded the whole terminated
+  // drill-in behind a hand-edited URL (CORR-357).
   return (
     <PerfBrowser
       controllers={fleet.controllers}

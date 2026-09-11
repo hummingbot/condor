@@ -115,7 +115,7 @@ def route_env(monkeypatch):
             lambda: _FakeCM(FakeClient(exc)),
         )
         monkeypatch.setattr(
-            "condor.server_data_service.get_server_data_service",
+            "condor.web.routes.executors.get_server_data_service",
             lambda: _FakeSDS(exc),
         )
 

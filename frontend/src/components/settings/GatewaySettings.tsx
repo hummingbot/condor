@@ -10,8 +10,9 @@ import {
   RefreshCw,
   Square,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
+import { venuesQueryKey } from "@/components/market/useVenues";
 import { useServer } from "@/hooks/useServer";
 import { OWNER_ONLY_HINT, useServerPermission } from "@/hooks/useServerPermission";
 import { api } from "@/lib/api";
@@ -337,6 +338,20 @@ export function GatewaySettings() {
     enabled: !!server,
     refetchInterval: 10000,
   });
+
+  // The server invalidates its own VENUES cache the moment Gateway is first
+  // observed running again (CORR-614), but this browser's own `["venues",
+  // server]` query (staleTime 5m) is a separate cache that nothing else
+  // refetches — invalidate it on the same false → true transition this
+  // 10s poll already observes, or the Trade/LP panels keep the DEX venues
+  // missing for up to 5 more minutes after Gateway comes back up.
+  const wasRunningRef = useRef<boolean | undefined>(undefined);
+  useEffect(() => {
+    if (status?.running && wasRunningRef.current === false) {
+      qc.invalidateQueries({ queryKey: venuesQueryKey(server) });
+    }
+    wasRunningRef.current = status?.running;
+  }, [status?.running, server, qc]);
 
   const { data: logsData, isFetching: fetchingLogs } = useQuery({
     queryKey: ["gateway-logs", server],

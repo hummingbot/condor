@@ -66,8 +66,8 @@ MAX_ERROR_CHARS = 400
 # The tools that carry their verb in an ``action`` argument. For these the
 # queryable key is ``tool:action`` — ``manage_bots`` alone would collapse a
 # deploy and a stop into one verb. ``manage_gateway_config`` is here for the
-# same reason even though the *gate* reads its resource type instead: the log's
-# question is whether it edited, and the action is what says so.
+# same reason even though it is never gated: the log's question is whether it
+# edited a token or a pool, and the action is what says so.
 _DISPATCH_TOOLS = frozenset(
     {
         "manage_bots",

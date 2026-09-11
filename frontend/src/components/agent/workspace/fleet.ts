@@ -22,7 +22,7 @@ import {
   alertsFor,
   type WorkspaceAlert,
 } from "@/components/agent/workspace/views";
-import type { AgentActionRow } from "@/lib/agent-attribution";
+import { countdown, type AgentActionRow } from "@/lib/agent-attribution";
 import type {
   AgentSummary,
   RunningInstance,
@@ -200,6 +200,15 @@ export function dueInSec(
   return live.last_tick_at + live.frequency_sec - nowSec;
 }
 
+/**
+ * The words that go with `dueInSec`, so the four surfaces that print a
+ * countdown cannot word the same state differently. A tick due exactly now is
+ * overdue, not "next in 0s" — the beat has already slipped.
+ */
+export function tickCountdownLabel(due: number): string {
+  return due > 0 ? `next in ${countdown(due)}` : `overdue ${countdown(-due)}`;
+}
+
 /** Running, then paused, then everything idle — the sort's first key. */
 function loopRank(live: RunningInstance | null): number {
   if (!live) return 2;
@@ -374,7 +383,7 @@ export function foldTargets(
  * an overview row *is about* one strategy and links into it. A floor row is
  * about the agent, and using the scoped rule here would be a silent loss:
  * records belonging to an agent's other strategies are **attributed** — so
- * they are in neither *Outside Condor* nor *Before the ledger* — and no row
+ * they are in neither *No record found* nor *Before the ledger* — and no row
  * would claim them. They would vanish out of a total whose entire job is to be
  * complete.
  *

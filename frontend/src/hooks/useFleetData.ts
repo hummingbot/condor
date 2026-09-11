@@ -16,6 +16,7 @@ import type { DeedIndex, FleetOwner } from "@/lib/agent-attribution";
 import type { ExecutorPaging } from "@/components/perf/PerfBrowser";
 import type { Population } from "@/lib/perf-tree";
 import { controllerKey } from "@/lib/controller-identity";
+import { useActiveSnapshots } from "@/hooks/useActiveSnapshots";
 import { historyRowBudget } from "@/lib/history-pagination";
 import {
   HISTORY_REFETCH_MS,
@@ -41,6 +42,15 @@ const EXECUTOR_PAGES = 4;
 
 /** Held still, so a failed or pending fleet map is not a new prop every render. */
 const EMPTY_OWNERS: FleetOwner[] = [];
+
+/** Held still, so the disabled Running-population runs query is not a new array every render. */
+const EMPTY_RUNS: BotRunInfo[] = [];
+
+/** Held still, so the disabled Running-population terminated-controllers query is not a new array every render. */
+const EMPTY_TERMINATED: ControllerInfo[] = [];
+
+/** Held still, so a not-yet-loaded bot list is not a new array every render. */
+const EMPTY_BOTS: BotSummary[] = [];
 
 /** Everything `PerfBrowser` reports on, and the state of fetching it. */
 export interface FleetData {
@@ -254,30 +264,13 @@ export function useFleetData(
     [controllers],
   );
 
-  // Filter performance snapshots to only active controllers and current run
-  const activeSnapshots = useMemo(() => {
-    if (!perfHistory?.snapshots || controllers.length === 0) return [];
-
-    // Build set of active controller keys and their deploy times. Keyed by
-    // bot + controller, because a bare controller id is a config id two bots
-    // can share: one map entry per id meant last-write-wins on the deploy
-    // time, so an hour-old bot truncated its five-day sibling's history to an
-    // hour of points (CORR-241).
-    const activeControllers = new Map<string, number>(); // key -> deployedAt ms
-    for (const ctrl of controllers) {
-      const deployMs = ctrl.deployed_at ? Date.parse(ctrl.deployed_at) : 0;
-      activeControllers.set(controllerKey(ctrl), deployMs);
-    }
-
-    return perfHistory.snapshots.filter((snap) => {
-      const key = controllerKey(snap);
-      if (!key || !activeControllers.has(key)) return false;
-      const deployMs = activeControllers.get(key)!;
-      if (!deployMs) return true; // no deploy time known, keep it
-      const snapMs = Date.parse(snap.timestamp) || 0;
-      return snapMs >= deployMs;
-    });
-  }, [perfHistory, controllers]);
+  // Filter performance snapshots to only active controllers and current run.
+  //
+  // Keyed on the roster's *identity* rather than the `controllers` array, which
+  // is rebuilt from scratch on every ~5s `bots` frame: see `useActiveSnapshots`
+  // for why walking the whole history six times more often than it changes was
+  // the only thing that bought (PERF-334).
+  const activeSnapshots = useActiveSnapshots(perfHistory?.snapshots, controllers);
 
   // ── The executors the browser hangs under those controllers ──
 
@@ -368,13 +361,13 @@ export function useFleetData(
 
   return {
     controllers: sortedControllers,
-    bots: data?.bots ?? [],
+    bots: data?.bots ?? EMPTY_BOTS,
     executors,
     paging,
     snapshots: activeSnapshots,
     truncated: perfHistory?.truncated ?? false,
-    runs: runsData?.runs ?? [],
-    terminatedControllers: terminatedData?.controllers ?? [],
+    runs: runsData?.runs ?? EMPTY_RUNS,
+    terminatedControllers: terminatedData?.controllers ?? EMPTY_TERMINATED,
     owners: fleet?.owners ?? EMPTY_OWNERS,
     deeds: fleet?.deeds ?? null,
     convert,

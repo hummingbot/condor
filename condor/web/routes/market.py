@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from condor import dex_candles
+from condor.asyncutil import SingleFlight
+from condor.server_data_service import ServerDataType, get_server_data_service
 from config_manager import get_config_manager
 
 logger = logging.getLogger(__name__)
@@ -17,8 +18,14 @@ _CANDLE_CACHE_TTL = 30.0  # seconds
 _CANDLE_CACHE_MAX = 50  # hard cap on entries (keys rotate every minute per chart)
 
 
-def _candle_cache_put(key: tuple, value: list, now: float) -> None:
-    """Insert into the candle cache, evicting expired entries and capping size."""
+def _candle_cache_put(key: tuple, value: list) -> None:
+    """Insert into the candle cache, evicting expired entries and capping size.
+
+    The stamp is taken here, at insert time, not at the start of the request:
+    a slow upstream fetch would otherwise write an entry already aged by its
+    own duration, and a fetch longer than the TTL would cache nothing at all.
+    """
+    now = time.monotonic()
     expired = [
         k for k, (ts, _) in _candle_cache.items() if now - ts >= _CANDLE_CACHE_TTL
     ]
@@ -35,10 +42,8 @@ def _candle_cache_put(key: tuple, value: list, now: float) -> None:
 # grid of executor panels for the same pair and window misses a cold cache in
 # all of them at once, and each miss used to fire its own upstream call — N
 # duplicate GeckoTerminal requests against the process-wide rate budget, or N
-# duplicate historical-candle calls to the API server. Same idiom as
-# `_snapshot_inflight` in condor/fetchers/bot_performance.py: one task per key,
-# popped by a done-callback so a failure is retried rather than remembered.
-_candle_inflight: dict[tuple, tuple[asyncio.AbstractEventLoop, asyncio.Task]] = {}
+# duplicate historical-candle calls to the API server.
+_candle_inflight = SingleFlight()
 
 
 from condor.fetchers.market_data import fetch_historical_candles
@@ -85,8 +90,6 @@ async def _fetch_dex_candles(
 @router.get("/servers/{name}/market/connectors")
 async def get_connectors(name: str, user: WebUser = Depends(require_server_access)):
 
-    from condor.server_data_service import ServerDataType, get_server_data_service
-
     try:
         result = await get_server_data_service().get_or_fetch(
             name, ServerDataType.CANDLE_CONNECTORS
@@ -102,8 +105,6 @@ async def get_connected_exchanges(
     name: str, user: WebUser = Depends(require_server_access)
 ):
     """Get connectors that have credentials configured (accounts connected)."""
-
-    from condor.server_data_service import ServerDataType, get_server_data_service
 
     try:
         result = await get_server_data_service().get_or_fetch(
@@ -141,8 +142,6 @@ async def get_venues(name: str, user: WebUser = Depends(require_server_access)):
     so that failure is never cached; a gateway- or candle-only failure degrades
     inside the fetcher and still reports the venues the other sources supplied.
     """
-
-    from condor.server_data_service import ServerDataType, get_server_data_service
 
     try:
         result = await get_server_data_service().get_or_fetch(
@@ -226,8 +225,6 @@ async def get_price(
     user: WebUser = Depends(require_server_access),
 ):
 
-    from condor.server_data_service import ServerDataType, get_server_data_service
-
     try:
         result = await get_server_data_service().get_or_fetch(
             name,
@@ -290,7 +287,6 @@ async def get_trading_rules(
 ):
 
     from condor.fetchers._identifiers import IdentifierError, validate_identifier
-    from condor.server_data_service import ServerDataType, get_server_data_service
 
     # Rejected here, not in the fetcher: SDS records a failed fetch as an
     # error-only cache entry, so a bad connector would still mint a key.
@@ -543,39 +539,23 @@ async def get_candles(
         return cached[1]
 
     # Cache miss: share one upstream fetch with every concurrent request on this
-    # key. Reuse an in-flight task only from the loop that created it — a task is
-    # bound to its loop and awaiting it from another one raises.
-    loop = asyncio.get_running_loop()
-    inflight = _candle_inflight.get(cache_key)
-    task = (
-        inflight[1]
-        if inflight is not None and inflight[0] is loop and not inflight[1].done()
-        # A finished task lingers until its done-callback runs; joining it would
-        # hand a fresh request the previous fetch's outcome (a failure included).
-        else None
+    # key. SingleFlight shields the shared task, so a request that goes away
+    # cannot cancel the fetch every other waiter on the key is riding on.
+    candles = await _candle_inflight.run(
+        cache_key,
+        lambda: _fetch_candles_upstream(
+            cm,
+            name,
+            connector,
+            trading_pair,
+            interval,
+            limit,
+            start_time,
+            end_time,
+            pool_address,
+        ),
     )
-    if task is None:
-        task = asyncio.ensure_future(
-            _fetch_candles_upstream(
-                cm,
-                name,
-                connector,
-                trading_pair,
-                interval,
-                limit,
-                start_time,
-                end_time,
-                pool_address,
-            )
-        )
-        _candle_inflight[cache_key] = (loop, task)
-        task.add_done_callback(lambda _t, k=cache_key: _candle_inflight.pop(k, None))
-
-    # Shielded: a browser that disconnects mid-request cancels this handler, and
-    # an unshielded `await task` would cancel the shared fetch out from under
-    # every other waiter on the same key.
-    candles = await asyncio.shield(task)
-    _candle_cache_put(cache_key, candles, now)
+    _candle_cache_put(cache_key, candles)
     return candles
 
 

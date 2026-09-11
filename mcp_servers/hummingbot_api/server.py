@@ -15,14 +15,11 @@ from mcp_servers._profiles import make_resolver
 from mcp_servers._profiles import register_tools as _register_tools
 from mcp_servers._profiles import resolve_profiles
 from mcp_servers.hummingbot_api.formatters import (
-    format_active_bots_as_table,
     format_amm_result,
-    format_bot_logs_as_table,
     format_clmm_result,
     format_gateway_clmm_pool_result,
     format_gateway_config_result,
     format_gateway_swap_result,
-    format_portfolio_as_table,
 )
 from mcp_servers.hummingbot_api.hummingbot_client import hummingbot_client
 from mcp_servers.hummingbot_api.middleware import GATEWAY_LOG_HINT, handle_errors
@@ -32,7 +29,6 @@ from mcp_servers.hummingbot_api.schemas import (
     CLMMRequest,
     GatewayCLMMRequest,
     GatewayConfigRequest,
-    GatewayContainerRequest,
     GatewaySwapRequest,
 )
 from mcp_servers.hummingbot_api.settings import DEFAULT_TOOL_PROFILE, settings
@@ -225,7 +221,9 @@ async def get_portfolio_overview(
        - Includes real-time fees and token amounts
     4. Active Orders - Currently open orders across all exchanges
 
-    NOTE: This only shows ACTIVE/OPEN positions. For historical data, use search_history() instead.
+    NOTE: This only shows ACTIVE/OPEN positions. For historical data, use
+    search_history(data_type="orders") — note that search_history's perp_positions
+    reads this same open book, not a closed-position history.
 
     Args:
         account_names: List of account names to filter by (optional). If empty, returns all accounts.
@@ -312,6 +310,7 @@ async def search_history(
     end_time: int | None = None,
     limit: int = 50,
     offset: int = 0,
+    cursor: str | None = None,
     network: str | None = None,
     wallet_address: str | None = None,
     position_addresses: list[str] | None = None,
@@ -323,18 +322,25 @@ async def search_history(
 
     Data Types:
     - orders: Historical order data (filled, cancelled, failed)
-    - perp_positions: Perpetual positions (both open and closed)
+    - perp_positions: The CURRENT open perpetual book, NOT a history. The backend
+      has no closed-position endpoint, so there is no closed perp history to search;
+      get_portfolio_overview() returns the same positions. For a time-windowed
+      record of perp activity use data_type="orders".
     - clmm_positions: CLMM LP positions (both open and closed)
 
-    Common Filters (apply to all data types):
-        account_names: Filter by account names (optional)
-        connector_names: Filter by connector names (optional)
-        trading_pairs: Filter by trading pairs (optional)
-        status: Filter by status (optional, e.g., 'OPEN', 'CLOSED', 'FILLED', 'CANCELED')
-        start_time: Start timestamp in seconds (optional)
-        end_time: End timestamp in seconds (optional)
-        limit: Maximum number of results (default: 50, max: 1000)
-        offset: Pagination offset (default: 0)
+    Filters (only the ones listed for a data type are honoured; passing any other
+    filter raises an error instead of silently ignoring it):
+        account_names: All data types (optional)
+        connector_names: All data types (optional)
+        limit: All data types (default: 50, max: 1000)
+        trading_pairs: orders, clmm_positions (optional)
+        status: orders, clmm_positions (optional, e.g., 'FILLED', 'CANCELED')
+        start_time: orders only, timestamp in seconds (optional)
+        end_time: orders only, timestamp in seconds (optional)
+        offset: clmm_positions only, pagination offset (default: 0)
+        cursor: orders only, the cursor printed at the end of the previous page
+            (optional). orders is cursor-paginated and has no offset at all;
+            clmm_positions is offset-paginated and takes no cursor.
 
     CLMM-Specific Filters:
         network: Network filter for CLMM positions (optional)
@@ -343,7 +349,9 @@ async def search_history(
 
     Examples:
     - Search filled orders: search_history("orders", status="FILLED", limit=100)
-    - Search closed perp positions: search_history("perp_positions", status="CLOSED")
+    - Orders in a time window: search_history("orders", start_time=..., end_time=...)
+    - Next page of orders: search_history("orders", cursor="<cursor from last page>")
+    - Current perp book: search_history("perp_positions", account_names=["master"])
     - Search all CLMM positions: search_history("clmm_positions", limit=100)
     """
     client = await hummingbot_client.get_client()
@@ -359,6 +367,7 @@ async def search_history(
         end_time=end_time,
         limit=limit,
         offset=offset,
+        cursor=cursor,
         network=network,
         wallet_address=wallet_address,
         position_addresses=position_addresses,
@@ -369,13 +378,22 @@ async def search_history(
 
 # Market Data Tools
 #
-# One tool, on purpose (ARCH-308). The candle, order book and funding-rate
-# readers that used to sit here returned a rendered table, so anything computed
-# from one — a spread, an indicator, three venues compared — had to be fetched a
-# second time through ``run_code`` to get numbers back. That is now the only
-# path: ``client.market_data.*`` inside a snippet returns dicts and gathers
-# across venues in one round trip. ``get_prices`` survives because a quote read
-# once and not computed on is answered completely by its own text.
+# Two tools, and neither renders a series (ARCH-308). The candle, order book and
+# funding-rate readers that used to sit here returned a rendered *table*, so
+# anything computed from one — a spread, an indicator, three venues compared —
+# had to be fetched a second time through ``run_code`` to get numbers back. That
+# objection was to prose, not to a tool: ``client.market_data.*`` inside a
+# snippet stays the path for anything with arithmetic in it, and ``get_prices``
+# survives because a quote read once and not computed on is answered completely
+# by its own text.
+#
+# ``get_market_data`` is the third case, and it exists because of dry-run
+# (CORR-625). A snippet holds the unrestricted API client and so does a routine,
+# so a rehearsal auto-approves neither (SEC-616, SEC-626) — which left a dry run
+# with no structured candle read at all, unable to rehearse the very decision the
+# shared playbooks teach. It answers in rows, so nothing read from it is read
+# twice, and it takes parameters instead of code, so there is nothing in it to
+# write with.
 
 
 @handle_errors("get prices")
@@ -400,6 +418,69 @@ async def get_prices(connector_name: str, trading_pairs: list[str]) -> str:
         f"Latest Prices for {result['connector_name']}:\n"
         f"Timestamp: {result['timestamp']}\n\n"
         f"{result['prices_table']}"
+    )
+
+
+@handle_errors("get market data")
+async def get_market_data(
+    action: Literal["candles", "historical_candles", "connectors"],
+    connector_name: str = "",
+    trading_pair: str = "",
+    interval: str = "1m",
+    max_records: int = 200,
+    start_time: int | None = None,
+    end_time: int | None = None,
+) -> dict[str, Any]:
+    """Read OHLCV candles back as rows, without writing any code.
+
+    Returns numbers, not a table: `candles` is a list of
+    `{timestamp, open, high, low, close, volume}` floats, ready to be read off
+    or handed to a snippet.
+
+    WHEN TO USE THIS INSTEAD OF `run_code`: when the candles ARE the answer —
+    the last N bars of one pair, the range they cover, whether a connector even
+    serves OHLCV. When you are going to *compute* on them — an indicator, a
+    regime, a spread across three venues, anything with pandas in it — write the
+    snippet instead: `client.market_data.*` inside `run_code` gathers venues in
+    one round trip and does the arithmetic where the data already is.
+
+    IN A DRY RUN THIS IS THE ONLY CANDLE READ. A snippet and a routine both hold
+    the unrestricted API client, so neither runs in a rehearsal; this tool has no
+    write path at all and runs in every mode.
+
+    Actions:
+    - "candles": the most recent `max_records` candles (needs connector_name,
+      trading_pair)
+    - "historical_candles": a unix time range (needs start_time; end_time
+      optional)
+    - "connectors": which connectors serve OHLCV at all — check before asking a
+      DEX for candles: Gateway AMM/CLMM connectors never serve them, and CLOB
+      DEXs vary (`hyperliquid_perpetual` does, `xrpl` does not)
+
+    Args:
+        action: What to read.
+        connector_name: Exchange connector, e.g. 'binance_perpetual'.
+        trading_pair: Pair to read, e.g. 'SOL-USDT'.
+        interval: Candle interval — '1m', '5m', '1h', '4h', '1d'.
+        max_records: Rows to return (default 200, max 1000).
+        start_time: Range start, unix epoch seconds (historical_candles).
+        end_time: Range end, unix epoch seconds. Defaults to now.
+
+    Example:
+    - get_market_data("candles", "binance_perpetual", "SOL-USDT", interval="1h",
+      max_records=168)
+    """
+    client = await hummingbot_client.get_client()
+
+    return await market_data_tools.get_market_data(
+        client=client,
+        action=action,
+        connector_name=connector_name,
+        trading_pair=trading_pair,
+        interval=interval,
+        max_records=max_records,
+        start_time=start_time,
+        end_time=end_time,
     )
 
 
@@ -1506,10 +1587,9 @@ async def manage_gateway_config(
     resource_type: Literal[
         "chains", "networks", "tokens", "connectors", "pools", "wallets"
     ],
-    action: Literal["list", "get", "update", "add", "delete", "save"],
+    action: Literal["list", "get", "add", "delete", "save"],
     network_id: str | None = None,
     connector_name: str | None = None,
-    config_updates: dict[str, Any] | None = None,
     token_address: str | None = None,
     token_symbol: str | None = None,
     token_decimals: int | None = None,
@@ -1522,7 +1602,7 @@ async def manage_gateway_config(
     network: str | None = None,
     chain: str | None = None,
 ) -> str:
-    """Read and edit Gateway's own configuration — chains, networks, tokens, connectors, pools, wallets.
+    """Read Gateway's own configuration, and edit the tokens and pools it knows.
 
     This is Gateway's config, not the chain. Adding or deleting a token here changes the
     symbol -> address mapping Gateway resolves against; it moves no funds and touches
@@ -1534,19 +1614,21 @@ async def manage_gateway_config(
 
     Resource types:
     - chains: every blockchain Gateway knows
-    - networks: network config, ids in 'chain-network' form ('solana-mainnet-beta')
-    - tokens: the per-network symbol/address/decimals mapping (list, add, delete)
-    - connectors: DEX connector config
-    - pools: the named pool registry (list, add)
+    - networks: list/get only, ids in 'chain-network' form ('solana-mainnet-beta').
+      The RPC endpoint and the rest of a network's config are changed by the user
+      in the Condor dashboard (Settings → Gateway), never by an agent.
+    - tokens: the per-network symbol/address/decimals mapping (list, add, delete, save)
+    - connectors: list/get only. A connector's settings (slippage and the like) are
+      changed by the server owner in Condor, never by an agent.
+    - pools: the named pool registry (list, add, delete, save)
     - wallets: list only. Add or remove wallets in the Condor dashboard
       (Settings → Gateway) — a private key must never be sent through chat.
 
     Args:
         resource_type: Which part of Gateway's config to act on.
-        action: list | get | update | add | delete | save.
+        action: list | get | add | delete | save.
         network_id: Network id in 'chain-network' form. Required for token and pool actions.
         connector_name: DEX connector name ('meteora', 'raydium', 'uniswap').
-        config_updates: Key-value updates for 'update'/'save'.
         token_address: Token contract address. Required to add or delete a token.
         token_symbol: Token symbol. Required to add a token.
         token_decimals: Token decimals (6 for USDC, 18 for WETH). Required to add a token.
@@ -1564,7 +1646,6 @@ async def manage_gateway_config(
         action=action,
         network_id=network_id,
         connector_name=connector_name,
-        config_updates=config_updates,
         token_address=token_address,
         token_symbol=token_symbol,
         token_decimals=token_decimals,
@@ -1581,29 +1662,6 @@ async def manage_gateway_config(
     client = await hummingbot_client.get_client()
     result = await manage_gateway_config_impl(client, request)
     return format_gateway_config_result(result)
-
-
-@handle_errors("manage Gateway container")
-async def manage_gateway_container(
-    action: Literal["get_status", "start", "stop", "restart", "get_logs"],
-    config: dict[str, Any] | None = None,
-    tail: int = 100,
-) -> str:
-    """Gateway container lifecycle — status, start, stop, restart, and logs.
-
-    `get_logs` is what the hint on a failed Gateway call points at: when a swap or an LP
-    action fails with an error that does not say why, the container log usually does.
-
-    Args:
-        action: get_status | start | stop | restart | get_logs.
-        config: Gateway configuration. Used by 'start', optional for 'restart'.
-        tail: Log lines to retrieve for 'get_logs' (1-200, default 100).
-    """
-    request = GatewayContainerRequest(action=action, config=config, tail=tail)
-
-    client = await hummingbot_client.get_client()
-    result = await manage_gateway_container_impl(client, request)
-    return format_gateway_container_result(result)
 
 
 @handle_errors("manage AMM", GATEWAY_LOG_HINT)
@@ -2085,11 +2143,12 @@ async def explore_geckoterminal(
 
 # ── Tool profiles (FEAT-066) ─────────────────────────────────────────────────
 #
-# Tool allowlists are only enforced for pydantic-ai model keys; an ACP bridge
-# (claude-code, gemini, copilot) runs unrestricted. For those seats the surface a
-# session MOUNTS is the whole permission model, so which tools this process
-# registers is a security boundary — hence explicit registration below instead of
-# an ``@mcp.tool()`` decorator that fires for everyone at import.
+# An ACP bridge (claude-code, gemini, copilot) filters no tool itself, so the
+# surface a session MOUNTS is the whole permission model — the profile, minus the
+# operator's mutes and whatever the Agent's allowlist leaves out, both arriving
+# as ``--mute-tools``. Which tools this process registers is a security boundary
+# — hence explicit registration below instead of an ``@mcp.tool()`` decorator
+# that fires for everyone at import.
 #
 # The rings themselves — which tool sits in which one, and why — moved to
 # ``profiles.py`` as plain name strings (FEAT-091), because the web process has

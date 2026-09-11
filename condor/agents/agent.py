@@ -85,7 +85,7 @@ class Agent:
     agent_key: str = ""  # default model (pydantic-ai or ACP, e.g. "claude-code")
     # Tool-name allowlist (pydantic-ai only), enforced on BOTH delegate and loop.
     # Names match full (``mcp__condor__manage_skill``) or short (``manage_skill``).
-    # Empty => UNRESTRICTED (all discovered tools, subject to tool_filter_mode).
+    # Empty => UNRESTRICTED (all discovered tools).
     tools: list[str] = field(default_factory=list)
     # Optional one-line routing hint ("when should condor pick this agent?").
     # NOT a capability switch — see consult_hint and the module docstring.

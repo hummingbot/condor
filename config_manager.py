@@ -485,15 +485,30 @@ class ConfigManager:
         return secret
 
     def _invalidate_server_caches(self, name: str):
-        """Drop the pooled client and memoized status for a server.
+        """Drop every cached artefact of a server: the pooled client, the memoized
+        status, and the whole SDS data cache for that name.
 
         Called whenever the server's credentials or existence change, so a
         cached client or status can never outlive the config it was built from.
+
+        The data cache is keyed by server *name* (CacheKey, server_data_service.py),
+        never by host, so repointing a server at a different host/port would
+        otherwise keep serving the previous host's answers under the same name
+        until each type's TTL expires on its own.
         """
         self._clients.pop(name, None)
         self._status_cache.pop(name, None)
         # New credentials deserve a real attempt, not the old failure's cooldown.
         self._client_failures.pop(name, None)
+        try:
+            # Lazy, mirroring the direction SDS already imports this module in
+            # (server_data_service.py) — no cycle, and a cache layer must never
+            # be able to fail a config write.
+            from condor.server_data_service import get_server_data_service
+
+            get_server_data_service().invalidate_server(name)
+        except Exception:
+            logger.debug("SDS invalidation skipped for '%s'", name, exc_info=True)
 
     async def get_client(self, name: str = None):
         """Get or create API client for a server."""
@@ -1394,6 +1409,42 @@ def user_display_name(record: Optional[dict], user_id: int = None) -> str:
 def get_config_manager() -> ConfigManager:
     """Get the ConfigManager singleton instance."""
     return ConfigManager.instance()
+
+
+def may_use_stored_server(cm, user_id: int, server_name: Optional[str]) -> bool:
+    """Whether ``user_id`` may turn a **stored** ``server_name`` into credentials.
+
+    Existence *and* reach, in that order of importance: a stored name is not a
+    capability. It was written earlier — by whoever created the strategy,
+    conversation, agent or session, often from an unvalidated request body — it
+    is read now by somebody else, and a share can be withdrawn long after
+    either happened.
+
+    The existence half is not redundant with the access half:
+    ``has_server_access`` answers True for an admin on an arbitrary string, so
+    without it a name that resolves to nothing today would be honoured the
+    moment a server is created under it. That is the SEC-164 shape, and it is
+    why SEC-178, SEC-333 and SEC-334 each landed another hand-written copy of
+    these four lines — five in all, until ARCH-587 gave them one home.
+
+    The level is the TRADER floor ``check_server_access`` applies to every
+    server-scoped web call; a caller needing OWNER layers ``require_owner`` on
+    top, as it already does over that floor.
+
+    Lives here rather than in ``condor/web/auth.py`` beside
+    ``check_server_access`` because three of the five callers — the tick
+    engine, the session resolver and the toolset builder — sit below the web
+    layer and cannot import from it without inverting the layering. ``cm`` is
+    passed in rather than resolved, matching ``require_owner``: every caller
+    already holds the manager it means.
+
+    ``check_server_access`` remains the reach-only line for a name the *caller*
+    just supplied and a route is about to act on. This is the line for a name
+    the caller merely inherited.
+    """
+    if not server_name or not cm.get_server(server_name):
+        return False
+    return cm.has_server_access(user_id, server_name)
 
 
 def get_effective_server(chat_id: int, user_data: dict = None) -> str | None:

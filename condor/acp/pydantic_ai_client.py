@@ -16,9 +16,8 @@ import logging
 import os
 import time
 import uuid
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Iterator
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
 
 from .client import (
     ACPEvent,
@@ -26,82 +25,13 @@ from .client import (
     PermissionCallback,
     PromptDone,
     TextChunk,
+    ThoughtChunk,
     ToolCallEvent,
     ToolCallUpdate,
 )
+from .usage import TokenUsage
 
 log = logging.getLogger(__name__)
-
-
-def _infer_tool_filter_mode(model_name: str) -> str:
-    """Automatically detect the best tool filter mode based on model name.
-
-    Analyzes model size and family to determine capability:
-    - Small models (≤8B): essential (minimal tools)
-    - Medium models (9B-32B): moderate (common operations)
-    - Large models (>32B) or cloud APIs: full (all tools)
-
-    Args:
-        model_name: Model identifier like "ollama:llama3.1:8b" or "lmstudio:qwen-14b"
-
-    Returns:
-        "essential", "moderate", or "full"
-    """
-    import re
-
-    model_lower = model_name.lower()
-
-    # Cloud providers always get full access (they're powerful enough).
-    # Custom endpoints are deliberately absent: "custom:" says nothing about
-    # the model behind it — it's just as likely a 4B model on a local vLLM as
-    # a frontier model on Together — so those fall through to the size
-    # heuristics below like any other unknown backend.
-    if any(
-        provider in model_lower
-        for provider in [
-            "openai:",
-            "anthropic:",
-            "groq:",
-            "google:",
-            "openrouter:",
-        ]
-    ):
-        log.info("Auto-detected cloud provider → tool_filter_mode=full")
-        return "full"
-
-    # Extract parameter count (e.g., "7b", "14b", "72b", "32b")
-    # Matches patterns like: 7b, 8b, 14b, 32b, 72b, 1.5b, 2.7b, etc.
-    size_match = re.search(r"(\d+(?:\.\d+)?)\s*[bB](?![a-z])", model_lower)
-
-    if size_match:
-        size = float(size_match.group(1))
-
-        if size <= 8.0:
-            mode = "essential"
-            log.info(f"Auto-detected {size}B model → tool_filter_mode=essential")
-        elif size <= 32.0:
-            mode = "moderate"
-            log.info(f"Auto-detected {size}B model → tool_filter_mode=moderate")
-        else:
-            mode = "full"
-            log.info(f"Auto-detected {size}B model → tool_filter_mode=full")
-
-        return mode
-
-    # Model name-based heuristics (if no size found)
-    # Small models
-    if any(name in model_lower for name in ["gemma", "phi", "tiny", "mini", "small"]):
-        log.info(f"Auto-detected small model family → tool_filter_mode=essential")
-        return "essential"
-
-    # Large models
-    if any(name in model_lower for name in ["deepseek", "mixtral", "command-r", "gpt"]):
-        log.info(f"Auto-detected large model family → tool_filter_mode=full")
-        return "full"
-
-    # Default to moderate for unknown models
-    log.info(f"Unknown model size, defaulting → tool_filter_mode=moderate")
-    return "moderate"
 
 
 # Model prefix → pydantic-ai model string mapping
@@ -455,12 +385,10 @@ class PydanticAIClient:
         extra_env: dict[str, str] | None = None,
         base_url: str | None = None,
         api_key: str | None = None,
-        tool_filter_mode: (
-            str | None
-        ) = None,  # "essential", "moderate", "full", or None for auto-detect
         allowed_tools: (
             list[str] | None
         ) = None,  # restrict the agent to these tool names
+        system_prompt: str = "",
     ):
         self.model_name = model
         self.mcp_server_configs = mcp_servers or []
@@ -468,11 +396,14 @@ class PydanticAIClient:
         self.extra_env = extra_env
         self.base_url = base_url
         self.api_key = api_key
+        # Who the model is told it is, delivered at system level as pydantic-ai
+        # ``instructions``. The twin of ACPClient's ``_meta.systemPrompt.append``
+        # (client.py): without it a bound Agent answers as the host instead of
+        # as itself, and the weaker channels do not fix that (FEAT-025).
+        self.system_prompt = system_prompt
         # When set, the agent only sees tools whose name is in this allowlist
         # (used by delegated domain agents to scope an agent to one domain).
         self.allowed_tools = set(allowed_tools) if allowed_tools else None
-        # Auto-detect filter mode based on model if not explicitly set
-        self.tool_filter_mode = tool_filter_mode or _infer_tool_filter_mode(model)
         self._mcp_servers: list[Any] = []
         self._agent: Any = None
         # Carries each tool call's permission decision from prompt_stream (where
@@ -483,6 +414,12 @@ class PydanticAIClient:
         # are serialized. Stays None for natively-resolved cloud providers
         # (anthropic/groq/default openai/google), which handle concurrency fine.
         self._request_semaphore: asyncio.Semaphore | None = None
+        # Whether *this* client currently owns a permit of that semaphore. The
+        # slot changes hands twice per confirmation (released for the human
+        # wait, re-acquired after), and a cancellation can land in either gap —
+        # so ownership is tracked explicitly rather than inferred from nesting,
+        # and only the owner ever releases (CORR-330).
+        self._slot_held = False
         # Background task that owns the MCP server cancel scopes.
         # anyio requires cancel scopes to be entered/exited in the same task,
         # so we can't close them from an arbitrary caller task.
@@ -490,6 +427,9 @@ class PydanticAIClient:
         self._ready_event: asyncio.Event | None = None
         self._shutdown_event: asyncio.Event | None = None
         self._startup_error: BaseException | None = None
+        # Set when the MCP context collapses *after* startup; the agent is
+        # dropped alongside it so ``alive`` reports False (CORR-332).
+        self._lifecycle_error: BaseException | None = None
         # Accumulated turn history — grows with each prompt_stream() call so
         # the model sees prior turns. A fresh client is created per session/tick,
         # so history is reset by recreating the client rather than in-place.
@@ -498,9 +438,18 @@ class PydanticAIClient:
         # There is no protocol to notify here (the "agent" is a library call),
         # so cancelling the run *is* the cancel.
         self._abort_requested = False
+        # Everything this client's runs have read and written, for its whole
+        # life (FEAT-120). The session takes per-turn deltas of it; nothing
+        # here knows what a turn is.
+        self.usage = TokenUsage()
 
-    def _build_model(self) -> Any:
+    async def _build_model(self) -> Any:
         """Build the pydantic-ai model object with sensible defaults.
+
+        Async because a bare local key ("ollama:" / "lmstudio:") has to ask the
+        local backend which model it serves, and that probe must not park the
+        one event loop that also runs Telegram polling, the dashboard and every
+        other session.
 
         All local providers (ollama, lmstudio) are routed through OpenAI-compatible
         endpoints so we control the base_url explicitly. This avoids requiring
@@ -592,7 +541,7 @@ class PydanticAIClient:
         if prefix in DEFAULT_BASE_URLS:
             base_url = base_url or DEFAULT_BASE_URLS[prefix]
             if not model_id:
-                model_id = self._resolve_default_local_model(
+                model_id = await self._resolve_default_local_model(
                     prefix=prefix, base_url=base_url
                 )
             openai_client = AsyncOpenAI(
@@ -620,7 +569,7 @@ class PydanticAIClient:
 
         return infer_model(self.model_name)
 
-    def _resolve_default_local_model(self, prefix: str, base_url: str) -> str:
+    async def _resolve_default_local_model(self, prefix: str, base_url: str) -> str:
         """Resolve a usable default model for local providers.
 
         For ollama/lmstudio with model strings like "ollama:" (no explicit model),
@@ -632,12 +581,12 @@ class PydanticAIClient:
         if env_override:
             return env_override
 
-        model_id = self._fetch_openai_compatible_model(base_url)
+        model_id = await self._fetch_openai_compatible_model(base_url)
         if model_id:
             return model_id
 
         if prefix == "ollama":
-            model_id = self._fetch_ollama_native_model(base_url)
+            model_id = await self._fetch_ollama_native_model(base_url)
             if model_id:
                 return model_id
 
@@ -647,18 +596,34 @@ class PydanticAIClient:
             "or set CONDOR_DEFAULT_LOCAL_MODEL."
         )
 
-    def _fetch_openai_compatible_model(self, base_url: str) -> str | None:
+    async def _probe_json(self, url: str) -> Any:
+        """GET ``url`` off the event loop and return the decoded JSON, or None.
+
+        Uses the same async client ``healthcheck_local_backend`` uses. The old
+        stdlib ``urlopen`` here was synchronous, so a local backend that was
+        down or hung froze the single loop that also runs Telegram polling, the
+        dashboard and every other session for the whole timeout (PERF-331).
+        """
+        import httpx
+
+        from condor.runtime.timeouts import TIMEOUTS
+
+        budget = TIMEOUTS.local_model_probe
+        timeout = httpx.Timeout(connect=budget, read=budget, write=budget, pool=budget)
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.get(url)
+            if resp.status_code != 200:
+                return None
+            return resp.json()
+        except Exception:
+            return None
+
+    async def _fetch_openai_compatible_model(self, base_url: str) -> str | None:
         """Try GET {base_url}/models and return the first model id."""
         url = f"{base_url.rstrip('/')}/models"
-        try:
-            req = Request(url, method="GET")
-            with urlopen(req, timeout=2) as resp:
-                if resp.status != 200:
-                    return None
-                import json
-
-                payload = json.loads(resp.read().decode("utf-8"))
-        except Exception:
+        payload = await self._probe_json(url)
+        if not isinstance(payload, dict):
             return None
 
         data = payload.get("data")
@@ -670,21 +635,14 @@ class PydanticAIClient:
                     return model_id.strip()
         return None
 
-    def _fetch_ollama_native_model(self, base_url: str) -> str | None:
+    async def _fetch_ollama_native_model(self, base_url: str) -> str | None:
         """Try GET /api/tags from the Ollama host and return first model name."""
         parsed = urlparse(base_url)
         if not parsed.scheme or not parsed.netloc:
             return None
         native_url = f"{parsed.scheme}://{parsed.netloc}/api/tags"
-        try:
-            req = Request(native_url, method="GET")
-            with urlopen(req, timeout=2) as resp:
-                if resp.status != 200:
-                    return None
-                import json
-
-                payload = json.loads(resp.read().decode("utf-8"))
-        except Exception:
+        payload = await self._probe_json(native_url)
+        if not isinstance(payload, dict):
             return None
 
         models = payload.get("models")
@@ -724,15 +682,22 @@ class PydanticAIClient:
                 args=args,
                 env=env,
                 timeout=30,
+                # pydantic-ai drops a server's ``instructions`` by default; the
+                # ACP host forwards them, so ask for them here too or the condor
+                # server's routing rules never reach a pydantic-ai model.
+                include_instructions=True,
             )
 
             toolsets.append(mcp_server)
             self._mcp_servers.append(mcp_server)
 
-        model = self._build_model()
+        model = await self._build_model()
         prepare = self._prepare_tools if self.allowed_tools else None
         self._agent = Agent(
-            model, toolsets=self._gate_toolsets(toolsets), prepare_tools=prepare
+            model,
+            instructions=self.system_prompt or None,
+            toolsets=self._gate_toolsets(toolsets),
+            prepare_tools=prepare,
         )
 
         # Resolve the global semaphore for this server's base URL so all client
@@ -753,20 +718,51 @@ class PydanticAIClient:
         self._ready_event = asyncio.Event()
         self._shutdown_event = asyncio.Event()
         self._startup_error = None
+        self._lifecycle_error = None
         self._mcp_task = asyncio.create_task(self._run_mcp_lifecycle())
 
-        await self._ready_event.wait()
-        if self._startup_error is not None:
-            self._mcp_task = None
-            self._mcp_servers.clear()
-            self._agent = None
-            raise self._startup_error
+        await self._await_ready()
 
         log.info(
             "PydanticAI client ready: model=%s, mcp_servers=%d",
             self.model_name,
             len(self._mcp_servers),
         )
+
+    async def _await_ready(self) -> None:
+        """Wait for the MCP lifecycle task to come up, under a deadline.
+
+        The wait used to be a bare ``self._ready_event.wait()`` -- the same
+        unbounded shape as the ACP handshake, with the same failure: an MCP
+        stdio server that spawns and never finishes its own init parks
+        ``start()`` forever, and with it the per-key session-creation lock the
+        caller holds (CORR-333). On expiry the lifecycle task is cancelled so
+        no MCP subprocess is left behind, and the client is left visibly dead.
+        """
+        from condor.runtime.timeouts import TIMEOUTS
+
+        try:
+            await asyncio.wait_for(
+                self._ready_event.wait(), timeout=TIMEOUTS.agent_handshake
+            )
+        except asyncio.TimeoutError:
+            task, self._mcp_task = self._mcp_task, None
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
+            self._mcp_servers.clear()
+            self._agent = None
+            raise TimeoutError(
+                f"MCP servers for {self.model_name} did not become ready within "
+                f"{TIMEOUTS.agent_handshake}s; the agent was not started."
+            ) from None
+
+        if self._startup_error is not None:
+            self._mcp_task = None
+            self._mcp_servers.clear()
+            self._agent = None
+            raise self._startup_error
 
     def _gate_toolsets(self, toolsets: list) -> list:
         """Wrap toolsets so a denied call never reaches the tool (SEC-080).
@@ -806,15 +802,46 @@ class PydanticAIClient:
         return kept
 
     async def _run_mcp_lifecycle(self) -> None:
-        """Background task that holds the MCP server context open."""
+        """Background task that holds the MCP server context open.
+
+        A failure *before* ready is handed to ``start()`` through
+        ``_startup_error``. A failure *after* ready means an MCP server died
+        under us (subprocess crash, host restart, OOM): log it and tear the
+        agent down so ``alive`` reports False and the session layer builds a
+        fresh client, instead of quietly handing prompts to a toolless one
+        (CORR-332). ``CancelledError`` is never converted into a normal return.
+        """
         try:
             async with self._agent.run_mcp_servers():
                 self._ready_event.set()
                 await self._shutdown_event.wait()
+        except asyncio.CancelledError as exc:
+            # Unblock start() if we were cancelled before ready, then stay
+            # visibly cancelled rather than completing "successfully".
+            if not self._ready_event.is_set():
+                self._startup_error = exc
+                self._ready_event.set()
+            else:
+                self._lifecycle_error = exc
+                self._teardown_after_lifecycle_failure()
+            raise
         except BaseException as exc:
             if not self._ready_event.is_set():
                 self._startup_error = exc
                 self._ready_event.set()
+                return
+            log.exception(
+                "MCP server lifecycle failed after startup (model=%s); "
+                "marking client dead so a new one is built",
+                self.model_name,
+            )
+            self._lifecycle_error = exc
+            self._teardown_after_lifecycle_failure()
+
+    def _teardown_after_lifecycle_failure(self) -> None:
+        """Drop the agent so ``alive`` cannot report a toolless client healthy."""
+        self._agent = None
+        self._mcp_servers.clear()
 
     async def stop(self) -> None:
         """Signal the MCP lifecycle task to shut down and wait for it."""
@@ -822,6 +849,13 @@ class PydanticAIClient:
             self._shutdown_event.set()
             try:
                 await asyncio.wait_for(self._mcp_task, timeout=10)
+            except asyncio.CancelledError:
+                # The lifecycle task now propagates its own cancellation
+                # (CORR-332). That is its shutdown, not ours -- only re-raise
+                # when it is *this* task being cancelled.
+                if not self._mcp_task.cancelled():
+                    raise
+                log.warning("MCP server task was cancelled during shutdown")
             except Exception:
                 log.exception("Error stopping MCP server task")
                 self._mcp_task.cancel()
@@ -832,6 +866,32 @@ class PydanticAIClient:
     @property
     def alive(self) -> bool:
         return self._agent is not None
+
+    @contextlib.asynccontextmanager
+    async def _hold_request_slot(self) -> AsyncIterator[None]:
+        """Hold the per-server request slot for the duration of one turn.
+
+        Deliberately not ``async with sem``: the slot is handed back and taken
+        again mid-turn by :meth:`_release_request_slot`, so a context manager
+        that releases unconditionally on exit would hand back a permit this
+        client no longer owns whenever the turn ends inside that window —
+        permanently widening concurrency against the shared, process-global
+        semaphore. ``_slot_held`` is the single source of truth (CORR-330).
+
+        No-op for cloud providers, whose semaphore is None (PERF-038).
+        """
+        sem = self._request_semaphore
+        if sem is None:
+            yield
+            return
+        await sem.acquire()
+        self._slot_held = True
+        try:
+            yield
+        finally:
+            if self._slot_held:
+                self._slot_held = False
+                sem.release()
 
     @contextlib.asynccontextmanager
     async def _release_request_slot(self) -> AsyncIterator[None]:
@@ -847,16 +907,33 @@ class PydanticAIClient:
         Releases the slot on entry and re-acquires it before returning, so model
         HTTP work stays serialized. No-op for cloud providers, whose semaphore is
         None (PERF-038).
+
+        When the wait is *cancelled* the slot is deliberately not re-acquired
+        (CORR-330). Web Stop cancels the prompt task outright, which lands in
+        this window by construction; queueing for a slot we would immediately
+        hand back would park the turn's teardown — and the session lock it
+        carries — behind another session's inference. ``_slot_held`` stays
+        False so :meth:`_hold_request_slot` skips a release it does not own.
         """
         sem = self._request_semaphore
         if sem is None:
             yield
             return
+        self._slot_held = False
         sem.release()
+        cancelled = False
         try:
             yield
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
         finally:
-            await sem.acquire()
+            if not cancelled:
+                # A cancellation landing here instead raises out of acquire()
+                # without taking a permit, leaving _slot_held False — which is
+                # exactly the state the outer guard needs to stay balanced.
+                await sem.acquire()
+                self._slot_held = True
 
     async def prompt(self, text: str) -> str:
         """One-shot prompt: send text, return response."""
@@ -900,15 +977,14 @@ class PydanticAIClient:
         # one request at a time. Without this, concurrent ticks race to connect
         # and the losing ticks ConnectTimeout against a busy server. Cloud
         # providers leave the semaphore None (see start()) so concurrent prompts
-        # run in parallel; nullcontext() makes the guard a no-op for them.
-        async with self._request_semaphore or contextlib.nullcontext():
+        # run in parallel; the guard is a no-op for them.
+        async with self._hold_request_slot():
             start_time = time.monotonic()
             self._abort_requested = False
             aborted = False
 
             try:
                 from pydantic_ai.agent import CallToolsNode, ModelRequestNode
-                from pydantic_ai.messages import TextPart, ToolCallPart, ToolReturnPart
                 from pydantic_graph import End
 
                 self._permission_gate.reset()
@@ -917,21 +993,13 @@ class PydanticAIClient:
                 # event the dashboard already received.
                 blocked_ids: set[str] = set()
 
-                user_prompt: Any = text
-                if images:
-                    from pydantic_ai.messages import BinaryContent
-
-                    user_prompt = [
-                        *(
-                            BinaryContent(data=image.data, media_type=image.mime)
-                            for image in images
-                        ),
-                        text,
-                    ]
-
-                async with self._agent.iter(
-                    user_prompt, message_history=self._message_history
-                ) as run:
+                async with (
+                    self._agent.iter(
+                        self._build_user_prompt(text, images),
+                        message_history=self._message_history,
+                    ) as run,
+                    self._usage_counted(run),
+                ):
                     async for node in run:
                         if self._abort_requested:
                             aborted = True
@@ -948,131 +1016,12 @@ class PydanticAIClient:
                         if isinstance(node, ModelRequestNode):
                             elapsed = time.monotonic() - start_time
                             yield Heartbeat(elapsed_seconds=elapsed)
-                            # Extract tool return results from request parts
-                            if hasattr(node, "request") and node.request:
-                                for part in node.request.parts:
-                                    if isinstance(part, ToolReturnPart):
-                                        if (part.tool_call_id or "") in blocked_ids:
-                                            continue
-                                        content = part.content
-                                        output_str = (
-                                            content
-                                            if isinstance(content, str)
-                                            else str(content)
-                                        )
-                                        yield ToolCallUpdate(
-                                            tool_call_id=part.tool_call_id or "",
-                                            status="completed",
-                                            output=output_str,
-                                        )
+                            for event in self._tool_return_events(node, blocked_ids):
+                                yield event
 
                         elif isinstance(node, CallToolsNode):
-                            # Emit text and tool-call events from model response
-                            for part in node.model_response.parts:
-                                if isinstance(part, TextPart) and part.content:
-                                    yield TextChunk(text=part.content)
-
-                                elif isinstance(part, ToolCallPart):
-                                    tool_id = part.tool_call_id or uuid.uuid4().hex[:12]
-                                    tool_name = part.tool_name
-
-                                    # Risk check via permission callback
-                                    if self.permission_callback:
-                                        # Unparseable args stay None rather than
-                                        # collapsing to {}: the gate reads that
-                                        # as "unknown" and fails closed, where
-                                        # an empty dict would have read as a
-                                        # harmless no-argument call (SEC-093).
-                                        tool_call_info = {
-                                            "tool": tool_name,
-                                            "title": tool_name,
-                                            "input": _tool_args_to_dict(part.args),
-                                        }
-                                        options = [
-                                            {"optionId": "allow", "kind": "allow_once"},
-                                            {"optionId": "deny", "kind": "deny"},
-                                        ]
-                                        # Don't hold the per-server slot while a
-                                        # human decides — release it for the wait
-                                        # so other sessions/ticks on this backend
-                                        # aren't blocked (PERF-029).
-                                        # Fail closed: only an explicit "selected"
-                                        # outcome allows the call. A check that
-                                        # raises or times out is a denial, never
-                                        # a pass (SEC-080).
-                                        reason = ""
-                                        try:
-                                            async with self._release_request_slot():
-                                                result = await self.permission_callback(
-                                                    tool_call_info, options
-                                                )
-                                            outcome = (
-                                                result.get("outcome", {})
-                                                if isinstance(result, dict)
-                                                else {}
-                                            )
-                                            approved = (
-                                                isinstance(outcome, dict)
-                                                and outcome.get("outcome") == "selected"
-                                            )
-                                            if not approved:
-                                                # The gate says why when it can
-                                                # (condor.agents.risk attaches a
-                                                # ``reason``); an agent told only
-                                                # "denied" reads its own refusal
-                                                # as a missing approval and waits
-                                                # for a human it may not have.
-                                                reason = (
-                                                    (
-                                                        result.get("reason")
-                                                        if isinstance(result, dict)
-                                                        else ""
-                                                    )
-                                                    or "denied by the risk/confirmation gate"
-                                                )
-                                        except Exception as exc:
-                                            log.exception(
-                                                "Permission check failed for %s — "
-                                                "blocking the call",
-                                                tool_name,
-                                            )
-                                            approved = False
-                                            reason = f"permission check failed ({exc})"
-
-                                        # Record before the node runs: the tool
-                                        # executes on the next graph step, where
-                                        # the gated toolset consumes this.
-                                        self._permission_gate.record(
-                                            part.tool_call_id,
-                                            tool_name,
-                                            approved,
-                                            reason,
-                                        )
-
-                                        if not approved:
-                                            if part.tool_call_id:
-                                                blocked_ids.add(part.tool_call_id)
-                                            yield ToolCallEvent(
-                                                tool_call_id=tool_id,
-                                                title=tool_name,
-                                                status="blocked",
-                                                kind="mcp",
-                                                input=_tool_args_to_dict(part.args),
-                                            )
-                                            continue
-
-                                    yield ToolCallEvent(
-                                        tool_call_id=tool_id,
-                                        title=tool_name,
-                                        status="in_progress",
-                                        kind="mcp",
-                                        input=_tool_args_to_dict(part.args),
-                                    )
-
-                                    yield ToolCallUpdate(
-                                        tool_call_id=tool_id,
-                                        status="completed",
-                                    )
+                            async for event in self._response_events(node, blocked_ids):
+                                yield event
 
                     # Accumulate messages so the next prompt_stream() call sees
                     # this turn's context via message_history. An aborted run
@@ -1092,6 +1041,251 @@ class PydanticAIClient:
                 log.exception("PydanticAI prompt error: %s", e)
                 yield TextChunk(text=self._format_error(e))
                 yield PromptDone(stop_reason="error")
+
+    @contextlib.asynccontextmanager
+    async def _usage_counted(self, run: Any) -> AsyncIterator[None]:
+        """Count the run's usage however its block is left.
+
+        On the way out of the run, not beside the history accumulation: a
+        finished run, a stopped one and one that raised all spent their
+        requests, and so does one whose consumer walked away mid-answer (a WS
+        drop, a page reload), which closes this generator at a ``yield`` and
+        never reaches the lines after the node loop. The run is still open
+        here, so ``PromptDone`` — yielded after this exits — already sees the
+        turn's tokens.
+        """
+        try:
+            yield
+        finally:
+            self._fold_usage(run)
+
+    def _fold_usage(self, run: Any) -> None:
+        """Add one run's tokens, price and context reading to :attr:`usage`.
+
+        pydantic-ai's ``input_tokens`` is already inclusive of cache, which is
+        the shape :class:`TokenUsage` stores, so the counters go in unconverted.
+
+        The price is all or nothing per run: one response the bundled
+        ``genai_prices`` table cannot price (every local model, a brand-new
+        id) makes the run's cost unknown rather than understated, and it is
+        counted in ``unpriced_turns`` instead.
+
+        Never raises: accounting must not cost the user their answer.
+        """
+        try:
+            from pydantic_ai.messages import ModelResponse
+
+            ru = run.usage()
+            new_messages = (
+                run.result.new_messages()
+                if run.result is not None
+                else run.new_messages()
+            )
+            responses = [m for m in new_messages if isinstance(m, ModelResponse)]
+            cost = 0.0
+            priced = True
+            for response in responses:
+                try:
+                    cost += float(response.cost().total_price)
+                except Exception:  # noqa: BLE001 - LookupError, the model_name assert
+                    priced = False
+                    break
+            context_used = None
+            if responses:
+                last = responses[-1].usage
+                context_used = (last.input_tokens + last.output_tokens) or None
+            self.usage = self.usage + TokenUsage(
+                input_tokens=ru.input_tokens,
+                output_tokens=ru.output_tokens,
+                cache_read_tokens=ru.cache_read_tokens,
+                cache_write_tokens=ru.cache_write_tokens,
+                cost_usd=cost if priced else 0.0,
+                unpriced_turns=0 if priced else 1,
+                context_used=context_used,
+                context_size=self._context_size(),
+            )
+        except Exception:  # noqa: BLE001 - see docstring
+            log.warning("Could not count usage for %s", self.model_name, exc_info=True)
+
+    def _context_size(self) -> int | None:
+        """The model's context window, when it is known without a request.
+
+        Only OpenRouter publishes one in a catalog Condor already fetches; a
+        local server or a natively resolved provider reports none, and the
+        readout then shows occupancy without a denominator.
+        """
+        prefix, _, model_id = self.model_name.partition(":")
+        if prefix != "openrouter" or not model_id:
+            return None
+        from condor.llm.openrouter_models import cached_context_length
+
+        return cached_context_length(model_id)
+
+    def _build_user_prompt(self, text: str, images: list | None) -> Any:
+        """Assemble the user turn: images first, then the text.
+
+        Plain text when there are no images, so the common path stays the shape
+        pydantic-ai documents.
+        """
+        if not images:
+            return text
+
+        from pydantic_ai.messages import BinaryContent
+
+        return [
+            *(
+                BinaryContent(data=image.data, media_type=image.mime)
+                for image in images
+            ),
+            text,
+        ]
+
+    def _tool_return_events(
+        self, node: Any, blocked_ids: set[str]
+    ) -> Iterator[ACPEvent]:
+        """Project a model request's tool results as ``completed`` updates.
+
+        A refused call still produces a (synthetic) refusal result on the next
+        request; projecting it would paint "completed" over the "blocked" event
+        the dashboard already has, so ``blocked_ids`` filters those out.
+        """
+        from pydantic_ai.messages import ToolReturnPart
+
+        request = getattr(node, "request", None)
+        if not request:
+            return
+
+        for part in request.parts:
+            if not isinstance(part, ToolReturnPart):
+                continue
+            if (part.tool_call_id or "") in blocked_ids:
+                continue
+            content = part.content
+            yield ToolCallUpdate(
+                tool_call_id=part.tool_call_id or "",
+                status="completed",
+                output=content if isinstance(content, str) else str(content),
+            )
+
+    async def _response_events(
+        self, node: Any, blocked_ids: set[str]
+    ) -> AsyncIterator[ACPEvent]:
+        """Project one model response into text, thought and tool-call events.
+
+        Tool calls are authorized here, one graph step before pydantic-graph
+        executes them; ``blocked_ids`` collects the refused ones so their
+        refusal result is not later reported as a completion.
+        """
+        from pydantic_ai.messages import TextPart, ThinkingPart, ToolCallPart
+
+        for part in node.model_response.parts:
+            if isinstance(part, TextPart) and part.content:
+                yield TextChunk(text=part.content)
+
+            elif isinstance(part, ThinkingPart) and part.content:
+                # Reasoning models (deepseek-r1/qwq via ollama, gpt-oss via
+                # openrouter) return their thinking as a third part type. The
+                # ACP path already translates the same thing from
+                # ``agent_thought_chunk``; without this branch the thinking
+                # stream is silently dropped and the dashboard/Telegram thought
+                # panel stays empty for every pydantic-ai model (ARCH-333).
+                yield ThoughtChunk(text=part.content)
+
+            elif isinstance(part, ToolCallPart):
+                approved = True
+                if self.permission_callback:
+                    approved, _reason = await self._authorize(part)
+                    if not approved and part.tool_call_id:
+                        blocked_ids.add(part.tool_call_id)
+                for event in self._tool_events(part, approved):
+                    yield event
+
+    async def _authorize(self, part: Any) -> tuple[bool, str]:
+        """Decide whether a tool call may run, and record the decision.
+
+        Fail closed: only an explicit "selected" outcome approves the call. A
+        callback that raises, times out or answers in any other shape is a
+        denial, never a pass (SEC-080).
+
+        The decision is recorded on ``self._permission_gate`` *before* this
+        returns, because the tool itself executes on the next graph step, where
+        the gated toolset consumes exactly that record. Moving the record after
+        the caller's event projection would let the tool run undecided.
+
+        Returns ``(approved, reason)``; ``reason`` is empty when approved.
+        """
+        tool_name = part.tool_name
+        # Unparseable args stay None rather than collapsing to {}: the gate
+        # reads that as "unknown" and fails closed, where an empty dict would
+        # have read as a harmless no-argument call (SEC-093).
+        tool_call_info = {
+            "tool": tool_name,
+            "title": tool_name,
+            "input": _tool_args_to_dict(part.args),
+        }
+        options = [
+            {"optionId": "allow", "kind": "allow_once"},
+            {"optionId": "deny", "kind": "deny"},
+        ]
+
+        reason = ""
+        try:
+            # Don't hold the per-server slot while a human decides — release it
+            # for the wait so other sessions/ticks on this backend aren't
+            # blocked (PERF-029).
+            async with self._release_request_slot():
+                result = await self.permission_callback(tool_call_info, options)
+            outcome = result.get("outcome", {}) if isinstance(result, dict) else {}
+            approved = (
+                isinstance(outcome, dict) and outcome.get("outcome") == "selected"
+            )
+            if not approved:
+                # The gate says why when it can (condor.agents.risk attaches a
+                # ``reason``); an agent told only "denied" reads its own refusal
+                # as a missing approval and waits for a human it may not have.
+                given = result.get("reason") if isinstance(result, dict) else ""
+                reason = given or "denied by the risk/confirmation gate"
+        except Exception as exc:
+            log.exception(
+                "Permission check failed for %s — blocking the call", tool_name
+            )
+            approved = False
+            reason = f"permission check failed ({exc})"
+
+        self._permission_gate.record(part.tool_call_id, tool_name, approved, reason)
+        return approved, reason
+
+    def _tool_events(self, part: Any, approved: bool) -> list[ACPEvent]:
+        """Project one tool call into the events the UI shows.
+
+        A refused call gets a single terminal ``blocked`` event; an approved one
+        opens ``in_progress`` and closes ``completed`` right away, with the real
+        output arriving later as the ``ToolReturnPart`` update for the same id.
+        """
+        tool_id = part.tool_call_id or uuid.uuid4().hex[:12]
+        args = _tool_args_to_dict(part.args)
+
+        if not approved:
+            return [
+                ToolCallEvent(
+                    tool_call_id=tool_id,
+                    title=part.tool_name,
+                    status="blocked",
+                    kind="mcp",
+                    input=args,
+                )
+            ]
+
+        return [
+            ToolCallEvent(
+                tool_call_id=tool_id,
+                title=part.tool_name,
+                status="in_progress",
+                kind="mcp",
+                input=args,
+            ),
+            ToolCallUpdate(tool_call_id=tool_id, status="completed"),
+        ]
 
     def _format_error(self, e: Exception) -> str:
         """Translate provider HTTP errors into actionable user-facing text.

@@ -35,7 +35,7 @@ UNIFIED_ACCOUNT_NOTE = (
 # more thing that has to agree with that one.
 
 
-def _balance_value(item: Dict[str, Any]) -> float:
+def balance_value(item: Dict[str, Any]) -> float:
     """USD value of one raw balance row, tolerating both payload spellings."""
     try:
         return float(item.get("value", item.get("usd_value", 0)) or 0)
@@ -46,7 +46,7 @@ def _balance_value(item: Dict[str, Any]) -> float:
 def _stable_value(balances: List[Any]) -> float:
     """Total USD held in Hyperliquid's shared stable collateral within one connector."""
     return sum(
-        _balance_value(item)
+        balance_value(item)
         for item in balances
         if isinstance(item, dict)
         and item.get("token", item.get("asset", "")) in HL_STABLES

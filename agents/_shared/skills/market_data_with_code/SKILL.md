@@ -3,10 +3,12 @@ name: market_data_with_code
 description: Fetch and analyse market data — use run_code for anything beyond a single
   raw value; canned snippets for common queries.
 when_to_use: 'User asks for market data: price, candles, funding rate, order book,
-  RSI/EMA/VWAP, comparisons across assets or venues, any derived calculation. The
-  only raw market data tool left is get_prices, and it is only appropriate for a single,
-  direct lookup with no computation. For everything else — indicators, multi-asset,
-  multi-venue, aggregations — write a Python snippet and call run_code.'
+  RSI/EMA/VWAP, comparisons across assets or venues, any derived calculation. Two
+  raw market data tools are left — get_prices for a single direct quote, and
+  get_market_data for plain OHLCV candles — and both are only appropriate when the
+  raw value IS the answer. For everything else — indicators, multi-asset, multi-venue,
+  aggregations — write a Python snippet and call run_code. In a dry run get_market_data
+  is the only candle read there is: run_code does not execute there.'
 created: '2026-09-02T15:29:27Z'
 source: chat
 ---
@@ -44,12 +46,37 @@ If you are reading this because a market data request just came in, do this chec
 |---|---|---|
 | Single price, one venue | `get_prices` MCP tool | 100 |
 | Single price inside run_code | `client.market_data.get_prices` | 150 |
+| Plain candles, no math on them | `get_market_data` MCP tool | 200 |
 | Order book — one or many venues | `run_code` → `get_order_book` | 350–500 |
 | Funding rate — one or many venues | `run_code` → `get_funding_info` | 350–500 |
 | Indicators (RSI / EMA / ATR / VWAP) | `run_code` → `get_candles_last_days` + pandas_ta | varies |
 | All tickers for a connector | `run_code` → `get_tickers` | 300 |
 | Multi-venue anything with math | `run_code` + `asyncio.gather` | ~500 |
-| DEX candles | GeckoTerminal — DEX connectors don't serve OHLCV | varies |
+| AMM/CLMM DEX candles (Gateway: meteora, raydium, orca, uniswap…) | GeckoTerminal — Gateway connectors don't serve OHLCV | varies |
+| CLOB DEX candles (`hyperliquid_perpetual`, …) | `get_candles*` like any CEX — CLOB DEXs are Hummingbot connectors, not Gateway; check the candle list (`xrpl` has no feed) | varies |
+
+---
+
+### In a dry run, `run_code` does not run
+
+A snippet and a routine both hold the unrestricted API client, so a dry-run
+session auto-approves neither — the refusal says so and the tick goes on. That
+leaves exactly three market reads in a rehearsal: `get_prices`,
+`explore_geckoterminal`, and
+
+```
+get_market_data(action="candles", connector_name="binance_perpetual",
+                trading_pair="SOL-USDT", interval="1h", max_records=168)
+```
+
+which returns `candles` as rows of `{timestamp, open, high, low, close, volume}`
+floats — the same numbers `client.market_data.get_candles` gives you, without the
+snippet. `action="historical_candles"` takes a unix `start_time`/`end_time` range;
+`action="connectors"` lists which venues serve OHLCV at all.
+
+Do the arithmetic in your head from the rows and say what you *would* have
+computed. Do not try to route around the refusal by writing the snippet into a
+routine — that door is closed too.
 
 ---
 
@@ -138,7 +165,8 @@ vol   = await client.market_data.get_quote_volume_for_price("binance_perpetual",
 
 **Utilities**
 ```python
-# Check which connectors serve OHLCV before using candles on a DEX connector
+# Check which connectors serve OHLCV before relying on one — Gateway AMM/CLMM
+# connectors never do; CLOB DEXs vary (hyperliquid_perpetual yes, xrpl no)
 candle_connectors = await client.market_data.get_available_candle_connectors()
 # → ["binance_perpetual", "binance", "okx_perpetual", ...]
 ```

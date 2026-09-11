@@ -1,8 +1,9 @@
 """FEAT-091: a muted tool is never mounted.
 
-The Tools tab stops being a read-only echo of the AGENT.md allowlist — which
-only binds pydantic-ai seats, and is decoration on an ACP bridge — and becomes
-the real mounted surface with a switch per row. Switching one off means the next
+The Tools tab stops being a read-only echo of the AGENT.md allowlist — which then
+bound only pydantic-ai seats, and was decoration on an ACP bridge until it was
+folded into this same subtraction (3b) — and becomes the real mounted surface
+with a switch per row. Switching one off means the next
 session's MCP subprocess never registers it, so the model is never told it
 exists, on every backend alike.
 
@@ -292,6 +293,77 @@ def test_a_mute_belongs_to_one_agent(tmp_path):
     set_muted("perps", "tool", "manage_clmm", True)
     assert load_mutes("spot")["tools"] == set()
     assert {r["name"] for r in seat_tools("spot") if r["muted"]} == set()
+
+
+# ── 3b. the allowlist, enforced through the same subtraction ──
+
+
+def _agent_allowing(*tools: str) -> str:
+    """An Agent on disk whose AGENT.md names ``tools`` as its allowlist."""
+    from condor.agents.agent import AgentStore
+
+    return AgentStore().create(name="Lister", tools=list(tools)).slug
+
+
+def _muted_on(argv: list[str]) -> set[str]:
+    return set(argv[argv.index("--mute-tools") + 1].split(","))
+
+
+def test_an_allowlist_mutes_everything_it_leaves_out(monkeypatch):
+    """Only pydantic-ai ever filtered by the list; now it reaches argv, which
+    every backend obeys because an unregistered tool is one nobody is told of."""
+    slug = _agent_allowing("get_prices", "delegate")
+    args = _session_args(monkeypatch, agent_slug=slug)
+
+    for argv in args.values():
+        muted = _muted_on(argv)
+        assert "get_prices" not in muted and "delegate" not in muted
+        assert {"manage_clmm", "execute_swap", "manage_agents"} <= muted
+
+
+def test_end_to_end_an_allowlisted_seat_mounts_only_its_list(monkeypatch):
+    slug = _agent_allowing("get_prices", "delegate")
+    args = _session_args(monkeypatch, agent_slug=slug)
+
+    mounted = {}
+    for name, module in (
+        ("condor", condor_server),
+        ("mcp-hummingbot", hummingbot_server),
+    ):
+        argv = args[name]
+        profile = argv[argv.index("--profile") + 1]
+        mounted[name] = _registered(module, profile, _muted_on(argv))
+
+    assert mounted == {"condor": {"delegate"}, "mcp-hummingbot": {"get_prices"}}
+
+
+def test_an_allowlist_and_an_operator_mute_add_up(monkeypatch):
+    slug = _agent_allowing("get_prices", "delegate")
+    set_muted(slug, "tool", "get_prices", True)
+
+    muted = _muted_on(_session_args(monkeypatch, agent_slug=slug)["mcp-hummingbot"])
+    assert "get_prices" in muted
+    assert "delegate" not in muted
+
+
+def test_a_namespaced_allowlist_name_still_matches(monkeypatch):
+    """pydantic-ai accepts ``mcp__server__tool``; the mount has to agree."""
+    slug = _agent_allowing("mcp__mcp-hummingbot__get_prices")
+    argv = _session_args(monkeypatch, agent_slug=slug)["mcp-hummingbot"]
+    assert "get_prices" not in _muted_on(argv)
+
+
+def test_an_empty_allowlist_stays_unrestricted(monkeypatch):
+    slug = _agent_allowing()
+    for argv in _session_args(monkeypatch, agent_slug=slug).values():
+        assert "--mute-tools" not in argv
+
+
+def test_the_panel_switch_stays_the_operators_alone():
+    """``muted`` is the operator's switch; the allowlist is its own flag, so a
+    tool the list leaves out is not reported as switched off."""
+    slug = _agent_allowing("get_prices")
+    assert all(row["muted"] is False for row in seat_tools(slug))
 
 
 # ── 4. through the route ──

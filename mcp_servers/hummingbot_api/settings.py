@@ -2,7 +2,6 @@
 Configuration settings for Hummingbot MCP Server
 """
 
-import argparse
 import os
 from pathlib import Path
 
@@ -10,6 +9,7 @@ import aiohttp
 import yaml
 from pydantic import BaseModel, Field, field_validator
 
+from mcp_servers._profiles import parse_profile_flags
 from mcp_servers.hummingbot_api.exceptions import ConfigurationError
 
 CONFIG_DIR = Path.home() / ".hummingbot_mcp"
@@ -19,39 +19,6 @@ SERVER_CONFIG_PATH = CONFIG_DIR / "server.yml"
 #: standalone (the uvx console script, an external MCP host, the checked-in
 #: `.mcp.json`), and a launch with no flag has to keep serving the whole surface.
 DEFAULT_TOOL_PROFILE = "full"
-
-
-def _parse_tool_profile() -> str:
-    """``--profile`` off argv, read at import.
-
-    It has to be resolved *here* rather than in ``server._apply_cli_args``: which
-    tools exist is decided when the module registers them, which is import time,
-    and ``_apply_cli_args`` only runs once ``_run()`` is already starting the
-    stdio loop. ``parse_known_args`` so every other flag the spawner passes
-    (``--url``, ``--server-name``, ``--bot-id``) stays inert here, and so a run
-    under pytest — whose argv is the test runner's — resolves the default.
-    """
-    parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--profile", default=DEFAULT_TOOL_PROFILE)
-    args, _ = parser.parse_known_args()
-    return args.profile
-
-
-def _parse_muted_tools() -> tuple[str, ...]:
-    """``--mute-tools a,b,c`` off argv, read at import (FEAT-091).
-
-    Same timing argument as ``_parse_tool_profile`` above — the mute subtracts
-    from the profile inside ``register_tools``, which runs at import — and the
-    same ``parse_known_args``, so a run under pytest resolves to nothing muted.
-
-    An empty or absent flag is the norm: the spawner only puts it on the line
-    when the operator has actually switched something off, so an uncurated
-    install keeps the argv it always had.
-    """
-    parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--mute-tools", default="")
-    args, _ = parser.parse_known_args()
-    return tuple(n.strip() for n in (args.mute_tools or "").split(",") if n.strip())
 
 
 class ServerConfig(BaseModel):
@@ -156,6 +123,7 @@ def get_settings() -> Settings:
     """Get application settings from server configuration"""
     try:
         server_config = _load_server_config()
+        tool_profile, muted_tools = parse_profile_flags(DEFAULT_TOOL_PROFILE)
 
         return Settings(
             api_url=server_config.url,
@@ -166,8 +134,8 @@ def get_settings() -> Settings:
             max_retries=int(os.getenv("HUMMINGBOT_MAX_RETRIES", "3")),
             retry_delay=float(os.getenv("HUMMINGBOT_RETRY_DELAY", "2.0")),
             log_level=os.getenv("HUMMINGBOT_LOG_LEVEL", "INFO"),
-            tool_profile=_parse_tool_profile(),
-            muted_tools=_parse_muted_tools(),
+            tool_profile=tool_profile,
+            muted_tools=muted_tools,
         )
     except Exception as e:
         raise ConfigurationError(f"Failed to load configuration: {e}")

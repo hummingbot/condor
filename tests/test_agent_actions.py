@@ -7,6 +7,7 @@ tick, and it never deletes a row.
 """
 
 import json
+import typing
 
 import pytest
 
@@ -553,6 +554,219 @@ def test_the_confirmation_gate_is_untouched_by_the_log_growing():
     assert (
         is_dangerous_tool_call({"tool": "manage_controllers", "input": None}) is False
     )
+
+
+# ── The snippet that can change anything (SEC-616) ──
+
+
+def test_a_snippet_a_tick_ran_is_recorded_with_its_label():
+    """``run_code`` is outside the gate on purpose and was outside the log too.
+
+    The one tool that can do anything any other tool can — it holds the
+    unrestricted API client — left the log that answers "what changed the world"
+    completely silent.
+    """
+    calls = [
+        folded(
+            "mcp__condor__run_code",
+            label="open a CLMM on SOL-USDC",
+            code="pos = await client.gateway.clmm_open(...)\nprint(pos)",
+        )
+    ]
+
+    (action,) = actions_from_tool_calls(calls, tick=4, at=1.0)
+
+    assert action.tool == "run_code"
+    assert action.verb == "run_code"
+    assert action.ok is True
+    assert action.summary == (
+        "Run snippet 'open a CLMM on SOL-USDC': "
+        "pos = await client.gateway.clmm_open(...)"
+    )
+
+
+def test_a_failed_snippet_is_recorded_with_its_error():
+    calls = [folded("run_code", status="failed", code="await client.boom()")]
+    calls[0]["output"] = "AttributeError: boom"
+
+    (action,) = actions_from_tool_calls(calls, tick=4, at=1.0)
+
+    assert action.ok is False
+    assert action.error == "AttributeError: boom"
+    assert action.summary == "Run snippet: await client.boom()"
+
+
+def test_reading_past_runs_back_is_not_recorded():
+    """``history`` and ``get`` read the store; they execute nothing."""
+    calls = [
+        folded("run_code", action="history", limit=20),
+        folded("run_code", action="get", run_id="cr_1"),
+    ]
+    assert actions_from_tool_calls(calls, tick=1, at=1.0) == []
+
+
+def test_the_snippet_predicate_fails_open_and_matches_the_tool_default():
+    """An unreadable action is recorded — and ``action`` omitted *is* a run."""
+    from condor.runtime.danger import is_recordable_tool_call
+
+    assert is_recordable_tool_call({"tool": "run_code", "input": None})
+    assert is_recordable_tool_call({"tool": "run_code", "input": {"code": "1"}})
+    assert is_recordable_tool_call({"tool": "run_code", "input": {"action": "sudo"}})
+
+
+def test_the_snippet_runner_is_still_not_gated():
+    """Criterion: no confirmation is introduced on the tick path.
+
+    Since ARCH-308 a snippet is how a tick reads a market, so a name gate here
+    would prompt a human on every candle read.
+    """
+    from condor.runtime.danger import DANGEROUS_TOOLS, is_dangerous_tool_call
+
+    assert "run_code" not in DANGEROUS_TOOLS
+    for action in ("run", "history", "get", "something_new"):
+        call = {"tool": "run_code", "input": {"action": action, "code": "x"}}
+        assert is_dangerous_tool_call(call) is False, action
+    assert is_dangerous_tool_call({"tool": "run_code", "input": None}) is False
+
+
+def test_the_snippet_action_sets_match_the_registered_tool():
+    """Every action literal the tool accepts is classified, or the fail-open
+    rule would record a read of the run history as a change to the world."""
+    from condor.runtime.danger import (
+        MUTATING_CODE_RUN_ACTIONS,
+        READ_ONLY_CODE_RUN_ACTIONS,
+    )
+    from mcp_servers.condor.server import run_code
+
+    fn = getattr(run_code, "fn", run_code)
+    literals = set(typing.get_args(fn.__annotations__["action"]))
+    assert MUTATING_CODE_RUN_ACTIONS | READ_ONLY_CODE_RUN_ACTIONS == literals
+    assert not (MUTATING_CODE_RUN_ACTIONS & READ_ONLY_CODE_RUN_ACTIONS)
+
+
+def test_the_market_data_action_sets_match_the_registered_tool():
+    """The candle reader has no write half, and this is what keeps it that way.
+
+    ``get_market_data`` exists so a dry run can read a market at all (CORR-625),
+    and it earns that by taking parameters rather than code. Its mutating set is
+    empty, so an action added to the tool and not classified here is refused in
+    dry-run rather than waved through — but only as long as the two sets still
+    partition what the tool actually accepts.
+    """
+    from condor.runtime.danger import (
+        MUTATING_MARKET_DATA_ACTIONS,
+        READ_ONLY_MARKET_DATA_ACTIONS,
+    )
+    from mcp_servers.hummingbot_api.server import get_market_data
+
+    fn = getattr(get_market_data, "fn", get_market_data)
+    literals = set(typing.get_args(fn.__annotations__["action"]))
+    assert MUTATING_MARKET_DATA_ACTIONS == set()
+    assert READ_ONLY_MARKET_DATA_ACTIONS == literals
+
+
+def test_the_candle_reader_is_neither_gated_nor_logged_as_a_change():
+    """It reads. A confirmation in front of it, or a row in the action log
+    claiming it changed something, would both be wrong."""
+    from condor.runtime.danger import (
+        DANGEROUS_TOOLS,
+        is_dangerous_tool_call,
+        is_mutating_tool_call,
+        is_recordable_tool_call,
+    )
+
+    assert "get_market_data" not in DANGEROUS_TOOLS
+    for action in ("candles", "historical_candles", "connectors"):
+        call = {"tool": "get_market_data", "input": {"action": action}}
+        assert is_dangerous_tool_call(call) is False, action
+        assert is_mutating_tool_call(call) is False, action
+        assert is_recordable_tool_call(call) is False, action
+
+
+def folded_routine(**args):
+    """A folded ``manage_routines`` call.
+
+    Its own ``name`` argument (the routine) collides with :func:`folded`'s first
+    positional (the tool), so the tool name is bound here instead.
+    """
+    return {
+        "id": "tc_manage_routines",
+        "name": "manage_routines",
+        "status": "completed",
+        "kind": "mcp",
+        "input": args,
+    }
+
+
+def test_a_tick_records_the_routines_it_writes_and_runs_and_not_the_ones_it_lists():
+    """A routine is Python too, so "wrote one and ran it" has to leave a trace."""
+    calls = [
+        folded_routine(action="list"),
+        folded_routine(action="describe", name="scan"),
+        folded_routine(action="read_routine", name="scan"),
+        folded_routine(action="create_routine", name="pwn", code="x"),
+        folded_routine(action="run", name="pwn"),
+    ]
+
+    actions = actions_from_tool_calls(calls, tick=3, at=1.0)
+
+    assert [a.summary for a in actions] == [
+        "Routine create_routine 'pwn'",
+        "Routine run 'pwn'",
+    ]
+
+
+def test_a_routine_row_names_the_library_it_landed_in():
+    """An agent-local routine and a shared one of the same name are different code."""
+    calls = [
+        folded_routine(action="edit_routine", name="scan", agent="brigado"),
+        folded_routine(action="create_routine", name="scan", shared=True),
+    ]
+
+    assert [a.summary for a in actions_from_tool_calls(calls, tick=3, at=1.0)] == [
+        "Routine edit_routine 'scan' (brigado)",
+        "Routine create_routine 'scan' (shared)",
+    ]
+
+
+def test_the_routine_predicate_fails_open_on_an_action_it_cannot_read():
+    from condor.runtime.danger import is_recordable_tool_call
+
+    assert is_recordable_tool_call({"tool": "manage_routines", "input": None})
+    assert is_recordable_tool_call({"tool": "manage_routines", "input": {"name": "x"}})
+    assert is_recordable_tool_call(
+        {"tool": "manage_routines", "input": {"action": "publish_routine"}}
+    )
+
+
+def test_the_routine_tool_is_still_not_gated():
+    """Criterion: no confirmation is introduced. Running a routine is tick work."""
+    from condor.runtime.danger import DANGEROUS_TOOLS, is_dangerous_tool_call
+
+    assert "manage_routines" not in DANGEROUS_TOOLS
+    for action in ("run", "start", "create_routine", "list", "something_new"):
+        call = {"tool": "manage_routines", "input": {"action": action, "name": "x"}}
+        assert is_dangerous_tool_call(call) is False, action
+    assert is_dangerous_tool_call({"tool": "manage_routines", "input": None}) is False
+
+
+def test_the_routine_action_sets_match_the_registered_tool():
+    """Every action literal the tool accepts is classified (SEC-626).
+
+    Unclassified is *refused* in dry-run and recorded elsewhere, so the cost of
+    a drifting set is a rehearsal that stops working rather than a silent hole —
+    but a new action must be a deliberate choice either way.
+    """
+    from condor.runtime.danger import (
+        MUTATING_ROUTINE_ACTIONS,
+        READ_ONLY_ROUTINE_ACTIONS,
+    )
+    from mcp_servers.condor.server import manage_routines
+
+    fn = getattr(manage_routines, "fn", manage_routines)
+    literals = set(typing.get_args(fn.__annotations__["action"]))
+    assert MUTATING_ROUTINE_ACTIONS | READ_ONLY_ROUTINE_ACTIONS == literals
+    assert not (MUTATING_ROUTINE_ACTIONS & READ_ONLY_ROUTINE_ACTIONS)
 
 
 def test_the_controller_action_sets_match_the_registered_tool():

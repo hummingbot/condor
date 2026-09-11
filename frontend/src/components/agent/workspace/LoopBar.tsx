@@ -7,6 +7,10 @@ import {
   runDurationSec,
   runLabel,
 } from "@/components/agent/lab/runs";
+import {
+  dueInSec,
+  tickCountdownLabel,
+} from "@/components/agent/workspace/fleet";
 import { useSeconds } from "@/hooks/useSeconds";
 import { countdown } from "@/lib/agent-attribution";
 import type {
@@ -70,10 +74,7 @@ export function LoopBar({
   const nowSec = now / 1000;
 
   const duration = run ? formatDuration(runDurationSec(run, nowSec)) : "";
-  const dueIn =
-    instance && instance.last_tick_at > 0
-      ? instance.last_tick_at + instance.frequency_sec - nowSec
-      : null;
+  const dueIn = dueInSec(instance, nowSec);
 
   return (
     <>
@@ -141,9 +142,7 @@ export function LoopBar({
                 dueIn > 0 ? "text-[var(--color-text-muted)]" : "text-amber-400"
               }`}
             >
-              {dueIn > 0
-                ? `next in ${countdown(dueIn)}`
-                : `overdue ${countdown(-dueIn)}`}
+              {tickCountdownLabel(dueIn)}
             </span>
           </>
         )}

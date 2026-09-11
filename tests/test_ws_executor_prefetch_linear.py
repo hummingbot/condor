@@ -18,7 +18,7 @@ import asyncio
 
 import pytest
 
-import condor.server_data_service as sds_module
+import condor.web.streams.hummingbot_ws as executor_stream_module
 import config_manager as cm_module
 from condor.web.models import ExecutorInfo
 from condor.web.ws_manager import WebSocketManager
@@ -93,7 +93,7 @@ def _run_prefetch(monkeypatch, pages):
         async def get_client(self, server_name):
             return client
 
-    monkeypatch.setattr(sds_module, "get_server_data_service", lambda: sds)
+    monkeypatch.setattr(executor_stream_module, "get_server_data_service", lambda: sds)
     monkeypatch.setattr(cm_module, "get_config_manager", lambda: _FakeCM())
 
     # Count every raw row pushed through the pydantic transform. This is the

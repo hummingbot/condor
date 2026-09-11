@@ -11,8 +11,7 @@ from routines import report_component_gallery as gallery
 
 @pytest.fixture
 def reports_dir(tmp_path, monkeypatch):
-    monkeypatch.setattr(reports, "CHARTS_DIR", tmp_path)
-    monkeypatch.setattr(reports, "INDEX_FILE", tmp_path / "reports_index.json")
+    monkeypatch.setenv("CONDOR_REPORTS_DIR", str(tmp_path))
     monkeypatch.setattr(
         rendering,
         "plotly_bundle",

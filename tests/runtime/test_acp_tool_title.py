@@ -68,6 +68,7 @@ def test_a_json_quoted_name_is_unwrapped_not_discarded():
 
 def _drive(update: dict):
     client = ACPClient(command="true")
+    client._current_req_id = 1  # a turn is being streamed (PERF-332)
     client._on_session_update("s", update)
     return client._event_queue.get_nowait()
 

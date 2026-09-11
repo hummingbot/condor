@@ -1,16 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Check,
   Edit2,
   Loader2,
   Plus,
   Star,
-  Trash2,
-  X,
 } from "lucide-react";
 import { useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
+import { InlineConfirm } from "@/components/ui/InlineConfirm";
 import { useIsAdmin } from "@/hooks/useIsAdmin";
 import { useServer } from "@/hooks/useServer";
 import { type ServerInfo, api } from "@/lib/api";
@@ -308,38 +306,14 @@ export function ServersSettings() {
                   >
                     <Edit2 className="h-3.5 w-3.5" />
                   </button>
-                  {confirmDelete === s.name ? (
-                    <div className="flex items-center gap-1">
-                      <button
-                        onClick={() => deleteMut.mutate(s.name)}
-                        disabled={deleteMut.isPending}
-                        className="rounded p-1.5 text-[var(--color-red)] hover:bg-red-500/10 disabled:opacity-50"
-                        title="Confirm delete"
-                      >
-                        {deleteMut.isPending ? (
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        ) : (
-                          <Check className="h-3.5 w-3.5" />
-                        )}
-                      </button>
-                      <button
-                        onClick={() => setConfirmDelete(null)}
-                        className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
-                        title="Cancel delete"
-                        aria-label="Cancel delete"
-                      >
-                        <X className="h-3.5 w-3.5" />
-                      </button>
-                    </div>
-                  ) : (
-                    <button
-                      onClick={() => setConfirmDelete(s.name)}
-                      className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-red)]"
-                      title="Delete"
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </button>
-                  )}
+                  <InlineConfirm
+                    confirming={confirmDelete === s.name}
+                    onRequest={() => setConfirmDelete(s.name)}
+                    onConfirm={() => deleteMut.mutate(s.name)}
+                    onCancel={() => setConfirmDelete(null)}
+                    pending={deleteMut.isPending}
+                    triggerLabel="Delete"
+                  />
                 </>
               )}
             </div>

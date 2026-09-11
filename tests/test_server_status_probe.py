@@ -14,7 +14,9 @@ import time
 
 import pytest
 
+import condor.server_data_service as sds_module
 import config_manager as cm_module
+from condor.server_data_service import CacheKey, ServerDataService, ServerDataType
 from config_manager import ConfigManager
 
 
@@ -79,6 +81,21 @@ def factory(monkeypatch):
     fake = FakeClientFactory()
     monkeypatch.setattr(hummingbot_api_client, "HummingbotAPIClient", fake)
     return fake
+
+
+@pytest.fixture
+def sds(monkeypatch):
+    """An isolated ServerDataService, wired in place of the process singleton."""
+    instance = ServerDataService()
+    monkeypatch.setattr(sds_module, "get_server_data_service", lambda: instance)
+    return instance
+
+
+def _seed_sds(sds: ServerDataService, server: str):
+    key = CacheKey.make(server, ServerDataType.PORTFOLIO)
+    sds._cache[key] = sds_module.CacheEntry(
+        key=key, value={"USD": 1}, fetched_at=time.time()
+    )
 
 
 def _pool(cm: ConfigManager, name: str, client: FakeClient):
@@ -252,6 +269,27 @@ async def test_deleting_a_server_clears_its_memo(cm, factory):
 
     assert "prod" not in cm._status_cache
     assert "prod" not in cm._clients
+
+
+def test_modifying_a_server_clears_its_sds_cache(cm, sds):
+    """Repointing a server at a new host must not keep serving the old one's
+    cached SDS data (portfolio, venues, connectors, ...) under the same name."""
+    _seed_sds(sds, "prod")
+    assert any(k.server == "prod" for k in sds._cache)
+
+    cm.modify_server("prod", host="new-host")
+
+    assert not any(k.server == "prod" for k in sds._cache)
+
+
+def test_deleting_a_server_clears_its_sds_cache(cm, sds):
+    """A deleted server leaves no SDS entries behind for a later namesake."""
+    _seed_sds(sds, "prod")
+    assert any(k.server == "prod" for k in sds._cache)
+
+    cm.delete_server("prod")
+
+    assert not any(k.server == "prod" for k in sds._cache)
 
 
 @pytest.mark.asyncio

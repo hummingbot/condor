@@ -13,6 +13,7 @@ client and pin the request count and the row set.
 import asyncio
 
 from condor.agents.performance import fetch_agent_performance_batch
+from condor.fetchers.executors import EXECUTORS_PAGE_SIZE
 from condor.web.ws_manager import WebSocketManager
 
 # The page sizes each loop asks for, mirrored here so the fake can answer with a
@@ -20,7 +21,9 @@ from condor.web.ws_manager import WebSocketManager
 # cursor guard).
 WS_FIRST_PAGE = 50
 WS_NEXT_PAGE = 500
-PERF_PAGE_SIZE = 50
+# Tracks the walk's real page size (PERF-599 moved it to the fetchers'
+# constant): a page shorter than the limit ends the walk before the guard.
+PERF_PAGE_SIZE = EXECUTORS_PAGE_SIZE
 
 
 def _page(start, count):
@@ -77,7 +80,7 @@ class _FakeSDS:
 
 def test_ws_executor_prefetch_stops_when_the_cursor_does_not_advance(monkeypatch):
     """The pre-fetch must not re-page, or duplicates land in the SDS cache."""
-    import condor.server_data_service as sds_module
+    import condor.web.streams.hummingbot_ws as executor_stream_module
     import config_manager as cm_module
 
     client = EchoingCursorClient(
@@ -90,7 +93,7 @@ def test_ws_executor_prefetch_stops_when_the_cursor_does_not_advance(monkeypatch
         async def get_client(self, server_name):
             return client
 
-    monkeypatch.setattr(sds_module, "get_server_data_service", lambda: sds)
+    monkeypatch.setattr(executor_stream_module, "get_server_data_service", lambda: sds)
     monkeypatch.setattr(cm_module, "get_config_manager", lambda: _FakeCM())
 
     manager = WebSocketManager()

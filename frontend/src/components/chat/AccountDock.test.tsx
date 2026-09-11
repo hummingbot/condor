@@ -26,7 +26,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { ACCOUNT_DOCK_KEY } from "@/lib/sessionState";
+import { ACCOUNT_DOCK_KEY, DESK_SPLIT_KEY } from "@/lib/sessionState";
 
 /** Every call the two panels can make; none of them may fire while closed. */
 const getPortfolio = vi.fn();
@@ -254,9 +254,34 @@ describe("the account dock", () => {
       "executors:brigado_2",
     ]);
 
-    // Both open: two panes, each `flex-1 basis-0`, so half and half.
+    // Both open: two panes, half and half, with the seam that moves the
+    // boundary between them.
     const open = [...column()!.querySelectorAll("div.flex-1.basis-0")];
     expect(open).toHaveLength(2);
+    expect(open.map((el) => (el as HTMLElement).style.flexGrow)).toEqual([
+      "0.5",
+      "0.5",
+    ]);
+    expect(column()!.querySelector('[role="separator"]')).not.toBeNull();
+  });
+
+  it("hands the whole panel to a lone section, with no seam to drag", async () => {
+    localStorage.setItem(DESK_SPLIT_KEY, "0.7");
+    await render();
+    await click(tab("Execution"));
+
+    // One pane means one occupant: it takes the panel whatever the stored
+    // split says, and a handle under it would drag against a header.
+    const [only] = [...column()!.querySelectorAll("div.flex-1.basis-0")];
+    expect((only as HTMLElement).style.flexGrow).toBe("");
+    expect(column()!.querySelector('[role="separator"]')).toBeNull();
+
+    // Opening the other one back up restores the split the reader dragged.
+    await click(tab("Portfolio"));
+    const both = [...column()!.querySelectorAll("div.flex-1.basis-0")];
+    const shares = both.map((el) => Number((el as HTMLElement).style.flexGrow));
+    expect(shares[0]).toBeCloseTo(0.7);
+    expect(shares[1]).toBeCloseTo(0.3);
   });
 
   it("opens in the workspace pane, not in a column of its own", async () => {

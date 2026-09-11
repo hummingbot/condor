@@ -16,6 +16,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from condor.runtime import slot_of
 from condor.runtime.confirmations import get_registry
 from condor.web.auth import get_current_user
 from condor.web.models import WebUser
@@ -32,8 +33,19 @@ class ResolveRequest(BaseModel):
 
 @router.get("")
 async def list_confirmations(user: WebUser = Depends(get_current_user)):
-    """Approvals this user still needs to answer."""
-    return [p.to_wire() for p in get_registry().list_pending(user_id=user.id)]
+    """Approvals this user still needs to answer.
+
+    Read by the dashboard on every socket open (``useChatSocket``), which is
+    what makes the reload case above real: the ``permission_request`` event was
+    pushed to a socket that no longer exists, and this is the only way the new
+    page learns the agent is still waiting. ``slot_id`` addresses each entry the
+    same way that event does, so a click meant for one conversation cannot
+    authorize another one's tool call.
+    """
+    return [
+        {**p.to_wire(), "slot_id": slot_of(p.session_key)}
+        for p in get_registry().list_pending(user_id=user.id)
+    ]
 
 
 @router.get("/{confirmation_id}")

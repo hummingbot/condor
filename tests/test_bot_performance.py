@@ -162,6 +162,31 @@ def test_concurrent_callers_share_one_round_trip():
     assert all(set(r) == {"river", "otherbot"} for r in results)
 
 
+def test_a_cancelled_waiter_does_not_kill_the_shared_snapshot_fetch():
+    """ARCH-606: the shared fetch is shielded, so one waiter going away is local.
+
+    The whole-server snapshot is shared by the agents rollup's ``asyncio.gather``
+    legs and by web handlers; before the extraction this joined the task bare, so
+    a single cancelled leg cancelled the fetch and handed every other waiter a
+    ``CancelledError``.
+    """
+    client = _ServerClient("http://server-cancel:8000", delay=0.05)
+
+    async def _go():
+        leaver = asyncio.ensure_future(fetch_all_bot_performance(client))
+        stayer = asyncio.ensure_future(fetch_all_bot_performance(client))
+        # Both are parked on the one in-flight fetch before either can finish.
+        await asyncio.sleep(0.01)
+        leaver.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await leaver
+        return await stayer
+
+    agg = asyncio.run(_go())
+    assert client.calls == 1
+    assert set(agg) == {"river", "otherbot"}
+
+
 def test_staggered_callers_within_ttl_reuse_the_snapshot():
     # The rollup's per-strategy calls do not always overlap exactly; the TTL keeps
     # a staggered fan-out at one round-trip too.
@@ -1183,7 +1208,7 @@ def test_history_inflight_from_another_loop_is_not_awaited():
     # A stale in-flight entry left by a different loop: the guard must ignore it
     # (awaiting a foreign loop's task raises) and start its own walk.
     foreign = SimpleNamespace()  # never awaited — would blow up if it were
-    bp._history_inflight[key] = (object(), foreign)
+    bp._history_inflight._inflight[key] = (object(), foreign)
 
     hist = asyncio.run(bp.fetch_instance_history(client, "bot-1"))
     assert client.bot_orchestration.calls == 1

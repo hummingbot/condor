@@ -22,6 +22,7 @@ import { LPConfigPanel } from "@/components/executor/LPConfigPanel";
 import { useLpConfig } from "@/components/executor/lp-config";
 import { OrderConfigPanel } from "@/components/executor/OrderConfigPanel";
 import { useOrderConfig } from "@/components/executor/order-config";
+import { useVenues } from "@/components/market/useVenues";
 import { TradeBottomPane } from "@/components/trade/TradeBottomPane";
 import { TradeChart, type ChartPriceAxis } from "@/components/trade/TradeChart";
 import { useDexUpstream } from "@/hooks/useDexUpstream";
@@ -208,12 +209,9 @@ export function DexPool() {
     },
   });
 
-  const { data: venues = [] } = useQuery({
-    queryKey: ["venues", server],
-    queryFn: () => api.getVenues(server!),
-    enabled: !!server,
-    staleTime: 5 * 60 * 1000,
-  });
+  // Shared with CreateExecutor through `useVenues`, so both pages read the same
+  // cached request instead of hand-copying the query.
+  const { venues } = useVenues(server);
 
   // Bins move with every swap through the active bin, so the server caches them
   // for a minute and this polls at the same cadence — every viewer of the pool

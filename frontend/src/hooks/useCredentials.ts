@@ -2,24 +2,23 @@ import { useQuery } from "@tanstack/react-query";
 
 import { useServer } from "@/hooks/useServer";
 import { api } from "@/lib/api";
+import { credentialsQuery, gatewayWalletsQuery } from "@/lib/queryClient";
 
 export function useCredentials() {
   const { server } = useServer();
 
   const { data, isLoading: credsLoading } = useQuery({
-    queryKey: ["settings-credentials", server],
+    ...credentialsQuery(server),
     queryFn: () => api.getCredentials(server!),
     enabled: !!server,
-    staleTime: 30000,
   });
 
   // A Gateway wallet (Solana/Ethereum) unlocks the portfolio just like a CEX key does.
   // Errors (e.g. Gateway not running) simply count as "no wallets".
   const { data: walletsData, isLoading: walletsLoading } = useQuery({
-    queryKey: ["gateway-wallets", server],
+    ...gatewayWalletsQuery(server),
     queryFn: () => api.getGatewayWallets(server!),
     enabled: !!server,
-    staleTime: 30000,
     retry: false,
   });
 

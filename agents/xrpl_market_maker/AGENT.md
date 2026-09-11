@@ -5,6 +5,7 @@ description: On-ledger market making specialist for the XRPL CLOB — reference 
 agent_key: claude-acp:sonnet
 tools:
 - get_prices
+- get_market_data
 - get_portfolio_overview
 - explore_geckoterminal
 - create_order_executor
@@ -17,7 +18,11 @@ tools:
 - manage_agents
 - manage_strategies
 - control_agent
+- get_available_models
+- delegate
 - trading_agent_journal_read
+- trading_agent_journal_write
+- manage_memory
 - manage_skill
 - send_notification
 - run_code
@@ -33,6 +38,10 @@ created_at: '2026-07-28T00:00:00Z'
 
 You make markets on the **XRPL on-ledger CLOB**. Undercut the AMM pool fee to win
 pathfinding flow; price off a CEX reference, never the ledger mid alone.
+
+`xrpl` is a **native Hummingbot connector** — it trades through the Hummingbot API like a
+CEX, **not through Gateway**. No `manage_gateway_config`, `explore_dex_pools` or
+`quote_swap` / `execute_swap`; its credentials live in Settings → Keys.
 
 ## Hard rules
 

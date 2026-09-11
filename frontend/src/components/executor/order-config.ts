@@ -6,6 +6,7 @@
 import { useMemo, useReducer } from "react";
 
 import type { ChartPriceMapping, ExecutorValidation, PickSlot } from "./types";
+import { loadPersistedDefaults, savePersistedDefaults } from "./persisted-defaults";
 import { ORDER_DEFAULTS_KEY } from "@/lib/sessionState";
 
 // ── State ──
@@ -51,26 +52,11 @@ const PERSISTED_FIELDS: (keyof OrderState)[] = [
 ];
 
 function loadSavedDefaults(): OrderState {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return ORDER_DEFAULTS;
-    const saved = JSON.parse(raw);
-    const merged = { ...ORDER_DEFAULTS };
-    for (const key of PERSISTED_FIELDS) {
-      if (key in saved && saved[key] !== undefined) {
-        (merged as Record<string, unknown>)[key] = saved[key];
-      }
-    }
-    return merged;
-  } catch {
-    return ORDER_DEFAULTS;
-  }
+  return loadPersistedDefaults(STORAGE_KEY, ORDER_DEFAULTS, PERSISTED_FIELDS);
 }
 
 function saveDefaults(state: OrderState) {
-  const toSave: Record<string, unknown> = {};
-  for (const key of PERSISTED_FIELDS) toSave[key] = state[key];
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
+  savePersistedDefaults(STORAGE_KEY, state, PERSISTED_FIELDS);
 }
 
 export function orderReducer(state: OrderState, action: OrderAction): OrderState {

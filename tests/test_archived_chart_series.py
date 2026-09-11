@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from condor.archived_chart_series import (
     activity_range,
     build_chart_series,
-    pick_interval,
+    pick_candle_interval,
 )
 from condor.archived_pnl import calculate_pnl_from_executors
 
@@ -41,11 +41,11 @@ def _ex(
 
 def test_interval_matches_run_length_not_archive_lag():
     """A 28-minute run charts at 1m, however long ago it was archived."""
-    assert pick_interval(28 * 60).name == "1m"
-    assert pick_interval(6 * 3600).name == "5m"
-    assert pick_interval(2 * 86400).name == "15m"
-    assert pick_interval(7 * 86400).name == "1h"
-    assert pick_interval(30 * 86400).name == "4h"
+    assert pick_candle_interval(28 * 60).name == "1m"
+    assert pick_candle_interval(6 * 3600).name == "5m"
+    assert pick_candle_interval(2 * 86400).name == "15m"
+    assert pick_candle_interval(7 * 86400).name == "1h"
+    assert pick_candle_interval(30 * 86400).name == "4h"
 
 
 def test_activity_range_spans_first_open_to_last_close():

@@ -2,7 +2,16 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
+
+from condor.fetchers.executors import build_executor_row, get_executor_type
+from condor.fetchers.models import (
+    ArchivedBotPerformance,
+    BotRunInfo,
+    ControllerInfo,
+    NormalizedExecutor,
+    PnlPoint,
+)
 
 # ── Auth ──
 
@@ -102,29 +111,6 @@ class BotDetailResponse(BaseModel):
     performance: dict[str, Any] = {}
 
 
-class ControllerInfo(BaseModel):
-    controller_name: str
-    #: The coarse bucket upstream sorts every controller into (``generic``,
-    #: ``directional_trading``, ``market_making``) — a fallback class for a
-    #: terminated controller whose config lookup could not recover the specific
-    #: one (see ``fill_classes_from_config``).
-    controller_type: str = ""
-    controller_id: str = ""
-    bot_name: str
-    status: str = "unknown"
-    connector: str = ""
-    trading_pair: str = ""
-    realized_pnl_quote: float = 0.0
-    unrealized_pnl_quote: float = 0.0
-    global_pnl_quote: float = 0.0
-    global_pnl_pct: float = 0.0
-    volume_traded: float = 0.0
-    close_type_counts: dict[str, int] = {}
-    positions_summary: list[dict[str, Any]] = []
-    deployed_at: Optional[str] = None
-    config: dict[str, Any] = {}
-
-
 class BotSummary(BaseModel):
     bot_name: str
     status: str = "unknown"
@@ -145,43 +131,6 @@ class BotsPageResponse(BaseModel):
 
 
 # ── Bot Runs ──
-
-
-class BotRunInfo(BaseModel):
-    bot_name: str
-    bot_run_id: Optional[int] = None
-    account_name: str = ""
-    strategy_type: str = ""
-    strategy_name: str = ""
-    run_status: str = ""
-    deployment_status: str = ""
-    created_at: Optional[str] = None
-    stopped_at: Optional[str] = None
-    realized_pnl_quote: float = 0.0
-    unrealized_pnl_quote: float = 0.0
-    global_pnl_quote: float = 0.0
-    volume_traded: float = 0.0
-    num_controllers: int = 0
-    # Path to this run's archived sqlite database, when one survived the bot.
-    # Present iff the run has a deep history to open; the archived-bot routes take
-    # it as their ``db_path``.
-    archive_db_path: Optional[str] = None
-    # The controller config ids this run was *deployed with*, straight from its
-    # own ``deployment_config``.
-    #
-    # This is the authoritative run -> controller mapping, and it is the only one
-    # that exists for a run old enough to have no performance snapshots left: the
-    # deployment declared these ids before the bot ever traded. It is what lets a
-    # closed executor be attributed to the run that created it rather than to
-    # whichever live controller happens to share its config id (FEAT-089).
-    controller_ids: list[str] = []
-    # Whether this run is the live fleet rather than history.
-    #
-    # Derived, because ``run_status`` cannot answer it: upstream never writes
-    # ``RUNNING``, and the eight bots trading right now on a real server all
-    # report the literal string ``CREATED``. A container that is deployed and has
-    # no stop time is what "still running" actually means here.
-    is_live: bool = False
 
 
 class BotRunsResponse(BaseModel):
@@ -455,10 +404,27 @@ class PerformanceCapabilityResponse(BaseModel):
 
 
 class CreateExecutorRequest(BaseModel):
+    """The browser's create body — and deliberately no ``controller_id``.
+
+    It carried one, defaulting to ``"main"``, which read as the attribution hook
+    and was not: the route passes only these three fields to
+    :func:`condor.fetchers.executors.create_executor`, whose signature has no
+    such argument, so nothing could have honoured it. The ``main`` a
+    browser-made executor comes back under is the trading API's own server-side
+    default, applied because the client omits the field entirely — not something
+    this model set.
+
+    Attribution is the MCP path's: ``executor_create.py`` passes an agent's
+    ``controller_id`` straight to ``client.executors.create_executor``. Putting
+    the field back here without threading it through the fetcher would only look
+    like it worked. Note also that the dashboard's own executor views query
+    ``controller_ids=["main"]``, so a browser-stamped executor would vanish from
+    the page that created it — wiring this is a feature decision, not a typo fix.
+    """
+
     executor_type: str
     config: dict[str, Any]
     account_name: str = "master_account"
-    controller_id: str = "main"
 
 
 class ExecutorInfo(BaseModel):
@@ -499,8 +465,6 @@ class ExecutorInfo(BaseModel):
         """
         if not isinstance(ex, dict):
             return None
-
-        from condor.fetchers.executors import build_executor_row, get_executor_type
 
         row = build_executor_row(ex)
         return cls(
@@ -673,66 +637,6 @@ class ArchivedBotSummary(BaseModel):
     end_time: Optional[float] = None
 
 
-class PnlPoint(BaseModel):
-    timestamp: float
-    pnl: float
-
-
-class NormalizedExecutor(BaseModel):
-    id: str = ""
-    type: str = ""
-    connector: str = ""
-    trading_pair: str = ""
-    side: str = ""
-    status: str = ""
-    close_type: str = ""
-    pnl: float = 0.0
-    volume: float = 0.0
-    timestamp: float = 0.0
-    close_timestamp: float = 0.0
-    entry_price: float = 0.0
-    current_price: float = 0.0
-    cum_fees_quote: float = 0.0
-    net_pnl_pct: float = 0.0
-    controller_id: str = ""
-    custom_info: dict[str, Any] = {}
-    config: dict[str, Any] = {}
-    # USD value of one unit of this market's quote currency. `pnl`, `volume` and
-    # `cum_fees_quote` above stay quote-denominated so prices on the same row
-    # remain comparable to the market's candles; renderers multiply by this.
-    usd_rate: float = 1.0
-
-
-class ArchivedBotPerformance(BaseModel):
-    bot_name: str
-    db_path: str
-    total_pnl: float = 0.0
-    total_fees: float = 0.0
-    total_volume: float = 0.0
-    trade_count: int = 0
-    buy_count: int = 0
-    sell_count: int = 0
-    pnl_by_pair: dict[str, float] = {}
-    cumulative_pnl: list[PnlPoint] = []
-    trading_pairs: list[str] = []
-    exchanges: list[str] = []
-    executors: list[NormalizedExecutor] = []
-    primary_connector: str = ""
-    primary_trading_pair: str = ""
-    executor_count: int = 0
-    # Quote currency of the primary market, for labelling a converted figure.
-    quote_currency: str = ""
-    # USD rate per quote currency seen in the run.
-    usd_rates: dict[str, float] = {}
-    # False when some quote had no path to USD and its figures are reported at
-    # face value in their own currency rather than silently passed off as USD.
-    converted: bool = True
-    # Which source the headline stats above were computed from. An archived
-    # database with an empty trades table falls back to executors, and the UI
-    # labels the count card accordingly instead of claiming zero trades.
-    stats_source: str = "trades"
-
-
 class ArchivedControllerRollup(BaseModel):
     """What one controller did inside an archived run. Money is USD.
 
@@ -837,6 +741,13 @@ class GatewayNetworkUpdateRequest(BaseModel):
     # Partial network config (snake_case keys, e.g. {"node_url": "https://..."}).
     # The Gateway validates values against its own JSON schema.
     config: dict[str, Any]
+
+    @field_validator("config")
+    @classmethod
+    def _strip_string_values(cls, v: dict[str, Any]) -> dict[str, Any]:
+        # Gateway stores strings verbatim, so a pasted " https://..." nodeURL
+        # saves fine and then breaks every Solana call (hummingbot-api#233).
+        return {k: val.strip() if isinstance(val, str) else val for k, val in v.items()}
 
 
 class GatewayWalletAddRequest(BaseModel):

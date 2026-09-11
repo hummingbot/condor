@@ -13,6 +13,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
 
+from condor.asyncutil import TaskSet
 from condor.llm.openrouter_models import fetch_models
 from condor.llm.options import DEFAULT_AGENT
 from condor.notifications import Notification, register_push_sink
@@ -29,6 +30,7 @@ from condor.runtime import client as runtime
 from condor.runtime import (
     conversations,
     secrets,
+    slot_of,
 )
 from condor.runtime.binding import remember_model_choice
 from condor.runtime.confirmations import (
@@ -229,6 +231,10 @@ def _to_ws_message(event: RuntimeEvent, slot_id: str) -> dict | None:
             "event": "prompt_done",
             "slot_id": slot_id,
             "stop_reason": event.stop_reason,
+            # What this turn cost (FEAT-120), added to the total the dashboard
+            # seeded from the conversation's meta. An added key: absent (null)
+            # on a DONE the funnel did not charge, which the client skips.
+            "usage": event.field("usage"),
         }
     if event.type == EventType.ERROR:
         return {
@@ -237,19 +243,6 @@ def _to_ws_message(event: RuntimeEvent, slot_id: str) -> dict | None:
             "message": event.field("message", "Stream error"),
         }
     return None
-
-
-def _slot_of(session_key: str) -> str:
-    """The slot a registry entry belongs to, or "" if the key is not canonical.
-
-    Never raises: a confirmation that cannot be attributed is still worth
-    delivering unaddressed, which is what the dashboard did for all of them
-    before this became a field.
-    """
-    try:
-        return SessionKey.parse(session_key).slot
-    except ValueError:
-        return ""
 
 
 async def _send(ws: WebSocket, event: dict) -> None:
@@ -288,14 +281,22 @@ class WebSocketChannel:
     now the registry's id rather than a locally-minted one, which is what lets
     the same request also be answered from Telegram or over HTTP after a page
     reload kills this socket.
+
+    Addressed like a turn's events rather than pinned to the socket that asked:
+    the request outlives its connection, so when that socket is gone the prompt
+    goes to whichever tabs the user still has open. With none open it is a
+    no-op and the entry stays pending in the registry, which is what the next
+    page load reads back over ``GET /api/v1/confirmations``.
     """
 
     def __init__(self, ws: WebSocket):
         self._ws = ws
 
     async def deliver(self, pending: PendingConfirmation) -> None:
-        await _send(
+        wire = pending.to_wire()
+        await _send_turn(
             self._ws,
+            pending.user_id,
             {
                 "event": "permission_request",
                 # Addressed like every other chat event (CORR-101). One socket
@@ -303,12 +304,18 @@ class WebSocketChannel:
                 # slot the dashboard can only render the approval in whichever
                 # one is on screen — and a click meant for one agent, on one
                 # trading server, authorizes a live tool call in another.
-                "slot_id": _slot_of(pending.session_key),
+                "slot_id": slot_of(pending.session_key),
                 "request_id": pending.id,
                 "summary": pending.summary,
                 # Which agent, on which server, is asking. The slot addresses
                 # the request; this says out loud what the user is authorizing.
                 "origin": pending.origin,
+                # The call itself and the time left to answer it, so the prompt
+                # previews a command that is paused rather than reading like a
+                # notice the user can leave for later.
+                "tool": wire["tool"],
+                "input": wire["input"],
+                "expires_in": wire["expires_in"],
             },
         )
 
@@ -441,17 +448,24 @@ async def chat_websocket(ws: WebSocket, token: str | None = Query(default=None))
     sessions = await _get_user_sessions(user_id)
     await _send(ws, {"event": "sessions_list", "sessions": sessions})
 
-    # Background tasks so long-running operations don't block the receive loop
-    bg_tasks: set[asyncio.Task] = set()
+    # Background tasks so long-running operations don't block the receive loop.
+    #
+    # Tracked by the shared helper rather than by a hand-rolled set (CORR-583):
+    # the old tracker attached only ``discard``, so nobody ever read the task's
+    # exception and a handler that raised — a disk error minting a conversation,
+    # a dead subprocess on abort — surfaced only as asyncio's GC-time "Task
+    # exception was never retrieved", on no logger and naming no action. TaskSet
+    # logs it here, named by the action that failed. Cancellation is not a
+    # failure and stays silent, which is what the disconnect below does to every
+    # task that is not a turn.
+    bg_tasks = TaskSet(log, f"Chat WS handler %s failed for user {user_id}: %s")
     # The subset of those that are a *turn*. A turn is the one piece of work
     # here that belongs to the conversation rather than to this connection, so
     # it is the one thing a disconnect must not cancel.
     turn_tasks: set[asyncio.Task] = set()
 
-    def _run_bg(coro, *, is_turn: bool = False):
-        task = asyncio.create_task(coro)
-        bg_tasks.add(task)
-        task.add_done_callback(bg_tasks.discard)
+    def _run_bg(coro, action: str, *, is_turn: bool = False):
+        task = bg_tasks.track(asyncio.create_task(coro), action)
         if is_turn:
             turn_tasks.add(task)
             task.add_done_callback(turn_tasks.discard)
@@ -468,20 +482,20 @@ async def chat_websocket(ws: WebSocket, token: str | None = Query(default=None))
             action = msg.get("action")
 
             if action == "start_session":
-                _run_bg(_handle_start_session(ws, user_id, msg))
+                _run_bg(_handle_start_session(ws, user_id, msg), action)
             elif action == "resume_conversation":
-                _run_bg(_handle_resume_conversation(ws, user_id, msg))
+                _run_bg(_handle_resume_conversation(ws, user_id, msg), action)
             elif action == "send_message":
-                _run_bg(_handle_send_message(ws, user_id, msg), is_turn=True)
+                _run_bg(_handle_send_message(ws, user_id, msg), action, is_turn=True)
             elif action == "destroy_session":
-                _run_bg(_handle_destroy_session(ws, user_id, msg))
+                _run_bg(_handle_destroy_session(ws, user_id, msg), action)
             elif action == "list_sessions":
                 sessions = await _get_user_sessions(user_id)
                 await _send(ws, {"event": "sessions_list", "sessions": sessions})
             elif action == "resolve_permission":
                 await _handle_resolve_permission(user_id, msg)
             elif action == "abort_prompt":
-                _run_bg(_handle_abort_prompt(ws, user_id, msg))
+                _run_bg(_handle_abort_prompt(ws, user_id, msg), action)
             else:
                 await _send(
                     ws, {"event": "error", "message": f"Unknown action: {action}"}

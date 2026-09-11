@@ -2,7 +2,7 @@ import { Activity, Bot, ChevronDown, ChevronRight, Circle, Layers, Server } from
 import { useMemo, type ReactNode } from "react";
 
 import { agentBucketLabel } from "@/components/perf/agentFilter";
-import { DEED_TITLE, provenanceOf } from "@/lib/agent-attribution";
+import { DEED_TITLE, provenanceOf, type FleetOwner } from "@/lib/agent-attribution";
 import { agentColor } from "@/lib/agentColor";
 import { formatCurrencyPnl, formatCurrencyVolume, pnlColor, shortBotName } from "@/lib/formatters";
 import type { ConvertQuote, PerfNode } from "@/lib/perf-tree";
@@ -104,11 +104,21 @@ function subtitle(node: PerfNode, showBot: boolean): string {
     }
     case "bot":
       return `${n} controller${n !== 1 ? "s" : ""}`;
-    // Counted by dead controller id rather than by executor: that is the
-    // number a reader who opens this row is actually choosing between, and it
-    // is usually far smaller than the executor count folded beneath it.
-    case "orphans":
-      return `${n} controller${n !== 1 ? "s" : ""} left no record`;
+    // Counted in executors, and credited to no controller, because that is the
+    // whole of what this row can prove. Its buckets are keyed by the
+    // `controller_id` the executor record carries, and that id is not a
+    // controller: `main` is the trading API's own default, stamped on every
+    // position opened through the browser — which never sends one — and an
+    // MCP-created position carries the calling agent's session id instead.
+    // Neither names a deployment, so the row cannot say a controller existed,
+    // let alone that it lost its record; the earlier wording sent the reader
+    // hunting a deployment that never happened. The executor count is the one
+    // number it can stand behind, and it is the number the buckets below add
+    // up to.
+    case "orphans": {
+      const execs = node.leaves.length;
+      return `${execs} executor${execs !== 1 ? "s" : ""} · under no controller`;
+    }
     // Counted in executors, because that is all a group ever holds: it exists
     // precisely for the leaves no controller claims, so the bot row's wording
     // would name a level that is not there.
@@ -129,6 +139,9 @@ function subtitle(node: PerfNode, showBot: boolean): string {
   }
 }
 
+/** No fleet map. One shared array, so a default prop is not a new one per render. */
+const NO_OWNERS: readonly FleetOwner[] = [];
+
 interface RowProps {
   node: PerfNode;
   depth: number;
@@ -136,6 +149,8 @@ interface RowProps {
   /** The nodes whose children are drawn. Everything else is shut. */
   open: Set<string>;
   showBot: boolean;
+  /** The fleet map, so an owner row can be named by the same rule everywhere. */
+  owners: readonly FleetOwner[];
   onSelect: (id: string) => void;
   onToggleOpen: (id: string) => void;
   cv: ConvertQuote;
@@ -152,7 +167,7 @@ interface RowProps {
  * Stop button on the row posts it — so the shortening a 288px column needs
  * happens here rather than in the tree.
  */
-function rowLabel(node: PerfNode): string {
+function rowLabel(node: PerfNode, owners: readonly FleetOwner[]): string {
   // A group's label is the controller id its executors carry, which is `main`
   // for a hand-opened position but a bot-shaped name for one a stopped
   // deployment left behind — so it gets the same shortening, which is a no-op
@@ -165,8 +180,10 @@ function rowLabel(node: PerfNode): string {
   // `agent / strategy`, the same two slugs the bot names beneath it are built
   // from, so the column can be matched by eye. The two rows that are *not* a
   // run — everything the fleet map could not credit, split in two by FEAT-106 —
-  // say what they are instead, which is what `agentBucketLabel` is for.
-  if (node.kind === "agent") return agentBucketLabel(node.label);
+  // say what they are instead, and a pseudo-run (a chat, a delegation, the
+  // dashboard) has no bot name to be matched against and says its words. All
+  // three judgements are `agentBucketLabel`'s, not this file's.
+  if (node.kind === "agent") return agentBucketLabel(node.label, owners);
   return node.label;
 }
 
@@ -184,6 +201,7 @@ function ScopeRow({
   activeId,
   open,
   showBot,
+  owners,
   onSelect,
   onToggleOpen,
   cv,
@@ -222,7 +240,7 @@ function ScopeRow({
           node.children.map((child) => (
             <ScopeRow
               key={child.id}
-              {...{ activeId, open, showBot, onSelect, onToggleOpen, cv, currencySymbol, now, compact, renderAction }}
+              {...{ activeId, open, showBot, owners, onSelect, onToggleOpen, cv, currencySymbol, now, compact, renderAction }}
               node={child}
               depth={depth + 1}
             />
@@ -264,7 +282,7 @@ function ScopeRow({
               }`}
               title={node.label}
             >
-              {rowLabel(node)}
+              {rowLabel(node, owners)}
             </span>
             {/* A namespace answer is a proof and a deed answer is a report, and
                 a reader about to stop a bot deserves to know which one they are
@@ -306,7 +324,7 @@ function ScopeRow({
         node.children.map((child) => (
           <ScopeRow
             key={child.id}
-            {...{ activeId, open, showBot, onSelect, onToggleOpen, cv, currencySymbol, now, compact, renderAction }}
+            {...{ activeId, open, showBot, owners, onSelect, onToggleOpen, cv, currencySymbol, now, compact, renderAction }}
             node={child}
             depth={depth + 1}
           />
@@ -340,6 +358,7 @@ export function ScopeTree({
   activeId,
   open,
   showBot = true,
+  owners = NO_OWNERS,
   onSelect,
   onToggleOpen,
   cv,
@@ -353,6 +372,14 @@ export function ScopeTree({
   open: Set<string>;
   /** Whether a controller row names its bot — pointless when only one is in scope. */
   showBot?: boolean;
+  /**
+   * The fleet map, for naming an owner row.
+   *
+   * Optional, and without it an owner row falls back to its run key's slugs —
+   * the same honest degradation `ownerTitle` makes. A tree drawn beside the map
+   * should pass it, or a pseudo-run reads as `condor / ui`.
+   */
+  owners?: readonly FleetOwner[];
   onSelect: (id: string) => void;
   onToggleOpen: (id: string) => void;
   cv: ConvertQuote;
@@ -389,6 +416,7 @@ export function ScopeTree({
           activeId={activeId}
           open={open}
           showBot={showBot}
+          owners={owners}
           onSelect={onSelect}
           onToggleOpen={onToggleOpen}
           cv={cv}

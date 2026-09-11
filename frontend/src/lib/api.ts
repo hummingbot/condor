@@ -23,6 +23,27 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json();
 }
 
+/**
+ * The query string for a set of optional parameters, `?` included — or `""`
+ * when none of them is set.
+ *
+ * Every optional query parameter in this file is skipped and stringified here,
+ * so a field added to an endpoint's parameter type is carried without a second
+ * edit. Spelling each name a second time in a `qs.set` line is what let a
+ * filter compile cleanly and never reach the server (READ-333).
+ *
+ * `undefined`, `null` and `""` are omitted; everything else is `String()`d, so
+ * a deliberate `0` is sent rather than dropped.
+ */
+function query(params: object): string {
+  const qs = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null && value !== "") qs.set(key, String(value));
+  }
+  const q = qs.toString();
+  return q ? `?${q}` : "";
+}
+
 /** A finished background task, addressed to the user rather than to a chat. */
 export interface AppNotification {
   id: string;
@@ -1048,12 +1069,11 @@ export interface AgentDetail {
  * `getAgentMemory`), so opening the panel never pulls the whole library.
  */
 /**
- * One tool this agent's seat actually mounts (FEAT-091).
+ * One tool of this agent's seat's ring (FEAT-091).
  *
- * Not the AGENT.md allowlist: that is only enforced for pydantic-ai model keys,
- * and an ACP bridge (claude-code, gemini, copilot) runs unrestricted — so for
- * most seats the list is decoration and this row is the real surface. Switching
- * one off means the next session does not register it at all.
+ * Two things keep it from being mounted, on every backend alike: `muted`, and —
+ * when the agent names an allowlist (`tools_unrestricted` false) — `allowlisted`
+ * being false. Either way the next session does not register it at all.
  */
 export interface ToolCard {
   name: string;
@@ -1062,7 +1082,7 @@ export interface ToolCard {
   description: string;
   /** Switched off by the operator — the next session never mounts it. */
   muted: boolean;
-  /** The AGENT.md allowlist names it (the pydantic-ai filter, not the mount). */
+  /** The AGENT.md allowlist names it. Under an allowlist, a row it omits is never mounted. */
   allowlisted: boolean;
 }
 
@@ -1725,6 +1745,31 @@ export interface ConversationMeta {
   share_id?: string;
   share_revision?: number;
   shared_at?: string | null;
+  /** Running token total (FEAT-120). `{}` or absent on a conversation older
+   *  than the measurement, which reads as "not measured", not as zero. */
+  usage?: Partial<TokenUsage>;
+}
+
+/**
+ * What a model read and wrote — the backend's `TokenUsage.to_dict()`.
+ *
+ * `input_tokens` is inclusive of cache on every backend, so `total_tokens` is
+ * everything read and written; the two `cache_*` counters are subsets of it.
+ * `cost_usd` is an estimate at API prices, never a spend — a Claude
+ * subscription is not billed per token — and `unpriced_turns` counts the runs
+ * no price was known for (a local model), which makes the cost a lower bound.
+ * The `context_*` pair is the latest reading, not a sum.
+ */
+export interface TokenUsage {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  cost_usd: number;
+  unpriced_turns: number;
+  context_used: number | null;
+  context_size: number | null;
+  total_tokens: number;
 }
 
 export interface ConversationTurn {
@@ -1983,17 +2028,8 @@ function fetchControllerPerformanceHistoryPage(
   } = {},
   init?: RequestInit,
 ) {
-  const qs = new URLSearchParams();
-  if (params.bot_name) qs.set("bot_name", params.bot_name);
-  if (params.controller_id) qs.set("controller_id", params.controller_id);
-  if (params.start_time) qs.set("start_time", params.start_time);
-  if (params.end_time) qs.set("end_time", params.end_time);
-  if (params.interval) qs.set("interval", params.interval);
-  if (params.limit) qs.set("limit", String(params.limit));
-  if (params.cursor) qs.set("cursor", params.cursor);
-  const q = qs.toString();
   return apiFetch<ControllerPerformanceHistoryResponse>(
-    `/api/v1/servers/${encodeURIComponent(server)}/controller-performance/history${q ? `?${q}` : ""}`,
+    `/api/v1/servers/${encodeURIComponent(server)}/controller-performance/history${query(params)}`,
     init,
   );
 }
@@ -2192,12 +2228,8 @@ function fetchPerformanceHistoryPage(
   params: PerformanceHistoryQuery & { limit?: number; cursor?: string },
   init?: RequestInit,
 ) {
-  const qs = new URLSearchParams();
-  for (const [key, value] of Object.entries(params)) {
-    if (value !== undefined && value !== null && value !== "") qs.set(key, String(value));
-  }
   return apiFetch<PerformanceHistoryResponse>(
-    `/api/v1/servers/${encodeURIComponent(server)}/performance/history?${qs.toString()}`,
+    `/api/v1/servers/${encodeURIComponent(server)}/performance/history${query(params)}`,
     init,
   );
 }
@@ -2263,6 +2295,22 @@ export async function fetchPerformanceHistoryAll(
 }
 
 // ── API functions ──
+
+/** One approval still waiting on this user, as `GET /api/v1/confirmations` lists it. */
+export interface PendingConfirmation {
+  id: string;
+  /** The conversation that asked, so the prompt renders where the click belongs. */
+  slot_id: string;
+  summary: string;
+  origin: string;
+  expires_at: number;
+  /** Seconds until the runtime denies it, measured on the server's clock. */
+  expires_in?: number;
+  /** The bare tool name the gate judged. */
+  tool?: string;
+  /** Its arguments, or null when they could not be read. */
+  input?: Record<string, unknown> | null;
+}
 
 export const api = {
   getServers: () => apiFetch<ServerInfo[]>("/api/v1/servers"),
@@ -2484,16 +2532,8 @@ export const api = {
       offset?: number;
     } = {},
   ) => {
-    const qs = new URLSearchParams();
-    if (params.bot_name) qs.set("bot_name", params.bot_name);
-    if (params.run_status) qs.set("run_status", params.run_status);
-    if (params.deployment_status)
-      qs.set("deployment_status", params.deployment_status);
-    if (params.limit) qs.set("limit", String(params.limit));
-    if (params.offset) qs.set("offset", String(params.offset));
-    const q = qs.toString();
     return apiFetch<BotRunsResponse>(
-      `/api/v1/servers/${encodeURIComponent(server)}/bot-runs${q ? `?${q}` : ""}`,
+      `/api/v1/servers/${encodeURIComponent(server)}/bot-runs${query(params)}`,
     );
   },
 
@@ -2549,15 +2589,8 @@ export const api = {
       limit?: number;
     },
   ) => {
-    const qs = new URLSearchParams();
-    if (params?.executor_type) qs.set("executor_type", params.executor_type);
-    if (params?.trading_pair) qs.set("trading_pair", params.trading_pair);
-    if (params?.status) qs.set("status", params.status);
-    if (params?.controller_id) qs.set("controller_id", params.controller_id);
-    if (params?.limit) qs.set("limit", String(params.limit));
-    const q = qs.toString();
     return apiFetch<ExecutorInfo[]>(
-      `/api/v1/servers/${encodeURIComponent(server)}/executors${q ? `?${q}` : ""}`,
+      `/api/v1/servers/${encodeURIComponent(server)}/executors${query(params ?? {})}`,
     );
   },
 
@@ -2577,25 +2610,20 @@ export const api = {
       controller_id?: string;
     } = {},
   ) => {
-    const qs = new URLSearchParams();
-    if (params.cursor) qs.set("cursor", params.cursor);
-    qs.set("limit", String(params.limit ?? 50));
-    if (params.executor_type) qs.set("executor_type", params.executor_type);
-    if (params.trading_pair) qs.set("trading_pair", params.trading_pair);
-    if (params.status) qs.set("status", params.status);
-    if (params.controller_id) qs.set("controller_id", params.controller_id);
     return apiFetch<{ executors: ExecutorInfo[]; next_cursor: string | null }>(
-      `/api/v1/servers/${encodeURIComponent(server)}/executors/page?${qs.toString()}`,
+      `/api/v1/servers/${encodeURIComponent(server)}/executors/page${query({ ...params, limit: params.limit ?? 50 })}`,
     );
   },
 
+  // No `controller_id`: the create route reads only these three fields, so an
+  // id sent here would be dropped and the executor would come back under the
+  // trading API's `main` default anyway. See `run-attribution.ts`.
   createExecutor: (
     server: string,
     data: {
       executor_type: string;
       config: Record<string, unknown>;
       account_name?: string;
-      controller_id?: string;
     },
   ) =>
     apiFetch<{ status: string; executor_id: string }>(
@@ -2632,11 +2660,6 @@ export const api = {
   getConsolidatedPositions: (server: string) =>
     apiFetch<ConsolidatedPositionsResponse>(
       `/api/v1/servers/${encodeURIComponent(server)}/positions`,
-    ),
-
-  getConnectors: (server: string) =>
-    apiFetch<string[]>(
-      `/api/v1/servers/${encodeURIComponent(server)}/market/connectors`,
     ),
 
   getConnectedExchanges: (server: string) =>
@@ -3357,15 +3380,9 @@ export const api = {
     limit?: number;
     offset?: number;
   }) => {
-    const qs = new URLSearchParams();
-    if (params?.source_type) qs.set("source_type", params.source_type);
-    if (params?.tag) qs.set("tag", params.tag);
-    if (params?.search) qs.set("search", params.search);
-    if (params?.agent) qs.set("agent", params.agent);
-    if (params?.limit) qs.set("limit", String(params.limit));
-    if (params?.offset) qs.set("offset", String(params.offset));
-    const q = qs.toString();
-    return apiFetch<ReportsListResponse>(`/api/v1/reports${q ? `?${q}` : ""}`);
+    return apiFetch<ReportsListResponse>(
+      `/api/v1/reports${query(params ?? {})}`,
+    );
   },
 
   getReport: (id: string) =>
@@ -3918,6 +3935,19 @@ export const api = {
       `/api/v1/settings/custom-providers/${encodeURIComponent(name)}`,
       { method: "DELETE" },
     ),
+
+  // ── Pending approvals (FEAT-010) ──
+
+  /**
+   * Approvals this user has not answered yet, scoped to the JWT server-side.
+   *
+   * The WS `permission_request` event is the low-latency path and dies with the
+   * socket that carried it; this is how a page that just reloaded mid-approval
+   * finds out an agent is still waiting on it. Answering still goes over the
+   * socket — the registry is the same one either way.
+   */
+  getPendingConfirmations: () =>
+    apiFetch<PendingConfirmation[]>("/api/v1/confirmations"),
 
   // ── Notifications (FEAT-048) ──
 

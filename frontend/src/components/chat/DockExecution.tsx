@@ -9,6 +9,7 @@ import {
   fleetRows,
   rowHref,
   dueInSec,
+  tickCountdownLabel,
   type FleetRow,
 } from "@/components/agent/workspace/fleet";
 import { ControllerToggle } from "@/components/perf/ControllerToggle";
@@ -19,9 +20,9 @@ import {
   visibleRows,
   type ExecutionRow,
 } from "@/components/chat/executionTree";
+import { useCoarseClock } from "@/hooks/useCoarseClock";
 import { useFleetData } from "@/hooks/useFleetData";
 import { useSeconds } from "@/hooks/useSeconds";
-import { countdown } from "@/lib/agent-attribution";
 import { api } from "@/lib/api";
 import { controllerKey } from "@/lib/controller-identity";
 import {
@@ -109,8 +110,8 @@ function clipBotName(name: string): string {
  *
  * The deployed fleet, in the shape the perf browser folds it, read **owner
  * first**: one row per agent, each expanding into the bots, controllers and
- * executors that agent deployed, and then the controllers nobody owns under
- * *Outside Condor* / *Before the ledger*. Every row deep-links into `/bots` by
+ * executors that agent deployed, and then the records nobody owns under
+ * *No record found* / *Before the ledger*. Every row deep-links into `/bots` by
  * the `?scope=` id the browser reads (FEAT-084, FEAT-086) — and builds that id
  * by calling `controllerNodeId` on the same `PerfLeaf` the browser folds, so
  * the two can only drift if the browser's own tree does.
@@ -182,8 +183,24 @@ export function DockExecution({
   // this panel that moves on its own, and an interval running under a fleet
   // that is idle is an interval running for nothing.
   const anyRunning = agents.some((agent) => agent.status === "running");
-  const now = useSeconds(anyRunning);
-  const nowSec = now / 1000;
+  const nowSec = useSeconds(anyRunning) / 1000;
+
+  /**
+   * The clock the *fold* measures runtimes against — a minute, not a second.
+   *
+   * Two clocks rather than one, because the panel asks two different questions
+   * of the time. The countdown above is "how long until the next tick", which
+   * is a number that has to move every second to be worth printing. This one is
+   * "how long has this been running", which reaches the screen only through
+   * `formatRuntimeHours` — 0.1h above an hour, whole minutes below it — so a
+   * per-second value prints the same characters for sixty consecutive renders.
+   *
+   * They used to be the same clock, and `now` is a dependency of the `rows`
+   * memo: the panel rebuilt the whole tree and re-folded every agent, bot and
+   * controller once a second to arrive at a byte-identical fold (PERF-342).
+   * The tree build now runs on data changes and once a minute.
+   */
+  const now = useCoarseClock();
 
   /**
    * Everything trading, in the browser's one vocabulary and its one attribution.
@@ -214,8 +231,8 @@ export function DockExecution({
   const currencySymbol = fleet.currencySymbol ?? "$";
 
   const rows = useMemo(
-    () => executionRows({ leaves, deeds: fleet.deeds, agents, convert, now }),
-    [leaves, fleet.deeds, agents, convert, now],
+    () => executionRows({ leaves, deeds: fleet.deeds, agents, owners: fleet.owners, convert, now }),
+    [leaves, fleet.deeds, agents, fleet.owners, convert, now],
   );
 
   // Only what the reader has actually clicked; the default for everything else
@@ -601,7 +618,7 @@ function AgentRow({
               data-agent-due
               className={`shrink-0 font-mono ${due <= 0 ? "text-amber-400" : ""}`}
             >
-              {due > 0 ? `next in ${countdown(due)}` : `overdue ${countdown(-due)}`}
+              {tickCountdownLabel(due)}
             </span>
           )}
           {live.lastDid ? (
@@ -696,13 +713,22 @@ function ControllerRow({
   const scope = controllerNodeId(leaf) ?? row.id;
   const stopped = leaf.status === "stopped";
 
+  /** The row said in full — its cell's tooltip, and its accessible name. */
+  const described = `${leaf.label} on ${leaf.bot}${stopped ? " — paused" : ""}`;
+
   return (
     <tr
       data-controller-row
       data-paused={stopped ? "" : undefined}
       role="button"
       tabIndex={0}
-      title={`${leaf.label} on ${leaf.bot}${stopped ? " — paused" : ""}`}
+      // Named rather than titled. A `title` here was a tooltip the browser
+      // anchored to the *row* — and a focusable `<tr>` inside a scrolled table
+      // is the one box Chrome gets wrong: clicking a row put a wrapped bubble
+      // up at the table's top corner, hundreds of pixels from what it
+      // described. The name is what a `role="button"` actually needs; the
+      // tooltip belongs to the cell that truncates, one line down.
+      aria-label={described}
       onClick={() => onOpen(scope)}
       onKeyDown={(e) => {
         if (e.key !== "Enter" && e.key !== " ") return;
@@ -718,10 +744,11 @@ function ControllerRow({
     >
       {/* The column that absorbs the slack, and the only one allowed to
           truncate: two rows under the same bot are told apart by nothing else,
-          so it gets every pixel the numbers do not need — and the row's `title`
+          so it gets every pixel the numbers do not need — and its own `title`
           says it in full when even that is not enough. It is indented by its
           depth, which is what makes the nesting readable without a rule. */}
       <td
+        title={described}
         className="truncate py-0.5 pr-1.5"
         style={{ paddingLeft: 12 + row.depth * 10 }}
       >

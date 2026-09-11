@@ -4,8 +4,6 @@ from . import subjects
 from .builder import LiveReport, ReportBuilder
 from .rendering import hydrate
 from .store import (
-    CHARTS_DIR,
-    INDEX_FILE,
     MAX_REPORTS,
     attribute_owner,
     attribute_to,
@@ -26,8 +24,6 @@ __all__ = [
     "ReportBuilder",
     "LiveReport",
     "subjects",
-    "CHARTS_DIR",
-    "INDEX_FILE",
     "MAX_REPORTS",
     "attribute_owner",
     "attribute_to",

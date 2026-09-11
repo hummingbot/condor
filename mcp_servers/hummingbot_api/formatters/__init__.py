@@ -19,11 +19,7 @@ from .base import (
     format_time_only,
     format_timestamp,
     get_field,
-    get_formatted_currency,
-    get_formatted_number,
-    get_formatted_percentage,
     get_timestamp_field,
-    get_truncated,
     truncate_address,
     truncate_string,
 )
@@ -51,7 +47,6 @@ from .gateway import (
     format_clmm_result,
     format_gateway_clmm_pool_result,
     format_gateway_config_result,
-    format_gateway_container_result,
     format_gateway_swap_result,
 )
 
@@ -61,20 +56,21 @@ from .market_data import (
 )
 
 # Portfolio formatters
-from .portfolio import format_portfolio_as_table
+from .portfolio import format_lp_positions_table, format_portfolio_as_table
 
 # Table builder for creating consistent tables
-from .table_builder import ColumnDef, TableBuilder, create_simple_table
+from .table_builder import ColumnDef, TableBuilder
 
 # Trading formatters
 from .trading import format_orders_as_table, format_positions_as_table
 
 __all__ = [
     # Gateway formatters
-    "format_gateway_container_result",
     "format_gateway_config_result",
     "format_gateway_swap_result",
     "format_gateway_clmm_pool_result",
+    "format_amm_result",
+    "format_clmm_result",
     # Base utilities
     "format_currency",
     "format_number",
@@ -83,17 +79,12 @@ __all__ = [
     "format_time_only",
     "format_timestamp",
     "get_field",
-    "get_formatted_currency",
-    "get_formatted_number",
-    "get_formatted_percentage",
     "get_timestamp_field",
-    "get_truncated",
     "truncate_address",
     "truncate_string",
     # Table builder
     "ColumnDef",
     "TableBuilder",
-    "create_simple_table",
     # Trading formatters
     "format_orders_as_table",
     "format_positions_as_table",
@@ -105,6 +96,7 @@ __all__ = [
     "format_controller_state",
     # Portfolio formatters
     "format_portfolio_as_table",
+    "format_lp_positions_table",
     # Executor formatters
     "format_executor_types_table",
     "format_executors_table",

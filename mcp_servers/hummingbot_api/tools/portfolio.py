@@ -12,7 +12,10 @@ import logging
 from typing import Any, Literal
 
 from mcp_servers.hummingbot_api.exceptions import ToolError
-from mcp_servers.hummingbot_api.formatters import format_portfolio_as_table
+from mcp_servers.hummingbot_api.formatters import (
+    format_lp_positions_table,
+    format_portfolio_as_table,
+)
 from mcp_servers.hummingbot_api.hummingbot_client import HummingbotClient
 from mcp_servers.hummingbot_api.tools import trading as trading_tools
 
@@ -343,55 +346,7 @@ async def get_portfolio_overview(
                 open_positions = lp_positions
 
                 # Format LP positions - show all open positions with real-time data
-                if open_positions:
-                    lp_table_lines = ["Status: OPEN positions", ""]
-                    lp_table_lines.append(
-                        "connector | trading_pair | lower_price | upper_price | position_address"
-                    )
-                    lp_table_lines.append("-" * 100)
-
-                    for pos in open_positions[:10]:  # Show up to 10 open positions
-                        connector = pos.get("connector", "N/A")
-                        trading_pair = pos.get("trading_pair", "N/A")
-                        lower_price = pos.get("lower_price", "N/A")
-                        upper_price = pos.get("upper_price", "N/A")
-                        position_address = pos.get("position_address", "N/A")
-
-                        # Format prices
-                        if lower_price != "N/A" and isinstance(
-                            lower_price, (int, float, str)
-                        ):
-                            try:
-                                lower_price = f"{float(lower_price):.4f}"
-                            except:
-                                pass
-
-                        if upper_price != "N/A" and isinstance(
-                            upper_price, (int, float, str)
-                        ):
-                            try:
-                                upper_price = f"{float(upper_price):.4f}"
-                            except:
-                                pass
-
-                        # Truncate position address
-                        if position_address != "N/A" and len(position_address) > 20:
-                            position_address = (
-                                f"{position_address[:8]}...{position_address[-6:]}"
-                            )
-
-                        lp_table_lines.append(
-                            f"{connector[:10]:10} | {trading_pair[:15]:15} | {str(lower_price)[:11]:11} | {str(upper_price)[:11]:11} | {position_address}"
-                        )
-
-                    if len(open_positions) > 10:
-                        lp_table_lines.append(
-                            f"... and {len(open_positions) - 10} more open positions"
-                        )
-
-                    lp_table = "\n".join(lp_table_lines)
-                else:
-                    lp_table = "No active LP positions found"
+                lp_table = format_lp_positions_table(open_positions)
 
                 sections.append(
                     {

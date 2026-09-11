@@ -133,11 +133,12 @@ export function MoneyView({
         strategy,
         leaves,
         deeds: fleet.deeds,
+        owners: fleet.owners,
         convert: cv,
         now,
         attributed,
       }),
-    [slug, strategy, leaves, fleet.deeds, cv, now, attributed],
+    [slug, strategy, leaves, fleet.deeds, fleet.owners, cv, now, attributed],
   );
 
   const symbol = fleet.currencySymbol;

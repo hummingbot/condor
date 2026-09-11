@@ -51,6 +51,19 @@ def _fresh_cache():
     trading_rules_cache.clear()
 
 
+@pytest.fixture(autouse=True)
+def _no_saved_defaults(monkeypatch):
+    """What is pinned here is the wiring, not the developer's own preferences file.
+
+    Saved defaults merge underneath a create — a nested barrier block included — so
+    without this the assertions below would read whichever barrier the machine
+    running the tests happens to have on disk.
+    """
+    monkeypatch.setattr(
+        executor_create.executor_preferences, "get_defaults", lambda executor_type: {}
+    )
+
+
 def _grid(client, **overrides):
     kwargs = {
         "connector_name": "binance_perpetual",

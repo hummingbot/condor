@@ -1,6 +1,6 @@
 """SEC-268: Telegram's share button reads reports through the guarded helper.
 
-``_share_report`` used to join ``CHARTS_DIR / entry["filename"]`` by hand and
+``_share_report`` used to join the reports dir and ``entry["filename"]`` and
 ``open()`` the result, checking only ``.exists()``. A poisoned or hand-edited
 ``reports_index.json`` could therefore make the share button mail an arbitrary
 file to a Telegram chat. It now reads through
@@ -14,7 +14,6 @@ from types import SimpleNamespace
 
 import pytest
 
-import condor.reports as rep
 import handlers.routines as hr
 
 CHAT_ID = 4242
@@ -83,8 +82,7 @@ def reports_dir(tmp_path, monkeypatch):
         ),
         encoding="utf-8",
     )
-    monkeypatch.setattr(rep, "CHARTS_DIR", directory)
-    monkeypatch.setattr(rep, "INDEX_FILE", index)
+    monkeypatch.setenv("CONDOR_REPORTS_DIR", str(directory))
     return directory
 
 

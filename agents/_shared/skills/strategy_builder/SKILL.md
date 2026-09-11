@@ -121,10 +121,9 @@ the wrong one strands live capital. This playbook ends at launch.
 
 **Model:** the strategy's `agent_key` defaults to yours; override per launch with
 `config={"agent_key": "…"}`. Never invent one — call `get_available_models` and pick from
-what the operator actually has, or leave it inherited. A pydantic-ai key
-(`ollama:`/`openai:`/`groq:`/`lmstudio:`/`openrouter:`/`custom@…`) enforces the `tools`
-allowlist; an ACP key (`claude-code`/`claude-acp`/`gemini`/`copilot`) runs unrestricted,
-with mutations still confirmation-gated.
+what the operator actually has, or leave it inherited. Every key is held to your `tools`
+allowlist — a tool it leaves out is never mounted — and an ACP key
+(`claude-code`/`claude-acp`/`gemini`/`copilot`) still confirmation-gates mutations.
 
 **Server:** leave `server_name` empty unless the user pins it. A strategy you own runs on
 whichever server your agent resolves.

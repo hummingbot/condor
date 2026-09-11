@@ -9,8 +9,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from condor.fetchers.portfolio import (
     PORTFOLIO_HISTORY_RANGES,
     UNIFIED_ACCOUNT_NOTE,
+    balance_value,
     dedupe_unified_accounts,
 )
+from condor.server_data_service import ServerDataType, get_server_data_service
 from condor.web.auth import require_server_access
 from condor.web.models import (
     BalanceItem,
@@ -20,6 +22,7 @@ from condor.web.models import (
     PortfolioResponse,
     WebUser,
 )
+from condor.web.routes._errors import upstream_error
 from config_manager import get_config_manager
 
 logger = logging.getLogger(__name__)
@@ -35,8 +38,6 @@ async def get_portfolio(
 ):
     cm = get_config_manager()
 
-    from condor.server_data_service import ServerDataType, get_server_data_service
-
     try:
         if refresh:
             # Bypass SDS cache — force exchange re-fetch via Hummingbot
@@ -51,8 +52,8 @@ async def get_portfolio(
                 name, ServerDataType.PORTFOLIO
             )
     except Exception as e:
-        logger.warning("Portfolio fetch exception for %s: %s", name, e)
-        raise HTTPException(status_code=502, detail=f"Failed to get portfolio: {e}")
+        logger.exception("Portfolio fetch failed for '%s'", name)
+        raise upstream_error("Failed to get portfolio", e)
 
     if state is None:
         # Check if fetch is registered
@@ -102,7 +103,7 @@ async def get_portfolio(
                             "available_units", item.get("available_balance", total_bal)
                         )
                     )
-                    usd_val = float(item.get("value", item.get("usd_value", 0)))
+                    usd_val = balance_value(item)
 
                     if not token:
                         continue
@@ -147,8 +148,6 @@ async def get_portfolio_history(
     breakdown: bool = Query(False),
     user: WebUser = Depends(require_server_access),
 ):
-
-    from condor.server_data_service import ServerDataType, get_server_data_service
 
     # The raw snapshots are the same regardless of *breakdown* (parsing happens
     # below), so the cache key is the range alone. SDS coalesces concurrent
@@ -338,7 +337,7 @@ def _extract_token_values(data: object) -> dict[str, float]:
                     for item in inner:
                         if isinstance(item, dict):
                             token = item.get("token", item.get("asset", ""))
-                            usd = float(item.get("value", item.get("usd_value", 0)))
+                            usd = balance_value(item)
                             if token and usd > 0:
                                 tokens[token] = tokens.get(token, 0) + usd
     return tokens
@@ -357,7 +356,7 @@ def _extract_connector_totals(data: object) -> dict[str, float]:
                     s = 0.0
                     for item in inner:
                         if isinstance(item, dict):
-                            s += float(item.get("value", item.get("usd_value", 0)))
+                            s += balance_value(item)
                     totals[key] = s
                 elif isinstance(inner, (int, float)):
                     totals[key] = float(inner)

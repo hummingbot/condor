@@ -118,6 +118,60 @@ function isActiveStatus(status: string): boolean {
   return s === "running" || s === "active_position" || s === "active";
 }
 
+/**
+ * The executor's span on the chart: its own timestamps, clamped to now while a
+ * bound is still missing. An open executor has no `close_timestamp`, and a
+ * malformed one can arrive with neither, so both ends fall back to the present
+ * rather than to 1970 -- which would stretch every chart back to the epoch.
+ */
+function lifetimeRange(executor: ExecutorInfo): { start: number; end: number } {
+  const now = Math.floor(Date.now() / 1000);
+  return {
+    start: executor.timestamp > 0 ? executor.timestamp : now,
+    end: executor.close_timestamp > 0 ? executor.close_timestamp : now,
+  };
+}
+
+/** The parts of an overlay each executor type draws for itself. */
+type OverlayExtras = Pick<ExecutorOverlay, "priceLines" | "markers"> &
+  Partial<Pick<ExecutorOverlay, "segment" | "gridBox" | "entryPrice" | "exitPrice">>;
+
+/**
+ * Every overlay field that is copied off the executor unchanged.
+ *
+ * The five `compute*Overlay` builders differ only in `type`, the lines, markers
+ * and prices they derive, and whether they draw a `segment` or a `gridBox`; the
+ * other ten fields were written out by hand five times, so adding one to
+ * `ExecutorOverlay` was five edits and forgetting one of them was a silent
+ * per-type drift for the optional fields (the shape CORR-280 shipped once, with
+ * `side` read differently per builder). Each builder now returns through here.
+ *
+ * `range` is a parameter only so a builder that already needed the bounds --
+ * to size a grid box or an order's segment -- draws the box and the time range
+ * from the same clamp instead of two calls to `Date.now()`.
+ */
+function baseOverlay(
+  executor: ExecutorInfo,
+  type: string,
+  extras: OverlayExtras,
+  range: { start: number; end: number } = lifetimeRange(executor),
+): ExecutorOverlay {
+  return {
+    executorId: executor.id,
+    type,
+    side: normSide(executor.side),
+    status: executor.status,
+    closeType: executor.close_type,
+    pnl: executor.pnl,
+    pnlPct: executor.net_pnl_pct,
+    volume: executor.volume,
+    fees: executor.cum_fees_quote,
+    timeRange: range,
+    config: executor.config,
+    ...extras,
+  };
+}
+
 // ── Position Executor Overlay ──
 
 function computePositionOverlay(executor: ExecutorInfo): ExecutorOverlay {
@@ -244,49 +298,33 @@ function computePositionOverlay(executor: ExecutorInfo): ExecutorOverlay {
     });
   }
 
-  const start = executor.timestamp > 0 ? executor.timestamp : Math.floor(Date.now() / 1000);
-  const end = executor.close_timestamp > 0 ? executor.close_timestamp : Math.floor(Date.now() / 1000);
-
-  return {
-    executorId: executor.id,
-    type: "position",
-    side,
-    status: executor.status,
-    closeType: executor.close_type,
-    pnl: executor.pnl,
-    pnlPct: executor.net_pnl_pct,
-    volume: executor.volume,
-    fees: executor.cum_fees_quote,
+  return baseOverlay(executor, "position", {
     priceLines: lines,
     markers,
     segment,
-    timeRange: { start, end },
-    config: executor.config,
     entryPrice: entry,
     exitPrice: closePrice,
-  };
+  });
 }
 
 // ── Grid Executor Overlay ──
 
 function computeGridOverlay(executor: ExecutorInfo): ExecutorOverlay {
-  const side = normSide(executor.side);
   const config = executor.config || {};
 
   const startPrice = Number(config.start_price);
   const endPrice = Number(config.end_price);
   const limitPrice = Number(config.limit_price);
 
-  const start = executor.timestamp > 0 ? executor.timestamp : Math.floor(Date.now() / 1000);
-  const end = executor.close_timestamp > 0 ? executor.close_timestamp : Math.floor(Date.now() / 1000);
+  const range = lifetimeRange(executor);
 
   // Grid box: rectangle from start_price to end_price over the executor lifetime
   let gridBox: GridBox | undefined;
-  if (startPrice > 0 && endPrice > 0 && start > 0) {
+  if (startPrice > 0 && endPrice > 0 && range.start > 0) {
     const profitable = executor.pnl >= 0;
     gridBox = {
-      startTime: start,
-      endTime: end,
+      startTime: range.start,
+      endTime: range.end,
       startPrice,
       endPrice,
       limitPrice: limitPrice > 0 ? limitPrice : undefined,
@@ -294,24 +332,18 @@ function computeGridOverlay(executor: ExecutorInfo): ExecutorOverlay {
     };
   }
 
-  return {
-    executorId: executor.id,
-    type: "grid",
-    side,
-    status: executor.status,
-    closeType: executor.close_type,
-    pnl: executor.pnl,
-    pnlPct: executor.net_pnl_pct,
-    volume: executor.volume,
-    fees: executor.cum_fees_quote,
-    priceLines: [],
-    markers: [],
-    gridBox,
-    timeRange: { start, end },
-    config: executor.config,
-    entryPrice: startPrice,
-    exitPrice: endPrice,
-  };
+  return baseOverlay(
+    executor,
+    "grid",
+    {
+      priceLines: [],
+      markers: [],
+      gridBox,
+      entryPrice: startPrice,
+      exitPrice: endPrice,
+    },
+    range,
+  );
 }
 
 // ── LP Executor Overlay ──
@@ -333,7 +365,6 @@ function computeGridOverlay(executor: ExecutorInfo): ExecutorOverlay {
 function computeLpOverlay(executor: ExecutorInfo): ExecutorOverlay {
   const customInfo = executor.custom_info || {};
   const config = executor.config || {};
-  const side = normSide(executor.side);
 
   // custom_info wins: a CLMM position is snapped to the venue's bins, so the
   // on-chain bounds are not the requested ones, and the box has to show where the
@@ -346,14 +377,13 @@ function computeLpOverlay(executor: ExecutorInfo): ExecutorOverlay {
   const lower = num(customInfo.lower_price ?? customInfo.price_lower ?? config.lower_price);
   const upper = num(customInfo.upper_price ?? customInfo.price_upper ?? config.upper_price);
 
-  const start = executor.timestamp > 0 ? executor.timestamp : Math.floor(Date.now() / 1000);
-  const end = executor.close_timestamp > 0 ? executor.close_timestamp : Math.floor(Date.now() / 1000);
+  const range = lifetimeRange(executor);
 
   let gridBox: GridBox | undefined;
-  if (lower > 0 && upper > 0 && start > 0) {
+  if (lower > 0 && upper > 0 && range.start > 0) {
     gridBox = {
-      startTime: start,
-      endTime: end,
+      startTime: range.start,
+      endTime: range.end,
       // startPrice is the box's dashed edge and endPrice its solid one; the grid
       // overlay puts start_price (the far bound) first, so upper goes first here.
       startPrice: upper,
@@ -362,24 +392,18 @@ function computeLpOverlay(executor: ExecutorInfo): ExecutorOverlay {
     };
   }
 
-  return {
-    executorId: executor.id,
-    type: "lp",
-    side,
-    status: executor.status,
-    closeType: executor.close_type,
-    pnl: executor.pnl,
-    pnlPct: executor.net_pnl_pct,
-    volume: executor.volume,
-    fees: executor.cum_fees_quote,
-    priceLines: [],
-    markers: [],
-    gridBox,
-    timeRange: { start, end },
-    config: executor.config,
-    entryPrice: lower,
-    exitPrice: upper,
-  };
+  return baseOverlay(
+    executor,
+    "lp",
+    {
+      priceLines: [],
+      markers: [],
+      gridBox,
+      entryPrice: lower,
+      exitPrice: upper,
+    },
+    range,
+  );
 }
 
 // ── Order Executor Overlay ──
@@ -411,8 +435,8 @@ function computeOrderOverlay(executor: ExecutorInfo): ExecutorOverlay {
   const descriptiveLabel = `${sideLabel}${amountStr}${chaserSuffix}`;
 
   const active = isActiveStatus(executor.status);
-  const start = executor.timestamp > 0 ? executor.timestamp : Math.floor(Date.now() / 1000);
-  const end = executor.close_timestamp > 0 ? executor.close_timestamp : Math.floor(Date.now() / 1000);
+  const range = lifetimeRange(executor);
+  const start = range.start;
 
   let segment: ExecutorSegment | undefined;
 
@@ -473,24 +497,18 @@ function computeOrderOverlay(executor: ExecutorInfo): ExecutorOverlay {
     }
   }
 
-  return {
-    executorId: executor.id,
-    type: "order",
-    side,
-    status: executor.status,
-    closeType: executor.close_type,
-    pnl: executor.pnl,
-    pnlPct: executor.net_pnl_pct,
-    volume: executor.volume,
-    fees: executor.cum_fees_quote,
-    priceLines: lines,
-    markers,
-    segment,
-    timeRange: { start, end },
-    config: executor.config,
-    entryPrice: orderPrice,
-    exitPrice: closePrice,
-  };
+  return baseOverlay(
+    executor,
+    "order",
+    {
+      priceLines: lines,
+      markers,
+      segment,
+      entryPrice: orderPrice,
+      exitPrice: closePrice,
+    },
+    range,
+  );
 }
 
 // ── Generic Executor Overlay (fallback) ──
@@ -553,27 +571,13 @@ function computeGenericOverlay(executor: ExecutorInfo): ExecutorOverlay {
     });
   }
 
-  const start = executor.timestamp > 0 ? executor.timestamp : Math.floor(Date.now() / 1000);
-  const end = executor.close_timestamp > 0 ? executor.close_timestamp : Math.floor(Date.now() / 1000);
-
-  return {
-    executorId: executor.id,
-    type: executor.type?.toLowerCase() || "unknown",
-    side,
-    status: executor.status,
-    closeType: executor.close_type,
-    pnl: executor.pnl,
-    pnlPct: executor.net_pnl_pct,
-    volume: executor.volume,
-    fees: executor.cum_fees_quote,
+  return baseOverlay(executor, executor.type?.toLowerCase() || "unknown", {
     priceLines: lines,
     markers,
     segment,
-    timeRange: { start, end },
-    config: executor.config,
     entryPrice: entryPrice,
     exitPrice: closePrice,
-  };
+  });
 }
 
 // ── Public API ──
@@ -782,4 +786,80 @@ export function renderOverlayTooltipHtml(
           </div>
           ${detailRows ? `<div style="border-top:1px solid ${border};margin-top:4px;padding-top:6px;font-size:11px;display:flex;flex-direction:column;gap:3px">${detailRows}</div>` : ""}
         `;
+}
+
+/**
+ * The tooltip element as the crosshair handlers drive it: show it over an
+ * overlay, or hide it (PERF-348).
+ *
+ * `renderOverlayTooltipHtml` above is a ~100-line string build that reads the
+ * theme, `JSON.parse`s a config and escapes a dozen rows, and both charts used
+ * to run it — plus the `innerHTML` reparse of ~20 nodes and the forced layout
+ * of the `offsetHeight` read that follows it — on *every* crosshair move, i.e.
+ * ~60/s for as long as the pointer sits anywhere inside an executor box. The
+ * card is a pure function of its arguments, so all but the first of those are
+ * identical work.
+ *
+ * `show()` therefore rewrites the DOM only when one of the three arguments
+ * that produced the current card changed identity, and otherwise reuses the
+ * height it measured then, leaving only the `left`/`top` writes per move.
+ *
+ * Staleness is bounded by that key being the render's *whole* input:
+ *
+ *  - the overlay object — rebuilt by `computeMultiOverlays` on each executors
+ *    refetch, and react-query's structural sharing gives it a new identity
+ *    exactly when one of its values (PnL included) actually changed, so a new
+ *    PnL repaints the card on the first move after it lands;
+ *  - both formatters — a display-currency switch mints new ones, so the card
+ *    reprints in the new currency.
+ *
+ * `hide()` forgets the card as well, so re-entering the same overlay draws a
+ * fresh one rather than trusting markup left over from before.
+ */
+export interface OverlayTooltipView {
+  /** Draw `o` in `el` (rebuilding only if needed) and return the card's height. */
+  show(el: HTMLElement, o: ExecutorOverlay, formatters: OverlayTooltipFormatters): number;
+  /** Hide `el` and forget what was drawn in it. */
+  hide(el: HTMLElement): void;
+}
+
+export function createOverlayTooltipView(): OverlayTooltipView {
+  let el: HTMLElement | null = null;
+  let overlay: ExecutorOverlay | null = null;
+  let formatValue: OverlayTooltipFormatters["formatValue"] | null = null;
+  let formatPnl: OverlayTooltipFormatters["formatPnl"] | null = null;
+  let height = 0;
+
+  return {
+    show(nextEl, nextOverlay, formatters) {
+      if (
+        nextEl !== el ||
+        nextOverlay !== overlay ||
+        formatters.formatValue !== formatValue ||
+        formatters.formatPnl !== formatPnl
+      ) {
+        nextEl.innerHTML = renderOverlayTooltipHtml(nextOverlay, formatters);
+        el = nextEl;
+        overlay = nextOverlay;
+        formatValue = formatters.formatValue;
+        formatPnl = formatters.formatPnl;
+        height = 0;
+      }
+      nextEl.style.display = "block";
+      // Measured only after the card is displayed — `offsetHeight` is 0 while
+      // it is `display:none`, which is what the 200 fallback is for.
+      if (!height) height = nextEl.offsetHeight || 200;
+      return height;
+    },
+    hide(nextEl) {
+      nextEl.style.display = "none";
+      if (nextEl === el) {
+        el = null;
+        overlay = null;
+        formatValue = null;
+        formatPnl = null;
+        height = 0;
+      }
+    },
+  };
 }

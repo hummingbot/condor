@@ -60,7 +60,11 @@ export function AgentWorkspace() {
   const adapter = useWorkspaceUrl(searchParams, setSearchParams);
 
   // The header's, and the two guards below. The same `["agent", slug]` the body
-  // reads, so react-query serves both from one poll rather than two.
+  // reads, so react-query serves both from one poll rather than two — and on
+  // the same gate, because sharing a key means sharing the shortest interval
+  // declared on it (PERF-343). Only a live loop can move the "Live" badge or
+  // the delete guard; the strategy controls invalidate this key when they
+  // start one, so the gate re-arms without a reload.
   const {
     data: agent,
     isLoading,
@@ -69,7 +73,14 @@ export function AgentWorkspace() {
     queryKey: ["agent", slug],
     queryFn: () => api.getAgent(slug),
     enabled: !!slug,
-    refetchInterval: 5000,
+    // The page resolves this key before it renders the screen, so the
+    // screen's observer mounts a tick later onto data react-query would
+    // otherwise call stale and re-fetch — one open, two requests. A cadence's
+    // worth of freshness makes the second mount reuse the first read; the
+    // interval below refetches on its own timer regardless.
+    staleTime: 5000,
+    refetchInterval: (q) =>
+      q.state.data?.strategies.some((s) => s.status === "running") ? 5000 : false,
   });
 
   const deleteAgentMutation = useMutation({

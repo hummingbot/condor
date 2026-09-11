@@ -1,5 +1,7 @@
 import { QueryClient } from "@tanstack/react-query";
 
+import { venuesQueryKey } from "@/components/market/useVenues";
+
 /**
  * App-wide TanStack Query cache.
  *
@@ -129,6 +131,19 @@ export type ExecutorsQueryKey = [
   controllerId: string,
   pair: string,
 ];
+
+/**
+ * Poll cadence for an executors entry that the socket already feeds.
+ *
+ * The `executors:<server>` frame is the update path — `shared-socket.ts` writes
+ * every one of them (~2s) straight into the unfiltered key — so REST is only
+ * the net underneath it. It has to be one constant because react-query drives a
+ * shared key at the *shortest* interval any of its observers asks for: while a
+ * hook polling that key at 10s was mounted, it pulled Portfolio's deliberate
+ * 60s down with it and the whole newest-500 list was re-downloaded six times a
+ * minute to overwrite data two seconds old (PERF-336).
+ */
+export const EXECUTORS_REFETCH_MS = 60_000;
 
 export function executorsQuery(
   server: string | null | undefined,
@@ -314,4 +329,63 @@ export function parseControllerPerfHistoryKey(
   if (start != null && typeof start !== "string") return null;
   if (interval !== undefined && typeof interval !== "string") return null;
   return { server, botName, controllerId, start: start as string | null | undefined, interval };
+}
+
+/**
+ * Freshness for the two lists that describe "what this server can trade with":
+ * the CEX credentials and the Gateway wallets.
+ *
+ * Both only ever change through this app's own mutations — adding, deleting or
+ * re-defaulting a key or a wallet — and every one of those paths invalidates
+ * the key explicitly, so nothing outside the tab can make the cache wrong. That
+ * is what lets the policy be minutes rather than seconds.
+ *
+ * It has to be one constant for the same reason `EXECUTORS_REFETCH_MS` does:
+ * `staleTime` is per-observer, and the *shortest* one governs refetch-on-mount
+ * and refetch-on-focus for the whole shared key. `useCredentials` is mounted
+ * app-wide by `AppShell`, so when Settings -> Keys declared the same key again
+ * with no `staleTime`, its 5s client default dragged the shared query down with
+ * it and both lists were re-fetched on every window refocus, discarding the
+ * 5-minute prefetch `usePrefetchData` had already paid for (PERF-351).
+ */
+export const CREDENTIALS_STALE_MS = 5 * 60 * 1000;
+
+/** The CEX credential list for a server. */
+export function credentialsQuery(server: string | null | undefined) {
+  return {
+    queryKey: ["settings-credentials", server] as ["settings-credentials", string | null | undefined],
+    staleTime: CREDENTIALS_STALE_MS,
+  };
+}
+
+/** The Gateway (Solana/Ethereum) wallets for a server. */
+export function gatewayWalletsQuery(server: string | null | undefined) {
+  return {
+    queryKey: ["gateway-wallets", server] as ["gateway-wallets", string | null | undefined],
+    staleTime: CREDENTIALS_STALE_MS,
+  };
+}
+
+/**
+ * Invalidates every cached answer a credential mutation (add/delete a CEX
+ * key, or the Hyperliquid connect flow) can change: the credential list
+ * itself, the venue traits the Trade page's `credentialed` gate reads
+ * (`useVenues` -> `caps.canTrade` in lib/connector-capabilities.ts), and the
+ * connected-exchange list `usePrefetchData` warms. All three are held at a
+ * multi-minute `staleTime`, so without this the Trade page kept rendering the
+ * view-only overlay for a venue whose keys were just saved — up to 5 minutes
+ * after the save, because only `["settings-credentials", server]` was
+ * invalidated and TanStack matches by prefix, so it provably cannot touch the
+ * other two (CORR-353, issue #238).
+ *
+ * One shared call rather than each caller hand-listing the keys: a second
+ * hand-written list is exactly how this drifted in the first place.
+ */
+export function invalidateCredentialQueries(
+  client: QueryClient,
+  server: string | null | undefined,
+) {
+  client.invalidateQueries({ queryKey: credentialsQuery(server).queryKey });
+  client.invalidateQueries({ queryKey: venuesQueryKey(server) });
+  client.invalidateQueries({ queryKey: ["connected-exchanges", server] });
 }

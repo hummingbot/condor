@@ -207,7 +207,11 @@ export function AgentStrategies({
         title="Delete Strategy"
         isPending={deleteMut.isPending}
         isError={deleteMut.isError}
-        errorText="Failed to delete strategy. It may be running."
+        errorText={
+          deleteMut.error instanceof Error
+            ? deleteMut.error.message
+            : "Failed to delete strategy. It may be running."
+        }
         onConfirm={() => deleteMut.mutate()}
         onClose={() => setDeleteStrategy(null)}
       >

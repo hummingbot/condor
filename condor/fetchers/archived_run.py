@@ -12,9 +12,11 @@ It lives here rather than in the route that used to own it because the routine
 is now one of its callers, and a routine published to ``agents/_shared/routines``
 must not reach into the web package to read an archive.
 
-The one thing this module borrows from ``condor.web`` is ``models`` — the
-pydantic wire shapes, which import nothing from condor and so introduce no cycle
-the package's no-web rule exists to prevent. It raises
+The shapes it returns live in :mod:`condor.fetchers.models` and are re-exported
+by ``condor.web.models``, so the direction stays one-way: this module borrows
+nothing from ``condor.web``. It used to import those shapes from there, which
+was a real cycle — ``condor.web.models`` calls into ``condor.fetchers.executors``
+— masked only by a function-local import on the other side. It raises
 :class:`ArchivedRunUnavailable` rather than ``HTTPException``; mapping that to a
 status code is the route's job.
 """
@@ -27,8 +29,16 @@ import os
 from collections import OrderedDict
 from typing import Any
 
-from condor.fetchers.executors import normalize_executor_side
-from condor.web.models import ArchivedBotPerformance, NormalizedExecutor, PnlPoint
+from condor.asyncutil import SingleFlight
+from condor.fetchers.executors import (
+    describe_executor_error,
+    normalize_executor_side,
+)
+from condor.fetchers.models import (
+    ArchivedBotPerformance,
+    NormalizedExecutor,
+    PnlPoint,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,11 +63,8 @@ _PERFORMANCE_CACHE_MAX = 32
 _performance_cache: OrderedDict[tuple[str, str], ArchivedBotPerformance] = OrderedDict()
 
 # In-flight fetches keyed like the cache, so concurrent cold-cache requests for
-# the same archived bot share one backend walk (same idiom as
-# condor.pool_data._single_flight).
-_performance_inflight: dict[tuple[str, str], "asyncio.Task[ArchivedBotPerformance]"] = (
-    {}
-)
+# the same archived bot share one backend walk.
+_performance_inflight = SingleFlight()
 
 # Attempts per page of the archived trade walk. A run with tens of thousands of
 # trades needs dozens of round trips, and one transient failure must not decide
@@ -230,17 +237,9 @@ async def fetch_archived_run(
     if cached is not None:
         return cached
 
-    task = _performance_inflight.get(cache_key)
-    if task is None or task.done():
-        task = asyncio.ensure_future(_fetch_performance(client, name, db_path))
-        _performance_inflight[cache_key] = task
-
-        def _clear(finished: "asyncio.Task", _key: tuple[str, str] = cache_key) -> None:
-            if _performance_inflight.get(_key) is finished:
-                _performance_inflight.pop(_key, None)
-
-        task.add_done_callback(_clear)
-    return await asyncio.shield(task)
+    return await _performance_inflight.run(
+        cache_key, lambda: _fetch_performance(client, name, db_path)
+    )
 
 
 async def _fetch_performance(
@@ -253,7 +252,15 @@ async def _fetch_performance(
     try:
         summary = await client.archived_bots.get_database_summary(db_path)
     except Exception as e:
-        raise ArchivedRunUnavailable(f"Failed to fetch summary: {e}")
+        # ``str(e)`` on an aiohttp client error carries the backend's host and
+        # port, and this detail is handed straight to the browser by the route.
+        # The operator keeps the address in the log; the caller gets the API's
+        # own reason (SEC-590).
+        logger.exception(
+            "Failed to fetch archived summary for %s on '%s'", db_path, name
+        )
+        _status, message = describe_executor_error(e)
+        raise ArchivedRunUnavailable(f"Failed to fetch summary: {message}")
 
     if not summary or not isinstance(summary, dict):
         raise ArchivedRunUnavailable("Database not found", missing=True)

@@ -19,7 +19,6 @@ import asyncio
 import pytest
 
 import condor.agents.journal as journal_mod
-import condor.reports as rep
 from condor.agents.journal import JournalManager, count_journal_ticks
 
 
@@ -155,8 +154,7 @@ class _FakeACP:
 
 
 def test_one_real_engine_tick_rewrites_the_journal_once(tmp_path, monkeypatch, writes):
-    monkeypatch.setattr(rep, "CHARTS_DIR", tmp_path / "reports")
-    monkeypatch.setattr(rep, "INDEX_FILE", tmp_path / "reports" / "reports_index.json")
+    monkeypatch.setenv("CONDOR_REPORTS_DIR", str(tmp_path / "reports"))
     engine = _engine(tmp_path / "agents", monkeypatch)
     monkeypatch.setattr(engine, "_get_client", _async(object()))
     monkeypatch.setattr(engine, "_adopt_running_bots", _async(None))
@@ -178,8 +176,7 @@ def test_a_risk_blocked_tick_rewrites_the_journal_once(tmp_path, monkeypatch, wr
     """The blocked path wrote twice (append_action + record_tick)."""
     from condor.agents.risk import RiskState
 
-    monkeypatch.setattr(rep, "CHARTS_DIR", tmp_path / "reports")
-    monkeypatch.setattr(rep, "INDEX_FILE", tmp_path / "reports" / "reports_index.json")
+    monkeypatch.setenv("CONDOR_REPORTS_DIR", str(tmp_path / "reports"))
     engine = _engine(tmp_path / "agents", monkeypatch)
     monkeypatch.setattr(engine, "_get_client", _async(object()))
     monkeypatch.setattr(engine, "_adopt_running_bots", _async(None))

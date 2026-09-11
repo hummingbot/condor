@@ -13,7 +13,6 @@ from aiohttp import web
 
 from condor.acp.pydantic_ai_client import (
     PydanticAIClient,
-    _infer_tool_filter_mode,
     is_pydantic_ai_model,
     model_prefix,
 )
@@ -65,14 +64,6 @@ def test_model_prefix_strips_endpoint_name():
     assert model_prefix("custom:llama-3.3-70b") == "custom"
     assert model_prefix("openrouter:anthropic/claude-sonnet-4.5") == "openrouter"
     assert model_prefix("claude-code") == ""
-
-
-def test_custom_tool_filter_follows_the_model_not_the_prefix():
-    # "custom:" says nothing about capability — a 4B model behind a local vLLM
-    # would choke on the full toolset, so the size heuristics still apply.
-    assert _infer_tool_filter_mode("custom:qwen3-4b") == "essential"
-    assert _infer_tool_filter_mode("custom@local:qwen3-14b") == "moderate"
-    assert _infer_tool_filter_mode("custom@together:llama-3.3-70b") == "full"
 
 
 # -- agent key composition --
@@ -497,13 +488,13 @@ def test_build_model_requires_base_url(monkeypatch):
     monkeypatch.delenv("CUSTOM_LLM_BASE_URL", raising=False)
     client = PydanticAIClient(model="custom:foo")
     with pytest.raises(RuntimeError, match="base URL"):
-        client._build_model()
+        asyncio.run(client._build_model())
 
 
 def test_build_model_requires_model_id():
     client = PydanticAIClient(model="custom:", base_url="https://api.example.com/v1")
     with pytest.raises(RuntimeError, match="model id"):
-        client._build_model()
+        asyncio.run(client._build_model())
 
 
 def test_build_model_uses_base_url_and_key():
@@ -512,7 +503,7 @@ def test_build_model_uses_base_url_and_key():
         base_url="https://api.venice.ai/api/v1",
         api_key="sk-test",
     )
-    model = client._build_model()
+    model = asyncio.run(client._build_model())
     assert model.model_name == "llama-3.3-70b"
     assert str(model.client.base_url).rstrip("/") == "https://api.venice.ai/api/v1"
     assert model.client.api_key == "sk-test"
@@ -524,7 +515,7 @@ def test_build_model_strips_endpoint_name_from_model_id():
         base_url="https://api.venice.ai/api/v1",
         api_key="sk-test",
     )
-    model = client._build_model()
+    model = asyncio.run(client._build_model())
     assert model.model_name == "meta-llama/Llama-3.3-70B"
 
 
@@ -532,7 +523,7 @@ def test_build_model_env_fallbacks(monkeypatch):
     monkeypatch.setenv("CUSTOM_LLM_BASE_URL", "https://env.example/v1")
     monkeypatch.setenv("CUSTOM_LLM_API_KEY", "sk-env")
     client = PydanticAIClient(model="custom:m")
-    model = client._build_model()
+    model = asyncio.run(client._build_model())
     assert str(model.client.base_url).rstrip("/") == "https://env.example/v1"
     assert model.client.api_key == "sk-env"
 

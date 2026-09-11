@@ -21,7 +21,6 @@ installed in this venv), fakes in the style of test_agents_chat_id_ownership.py.
 """
 
 import asyncio
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -146,18 +145,13 @@ def test_a_budget_past_the_session_ceiling_is_refused_with_the_limit(monkeypatch
 def test_the_ceiling_stays_under_the_acp_prompt_hard_stop():
     """A budget the agent session cannot honour would be a promise, not a knob.
 
-    ``ACPClient.prompt_stream`` stops a prompt at its own hard ceiling, so an
-    outer budget past that only delays the same cut-off. Read from the source
-    rather than copied, so raising one and not the other fails here.
+    ``ACPClient.prompt_stream`` stops a prompt at ``TIMEOUTS.prompt_hard_stop``,
+    so an outer budget past that only delays the same cut-off. Read from the
+    policy the stream itself reads, so raising one and not the other fails here.
     """
-    import re
+    from condor.runtime.timeouts import TIMEOUTS
 
-    from condor.acp import client as acp_client
-
-    src = Path(acp_client.__file__).read_text()
-    ceiling = int(re.search(r"max_duration = \(?\s*(\d+)", src).group(1))
-
-    assert MAX_DELEGATE_TIMEOUT_S <= ceiling
+    assert MAX_DELEGATE_TIMEOUT_S <= TIMEOUTS.prompt_hard_stop
 
 
 # -- The MCP tool: can a caller reach it at all --

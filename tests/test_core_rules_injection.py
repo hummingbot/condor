@@ -182,3 +182,96 @@ def test_the_shipped_rulebook_is_real():
 
     assert "manage_skill" in body
     assert not body.strip().endswith("---"), "frontmatter only, no body"
+    # The two rules that only ever existed in a local shadow or a later commit
+    # (ARCH-612 folded the first back in, CORR-611 added the second).
+    assert "In an unattended loop the approval already happened" in body
+    assert "background task outstanding" in body
+
+
+# ── A local shadow is loud, not silent (ARCH-612) ──
+
+
+@pytest.fixture(autouse=True)
+def _forget_shadow_warnings():
+    """The warning is once *per process*, so tests must not inherit each other's."""
+    from condor.agents import prompts
+
+    prompts._SHADOWED_RULEBOOKS_WARNED.clear()
+    yield
+    prompts._SHADOWED_RULEBOOKS_WARNED.clear()
+
+
+@pytest.fixture
+def shipped():
+    """The stock ``_defaults/`` layer, the one a ``git pull`` updates."""
+    from condor.paths import stock_agents_root
+
+    root = stock_agents_root() / "_defaults"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def test_a_local_shadow_that_differs_is_warned_about(defaults, shipped, caplog):
+    """Editing the tracked file used to be a no-op nobody was told about."""
+    (shipped / "core_rules.md").write_text(OVERRIDE, "utf-8")
+
+    with caplog.at_level("WARNING"):
+        assert load_core_rules() == RULES  # the local copy still wins
+
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert str(defaults / "_defaults" / "core_rules.md") in message
+    assert str(shipped / "core_rules.md") in message
+
+
+def test_the_shadow_warning_is_said_once_not_once_per_tick(defaults, shipped, caplog):
+    (shipped / "core_rules.md").write_text(OVERRIDE, "utf-8")
+
+    with caplog.at_level("WARNING"):
+        for _ in range(5):
+            load_core_rules()
+
+    assert len([r for r in caplog.records if r.levelname == "WARNING"]) == 1
+
+
+def test_no_local_copy_says_nothing(shipped, caplog):
+    (shipped / "core_rules.md").write_text(RULES, "utf-8")
+
+    with caplog.at_level("WARNING"):
+        assert load_core_rules() == RULES
+
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+def test_an_identical_local_copy_is_not_a_fork(defaults, shipped, caplog):
+    (shipped / "core_rules.md").write_text(RULES, "utf-8")
+
+    with caplog.at_level("WARNING"):
+        assert load_core_rules() == RULES
+
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+def test_an_agents_own_rulebook_is_warned_about_the_same_way(defaults, caplog):
+    """The shadow is per file, so a forked ``<slug>/core_rules.md`` counts too."""
+    from condor.paths import stock_agents_root
+
+    (defaults / "brigado").mkdir(parents=True, exist_ok=True)
+    (defaults / "brigado" / "core_rules.md").write_text(OVERRIDE, "utf-8")
+    stock = stock_agents_root() / "brigado"
+    stock.mkdir(parents=True, exist_ok=True)
+    (stock / "core_rules.md").write_text(RULES, "utf-8")
+
+    with caplog.at_level("WARNING"):
+        assert load_core_rules("brigado") == OVERRIDE
+
+    assert len([r for r in caplog.records if r.levelname == "WARNING"]) == 1
+
+
+def test_the_shipped_rulebook_is_not_shadowed_on_this_install():
+    """Step 2 of ARCH-612 is disk-only: assert the fork is really gone."""
+    from condor.paths import _PROJECT_ROOT
+
+    shadow = _PROJECT_ROOT / ".condor" / "agents" / "_defaults" / "core_rules.md"
+    assert not shadow.exists(), f"{shadow} forks the tracked rulebook again"

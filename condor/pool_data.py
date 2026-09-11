@@ -28,6 +28,7 @@ from glom import glom
 
 import utils.config  # noqa: F401  (imported for its load_dotenv() side effect)
 from condor import orca_api
+from condor.asyncutil import SingleFlight
 
 logger = logging.getLogger(__name__)
 
@@ -697,27 +698,12 @@ _GECKO_BACKOFF = (0.4, 1.0)
 # air, so every one of them misses the cache and opens its own gecko request — the
 # fastest way there is to spend the minute's budget. This collapses concurrent
 # callers of the same key onto one upstream request.
-_gecko_inflight: Dict[Tuple, "asyncio.Task"] = {}
+_gecko_inflight = SingleFlight()
 
 
 async def _single_flight(key: Tuple, factory) -> Any:
-    """Run ``factory()`` once per key, sharing its result with every concurrent caller.
-
-    The work runs as a detached task and awaiters ``shield`` it, so the very thing
-    that causes the stampede — a viewer navigating away and cancelling their
-    request — cannot also cancel the fetch the remaining viewers are waiting on.
-    """
-    task = _gecko_inflight.get(key)
-    if task is None or task.done():
-        task = asyncio.ensure_future(factory())
-        _gecko_inflight[key] = task
-
-        def _clear(finished: "asyncio.Task", _key: Tuple = key) -> None:
-            if _gecko_inflight.get(_key) is finished:
-                _gecko_inflight.pop(_key, None)
-
-        task.add_done_callback(_clear)
-    return await asyncio.shield(task)
+    """Run ``factory()`` once per key, sharing its result with every concurrent caller."""
+    return await _gecko_inflight.run(key, factory)
 
 
 # ── Small TTL caches for token lookups ──
@@ -1929,6 +1915,28 @@ _orca_pool_list_cache: Dict[Tuple, Tuple[float, List[Dict[str, Any]]]] = {}
 _multi_pool_cache: Dict[Tuple[str, str], Tuple[float, List[Dict[str, Any]]]] = {}
 _pool_by_address_cache: Dict[Tuple[str, str], Tuple[float, Dict[str, Any]]] = {}
 
+
+def _remember_pool(gnet: str, pool: Dict[str, Any]) -> None:
+    """Index one already-normalized listing row by its address.
+
+    The listings above cache *lists* — a page, a favourites batch — but the
+    primary navigation path is clicking a row you can already see, which asks
+    ``fetch_pool_by_address`` for that one pool. Without this it always missed and
+    spent a fresh single-pool request on the shared GeckoTerminal budget, seconds
+    after the identical row arrived. Every path builds the row with
+    ``_normalize_gecko_pool``, so a listing row and a by-address row are the same
+    dict, and one entry serves both.
+
+    A copy is stored because a listing hands its rows to callers uncopied, and
+    those callers must not be able to reach into this cache through them. Only
+    *found* pools are remembered: an address merely absent from a page is not the
+    known-missing pool that ``fetch_pool_by_address`` caches as ``{}``.
+    """
+    address = str(pool.get("address") or "")
+    if address:
+        _ttl_put(_pool_by_address_cache, (gnet, address), dict(pool), POOL_LIST_TTL)
+
+
 # A pool list is a browser page, not a report: cap what an upstream can be asked
 # for so one query cannot drag a thousand rows through normalization.
 _POOL_LIST_MAX = 100
@@ -2158,6 +2166,7 @@ def _normalized_gecko_rows(
     rows: List[Dict[str, Any]], network: str, dexes: set
 ) -> List[Dict[str, Any]]:
     """Raw upstream rows → decorated pools, keeping only the venues asked for."""
+    gnet = get_gecko_network(network)
     pools: List[Dict[str, Any]] = []
     for row in rows:
         try:
@@ -2170,6 +2179,7 @@ def _normalized_gecko_rows(
         if dexes and str(pool.get("dex_id") or "").strip().lower() not in dexes:
             continue
         pools.append(pool)
+        _remember_pool(gnet, pool)
     return pools
 
 
@@ -2417,6 +2427,7 @@ async def fetch_pools_by_addresses(
                 continue
             if pool.get("address"):
                 batch_pools.append(pool)
+                _remember_pool(gnet, pool)
         _stale_put(_multi_pool_cache, batch_key, batch_pools)
         pools.extend(dict(row) for row in batch_pools)
 

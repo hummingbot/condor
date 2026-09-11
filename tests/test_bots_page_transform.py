@@ -219,15 +219,13 @@ def test_rest_response_matches_pre_refactor_golden():
     assert BotsPageResponse(**page).model_dump() == GOLDEN_REST
 
 
-def test_ws_transform_matches_pre_refactor_golden():
-    """build_bots_page without enrichment reproduces the old _transform_bots."""
+def test_unenriched_transform_matches_pre_refactor_golden():
+    """The degraded shape, for when a server cannot answer the enrichment calls.
+
+    Both delivery paths now feed the builder the same enrichment (ARCH-586);
+    what the empty maps still pin is how a page renders when those fetches fail.
+    """
     assert build_bots_page(SAMPLE_RAW) == GOLDEN_WS
-
-
-def test_ws_manager_delegates_to_shared_transform():
-    from condor.web.ws_manager import WebSocketManager
-
-    assert WebSocketManager._transform_bots(SAMPLE_RAW) == build_bots_page(SAMPLE_RAW)
 
 
 def test_live_zero_wins_over_stale_db_snapshot():

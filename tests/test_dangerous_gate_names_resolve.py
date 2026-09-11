@@ -15,31 +15,35 @@ either side fails here instead of in production.
 import inspect
 import typing
 
-from condor.runtime.danger import is_mutating_tool_call
+from condor.runtime.danger import READ_ONLY_CONFIG_ACTIONS, is_mutating_tool_call
 from handlers.agents._shared import (
     CREATE_EXECUTOR_TOOLS,
     DANGEROUS_AMM_ACTIONS,
     DANGEROUS_BOT_ACTIONS,
     DANGEROUS_CLMM_ACTIONS,
-    DANGEROUS_CONFIG_RESOURCES,
     DANGEROUS_CONTROL_ACTIONS,
     DANGEROUS_TOOLS,
     is_dangerous_tool_call,
 )
+from mcp_servers.condor import server as condor_mcp_server
 from mcp_servers.hummingbot_api import server as mcp_server
 
-# Gate names that belong to a different MCP server than hummingbot_api.
-# ``control_agent`` is on the condor orchestration server, and gets its own
-# resolution test below rather than this file's Literal-reading one — its
-# actions are a dict in the tool module, not an annotation.
-_FOREIGN_TOOLS = {"place_order", "control_agent"}
+# Gate names that no MCP server registers as a tool of its own.
+# ``place_order`` is gated by name without a tool behind it.
+_FOREIGN_TOOLS = {"place_order"}
 
 
 def _registered_tools() -> dict:
-    """Every function the hummingbot_api MCP server registers as a tool."""
+    """Every function either MCP server registers as a tool.
+
+    Both are read because the gate spans them: ``control_agent`` lives on the
+    condor orchestration server and the rest on hummingbot_api. The two share
+    no tool name, so one flat mapping resolves every gated name.
+    """
     return {
         name: obj.fn if hasattr(obj, "fn") else obj
-        for name, obj in vars(mcp_server).items()
+        for server in (mcp_server, condor_mcp_server)
+        for name, obj in vars(server).items()
         if callable(obj) and not name.startswith("_")
     }
 
@@ -67,6 +71,9 @@ def test_gated_actions_exist_on_their_tools():
         ("manage_clmm", DANGEROUS_CLMM_ACTIONS),
         ("manage_amm", DANGEROUS_AMM_ACTIONS),
         ("manage_bots", DANGEROUS_BOT_ACTIONS),
+        # Not a gate but the log's read set: a rename of `get` would record every
+        # config read as a write, so the reads have to keep resolving too.
+        ("manage_gateway_config", READ_ONLY_CONFIG_ACTIONS),
     ):
         available = _action_literals(tool_name)
         unknown = actions - available
@@ -255,43 +262,38 @@ def test_gated_calls_render_a_specific_confirmation_summary():
         assert summary != tool_name
 
 
-def test_gateway_config_gates_nothing_now_that_wallets_are_read_only():
-    """manage_gateway_config is gated on resource_type, not action — and gates nothing.
-
-    `wallets` was the one gated resource because `add` took a private key; that path
-    is gone (wallets are read-only over MCP, FEAT-065). Everything the tool still
-    edits is Gateway's own symbol/address mapping — deleting a token moves no funds
-    and changes nothing on-chain, so gating it would stop a config edit while leaving
-    the trades it enables ungated.
-    """
+def _config_resource_literals() -> set[str]:
+    """Every ``resource_type`` ``manage_gateway_config`` actually accepts."""
     fn = _registered_tools()["manage_gateway_config"]
-    resources = {
+    return {
         str(v)
         for v in typing.get_args(
             inspect.signature(fn).parameters["resource_type"].annotation
         )
         if isinstance(v, str)
     }
-    assert DANGEROUS_CONFIG_RESOURCES <= resources, (
-        f"gated resource(s) the tool has no such value for: "
-        f"{sorted(DANGEROUS_CONFIG_RESOURCES - resources)}"
-    )
-    assert DANGEROUS_CONFIG_RESOURCES == set()
 
-    for resource in resources - DANGEROUS_CONFIG_RESOURCES:
-        for action in ("list", "add", "delete"):
+
+def test_gateway_config_has_no_write_left_that_needs_a_human():
+    """The funds-path writes are gone from the tool rather than gated on it.
+
+    `networks` and `connectors` used to be gated on `update` (SEC-566): a network
+    config carries `nodeURL`, the RPC every transaction is broadcast through, and
+    a connector config the slippage every swap inherits. Those writes now belong
+    to the server owner in Condor and the tool cannot name them, so every call it
+    accepts is a read or a token/pool mapping edit, and none of them asks.
+    """
+    assert "update" not in _action_literals("manage_gateway_config")
+    assert "manage_gateway_config" not in DANGEROUS_TOOLS
+
+    for resource in _config_resource_literals():
+        for action in _action_literals("manage_gateway_config"):
             assert not is_dangerous_tool_call(
                 {
                     "tool": "manage_gateway_config",
                     "input": {"resource_type": resource, "action": action},
                 }
             ), f"{resource}/{action} should not need confirmation"
-
-
-def test_gateway_config_fails_closed_on_an_unreadable_resource():
-    """SEC-093: a call whose resource_type cannot be read is treated as dangerous."""
-    for bad in ({}, {"resource_type": None}, {"resource_type": 7}, {"action": "add"}):
-        assert is_dangerous_tool_call({"tool": "manage_gateway_config", "input": bad})
 
 
 # ---------------------------------------------------------------------------
@@ -302,20 +304,13 @@ def test_gateway_config_fails_closed_on_an_unreadable_resource():
 def _control_actions() -> set[str]:
     """Every action string ``control_agent`` actually accepts.
 
-    Its actions are not a ``Literal`` on the signature — the tool takes a bare
-    ``str`` and resolves it through ``_resolve_action``, which accepts both the
-    short spelling (``start``) and the legacy internal one (``start_agent``).
-    Both reach the same lifecycle call, so the gate has to know both.
+    Read off the signature like every other gated tool (ARCH-568). The
+    ``Literal`` carries both the short spelling (``start``) and the legacy
+    internal one (``start_agent``), because ``_resolve_action`` still answers
+    to both and they reach the same lifecycle call — so the gate has to know
+    both, and the schema has to advertise both.
     """
-    from mcp_servers.condor.tools import trading_agent
-
-    accepted = set(trading_agent._CONTROL_ACTIONS)
-    accepted.update(
-        action
-        for action, (owner, _call) in trading_agent._ACTION_OWNER.items()
-        if owner == "control_agent"
-    )
-    return accepted
+    return _action_literals("control_agent")
 
 
 def test_control_agent_is_registered_by_the_condor_server():
@@ -601,8 +596,8 @@ def test_the_ungated_brakes_are_recorded():
 
 
 def test_an_ungated_config_edit_is_recorded():
-    """``DANGEROUS_CONFIG_RESOURCES`` is empty on purpose; the log is not."""
-    for action in ("add", "delete", "update", "save"):
+    """A token edit is ungated on purpose; the log keeps it anyway."""
+    for action in ("add", "delete", "save"):
         call = _call("manage_gateway_config", action=action, resource_type="tokens")
         assert not is_dangerous_tool_call(call)
         assert is_mutating_tool_call(call)
@@ -636,12 +631,22 @@ def _every_plausible_call() -> list[dict]:
     action added to a gated tool lands in the subset assertion below on its own.
     """
     calls: list[dict] = []
-    for tool in ("manage_bots", "manage_clmm", "manage_amm", "manage_gateway_config"):
+    for tool in (
+        "manage_bots",
+        "manage_clmm",
+        "manage_amm",
+        "manage_gateway_config",
+    ):
         for action in _action_literals(tool):
             calls.append(_call(tool, action=action, resource_type="tokens"))
             calls.append(_call(tool, action=action))
-    for resource in _action_literals("manage_gateway_config"):
+    for resource in _config_resource_literals():
         calls.append(_call("manage_gateway_config", resource_type=resource))
+        # Every real (resource, action) pair, held to `dangerous ⊆ mutating`.
+        for action in _action_literals("manage_gateway_config"):
+            calls.append(
+                _call("manage_gateway_config", resource_type=resource, action=action)
+            )
     for action in _control_actions():
         calls.append(_call("control_agent", action=action, agent_id="a.b_1"))
     for tool in sorted(DANGEROUS_TOOLS | {"manage_bots"}):

@@ -34,7 +34,7 @@ import {
   isExecutorActive,
   toMs,
 } from "./formatters";
-import { runKeyLabel, type FleetOwner } from "./agent-attribution";
+import { ownerRowLabel, type FleetOwner } from "./agent-attribution";
 import { runStatus } from "./perf-tree";
 import { formatWithRate, type RateTable } from "./rates";
 import type { ViewFacts } from "./viewFacts";
@@ -478,9 +478,9 @@ function agentFacts(qc: QueryClient): string | undefined {
   const owners = fresh<FleetOwner[]>(qc, ["fleet-map"]);
   if (!Array.isArray(owners) || owners.length === 0) return undefined;
   const live = owners.filter((owner) => owner.live);
-  const named = names(owners.map((owner) => runKeyLabel(owner.runKey)));
+  const named = names(owners.map((owner) => ownerRowLabel(owners, owner.runKey)));
   return live.length > 0
-    ? `${named} · ${live.length} looping (${names(live.map((owner) => `${runKeyLabel(owner.runKey)} ${owner.live?.status}`))})`
+    ? `${named} · ${live.length} looping (${names(live.map((owner) => `${ownerRowLabel(owners, owner.runKey)} ${owner.live?.status}`))})`
     : `${named} · none looping`;
 }
 

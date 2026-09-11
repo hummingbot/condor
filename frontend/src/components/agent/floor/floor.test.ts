@@ -174,7 +174,7 @@ describe("an agent's fold is the agent entire", () => {
 
   it("prints the same number as the home's row when one strategy is in scope", () => {
     const leaves = [leaf({ agent: "alpha.mm", how: "namespace", net: 64.12, volume: 2_549 })];
-    const input = { leaves, deeds: DEEDS, convert: cv, now: NOW, symbol: "$" };
+    const input = { leaves, deeds: DEEDS, owners: [], convert: cv, now: NOW, symbol: "$" };
     const home = foldRows(foldTargets([agent()], null)[0].targets, input);
     const floor = foldRows(floorTargets([agent()], null)[0].targets, input);
 
@@ -188,7 +188,7 @@ describe("an agent's fold is the agent entire", () => {
       leaf({ agent: "alpha.mm", how: "namespace", net: 100, volume: 10 }),
       leaf({ agent: "alpha.grid", how: "namespace", net: 25, volume: 5 }),
     ];
-    const input = { leaves, deeds: DEEDS, convert: cv, now: NOW, symbol: "$" };
+    const input = { leaves, deeds: DEEDS, owners: [], convert: cv, now: NOW, symbol: "$" };
 
     expect(foldRows(foldTargets([two], null)[0].targets, input).get("alpha")!.net).toBe(100);
     // The whole reason `floorTargets` exists: `alpha.grid` is attributed, so it
@@ -225,6 +225,7 @@ describe("an agent's fold is the agent entire", () => {
     const fold = foldRows([{ slug: "alpha", strategy: null }], {
       leaves,
       deeds: DEEDS,
+      owners: [],
       convert: cv,
       now: NOW,
       symbol: "$",

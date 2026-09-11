@@ -1020,9 +1020,15 @@ def main() -> None:
     # In local mode there is no token and nothing polls; the placeholder exists
     # only so the Application (and with it job_queue, CallbackContext and the
     # handler registry) can be built at all. Nothing ever calls Telegram with it.
+    # PTB's 5s defaults kill startup on a slow link: initialize() calls getMe,
+    # and one connect that takes >5s raises TimedOut and exits the process.
     application = (
         Application.builder()
         .token(TELEGRAM_TOKEN or "0:local")
+        .connect_timeout(20)
+        .read_timeout(20)
+        .get_updates_connect_timeout(20)
+        .get_updates_read_timeout(30)
         .persistence(persistence)
         .concurrent_updates(True)
         .build()

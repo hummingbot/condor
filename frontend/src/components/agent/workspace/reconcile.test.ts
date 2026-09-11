@@ -13,7 +13,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import type { DeedIndex } from "@/lib/agent-attribution";
+import type { DeedIndex, FleetOwner } from "@/lib/agent-attribution";
 import type { ControllerInfo } from "@/lib/api";
 import {
   DEFAULT_GROUPING,
@@ -23,14 +23,7 @@ import {
   leafFromController,
   type PerfLeaf,
 } from "@/lib/perf-tree";
-import {
-  agentScope,
-  botScope,
-  isPseudoRunKey,
-  recordsHref,
-  reconcile,
-  splitRunKey,
-} from "./reconcile";
+import { agentScope, botScope, recordsHref, reconcile } from "./reconcile";
 
 /** Everything is already in the display currency in these tests. */
 const identity = (value: number) => value;
@@ -84,12 +77,51 @@ function owned(
   return leaf;
 }
 
+/**
+ * The map as the wire ships it, pseudo-owners and all.
+ *
+ * `_pseudo_owners` gives a door an empty namespace and puts
+ * `PSEUDO_STRATEGY_NAMES`' word in `strategy_name` — which is where a term's
+ * label comes from, so the browser keeps no copy of those words.
+ */
+const OWNERS: FleetOwner[] = [
+  {
+    runKey: "brigado.brl_mm",
+    agentSlug: "brigado",
+    agentName: "Brigado",
+    strategySlug: "brl_mm",
+    strategyName: "BRL MM",
+    namespace: "brigado-brl_mm",
+    declaredBots: [],
+    agentIds: [],
+    live: null,
+  },
+  ...(
+    [
+      ["chat", "Chat"],
+      ["delegation", "Delegation"],
+      ["ui", "Dashboard"],
+    ] as const
+  ).map(([slug, name]) => ({
+    runKey: `brigado.${slug}`,
+    agentSlug: "brigado",
+    agentName: "Brigado",
+    strategySlug: slug,
+    strategyName: name,
+    namespace: "",
+    declaredBots: [],
+    agentIds: [],
+    live: null,
+  })),
+];
+
 function base(leaves: PerfLeaf[], attributed: number | null) {
   return {
     slug: "brigado",
     strategy: null,
     leaves,
     deeds: NO_DEEDS,
+    owners: OWNERS,
     convert: identity,
     now: NOW,
     attributed,
@@ -102,19 +134,6 @@ function botsPageNet(leaves: PerfLeaf[], runKey: string): number {
   const node = indexTree(tree).get(agentScope(runKey));
   return foldLeaves(node?.leaves ?? [], identity, NOW).net;
 }
-
-describe("run keys", () => {
-  it("splits an agent from its strategy", () => {
-    expect(splitRunKey("brigado.brl_mm")).toEqual({ agent: "brigado", strategy: "brl_mm" });
-  });
-
-  it("knows the three reserved slugs from every other one", () => {
-    expect(isPseudoRunKey("brigado.chat")).toBe(true);
-    expect(isPseudoRunKey("brigado.delegation")).toBe(true);
-    expect(isPseudoRunKey("brigado.ui")).toBe(true);
-    expect(isPseudoRunKey("brigado.brl_mm")).toBe(false);
-  });
-});
 
 describe("the headline is the fleet's own number", () => {
   it("equals /bots at ?scope=agent:{runKey} on the same records", () => {
@@ -176,7 +195,7 @@ describe("the reconciliation", () => {
 
     expect(r.fold).toBe(91);
     expect(r.terms).toHaveLength(1);
-    expect(r.terms[0].label).toBe("Deployed from chat");
+    expect(r.terms[0].label).toBe("Brigado / Chat");
     expect(r.terms[0].delta).toBe(27);
     expect(r.terms[0].scope).toBe("agent:brigado.chat");
     expect(r.terms[0].count).toBe(1);
@@ -195,7 +214,7 @@ describe("the reconciliation", () => {
 
     expect(r.runKeys).toEqual(["brigado.brl_mm", "brigado.chat"]);
     expect(r.fold).toBe(91);
-    expect(r.terms.map((t) => t.label)).toEqual(["Deployed from chat"]);
+    expect(r.terms.map((t) => t.label)).toEqual(["Brigado / Chat"]);
   });
 
   it("names a delegation and the dashboard apart from a chat", () => {
@@ -207,9 +226,9 @@ describe("the reconciliation", () => {
     const r = reconcile(base(leaves, 0));
 
     expect(r.terms.map((t) => t.label)).toEqual([
-      "Deployed from chat",
-      "Deployed by a delegation",
-      "Deployed from the dashboard",
+      "Brigado / Chat",
+      "Brigado / Delegation",
+      "Brigado / Dashboard",
     ]);
     expect(r.terms.map((t) => t.delta)).toEqual([10, 20, 30]);
     expect(r.unaccounted).toBe(0);
