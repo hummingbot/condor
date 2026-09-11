@@ -76,7 +76,7 @@ function AppShellBody() {
   // history must remain accessible without an exchange/Gateway credential.
   const params = new URLSearchParams(search);
   const isOnchainSurface = pathname === "/executors/lending" ||
-    (pathname === "/bots" && params.get("population") === "terminated" && params.get("group") === "type");
+    (pathname === "/bots" && params.get("population") === "terminated" && params.get("groupBy") === "ctrlType");
   const showKeysOverlay =
     server && !keysLoading && !hasKeys && pathname !== "/" && !isOnchainSurface &&
     !exemptRoutes.some((r) => pathname.startsWith(r));

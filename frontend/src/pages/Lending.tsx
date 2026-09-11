@@ -78,7 +78,7 @@ function LendingForm({ server }: { server: string }) {
 
   const inputClass = "w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm";
   return <div className="max-w-5xl mx-auto p-6 space-y-6">
-    <Link to="/bots?population=terminated&group=type" className="text-sm text-[var(--color-text-muted)]">← Executors</Link>
+    <Link to="/bots?population=terminated&groupBy=ctrlType" className="text-sm text-[var(--color-text-muted)]">← Executors</Link>
     <header><h1 className="text-2xl font-semibold">Put idle reserves to work</h1>
       <p className="mt-2 text-[var(--color-text-muted)]">Supply USDC to Aave V3 on Base, or withdraw it to your signing wallet when you need trading liquidity.</p>
     </header>
@@ -107,7 +107,7 @@ function LendingForm({ server }: { server: string }) {
         {executor ? <OnchainEvidence executor={executor} /> : <section className="rounded-xl border border-[var(--color-border)] p-5 text-sm text-[var(--color-text-muted)]">
           {pending || executorId ? "Waiting for the executor’s simulation and result…" : "Preview first. Review the wallet, asset movements, approval and estimated gas here before confirming."}
         </section>}
-        {detail.isError && <p role="alert" className="text-sm">Could not refresh this executor. <Link to="/bots?population=terminated&group=type" className="underline">Check Executors</Link> before submitting again.</p>}
+        {detail.isError && <p role="alert" className="text-sm">Could not refresh this executor. <Link to="/bots?population=terminated&groupBy=ctrlType" className="underline">Check Executors</Link> before submitting again.</p>}
         {executorId && <p className="text-xs break-all">Executor: {executorId}</p>}
         <p className="text-xs text-[var(--color-text-muted)]">Lending rates vary. Withdrawals depend on available liquidity and your collateral obligations. Keep reserves for trading and fees; a completed supply is an open lending position, not realized profit.</p>
       </div>

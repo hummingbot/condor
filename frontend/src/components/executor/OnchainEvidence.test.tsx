@@ -4,6 +4,14 @@ import type { ExecutorInfo } from "@/lib/api";
 import { OnchainEvidence } from "./OnchainEvidence";
 
 describe("on-chain execution evidence", () => {
+  it("shows the estimate independently of incurred executor fees", () => {
+    const executor = { config: { commit: false }, cum_fees_quote: "0", custom_info: {
+      estimated_gas_quote: "0.063", fees_quote_source: "unavailable",
+    }} as unknown as ExecutorInfo;
+    const html = renderToStaticMarkup(<OnchainEvidence executor={executor} />);
+    expect(html).toContain("0.063 USDT");
+    expect(html).not.toContain(">0 USDT<");
+  });
   it("shows a risk rejection even when the chain simulation passed", () => {
     const executor = { config: { commit: false }, custom_info: {
       simulation_passed: true, error: { reason: "gas_unpriced" },

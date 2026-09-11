@@ -44,7 +44,7 @@ export function OnchainEvidence({ executor }: { executor: ExecutorInfo }) {
       <dt>Network</dt><dd>{text(info.chain)} · {text(info.chain_id)}</dd>
       <dt>Wallet</dt><dd className="break-all font-mono">{text(info.wallet_address)}</dd>
       <dt>Simulation</dt><dd>{info.simulation_passed === true ? "Passed" : info.simulation_passed === false ? "Failed" : "Not available"}</dd>
-      <dt>Estimated gas</dt><dd>{info.fees_quote_source === "priced" ? `${executor.cum_fees_quote} USDT` : "Not priced"}</dd>
+      <dt>Estimated gas</dt><dd>{info.estimated_gas_quote != null ? `${info.estimated_gas_quote} USDT` : "Not priced"}</dd>
       <dt>Plan digest</dt><dd className="break-all font-mono">{text(info.digest)}</dd>
     </dl>
     {changes.length > 0 && <div><h4 className="font-medium mb-2">Simulated asset movements</h4><ul className="space-y-2">{changes.map((row, index) => <li key={index} className="text-xs">

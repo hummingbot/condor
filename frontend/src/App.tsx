@@ -113,7 +113,7 @@ export default function App() {
                     Terminated population grouped by type is. */}
                 <Route
                   path="/executors"
-                  element={<Navigate to="/bots?population=terminated&group=type" replace />}
+                  element={<Navigate to="/bots?population=terminated&groupBy=ctrlType" replace />}
                 />
                 <Route path="/executors/lending" element={<Lending />} />
                 <Route path="/executors/new" element={<Navigate to="/trade" replace />} />
