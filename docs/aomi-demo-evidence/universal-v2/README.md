@@ -29,3 +29,5 @@ UI execution proof is complete. Code is published for review in [API #230](https
 ## Narration and connector scope
 
 [Draft narration V2](narration-v2.md) and [research](research.md). The [fresh connector check](connector-recheck.json) inspected upstream Gateway `f090f4ab7a8159b85fca2f3d4467970a5231cf5f` on 12 September 2026 (Asia/Shanghai). Jupiter Lend proposal #672 and PumpSwap request #570 remain open; PumpAmm PR #575 is closed without merge. Existing Jupiter swap routing is separate from lending and direct LP actions. These claims concern upstream connectors, not every custom integration or fork.
+
+The API market-policy review correction requires every top-level instruction for the selected protocol to reference the selected market. [A check of all six archived receipts](market-policy-receipt-recheck.json) confirms these demonstrated transactions satisfy the stricter rule. This is an offline receipt check, not a new execution or recording.

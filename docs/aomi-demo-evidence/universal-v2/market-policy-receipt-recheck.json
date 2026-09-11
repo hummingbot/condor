@@ -1,0 +1,44 @@
+[
+  {
+    "venue": "jupiter",
+    "action": "deposit",
+    "protocol_instructions": 1,
+    "every_instruction_references_selected_market": true,
+    "signature": "3MwhxSwHPnHmARw29PUKvdRBrxD5qXrQpXWt9SvLQGeuCQHJQynynUw56VBZc9MbNLkH6ksV8T2kLeQCZPq1CD1U"
+  },
+  {
+    "venue": "jupiter",
+    "action": "withdraw",
+    "protocol_instructions": 1,
+    "every_instruction_references_selected_market": true,
+    "signature": "4hReKK5XTHnkq4CZzSUyRm2a8XBLsA2oK1scoRPSnu5mzwixktuzbD114vjEwnAAK7H2byudVEnScG7W7T6hP835"
+  },
+  {
+    "venue": "kamino",
+    "action": "deposit",
+    "protocol_instructions": 1,
+    "every_instruction_references_selected_market": true,
+    "signature": "469m4Hzaw4862MaVF9tfWRx8QW2j638HQFv6AXWAsqLHF3dJakd87sbb8pWhx8F5dh5p2cBMhKRvmTHCSPjUK6CL"
+  },
+  {
+    "venue": "kamino",
+    "action": "withdraw",
+    "protocol_instructions": 1,
+    "every_instruction_references_selected_market": true,
+    "signature": "3JyhsHVcQXoj2GnLAuT3pnWBGxaWQ5uUfnXsJ32Aq2Jk5A5XJS3rMwgsLxP894ijsLiEPgBrEAjA5r2TZPdF8CeT"
+  },
+  {
+    "venue": "pumpswap",
+    "action": "deposit",
+    "protocol_instructions": 1,
+    "every_instruction_references_selected_market": true,
+    "signature": "4koR7eBgwA2aRS6QmFegqonPP1w4W1RFy6jTzyAzVqtj9oLtjFVrmq9wMyKtFYXxP3PA1V7isWdpdH9UejkCjoGB"
+  },
+  {
+    "venue": "pumpswap",
+    "action": "withdraw",
+    "protocol_instructions": 1,
+    "every_instruction_references_selected_market": true,
+    "signature": "4t98jFqxkTJUKTbZyisvmhvkZ9vZzhWySjQJcnbGVQgtmtAbSNma4WmUkSg13XqVQxkwRe35eYJ15eMYb3EXhuzJ"
+  }
+]
