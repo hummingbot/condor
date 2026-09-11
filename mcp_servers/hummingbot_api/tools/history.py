@@ -179,7 +179,18 @@ async def search_history(
             # model that followed it re-fetched page one forever and read the
             # identical rows as fresh history (CORR-569).
             following = next_cursor(result)
-            if following:
+            if following and following == cursor:
+                # hummingbot-api before its keyset-cursor fix built every order's
+                # cursor from fields its rows do not carry (timestamp/client_order_id
+                # instead of created_at/order_id), so every page handed back "0:" and
+                # the page after it overlapped the one before. Surfacing it again would
+                # send the model round the same page forever.
+                formatted_output += (
+                    "\n\n... the backend handed back the same cursor it was given, so it "
+                    "cannot page any further and the rows above may repeat the previous "
+                    "page. Narrow the search with start_time/end_time to reach older orders."
+                )
+            elif following:
                 formatted_output += (
                     f'\n\n... and more (use cursor="{following}" to see the next page)'
                 )

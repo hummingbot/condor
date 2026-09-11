@@ -126,6 +126,48 @@ def test_passing_the_cursor_back_returns_a_different_page(client_calls):
     assert "cursor=" not in second
 
 
+def test_a_cursor_the_backend_hands_straight_back_is_not_offered_again(monkeypatch):
+    """hummingbot-api once answered every order page with the cursor ``0:``.
+
+    Its cursor was built from ``timestamp``/``client_order_id``, which order rows do
+    not carry, so the page after ``0:`` was always the list minus its first row: it
+    repeated most of the previous page and handed ``0:`` back again. A tool that kept
+    printing ``use cursor="0:"`` sent the model round that page forever.
+    """
+
+    class StuckTrading:
+        def __init__(self):
+            self.order_calls = []
+
+        async def search_orders(self, **kwargs):
+            self.order_calls.append(kwargs)
+            return {
+                "data": PAGE_ONE,
+                "pagination": {"has_more": True, "next_cursor": "0:"},
+            }
+
+    client = PaginatingClient()
+    client.trading = StuckTrading()
+
+    async def fake_get_client():
+        return client
+
+    monkeypatch.setattr(hb_server.hummingbot_client, "get_client", fake_get_client)
+
+    first = asyncio.run(hb_server.search_history(data_type="orders", limit=3))
+    # Page one cannot tell a stuck cursor from a real one yet: it has sent none.
+    assert 'cursor="0:"' in first
+
+    second = asyncio.run(
+        hb_server.search_history(data_type="orders", limit=3, cursor="0:")
+    )
+
+    assert client.trading.order_calls[1]["cursor"] == "0:"
+    assert "cursor=" not in second, f"the stuck cursor was offered again: {second}"
+    assert "same cursor" in second
+    assert "may repeat the previous page" in second
+
+
 def test_orders_refuses_an_offset_it_would_silently_drop(client_calls):
     """search_orders has no offset parameter; accepting one is the CORR-563 bug."""
     with pytest.raises(ToolError) as excinfo:
