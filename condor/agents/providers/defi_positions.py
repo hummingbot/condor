@@ -14,6 +14,7 @@ config) gets a one-line ``none`` and no network call.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from condor.fetchers.executors import extract_executors_list
@@ -108,14 +109,94 @@ class DefiPositionsProvider(BaseProvider):
         if len(executors) > MAX_LISTED:
             lines.append(f"  … {len(executors) - MAX_LISTED} more not shown")
 
+        lending = await self._lending_positions(client, agent_id)
+        lines.extend(lending["lines"])
         wallet = await self._wallet(config, executors)
         lines.append(wallet["line"])
 
         return ProviderResult(
             name=self.name,
-            data={"executors": executors, "wallet": wallet},
+            data={"executors": executors, "wallet": wallet, "lending": lending},
             summary="\n".join(lines),
         )
+
+    async def _lending_positions(self, client: Any, agent_id: str) -> dict:
+        """Use full durable history, never infer remaining positions from recent txs."""
+        try:
+            response = await client.executors._get("/executors/lending/positions")
+            if not isinstance(response, dict) or not isinstance(
+                response.get("positions"), list
+            ):
+                raise ValueError("Invalid lending ledger response")
+            rows = response["positions"]
+            if any(
+                not isinstance(row, dict)
+                or not isinstance(row.get("controller_id"), str)
+                or not row["controller_id"]
+                for row in rows
+            ):
+                raise ValueError("Lending ledger is missing attribution")
+            positions = [
+                row for row in rows if not agent_id or row["controller_id"] == agent_id
+            ]
+            lines = [
+                "Lending: controller contributions are not profit; receipt balances cover the entire wallet."
+            ]
+            for row in positions:
+
+                def amount(field: str) -> str:
+                    raw = row.get(field)
+                    if not isinstance(raw, str) or not re.fullmatch(r"[0-9]+", raw):
+                        raise ValueError("Invalid lending amount")
+                    decimals = row.get("decimals")
+                    if decimals is None:
+                        return f"{raw} raw units"
+                    if type(decimals) is not int or not 0 <= decimals <= 255:
+                        raise ValueError("Invalid lending precision")
+                    digits = raw.lstrip("0") or "0"
+                    if decimals:
+                        digits = digits.zfill(decimals + 1)
+                        digits = (
+                            (digits[:-decimals] + "." + digits[-decimals:])
+                            .rstrip("0")
+                            .rstrip(".")
+                        )
+                    return digits
+
+                unresolved = row.get("unresolved_executor_ids")
+                if not isinstance(unresolved, list):
+                    raise ValueError("Missing lending reconciliation state")
+                balance = (
+                    amount("wallet_receipt_balance_raw")
+                    if row.get("balance_status") == "verified_wallet_balance"
+                    and row.get("balance_scope") == "wallet"
+                    else "unavailable"
+                )
+                lines.append(
+                    f"  {row['controller_id']} account={row.get('account_name', '?')} "
+                    f"chain={row.get('chain_id', '?')} asset={row.get('asset', '?')} "
+                    f"wallet={row.get('wallet', '?')} pool={row.get('pool', '?')}: "
+                    f"net contribution={amount('net_contributed_raw')}; "
+                    f"wallet-wide receipt balance={balance}; "
+                    f"pending supply={amount('pending_supply_raw')}; "
+                    f"pending withdrawal={amount('pending_withdraw_raw')}; "
+                    f"unresolved actions={len(unresolved)}"
+                )
+            if not positions:
+                lines.append("  No recorded lending contributions for this controller.")
+            lines.append(
+                "Lending data is for reconciliation, not permission for automatic spending."
+            )
+            return {"status": "available", "positions": positions, "lines": lines}
+        except Exception:
+            # Old APIs and failed balance/history reads must never mean zero exposure.
+            return {
+                "status": "unavailable",
+                "positions": None,
+                "lines": [
+                    "Lending history or balances unavailable. Do not assume zero exposure or allocate these funds."
+                ],
+            }
 
     async def _wallet(self, config: dict, executors: list[dict]) -> dict[str, Any]:
         """One line about the signing wallet, read through Aomi.

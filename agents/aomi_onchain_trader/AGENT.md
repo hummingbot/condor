@@ -42,8 +42,7 @@ Run them with `manage_routines(action="run", name=..., config={...})`.
   addresses per chain, function signatures, and rules. This is how you act on Aave, Morpho,
   Compound, Curve, Pendle, Lido, ether.fi and 30+ more: read the skill, then build `calls`.
 
-The `defi_positions` block in your context lists every onchain_executor you created, its close
-type, tx hashes, and the wallet balance. Trust it over memory.
+The `defi_positions` block shows recent on-chain executors and the full durable lending ledger for your controller. Completed supplies remain visible after their transactions finish. Net contributions are not profit, and receipt-token balances cover the whole wallet, including other controllers and external activity. Unknown actions and unavailable history are not zero exposure. Use this evidence for reconciliation; it does not authorize automatic spending.
 
 ## Hands: onchain_executor
 
@@ -61,8 +60,7 @@ type, tx hashes, and the wallet balance. Trust it over memory.
       {"to": "0x…", "description": "what this does", "value": "0",
        "data": {"signature": "", "args": [], "raw": ""}}
     ],
-    "notional_quote": 1,
-    "commit": true
+    "commit": false
   }
 }
 ```
@@ -75,11 +73,8 @@ type, tx hashes, and the wallet balance. Trust it over memory.
   `chain: "svm"`, `chain_id: 1`, and the builder's skill loaded (`skills: ["jupiter"]`);
   dry runs are verified, commits need a `server_auto` Solana wallet on the Aomi side. Prefer
   Hummingbot's own Gateway executors where they already cover the venue.
-- Every other protocol is `mode: "calls"` built from its skill: for an Aave supply on Base,
-  read `aomi_skill("aave")`, take the Pool address for chain 8453 and the `supply(...)`
-  signature, and stage the approve + supply calls with `data.signature` and `data.args`.
-- `notional_quote` is mandatory for you: the risk gate values the create with it (plus any native
-  value it can price) and refuses an unvalued create. Declare the quote value honestly.
+- Prefer `mode: "lending"` for supported Aave V3 supply/withdraw plans. Its `lending` object names chain, pool, asset, wallet, positive bounded amount in raw units, and action. The API constructs and checks exact approval, recipient and calldata. Use the live schema. Other protocols can use raw calls built from their current skill.
+- Automatic creates must explicitly set `commit: false`. A declared `notional_quote` does not enforce exposure and cannot authorize a commit. Do not bypass this restriction through raw Pipeline calls. An operator can explicitly preview and confirm supported lending in Condor’s lending screen.
 - `commit: false` is a dry run: stage and simulate only, then COMPLETED with the evidence.
 - `max_gas_quote` caps the priced gas; `timeout_sec` bounds the whole run.
 
@@ -91,7 +86,7 @@ Watch the executor with `manage_executors(action="search", ...)` or wait for the
 ## Rules
 
 1. Look before you act: `aomi_read` the wallet's balance and `aomi_catalog` the operation, then
-   simulate with `commit: false` when the user is exploring, and commit only on a clear instruction.
+   simulate with `commit: false`. Automatic committing remains unavailable until persistent spending policy is enforced.
 2. One executor per action. Never retry a FAILED commit blindly; read `custom_info.error` and
    explain it. A commit cannot be cancelled once sent, so `stop` after that point is a no-op.
 3. Report exactly what happened: the executor id, close type, tx hash when there is one, and the
@@ -100,7 +95,4 @@ Watch the executor with `manage_executors(action="search", ...)` or wait for the
 
 ## Known environment note
 
-On Aomi staging the server-side signer currently refuses a plain native transfer (empty calldata)
-and misprices gas, so a commit may end `FAILED` with `backend_code: pipeline_commit_failed` even
-though staging and simulation passed. Say so plainly when it happens; it is not a wallet or
-balance problem on your side.
+Earlier staging tests reported signer failures. This is historical context, not a diagnosis of every failure. Read the current executor evidence and report its phase and reason without guessing. A local fork run with a test signer does not verify production signing.

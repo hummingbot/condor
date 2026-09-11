@@ -9,7 +9,8 @@ set of calls to the Aomi Pipeline, which fork-simulates them, and — when
 `commit` is true — signs and broadcasts them from the Aomi wallet, recording
 the transaction hashes on the executor.
 
-Two ways to say what to sign:
+Three ways to describe an action:
+- **`mode="lending"`** — an exact Aave V3 supply/withdraw plan. The `lending` object contains `chain_id`, `pool`, `asset`, `wallet`, `amount` in raw token units, and `action` (`supply` or `withdraw`). The API constructs and verifies exact calldata, recipient and bounded approval. Condor’s lending screen provides Base USDC preview and explicit operator confirmation.
 - **`mode="operation"`** — a builder from the catalog (`app`, `operation`,
   `arguments`): Uniswap V4 swaps, LI.FI swaps/bridges, deBridge orders, Lido and
   ether.fi withdrawal claims, and the Solana swaps (Jupiter, Raydium, Sanctum) with
@@ -68,18 +69,17 @@ lifecycle. Passing one of those as `operation` is refused at create time. Reads
 | `chain_id` | yes | EVM chain: `8453` Base, `1` Ethereum, `42161` Arbitrum, `10` Optimism |
 | `chain` | no | `evm` (default) or `svm` for Solana operations in `mode=operation` (then `chain_id: 1`, optional `cluster`) |
 | `skills` | no | Skills to load alongside the app for a build (rarely needed; skills are read with `aomi_skill`) |
-| `mode` | yes | `calls` (raw `evm_stage_tx` calls) or `operation` (an app operation) |
+| `mode` | yes | `lending` (exact Aave plan), `calls` (raw EVM calls) or `operation` (an app operation) |
 | `calls[]` | `mode=calls` | Each `{to, description, data: {signature, args, raw}, value}` — `value` is a **wei string** (`"0"` for none); `data.signature` + `data.args` for an ABI call, or `data.raw` for pre-encoded calldata |
 | `app` / `operation` / `arguments` | `mode=operation` | The catalog entry to execute and its argument map (see `aomi_catalog`) |
-| `notional_quote` | agents: yes | Informational USDT estimate; never authorizes an automatic commit |
+| `notional_quote` | no | Informational USDT estimate; never authorizes an automatic commit |
 | `max_gas_quote` | no | Gas ceiling in USDT; missing pricing blocks budgeted commits |
 | `commit` | no | Default `true`. `false` = simulate only — nothing is signed |
 | `controller_id` | yes | Your session's agent id; attributes the executor to you |
 
 #### Example: a 0-value self-transfer on Base
 
-The smallest real transaction — it proves the wallet, the chain and the commit
-path without moving funds. `WALLET` is the Aomi wallet's own address (read it
+A minimal simulation probe. This dry run does not prove signing or confirmation. `WALLET` is the Aomi wallet's own address (read it
 with `aomi_read(op="account")`).
 
 ```python
@@ -98,9 +98,8 @@ manage_executors(
                 "value": "0",
             }
         ],
-        "notional_quote": 1,     # nothing at risk beyond gas; declare a token bound
         "max_gas_quote": 1,
-        "commit": True,
+        "commit": False,
     },
 )
 ```
@@ -113,7 +112,7 @@ manage_executors(
 - `custom_info.error` — `{reason, message, code}` when the executor failed; the
   `reason` is the one to act on
 - `custom_info.wallet_address` — the wallet Aomi signed from
-- `close_type`: `COMPLETED` (committed, hashes recorded), `FAILED` (simulation or
+- `close_type`: `COMPLETED` (confirmed, or simulation-only when `commit=false`), `FAILED` (simulation or
   commit failed — see `custom_info.error`), `EARLY_STOP` (stopped before commit)
 
 #### Important
@@ -125,5 +124,5 @@ manage_executors(
   and the Aomi wallet must be in **`server_auto`** signing mode for an unattended
   commit. Otherwise the executor ends `FAILED` with `reason: awaiting_wallet`
   — the transaction was staged but nobody signed it.
-- One executor, one atomic set of calls: split unrelated actions into separate
-  executors so a failure is attributable.
+- One executor groups one intended action. Multiple wallet transactions are not necessarily atomic: an approval may succeed before a later call fails. Reconcile actual receipts before retrying.
+- `defi_positions` reads the full durable lending ledger independently of the recent-transaction window. Controller contributions and wallet-wide receipt balances are separate; unresolved actions or unavailable reads must not be treated as zero exposure. This is evidence for reconciliation, not an automatic spending policy.

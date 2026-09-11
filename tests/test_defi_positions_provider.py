@@ -332,3 +332,107 @@ def test_run_core_providers_includes_defi_positions(monkeypatch):
         "DeFi Positions (1 on-chain executors) [agent: agent-a]:"
     )
     assert results["executors"].summary == "executors: stub"
+
+
+def _position(controller="agent-a", **over):
+    row = {
+        "controller_id": controller,
+        "account_name": "master_account",
+        "chain_id": 8453,
+        "wallet": WALLET,
+        "pool": "0xpool",
+        "asset": "0xasset",
+        "decimals": 6,
+        "net_contributed_raw": "100000000",
+        "pending_supply_raw": "2000000",
+        "pending_withdraw_raw": "0",
+        "wallet_receipt_balance_raw": "150000001",
+        "balance_status": "verified_wallet_balance",
+        "balance_scope": "wallet",
+        "unresolved_executor_ids": ["pending-1"],
+    }
+    return {**row, **over}
+
+
+def _ledger(client, result=None, fail=False):
+    async def read(path):
+        assert path == "/executors/lending/positions"
+        if fail:
+            raise RuntimeError("private upstream response must not be echoed")
+        return result
+
+    client.executors._get = read
+
+
+def test_old_supply_survives_recent_transaction_window_and_scopes_controller(
+    monkeypatch,
+):
+    _aomi(monkeypatch, None)
+    # Fifty newer non-lending transactions must not erase the older supply.
+    client = _Client(
+        {"data": [_executor(executor_id=f"recent-{i}") for i in range(50)]}
+    )
+    _ledger(client, {"positions": [_position(), _position("agent-b")]})
+    result = _run(client)
+    assert len(result.data["lending"]["positions"]) == 1
+    assert "agent-b" not in result.summary
+    assert (
+        "net contribution=100; wallet-wide receipt balance=150.000001" in result.summary
+    )
+    assert "pending supply=2" in result.summary
+    assert "unresolved actions=1" in result.summary
+    assert "not profit" in result.summary
+    assert "not permission for automatic spending" in result.summary
+
+
+def test_lending_precision_does_not_round_large_integers(monkeypatch):
+    _aomi(monkeypatch, None)
+    client = _Client({"data": [_executor()]})
+    _ledger(
+        client, {"positions": [_position(net_contributed_raw="9007199254740993123456")]}
+    )
+    result = _run(client)
+    assert "net contribution=9007199254740993.123456;" in result.summary
+
+
+def test_lending_read_failure_never_means_empty_and_keeps_transaction_evidence(
+    monkeypatch,
+):
+    _aomi(monkeypatch, None)
+    client = _Client({"data": [_executor()]})
+    _ledger(client, fail=True)
+    result = _run(client)
+    assert result.data["lending"]["positions"] is None
+    assert "Do not assume zero exposure" in result.summary
+    assert "private upstream" not in result.summary
+    assert "onchain-1234" in result.summary
+
+
+def test_malformed_lending_history_is_unavailable(monkeypatch):
+    _aomi(monkeypatch, None)
+    for response in (
+        {},
+        {"positions": {}},
+        {"positions": [{}]},
+        {"positions": [_position(net_contributed_raw=100)]},
+        {"positions": [_position(decimals=True)]},
+    ):
+        client = _Client({"data": [_executor()]})
+        _ledger(client, response)
+        result = _run(client)
+        assert result.data["lending"]["status"] == "unavailable"
+        assert result.data["lending"]["positions"] is None
+
+
+def test_empty_ledger_is_distinct_from_unavailable_balance(monkeypatch):
+    _aomi(monkeypatch, None)
+    client = _Client({"data": [_executor()]})
+    _ledger(client, {"positions": []})
+    assert "No recorded lending contributions" in _run(client).summary
+    _ledger(
+        client,
+        {"positions": [_position(balance_status="unsupported_market", decimals=None)]},
+    )
+    result = _run(client)
+    assert "net contribution=100000000 raw units" in result.summary
+    assert "wallet-wide receipt balance=unavailable" in result.summary
