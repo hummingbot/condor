@@ -34,8 +34,19 @@ MAX_RUNS = 300
 # that is not this shape never becomes a path.
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
-# The light meta the index carries, so `list` never opens a run file.
-_INDEX_FIELDS = ("id", "created", "agent", "label", "status", "error", "duration_ms")
+# The light meta the index carries, so `list` never opens a run file. Since
+# FEAT-061 that includes the owner: a listing has to authorize its rows, and
+# opening 300 files to learn who they belong to defeats the index's whole point.
+_INDEX_FIELDS = (
+    "id",
+    "created",
+    "agent",
+    "label",
+    "status",
+    "error",
+    "duration_ms",
+    "user_id",
+)
 
 
 @dataclass
@@ -45,6 +56,10 @@ class CodeRun:
     id: str
     created: float
     agent: str = ""  # attribution slug ("condor" | agent slug)
+    # The authenticated caller who ran it. 0 means *unknown*, not public — it is
+    # what every run written before FEAT-061 carries — and every reader that
+    # filters by owner drops those (fail closed, the SEC-196 rule for reports).
+    user_id: int = 0
     label: str = ""  # short purpose the caller passed ("returns of SOL 1h")
     server: str = ""
     status: str = "ok"  # "ok" | "error" | "timeout"
@@ -106,11 +121,30 @@ class CodeRunStore:
             logger.warning("Failed to read code run file %s", path)
             return None
 
-    def list(self, agent: str | None = None, limit: int = 20) -> list[dict]:
-        """Index meta only, newest first, optionally for one agent."""
+    def list(
+        self,
+        agent: str | None = None,
+        limit: int = 20,
+        user_id: int | None = None,
+    ) -> list[dict]:
+        """Index meta only, newest first, optionally for one agent and owner.
+
+        ``user_id=None`` is *no filter* — the admin scope, and what the MCP
+        subprocess's own reads keep passing. An int is that owner and nobody
+        else: an entry with no owner recorded is dropped rather than shared,
+        because unowned means unknown and this store holds whatever a snippet
+        printed (FEAT-061).
+        """
         entries = self._index
         if agent:
             entries = [e for e in entries if e.get("agent") == agent]
+        if user_id is not None:
+            # ``0`` is the absence of an owner, never a filter that matches one:
+            # an entry recorded before the field existed carries 0 (or nothing
+            # at all, in an index written back then) and is dropped either way.
+            entries = [
+                e for e in entries if user_id and (e.get("user_id") or 0) == user_id
+            ]
         return [dict(e) for e in entries[: max(0, limit)]]
 
     # ── internals ──

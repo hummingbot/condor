@@ -1,8 +1,9 @@
 """One answer to "can Condor actually run this model right now?".
 
 Every surface that offers a model — the ``get_available_models`` MCP tool behind
-the agent_builder skill, and the setup wizard (``condor/setup_llm.py``) — asks
-this module, so they can never disagree about what a machine can run. The probes
+the agent_builder skill, the setup wizard (``condor/setup_llm.py``) and the
+dashboard's model picker (``GET /sessions/options``) — asks this module, so they
+can never disagree about what a machine can run. The probes
 source their commands from :data:`condor.acp.ACP_COMMANDS` and their base URLs
 from :data:`condor.acp.pydantic_ai_client.DEFAULT_BASE_URLS`, so adding a
 provider there lights it up here for free.
@@ -71,6 +72,19 @@ _START_COMMANDS = {
     "ollama": "start it with `ollama serve`",
     "lmstudio": "start LM Studio and enable its local server",
 }
+
+
+def base_of(agent_key: str) -> str:
+    """The provider base of an agent key: ``claude-acp:opus`` → ``claude-acp``.
+
+    Lives here, next to the probes it feeds, because every surface that asks
+    "can this machine run that key?" has to reduce the key to a base first —
+    the setup wizard, ``condor doctor`` and the dashboard's model picker alike.
+    """
+    key = (agent_key or "").strip()
+    if key.startswith("custom@"):
+        return "custom"
+    return key.split(":", 1)[0]
 
 
 @dataclass(frozen=True)

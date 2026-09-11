@@ -44,7 +44,7 @@ The `hip3_market_scanner` routine does the full deterministic scan + ranking of 
 every `reselect_every_ticks` ticks (default 30), and whenever you are flat and need a market:
 ```
 manage_routines(action="run", name="hip3_market_scanner",
-  strategy_id="market_making_expert.hip_3_mm_operator",
+  agent="market_making_expert",
   config={"issuer": <issuer>, "min_spread_bps": <min_spread_bps>,
           "max_daily_drift_pct": <max_daily_drift_pct>, "top_n": 5})
 ```
@@ -97,7 +97,7 @@ your wider levels.
   `clearinghouseState {"dex":"xyz"}` (shows only per-dex position margin, $0 when flat).
 - **Trading hours:** many xyz markets close off-hours (empty book). Scanner filters them;
   re-check the live book before deploying.
-- **Data:** candles via `get_market_data`; live book via Hyperliquid `l2Book`
+- **Data:** candles via `run_code` (`client.market_data.get_candles_last_days`); live book via Hyperliquid `l2Book`
   `{"type":"l2Book","coin":"xyz:DRAM"}` — **lowercase prefix + UPPERCASE token**, no `-USD`
   (both `XYZ:...` and `xyz:dram` return null).
 

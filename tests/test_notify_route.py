@@ -104,7 +104,7 @@ def test_a_live_session_gets_both_a_transcript_note_and_the_telegram_push(
 def test_the_note_is_scoped_to_the_jwt_caller_not_the_posted_user_id(
     monkeypatch, bot, notes
 ):
-    """Mirror consult/delegate: a caller cannot write into another transcript."""
+    """Mirror delegate: a caller cannot write into another transcript."""
     _resolves_to(monkeypatch, "conv-1")
 
     asyncio.run(

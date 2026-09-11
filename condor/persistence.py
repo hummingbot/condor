@@ -40,6 +40,21 @@ EPHEMERAL_KEYS = frozenset(
         "portfolio_accounts_distribution",
         "portfolio_changes_24h",
         "portfolio_pnl_indicators",
+        # Per-render API snapshots (re-fetched by the handler that reads
+        # them; every read site falls back to a fresh fetch on a miss)
+        "active_bots_data",
+        "current_bot_info",
+        "bot_runs_map",
+        "controller_configs_list",
+        "configs_type_filtered",
+        "current_executor",
+        "running_executors",
+        "gs_candles",
+        "selected_pool_info",
+        "gecko_pools",
+        "pool_list_cache",
+        "positions_cache",
+        "lp_positions_cache",
     }
 )
 

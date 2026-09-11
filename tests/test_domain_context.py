@@ -2,7 +2,7 @@
 
 ARCH-099: the ``[DOMAIN MEMORY]`` / ``[DOMAIN SKILLS]`` block used to be written
 out twice — once in ``binding.agent_identity_context`` (a chatted Agent) and once
-in ``_shared.build_agent_context`` (a consulted one). Editing one copy silently
+in ``_shared.build_agent_context`` (a delegated one). Editing one copy silently
 made the Agent behave differently depending on how it was reached. Both now
 compose :func:`condor.memory.domain_context`, and these tests fail if a copy ever
 comes back.
@@ -44,18 +44,18 @@ def stocked_agent(tmp_path):
 def _domain_part(text: str) -> str:
     """The memory/skills block of a built prompt, stripped of what wraps it."""
     start = text.index("[DOMAIN MEMORY")
-    end = text.find("[CONSULT REQUEST]")
+    end = text.find("[TASK]")
     return text[start:] if end == -1 else text[start:end].rstrip()
 
 
-def test_chatted_and_consulted_agents_get_identical_domain_sections(stocked_agent):
+def test_chatted_and_delegated_agents_get_identical_domain_sections(stocked_agent):
     from condor.runtime import binding
     from handlers.agents._shared import build_agent_context
 
     chatted = binding.agent_identity_context(
         _SLUG, user_id=_USER_ID, instructions="Domain knowledge.", label="Backpack MM"
     )
-    consulted = build_agent_context(
+    delegated = build_agent_context(
         SimpleNamespace(slug=_SLUG, instructions="Domain knowledge."),
         user_id=_USER_ID,
         task="Why is the spread wide?",
@@ -63,7 +63,7 @@ def test_chatted_and_consulted_agents_get_identical_domain_sections(stocked_agen
 
     # Byte-identical, not merely "both mention memory": the point of the shared
     # builder is that an edit to one instruction reaches both doors at once.
-    assert _domain_part(chatted) == _domain_part(consulted)
+    assert _domain_part(chatted) == _domain_part(delegated)
     assert _domain_part(chatted) == "\n\n".join(domain_context(_SLUG, _USER_ID))
 
 
@@ -74,13 +74,13 @@ def test_both_builders_carry_the_memory_and_skills_indexes(stocked_agent):
     chatted = binding.agent_identity_context(
         _SLUG, user_id=_USER_ID, instructions="Domain knowledge.", label="Backpack MM"
     )
-    consulted = build_agent_context(
+    delegated = build_agent_context(
         SimpleNamespace(slug=_SLUG, instructions="Domain knowledge."),
         user_id=_USER_ID,
         task="Why is the spread wide?",
     )
 
-    for built in (chatted, consulted):
+    for built in (chatted, delegated):
         assert "[DOMAIN MEMORY — what you remember in this domain]" in built
         assert "When funding settles" in built
         assert "[DOMAIN SKILLS — playbooks you can follow]" in built
@@ -90,8 +90,8 @@ def test_both_builders_carry_the_memory_and_skills_indexes(stocked_agent):
     from condor.agents.agent import identity_header
 
     assert chatted.startswith(identity_header(_SLUG, "Backpack MM"))
-    assert "[CONSULT REQUEST]\nWhy is the spread wide?" in consulted
-    assert "[CONSULT REQUEST]" not in chatted
+    assert "[TASK]\nWhy is the spread wide?" in delegated
+    assert "[TASK]" not in chatted
 
 
 def test_an_empty_store_contributes_no_sections(tmp_path):

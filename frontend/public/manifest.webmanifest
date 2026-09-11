@@ -1,0 +1,29 @@
+{
+  "id": "/",
+  "name": "Condor",
+  "short_name": "Condor",
+  "description": "Portfolio, bots, agents and trading for Hummingbot.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#080c18",
+  "theme_color": "#080c18",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    {
+      "src": "/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ],
+  "launch_handler": { "client_mode": "navigate-existing" },
+  "shortcuts": [
+    { "name": "Portfolio", "url": "/portfolio" },
+    { "name": "Bots", "url": "/bots" },
+    { "name": "Trade", "url": "/trade" },
+    { "name": "Routines", "url": "/routines" },
+    { "name": "Settings", "url": "/settings" }
+  ]
+}

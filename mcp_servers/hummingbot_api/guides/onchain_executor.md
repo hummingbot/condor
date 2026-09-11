@@ -1,132 +1,45 @@
-> Automatic raw-call and catalog-operation creates require explicit `commit: false`.
-> Exact lending commits require an operator-owned API grant and `require_lending_policy: true`.
-> Agent-declared notional and native value never authorize arbitrary contract effects.
-> `max_gas_quote` is denominated in USDT; missing gas pricing blocks a budgeted commit.
+# Aomi on-chain executors
 
-### Onchain Executor
-**This is the way to sign arbitrary EVM transactions from a strategy.** It hands a
-set of calls to the Aomi Pipeline, which fork-simulates them, and — when
-`commit` is true — signs and broadcasts them from the Aomi wallet, recording
-the transaction hashes on the executor.
+Use the typed create_lending_executor for exact Aave V3 supply/withdraw plans and
+create_onchain_executor for catalog operations or raw EVM calls. Both return an
+onchain_executor owned by the Hummingbot API. Read get_executor for its result,
+list_executors for history and stop_executor to stop an action before submission.
 
-Three ways to describe an action:
-- **`mode="lending"`** — an exact Aave V3 supply/withdraw plan. The `lending` object contains `chain_id`, `pool`, `asset`, `wallet`, `amount` in raw token units, and `action` (`supply` or `withdraw`). The API constructs and verifies exact calldata, recipient and bounded approval. Condor’s lending screen provides Base USDC preview and explicit operator confirmation.
-- **`mode="operation"`** — a builder from the catalog (`app`, `operation`,
-  `arguments`): Uniswap V4 swaps, LI.FI swaps/bridges, deBridge orders, Lido and
-  ether.fi withdrawal claims, and the Solana swaps (Jupiter, Raydium, Sanctum) with
-  `chain="svm"` plus `skills=["jupiter"]` (the builder's skill must be loaded).
-  Aomi builds the calls; you never touch calldata. Solana is verified through
-  staging and simulation (a Jupiter SOL→USDC dry run returns a 7-instruction
-  bundle); a Solana *commit* additionally needs the wallet bound `server_auto`
-  on the Aomi side, and quote-based builders can be refused at commit as stale
-  when the fresh quote no longer matches the simulated build.
-- **`mode="calls"`** — raw EVM calls (`to`, `data`, `value`). This is how every
-  other protocol is reached: Aomi's 40+ **skills** (Aave, Morpho, Compound, Curve,
-  Pendle, Lido, ether.fi, Rocket Pool, ...) are instructions — contract addresses,
-  function signatures and rules — that you read with the `aomi_skill` routine and
-  turn into `data.signature` + `data.args` calls. Simulation still gates the commit.
+## Lending workflow
 
-What the catalog will **not** offer you: Aomi's own chat plumbing
-(`ask_authorization`, `schedule_cron`, `spawn_thread`, `brave_search`, ...) and its
-raw stage/simulate/commit primitives (`evm_stage_tx`, `evm_commit_txs`,
-`svm_commit_ix`, ...). Authorization is decided by the wallet's signing policy on
-the Aomi side, scheduling is the tick engine's job, and this executor owns the
-lifecycle. Passing one of those as `operation` is refused at create time. Reads
-(`get_*`, `*_quote`, `*_status`) are listed for `aomi_read`, not as build targets.
+1. Read the wallet, market and available liquidity through the Aomi read routines.
+2. Call create_lending_executor with chain_id, wallet, pool, asset, amount (raw integer
+   string), action (supply/withdraw), controller_id and commit=False to preview.
+3. Inspect simulation, exact approval, asset movements and estimated gas.
+4. For an automatic commit, use the operator-granted account/controller and identical
+   plan, commit=True, require_lending_policy=True and an explicit max_gas_quote.
+   Condor checks durable contributions and real USDC/USDT valuation. The API checks
+   exact authority and reserves capacity under a database transaction lock.
+5. Inspect actual receipt evidence and durable contributions after confirmation.
 
-**Use when:**
-- Executing a DeFi action (swap, lend, stake, bridge) on an EVM chain from an agent
-- Sending a native transfer or a contract call that no other executor expresses
-- You want a fork simulation before anything is signed
+A policy is configured by the operator with AOMI_LENDING_POLICY_FILE on the API.
+It bounds recorded contributions and pending supplies, not externally deposited funds,
+interest or the whole portfolio's market value. Only confirmed withdrawals free
+capacity. Wallet-wide receipt-token balances are shown separately from controller
+contributions. Do not clear unknown history to free a limit.
 
-**Avoid when:**
-- Trading on a CEX (use order/position/grid/dca executors)
-- Providing CLMM liquidity (use `lp_executor`)
-- Solana swaps that Hummingbot's own Gateway connectors already cover (Jupiter, Raydium, Orca, Meteora) — prefer the native `lp_executor`/Gateway path there; use this executor for what Gateway lacks
+## Catalog and raw calls
 
-#### Setup Workflow
+create_onchain_executor requires an explicit commit decision. Its mode is calls or
+operation. Unattended use permits only commit=False; granted lending has its own tool.
 
-1. **Browse the catalog** — run the `aomi_catalog` routine: the builders and reads
-   of each app, and the protocol skills. For a protocol without a builder, run
-   `aomi_skill` (skill="aave") and build `calls` from its contracts and signatures.
-2. **Read state first** — run the `aomi_read` routine (`op="account"` for the
-   wallet's balance and nonce, `op="token-holdings"` for an ERC-20 balance,
-   `op="contract"` to inspect a target, `op="context"` for block and gas). Do not
-   sign into a wallet whose balance you have not read.
-3. **Decide the mode** — an app operation when the catalog has one; raw calls otherwise.
-4. **Preview first** — set `commit: false`. To execute lending automatically, the operator must configure `AOMI_LENDING_POLICY_FILE` on the API with your exact current agent ID, account, signing wallet, and contribution/gas limits. Use `mode: "lending"`, `require_lending_policy: true`, and the approved plan. Condor reads the grant, durable contributions and a USDC/USDT quote; the API rechecks and reserves capacity atomically at creation. Other automatic modes remain dry-run only. Gas budgets use USDT and fail closed without pricing.
+Raw calls have to, value (decimal wei string), data (signature, args, raw), optional
+chain_id and description. A plain transfer has empty signature/args/raw. Catalog mode
+uses operation, arguments and optionally app/skills as discovered by aomi_catalog.
+Use aomi_skill to read protocol instructions and aomi_read to inspect chain state.
+The catalog excludes chat plumbing and direct stage/commit primitives.
 
-5. **Create** — `manage_executors(action="create", executor_type="onchain_executor", executor_config={...})`.
-6. **Read the result** — poll the executor (`action="search"`, `executor_id=...`)
-   until `status == "TERMINATED"`, then read `close_type` and `custom_info`.
+The backend stages/builds, fork-simulates, checks risk, commits and records evidence.
+max_gas_quote is an estimated execution-gas ceiling in USDT, independent of display
+pair. Missing pricing refuses a budgeted commit. Rollup data fees and provider
+surcharges are excluded; it is not a final signing fee cap. timeout_sec bounds the run.
 
-#### Key Parameters
-
-| Parameter | Required | Meaning |
-|---|---|---|
-| `chain_id` | yes | EVM chain: `8453` Base, `1` Ethereum, `42161` Arbitrum, `10` Optimism |
-| `chain` | no | `evm` (default) or `svm` for Solana operations in `mode=operation` (then `chain_id: 1`, optional `cluster`) |
-| `skills` | no | Skills to load alongside the app for a build (rarely needed; skills are read with `aomi_skill`) |
-| `mode` | yes | `lending` (exact Aave plan), `calls` (raw EVM calls) or `operation` (an app operation) |
-| `calls[]` | `mode=calls` | Each `{to, description, data: {signature, args, raw}, value}` — `value` is a **wei string** (`"0"` for none); `data.signature` + `data.args` for an ABI call, or `data.raw` for pre-encoded calldata |
-| `app` / `operation` / `arguments` | `mode=operation` | The catalog entry to execute and its argument map (see `aomi_catalog`) |
-| `notional_quote` | no | Informational USDT estimate; never authorizes an automatic commit |
-| `max_gas_quote` | no | Gas ceiling in USDT; missing pricing blocks budgeted commits |
-| `commit` | no | Default `true`. `false` = simulate only — nothing is signed |
-| `controller_id` | yes | Your session's agent id; attributes the executor to you |
-
-#### Example: a 0-value self-transfer on Base
-
-A minimal simulation probe. This dry run does not prove signing or confirmation. `WALLET` is the Aomi wallet's own address (read it
-with `aomi_read(op="account")`).
-
-```python
-manage_executors(
-    action="create",
-    executor_type="onchain_executor",
-    executor_config={
-        "controller_id": "<your agent id>",
-        "chain_id": 8453,
-        "mode": "calls",
-        "calls": [
-            {
-                "to": WALLET,
-                "description": "self-transfer smoke test",
-                "data": {"signature": "", "args": [], "raw": ""},
-                "value": "0",
-            }
-        ],
-        "max_gas_quote": 1,
-        "commit": False,
-    },
-)
-```
-
-#### Reading the Result
-
-- `custom_info.tx_hashes` — the broadcast transaction hashes (empty when
-  `commit=false` or the executor failed before signing)
-- `custom_info.simulation_passed` — whether the fork simulation passed
-- `custom_info.error` — `{reason, message, code}` when the executor failed; the
-  `reason` is the one to act on
-- `custom_info.wallet_address` — the wallet Aomi signed from
-- `close_type`: `COMPLETED` (confirmed, or simulation-only when `commit=false`), `FAILED` (simulation or
-  commit failed — see `custom_info.error`), `EARLY_STOP` (stopped before commit)
-
-#### Important
-
-- **Stop is a no-op after commit.** An on-chain transaction cannot be recalled;
-  `manage_executors(action="stop")` only matters while the executor is still
-  simulating. Simulate first (`commit=false`) when unsure.
-- **Precondition:** the Hummingbot API process needs `AOMI_URL` and `AOMI_TOKEN`,
-  and the Aomi wallet must be in **`server_auto`** signing mode for an unattended
-  commit. Otherwise the executor ends `FAILED` with `reason: awaiting_wallet`
-  — the transaction was staged but nobody signed it.
-- One executor groups one intended action. Multiple wallet transactions are not necessarily atomic: an approval may succeed before a later call fails. Reconcile actual receipts before retrying.
-- `defi_positions` reads the full durable lending ledger independently of the recent-transaction window. Controller contributions and wallet-wide receipt balances are separate; unresolved actions or unavailable reads must not be treated as zero exposure. The data is evidence for reconciliation. Automatic spending additionally requires the API grant and database admission check; the provider alone cannot authorize it.
-
-#### Automatic lending limits
-
-The operator policy supports Base USDC/Aave V3 and reserves contributions plus pending supplies across controllers. Condor uses the API account specified in the tool call (default `master_account`) and requires both controller fields, when present, to match the current agent. It values the exact USDC amount with the server’s Binance USDC/USDT quote, independently of `trading_pair` and `notional_quote`. Completed contributions remain in the next tick’s risk state. Missing history or pricing pauses automatic decisions. Withdrawals cannot consume another controller’s contributions or pending deposits; confirmed withdrawals release capacity, not a request or simulation.
-
-Limits apply to recorded contributions, not external deposits, interest or a guarantee of USDC’s peg. Policy edits govern new admissions. Unknown outcomes stay reserved until reconciled. The API’s `require_lending_policy` field prevents a grant removed between checks and creation from reverting to unrestricted manual mode. Current automatic validation must still be paired with a configured Aomi signer; a local test-wallet demo does not prove production signing.
+Creation is persisted before on-chain execution starts. Unknown outcomes remain
+reserved for reconciliation. Multiple wallet transactions are not atomic. A dry-run
+COMPLETED status does not prove signing. Local fork/test-wallet evidence does not
+certify production Para signing, service availability or realized investment returns.

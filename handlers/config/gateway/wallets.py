@@ -5,8 +5,7 @@ Gateway wallet management functions
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
-from ..server_context import build_config_message_header
-from ..user_preferences import (
+from condor.preferences import (
     get_active_server,
     get_all_networks_for_chain,
     get_default_networks_for_chain,
@@ -14,6 +13,8 @@ from ..user_preferences import (
     remove_wallet_networks,
     set_wallet_networks,
 )
+
+from ..server_context import build_config_message_header
 from ._shared import escape_markdown_v2, logger
 
 

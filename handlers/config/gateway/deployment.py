@@ -5,8 +5,9 @@ Gateway deployment, lifecycle, and logs management
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
+from condor.preferences import get_active_server
+
 from ..server_context import build_config_message_header
-from ..user_preferences import get_active_server
 from ._shared import escape_markdown_v2, logger
 
 

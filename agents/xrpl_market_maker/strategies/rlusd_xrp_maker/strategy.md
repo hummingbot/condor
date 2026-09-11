@@ -66,7 +66,7 @@ error from the XRPL connector on tick #1 or tick #2 is **transient, not fatal**.
 
 ```
 manage_routines(action="run", name="xrpl_mm_quote_planner",
-                strategy_id="xrpl_market_maker.rlusd_xrp_maker",
+                agent="xrpl_market_maker",
                 config={"xrpl_pair": "<from config>",
                         "reference_connector": "<from config>",
                         "reference_pair": "<from config>",

@@ -94,7 +94,7 @@ def env(tmp_path, monkeypatch):
     """A sandboxed agents/ tree, conversation store and runtime."""
     agents_root = tmp_path / "agents"
     agents_root.mkdir()
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", agents_root)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(agents_root))
     monkeypatch.setattr(conversations, "_live_recorders", set())
     monkeypatch.setattr(session_module, "_sessions", {})
     monkeypatch.setattr("condor.acp.client.ACPClient", _Client)
@@ -288,7 +288,7 @@ def test_switching_the_model_in_a_bound_chat_moves_the_agent(env):
     assert res.json()["session"]["agent_key"] == "claude-acp:opus"
     assert (
         AgentStore().get("brigado").agent_key == "claude-acp:opus"
-    ), "the next chat, consult, delegate or loop starts there too"
+    ), "the next chat, delegate or loop starts there too"
 
 
 def test_a_pick_in_an_unbound_chat_writes_the_user_preference(env, monkeypatch):

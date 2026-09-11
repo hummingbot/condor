@@ -11,9 +11,13 @@ record in one store.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
+from dataclasses import dataclass
 from typing import Any
+
+import aiohttp
 
 from condor.fetchers.executors import normalize_executor_side
 
@@ -24,6 +28,25 @@ logger = logging.getLogger(__name__)
 # action='run_async') rather than shortening this.
 DEFAULT_POLL_INTERVAL = 2.0
 DEFAULT_TIMEOUT = 600.0
+
+# How many backtests a fan-out puts on the wire at once. hummingbot-api runs each
+# backtest in its own worker process behind a semaphore of BACKTESTING_MAX_CONCURRENT
+# (1 upstream; setup-environment.sh writes 4 into the .env it generates), so a caller
+# that submits more than this is not going faster -- it is only queueing on the
+# server, where a run's deadline is already ticking.
+DEFAULT_MAX_CONCURRENT = 4
+
+# The one response that carries the whole backtest -- every executor plus
+# processed_data -- is the poll that finally succeeds, and aiohttp's ``total``
+# covers the body read, so the shared client's 60s cap (config_manager.get_client)
+# applied to it: a multi-month 1m window does not transfer and parse in a minute,
+# the run completed on the server and Condor timed out reading the answer.
+# ``sock_read`` is the knob that fits both shapes of slowness on this path -- a
+# payload that is streaming keeps resetting it however long the transfer takes,
+# while an API server stalled computing sends nothing and still trips it in a
+# minute, which is the case _poll_task retries. ``total`` stays only as a backstop
+# against a connection that dribbles forever.
+TASK_READ_TIMEOUT = aiohttp.ClientTimeout(total=600, connect=15, sock_read=60)
 
 _TERMINAL = ("completed", "failed", "error", "cancelled")
 
@@ -141,27 +164,138 @@ async def run_and_save(
     if isinstance(result, dict) and result.get("error"):
         raise BacktestError(f"Backtest {task_id} failed: {result['error']}")
 
-    _save(server, task_id, task)
+    await _save(server, task_id, task)
     return task_id, task
+
+
+@dataclass(frozen=True)
+class BacktestOutcome:
+    """One config's place in a fan-out: the task it produced, or why it has none.
+
+    A batch of backtests is reported over, and a report that quietly covers five of
+    the seven configs it was asked about is worse than one that says two failed. So
+    the failure travels back with the config that caused it instead of being logged
+    and turned into ``None``.
+    """
+
+    config: dict
+    task_id: str | None = None
+    task: dict | None = None
+    error: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.task is not None
+
+
+async def run_many(
+    client,
+    server: str,
+    configs: list[dict],
+    start_time: int,
+    end_time: int,
+    resolution: str = "1m",
+    trade_cost: float = 0.0002,
+    max_concurrent: int | None = None,
+    poll_interval: float | None = None,
+    timeout: float | None = None,
+) -> list[BacktestOutcome]:
+    """Run a batch of backtests against one server, in input order, losing none.
+
+    Two things make a fan-out different from N calls to :func:`run_and_save`, and
+    both live here rather than in each caller:
+
+    *Bounded.* The server serializes backtests behind ``BACKTESTING_MAX_CONCURRENT``
+    worker slots, so submitting seven at once buys nothing and costs the six that
+    wait. At most ``max_concurrent`` are on the wire, and the rest wait here, where
+    waiting is free.
+
+    *Patient.* A submitted run's deadline starts at submission, not at execution, so
+    a run that shares a batch has to outlast the batch. Each therefore gets
+    ``timeout`` multiplied by the number in flight beside it -- which covers the
+    worst case, a server whose own cap is 1 running the whole batch end to end.
+
+    Returns one :class:`BacktestOutcome` per config, in the order given.
+    """
+    configs = list(configs)
+    if not configs:
+        return []
+
+    bound = DEFAULT_MAX_CONCURRENT if max_concurrent is None else int(max_concurrent)
+    in_flight = max(1, min(bound, len(configs)))
+    deadline = (DEFAULT_TIMEOUT if timeout is None else timeout) * in_flight
+    slots = asyncio.Semaphore(in_flight)
+
+    async def _one(config: dict) -> BacktestOutcome:
+        async with slots:
+            try:
+                task_id, task = await run_and_save(
+                    client,
+                    server,
+                    config,
+                    start_time,
+                    end_time,
+                    resolution=resolution,
+                    trade_cost=trade_cost,
+                    poll_interval=poll_interval,
+                    timeout=deadline,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Backtest failed for config %s: %s",
+                    config.get("id", "?"),
+                    exc,
+                    exc_info=True,
+                )
+                return BacktestOutcome(
+                    config=config, error=f"{type(exc).__name__}: {exc}"
+                )
+        task["task_id"] = task_id
+        return BacktestOutcome(config=config, task_id=task_id, task=task)
+
+    return list(await asyncio.gather(*[_one(cfg) for cfg in configs]))
 
 
 async def _poll_task(
     client, task_id: str, poll_interval: float, timeout: float
 ) -> dict:
-    """Poll a submitted task until it reaches a terminal state."""
+    """Poll a submitted task until it reaches a terminal state.
+
+    A poll that times out is *not* a failed backtest. The API server computes a
+    backtest on the same event loop it answers HTTP on, so a wide window over
+    fine candles stalls every request to it — including this one, which then
+    hits the client's own request timeout and raised a bare ``TimeoutError``
+    that killed a run whose task was still healthy on the server. The deadline
+    below is what bounds the wait; an individual poll failing to answer only
+    means "ask again".
+    """
     deadline = time.monotonic() + timeout
-    task: dict = {}
+    last_status: str | None = None
     while True:
-        task = await client.backtesting.get_task(task_id)
-        if not isinstance(task, dict):
-            raise BacktestError(
-                f"Backtest {task_id} returned an unreadable task: {task}"
+        stalled = False
+        try:
+            task = await get_task(client, task_id)
+        except TimeoutError:
+            # Covers asyncio.TimeoutError too — the same object since 3.11, and
+            # what aiohttp raises when a request outlives its ClientTimeout.
+            logger.debug(
+                "Poll for backtest %s timed out; the server is busy, retrying",
+                task_id,
             )
-        if task.get("status") in _TERMINAL:
-            return normalize_backtest_task(task)
+            stalled = True
+
+        if not stalled:
+            if not isinstance(task, dict):
+                raise BacktestError(
+                    f"Backtest {task_id} returned an unreadable task: {task}"
+                )
+            if task.get("status") in _TERMINAL:
+                return normalize_backtest_task(task)
+            last_status = task.get("status")
+
         if time.monotonic() >= deadline:
             raise BacktestError(
-                f"Backtest {task_id} is still {task.get('status') or 'running'} after "
+                f"Backtest {task_id} is still {last_status or 'running'} after "
                 f"{int(timeout)}s. It keeps running on the server — render it later "
                 f"with task_id='{task_id}'. For a window this long, submit the routine "
                 "with action='run_async' instead of waiting."
@@ -169,12 +303,88 @@ async def _poll_task(
         await asyncio.sleep(poll_interval)
 
 
-def _save(server: str, task_id: str, task: dict) -> None:
-    """Persist the envelope. A store failure must never lose the backtest itself."""
+async def get_task(client, task_id: str) -> Any:
+    """GET one backtest task with a read deadline sized for its result payload.
+
+    ``BacktestingRouter.get_task`` takes no per-request timeout, and the
+    session-wide one belongs to every other caller of the shared client -- 60s is
+    right for a chat-latency call and wrong for this one. The request therefore
+    goes to the same authenticated session directly, carrying
+    :data:`TASK_READ_TIMEOUT`. A client that does not expose its session (the
+    test doubles, a future client shape) falls back to the router.
+
+    The body is read and then decoded in a worker thread rather than through
+    ``response.json()``: aiohttp awaits the read and *then* runs ``json.loads``
+    inline, and the one response worth this deadline is the completed one --
+    ~125 MB of JSON, ~0.8 s of pure CPU. This coroutine shares its loop with the
+    Telegram poller, every WebSocket and every dashboard request, and ``run_many``
+    can land four of these at once, so that decode is a freeze of the whole
+    process. ``json.loads`` takes bytes directly, so nothing decodes twice.
+    """
+    router = getattr(client, "backtesting", None)
+    session = getattr(router, "session", None)
+    base_url = getattr(router, "base_url", None)
+    if session is None or base_url is None:
+        return await router.get_task(task_id)
+
+    url = f"{base_url}/backtesting/tasks/{task_id}"
+    async with session.get(url, timeout=TASK_READ_TIMEOUT) as response:
+        if not response.ok:
+            detail = (await response.text())[:300].strip()
+            raise BacktestError(
+                f"Backtest {task_id} could not be read: "
+                f"HTTP {response.status} {detail}".strip()
+            )
+        body = await response.read()
+
+    # Outside the ``async with``: the body is already buffered, so the connection
+    # goes back to the pool while the parse runs instead of being held for it.
+    return await asyncio.to_thread(json.loads, body)
+
+
+async def fetch_and_save(client, server: str, task_id: str) -> dict | None:
+    """Fetch a finished task from the server and persist it; None if there is none.
+
+    ``_save`` only ever runs at the end of a wait, so a run whose result read timed
+    out completed on the server and never reached the store -- and "render it later
+    with task_id=..." then found nothing to render. This is the fall-through that
+    makes that advice true: fetched once, saved, and every later render is local.
+    """
+    try:
+        task = await get_task(client, task_id)
+    except Exception:
+        logger.debug(
+            "Could not fetch backtest %s from the server", task_id, exc_info=True
+        )
+        return None
+
+    if (
+        not isinstance(task, dict)
+        or task.get("status") != "completed"
+        or not task.get("result")
+    ):
+        return None
+
+    task = normalize_backtest_task(task)
+    await _save(server, task_id, task)
+    return task
+
+
+async def _save(server: str, task_id: str, task: dict) -> None:
+    """Persist the envelope. A store failure must never lose the backtest itself.
+
+    The write is ``json.dumps`` plus gzip level 6 over the whole envelope, which
+    the store's own ``migrate`` docstring measures at seconds per file (payloads
+    run to 137 MB). This coroutine shares its loop with the Telegram poller and
+    every dashboard request, so the compression goes to a thread — the same
+    treatment ``migrate_backtest_archive`` already gets in ``main.py``. The
+    store is resolved on the loop first so only the bound method crosses over.
+    """
     from condor.backtest_store import get_backtest_store
 
     try:
-        get_backtest_store().save_result(server or "", task_id, task)
+        store = get_backtest_store()
+        await asyncio.to_thread(store.save_result, server or "", task_id, task)
     except Exception:
         logger.warning(
             "Failed to save backtest %s to the store", task_id, exc_info=True

@@ -133,3 +133,93 @@ def test_delete_is_the_only_way_to_lose_a_transcript(store):
     assert body["deleted"] is True
     assert conversations.get_conversation(USER.id, meta.id) is None
     assert _client(USER).get("/conversations").json() == []
+
+
+# ── Attachments (FEAT-098) ──
+#
+# The store's own rules are pinned in ``tests/test_attachments_store.py``; here
+# only the route's half matters — the status codes a composer has to be able to
+# read, and the fact that the ownership rule already on this router covers the
+# new pair without a second implementation.
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+
+
+def _upload(user: WebUser, conv_id: str, data: bytes, mime: str = "image/png"):
+    return _client(user).post(
+        f"/conversations/{conv_id}/attachments",
+        files={"file": ("shot.png", data, mime)},
+    )
+
+
+def test_an_image_round_trips_through_the_routes(store):
+    meta = _seed(USER.id)
+
+    posted = _upload(USER, meta.id, PNG)
+    assert posted.status_code == 200
+    body = posted.json()
+    assert body["mime"] == "image/png"
+    assert body["bytes"] == len(PNG)
+
+    got = _client(USER).get(f"/conversations/{meta.id}/attachments/{body['id']}")
+    assert got.status_code == 200
+    assert got.content == PNG
+    assert got.headers["content-type"] == "image/png"
+
+
+def test_the_response_never_carries_the_filename(store):
+    """The chip shows the name from the local ``File``; nothing else ever has it."""
+    meta = _seed(USER.id)
+    body = _upload(USER, meta.id, PNG).json()
+    assert "shot.png" not in str(body)
+    assert set(body) == {"id", "mime", "bytes"}
+
+
+def test_a_file_over_the_cap_is_413(store):
+    meta = _seed(USER.id)
+    from condor.runtime import attachments
+
+    resp = _upload(USER, meta.id, PNG + b"\x00" * attachments.MAX_BYTES)
+    assert resp.status_code == 413
+    assert "limit" in resp.json()["detail"]
+
+
+def test_a_non_image_is_415_however_it_is_labelled(store):
+    meta = _seed(USER.id)
+    resp = _upload(USER, meta.id, b"PK\x03\x04 zip", mime="image/png")
+    assert resp.status_code == 415
+    assert "PNG" in resp.json()["detail"]
+
+
+def test_uploading_into_another_users_conversation_is_refused(store):
+    meta = _seed(OTHER_ID)
+    assert _upload(USER, meta.id, PNG).status_code == 404
+    assert (
+        _client(USER)
+        .post(
+            f"/conversations/{meta.id}/attachments?user_id={OTHER_ID}",
+            files={"file": ("x.png", PNG, "image/png")},
+        )
+        .status_code
+        == 403
+    )
+
+
+def test_reading_another_users_attachment_is_refused(store):
+    mine = _seed(USER.id)
+    theirs = _seed(OTHER_ID)
+    att_id = _upload(USER, mine.id, PNG).json()["id"]
+
+    # Right id, wrong conversation — and the owner's own tree does not hold it.
+    assert (
+        _client(USER)
+        .get(f"/conversations/{theirs.id}/attachments/{att_id}")
+        .status_code
+        == 404
+    )
+
+
+def test_a_traversal_in_the_url_is_404_not_a_file(store):
+    meta = _seed(USER.id)
+    resp = _client(USER).get(f"/conversations/{meta.id}/attachments/..%2Fmeta.json")
+    assert resp.status_code == 404

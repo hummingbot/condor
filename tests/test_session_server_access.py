@@ -68,6 +68,13 @@ class _Cm:
     def has_server_access(self, user_id, name, *a, **kw):
         return name in self.grants.get(user_id, [])
 
+    def get_server_permission(self, user_id, name):
+        # This double grants at OWNER level, so the seat keeps ``full`` and
+        # these tests stay about reach, not about the admin ring (SEC-252).
+        from config_manager import ServerPermission
+
+        return ServerPermission.OWNER if name in self.grants.get(user_id, []) else None
+
     def get_accessible_servers(self, user_id):
         if self._accessible is not None:
             return list(self._accessible)

@@ -20,7 +20,13 @@ async def manage_gateway_swaps(
     client: Any, request: GatewaySwapRequest
 ) -> dict[str, Any]:
     """
-    Manage Gateway swap operations: quote, execute, search, and status tracking.
+    The shared implementation behind the four registered swap tools.
+
+    ``server.py`` registers ``quote_swap``, ``execute_swap``, ``get_swap_status`` and
+    ``search_swaps`` (FEAT-064); each builds a request with its own ``action`` and lands
+    on the matching branch below. There is no ``manage_gateway_swaps`` tool on the wire
+    any more — a swap that spends is reachable only under a name the danger gate knows
+    is dangerous.
 
     Actions:
     - quote: Get price quote for a swap before executing
@@ -196,14 +202,14 @@ async def manage_gateway_swaps(
         search_params = {"limit": request.limit or 50, "offset": request.offset or 0}
 
         # Add optional filters
-        if request.search_network:
-            search_params["network"] = request.search_network
-        if request.search_connector:
-            search_params["connector"] = request.search_connector
-        if request.search_wallet_address:
-            search_params["wallet_address"] = request.search_wallet_address
-        if request.search_trading_pair:
-            search_params["trading_pair"] = request.search_trading_pair
+        if request.network:
+            search_params["network"] = request.network
+        if request.connector:
+            search_params["connector"] = request.connector
+        if request.wallet_address:
+            search_params["wallet_address"] = request.wallet_address
+        if request.trading_pair:
+            search_params["trading_pair"] = request.trading_pair
         if request.status:
             search_params["status"] = request.status
         if request.start_time:

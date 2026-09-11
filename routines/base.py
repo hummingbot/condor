@@ -15,7 +15,12 @@ from typing import Any, Awaitable, Callable
 
 from pydantic import BaseModel
 
-from condor.memory.paths import CHAT_SLUG, shared_routines_root
+from condor.memory.mutes import load_mutes
+from condor.memory.paths import (
+    CHAT_SLUG,
+    agent_home_layers,
+    shared_routines_roots,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -27,26 +32,38 @@ def assistant_routines_dir(agent_slug: str | None) -> Path:
 
     There is a single home for the general library — the repo-root ``routines/``,
     owned by the chat ``condor``. A trading agent / domain expert owns
-    ``agents/<slug>/routines``.
+    ``<local>/<slug>/routines``.
 
     - chat ``condor`` (``agent_slug`` None **or** ``"condor"``) → ``routines``
-    - trading agent / domain expert (slug) → ``agents/<slug>/routines``
+    - trading agent / domain expert (slug) → ``<local>/<slug>/routines``
 
     The explicit ``"condor"`` carve-out is load-bearing (FEAT-033): Condor is now
-    an ordinary entry under ``agents/``, so threading its slug through naively
-    would relocate the general library to ``agents/condor/routines`` and empty
+    an ordinary entry under the agent roots, so threading its slug through
+    naively would relocate the general library to ``<slug>/routines`` and empty
     the catalog — silently, since a missing dir simply lists nothing.
 
     This is what an assistant may **write**, not everything it may run: since
-    FEAT-038 every assistant also *reads* the shared library
-    (:func:`condor.memory.paths.shared_routines_root`). Use
-    :func:`assistant_routines` for "what can this assistant run"; keeping this
-    function the writable dir is what makes an agent's ``create_routine``
-    physically unable to land in the shared root.
+    FEAT-038 every assistant also *reads* the shared library, and since FEAT-115
+    the shipped root as well. Use :func:`assistant_routines_dirs` for the read
+    order and :func:`assistant_routines` for "what can this assistant run";
+    keeping this function the writable dir is what makes an agent's
+    ``create_routine`` physically unable to land in the shared or the shipped
+    root.
     """
     if agent_slug and agent_slug != CHAT_SLUG:
-        return _PROJECT_ROOT / "agents" / agent_slug / "routines"
+        return agent_home_layers(agent_slug)[0] / "routines"
     return _PROJECT_ROOT / "routines"
+
+
+def assistant_routines_dirs(agent_slug: str | None) -> tuple[Path, ...]:
+    """An assistant's own routine dirs in **read** order: local, then stock.
+
+    The chat's general library is the repo-root ``routines/`` and has no second
+    layer — it is not under either agent root.
+    """
+    if agent_slug and agent_slug != CHAT_SLUG:
+        return tuple(home / "routines" for home in agent_home_layers(agent_slug))
+    return (_PROJECT_ROOT / "routines",)
 
 
 @dataclass
@@ -254,19 +271,40 @@ def discover_routines(force_reload: bool = False) -> dict[str, RoutineInfo]:
         except Exception as e:
             logger.error(f"Failed to load routine {file_path.stem}: {e}")
 
-    shared = discover_routines_from_path(
-        shared_routines_root(), agent_slug=None, force_reload=force_reload
-    )
+    shared = _merged_from(shared_routines_roots(), force_reload=force_reload)
     # Root ``routines/`` is the chat's OWN library and shadows the shared one,
-    # the same precedence SkillStore gives an assistant's own playbooks. The
-    # shared root keeps its own mtime cache in ``_path_caches``, so hot-reload
-    # behaves identically for both halves.
+    # the same precedence SkillStore gives an assistant's own playbooks, and
+    # within the shared library the local root shadows the shipped one (the same
+    # rule again, on the second axis). Each root keeps its own mtime cache in
+    # ``_path_caches``, so hot-reload behaves identically for every half.
     routines = {**shared, **routines}
 
     _routines_mtimes.clear()
     _routines_mtimes.update(scanned_mtimes)
     _routines_cache = routines
     return routines
+
+
+def _merged_from(
+    roots, agent_slug: str | None = None, force_reload: bool = False
+) -> dict[str, RoutineInfo]:
+    """Discover across several roots given in **read** order — first wins by name.
+
+    Merged in reverse so the earliest root overwrites the later ones, which is
+    the same shadowing ``discover_routines`` already applies between the chat's
+    own library and the shared one — here between the local root and the shipped
+    one (FEAT-115). A routine carries no frontmatter to stamp a fork into, so a
+    shadowed one is indistinguishable from one authored locally; routines have
+    always shadowed by name and this changes nothing about that.
+    """
+    merged: dict[str, RoutineInfo] = {}
+    for root in reversed(list(roots)):
+        merged.update(
+            discover_routines_from_path(
+                root, agent_slug=agent_slug, force_reload=force_reload
+            )
+        )
+    return merged
 
 
 def discover_routines_from_path(
@@ -366,7 +404,9 @@ def discover_routines_from_path(
 
 
 def assistant_routines(
-    agent_slug: str | None = None, force_reload: bool = False
+    agent_slug: str | None = None,
+    force_reload: bool = False,
+    include_muted: bool = False,
 ) -> dict[str, RoutineInfo]:
     """Every routine an assistant can run: its OWN library over the SHARED one.
 
@@ -382,19 +422,37 @@ def assistant_routines(
     The own library **shadows** a shared routine of the same name: specialising
     is creating a local routine, never forking the shared file. Shared entries
     keep ``source="global"`` — they are the general library, un-prefixed.
+
+    Routines the operator muted for this assistant are subtracted here, for the
+    same reason the filter lives in this one function at all (FEAT-090): every
+    caller that decides what the assistant may run already asks *here*, so one
+    subtraction reaches the prompt section, ``_resolve_routine`` and the skill
+    store's ``references_routine`` validation at once. ``include_muted=True`` is
+    the operator's view — only the brain panel takes it.
+
+    ``discover_routines`` is deliberately not touched, so the human ``/routines``
+    page still lists and runs a muted routine. A mute is about what an assistant
+    is told, never about what a person may do.
     """
     if not agent_slug or agent_slug == CHAT_SLUG:
-        return discover_routines(force_reload=force_reload)
+        found = discover_routines(force_reload=force_reload)
+    else:
+        shared = _merged_from(shared_routines_roots(), force_reload=force_reload)
+        own = _merged_from(
+            assistant_routines_dirs(agent_slug),
+            agent_slug=agent_slug,
+            force_reload=force_reload,
+        )
+        found = {**shared, **own}
 
-    shared = discover_routines_from_path(
-        shared_routines_root(), agent_slug=None, force_reload=force_reload
-    )
-    own = discover_routines_from_path(
-        assistant_routines_dir(agent_slug),
-        agent_slug=agent_slug,
-        force_reload=force_reload,
-    )
-    return {**shared, **own}
+    if include_muted:
+        return found
+    muted = load_mutes(agent_slug)["routines"]
+    if not muted:
+        # The overwhelmingly common case, and the chat's dict is the discovery
+        # cache itself: hand back the same object rather than copy it per call.
+        return found
+    return {name: info for name, info in found.items() if name not in muted}
 
 
 def get_routine(name: str) -> RoutineInfo | None:

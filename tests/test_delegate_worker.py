@@ -55,7 +55,7 @@ def test_worker_instructions_own_the_authoring_and_close_delegation(
     assert "routine_cookbook" in text
     # Into the GLOBAL library — an agent-private dir would hide the result from
     # the very user who asked for it.
-    assert "GLOBAL" in text and "no `strategy_id`" in text
+    assert "GLOBAL" in text and "no `agent`" in text
     assert "TEST it with" in text
     # And it never spawns another background agent.
     assert 'NEVER start another delegation: `delegate(action="start", ...)`' in text
@@ -86,8 +86,7 @@ def test_a_specialist_is_never_re_framed_as_a_condor_worker(
     """A specialist reads its OWN worker framing — never the coordinator's."""
     from condor.agents.agent import identity_header
 
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
-    monkeypatch.setattr(strategy_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     _write_agent(tmp_path, "backpack_mm", name="Backpack MM")
 
     text = _instructions(settings_obj, monkeypatch, slug="backpack_mm", worker=True)
@@ -102,8 +101,7 @@ def test_a_specialist_is_never_re_framed_as_a_condor_worker(
 
 
 def _specialist_instructions(settings_obj, monkeypatch, tmp_path, *, worker: bool):
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
-    monkeypatch.setattr(strategy_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     _write_agent(tmp_path, "backpack_mm", name="Backpack MM")
     return _instructions(settings_obj, monkeypatch, slug="backpack_mm", worker=worker)
 
@@ -128,7 +126,7 @@ def test_the_background_copy_is_not_invited_to_spawn_another(
     assert "SPAWN A BACKGROUND COPY OF YOURSELF" not in text
     assert "NEVER spawn another copy of yourself" in text
     # Handing work outside its domain to a peer stays open — only self recurses.
-    assert "You MAY consult a PEER agent" in text
+    assert "You MAY hand work outside your own domain to a PEER agent" in text
 
 
 def test_a_background_agent_cannot_spawn_a_copy_of_itself(settings_obj, monkeypatch):
@@ -279,10 +277,9 @@ def test_settings_parse_the_flag_off_by_default(monkeypatch):
 def _delegated_worker_kwarg(monkeypatch, tmp_path, slug: str) -> bool:
     """Run a delegation for ``slug`` and report the flag it built its tools with."""
     from condor.acp import client as acp_client_module
-    from condor.agents.consult import _run_agent_to_completion
+    from condor.agents.agent_run import run_agent_to_completion
 
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
-    monkeypatch.setattr(strategy_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     _write_agent(tmp_path, slug, name=slug.title())
 
     seen: dict = {}
@@ -313,7 +310,7 @@ def _delegated_worker_kwarg(monkeypatch, tmp_path, slug: str) -> bool:
     monkeypatch.setattr(acp_client_module, "ACPClient", _FakeClient)
 
     asyncio.run(
-        _run_agent_to_completion(
+        run_agent_to_completion(
             slug=slug,
             user_id=42,
             chat_id=42,

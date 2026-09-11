@@ -266,6 +266,81 @@ async def test_an_excluded_conversation_is_never_shared(install):
 
 
 @pytest.mark.asyncio
+async def test_unsharing_stops_the_sweep_from_sending_it_again(install):
+    """Acceptance criterion (CORR-231): Unshare is a standing refusal.
+
+    Clearing the receipt alone left the conversation *maximally* eligible —
+    ``share_turn_count`` back at zero is what the growth gate reads as "never
+    sent" — so the next tick re-uploaded it under a new ``share_id`` while the
+    UI said it was not shared.
+    """
+    meta = _conversation()
+    _opt_in()
+    assert await sweep.sweep() == 1
+    assert conversations.get_conversation(USER, meta.id).share_id
+
+    assert share.unshare(USER, meta.id) is True
+    after = conversations.get_conversation(USER, meta.id)
+    assert after.share_excluded is True
+    assert after.share_id == ""
+
+    # Idle again, and grown since — it would clear every other gate.
+    conversations.append_turn(USER, meta.id, TurnEntry(role="user", text="more"))
+    _touch(USER, meta.id, updated=time.time() - LONG_AGO)
+
+    assert sweep.eligible(USER) == []
+    assert await sweep.sweep() == 0
+    assert conversations.get_conversation(USER, meta.id).share_id == ""
+    assert [r["op"] for r in outbox.pending()] == [outbox.OP_SHARE, outbox.OP_UNSHARE]
+
+
+@pytest.mark.asyncio
+async def test_unsharing_everything_takes_the_back_catalogue_out_of_the_sweep(install):
+    """Acceptance criterion (CORR-231): the Settings button holds too.
+
+    ``unshare_all`` inherits the exclusion per conversation, so an ``always``
+    user's archive does not reappear over the following ticks.
+    """
+    first = _conversation(USER)
+    second = _conversation(USER)
+    _opt_in(USER)
+    share.submit(USER, first.id)
+    share.submit(USER, second.id)
+
+    assert share.unshare_all(USER) == 2
+    for conv in (first, second):
+        assert conversations.get_conversation(USER, conv.id).share_excluded is True
+
+    for conv in (first, second):
+        conversations.append_turn(USER, conv.id, TurnEntry(role="user", text="more"))
+        _touch(USER, conv.id, updated=time.time() - LONG_AGO)
+
+    assert await sweep.sweep() == 0
+    assert share.list_shares(USER) == []
+
+
+def test_unsharing_records_the_exclusion_for_a_user_who_never_opted_in(install):
+    """Acceptance criterion (CORR-231): ``off``/``explicit`` behave as before.
+
+    The flag is written for them too — it costs nothing and keeps one code path
+    — but it changes no behaviour, because the sweep was never coming for them.
+    """
+    meta = _conversation()
+    share.submit(USER, meta.id)
+
+    assert share.unshare(USER, meta.id) is True
+    after = conversations.get_conversation(USER, meta.id)
+    assert after.share_excluded is True
+    assert after.share_id == ""
+    assert share.list_shares(USER) == []
+    assert [r["op"] for r in outbox.pending()] == [outbox.OP_SHARE, outbox.OP_UNSHARE]
+    assert sweep.covered(after, USER) is False
+
+    # And it can still be handed over again deliberately.
+    assert share.submit(USER, meta.id).share_id
+
+
+@pytest.mark.asyncio
 async def test_including_it_again_puts_it_back(install):
     meta = _conversation()
     _opt_in()

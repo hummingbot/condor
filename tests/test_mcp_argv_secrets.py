@@ -28,6 +28,11 @@ def session_servers(monkeypatch):
         def has_server_access(self, user_id, name, *a, **kw):
             return True
 
+        def get_server_permission(self, user_id, name):
+            from config_manager import ServerPermission
+
+            return ServerPermission.OWNER
+
         def get_server(self, name):
             return {
                 "host": "10.0.0.5",

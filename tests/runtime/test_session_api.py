@@ -200,6 +200,9 @@ def test_ws_contract_unchanged():
         "slot_id": "slot1",
         "tool_call_id": "t1",
         "status": "completed",
+        # An update that names nothing stays null, so the client keeps the name
+        # the create frame gave it.
+        "title": None,
     }
 
     beat = _to_ws_message(
@@ -217,6 +220,23 @@ def test_ws_contract_unchanged():
 
     # Permission requests travel out-of-band through the permission callback.
     assert _to_ws_message(RuntimeEvent(type=EventType.PERMISSION), "slot1") is None
+
+
+def test_tool_update_carries_the_title_it_was_given():
+    """A name that arrives on the update must reach the wire (CORR-327).
+
+    The ACP adapter announces some calls with a placeholder title and only
+    names them on the following update. While ``_to_ws_message`` dropped the
+    field, the dashboard showed the generic label for the whole call and picked
+    up the real name only when a reload replayed the transcript.
+    """
+    update = _to_ws_message(
+        RuntimeEvent.from_acp(
+            ToolCallUpdate(tool_call_id="t1", status="in_progress", title="Read")
+        ),
+        "slot1",
+    )
+    assert update["title"] == "Read"
 
 
 # ── Facade-level prompting ──

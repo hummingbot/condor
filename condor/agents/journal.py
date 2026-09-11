@@ -29,10 +29,9 @@ from pathlib import Path
 from typing import Any
 
 from condor.fsutil import atomic_write_text
+from condor.paths import local_agents_root
 
 log = logging.getLogger(__name__)
-
-_DATA_ROOT = Path(__file__).parent.parent.parent / "agents"
 
 MAX_LEARNINGS = 20
 
@@ -41,14 +40,17 @@ def _strategy_base_dir(prefix: str) -> Path:
     """Resolve the per-strategy base dir from an agent_id prefix.
 
     New format prefixes are ``"{agent_slug}.{strategy_slug}"`` →
-    ``agents/{agent_slug}/strategies/{strategy_slug}/``. Legacy flat
-    prefixes (no dot) fall back to ``agents/{slug}/`` so old ids still
-    resolve.
+    ``{agent_slug}/strategies/{strategy_slug}/``. Legacy flat prefixes (no dot)
+    fall back to ``{slug}/`` so old ids still resolve.
+
+    Always the **local** root (FEAT-115): a journal is what this install's run
+    produced, so there is no shipped layer to resolve against.
     """
+    root = local_agents_root()
     if "." in prefix:
         agent_slug, sslug = prefix.split(".", 1)
-        return _DATA_ROOT / agent_slug / "strategies" / sslug
-    return _DATA_ROOT / prefix
+        return root / agent_slug / "strategies" / sslug
+    return root / prefix
 
 
 def resolve_agent_dirs(agent_id: str) -> tuple[Path | None, Path | None]:
@@ -97,6 +99,12 @@ MAX_SNAPSHOTS = 100
 # bounded and untouched here.
 MAX_TICK_LINES = 1000
 MAX_SNAPSHOT_LINES = 1000
+# Decisions are the visible audit trail of a run, and they used to be the one
+# bounded section that *deleted* its overflow instead of archiving it: a run past
+# tick 20 no longer showed the decision that opened its position, and the line
+# was not in journal_archive.md either. Bounded like the others now, through
+# _append_bounded, so the trim leaves a marker and the lines survive.
+MAX_DECISION_LINES = 20
 
 # Sidecar holding everything trimmed out of journal.md. Append-only, never read
 # in the trading hot path: it exists so the audit trail survives the trim and a
@@ -362,7 +370,7 @@ class JournalManager:
             # Try to resolve from agent_id before falling back
             resolved_session, resolved_agent = resolve_agent_dirs(agent_id)
             self._session_dir = (
-                resolved_session if resolved_session else _DATA_ROOT / agent_id
+                resolved_session if resolved_session else local_agents_root() / agent_id
             )
             if not agent_dir and resolved_agent:
                 agent_dir = resolved_agent
@@ -753,7 +761,11 @@ class JournalManager:
         if not section:
             return ""
 
-        lines = [l for l in section.splitlines() if l.startswith("- ")]
+        lines = [
+            l
+            for l in section.splitlines()
+            if l.startswith("- ") and not l.startswith(ARCHIVE_MARKER_PREFIX)
+        ]
         return "\n".join(lines[-count:])
 
     def _cleanup_old_snapshots(self) -> None:
@@ -844,12 +856,7 @@ class JournalManager:
         entry = parts[0]
 
         # Write to Decisions section
-        section = self._get_section("Decisions")
-        lines = [l for l in section.splitlines() if l.strip()]
-        lines.append(entry)
-        if len(lines) > 20:
-            lines = lines[-20:]
-        self._replace_section("Decisions", "\n".join(lines))
+        self._append_bounded("Decisions", entry, MAX_DECISION_LINES)
 
         # Also write to Recent Actions if it exists (legacy compat)
         if "## Recent Actions" in self.read_full():
@@ -863,12 +870,9 @@ class JournalManager:
     def append_error(self, error: str) -> None:
         """Append an error as a decision entry."""
         now = datetime.now(timezone.utc).strftime("%H:%M")
-        section = self._get_section("Decisions")
-        lines = [l for l in section.splitlines() if l.strip()]
-        lines.append(f"- **error** ({now}) {error}")
-        if len(lines) > 20:
-            lines = lines[-20:]
-        self._replace_section("Decisions", "\n".join(lines))
+        self._append_bounded(
+            "Decisions", f"- **error** ({now}) {error}", MAX_DECISION_LINES
+        )
 
     # ------------------------------------------------------------------
     # Tick tracking

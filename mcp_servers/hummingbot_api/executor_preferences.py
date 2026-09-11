@@ -122,14 +122,11 @@ lp_executor:
 
 ```yaml
 onchain_executor:
-  # Set your preferred defaults here (all optional, ask user if not set):
-  # chain_id: 8453  # 8453=Base, 1=Ethereum, 42161=Arbitrum, 10=Optimism
-  # mode: calls  # calls (raw evm_stage_tx calls) | operation (app + operation + arguments)
-  # commit: true  # false = simulate only, nothing is signed
-  # max_gas_quote: 5  # gas ceiling in quote terms, added to the risk-gate valuation
-  #
-  # Note: notional_quote is per-create, never a default — the risk gate values
-  # each create with it, so it must describe the calls actually being signed
+  # Optional operational defaults; signing intent and lending authority are explicit tool parameters.
+  # app: default
+  # timeout_sec: 120
+  # skills: []
+  # Gas budgets use USDT. Declared notional never authorizes automatic execution.
 ```
 
 ---
@@ -204,23 +201,6 @@ class ExecutorPreferencesManager:
                 continue
 
         return defaults
-
-    def get_executor_guide(self, executor_type: str) -> str | None:
-        """Load the documentation guide for a specific executor type from a markdown file.
-
-        Reads `hummingbot_mcp/guides/{executor_type}.md` and returns its content.
-
-        Args:
-            executor_type: The executor type (e.g., 'grid_executor')
-
-        Returns:
-            The markdown content of the guide, or None if the file doesn't exist.
-        """
-        guides_dir = Path(__file__).parent / "guides"
-        guide_file = guides_dir / f"{executor_type}.md"
-        if guide_file.exists():
-            return guide_file.read_text().strip()
-        return None
 
     def get_defaults(self, executor_type: str) -> dict[str, Any]:
         """Get default configuration for an executor type.

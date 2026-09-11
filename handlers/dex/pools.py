@@ -20,8 +20,8 @@ from condor.pool_data import (
     gecko_call,
     get_gecko_network,
 )
+from condor.preferences import get_dex_last_pool, set_dex_last_pool
 from config_manager import get_client
-from handlers.config.user_preferences import get_dex_last_pool, set_dex_last_pool
 from utils.telegram_formatters import (
     KNOWN_TOKENS,
     escape_markdown_v2,

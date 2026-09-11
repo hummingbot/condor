@@ -436,8 +436,8 @@ async def set_default_server(
 ) -> None:
     """Set server as default for this user/chat"""
     try:
+        from condor.preferences import set_active_server
         from config_manager import get_config_manager
-        from handlers.config.user_preferences import set_active_server
         from handlers.dex._shared import invalidate_cache
 
         # Save to user_data (in-memory, pickle persistence)
@@ -512,7 +512,7 @@ async def delete_server(
             return
 
         # Check if this is the user's current default server
-        from handlers.config.user_preferences import get_active_server
+        from condor.preferences import get_active_server
 
         was_current = get_active_server(context.user_data) == server_name
 
@@ -1194,7 +1194,7 @@ async def handle_modify_value_input(
             logger.info(f"Successfully modified {field} for server {server_name}")
 
             # Invalidate cache if this is the user's current default server
-            from handlers.config.user_preferences import get_active_server
+            from condor.preferences import get_active_server
 
             if get_active_server(context.user_data) == server_name:
                 from handlers.dex._shared import invalidate_cache

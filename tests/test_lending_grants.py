@@ -53,28 +53,20 @@ class Client:
 
 def call(amount="60000000", action="supply"):
     return {
-        "tool": "manage_executors",
+        "tool": "create_lending_executor",
         "input": {
-            "action": "create",
-            "executor_type": "onchain_executor",
-            "executor_config": {
-                "controller_id": "agent-a",
-                "chain_id": 8453,
-                "mode": "lending",
-                "commit": True,
-                "require_lending_policy": True,
-                "max_gas_quote": "1",
-                "notional_quote": "0.000001",
-                "trading_pair": "ETH-ETH",
-                "lending": {
-                    "chain_id": 8453,
-                    "wallet": WALLET,
-                    "pool": POOL,
-                    "asset": ASSET,
-                    "amount": amount,
-                    "action": action,
-                },
-            },
+            "controller_id": "agent-a",
+            "chain_id": 8453,
+            "commit": True,
+            "require_lending_policy": True,
+            "max_gas_quote": "1",
+            "wallet": WALLET,
+            "pool": POOL,
+            "asset": ASSET,
+            "amount": amount,
+            "action": action,
+            "notional_quote": "0.000001",
+            "trading_pair": "ETH-ETH",
         },
     }
 
@@ -135,19 +127,19 @@ def test_exact_grant_uses_trusted_usdc_price_not_notional_or_display_pair():
 def test_authority_and_policy_changes_refuse_automatic_commit(mutation):
     client = Client()
     request = call()
-    cfg = request["input"]["executor_config"]
+    cfg = request["input"]
     if mutation == "disabled":
         client.policy["enabled"] = False
     elif mutation == "require":
         cfg["require_lending_policy"] = False
     elif mutation in {"wallet", "pool", "asset"}:
-        cfg["lending"][mutation] = "0x" + "4" * 40
+        cfg[mutation] = "0x" + "4" * 40
     elif mutation == "controller":
         request["input"]["controller_id"] = "agent-b"
     elif mutation == "account":
         request["input"]["account_name"] = "other"
     elif mutation == "amount":
-        cfg["lending"]["amount"] = "100000001"
+        cfg["amount"] = "100000001"
     elif mutation == "gas":
         cfg["max_gas_quote"] = "2"
     callback, state = gate(client)
@@ -200,13 +192,7 @@ def test_each_new_tick_includes_completed_lending_and_blocks_other_excess_alloca
     state = RiskState(total_exposure=30)
     engine.include_lending(state, {"lending": {"exposure_quote": 60}})
     assert state.total_exposure == 90
-    other = {
-        "input": {
-            "action": "create",
-            "executor_type": "grid_executor",
-            "executor_config": {},
-        }
-    }
+    other = {"tool": "create_grid_executor", "input": {"leverage": 1}}
     assert not engine.check_executor_action(other, state, 11)[0]
     engine.include_lending(state, {"lending": {"exposure_quote": None}})
     assert state.is_blocked

@@ -119,14 +119,27 @@ async def get_connected_exchanges(
 async def get_venues(name: str, user: WebUser = Depends(require_server_access)):
     """Venues the trade panel can offer, each with its independent traits.
 
-    ``{"venues": [{"name", "hummingbot_market_data", "clmm_lp"}, ...]}``. The panel
-    maps traits to UI decisions itself — which tabs and strategies to render is a
-    product decision, not a server fact; only the facts they rest on come from here.
+    ``{"venues": [{"name", "hummingbot_market_data", "clmm_lp", "credentialed"},
+    ...]}``, over the union of the credentialed connectors, the candle-capable
+    connectors and the chartable Gateway networks. The panel maps traits to UI
+    decisions itself — which tabs and strategies to render is a product decision,
+    not a server fact; only the facts they rest on come from here:
+
+    - ``hummingbot_market_data``: the ``/market/tickers``, ``/market/order-book``,
+      ``/market/trading-rules`` and ``/market/prices`` reads answer for this venue.
+      They are public, so a candle-capable venue qualifies without any keys. It
+      promises the venue is chartable, not that all four endpoints answer every
+      time — they degrade per endpoint, so consumers still tolerate an empty one.
+    - ``clmm_lp``: the venue is a Gateway network whose chain hosts a CLMM venue,
+      so an LP position can actually be opened on it.
+    - ``credentialed``: the venue reached the list from a trading source — account
+      credentials or a configured Gateway — rather than from the candle list alone.
+      False means read-only: chart and browse it, but do not offer to trade it.
 
     Answers ``{"venues": []}`` rather than a 502 when the server cannot be described
     at all, so the panel renders its empty state. The fetcher runs ``strict=True``,
-    so that failure is never cached; a gateway-only failure degrades inside the
-    fetcher and still reports the credentialed venues.
+    so that failure is never cached; a gateway- or candle-only failure degrades
+    inside the fetcher and still reports the venues the other sources supplied.
     """
 
     from condor.server_data_service import ServerDataType, get_server_data_service

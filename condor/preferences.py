@@ -265,6 +265,11 @@ class AgentPrefs(TypedDict, total=False):
     # code outside a PTB context — the MCP subprocess, web, background agent
     # runs — can see which model the user is actually on.
     active_agent_key: str
+    # Whether to say anything when a message carries a value shaped like key
+    # material but ambiguous enough to pass through (FEAT-056). Default True;
+    # a user who pastes transaction hashes all day can turn it off, and a
+    # warning nobody can silence is a warning everybody learns to ignore.
+    secret_notices: bool
 
 
 class VoicePrefs(TypedDict, total=False):
@@ -365,6 +370,7 @@ def _get_default_preferences() -> UserPreferences:
             "default_agent": "claude-code",
             "show_tool_calls": True,
             "custom_providers": [],
+            "secret_notices": True,
         },
         "voice": {
             "whisper_model": "small",
@@ -1008,6 +1014,26 @@ def get_chat_binding(user_data: Dict) -> "ChatBindingPrefs":
     return deepcopy(prefs.get("agent", {}).get("chat_binding") or {})
 
 
+def secret_notices_enabled(user_data: Dict) -> bool:
+    """Whether the ambiguous-shape notice may be sent (FEAT-056).
+
+    Defaults on. Nothing about the *certain* shapes is optional: those are
+    removed before the model call whatever this says, and the message that says
+    so is not a notice but the explanation for text that vanished.
+    """
+    return bool(get_agent_prefs(user_data).get("secret_notices", True))
+
+
+def set_secret_notices(user_data: Dict, enabled: bool) -> None:
+    """Turn the ambiguous-shape notice on or off for this user."""
+    prefs = _ensure_preferences(user_data)
+    agent = prefs.setdefault("agent", {})
+    if agent.get("secret_notices", True) == bool(enabled):
+        return
+    agent["secret_notices"] = bool(enabled)
+    _sync_section_to_cm(user_data, "agent")
+
+
 def set_chat_binding(user_data: Dict, binding: "ChatBindingPrefs") -> None:
     """Merge ``binding`` into the stored record, leaving the other fields alone.
 
@@ -1177,7 +1203,7 @@ def resolve_custom_endpoint(
     Returns ``(None, None)`` for any key that isn't a custom-endpoint key, so
     callers can pass this through unconditionally.
 
-    Every surface that builds a model — chat sessions, consult, delegate, the
+    Every surface that builds a model — chat sessions, delegate, the
     trading-agent engine — needs this. Without it a custom key resolves to
     nothing and dies with "No base URL configured", which is exactly what
     happens when only the chat path knows how to look endpoints up.
@@ -1189,7 +1215,7 @@ def resolve_custom_endpoint(
     when the key *names* an endpoint that isn't saved, instead of logging a
     warning and falling back to the ``CUSTOM_LLM_*`` env vars. Interactive
     surfaces (chat sessions) want the loud failure; background surfaces
-    (consult, engine) keep the lenient default.
+    (delegate, engine) keep the lenient default.
     """
     provider_name, model_id = parse_custom_agent_key(agent_key)
     if not model_id:

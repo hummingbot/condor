@@ -10,19 +10,12 @@ from condor.fetchers.market_data import fetch_current_price
 async def lending_grant(
     input_data: dict, client, agent_id: str
 ) -> tuple[str, float, float]:
-    cfg = input_data.get("executor_config") or {}
-    if (
-        not agent_id
-        or cfg.get("mode") != "lending"
-        or cfg.get("require_lending_policy") is not True
-    ):
+    cfg = input_data
+    if not agent_id or cfg.get("require_lending_policy") is not True:
         raise ValueError(
             "Automatic lending requires a named agent and an enforced operator policy"
         )
-    if (
-        cfg.get("controller_id") != agent_id
-        or (input_data.get("controller_id") or agent_id) != agent_id
-    ):
+    if cfg.get("controller_id") != agent_id:
         raise ValueError("Lending controller must match the current agent")
     policy = await client.executors._get("/executors/lending/policy")
     if (
@@ -36,7 +29,7 @@ async def lending_grant(
         "controller_limits_raw", {}
     ):
         raise ValueError("Agent or account has no lending grant")
-    plan = cfg.get("lending")
+    plan = cfg
     if not isinstance(plan, dict) or plan.get("action") not in {"supply", "withdraw"}:
         raise ValueError("A supply or withdrawal plan is required")
     if (

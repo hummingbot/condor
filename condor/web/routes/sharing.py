@@ -14,12 +14,24 @@ here, at the boundary, where the caller's identity is actually known:
 ``CONDOR_SHARING=off``, the admin's install-wide veto, and — for the veto's own
 route — that the caller is the admin.
 
+**Every handler here runs on the bot's own event loop.** ``main.py`` starts
+uvicorn as a task beside PTB's polling and its job queue, so the blocking verbs
+in :mod:`condor.sharing` — a scrub reads a whole transcript and passes every
+string through some fifty substring and regex sweeps, and ``unshare_all`` walks
+a user's entire store — do not merely slow the request that asked for them.
+Inline, they stop the Telegram bot polling, stall the WebSocket pushes, and
+delay the flush and the sweep, for everyone on the install. So they go through
+``asyncio.to_thread`` here, exactly as :func:`condor.sharing.sweep.sweep`
+already sends the automatic path through it, and for the same reason: the
+latency belongs to the caller, the blocking never did (PERF-235).
+
 Note: modules under ``condor/web/routes/`` are not in ``main.py``'s hot-reload
 list, so changes here need a full bot restart.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -84,7 +96,6 @@ class SharingPreference(BaseModel):
     opted_in_at: float = 0.0
     allowed: bool = False
     sweeping: bool = False
-    shared_count: int = 0
 
 
 class SharingPreferenceUpdate(BaseModel):
@@ -92,7 +103,7 @@ class SharingPreferenceUpdate(BaseModel):
 
 
 class ConversationSharingStatus(BaseModel):
-    """What the chat header chip renders for one conversation."""
+    """What the share dialog renders for one conversation."""
 
     conversation_id: str
     excluded: bool = False
@@ -120,9 +131,10 @@ async def preview_share(
     """
     owner_id = _sharer(user)
     try:
-        return share.preview(owner_id, conversation_id).model_dump(mode="json")
+        scrubbed = await asyncio.to_thread(share.preview, owner_id, conversation_id)
     except (share.ConversationMissing, ConversationIdError) as exc:
         raise _handle(exc) from exc
+    return scrubbed.model_dump(mode="json")
 
 
 @router.post("/conversations/{conversation_id}")
@@ -133,7 +145,7 @@ async def submit_share(
     """Queue this conversation for delivery. The consent is the request itself."""
     owner_id = _sharer(user)
     try:
-        receipt = share.submit(owner_id, conversation_id)
+        receipt = await asyncio.to_thread(share.submit, owner_id, conversation_id)
     except (share.ConversationMissing, ConversationIdError) as exc:
         raise _handle(exc) from exc
     return receipt.model_dump(mode="json")
@@ -151,7 +163,7 @@ async def unshare_conversation(
     for this route is ownership alone.
     """
     try:
-        removed = share.unshare(user.id, conversation_id)
+        removed = await asyncio.to_thread(share.unshare, user.id, conversation_id)
     except (share.ConversationMissing, ConversationIdError) as exc:
         raise _handle(exc) from exc
     if not removed:
@@ -162,7 +174,7 @@ async def unshare_conversation(
 @router.get("/conversations")
 async def list_shared(user: WebUser = Depends(get_current_user)):
     """Everything this user currently has out there, for Settings → Privacy."""
-    return share.list_shares(user.id)
+    return await asyncio.to_thread(share.list_shares, user.id)
 
 
 @router.delete("/conversations")
@@ -174,7 +186,7 @@ async def unshare_everything(user: WebUser = Depends(get_current_user)):
     sending. Separate from turning Always off, because they are separate
     decisions (FEAT-055).
     """
-    return {"unshared": share.unshare_all(user.id)}
+    return {"unshared": await asyncio.to_thread(share.unshare_all, user.id)}
 
 
 @router.get(
@@ -241,13 +253,18 @@ async def set_exclusion(
 
 @router.get("/preference", response_model=SharingPreference)
 async def get_preference(user: WebUser = Depends(get_current_user)):
-    """This user's own answer. Never another's — there is no id to name one."""
+    """This user's own answer. Never another's — there is no id to name one.
+
+    Every read here is an in-memory consent lookup, so nothing on this route
+    touches the conversation store. It used to also report a count of the
+    user's shares, which walked their whole store to take a length no caller
+    read (PERF-239); a count belongs to whoever already holds the list.
+    """
     return SharingPreference(
         state=consent.user_state(user.id),
         opted_in_at=consent.opted_in_at(user.id),
         allowed=consent.can_share(user.id),
         sweeping=consent.can_sweep(user.id),
-        shared_count=len(share.list_shares(user.id)),
     )
 
 
@@ -281,7 +298,9 @@ async def set_preference(
             raise HTTPException(status_code=403, detail=SHARING_DISABLED)
         consent.set_user_state(user.id, state)
     elif consent.user_state(user.id) == consent.ALWAYS:
-        sweep.withdraw(user.id, state)
+        # Off the loop: the withdrawal rewrites the share queue, which means
+        # parsing every transcript still in it (PERF-280).
+        await asyncio.to_thread(sweep.withdraw, user.id, state)
     else:
         consent.set_user_state(user.id, state)
 
@@ -302,7 +321,7 @@ async def get_sharing_settings(user: WebUser = Depends(get_current_user)):
         env_overridden=consent.env_overridden(),
         can_change=get_config_manager().is_admin(user.id),
         endpoint_configured=bool(outbox.endpoint()),
-        pending=len(outbox.pending()),
+        pending=await asyncio.to_thread(outbox.count),
     )
 
 
@@ -333,5 +352,7 @@ async def set_sharing_settings(
                 "and overrides this setting"
             ),
         )
-    consent.set_install_allows(body.enabled)
+    # Off the loop like the withdrawal above: turning the switch off purges the
+    # queue, and a purge parses every queued transcript (PERF-280).
+    await asyncio.to_thread(consent.set_install_allows, body.enabled)
     return await get_sharing_settings(user)

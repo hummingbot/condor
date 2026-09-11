@@ -2,6 +2,7 @@
 
 CATEGORY = "Bot Analysis"
 
+import asyncio
 import io
 import logging
 from datetime import datetime, timezone
@@ -13,7 +14,7 @@ from plotly.subplots import make_subplots
 from pydantic import BaseModel, Field
 from telegram.ext import ContextTypes
 
-from condor.backtesting import run_and_save
+from condor.backtesting import fetch_and_save, run_and_save
 from config_manager import get_client
 from routines.base import RoutineResult
 
@@ -120,7 +121,27 @@ def _format_date(ts) -> str:
     return datetime.fromtimestamp(float(ts), tz=timezone.utc).strftime("%Y-%m-%d")
 
 
-def _load_saved_task(task_id: str) -> tuple[dict, "Config"] | str:
+def _retention_days() -> int:
+    from condor.backtest_store import retention_days
+
+    return retention_days()
+
+
+def _is_saved(task_id: str) -> bool:
+    """Whether a chart could be rendered from the store, by id or unique prefix.
+
+    A miss is exactly the case that has to fall through to the server before it
+    gives up. A run whose payload was pruned is a miss too -- asking the server
+    for it once is the only thing that could bring the chart back.
+    """
+    from condor.backtest_store import get_backtest_store
+
+    store = get_backtest_store()
+    resolved = store.resolve_task_id(task_id)
+    return isinstance(resolved, str) and store.has_payload(resolved)
+
+
+async def _load_saved_task(task_id: str) -> tuple[dict, "Config"] | str:
     """Load a stored backtest result, or return an error message.
 
     The returned Config mirrors the parameters the saved run was executed with,
@@ -129,19 +150,29 @@ def _load_saved_task(task_id: str) -> tuple[dict, "Config"] | str:
     from condor.backtest_store import get_backtest_store
 
     store = get_backtest_store()
-    known = list(store._index.keys())
+    resolved = store.resolve_task_id(task_id)
 
-    if task_id not in known:
-        matches = [t for t in known if t.startswith(task_id)]
-        if not matches:
-            saved = ", ".join(sorted(known)) or "none"
-            return f"No saved backtest matching '{task_id}'. Saved: {saved}"
-        if len(matches) > 1:
-            return f"'{task_id}' is ambiguous: {', '.join(sorted(matches))}"
-        task_id = matches[0]
+    if resolved is None:
+        saved = ", ".join(sorted(store.known_task_ids())) or "none"
+        return f"No saved backtest matching '{task_id}'. Saved: {saved}"
+    if isinstance(resolved, list):
+        return f"'{task_id}' is ambiguous: {', '.join(resolved)}"
+    task_id = resolved
 
-    task = store.get_result(task_id)
-    if not task or task.get("status") != "completed" or not task.get("result"):
+    # gunzip + parse of a payload that runs to 137 MB, so it goes to a thread:
+    # a routine runs on the loop that also polls Telegram and serves the dashboard.
+    task = await asyncio.to_thread(store.get_result, task_id)
+    if task is None:
+        # The run is real and its metrics are still in the index; only the
+        # candles are gone. Saying "no saved backtest" here would be a lie.
+        summary = store.get_summary(task_id) or {}
+        ran_on = _format_date(summary.get("completed_at")) or "an earlier date"
+        return (
+            f"Backtest '{task_id}' was run on {ran_on} but its chart data has "
+            f"expired (payloads are kept {_retention_days()} days). Its metrics "
+            "are still available in backtest_compare."
+        )
+    if task.get("status") != "completed" or not task.get("result"):
         return f"Backtest '{task_id}' has no completed result to render"
 
     task_config = task.get("config") or {}
@@ -661,6 +692,177 @@ def _add_position_held(fig, position_held_ts: list[dict], row=3, col=1):
     fig.add_hline(y=0, line_dash="dot", line_color="#555", row=row, col=col)
 
 
+# ---------------------------------------------------------------------------
+# Indicator helpers — auto-detect columns from processed_data and render them
+# ---------------------------------------------------------------------------
+
+
+def _detect_bb_cols(df: pd.DataFrame) -> dict:
+    """Return BB column names if Bollinger Bands are present, else empty dict."""
+    for col in df.columns:
+        if col.startswith("BBU_"):
+            suffix = col[4:]
+            lower = f"BBL_{suffix}"
+            if lower in df.columns:
+                mid = f"BBM_{suffix}"
+                return {
+                    "upper": col,
+                    "mid": mid if mid in df.columns else None,
+                    "lower": lower,
+                    "label": f"BB({suffix})",
+                }
+    return {}
+
+
+def _detect_macd_cols(df: pd.DataFrame) -> dict:
+    """Return MACD column names if MACD is present, else empty dict."""
+    for col in df.columns:
+        if col.startswith("MACDh_"):
+            suffix = col[6:]
+            macd = f"MACD_{suffix}"
+            sig = f"MACDs_{suffix}"
+            if macd in df.columns:
+                return {
+                    "hist": col,
+                    "macd": macd,
+                    "signal": sig if sig in df.columns else None,
+                    "label": f"MACD({suffix})",
+                }
+    return {}
+
+
+def _add_signal_shading(fig, df: pd.DataFrame, row: int = 1, col: int = 1):
+    """Paint subtle green/red background stripes where the signal is +1/-1."""
+    if "signal" not in df.columns:
+        return
+    s = df[["datetime", "signal"]].copy()
+    s["signal"] = pd.to_numeric(s["signal"], errors="coerce").fillna(0)
+    s["block"] = (s["signal"] != s["signal"].shift()).cumsum()
+    for _, block in s.groupby("block"):
+        sig = block["signal"].iloc[0]
+        if sig == 0:
+            continue
+        color = "rgba(38,166,154,0.09)" if sig > 0 else "rgba(239,83,80,0.09)"
+        fig.add_vrect(
+            x0=block["datetime"].iloc[0],
+            x1=block["datetime"].iloc[-1],
+            fillcolor=color,
+            line_width=0,
+            row=row,
+            col=col,
+        )
+
+
+def _add_bb_bands(fig, df: pd.DataFrame, bb_cols: dict, row: int = 1, col: int = 1):
+    """Overlay Bollinger Bands on the price panel with a subtle shaded fill."""
+    x = df["datetime"]
+    upper_y = pd.to_numeric(df[bb_cols["upper"]], errors="coerce")
+    lower_y = pd.to_numeric(df[bb_cols["lower"]], errors="coerce")
+
+    # Upper band — rendered first so the lower fill reaches it via tonexty
+    fig.add_trace(
+        go.Scatter(
+            x=x,
+            y=upper_y,
+            mode="lines",
+            line=dict(color="rgba(38,166,154,0.55)", width=1),
+            showlegend=True,
+            legendgroup="bb",
+            name=bb_cols.get("label", "BB Upper"),
+            hoverinfo="skip",
+        ),
+        row=row,
+        col=col,
+    )
+    # Lower band fills the space between itself and the upper trace
+    fig.add_trace(
+        go.Scatter(
+            x=x,
+            y=lower_y,
+            mode="lines",
+            line=dict(color="rgba(239,83,80,0.55)", width=1),
+            fill="tonexty",
+            fillcolor="rgba(120,144,156,0.07)",
+            showlegend=False,
+            legendgroup="bb",
+            name="BB Lower",
+            hoverinfo="skip",
+        ),
+        row=row,
+        col=col,
+    )
+    # Middle / basis line
+    if bb_cols.get("mid") and bb_cols["mid"] in df.columns:
+        fig.add_trace(
+            go.Scatter(
+                x=x,
+                y=pd.to_numeric(df[bb_cols["mid"]], errors="coerce"),
+                mode="lines",
+                line=dict(color="rgba(255,213,79,0.35)", width=1, dash="dot"),
+                showlegend=False,
+                legendgroup="bb",
+                name="BB Mid",
+                hoverinfo="skip",
+            ),
+            row=row,
+            col=col,
+        )
+
+
+def _add_macd_panel(fig, df: pd.DataFrame, macd_cols: dict, row: int = 2, col: int = 1):
+    """Render MACD histogram + line + signal in its own sub-panel."""
+    x = df["datetime"]
+    hist = pd.to_numeric(df[macd_cols["hist"]], errors="coerce")
+    bar_colors = np.where(hist >= 0, COLORS["green"], COLORS["red"])
+
+    fig.add_trace(
+        go.Bar(
+            x=x,
+            y=hist,
+            marker_color=bar_colors,
+            marker_line_width=0,
+            opacity=0.75,
+            name="MACD Hist",
+            legendgroup="macd",
+            hovertemplate="%{y:.5f}<extra>MACD Hist</extra>",
+        ),
+        row=row,
+        col=col,
+    )
+
+    if macd_cols.get("macd") and macd_cols["macd"] in df.columns:
+        fig.add_trace(
+            go.Scatter(
+                x=x,
+                y=pd.to_numeric(df[macd_cols["macd"]], errors="coerce"),
+                mode="lines",
+                line=dict(color=COLORS["blue"], width=1.5),
+                name=macd_cols.get("label", "MACD"),
+                legendgroup="macd",
+                hovertemplate="%{y:.5f}<extra>MACD</extra>",
+            ),
+            row=row,
+            col=col,
+        )
+
+    if macd_cols.get("signal") and macd_cols["signal"] in df.columns:
+        fig.add_trace(
+            go.Scatter(
+                x=x,
+                y=pd.to_numeric(df[macd_cols["signal"]], errors="coerce"),
+                mode="lines",
+                line=dict(color=COLORS["orange"], width=1.5),
+                name="Signal",
+                legendgroup="macd",
+                hovertemplate="%{y:.5f}<extra>Signal</extra>",
+            ),
+            row=row,
+            col=col,
+        )
+
+    fig.add_hline(y=0, line_dash="dot", line_color="#555", row=row, col=col)
+
+
 def generate_chart(
     candle_df: pd.DataFrame,
     executors: list[dict],
@@ -670,120 +872,200 @@ def generate_chart(
     position_held_ts: list[dict] | None = None,
     render_png: bool = True,
 ) -> tuple[io.BytesIO | None, go.Figure]:
-    """Generate a multi-panel backtest chart matching hummingbot reference.
+    """Generate a multi-panel backtest chart with indicator overlays.
 
-    ``render_png=False`` returns the figure alone. The web report renders the figure
-    itself, so a quiet run skips the PNG — which is the expensive half (kaleido) and
-    the only half a chat-less sweep has no use for.
+    Panels (top → bottom): Price + BB + signal shading → MACD (if detected)
+    → Cumulative PnL → Position held.
+
+    ``render_png=False`` skips the kaleido PNG step; the web report renders the
+    figure directly, so sweeps can leave chart=False and skip the slow half.
     """
+    # --- Detect indicators present in processed data ---
+    bb_cols = _detect_bb_cols(candle_df)
+    macd_cols = _detect_macd_cols(candle_df)
+    has_macd = bool(macd_cols)
     has_pnl = bool(pnl_ts)
     has_position = bool(position_held_ts)
 
-    n_rows = 1 + (1 if has_pnl else 0) + (1 if has_position else 0)
-    if n_rows == 3:
-        row_heights = [0.55, 0.2, 0.25]
-    elif n_rows == 2:
-        row_heights = [0.7, 0.3]
-    else:
-        row_heights = [1.0]
+    # Build ordered row list and index
+    row_list = ["price"]
+    if has_macd:
+        row_list.append("macd")
+    if has_pnl:
+        row_list.append("pnl")
+    if has_position:
+        row_list.append("position")
+    n_rows = len(row_list)
+    row_idx = {name: i + 1 for i, name in enumerate(row_list)}
 
-    subtitles = [""] * n_rows
+    _heights = {
+        1: [1.0],
+        2: [0.70, 0.30],
+        3: [0.52, 0.22, 0.26],
+        4: [0.44, 0.18, 0.21, 0.17],
+    }
+    row_heights = _heights.get(n_rows, [1.0 / n_rows] * n_rows)
     specs = [[{"secondary_y": True}] for _ in range(n_rows)]
 
     fig = make_subplots(
         rows=n_rows,
         cols=1,
         shared_xaxes=True,
-        vertical_spacing=0.04,
+        vertical_spacing=0.03,
         row_heights=row_heights,
-        subplot_titles=subtitles,
         specs=specs,
     )
 
-    # --- Row 1: Close price line (lighter than candlestick, renders faster) ---
+    # --- Row 1: Price panel ---
     c_col = "close_bt" if "close_bt" in candle_df.columns else "close"
 
+    # Signal direction shading (subtle green/red backgrounds for long/short)
+    _add_signal_shading(fig, candle_df, row=1, col=1)
+
+    # Bollinger Bands rendered behind the price line
+    if bb_cols:
+        _add_bb_bands(fig, candle_df, bb_cols, row=1, col=1)
+
+    # Price line — white for crisp contrast on dark background
     fig.add_trace(
         go.Scatter(
             x=candle_df["datetime"],
             y=candle_df[c_col],
             mode="lines",
-            line=dict(color=COLORS["blue"], width=1.5),
+            line=dict(color="#ffffff", width=1.5),
             name="Price",
+            hovertemplate="%{y:.4f}<extra>Price</extra>",
         ),
         row=1,
         col=1,
     )
 
-    # Executor markers (category-based like reference)
+    # Entry/exit markers and grid overlays
     _add_executor_markers(fig, executors, row=1, col=1)
-
-    # Grid visualization
     _add_grid_visualization(fig, executors, row=1, col=1)
 
-    # --- Row 2: Cumulative PnL ---
+    # --- MACD panel ---
+    if has_macd:
+        _add_macd_panel(fig, candle_df, macd_cols, row=row_idx["macd"], col=1)
+
+    # --- Cumulative PnL panel ---
     if has_pnl:
-        _add_cumulative_pnl(fig, pnl_ts, row=2, col=1)
+        _add_cumulative_pnl(fig, pnl_ts, row=row_idx["pnl"], col=1)
 
-    # --- Row 3: Position held ---
+    # --- Position held panel ---
     if has_position:
-        pos_row = 3 if has_pnl else 2
-        _add_position_held(fig, position_held_ts, row=pos_row, col=1)
+        _add_position_held(fig, position_held_ts, row=row_idx["position"], col=1)
 
-    # --- Title ---
+    # --- Title with color-coded PnL and key metrics ---
     net_pnl = results.get("net_pnl_quote", results.get("net_pnl", 0))
     net_pnl_pct = results.get("net_pnl", 0)
+    sharpe = results.get("sharpe_ratio", 0)
+    profit_factor = results.get("profit_factor", 0)
+    total_executors = results.get("total_executors", 0)
     total_volume = results.get("total_volume", 0)
+    accuracy = results.get("accuracy", 0)
+
+    pnl_color = COLORS["green"] if net_pnl >= 0 else COLORS["red"]
+    pnl_sign = "+" if net_pnl >= 0 else ""
+    sharpe_color = (
+        COLORS["green"]
+        if sharpe >= 1
+        else (COLORS["yellow"] if sharpe >= 0 else COLORS["red"])
+    )
+
+    title_text = (
+        f"<b>{config.config_name}</b>  ·  "
+        f"{config.start_date} → {config.end_date} @ {config.resolution}  │  "
+        f"<span style='color:{pnl_color}'><b>{pnl_sign}${net_pnl:.2f} ({pnl_sign}{net_pnl_pct * 100:.2f}%)</b></span>  "
+        f"<span style='color:{sharpe_color}'>Sharpe {sharpe:.2f}</span>  "
+        f"PF {profit_factor:.2f}  "
+        f"Acc {accuracy * 100:.0f}%  "
+        f"{total_executors} trades  "
+        f"Vol ${total_volume:,.0f}"
+    )
 
     fig.update_layout(
         plot_bgcolor=COLORS["plot_bg"],
         paper_bgcolor=COLORS["bg"],
-        font=dict(color=COLORS["text"], size=11),
-        height=950,
+        font=dict(color=COLORS["text"], size=11, family="'Courier New', monospace"),
+        height=1050 if n_rows >= 3 else 800,
         width=1400,
-        margin=dict(l=60, r=30, t=120, b=40),
+        margin=dict(l=70, r=30, t=90, b=40),
         hovermode="x unified",
         showlegend=True,
         legend=dict(
             orientation="h",
             yanchor="bottom",
-            y=1.06,
+            y=1.03,
             xanchor="center",
             x=0.5,
             font=dict(size=10),
+            bgcolor="rgba(14,17,23,0.75)",
+            bordercolor=COLORS["grid"],
+            borderwidth=1,
         ),
         title=dict(
-            text=(
-                f"{config.config_name} | "
-                f"{config.start_date} to {config.end_date} @ {config.resolution} | "
-                f"PnL: ${net_pnl:.2f} ({net_pnl_pct * 100:.2f}%) | "
-                f"Volume: ${total_volume:,.0f}"
-            ),
-            font=dict(size=14),
+            text=title_text,
+            font=dict(size=12),
             y=0.99,
             yanchor="top",
         ),
+        bargap=0,
+        bargroupgap=0,
     )
 
-    # Axis styling
-    fig.update_xaxes(rangeslider_visible=False, row=1, col=1)
+    # Axis styling — crosshair spikes on hover, consistent grid
     for r in range(1, n_rows + 1):
         fig.update_xaxes(
-            gridcolor=COLORS["grid"], zerolinecolor=COLORS["zero"], row=r, col=1
+            gridcolor=COLORS["grid"],
+            zerolinecolor=COLORS["zero"],
+            showspikes=True,
+            spikecolor="#546e7a",
+            spikethickness=1,
+            spikedash="dot",
+            spikemode="across",
+            row=r,
+            col=1,
         )
         fig.update_yaxes(
-            gridcolor=COLORS["grid"], zerolinecolor=COLORS["zero"], row=r, col=1
+            gridcolor=COLORS["grid"],
+            zerolinecolor=COLORS["zero"],
+            showspikes=True,
+            spikecolor="#546e7a",
+            spikethickness=1,
+            row=r,
+            col=1,
         )
 
-    fig.update_yaxes(title_text="Price", row=1, col=1)
-    if has_pnl:
-        fig.update_yaxes(title_text="PnL ($)", row=2, col=1)
+    fig.update_xaxes(rangeslider_visible=False, row=1, col=1)
+    # Hide x-tick labels on all but the bottom panel to save vertical space
+    for r in range(1, n_rows):
+        fig.update_xaxes(showticklabels=False, row=r, col=1)
+
+    fig.update_yaxes(title_text="Price", title_font=dict(size=10), row=1, col=1)
+    if has_macd:
         fig.update_yaxes(
-            title_text="Volume ($)", row=2, col=1, secondary_y=True, showgrid=False
+            title_text="MACD", title_font=dict(size=10), row=row_idx["macd"], col=1
+        )
+    if has_pnl:
+        fig.update_yaxes(
+            title_text="PnL ($)", title_font=dict(size=10), row=row_idx["pnl"], col=1
+        )
+        fig.update_yaxes(
+            title_text="Vol ($)",
+            title_font=dict(size=10),
+            row=row_idx["pnl"],
+            col=1,
+            secondary_y=True,
+            showgrid=False,
         )
     if has_position:
-        pos_row = 3 if has_pnl else 2
-        fig.update_yaxes(title_text="Position ($)", row=pos_row, col=1)
+        fig.update_yaxes(
+            title_text="Position",
+            title_font=dict(size=10),
+            row=row_idx["position"],
+            col=1,
+        )
 
     if not render_png:
         return None, fig
@@ -978,15 +1260,32 @@ def _server_name(chat_id: int | None, context: ContextTypes.DEFAULT_TYPE) -> str
 async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> RoutineResult:
     chat_id = context._chat_id if hasattr(context, "_chat_id") else None
 
-    # Rendering a stored run needs neither the API nor the controller config.
+    # One answer to "which server is this run", used for both halves of it: the
+    # box the backtest executes on and the key the store files it under. They
+    # were resolved separately -- the client from the chat's ambient
+    # preferences, the record from the launch -- so a dashboard or agent run,
+    # which carries no chat, could execute on the default server and be
+    # recorded under the one it was launched against. Naming the server to
+    # ``get_client`` is what makes the two the same server by construction.
+    server = _server_name(chat_id, context)
+
+    # Rendering a stored run needs neither the API nor the controller config --
+    # unless the run is not stored. A backtest whose result read timed out finished
+    # on the server and never reached the store, so a miss asks the server once and
+    # saves what it gets; from then on this task renders locally like any other.
     if config.task_id.strip():
-        loaded = _load_saved_task(config.task_id.strip())
+        task_id = config.task_id.strip()
+        if not _is_saved(task_id):
+            client = await get_client(chat_id, context=context, server=server)
+            if client:
+                await fetch_and_save(client, server, task_id)
+        loaded = await _load_saved_task(task_id)
         if isinstance(loaded, str):
             return RoutineResult(text=loaded)
         result, config = loaded
         return await _render(result, config, chat_id, context)
 
-    client = await get_client(chat_id, context=context)
+    client = await get_client(chat_id, context=context, server=server)
     if not client:
         return RoutineResult(text="No server available")
 
@@ -1007,7 +1306,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> RoutineResu
     # is keyed by, so every run — chat, web or agent — is rankable by backtest_compare.
     task_id, task = await run_and_save(
         client,
-        _server_name(chat_id, context),
+        server,
         ctrl_config,
         start_ts,
         end_ts,

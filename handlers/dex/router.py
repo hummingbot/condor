@@ -329,11 +329,11 @@ async def _handle_switch_to_cex(
     update: Update, context: ContextTypes.DEFAULT_TYPE, connector_name: str
 ) -> None:
     """Switch from DEX to CEX trading"""
-    from handlers.cex.trade import handle_trade as cex_handle_trade
-    from handlers.config.user_preferences import (
+    from condor.preferences import (
         get_clob_order_defaults,
         set_last_trade_connector,
     )
+    from handlers.cex.trade import handle_trade as cex_handle_trade
 
     # Clear DEX state
     context.user_data.pop("dex_state", None)

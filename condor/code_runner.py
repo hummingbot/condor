@@ -184,6 +184,10 @@ async def execute_code(
         id=run_id,
         created=time.time(),
         agent=agent,
+        # The same authenticated id that resolves the client and stamps the
+        # run's reports. Recording it is what lets a listing authorize its rows
+        # without opening them (FEAT-061); 0 when nothing authenticated.
+        user_id=chat_id,
         label=label,
         server=server_name,
         code=code,

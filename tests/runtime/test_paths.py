@@ -5,9 +5,11 @@ override is read at call time (so the suite can isolate itself and a subprocess
 can inherit it), and an id that could escape its directory is refused rather
 than sanitized.
 
-The agent registry root is pinned the same way at the bottom: it was the third
-root and the last to get a knob (CORR-220), and it is the one a test *writes*
-to, so "read at call time" is not a nicety there.
+The agent registry is pinned the same way at the bottom, and since FEAT-115 it
+is **two** roots: the shipped library the repo tracks and the one this install
+writes. Both are read at call time -- the writable one is what a test writes to,
+so "read at call time" is not a nicety there, and the shipped one has to be
+repointable or a test would layer the developer's real agents under its tmp tree.
 """
 
 import pytest
@@ -27,9 +29,23 @@ def test_root_defaults_to_a_dot_condor_beside_the_code(monkeypatch):
 
 
 def test_the_agent_registry_defaults_to_agents_beside_the_code(monkeypatch):
-    monkeypatch.delenv(paths.AGENTS_ROOT_ENV, raising=False)
+    monkeypatch.delenv(paths.STOCK_AGENTS_ROOT_ENV, raising=False)
 
-    assert paths.agents_root() == paths._PROJECT_ROOT / "agents"
+    assert paths.stock_agents_root() == paths._PROJECT_ROOT / "agents"
+
+
+def test_the_writable_agent_root_lives_under_the_runtime_root(monkeypatch):
+    """What git has never heard of: ``.condor/agents``, not ``agents/``.
+
+    The whole point of FEAT-115 -- a self-hoster runs ``/update`` and it never
+    mentions their agents, because nothing the product writes is under a tracked
+    path any more.
+    """
+    monkeypatch.delenv(paths.AGENTS_ROOT_ENV, raising=False)
+    monkeypatch.delenv(paths.RUNTIME_ROOT_ENV, raising=False)
+
+    assert paths.local_agents_root() == paths.runtime_root() / "agents"
+    assert paths.local_agents_root() != paths.stock_agents_root()
 
 
 def test_the_agent_registry_override_is_observable_after_import(tmp_path, monkeypatch):
@@ -43,8 +59,8 @@ def test_the_agent_registry_override_is_observable_after_import(tmp_path, monkey
 
     monkeypatch.setenv(paths.AGENTS_ROOT_ENV, str(tmp_path / "elsewhere"))
 
-    assert paths.agents_root() == tmp_path / "elsewhere"
-    assert memory_paths.assistant_home("scout") == tmp_path / "elsewhere" / "scout"
+    assert paths.local_agents_root() == tmp_path / "elsewhere"
+    assert memory_paths.agent_home("scout") == tmp_path / "elsewhere" / "scout"
     assert memory_paths.store_root(7, "scout") == (
         tmp_path / "elsewhere" / "scout" / "store" / "user_7"
     )
@@ -57,21 +73,57 @@ def test_the_agent_registry_override_is_observable_after_import(tmp_path, monkey
 
     monkeypatch.setenv(paths.AGENTS_ROOT_ENV, str(tmp_path / "moved"))
 
-    assert paths.agents_root() == tmp_path / "moved"
+    assert paths.local_agents_root() == tmp_path / "moved"
     assert memory_paths.store_root(7, "scout") == (
         tmp_path / "moved" / "scout" / "store" / "user_7"
     )
 
 
-def test_the_three_roots_stay_apart(tmp_path, monkeypatch):
-    """Repointing one root must not drag the other two with it."""
+def test_reads_are_layered_local_then_stock(tmp_path, monkeypatch):
+    """The read order every resolver returns: this install first, then upstream.
+
+    Per *item*, which is the rule the whole feature turns on: forking one file
+    of an agent must not stop that agent receiving upstream's other files.
+    """
+    from condor.memory import paths as memory_paths
+
+    monkeypatch.setenv(paths.AGENTS_ROOT_ENV, str(tmp_path / "mine"))
+    monkeypatch.setenv(paths.STOCK_AGENTS_ROOT_ENV, str(tmp_path / "shipped"))
+
+    local, stock = memory_paths.agent_home_layers("scout")
+    assert (local, stock) == (
+        tmp_path / "mine" / "scout",
+        tmp_path / "shipped" / "scout",
+    )
+
+    stock.mkdir(parents=True)
+    (stock / "AGENT.md").write_text("shipped", "utf-8")
+    (stock / "core_rules.md").write_text("shipped rules", "utf-8")
+    assert memory_paths.resolve_agent_file("scout", "AGENT.md") == stock / "AGENT.md"
+
+    local.mkdir(parents=True)
+    (local / "AGENT.md").write_text("mine", "utf-8")
+    assert memory_paths.resolve_agent_file("scout", "AGENT.md") == local / "AGENT.md"
+    # The sibling the install never touched still resolves upstream.
+    assert (
+        memory_paths.resolve_agent_file("scout", "core_rules.md")
+        == stock / "core_rules.md"
+    )
+    # And the registry is the union, listed once.
+    assert memory_paths.iter_agent_slugs() == ["scout"]
+
+
+def test_the_roots_stay_apart(tmp_path, monkeypatch):
+    """Repointing one root must not drag the others with it."""
     monkeypatch.setenv(paths.RUNTIME_ROOT_ENV, str(tmp_path / "runtime"))
     monkeypatch.setenv(paths.DATA_DIR_ENV, str(tmp_path / "operational"))
     monkeypatch.setenv(paths.AGENTS_ROOT_ENV, str(tmp_path / "registry"))
+    monkeypatch.setenv(paths.STOCK_AGENTS_ROOT_ENV, str(tmp_path / "library"))
 
     assert paths.runtime_root() == tmp_path / "runtime"
     assert paths.data_dir() == tmp_path / "operational"
-    assert paths.agents_root() == tmp_path / "registry"
+    assert paths.local_agents_root() == tmp_path / "registry"
+    assert paths.stock_agents_root() == tmp_path / "library"
 
 
 def test_env_override_is_observable_after_import(tmp_path, monkeypatch):

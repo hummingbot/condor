@@ -1,6 +1,6 @@
 """Unit tests for the unified Agent model: AgentStore + Strategy sub-resource.
 
-Covers the universal capabilities (every Agent is consultable, delegable and
+Covers the universal capabilities (every Agent is delegable and
 loopable — no flags, no gating), the strategy CRUD scoped under an Agent, the
 default playbook that makes a strategy-less Agent loopable, the shared per-Agent
 skill library, and the pydantic-ai tool allowlist.
@@ -26,8 +26,7 @@ def _write_agent(root, slug, *, body="Body.", **frontmatter):
 
 
 def _patch_roots(monkeypatch, tmp_path):
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
-    monkeypatch.setattr(strategy_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
 
 
 # ── Agent discovery + the index every Agent appears in ──
@@ -44,7 +43,7 @@ def test_agent_discovery_and_index(tmp_path, monkeypatch):
         agent_key="ollama:qwen3:32b",
         body="Body for executor_manager.",
     )
-    # No consult trigger — still a first-class agent, just described by its
+    # No routing hint — still a first-class agent, just described by its
     # description in the index. Filtering it out would make it unroutable.
     _write_agent(
         tmp_path,
@@ -67,7 +66,7 @@ def test_agent_discovery_and_index(tmp_path, monkeypatch):
 
 
 def test_consult_hint_falls_back(tmp_path, monkeypatch):
-    """The hint degrades description -> name; it never gates consultability."""
+    """The hint degrades description -> name; it never gates anything."""
     _patch_roots(monkeypatch, tmp_path)
     _write_agent(
         tmp_path, "with_trigger", name="A", description="d", when_to_consult="t"
@@ -131,8 +130,8 @@ def test_strategy_crud_under_agent(tmp_path, monkeypatch):
     )
     assert s.slug == "brl_mm"
     assert s.key == "brigado.brl_mm"
-    assert s.dir == tmp_path / "brigado" / "strategies" / "brl_mm"
-    assert (s.dir / "strategy.md").exists()
+    assert s.home == tmp_path / "brigado" / "strategies" / "brl_mm"
+    assert (s.home / "strategy.md").exists()
 
     # get / get_by_key / list
     assert store.get("brigado", "brl_mm").instructions.strip() == "do the thing"
@@ -179,7 +178,7 @@ def test_agent_with_no_strategy_is_still_loopable(tmp_path, monkeypatch):
     assert resolved is not None
     assert resolved.slug == strategy_module.DEFAULT_STRATEGY_SLUG
     assert resolved.key == "brigado.default"
-    assert (resolved.dir / "strategy.md").exists()
+    assert (resolved.home / "strategy.md").exists()
     assert resolved.instructions.strip()  # a real playbook body, not empty
 
     # Idempotent: a second start reuses the same one instead of piling up.
@@ -212,66 +211,54 @@ def test_resolve_for_loop_unknown_target(tmp_path, monkeypatch):
     assert StrategyStore().resolve_for_loop("nope.also_nope") is None
 
 
-# ── MCP tool: manage_trading_agent agent CRUD (the AGENT.md identity) ──
+# ── MCP tool: manage_agents CRUD (the AGENT.md identity) ──
 
 
-def test_manage_trading_agent_agent_crud(tmp_path, monkeypatch):
-    """create_agent/get_agent/update_agent/delete_agent through the MCP tool."""
+def test_manage_agents_crud(tmp_path, monkeypatch):
+    """create/get/update/delete through the manage_agents tool."""
     from mcp_servers.condor.settings import settings
     from mcp_servers.condor.tools import trading_agent as ta
 
     _patch_roots(monkeypatch, tmp_path)
     monkeypatch.setattr(settings, "user_id", 7, raising=False)
 
-    created = asyncio.run(
-        ta.manage_trading_agent(
-            action="create_agent",
-            name="Risk Sentry",
-            description="watches drawdown",
-            instructions="identity + domain knowledge",
-            agent_key="ollama:qwen3:32b",
-            when_to_consult="when sizing a position",
-            tools=["get_market_data"],
-        )
+    created = ta.manage_agents(
+        action="create",
+        name="Risk Sentry",
+        description="watches drawdown",
+        instructions="identity + domain knowledge",
+        agent_key="ollama:qwen3:32b",
+        when_to_consult="when sizing a position",
+        tools=["get_market_data"],
     )
     assert created["created"] is True
     assert created["agent_slug"] == "risk_sentry"
 
-    got = asyncio.run(
-        ta.manage_trading_agent(action="get_agent", agent_slug="risk_sentry")
-    )
+    got = ta.manage_agents(action="get", agent_slug="risk_sentry")
     assert got["instructions"].strip() == "identity + domain knowledge"
     assert got["tools"] == ["get_market_data"]
 
-    updated = asyncio.run(
-        ta.manage_trading_agent(
-            action="update_agent",
-            agent_slug="risk_sentry",
-            instructions="new body",
-            when_to_consult="",  # clearing the hint must NOT gate anything
-        )
+    updated = ta.manage_agents(
+        action="update",
+        agent_slug="risk_sentry",
+        instructions="new body",
+        when_to_consult="",  # clearing the hint must NOT gate anything
     )
     assert updated["updated"] is True
     assert (
-        asyncio.run(
-            ta.manage_trading_agent(action="get_agent", agent_slug="risk_sentry")
-        )["instructions"].strip()
+        ta.manage_agents(action="get", agent_slug="risk_sentry")["instructions"].strip()
         == "new body"
     )
 
-    listed = asyncio.run(ta.manage_trading_agent(action="list_agent_definitions"))[
-        "agents"
-    ]
+    listed = ta.manage_agents(action="list")["agents"]
     entry = next(a for a in listed if a["slug"] == "risk_sentry")
     # The hint fell back to the description once the trigger was cleared.
     assert entry["when_to_consult"] == "watches drawdown"
 
-    assert asyncio.run(
-        ta.manage_trading_agent(action="delete_agent", agent_slug="risk_sentry")
-    ) == {"deleted": True}
-    assert "error" in asyncio.run(
-        ta.manage_trading_agent(action="get_agent", agent_slug="risk_sentry")
-    )
+    assert ta.manage_agents(action="delete", agent_slug="risk_sentry") == {
+        "deleted": True
+    }
+    assert "error" in ta.manage_agents(action="get", agent_slug="risk_sentry")
 
 
 def test_create_strategy_requires_existing_agent(tmp_path, monkeypatch):
@@ -282,13 +269,11 @@ def test_create_strategy_requires_existing_agent(tmp_path, monkeypatch):
     _patch_roots(monkeypatch, tmp_path)
     monkeypatch.setattr(settings, "user_id", 7, raising=False)
 
-    result = asyncio.run(
-        ta.manage_trading_agent(
-            action="create_strategy",
-            agent_slug="ghost",
-            name="S",
-            instructions="x",
-        )
+    result = ta.manage_strategies(
+        action="create",
+        agent_slug="ghost",
+        name="S",
+        instructions="x",
     )
     assert "error" in result and "not found" in result["error"].lower()
 
@@ -335,22 +320,22 @@ def test_agent_skill_library_read_and_edit(tmp_path):
     assert "stop_or_widen" not in store.list_index()
 
 
-# ── pydantic-ai tool allowlist (enforced on consult) ──
+# ── pydantic-ai tool allowlist (enforced on a delegated run) ──
 
 
 def test_allowlist_filters_bare_and_namespaced_names():
     client = PydanticAIClient(
-        model="ollama:x", allowed_tools=["manage_executors", "get_market_data"]
+        model="ollama:x", allowed_tools=["create_grid_executor", "get_market_data"]
     )
     defs = [
-        SimpleNamespace(name="manage_executors"),
+        SimpleNamespace(name="create_grid_executor"),
         SimpleNamespace(name="mcp__condor__get_market_data"),
         SimpleNamespace(name="manage_bots"),
         SimpleNamespace(name="place_order"),
     ]
     kept = asyncio.run(client._prepare_tools(None, defs))
     assert sorted(d.name for d in kept) == [
-        "manage_executors",
+        "create_grid_executor",
         "mcp__condor__get_market_data",
     ]
 
@@ -619,33 +604,37 @@ def test_claude_acp_takes_acp_path_not_pydantic_ai():
     assert is_pydantic_ai_model("ollama:qwen3:32b") is True
 
 
-# ── consult endpoint authorization (SEC-035) ──
+# ── delegate endpoint authorization (SEC-035) ──
+#
+# These pinned the consult endpoint until that channel was removed. Delegate is
+# the only door left and carries the same two gates, so the coverage moved with
+# them rather than going away with the route.
 
 
-def _consult_request(**kw):
-    from condor.web.routes.agents import ConsultRequest
+def _delegate_request(**kw):
+    from condor.web.routes.agents import DelegateRequest
 
     kw.setdefault("task", "what's my balance?")
-    return ConsultRequest(**kw)
+    return DelegateRequest(**kw)
 
 
 def _web_user(uid):
     return SimpleNamespace(id=uid, username="", first_name="", role="user")
 
 
-def test_consult_denies_server_without_access(monkeypatch):
-    """A user without access to server 'X' gets 403 and run_consult is not called."""
-    import config_manager
-    from condor.agents import consult as consult_module
+def test_delegate_denies_server_without_access(monkeypatch):
+    """A user without access to server 'X' gets 403 and no delegation starts."""
+    from condor.agents import delegate as delegate_module
     from condor.web.routes import agents as agents_module
 
     called = {"run": False}
 
-    async def _fail_run_consult(**kw):  # pragma: no cover - must not be reached
+    async def _fail_start(**kw):  # pragma: no cover - must not be reached
         called["run"] = True
-        return "should not run"
+        raise AssertionError("should not run")
 
-    monkeypatch.setattr(consult_module, "run_consult", _fail_run_consult)
+    monkeypatch.setattr(agents_module, "_get_agent", lambda slug: SimpleNamespace())
+    monkeypatch.setattr(delegate_module, "start_delegation", _fail_start)
     monkeypatch.setattr(
         "condor.web.auth.get_config_manager",
         lambda: SimpleNamespace(has_server_access=lambda uid, name: False),
@@ -653,44 +642,48 @@ def test_consult_denies_server_without_access(monkeypatch):
 
     from fastapi import HTTPException
 
-    req = _consult_request(server_name="X", user_id=999)
+    req = _delegate_request(server_name="X", user_id=999)
     try:
-        asyncio.run(agents_module.consult_agent("em", req, user=_web_user(42)))
+        asyncio.run(agents_module.delegate_agent("em", req, user=_web_user(42)))
         assert False, "expected 403"
     except HTTPException as exc:
         assert exc.status_code == 403
     assert called["run"] is False  # no MCP client built for X
 
 
-def test_consult_forces_caller_user_id(monkeypatch):
-    """An accessible-server consult runs, but user_id is forced to the caller's."""
-    import config_manager
-    from condor.agents import consult as consult_module
+def test_delegate_forces_caller_user_id(monkeypatch):
+    """An accessible-server delegation runs, but user_id is forced to the caller's."""
+    from condor.agents import delegate as delegate_module
     from condor.web.routes import agents as agents_module
 
     seen = {}
 
-    async def _capture_run_consult(**kw):
+    async def _capture_start(**kw):
         seen.update(kw)
-        return "ok"
+        return SimpleNamespace(task_id="em-delegate-1", status="running")
 
-    monkeypatch.setattr(consult_module, "run_consult", _capture_run_consult)
+    async def _no_conversation(session_key):
+        return ""
+
+    monkeypatch.setattr(agents_module, "_get_agent", lambda slug: SimpleNamespace())
+    monkeypatch.setattr(agents_module, "_conversation_for_session", _no_conversation)
+    monkeypatch.setattr(delegate_module, "start_delegation", _capture_start)
     monkeypatch.setattr(
         "condor.web.auth.get_config_manager",
         lambda: SimpleNamespace(has_server_access=lambda uid, name: True),
     )
 
     # Caller is 42 but tries to impersonate user 999.
-    req = _consult_request(server_name="X", user_id=999)
-    result = asyncio.run(agents_module.consult_agent("em", req, user=_web_user(42)))
+    req = _delegate_request(server_name="X", user_id=999)
+    result = asyncio.run(agents_module.delegate_agent("em", req, user=_web_user(42)))
 
-    assert result["answer"] == "ok"
+    assert result["task_id"] == "em-delegate-1"
     assert seen["user_id"] == 42  # caller's id, not the 999 override
     assert seen["server_name"] == "X"
 
 
 def test_session_mcp_servers_carry_agent_slug(monkeypatch):
-    """Serverless agent runs (consult/tick without server_name) must scope the
+    """Serverless agent runs (delegate/tick without server_name) must scope the
     condor MCP tools to the agent's own memory/skills via --agent-slug —
     without it, an agent silently reads/writes the CHAT's stores (e.g. its
     routines land in the global library instead of its own dir)."""
@@ -749,6 +742,11 @@ def test_numeric_credentials_reach_the_subprocess_as_strings(monkeypatch):
             # SEC-178: the resolver holds every candidate to reach, not just
             # existence. This double owns the server it hands out.
             return True
+
+        def get_server_permission(self, user_id, server_name):
+            from config_manager import ServerPermission
+
+            return ServerPermission.OWNER
 
     monkeypatch.setattr(
         config_manager, "get_config_manager", lambda: _NumericPasswordServer()

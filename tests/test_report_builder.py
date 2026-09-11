@@ -21,7 +21,9 @@ def reports_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(reports, "CHARTS_DIR", tmp_path)
     monkeypatch.setattr(reports, "INDEX_FILE", tmp_path / "reports_index.json")
     monkeypatch.setattr(
-        rendering, "plotly_script", lambda: "<script>window.Plotly={};</script>"
+        rendering,
+        "plotly_bundle",
+        lambda: "/**\n* plotly.js v0.0.0\n*/\nwindow.Plotly={};",
     )
     return tmp_path
 
@@ -301,3 +303,109 @@ def test_report_runtime_core_with_node(tmp_path):
         encoding="utf-8",
     )
     subprocess.run(["node", str(harness)], check=True)
+
+
+# ── PERF-267: reports reference one shared plotly bundle, hydrated on egress ──
+
+
+def _plotly_report(title: str = "Chart Report"):
+    import plotly.graph_objects as go
+
+    builder = reports.ReportBuilder(title).source("routine", "perf267")
+    builder.plotly(go.Figure(data=[go.Scatter(x=[1, 2], y=[3, 4])]), optimize=False)
+    return builder
+
+
+def _saved_document(reports_dir, report_id: str) -> str:
+    entry = store.get_report(report_id)
+    return (reports_dir / entry["filename"]).read_text(encoding="utf-8")
+
+
+def test_saved_chart_report_references_the_shared_bundle_instead_of_inlining_it(
+    reports_dir,
+):
+    """A saved chart report carries no bundle and no off-origin host."""
+    report_id = asyncio.run(_plotly_report().save())
+    document = _saved_document(reports_dir, report_id)
+
+    bundle = rendering.plotly_bundle()
+    asset = reports_dir / rendering.ASSETS_DIRNAME / rendering.plotly_asset_name(bundle)
+    assert asset.is_file()
+    # Byte-for-byte what plotly ships: hydration re-inlines exactly this.
+    assert asset.read_text(encoding="utf-8") == bundle
+
+    assert bundle not in document
+    assert f'<script src="/api/v1/reports/assets/{asset.name}"></script>' in document
+    # Self-containment invariant: every script the document pulls in is served
+    # by this app, from its own path. No CDN, no third-party host, no scheme.
+    for src in re.findall(r'<script[^>]+src="([^"]*)"', document):
+        assert src.startswith("/api/v1/reports/assets/"), src
+
+
+def test_chartless_report_writes_no_asset_and_references_none(reports_dir):
+    """No plotly section, no plotly slot — and no ``_assets`` directory at all."""
+    builder = reports.ReportBuilder("Text Only").source("routine", "perf267")
+    builder.markdown("Nothing but prose.")
+    report_id = asyncio.run(builder.save())
+    document = _saved_document(reports_dir, report_id)
+
+    assert rendering.ASSET_URL_PREFIX not in document
+    assert "<script src=" not in document
+    assert "Charts unavailable" not in document
+    assert not (reports_dir / rendering.ASSETS_DIRNAME).exists()
+
+
+def test_hydrated_document_is_self_contained(reports_dir):
+    """The egress form inlines the bundle and references nothing external."""
+    report_id = asyncio.run(_plotly_report().save())
+    hydrated = rendering.hydrate(_saved_document(reports_dir, report_id))
+
+    assert rendering.plotly_bundle() in hydrated
+    # The criterion that matters at ``file://`` and in Telegram: nothing left
+    # for the document to fetch.
+    assert "<script src=" not in hydrated
+
+
+def test_hydrate_pins_the_version_the_report_was_saved_against(
+    reports_dir, monkeypatch
+):
+    """A plotly upgrade must not retarget reports already on disk.
+
+    Stored reports are immutable snapshots, so a v3 figure spec has to keep
+    getting the v3 runtime after ``_assets`` gains a second, newer bundle.
+    """
+    report_id = asyncio.run(_plotly_report().save())
+    old_bundle = rendering.plotly_bundle()
+    old_name = rendering.plotly_asset_name(old_bundle)
+
+    new_bundle = "/**\n* plotly.js v9.9.9\n*/\nwindow.Plotly={upgraded:true};"
+    monkeypatch.setattr(rendering, "plotly_bundle", lambda: new_bundle)
+    asyncio.run(_plotly_report("Newer Report").save())
+
+    assets = reports_dir / rendering.ASSETS_DIRNAME
+    assert (assets / "plotly-9.9.9.js").is_file()
+    assert (assets / old_name).read_text(encoding="utf-8") == old_bundle
+
+    document = _saved_document(reports_dir, report_id)
+    assert old_name in document
+    hydrated = rendering.hydrate(document)
+    assert old_bundle in hydrated
+    assert new_bundle not in hydrated
+
+
+def test_hydrate_leaves_a_document_whose_asset_is_missing_alone(reports_dir):
+    """A vanished bundle degrades to the in-report banner, not a crash."""
+    report_id = asyncio.run(_plotly_report().save())
+    document = _saved_document(reports_dir, report_id)
+    for asset in (reports_dir / rendering.ASSETS_DIRNAME).iterdir():
+        asset.unlink()
+
+    assert rendering.hydrate(document) == document
+    # The bootstrap that turns a missing bundle into something visible.
+    assert "Charts unavailable" in document
+
+
+def test_hydrate_is_a_no_op_for_a_pre_existing_inlined_report(reports_dir):
+    """The 100 reports already on disk need no migration to keep working."""
+    legacy = "<html><head><script>window.Plotly={};</script></head><body></body></html>"
+    assert rendering.hydrate(legacy) == legacy

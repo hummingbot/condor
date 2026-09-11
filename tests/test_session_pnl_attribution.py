@@ -288,7 +288,7 @@ def _rollup(monkeypatch, tmp_path, client):
     """
     from condor.web.routes import agents as mod
 
-    async def _fake_client(strategy_dir, default_config):
+    async def _fake_client(strategy_dir, default_config, principal):
         return client, "srv"
 
     async def _no_executors(client, ids, bot_names, failed_ids=None):
@@ -302,7 +302,7 @@ def _rollup(monkeypatch, tmp_path, client):
     )
     mod._PERF_CACHE.clear()
     mod._CLOSED_PERF_CACHE.clear()
-    return asyncio.run(mod._compute_strategy_performance("run", tmp_path, None))
+    return asyncio.run(mod._compute_strategy_performance("run", tmp_path, None, 1))
 
 
 def test_rollup_of_a_handover_sums_to_the_bots_cumulative(monkeypatch, tmp_path):

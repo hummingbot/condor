@@ -2,7 +2,7 @@
 
 The pending approval itself lives in :mod:`condor.runtime.confirmations`; a
 channel only renders it somewhere a human can answer. ``TelegramChannel`` moved
-here from ``handlers/agents/confirmation.py`` so the runtime (consult,
+here from ``handlers/agents/confirmation.py`` so the runtime (
 delegate) no longer imports from the hot-reloaded handlers package; that module
 re-exports it for its Telegram callers.
 """

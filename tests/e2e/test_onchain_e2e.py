@@ -90,55 +90,45 @@ def test_the_api_offers_the_onchain_executor():
     assert "onchain_executor" in str(types), types
 
 
-def test_show_schema_renders_the_onchain_fields():
-    from mcp_servers.hummingbot_api.schemas import ManageExecutorsRequest
-    from mcp_servers.hummingbot_api.tools.executors import manage_executors
-
+def test_backend_schema_offers_onchain_fields():
     async def _go():
         client = await _client()
         try:
-            return await manage_executors(
-                client, ManageExecutorsRequest(executor_type="onchain_executor")
-            )
+            return await client.executors.get_executor_config_schema("onchain_executor")
         finally:
             await client.close()
 
-    result = _run(_go())
-    assert "error" not in result, result
-    assert "chain_id" in result["formatted_output"]
+    assert "chain_id" in str(_run(_go()))
 
 
 @pytest.mark.skipif(not WALLET, reason="set AOMI_E2E_WALLET (the Aomi wallet address)")
 def test_self_transfer_commits_and_surfaces_everywhere():
     from condor.agents.providers.defi_positions import DefiPositionsProvider
     from condor.routine_store import WebRoutineContext
-    from mcp_servers.hummingbot_api.schemas import ManageExecutorsRequest
-    from mcp_servers.hummingbot_api.tools.executors import manage_executors
+    from mcp_servers.hummingbot_api.tools.onchain import (
+        EvmCall,
+        EvmCalldata,
+        create_onchain_executor,
+    )
     from tests.conftest import load_shared_routine
 
     async def _go():
         client = await _client()
         try:
-            created = await manage_executors(
+            created = await create_onchain_executor(
                 client,
-                ManageExecutorsRequest(
-                    action="create",
-                    executor_type="onchain_executor",
-                    executor_config={
-                        "controller_id": AGENT_ID,
-                        "chain_id": CHAIN_ID,
-                        "mode": "calls",
-                        "calls": [
-                            {
-                                "to": WALLET,
-                                "description": "condor e2e self-transfer",
-                                "data": {"signature": "", "args": [], "raw": ""},
-                                "value": "0",
-                            }
-                        ],
-                        "notional_quote": 1,
-                    },
-                ),
+                chain_id=CHAIN_ID,
+                mode="calls",
+                commit=True,
+                controller_id=AGENT_ID,
+                calls=[
+                    EvmCall(
+                        to=WALLET,
+                        value="0",
+                        data=EvmCalldata(),
+                        description="condor e2e self-transfer",
+                    )
+                ],
             )
             assert "error" not in created, created
             executor_id = created.get("executor_id") or re.search(

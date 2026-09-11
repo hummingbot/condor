@@ -16,6 +16,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
+from condor.fetchers.market_data import fetch_current_price
 from utils.telegram_formatters import (
     escape_markdown_v2,
     format_active_bots,
@@ -1261,10 +1262,7 @@ async def show_controller_chart(
         candles = await client.market_data.get_candles(
             connector_name=connector, trading_pair=pair, interval="1h", max_records=420
         )
-        prices = await client.market_data.get_prices(
-            connector_name=connector, trading_pairs=pair
-        )
-        current_price = prices.get("prices", {}).get(pair)
+        current_price = await fetch_current_price(client, connector, pair, strict=True)
 
         # Generate chart based on controller type
         if is_pmm_mister:

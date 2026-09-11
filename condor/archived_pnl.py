@@ -367,3 +367,77 @@ def _calculate_pnl_average_cost(trades: list[dict[str, Any]]) -> dict[str, Any]:
 def _calculate_pnl_open_close(trades: list[dict[str, Any]]) -> dict[str, Any]:
     """Calculate PnL using OPEN/CLOSE position tracking for perpetual futures."""
     return _walk_trades(trades, _OpenClosePositionAccounting())
+
+
+def calculate_pnl_from_executors(
+    executors: list[Any], rates: Any = None
+) -> dict[str, Any]:
+    """Reconstruct the same summary shape from executors instead of trades.
+
+    An archived database can carry tens of thousands of executors and an empty
+    ``trades`` table -- a run whose fills never landed as trade rows, or one
+    whose executors (LP, grid) settle without emitting them. Reading the summary
+    only from trades reports ``$0.00`` across the board for such a run while the
+    chart, which reads executors, plots real PnL. This is the fallback that
+    keeps the two halves of the page telling the same story.
+
+    Takes normalized executors (attribute access, not dicts) and returns the
+    same keys as :func:`calculate_pnl_from_trades` so the caller can swap one
+    for the other. PnL here is whatever the executor already realized -- there
+    is no position walk to redo, since each executor reports its own net.
+
+    ``rates`` is an optional :class:`condor.quote_conversion.QuoteRates`; when
+    given, the quote-denominated figures are restated in USD per executor's own
+    market, so a run spanning markets with different quotes still totals.
+    """
+    if not executors:
+        return {
+            "total_pnl": 0,
+            "total_fees": 0,
+            "pnl_by_pair": {},
+            "cumulative_pnl": [],
+            "total_volume": 0,
+        }
+
+    total_pnl = 0.0
+    total_fees = 0.0
+    total_volume = 0.0
+    pnl_by_pair: dict[str, float] = defaultdict(float)
+
+    # An executor's PnL is realized when it closes, so the curve is ordered by
+    # close time. Executors that never closed carry no close stamp; they fall
+    # back to their open stamp rather than collapsing onto the epoch.
+    def _when(ex: Any) -> float:
+        return float(getattr(ex, "close_timestamp", 0) or 0) or float(
+            getattr(ex, "timestamp", 0) or 0
+        )
+
+    def _rate(ex: Any) -> float:
+        return rates.for_pair(getattr(ex, "trading_pair", "") or "") if rates else 1.0
+
+    for ex in executors:
+        rate = _rate(ex)
+        total_fees += float(getattr(ex, "cum_fees_quote", 0) or 0) * rate
+        total_volume += float(getattr(ex, "volume", 0) or 0) * rate
+        pnl = float(getattr(ex, "pnl", 0) or 0) * rate
+        total_pnl += pnl
+        pair = getattr(ex, "trading_pair", "") or ""
+        if pair:
+            pnl_by_pair[pair] += pnl
+
+    cumulative_pnl: list[dict[str, Any]] = []
+    running = 0.0
+    for ex in sorted(executors, key=_when):
+        when = _when(ex)
+        if when <= 0:
+            continue
+        running += float(getattr(ex, "pnl", 0) or 0) * _rate(ex)
+        cumulative_pnl.append({"timestamp": when, "pnl": running})
+
+    return {
+        "total_pnl": total_pnl,
+        "total_fees": total_fees,
+        "pnl_by_pair": dict(pnl_by_pair),
+        "cumulative_pnl": cumulative_pnl,
+        "total_volume": total_volume,
+    }

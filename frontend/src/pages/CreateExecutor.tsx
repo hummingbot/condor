@@ -5,10 +5,10 @@ import {
   ArrowLeft,
   ArrowUpDown,
   BarChart3,
+  ChevronDown,
   Droplets,
   Grid3X3,
   Layers,
-  List,
   Loader2,
   Rocket,
   Settings2,
@@ -16,24 +16,31 @@ import {
 } from "lucide-react";
 
 import { NoServerCard } from "@/components/NoServerCard";
-import { ExchangeSelector } from "@/components/market/ExchangeSelector";
-import { PairSelector, useTradingRules } from "@/components/market/PairSelector";
+import { useTradingRules } from "@/components/market/useTradingRules";
 import { PriceTicker } from "@/components/market/PriceTicker";
 import { MarketDepthPanel } from "@/components/market/MarketDepthPanel";
 import { MarketBrowser, type MarketPick } from "@/components/market/MarketBrowser";
+import { FavoritesStrip } from "@/components/market/FavoritesStrip";
+import { StarMarketButton } from "@/components/market/StarMarketButton";
 import { TradeChart } from "@/components/trade/TradeChart";
 import { GridConfigPanel, useGridValidation } from "@/components/grid/GridConfigPanel";
 import {
   ErrorToast,
   ExecutorSuccessModal,
 } from "@/components/executor/ExecutorSuccessModal";
-import { PositionConfigPanel, usePositionConfig } from "@/components/executor/PositionConfigPanel";
-import { OrderConfigPanel, useOrderConfig } from "@/components/executor/OrderConfigPanel";
-import { DCAConfigPanel, useDCAConfig } from "@/components/executor/DCAConfigPanel";
+import { PositionConfigPanel } from "@/components/executor/PositionConfigPanel";
+import { usePositionConfig } from "@/components/executor/position-config";
+import { OrderConfigPanel } from "@/components/executor/OrderConfigPanel";
+import { useOrderConfig } from "@/components/executor/order-config";
+import { DCAConfigPanel } from "@/components/executor/DCAConfigPanel";
+import { useDCAConfig } from "@/components/executor/dca-config";
 import { LPConfigPanel } from "@/components/executor/LPConfigPanel";
-import { useLpConfig } from "@/components/executor/lp-config";
+import { LP_SIDE_RANGE, useLpConfig } from "@/components/executor/lp-config";
+import { HintBubble } from "@/components/ui/HintBubble";
+import { useOneTimeHint } from "@/hooks/useOneTimeHint";
 import { TradeBottomPane } from "@/components/trade/TradeBottomPane";
-import { useCandleStore } from "@/hooks/useCandleStore";
+import { ViewOnlyOverlay } from "@/components/trade/ViewOnlyOverlay";
+import { useLastClose } from "@/hooks/useCandleStore";
 import { usePairBalances } from "@/hooks/usePairBalances";
 import { useServer } from "@/hooks/useServer";
 import { useCondorWebSocket } from "@/hooks/useWebSocket";
@@ -41,10 +48,16 @@ import { useMainControllerData } from "@/hooks/useMainControllerData";
 import { useResizeDrag } from "@/hooks/useResizeDrag";
 import { api } from "@/lib/api";
 import { candleStore } from "@/lib/candle-store";
-import { connectorCapabilities } from "@/lib/connector-capabilities";
-import type { ExecutorType, PickSlot } from "@/components/executor/types";
+import { connectorCapabilities, orderBookVenues } from "@/lib/connector-capabilities";
+import { executorsQuery } from "@/lib/queryClient";
+import { BROWSE_HINT_KEY } from "@/lib/sessionState";
+import { isChartLineSlot } from "@/components/executor/types";
+import type { ChartPriceMapping, ExecutorType, PickSlot } from "@/components/executor/types";
 import {
+  clampGridPrice,
+  gridLineLabels,
   gridReducer,
+  hasRememberedMarket,
   isSpotConnector,
   loadGridDefaults,
   saveGridDefaults,
@@ -52,6 +65,8 @@ import {
   INTERVALS,
   LOOKBACK_OPTIONS,
 } from "@/lib/gridExecutor";
+import { formatConnectorName, formatPriceSig } from "@/lib/formatters";
+import { useViewFacts } from "@/lib/viewFacts";
 
 // ── Type tabs config ──
 
@@ -138,7 +153,13 @@ export function CreateExecutor() {
 
   const [successInfo, setSuccessInfo] = useState<{ id: string; type: ExecutorType; connector: string; pair: string } | null>(null);
   const [rightPanel, setRightPanel] = useState<"config" | "depth">("config");
-  const [browserOpen, setBrowserOpen] = useState(false);
+  // Cold start lands on the market list (FEAT-053): with no remembered market
+  // there is nothing to come back to, and the alternative is a chart on a pair
+  // the reset effect picked. A URL that names a pair *is* a choice, so it skips
+  // the list — the effect above has not stripped the param yet on this render.
+  const [browserOpen, setBrowserOpen] = useState(
+    () => !searchParams.get("pair") && !hasRememberedMarket(),
+  );
   const [rightPanelWidth, setRightPanelWidth] = useState(288);
   const [bottomPaneHeight, setBottomPaneHeight] = useState(200);
   // The selection belongs to the market it was made in, so it carries that
@@ -192,16 +213,21 @@ export function CreateExecutor() {
   // switch its tab to Order.
   const listsReady = !!server && !venuesPending;
 
-  // Order-book venues first, then swap-only ones — the grouping ExchangeSelector
-  // renders, and it keeps allConnectors[0] (the reset fallback) a tradable venue
-  // rather than whichever chain sorts first alphabetically.
-  // Trade is for venues with an order book — whether or not the venue is
-  // decentralized: hyperliquid and xrpl belong here, solana-mainnet-beta does
-  // not. Everything Condor trades through Gateway lives on /dex instead, where
-  // the pool rather than the pair is the unit of navigation.
-  const allConnectors = useMemo(
-    () => venues.filter((v) => v.hummingbotMarketData).map((v) => v.name),
-    [venues],
+  // Every venue with an order book, credentialed ones first — see
+  // `orderBookVenues` for why both halves of that sentence are load-bearing.
+  // View-only venues are full members of this list, which is also what keeps the
+  // correction effect below from bouncing a persisted one on reload.
+  const allConnectors = useMemo(() => orderBookVenues(venues), [venues]);
+
+  // Which of them the account can actually execute on, for the selector's
+  // `Your accounts` / `View only` split. Undefined until the query resolves, so
+  // the pending list renders flat instead of flashing every venue as view-only.
+  const credentialedConnectors = useMemo(
+    () =>
+      venuesPending
+        ? undefined
+        : new Set(venues.filter((v) => v.credentialed).map((v) => v.name)),
+    [venues, venuesPending],
   );
 
 
@@ -310,16 +336,20 @@ export function CreateExecutor() {
     refetchInterval: 5000,
   });
 
-  const { candles: sharedCandles } = useCandleStore(
-    server ?? null,
+  // Only the last close is read, so only the last close is subscribed: a fresh
+  // candle array once a second would re-render this page — chart wrapper, every
+  // config panel, the bottom pane — under the user's hands for a scalar that a
+  // REST-priced venue never even reads. Gating the server on the capability
+  // keeps a CLOB page off the stream entirely; TradeChart holds the channel's
+  // own refcounted subscription either way, so the wire is unchanged.
+  const lastClose = useLastClose(
+    caps.hasRestPrice ? null : (server ?? null),
     connector,
     pair,
     gridState.interval,
   );
 
-  const currentPrice = !caps.hasRestPrice
-    ? (sharedCandles[sharedCandles.length - 1]?.close ?? null)
-    : (priceData?.mid_price ?? null);
+  const currentPrice = !caps.hasRestPrice ? lastClose : (priceData?.mid_price ?? null);
 
 
   // Price precision
@@ -349,6 +379,13 @@ export function CreateExecutor() {
     [connector],
   );
 
+  // A shortcut nobody can see. The chip used to carry a bare `<kbd>/</kbd>`,
+  // which QA reported reading as decoration until they pressed it by accident —
+  // a glyph names the key without saying what it opens. So the key is taught in
+  // words, on the first hover, once (FEAT-053 follow-up from PR #224 QA).
+  const browseHint = useOneTimeHint(BROWSE_HINT_KEY);
+  const markBrowseHintTaught = browseHint.markTaught;
+
   // "/" opens the browser, unless the keystroke belongs to something being
   // typed into. Cmd+K is the chat's (AppShell), so the market list takes the
   // key every other terminal gives a search box.
@@ -367,10 +404,12 @@ export function CreateExecutor() {
       }
       e.preventDefault();
       setBrowserOpen(true);
+      // Whoever pressed it does not need to be told it exists.
+      markBrowseHintTaught();
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, []);
+  }, [markBrowseHintTaught]);
 
   // ── Active config derived values ──
   const activeValidation = useMemo(() => {
@@ -383,8 +422,85 @@ export function CreateExecutor() {
     }
   }, [executorType, gridValidation, positionConfig.validation, orderConfig.validation, dcaConfig.validation, lpConfig.validation]);
 
+  // What the form currently says, for the chat bubble (FEAT-060/FEAT-072).
+  //
+  // The one page that registers its own facts: everywhere else the numbers on
+  // screen came out of a react-query cache the fact table can read at send
+  // time, but a half-filled order form is local reducer state and no cache
+  // holds it. Read at send time like every other contributor, so it is what
+  // the user is looking at when they ask — not what they had typed when the
+  // bubble was opened.
+  //
+  // Declared after `activeValidation` so the validation it reports is the one
+  // the submit button is reading.
+  useViewFacts(() => {
+    const side = (n: number) => (n === 1 ? "buy" : "sell");
+    const lev = (n: number) => (isSpot ? undefined : `${n}x`);
+    const range = (low: number, high: number) =>
+      low > 0 || high > 0 ? `${formatPriceSig(low)}–${formatPriceSig(high)}` : undefined;
+    const shown: Record<string, string | number | null | undefined> =
+      executorType === "grid"
+        ? {
+            side: side(gridState.side),
+            amount: gridState.total_amount_quote,
+            range: range(gridState.start_price, gridState.end_price),
+            leverage: lev(gridState.leverage),
+          }
+        : executorType === "position"
+          ? {
+              side: side(positionConfig.state.side),
+              amount: positionConfig.state.amount,
+              entry: positionConfig.state.entry_price
+                ? formatPriceSig(positionConfig.state.entry_price)
+                : "market",
+              leverage: lev(positionConfig.state.leverage),
+            }
+          : executorType === "order"
+            ? {
+                side: side(orderConfig.state.side),
+                "order type": orderConfig.state.execution_strategy,
+                amount: orderConfig.state.amount,
+                price:
+                  orderConfig.state.execution_strategy === "MARKET"
+                    ? undefined
+                    : formatPriceSig(orderConfig.state.price),
+                leverage: lev(orderConfig.state.leverage),
+              }
+            : executorType === "dca"
+              ? {
+                  side: side(dcaConfig.state.side),
+                  orders: dcaConfig.state.amounts_quote.length,
+                  amount: dcaConfig.state.amounts_quote.reduce((a, b) => a + b, 0),
+                  leverage: lev(dcaConfig.state.leverage),
+                }
+              : {
+                  side:
+                    lpConfig.state.side === LP_SIDE_RANGE
+                      ? "range"
+                      : side(lpConfig.state.side),
+                  base: lpConfig.state.base_amount || undefined,
+                  quote: lpConfig.state.quote_amount || undefined,
+                  range: range(lpConfig.state.lower_price, lpConfig.state.upper_price),
+                  pool: lpConfig.state.pool_address || undefined,
+                };
+    // R2/R3: the two facts a user on this form actually asks about — what
+    // they have to spend, and why the button is greyed out.
+    shown["available"] =
+      balances.quote != null && pair
+        ? `${balances.quote.toLocaleString("en-US", { maximumFractionDigits: 4 })} ${pair.split("-")[1]}`
+        : undefined;
+    shown["blocked by"] = activeValidation.valid
+      ? undefined
+      : activeValidation.errors[0];
+    return {
+      label: "Trade",
+      subject: `a ${TYPE_LABELS[executorType]} on ${connector} ${pair}`,
+      onScreen: shown,
+    };
+  });
+
   // Chart props depend on active type
-  const chartProps = useMemo(() => {
+  const chartProps = useMemo((): ChartPriceMapping => {
     switch (executorType) {
       case "grid":
         return {
@@ -394,6 +510,7 @@ export function CreateExecutor() {
           side: gridState.side,
           minSpread: gridState.min_spread_between_orders,
           activePickField: gridState.activePickField,
+          lineLabels: gridLineLabels(gridState.side),
         };
       case "position": return positionConfig.chartProps;
       case "order": return orderConfig.chartProps;
@@ -410,9 +527,9 @@ export function CreateExecutor() {
   // bought that stability with a stale closure -- the callback kept calling
   // whichever `handleChartPriceSet` existed when the type last changed, not the
   // current one. A latest-value ref gives the stability without the staleness.
-  const priceSetTargets = useRef({ positionConfig, orderConfig, dcaConfig, lpConfig });
+  const priceSetTargets = useRef({ positionConfig, orderConfig, dcaConfig, lpConfig, gridState, pricePrecision });
   useEffect(() => {
-    priceSetTargets.current = { positionConfig, orderConfig, dcaConfig, lpConfig };
+    priceSetTargets.current = { positionConfig, orderConfig, dcaConfig, lpConfig, gridState, pricePrecision };
   });
 
   const handlePriceSet = useCallback(
@@ -420,10 +537,18 @@ export function CreateExecutor() {
       const targets = priceSetTargets.current;
       switch (executorType) {
         case "grid":
-          // The grid panel arms only start/end/limit; `limit2` belongs to the LP
-          // lower limit and would name a grid field that does not exist.
-          if (field === "limit2") break;
-          gridDispatch({ type: "SET_FIELD", field: `${field}_price`, value: price });
+          // The grid owns exactly the chart's own three lines; any other slot
+          // belongs to a panel that draws its own and would name a grid field
+          // that does not exist.
+          if (!isChartLineSlot(field)) break;
+          // Bound the picked price against the two the user already set, so a
+          // click (and, later, a drag) cannot write a price the form will only
+          // reject afterwards. The chart stays ignorant of grid semantics.
+          gridDispatch({
+            type: "SET_FIELD",
+            field: `${field}_price`,
+            value: clampGridPrice(field, price, targets.gridState, targets.pricePrecision),
+          });
           gridDispatch({ type: "SET_FIELD", field: "activePickField", value: null });
           break;
         case "position":
@@ -447,6 +572,11 @@ export function CreateExecutor() {
   const createMutation = useMutation({
     mutationFn: () => {
       if (!server) throw new Error("No server");
+      // Belt to the overlay's braces: the footer is covered on a view-only
+      // venue, so this is unreachable from the UI — but the panel should not be
+      // one stray caller away from posting a create it knows the venue will
+      // reject for want of credentials.
+      if (!caps.canTrade) throw new Error(`No API keys for ${connector}`);
 
       let payload: { executor_type: string; config: Record<string, unknown> };
 
@@ -508,7 +638,9 @@ export function CreateExecutor() {
       // Show success modal
       setSuccessInfo({ id: data.executor_id, type: executorType, connector, pair });
       // Invalidate executor queries so the new one appears immediately
-      queryClient.invalidateQueries({ queryKey: ["executors", server, "main", pair] });
+      queryClient.invalidateQueries({
+        queryKey: executorsQuery(server, { controllerId: "main", pair }).queryKey,
+      });
       queryClient.invalidateQueries({ queryKey: ["consolidated-positions", server] });
       // Auto-select the new executor in the bottom pane
       setSelectedExecutorId(data.executor_id);
@@ -531,38 +663,79 @@ export function CreateExecutor() {
           <ArrowLeft className="h-3.5 w-3.5" />
         </button>
 
-        {/* Pair + Exchange */}
-        <div className="flex items-center border-r border-[var(--color-border)]">
-          <PairSelector
-            server={server}
-            connector={connector}
-            value={pair}
-            onChange={(v) => gridDispatch({ type: "SET_PAIR", value: v })}
-            hasTradingRules={caps.hasTradingRules}
-            onBrowseAll={caps.hasOrderBook ? () => setBrowserOpen(true) : undefined}
-          />
-          <div className="relative border-l border-[var(--color-border)]">
-            <ExchangeSelector
-              connectors={allConnectors}
-              value={connector}
-              onChange={(v) => gridDispatch({ type: "SET_CONNECTOR", value: v })}
+        {/* The market: one chip, one door.
+            Pair and venue used to be two dropdowns beside a Browse button —
+            three controls answering one question, and the venue one committed
+            on its own, dropping the page onto the new venue's default pair
+            before you had chosen one. The chip states the market and opens the
+            browser, which is where both halves are now chosen together. */}
+        <div className="relative flex items-center border-r border-[var(--color-border)]">
+          <button
+            onClick={() => setBrowserOpen((v) => !v)}
+            aria-pressed={browserOpen}
+            aria-expanded={browserOpen}
+            aria-haspopup="dialog"
+            {...browseHint.hoverProps}
+            // The hint owns the hover while it is pending, so the browser's own
+            // tooltip does not come up underneath it saying the same thing.
+            title={
+              browseHint.pending
+                ? undefined
+                : browserOpen
+                  ? "Close market list (Esc)"
+                  : "Change market (/)"
+            }
+            className={`flex items-center gap-2 px-3 py-2.5 text-left transition-colors ${
+              browserOpen
+                ? "bg-[var(--color-surface-hover)]"
+                : "hover:bg-[var(--color-surface-hover)]"
+            }`}
+          >
+            {/* The venue qualifies the pair, and reads first here so the chip
+                agrees with the browser it opens: venue rail first, pair table
+                after. The pair is still the identity of everything on this
+                page, so it keeps the body colour. */}
+            <span className="text-xs text-[var(--color-text-muted)]">
+              {formatConnectorName(connector)}
+            </span>
+            <span className="text-base font-semibold text-[var(--color-text)]">{pair}</span>
+            {/* A chevron, not a list glyph: the caret is the web's word for
+                "this opens", and it points at the panel that drops below. It
+                flips while the browser is open, so the chip also says how to
+                close it. */}
+            <ChevronDown
+              className={`h-4 w-4 transition-transform ${
+                browserOpen
+                  ? "rotate-180 text-[var(--color-primary)]"
+                  : "text-[var(--color-text-muted)]"
+              }`}
             />
-          </div>
-          {caps.hasOrderBook && (
-            <button
-              onClick={() => setBrowserOpen(true)}
-              title="Browse all markets (/)"
-              className="flex items-center gap-1.5 border-l border-[var(--color-border)] px-3 py-2.5 text-xs text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-            >
-              <List className="h-3.5 w-3.5" />
-              Browse
-            </button>
+          </button>
+          {/* Star the pair in the header, without a round trip through Browse.
+              Reads as a mark on the pair name, so it trails it. */}
+          <StarMarketButton server={server} connector={connector} pair={pair} />
+          {/* The shortcut, in words, on the first hover only. Suppressed while
+              the list is open, where the key it teaches would do nothing. */}
+          {browseHint.visible && !browserOpen && (
+            <HintBubble>
+              Tip: press{" "}
+              <kbd className="rounded border border-[var(--color-border)] px-1 font-mono text-[10px] leading-4">
+                /
+              </kbd>{" "}
+              to browse markets.
+            </HintBubble>
           )}
         </div>
 
         {/* Price ticker */}
         <div className="flex flex-1 items-center px-4 py-2">
-          <PriceTicker server={server} connector={connector} pair={pair} hasRestPrice={caps.hasRestPrice} />
+          <PriceTicker
+            server={server}
+            connector={connector}
+            pair={pair}
+            hasRestPrice={caps.hasRestPrice}
+            showStats={caps.hasOrderBook}
+          />
         </div>
 
         {/* Interval + Range */}
@@ -604,16 +777,27 @@ export function CreateExecutor() {
         </div>
       </div>
 
+      {/* This server's starred markets — one click to the chart, no overlay. */}
+      {caps.hasOrderBook && !browserOpen && (
+        <FavoritesStrip
+          server={server}
+          connector={connector}
+          pair={pair}
+          onPick={applyMarket}
+        />
+      )}
+
       {/* Main Area: Chart + Right Panel */}
       <div className="flex min-h-0 flex-1">
         {/* Chart + Bottom Pane */}
         <div className="relative min-w-0 flex-1 flex flex-col">
-          {browserOpen && (
+          {browserOpen && caps.hasOrderBook && (
             <MarketBrowser
               server={server}
-              connectors={allConnectors}
               connector={connector}
               pair={pair}
+              connectors={allConnectors}
+              credentialed={credentialedConnectors}
               onPick={applyMarket}
               onClose={() => setBrowserOpen(false)}
             />
@@ -737,44 +921,53 @@ export function CreateExecutor() {
                 </div>
               </div>
 
-              {/* Config Panel */}
-              <div className="flex-1 overflow-y-auto">
-                {executorType === "grid" && (
-                  <GridConfigPanel state={gridState} dispatch={gridDispatch} currentPrice={currentPrice} isSpot={isSpot} quoteCurrency={pair?.split("-")[1] || "USDT"} />
-                )}
-                {executorType === "position" && (
-                  <PositionConfigPanel state={positionConfig.state} dispatch={positionConfig.dispatch} validation={positionConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
-                )}
-                {executorType === "order" && (
-                  <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} validation={orderConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} strategies={caps.orderStrategies} baseAvailable={balances.base} quoteAvailable={balances.quote} />
-                )}
-                {executorType === "dca" && (
-                  <DCAConfigPanel state={dcaConfig.state} dispatch={dcaConfig.dispatch} validation={dcaConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
-                )}
-                {executorType === "lp" && (
-                  <LPConfigPanel state={lpConfig.state} dispatch={lpConfig.dispatch} validation={lpConfig.validation} currentPrice={currentPrice} pair={pair} pool={lpConfig.pool} poolFetching={lpConfig.poolFetching} baseAvailable={balances.base} quoteAvailable={balances.quote} />
-                )}
-              </div>
-
-              {/* Sticky Create Footer */}
-              <div className="border-t border-[var(--color-border)] p-3">
-                {!activeValidation.valid && (
-                  <p className="mb-2 text-[11px] text-[var(--color-red)]">
-                    {activeValidation.errors[0]}
-                  </p>
-                )}
-                <button
-                  onClick={() => createMutation.mutate()}
-                  disabled={!activeValidation.valid || createMutation.isPending}
-                  className="flex w-full items-center justify-center gap-2 rounded-lg bg-[var(--color-primary)] px-4 py-2.5 text-sm font-bold text-white transition-colors hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {createMutation.isPending ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <Rocket className="h-4 w-4" />
+              {/* Everything the venue's credentials gate — the config form and
+                  the Create button — sits inside this one positioned box, so
+                  the view-only overlay covers exactly that and nothing else:
+                  the type tabs above it still switch, the Data tab beside it
+                  is untouched, and the panel keeps its scroll/footer split. */}
+              <div className="relative flex min-h-0 flex-1 flex-col">
+                {/* Config Panel */}
+                <div className="flex-1 overflow-y-auto">
+                  {executorType === "grid" && (
+                    <GridConfigPanel state={gridState} dispatch={gridDispatch} currentPrice={currentPrice} isSpot={isSpot} quoteCurrency={pair?.split("-")[1] || "USDT"} />
                   )}
-                  Create {TYPE_LABELS[executorType]}
-                </button>
+                  {executorType === "position" && (
+                    <PositionConfigPanel state={positionConfig.state} dispatch={positionConfig.dispatch} validation={positionConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
+                  )}
+                  {executorType === "order" && (
+                    <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} validation={orderConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} strategies={caps.orderStrategies} baseAvailable={balances.base} quoteAvailable={balances.quote} />
+                  )}
+                  {executorType === "dca" && (
+                    <DCAConfigPanel state={dcaConfig.state} dispatch={dcaConfig.dispatch} validation={dcaConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
+                  )}
+                  {executorType === "lp" && (
+                    <LPConfigPanel state={lpConfig.state} dispatch={lpConfig.dispatch} validation={lpConfig.validation} currentPrice={currentPrice} pair={pair} pool={lpConfig.pool} poolFetching={lpConfig.poolFetching} baseAvailable={balances.base} quoteAvailable={balances.quote} />
+                  )}
+                </div>
+
+                {/* Sticky Create Footer */}
+                <div className="border-t border-[var(--color-border)] p-3">
+                  {!activeValidation.valid && (
+                    <p className="mb-2 text-[11px] text-[var(--color-red)]">
+                      {activeValidation.errors[0]}
+                    </p>
+                  )}
+                  <button
+                    onClick={() => createMutation.mutate()}
+                    disabled={!caps.canTrade || !activeValidation.valid || createMutation.isPending}
+                    className="flex w-full items-center justify-center gap-2 rounded-lg bg-[var(--color-primary)] px-4 py-2.5 text-sm font-bold text-white transition-colors hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {createMutation.isPending ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Rocket className="h-4 w-4" />
+                    )}
+                    Create {TYPE_LABELS[executorType]}
+                  </button>
+                </div>
+
+                {!caps.canTrade && <ViewOnlyOverlay connector={connector} />}
               </div>
             </>
           ) : (

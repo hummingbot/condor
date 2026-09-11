@@ -7,6 +7,7 @@ streaming via session/update notifications.
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import logging
@@ -20,6 +21,36 @@ from typing import Any, AsyncIterator, Awaitable, Callable
 from .jsonrpc import JSONRPCPeer
 
 log = logging.getLogger(__name__)
+
+
+#: Values an adapter sends when it means "no name". ``undefined`` is a
+#: JavaScript ``undefined`` that reached the wire as text; ``null``/``none`` are
+#: the JSON and Python spellings of the same absence. Compared case-folded, and
+#: only after a JSON-quoted scalar has been unwrapped.
+_ABSENT_TOOL_NAMES = frozenset({"undefined", "null", "none"})
+
+
+def normalize_tool_title(value: Any) -> str:
+    """A tool title stripped of encoding artefacts, or ``""`` when it says nothing.
+
+    The ACP adapter can hand us a title that is not a name: a real transcript
+    carries five ``kind: "fetch"`` calls titled ``'"undefined"'`` — a JavaScript
+    ``undefined`` that was JSON-encoded on its way to the wire, quote characters
+    and all (CORR-327). Condor writes tool titles to the transcript, and a
+    transcript is read forever, so a value that means nothing must be recognised
+    as nothing *before* it is persisted rather than papered over by each reader.
+
+    A value that both starts and ends with ``"`` is an encoding artefact, not a
+    name, so it is unwrapped; a non-string is not a name at all. What survives is
+    returned byte-identical — a legitimate ``mcp__condor__run_code`` is never
+    rewritten.
+    """
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    while len(text) >= 2 and text.startswith('"') and text.endswith('"'):
+        text = text[1:-1].strip()
+    return "" if text.casefold() in _ABSENT_TOOL_NAMES else text
 
 
 def normalize_tool_call(payload: dict[str, Any]) -> dict[str, Any]:
@@ -38,10 +69,20 @@ def normalize_tool_call(payload: dict[str, Any]) -> dict[str, Any]:
     "no arguments I can read" from "an empty argument set", and fail closed on
     the former.
     """
-    title = payload.get("title") or ""
+    name = normalize_tool_title(payload.get("title"))
     normalized = dict(payload)
-    normalized["title"] = title
-    normalized["tool"] = payload.get("tool") or title
+    # A call whose title says nothing still has to read as *something*: the tool
+    # name if the adapter sent one, else the call's ``kind``, so a broken fetch
+    # reads as "fetch" rather than as a lie (CORR-327).
+    normalized["title"] = (
+        name
+        or normalize_tool_title(payload.get("tool"))
+        or normalize_tool_title(payload.get("kind"))
+    )
+    # ``tool`` deliberately does NOT take the ``kind`` fallback: it is what the
+    # danger list and the risk gate dispatch on, and a category is not a tool
+    # name. An unreadable one stays empty and those callers fail closed.
+    normalized["tool"] = payload.get("tool") or name
     args = payload.get("rawInput")
     if args is None:
         args = payload.get("input")
@@ -331,6 +372,17 @@ class ToolCallUpdate:
     status: str | None = None
     title: str | None = None
     output: str | None = None
+    #: Arguments, when the adapter supplies them late (FEAT-102).
+    #:
+    #: ``claude-agent-acp`` (0.21+) emits a tool call **twice**: once at
+    #: ``content_block_start``, while the input JSON is still streaming and
+    #: ``chunk.input`` is often ``{}`` (its own source says "sometimes input is
+    #: empty object"), and again as a ``tool_call_update`` once the full
+    #: assistant message has arrived — that second one carries the complete
+    #: ``rawInput``. Without a field to land in, every argument of every
+    #: ACP-bridged call was dropped, which is why the action log read
+    #: "(arguments could not be read)" for a tick that deployed a live fleet.
+    input: dict | None = None
 
 
 @dataclass
@@ -357,8 +409,14 @@ def fold_tool_call_event(
     so the create/patch semantics can't drift (ARCH-063). A :class:`ToolCallEvent`
     creates an entry (returned so the caller can append it to its own list) or
     patches ``status``/``name``/``input`` in place; a :class:`ToolCallUpdate`
-    patches ``status``/``name``/``output``. Returns the newly created entry, or
-    ``None`` when the event patched an existing (or unknown) one.
+    patches ``status``/``name``/``output``/``input``. Returns the newly created
+    entry, or ``None`` when the event patched an existing (or unknown) one.
+
+    Both branches guard ``input`` with a plain truthiness test, and that is the
+    load-bearing part: the adapter announces a call with empty arguments and
+    supplies the real ones on a later update, so a later event must be able to
+    *fill* the field — but an update that carries no arguments must never erase
+    the ones an earlier event already supplied.
     """
     if isinstance(event, ToolCallEvent):
         tc = tc_map.get(event.tool_call_id)
@@ -387,6 +445,8 @@ def fold_tool_call_event(
                 tc["name"] = event.title
             if event.output:
                 tc["output"] = event.output
+            if event.input:
+                tc["input"] = event.input
     return None
 
 
@@ -423,10 +483,27 @@ class ACPClient:
         self._process: asyncio.subprocess.Process | None = None
         self._peer = JSONRPCPeer()
         self._session_id: str | None = None
+        # Answered by the handshake in :meth:`start`. False until then, so a
+        # client that never got that far is never handed a picture.
+        self.accepts_images = False
         self._read_task: asyncio.Task | None = None
         self._stderr_task: asyncio.Task | None = None
         self._event_queue: asyncio.Queue[ACPEvent | None] = asyncio.Queue()
         self._current_req_id: int | None = None  # tracks in-flight prompt request
+        # A turn the agent has not settled and that nobody is streaming any
+        # more: one that ignored ``session/cancel``, or one whose consumer
+        # walked away (a WS drop, a page reload, a cancelled prompt task).
+        #
+        # It matters because ACP ``session/update`` notifications carry only a
+        # sessionId — no request id. One queue, no way to tell whose chunk is
+        # whose: opening a second ``session/prompt`` while the first turn is
+        # still generating had the tail of the old answer delivered as the
+        # opening of the new one. So the next prompt waits for this to clear
+        # instead of interleaving two turns on one queue.
+        self._unsettled_req: int | None = None
+        # Holds the reference to the fire-and-forget cancel a torn-down turn
+        # sends, so the loop cannot collect the task before it is written.
+        self._cancel_task: asyncio.Task | None = None
         self._peer.register_handler("session/update", self._on_session_update)
         self._peer.register_handler(
             "session/request_permission", self._on_request_permission
@@ -479,7 +556,7 @@ class ACPClient:
         self._stderr_task = asyncio.create_task(self._drain_stderr())
 
         try:
-            await self._peer.send_request(
+            handshake = await self._peer.send_request(
                 "initialize",
                 {
                     "protocolVersion": 1,
@@ -500,6 +577,17 @@ class ACPClient:
 
         self._session_id = result["sessionId"]
         log.info("ACP session started: %s (cmd=%s)", self._session_id, self.command)
+
+        # The agent's own statement of whether it will take a picture. This
+        # response used to be thrown away wholesale, which meant a turn carrying
+        # an image could only find out by being rejected mid-protocol, in words
+        # the user cannot read. Absent is False: an agent that does not say it
+        # accepts images is not asked to (FEAT-098).
+        self.accepts_images = bool(
+            ((handshake or {}).get("agentCapabilities") or {})
+            .get("promptCapabilities", {})
+            .get("image")
+        )
 
         # Select the requested model over the ACP protocol. The claude-agent-acp
         # bridge does NOT honor ANTHROPIC_MODEL — it defaults to Claude Code's
@@ -655,20 +743,109 @@ class ACPClient:
                 break
 
     def _cancel_locally(self, req_id: int) -> None:
-        """Fallback cancel: drop the pending future and clear the queue.
+        """Fallback cancel: stop relaying the turn, and remember it is unsettled.
 
-        Used when the agent does not honour ``session/cancel``. Clearing
-        ``_current_req_id`` before cancelling the future makes ``_on_response``
-        discard a late reply, so the queue we drain here stays drained.
+        Used when the agent does not honour ``session/cancel``. The screen ends
+        here — that is what the terminal event below is for — but the agent may
+        well still be generating, so the request is deliberately LEFT pending:
+        its settlement is the only signal we get that this turn's notifications
+        have stopped arriving. ``_unsettled_req`` is what keeps the next prompt
+        from opening a second turn on top of it.
+
+        Only the turn being *streamed* owns the queue. Called for any other
+        request — an abandoned turn whose cancel timed out in the background —
+        this records the marker and touches nothing else, so a late fallback
+        cannot cut short the turn that replaced it.
         """
-        future = self._peer._pending.pop(req_id, None)
-        self._current_req_id = None
-        if future and not future.done():
-            future.cancel()
+        live = req_id == self._current_req_id
+        if live:
+            self._current_req_id = None
+        future = self._peer._pending.get(req_id)
+        if future is not None and not future.done():
+            self._unsettled_req = req_id
+        else:
+            self._peer._pending.pop(req_id, None)
+        if not live:
+            return
         self._drain_events()
         # The consumer of prompt_stream is parked on the queue; hand it a
         # terminal event so the turn ends now rather than at the next heartbeat.
         self._event_queue.put_nowait(PromptDone(stop_reason="cancelled"))
+
+    async def _send_cancel(self) -> bool:
+        """Ask the agent to stop the current turn. True if the notice went out."""
+        try:
+            assert self._process and self._process.stdin
+            await self._peer.send_notification(
+                "session/cancel",
+                {"sessionId": self._session_id},
+                self._process.stdin,
+            )
+            return True
+        except Exception as exc:  # noqa: BLE001 - a dead pipe means fall back
+            log.warning("ACP session/cancel could not be sent (%s)", exc)
+            return False
+
+    async def _settle_previous_turn(self) -> None:
+        """Wait for a turn nobody is streaming any more to end at the agent.
+
+        The gate that keeps two turns from sharing one event queue. Reached
+        with something unsettled in two ways: an agent that ignored
+        ``session/cancel`` (:meth:`_cancel_locally`), and a consumer that
+        walked away mid-answer, which unwinds ``prompt_stream`` through its own
+        cleanup without anyone awaiting the cancel.
+
+        Both leave the subprocess generating into ``_event_queue``. Draining
+        the queue does not help — the drain is a moment, the leak is a stream —
+        so this asks again and then *waits*. An agent that will not settle
+        within ``TIMEOUTS.prompt_settle`` fails this turn out loud, which is the
+        honest outcome: the alternative is an answer with someone else's words
+        in front of it.
+        """
+        from condor.runtime.timeouts import TIMEOUTS
+
+        req_id = self._unsettled_req
+        if req_id is None:
+            req_id = self._current_req_id
+        if req_id is None:
+            return
+
+        self._current_req_id = None
+        future = self._peer._pending.get(req_id)
+        if future is None or future.done() or not self.alive:
+            # Nothing still generating: a dead subprocess emits nothing, and
+            # the read loop cancels every pending future on its way out.
+            self._peer._pending.pop(req_id, None)
+            self._unsettled_req = None
+            return
+
+        self._unsettled_req = req_id
+        await self._send_cancel()
+        try:
+            # Shielded for the same reason abort_prompt shields: the timeout
+            # must abandon the wait, never the future that resolves it.
+            await asyncio.wait_for(
+                asyncio.shield(future), timeout=TIMEOUTS.prompt_settle
+            )
+        except asyncio.TimeoutError:
+            log.warning(
+                "Previous turn still generating %ss after cancel; refusing to "
+                "overlap it with a new prompt",
+                TIMEOUTS.prompt_settle,
+            )
+            raise RuntimeError(
+                "The previous answer is still being written. Press Stop, or "
+                "try again in a moment."
+            ) from None
+        except asyncio.CancelledError:
+            # Ours to absorb only when the *request* died under us.
+            if not future.cancelled():
+                raise
+        except Exception:  # noqa: BLE001 - failed is settled too
+            pass
+
+        self._unsettled_req = None
+        self._peer._pending.pop(req_id, None)
 
     async def abort_prompt(self) -> None:
         """Cancel the in-flight prompt at the agent, not just locally.
@@ -693,17 +870,7 @@ class ACPClient:
             self._cancel_locally(req_id)
             return
 
-        try:
-            assert self._process and self._process.stdin
-            await self._peer.send_notification(
-                "session/cancel",
-                {"sessionId": self._session_id},
-                self._process.stdin,
-            )
-        except Exception as exc:  # noqa: BLE001 - a dead pipe means fall back
-            log.warning(
-                "ACP session/cancel could not be sent (%s), cancelling locally", exc
-            )
+        if not await self._send_cancel():
             self._cancel_locally(req_id)
             return
 
@@ -746,20 +913,27 @@ class ACPClient:
                 chunks.append(event.text)
         return "".join(chunks)
 
-    async def prompt_stream(self, text: str) -> AsyncIterator[ACPEvent]:
-        """Send a prompt and yield ACP events as they arrive."""
+    async def prompt_stream(
+        self, text: str, *, images: list | None = None
+    ) -> AsyncIterator[ACPEvent]:
+        """Send a prompt and yield ACP events as they arrive.
+
+        ``images`` become ``image`` content blocks *before* the text block,
+        which is the order providers document for a prompt that asks about a
+        picture — the question reads against something already in view.
+        """
         assert self._process and self._session_id
 
-        # Cancel any previous in-flight prompt (e.g. after abort)
-        if self._current_req_id is not None:
-            old_future = self._peer._pending.pop(self._current_req_id, None)
-            if old_future and not old_future.done():
-                old_future.cancel()
-            self._current_req_id = None
+        # No second turn until the previous one has actually ended at the
+        # agent. Cancelling the old *future* is not enough: the subprocess does
+        # not know about our futures and keeps pushing chunks onto the one
+        # queue this turn is about to read from.
+        await self._settle_previous_turn()
 
-        # Clear the event queue (stale events from a previous prompt)
-        while not self._event_queue.empty():
-            self._event_queue.get_nowait()
+        # Now — and only now — is the queue drained meaningfully: with nothing
+        # generating behind us, everything that arrives after this line was
+        # produced by the turn below.
+        self._drain_events()
 
         # Send request without awaiting so read loop can dispatch notifications
         req_id = self._peer._next_id
@@ -770,7 +944,17 @@ class ACPClient:
             "method": "session/prompt",
             "params": {
                 "sessionId": self._session_id,
-                "prompt": [{"type": "text", "text": text}],
+                "prompt": [
+                    *(
+                        {
+                            "type": "image",
+                            "data": base64.b64encode(image.data).decode("ascii"),
+                            "mimeType": image.mime,
+                        }
+                        for image in images or ()
+                    ),
+                    {"type": "text", "text": text},
+                ],
             },
             "id": req_id,
         }
@@ -805,29 +989,45 @@ class ACPClient:
             1860  # 31 min hard ceiling (slightly above session-level timeout)
         )
 
-        while True:
-            try:
-                event = await asyncio.wait_for(self._event_queue.get(), timeout=30)
-            except asyncio.TimeoutError:
-                elapsed = loop.time() - start_time
-                if not self.alive:
-                    yield PromptDone(stop_reason="disconnected")
+        try:
+            while True:
+                try:
+                    event = await asyncio.wait_for(self._event_queue.get(), timeout=30)
+                except asyncio.TimeoutError:
+                    elapsed = loop.time() - start_time
+                    if not self.alive:
+                        yield PromptDone(stop_reason="disconnected")
+                        break
+                    if elapsed > max_duration:
+                        log.warning("Prompt hard timeout after %.0fs", elapsed)
+                        yield PromptDone(stop_reason="timeout")
+                        break
+                    yield Heartbeat(elapsed_seconds=elapsed)
+                    continue
+                if event is None:
                     break
-                if elapsed > max_duration:
-                    log.warning("Prompt hard timeout after %.0fs", elapsed)
-                    yield PromptDone(stop_reason="timeout")
+                yield event
+                if isinstance(event, PromptDone):
                     break
-                yield Heartbeat(elapsed_seconds=elapsed)
-                continue
-            if event is None:
-                break
-            yield event
-            if isinstance(event, PromptDone):
-                break
-
-        # Clear current request tracking when prompt completes normally
-        if self._current_req_id == req_id:
-            self._current_req_id = None
+        finally:
+            # Reached on every way out, including the one that used to leak:
+            # the consumer walking away mid-answer (a WS drop, a page reload, a
+            # cancelled prompt task) unwinds this generator with the agent
+            # still generating and nothing ever telling it to stop.
+            if self._current_req_id == req_id:
+                self._current_req_id = None
+                unfinished = self._peer._pending.get(req_id)
+                if unfinished is not None and not unfinished.done():
+                    self._unsettled_req = req_id
+                    # Not awaited: under GeneratorExit there may be no one left
+                    # to await us. This is the ask; the next prompt asks again
+                    # and *waits*, which is where correctness actually lives.
+                    try:
+                        self._cancel_task = asyncio.get_running_loop().create_task(
+                            self._send_cancel()
+                        )
+                    except RuntimeError:  # no running loop: nothing to send on
+                        pass
 
     # --- Reverse-RPC handlers ---
 
@@ -850,13 +1050,17 @@ class ACPClient:
             if text:
                 self._event_queue.put_nowait(ThoughtChunk(text=text))
         elif kind == "tool_call":
+            call = normalize_tool_call(update)
             self._event_queue.put_nowait(
                 ToolCallEvent(
                     tool_call_id=update.get("toolCallId", ""),
-                    title=update.get("title", ""),
+                    # Same seam as ``input``: the title comes from the canonical
+                    # view, so a malformed one never reaches a consumer — the
+                    # transcript recorder above all (CORR-327).
+                    title=call["title"],
                     status=update.get("status", "pending"),
                     kind=update.get("kind", "other"),
-                    input=normalize_tool_call(update)["input"],
+                    input=call["input"],
                 )
             )
         elif kind == "tool_call_update":
@@ -864,8 +1068,19 @@ class ACPClient:
                 ToolCallUpdate(
                     tool_call_id=update.get("toolCallId", ""),
                     status=update.get("status"),
-                    title=update.get("title"),
+                    # Empty rather than garbage when the adapter's title says
+                    # nothing, and no ``kind`` fallback here: every fold patches
+                    # the name only when the update carries one, so "" leaves
+                    # the announced title standing instead of overwriting a real
+                    # name with noise — or with a category (CORR-327).
+                    title=normalize_tool_title(update.get("title")),
                     output=update.get("output"),
+                    # Same seam as the ``tool_call`` branch above: the wire
+                    # spells arguments ``rawInput`` and every consumer reads
+                    # ``input`` (SEC-093). The ACP schema allows ``rawInput`` on
+                    # an update ("Update the raw input") and claude-agent-acp is
+                    # where a call's arguments actually become complete.
+                    input=normalize_tool_call(update)["input"],
                 )
             )
 
@@ -887,13 +1102,27 @@ class ACPClient:
         if self.permission_callback:
             tool_call = normalize_tool_call(toolCall or {})
             try:
-                return await self.permission_callback(tool_call, options)
+                result = await self.permission_callback(tool_call, options)
             except Exception:
                 log.exception(
                     "Permission callback failed for %s — denying",
                     tool_call.get("title") or "<unknown tool>",
                 )
                 return {"outcome": {"outcome": "cancelled"}}
+            # Only the outcome goes on the wire. A callback may return more —
+            # the risk gate attaches the ``reason`` it refused for, which the
+            # pydantic-ai path hands the model in-band — but ACP's
+            # RequestPermissionResponse has no field for it, and a bridge that
+            # validates its input strictly would reject the whole response and
+            # turn a plain refusal into a protocol error. The reason reaches the
+            # unattended agent by the other road: RefusalLog → journal → the next
+            # tick's prompt.
+            outcome = result.get("outcome") if isinstance(result, dict) else None
+            return (
+                {"outcome": outcome}
+                if outcome
+                else {"outcome": {"outcome": "cancelled"}}
+            )
 
         # Default: auto-approve
         for opt in options:

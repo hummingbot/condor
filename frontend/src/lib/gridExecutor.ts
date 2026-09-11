@@ -1,5 +1,8 @@
 // ── Grid executor state machine (shared by CreateExecutor, GridConfigPanel and DexPool) ──
 
+import { roundToPricePrecision } from "@/lib/formatters";
+import { GRID_STORAGE_KEY, LAST_MARKET_KEY } from "@/lib/sessionState";
+
 export interface GridState {
   connector: string;
   pair: string;
@@ -24,12 +27,21 @@ export interface GridState {
   coerce_tp_to_step: boolean;
   activePickField: "start" | "end" | "limit" | null;
   showAdvanced: boolean;
+  /**
+   * Whether this market's price has already been offered to the three prices.
+   *
+   * The anchoring runs once per market, not once per price tick: the live price
+   * changes every second, and re-running the fill on each one would overwrite
+   * whatever the user was in the middle of typing.
+   */
+  anchored: boolean;
 }
 
 export type GridAction =
   | { type: "SET_FIELD"; field: string; value: unknown }
   | { type: "SET_CONNECTOR"; value: string }
-  | { type: "SET_PAIR"; value: string };
+  | { type: "SET_PAIR"; value: string }
+  | { type: "ANCHOR"; price: number };
 
 export const GRID_DEFAULTS: GridState = {
   connector: "binance_perpetual",
@@ -55,12 +67,12 @@ export const GRID_DEFAULTS: GridState = {
   coerce_tp_to_step: false,
   activePickField: null,
   showAdvanced: false,
+  anchored: false,
 };
 
-export const GRID_STORAGE_KEY = "condor_grid_defaults";
-
-/** localStorage key for the last connector/pair selected on the unified create page. */
-export const LAST_MARKET_KEY = "condor_last_market";
+// Both are session state, cleared at the session boundary, so `sessionState`
+// defines them and this module re-exports for its existing importers.
+export { GRID_STORAGE_KEY, LAST_MARKET_KEY };
 
 /** Fields persisted across sessions (no prices — those are per-trade). */
 export const GRID_PERSISTED_FIELDS: (keyof GridState)[] = [
@@ -106,6 +118,26 @@ export function loadGridDefaults(applyLastMarket = false): GridState {
   }
 }
 
+/**
+ * Whether this browser has a market to come back to.
+ *
+ * The trade page opens on the market list when it does not: with nothing
+ * remembered the panel would otherwise land on whichever venue happens to sort
+ * first, on `BTC-USDT` by default — a market chosen by the code rather than by
+ * anyone. A returning user goes straight to their chart, which is why this asks
+ * about the *stored* market and not about the state already merged over it.
+ */
+export function hasRememberedMarket(): boolean {
+  try {
+    const raw = localStorage.getItem(LAST_MARKET_KEY);
+    if (!raw) return false;
+    const { connector, pair } = JSON.parse(raw);
+    return !!connector && !!pair;
+  } catch {
+    return false;
+  }
+}
+
 export function saveGridDefaults(state: GridState) {
   const toSave: Record<string, unknown> = {};
   for (const key of GRID_PERSISTED_FIELDS) {
@@ -136,14 +168,54 @@ export function gridReducer(state: GridState, action: GridAction): GridState {
         start_price: 0,
         end_price: 0,
         limit_price: 0,
+        anchored: false,
         leverage: spot ? 1 : state.leverage,
       };
     }
     case "SET_PAIR":
-      return { ...state, pair: action.value, start_price: 0, end_price: 0, limit_price: 0 };
+      return {
+        ...state,
+        pair: action.value,
+        start_price: 0,
+        end_price: 0,
+        limit_price: 0,
+        anchored: false,
+      };
+    case "ANCHOR": {
+      if (state.anchored) return state;
+      // Only fills a range nobody has drawn: one price already set means the
+      // user is drawing it, and the other two are theirs to place too.
+      const untouched =
+        state.start_price <= 0 && state.end_price <= 0 && state.limit_price <= 0;
+      const filled = untouched ? autoFillGridPrices(state.side, action.price) : null;
+      return filled ? { ...state, ...filled, anchored: true } : { ...state, anchored: true };
+    }
     default:
       return state;
   }
+}
+
+/**
+ * A grid drawn around `price`: a range straddling it, and a stop just outside.
+ *
+ * Asymmetric on purpose — a long grid wants more room above the price than
+ * below, a short the reverse — so the side it is opened on decides which way it
+ * leans. One copy, shared by the panel's Auto-fill button and by the anchoring
+ * that runs when a market's price first arrives.
+ */
+export function autoFillGridPrices(
+  side: 1 | 2,
+  price: number,
+): { start_price: number; end_price: number; limit_price: number } | null {
+  if (!(price > 0)) return null;
+  const sig = (value: number) => parseFloat(value.toPrecision(6));
+  const start = side === 1 ? price * 0.99 : price * 0.97;
+  const end = side === 1 ? price * 1.03 : price * 1.01;
+  return {
+    start_price: sig(start),
+    end_price: sig(end),
+    limit_price: sig(side === 1 ? start * 0.995 : end * 1.005),
+  };
 }
 
 // ── Intervals ──
@@ -159,3 +231,144 @@ export const LOOKBACK_OPTIONS: { label: string; seconds: number }[] = [
   { label: "14d", seconds: 14 * 86400 },
   { label: "30d", seconds: 30 * 86400 },
 ];
+
+// ── Price rules ──
+//
+// One copy of the grid's ordering rules, read by the panel's error list, by the
+// page's sticky footer / chat "blocked by" fact, by the per-field validity icons
+// and by the chart write-back. They used to be written out three times in
+// GridConfigPanel with drifting wording, so for the same state the footer could
+// name a different rule than the panel's first red line.
+
+/** Relative gap the clamp leaves, so the strict inequalities survive rounding. */
+export const GRID_MIN_SEPARATION = 0.0001;
+
+function tickOf(pricePrecision?: number | null): number {
+  return pricePrecision != null ? 1 / 10 ** pricePrecision : 0;
+}
+
+/** The nearest price strictly below `bound`, on the tick grid when there is one. */
+function justBelow(bound: number, pricePrecision?: number | null): number {
+  const gap = Math.max(bound * GRID_MIN_SEPARATION, tickOf(pricePrecision));
+  const rounded = roundToPricePrecision(bound - gap, pricePrecision);
+  return rounded < bound ? rounded : bound - gap;
+}
+
+/** The nearest price strictly above `bound`, on the tick grid when there is one. */
+function justAbove(bound: number, pricePrecision?: number | null): number {
+  const gap = Math.max(bound * GRID_MIN_SEPARATION, tickOf(pricePrecision));
+  const rounded = roundToPricePrecision(bound + gap, pricePrecision);
+  return rounded > bound ? rounded : bound + gap;
+}
+
+/**
+ * Bound a proposed price against the other two prices and the side, returning the
+ * nearest legal price.
+ *
+ * Written for a gesture: a chart click today and a chart drag tomorrow hand over a
+ * candidate price and get back one the form will accept, so the rules apply during
+ * the gesture instead of turning into red text underneath it. A `0` neighbour means
+ * "not set yet" and imposes no bound — picking `start` first must not clamp against
+ * an `end` the user has not chosen.
+ *
+ * When both bounds could apply, the start/end ordering wins: that pair is the range
+ * the user is drawing, and the limit trails it.
+ */
+export function clampGridPrice(
+  field: "start" | "end" | "limit",
+  price: number,
+  state: GridState,
+  pricePrecision?: number | null,
+): number {
+  if (!Number.isFinite(price) || price <= 0) return price;
+  const { start_price: start, end_price: end, limit_price: limit, side } = state;
+
+  switch (field) {
+    case "start":
+      if (end > 0 && price >= end) return justBelow(end, pricePrecision);
+      if (side === 1 && limit > 0 && price <= limit) return justAbove(limit, pricePrecision);
+      return price;
+    case "end":
+      if (start > 0 && price <= start) return justAbove(start, pricePrecision);
+      if (side === 2 && limit > 0 && price >= limit) return justBelow(limit, pricePrecision);
+      return price;
+    case "limit":
+      if (side === 1) return start > 0 && price >= start ? justBelow(start, pricePrecision) : price;
+      return end > 0 && price <= end ? justAbove(end, pricePrecision) : price;
+  }
+}
+
+/**
+ * What the chart calls a grid's three price lines.
+ *
+ * Named for where they sit on the price axis, not for the API fields behind them
+ * (`start_price` is the *lower* bound, `end_price` the upper), so a grid and an LP
+ * drawn on the same chart use one vocabulary: two bounds, `Upper` and `Lower`, and
+ * a stop named for the side it trails on.
+ */
+export function gridLineLabels(side: 1 | 2): Record<"start" | "end" | "limit", string> {
+  return {
+    start: "Lower",
+    end: "Upper",
+    limit: side === 1 ? "Lower limit" : "Upper limit",
+  };
+}
+
+/** The ordering rules, as the messages the user reads. */
+export function gridPriceErrors(state: GridState): string[] {
+  const errors: string[] = [];
+
+  if (state.start_price > 0 && state.end_price > 0 && state.start_price >= state.end_price) {
+    errors.push("Lower price must be < upper price");
+  }
+  if (state.side === 1 && state.limit_price > 0 && state.start_price > 0 && state.limit_price >= state.start_price) {
+    errors.push("LONG: limit must be < lower price");
+  }
+  if (state.side === 2 && state.limit_price > 0 && state.end_price > 0 && state.limit_price <= state.end_price) {
+    errors.push("SHORT: limit must be > upper price");
+  }
+  if (state.start_price <= 0 || state.end_price <= 0 || state.limit_price <= 0) {
+    errors.push("All prices required");
+  }
+
+  return errors;
+}
+
+/** Everything that blocks a grid from being created: the price rules plus the amounts. */
+export function gridConfigErrors(state: GridState): string[] {
+  const errors = gridPriceErrors(state);
+
+  if (state.total_amount_quote <= 0) {
+    errors.push("Total amount required");
+  }
+  if (
+    state.total_amount_quote > 0 &&
+    state.min_order_amount_quote > 0 &&
+    state.total_amount_quote < state.min_order_amount_quote
+  ) {
+    errors.push("Total must be >= min order amount");
+  }
+
+  return errors;
+}
+
+/**
+ * Whether one price field is settled: set, and ordered against the price it is
+ * measured from. An unset neighbour leaves it unsettled — this answers "show the
+ * check or the warning", not "is this price legal", which is `clampGridPrice`.
+ */
+export function gridPriceFieldValid(field: "start" | "end" | "limit", state: GridState): boolean {
+  switch (field) {
+    case "start":
+      return state.start_price > 0 && state.start_price < state.end_price;
+    case "end":
+      return state.end_price > 0 && state.end_price > state.start_price;
+    case "limit":
+      return (
+        state.limit_price > 0 &&
+        (state.side === 1
+          ? state.limit_price < state.start_price
+          : state.limit_price > state.end_price)
+      );
+  }
+}

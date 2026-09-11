@@ -263,11 +263,14 @@ def _resolve_report_html(report_id: str | None, result) -> tuple[str, str]:
     """
     if report_id:
         try:
-            from condor.reports import get_report_raw_html
+            from condor.reports import get_report_raw_html, hydrate
 
             found = get_report_raw_html(report_id)
             if found:
-                return found
+                # Telegram is off-origin: nothing there resolves the shared
+                # plotly bundle a stored report references, so inline it back
+                # (PERF-267). A report with no reference passes through.
+                return hydrate(found[0]), found[1]
         except Exception as e:  # noqa: BLE001
             logger.warning("Could not load report %s: %s", report_id, e)
 

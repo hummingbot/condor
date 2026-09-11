@@ -23,10 +23,35 @@ _usd = _compare._usd
 
 
 class FakeStore:
-    """Stands in for BacktestStore: only the index is needed for resolution."""
+    """Stands in for BacktestStore: only the summary tier is needed here.
+
+    Speaks the public API the routine now uses (FEAT-075) rather than reaching
+    into an index attribute, which is what a fake standing in for a store with
+    a real listing contract should look like.
+    """
 
     def __init__(self, task_ids, server="local"):
-        self._index = {tid: {"server": server, "config": ""} for tid in task_ids}
+        self._ids = list(task_ids)
+        self._server = server
+
+    def known_task_ids(self):
+        return list(self._ids)
+
+    def list_summaries(self, server=None):
+        if server and server != self._server:
+            return []
+        return [
+            {"task_id": tid, "server": self._server, "status": "completed"}
+            for tid in self._ids
+        ]
+
+    def resolve_task_id(self, prefix):
+        if prefix in self._ids:
+            return prefix
+        matches = sorted(t for t in self._ids if t.startswith(prefix))
+        if not matches:
+            return None
+        return matches[0] if len(matches) == 1 else matches
 
 
 def make_run(task_id, **metrics):

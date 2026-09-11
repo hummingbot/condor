@@ -5,7 +5,7 @@ from pydantic import BaseModel
 
 from condor.web.auth import create_jwt, get_current_user, redeem_login_token
 from condor.web.models import LoginResponse, WebUser
-from config_manager import UserRole, get_config_manager
+from config_manager import RESERVED_PREFERENCE_KEYS, UserRole, get_config_manager
 from utils import config as app_config
 
 router = APIRouter(tags=["auth"])
@@ -141,7 +141,22 @@ async def update_preferences(
     body: PreferencesUpdate,
     user: WebUser = Depends(get_current_user),
 ):
-    """Merge preference updates for the current user."""
+    """Merge preference updates for the current user.
+
+    The body is an arbitrary caller-supplied dict, and ``user_preferences`` is
+    also where the ``code_run`` capability grant is stored — so an unfiltered
+    merge here let any approved seat write itself the grant and reach the
+    unsandboxed runner behind ``/code/run``, bypassing the admin-only, audited
+    path in ``routes/admin.py`` entirely (SEC-250). Reserved keys are refused
+    rather than silently dropped, so a caller is never told a grant took.
+    """
+    reserved = RESERVED_PREFERENCE_KEYS.intersection(body.updates)
+    if reserved:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only an admin can administer users",
+        )
+
     cm = get_config_manager()
     cm.set_user_preferences(user.id, body.updates)
     return cm.get_user_preferences(user.id)

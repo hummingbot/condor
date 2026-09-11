@@ -207,6 +207,77 @@ api_health_check() {
     curl -sf --connect-timeout 3 --max-time 5 http://localhost:8000/docs >/dev/null 2>&1
 }
 
+# Can we actually reach and log into the API we were just told to use?
+#
+# Checked before setup reports success, because every way this goes wrong
+# produces a symptom that points somewhere else:
+#
+#   no connection   hummingbot-api publishes port 8000 on 127.0.0.1 by
+#                   default, so a correct install on another machine is
+#                   unreachable until API_BIND is widened there -- and nothing
+#                   in either installer mentions that at the point you choose
+#                   a remote API.
+#   401             the host answered, but not with these credentials. On a
+#                   tailnet that usually means a name collision: some OTHER
+#                   machine is running hummingbot-api under the name we asked
+#                   for.
+#
+# Echoes one of: ok | unauthorized | unreachable
+api_probe() {
+    local proto="$1" host="$2" port="$3" user="$4" pass="$5" code
+    command_exists curl || { echo ok; return; }
+    code="$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 \
+            -u "$user:$pass" "$proto://$host:$port/accounts/" 2>/dev/null)" || code=000
+    case "$code" in
+        2*)      echo ok ;;
+        401|403) echo unauthorized ;;
+        000)     echo unreachable ;;
+        *)       echo ok ;;   # 404/500 etc: it is there and it let us in
+    esac
+}
+
+# Report an api_probe result, with the diagnosis each failure actually needs.
+# Never fatal: a VPS that is not up yet is a normal reason to finish setup and
+# fix the connection afterwards.
+api_probe_report() {
+    local proto="$1" host="$2" port="$3" user="$4" pass="$5" tailnet="${6:-false}"
+    msg_info "Checking the API at $proto://$host:$port ..."
+    case "$(api_probe "$proto" "$host" "$port" "$user" "$pass")" in
+        ok)
+            msg_ok "API reachable and credentials accepted"
+            ;;
+        unauthorized)
+            msg_warn "$host:$port answered, but rejected these credentials (401)."
+            if [ "$tailnet" = true ]; then
+                msg_info "On a tailnet this usually means the name belongs to a DIFFERENT machine:"
+                msg_info "Tailscale appends -1, -2 ... when a hostname is taken, so the node you"
+                msg_info "deployed may be '$host-1' while '$host' is somebody else's."
+                msg_info "Check with: tailscale status"
+            fi
+            msg_info "Fix the host or the credentials in config.yml, or via /servers in Telegram."
+            ;;
+        unreachable)
+            msg_warn "Could not connect to $host:$port."
+            case "$host" in
+                localhost|127.0.0.1|::1)
+                    # Nothing to do with bind addresses: the stack is right
+                    # here and simply is not up.
+                    msg_info "That is this machine, so the API is just not running."
+                    msg_info "Start it: cd $HB_API_DIR && make deploy"
+                    ;;
+                *)
+                    msg_info "hummingbot-api publishes port 8000 on 127.0.0.1 by default, so a healthy"
+                    msg_info "install is still unreachable from another machine until you widen it."
+                    msg_info "On the machine running hummingbot-api:"
+                    msg_info "  add API_BIND=0.0.0.0 to its .env, then 'make deploy'"
+                    msg_info "  (or put both machines on a tailnet, which needs no open port)"
+                    ;;
+            esac
+            msg_info "Then re-check here with: make doctor"
+            ;;
+    esac
+}
+
 # Restore Tailscale wizard choice from .env (survives re-runs after Step 1 is skipped)
 load_tailscale_choice() {
     case "${USE_TAILSCALE:-}" in
@@ -305,19 +376,113 @@ PYEOF
     return 1
 }
 
-# On WSL2, systemd doesn't manage tailscaled — we must start the daemon manually
-# before calling `tailscale up`, otherwise the call silently fails.
+# Does the tailnet device exist on this host?
+#
+# /sys/class/net is present on every Linux kernel and reading it needs no
+# iproute2, so a host without `ip` still gets a real answer rather than the
+# permissive one -- previously a missing `ip` read as "device free" and sent
+# a caller straight into the collision this is meant to detect.
+#
+# No /sys and no tools means this is not Linux, and a network_mode: host
+# container cannot hold the host's device there in the first place, so
+# "absent" is the correct answer rather than a guess.
+tailnet_device_present() {
+    [ -e /sys/class/net/tailscale0 ] && return 0
+    command_exists ip && ip link show tailscale0 >/dev/null 2>&1 && return 0
+    command_exists ifconfig && ifconfig tailscale0 >/dev/null 2>&1 && return 0
+    return 1
+}
+
+# The name a node is ACTUALLY registered under on the tailnet.
+#
+# Tailscale suffixes a hostname that is already taken: ask for
+# "hummingbot-api" on a tailnet that already has one -- a colleague's box, an
+# earlier install, a machine someone rebuilt -- and this node comes up as
+# "hummingbot-api-1". The requested name then belongs to somebody ELSE, and
+# because their machine is very likely running the same software it answers,
+# so the mistake surfaces as "401 Incorrect username or password" and sends
+# people to check a password that was never wrong.
+#
+# `--self=true --peers=false` prints exactly one line whose second field is the
+# assigned DNS label. No JSON parser needed, which matters inside the sidecar
+# image (no python, no jq).
+#
+# Pass the command that reaches the right daemon:
+#   tailnet_node_name                                              # this host
+#   tailnet_node_name docker exec hummingbot-tailscale tailscale   # sidecar
+tailnet_node_name() {
+    local line
+    if [ "$#" -eq 0 ]; then
+        set -- tailscale
+    fi
+    line="$("$@" status --self=true --peers=false 2>/dev/null | grep -v '^[[:space:]]*$' | head -1)" || return 1
+    [ -n "$line" ] || return 1
+    printf '%s' "$line" | awk '{print $2}'
+}
+
+# Peers on this tailnet whose name looks like a hummingbot-api node, newline
+# separated. Matches the requested name and the -1/-2 suffixes Tailscale adds,
+# so the machine we are looking for is found under whichever one it got.
+tailnet_api_peers() {
+    local want="${1:-hummingbot-api}"
+    tailscale status --peers 2>/dev/null \
+        | awk '{print $2}' \
+        | grep -E "^${want}(-[0-9]+)?$" || true
+}
+
+# Make sure a tailscaled is running, then `tailscale up`.
+#
+# Ask the service manager first, ALWAYS -- including on WSL2, which has shipped
+# with systemd on by default since 0.67 and which the packaged tailscale
+# installs a unit for. This used to branch straight to a hand-started daemon
+# whenever /proc/version mentioned microsoft, and that daemon is a background
+# child of this script with no nohup and no setsid: it died with the
+# installer's shell, taking tailscale0 and the serve config with it, while
+# setup had already printed "Tailscale connected" and written a tailnet
+# dashboard URL. It also left tailscaled.service sitting there inactive and
+# never enabled, so nothing brought it back on reboot either.
+#
+# That matters more than it used to: the tailnet work now resolves most
+# machines to mode=host, which means `make deploy` -- today's and every future
+# one -- depends on this daemon still being here.
 tailscale_up() {
-    if grep -qi microsoft /proc/version 2>/dev/null; then
-        if ! pgrep -x tailscaled >/dev/null 2>&1; then
-            msg_info "Starting Tailscale daemon (WSL2)..."
-            sudo mkdir -p /var/run/tailscale /var/lib/tailscale
-            sudo tailscaled --state=/var/lib/tailscale/tailscaled.state \
-                            --socket=/var/run/tailscale/tailscaled.sock \
-                            >/dev/null 2>&1 &
-            sleep 2
+    if ! pgrep -x tailscaled >/dev/null 2>&1; then
+        if command_exists systemctl && systemctl list-unit-files tailscaled.service >/dev/null 2>&1; then
+            msg_info "Starting the tailscaled service..."
+            # --now starts it; enable is what survives a reboot.
+            sudo systemctl enable --now tailscaled >/dev/null 2>&1 || \
+                sudo systemctl start tailscaled >/dev/null 2>&1 || true
+            # The socket appears a moment after the unit reports active.
+            for _ in 1 2 3 4 5 6 7 8 9 10; do
+                pgrep -x tailscaled >/dev/null 2>&1 && break
+                sleep 1
+            done
         fi
     fi
+
+    if ! pgrep -x tailscaled >/dev/null 2>&1; then
+        # No service manager, or no unit for it. Start it ourselves -- but
+        # detached, so it outlives this script's terminal instead of dying
+        # with it.
+        msg_info "Starting the Tailscale daemon..."
+        sudo mkdir -p /var/run/tailscale /var/lib/tailscale
+        # The redirection has to happen INSIDE sudo. Written as
+        # `sudo tailscaled ... >/var/log/tailscaled.log` the calling shell
+        # opens that path as the invoking user, which fails on any normal
+        # box before sudo runs at all -- and the daemon then never starts,
+        # silently, which is the failure this whole function exists to avoid.
+        # setsid detaches it from this terminal so it outlives the installer.
+        sudo sh -c 'setsid tailscaled --state=/var/lib/tailscale/tailscaled.state \
+                                      --socket=/var/run/tailscale/tailscaled.sock \
+                                      >>/var/log/tailscaled.log 2>&1 </dev/null &'
+        sleep 2
+        # Say it out loud rather than leaving someone to discover it after a
+        # reboot: nothing here arranges for this daemon to come back.
+        msg_warn "Started without a service manager — this daemon will not restart on boot."
+        msg_info "Re-run 'sudo tailscaled ... &' and 'sudo tailscale up' after a restart,"
+        msg_info "or install a service for it."
+    fi
+
     sudo tailscale up "$@"
 }
 
@@ -796,6 +961,8 @@ echo -e "${BOLD}Step 3: Hummingbot API${RESET}"
 echo ""
 
 hb_api_deployed=false
+# Configured is not the same as answering; the summary must not conflate them.
+hb_api_healthy=false
 
 # Source .env again to get latest values
 if [ -f "$ENV_FILE" ]; then
@@ -848,6 +1015,10 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
             HB_API_PORT="8000"
             hb_api_configured=true
 
+            echo ""
+            api_probe_report "$HB_API_PROTOCOL" "$HB_API_HOST" "$HB_API_PORT" \
+                             "$hb_username" "$hb_password"
+
             # Skip the rest of the API setup block
             existing_api=skip
         fi
@@ -862,7 +1033,30 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
     else
     msg_info "Condor connects to Hummingbot Backend API for trading."
     echo ""
-    prompt_visible "Configure and launch local Hummingbot API with Docker? [Y/n]" "Y" "deploy_hb"
+    # An install that exists on disk is protected even when it is not running.
+    # The api_health_check above only sees a *live* API on :8000, so a stopped
+    # stack used to fall straight through to the deploy branch, which
+    # overwrote .env -- replacing generated broker credentials with weak ones
+    # while the broker's own bootstrap file (and its mnesia volume) kept the
+    # old password. That mismatch is not repairable by re-running setup; it
+    # needs `make emqx-auth-reset`. So the default flips to "n" here, and the
+    # existing .env becomes read-only input.
+    hb_api_preexisting=false
+    if [ -f "$HB_API_DIR/.env" ]; then
+        hb_api_preexisting=true
+        msg_ok "Existing hummingbot-api install detected at $HB_API_DIR"
+        msg_info "Its .env (API and broker credentials) will be left untouched."
+        # "Restart", not "reconfigure": .env stays untouched either way -- this
+        # only decides whether Condor brings the stack up via `make deploy`.
+        prompt_visible "Restart its Docker stack now? [y/N]" "N" "redeploy_hb"
+        if [[ "${redeploy_hb:-}" =~ ^[Yy]$ ]]; then
+            deploy_hb="y"
+        else
+            deploy_hb="n"
+        fi
+    else
+        prompt_visible "Configure and launch local Hummingbot API with Docker? [Y/n]" "Y" "deploy_hb"
+    fi
     fi
 
     if [[ "${deploy_hb:-}" =~ ^[Nn]$ ]]; then
@@ -871,6 +1065,26 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
         fi
         msg_ok "Skipped Hummingbot API deployment"
         echo ""
+        if [ "${hb_api_preexisting:-false}" = true ]; then
+            # Co-located install we chose not to touch: its credentials are
+            # already on disk, so asking the user to retype them invites a
+            # typo and a 401. localhost, not the tailnet name -- Condor is on
+            # this machine, so MagicDNS would be a longer route to the same
+            # port and one more thing that can be down.
+            hb_username=$(grep -m1 "^USERNAME=" "$HB_API_DIR/.env" 2>/dev/null | cut -d= -f2-)
+            hb_password=$(grep -m1 "^PASSWORD=" "$HB_API_DIR/.env" 2>/dev/null | cut -d= -f2-)
+            HB_API_PROTOCOL="http"
+            HB_API_HOST="localhost"
+            HB_API_PORT="8000"
+            if [ -n "${hb_username:-}" ] && [ -n "${hb_password:-}" ]; then
+                msg_ok "Read API credentials from $HB_API_DIR/.env"
+            else
+                msg_warn "Could not read USERNAME/PASSWORD from $HB_API_DIR/.env"
+                prompt_required_visible "API admin username" "hb_username" "Username cannot be empty"
+                prompt_required_secret "API admin password" "hb_password" "Password cannot be empty"
+            fi
+            hb_api_configured=true
+        else
         msg_info "Enter the Hummingbot API connection details."
         if [[ "${use_tailscale_early:-}" =~ ^[Yy]$ ]]; then
             # Tailscale: host is resolved via MagicDNS after joining the tailnet — no URL needed
@@ -878,13 +1092,13 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
             HB_API_HOST="hummingbot-api"
             HB_API_PORT="8000"
             # Skipping local deploy + using Tailscale means hummingbot-api is
-            # on another machine (a VPS, most likely) -- this is the default
-            # hostname its own Tailscale setup assigns it, not a guess made
-            # up here.
-            msg_info "Assuming the default tailnet address: http://hummingbot-api:8000"
-            msg_info "If that machine's hummingbot-api used a different TAILSCALE_HOSTNAME"
-            msg_info "(or you renamed the device in the Tailscale admin console), update the"
-            msg_info "host afterward in config.yml, or via /servers in Telegram."
+            # on another machine (a VPS, most likely). "hummingbot-api" is the
+            # name its own setup ASKS for -- a starting point, not an answer.
+            # The tailnet is searched for the real node once we are on it,
+            # a few lines below, because Tailscale suffixes a name that is
+            # already taken and the unsuffixed one then belongs to someone
+            # else's machine.
+            msg_info "Looking for hummingbot-api on your tailnet after connecting..."
         else
             prompt_visible "API URL + port (e.g. http://your-server:8000)" "http://localhost:8000" "hb_api_url_raw"
             hb_api_url_raw="${hb_api_url_raw:-http://localhost:8000}"
@@ -895,9 +1109,16 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
         fi
         prompt_required_visible "API admin username" "hb_username" "Username cannot be empty"
         prompt_required_secret "API admin password" "hb_password" "Password cannot be empty"
+        fi
 
         # ── Tailscale option for external API ──────────────
+        # Skipped for a co-located pre-existing install: HB_API_HOST is already
+        # localhost, and this block would rewrite it to a MagicDNS name that
+        # points back at this same machine by a longer path.
         use_tailscale_remote="${use_tailscale_early:-N}"
+        if [ "${hb_api_preexisting:-false}" = true ]; then
+            use_tailscale_remote="N"
+        fi
         if [[ "${use_tailscale_remote:-}" =~ ^[Yy]$ ]]; then
             if command_exists tailscale && tailscale status >/dev/null 2>&1; then
                 msg_ok "Tailscale already connected on this machine"
@@ -929,16 +1150,54 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
             msg_info "Connecting to Tailscale network..."
             tailscale_up --authkey="$ts_auth_key" --hostname="condor" --accept-dns=true
             fi
-            ts_hostname="hummingbot-api"
             ts_condor_ip=$(tailscale ip -4 2>/dev/null | head -1)
+
+            # Which node on this tailnet IS the hummingbot-api? Asked, not
+            # assumed. Tailscale suffixes a hostname that is already taken, so
+            # on a tailnet that already had a "hummingbot-api" -- a
+            # colleague's box, an older install -- the machine we want is
+            # "hummingbot-api-1" and the bare name is somebody else's. Their
+            # box is likely running the same software, so it ANSWERS, and the
+            # install ends up pointed at it: the failure arrives as "401
+            # Incorrect username or password", which sends people to check a
+            # password that was never wrong.
+            ts_hostname=""
+            _ts_candidates="$(tailnet_api_peers hummingbot-api)"
+            _ts_count="$(printf '%s' "$_ts_candidates" | grep -c . || true)"
+            if [ "${_ts_count:-0}" -eq 1 ]; then
+                ts_hostname="$_ts_candidates"
+                msg_ok "Found it on your tailnet: $ts_hostname"
+            elif [ "${_ts_count:-0}" -gt 1 ]; then
+                msg_warn "More than one hummingbot-api node on this tailnet:"
+                printf '%s\n' "$_ts_candidates" | while IFS= read -r _c; do
+                    [ -n "$_c" ] && echo "      • $_c"
+                done
+                msg_info "Tailscale adds -1, -2 ... when a name is taken, so these are"
+                msg_info "different machines. Pick the one you just deployed."
+                prompt_required_visible "Which node is your hummingbot-api?" "ts_hostname" "Name cannot be empty"
+            else
+                msg_warn "No hummingbot-api node is visible on this tailnet yet."
+                msg_info "Deploy it on that machine first (its setup joins the tailnet), or"
+                msg_info "enter the name/address it is reachable at."
+                prompt_visible "hummingbot-api host" "hummingbot-api" "ts_hostname"
+                ts_hostname="${ts_hostname:-hummingbot-api}"
+            fi
 
             # Use the Tailscale MagicDNS hostname to reach hummingbot-api (plain HTTP — WireGuard encrypts in transit)
             HB_API_HOST="$ts_hostname"
             HB_API_PORT="8000"
             HB_API_PROTOCOL="http"
             msg_ok "Tailscale connected — server URL: http://$ts_hostname:8000"
-            # On a VPS (SERVER_IP set), point the web dashboard at the Tailscale IP so the /web link works remotely
-            if [ -n "${SERVER_IP:-}" ] && [ -n "${ts_condor_ip:-}" ]; then
+            # Tailscale on: the dashboard binds this node's tailnet address, so
+            # that is the URL /web must hand out. This used to also require
+            # SERVER_IP, which is only ever prompted in the non-Tailscale
+            # branch, so the rewrite never ran and WEB_URL stayed at
+            # localhost:8088 while the installer advertised it.
+            #
+            # Local mode is excluded: it keeps its loopback bind whether or not
+            # Tailscale is on (an unauthenticated dashboard does not go on the
+            # tailnet), so localhost:8088 stays the correct URL there.
+            if [ -n "${ts_condor_ip:-}" ] && [ "${CONDOR_MODE:-telegram}" != "local" ]; then
                 if grep -q "^WEB_URL=" "$ENV_FILE"; then
                     sed -i.bak "s|^WEB_URL=.*|WEB_URL=http://$ts_condor_ip:8088|" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
                 else
@@ -947,6 +1206,14 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
                 msg_ok "Web dashboard: http://$ts_condor_ip:8088 (Tailscale access)"
             fi
         fi
+
+        # Say now whether the address we just wrote actually works. Everything
+        # above is a claim about another machine; this is the only step that
+        # checks one.
+        echo ""
+        api_probe_report "$HB_API_PROTOCOL" "$HB_API_HOST" "$HB_API_PORT" \
+                         "$hb_username" "$hb_password" \
+                         "$([[ "${use_tailscale_remote:-N}" =~ ^[Yy]$ ]] && echo true || echo false)"
 
         hb_api_configured=true
     else
@@ -976,8 +1243,71 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
         HB_OWN_TAILNET_NODE=false
         ts_auth_key=""
         ts_hb_hostname="hummingbot-api"
+        HB_TAILSCALE_MODE=none
         use_tailscale="${use_tailscale_early:-N}"
+        # Only a NATIVE daemon is a node Condor can reuse. A hummingbot-api
+        # sidecar is a separate tailnet identity with its socket inside its
+        # container: `tailscale ip` on the host returns nothing for it, so
+        # treating it as reusable produced an install that reported "Tailscale
+        # connected" with no address and a dashboard reachable from nowhere.
+        #
+        # A kernel-mode sidecar also OWNS tailscale0, so Condor cannot enroll
+        # natively alongside it -- that is the collision this whole change
+        # exists to prevent, and it must not be walked into here either. A
+        # userspace sidecar holds no device, so enrolling is fine.
+        # Two facts decide this, and neither needs to attribute a process to a
+        # host or a container:
+        #   can we USE a host daemon?   status answers AND yields an address
+        #   is the device taken?        tailscale0 already exists
+        #
+        # Reuse requires the first. Enrolling requires the absence of the
+        # second: `tailscale up` against a device something else owns fails,
+        # and that something else is usually hummingbot-api's kernel-mode
+        # sidecar.
+        #
+        # Deliberately NOT derived from tailnet_state(). That has to decide
+        # whether a tailscaled belongs to this host or to a container, and it
+        # cannot always -- an unreadable /proc, a cgroup with no recognised
+        # marker, a docker daemon this user may not query. A sidecar
+        # misattributed as native there has no host address, which used to
+        # fall through to enrollment and contend for the very device the
+        # sidecar was holding. Asking what we can use, and what is already
+        # taken, has no such failure mode.
+        _ts_host_usable=false
+        if command_exists tailscale && tailscale status >/dev/null 2>&1 \
+           && [ -n "$(tailscale ip -4 2>/dev/null | head -1)" ]; then
+            _ts_host_usable=true
+        fi
+        _ts_device_busy=false
+        tailnet_device_present && _ts_device_busy=true
+
+        if [[ "${use_tailscale:-}" =~ ^[Yy]$ ]] && [ "$_ts_host_usable" != true ] \
+           && [ "$_ts_device_busy" = true ]; then
+            msg_warn "Something already owns this machine's tailnet device (tailscale0),"
+            msg_warn "and it is not a daemon Condor can use — most likely hummingbot-api's"
+            msg_warn "Tailscale sidecar running in kernel mode."
+            msg_info "Joining now would contend for the same device and fail."
+            msg_info "Fix it in ../hummingbot-api, then re-run this setup:"
+            msg_info "  set TAILSCALE_MODE=host in its .env  (one shared node), or"
+            msg_info "  set TAILSCALE_MODE=sidecar           (its own node, userspace)"
+            msg_info "then run 'make deploy' there. Continuing without Tailscale for Condor."
+            use_tailscale="N"
+            use_tailscale_early="N"
+            # Step 1 already recorded USE_TAILSCALE=true. Leaving it would put
+            # the rest of the system at odds with what we just told the user:
+            # main.py would try a tailnet bind, fail closed to loopback, and
+            # doctor would report the dashboard as unreachable -- all correct
+            # individually, and all confusing after "continuing without".
+            USE_TAILSCALE=false
+            set_env_var USE_TAILSCALE "false"
+        fi
         if [[ "${use_tailscale:-}" =~ ^[Yy]$ ]]; then
+          # Already on the tailnet: no key needed to reuse this machine's own
+          # node. Asking for one would demand a credential for a join we are
+          # about to skip.
+          if [ "$_ts_host_usable" = true ]; then
+            msg_ok "Tailscale already active on this machine — no auth key needed"
+          else
             echo ""
             echo -e "  ${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
             echo -e "  ${CYAN}  How to get a Tailscale auth key:${RESET}"
@@ -999,15 +1329,45 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
                 fi
                 break
             done
-            msg_info "Installing Tailscale on this machine..."
-            curl -fsSL https://tailscale.com/install.sh | sh
-            msg_info "Connecting to Tailscale network..."
-            tailscale_up --authkey="$ts_auth_key" --hostname="condor" --accept-dns=true
+          fi
+            # Only join the tailnet if nothing here has already. This branch
+            # used to install and `tailscale up` unconditionally: a smoke test
+            # with a daemon already running produced output byte-identical to
+            # one without, because nothing ever looked. The remote-API branch
+            # above has always checked; this one never did.
+            # Reuse only a daemon we can actually use. Reaching the else means
+            # the device is free -- the busy case bailed out above -- so
+            # enrolling here cannot contend with anything.
+            if [ "$_ts_host_usable" = true ]; then
+                msg_ok "Tailscale already active on this machine — reusing its node"
+                msg_info "Not joining the tailnet a second time: one machine, one node."
+            else
+                msg_info "Installing Tailscale on this machine..."
+                curl -fsSL https://tailscale.com/install.sh | sh
+                msg_info "Connecting to Tailscale network..."
+                tailscale_up --authkey="$ts_auth_key" --hostname="condor" --accept-dns=true
+            fi
             ts_condor_ip=$(tailscale ip -4 2>/dev/null | head -1)
-            TS_DEPLOY=true
-            msg_ok "Tailscale connected — this machine (and its dashboard) is reachable on your tailnet"
-            # On a VPS (SERVER_IP set), point the web dashboard at the Tailscale IP so the /web link works remotely
-            if [ -n "${SERVER_IP:-}" ] && [ -n "${ts_condor_ip:-}" ]; then
+            # Report what actually happened. Without an address there is no
+            # tailnet bind and no working /web link, so announcing success
+            # here just moves the failure somewhere harder to diagnose.
+            if [ -n "${ts_condor_ip:-}" ]; then
+                TS_DEPLOY=true
+                msg_ok "Tailscale connected — this machine (and its dashboard) is reachable on your tailnet"
+            else
+                msg_warn "Tailscale did not report an address for this machine."
+                msg_info "The dashboard will stay on localhost until \`tailscale status\` is healthy."
+            fi
+            # Tailscale on: the dashboard binds this node's tailnet address, so
+            # that is the URL /web must hand out. This used to also require
+            # SERVER_IP, which is only ever prompted in the non-Tailscale
+            # branch, so the rewrite never ran and WEB_URL stayed at
+            # localhost:8088 while the installer advertised it.
+            #
+            # Local mode is excluded: it keeps its loopback bind whether or not
+            # Tailscale is on (an unauthenticated dashboard does not go on the
+            # tailnet), so localhost:8088 stays the correct URL there.
+            if [ -n "${ts_condor_ip:-}" ] && [ "${CONDOR_MODE:-telegram}" != "local" ]; then
                 if grep -q "^WEB_URL=" "$ENV_FILE"; then
                     sed -i.bak "s|^WEB_URL=.*|WEB_URL=http://$ts_condor_ip:8088|" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
                 else
@@ -1021,8 +1381,38 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
             msg_info "localhost — it doesn't need a tailnet node of its own for that."
             prompt_visible "Also give hummingbot-api its own Tailscale node, so other devices (e.g. an MCP client on another machine) can reach it directly? [y/N]" "N" "hb_tailscale_choice"
             if [[ "${hb_tailscale_choice:-}" =~ ^[Yy]$ ]]; then
+                # A second node is safe now: this machine already runs a
+                # kernel-mode daemon, so hummingbot-api's `make deploy` starts
+                # its sidecar in userspace mode. Netstack claims no TUN device
+                # and no host routes, so both coexist -- verified on a live
+                # tailnet, serving a loopback-bound port to another node with a
+                # single tailscale0 between them. Before that, answering yes
+                # here produced a sidecar that died on startup and a container
+                # that still reported "running".
                 HB_OWN_TAILNET_NODE=true
-                msg_ok "hummingbot-api will join the tailnet as '$ts_hb_hostname' — reachable at http://$ts_hb_hostname:8000"
+                HB_TAILSCALE_MODE=sidecar
+                if [ -z "${ts_auth_key:-}" ]; then
+                    msg_info "A separate node needs its own auth key (this machine's node is already registered)."
+                    while true; do
+                        prompt_visible "Tailscale auth key for hummingbot-api (tskey-auth-...)" "" "ts_auth_key"
+                        if [ -z "${ts_auth_key:-}" ]; then
+                            msg_warn "Auth key cannot be empty"; continue
+                        fi
+                        if [[ ! "$ts_auth_key" =~ ^tskey-auth- ]]; then
+                            msg_warn "Auth key must start with 'tskey-auth-'"; continue
+                        fi
+                        break
+                    done
+                fi
+                msg_ok "hummingbot-api will join the tailnet as '$ts_hb_hostname'"
+                msg_info "If that name is already taken on your tailnet it registers as"
+                msg_info "$ts_hb_hostname-1, -2 ... — the real one is confirmed after deploy."
+            else
+                # One machine, one node: port 8000 is served on the node this
+                # host already has, so nothing new registers and nothing
+                # contends for tailscale0.
+                HB_TAILSCALE_MODE=host
+                msg_ok "hummingbot-api will be served on this machine's existing tailnet node"
             fi
         fi
 
@@ -1047,125 +1437,100 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
             fi
         fi
 
-        # Generate hummingbot-api .env
+        # Configure hummingbot-api by running ITS OWN setup, not by writing its
+        # .env from here.
+        #
+        # Condor used to hand-write that file. Two authors meant two schemas:
+        # this side shipped BROKER_PASSWORD=password (the well-known default
+        # hummingbot-api's setup.sh deliberately stopped shipping), omitted
+        # BROKER_DASHBOARD_PASSWORD so compose fell back to another well-known
+        # default, and wrote API_BIND_HOST -- a key nothing on that side reads,
+        # since docker-compose.yml wants API_BIND. Delegating removes the drift
+        # by construction: .env has exactly one author. Everything setup.sh
+        # generates -- both broker passwords especially -- stays generated
+        # there, so nothing Condor passes can weaken them.
+        #
+        # The backtesting values below are Condor's own tuning, passed through
+        # rather than written here: mm_optimizer_cycle submits a base config
+        # plus its variations at once, and hummingbot-api's default of 1
+        # concurrent worker turns that sweep into a queue. The deadline is
+        # sized for a multi-day window at a fine resolution rather than for a
+        # single ad-hoc backtest.
         if [ -d "$HB_API_DIR" ]; then
-            hb_api_abs_path="$(cd "$HB_API_DIR" 2>/dev/null && pwd)"
-            cat > "$HB_API_DIR/.env" << HBEOF
-USERNAME=${hb_username}
-PASSWORD=${hb_password}
-CONFIG_PASSWORD=${hb_config_password}
-DEBUG_MODE=false
-BROKER_HOST=localhost
-BROKER_PORT=1883
-BROKER_USERNAME=admin
-BROKER_PASSWORD=password
-DATABASE_URL=postgresql+asyncpg://hbot:hummingbot-api@localhost:5432/hummingbot_api
-GATEWAY_URL=http://localhost:15888
-GATEWAY_PASSPHRASE=${hb_config_password}
-BOTS_PATH=${hb_api_abs_path}
-TAILSCALE_ENABLED=${HB_OWN_TAILNET_NODE}
-TAILSCALE_AUTH_KEY=${ts_auth_key}
-TAILSCALE_HOSTNAME=${ts_hb_hostname}
-# Condor is co-located on this machine and always reaches the API over
-# localhost, tailnet node or not -- so port 8000 never needs to sit on every
-# interface here. See docker-compose.yml / docker-compose.tailscale.yml.
-API_BIND_HOST=127.0.0.1
-HBEOF
-            # Holds the API password, the config password and (when set) a
-            # Tailscale auth key -- not a world-readable file.
+            # Tracks whether the API is actually configured. Deploying an
+            # unconfigured stack produces containers that cannot authenticate
+            # to their own broker, and reporting it as running sends people
+            # looking for the fault in the wrong place.
+            hb_api_ready=false
+            if [ -f "$HB_API_DIR/.env" ]; then
+                msg_ok "hummingbot-api .env already exists — leaving it untouched"
+                hb_api_ready=true
+            elif [ -x "$HB_API_DIR/setup.sh" ] || [ -f "$HB_API_DIR/setup.sh" ]; then
+                msg_info "Running hummingbot-api's own setup (non-interactive)..."
+                if (cd "$HB_API_DIR" && chmod +x setup.sh 2>/dev/null; \
+                    HBAPI_NONINTERACTIVE=1 \
+                    HBAPI_SKIP_DEPS=1 \
+                    HBAPI_USERNAME="$hb_username" \
+                    HBAPI_PASSWORD="$hb_password" \
+                    HBAPI_CONFIG_PASSWORD="$hb_config_password" \
+                    TAILSCALE_ENABLED="$([ "$HB_TAILSCALE_MODE" = none ] && echo false || echo true)" \
+                    TAILSCALE_MODE="$HB_TAILSCALE_MODE" \
+                    TAILSCALE_AUTH_KEY="$ts_auth_key" \
+                    TAILSCALE_HOSTNAME="$ts_hb_hostname" \
+                    HBAPI_BACKTESTING_MAX_CONCURRENT=4 \
+                    HBAPI_BACKTESTING_TIMEOUT_SECONDS=1800 \
+                    ./setup.sh); then
+                    msg_ok "Hummingbot API configured by its own setup.sh"
+                    hb_api_ready=true
+                else
+                    msg_error "hummingbot-api setup.sh failed — see the output above"
+                    msg_info "Run it yourself: cd $HB_API_DIR && ./setup.sh, then: make deploy"
+                fi
+            else
+                msg_error "No setup.sh found in $HB_API_DIR — cannot configure the API"
+                msg_info "Update that checkout, then run: cd $HB_API_DIR && ./setup.sh"
+            fi
+            # setup.sh already chmods this; harmless belt-and-braces if an
+            # older checkout did not.
             chmod 600 "$HB_API_DIR/.env" 2>/dev/null || true
-            msg_ok "Hummingbot API .env configured"
 
-            # Generate docker-compose.tailscale.yml if hummingbot-api is getting
-            # its own tailnet node. TS_SERVE_CONFIG is load-bearing, not
-            # cosmetic: API_BIND_HOST above always binds port 8000 to
-            # 127.0.0.1, so without this forward the sidecar would join the
-            # tailnet with nothing behind it -- reachable from nowhere at all.
-            if [ "$HB_OWN_TAILNET_NODE" = true ] && [ ! -f "$HB_API_DIR/docker-compose.tailscale.yml" ]; then
-                cat > "$HB_API_DIR/docker-compose.tailscale.yml" << 'TSEOF'
-services:
-  tailscale:
-    image: tailscale/tailscale:latest
-    container_name: hummingbot-tailscale
-    network_mode: host
-    environment:
-      - TS_AUTHKEY=${TAILSCALE_AUTH_KEY}
-      - TS_STATE_DIR=/var/lib/tailscale
-      - TS_USERSPACE=false
-      - TS_HOSTNAME=${TAILSCALE_HOSTNAME:-hummingbot-api}
-      - TS_SERVE_CONFIG=/config/tailscale-serve.json
-    volumes:
-      - tailscale_state:/var/lib/tailscale
-      - /dev/net/tun:/dev/net/tun
-      - ./tailscale-serve.json:/config/tailscale-serve.json:ro
-    cap_add:
-      - NET_ADMIN
-      - NET_RAW
-    restart: unless-stopped
-volumes:
-  tailscale_state:
-TSEOF
-                cat > "$HB_API_DIR/tailscale-serve.json" << 'TSSEOF'
-{
-  "TCP": {
-    "8000": {
-      "TCPForward": "127.0.0.1:8000"
-    }
-  }
-}
-TSSEOF
-                msg_ok "docker-compose.tailscale.yml created"
-            fi
-
-            # Patch hummingbot-api Makefile so future 'make deploy' stays Tailscale-aware
-            if [ "$HB_OWN_TAILNET_NODE" = true ] && [ -f "$HB_API_DIR/Makefile" ]; then
-                python3 - "$HB_API_DIR/Makefile" << 'PYEOF'
-import sys
-with open(sys.argv[1]) as f:
-    content = f.read()
-old = "# Deploy with Docker\ndeploy: $(SETUP_SENTINEL)\n\tdocker compose up -d"
-new = (
-    "# Deploy with Docker (Tailscale-aware: reads TAILSCALE_ENABLED from .env)\n"
-    "deploy: $(SETUP_SENTINEL)\n"
-    "\t@set -a; [ -f .env ] && . ./.env; set +a; \\\n"
-    "\tif [ \"$${TAILSCALE_ENABLED:-false}\" = \"true\" ]; then \\\n"
-    "\t\techo \"[INFO] Deploying with Tailscale sidecar...\"; \\\n"
-    "\t\tdocker compose -f docker-compose.yml -f docker-compose.tailscale.yml up -d; \\\n"
-    "\telse \\\n"
-    "\t\tdocker compose up -d; \\\n"
-    "\tfi"
-)
-content = content.replace(old, new)
-content = content.replace(
-    ".PHONY: setup run run-https deploy stop install uninstall build install-pre-commit generate-certs show-certs",
-    ".PHONY: setup run run-https deploy stop install uninstall build install-pre-commit generate-certs show-certs tailscale-status"
-)
-if "tailscale-status" not in content:
-    content += (
-        "\n# Show Tailscale connection status\n"
-        "tailscale-status:\n"
-        "\t@if command -v tailscale >/dev/null 2>&1; then \\\n"
-        "\t\ttailscale status; \\\n"
-        "\telse \\\n"
-        "\t\techo \"Tailscale is not installed or not on PATH.\"; \\\n"
-        "\tfi\n"
-    )
-with open(sys.argv[1], "w") as f:
-    f.write(content)
-PYEOF
-                msg_ok "Hummingbot API Makefile patched for Tailscale-aware deploy"
-            fi
+            # The Tailscale overlay and the Tailscale-aware deploy target are
+            # hummingbot-api's own, checked into that repo. Condor used to
+            # generate the overlay and string-patch the Makefile to add both;
+            # against current main all three of those patch replacements match
+            # nothing and silently no-op, while still reporting success. Owning
+            # one copy upstream is the fix -- there is nothing to inject here.
 
             # Deploy if Docker is available
-            if [ "$docker_available" = true ] && [ -f "$HB_API_DIR/docker-compose.yml" ]; then
+            if [ "$hb_api_ready" != true ]; then
+                msg_warn "Skipping the API deploy: it has no configuration to start with."
+                msg_info "Fix the error above, then: cd $HB_API_DIR && make deploy"
+            elif [ "$docker_available" = true ] && [ -f "$HB_API_DIR/docker-compose.yml" ]; then
                 msg_info "Starting Hummingbot API stack..."
-                if [ "$HB_OWN_TAILNET_NODE" = true ] && [ -f "$HB_API_DIR/docker-compose.tailscale.yml" ]; then
-                    _compose_cmd="docker compose -f docker-compose.yml -f docker-compose.tailscale.yml up -d"
-                    msg_info "Using Tailscale sidecar overlay..."
-                else
-                    _compose_cmd="docker compose up -d"
-                fi
-                if (cd "$HB_API_DIR" && eval "$_compose_cmd" 2>/dev/null); then
+                # `make deploy`, not a raw `docker compose up -d`.
+                #
+                # deploy depends on emqx-auth, which generates
+                # .emqx/auth-bootstrap.csv from the broker credentials in .env.
+                # Skipping it did not merely miss a nicety: the bind-mount
+                # source stayed absent, Docker created it as a root-owned
+                # DIRECTORY, EMQX logged boostrap_authn_built_in_database_failed
+                # and came up with authentication enabled and zero accounts --
+                # so every MQTT connection was refused while the API's HTTP
+                # health check still passed and this installer reported
+                # success. The Makefile also picks the Tailscale overlay itself
+                # from TAILSCALE_ENABLED, so the compose-file juggling that
+                # used to live here is upstream's job now.
+                # No fallback to raw `docker compose up -d`. That is exactly
+                # the bug described above: it bypasses emqx-auth and produces
+                # a broker with authentication enabled and no accounts, which
+                # the HTTP health check cannot see. If make is missing, the
+                # honest outcome is a configured API that has not been
+                # started, not a started one that cannot authenticate.
+                if ! command_exists make; then
+                    msg_warn "make is not installed, and the API deploy needs it:"
+                    msg_info "it runs the emqx-auth step that seeds the broker's account."
+                    msg_info "Install make, then: cd $HB_API_DIR && make deploy"
+                elif (cd "$HB_API_DIR" && make deploy); then
                     msg_ok "Hummingbot API stack started"
 
                     # Wait for API to be healthy
@@ -1173,6 +1538,7 @@ PYEOF
                     for i in $(seq 1 30); do
                         if api_health_check; then
                             msg_ok "Hummingbot API is healthy"
+                            hb_api_healthy=true
                             break
                         fi
                         sleep 2
@@ -1183,14 +1549,27 @@ PYEOF
                     fi
                 else
                     msg_error "Failed to start Hummingbot API stack"
-                    msg_info "Try manually: cd $HB_API_DIR && docker compose up -d"
+                    msg_info "Try manually: cd $HB_API_DIR && make deploy"
                 fi
             else
-                msg_info "Start API later: cd $HB_API_DIR && docker compose up -d"
+                msg_info "Start API later: cd $HB_API_DIR && make deploy"
             fi
 
-            msg_ok "Hummingbot API credentials saved"
-            hb_api_deployed=true
+            # hb_api_deployed means CONFIGURED, and drives the config.yml
+            # credential sync -- which is right even when the stack did not
+            # come up, since the credentials are valid and the API can be
+            # started later. Whether it is actually RUNNING is a separate
+            # fact, tracked by hb_api_healthy, because a deploy that failed
+            # (no Docker, a compose error, a container that never answers)
+            # must not be summarised as running.
+            if [ "$hb_api_ready" = true ]; then
+                msg_ok "Hummingbot API credentials saved"
+                hb_api_deployed=true
+            else
+                set_env_var DEPLOY_HUMMINGBOT_API "false"
+                msg_warn "Hummingbot API is not configured — Condor will start without it."
+                msg_info "Once it is set up, add it to Condor via /servers or config.yml."
+            fi
         fi
     fi
     fi  # end existing_api != skip
@@ -1336,19 +1715,30 @@ else
 echo ""
 echo -e "  Then send ${BOLD}/start${RESET} to your Telegram bot."
 fi
-if [ "${hb_api_deployed:-}" = true ]; then
+if [ "${hb_api_healthy:-false}" = true ]; then
 echo ""
 echo -e "  Hummingbot API is running — config at ${BOLD}../hummingbot-api/.env${RESET}"
+elif [ "${hb_api_deployed:-}" = true ]; then
+echo ""
+echo -e "  Hummingbot API is configured but ${BOLD}not answering yet${RESET} — config at ${BOLD}../hummingbot-api/.env${RESET}"
+echo -e "  ${DIM}Start or check it: cd ../hummingbot-api && make deploy && make doctor${RESET}"
 fi
 if [ "${TS_DEPLOY:-false}" = true ]; then
 echo ""
 echo -e "  ${BOLD}Tailscale:${RESET}"
 if [ "${HB_OWN_TAILNET_NODE:-false}" = true ]; then
-echo -e "    hummingbot-api URL:  http://${ts_hb_hostname}:8000  ${CYAN}(own tailnet node)${RESET}"
+# Ask the sidecar what name the control plane gave it, rather than repeating
+# the one we requested: Tailscale suffixes a name that is already taken, and a
+# URL built from the request then points at whoever holds the original.
+_hb_node="$(tailnet_node_name docker exec hummingbot-tailscale tailscale 2>/dev/null || true)"
+echo -e "    hummingbot-api URL:  http://${_hb_node:-$ts_hb_hostname}:8000  ${CYAN}(own tailnet node)${RESET}"
+if [ -n "$_hb_node" ] && [ "$_hb_node" != "$ts_hb_hostname" ]; then
+echo -e "    ${DIM}('$ts_hb_hostname' was already taken on your tailnet — this node is '$_hb_node')${RESET}"
+fi
 else
 echo -e "    hummingbot-api:      http://localhost:8000  ${CYAN}(local — no tailnet node needed)${RESET}"
 fi
-if [ -n "${ts_condor_ip:-}" ] && [ -n "${SERVER_IP:-}" ]; then
+if [ -n "${ts_condor_ip:-}" ] && [ "${CONDOR_MODE:-telegram}" != "local" ]; then
 echo -e "    Web dashboard URL:   http://${ts_condor_ip}:8088  ${CYAN}(Tailscale only)${RESET}"
 else
 echo -e "    Web dashboard URL:   http://localhost:8088"
@@ -1358,7 +1748,7 @@ elif [[ "${use_tailscale_remote:-}" =~ ^[Yy]$ ]]; then
 echo ""
 echo -e "  ${BOLD}Tailscale:${RESET}"
 echo -e "    hummingbot-api URL:  http://${ts_hostname:-hummingbot-api}:8000"
-if [ -n "${ts_condor_ip:-}" ] && [ -n "${SERVER_IP:-}" ]; then
+if [ -n "${ts_condor_ip:-}" ] && [ "${CONDOR_MODE:-telegram}" != "local" ]; then
 echo -e "    Web dashboard URL:   http://${ts_condor_ip}:8088  ${CYAN}(Tailscale only)${RESET}"
 else
 echo -e "    Web dashboard URL:   http://localhost:8088"

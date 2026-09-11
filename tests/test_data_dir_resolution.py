@@ -98,7 +98,7 @@ def test_every_store_follows_the_override(tmp_path, monkeypatch):
     moved = tmp_path / "moved"
     assert (moved / "notifications.json").is_file()
     assert (moved / "routine_hooks.json").is_file()
-    assert (moved / "backtests" / "task-1.json").is_file()
+    assert (moved / "backtests" / "task-1.json.gz").is_file()
     assert (moved / "code_runs" / "code_1.json").is_file()
 
 

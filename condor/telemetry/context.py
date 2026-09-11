@@ -134,9 +134,12 @@ def config_shape() -> dict:
     except Exception:
         log.debug("Telemetry could not read config shape", exc_info=True)
     try:
-        agents_dir = _REPO / "agents"
+        from condor.memory.paths import iter_agent_slugs, resolve_agent_file
+
         shape["agent_count"] = sum(
-            1 for p in agents_dir.iterdir() if (p / "AGENT.md").is_file()
+            1
+            for slug in iter_agent_slugs()
+            if resolve_agent_file(slug, "AGENT.md") is not None
         )
     except Exception:
         pass

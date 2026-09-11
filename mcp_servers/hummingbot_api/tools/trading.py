@@ -4,7 +4,7 @@ Trading operations business logic.
 This module provides the core business logic for trading operations including
 managing positions and setting account configurations.
 
-For order placement and cancellation, use `manage_executors` with `order_executor` type.
+For order placement use `create_order_executor`; to cancel, use `stop_executor`.
 """
 
 import re

@@ -20,10 +20,8 @@ import {
 } from "@/components/executor/ExecutorSuccessModal";
 import { LPConfigPanel } from "@/components/executor/LPConfigPanel";
 import { useLpConfig } from "@/components/executor/lp-config";
-import {
-  OrderConfigPanel,
-  useOrderConfig,
-} from "@/components/executor/OrderConfigPanel";
+import { OrderConfigPanel } from "@/components/executor/OrderConfigPanel";
+import { useOrderConfig } from "@/components/executor/order-config";
 import { TradeBottomPane } from "@/components/trade/TradeBottomPane";
 import { TradeChart, type ChartPriceAxis } from "@/components/trade/TradeChart";
 import { useDexUpstream } from "@/hooks/useDexUpstream";
@@ -31,19 +29,22 @@ import { useMainControllerData } from "@/hooks/useMainControllerData";
 import { usePairBalances } from "@/hooks/usePairBalances";
 import { useResizeDrag } from "@/hooks/useResizeDrag";
 import { useServer } from "@/hooks/useServer";
+import {
+  OWNER_ONLY_HINT,
+  useServerPermission,
+} from "@/hooks/useServerPermission";
 import { useCondorWebSocket } from "@/hooks/useWebSocket";
 import { api, type DexTokenConflict } from "@/lib/api";
 import { connectorCapabilities } from "@/lib/connector-capabilities";
 import { LOOKBACK_OPTIONS } from "@/lib/gridExecutor";
+import { executorsQuery } from "@/lib/queryClient";
+import { DEX_DEPTH_COLLAPSED_KEY } from "@/lib/sessionState";
 
 type Tab = "order" | "lp";
 
 // Only the fine intervals: 1h/4h/1d candles read as duplicates of the 1h/1d
-// lookback buttons sitting next to them, and a 3-day window of 15m candles
-// already fits GeckoTerminal's 1000-candle cap.
+// lookback buttons sitting next to them.
 const DEX_INTERVALS = ["1m", "5m", "15m"];
-
-const DEPTH_KEY = "condor.dex.depth-collapsed";
 
 /**
  * One pool, and everything you can do in it.
@@ -56,6 +57,10 @@ const DEPTH_KEY = "condor.dex.depth-collapsed";
  */
 export function DexPool() {
   const { server } = useServer();
+  // Replacing a token deletes the entry another token holds, so the backend
+  // gates that one flag on ownership (condor/web/routes/dex.py). Read the same
+  // answer here so a trader is told, rather than handed a 403.
+  const { isOwner } = useServerPermission();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { network = "", address = "" } = useParams();
@@ -64,12 +69,16 @@ export function DexPool() {
   const upstream = useDexUpstream(server ?? null);
 
   const [wantedTab, setTab] = useState<Tab>("order");
-  // 5m over 3 days, matching the executor pages. Not 1m: GeckoTerminal caps a
-  // response at 1000 candles, so 1m can only ever fill ~16h of this window (the
-  // buffer then sits permanently short and re-backfills), while 5m covers the
-  // full 3 days in one request and halves the poll rate on a shared budget.
-  const [interval, setIntervalValue] = useState("5m");
-  const [lookbackSeconds, setLookbackSeconds] = useState(3 * 86400);
+  // 15m over 7 days: the widest window one GeckoTerminal request pays for, at
+  // the coarsest interval that still shows a pool's intraday shape. One request
+  // is 1000 candles at most (see `gecko-candles.ts`), so 15m spans ~10 days
+  // while 1m fills only ~16h of any window — the buffer then sits permanently
+  // short and re-backfills. Coarser candles also earn a slower live poll (the
+  // gecko budget is shared by every chart on the dashboard; see
+  // `_gecko_poll_interval` in condor/web/streams/candles.py), so this default
+  // costs a third of what 5m did and shows twice the history.
+  const [interval, setIntervalValue] = useState("15m");
+  const [lookbackSeconds, setLookbackSeconds] = useState(7 * 86400);
   const [rightPanelWidth, setRightPanelWidth] = useState(288);
   const [bottomPaneHeight, setBottomPaneHeight] = useState(200);
   const [selectedExecutorId, setSelectedExecutorId] = useState<string | null>(null);
@@ -78,7 +87,7 @@ export function DexPool() {
   const [priceAxis, setPriceAxis] = useState<ChartPriceAxis | null>(null);
   const [depthCollapsed, setDepthCollapsed] = useState(() => {
     try {
-      return localStorage.getItem(DEPTH_KEY) === "1";
+      return localStorage.getItem(DEX_DEPTH_COLLAPSED_KEY) === "1";
     } catch {
       return false;
     }
@@ -86,7 +95,7 @@ export function DexPool() {
 
   useEffect(() => {
     try {
-      localStorage.setItem(DEPTH_KEY, depthCollapsed ? "1" : "0");
+      localStorage.setItem(DEX_DEPTH_COLLAPSED_KEY, depthCollapsed ? "1" : "0");
     } catch {
       /* private mode; the column just forgets */
     }
@@ -324,7 +333,9 @@ export function DexPool() {
     onSuccess: (data) => {
       active.save();
       setSuccessId(data.executor_id);
-      queryClient.invalidateQueries({ queryKey: ["executors", server, "main", pair] });
+      queryClient.invalidateQueries({
+        queryKey: executorsQuery(server, { controllerId: "main", pair }).queryKey,
+      });
       queryClient.invalidateQueries({ queryKey: ["consolidated-positions", server] });
       setSelectedExecutorId(data.executor_id);
     },
@@ -436,8 +447,9 @@ export function DexPool() {
                     replace: true,
                   })
                 }
-                disabled={addTokenMutation.isPending}
-                className="rounded border border-amber-500/40 px-2 py-0.5 font-medium text-[var(--color-yellow)] hover:bg-amber-500/20 disabled:opacity-50"
+                disabled={addTokenMutation.isPending || !isOwner}
+                title={isOwner ? undefined : OWNER_ONLY_HINT}
+                className="rounded border border-amber-500/40 px-2 py-0.5 font-medium text-[var(--color-yellow)] hover:bg-amber-500/20 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 Replace
               </button>

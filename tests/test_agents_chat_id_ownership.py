@@ -1,9 +1,8 @@
 """Ownership gate on body-supplied ``chat_id`` push targets (SEC-198).
 
-``/agents/notify``, ``/agents/{slug}/delegate``, ``/agents/{slug}/consult`` and
-the strategy start routes all forward a ``chat_id`` from the request body to
-outbound Telegram sends (directly, or via the delegation's completion notice,
-the consult's confirmation prompts, or the engine's tick notifications). The
+``/agents/notify``, ``/agents/{slug}/delegate`` and the strategy start routes all
+forward a ``chat_id`` from the request body to outbound Telegram sends (directly,
+or via the delegation's completion notice or the engine's tick notifications). The
 routes already refuse ``req.user_id`` impersonation; this pins the same rule for
 the outbound address: a caller reaches their own private chat for free, a group
 only when Telegram confirms they are a member, and anything unverifiable is
@@ -24,12 +23,10 @@ from condor.agents import delegate as delegate_module
 from condor.web.models import WebUser
 from condor.web.routes import agents as agents_routes
 from condor.web.routes.agents import (
-    ConsultRequest,
     DelegateRequest,
     NotifyRequest,
     StartStrategyRequest,
     _check_chat_access,
-    consult_agent,
     delegate_agent,
     notify_user,
 )
@@ -216,31 +213,6 @@ def test_delegate_accepts_the_callers_own_chat(monkeypatch, bot):
     assert started[0]["chat_id"] == CALLER.id
 
 
-# ── POST /agents/{slug}/consult ──
-
-
-def test_consult_refuses_a_foreign_chat(monkeypatch, bot):
-    from condor.agents import consult as consult_module
-
-    called = []
-
-    async def fake_run_consult(**kw):  # pragma: no cover - must not be reached
-        called.append(kw)
-        return "no"
-
-    monkeypatch.setattr(consult_module, "run_consult", fake_run_consult)
-
-    with pytest.raises(HTTPException) as exc:
-        asyncio.run(
-            consult_agent(
-                "scout", ConsultRequest(task="t", chat_id=FOREIGN_CHAT), user=CALLER
-            )
-        )
-
-    assert exc.value.status_code == 403
-    assert called == []
-
-
 # ── POST /agents/{slug}(/strategies/{sslug})/start ──
 
 
@@ -250,7 +222,7 @@ def test_start_refuses_a_foreign_notification_chat(monkeypatch, bot):
     monkeypatch.setattr(config_module, "load_full_config", lambda *a, **kw: {})
     agent = SimpleNamespace(slug="scout")
     strategy = SimpleNamespace(
-        slug="scalp", dir=".", default_config={}, default_trading_context=""
+        slug="scalp", home=".", default_config={}, default_trading_context=""
     )
 
     with pytest.raises(HTTPException) as exc:

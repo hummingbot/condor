@@ -7,9 +7,14 @@ and the sender to call one function. :func:`_build` is that function; neither
 verb has a scrubbing path of its own.
 
 Nothing here decides *whether* to share. That is
-:mod:`condor.sharing.consent`'s job, checked at the HTTP boundary where the
-caller's identity is known, and the answer in this feature is always "because a
-human pressed the button".
+:mod:`condor.sharing.consent`'s job, and :func:`submit` has two producers who
+ask it in two different places. The HTTP route checks
+:func:`consent.can_share` at the boundary, where the caller's identity is known
+and the answer is "because a human pressed the button". The sweep has no
+boundary and no human: :func:`condor.sharing.sweep.eligible` checks the
+narrower :func:`consent.can_sweep` before a conversation is ever offered here.
+Neither check lives in this module, so a third producer inherits nothing — its
+gate is its own to supply.
 """
 
 from __future__ import annotations
@@ -87,6 +92,13 @@ def _build(user_id: int, conv_id: str) -> tuple[ScrubbedShare, object]:
     preview honest: the pseudonyms in the dialog are salted with the same
     ``share_secret`` the sent payload will use, so the user is looking at the
     real bytes and not a rehearsal of them.
+
+    Scrubbing is handed to :func:`wire.bound` rather than run over the whole
+    read: the archive is moved, never deleted, so a long-lived conversation can
+    be many times the 1.5 MB a share may carry, and there is no point redacting
+    turns the cap is about to drop. ``counts`` therefore describes the turns
+    that ship — which is what the dialog's "N wallets were replaced" claims
+    about the bytes in front of the user — rather than the whole transcript.
     """
     meta = _meta(user_id, conv_id)
     consent.ensure_identity()
@@ -94,10 +106,9 @@ def _build(user_id: int, conv_id: str) -> tuple[ScrubbedShare, object]:
     turns = conversations.read_transcript(
         user_id, conv_id, limit=0, include_archive=True
     )
-    scrubbed, counts = scrub.scrub(
-        turns, secret=consent.share_secret(), user_id=user_id
-    )
-    bounded, truncated = wire.bound(scrubbed)
+    scrubber = scrub.scrubber(secret=consent.share_secret(), user_id=user_id)
+    bounded, truncated = wire.bound(turns, scrub_one=scrubber.turn)
+    counts = scrubber.counts
 
     return (
         ScrubbedShare(
@@ -109,9 +120,7 @@ def _build(user_id: int, conv_id: str) -> tuple[ScrubbedShare, object]:
             turns=bounded,
             counts=counts,
             truncated=truncated,
-            turns_omitted=max(
-                0, len(scrubbed) - len(bounded) + (1 if truncated else 0)
-            ),
+            turns_omitted=max(0, len(turns) - len(bounded) + (1 if truncated else 0)),
             revision=meta.share_revision,
             shared=bool(meta.share_id),
             share_id=meta.share_id,
@@ -206,6 +215,16 @@ def unshare(user_id: int, conv_id: str) -> bool:
     mean the UI shows "shared" for a conversation the user has already taken
     back, and the queue — not the meta — is what actually owes the server a
     request.
+
+    Revoking also **excludes** the conversation (CORR-231). Clearing the receipt
+    alone is not a revocation for a user at ``always``: it resets
+    ``share_turn_count`` to zero, which is precisely the state the sweep's
+    growth gate reads as "never sent", so the next tick would re-upload the same
+    transcript under a fresh ``share_id`` half an hour later. ``share_excluded``
+    is the one flag the sweep honours forever, and it is inert for users at
+    ``off`` or ``explicit`` — nothing was going to be taken from them anyway. The
+    way back in is the share dialog's *Include it*, which is a deliberate act
+    rather than an automatic one.
     """
     meta = _meta(user_id, conv_id)
     if not meta.share_id or not meta.share_delete_token:
@@ -227,6 +246,7 @@ def unshare(user_id: int, conv_id: str) -> bool:
         share_delete_token="",
         shared_at=None,
         share_turn_count=0,
+        share_excluded=True,
     )
     log.info("Queued an unshare for conversation %s", conv_id)
     return True
@@ -245,6 +265,13 @@ def unshare_all(user_id: int) -> int:
     queued with its own delete token and survives a restart exactly like a
     single one does. A conversation that fails is logged and the rest continue:
     a partial withdrawal is strictly better than an aborted one.
+
+    Each one is also excluded from the sweep, per :func:`unshare`. For a user
+    still at ``always`` that means the whole back catalogue stops being swept,
+    permanently and with no bulk way back — they just asked for all of it
+    deleted, so re-uploading any of it on the next tick would be the wrong
+    reading. Settings says so on the button, and an individual chat can be
+    re-included from its share dialog.
     """
     removed = 0
     for meta in conversations.list_conversations(user_id, limit=0):

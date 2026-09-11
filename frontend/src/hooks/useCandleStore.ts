@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 
 import type { CandleData } from "@/lib/api";
 import { candleChannelKey, candleStore } from "@/lib/candle-store";
@@ -93,4 +93,54 @@ export function useCandleStore(
   };
 
   return { candles, isStale, mergeCandles, setDuration };
+}
+
+/** The close of the newest candle, or null for an empty channel. */
+function lastCloseOf(candles: CandleData[]): number | null {
+  return candles[candles.length - 1]?.close ?? null;
+}
+
+/**
+ * The last close of a candle channel, and nothing else.
+ *
+ * `useCandleStore` hands back a fresh array on every frame, so a caller that
+ * wants one scalar re-renders its whole tree at candle-tick rate — once a
+ * second — for a number that usually hasn't moved. Reading the channel as an
+ * external store whose snapshot *is* the close leaves React to compare two
+ * numbers: an unchanged close costs a comparison instead of a render pass, and
+ * the snapshot is recomputed for the new channel the moment the key changes, so
+ * no market's price can outlive its pair.
+ *
+ * A null `server` means "no subscription", exactly as in `useCandleStore` —
+ * that is how a caller gates itself off the stream entirely (a venue whose
+ * price comes from REST has no reason to be on it).
+ */
+export function useLastClose(
+  server: string | null,
+  connector: string,
+  pair: string,
+  interval: string,
+  poolAddress?: string,
+): number | null {
+  const key = server ? candleChannelKey(server, connector, pair, interval, poolAddress) : "";
+
+  const subscribe = useCallback(
+    (onStoreChange: () => void) => {
+      if (!key) return () => {};
+      candleStore.subscribe(key);
+      const removeListener = candleStore.onUpdate(key, onStoreChange);
+      return () => {
+        removeListener();
+        candleStore.unsubscribe(key);
+      };
+    },
+    [key],
+  );
+
+  const getSnapshot = useCallback(
+    () => (key ? lastCloseOf(candleStore.getCandles(key)) : null),
+    [key],
+  );
+
+  return useSyncExternalStore(subscribe, getSnapshot);
 }

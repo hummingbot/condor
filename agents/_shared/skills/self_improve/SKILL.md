@@ -10,6 +10,8 @@ source: chat
 
 ## Self-Improve — Real-Time Reflex
 
+> **Scope**: reactive, in-conversation, single-turn. Fires immediately after a feedback moment — a correction, a stated preference, a missed step. For *proactive* systematic improvement of a skill (multi-round scenario testing loop), use `skill_optimizer` instead.
+
 Run this checklist immediately after any feedback moment. Do NOT accumulate and review at end of session (token-expensive and easy to forget).
 
 ### Checklist
@@ -26,30 +28,26 @@ Run this checklist immediately after any feedback moment. Do NOT accumulate and 
 **2. Is this a workflow pattern or missed step?**
 - e.g. "when asked to backtest, list available controllers first"
 - → First: `manage_skill(action="list")` — check if an existing skill covers it
-  - If yes: `manage_skill(action="read", name=...)` to confirm it is the same
-    pattern, then `manage_skill(action="edit", ...)` — update the existing one
-    - **If the read returns `inherited: true`**, the playbook lives in the
-      shared library and is read-only for you. `edit` will fail. To specialize
-      it, `create` a skill with the SAME name — it shadows the shared one for
-      you only. If the improvement is good for everyone, ask the user to have
-      the chat edit the published version instead of shadowing it.
-  - If no: `manage_skill(action="create", ...)` — create a new one
-- **Whose library?** A skill is written to the CALLER's library. Before creating,
-  decide who the pattern belongs to:
-  - It is about how *you* work → create it normally (no `agent` argument).
-  - You are the chat and the pattern belongs to a domain agent → pass
-    `agent="<agent_slug>"` so it lands in that agent's library. Skipping this is
-    the #1 cause of skills ending up on the wrong agent.
-  - It should apply to ALL agents → only the chat can publish: create it with
-    `shared=True`, which puts it in the shared library every assistant reads.
+  - If yes: `manage_skill(action="read", name=...)` to confirm, then `manage_skill(action="edit", ...)` to update it
+    - **If `inherited: true`**: the skill is shared and read-only. `create` a local skill with the same name to shadow it, or ask the user to have the chat edit the published version.
+  - If no: `manage_skill(action="create", ...)`
+- **Before writing the body**, read `skill_authoring` — it covers anatomy, scoping, routine linking, and companion files.
+- **Whose library?** Decide before creating: yours (no `agent`), a domain agent (`agent="slug"`), or all agents (`shared=True`). See `skill_authoring` for the full scoping rules.
 
 **3. Is this a one-off or session-specific detail?**
 - → Skip it. Don't pollute memory/skills with ephemeral context.
+
+### When to escalate to `skill_optimizer`
+A single reactive edit (step 2 above) is right for most feedback moments. Escalate to `skill_optimizer` when:
+- The user asks for systematic or automated improvement ("make it handle edge cases", "iterate on this skill")
+- The same gap has surfaced more than once across conversations
+- The skill is complex enough that a single edit may introduce new blind spots
+
+`skill_optimizer` runs a multi-round scenario-testing loop in the background — read it before triggering.
 
 ### Rules
 - Save in the moment, not at the end
 - One memory = one fact (no bundling)
 - Always check existing skills before creating a new one
-- Decide the OWNER before writing: memory is per-agent and cannot be shared;
-  skills are per-agent but the chat can publish one to all with `shared=True`
+- Decide the OWNER before writing
 - Shared skills land in every agent's context — publish deliberately

@@ -60,8 +60,22 @@ def in_namespace(name: str, ns: str) -> bool:
 
 
 def strip_deploy_suffix(name: str) -> str:
-    """Drop the ``-YYYYMMDD-HHMMSS`` a deploy appends, leaving the asked-for name."""
-    return _DEPLOY_SUFFIX_RE.sub("", name or "")
+    """Drop the ``-YYYYMMDD-HHMMSS`` a deploy appends, leaving the asked-for name.
+
+    **Every** suffix, not one. The stamp is appended per deploy, so redeploying a
+    name that already carries one produces a second:
+    ``pmm-king-btcbrl-20260903-181000-20260903-151237``. Every caller of this
+    compares a stripped name against another stripped name -- an instance
+    against a ledger base, a deployed bot against the deed index's key -- so a
+    single strip did not make the two sides disagree once, it made them disagree
+    from the first redeploy on, which is the bot that has been running longest.
+    """
+    base = name or ""
+    while True:
+        shorter = _DEPLOY_SUFFIX_RE.sub("", base)
+        if shorter == base:
+            return base
+        base = shorter
 
 
 def resolve_bot_name(
@@ -154,6 +168,29 @@ def read_owned(session_dir: Path | None) -> list[OwnedBot]:
         log.warning("BotLedger: unreadable %s", path)
         return []
     return sorted(_parse_bots(data).values(), key=lambda b: (b.since, b.base))
+
+
+def read_ledger_namespace(session_dir: Path | None) -> str:
+    """The scope a ledger recorded for itself, or ``""``.
+
+    ``owned_bots.json`` stores the namespace it was constructed with, and for a
+    run with no strategy behind it (a chat, a delegation, the dashboard) that
+    string is the *only* place the acting agent is written down: the directory
+    is named after a conversation, not after who was bound to it. FEAT-106's
+    index reads it back to answer "``condor.chat`` or ``brigado.chat``?".
+
+    Read rather than reconstructed by opening a :class:`BotLedger`, because a
+    reader has no business instantiating the writer — and because ``_load``
+    would happily create the object for a file that does not exist.
+    """
+    if session_dir is None:
+        return ""
+    path = Path(session_dir) / LEDGER_FILENAME
+    try:
+        data = json.loads(path.read_text()) or {}
+    except Exception:
+        return ""
+    return str(data.get("namespace", "") or "")
 
 
 def prior_session_bases(sessions_root: Path | None) -> set[str]:
@@ -292,6 +329,38 @@ class BotLedger:
         pending, self._pending_violations = self._pending_violations, []
         return pending
 
+    def forget(self, name: str) -> bool:
+        """Erase a bot from this session's record. True when something went.
+
+        The undo of :meth:`adopt`, and deliberately an *erase* rather than a
+        :meth:`release`: releasing closes the attribution window at a moment,
+        which is the right answer for a bot the session really did operate and
+        the wrong one for a bot it never should have been credited with. A
+        mis-claim has no window worth keeping — every hour of it is somebody
+        else's money on this strategy's book.
+
+        The legacy name goes with the entry. ``declared`` is matched on the
+        stripped base like everything else, because the claim route writes the
+        instance name it was handed and the ledger keys the base, and a
+        ``declared`` survivor would let :meth:`owns` re-adopt on the next tick
+        the entry this just removed.
+
+        Session-local by design: erasing here does not stop a *later* session
+        from inheriting the bot by lineage. That is what :func:`disown` is for,
+        and it is the entry point every caller outside the tick loop wants.
+        """
+        base = strip_deploy_suffix((name or "").strip())
+        if not base:
+            return False
+        changed = self.bots.pop(base, None) is not None
+        kept = [d for d in self.declared if strip_deploy_suffix(d) != base]
+        if len(kept) != len(self.declared):
+            self.declared = kept
+            changed = True
+        if changed:
+            self._save()
+        return changed
+
     def _record(self, name: str, origin: str, now: float | None) -> None:
         base = strip_deploy_suffix((name or "").strip())
         if not base:
@@ -352,3 +421,107 @@ class BotLedger:
             atomic_write_json(path, self.to_dict(), indent=2)
         except Exception:
             log.warning("BotLedger: could not write %s", path, exc_info=True)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Disowning — taking a bot off a strategy, and making it stay off
+# ──────────────────────────────────────────────────────────────────────
+
+#: The strategy-level set of bots this strategy is *not* to be credited with.
+#: Lives beside ``sessions/``, not inside one, because "this strategy does not
+#: own that bot" is a fact about the strategy: a per-session flag would be
+#: inherited around by the very lineage rule it exists to stop, and a new
+#: session would start with an empty one and re-adopt on its first tick.
+DISOWNED_FILENAME = "disowned_bots.json"
+
+
+def read_disowned(strategy_home: Path | None) -> set[str]:
+    """Bases this strategy has been told it does not own.
+
+    Empty for every strategy that has never disowned anything, which is almost
+    all of them — the file is written only by :func:`disown`.
+    """
+    if strategy_home is None:
+        return set()
+    path = Path(strategy_home) / DISOWNED_FILENAME
+    try:
+        data = json.loads(path.read_text()) or {}
+    except Exception:
+        return set()
+    return {str(b) for b in (data.get("bases") or []) if b}
+
+
+def _write_disowned(strategy_home: Path, bases: Iterable[str]) -> None:
+    path = Path(strategy_home) / DISOWNED_FILENAME
+    try:
+        atomic_write_json(path, {"bases": sorted(set(bases))}, indent=2)
+    except Exception:
+        log.warning("disowned: could not write %s", path, exc_info=True)
+
+
+def disown(strategy_home: Path, name: str) -> dict[str, Any]:
+    """Take a bot away from a strategy — in every session, and for good.
+
+    The counterpart of the claim route, and it has to do two things rather than
+    one, because there are two places a strategy's ownership of a bot is
+    written down and deleting only the first is what makes an unassign silently
+    undo itself on the next restart:
+
+    1. **The ledgers.** Every session's ``owned_bots.json``, not just the newest
+       one. Attribution reads the ``bots`` map of each session directly, and
+       :func:`prior_session_bases` — the lineage rule a non-enforcing session
+       adopts by — walks *all* of them. A bot cleared from session 3 and left in
+       session 1 is re-adopted by session 4 the moment it boots, with a fresh
+       ``since``, which reads as a brand-new claim nobody made.
+
+    2. **The disowned set**, here. Erasing the ledgers cannot be enough on its
+       own: ``_adopt_running_bots`` re-derives ownership on the first tick from
+       the namespace, from lineage *and* from this session's own recorded
+       deploys (``actions.jsonl``), and that third source is a permanent record
+       of a real event — the strategy did deploy the bot. Nothing that reads a
+       deploy log can distinguish "we deployed this" from "we should be credited
+       with this", so the human's answer is stored separately and consulted
+       first.
+
+    Returns the base it acted on and the sessions it actually changed, so the
+    caller can say what happened instead of claiming a no-op worked.
+    """
+    base = strip_deploy_suffix((name or "").strip())
+    if not base:
+        return {"base": "", "sessions": []}
+
+    home = Path(strategy_home)
+    cleared: list[str] = []
+    sessions_root = home / "sessions"
+    if sessions_root.is_dir():
+        for session_dir in sorted(sessions_root.glob("session_*")):
+            if not session_dir.is_dir():
+                continue
+            # An empty namespace and ``enforced=None`` mean "recover from disk":
+            # this is a repair pass with no strategy config in hand, and it must
+            # not rewrite the scope fields it did not come to change.
+            ledger = BotLedger("", session_dir, enforced=None)
+            if ledger.forget(base):
+                cleared.append(session_dir.name)
+
+    _write_disowned(home, read_disowned(home) | {base})
+    return {"base": base, "sessions": cleared}
+
+
+def reown(strategy_home: Path, name: str) -> bool:
+    """Lift a disown so the bot can be owned again. True when one was lifted.
+
+    A claim is a person saying "this *is* ours", which is the same authority
+    that said it was not — so it wins, and the claim route calls this before it
+    adopts. Without it, claiming a bot you had previously unassigned would write
+    a ledger entry that the next boot's adoption pass quietly skips forever.
+    """
+    base = strip_deploy_suffix((name or "").strip())
+    if not base:
+        return False
+    home = Path(strategy_home)
+    bases = read_disowned(home)
+    if base not in bases:
+        return False
+    _write_disowned(home, bases - {base})
+    return True

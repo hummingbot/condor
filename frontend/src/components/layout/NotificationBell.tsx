@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Bell, Bot, CheckCheck, Terminal, Workflow, Zap } from "lucide-react";
 import { useNavigate } from "react-router-dom";
@@ -6,8 +6,10 @@ import { useNavigate } from "react-router-dom";
 import { AnchoredMenu } from "@/components/ui/AnchoredMenu";
 import { NOTIFICATIONS_KEY } from "@/hooks/useChatSocket";
 import { api, type AppNotification, type NotificationsResponse } from "@/lib/api";
+import { setAppBadge } from "@/lib/appBadge";
 import { useAuth } from "@/lib/auth";
 import { formatRelativeTime } from "@/lib/formatters";
+import { onPushNavigate } from "@/lib/push";
 
 const KIND_ICON: Record<string, typeof Bell> = {
   delegation: Workflow,
@@ -66,6 +68,20 @@ export function NotificationBell() {
 
   const items = data?.items ?? [];
   const unread = data?.unread ?? 0;
+
+  // The dock icon carries the same number as the bell (FEAT-082). Not a second
+  // source of truth: it is a second render of the count this component already
+  // holds, so it cannot drift from what the dropdown shows, and it follows the
+  // bell through the poll, a live socket write and marking everything read.
+  useEffect(() => setAppBadge(unread), [unread]);
+
+  // A click on an OS notification lands here too (FEAT-083). `sw.js` focuses
+  // the window it found and posts the link rather than calling `openWindow`,
+  // because a second window is a second live chat WebSocket for the same user
+  // — the runtime twin of the manifest's `navigate-existing`. This component is
+  // where it belongs: it is mounted on every route and it already owns what
+  // happens when someone opens a notification.
+  useEffect(() => onPushNavigate((link) => navigate(link)), [navigate]);
 
   const markRead = useMutation({
     mutationFn: (ids?: string[]) => api.markNotificationsRead(ids),

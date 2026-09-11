@@ -5,7 +5,7 @@ Two tools live here:
 - explore_gateway_clmm_pools: read-only pool discovery (list pools, get pool info)
 - manage_clmm: direct position operations (open, add, remove, close, collect fees, create pool)
 
-The managed path for normal LP work is `manage_executors` with `lp_executor`, which owns range
+The managed path for normal LP work is `create_lp_executor`, which owns range
 monitoring, rebalancing and close retries. manage_clmm is the direct path, and the only way to
 recover an orphaned position: once an executor has terminated it cannot be told to close anything,
 so the position has to be closed by address.

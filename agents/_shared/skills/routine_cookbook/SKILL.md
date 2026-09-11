@@ -84,10 +84,20 @@ A **one-off computation** is not. "What were SOL's hourly returns yesterday",
 "what is the spread between these two venues right now", "aggregate these
 executors by controller" — write the Python and call
 `run_code(code="...")`. It runs in the bot with exactly the primitives below
-(`context`, `client`, pandas, `ReportBuilder`, every `condor.*` module, and
-`condor.primitives` to find the rest), returns its `print` output and its
-`result`, and hands you the traceback to fix when it fails. No file, no `Config`
-class, no library entry.
+(`context`, `client`, pandas, `pandas_ta`, `ReportBuilder`, every `condor.*`
+module, and `condor.primitives` to find the rest), returns its `print` output and
+its `result`, and hands you the traceback to fix when it fails. No file, no
+`Config` class, no library entry.
+
+**Technical analysis: use `pandas_ta`, never hand-rolled math.** Condor pins the
+same version the hummingbot-api image runs (`pandas-ta>=0.4.71b` →
+`0.4.71b0`), so an RSI, EMA, ATR, MACD or Bollinger band computed in a routine
+is bit-for-bit the one a Hummingbot controller or a backtest computes. Writing
+your own EMA instead silently disagrees with the strategy you are analysing.
+Both call styles work — `pandas_ta.rsi(df["close"], length=14)` and the
+accessor `df.ta.macd(append=True)`. In 0.4.x the multi-output column names
+repeat the deviation, e.g. `BBP_20_2.0_2.0`, `MACD_12_26_9` — read the columns
+off the returned frame rather than assuming a 0.3.x name.
 
 Promote a snippet to a routine when you have run essentially the same thing a
 third time, or the moment it needs to be scheduled, shared, or visible to the

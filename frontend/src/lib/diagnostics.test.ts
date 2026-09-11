@@ -12,7 +12,8 @@
 
 import { describe, expect, it } from "vitest";
 
-import { redact } from "@/lib/diagnostics";
+import { areaForRoute, redact } from "@/lib/diagnostics";
+import { AREAS, describePage } from "@/lib/page-context";
 
 const HEX64 = "a".repeat(64);
 
@@ -126,5 +127,82 @@ describe("redact", () => {
     ].join("\n");
     const once = redact(text);
     expect(redact(once)).toBe(once);
+  });
+});
+
+/**
+ * The other half of a report's accuracy: `describePage` is the route table the
+ * `Page:` line and the dialog's default area are read from, and it drifted away
+ * from `App.tsx` once already — the two DEX pages, the newest in the app, filed
+ * as a raw pathname under "Dashboard (other)" (READ-236). These cases pin the
+ * table to the router: every route App.tsx actually renders a component for
+ * gets a name and an area, and nothing claims a path the router redirects.
+ */
+describe("describePage", () => {
+  it.each([
+    ["/dex", "DEX pools"],
+    ["/dex/solana/7qbRF6YsyGuLUVs6Y1q64bdVrfe4ZcUUz1JRdoVNUJnm", "DEX pool"],
+  ])("files %s under Gateway / DEX", (route, name) => {
+    const page = describePage(route);
+    expect(page.area).toBe("Gateway / DEX");
+    expect(areaForRoute(route)).toBe("Gateway / DEX");
+    expect(page.page).toContain(name);
+  });
+
+  it("names the network and the address of a pool", () => {
+    const page = describePage("/dex/solana/7qbRF6YsyGuLUVs6Y1q64bdVrfe4ZcUUz1JRdoVNUJnm");
+    expect(page.page).toContain("solana");
+    expect(page.page).toContain("7qbRF6YsyGuLUVs6Y1q64bdVrfe4ZcUUz1JRdoVNUJnm");
+  });
+
+  // Every path App.tsx renders a real component for, inside the shell that
+  // mounts the dialog and the error boundary. `/login` is deliberately absent:
+  // it lives outside `ProtectedRoute`, so no consumer of this module can run
+  // there.
+  it.each([
+    ["/", "Agents & chat"],
+    ["/portfolio", "Portfolio"],
+    ["/bots", "Bots & controllers"],
+    ["/bots/hummingbot-1", "Bots & controllers"],
+    ["/trade", "Trading & executors"],
+    ["/dex", "Gateway / DEX"],
+    ["/dex/solana/PoolAddr", "Gateway / DEX"],
+    ["/routines", "Routines & reports"],
+    ["/agents/scout", "Agents & chat"],
+    ["/agents/scout/strategies/grid", "Agents & chat"],
+    ["/settings", "Settings & connections"],
+  ])("gives %s a real area, never the catch-all", (route, area) => {
+    expect(describePage(route).area).toBe(area);
+    expect(describePage(route).area).not.toBe("Dashboard (other)");
+    expect(describePage(route).page).not.toBe(route);
+  });
+
+  // The drift runs the other way too: a case for a path the router answers with
+  // `<Navigate>` is dead code that reads as coverage.
+  it.each([
+    "/reports",
+    "/agents",
+    "/archived",
+    "/market",
+    "/executors",
+    "/executors/new",
+    "/executors/new-grid",
+  ])("claims no name for %s, which App.tsx redirects", (route) => {
+    // `/executors*` joined this list in FEAT-086: executors are a scope of the
+    // Bots browser, and every path under it is now a `<Navigate>`.
+    const page = describePage(route);
+    expect(page.page).toBe(route === "/agents" ? 'Agent detail ("")' : route);
+  });
+
+  it("only ever returns an area the issue templates offer", () => {
+    for (const route of ["/", "/dex", "/dex/a/b", "/nope", "/settings"]) {
+      expect(AREAS).toContain(describePage(route).area);
+    }
+  });
+
+  it("keeps the tab in the page name, and the query in the route", () => {
+    const page = describePage("/dex", "?tab=clmm");
+    expect(page.page).toBe('DEX pools · tab "clmm"');
+    expect(page.route).toBe("/dex?tab=clmm");
   });
 });

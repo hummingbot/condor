@@ -23,6 +23,7 @@ from condor.web.models import (
     DeployBotRequest,
     WebUser,
 )
+from condor.web.routes._deeds import record_ui_deed
 from condor.web.routes._errors import upstream_error
 from config_manager import get_config_manager
 
@@ -588,6 +589,11 @@ async def update_controller_config(
         )
         raise upstream_error("Failed to save controller config", e)
 
+    record_ui_deed(
+        user,
+        verb="manage_controllers:upsert",
+        summary=f"Update controller config '{config_id}' on {name}",
+    )
     return {"updated": True, "config_id": config_id, "result": result}
 
 
@@ -668,6 +674,13 @@ async def update_controller_source(
         )
         raise upstream_error("Failed to save controller source", e)
 
+    record_ui_deed(
+        user,
+        verb="manage_controllers:upsert",
+        summary=(
+            f"Update controller source '{controller_type}/{controller_name}' on {name}"
+        ),
+    )
     return {"updated": True, "result": result}
 
 
@@ -747,6 +760,11 @@ async def create_controller_config(
         )
         raise upstream_error("Failed to save controller config", e)
 
+    record_ui_deed(
+        user,
+        verb="manage_controllers:upsert",
+        summary=f"Save controller config '{config_id}' on {name}",
+    )
     return {"created": True, "config_id": config_id, "result": result}
 
 
@@ -768,6 +786,11 @@ async def delete_controller_config(
         )
         raise upstream_error("Failed to delete controller config", e)
 
+    record_ui_deed(
+        user,
+        verb="manage_controllers:delete",
+        summary=f"Delete controller config '{config_id}' on {name}",
+    )
     return {"deleted": True, "config_id": config_id, "result": result}
 
 
@@ -795,6 +818,11 @@ async def delete_controller(
         )
         raise upstream_error("Failed to delete controller", e)
 
+    record_ui_deed(
+        user,
+        verb="manage_controllers:delete",
+        summary=f"Delete controller '{controller_type}/{controller_name}' on {name}",
+    )
     return {
         "deleted": True,
         "controller_type": controller_type,
@@ -827,6 +855,17 @@ async def deploy_bot_endpoint(
         logger.exception("Failed to deploy bot '%s' on '%s'", body.bot_name, name)
         raise upstream_error("Failed to deploy bot", e)
 
+    # The one deed that also claims ownership: the summary names the bot and the
+    # subject is what ``owned_bots.json`` is keyed on, so a bot deployed from
+    # ``/bots`` is as attributable as one a tick deployed (FEAT-105).
+    record_ui_deed(
+        user,
+        verb="manage_bots:deploy",
+        summary=(
+            f"Deploy bot '{body.bot_name}' with controllers {body.controllers_config}"
+        ),
+        subject=body.bot_name,
+    )
     return result
 
 
@@ -854,6 +893,9 @@ async def stop_bot_endpoint(
         logger.exception("Failed to stop bot '%s' on '%s'", bot_name, name)
         raise upstream_error("Failed to stop bot", e)
 
+    record_ui_deed(
+        user, verb="manage_bots:stop_bot", summary=f"Bot '{bot_name}': stop_bot"
+    )
     return result
 
 
@@ -886,6 +928,11 @@ async def stop_controllers_endpoint(
         )
         raise upstream_error("Failed to stop controllers", e)
 
+    record_ui_deed(
+        user,
+        verb="manage_bots:stop_controllers",
+        summary=f"Bot '{bot_name}': stop_controllers {body.controller_names}",
+    )
     return result
 
 
@@ -915,6 +962,11 @@ async def start_controllers_endpoint(
         )
         raise upstream_error("Failed to start controllers", e)
 
+    record_ui_deed(
+        user,
+        verb="manage_bots:start_controllers",
+        summary=f"Bot '{bot_name}': start_controllers {body.controller_names}",
+    )
     return result
 
 
@@ -960,6 +1012,11 @@ async def update_bot_controller_config_endpoint(
         )
         raise upstream_error("Failed to save controller config", e)
 
+    record_ui_deed(
+        user,
+        verb="manage_bots:update_config",
+        summary=f"Update config '{config_id}' on bot '{bot_name}'",
+    )
     return {
         "updated": True,
         "config_id": config_id,

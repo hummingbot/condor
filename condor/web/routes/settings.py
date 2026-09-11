@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
 from urllib.parse import urlsplit
@@ -26,6 +25,7 @@ from condor.web.models import (
     WebUser,
 )
 from condor.web.routes._errors import upstream_error
+from condor.web.routes.servers import server_rows
 from config_manager import ServerPermission, get_config_manager
 
 logger = logging.getLogger(__name__)
@@ -62,41 +62,13 @@ async def _get_client(cm, server_name: str):
 
 @router.get("/servers", response_model=list[ServerInfo])
 async def list_settings_servers(user: WebUser = Depends(get_current_user)):
-    cm = get_config_manager()
-    accessible = cm.list_accessible_servers(user.id)
+    """The same listing ``GET /servers`` serves, under the settings prefix.
 
-    from condor.server_data_service import ServerDataType, get_server_data_service
-
-    sds = get_server_data_service()
-
-    # Fetch status for all servers concurrently (uses SDS cache, instant if warm)
-    async def _get_status(name: str) -> dict:
-        result = await sds.get_or_fetch(name, ServerDataType.SERVER_STATUS)
-        return result if isinstance(result, dict) else {}
-
-    statuses = await asyncio.gather(*[_get_status(name) for name in accessible])
-
-    # Which one the star should be filled on. Read once: the config manager falls
-    # back to the global default and then to the first server, so this is the
-    # server that actually answers, not only an explicit `chat_defaults` entry.
-    default_server = cm.get_chat_default_server(user.id)
-
-    results = []
-    for (name, cfg), status in zip(accessible.items(), statuses):
-        perm = cm.get_server_permission(user.id, name)
-        online = status.get("status") == "online"
-        results.append(
-            ServerInfo(
-                name=name,
-                host=cfg.get("host", ""),
-                port=cfg.get("port", 0),
-                online=online,
-                permission=perm.value if perm else "trader",
-                is_default=name == default_server,
-            )
-        )
-
-    return sorted(results, key=lambda s: (not s.online, s.name))
+    The settings page renders the very fields that endpoint builds (permission,
+    the default star, the shared-with line), so it reads the shared builder
+    rather than keeping a second copy that drifts (ARCH-285).
+    """
+    return await server_rows(user)
 
 
 @router.post("/servers")

@@ -30,6 +30,12 @@ export interface VenueTraits {
   hummingbotMarketData: boolean;
   /** This venue can take an `lp_executor` CLMM position. */
   clmmLp: boolean;
+  /**
+   * The account holds credentials for this venue, so an executor created here
+   * has something to execute against. False means the venue reached the list on
+   * its market data alone: every read works, nothing can be traded.
+   */
+  credentialed: boolean;
 }
 
 export interface ConnectorCapabilities {
@@ -45,6 +51,13 @@ export interface ConnectorCapabilities {
   hasRestPrice: boolean;
   /** Whether the LP tab is offered. */
   supportsLp: boolean;
+  /**
+   * Whether an executor can actually be created here. The only capability that
+   * rests on credentials rather than on market data — a view-only venue keeps
+   * its book, its rules and its strategies, and loses just the account to
+   * execute against.
+   */
+  canTrade: boolean;
 }
 
 /**
@@ -57,6 +70,10 @@ const UNKNOWN_VENUE: VenueTraits = {
   name: "",
   hummingbotMarketData: true,
   clmmLp: false,
+  // Credentialed, emphatically: this is the answer for every venue until the
+  // venues query resolves, and a `false` here would blur the Execute panel on
+  // every single page load before settling back a moment later.
+  credentialed: true,
 };
 
 /**
@@ -92,5 +109,28 @@ export function connectorCapabilities(
     hasTradingRules: traits.hummingbotMarketData,
     hasRestPrice: traits.hummingbotMarketData,
     supportsLp: traits.clmmLp,
+    canTrade: traits.credentialed,
   };
+}
+
+/**
+ * The venues the trade panel offers, credentialed ones first.
+ *
+ * Trade is for venues with an order book — whether or not the venue is
+ * decentralized: hyperliquid and xrpl belong here, solana-mainnet-beta does not.
+ * Everything Condor trades through Gateway lives on /dex instead, where the pool
+ * rather than the pair is the unit of navigation.
+ *
+ * The order is load-bearing twice over: it is the order the selector groups into
+ * `Your accounts` / `View only`, and the first entry is the panel's reset
+ * fallback — which should land on a venue you can trade whenever one exists.
+ * Within each group the server's order is kept, so this is a stable partition
+ * rather than a sort.
+ */
+export function orderBookVenues(venues: VenueTraits[]): string[] {
+  const offered = venues.filter((v) => v.hummingbotMarketData);
+  return [
+    ...offered.filter((v) => v.credentialed).map((v) => v.name),
+    ...offered.filter((v) => !v.credentialed).map((v) => v.name),
+  ];
 }

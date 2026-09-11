@@ -113,3 +113,19 @@ export function lpStateStyle(state: string): {
     bg: "var(--color-surface)",
   };
 }
+
+/**
+ * Where the price sits inside the range, as a 0–1 fraction, or `null`.
+ *
+ * The number a CLMM position is actually about: a range you are 95% of the way
+ * through is one swap from earning nothing, and no amount of reading two price
+ * strings makes that as obvious as a marker does.
+ *
+ * Lives here rather than beside one renderer because the bar above a pool's
+ * chart and the portfolio's liquidity table draw the same marker.
+ */
+export function rangeFraction(pos: LpPosition, price: number | null): number | null {
+  const { lowerPrice: lo, upperPrice: hi } = pos;
+  if (!lo || !hi || hi <= lo || !price || price <= 0) return null;
+  return Math.min(1, Math.max(0, (price - lo) / (hi - lo)));
+}

@@ -245,7 +245,7 @@ def _live_engine(session_dir, agent_dir):
     return SimpleNamespace(
         is_experiment=False,
         session_dir=session_dir,
-        strategy=SimpleNamespace(dir=agent_dir),
+        strategy=SimpleNamespace(home=agent_dir),
     )
 
 
@@ -289,7 +289,7 @@ def test_experiment_mode_skips_and_writes_nothing(monkeypatch, session_dir, tmp_
     experiment = SimpleNamespace(
         is_experiment=True,
         session_dir=session_dir,
-        strategy=SimpleNamespace(dir=tmp_path),
+        strategy=SimpleNamespace(home=tmp_path),
     )
     result = _journal_write(
         monkeypatch, experiment, text="thesis", section="thesis", tick=1
@@ -328,7 +328,7 @@ def _prompt(config, **kwargs):
         agent_key="claude-code",
         slug="grid",
         agent_slug="brigado",
-        dir=None,
+        home=None,
     )
     kwargs.setdefault("recent_decisions", "")
     return build_tick_prompt(

@@ -109,7 +109,12 @@ def test_three_slow_servers_resolve_in_one_timeout_not_three(monkeypatch):
 
 
 def test_all_online_response_is_unchanged(monkeypatch):
-    """Names, hosts, ports, online flags, permission and sort order hold."""
+    """Names, hosts, ports, online flags, permission and sort order hold.
+
+    ``shared_with`` joined the payload with FEAT-088 and is additive: it is
+    populated only for a server's owner, and this fixture's permission object is
+    not the real enum, so every row takes the empty branch.
+    """
     sds = FakeSDS(
         statuses={n: {"status": "online"} for n in three_servers()},
         delay=0,
@@ -124,6 +129,7 @@ def test_all_online_response_is_unchanged(monkeypatch):
             "online": True,
             "permission": "owner",
             "is_default": False,
+            "shared_with": [],
         },
         {
             "name": "bravo",
@@ -132,6 +138,7 @@ def test_all_online_response_is_unchanged(monkeypatch):
             "online": True,
             "permission": "owner",
             "is_default": False,
+            "shared_with": [],
         },
         {
             "name": "charlie",
@@ -140,6 +147,7 @@ def test_all_online_response_is_unchanged(monkeypatch):
             "online": True,
             "permission": "owner",
             "is_default": False,
+            "shared_with": [],
         },
     ]
 
@@ -227,3 +235,56 @@ def test_no_default_flags_nothing(monkeypatch):
     client = build_client(monkeypatch, FakeConfigManager(three_servers()), sds)
 
     assert not any(r["is_default"] for r in client.get("/servers").json())
+
+
+# ── The settings listing is this same listing (ARCH-285) ──
+
+
+def build_settings_client(monkeypatch, cm, sds):
+    """Mount only the settings router; it reads ``servers_routes.server_rows``."""
+    import condor.web.routes.settings as settings_routes
+
+    monkeypatch.setattr(servers_routes, "get_config_manager", lambda: cm)
+    monkeypatch.setattr(servers_routes, "get_server_data_service", lambda: sds)
+    app = FastAPI()
+    app.include_router(settings_routes.router)
+    app.dependency_overrides[get_current_user] = lambda: USER
+    return TestClient(app)
+
+
+def test_settings_servers_survives_a_raising_fetch(monkeypatch):
+    """The settings copy fetched unguarded, so one bad server 500'd the page."""
+    sds = FakeSDS(
+        statuses={n: {"status": "online"} for n in three_servers()},
+        delay=0,
+        raises=["bravo"],
+    )
+    client = build_settings_client(monkeypatch, FakeConfigManager(three_servers()), sds)
+
+    resp = client.get("/settings/servers")
+    assert resp.status_code == 200
+    assert {r["name"]: r["online"] for r in resp.json()} == {
+        "alpha": True,
+        "bravo": False,
+        "charlie": True,
+    }
+
+
+def test_both_server_listings_return_the_same_payload(monkeypatch):
+    """One builder, so the settings page can never render a staler shape."""
+    cm = FakeConfigManager(three_servers(), default="bravo")
+
+    def rows(build, path):
+        sds = FakeSDS(
+            statuses={
+                "alpha": {"status": "online"},
+                "bravo": {"status": "online"},
+                "charlie": None,
+            },
+            delay=0,
+        )
+        return build(monkeypatch, cm, sds).get(path).json()
+
+    assert rows(build_settings_client, "/settings/servers") == rows(
+        build_client, "/servers"
+    )

@@ -24,10 +24,15 @@ from condor.runtime import timeouts
 class _FakeStdin:
     """Subprocess stdin that plays the agent's side of the conversation."""
 
-    def __init__(self, *, answers_cancel: bool):
+    def __init__(self, *, answers_cancel: bool, cancel_delay: float = 0.0):
         self.answers_cancel = answers_cancel
+        # How long the agent takes to settle the turn after being asked to.
+        # Above ``prompt_cancel`` it models the real awkward case: an agent that
+        # does honour the cancel, but not before Stop has given up waiting.
+        self.cancel_delay = cancel_delay
         self.sent: list[dict] = []
         self.prompt_id: int | None = None
+        self.settled: set[int] = set()
         self.peer = None
         self._tasks: list[asyncio.Task] = []
 
@@ -44,10 +49,17 @@ class _FakeStdin:
 
     async def _reply_cancelled(self) -> None:
         """What a conforming agent does: settle the prompt as cancelled."""
+        req_id = self.prompt_id
+        if self.cancel_delay:
+            await asyncio.sleep(self.cancel_delay)
+        # A turn settles once, however many times it was asked to stop.
+        if req_id in self.settled:
+            return
+        self.settled.add(req_id)
         line = json.dumps(
             {
                 "jsonrpc": "2.0",
-                "id": self.prompt_id,
+                "id": req_id,
                 "result": {"stopReason": "cancelled"},
             }
         )
@@ -63,10 +75,10 @@ class _FakeProcess:
         self.returncode = None
 
 
-def _client(*, answers_cancel: bool) -> ACPClient:
+def _client(*, answers_cancel: bool, cancel_delay: float = 0.0) -> ACPClient:
     """An ACPClient wired to a fake subprocess — no spawn, real JSON-RPC peer."""
     client = ACPClient(command="fake-agent")
-    stdin = _FakeStdin(answers_cancel=answers_cancel)
+    stdin = _FakeStdin(answers_cancel=answers_cancel, cancel_delay=cancel_delay)
     stdin.peer = client._peer
     client._process = _FakeProcess(stdin)
     client._session_id = "sess-1"
@@ -182,7 +194,174 @@ def test_unanswered_cancel_falls_back_within_the_timeout(monkeypatch):
     assert session.is_busy is False
     assert session._lock.locked() is False
     assert client._current_req_id is None
-    assert client._peer._pending == {}
+    # The request stays pending on purpose. An agent that ignored the cancel
+    # may still be generating, and its settlement is the only signal that its
+    # chunks have stopped arriving — dropping the future here is what used to
+    # let the next turn open on top of this one.
+    assert client._unsettled_req is not None
+    assert set(client._peer._pending) == {client._unsettled_req}
+
+
+# ── the tail of one turn never opens the next one ──
+
+
+def _chunk(text: str) -> dict:
+    """One ``agent_message_chunk`` as the bridge sends it: no request id."""
+    return {"sessionUpdate": "agent_message_chunk", "content": {"text": text}}
+
+
+async def _drive(agen, into: list):
+    """Consume a prompt stream to its end, collecting events."""
+    async for event in agen:
+        into.append(event)
+
+
+def _said(events: list) -> str:
+    return "".join(e.text for e in events if isinstance(e, TextChunk))
+
+
+async def _finish(client: ACPClient, reason: str = "end_turn") -> None:
+    """Settle the live turn the way the agent does: answer its session/prompt."""
+    stdin = client._process.stdin
+    stdin.settled.add(stdin.prompt_id)
+    line = json.dumps(
+        {"jsonrpc": "2.0", "id": stdin.prompt_id, "result": {"stopReason": reason}}
+    )
+    await client._peer.handle_line(line, stdin)
+
+
+def test_a_turn_that_ignored_cancel_never_bleeds_into_the_next_one(monkeypatch):
+    """The reported bug: an answer that resumes inside the *following* answer.
+
+    A long turn is steered aside, the agent does not settle it, and it keeps
+    generating into the one event queue the session has. Because ACP
+    ``session/update`` carries no request id, the next turn used to read those
+    leftovers as its own opening words — the user saw the tail of a question
+    they had already moved on from, glued to the front of the new answer.
+    """
+    monkeypatch.setattr(
+        timeouts,
+        "TIMEOUTS",
+        replace(timeouts.TIMEOUTS, prompt_cancel=0.1, prompt_settle=0.2),
+    )
+    client = _client(answers_cancel=False)
+
+    async def scenario():
+        first: list = []
+        agen = client.prompt_stream("give me everything you have")
+        pending = asyncio.ensure_future(agen.__anext__())
+        await asyncio.sleep(0.05)
+        client._on_session_update("sess-1", _chunk("PART-1 of the long answer "))
+        first.append(await asyncio.wait_for(pending, timeout=5))
+
+        # The user redirects mid-answer. The agent ignores session/cancel.
+        await client.abort_prompt()
+        await _drive(agen, first)
+
+        # ...and keeps generating the turn nobody is listening to any more.
+        client._on_session_update("sess-1", _chunk("PART-2, the abandoned tail "))
+
+        second: list = []
+        try:
+            await _drive(
+                client.prompt_stream("actually, what's the SOL price?"), second
+            )
+        except RuntimeError as exc:
+            return first, second, str(exc)
+        return first, second, ""
+
+    first, second, error = asyncio.run(scenario())
+
+    assert _said(first) == "PART-1 of the long answer "
+    assert first[-1].stop_reason == "cancelled"
+    # The new question is refused out loud rather than answered with someone
+    # else's words in front of it.
+    assert _said(second) == ""
+    assert "still being written" in error
+    # Asked to stop twice: once by Stop, once by the turn that wants the queue.
+    assert client._process.stdin.methods().count("session/cancel") == 2
+
+
+def test_a_late_settle_lets_the_next_turn_through_clean(monkeypatch):
+    """The common case: the agent does settle, just not within Stop's budget.
+
+    Stop stays snappy (``prompt_cancel``) and the screen ends immediately; the
+    waiting is done by the next prompt (``prompt_settle``), which is the only
+    place it buys anything.
+    """
+    monkeypatch.setattr(
+        timeouts,
+        "TIMEOUTS",
+        replace(timeouts.TIMEOUTS, prompt_cancel=0.05, prompt_settle=5),
+    )
+    client = _client(answers_cancel=True, cancel_delay=0.2)
+
+    async def scenario():
+        first: list = []
+        agen = client.prompt_stream("give me everything you have")
+        pending = asyncio.ensure_future(agen.__anext__())
+        await asyncio.sleep(0.05)
+        client._on_session_update("sess-1", _chunk("PART-1 of the long answer "))
+        first.append(await asyncio.wait_for(pending, timeout=5))
+
+        await client.abort_prompt()  # falls back locally: 0.2s > 0.05s
+        await _drive(agen, first)
+
+        second: list = []
+        task = asyncio.create_task(
+            _drive(client.prompt_stream("actually, what's the SOL price?"), second)
+        )
+        # The gate holds the new turn until the old one settles for real.
+        await asyncio.sleep(0.3)
+        client._on_session_update("sess-1", _chunk("SOL is $200"))
+        await _finish(client)
+        await asyncio.wait_for(task, timeout=5)
+        return first, second
+
+    first, second = asyncio.run(scenario())
+
+    assert _said(first) == "PART-1 of the long answer "
+    assert _said(second) == "SOL is $200"
+    assert second[-1].stop_reason == "end_turn"
+    assert client._unsettled_req is None
+
+
+def test_walking_away_mid_answer_still_stops_the_agent():
+    """A consumer torn down mid-turn (WS drop, page reload) cancels at the agent.
+
+    ``prompt_stream`` used to unwind with the subprocess still generating and
+    nothing ever telling it to stop, which is the same leak arriving by a
+    different door — and one nobody could see, since the tab was gone.
+    """
+    client = _client(answers_cancel=True)
+
+    async def scenario():
+        events: list = []
+        agen = client.prompt_stream("give me everything you have")
+        pending = asyncio.ensure_future(agen.__anext__())
+        await asyncio.sleep(0.05)
+        client._on_session_update("sess-1", _chunk("half an answer"))
+        events.append(await asyncio.wait_for(pending, timeout=5))
+
+        await agen.aclose()  # the socket dropped: nobody is reading any more
+        await asyncio.sleep(0.05)
+        # The abandoned turn's last words, produced after everyone left.
+        client._on_session_update("sess-1", _chunk(" nobody asked for"))
+
+        after: list = []
+        task = asyncio.create_task(_drive(client.prompt_stream("still there?"), after))
+        await asyncio.sleep(0.05)
+        client._on_session_update("sess-1", _chunk("yes"))
+        await _finish(client)
+        await asyncio.wait_for(task, timeout=5)
+        return events, after
+
+    events, after = asyncio.run(scenario())
+
+    assert _said(events) == "half an answer"
+    assert "session/cancel" in client._process.stdin.methods()
+    # The next turn starts on an empty queue, not on the old turn's leftovers.
+    assert _said(after) == "yes"
 
 
 def test_abort_with_nothing_in_flight_is_a_no_op():

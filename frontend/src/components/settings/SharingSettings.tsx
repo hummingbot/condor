@@ -28,7 +28,8 @@ const CHOICES: { value: SharingState; label: string; detail: string }[] = [
   {
     value: "off",
     label: "Off",
-    detail: "Nothing is shared. The share button stays available if you want it.",
+    detail:
+      "Nothing is shared. The share button stays available if you want it.",
   },
   {
     value: "explicit",
@@ -96,6 +97,10 @@ export function SharingSettings() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: SHARES_KEY });
       queryClient.invalidateQueries({ queryKey: ["conversations"] });
+      // Same reason the purge below does it: unsharing one row also excludes
+      // that conversation, so an open chat header must stop saying it is
+      // shared without waiting for a reload.
+      queryClient.invalidateQueries({ queryKey: ["conversation-sharing"] });
     },
   });
 
@@ -140,8 +145,8 @@ export function SharingSettings() {
             Telemetry is anonymous counts the admin turns on once for this whole
             install. A shared conversation is <strong>content</strong>: only you
             can share one of yours, and by default only after reading the
-            redacted transcript we would send. You choose below whether that
-            stays one button press at a time.
+            transcript we would send, with its sensitive content redacted first.
+            You choose below whether that stays one button press at a time.
           </p>
           <p>
             Keys, wallet addresses, server names, accounts and file paths are
@@ -161,7 +166,8 @@ export function SharingSettings() {
             const selected = state === choice.value;
             // Always is the only answer that needs the install's permission:
             // it is the only one that sends anything on its own.
-            const blocked = choice.value === "always" && preference?.allowed === false;
+            const blocked =
+              choice.value === "always" && preference?.allowed === false;
             return (
               <button
                 key={choice.value}
@@ -204,8 +210,8 @@ export function SharingSettings() {
         )}
         {state === "always" && preference?.allowed === false && (
           <p className="mt-2 text-xs text-[var(--color-yellow)]">
-            Your answer is Always, but sharing is turned off for this install, so
-            nothing is going out.
+            Your answer is Always, but sharing is turned off for this install,
+            so nothing is going out.
           </p>
         )}
         {choose.isError && (
@@ -263,8 +269,13 @@ export function SharingSettings() {
 
         {shares.length > 0 && (
           <p className="mt-2 text-xs text-[var(--color-text-muted)]">
-            Unsharing deletes the copy on our side. Deleting a conversation here
-            unshares it first, so it never outlives the chat it came from.
+            Unsharing deletes the copy on our side, and takes that chat out of
+            automatic sharing for good — it will not be sent again on its own,
+            however much it grows. To put one back, open its share dialog from
+            the conversation list and use{" "}
+            <span className="text-[var(--color-text)]">Include it</span>.
+            Deleting a conversation here unshares it first, so it never outlives
+            the chat it came from.
           </p>
         )}
         {unshare.isError && (
@@ -284,13 +295,24 @@ export function SharingSettings() {
                 Unshare all {shares.length} conversations? Every copy we hold is
                 deleted. The chats themselves stay here, untouched.
               </p>
+              {/* The caveat this button earns: each one is also excluded from
+                  automatic sharing, and there is no bulk way back. Somebody who
+                  later wants Always to cover their archive again has to include
+                  the chats one at a time, so they are told before, not after. */}
+              <p className="mt-1 text-xs text-[var(--color-text-muted)]">
+                {state === "always"
+                  ? "All of them also stop being shared automatically, permanently. Turning Always back on will not cover them again — each one has to be included from its own share dialog."
+                  : "All of them are also taken out of automatic sharing, so turning Always on later will not cover them — each one has to be included from its own share dialog."}
+              </p>
               <div className="mt-2 flex gap-2">
                 <button
                   onClick={() => purge.mutate()}
                   disabled={purge.isPending}
                   className="flex items-center gap-1.5 rounded-md bg-[var(--color-red)] px-3 py-1 text-xs font-medium text-white disabled:opacity-60"
                 >
-                  {purge.isPending && <Loader2 className="h-3 w-3 animate-spin" />}
+                  {purge.isPending && (
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                  )}
                   Yes, delete everything I've shared
                 </button>
                 <button

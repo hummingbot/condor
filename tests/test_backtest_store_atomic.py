@@ -11,6 +11,7 @@ writer, no litter left behind, and UTF-8 on disk regardless of locale.
 
 from __future__ import annotations
 
+import gzip
 import json
 import os
 import threading
@@ -74,8 +75,8 @@ def test_index_survives_concurrent_writers_intact(tmp_path):
     # A torn index is unparseable; a reload that has to rebuild would mask it,
     # so read the bytes directly.
     on_disk = json.loads(store._index_path.read_text(encoding="utf-8"))
-    assert isinstance(on_disk, dict) and on_disk
-    assert all(isinstance(v, dict) and "server" in v for v in on_disk.values())
+    assert isinstance(on_disk, dict) and on_disk.get("tasks")
+    assert all(isinstance(v, dict) and "server" in v for v in on_disk["tasks"].values())
     assert _tmp_files(store._dir) == []
 
 
@@ -94,7 +95,9 @@ def test_writers_never_share_a_temp_path(tmp_path, monkeypatch):
     store.save_result("srv", "task-1", {"n": 2})
 
     assert len(seen) == len(set(seen))
-    assert not any(name == "task-1.tmp" or name == "_index.tmp" for name in seen)
+    assert not any(
+        name == "task-1.json.gz.tmp" or name == "_index.tmp" for name in seen
+    )
 
 
 def test_round_trip_is_utf8_regardless_of_locale(tmp_path):
@@ -103,7 +106,7 @@ def test_round_trip_is_utf8_regardless_of_locale(tmp_path):
 
     assert store.get_result("task-1")["note"] == "café ☕"
     # Decoded explicitly as UTF-8, not as whatever the reader's locale is.
-    raw = (store._dir / "task-1.json").read_bytes().decode("utf-8")
+    raw = gzip.decompress((store._dir / "task-1.json.gz").read_bytes()).decode("utf-8")
     assert json.loads(raw)["note"] == "café ☕"
 
 
@@ -113,5 +116,5 @@ def test_delete_still_removes_file_and_index_entry(tmp_path):
 
     assert store.delete_result("task-1") is True
     assert store.get_result("task-1") is None
-    assert not (store._dir / "task-1.json").exists()
-    assert json.loads(store._index_path.read_text(encoding="utf-8")) == {}
+    assert not (store._dir / "task-1.json.gz").exists()
+    assert json.loads(store._index_path.read_text(encoding="utf-8"))["tasks"] == {}

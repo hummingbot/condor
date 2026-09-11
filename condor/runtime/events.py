@@ -46,6 +46,10 @@ class EventType(str, Enum):
     # in front of it. Emitted only when a caller opted into waiting, so a
     # surface can say "waiting its turn" instead of showing a dead composer.
     QUEUED = "queued"
+    # The session was rebuilt before this turn because its configuration had
+    # changed since it spawned (FEAT-093). Carries the *names* of the parts that
+    # moved — never their values or their digests.
+    RELOADED = "reloaded"
 
 
 def serialize(value: Any) -> Any:
@@ -115,10 +119,19 @@ class RuntimeEvent(BaseModel):
                 type=EventType.TOOL_UPDATE,
                 session_key=session_key,
                 data={
+                    # ``input`` rides the update for the same reason the
+                    # dataclass has the field at all (FEAT-102): the ACP
+                    # adapter announces a call at ``content_block_start`` with
+                    # ``rawInput: {}`` and supplies the real arguments on the
+                    # following ``tool_call_update``. A projection that drops
+                    # them here loses them for every consumer downstream of
+                    # ``RuntimeEvent`` — which is how the chat transcript came
+                    # to record every ACP-bridged call with ``"input": null``.
                     "tool_call_id": event.tool_call_id,
                     "status": event.status,
                     "title": event.title,
                     "output": event.output,
+                    "input": serialize(event.input),
                 },
             )
         if isinstance(event, Heartbeat):
@@ -149,6 +162,19 @@ class RuntimeEvent(BaseModel):
     def queued(cls, session_key: str = "") -> "RuntimeEvent":
         """This turn is waiting for the one ahead of it to finish."""
         return cls(type=EventType.QUEUED, session_key=session_key, data={})
+
+    @classmethod
+    def reloaded(cls, parts: list[str], session_key: str = "") -> "RuntimeEvent":
+        """The session was rebuilt to pick up a configuration change.
+
+        ``parts`` names what moved — ``model``, ``identity``, ``tools``,
+        ``libraries``, ``server`` — and nothing else. The values behind the
+        ``tools`` part include the MCP servers' environment, API keys included,
+        so only the names ever cross this boundary.
+        """
+        return cls(
+            type=EventType.RELOADED, session_key=session_key, data={"parts": parts}
+        )
 
     @classmethod
     def done(

@@ -294,8 +294,7 @@ def _seed_agent_and_strategy(
     from condor.agents.agent import AgentStore
     from condor.agents.strategy import StrategyStore
 
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", agents_root)
-    monkeypatch.setattr(strategy_module, "_DATA_ROOT", agents_root)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(agents_root))
     AgentStore().create(name=agent_slug, created_by=created_by)
     StrategyStore().create(agent_slug=agent_slug, name=sslug, created_by=created_by)
 
@@ -502,7 +501,9 @@ def test_stop_all_stops_every_engine(tmp_path):
     assert sorted(stopped) == ["brigado.mm_1", "brigado.mm_2"]
     assert supervisor.all() == {}
     for d in dirs:
-        assert read_status(d)["state"] == LoopState.STOPPED
+        # SUSPENDED, not STOPPED: the process ended these, not their owner, and
+        # only that distinction lets the next boot honour ``restart_on_boot``.
+        assert read_status(d)["state"] == LoopState.SUSPENDED
 
 
 def test_for_strategy_filters_by_pair(tmp_path):

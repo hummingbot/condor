@@ -529,7 +529,7 @@ def test_every_agent_inherits_the_aomi_routines(monkeypatch):
     from condor import paths
     from routines.base import assistant_routines
 
-    monkeypatch.delenv(paths.AGENTS_ROOT_ENV, raising=False)
+    monkeypatch.delenv(paths.STOCK_AGENTS_ROOT_ENV, raising=False)
 
     available = assistant_routines("some-agent", force_reload=True)
 

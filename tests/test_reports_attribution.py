@@ -82,7 +82,7 @@ def test_mcp_runner_sends_bare_agent_slug_for_strategy(
 
     # Point both data roots (strategies live under agents/, routines are
     # resolved relative to the project root) at an isolated tmp tree.
-    monkeypatch.setattr(strategy_mod, "_DATA_ROOT", tmp_path / "agents")
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path / "agents"))
     monkeypatch.setattr(routines_base, "_PROJECT_ROOT", tmp_path)
 
     # A real strategy on disk so StrategyStore().get_by_key(...) resolves.

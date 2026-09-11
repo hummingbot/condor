@@ -373,7 +373,7 @@ def format_clmm_result(action: str, result: dict[str, Any]) -> str:
             f"Pool: {payload.get('pool_address')}\n"
             f"Tx: {payload.get('transaction_hash')}  Status: {payload.get('status')}\n"
             "The pool is created empty — add liquidity by opening a position "
-            "(action='open' or manage_executors lp_executor)."
+            "(action='open' or create_lp_executor)."
         )
 
     return f"{header}\n{payload}"

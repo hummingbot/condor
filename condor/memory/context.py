@@ -1,6 +1,6 @@
 """The domain memory/skills block every Agent opens with, built once.
 
-An Agent behaves the same whether it is chatted with or consulted, so the two
+An Agent behaves the same whether it is chatted with or delegated to, so the two
 prompt builders that stand at those doors — ``binding.agent_identity_context``
 and ``_shared.build_agent_context`` — must inject byte-identical sections. They
 used to hold their own copy of these literals; they now compose this one
@@ -21,7 +21,7 @@ def domain_context(agent_slug: str, user_id: int) -> list[str]:
     Returns zero, one or two sections — an empty index contributes nothing, and
     a store that cannot be read is skipped rather than allowed to break session
     start. Callers add their own prefix (identity header or bare instructions)
-    and suffix (nothing, or the consult request).
+    and suffix (nothing, or the delegated task).
     """
     sections: list[str] = []
 

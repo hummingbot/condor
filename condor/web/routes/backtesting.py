@@ -1,180 +1,145 @@
+"""The backtest archive, and nothing else.
+
+Three routes over local data. Launching a backtest is the ``backtest_chart``
+routine's job from every seat, the dashboard included (FEAT-076), so this module
+makes no call to the Hummingbot API at all: a run is submitted through
+``POST /api/v1/routines/run`` and read back from here once it has completed.
+"""
+
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
 
 from condor.backtest_store import get_backtest_store
-from condor.backtesting import coerce_controller_config, normalize_backtest_task
-from condor.web.auth import require_server_access
+from condor.backtesting import normalize_backtest_task
+from condor.web.auth import get_current_user
 from condor.web.models import WebUser
-from config_manager import get_config_manager
+from config_manager import ServerPermission, get_config_manager
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["backtesting"])
 
 
-class SubmitBacktestRequest(BaseModel):
-    config_id: str
-    start_time: int
-    end_time: int
-    backtesting_resolution: str = "1m"
-    trade_cost: float = 0.0002
+# ── Archive (server-agnostic) ──
+#
+# Not under ``/servers/{name}``: a backtest is a computation over candles, and
+# the server is only the box that ran it. Once listing reads the index instead
+# of every payload, scoping by server is a filter rather than a precondition --
+# so the archive spans every server the caller can reach and authorization
+# *filters* rather than gates. The per-server ``/saved`` pair these replace had
+# zero consumers.
 
 
-@router.post("/servers/{name}/backtesting/tasks")
-async def submit_backtest_task(
-    name: str,
-    body: SubmitBacktestRequest,
-    user: WebUser = Depends(require_server_access),
-):
+def _accessible_servers(user_id: int) -> set[str]:
     cm = get_config_manager()
+    return {
+        name
+        for name in cm.list_servers()
+        if cm.has_server_access(user_id, name, ServerPermission.TRADER)
+    }
 
-    client = await cm.get_client(name)
 
-    # Resolve config
-    config = await client.controllers.get_controller_config(body.config_id)
-    if not config:
+def _summary_entry(summary: dict) -> dict:
+    """A summary in the shape the task list already speaks.
+
+    The dashboard reads a run's parameters out of ``config.config``; rebuilding
+    that nesting here is what lets one renderer handle an archived run and a
+    run still in flight without branching, and it still costs ~1.6 KB because
+    the payload never enters it.
+    """
+    return {
+        "task_id": summary["task_id"],
+        "status": summary.get("status") or "completed",
+        "server": summary.get("server", ""),
+        "config": {
+            "config": {
+                "id": summary.get("config_id", ""),
+                "controller_name": summary.get("controller", ""),
+                "trading_pair": summary.get("trading_pair", ""),
+                "connector_name": summary.get("connector", ""),
+            },
+            "start_time": summary.get("start_time"),
+            "end_time": summary.get("end_time"),
+            "backtesting_resolution": summary.get("resolution", ""),
+            "trade_cost": summary.get("trade_cost"),
+        },
+        "metrics": summary.get("metrics") or {},
+        "has_payload": summary.get("has_payload", True),
+        "created_at": summary.get("created_at"),
+        "completed_at": summary.get("completed_at"),
+        "error": summary.get("error"),
+        "saved": True,
+    }
+
+
+@router.get("/backtesting/archive")
+async def list_backtest_archive(
+    server: str | None = None,
+    user: WebUser = Depends(get_current_user),
+):
+    store = get_backtest_store()
+    allowed = _accessible_servers(user.id)
+    # A summary with no server provenance belongs to no server's access list and
+    # so is reachable by nobody -- which is exactly how the per-server listing it
+    # replaces behaved, since no server name ever equalled "".
+    return {
+        "migrated": store.migrated,
+        "summaries": [
+            _summary_entry(s)
+            for s in store.list_summaries(server)
+            if s.get("server") in allowed
+        ],
+    }
+
+
+def _archived_or_404(task_id: str, user: WebUser) -> dict:
+    """The summary for ``task_id``, or 404 if the caller cannot reach its server.
+
+    404 rather than 403 on purpose: an id-addressed route that answers "you may
+    not see this" tells an unauthorized caller the run exists. That is the rule
+    SEC-197 established for the per-server reads these replaced, and this is now
+    the only place it lives: the server arrives from the record rather than from
+    the path, so the check has to read the summary to know whose run it is.
+    """
+    summary = get_backtest_store().get_summary(task_id)
+    if summary is None:
+        raise HTTPException(status_code=404, detail="Backtest not found")
+    server = summary.get("server") or ""
+    if not server or server not in _accessible_servers(user.id):
+        raise HTTPException(status_code=404, detail="Backtest not found")
+    return summary
+
+
+@router.get("/backtesting/archive/{task_id}")
+async def get_archived_backtest(
+    task_id: str,
+    user: WebUser = Depends(get_current_user),
+):
+    summary = _archived_or_404(task_id, user)
+    store = get_backtest_store()
+
+    # gunzip + parse of a payload that runs to 137 MB: off the loop, or this
+    # one chart open stalls the Telegram poller and every other request with it.
+    payload = await asyncio.to_thread(store.get_result, task_id)
+    if payload is None:
+        # Not "not found": the run is real and its metrics are right here. The
+        # UI has to be able to say "chart expired" rather than deny the run.
         raise HTTPException(
-            status_code=404, detail=f"Config '{body.config_id}' not found"
+            status_code=409,
+            detail={"reason": "payload_expired", "summary": _summary_entry(summary)},
         )
-
-    result = await client.backtesting.submit_task(
-        start_time=body.start_time,
-        end_time=body.end_time,
-        backtesting_resolution=body.backtesting_resolution,
-        trade_cost=body.trade_cost,
-        config=coerce_controller_config(config),
-    )
-    return result
+    return normalize_backtest_task({**payload, "task_id": task_id, "saved": True})
 
 
-@router.get("/servers/{name}/backtesting/tasks")
-async def list_backtest_tasks(
-    name: str,
-    user: WebUser = Depends(require_server_access),
-):
-    cm = get_config_manager()
-
-    store = get_backtest_store()
-
-    # Try to get live tasks from hummingbot-api
-    try:
-        client = await cm.get_client(name)
-        live_tasks = await client.backtesting.list_tasks()
-    except Exception:
-        live_tasks = []
-
-    # Merge with saved results
-    live_ids = (
-        {t["task_id"] for t in live_tasks} if isinstance(live_tasks, list) else set()
-    )
-    saved = store.list_results(name)
-
-    # Add saved results that aren't in live tasks
-    for entry in saved:
-        if entry["task_id"] not in live_ids:
-            live_tasks.append(
-                {
-                    "task_id": entry["task_id"],
-                    "status": "completed",
-                    "result": entry.get("result"),
-                    "config": entry.get("config"),
-                    "saved": True,
-                }
-            )
-
-    # Mark live completed tasks as saved if they are
-    if isinstance(live_tasks, list):
-        for task in live_tasks:
-            tid = task.get("task_id", "")
-            if store.get_result(tid):
-                task["saved"] = True
-            normalize_backtest_task(task)
-
-    return live_tasks
-
-
-@router.get("/servers/{name}/backtesting/tasks/{task_id}")
-async def get_backtest_task(
-    name: str,
+@router.delete("/backtesting/archive/{task_id}")
+async def delete_archived_backtest(
     task_id: str,
-    user: WebUser = Depends(require_server_access),
+    user: WebUser = Depends(get_current_user),
 ):
-    cm = get_config_manager()
-
-    store = get_backtest_store()
-
-    # Try live first
-    try:
-        client = await cm.get_client(name)
-        result = await client.backtesting.get_task(task_id)
-
-        # Auto-save completed results
-        if isinstance(result, dict) and result.get("status") == "completed":
-            store.save_result(name, task_id, result)
-            result["saved"] = True
-
-        return normalize_backtest_task(result)
-    except Exception:
-        pass
-
-    # Fallback to saved (only if the result belongs to this server)
-    saved = store.get_result(task_id)
-    if saved and saved.get("server") == name:
-        return normalize_backtest_task({**saved, "saved": True})
-
-    raise HTTPException(status_code=404, detail="Task not found")
-
-
-@router.delete("/servers/{name}/backtesting/tasks/{task_id}")
-async def delete_backtest_task(
-    name: str,
-    task_id: str,
-    user: WebUser = Depends(require_server_access),
-):
-    cm = get_config_manager()
-
-    store = get_backtest_store()
-    saved = store.get_result(task_id)
-    if saved is not None and saved.get("server") != name:
-        # Result belongs to another server; don't let this server delete it
-        raise HTTPException(status_code=404, detail="Task not found")
-    store.delete_result(task_id)
-
-    # Also try to delete from live
-    try:
-        client = await cm.get_client(name)
-        return await client.backtesting.delete_task(task_id)
-    except Exception:
-        return {"deleted": True}
-
-
-# ── Saved results endpoints ──
-
-
-@router.get("/servers/{name}/backtesting/saved")
-async def list_saved_results(
-    name: str,
-    user: WebUser = Depends(require_server_access),
-):
-
-    store = get_backtest_store()
-    return [normalize_backtest_task(entry) for entry in store.list_results(name)]
-
-
-@router.delete("/servers/{name}/backtesting/saved/{task_id}")
-async def delete_saved_result(
-    name: str,
-    task_id: str,
-    user: WebUser = Depends(require_server_access),
-):
-
-    store = get_backtest_store()
-    saved = store.get_result(task_id)
-    if saved is None or saved.get("server") != name:
-        raise HTTPException(status_code=404, detail="Saved result not found")
-    store.delete_result(task_id)
+    _archived_or_404(task_id, user)
+    get_backtest_store().delete_result(task_id)
     return {"deleted": True}

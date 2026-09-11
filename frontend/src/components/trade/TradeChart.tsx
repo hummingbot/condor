@@ -5,20 +5,42 @@ import { useCandleStore } from "@/hooks/useCandleStore";
 import { useRates } from "@/hooks/useRates";
 import { api, type ConsolidatedPosition } from "@/lib/api";
 import { candleChannelKey, candleStore } from "@/lib/candle-store";
-import type { ExtraLine, PickSlot } from "@/components/executor/types";
-import { getExecutorColor, type ExecutorOverlay } from "@/lib/executor-overlays";
-import { getThemeColors, pnlHexColor, sideColor } from "@/lib/theme-colors";
-import { escapeHtml, formatPriceSig } from "@/lib/formatters";
+import type { ChartLineSlot, ExtraLine, PickSlot } from "@/components/executor/types";
+import { getExecutorColor, renderOverlayTooltipHtml, type ExecutorOverlay } from "@/lib/executor-overlays";
+import { getThemeColors, pnlHexColor } from "@/lib/theme-colors";
+import { roundToPricePrecision } from "@/lib/formatters";
+import { createDragHitPrimitive, type DragTarget } from "./priceLineDrag";
+import { usePriceLineDrag } from "./usePriceLineDrag";
 
 type PickField = PickSlot | null;
 
-/** What each pick slot is called in the hint the chart shows while picking. */
-const PICK_LABELS: Record<PickSlot, string> = {
+/**
+ * What the chart's own three lines are called when a panel names none of them.
+ *
+ * A slot a panel minted for one of its extra lines has no entry here and needs
+ * none: the panel that invented the id is the only thing that knows what the
+ * price means, and says so in `lineLabels`.
+ */
+const PICK_LABELS: Record<ChartLineSlot, string> = {
   start: "start",
   end: "end",
   limit: "limit",
-  limit2: "lower limit",
 };
+
+/** The wording of the pick banner for whichever slot is armed. */
+function pickLabel(slot: PickSlot, lineLabels?: Partial<Record<PickSlot, string>>): string {
+  const named = lineLabels?.[slot] ?? PICK_LABELS[slot as ChartLineSlot];
+  // Last resort: the raw slot id. Reached only by a panel that armed a line it
+  // never labelled, which is a bug in that panel and reads like one.
+  return (named ?? slot).toLowerCase();
+}
+
+/**
+ * How far the pointer may drift between press and release and still count as a
+ * click. Past it the gesture was a pan — the chart scrolls on a pressed move —
+ * and none of the pane's click actions should fire.
+ */
+const CLICK_SLOP_PX = 4;
 
 /**
  * The chart's price mapping, and nothing else.
@@ -103,8 +125,9 @@ export function TradeChart({
   const chartRef = useRef<import("lightweight-charts").IChartApi | null>(null);
   const seriesRef = useRef<import("lightweight-charts").ISeriesApi<"Candlestick"> | null>(null);
   const initializedRef = useRef(false);
-  const crosshairPriceRef = useRef<number | null>(null);
-  // Exact price under the pointer (not snapped to candle close) — used by the measure tool
+  // Exact price under the pointer, never snapped to the hovered candle's close:
+  // the crosshair is free vertically, so this is the price the axis label shows
+  // and the only one a click or a measurement may report.
   const cursorPriceRef = useRef<number | null>(null);
   const crosshairTimeRef = useRef<number | null>(null);
   // ── Measure tool (Shift+click anchor → live % of range) ──
@@ -151,6 +174,24 @@ export function TradeChart({
   const overlayPriceLinesRef = useRef<import("lightweight-charts").IPriceLine[]>([]);
   const positionLinesRef = useRef<import("lightweight-charts").IPriceLine[]>([]);
 
+  // ── Drag a price line ──
+  //
+  // The grabbable lines, filled in further down where the prices are known, and
+  // read only at call time — so a price moving under the pointer never restages
+  // the hit test. The gesture is installed here, above the effect that creates
+  // the chart, so that on unmount its cleanup runs *first* and hands panning
+  // back to a chart that still exists.
+  const dragTargetsRef = useRef<DragTarget[]>([]);
+  const drag = usePriceLineDrag({
+    getContainer: () => containerRef.current,
+    getChart: () => chartRef.current,
+    getSeries: () => seriesRef.current,
+    getTargets: () => dragTargetsRef.current,
+    getPricePrecision: () => pricePrecision,
+    onPriceSet,
+    slopPx: CLICK_SLOP_PX,
+  });
+
   // ── Candle data from the singleton store (WS live + cached) ──
   const { candles, mergeCandles, setDuration } = useCandleStore(
     server,
@@ -177,12 +218,13 @@ export function TradeChart({
   }, [executorOverlays, minCandleTime, selectedExecutorId]);
 
   // ── REST backfill on pair/interval/lookback change ──
-  const backfillKeyRef = useRef("");
+  // The dependency array below is the whole gate: React re-runs this only when
+  // one of those six changes. A ref remembering the last key would add nothing
+  // in production and would break development, where StrictMode mounts the
+  // effect twice — the first cleanup throws the in-flight fetch away, and a ref
+  // that outlives the remount would make the second pass a no-op, leaving the
+  // chart with no history at all.
   useEffect(() => {
-    const backfillKey = `${server}:${connector}:${pair}:${interval}:${lookbackSeconds}:${poolAddress ?? ""}`;
-    if (backfillKey === backfillKeyRef.current) return;
-    backfillKeyRef.current = backfillKey;
-
     setDuration(lookbackSeconds);
 
     let cancelled = false;
@@ -242,10 +284,11 @@ export function TradeChart({
       seriesRef.current = series;
       setChartReady(true);
 
-      // Track crosshair price for click-to-set + executor tooltip
+      // Track the pointer's price/time for click-to-set, the measure tool and
+      // the executor tooltip
       chart.subscribeCrosshairMove((param) => {
         if (!param.point || !param.seriesData) {
-          crosshairPriceRef.current = null;
+          cursorPriceRef.current = null;
           crosshairTimeRef.current = null;
           if (tooltipRef.current) tooltipRef.current.style.display = "none";
           // Leave the measure box/badge frozen at their last position — a
@@ -253,18 +296,17 @@ export function TradeChart({
           // the pane edge doesn't make it vanish.
           return;
         }
-        const data = param.seriesData.get(series);
-        if (data && "close" in data) {
-          crosshairPriceRef.current = (data as { close: number }).close;
-        } else if (param.point.y !== undefined) {
-          const price = series.coordinateToPrice(param.point.y);
-          if (price !== null) {
-            crosshairPriceRef.current = price as number;
-          }
-        }
-        // Exact pointer price (measure tool needs sub-candle precision)
+        // `seriesData` is the bar at the crosshair's *time* and carries no
+        // vertical component, so its close would be the same price for every
+        // height inside one candle's column — it serves only as a last resort
+        // when the pane can't map the pixel back to a price at all.
         const cursorP = param.point.y !== undefined ? series.coordinateToPrice(param.point.y) : null;
-        cursorPriceRef.current = cursorP !== null && cursorP !== undefined ? (cursorP as number) : crosshairPriceRef.current;
+        if (cursorP !== null && cursorP !== undefined) {
+          cursorPriceRef.current = cursorP as number;
+        } else {
+          const data = param.seriesData.get(series);
+          cursorPriceRef.current = data && "close" in data ? (data as { close: number }).close : null;
+        }
         crosshairTimeRef.current = typeof param.time === "number" ? param.time : null;
 
         // ── Measure tool: live % of range from the anchor to the cursor ──
@@ -375,93 +417,10 @@ export function TradeChart({
           return;
         }
 
-        const o = bestOverlay;
-        const pnlClr = pnlHexColor(o.pnl);
-        const cvtPnl = convertPnlRef.current;
-        const cvtVal = convertValueRef.current;
-        const pnlStr = cvtPnl(o.pnl);
-        const pctStr = o.pnlPct !== 0 ? `${o.pnlPct > 0 ? "+" : ""}${(o.pnlPct * 100).toFixed(2)}%` : "";
-        const volStr = cvtVal(o.volume);
-        const feesStr = o.fees ? cvtVal(o.fees) : "";
-
-        // An LP position has no direction -- it is `RANGE` -- and the buy/sell
-        // normalization files everything that is not a buy under "sell", which
-        // labelled a live two-sided range position `SELL`. Neutral for that type.
-        const isRangeSide = o.type === "lp";
-        const sideLabel = isRangeSide ? "range" : o.side;
-        const sideClr = isRangeSide ? "#9ca3af" : sideColor(o.side);
-        const sideBg = isRangeSide
-          ? "rgba(156,163,175,0.15)"
-          : o.side === "buy"
-            ? "rgba(34,197,94,0.15)"
-            : "rgba(239,68,68,0.15)";
-        const statusBg = o.status?.toLowerCase() === "running" || o.status?.toLowerCase() === "active"
-          ? "rgba(34,197,94,0.15)" : "rgba(156,163,175,0.15)";
-        const statusClr = o.status?.toLowerCase() === "running" || o.status?.toLowerCase() === "active"
-          ? getThemeColors().green : "#9ca3af";
-
-        // Build config detail rows
-        const cfg = o.config || {};
-        const tripleBarrier: Record<string, unknown> = (() => {
-          const raw = cfg.triple_barrier_config;
-          if (!raw) return {};
-          if (typeof raw === "string") { try { return JSON.parse(raw); } catch { return {}; } }
-          return typeof raw === "object" ? (raw as Record<string, unknown>) : {};
-        })();
-
-        let detailRows = "";
-        const addRow = (label: string, value: string, color?: string) => {
-          detailRows += `<div style="display:flex;justify-content:space-between;gap:12px"><span style="color:#6b7994">${escapeHtml(label)}</span><span style="font-family:monospace;${color ? `color:${color}` : ""}">${escapeHtml(value)}</span></div>`;
-        };
-
-        // Range-box details. Any executor drawn as a box describes itself by its
-        // bounds, not by an entry→exit pair; only the labels differ per type.
-        if (o.gridBox) {
-          if (o.type === "lp") {
-            // startPrice is the box's upper edge (see computeLpOverlay).
-            addRow("Upper Price", formatPriceSig(o.gridBox.startPrice));
-            addRow("Lower Price", formatPriceSig(o.gridBox.endPrice));
-            if (cfg.lp_provider != null) addRow("Provider", String(cfg.lp_provider));
-          } else {
-            addRow("Start Price", formatPriceSig(o.gridBox.startPrice));
-            addRow("End Price", formatPriceSig(o.gridBox.endPrice));
-            if (o.gridBox.limitPrice) addRow("Limit Price", formatPriceSig(o.gridBox.limitPrice));
-          }
-        } else if (o.entryPrice && o.entryPrice > 0) {
-          addRow("Entry", formatPriceSig(o.entryPrice));
-          if (o.exitPrice && o.exitPrice > 0 && o.exitPrice !== o.entryPrice) {
-            addRow(o.status?.toLowerCase() === "running" ? "Current" : "Close", formatPriceSig(o.exitPrice));
-          }
-        }
-
-        if (cfg.leverage != null && Number(cfg.leverage) > 1) addRow("Leverage", `${cfg.leverage}x`);
-        if (cfg.total_amount_quote != null) addRow("Amount", cvtVal(Number(cfg.total_amount_quote)));
-        else if (cfg.amount != null && Number(cfg.amount) > 0) addRow("Amount", String(cfg.amount));
-
-        const tp = Number(tripleBarrier.take_profit || cfg.take_profit);
-        if (tp > 0 && tp !== -1) addRow("Take Profit", `${(tp * 100).toFixed(2)}%`, getThemeColors().green);
-        const sl = Number(cfg.stop_loss);
-        if (sl > 0 && sl !== -1) addRow("Stop Loss", `${(sl * 100).toFixed(2)}%`, getThemeColors().red);
-        if (cfg.keep_position != null) addRow("Keep Position", String(cfg.keep_position) === "true" ? "Yes" : "No");
-
-        tooltip.innerHTML = `
-          <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
-            <span style="font-weight:700;font-size:12px;font-family:monospace">${escapeHtml(o.executorId.slice(0, 10))}\u2026</span>
-            <span style="background:${sideBg};color:${sideClr};font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;text-transform:uppercase">${escapeHtml(sideLabel)}</span>
-            <span style="background:${statusBg};color:${statusClr};font-size:9px;font-weight:600;padding:1px 5px;border-radius:3px">${escapeHtml(o.status)}</span>
-          </div>
-          <div style="display:flex;align-items:center;gap:4px;margin-bottom:2px">
-            <span style="background:rgba(255,255,255,0.06);padding:1px 5px;border-radius:3px;font-size:10px;border:1px solid rgba(255,255,255,0.08)">${escapeHtml(o.type.toUpperCase())}</span>
-            ${o.closeType ? `<span style="font-size:10px;color:#6b7994">${escapeHtml(o.closeType)}</span>` : ""}
-          </div>
-          <div style="border-top:1px solid rgba(255,255,255,0.08);margin:6px 0;padding-top:6px;display:grid;grid-template-columns:1fr 1fr;gap:4px 16px">
-            <div><div style="color:#6b7994;font-size:9px;text-transform:uppercase;margin-bottom:1px">Net PnL</div><div style="font-weight:600;font-size:13px;color:${pnlClr};font-family:monospace">${pnlStr}</div></div>
-            <div><div style="color:#6b7994;font-size:9px;text-transform:uppercase;margin-bottom:1px">PnL %</div><div style="font-weight:600;font-size:13px;color:${pnlClr};font-family:monospace">${pctStr || "—"}</div></div>
-            <div><div style="color:#6b7994;font-size:9px;text-transform:uppercase;margin-bottom:1px">Volume</div><div style="font-family:monospace;font-size:11px">${volStr}</div></div>
-            <div><div style="color:#6b7994;font-size:9px;text-transform:uppercase;margin-bottom:1px">Fees</div><div style="font-family:monospace;font-size:11px">${feesStr || "—"}</div></div>
-          </div>
-          ${detailRows ? `<div style="border-top:1px solid rgba(255,255,255,0.08);margin-top:4px;padding-top:6px;font-size:11px;display:flex;flex-direction:column;gap:3px">${detailRows}</div>` : ""}
-        `;
+        tooltip.innerHTML = renderOverlayTooltipHtml(bestOverlay, {
+          formatValue: convertValueRef.current,
+          formatPnl: convertPnlRef.current,
+        });
         tooltip.style.display = "block";
 
         // Position tooltip using viewport-fixed coords (rendered via portal)
@@ -686,7 +645,11 @@ export function TradeChart({
         price: endPrice,
         color: getThemeColors().green,
         lineWidth: 2,
-        lineStyle: mod.LineStyle.Dashed,
+        // Solid, like `start`: the two are the same kind of thing — the bounds of
+        // the range being drawn — and a different style on one of them only ever
+        // read as a difference in kind. Limits stay dotted, which is the real
+        // distinction: a bound the executor works inside vs. a price it stops at.
+        lineStyle: mod.LineStyle.Solid,
         axisLabelVisible: true,
         title: lineLabels?.end ?? "End",
       });
@@ -759,6 +722,40 @@ export function TradeChart({
       }
     }
   }, [startPrice, endPrice, limitPrice, side, minSpread, totalAmountQuote, minOrderAmountQuote, activePickField, extraLines, lineLabels, chartReady]);
+
+  // ── Which of those lines can be grabbed ──
+  //
+  // The three the chart draws itself, plus every extra line a panel tagged with
+  // a slot (LP's lower limit). Published into the ref the hit test reads, so it
+  // always sees the list the last render produced.
+  const dragTargets = useMemo<DragTarget[]>(() => {
+    const targets: DragTarget[] = [];
+    if (startPrice > 0) targets.push({ slot: "start", price: startPrice });
+    if (endPrice > 0) targets.push({ slot: "end", price: endPrice });
+    if (limitPrice > 0) targets.push({ slot: "limit", price: limitPrice });
+    for (const el of extraLines ?? []) {
+      if (el.slot && el.price > 0) targets.push({ slot: el.slot, price: el.price });
+    }
+    return targets;
+  }, [startPrice, endPrice, limitPrice, extraLines]);
+  dragTargetsRef.current = dragTargets;
+
+  // ── Hover cursor over a draggable line ──
+  //
+  // A primitive that draws nothing: it exists so the library, which calls
+  // `hitTest` on every mouse move, hands the pane an `ns-resize` cursor over a
+  // grabbable line. The lines themselves stay ordinary price lines.
+  useEffect(() => {
+    const series = seriesRef.current;
+    if (!chartReady || !series) return;
+    const primitive = createDragHitPrimitive(() => dragTargetsRef.current);
+    series.attachPrimitive(primitive);
+    return () => {
+      // On unmount the chart is disposed by the init effect's cleanup, which
+      // runs first and takes the series with it.
+      try { series.detachPrimitive(primitive); } catch { /* chart already gone */ }
+    };
+  }, [chartReady]);
 
   // ── Executor overlays ──
   // `chartReady` is a dependency, not a guard for its own sake: lightweight-charts
@@ -839,8 +836,9 @@ export function TradeChart({
           ]);
           overlaySeriesRef.current.push(top);
 
+          // Solid, matching the top edge — both are grid bounds.
           const bottom = chart.addSeries(mod.LineSeries, {
-            color: boxColor, lineWidth: lineW, lineStyle: mod.LineStyle.Dashed,
+            color: boxColor, lineWidth: lineW,
             priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
           });
           bottom.setData([
@@ -1020,9 +1018,50 @@ export function TradeChart({
   }, []);
 
   // ── Click-to-set price / deselect executor / measure ──
-  const handleClick = (e: React.MouseEvent) => {
+  //
+  // A press-drag-release inside the pane is a chart pan, and the browser still
+  // reports it as a `click` on the container: the event fires on the common
+  // ancestor of press and release whatever the distance travelled. Bound to
+  // `onClick`, every pan would set a price or drop the executor selection. So
+  // the gesture is tracked by hand — press position recorded, release gated on
+  // having stayed put — and the modifier is read from the press, so releasing
+  // shift mid-gesture cannot switch which branch runs.
+  const pointerDownRef = useRef<{
+    x: number;
+    y: number;
+    button: number;
+    shiftKey: boolean;
+  } | null>(null);
+
+  // A press that lands on a price line arms `drag` (installed above, with the
+  // refs) alongside this gate rather than instead of it. The two split the
+  // gesture on the same slop: past it the press was a drag and the release is
+  // consumed, so the drop cannot re-fire the pick or the executor deselect;
+  // inside it the press was a click and every branch below runs as before.
+  const handlePointerDown = (e: React.PointerEvent) => {
+    drag.onPointerDown(e);
+    pointerDownRef.current = {
+      x: e.clientX,
+      y: e.clientY,
+      button: e.button,
+      shiftKey: e.shiftKey,
+    };
+  };
+
+  const handlePointerUp = (e: React.PointerEvent) => {
+    // A grab that actually travelled owns this release outright; one that never
+    // left the slop was a click after all, and falls through untouched.
+    if (drag.onPointerUp(e)) {
+      pointerDownRef.current = null;
+      return;
+    }
+    const down = pointerDownRef.current;
+    pointerDownRef.current = null;
+    if (!down || down.button !== 0) return;
+    if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > CLICK_SLOP_PX) return;
+
     // Shift+click drops the measure anchor; move the mouse to see the % of the range
-    if (e.shiftKey) {
+    if (down.shiftKey) {
       if (cursorPriceRef.current != null && crosshairTimeRef.current != null) {
         clearMeasure();
         measureAnchorRef.current = { price: cursorPriceRef.current, time: crosshairTimeRef.current };
@@ -1034,8 +1073,8 @@ export function TradeChart({
       clearMeasure();
       return;
     }
-    if (activePickField && crosshairPriceRef.current !== null) {
-      onPriceSet(activePickField, crosshairPriceRef.current);
+    if (activePickField && cursorPriceRef.current !== null) {
+      onPriceSet(activePickField, roundToPricePrecision(cursorPriceRef.current, pricePrecision));
       return;
     }
     // Click on chart background deselects executor
@@ -1050,12 +1089,12 @@ export function TradeChart({
         <div className="flex items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5">
           <p className="text-[10px] text-[var(--color-text-muted)]">
             Click on chart to set{" "}
-            {(lineLabels?.[activePickField] ?? PICK_LABELS[activePickField]).toLowerCase()}{" "}
+            {pickLabel(activePickField, lineLabels)}{" "}
             price
           </p>
           <span className="animate-pulse rounded bg-[var(--color-primary)]/20 px-2 py-0.5 text-xs text-[var(--color-primary)]">
             Pick mode:{" "}
-            {(lineLabels?.[activePickField] ?? PICK_LABELS[activePickField]).toLowerCase()}
+            {pickLabel(activePickField, lineLabels)}
           </span>
         </div>
       )}
@@ -1064,7 +1103,10 @@ export function TradeChart({
           ref={containerRef}
           className="absolute inset-0"
           style={{ cursor: activePickField ? "crosshair" : "default" }}
-          onClick={handleClick}
+          onPointerDown={handlePointerDown}
+          onPointerMove={drag.onPointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerCancel={drag.onPointerCancel}
         />
         {/* Measure box overlay — pure DOM, never touches chart series */}
         <div
@@ -1072,9 +1114,9 @@ export function TradeChart({
           className="pointer-events-none absolute z-10"
           style={{ display: "none", border: "1px dashed", borderRadius: 2 }}
         />
-        {/* Measure-tool discoverability hint */}
+        {/* Measure-tool and drag discoverability hint */}
         <div className="pointer-events-none absolute bottom-1 left-2 z-10 text-[9px] text-[var(--color-text-muted)] opacity-60">
-          ⇧+click: measure range
+          ⇧+click: measure range · drag a price line to move it
         </div>
         {/* Executor tooltip overlay — rendered via portal to escape overflow-hidden */}
         {createPortal(

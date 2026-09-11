@@ -12,7 +12,7 @@ import json
 
 import pytest
 
-from condor.acp.client import PromptDone, TextChunk
+from condor.acp.client import PromptDone, TextChunk, ToolCallEvent, ToolCallUpdate
 from condor.runtime import PromptRequest, SessionKey, SessionSpec
 from condor.runtime import client as runtime
 from condor.runtime import conversations
@@ -113,6 +113,48 @@ def test_list_is_newest_first_and_limited(conv_root):
     assert listed[0] == ids[-1], "most recently updated must sort first"
     assert set(listed) == set(ids)
     assert len(list_conversations(USER, limit=2)) == 2
+
+
+def test_list_parses_only_the_metas_it_returns(conv_root, monkeypatch):
+    """A limited listing costs a stat per conversation, not a parse (PERF-328).
+
+    The store is never pruned, so N grows for the life of the install; the
+    dashboard rail asks for 100 rows and its prewarm for 1, and both used to
+    read and validate every meta on disk to get them.
+    """
+    ids = [new_conversation(USER, WEB).id for _ in range(50)]
+
+    real_read_status = conversations.read_status
+    parsed: list[str] = []
+
+    def counting(session_dir, filename=conversations.META_FILENAME):
+        parsed.append(session_dir.name)
+        return real_read_status(session_dir, filename)
+
+    monkeypatch.setattr(conversations, "read_status", counting)
+
+    parsed.clear()
+    newest = list_conversations(USER, limit=1)
+    assert [m.id for m in newest] == [ids[-1]], "still the newest conversation"
+    assert parsed == [ids[-1]], "exactly one meta.json opened, not fifty"
+
+    parsed.clear()
+    assert len(list_conversations(USER, limit=5)) == 5
+    assert len(parsed) == 5
+
+    parsed.clear()
+    assert len(list_conversations(USER, limit=0)) == 50, "limit=0 still walks all"
+    assert len(parsed) == 50
+
+
+def test_an_unreadable_meta_is_skipped_by_a_limited_listing(conv_root):
+    """The newest conversation being half written must not eat a returned row."""
+    ids = [new_conversation(USER, WEB).id for _ in range(4)]
+    (_conv_dir(USER, ids[-1]) / conversations.META_FILENAME).write_text("{not json")
+
+    listed = [m.id for m in list_conversations(USER, limit=2)]
+
+    assert listed == [ids[-2], ids[-3]], "skipped, and the limit is still filled"
 
 
 def test_delete_removes_the_transcript(conv_root):
@@ -425,6 +467,170 @@ def test_recorder_keeps_tool_io_on_the_acp_path(conv_root):
     assert call["kind"] == "read"
     assert call["input"] == {"path": "config.py"}
     assert call["output"] == "PORT = 8080"
+
+
+def test_recorder_persists_arguments_that_arrive_late_on_an_acp_update(conv_root):
+    """The real ACP sequence, through both links of the chat chain (CORR-326).
+
+    ``claude-agent-acp`` announces a call at ``content_block_start`` while the
+    input JSON is still streaming — ``rawInput`` is routinely ``{}`` — and
+    carries the complete arguments on the following ``tool_call_update``
+    (FEAT-102). Built from the dataclasses through ``RuntimeEvent.from_acp``
+    rather than from hand-written payloads, because the projection is the link
+    that used to drop them: a transcript that records that the agent called
+    ``create_position_executor`` but not on what is not a trajectory.
+    """
+    meta = new_conversation(USER, WEB)
+    rec = Recorder(USER, meta.id, "open a position")
+
+    rec.observe(
+        RuntimeEvent.from_acp(
+            ToolCallEvent(
+                tool_call_id="call_1",
+                title="create_position_executor",
+                status="pending",
+                kind="other",
+                input={},  # streaming has not delivered the arguments yet
+            )
+        )
+    )
+    rec.observe(
+        RuntimeEvent.from_acp(
+            ToolCallUpdate(
+                tool_call_id="call_1",
+                status="completed",
+                input={"connector_name": "binance", "trading_pair": "SOL-USDC"},
+                output="executor started",
+            )
+        )
+    )
+    rec.flush()
+
+    call = read_transcript(USER, meta.id)[-1].tool_calls[0]
+    assert call["input"] == {"connector_name": "binance", "trading_pair": "SOL-USDC"}
+    assert call["status"] == "completed"
+    assert call["output"] == "executor started"
+
+
+def test_recorder_redacts_arguments_that_arrive_late(conv_root):
+    """Landing late buys no exemption from the redactor."""
+    meta = new_conversation(USER, WEB)
+    rec = Recorder(USER, meta.id, "connect the server")
+
+    rec.observe(
+        RuntimeEvent.from_acp(
+            ToolCallEvent(
+                tool_call_id="cfg", title="configure_server", status="pending", input={}
+            )
+        )
+    )
+    rec.observe(
+        RuntimeEvent.from_acp(
+            ToolCallUpdate(
+                tool_call_id="cfg",
+                status="completed",
+                input={"host": "localhost", "password": "barabit"},
+            )
+        )
+    )
+    rec.flush()
+
+    raw = (
+        conv_root / str(USER) / "conversations" / meta.id / "transcript.jsonl"
+    ).read_text()
+    assert "barabit" not in raw
+    call = read_transcript(USER, meta.id)[-1].tool_calls[0]
+    assert call["input"]["host"] == "localhost"
+    assert call["input"]["password"] == REDACTED
+
+
+def test_recorder_lets_a_late_update_name_a_call_the_announcement_did_not(conv_root):
+    """A title supplied on the update reaches disk under the on-disk spelling."""
+    meta = new_conversation(USER, WEB)
+    rec = Recorder(USER, meta.id, "what moved?")
+
+    rec.observe(
+        RuntimeEvent.from_acp(
+            ToolCallEvent(tool_call_id="t", title="", status="pending")
+        )
+    )
+    rec.observe(
+        RuntimeEvent.from_acp(
+            ToolCallUpdate(tool_call_id="t", status="completed", title="get_prices")
+        )
+    )
+    rec.flush()
+
+    assert read_transcript(USER, meta.id)[-1].tool_calls[0]["title"] == "get_prices"
+
+
+def test_recorder_does_not_let_a_later_empty_update_erase_what_arrived(conv_root):
+    """The non-erasing guard, on every field a later update can carry."""
+    meta = new_conversation(USER, WEB)
+    rec = Recorder(USER, meta.id, "deploy it")
+
+    rec.observe(
+        RuntimeEvent.from_acp(
+            ToolCallEvent(
+                tool_call_id="d",
+                title="manage_bots",
+                status="pending",
+                input={"action": "deploy"},
+            )
+        )
+    )
+    rec.observe(
+        RuntimeEvent.from_acp(
+            ToolCallUpdate(tool_call_id="d", status="completed", output="deployed")
+        )
+    )
+    rec.observe(RuntimeEvent.from_acp(ToolCallUpdate(tool_call_id="d")))
+    rec.flush()
+
+    call = read_transcript(USER, meta.id)[-1].tool_calls[0]
+    assert call["input"] == {"action": "deploy"}
+    assert call["title"] == "manage_bots"
+    assert call["output"] == "deployed"
+    assert call["status"] == "completed"
+
+
+def test_recorder_patches_a_repeated_announcement_instead_of_replacing_it(conv_root):
+    """One id is one call: a second announcement must not erase its result.
+
+    The recorder used to overwrite ``self._tools[call_id]`` wholesale, so a
+    call announced twice — which is exactly what the ACP adapter does — lost
+    whatever status and output had already been recorded for it.
+    """
+    meta = new_conversation(USER, WEB)
+    rec = Recorder(USER, meta.id, "read it")
+
+    rec.observe(
+        RuntimeEvent.from_acp(
+            ToolCallEvent(tool_call_id="r", title="Read", status="pending", kind="read")
+        )
+    )
+    rec.observe(
+        RuntimeEvent.from_acp(
+            ToolCallUpdate(tool_call_id="r", status="completed", output="PORT = 8080")
+        )
+    )
+    rec.observe(
+        RuntimeEvent.from_acp(
+            ToolCallEvent(
+                tool_call_id="r",
+                title="Read",
+                status="in_progress",
+                kind="read",
+                input={"path": "config.py"},
+            )
+        )
+    )
+    rec.flush()
+
+    calls = read_transcript(USER, meta.id)[-1].tool_calls
+    assert len(calls) == 1, "one tool_call_id is one recorded call"
+    assert calls[0]["output"] == "PORT = 8080"
+    assert calls[0]["input"] == {"path": "config.py"}
 
 
 def test_recorder_keeps_tool_io_on_the_pydantic_ai_path(conv_root):
@@ -850,7 +1056,7 @@ def bound_agent(tmp_path, monkeypatch):
     from condor.agents import agent as agent_module
     from condor.agents.agent import AgentStore
 
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path / "agents")
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path / "agents"))
     return AgentStore().create(
         name="Brigado",
         description="Domain agent",
@@ -1295,3 +1501,148 @@ def test_read_transcript_tail_skips_malformed_lines_like_the_full_read(conv_root
         "middle",
         "newest",
     ]
+
+
+# ── The order the run happened in (ARCH-330) ──
+
+
+def test_the_recorder_keeps_think_call_think_call_in_that_order(conv_root):
+    """The four steps of a real turn, in the order the model produced them.
+
+    ``thought`` and ``tool_calls`` cannot say this: the two reasoning runs are
+    one string there and the two calls are a flat list, so a reader is left
+    guessing whether the agent thought once before both calls or thought again
+    between them — which is the whole of what a trajectory is for.
+    """
+    meta = new_conversation(USER, WEB)
+    rec = Recorder(USER, meta.id, "how much cash?")
+
+    rec.observe(RuntimeEvent(type="thought", data={"text": "Check the book. "}))
+    rec.observe(
+        RuntimeEvent(
+            type="tool_call",
+            data={"tool_call_id": "t1", "title": "get_prices", "status": "pending"},
+        )
+    )
+    rec.observe(RuntimeEvent(type="thought", data={"text": "Now the balances."}))
+    rec.observe(
+        RuntimeEvent(
+            type="tool_call",
+            data={"tool_call_id": "t2", "title": "get_portfolio", "status": "pending"},
+        )
+    )
+    rec.observe(RuntimeEvent(type="text", data={"text": "You have $50."}))
+    rec.flush()
+
+    assert read_transcript(USER, meta.id)[-1].events == [
+        {"type": "thought", "text": "Check the book. "},
+        {"type": "tool", "id": "t1"},
+        {"type": "thought", "text": "Now the balances."},
+        {"type": "tool", "id": "t2"},
+    ]
+
+
+def test_the_run_is_a_projection_of_the_two_flat_fields(conv_root):
+    """Additive, not a replacement — every existing reader keeps its answer.
+
+    The reasoning in the steps concatenates back to ``thought`` byte for byte
+    and the tool steps name exactly the calls ``tool_calls`` holds, so nothing
+    downstream (``replay_context``, sharing, Telegram, an older client) has to
+    learn the new field to stay correct.
+    """
+    meta = new_conversation(USER, WEB)
+    rec = Recorder(USER, meta.id, "check")
+
+    for chunk in ("Weigh ", "the ", "spread. "):
+        rec.observe(RuntimeEvent(type="thought", data={"text": chunk}))
+    rec.observe(
+        RuntimeEvent(
+            type="tool_call",
+            data={"tool_call_id": "t1", "title": "get_prices", "status": "pending"},
+        )
+    )
+    rec.observe(RuntimeEvent(type="thought", data={"text": "Thin."}))
+    rec.flush()
+
+    turn = read_transcript(USER, meta.id)[-1]
+    steps = turn.events
+    assert "".join(s["text"] for s in steps if s["type"] == "thought") == turn.thought
+    assert [s["id"] for s in steps if s["type"] == "tool"] == [
+        call["id"] for call in turn.tool_calls
+    ]
+    assert [s["type"] for s in steps] == [
+        "thought",
+        "tool",
+        "thought",
+    ], "consecutive reasoning chunks are one step; a call between them starts another"
+
+
+def test_the_run_never_names_a_call_the_turn_does_not_hold(conv_root):
+    """One step per call, and only for calls that reached disk.
+
+    A repeat announcement patches the call in flight — the ACP bridge does this
+    routinely as arguments stream in — and must not put the same tool in the
+    run twice. An update for a call nobody announced creates nothing at all, so
+    it leaves no dangling step either.
+    """
+    meta = new_conversation(USER, WEB)
+    rec = Recorder(USER, meta.id, "read it")
+
+    rec.observe(
+        RuntimeEvent(
+            type="tool_call",
+            data={"tool_call_id": "t1", "title": "Read", "status": "pending"},
+        )
+    )
+    rec.observe(
+        RuntimeEvent(
+            type="tool_call",
+            data={
+                "tool_call_id": "t1",
+                "title": "Read",
+                "status": "in_progress",
+                "input": {"path": "config.py"},
+            },
+        )
+    )
+    rec.observe(
+        RuntimeEvent(
+            type="tool_update",
+            data={"tool_call_id": "ghost", "status": "completed", "output": "?"},
+        )
+    )
+    rec.flush()
+
+    turn = read_transcript(USER, meta.id)[-1]
+    assert turn.events == [{"type": "tool", "id": "t1"}]
+    assert [call["id"] for call in turn.tool_calls] == ["t1"]
+
+
+def test_a_turn_written_before_the_order_existed_still_reads(conv_root):
+    """The growth contract: an older line parses, and says so honestly.
+
+    An empty run is "the order was not recorded", which is what every turn on
+    disk today is — not "the agent did nothing". A reader falls back to the
+    flat fields for those, and they are still fully populated.
+    """
+    meta = new_conversation(USER, WEB)
+    _write_raw_transcript(
+        conv_root,
+        meta.id,
+        [
+            json.dumps(
+                {
+                    "role": "assistant",
+                    "text": "done",
+                    "thought": "thinking",
+                    "tool_calls": [{"id": "t1", "title": "get_prices"}],
+                }
+            )
+            + "\n"
+        ],
+    )
+
+    turn = read_transcript(USER, meta.id)[-1]
+    assert turn.events == []
+    assert turn.thought == "thinking"
+    assert turn.tool_calls[0]["title"] == "get_prices"

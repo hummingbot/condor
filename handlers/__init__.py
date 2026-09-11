@@ -172,10 +172,6 @@ def clear_all_input_states(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("routines_state", None)
     context.user_data.pop("routines_editing", None)
 
-    # Signals states
-    context.user_data.pop("signals_state", None)
-    context.user_data.pop("signals_editing", None)
-
     # Access share states
     context.user_data.pop("sharing_server", None)
     context.user_data.pop("awaiting_share_user_id", None)

@@ -6,8 +6,8 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from condor.pool_data import gecko_call
+from condor.preferences import get_active_server
 
-from ..user_preferences import get_active_server
 from ._shared import (
     OWNER_REQUIRED_MESSAGE,
     escape_markdown_v2,

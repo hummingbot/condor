@@ -11,6 +11,7 @@ These pin the two properties the derivation has to keep: it covers every module
 under ``handlers/``, and it orders children before parents.
 """
 
+import importlib
 import importlib.util
 from pathlib import Path
 
@@ -60,6 +61,26 @@ def test_no_module_in_the_reload_set_is_a_dead_name():
     names = [*main._EXTRA_RELOAD_MODULES, *main._discover_handler_modules()]
     dead = [n for n in names if importlib.util.find_spec(n) is None]
     assert not dead, f"names that resolve to nothing: {dead}"
+
+
+def test_every_module_in_the_reload_set_actually_imports():
+    """Resolving to a file is not enough — the module has to execute.
+
+    ``find_spec`` above only proves a file sits at that path; it never runs it.
+    ``handlers.signals`` passed that check for the whole of its life while
+    raising ``ModuleNotFoundError`` on its very first import line (it imported a
+    top-level ``signals`` package that has never existed in this repo), so it
+    rode the derived reload list as 1,323 lines of code no reload could ever
+    touch. Importing for real is what makes such a module visible (READ-254).
+    """
+    names = [*main._EXTRA_RELOAD_MODULES, *main._discover_handler_modules()]
+    broken = {}
+    for name in names:
+        try:
+            importlib.import_module(name)
+        except Exception as exc:  # noqa: BLE001 - the failure is the finding
+            broken[name] = f"{type(exc).__name__}: {exc}"
+    assert not broken, f"in the reload list but unimportable: {broken}"
 
 
 def test_children_reload_before_their_parents():

@@ -17,7 +17,7 @@ TABLE_COLUMNS = ["source", "operation", "kind", "args"]
 FOOTER = (
     "Reads return state or a quote and stage nothing; run them with the `aomi_read` "
     "routine or as `mode='operation'` dry runs. Execute an operation with "
-    "`manage_executors(action='create', executor_type='onchain_executor')`: "
+    "`create_onchain_executor` (or `create_lending_executor` for exact Aave plans): "
     "`mode='operation'` with `app`, `operation` and `arguments` for a listed builder; "
     "or `mode='calls'` with raw EVM calls built from a skill's instructions "
     "(`aomi_skill`) for every other protocol. Solana operations need "

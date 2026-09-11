@@ -13,7 +13,12 @@ from pydantic import BaseModel
 from condor import routine_hooks
 from condor.reports import list_reports
 from condor.routine_store import get_routine_store
-from condor.runtime import client
+from condor.runtime import client, wake
+from condor.runtime.wake import (
+    ON_COMPLETE_CHOICES,
+    ON_COMPLETE_NOTIFY,
+    ON_COMPLETE_RESUME,
+)
 from condor.web.auth import (
     check_server_access,
     get_current_user,
@@ -51,6 +56,15 @@ class RunRequestV2(BaseModel):
     # reports back to when it finishes (ARCH-089). Empty for the dashboard's own
     # calls, which have no conversation behind them.
     session_key: str = ""
+    # What that conversation gets when the run ends: "notify" (a line to read)
+    # or "resume" (the asking agent is woken with the outcome and continues).
+    # The dashboard never sends it — a human watching the page is the caller
+    # ``notify`` exists for.
+    on_complete: str = ON_COMPLETE_NOTIFY
+
+
+class OnCompleteRequest(BaseModel):
+    on_complete: str = ON_COMPLETE_NOTIFY
 
 
 class ScheduleRequestV2(BaseModel):
@@ -93,6 +107,25 @@ def _require_instance_access(inst: dict, user: WebUser) -> None:
         return
     if not _owns(inst, user):
         raise HTTPException(status_code=403, detail="Not your instance")
+
+
+def _bounded_on_complete(requested: str, conversation_id: str) -> str:
+    """``resume``, unless this conversation is already inside a wake turn.
+
+    The same depth-1 bound the delegate route holds, for the same reason and
+    with no rate limiter: a run submitted *from* a woken turn may not wake the
+    conversation again, so a routine that ends by starting another one cannot
+    drive an unbounded chain of model turns. Downgrading to ``notify`` still
+    delivers — the outcome reaches the transcript and the surface, only without
+    a turn behind it.
+    """
+    if requested == ON_COMPLETE_RESUME and wake.is_waking(conversation_id):
+        log.info(
+            "Forcing on_complete=notify: conversation %s is already mid-wake",
+            conversation_id,
+        )
+        return ON_COMPLETE_NOTIFY
+    return requested
 
 
 def _authorized_instance(instance_id: str, user: WebUser) -> dict:
@@ -192,7 +225,14 @@ async def run_routine_v2(
 ):
     """Execute a routine (supports names with slashes like agent/routine)."""
     check_server_access(user.id, body.server_name)
+    if body.on_complete not in ON_COMPLETE_CHOICES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"on_complete must be one of {list(ON_COMPLETE_CHOICES)}",
+        )
     store = get_routine_store()
+    conversation_id = await client.conversation_for_session(body.session_key)
+    on_complete = _bounded_on_complete(body.on_complete, conversation_id)
     try:
         instance_id = await store.execute(
             routine_name=body.routine_name,
@@ -200,12 +240,17 @@ async def run_routine_v2(
             server_name=body.server_name,
             user_id=user.id,
             agent=body.attribute_to,
-            conversation_id=await client.conversation_for_session(body.session_key),
+            conversation_id=conversation_id,
             session_key=body.session_key,
+            on_complete=on_complete,
         )
     except ValueError as e:
         raise HTTPException(404, str(e))
-    return {"instance_id": instance_id}
+    # The *bounded* value, not the requested one: a caller told "resume" when
+    # the depth-1 bound already forced "notify" would end its turn waiting for
+    # a wake that is never coming (CORR-287). Mirrors what
+    # ``set_instance_on_complete`` already reports.
+    return {"instance_id": instance_id, "on_complete": on_complete}
 
 
 @router.post("/start")
@@ -255,6 +300,40 @@ async def schedule_routine_v2(
     except ValueError as e:
         raise HTTPException(404, str(e))
     return {"instance_id": instance_id}
+
+
+@router.post("/instances/{instance_id}/on_complete")
+async def set_instance_on_complete(
+    instance_id: str,
+    body: OnCompleteRequest,
+    user: WebUser = Depends(get_current_user),
+):
+    """Change what the conversation behind a *running* instance gets when it ends.
+
+    The escape hatch for an agent whose blocking ``run`` timed out: rather than
+    poll the instance it asked for, it converts the run it already started into
+    one that wakes it. ``applied`` is false when the run has already finished —
+    the caller reads the result the ordinary way and nobody is woken, which is
+    the whole point of checking the status rather than setting the field blind.
+    """
+    inst = _authorized_instance(instance_id, user)
+    if body.on_complete not in ON_COMPLETE_CHOICES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"on_complete must be one of {list(ON_COMPLETE_CHOICES)}",
+        )
+    requested = _bounded_on_complete(
+        body.on_complete, inst.get("conversation_id") or ""
+    )
+    status = get_routine_store().set_on_complete(instance_id, requested)
+    if status is None:
+        raise HTTPException(404, "Instance not found")
+    return {
+        "instance_id": instance_id,
+        "status": status,
+        "applied": status == "running",
+        "on_complete": requested,
+    }
 
 
 @router.post("/instances/{instance_id}/stop")

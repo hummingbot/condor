@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import FileResponse, HTMLResponse
 
 from condor.reports import (
     delete_report,
     get_report,
     get_report_raw_html,
+    hydrate,
     list_reports,
     list_reports_grouped,
+    resolve_report_asset,
 )
 from condor.web.auth import get_current_user
 from condor.web.models import ReportsListResponse, ReportSummary, WebUser
@@ -80,6 +82,35 @@ async def get_reports_grouped(user: WebUser = Depends(get_current_user)):
     return list_reports_grouped(owner_id=_owner_filter(user))
 
 
+@router.get("/assets/{filename}")
+async def get_report_asset(filename: str):
+    """Serve a persisted report asset — today, the pinned plotly.js bundle.
+
+    Unauthenticated on purpose, and *not* a regression of SEC-112: SEC-112
+    removed a public mount that served report **content** (portfolio value,
+    PnL, positions). This serves vendored library bytes — byte-identical for
+    every user, carrying nothing about anyone's account, the same class of
+    asset ``/assets`` and the SPA catch-all already hand out. Reports reference
+    it instead of inlining 4.85 MB apiece (PERF-267), and an iframe with no
+    ``allow-same-origin`` cannot reach the dashboard JWT even given a plotly
+    CVE. What would re-open SEC-112 is reading a caller-supplied path, so the
+    name goes through ``resolve_report_asset``'s fixed allowlist.
+
+    It lives under ``/api/v1`` because that is the only prefix Vite proxies in
+    dev; it is also what makes a miss a real 404 rather than the SPA's
+    ``index.html``, which browsers refuse to execute as a classic script and
+    which would show up as a silently blank chart.
+    """
+    path = resolve_report_asset(filename)
+    if path is None:
+        raise HTTPException(404, "Asset not found")
+    return FileResponse(
+        path,
+        media_type="text/javascript",
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
+
+
 @router.get("/{report_id}", response_model=ReportSummary)
 async def get_report_detail(report_id: str, user: WebUser = Depends(get_current_user)):
     entry = _authorized_entry(report_id, user)
@@ -87,7 +118,11 @@ async def get_report_detail(report_id: str, user: WebUser = Depends(get_current_
 
 
 @router.get("/{report_id}/html", response_class=HTMLResponse)
-async def get_report_html(report_id: str, user: WebUser = Depends(get_current_user)):
+async def get_report_html(
+    report_id: str,
+    hydrate_assets: bool = Query(False, alias="hydrate"),
+    user: WebUser = Depends(get_current_user),
+):
     """Return a report's rendered HTML body to its owner (or an admin).
 
     Report bodies carry portfolio value, PnL, positions and strategy internals,
@@ -97,12 +132,20 @@ async def get_report_html(report_id: str, user: WebUser = Depends(get_current_us
     client fetches this with an ``Authorization`` header and hands the result to
     a sandboxed iframe via ``srcDoc``, which is why the body is returned inline
     rather than as a file the browser navigates to.
+
+    The body is served exactly as stored — charts reference the shared bundle
+    under ``/api/v1/reports/assets/``, which the frame resolves against the
+    parent origin and the browser caches once for every report. ``?hydrate=1``
+    inlines that bundle instead, and is for the one caller whose output leaves
+    the origin: the Download button, whose file is opened at ``file://``.
     """
     _authorized_entry(report_id, user)
     result = get_report_raw_html(report_id)
     if result is None:
         raise HTTPException(404, "Report not found")
     html, _filename = result
+    if hydrate_assets:
+        html = hydrate(html)
     return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
 
 

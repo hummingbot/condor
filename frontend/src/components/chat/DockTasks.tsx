@@ -2,7 +2,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Loader2, Square } from "lucide-react";
 import { useEffect, useState } from "react";
 
-import { DelegationHistory } from "@/components/agent/DelegationHistory";
+import { ActivityFeed } from "@/components/agent/ActivityFeed";
 import { DelegationSheet } from "@/components/agent/DelegationSheet";
 import {
   DELEGATION_STATUS,
@@ -121,8 +121,12 @@ export function DockTasks({
               </button>
             </div>
           )}
-          <DelegationHistory
+          {/* Pinned to background tasks: the dock is about what this
+              conversation handed off, and every consult it made would drown
+              that. The whole picture lives on an agent's Activity tab. */}
+          <ActivityFeed
             agent={historyAll ? undefined : agentSlug || undefined}
+            kind="delegate"
           />
         </div>
       ) : ordered.length === 0 ? (

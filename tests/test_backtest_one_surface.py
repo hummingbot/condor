@@ -17,6 +17,7 @@ and both are slow (kaleido) or write to the repo.
 
 import asyncio
 import io
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -61,6 +62,14 @@ _PAYLOAD = {
 }
 
 
+# Inside the store's payload retention window by construction
+# (``DEFAULT_RETENTION_DAYS`` in condor/backtest_store.py). This was a literal
+# date until it aged past that window and turned every test in this file red
+# exactly 30 days after it was written — a date that is always "yesterday"
+# cannot expire.
+_CREATED_AT = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+
+
 def _envelope(task_id: str, status: str = "completed", error=None) -> dict:
     return {
         "task_id": task_id,
@@ -72,7 +81,7 @@ def _envelope(task_id: str, status: str = "completed", error=None) -> dict:
             "trade_cost": 0.0002,
             "config": {"id": CONFIG_NAME, "controller_name": "ema_trend_v1"},
         },
-        "created_at": "2026-08-05T00:00:00+00:00",
+        "created_at": _CREATED_AT,
         "error": error,
         **({"result": _PAYLOAD} if status == "completed" else {}),
     }
@@ -211,9 +220,10 @@ def test_both_routines_are_published_to_every_assistant(monkeypatch):
     from routines.base import assistant_routines, discover_routines
 
     # A fact about the *shipped* library, so it reads the real ``agents/``
-    # rather than the suite's tmp one. Read-only: nothing here writes, which is
-    # the only condition under which dropping the isolation knob is allowed.
+    # rather than the suite's tmp roots. Read-only: nothing here writes, which
+    # is the only condition under which dropping the isolation knobs is allowed.
     monkeypatch.delenv(paths.AGENTS_ROOT_ENV, raising=False)
+    monkeypatch.delenv(paths.STOCK_AGENTS_ROOT_ENV, raising=False)
 
     chat = discover_routines(force_reload=True)
     agent = assistant_routines("directional_trader", force_reload=True)
@@ -228,12 +238,17 @@ def test_both_routines_are_published_to_every_assistant(monkeypatch):
 # ── One coercion ──────────────────────────────────────────────────────────────
 
 
-def test_the_web_route_shares_the_one_coercion():
-    """No private copy survives in the web route (nor in the routine)."""
+def test_the_web_route_has_no_coercion_left_to_share():
+    """FEAT-039 gave the web route the one coercion; FEAT-076 took the caller.
+
+    The route no longer submits anything, so it needs neither the shared helper
+    nor a private copy -- and `core` still owns the only one there is.
+    """
     import condor.web.routes.backtesting as web
 
-    assert web.coerce_controller_config is core.coerce_controller_config
+    assert not hasattr(web, "coerce_controller_config")
     assert not hasattr(web, "_coerce_numeric_values")
+    assert callable(core.coerce_controller_config)
 
 
 def test_coercion_reaches_the_engine(routine):
@@ -263,7 +278,7 @@ def test_a_stored_run_re_renders_with_its_original_parameters(routine):
     """task_id= must reproduce the run, not the form defaults."""
     routine(_completed("task-1"))
 
-    loaded = bc._load_saved_task("task-1")
+    loaded = asyncio.run(bc._load_saved_task("task-1"))
     assert not isinstance(loaded, str), loaded
     payload, restored = loaded
 
@@ -285,7 +300,7 @@ def test_backtest_compare_picks_up_routine_runs(store, routine):
     latest = cmp._latest_ids(store, 2, SERVER)
     assert set(latest) == {"task-1", "task-2"}
 
-    runs = [cmp._load_run(store, tid) for tid in latest]
+    runs = [asyncio.run(cmp._load_run(store, tid)) for tid in latest]
     assert all(r is not None for r in runs)
     assert {r.metrics["net_pnl_quote"] for r in runs} == {12.5}
 
@@ -298,7 +313,7 @@ def test_an_agent_run_is_filed_under_the_server_it_was_launched_with(store, rout
     routine(_completed("task-agent"), context=context)
 
     assert store.get_result("task-agent")["server"] == SERVER
-    assert store.list_results(SERVER), "an agent's run must be rankable too"
+    assert store.list_summaries(SERVER), "an agent's run must be rankable too"
 
 
 def test_the_task_id_is_reported(routine):

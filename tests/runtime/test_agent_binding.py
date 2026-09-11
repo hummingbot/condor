@@ -46,15 +46,14 @@ class _FakeClient:
 @pytest.fixture
 def agents_root(tmp_path, monkeypatch):
     """An agents/ tree with one pinned Agent and one serverless Agent."""
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
-
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     store = AgentStore()
     store.create(
         name="Executor Manager",
         description="Manages executors",
         instructions="You manage executors.",
         agent_key="ollama:qwen3:32b",
-        tools=["get_market_data", "manage_executors"],
+        tools=["get_market_data", "create_grid_executor"],
         when_to_consult="When deploying executors",
         server_required=False,
     )
@@ -67,6 +66,10 @@ def registry(monkeypatch):
     monkeypatch.setattr("condor.acp.client.ACPClient", _FakeClient)
     monkeypatch.setattr("condor.acp.pydantic_ai_client.PydanticAIClient", _FakeClient)
     monkeypatch.setattr(session_module, "build_initial_context", lambda *a, **k: "CHAT")
+    # This file asserts the opening turn verbatim, so the conversation's
+    # attribution block is blanked alongside the context builder above — it
+    # is covered on its own in tests/runtime/test_conversation_attribution.py
+    monkeypatch.setattr(session_module, "conversation_attribution", lambda *a, **k: "")
     _FakeClient.last = None
     return session_module
 
@@ -160,7 +163,7 @@ def test_ownerless_session_argv_matches_the_env_fallback(monkeypatch):
 
 def test_a_missing_default_record_still_starts_the_chat(monkeypatch, tmp_path):
     """An unreadable agents/condor/AGENT.md degrades; it does not fail closed."""
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     monkeypatch.setattr(
         "condor.runtime.toolsets.build_mcp_servers_for_session", lambda *a, **kw: []
     )
@@ -173,7 +176,7 @@ def test_a_missing_default_record_still_starts_the_chat(monkeypatch, tmp_path):
 
 
 def test_a_named_agent_that_does_not_exist_still_raises(monkeypatch, tmp_path):
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     with pytest.raises(UnknownAgent):
         binding.resolve(_spec(agent_slug="ghost"))
 
@@ -235,7 +238,7 @@ def test_tool_allowlist_enforced(agents_root, registry, monkeypatch):
 
     assert _FakeClient.last.kwargs["allowed_tools"] == [
         "get_market_data",
-        "manage_executors",
+        "create_grid_executor",
     ]
     # The Agent's own model was used, so the pydantic-ai client was selected.
     assert _FakeClient.last.kwargs["model"] == "ollama:qwen3:32b"

@@ -28,6 +28,7 @@ from utils.telegram_formatters import escape_markdown_v2, format_error_message
 from ._shared import (
     SIDE_LONG,
     SIDE_SHORT,
+    _show_pair_suggestions,
     clear_executors_state,
     create_executor,
     describe_executor_error,
@@ -382,7 +383,7 @@ async def handle_connector_select(
         "_Enter pair \\(e\\.g\\. SOL\\-USDT\\):_",
     ]
 
-    from handlers.config.user_preferences import get_executor_deployed_pairs
+    from condor.preferences import get_executor_deployed_pairs
 
     executor_pairs = get_executor_deployed_pairs(context.user_data)
     keyboard = []
@@ -462,7 +463,13 @@ async def handle_pair_input(
 
     if not is_valid:
         await _show_pair_suggestions(
-            update, context, pair, error_msg, suggestions, connector
+            update,
+            context,
+            error_msg,
+            suggestions,
+            title="🎯 *Position Executor \\- Step 1/2*",
+            select_prefix="executors:pos_pair_select:",
+            back_callback="executors:create_position",
         )
         return
 
@@ -477,65 +484,6 @@ async def handle_pair_input(
     context.user_data["executors_state"] = "wizard_config_input"
 
     await show_step_2_config(update, context)
-
-
-async def _show_pair_suggestions(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    input_pair: str,
-    error_msg: str,
-    suggestions: list,
-    connector: str,
-) -> None:
-    """Show trading pair suggestions when validation fails."""
-    chat_id = update.effective_chat.id
-    msg_id = context.user_data.get("executor_wizard_msg_id")
-
-    help_text = f"🎯 *Position Executor \\- Step 1/2*\n"
-    help_text += f"─────────────────────────\n\n"
-    help_text += f"❌ *{escape_markdown_v2(error_msg)}*\n\n"
-
-    if suggestions:
-        help_text += "💡 *Did you mean:*\n"
-    else:
-        help_text += "_No similar pairs found\\._\n"
-
-    keyboard = []
-    for pair in suggestions:
-        keyboard.append(
-            [
-                InlineKeyboardButton(
-                    f"📈 {pair}", callback_data=f"executors:pos_pair_select:{pair}"
-                )
-            ]
-        )
-
-    keyboard.append(
-        [
-            InlineKeyboardButton("⬅️ Back", callback_data="executors:create_position"),
-            InlineKeyboardButton("❌ Cancel", callback_data="executors:menu"),
-        ]
-    )
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    if update.callback_query:
-        try:
-            await update.callback_query.message.edit_text(
-                help_text, parse_mode="MarkdownV2", reply_markup=reply_markup
-            )
-        except Exception as e:
-            logger.debug(f"Could not update wizard message: {e}")
-    elif msg_id:
-        try:
-            await context.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=msg_id,
-                text=help_text,
-                parse_mode="MarkdownV2",
-                reply_markup=reply_markup,
-            )
-        except Exception as e:
-            logger.debug(f"Could not update wizard message: {e}")
 
 
 # ============================================
@@ -971,7 +919,7 @@ async def handle_deploy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             executor_id = result.get("executor_id") or result.get("id") or "unknown"
 
         # Save deployed pair and last-used config to user preferences
-        from handlers.config.user_preferences import (
+        from condor.preferences import (
             add_executor_deployed_pair,
             set_executor_last_config,
         )

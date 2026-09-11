@@ -30,6 +30,7 @@ class FakeRoutineStore:
         self.agents = []
         self.conversations = []
         self.session_keys = []
+        self.on_completes = []
 
     async def execute(
         self,
@@ -40,11 +41,13 @@ class FakeRoutineStore:
         agent="",
         conversation_id="",
         session_key="",
+        on_complete="",
     ):
         self.execute_calls.append((routine_name, server_name, user_id))
         self.agents.append(agent)
         self.conversations.append(conversation_id)
         self.session_keys.append(session_key)
+        self.on_completes.append(on_complete)
         return "inst-run"
 
     async def schedule(
@@ -322,6 +325,53 @@ def test_a_dashboard_run_has_no_conversation_behind_it(client_and_store, monkeyp
         json={"routine_name": "some_routine", "server_name": OWNED_SERVER},
     )
     assert store.conversations == [""]
+
+
+def test_a_run_can_ask_to_wake_the_agent_that_started_it(client_and_store, monkeypatch):
+    """What a slow run submitted from chat needs: a turn, not a note to nobody."""
+    client, store = client_and_store
+    _resolves_to(monkeypatch, "conv-1")
+
+    client.post(
+        "/routines/run",
+        json={
+            "routine_name": "some_routine",
+            "server_name": OWNED_SERVER,
+            "session_key": "web:1:slot-1",
+            "on_complete": "resume",
+        },
+    )
+    assert store.on_completes == ["resume"]
+
+
+def test_a_dashboard_run_never_pays_for_a_turn(client_and_store, monkeypatch):
+    """The field is opt-in: a human watching the page is who ``notify`` is for."""
+    client, store = client_and_store
+    _resolves_to(monkeypatch, "conv-1")
+
+    client.post(
+        "/routines/run",
+        json={"routine_name": "some_routine", "server_name": OWNED_SERVER},
+    )
+    assert store.on_completes == ["notify"]
+
+
+def test_an_unknown_on_complete_is_rejected_rather_than_guessed(
+    client_and_store, monkeypatch
+):
+    client, store = client_and_store
+    _resolves_to(monkeypatch, "conv-1")
+
+    resp = client.post(
+        "/routines/run",
+        json={
+            "routine_name": "some_routine",
+            "server_name": OWNED_SERVER,
+            "on_complete": "explode",
+        },
+    )
+    assert resp.status_code == 400
+    assert store.execute_calls == []
 
 
 # ── SEC-159: the field-options route is server-scoped too ──

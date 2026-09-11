@@ -16,9 +16,20 @@ from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
 from condor.llm.openrouter_models import fetch_models
 from condor.llm.options import DEFAULT_AGENT
 from condor.notifications import Notification, register_push_sink
-from condor.runtime import WEB, EventType, PromptRequest, SessionKey, SessionSpec
+from condor.runtime import (
+    WEB,
+    EventType,
+    PromptImage,
+    PromptRequest,
+    SessionKey,
+    SessionSpec,
+    attachments,
+)
 from condor.runtime import client as runtime
-from condor.runtime import conversations
+from condor.runtime import (
+    conversations,
+    secrets,
+)
 from condor.runtime.binding import remember_model_choice
 from condor.runtime.confirmations import (
     PendingConfirmation,
@@ -39,6 +50,18 @@ router = APIRouter(tags=["chat"])
 # Connection-scoped, not session state, so this stays local to the WS layer.
 _active_prompt_tasks: dict[str, asyncio.Task] = {}
 
+# Turns that outlived the socket which started them. A page reload drops the WS
+# mid-answer, and cancelling the turn there is what truncated the reply and
+# threw away work the agent had already done: the recorder's ``finally`` wrote
+# the half-written answer, honestly, but the turn was over. Now the task keeps
+# running and its events are addressed to whatever tabs the user has open, so
+# the reloaded page picks the answer back up (``_send_turn``).
+#
+# Module-level because asyncio holds only a weak reference to a running task: a
+# task kept alive solely by the closing connection's local set would be
+# garbage-collected mid-turn, which is the very bug this removes.
+_orphaned_turns: set[asyncio.Task] = set()
+
 # Spawns still in flight, keyed like _active_prompt_tasks. Subprocess start plus
 # the ACP handshake takes seconds, and the dashboard now lets the user type
 # through it: a message that arrives mid-spawn waits here instead of reading the
@@ -53,6 +76,12 @@ _pending_spawns: dict[str, asyncio.Task] = {}
 # stopping the turn ahead, claiming the task entry — never across the answer
 # itself, which would turn steering into queueing.
 _slot_gates: dict[str, asyncio.Lock] = {}
+
+# Hard cap on the page-context block a frame may carry (FEAT-059). Load-bearing,
+# not defensive: this is a client-supplied string that is prepended to the
+# prompt, so an unbounded one is an unbounded turn. The frontend renders at
+# most 1200 chars; the slack covers a client a version ahead.
+VIEW_CONTEXT_MAX_CHARS = 1500
 
 # Chat sockets currently attached, per user. One socket carries every
 # conversation a user has open, so this is all the addressing a server-initiated
@@ -97,11 +126,18 @@ async def _await_spawn(user_id: int, slot_id: str) -> None:
 
 
 async def _get_user_sessions(user_id: int) -> list[dict]:
-    """This user's live web sessions, as the frontend expects them.
+    """This user's web slots, as the frontend expects them.
 
     Derived from the runtime rather than from local slot bookkeeping, so a
     session survives a WebSocket reconnect and a session killed elsewhere
     (Telegram, the REST API) disappears here without any cross-talk.
+
+    The roster describes the user's conversations on this surface, not the
+    subprocesses behind them (CORR-265): a slot the runtime reaped while the
+    socket was down — the idle detach, an eviction, a subprocess that died — is
+    still listed, with ``alive`` false, so its tab and its messages survive the
+    reconnect and the next message reattaches it. A slot the runtime has no
+    memory of is the one the user really did end, and it is still absent.
     """
     return [
         {
@@ -124,9 +160,14 @@ async def _get_user_sessions(user_id: int) -> list[dict]:
             "last_prompt_at": (
                 info.last_prompt_at.isoformat() if info.last_prompt_at else None
             ),
+            # Whether a subprocess is behind the slot right now. Added, never
+            # substituted: every key above keeps its name and its meaning, so a
+            # bundle shipped before this one reads the roster exactly as it did
+            # and simply does not know the difference.
+            "alive": info.alive,
         }
-        for info in await runtime.list_sessions(user_id)
-        if info.surface == WEB and info.alive
+        for info in await runtime.list_sessions(user_id, include_detached=True)
+        if info.surface == WEB
     ]
 
 
@@ -157,6 +198,13 @@ def _to_ws_message(event: RuntimeEvent, slot_id: str) -> dict | None:
             "slot_id": slot_id,
             "tool_call_id": event.field("tool_call_id"),
             "status": event.field("status"),
+            # The ACP adapter announces some calls with a placeholder name and
+            # supplies the real one on the update (CORR-327). Dropping ``title``
+            # here left the dashboard showing the generic label until a reload
+            # replayed the transcript. It rides along as an added key, never a
+            # substitution: it is null when the update carries no name, and the
+            # client keeps whatever the create frame already gave it.
+            "title": event.field("title"),
         }
     if event.type == EventType.HEARTBEAT:
         return {
@@ -166,6 +214,16 @@ def _to_ws_message(event: RuntimeEvent, slot_id: str) -> dict | None:
         }
     if event.type == EventType.QUEUED:
         return {"event": "queued", "slot_id": slot_id}
+    if event.type == EventType.RELOADED:
+        # The session behind this slot was rebuilt to pick up a configuration
+        # change (FEAT-093). Part *names* only — the values behind them carry
+        # the MCP servers' env. The dashboard composes the sentence; the same
+        # one is already in the transcript, so a page reload agrees.
+        return {
+            "event": "reload",
+            "slot_id": slot_id,
+            "parts": event.field("parts", []),
+        }
     if event.type == EventType.DONE:
         return {
             "event": "prompt_done",
@@ -200,6 +258,27 @@ async def _send(ws: WebSocket, event: dict) -> None:
         await ws.send_text(json.dumps(event))
     except Exception:
         pass
+
+
+async def _send_turn(ws: WebSocket, user_id: int, event: dict) -> None:
+    """Send one turn event to the tab that asked, or to the tabs still open.
+
+    While the asking socket is attached this is ``_send`` — one tab asked, one
+    tab is answered. Once it is gone (a reload, a closed tab) the turn is not
+    cancelled any more, so its events are addressed the way a woken turn's are
+    (``_WakeSink``): broadcast to every socket this user has open, routed by
+    ``slot_id``. With no tab open it is a no-op and the turn still finishes and
+    is recorded, which is what the next page load reads.
+    """
+    attached = _attached_sockets.get(user_id)
+    if attached is None or ws in attached:
+        # Either this socket is the live one, or nothing is registered for the
+        # user at all (no connection loop is managing them) — both mean "send
+        # where you were told". A dead socket swallows it; the turn goes on.
+        await _send(ws, event)
+        return
+    for other in list(attached):
+        await _send(other, event)
 
 
 class WebSocketChannel:
@@ -364,11 +443,18 @@ async def chat_websocket(ws: WebSocket, token: str | None = Query(default=None))
 
     # Background tasks so long-running operations don't block the receive loop
     bg_tasks: set[asyncio.Task] = set()
+    # The subset of those that are a *turn*. A turn is the one piece of work
+    # here that belongs to the conversation rather than to this connection, so
+    # it is the one thing a disconnect must not cancel.
+    turn_tasks: set[asyncio.Task] = set()
 
-    def _spawn(coro):
+    def _run_bg(coro, *, is_turn: bool = False):
         task = asyncio.create_task(coro)
         bg_tasks.add(task)
         task.add_done_callback(bg_tasks.discard)
+        if is_turn:
+            turn_tasks.add(task)
+            task.add_done_callback(turn_tasks.discard)
 
     try:
         while True:
@@ -382,20 +468,20 @@ async def chat_websocket(ws: WebSocket, token: str | None = Query(default=None))
             action = msg.get("action")
 
             if action == "start_session":
-                _spawn(_handle_start_session(ws, user_id, msg))
+                _run_bg(_handle_start_session(ws, user_id, msg))
             elif action == "resume_conversation":
-                _spawn(_handle_resume_conversation(ws, user_id, msg))
+                _run_bg(_handle_resume_conversation(ws, user_id, msg))
             elif action == "send_message":
-                _spawn(_handle_send_message(ws, user_id, msg))
+                _run_bg(_handle_send_message(ws, user_id, msg), is_turn=True)
             elif action == "destroy_session":
-                _spawn(_handle_destroy_session(ws, user_id, msg))
+                _run_bg(_handle_destroy_session(ws, user_id, msg))
             elif action == "list_sessions":
                 sessions = await _get_user_sessions(user_id)
                 await _send(ws, {"event": "sessions_list", "sessions": sessions})
             elif action == "resolve_permission":
                 await _handle_resolve_permission(user_id, msg)
             elif action == "abort_prompt":
-                _spawn(_handle_abort_prompt(ws, user_id, msg))
+                _run_bg(_handle_abort_prompt(ws, user_id, msg))
             else:
                 await _send(
                     ws, {"event": "error", "message": f"Unknown action: {action}"}
@@ -413,11 +499,23 @@ async def chat_websocket(ws: WebSocket, token: str | None = Query(default=None))
                 # Dropped rather than left empty: an entry that outlives the
                 # last tab would read as "someone is watching" forever.
                 _attached_sockets.pop(user_id, None)
-        # Cancel any in-flight background tasks on disconnect
-        for task in bg_tasks:
+        # Cancel this connection's in-flight work on disconnect — except a
+        # turn, which outlives the tab that asked for it. Cancelling one is
+        # what made a page reload truncate the agent's answer mid-sentence and
+        # abandon the work behind it; the turn now runs to its end, records a
+        # whole turn, and streams into whatever tabs are still open. Stop still
+        # reaches it from the next socket: ``_active_prompt_tasks`` is keyed by
+        # user and slot, not by connection.
+        cancelled = []
+        for task in list(bg_tasks):
+            if task in turn_tasks and not task.done():
+                _orphaned_turns.add(task)
+                task.add_done_callback(_orphaned_turns.discard)
+                continue
             task.cancel()
-        if bg_tasks:
-            await asyncio.gather(*bg_tasks, return_exceptions=True)
+            cancelled.append(task)
+        if cancelled:
+            await asyncio.gather(*cancelled, return_exceptions=True)
 
 
 async def _handle_start_session(
@@ -654,6 +752,69 @@ async def _spawn(
         return False
 
 
+# ── Pasted key material (FEAT-056) ───────────────────────────────────────
+#
+# Safety is the funnel's: ``runtime.prompt`` has already replaced the certain
+# shapes by the time anything below runs. This surface cannot delete what the
+# user typed the way Telegram can, so all it does is say what happened, and say
+# it at most once per conversation per kind — a web slot id *is* its
+# conversation id, so that bound is exactly the one the Telegram side keeps in
+# ``chat_data``.
+_secret_notices_sent: dict[str, set[str]] = {}
+
+
+async def _notify_secret_shapes(
+    ws: WebSocket, user_id: int, slot_id: str, text: str
+) -> None:
+    """Emit ``secret_notice`` for each key shape this message carried."""
+    findings = secrets.scan(text)
+    if not findings:
+        return
+
+    told = _secret_notices_sent.setdefault(f"{user_id}:{slot_id}", set())
+    allowed: bool | None = None  # the preference, read only if it is needed
+    for kind in dict.fromkeys(finding.kind for finding in findings):
+        if kind in told:
+            continue
+        certain = secrets.KINDS.get(kind, False)
+        if not certain:
+            if allowed is None:
+                from condor.preferences import (
+                    load_user_data_for,
+                    secret_notices_enabled,
+                )
+
+                allowed = secret_notices_enabled(load_user_data_for(user_id))
+            if not allowed:
+                continue
+        told.add(kind)
+        await _send(
+            ws,
+            {
+                "event": "secret_notice",
+                "slot_id": slot_id,
+                "kind": kind,
+                "certain": certain,
+            },
+        )
+
+
+def _resolve_attachments(
+    user_id: int, conv_id: str, attachment_ids: list[str]
+) -> list[PromptImage]:
+    """Ids off the wire to the bytes behind them, or refuse the whole turn.
+
+    All-or-nothing: a turn whose picture cannot be found is not quietly answered
+    without it. The user asked about something the agent would not be looking at,
+    and an answer to the wrong question is worse than an error.
+    """
+    images = []
+    for att_id in attachment_ids:
+        data, mime = attachments.load(user_id, conv_id, att_id)
+        images.append(PromptImage(data=data, mime=mime, id=att_id))
+    return images
+
+
 async def _handle_send_message(
     ws: WebSocket,
     user_id: int,
@@ -661,12 +822,30 @@ async def _handle_send_message(
 ) -> None:
     slot_id = msg.get("slot_id", "")
     text = msg.get("text", "").strip()
-    if not text:
+    # What the user was looking at while asking (FEAT-059). Rides beside the
+    # text to the funnel, which prepends it to this one prompt and never
+    # records it — the transcript keeps only the user's words.
+    view_context = str(msg.get("view_context") or "")[:VIEW_CONTEXT_MAX_CHARS]
+    # Ids only, never bytes (FEAT-098). The frame stays small on purpose: uvicorn
+    # runs without ``ws_max_size``, so the websockets default of 16 MiB applies
+    # and an oversize frame *closes the socket* rather than failing the message —
+    # one pasted screenshot would drop the user's whole chat connection mid-answer
+    # with no error that names a cause. The bytes went out over HTTP already.
+    attachment_ids = [str(value) for value in (msg.get("attachments") or []) if value][
+        : attachments.MAX_PER_TURN
+    ]
+    # An image with no words is a complete message. This used to be the one
+    # refusal in the way of that.
+    if not text and not attachment_ids:
         await _send(ws, {"event": "error", "message": "Empty message"})
         return
     if not slot_id:
         await _send(ws, {"event": "error", "message": "No slot_id"})
         return
+
+    # Said before the spawn wait, so the notice lands with the message it is
+    # about rather than after the answer to it.
+    await _notify_secret_shapes(ws, user_id, slot_id, text)
 
     # The user is allowed to type through a spawn, so a message can legitimately
     # arrive before the subprocess exists. Waiting for it is the difference
@@ -753,19 +932,45 @@ async def _handle_send_message(
         if task:
             _active_prompt_tasks[task_key] = task
 
+        # Resolved here, against the conversation the live session is actually
+        # attached to — which the reattach above may have just decided. The path
+        # is per-user, so a frame naming someone else's attachment resolves to
+        # nothing under the caller's own tree: the ownership check is the lookup
+        # itself, not a rule beside it.
+        try:
+            images = _resolve_attachments(
+                user_id, info.conversation_id or slot_id, attachment_ids
+            )
+        except attachments.NotFoundError:
+            await _send(
+                ws,
+                {
+                    "event": "error",
+                    "slot_id": slot_id,
+                    "message": "That image is no longer available. Attach it again.",
+                },
+            )
+            return
+
         # Busy is no longer a refusal: the composer stays live and sending is
         # how the user redirects an answer that is heading the wrong way.
-        stream = runtime.prompt(session_key, PromptRequest(text=text), on_busy="steer")
+        stream = runtime.prompt(
+            session_key,
+            PromptRequest(text=text, images=images, view_context=view_context),
+            on_busy="steer",
+        )
 
         if info.is_busy:
             # Said before the stream starts, so the partial answer on screen is
             # marked interrupted instead of being left looking finished.
-            await _send(ws, {"event": "prompt_interrupted", "slot_id": slot_id})
+            await _send_turn(
+                ws, user_id, {"event": "prompt_interrupted", "slot_id": slot_id}
+            )
             # One pull, still under the gate: in the steer path the runtime
             # stops the turn ahead and *then* yields QUEUED, so this is bounded
             # by TIMEOUTS.prompt_cancel and is exactly the window a third
             # message must not race through.
-            await _pump_one(ws, stream, slot_id)
+            await _pump_one(ws, user_id, stream, slot_id)
 
         gate.release()
         gate_held = False
@@ -773,23 +978,33 @@ async def _handle_send_message(
         async for event in stream:
             message = _to_ws_message(event, slot_id)
             if message:
-                await _send(ws, message)
+                await _send_turn(ws, user_id, message)
     except asyncio.CancelledError:
-        await _send(
-            ws, {"event": "prompt_done", "slot_id": slot_id, "stop_reason": "cancelled"}
+        await _send_turn(
+            ws,
+            user_id,
+            {"event": "prompt_done", "slot_id": slot_id, "stop_reason": "cancelled"},
         )
     except RuntimeError as e:
-        await _send(ws, {"event": "error", "slot_id": slot_id, "message": str(e)})
-        await _send(
-            ws, {"event": "prompt_done", "slot_id": slot_id, "stop_reason": "error"}
+        await _send_turn(
+            ws, user_id, {"event": "error", "slot_id": slot_id, "message": str(e)}
+        )
+        await _send_turn(
+            ws,
+            user_id,
+            {"event": "prompt_done", "slot_id": slot_id, "stop_reason": "error"},
         )
     except Exception:
         log.exception("Error streaming prompt for user %d", user_id)
-        await _send(
-            ws, {"event": "error", "slot_id": slot_id, "message": "Stream error"}
+        await _send_turn(
+            ws,
+            user_id,
+            {"event": "error", "slot_id": slot_id, "message": "Stream error"},
         )
-        await _send(
-            ws, {"event": "prompt_done", "slot_id": slot_id, "stop_reason": "error"}
+        await _send_turn(
+            ws,
+            user_id,
+            {"event": "prompt_done", "slot_id": slot_id, "stop_reason": "error"},
         )
     finally:
         if gate_held:
@@ -801,7 +1016,7 @@ async def _handle_send_message(
             _active_prompt_tasks.pop(task_key, None)
 
 
-async def _pump_one(ws: WebSocket, stream, slot_id: str) -> None:
+async def _pump_one(ws: WebSocket, user_id: int, stream, slot_id: str) -> None:
     """Forward exactly one event from a prompt stream, if it has one."""
     try:
         event = await stream.__anext__()
@@ -809,7 +1024,7 @@ async def _pump_one(ws: WebSocket, stream, slot_id: str) -> None:
         return
     message = _to_ws_message(event, slot_id)
     if message:
-        await _send(ws, message)
+        await _send_turn(ws, user_id, message)
 
 
 async def _handle_abort_prompt(ws: WebSocket, user_id: int, msg: dict) -> None:

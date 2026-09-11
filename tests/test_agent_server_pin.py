@@ -30,7 +30,7 @@ class FakeConfigManager:
 
 @pytest.fixture
 def env(tmp_path, monkeypatch):
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     monkeypatch.setattr(
         "config_manager.get_config_manager", lambda: FakeConfigManager()
     )

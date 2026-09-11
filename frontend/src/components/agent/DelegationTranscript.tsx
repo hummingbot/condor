@@ -93,7 +93,7 @@ function ToolRow({
 /**
  * What a delegation actually did: its reasoning and every tool call, in order.
  *
- * The delegate counterpart of `SessionReviewer` — except nothing is parsed here.
+ * The delegate counterpart of the Lab's run view — except nothing is parsed here.
  * The backend already folds the stream into exactly these three shapes and
  * patches tool entries in place, so a poll returns the live state of every call
  * and rows keyed by `id` update instead of remounting: a tool row expanded while

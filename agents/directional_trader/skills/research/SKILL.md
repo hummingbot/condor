@@ -17,15 +17,20 @@ until this passes.
 
 ## Step 1 — Gather market data
 
-`get_market_data(data_type="candles", ...)` with:
-- `connector_name` (e.g. `binance_perpetual`)
-- `trading_pair` (e.g. `BTC-USDT`)
+`run_code`, over `client.market_data.*` — the rows come back as numbers you can put
+straight into a DataFrame (see the `market_data_with_code` skill):
+
+```python
+df = await client.market_data.get_candles_last_days(connector, pair, days=60, interval="1h")
+```
+- `connector` (e.g. `binance_perpetual`)
+- `pair` (e.g. `BTC-USDT`)
 - `interval` — `1h` swing, `15m` intraday, `1d` position
 - `days` — ≥ 60 swing, ≥ 14 intraday, ≥ 180 position
 
-Also fetch, when the pair is a perpetual:
-- **funding rate** — reveals directional bias and carry cost
-- **order book snapshot** — reveals liquidity depth and skew
+Also fetch in the same snippet, when the pair is a perpetual:
+- **funding rate** (`get_funding_info`) — reveals directional bias and carry cost
+- **order book snapshot** (`get_order_book`) — reveals liquidity depth and skew
 
 ## Step 2 — Compute exploratory indicators
 

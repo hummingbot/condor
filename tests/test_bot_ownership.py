@@ -75,6 +75,26 @@ def test_strip_deploy_suffix_only_drops_the_timestamp():
     assert strip_deploy_suffix(f"{NS}-2026") == f"{NS}-2026"
 
 
+def test_strip_deploy_suffix_drops_every_stamp_a_redeploy_left():
+    """A redeploy stamps a name that already carries a stamp.
+
+    ``pmm-king-btcbrl`` deployed twice becomes
+    ``pmm-king-btcbrl-20260903-181000-20260903-151237``, and every caller here
+    compares one stripped name against another -- an instance against a ledger
+    base, a running bot against the deed index's key. Taking one stamp off left
+    the two sides disagreeing from the first redeploy on, which is the bot with
+    the most trading behind it.
+    """
+    assert (
+        strip_deploy_suffix("pmm-king-btcbrl-20260903-181000-20260903-151237")
+        == "pmm-king-btcbrl"
+    )
+    # Four digits short of a stamp: a name, not a deploy, and it stays whole.
+    assert strip_deploy_suffix("pmm-king-btcbrl-20260901-2315") == (
+        "pmm-king-btcbrl-20260901-2315"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Ledger
 # ---------------------------------------------------------------------------
@@ -346,9 +366,9 @@ def _engine(tmp_path, monkeypatch, config):
     from condor.agents.engine import TickEngine
     from condor.agents.strategy import Strategy
 
-    monkeypatch.setattr(strategy_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     strategy = Strategy(agent_slug="brigado", name="EMA Trend")
-    strategy.dir.mkdir(parents=True, exist_ok=True)
+    strategy.home.mkdir(parents=True, exist_ok=True)
     agent = Agent(slug="brigado", name="Brigado")
     return TickEngine(
         agent=agent, strategy=strategy, config=dict(config), chat_id=1, user_id=1
@@ -410,7 +430,7 @@ def test_experiment_engine_ledger_writes_no_file(tmp_path, monkeypatch):
     assert engine.session_dir is None
     assert engine.ledger is not None and engine.ledger.path is None
     engine.ledger.note_deploy(f"{NS}-btc", now=1000.0)
-    assert not list(engine.strategy.dir.rglob("owned_bots.json"))
+    assert not list(engine.strategy.home.rglob("owned_bots.json"))
 
 
 def test_engine_adopts_a_live_bot_in_its_namespace(tmp_path, monkeypatch):
@@ -430,6 +450,79 @@ def test_engine_adopts_a_live_bot_in_its_namespace(tmp_path, monkeypatch):
     assert engine.ledger.bases() == [f"{NS}-btc"]
     assert engine.ledger.owned()[0].origin == "adopted"
     assert engine._adoption_done
+
+
+def test_engine_recovers_a_fleet_from_its_own_action_log(tmp_path, monkeypatch):
+    """FEAT-102: a session whose bots fall outside its namespace, restarted.
+
+    ``bot_name: ''`` means the namespace rule claims nothing, and on a first
+    session there is no prior lineage to inherit — so the fleet it deployed was
+    adopted by nobody and every money surface below the ledger read $0.00. The
+    session's own action log is a record, not a guess, so it is a safe third
+    source.
+    """
+    from condor.agents.actions import AgentAction, append_actions
+    from condor.fetchers import bot_performance
+
+    engine = _engine(tmp_path, monkeypatch, {"bot_name": ""})
+    assert not engine.ledger.enforced
+    assert not (engine.session_dir / "owned_bots.json").exists()
+
+    append_actions(
+        engine.session_dir,
+        [
+            AgentAction(
+                tick=1,
+                at=1.0,
+                tool="manage_bots",
+                verb="manage_bots:deploy",
+                summary="Deploy bot 'pmm-king-btcbrl-20260903-181000'",
+                ok=True,
+                subject="pmm-king-btcbrl-20260903-181000",
+            )
+        ],
+    )
+
+    async def _fake_perf(client):
+        return {
+            "pmm-king-btcbrl-20260903-181000": {"bot_name": "pmm-king-btcbrl"},
+            "someone-elses-bot-20260731-101500": {"bot_name": "someone-elses-bot"},
+        }
+
+    monkeypatch.setattr(bot_performance, "fetch_all_bot_performance", _fake_perf)
+    asyncio.run(engine._adopt_running_bots(object()))
+
+    assert engine.ledger.bases() == ["pmm-king-btcbrl"]
+    assert (engine.session_dir / "owned_bots.json").exists()
+
+
+def test_engine_adopts_nothing_from_a_log_with_no_deploys(tmp_path, monkeypatch):
+    """The third source stays as conservative as the other two."""
+    from condor.agents.actions import AgentAction, append_actions
+    from condor.fetchers import bot_performance
+
+    engine = _engine(tmp_path, monkeypatch, {"bot_name": ""})
+    append_actions(
+        engine.session_dir,
+        [
+            AgentAction(
+                tick=1,
+                at=1.0,
+                tool="stop_executor",
+                verb="stop_executor",
+                summary="Stop executor a1",
+                ok=True,
+            )
+        ],
+    )
+
+    async def _fake_perf(client):
+        return {"someone-elses-bot-20260731-101500": {"bot_name": "someone-elses-bot"}}
+
+    monkeypatch.setattr(bot_performance, "fetch_all_bot_performance", _fake_perf)
+    asyncio.run(engine._adopt_running_bots(object()))
+
+    assert engine.ledger.bases() == []
 
 
 def test_engine_adoption_failure_is_non_fatal_and_retried(tmp_path, monkeypatch):
@@ -514,3 +607,126 @@ def test_prior_session_bases_reads_the_whole_lineage(tmp_path):
     # Deploy suffixes are stripped, so a restart recognises the base it left running.
     assert prior_session_bases(sessions) == {"ema_trend_loop", "other_bot"}
     assert prior_session_bases(tmp_path / "nope") == set()
+
+
+# ---------------------------------------------------------------------------
+# Disowning — handing a bot back
+# ---------------------------------------------------------------------------
+
+
+def test_forget_erases_the_entry_and_the_declared_name(tmp_path):
+    """A claim writes two things; the undo has to take both.
+
+    The claim route puts the name in ``declared`` as well as in ``bots``, and a
+    surviving ``declared`` entry makes ``owns()`` true, which re-adopts on the
+    next tick the entry this just deleted.
+    """
+    ledger = BotLedger(NS, tmp_path, declared=["pmm-king-btcbrl"], enforced=False)
+    ledger.adopt("pmm-king-btcbrl-20260903-181000", now=1000.0)
+    assert ledger.bases() == ["pmm-king-btcbrl"]
+
+    assert ledger.forget("pmm-king-btcbrl-20260903-181000") is True
+    assert ledger.bases() == []
+    assert ledger.declared == []
+    assert not ledger.owns("pmm-king-btcbrl")
+    # Idempotent: a second unassign of the same bot is not an error.
+    assert ledger.forget("pmm-king-btcbrl") is False
+
+
+def test_disown_clears_every_session_not_just_the_newest(tmp_path):
+    """The lineage rule is why a single-session delete undoes itself."""
+    from condor.agents.ownership import disown, prior_session_bases, read_disowned
+
+    sessions = tmp_path / "sessions"
+    BotLedger(NS, sessions / "session_1", enforced=False).adopt("pmm-fleet-btcbrl")
+    BotLedger(NS, sessions / "session_2", enforced=False).adopt("pmm-fleet-btcbrl")
+    BotLedger(NS, sessions / "session_2", enforced=False).adopt("pmm-king-btcbrl")
+
+    result = disown(tmp_path, "pmm-fleet-btcbrl-20260902-101324")
+
+    assert result["base"] == "pmm-fleet-btcbrl"
+    assert result["sessions"] == ["session_1", "session_2"]
+    # Gone from the lineage every future session inherits from...
+    assert prior_session_bases(sessions) == {"pmm-king-btcbrl"}
+    # ...and written down, so nothing re-derives it.
+    assert read_disowned(tmp_path) == {"pmm-fleet-btcbrl"}
+    # The strategy's other bot is untouched.
+    assert BotLedger(NS, sessions / "session_2").bases() == ["pmm-king-btcbrl"]
+
+
+def test_disowning_a_bot_the_strategy_never_owned_is_harmless(tmp_path):
+    from condor.agents.ownership import disown, read_disowned
+
+    result = disown(tmp_path, "not-ours")
+
+    assert result["sessions"] == []
+    assert read_disowned(tmp_path) == {"not-ours"}
+
+
+def test_reown_lifts_the_disown(tmp_path):
+    from condor.agents.ownership import disown, read_disowned, reown
+
+    disown(tmp_path, "pmm-fleet-btcbrl")
+
+    assert reown(tmp_path, "pmm-fleet-btcbrl-20260902-101324") is True
+    assert read_disowned(tmp_path) == set()
+    # Nothing to lift is False, not a crash.
+    assert reown(tmp_path, "pmm-fleet-btcbrl") is False
+
+
+def test_adoption_skips_a_disowned_bot_in_the_namespace(tmp_path, monkeypatch):
+    """A person's answer outranks the name, which is otherwise the proof."""
+    from condor.agents.ownership import disown
+    from condor.fetchers import bot_performance
+
+    engine = _engine(tmp_path, monkeypatch, {"bot_name": NS})
+    disown(engine.strategy.home, f"{NS}-btc")
+
+    async def _fake_perf(client):
+        return {
+            f"{NS}-btc-20260731-101500": {"bot_name": f"{NS}-btc"},
+            f"{NS}-eth-20260731-101500": {"bot_name": f"{NS}-eth"},
+        }
+
+    monkeypatch.setattr(bot_performance, "fetch_all_bot_performance", _fake_perf)
+    asyncio.run(engine._adopt_running_bots(object()))
+
+    assert engine.ledger.bases() == [f"{NS}-eth"]
+
+
+def test_adoption_skips_a_disowned_bot_it_recorded_deploying(tmp_path, monkeypatch):
+    """The regression the whole feature exists for.
+
+    A recorded deploy is permanent, so without the disowned set the unassign is
+    undone on the next restart — which is exactly what a mis-claimed bot did:
+    cleared by hand, back on the strategy's book at the next boot with a fresh
+    ``since``, reading as a brand-new claim nobody made.
+    """
+    from condor.agents.actions import AgentAction, append_actions
+    from condor.agents.ownership import disown
+    from condor.fetchers import bot_performance
+
+    engine = _engine(tmp_path, monkeypatch, {"bot_name": ""})
+    append_actions(
+        engine.session_dir,
+        [
+            AgentAction(
+                tick=1,
+                at=1.0,
+                tool="manage_bots",
+                verb="manage_bots:deploy",
+                summary="Deploy bot 'pmm-king-btcbrl-20260903-181000'",
+                ok=True,
+                subject="pmm-king-btcbrl-20260903-181000",
+            )
+        ],
+    )
+    disown(engine.strategy.home, "pmm-king-btcbrl")
+
+    async def _fake_perf(client):
+        return {"pmm-king-btcbrl-20260903-181000": {"bot_name": "pmm-king-btcbrl"}}
+
+    monkeypatch.setattr(bot_performance, "fetch_all_bot_performance", _fake_perf)
+    asyncio.run(engine._adopt_running_bots(object()))
+
+    assert engine.ledger.bases() == []

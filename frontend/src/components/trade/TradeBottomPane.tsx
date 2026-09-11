@@ -13,8 +13,12 @@ import {
   formatPriceSig,
   formatUsd,
   pnlColor,
+  pnlTextClass,
   isExecutorActive,
 } from "@/lib/formatters";
+import { stopKeepCopy } from "@/lib/executorStopCopy";
+import { executorsQuery } from "@/lib/queryClient";
+import { TRADE_BOTTOM_PANE_KEY } from "@/lib/sessionState";
 
 interface TradeBottomPaneProps {
   executors: ExecutorInfo[];
@@ -34,8 +38,6 @@ interface TradeBottomPaneProps {
   selectedExecutorId?: string | null;
   onExecutorSelect?: (executor: ExecutorInfo | null) => void;
 }
-
-const STORAGE_KEY = "condor_trade_bottom_pane";
 
 const STRATEGY_LABELS: Record<string, string> = {
   LIMIT: "Limit",
@@ -248,17 +250,18 @@ export function TradeBottomPane({
   const queryClient = useQueryClient();
   const containerRef = useRef<HTMLDivElement>(null);
   const [expanded, setExpanded] = useState(() => {
-    try { return localStorage.getItem(STORAGE_KEY) !== "0"; } catch { return true; }
+    try { return localStorage.getItem(TRADE_BOTTOM_PANE_KEY) !== "0"; } catch { return true; }
   });
   const [tab, setTab] = useState<"executors" | "positions">("executors");
   const [stoppingIds, setStoppingIds] = useState<Set<string>>(new Set());
   const [confirmStopId, setConfirmStopId] = useState<string | null>(null);
+  const [keepPosition, setKeepPosition] = useState(false);
   const [confirmClearPos, setConfirmClearPos] = useState<ConsolidatedPosition | null>(null);
   const [clearingPositions, setClearingPositions] = useState<Set<string>>(new Set());
   const [hoveredExecutor, setHoveredExecutor] = useState<{ executor: ExecutorInfo; rect: DOMRect } | null>(null);
 
   useEffect(() => {
-    try { localStorage.setItem(STORAGE_KEY, expanded ? "1" : "0"); } catch { /* ok */ }
+    try { localStorage.setItem(TRADE_BOTTOM_PANE_KEY, expanded ? "1" : "0"); } catch { /* ok */ }
   }, [expanded]);
 
   // Extract base/quote tokens from pair (e.g. "BTC-USDT" -> ["BTC", "USDT"]),
@@ -270,20 +273,29 @@ export function TradeBottomPane({
   // Balances for the active connector (shared ["portfolio", server] query)
   const balances = usePairBalances(server, connector, baseToken, quoteToken);
 
+  // What "keep position" means depends on the executor being stopped: this pane
+  // is also the DEX pool workspace's, where the rows are lp executors whose pool
+  // position is closed on-chain whichever way the box is ticked.
+  const stopCopy = useMemo(
+    () => stopKeepCopy(executors.filter((ex) => ex.id === confirmStopId)),
+    [executors, confirmStopId],
+  );
+
   const stopMutation = useMutation({
-    mutationFn: (id: string) => {
+    mutationFn: ({ id, keep }: { id: string; keep: boolean }) => {
       setStoppingIds((prev) => new Set([...prev, id]));
-      return api.stopExecutor(server!, id, false);
+      return api.stopExecutor(server!, id, keep);
     },
-    onSettled: (_data, _error, id) => {
+    onSettled: (_data, _error, { id }) => {
       setStoppingIds((prev) => {
         const next = new Set(prev);
         next.delete(id);
         return next;
       });
       setConfirmStopId(null);
-      // Prefix match covers ["executors", server, "main", pair] and the altPair variant
-      queryClient.invalidateQueries({ queryKey: ["executors", server] });
+      // The prefix covers every filtered executors view — the pair-filtered
+      // trade panel, its altPair twin, and the unfiltered portfolio list.
+      queryClient.invalidateQueries({ queryKey: executorsQuery(server).prefix });
       queryClient.invalidateQueries({ queryKey: ["dex-lp-executors", server] });
       queryClient.invalidateQueries({ queryKey: ["executors-infinite", server] });
     },
@@ -313,6 +325,7 @@ export function TradeBottomPane({
   });
 
   const handleStop = useCallback((id: string) => {
+    setKeepPosition(false);
     setConfirmStopId(id);
   }, []);
 
@@ -651,7 +664,7 @@ export function TradeBottomPane({
                             {pos.leverage > 1 && (
                               <span className="text-[10px] text-[var(--color-text-muted)]">{pos.leverage}x</span>
                             )}
-                            <span className={`font-mono font-medium ${pos.unrealized_pnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]"}`}>
+                            <span className={`font-mono font-medium ${pnlTextClass(pos.unrealized_pnl)}`}>
                               {fmtPnl(pos.unrealized_pnl)}
                             </span>
                             <button
@@ -670,7 +683,7 @@ export function TradeBottomPane({
                         </div>
                         <div className="mt-1 flex items-center gap-3 text-[10px] text-[var(--color-text-muted)]">
                           <span>
-                            Realized: <span className={`font-mono ${pos.realized_pnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]"}`}>
+                            Realized: <span className={`font-mono ${pnlTextClass(pos.realized_pnl)}`}>
                               {fmtPnl(pos.realized_pnl)}
                             </span>
                           </span>
@@ -706,6 +719,18 @@ export function TradeBottomPane({
             <p className="text-sm text-[var(--color-text)]">
               Stop executor <span className="font-mono text-[var(--color-text-muted)]">{confirmStopId.slice(0, 8)}</span>?
             </p>
+            <label className="mt-3 flex cursor-pointer select-none items-center gap-2">
+              <input
+                type="checkbox"
+                checked={keepPosition}
+                onChange={(e) => setKeepPosition(e.target.checked)}
+                className="h-4 w-4 rounded border-[var(--color-border)] accent-[var(--color-primary)]"
+              />
+              <span className="text-xs text-[var(--color-text)]">{stopCopy.label}</span>
+            </label>
+            <p className="mt-1 ml-6 text-[11px] text-[var(--color-text-muted)]">
+              {keepPosition ? stopCopy.checked : stopCopy.unchecked}
+            </p>
             <div className="mt-3 flex justify-end gap-2">
               <button
                 onClick={() => setConfirmStopId(null)}
@@ -714,7 +739,7 @@ export function TradeBottomPane({
                 Cancel
               </button>
               <button
-                onClick={() => stopMutation.mutate(confirmStopId)}
+                onClick={() => stopMutation.mutate({ id: confirmStopId, keep: keepPosition })}
                 className="rounded bg-[var(--color-red)] px-3 py-1.5 text-xs font-medium text-white hover:brightness-110"
               >
                 Stop

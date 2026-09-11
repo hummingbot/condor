@@ -61,7 +61,7 @@ async def _custom_endpoints() -> list[dict]:
     These are the strongest signal in the whole report: the operator added each
     one deliberately and Condor validated it reachable at save time. Models are
     re-fetched here so a stale endpoint shows up as ``reachable: false`` rather
-    than being recommended and failing on the first consult.
+    than being recommended and failing on the first agent run.
     """
     from condor.preferences import get_custom_providers, load_user_data_for
     from handlers.agents.custom_models import CustomProviderError, fetch_models

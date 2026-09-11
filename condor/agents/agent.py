@@ -3,14 +3,18 @@
 An **Agent** is a specialized domain agent with an identity, domain knowledge, a
 tool allowlist, an ``agent_key`` (its default model) and its own memory/skills
 store (FEAT-003, keyed by the directory slug — the "brain"). It replaces the old
-split between ``experts.py`` (consult-only) and the identity half of
-``strategy.py`` (loop-only).
+split between ``experts.py`` (ask-only) and the identity half of ``strategy.py``
+(loop-only).
 
-**Every Agent can do all three things, always** — there is no capability flag and
+**Every Agent can do both things, always** — there is no capability flag and
 nothing to opt into:
 
-- **consult** — run its brain to completion, human-gated, and return the answer,
-- **delegate** — the same run, detached and unattended, notifying when done,
+- **delegate** — run its brain to completion, reached two ways by one tool.
+  ``delegate(action="start")`` detaches: it runs unattended and notifies the user
+  when done (handing the answer back to the caller on ``on_complete="resume"``).
+  ``delegate(action="ask")`` blocks and returns the answer — inter-agent
+  communication, and the only door open to an unattended seat, which has no
+  conversation for ``resume`` to wake.
 - **loop** — tick a playbook via ``TickEngine``. An Agent that has never been
   given a bespoke playbook loops its *default* one, materialized on first start
   from its own identity (see ``strategy.ensure_default``).
@@ -18,18 +22,24 @@ nothing to opt into:
 ``when_to_consult`` is therefore NOT a switch — it is an optional one-line routing
 hint for the coordinator's ``[AGENTS]`` index, falling back to ``description``
 then ``name`` (see :attr:`Agent.consult_hint`). An Agent missing it is still
-consulted, delegated to and looped exactly like every other.
+delegated to, asked and looped exactly like every other.
 
 Disk layout::
 
-    agents/{slug}/
+    <root>/{slug}/
         AGENT.md                       # Agent identity + domain knowledge (no `role`)
-        skills/<slug>/SKILL.md         # shared skills (consult + every strategy) [FEAT-002/003]
+        skills/<slug>/SKILL.md         # shared skills (the brain + every strategy) [FEAT-002/003]
         store/user_{id}/               # learned memory (the shared brain) [FEAT-003]
         strategies/{sslug}/            # owned playbooks (see strategy.py)
 
-An Agent may be **authored in the repo** (e.g. ``executor_manager``) or **created
-at runtime**; either way ``AgentStore`` can create/update/delete it.
+``<root>`` is **two** roots since FEAT-115: the shipped library the repo tracks
+and this install's own, which git has never heard of. An Agent may be
+**authored in the repo** (e.g. ``executor_manager``) or **created at runtime**;
+either way ``AgentStore`` can create/update it, and a definition that is still
+stock is forked down on the first write. The two questions an agent directory
+used to answer with one path are :attr:`Agent.home` (where writes go, always
+local) and :attr:`Agent.source` (where the authored ``AGENT.md`` actually is,
+local-then-stock).
 
 ``condor`` is one of these directories (FEAT-033) — the **default** agent, the
 one answering when no specialist is bound. What makes it default is that a falsy
@@ -48,11 +58,22 @@ from pathlib import Path
 
 from condor.frontmatter import parse_frontmatter, render_frontmatter, slugify
 from condor.fsutil import atomic_write_text
-from condor.memory.paths import CHAT_SLUG
+from condor.layering import (
+    carry_fork_stamp,
+    fork_if_stock,
+    resolves_to_stock,
+    stock_delete_error,
+)
+from condor.memory.paths import (
+    CHAT_SLUG,
+    agent_home,
+    iter_agent_slugs,
+    resolve_agent_file,
+)
 
 log = logging.getLogger(__name__)
 
-_DATA_ROOT = Path(__file__).parent.parent.parent / "agents"
+AGENT_MD = "AGENT.md"
 
 
 @dataclass
@@ -62,7 +83,7 @@ class Agent:
     description: str = ""
     instructions: str = ""  # AGENT.md body: identity + domain knowledge
     agent_key: str = ""  # default model (pydantic-ai or ACP, e.g. "claude-code")
-    # Tool-name allowlist (pydantic-ai only), enforced on BOTH consult and loop.
+    # Tool-name allowlist (pydantic-ai only), enforced on BOTH delegate and loop.
     # Names match full (``mcp__condor__manage_skill``) or short (``manage_skill``).
     # Empty => UNRESTRICTED (all discovered tools, subject to tool_filter_mode).
     tools: list[str] = field(default_factory=list)
@@ -82,24 +103,44 @@ class Agent:
             self.created_at = datetime.now(timezone.utc).isoformat()
 
     @property
-    def agent_dir(self) -> Path:
-        return _DATA_ROOT / self.slug
+    def home(self) -> Path:
+        """This agent's **writable** directory. Always local, may not exist yet.
+
+        Its store, its proposals, its mutes, its strategies and any definition
+        forked down from stock. Split from the old single ``agent_dir`` in
+        FEAT-115 rather than retargeted: every call site had to be read once and
+        assigned to the right question, and a silently-repointed property would
+        have got that wrong in whichever direction the last refactor left it.
+        """
+        return agent_home(self.slug)
+
+    @property
+    def source(self) -> Path | None:
+        """The authored ``AGENT.md`` behind this Agent — local, else stock.
+
+        ``None`` only for an Agent built in memory that was never saved.
+        """
+        return resolve_agent_file(self.slug, AGENT_MD)
 
     @property
     def routines_dir(self) -> Path:
-        """Agent-level routines, shared across all of this agent's strategies."""
-        return self.agent_dir / "routines"
+        """Agent-level routines, shared across all of this agent's strategies.
+
+        The **writable** one. What the agent may *run* also includes the stock
+        layer and the shared library — see ``routines.base.assistant_routines``.
+        """
+        return self.home / "routines"
 
     @property
     def consult_hint(self) -> str:
         """The one line that describes this Agent in the coordinator's index.
 
-        Every Agent is consultable on any model — a pydantic-ai key runs the
-        consult with the tool allowlist enforced, an ACP key (claude-code/gemini/
-        copilot) runs it unrestricted with mutations confirmation-gated (see
-        consult.py). So this never gates anything; it only helps condor *route*.
-        An Agent that never got an explicit ``when_to_consult`` still gets a
-        useful line from its description (or, failing that, its name).
+        Every Agent can be reached on any model — a pydantic-ai key runs it
+                with the tool allowlist enforced, an ACP key (claude-code/gemini/copilot)
+                runs it unrestricted (see ``agent_run.py``). So this never gates
+                anything; it only helps condor *route*. An Agent that never got an
+                explicit ``when_to_consult`` still gets a useful line from its
+                description (or, failing that, its name).
         """
         return self.when_to_consult or self.description or self.name
 
@@ -110,7 +151,7 @@ def identity_header(slug: str, name: str = "") -> str:
     An Agent's AGENT.md says what it knows ("You are a specialist in …") but
     never that it IS this agent and is NOT Condor, the chat assistant. Without
     that line the model reads the coordinator framing it also receives and
-    answers in the third person about itself, offering to consult itself
+    answers in the third person about itself, offering to hand work to itself
     (FEAT-025). Shared verbatim by the condor MCP server's instructions (the
     only system-level channel ACP v1 gives us) and by the session's opening
     context, so the two framings can never drift apart.
@@ -124,12 +165,12 @@ def identity_header(slug: str, name: str = "") -> str:
     the specialist text would be self-contradictory for it ("You ARE Condor …
     You are NOT Condor"). It gets the coordinator's framing instead.
 
-    It rules out CONSULT on yourself and nothing more (FEAT-041). Delegating to
-    your own slug is legitimate — it starts a background session of you — and it
-    is only legitimate from the interactive seat, so the rule belongs with the
-    seat-aware routing text (``_agent_base`` / ``_chat_base`` / ``_worker_base``),
-    not in a line both seats read verbatim. Saying "never delegate to yourself"
-    here contradicted the chat's own routine-authoring rule and was why an agent
+    It says nothing about self-delegation (FEAT-041). Delegating to your own slug
+    is legitimate — it starts a background session of you — and it is only
+    legitimate from the interactive seat, so the rule belongs with the seat-aware
+    routing text (``_agent_base`` / ``_chat_base`` / ``_worker_base``), not in a
+    line both seats read verbatim. Saying "never delegate to yourself" here
+    contradicted the chat's own routine-authoring rule and was why an agent
     refused to spawn a copy of itself.
     """
     label = name or slug
@@ -137,32 +178,30 @@ def identity_header(slug: str, name: str = "") -> str:
         return (
             "You ARE Condor (slug: `condor`), the chat assistant the user talks "
             "to. You are the coordinator, not a specialist: domain work goes to "
-            "the agents listed for you, and their answers come back through you. "
-            "Never consult `condor`, because that is you (delegating to `condor` "
-            "is different — it starts a background session of you, and the "
-            "routing rules below say when that is right)."
+            "the agents listed for you, and their results come back through you. "
+            "Delegating to `condor` is delegating to yourself — it starts a "
+            "background session of you, and the routing rules below say when "
+            "that is right."
         )
     return (
         f'You ARE the "{label}" agent (slug: `{slug}`) running inside Condor. '
         "You are NOT Condor, the chat assistant — Condor is a different "
-        f"assistant that can consult you. Answer in the first person as {label}: "
-        f"never describe {label} in the third person, and never consult "
-        f"`{slug}`, because that is you (delegating to `{slug}` is different — it "
-        "starts a background session of you, and the routing rules below say "
-        "when that is right)."
+        f"assistant that can hand you work. Answer in the first person as "
+        f"{label}: never describe {label} in the third person. Delegating to "
+        f"`{slug}` is delegating to yourself — it starts a background session of "
+        "you, and the routing rules below say when that is right."
     )
 
 
-def _load_agent_from_dir(agent_dir: Path) -> Agent | None:
-    """Load an Agent from ``<agent_dir>/AGENT.md`` (any dir with the file)."""
-    path = agent_dir / "AGENT.md"
+def _load_agent_from_file(path: Path, slug: str) -> Agent | None:
+    """Load an Agent from a resolved ``AGENT.md``, whichever root it came from."""
     if not path.exists():
         return None
     try:
         meta, body = parse_frontmatter(path.read_text())
         return Agent(
-            slug=agent_dir.name,
-            name=meta.get("name", agent_dir.name),
+            slug=slug,
+            name=meta.get("name", slug),
             description=meta.get("description", ""),
             instructions=body,
             agent_key=meta.get("agent_key", ""),
@@ -179,23 +218,26 @@ def _load_agent_from_dir(agent_dir: Path) -> Agent | None:
 
 
 class AgentStore:
-    """Discovery + CRUD for Agents under ``agents/*/AGENT.md``.
+    """Discovery + CRUD for Agents under ``<root>/*/AGENT.md``, both roots.
 
     Replaces ``ExpertStore`` and the identity half of ``StrategyStore``. There is
     no ``role`` discriminator and no capability flag: every directory with an
-    ``AGENT.md`` is an Agent, and every Agent can be consulted, delegated to and
-    looped.
+    ``AGENT.md`` is an Agent, and every Agent can be asked, delegated to and looped.
     """
 
     def get(self, slug: str) -> Agent | None:
         if not slug:
             return None
-        return _load_agent_from_dir(_DATA_ROOT / slug)
+        path = resolve_agent_file(slug, AGENT_MD)
+        if path is None:
+            return None
+        return _load_agent_from_file(path, slug)
 
     def list_all(self) -> list[Agent]:
+        """Every agent either root knows — local definitions shadowing stock."""
         agents: list[Agent] = []
-        for d in self._iter_agent_dirs():
-            a = _load_agent_from_dir(d)
+        for slug in iter_agent_slugs():
+            a = self.get(slug)
             if a is not None:
                 agents.append(a)
         return agents
@@ -218,17 +260,17 @@ class AgentStore:
     def list_index(self, exclude: str | Iterable[str] = "") -> str:
         """Injectable index — one line per Agent (mirrors SKILLS).
 
-        EVERY consultable Agent is listed. An agent missing from this index is
-        invisible to whoever reads it, which means it can never be consulted or
+        EVERY Agent is listed. An agent missing from this index is
+        invisible to whoever reads it, which means it can never be reached or
         delegated to — so filtering here is the same as deleting the agent.
         Empty string only when no agents exist at all, so callers inject nothing.
 
         ``exclude`` drops slugs that are not *peers* of the reader, and nothing
         else — the rule is still "never filter to hide an agent":
 
-        - the reader itself, which must not be told to consult itself (FEAT-025);
+        - the reader itself, which must not be told to hand work to itself (FEAT-025);
         - ``condor``, which is an agent now (FEAT-033) but is the coordinator,
-          not a peer. A specialist offered Condor could consult back into the
+          not a peer. A specialist offered Condor could delegate back into the
           chat, with auto-approved tools on the delegate path.
 
         Callers pass a set of both. Filtering for any other reason stays
@@ -287,8 +329,13 @@ class AgentStore:
             raise ValueError(
                 f"'{CHAT_SLUG}' is the default agent and cannot be deleted"
             )
-        agent_dir = _DATA_ROOT / slug
-        path = agent_dir / "AGENT.md"
+        if resolves_to_stock(slug, AGENT_MD):
+            # A shipped agent has no local file to remove and an update would
+            # bring it straight back, so deletion would be a lie. FEAT-090's
+            # mute is the reversible answer that already exists.
+            raise ValueError(stock_delete_error(slug))
+        agent_dir = agent_home(slug)
+        path = agent_dir / AGENT_MD
         if not path.exists():
             return False
         path.unlink()
@@ -314,16 +361,14 @@ class AgentStore:
             "created_by": agent.created_by,
             "created_at": agent.created_at,
         }
-        agent.agent_dir.mkdir(parents=True, exist_ok=True)
+        # Forks a stock AGENT.md down before overwriting it, so the shipped
+        # copy is never the file this writes and the local one carries a
+        # ``forked_from`` stamp naming the revision it diverged from.
+        target = fork_if_stock(agent.slug, AGENT_MD)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # The meta here is rebuilt from the dataclass, which knows nothing about
+        # the fork; without this the stamp would vanish on the next save.
         atomic_write_text(
-            agent.agent_dir / "AGENT.md",
-            render_frontmatter(meta, agent.instructions),
+            target,
+            render_frontmatter(carry_fork_stamp(target, meta), agent.instructions),
         )
-
-    def _iter_agent_dirs(self):
-        if not _DATA_ROOT.exists():
-            return
-        for d in sorted(_DATA_ROOT.iterdir()):
-            if not d.is_dir() or d.name.startswith("_") or d.name == "strategies":
-                continue
-            yield d

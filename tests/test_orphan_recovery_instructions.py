@@ -2,7 +2,7 @@
 
 The listing used to say "close the position via the gateway tools (remove liquidity by position
 address)" — an instruction with no implementing tool. An agent following it found that
-``manage_executors(action="stop")`` was a no-op (the executor is already terminated), ``manage_amm``
+``stop_executor`` was a no-op (the executor is already terminated), ``manage_amm``
 does not handle CLMM positions, and ``explore_dex_pools`` is read-only, so the position stayed open.
 
 The listing now emits a concrete ``manage_clmm(action="close", ...)`` call built from the record's
@@ -16,8 +16,7 @@ The repo has no async test setup, so coroutines are driven with asyncio.run().
 
 import asyncio
 
-from mcp_servers.hummingbot_api.schemas import ManageExecutorsRequest
-from mcp_servers.hummingbot_api.tools.executors import manage_executors
+from mcp_servers.hummingbot_api.tools.executors import list_orphaned_positions
 
 ORPHAN = {
     "executor_id": "HJJUFaSZdThCH6rRv5agcVCZ4widziThm1aRdh2LtcTW",
@@ -66,10 +65,7 @@ class _Client:
 
 def _list_orphans(orphans):
     client = _Client({"count": len(orphans), "orphans": orphans})
-    request = ManageExecutorsRequest(action="orphaned")
-    return asyncio.run(manage_executors(client=client, request=request))[
-        "formatted_output"
-    ]
+    return asyncio.run(list_orphaned_positions(client))["formatted_output"]
 
 
 def test_listing_emits_a_runnable_close_call():

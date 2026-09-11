@@ -27,7 +27,7 @@ real controller failure (schema reject, deploy/status error, or no on-ledger ord
 
 ```
 manage_routines(action="run", name="xrpl_mm_quote_planner",
-                strategy_id="xrpl_market_maker.rlusd_xrp_maker",
+                agent="xrpl_market_maker",
                 config={"xrpl_pair": "<pair>", "tick_interval_sec": <frequency_sec>,
                         "requote_interval_sec": <executor_refresh_time>,
                         "levels_per_side": <n>, "total_amount_quote": <capital>})
@@ -78,16 +78,18 @@ so PnL attributes to direct executors.
 ### Executor fallback
 
 ```
-manage_executors(action="create", controller_id="{agent_id}",
-                 executor_config={"type": "order_executor", "connector_name": "xrpl", ...})
+create_order_executor(connector_name="xrpl", trading_pair="<pair>", side=<1|2>,
+                      amount=<base_amount>, execution_strategy="LIMIT_MAKER",
+                      price=<price>, controller_id="{agent_id}")
 ```
 
 One LIMIT/LIMIT_MAKER level per side first; confirm on-ledger before laddering.
 
 ## Phase 4 — Verify
 
-```
-get_market_data(data_type="order_book", connector_name="xrpl", trading_pair="<pair>")
+```python
+# run_code
+ob = await client.market_data.get_order_book("xrpl", "<pair>")
 ```
 
 Offer must be visible at the expected price.

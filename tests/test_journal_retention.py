@@ -121,9 +121,9 @@ def _engine(tmp_path, monkeypatch):
     from condor.agents.engine import TickEngine
     from condor.agents.strategy import Strategy
 
-    monkeypatch.setattr(strategy_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     strategy = Strategy(agent_slug="brigado", name="Grid")
-    strategy.dir.mkdir(parents=True, exist_ok=True)
+    strategy.home.mkdir(parents=True, exist_ok=True)
     agent = Agent(slug="brigado", name="Brigado")
     return TickEngine(
         agent=agent,
@@ -208,6 +208,7 @@ def test_a_risk_blocked_tick_rewrites_the_journal_once(tmp_path, monkeypatch, wr
 def small_caps(monkeypatch):
     monkeypatch.setattr(journal_mod, "MAX_TICK_LINES", 10)
     monkeypatch.setattr(journal_mod, "MAX_SNAPSHOT_LINES", 10)
+    monkeypatch.setattr(journal_mod, "MAX_DECISION_LINES", 10)
     return 10
 
 
@@ -326,3 +327,72 @@ def test_an_unwritable_archive_keeps_the_entries_in_the_journal(
 
     assert len(_tick_lines(journal)) == small_caps + 1
     assert "archiving Ticks failed" in caplog.text
+
+
+# ── Decisions retention ──
+#
+# Decisions were the one bounded section that *deleted* its overflow: a run past
+# the cap no longer showed the decision that opened its position, and the line
+# was not in journal_archive.md either -- so the only copy left was inside a
+# snapshot file under .condor, which nobody is going to go and read. They go
+# through _append_bounded now, like Ticks and Snapshots.
+
+
+def _decision_lines(journal: JournalManager) -> list[str]:
+    return [
+        l
+        for l in journal._get_section("Decisions").splitlines()
+        if l.startswith("- **")
+    ]
+
+
+def test_the_decisions_section_never_exceeds_the_cap(journal, small_caps):
+    for i in range(small_caps * 3):
+        journal.append_action(i + 1, f"action {i + 1}", "because")
+
+    assert len(_decision_lines(journal)) == small_caps
+
+
+def test_the_first_decision_of_a_long_run_is_archived_not_destroyed(
+    journal, small_caps
+):
+    """The tick-1 deploy is exactly the decision a reader comes back for."""
+    journal.append_action(1, "deploy_grid", "opened the position")
+    for i in range(small_caps + 4):
+        journal.append_action(i + 2, f"hold {i + 2}", "no change")
+
+    assert "deploy_grid" not in journal._get_section("Decisions")
+    archive = (journal._session_dir / journal_mod.ARCHIVE_NAME).read_text()
+    assert "## Decisions" in archive
+    assert "- **#1** " in archive and "deploy_grid" in archive
+
+
+def test_what_the_reader_sees_where_the_decisions_stop(journal, small_caps):
+    for i in range(small_caps + 3):
+        journal.append_action(i + 1, f"action {i + 1}", "because")
+
+    lines = journal._get_section("Decisions").splitlines()
+    assert lines[0] == "- archived 3 earlier decisions to journal_archive.md"
+    assert lines[1].startswith("- **#4** ")
+
+
+def test_errors_are_bounded_and_archived_the_same_way(journal, small_caps):
+    journal.append_error("the first failure, worth keeping")
+    for i in range(small_caps + 4):
+        journal.append_error(f"failure {i + 2}")
+
+    assert len(_decision_lines(journal)) == small_caps
+    archive = (journal._session_dir / journal_mod.ARCHIVE_NAME).read_text()
+    assert "the first failure, worth keeping" in archive
+
+
+def test_the_marker_does_not_eat_a_slot_in_the_agents_recent_decisions(
+    journal, small_caps
+):
+    """get_recent_decisions feeds the next prompt: 3 means 3 decisions."""
+    for i in range(small_caps + 5):
+        journal.append_action(i + 1, f"action {i + 1}", "because")
+
+    recent = journal.get_recent_decisions(count=3).splitlines()
+    assert len(recent) == 3
+    assert all(l.startswith("- **#") for l in recent)

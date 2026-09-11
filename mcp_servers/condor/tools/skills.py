@@ -54,15 +54,13 @@ async def manage_skill(
     query: str | None = None,
     max_entries: int = 30,
     agent: str | None = None,
-    strategy_id: str | None = None,
     file: str | None = None,
     content: str | None = None,
     shared: bool | None = None,
 ) -> dict:
-    # ``strategy_id`` is the deprecated spelling of ``agent`` — a skill library
-    # is keyed by agent, never by strategy. Kept so existing MCP hosts and the
-    # playbooks that name it keep working.
-    target = agent or strategy_id
+    # A skill library is keyed by agent, never by strategy — ``agent`` is the
+    # only target selector.
+    target = agent
     agent_slug, resolved = _resolve_agent_slug(target)
     if target and not resolved:
         return {"error": f"No agent or strategy found for '{target}'"}

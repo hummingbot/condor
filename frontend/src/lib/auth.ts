@@ -9,6 +9,7 @@ import {
 import { TOKEN_KEY, authHeaders } from "./auth-token";
 import { clearDiagnostics } from "./diagnostics";
 import { queryClient } from "./queryClient";
+import { clearSessionState } from "./sessionState";
 
 export interface User {
   id: number;
@@ -41,9 +42,11 @@ export const SERVER_KEY = "condor_selected_server";
  * is a session boundary with no `logout` in between, and everything `logout`
  * drops would otherwise cross it: the React Query cache (every cached response
  * belongs to the session that fetched it — portfolio, bots, API keys,
- * conversations), the console-error ring, and the selected server, which the
- * next user may not even have access to. One function and one predicate for the
- * three of them, so they cannot drift apart.
+ * conversations), the console-error ring, the selected server, which the next
+ * user may not even have access to, and the stored form state — order sizes,
+ * leverage, routine configs — that would otherwise pre-fill the incoming user's
+ * panels with the outgoing user's trading (see lib/sessionState.ts). One
+ * function and one predicate for the four of them, so they cannot drift apart.
  *
  * Re-logging in as the same user is not a boundary — Telegram mints a new token
  * every time — and keeps its state: the errors are often exactly the session
@@ -66,6 +69,7 @@ function resetForNewUser(incoming: User) {
   localStorage.removeItem(SERVER_KEY);
   queryClient.clear();
   clearDiagnostics();
+  clearSessionState();
 }
 
 export const AuthContext = createContext<AuthState>({
@@ -141,6 +145,10 @@ export function useAuthState(): AuthState {
     // from the Settings button and from the token check below, so an expired
     // session drops its errors too.
     clearDiagnostics();
+    // Order sizes, leverage, saved routine configs and starred pairs: what the
+    // outgoing user typed, not how this device renders. Device preferences —
+    // theme, display currency, panel layout — deliberately survive.
+    clearSessionState();
     setToken(null);
     setUser(null);
   }, []);

@@ -3,12 +3,12 @@
 Direct, chain- and DEX-agnostic CLMM position control. Stateless: you hold position state in your
 journal.
 
-**This is the unmanaged path.** For normal LP work use `manage_executors` with `lp_executor` — it
+**This is the unmanaged path.** For normal LP work use `create_lp_executor` — it
 owns range monitoring, rebalancing, and bounded close retries. Reach for `manage_clmm` when there is
 no executor to do that for you:
 
 - **Recovering an orphaned position** — the main reason this tool exists. Once an executor has
-  terminated it cannot be told to close anything; `manage_executors(action="stop")` on it correctly
+  terminated it cannot be told to close anything; `stop_executor` on it correctly
   returns a no-op. The position has to be closed by address.
 - Inspecting a position's live amounts and uncollected fees.
 - Collecting fees without disturbing the position.
@@ -63,7 +63,7 @@ filter) does not use it either — so a position the API never recorded, such as
 
 ## Recovering an orphaned position
 
-1. `manage_executors(action="orphaned")` — each entry carries `lp_provider`, `pool_address`,
+1. `list_orphaned_positions()` — each entry carries `lp_provider`, `pool_address`,
    `position_address`, and `connector_name` (which for an LP executor holds the *network*, e.g.
    `solana-mainnet-beta`, not the DEX).
 2. Confirm it is really still on-chain (lists every position the wallet owns; match by
@@ -71,7 +71,7 @@ filter) does not use it either — so a position the API never recorded, such as
    `manage_clmm(action="position_info", connector=<lp_provider>, network=<connector_name>)`
 3. Close it:
    `manage_clmm(action="close", connector=<lp_provider>, network=<connector_name>, position_address=<position_address>)`
-4. `manage_executors(action="resolve_orphan", executor_id="...")` so it stops being reported.
+4. `resolve_orphaned_position(executor_id="...")` so it stops being reported.
 
 If an entry has `needs_onchain_reconciliation: true` its position address was never persisted (an
 API restart). Find it with `get_portfolio_overview(include_lp_positions=True)` or `position_info`

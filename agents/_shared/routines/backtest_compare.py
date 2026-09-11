@@ -2,11 +2,11 @@
 
 CATEGORY = "Bot Analysis"
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -117,64 +117,44 @@ def _num(value: float | None, decimals: int = 2) -> str:
 # -- store access --
 
 
-def _store_path(store, task_id: str) -> Path:
-    """Path of a task file. Touches the store's internals in exactly one place."""
-    return store._task_path(task_id)
-
-
 def _known_task_ids(store) -> list[str]:
-    """All task IDs the store knows about. Index-only, no file parsing."""
-    return list(store._index.keys())
-
-
-def _task_server(store, task_id: str) -> str:
-    return store._index.get(task_id, {}).get("server", "")
+    """All task IDs the store knows about. Index-only, no payload parsing."""
+    return store.known_task_ids()
 
 
 def _resolve_ids(store, raw: str) -> tuple[list[str], list[str]]:
     """Resolve user-supplied IDs (exact or unique prefix) to real task IDs."""
-    known = _known_task_ids(store)
     resolved: list[str] = []
     errors: list[str] = []
 
     for token in (t.strip() for t in raw.split(",")):
         if not token:
             continue
-        if token in known:
-            if token not in resolved:
-                resolved.append(token)
-            continue
-        matches = [tid for tid in known if tid.startswith(token)]
-        if not matches:
+        match = store.resolve_task_id(token)
+        if match is None:
             errors.append(f"'{token}' matches no saved backtest")
-        elif len(matches) > 1:
-            errors.append(f"'{token}' is ambiguous ({', '.join(sorted(matches))})")
-        elif matches[0] not in resolved:
-            resolved.append(matches[0])
+        elif isinstance(match, list):
+            errors.append(f"'{token}' is ambiguous ({', '.join(match)})")
+        elif match not in resolved:
+            resolved.append(match)
 
     return resolved, errors
 
 
 def _latest_ids(store, count: int, server: str | None) -> list[str]:
-    """Most recently written task IDs, newest first.
+    """Most recently completed task IDs, newest first.
 
-    Ordered by file mtime so picking candidates never parses the result files
-    (they run to ~16 MB each).
+    Ordered by the summary's ``completed_at`` rather than the payload's mtime:
+    a payload can be pruned (FEAT-075) and its metrics still rank, so a file
+    timestamp is no longer a clock this can rely on. ``server=None`` compares
+    across every server, which is now free.
     """
-    candidates = _known_task_ids(store)
-    if server:
-        scoped = [t for t in candidates if _task_server(store, t) == server]
+    summaries = store.list_summaries(server)
+    if server and not summaries:
         # A chat pointed at a server with no saved backtests still gets an
         # answer rather than an empty comparison.
-        candidates = scoped or candidates
-
-    def mtime(task_id: str) -> float:
-        try:
-            return _store_path(store, task_id).stat().st_mtime
-        except OSError:
-            return 0.0
-
-    return sorted(candidates, key=mtime, reverse=True)[:count]
+        summaries = store.list_summaries()
+    return [s["task_id"] for s in summaries[:count]]
 
 
 # -- run loading --
@@ -220,37 +200,48 @@ def _build_curve(result: dict) -> list[tuple[float, float]]:
     return _downsample(points)
 
 
-def _load_run(store, task_id: str) -> Run | None:
-    """Load one completed backtest, or None if it is unusable."""
-    try:
-        task = store.get_result(task_id)
-    except (OSError, json.JSONDecodeError):
-        logger.warning("Failed to read backtest %s", task_id, exc_info=True)
+async def _load_run(store, task_id: str) -> Run | None:
+    """Load one completed backtest, or None if it is unusable.
+
+    Everything the ranked table needs — the identity, the window and all 21
+    metrics — comes from the summary, so a comparison costs one index read per
+    run instead of opening a payload for a number the index already holds. The
+    payload is opened only for the equity curve, and a run whose payload has
+    been pruned still ranks; it just has no line on the chart.
+    """
+    summary = store.get_summary(task_id)
+    if summary is None or summary.get("status") != "completed":
         return None
-    if not task or task.get("status") != "completed":
+    metrics = summary.get("metrics") or {}
+    if not metrics:
         return None
 
-    result = task.get("result") or {}
-    if not result:
-        return None
-
-    task_config = task.get("config") or {}
-    controller_config = task_config.get("config") or {}
+    curve: list[tuple[float, float]] = []
+    if summary.get("has_payload", True):
+        try:
+            # gunzip + parse of a payload that runs to 137 MB. Off the loop, and
+            # one run at a time: a comparison opens up to MAX_RUNS of them and
+            # decompressing them concurrently would trade a stall for the memory.
+            task = await asyncio.to_thread(store.get_result, task_id)
+        except (OSError, json.JSONDecodeError):
+            logger.warning("Failed to read backtest %s", task_id, exc_info=True)
+            task = None
+        result = (task or {}).get("result") or {}
+        if result:
+            curve = _build_curve(result)
 
     return Run(
         task_id=task_id,
-        config_id=str(
-            controller_config.get("id") or task_config.get("config_id") or ""
-        ),
-        controller=str(controller_config.get("controller_name") or ""),
-        connector=str(controller_config.get("connector_name") or ""),
-        pair=str(controller_config.get("trading_pair") or ""),
-        resolution=str(task_config.get("backtesting_resolution") or ""),
-        start_ts=int(task_config.get("start_time") or 0),
-        end_ts=int(task_config.get("end_time") or 0),
-        metrics=result.get("results") or {},
-        close_types=result.get("results", {}).get("close_types") or {},
-        curve=_build_curve(result),
+        config_id=str(summary.get("config_id") or ""),
+        controller=str(summary.get("controller") or ""),
+        connector=str(summary.get("connector") or ""),
+        pair=str(summary.get("trading_pair") or ""),
+        resolution=str(summary.get("resolution") or ""),
+        start_ts=int(summary.get("start_time") or 0),
+        end_ts=int(summary.get("end_time") or 0),
+        metrics=metrics,
+        close_types=metrics.get("close_types") or {},
+        curve=curve,
     )
 
 
@@ -460,9 +451,11 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> RoutineResu
                 )
         requested = _latest_ids(store, count, server)
 
-    runs = [
-        run_ for run_ in (_load_run(store, tid) for tid in requested[:MAX_RUNS]) if run_
-    ]
+    runs: list[Run] = []
+    for tid in requested[:MAX_RUNS]:
+        run_ = await _load_run(store, tid)
+        if run_:
+            runs.append(run_)
 
     if len(runs) < MIN_RUNS:
         return RoutineResult(text=_no_runs_message(store, requested, errors))

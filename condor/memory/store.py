@@ -12,7 +12,7 @@ subprocess (the ``manage_memory`` tool) alike.
 Each store lives under its assistant's home, keyed by ``user_id`` (FEAT-003);
 :func:`condor.memory.paths.store_root` resolves the root. Layout on disk::
 
-    {assistant_home}/store/user_{user_id}/
+    {agent_home}/store/user_{user_id}/
         MEMORY.md            # injectable index: one line per memory
         memories/
             <slug>.md        # one fact per file (frontmatter + body)
@@ -211,6 +211,24 @@ class MemoryStore:
             if len(results) >= limit:
                 break
         return results
+
+    def catalog(self) -> list[dict]:
+        """Every memory's metadata, oldest first — no bodies.
+
+        The structured twin of :meth:`list_index`, which returns the same set as
+        one markdown blob for the prompt. Bodies stay behind :meth:`read` so a
+        reader pays for the one memory they opened, not for all of them.
+        """
+        return [
+            {
+                "name": meta.get("name", ""),
+                "description": meta.get("description", ""),
+                "type": meta.get("type", "fact"),
+                "created": meta.get("created", ""),
+                "source": meta.get("source", ""),
+            }
+            for meta, _ in self._iter_memories()
+        ]
 
     def list_index(self) -> str:
         """Return the contents of ``MEMORY.md`` (for prompt injection).
