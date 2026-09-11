@@ -96,3 +96,59 @@ def build_llm_client(
         model=model_pref or None,
         system_prompt=system_prompt,
     )
+
+
+async def agent_key_error(
+    agent_key: str,
+    *,
+    user_id: int | None = None,
+    base_url_override: str | None = None,
+) -> str | None:
+    """Why ``agent_key`` cannot run here, or ``None`` when nothing says so yet.
+
+    For a caller about to hand the key to something unattended — the loop
+    engine above all — that would rather refuse up front than start a run which
+    fails where nobody is watching. Only what is certain before a request goes
+    out counts: a provider no client knows, a key with no model id, a custom key
+    naming an endpoint this user never saved, a provider with no API key or base
+    URL. Those are exactly what a tick raises from its first ``start()``, and
+    they are raised here by the same code, so the two cannot disagree. A local
+    server that is down, or a model the provider does not serve, still fails at
+    run time: telling those apart takes a network call, and a server that is off
+    now may well be on by the first tick.
+    """
+    key = (agent_key or "").strip()
+    if not key:
+        return None  # no key = the ACP default, always addressable
+    if not pydantic_ai.is_pydantic_ai_model(key):
+        base = key.split(":", 1)[0]
+        if base.split("@", 1)[0] in pydantic_ai.PYDANTIC_AI_PREFIXES:
+            return f"no model id — use '{base}:<model-id>'"
+        if base not in acp_client.ACP_COMMANDS:
+            # resolve_acp would quietly run Claude Code in its place.
+            known = sorted(acp_client.ACP_COMMANDS) + sorted(
+                pydantic_ai.PYDANTIC_AI_PREFIXES
+            )
+            return f"unknown model provider '{base}' (known: {', '.join(known)})"
+        return None
+
+    from condor.llm.readiness import LOCAL_PREFIXES
+
+    try:
+        client = build_llm_client(
+            key,
+            user_id=user_id,
+            base_url_override=base_url_override,
+            # An explicit base URL is the endpoint, so the saved name is moot.
+            strict_custom_endpoint=not base_url_override,
+        )
+        # A bare local key ("ollama:") asks the server which model to use.
+        if (
+            pydantic_ai.model_prefix(key) in LOCAL_PREFIXES
+            and not key.partition(":")[2]
+        ):
+            return None
+        await client._build_model()
+    except Exception as e:
+        return str(e) or type(e).__name__
+    return None

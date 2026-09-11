@@ -75,6 +75,15 @@ def _supervisor():
     return get_supervisor()
 
 
+def resolve_agent_key(config: dict[str, Any], strategy, agent) -> str:
+    """The model a run uses: run config override > strategy override > Agent.
+
+    Module-level so the start route can check the very key the engine will run
+    before building one — building an engine allocates a session on disk.
+    """
+    return config.get("agent_key") or strategy.agent_key or agent.agent_key
+
+
 def get_engine(agent_id: str) -> TickEngine | None:
     return _supervisor().get(agent_id)
 
@@ -114,6 +123,9 @@ class TickEngine:
     _shutting_down: bool = field(default=False, init=False)
     _last_tick_at: float = field(default=0.0, init=False)
     _last_error: str = field(default="", init=False)
+    # The block the owner was last told about, so a block lasting many ticks is
+    # announced once instead of on every one of them.
+    _last_block_reason: str = field(default="", init=False, repr=False)
     _last_skill_data: dict[str, Any] = field(default_factory=dict, init=False)
     _adoption_done: bool = field(default=False, init=False, repr=False)
     _mode_mismatch_noted: bool = field(default=False, init=False, repr=False)
@@ -386,17 +398,28 @@ class TickEngine:
         mode = self.config.get("execution_mode", "loop")
         while self._running:
             if not self._paused:
+                tick_error = ""
                 try:
                     await self._tick()
                     self._last_error = ""
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
-                    self._last_error = str(e)
+                    tick_error = str(e) or type(e).__name__
+                    # A loop with a broken model or server fails every tick the
+                    # same way: tell the owner when the error starts or changes,
+                    # not once a tick. A single-tick run reports below instead.
+                    repeated = tick_error == self._last_error
+                    self._last_error = tick_error
                     log.exception("TickEngine %s tick error", self.agent_id)
                     if self.journal:
-                        self.journal.append_error(str(e))
-                    await self._notify(f"Agent {self.agent_id} tick error: {e}")
+                        self.journal.append_error(tick_error)
+                    if mode in ("dry_run", "run_once"):
+                        self._record_failed_experiment(tick_error)
+                    elif not repeated:
+                        await self._notify(
+                            f"Agent {self.agent_id} tick error: {tick_error}"
+                        )
 
                 # A shutdown that started *inside* the tick (the hard risk
                 # kill-switch) already ran its winddown, wrote the terminal
@@ -416,6 +439,20 @@ class TickEngine:
                 # Single-tick modes: stop after first tick
                 if mode in ("dry_run", "run_once"):
                     label = "Dry run" if mode == "dry_run" else "Run-once"
+                    if tick_error:
+                        # A tick that raised is a failed run, not a completed one.
+                        log.info(
+                            "TickEngine %s: %s failed, self-stopping",
+                            self.agent_id,
+                            label,
+                        )
+                        await self._notify(
+                            f"Agent {self.agent_id}: {label} failed: {tick_error}"
+                        )
+                        self._last_stop_reason = "error"
+                        self._running = False
+                        _supervisor().unregister(self.agent_id, LoopState.ERROR)
+                        return
                     log.info(
                         "TickEngine %s: %s complete, self-stopping",
                         self.agent_id,
@@ -531,10 +568,13 @@ class TickEngine:
                     risk_state.block_reason,
                 )
                 self.journal.record_tick("blocked: " + risk_state.block_reason)
-            await self._notify(
-                f"Agent {self.agent_id} blocked: {risk_state.block_reason}"
-            )
+            if risk_state.block_reason != self._last_block_reason:
+                await self._notify(
+                    f"Agent {self.agent_id} blocked: {risk_state.block_reason}"
+                )
+            self._last_block_reason = risk_state.block_reason
             return
+        self._last_block_reason = ""
 
         # 5. Build prompt (server credentials are injected via env into MCP process)
         # Routine discovery is read fresh each tick, like the skills index right
@@ -1084,12 +1124,8 @@ class TickEngine:
         return owners
 
     def _agent_key(self) -> str:
-        """Resolve the model for this run: config override > strategy override > Agent."""
-        return (
-            self.config.get("agent_key")
-            or self.strategy.agent_key
-            or self.agent.agent_key
-        )
+        """Resolve the model for this run (see :func:`resolve_agent_key`)."""
+        return resolve_agent_key(self.config, self.strategy, self.agent)
 
     def _resolve_server(self) -> tuple[str | None, dict | None]:
         """Resolve the server for this run, keyed on ``user_id`` (SEC-164).
@@ -1165,12 +1201,54 @@ class TickEngine:
             return None
 
     async def _notify(self, message: str) -> None:
-        """Send a notification to the user via Telegram."""
-        if hasattr(self, "_bot") and self._bot:
-            try:
-                await self._bot.send_message(chat_id=self.chat_id, text=message)
-            except Exception:
-                log.exception("Failed to send notification to chat %s", self.chat_id)
+        """Tell the run's owner, down the same ladder a delegation's notice takes.
+
+        Only a live bot handed to ``start()`` used to count, and neither caller
+        (the start route, the boot restart) has one to hand, so every notice
+        here went nowhere. A dashboard launch carries no chat (``chat_id`` 0);
+        its owner's private chat is the one their user id names.
+        """
+        chat_id = self.chat_id or self.user_id
+        if not chat_id:
+            return
+        from .delegate import resolve_bot
+
+        try:
+            bot = resolve_bot(getattr(self, "_bot", None))
+            await bot.send_message(chat_id=chat_id, text=message)
+        except Exception:
+            log.exception("Failed to send notification to chat %s", chat_id)
+
+    def _record_failed_experiment(self, error: str) -> None:
+        """Write the dry run's file for a tick that raised before writing it.
+
+        An experiment keeps no journal and its engine is dropped the moment it
+        stops, so a failed dry run used to leave nothing behind at all. The
+        error goes where a failed model call already puts it — the Agent
+        Response — which is what marks the run as failed in the Runs rail.
+        """
+        from datetime import datetime, timezone
+
+        from .journal import save_experiment_snapshot
+
+        try:
+            save_experiment_snapshot(
+                agent_dir=self.strategy.home,
+                experiment_num=self.session_num,
+                execution_mode=self.config.get("execution_mode", "loop"),
+                timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+                system_prompt="",
+                response_text=f"(error: {error})",
+                tool_calls=[],
+                executors_data="The tick failed before collecting any.",
+                risk_state={},
+                duration=time.time() - self._last_tick_at,
+                agent_key=self._agent_key(),
+            )
+        except Exception:
+            log.exception(
+                "TickEngine %s: could not record the failed run", self.agent_id
+            )
 
     def get_info(self) -> dict[str, Any]:
         """Return a summary dict for display."""

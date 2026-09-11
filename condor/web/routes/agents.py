@@ -2846,6 +2846,23 @@ async def _start(agent, strategy, req: StartStrategyRequest, user_id: int) -> di
         if not cm.get_server(server_name):
             raise HTTPException(status_code=404, detail="Server not found")
 
+    # The model is held to the same up-front check as the server. The loop runs
+    # in the background, so a key that could not run used to answer "started"
+    # and then fail its first tick where nobody saw it.
+    from condor.agents.engine import resolve_agent_key
+    from condor.runtime.llm_client import agent_key_error
+
+    agent_key = resolve_agent_key(config_dict, strategy, agent)
+    problem = await agent_key_error(
+        agent_key,
+        user_id=user_id,
+        base_url_override=config_dict.get("model_base_url") or None,
+    )
+    if problem:
+        raise HTTPException(
+            status_code=422, detail=f"Model '{agent_key}' cannot run: {problem}"
+        )
+
     if req.trading_context:
         config_dict["trading_context"] = req.trading_context
     elif not config_dict.get("trading_context") and strategy.default_trading_context:
