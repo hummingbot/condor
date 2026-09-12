@@ -1,0 +1,45 @@
+{
+  "executor_id": "5fBdhC1JWfsNAL5SgPMoL4GoZcFXNcSCgvnUE5hrDvDC",
+  "status": "TERMINATED",
+  "close_type": "COMPLETED",
+  "config": {
+    "reviewed_svm_plan_hash": null,
+    "svm_spending_policy": {
+      "wallet": "HQXTpSdMnY1WgyoAXgczyBmwkmajQVUdSe6fpraNaG1F",
+      "market": "2vVYHYM8VYnvZqQWpTJSj8o8DBf1wM8pVs3bsTgYZiqJ",
+      "protocol_program": "jup3YeL8QhtSx1e253b2FDvsMNC87fDrgQZivbrndc9",
+      "allowed_programs": [
+        "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
+        "jup3YeL8QhtSx1e253b2FDvsMNC87fDrgQZivbrndc9"
+      ],
+      "max_debits_raw": {
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": "2000000",
+        "native": "30000000"
+      }
+    },
+    "controller_id": null,
+    "chain": "svm",
+    "mode": "instructions",
+    "chain_id": 1,
+    "cluster": "mainnet-beta",
+    "max_svm_network_fee_lamports": 10000,
+    "commit": false
+  },
+  "custom_info": {
+    "guards": null,
+    "simulation_passed": true,
+    "commit_attempted": false,
+    "svm_plan_hash": "534e8a9824d64fdd60325e775426bc83330778d441c2f41fa229eb5cacff6b6d",
+    "phase": "done",
+    "tx_hashes": [],
+    "svm_network_fees": null,
+    "cluster": "mainnet-beta",
+    "wallet_address": "HQXTpSdMnY1WgyoAXgczyBmwkmajQVUdSe6fpraNaG1F",
+    "estimated_svm_network_fee_lamports": "5000",
+    "committed": false,
+    "svm_balance_changes": null,
+    "outcome_kind": null,
+    "digest": "sha256:e4ba3883835533c777b02c837401d02fa094474e6f28bc0fca9ee8c80828f923",
+    "error_reason": null
+  }
+}

@@ -5,6 +5,7 @@ This module provides table formatters for executor types, executor lists,
 positions held, and executor configuration schemas.
 """
 
+import json
 from typing import Any
 
 from .base import (
@@ -121,6 +122,91 @@ def format_executors_table(executors: list[dict[str, Any]]) -> str:
     return f"{header}\n{separator}\n" + "\n".join(rows)
 
 
+def _format_onchain_detail(executor: dict[str, Any]) -> str:
+    """Expose review evidence, never raw pipeline requests, logs or credentials."""
+    config = executor.get("config") or {}
+    info = executor.get("custom_info") or {}
+
+    def fields(source, names):
+        if not isinstance(source, dict):
+            return {}
+        return {
+            name: source[name]
+            for name in names.split()
+            if name in source
+            and (
+                source[name] is None
+                or isinstance(source[name], (str, int, float, bool))
+            )
+        }
+
+    evidence = fields(executor, "id executor_id type status close_type")
+    evidence["config"] = fields(
+        config,
+        "chain chain_id cluster mode commit require_simulation max_gas_quote "
+        "max_svm_network_fee_lamports reviewed_svm_plan_hash",
+    )
+    if isinstance(config.get("lending"), dict):
+        evidence["config"]["lending"] = fields(
+            config["lending"], "chain_id wallet pool asset amount action"
+        )
+    evidence["execution"] = fields(
+        info,
+        "phase chain chain_id cluster requested_cluster wallet_address digest "
+        "svm_plan_hash build_expires_at simulation_passed "
+        "estimated_svm_network_fee_lamports max_svm_network_fee_lamports "
+        "estimated_gas_quote gas_units gas_price_wei gas_native_cost "
+        "commit_attempted committed outcome_kind reason",
+    )
+    if "reason" not in evidence["execution"]:
+        evidence["execution"].update(fields(info.get("error"), "reason"))
+    policy = config.get("svm_spending_policy") or info.get("svm_spending_policy")
+    if isinstance(policy, dict):
+        projected = fields(policy, "wallet market protocol_program")
+        projected["allowed_programs"] = [
+            value
+            for value in policy.get("allowed_programs", [])
+            if isinstance(value, str)
+        ]
+        debits = policy.get("max_debits_raw") or {}
+        projected["max_debits_raw"] = {
+            asset: amount
+            for asset, amount in debits.items()
+            if isinstance(asset, str) and isinstance(amount, (str, int))
+        }
+        evidence["svm_spending_policy"] = projected
+    for name, keys in {
+        "simulation_guards": "name status",
+        "balance_changes": "account asset amount direction symbol decimals chain_id cluster standard step",
+        "approvals": "account spender asset kind amount approved unlimited token_id standard symbol decimals chain_id step",
+        "simulation_fees": "account asset amount decimals cluster chain_id kind step",
+    }.items():
+        if isinstance(info.get(name), list):
+            evidence[name] = [
+                fields(row, keys) for row in info[name] if isinstance(row, dict)
+            ]
+    evidence["tx_hashes"] = [
+        value for value in info.get("tx_hashes", []) if isinstance(value, str)
+    ]
+    return (
+        "On-chain Executor Review Evidence:\n"
+        "Balance changes and fees below are simulation estimates, not receipt-derived results. "
+        "A passed simulation is not authorization or proof of submission. "
+        "Native wallet balance_changes report total net wallet movement, already including "
+        "network fees and account funding. simulation_fees and the estimated network fee "
+        "are components of that movement, not extra debits: do not add them again. "
+        "Do not label the entire native outflow as account rent or funding; its exact "
+        "breakdown requires separate evidence. Network fees alone exclude account rent "
+        "and signing-provider charges. "
+        "committed=true means the backend reports a confirmed outcome. committed=false "
+        "alone does not prove no transaction was submitted: inspect commit_attempted, "
+        "outcome_kind and transaction hashes. An attempted or submitted outcome may still "
+        "be unconfirmed; do not retry it as though it were an unsubmitted preview. "
+        "missing values are unknown, not zero or passed.\n"
+        + json.dumps(evidence, indent=2, ensure_ascii=False)
+    )
+
+
 def format_executor_detail(executor: dict[str, Any]) -> str:
     """
     Format a single executor's details in a readable format.
@@ -133,6 +219,13 @@ def format_executor_detail(executor: dict[str, Any]) -> str:
     """
     if not executor:
         return "No executor data."
+
+    config = executor.get("config") or {}
+    if (
+        get_field(executor, "type", "executor_type", default=config.get("type"))
+        == "onchain_executor"
+    ):
+        return _format_onchain_detail(executor)
 
     output = "Executor Details:\n"
     output += format_table_separator(60) + "\n"

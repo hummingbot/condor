@@ -78,3 +78,20 @@ permissions, instruction bytes or assembly options after fresh staging/simulatio
 Queue IDs, expiry and display descriptions may change. This is per-invocation
 review binding, not an unattended grant or a venue/spending policy. Asset spending
 limits and the operator selection workflow still need their separate checks.
+
+
+## Attended Solana chat
+
+`list_onchain_venues`, `inspect_onchain_market`, `get_onchain_position` and
+`prepare_onchain_action` expose the same registered Aomi preparation service as
+Condor's dashboard. They do not stage, sign or submit. Supported recipes currently
+cover Jupiter Lend, Kamino Earn and PumpSwap; inspect a market before preparing it.
+Pass the returned `prepared_action_id` to `create_onchain_executor` in svm
+instructions mode. The reference preserves exact instruction bytes and assembly;
+do not reconstruct them. Expired references require a new preparation and review. Include `svm_spending_policy` with the reviewed wallet, market,
+protocol program, returned allowed top-level programs and raw debit ceilings (including
+`native` for SOL fees/account funding). The API independently verifies the policy.
+`get_executor` returns allowlisted simulation, policy and receipt identity evidence.
+Confirm in the attended chat using the preview's `reviewed_svm_plan_hash` and the
+same instructions and ceilings. For the full procedure read the shared
+`aomi_universal_execution` skill when the Condor skills library is available.

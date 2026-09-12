@@ -174,3 +174,67 @@ async def test_invalid_solana_bundles_do_not_reach_api(client, overrides):
     with pytest.raises(ValueError):
         await onchain.create_onchain_executor(client, **{**values, **overrides})
     client.executors.create_executor.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_preparation_uses_read_endpoint_without_creating_executor(client):
+    client.executors._post = AsyncMock(
+        return_value={"wallet": "connected", "result": {}}
+    )
+    result = await onchain.prepare_onchain(
+        client, "market", {"venue": "jupiter-lend", "market": "market"}
+    )
+    assert result["wallet"] == "connected"
+    client.executors._post.assert_awaited_once_with(
+        "/executors/onchain/prepare",
+        json={
+            "operation": "market",
+            "arguments": {"venue": "jupiter-lend", "market": "market"},
+        },
+    )
+    client.executors.create_executor.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_chat_solana_policy_preserves_exact_operator_limits(client):
+    policy = onchain.SvmSpendingPolicy(
+        wallet="wallet",
+        market="market",
+        protocol_program="program",
+        allowed_programs=["program"],
+        max_debits_raw={"native": "30000000", "usdc": "1900000"},
+    )
+    await onchain.create_onchain_executor(
+        client,
+        chain_id=1,
+        chain="svm",
+        mode="instructions",
+        instructions=[{"instructions": []}],
+        commit=False,
+        svm_spending_policy=policy,
+    )
+    config = client.executors.create_executor.call_args.kwargs["executor_config"]
+    assert config["svm_spending_policy"] == policy.model_dump()
+    assert config["svm_spending_policy"]["max_debits_raw"]["usdc"] == "1900000"
+
+
+@pytest.mark.asyncio
+async def test_solana_policy_rejects_evm_before_dispatch(client):
+    policy = onchain.SvmSpendingPolicy(
+        wallet="wallet",
+        market="market",
+        protocol_program="program",
+        allowed_programs=["program"],
+        max_debits_raw={"native": "30000000"},
+    )
+    with pytest.raises(ValueError, match="spending policy"):
+        await onchain.create_onchain_executor(
+            client,
+            chain_id=1,
+            chain="evm",
+            mode="operation",
+            operation="deposit",
+            commit=True,
+            svm_spending_policy=policy,
+        )
+    client.executors.create_executor.assert_not_awaited()

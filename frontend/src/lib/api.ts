@@ -54,6 +54,17 @@ export interface NotificationsResponse {
   unread: number;
 }
 
+/** A live approval that survived a dropped chat socket or page reload. */
+export interface PendingConfirmation {
+  id: string;
+  session_key: string;
+  summary: string;
+  origin?: string;
+  status: "pending";
+  created_at: number;
+  expires_at: number;
+}
+
 // ── Types ──
 
 /** Someone a server is shared with, named rather than numbered. */
@@ -3942,6 +3953,10 @@ export const api = {
   /** The bell's history. Scoped to the JWT server-side — there is no user param. */
   getNotifications: (limit = 50) =>
     apiFetch<NotificationsResponse>(`/api/v1/notifications?limit=${limit}`),
+
+  /** Recover approvals whose one-shot socket notification was missed. */
+  getConfirmations: () =>
+    apiFetch<PendingConfirmation[]>("/api/v1/confirmations"),
 
   /** Mark some notifications read, or all of them when `ids` is omitted. */
   markNotificationsRead: (ids?: string[]) =>

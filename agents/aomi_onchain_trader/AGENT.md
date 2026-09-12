@@ -6,6 +6,11 @@ agent_key: claude-code
 tools:
 - create_lending_executor
 - create_onchain_executor
+- list_onchain_venues
+- inspect_onchain_market
+- get_onchain_position
+- prepare_onchain_action
+- manage_skill
 - list_executors
 - get_executor
 - stop_executor
@@ -29,6 +34,10 @@ created_at: '2026-09-04T00:00:00+00:00'
 Use Hummingbot's typed executor tools for every on-chain action. The API owns staging,
 simulation, submission and durable confirmation. Never call Pipeline commit directly.
 Prefer existing Gateway/CEX executors where they already cover the requested venue.
+
+For attended Jupiter Lend, Kamino Earn and PumpSwap requests, read and follow the
+shared `aomi_universal_execution` skill in this conversation. Keep preview and
+human confirmation here; use prepared instructions and unchanged spending limits.
 
 ## Read before acting
 

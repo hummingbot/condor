@@ -22,12 +22,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ServerContext } from "@/hooks/useServer";
 
 const getConversation = vi.fn();
+const getConfirmations = vi.fn();
 
 vi.mock("@/lib/api", () => ({
   api: {
     listConversations: () => Promise.resolve([]),
     getSessionOptions: () => Promise.resolve({ default_agent: "claude-code" }),
     getConversation: (...args: unknown[]) => getConversation(...args),
+    getConfirmations: () => getConfirmations(),
   },
 }));
 
@@ -144,6 +146,7 @@ beforeEach(() => {
     meta: {},
     turns: [{ role: "user", text: "run the audit", ts: "1", tool_calls: [] }],
   });
+  getConfirmations.mockResolvedValue([]);
 });
 
 afterEach(() => {
@@ -154,6 +157,28 @@ afterEach(() => {
 });
 
 describe("re-reading the transcript on a reconnect", () => {
+  it("recovers a pending approval that the socket did not deliver", async () => {
+    getConfirmations.mockResolvedValue([
+      {
+        id: "approval-1",
+        session_key: "web:7:s1",
+        summary: "Execute the reviewed action",
+        origin: "Aomi On-chain Trader on mirror",
+        status: "pending",
+        created_at: 1,
+        expires_at: 100,
+      },
+    ]);
+
+    await arrive();
+
+    expect(chat().permissionFor("s1")).toEqual({
+      request_id: "approval-1",
+      summary: "Execute the reviewed action",
+      origin: "Aomi On-chain Trader on mirror",
+    });
+  });
+
   it("shows a note that landed while the socket was down", async () => {
     await arrive();
     expect(messages().map((m) => m.text)).toEqual(["run the audit"]);
