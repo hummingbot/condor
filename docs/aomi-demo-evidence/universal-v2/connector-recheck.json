@@ -1,0 +1,42 @@
+{
+  "checked_at": "2026-09-11T18:25:12.864610+00:00",
+  "gateway_commit": "f090f4ab7a8159b85fca2f3d4467970a5231cf5f",
+  "connector_directories": [
+    "0x",
+    "dflow",
+    "jupiter",
+    "meteora",
+    "okx",
+    "orca",
+    "pancakeswap",
+    "pancakeswap-sol",
+    "raydium",
+    "titan",
+    "uniswap"
+  ],
+  "requests": [
+    {
+      "number": 672,
+      "title": "Proposal: add Jupiter Lend lending/borrowing/looping endpoints (new `lending` trading type)",
+      "state": "open",
+      "html_url": "https://github.com/hummingbot/gateway/issues/672",
+      "updated_at": "2026-08-05T19:29:48Z"
+    },
+    {
+      "number": 570,
+      "title": "feat: add PumpSwap AMM connector",
+      "state": "open",
+      "html_url": "https://github.com/hummingbot/gateway/issues/570",
+      "updated_at": "2026-04-02T06:21:41Z"
+    },
+    {
+      "number": 575,
+      "title": "feat: add PumpAmm",
+      "state": "closed",
+      "html_url": "https://github.com/hummingbot/gateway/pull/575",
+      "updated_at": "2026-03-31T16:25:49Z",
+      "merged_at": null
+    }
+  ],
+  "scope": "Upstream main connector directories and public requests; excludes forks, custom integrations and aggregator swap routing."
+}

@@ -72,8 +72,13 @@ function AppShellBody() {
   // teach nobody anything. Matched exactly rather than by prefix, because `/`
   // prefixes every route in the app.
   const exemptRoutes = ["/routines", "/settings"];
+  // Aomi owns its signer on the API server. Its lending form and executor
+  // history must remain accessible without an exchange/Gateway credential.
+  const params = new URLSearchParams(search);
+  const isOnchainSurface = pathname === "/executors/lending" || pathname === "/executors/onchain" ||
+    (pathname === "/bots" && params.get("population") === "terminated" && params.get("groupBy") === "ctrlType");
   const showKeysOverlay =
-    server && !keysLoading && !hasKeys && pathname !== "/" &&
+    server && !keysLoading && !hasKeys && pathname !== "/" && !isOnchainSurface &&
     !exemptRoutes.some((r) => pathname.startsWith(r));
 
   // ⌘K used to toggle the overlay panel. It now goes to the chat, so the

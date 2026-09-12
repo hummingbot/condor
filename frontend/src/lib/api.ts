@@ -54,6 +54,17 @@ export interface NotificationsResponse {
   unread: number;
 }
 
+/** A live approval that survived a dropped chat socket or page reload. */
+export interface PendingConfirmation {
+  id: string;
+  session_key: string;
+  summary: string;
+  origin?: string;
+  status: "pending";
+  created_at: number;
+  expires_at: number;
+}
+
 // ── Types ──
 
 /** Someone a server is shared with, named rather than numbered. */
@@ -2589,6 +2600,24 @@ export const api = {
     );
   },
 
+  getLendingPositions: (server: string) =>
+    apiFetch<{ positions: Array<{
+      account_name: string; controller_id: string; chain_id: number;
+      wallet: string; pool: string; asset: string;
+      net_contributed_raw: string; pending_supply_raw: string; pending_withdraw_raw: string;
+      wallet_receipt_balance_raw?: string; decimals?: number; symbol?: string;
+      balance_status: string; unresolved_executor_ids: string[];
+    }> }>(`/api/v1/servers/${encodeURIComponent(server)}/executors/lending/positions`),
+
+  prepareOnchain: (server: string, operation: "venues" | "market" | "prepare" | "position", args: Record<string, unknown> = {}) =>
+    apiFetch<import("./universal").DefiResponse>(`/api/v1/servers/${encodeURIComponent(server)}/executors/onchain/prepare`,
+      { method: "POST", body: JSON.stringify({ operation, arguments: args }) }),
+
+  getExecutor: (server: string, executorId: string) =>
+    apiFetch<ExecutorInfo>(
+      `/api/v1/servers/${encodeURIComponent(server)}/executors/${encodeURIComponent(executorId)}`,
+    ),
+
   createExecutor: (
     server: string,
     data: {
@@ -3924,6 +3953,10 @@ export const api = {
   /** The bell's history. Scoped to the JWT server-side — there is no user param. */
   getNotifications: (limit = 50) =>
     apiFetch<NotificationsResponse>(`/api/v1/notifications?limit=${limit}`),
+
+  /** Recover approvals whose one-shot socket notification was missed. */
+  getConfirmations: () =>
+    apiFetch<PendingConfirmation[]>("/api/v1/confirmations"),
 
   /** Mark some notifications read, or all of them when `ids` is omitted. */
   markNotificationsRead: (ids?: string[]) =>

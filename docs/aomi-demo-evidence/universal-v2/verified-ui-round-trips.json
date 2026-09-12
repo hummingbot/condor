@@ -1,0 +1,70 @@
+{
+  "local_test_only": true,
+  "ui_and_chain_verified": true,
+  "wallet": "HQXTpSdMnY1WgyoAXgczyBmwkmajQVUdSe6fpraNaG1F",
+  "final_usdc_raw": "99998988",
+  "final_native_lamports": "9988562559",
+  "network_fees_lamports": 30000,
+  "final_positions": {
+    "jupiter_shares_raw": "0",
+    "pumpswap_lp_raw": "0",
+    "kamino_staked_shares": "0",
+    "kamino_unstaked_shares": "0"
+  },
+  "operations": [
+    {
+      "venue": "jupiter",
+      "action": "deposit",
+      "executor_id": "DQM6MSAHF8FVYbeeEnWHBaEAxWwBxEnnw7844Cf6kENc",
+      "signature": "3MwhxSwHPnHmARw29PUKvdRBrxD5qXrQpXWt9SvLQGeuCQHJQynynUw56VBZc9MbNLkH6ksV8T2kLeQCZPq1CD1U",
+      "usdc_delta_raw": "-2000000",
+      "native_delta_raw": "-2044280",
+      "fee_lamports": 5000
+    },
+    {
+      "venue": "jupiter",
+      "action": "withdraw",
+      "executor_id": "N1sVXXK9aQ2qcTmTku1WgyCfkUNBEi6xFAySiE5DL18",
+      "signature": "4hReKK5XTHnkq4CZzSUyRm2a8XBLsA2oK1scoRPSnu5mzwixktuzbD114vjEwnAAK7H2byudVEnScG7W7T6hP835",
+      "usdc_delta_raw": "1999998",
+      "native_delta_raw": "-5000",
+      "fee_lamports": 5000
+    },
+    {
+      "venue": "kamino",
+      "action": "deposit",
+      "executor_id": "8QWBxsfcbyPHecVNcLTcDG2PqTgtDh1Uv5aFk1cowYXk",
+      "signature": "469m4Hzaw4862MaVF9tfWRx8QW2j638HQFv6AXWAsqLHF3dJakd87sbb8pWhx8F5dh5p2cBMhKRvmTHCSPjUK6CL",
+      "usdc_delta_raw": "-2000000",
+      "native_delta_raw": "-9338360",
+      "fee_lamports": 5000
+    },
+    {
+      "venue": "kamino",
+      "action": "withdraw",
+      "executor_id": "7eRVXBcdn6K2sKgEhm1CTWipViCJGd6iQyQQcvCvQzR5",
+      "signature": "3JyhsHVcQXoj2GnLAuT3pnWBGxaWQ5uUfnXsJ32Aq2Jk5A5XJS3rMwgsLxP894ijsLiEPgBrEAjA5r2TZPdF8CeT",
+      "usdc_delta_raw": "1998991",
+      "native_delta_raw": "2034280",
+      "fee_lamports": 5000
+    },
+    {
+      "venue": "pumpswap",
+      "action": "deposit",
+      "executor_id": "3ArasAyvY8MmGAKX6ukuopaY7JBFUA5T1MbBJ4RSUqyi",
+      "signature": "4koR7eBgwA2aRS6QmFegqonPP1w4W1RFy6jTzyAzVqtj9oLtjFVrmq9wMyKtFYXxP3PA1V7isWdpdH9UejkCjoGB",
+      "usdc_delta_raw": "-2000000",
+      "native_delta_raw": "-21706159",
+      "fee_lamports": 5000
+    },
+    {
+      "venue": "pumpswap",
+      "action": "withdraw",
+      "executor_id": "BPbBbVYqoSUPDNHiMewRD6YNX5fU2SgyWBDVdDSrv6VD",
+      "signature": "4t98jFqxkTJUKTbZyisvmhvkZ9vZzhWySjQJcnbGVQgtmtAbSNma4WmUkSg13XqVQxkwRe35eYJ15eMYb3EXhuzJ",
+      "usdc_delta_raw": "1999999",
+      "native_delta_raw": "19622078",
+      "fee_lamports": 5000
+    }
+  ]
+}

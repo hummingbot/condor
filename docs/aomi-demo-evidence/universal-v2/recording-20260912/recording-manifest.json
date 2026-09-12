@@ -1,0 +1,31 @@
+{
+  "recording_date": "2026-09-12",
+  "local_test_only": true,
+  "source_heads": {
+    "api": "ed827c01d6adbbdf8884bfa683c16c7fea7e5b8e",
+    "condor": "7c2e8874b1c550ffc9e82f89062184142fd52b3c",
+    "sdk": "1d0bd3b6fcaf4cea16a5729e7d6faf7a007c07c0",
+    "backend": "8513f88c0c57771e28af9405951a80209dda77ff"
+  },
+  "binary_sha256": {
+    "backend": "538612dc6e23f936959a5bcea7bd28531249c5a862ea3ecc24d7d310424cdbaf",
+    "api-server": "cbff0f7fdedc669c2e27fddc4277db9b6afb7f5e8967a550ca9d22be174fb4fa"
+  },
+  "raw_video_sha256": {
+    "universal-v2-kamino-failed-preflight.webm": "8c7502d6771fe2b7780534d62e35552b41b892978f8f063aaf37ea5a6b2442a5",
+    "universal-v2-pumpswap-deposit.webm": "4644dd90c26f1f2200de88c1b5f5e3dc9235ba9da7a1890873aa3930d1d0f512",
+    "universal-v2-pumpswap-failed-preflight.webm": "403ff7a5347c2d33b51dfd50614ded955441991478e22113e75634656b72babb",
+    "universal-v2-jupiter.webm": "6ac4f9fd213596ac095757feea392b97fa8a597b7a0991fcd89aecd3046a34c1",
+    "universal-v2-kamino-withdraw.webm": "43dd6a817eabb84afa9c460ed918f2d16aad49562bd667df6c6182a738348663",
+    "universal-v2-kamino-failed-market-read.webm": "c5b5cdcb124dccba421676eefa2ef355a4d78f6a13a73bd997fcee438d2b51fe",
+    "universal-v2-pumpswap-withdraw.webm": "82ae17e17744beaae1210ba04f8c89ae10313599c964d28e8f434c96c942a128",
+    "universal-v2-kamino.webm": "e80e7f114a26dbdea3b110a2c4ab7c5a7ab07e4dda205910f708371ad0da12f1",
+    "universal-v2-refusal.webm": "dc1841d51af37d43f280a8d97d48eb8396952f08879765827408bfb6eeae536f"
+  },
+  "preparation_correction_heads": {
+    "api": "1134e3c7cda5b6c4a187200e2ffdc7a3a819ec93",
+    "condor": "ba9d8612bd3e0ff8450101928cce73c6b0fe693c"
+  },
+  "video_sha256": "701f5acb596e26f7de07c720e6d10095c80df1e71498733e40c13193a32644c3",
+  "browser_closed": true
+}

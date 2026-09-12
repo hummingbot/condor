@@ -242,5 +242,31 @@ def test_lp_branch_is_skipped_when_not_requested():
     assert not any(s["title"] == "LP Positions (CLMM)" for s in result["sections"])
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+def test_onchain_tools_expose_typed_plan_and_calldata_schemas():
+    from mcp_servers.hummingbot_api import server
+
+    tools = {
+        tool.name: tool.inputSchema for tool in asyncio.run(server.mcp.list_tools())
+    }
+    lending = tools["create_lending_executor"]
+    assert {"chain_id", "wallet", "pool", "asset", "amount", "action", "commit"} <= set(
+        lending["required"]
+    )
+    assert lending["properties"]["action"]["enum"] == ["supply", "withdraw"]
+    raw = tools["create_onchain_executor"]
+    assert raw["properties"]["mode"]["enum"] == ["calls", "operation", "instructions"]
+    assert {
+        "instructions",
+        "reviewed_svm_plan_hash",
+        "max_svm_network_fee_lamports",
+    } <= set(raw["properties"])
+    assert "EvmCall" in str(raw) and "executor_config" not in raw["properties"]
+
+
+def test_default_preferences_do_not_seed_an_onchain_authority(tmp_path):
+    from mcp_servers.hummingbot_api.executor_preferences import (
+        ExecutorPreferencesManager,
+    )
+
+    preferences = ExecutorPreferencesManager(tmp_path / "preferences.md")
+    assert preferences.get_defaults("onchain_executor") == {}

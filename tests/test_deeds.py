@@ -294,6 +294,13 @@ def _mutating_route_sources() -> list[tuple[str, str, str]]:
             if not (set(getattr(route, "methods", ()) or ()) & _MUTATING_METHODS):
                 continue
             endpoint = route.endpoint
+            # This POST transports query arguments and unsigned preparation only;
+            # the separate create-executor route records the execution deed.
+            if (module_name, endpoint.__name__) == (
+                "condor.web.routes.executors",
+                "onchain_preparation",
+            ):
+                continue
             found.append((module_name, endpoint.__name__, inspect.getsource(endpoint)))
     return found
 

@@ -28,13 +28,19 @@ CREATE_EXECUTOR_TOOLS = frozenset(
         "create_dca_executor",
         "create_order_executor",
         "create_lp_executor",
+        "create_onchain_executor",
+        "create_lending_executor",
     }
 )
 
 #: The create tools that take a ``leverage`` parameter, and so the ones a
 #: leverage limit can stand in front of (SEC-558). ``create_lp_executor`` opens
 #: a CLMM position, which is not margined, and takes no leverage at all.
-LEVERAGED_EXECUTOR_TOOLS = CREATE_EXECUTOR_TOOLS - {"create_lp_executor"}
+LEVERAGED_EXECUTOR_TOOLS = CREATE_EXECUTOR_TOOLS - {
+    "create_lp_executor",
+    "create_onchain_executor",
+    "create_lending_executor",
+}
 
 #: The account-wide leverage control. It is scoped to an (account, connector,
 #: trading pair) and to nothing else, so raising leverage with it moves the
@@ -504,6 +510,26 @@ def format_tool_summary(tool_call: dict[str, Any]) -> str:
             summary += f" @ {price}"
         summary += f" on {connector}"
         return summary
+
+    if tool_name in {"create_onchain_executor", "create_lending_executor"}:
+        verb = "Simulate" if input_data.get("commit") is False else "Execute"
+        chain = (
+            f"Solana ({input_data.get('cluster', 'mainnet-beta')})"
+            if input_data.get("chain") == "svm"
+            else input_data.get("chain_id", "?")
+        )
+        if tool_name == "create_lending_executor":
+            return (
+                f"{verb} lending {input_data.get('action', '?')}: "
+                f"{input_data.get('amount', '?')} raw units of {input_data.get('asset', '?')} "
+                f"on chain {chain}, wallet {input_data.get('wallet', '?')}"
+            )
+        operation = input_data.get("operation") or (
+            "instruction bundle"
+            if input_data.get("mode") == "instructions"
+            else "raw calls"
+        )
+        return f"{verb} on-chain {operation} on chain {chain}"
 
     if tool_name in CREATE_EXECUTOR_TOOLS:
         # The typed tools put the numbers the human is approving at the top level,

@@ -1,0 +1,134 @@
+{
+  "executor_id": "7eRVXBcdn6K2sKgEhm1CTWipViCJGd6iQyQQcvCvQzR5",
+  "status": "TERMINATED",
+  "close_type": "COMPLETED",
+  "config": {
+    "commit": true,
+    "svm_spending_policy": {
+      "wallet": "HQXTpSdMnY1WgyoAXgczyBmwkmajQVUdSe6fpraNaG1F",
+      "market": "HDsayqAsDWy3QvANGqh2yNraqcD8Fnjgh73Mhb3WRS5E",
+      "protocol_program": "KvauGMspG5k6rtzrqqn7WNn3oZdyKqLKwK2XWQ8FLjd",
+      "allowed_programs": [
+        "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
+        "FarmsPZpWu9i7Kky8tPN37rs2TpmMrAZrC7S7vJa91Hr",
+        "KvauGMspG5k6rtzrqqn7WNn3oZdyKqLKwK2XWQ8FLjd",
+        "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+      ],
+      "max_debits_raw": {
+        "native": "30000000",
+        "7D8C5pDFxug58L9zkwK7bCiDg4kD4AygzbcZUmf5usHS": "0"
+      }
+    },
+    "max_svm_network_fee_lamports": 10000,
+    "reviewed_svm_plan_hash": "fc0e0971e3ab4eeffb00917944e41b114c526aa33eea243aca1f27cf16d3dca5"
+  },
+  "custom_info": {
+    "simulation_passed": true,
+    "simulation_guards": [
+      {
+        "name": "simulation",
+        "status": "passed",
+        "message": "SVM simulation sources: 0=litesvm"
+      },
+      {
+        "name": "svm_network_fees",
+        "status": "passed",
+        "message": "Network fee estimates available for all 1 simulated transactions"
+      },
+      {
+        "name": "svm_balance_changes",
+        "status": "passed",
+        "message": "Native and SPL balance snapshots are complete for the simulated accounts"
+      }
+    ],
+    "balance_changes": [
+      {
+        "account": "HQXTpSdMnY1WgyoAXgczyBmwkmajQVUdSe6fpraNaG1F",
+        "asset": "native",
+        "amount": "2034280",
+        "direction": "in",
+        "symbol": "SOL",
+        "decimals": 9,
+        "chain_id": null,
+        "cluster": "mainnet-beta",
+        "standard": "native",
+        "name": null,
+        "token_id": null,
+        "counterparty": null,
+        "step": 0
+      },
+      {
+        "account": "8XyLf3NFweXdpQhbQPbvWbXqSDZE53kq5CaQwF9wDhK4",
+        "asset": "native",
+        "amount": "2039280",
+        "direction": "out",
+        "symbol": "SOL",
+        "decimals": 9,
+        "chain_id": null,
+        "cluster": "mainnet-beta",
+        "standard": "native",
+        "name": null,
+        "token_id": null,
+        "counterparty": null,
+        "step": 0
+      },
+      {
+        "account": "AyY6VCkHfTWdFs7SqBbu6AnCqLUhgzVHBzW3WcJu5Jc8",
+        "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        "amount": "1998991",
+        "direction": "out",
+        "symbol": null,
+        "decimals": 6,
+        "chain_id": null,
+        "cluster": "mainnet-beta",
+        "standard": "spl_token",
+        "name": null,
+        "token_id": null,
+        "counterparty": null,
+        "step": 0
+      },
+      {
+        "account": "HQXTpSdMnY1WgyoAXgczyBmwkmajQVUdSe6fpraNaG1F",
+        "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        "amount": "1998991",
+        "direction": "in",
+        "symbol": null,
+        "decimals": 6,
+        "chain_id": null,
+        "cluster": "mainnet-beta",
+        "standard": "spl_token",
+        "name": null,
+        "token_id": null,
+        "counterparty": null,
+        "step": 0
+      },
+      {
+        "account": "45AYN1NotDSbptLmfPrV31nrbZktJ6DLJKBxQbJMBxYg",
+        "asset": "7D8C5pDFxug58L9zkwK7bCiDg4kD4AygzbcZUmf5usHS",
+        "amount": "1889724",
+        "direction": "out",
+        "symbol": null,
+        "decimals": 6,
+        "chain_id": null,
+        "cluster": "mainnet-beta",
+        "standard": "spl_token",
+        "name": null,
+        "token_id": null,
+        "counterparty": null,
+        "step": 0
+      }
+    ],
+    "commit_attempted": true,
+    "svm_plan_hash": "fc0e0971e3ab4eeffb00917944e41b114c526aa33eea243aca1f27cf16d3dca5",
+    "tx_hashes": [
+      "3JyhsHVcQXoj2GnLAuT3pnWBGxaWQ5uUfnXsJ32Aq2Jk5A5XJS3rMwgsLxP894ijsLiEPgBrEAjA5r2TZPdF8CeT"
+    ],
+    "error": null,
+    "digest": "sha256:8184ef651f26eee00cca495addc1e921cbc599d64a8879e7ca6bb2a962bb1a53",
+    "cluster": "mainnet-beta",
+    "reason": null,
+    "committed": true,
+    "estimated_svm_network_fee_lamports": "5000",
+    "wallet_address": "HQXTpSdMnY1WgyoAXgczyBmwkmajQVUdSe6fpraNaG1F"
+  }
+}

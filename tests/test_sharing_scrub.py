@@ -746,6 +746,26 @@ def test_sharing_never_imports_the_telemetry_taxonomy():
     assert offenders == []
 
 
+# ── The install table ────────────────────────────────────────────────────
+
+
+def test_the_aomi_bearer_is_a_known_key(monkeypatch):
+    """``AOMI_TOKEN`` signs on-chain transactions: it must never leave the install."""
+    import utils.config  # noqa: F401  (load_dotenv() runs once; setenv must come after)
+
+    monkeypatch.setenv("AOMI_TOKEN", "aomi-bearer-0123456789abcdef")
+
+    assert ("aomi-bearer-0123456789abcdef", "known_key") in scrub.install_values()
+
+
+def test_an_unset_aomi_bearer_adds_nothing(monkeypatch):
+    import utils.config  # noqa: F401
+
+    monkeypatch.delenv("AOMI_TOKEN", raising=False)
+
+    assert not any(v == "" for v, _ in scrub.install_values())
+
+
 def test_a_shared_attachment_is_an_inert_reference():
     """What a share carries when the turn had a picture on it (FEAT-098).
 

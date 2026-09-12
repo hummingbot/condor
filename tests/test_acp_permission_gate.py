@@ -384,6 +384,7 @@ def test_dry_run_cancels_a_swap_but_not_a_quote():
 #: Tools whose actions can move funds or a live bot. Every mutating action of
 #: these must be classified dangerous.
 FUND_MOVING_TOOLS = {
+    "create_lending_executor",  # both actions gated by tool name
     "manage_amm",
     "manage_bots",
     "manage_clmm",
@@ -394,6 +395,8 @@ FUND_MOVING_TOOLS = {
 #: pick up. Listed explicitly so a new tool belongs to neither set and trips
 #: ``test_every_action_gated_tool_is_classified`` below.
 NON_FUND_MOVING_TOOLS = {
+    "prepare_onchain_action",
+    "create_lending_executor",  # both actions gated by tool name
     "manage_controllers",  # writes controller templates, never a running bot
     "manage_gateway_container",  # starts and stops Gateway; signs nothing
     "executor_defaults",  # edits a local preferences file; creates nothing

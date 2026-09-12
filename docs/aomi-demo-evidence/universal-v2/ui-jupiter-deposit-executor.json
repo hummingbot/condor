@@ -1,0 +1,132 @@
+{
+  "executor_id": "DQM6MSAHF8FVYbeeEnWHBaEAxWwBxEnnw7844Cf6kENc",
+  "status": "TERMINATED",
+  "close_type": "COMPLETED",
+  "config": {
+    "commit": true,
+    "svm_spending_policy": {
+      "wallet": "HQXTpSdMnY1WgyoAXgczyBmwkmajQVUdSe6fpraNaG1F",
+      "market": "2vVYHYM8VYnvZqQWpTJSj8o8DBf1wM8pVs3bsTgYZiqJ",
+      "protocol_program": "jup3YeL8QhtSx1e253b2FDvsMNC87fDrgQZivbrndc9",
+      "allowed_programs": [
+        "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
+        "jup3YeL8QhtSx1e253b2FDvsMNC87fDrgQZivbrndc9"
+      ],
+      "max_debits_raw": {
+        "native": "30000000",
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": "2100000"
+      }
+    },
+    "max_svm_network_fee_lamports": 10000,
+    "reviewed_svm_plan_hash": "534e8a9824d64fdd60325e775426bc83330778d441c2f41fa229eb5cacff6b6d"
+  },
+  "custom_info": {
+    "svm_plan_hash": "534e8a9824d64fdd60325e775426bc83330778d441c2f41fa229eb5cacff6b6d",
+    "error": null,
+    "simulation_guards": [
+      {
+        "name": "simulation",
+        "status": "passed",
+        "message": "SVM simulation sources: 0=litesvm"
+      },
+      {
+        "name": "svm_network_fees",
+        "status": "passed",
+        "message": "Network fee estimates available for all 1 simulated transactions"
+      },
+      {
+        "name": "svm_balance_changes",
+        "status": "passed",
+        "message": "Native and SPL balance snapshots are complete for the simulated accounts"
+      }
+    ],
+    "committed": true,
+    "estimated_svm_network_fee_lamports": "5000",
+    "wallet_address": "HQXTpSdMnY1WgyoAXgczyBmwkmajQVUdSe6fpraNaG1F",
+    "reason": null,
+    "balance_changes": [
+      {
+        "account": "HQXTpSdMnY1WgyoAXgczyBmwkmajQVUdSe6fpraNaG1F",
+        "asset": "native",
+        "amount": "2044280",
+        "direction": "out",
+        "symbol": "SOL",
+        "decimals": 9,
+        "chain_id": null,
+        "cluster": "mainnet-beta",
+        "standard": "native",
+        "name": null,
+        "token_id": null,
+        "counterparty": null,
+        "step": 0
+      },
+      {
+        "account": "GKvmwqkriskayJht5zxRnjeRVnSwLyJgHcwfznw94gK7",
+        "asset": "native",
+        "amount": "2039280",
+        "direction": "in",
+        "symbol": "SOL",
+        "decimals": 9,
+        "chain_id": null,
+        "cluster": "mainnet-beta",
+        "standard": "native",
+        "name": null,
+        "token_id": null,
+        "counterparty": null,
+        "step": 0
+      },
+      {
+        "account": "7s1da8DduuBFqGra5bJBjpnvL5E9mGzCuMk1Qkh4or2Z",
+        "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        "amount": "2000000",
+        "direction": "in",
+        "symbol": null,
+        "decimals": 6,
+        "chain_id": null,
+        "cluster": "mainnet-beta",
+        "standard": "spl_token",
+        "name": null,
+        "token_id": null,
+        "counterparty": null,
+        "step": 0
+      },
+      {
+        "account": "HQXTpSdMnY1WgyoAXgczyBmwkmajQVUdSe6fpraNaG1F",
+        "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        "amount": "2000000",
+        "direction": "out",
+        "symbol": null,
+        "decimals": 6,
+        "chain_id": null,
+        "cluster": "mainnet-beta",
+        "standard": "spl_token",
+        "name": null,
+        "token_id": null,
+        "counterparty": null,
+        "step": 0
+      },
+      {
+        "account": "HQXTpSdMnY1WgyoAXgczyBmwkmajQVUdSe6fpraNaG1F",
+        "asset": "9BEcn9aPEmhSPbPQeFGjidRiEKki46fVQDyPpSQXPA2D",
+        "amount": "1887320",
+        "direction": "in",
+        "symbol": null,
+        "decimals": 6,
+        "chain_id": null,
+        "cluster": "mainnet-beta",
+        "standard": "spl_token",
+        "name": null,
+        "token_id": null,
+        "counterparty": null,
+        "step": 0
+      }
+    ],
+    "cluster": "mainnet-beta",
+    "tx_hashes": [
+      "3MwhxSwHPnHmARw29PUKvdRBrxD5qXrQpXWt9SvLQGeuCQHJQynynUw56VBZc9MbNLkH6ksV8T2kLeQCZPq1CD1U"
+    ],
+    "digest": "sha256:0c2884afe2ac77df212bac38aa4c3626dae2a696e8964702b9df9123e6335c4a",
+    "commit_attempted": true,
+    "simulation_passed": true
+  }
+}

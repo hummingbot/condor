@@ -3,6 +3,7 @@ Main MCP server for Hummingbot API integration
 """
 
 import asyncio
+import json
 import logging
 import os
 import sys
@@ -42,6 +43,7 @@ from mcp_servers.hummingbot_api.tools import executor_create
 from mcp_servers.hummingbot_api.tools import executors as executors_tools
 from mcp_servers.hummingbot_api.tools import history as history_tools
 from mcp_servers.hummingbot_api.tools import market_data as market_data_tools
+from mcp_servers.hummingbot_api.tools import onchain
 from mcp_servers.hummingbot_api.tools import portfolio as portfolio_tools
 from mcp_servers.hummingbot_api.tools import trading as trading_tools
 from mcp_servers.hummingbot_api.tools.gateway import (
@@ -60,6 +62,7 @@ from mcp_servers.hummingbot_api.tools.gateway_swap import (
 from mcp_servers.hummingbot_api.tools.geckoterminal import (
     explore_geckoterminal as explore_geckoterminal_impl,
 )
+from mcp_servers.hummingbot_api.tools.onchain import EvmCall
 
 # Configure root logger
 logging.basicConfig(
@@ -739,6 +742,213 @@ async def create_position_executor(
         account_name=account_name,
         controller_id=controller_id,
         save_as_default=save_as_default,
+    )
+    return result.get("formatted_output", str(result))
+
+
+@handle_errors("create lending executor")
+async def create_lending_executor(
+    chain_id: int,
+    wallet: str,
+    pool: str,
+    asset: str,
+    amount: str,
+    action: Literal["supply", "withdraw"],
+    commit: bool,
+    require_lending_policy: bool | None = None,
+    account_name: str | None = None,
+    controller_id: str | None = None,
+    max_gas_quote: str | None = None,
+    timeout_sec: int | None = None,
+) -> str:
+    """Supply or withdraw an exact raw token amount through Aomi; commit=True can spend funds.
+
+    Use commit=False to inspect simulation first. Amount is an integer string in the
+    asset's smallest units: 1000000 is one six-decimal USDC. Lending validates exact
+    chain, wallet, pool, asset and approval before signing. For raw calls or catalog
+    operations use create_onchain_executor. Autonomous use requires controller_id
+    equal to the agent id, require_lending_policy=True and an operator-owned API grant.
+    max_gas_quote is an estimated execution-gas ceiling in USDT, not a final fee cap.
+    Read get_executor for the receipt and the durable lending provider for exposure.
+    Default account is master_account and controller is main for attended use."""
+    client = await hummingbot_client.get_client()
+    result = await onchain.create_lending_executor(
+        client,
+        chain_id=chain_id,
+        wallet=wallet,
+        pool=pool,
+        asset=asset,
+        amount=amount,
+        action=action,
+        commit=commit,
+        require_lending_policy=require_lending_policy,
+        account_name=account_name,
+        controller_id=controller_id,
+        max_gas_quote=max_gas_quote,
+        timeout_sec=timeout_sec,
+    )
+    return result.get("formatted_output", str(result))
+
+
+@handle_errors("list onchain venues")
+async def list_onchain_venues() -> str:
+    """Discover Aomi-supported Solana venues and example markets without signing.
+
+    Returns the connected wallet, cluster and protocol families. Examples are not
+    investment recommendations. Inspect the selected market before preparing an action.
+    """
+    client = await hummingbot_client.get_client()
+    return json.dumps(await onchain.prepare_onchain(client, "venues", {}))
+
+
+@handle_errors("inspect onchain market")
+async def inspect_onchain_market(
+    venue: Literal["jupiter-lend", "kamino-earn", "pumpswap"], market: str
+) -> str:
+    """Read a supported market's assets, decimals, fees and connected wallet position.
+
+    market is its on-chain address, from list_onchain_venues or the user. Aomi
+    checks program ownership. Reads do not authorize or submit a transaction.
+    """
+    client = await hummingbot_client.get_client()
+    return json.dumps(
+        await onchain.prepare_onchain(
+            client, "market", {"venue": venue, "market": market}
+        )
+    )
+
+
+@handle_errors("get onchain position")
+async def get_onchain_position(
+    venue: Literal["jupiter-lend", "kamino-earn", "pumpswap"], market: str
+) -> str:
+    """Read the connected wallet's current shares in a supported Solana market.
+
+    Wallet holdings include externally acquired positions. Farm economic shares
+    may be fractional; use wallet_shares_raw for wallet token debit limits.
+    """
+    client = await hummingbot_client.get_client()
+    return json.dumps(
+        await onchain.prepare_onchain(
+            client, "position", {"venue": venue, "market": market}
+        )
+    )
+
+
+@handle_errors("prepare onchain action")
+async def prepare_onchain_action(
+    venue: Literal["jupiter-lend", "kamino-earn", "pumpswap"],
+    market: str,
+    action: Literal["deposit", "withdraw"],
+    amount_raw: str | None = None,
+    withdraw_all: bool | None = None,
+    slippage_bps: int | None = None,
+) -> str:
+    """Prepare unsigned Solana instructions with an Aomi recipe; does not execute.
+
+    Use exact integer strings. Deposits use the market asset (PumpSwap quote
+    token); partial withdrawals use shares. withdraw_all=True takes no amount.
+    slippage_bps is 0..500 (default 50). Exact instruction bytes stay server-side.
+    Pass prepared_action_id for both preview and commit; never reconstruct batches.
+    Plans expire after 120 seconds; expired references require fresh preparation and review. Preview with
+    create_onchain_executor(commit=False), then inspect get_executor for simulation,
+    wallet movements and svm_plan_hash before asking the user to confirm.
+    """
+    if withdraw_all is True:
+        if action != "withdraw" or amount_raw is not None:
+            raise ValueError("Withdraw all requires withdraw and no amount")
+    elif (
+        not amount_raw
+        or not amount_raw.isascii()
+        or not amount_raw.isdecimal()
+        or not 0 < int(amount_raw) < 2**64
+    ):
+        raise ValueError("amount_raw must be a positive u64 integer string")
+    if slippage_bps is not None and (
+        type(slippage_bps) is not int or not 0 <= slippage_bps <= 500
+    ):
+        raise ValueError("slippage_bps must be an integer from 0 to 500")
+    arguments = {"venue": venue, "market": market, "action": action}
+    arguments.update(
+        {
+            key: value
+            for key, value in {
+                "amount_raw": amount_raw,
+                "withdraw_all": withdraw_all,
+                "slippage_bps": slippage_bps,
+            }.items()
+            if value is not None
+        }
+    )
+    client = await hummingbot_client.get_client()
+    return json.dumps(await onchain.prepare_onchain_action(client, arguments))
+
+
+@handle_errors("create onchain executor")
+async def create_onchain_executor(
+    chain_id: int,
+    mode: Literal["calls", "operation", "instructions"],
+    commit: bool,
+    calls: list[EvmCall] | None = None,
+    instructions: list[dict[str, Any]] | None = None,
+    prepared_action_id: str | None = None,
+    operation: str | None = None,
+    arguments: dict[str, Any] | None = None,
+    app: str | None = None,
+    skills: list[str] | None = None,
+    chain: Literal["evm", "svm"] | None = None,
+    cluster: str | None = None,
+    account_name: str | None = None,
+    controller_id: str | None = None,
+    max_gas_quote: str | None = None,
+    max_svm_network_fee_lamports: int | None = None,
+    reviewed_svm_plan_hash: str | None = None,
+    svm_spending_policy: onchain.SvmSpendingPolicy | None = None,
+    timeout_sec: int | None = None,
+) -> str:
+    """Preview or execute EVM calls, Solana instructions or an Aomi catalog operation.
+
+    commit=False stages and simulates without signing; commit=True requires human
+    confirmation for this unrestricted surface. For automatically granted Aave actions
+    use create_lending_executor. Raw calls carry decimal native value, typed calldata
+    and optional chain id; catalog arguments are operation-defined. Discover supported
+    operations with the aomi_catalog routine. Solana instructions mode requires
+    chain=svm. Prefer prepared_action_id from prepare_onchain_action for both preview
+    and commit; it is mutually exclusive with raw instructions. References are client-bound
+    and expire: prepare and review again rather than silently rebuilding. Raw compatibility
+    accepts svm_stage_ix argument batches, each with description and instructions;
+    instructions carry program_id, accounts and either encode or data_base64.
+    max_svm_network_fee_lamports is a Solana simulation ceiling in integer lamports,
+    excluding rent, protocol and signing-provider costs. Missing fees refuse submission.
+    svm_spending_policy binds wallet, market, protocol_program, allowed_programs
+    and max_debits_raw keyed by mint or native (SOL). It caps complete simulated
+    wallet debits, including fees and account funding. Use the user-approved limits.
+    reviewed_svm_plan_hash must match the reviewed dry run when committing.
+    max_gas_quote is in USDT and excludes
+    rollup data fees. Default app is default, chain is evm, account is master_account.
+    Set controller_id to the owning agent and inspect get_executor for confirmation."""
+    client = await hummingbot_client.get_client()
+    result = await onchain.create_onchain_executor(
+        client,
+        chain_id=chain_id,
+        mode=mode,
+        commit=commit,
+        calls=calls,
+        instructions=instructions,
+        prepared_action_id=prepared_action_id,
+        operation=operation,
+        arguments=arguments,
+        app=app,
+        skills=skills,
+        chain=chain,
+        cluster=cluster,
+        account_name=account_name,
+        controller_id=controller_id,
+        max_gas_quote=max_gas_quote,
+        max_svm_network_fee_lamports=max_svm_network_fee_lamports,
+        reviewed_svm_plan_hash=reviewed_svm_plan_hash,
+        svm_spending_policy=svm_spending_policy,
+        timeout_sec=timeout_sec,
     )
     return result.get("formatted_output", str(result))
 

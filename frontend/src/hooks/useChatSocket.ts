@@ -1072,6 +1072,30 @@ export function useChatSocket() {
       needsResync.current = hasConnected.current;
       hasConnected.current = true;
       setIsConnected(true);
+      // The socket notification is deliberately low latency, not durable. A
+      // reload or reconnect can miss it while the agent is still waiting, so
+      // restore this user's live web approvals from the registry. Keep any
+      // request that arrived on the new socket while this read was in flight.
+      if (user) {
+        const sessionPrefix = `web:${user.id}:`;
+        void (api.getConfirmations?.() ?? Promise.resolve([]))
+          .then((pending) => {
+            const recovered: Record<string, PermissionRequest> = {};
+            for (const request of pending) {
+              if (!request.session_key.startsWith(sessionPrefix)) continue;
+              recovered[request.session_key.slice(sessionPrefix.length)] = {
+                request_id: request.id,
+                summary: request.summary,
+                origin: request.origin || "",
+              };
+            }
+            setPermissionRequests((current) => ({ ...recovered, ...current }));
+          })
+          .catch(() => {
+            // The socket path remains available. A failed recovery read must
+            // never turn an approval into an approval or interrupt the chat.
+          });
+      }
       const queued = unsent.current;
       unsent.current = [];
       for (const msg of queued) ws.send(JSON.stringify(msg));
@@ -1096,7 +1120,7 @@ export function useChatSocket() {
         /* ignore */
       }
     };
-  }, [token, closeSocket]);
+  }, [token, user, closeSocket]);
 
   const disconnect = useCallback(() => {
     shouldConnect.current = false;

@@ -130,6 +130,7 @@ class _PriceClient:
         ("create_order_executor", {"amount": "$7"}, 7),
         ("create_position_executor", {"amount": 4}, 8),
         ("create_lp_executor", {"base_amount": 3, "quote_amount": 4}, 10),
+        ("create_onchain_executor", {"commit": False}, 0),
     ],
 )
 def test_planned_amount_quote_uses_each_executor_capital_field(
@@ -735,3 +736,109 @@ def test_amm_guide_load_is_not_risk_checked():
 
     assert result["outcome"]["outcome"] == "selected"
     assert state.total_exposure == 0
+
+
+# ---------------------------------------------------------------------------
+# onchain_executor: an arbitrary EVM transaction has no ``amount`` field to
+# read, so the gate values it from what the create declares (notional_quote,
+# max_gas_quote) and what the calls carry (native value, priced via the feed).
+# A create with no bound at all is refused — fail closed, like the DEX path.
+# ---------------------------------------------------------------------------
+
+HALF_ETH_WEI = 500_000_000_000_000_000
+HALF_ETH_HEX = "0x6f05b59d3b20000"
+
+
+def _onchain_config(**over) -> dict:
+    config = {
+        "controller_id": "test_controller",
+        "chain_id": 8453,
+        "mode": "calls",
+        "calls": [
+            {
+                "to": "0x" + "11" * 20,
+                "description": "self-transfer",
+                "data": {"signature": "", "args": [], "raw": ""},
+                "value": "0",
+            }
+        ],
+    }
+    config.update(over)
+    return config
+
+
+def _onchain_call(**over) -> dict:
+    return {"tool": "create_onchain_executor", "input": _onchain_config(**over)}
+
+
+def _onchain_callback(limit=500.0, price=2000.0, agent_id=""):
+    state = RiskState()
+    callback = auto_approve_with_risk_check(
+        RiskEngine(RiskLimits(max_position_size_quote=limit)),
+        state,
+        price_client=_PriceClient(price),
+        agent_id=agent_id,
+    )
+    return callback, state
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        {"notional_quote": 1},
+        {"max_gas_quote": 1},
+        {"mode": "operation", "operation": "swap", "notional_quote": 1},
+        {
+            "calls": [
+                {
+                    "value": "0",
+                    "data": {
+                        "signature": "transfer(address,uint256)",
+                        "args": ["0x1", "1000000000000"],
+                    },
+                }
+            ],
+            "max_gas_quote": 1,
+        },
+        {"calls": [{"value": str(HALF_ETH_WEI)}], "notional_quote": 1},
+        {"chain": "svm", "notional_quote": 1},
+        {"commit": "false", "notional_quote": 1},
+        {"commit": 0, "notional_quote": 1},
+    ],
+)
+def test_unverified_onchain_commits_are_cancelled(over):
+    callback, state = _onchain_callback()
+    result = asyncio.run(callback(_onchain_call(**over), _OPTIONS))
+    assert result["outcome"]["outcome"] == "cancelled"
+    assert state.total_exposure == 0
+    assert state.executor_count == 0
+
+
+def test_onchain_dry_run_needs_no_invented_notional():
+    callback, state = _onchain_callback()
+    result = asyncio.run(callback(_onchain_call(commit=False), _OPTIONS))
+    assert result["outcome"]["outcome"] == "selected"
+    assert state.total_exposure == 0
+    assert state.executor_count == 1
+
+
+def test_direct_risk_check_cannot_trust_a_declared_onchain_amount():
+    engine = RiskEngine()
+    allowed, reason = engine.check_executor_action(
+        _onchain_call(notional_quote=1), RiskState(), 1
+    )
+    assert not allowed
+    assert "operator lending grant" in reason
+
+
+def test_onchain_confirmation_summary_names_chain_and_mode():
+    from condor.runtime.danger import format_tool_summary
+
+    summary = format_tool_summary(_onchain_call(notional_quote=25))
+    assert summary == "Execute on-chain raw calls on chain 8453"
+
+    op_call = _onchain_call(
+        mode="operation", app="uniswap", operation="swap", commit=False, calls=None
+    )
+    assert format_tool_summary(op_call) == "Simulate on-chain swap on chain 8453"
+    assert " on ?" not in summary

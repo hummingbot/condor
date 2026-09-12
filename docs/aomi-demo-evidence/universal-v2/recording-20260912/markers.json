@@ -1,0 +1,169 @@
+{
+  "duration_seconds": 150,
+  "audio": "none; supplied narration script",
+  "chapters": [
+    {
+      "name": "01-opportunity",
+      "kind": "editorial_card",
+      "duration": 7,
+      "start": 0,
+      "end": 7
+    },
+    {
+      "name": "02-backlog",
+      "kind": "editorial_card",
+      "duration": 8,
+      "start": 7,
+      "end": 15
+    },
+    {
+      "name": "03-integration",
+      "kind": "editorial_card",
+      "duration": 8,
+      "start": 15,
+      "end": 23
+    },
+    {
+      "name": "04-jupiter",
+      "kind": "actual_ui_capture",
+      "duration": 35,
+      "source_ranges": [
+        {
+          "file": "universal-v2-jupiter.webm",
+          "start": 3,
+          "end": 10
+        },
+        {
+          "file": "universal-v2-jupiter.webm",
+          "start": 27,
+          "end": 32
+        },
+        {
+          "file": "universal-v2-jupiter.webm",
+          "start": 44,
+          "end": 59
+        },
+        {
+          "file": "universal-v2-jupiter.webm",
+          "start": 76,
+          "end": 81
+        },
+        {
+          "file": "universal-v2-jupiter.webm",
+          "start": 95,
+          "end": 105
+        }
+      ],
+      "speed": 1.2,
+      "start": 23,
+      "end": 58
+    },
+    {
+      "name": "05-kamino",
+      "kind": "actual_ui_capture",
+      "duration": 34,
+      "source_ranges": [
+        {
+          "file": "universal-v2-kamino.webm",
+          "start": 0,
+          "end": 4
+        },
+        {
+          "file": "universal-v2-kamino.webm",
+          "start": 39,
+          "end": 43
+        },
+        {
+          "file": "universal-v2-kamino.webm",
+          "start": 53,
+          "end": 71
+        },
+        {
+          "file": "universal-v2-kamino.webm",
+          "start": 90,
+          "end": 95
+        },
+        {
+          "file": "universal-v2-kamino-withdraw.webm",
+          "start": 12,
+          "end": 31
+        },
+        {
+          "file": "universal-v2-kamino-withdraw.webm",
+          "start": 48,
+          "end": 55
+        }
+      ],
+      "speed": 1.6764705882352942,
+      "start": 58,
+      "end": 92
+    },
+    {
+      "name": "06-pumpswap",
+      "kind": "actual_ui_capture",
+      "duration": 30,
+      "source_ranges": [
+        {
+          "file": "universal-v2-pumpswap-deposit.webm",
+          "start": 0,
+          "end": 5
+        },
+        {
+          "file": "universal-v2-pumpswap-deposit.webm",
+          "start": 8,
+          "end": 14
+        },
+        {
+          "file": "universal-v2-pumpswap-deposit.webm",
+          "start": 23,
+          "end": 42
+        },
+        {
+          "file": "universal-v2-pumpswap-deposit.webm",
+          "start": 65,
+          "end": 71
+        },
+        {
+          "file": "universal-v2-pumpswap-withdraw.webm",
+          "start": 9,
+          "end": 13
+        },
+        {
+          "file": "universal-v2-pumpswap-withdraw.webm",
+          "start": 26,
+          "end": 42
+        }
+      ],
+      "speed": 1.8666666666666667,
+      "start": 92,
+      "end": 122
+    },
+    {
+      "name": "07-refusal",
+      "kind": "actual_ui_capture",
+      "duration": 18,
+      "source_ranges": [
+        {
+          "file": "universal-v2-refusal.webm",
+          "start": 0,
+          "end": 7
+        },
+        {
+          "file": "universal-v2-refusal.webm",
+          "start": 12,
+          "end": 23
+        }
+      ],
+      "speed": 1.0,
+      "start": 122,
+      "end": 140
+    },
+    {
+      "name": "08-value",
+      "kind": "editorial_card",
+      "duration": 10,
+      "start": 140,
+      "end": 150
+    }
+  ]
+}

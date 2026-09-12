@@ -64,6 +64,7 @@ class RiskLimits:
 class RiskState:
     total_exposure: float = 0.0
     executor_count: int = 0
+    lending_exposure_quote: float = 0.0
     drawdown_pct: float = 0.0
     is_blocked: bool = False
     block_reason: str = ""
@@ -255,6 +256,24 @@ class RiskEngine:
 
         return state
 
+    def include_lending(self, state: RiskState, data: dict) -> None:
+        """Carry durable positions into each tick, including after executor completion."""
+        lending = data.get("lending")
+        if lending is None and not data.get("error"):
+            return  # Provider found no on-chain history and was not opted in.
+        exposure = lending.get("exposure_quote") if isinstance(lending, dict) else None
+        if (
+            type(exposure) not in (int, float)
+            or not math.isfinite(exposure)
+            or exposure < 0
+        ):
+            state.is_blocked = True
+            state.block_reason = "Durable lending exposure is unavailable"
+            return
+        increase = max(0.0, exposure - state.lending_exposure_quote)
+        state.total_exposure += increase
+        state.lending_exposure_quote += increase
+
     def _leverage_refusal(
         self, input_data: dict[str, Any], label: str, *, required: bool
     ) -> tuple[bool, str] | None:
@@ -297,6 +316,7 @@ class RiskEngine:
         tool_call: dict,
         current_state: RiskState,
         planned_amount_quote: float | None = None,
+        verified_lending: str = "",
     ) -> tuple[bool, str]:
         """Check if an executor creation is within risk limits.
 
@@ -332,6 +352,16 @@ class RiskEngine:
                 f"Max open executors ({self.limits.max_open_executors}) reached",
             )
 
+        onchain = tool_call_name(tool_call) in {
+            "create_onchain_executor",
+            "create_lending_executor",
+        }
+        dry_run = onchain and input_data.get("commit") is False
+        if onchain and not dry_run and not verified_lending:
+            return (
+                False,
+                "Automatic on-chain execution requires an operator lending grant",
+            )
         # Before the exposure check on purpose, so a leveraged create is
         # refused for the reason that is actually true of it ([[SEC-558]]):
         # the quote figure the position limit weighs is the same at 1x and at
@@ -346,12 +376,22 @@ class RiskEngine:
         if (
             planned_amount_quote is None
             or not math.isfinite(planned_amount_quote)
-            or planned_amount_quote <= 0
+            or (
+                planned_amount_quote <= 0
+                and not (
+                    (dry_run or verified_lending == "withdraw")
+                    and planned_amount_quote == 0
+                )
+            )
         ):
             return False, "Planned quote exposure is unavailable"
         amount = planned_amount_quote
 
-        if current_state.total_exposure + amount > self.limits.max_position_size_quote:
+        if (
+            verified_lending != "withdraw"
+            and current_state.total_exposure + amount
+            > self.limits.max_position_size_quote
+        ):
             return False, (
                 f"Would exceed position limit: ${current_state.total_exposure + amount:.2f} > "
                 f"${self.limits.max_position_size_quote:.2f}"
@@ -361,6 +401,8 @@ class RiskEngine:
         # tick is gated against the running totals, not the pre-tick numbers.
         current_state.executor_count += 1
         current_state.total_exposure += amount
+        if verified_lending == "supply":
+            current_state.lending_exposure_quote += amount
 
         return True, ""
 
@@ -743,15 +785,33 @@ def auto_approve_with_risk_check(
                         f"{agent_id!r} — the position would be unattributable",
                     )
 
+                verified_lending = ""
                 try:
-                    planned_amount_quote = await _planned_amount_quote(
-                        tool_name, input_data, price_client
-                    )
+                    if (
+                        tool_name == "create_lending_executor"
+                        and input_data.get("commit") is not False
+                    ):
+                        from .lending import lending_grant
+
+                        verified_lending, planned_amount_quote, durable_exposure = (
+                            await lending_grant(input_data, price_client, agent_id)
+                        )
+                        increase = max(
+                            0.0, durable_exposure - risk_state.lending_exposure_quote
+                        )
+                        risk_state.total_exposure += increase
+                        risk_state.lending_exposure_quote += increase
+                    else:
+                        planned_amount_quote = await _planned_amount_quote(
+                            tool_name, input_data, price_client
+                        )
                 except Exception as exc:
-                    return deny(tool_name, f"it could not be priced: {exc}")
+                    return deny(
+                        tool_name, f"it could not be authorized or priced: {exc}"
+                    )
 
                 allowed, reason = risk_engine.check_executor_action(
-                    tool_call, risk_state, planned_amount_quote
+                    tool_call, risk_state, planned_amount_quote, verified_lending
                 )
                 if not allowed:
                     return deny(tool_name, reason)
@@ -962,6 +1022,12 @@ async def _planned_amount_quote(
             amount = quote + base * price
         else:
             amount = quote
+    elif tool_name in {"create_onchain_executor", "create_lending_executor"}:
+        if input_data.get("commit") is not False:
+            raise ValueError(
+                "Automatic on-chain execution requires an operator lending grant"
+            )
+        return 0.0
     else:
         raise ValueError(f"unsupported executor tool: {tool_name or 'unknown'}")
 

@@ -45,8 +45,16 @@ dependencies = [
 # ``black --check`` with no black on PATH and failed to spawn it.
 dev = ["pytest", "pytest-asyncio", "black", "isort", "pre-commit"]
 
+# Optional on-chain routines/provider use the public Pipeline client:
+# uv pip install "aomi @ git+https://github.com/aomi-labs/aomi-python@caa72d5225dd60e482835e0341a91293d7549dd3"
+
 [tool.isort]
 profile = "black"
+
+[tool.pytest.ini_options]
+markers = [
+    "e2e: live tests against a running Hummingbot API and Aomi (skipped unless HUMMINGBOT_API_URL and AOMI_TOKEN are set)",
+]
 
 [tool.setuptools.package-data]
 "condor.reports" = ["report_runtime.js"]

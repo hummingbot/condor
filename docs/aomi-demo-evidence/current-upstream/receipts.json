@@ -1,0 +1,130 @@
+{
+  "scope": "Local Base fork, test signer; not public-chain receipts",
+  "fork_block": 51161414,
+  "api_commit": "f5bc4b191b019b9e7834d227cae086c3c4c4f969",
+  "condor_code_commit": "312567b725cec720ad0dffe4ed2d7c019d421ca2",
+  "client_commit": "b108c2d5399ac1d3a31a98f4b6668b3b20233d8e",
+  "backend_code_commit": "e1e89ad0fb397cf353f6ece46e5ec10e261c5af1",
+  "runs": [
+    {
+      "status": "confirmed",
+      "chain_id": 8453,
+      "wallet": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+      "action": "supply",
+      "amount_raw": "5000000",
+      "before": {
+        "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913": "999999997",
+        "0x4e65fe4dba92790696d040ac24aa414708f5c0ab": "12"
+      },
+      "after": {
+        "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913": "994999997",
+        "0x4e65fe4dba92790696d040ac24aa414708f5c0ab": "5000012"
+      },
+      "allowance_raw": "0",
+      "receipts": [
+        {
+          "transactionHash": "0x49059ca0a2ca503d984ba96f070e1e4b6395c2282e31c07de52a354b4f298adb",
+          "blockHash": "0x42fb277f2030c966ce1c672c76cdf2d67925016270ffcf59882ad6102ad09855",
+          "blockNumber": "0x30ca94e",
+          "status": "0x1",
+          "gasUsed": "0xd88d",
+          "effectiveGasPrice": "0x1a8b8d"
+        },
+        {
+          "transactionHash": "0xd3c2530f46b234562a23c9fc936179d85842d936c6328650be81236b857c9c1a",
+          "blockHash": "0xd2602c1dab86e791961069af48130f21e40018836274e5375efd0485fb352fcb",
+          "blockNumber": "0x30ca94f",
+          "status": "0x1",
+          "gasUsed": "0x29ca6",
+          "effectiveGasPrice": "0x173a58"
+        }
+      ]
+    },
+    {
+      "status": "confirmed",
+      "chain_id": 8453,
+      "wallet": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+      "action": "withdraw",
+      "amount_raw": "4999999",
+      "before": {
+        "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913": "994999997",
+        "0x4e65fe4dba92790696d040ac24aa414708f5c0ab": "5000012"
+      },
+      "after": {
+        "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913": "999999996",
+        "0x4e65fe4dba92790696d040ac24aa414708f5c0ab": "12"
+      },
+      "allowance_raw": "0",
+      "receipts": [
+        {
+          "transactionHash": "0x124ce9af617deb7cca9807d06d00d8799a2f0e1b1348a936996fd9ccd69c55f7",
+          "blockHash": "0xbed14db737966bebdec50ddcae343eb51a3886a52b2f965968f19165c77cadb9",
+          "blockNumber": "0x30ca950",
+          "status": "0x1",
+          "gasUsed": "0x2b453",
+          "effectiveGasPrice": "0x1453b0"
+        }
+      ]
+    },
+    {
+      "status": "confirmed",
+      "chain_id": 8453,
+      "wallet": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+      "action": "supply",
+      "amount_raw": "2000000",
+      "before": {
+        "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913": "999999996",
+        "0x4e65fe4dba92790696d040ac24aa414708f5c0ab": "12"
+      },
+      "after": {
+        "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913": "997999996",
+        "0x4e65fe4dba92790696d040ac24aa414708f5c0ab": "2000011"
+      },
+      "allowance_raw": "0",
+      "receipts": [
+        {
+          "transactionHash": "0x3abe751053e8cf4702921e2eb83895cc22af3eb3fe708d24a2ce0149c2a97ad2",
+          "blockHash": "0xb4106afb24e876f9c6d423f3f3f2ea1e897d5e22abfd44e61f47688acd5783f6",
+          "blockNumber": "0x30ca951",
+          "status": "0x1",
+          "gasUsed": "0xd88d",
+          "effectiveGasPrice": "0x11c9ce"
+        },
+        {
+          "transactionHash": "0xb68653999cb9a7b63aea314c0f986fd8fa352db7a3fdffc331c6f904dc775cb9",
+          "blockHash": "0xe5b6d96cbf7c67cc184d679b9497c0251957103f0a0b38c8e0c5e4884b33fe83",
+          "blockNumber": "0x30ca952",
+          "status": "0x1",
+          "gasUsed": "0x29ca6",
+          "effectiveGasPrice": "0xf90bd"
+        }
+      ]
+    },
+    {
+      "status": "confirmed",
+      "chain_id": 8453,
+      "wallet": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+      "action": "withdraw",
+      "amount_raw": "1999999",
+      "before": {
+        "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913": "997999996",
+        "0x4e65fe4dba92790696d040ac24aa414708f5c0ab": "2000011"
+      },
+      "after": {
+        "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913": "999999995",
+        "0x4e65fe4dba92790696d040ac24aa414708f5c0ab": "12"
+      },
+      "allowance_raw": "0",
+      "receipts": [
+        {
+          "transactionHash": "0x55b024a39464351b98d0bb5f5014a437cbe49c2a6b47738ba2d6b59e169fcd73",
+          "blockHash": "0x3c83e13a1e79a0ad23fb335b268ef9c9abb4d5b6fb9fe313b06439055dc3be74",
+          "blockNumber": "0x30ca953",
+          "status": "0x1",
+          "gasUsed": "0x2b453",
+          "effectiveGasPrice": "0xd9f13"
+        }
+      ]
+    }
+  ]
+}

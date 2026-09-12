@@ -118,6 +118,17 @@ lp_executor:
   # Note: side is TradeType enum (1=BUY/quote-only, 2=SELL/base-only, 3=RANGE/both)
 ```
 
+### Onchain Executor Defaults
+
+```yaml
+onchain_executor:
+  # Optional operational defaults; signing intent and lending authority are explicit tool parameters.
+  # app: default
+  # timeout_sec: 120
+  # skills: []
+  # Gas budgets use USDT. Declared notional never authorizes automatic execution.
+```
+
 ---
 
 *Last updated: Never*

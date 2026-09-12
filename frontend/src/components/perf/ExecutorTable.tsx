@@ -10,6 +10,7 @@ import {
 import { memo, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
+import { OnchainEvidence } from "@/components/executor/OnchainEvidence";
 import { ExecutorChart } from "@/components/charts/ExecutorChart";
 import { PairLabel } from "@/components/executor/PairLabel";
 import { useResizeDrag } from "@/hooks/useResizeDrag";
@@ -149,7 +150,7 @@ const ExecutorRow = memo(function ExecutorRow({
 }) {
   const side = ex.side.toUpperCase();
   const pnlBorder = ex.pnl >= 0 ? "var(--color-green)" : "var(--color-red)";
-  const quote = ex.trading_pair?.split("-")[1] || "USDT";
+  const quote = ex.type === "onchain" || ex.type === "onchain_executor" ? "USDT" : ex.trading_pair?.split("-")[1] || "USDT";
   return (
     <tr
       className={`border-b border-[var(--color-border)]/30 hover:bg-[var(--color-surface-hover)]/50 cursor-pointer transition-colors ${isSelected ? "bg-[var(--color-surface-hover)]/70" : ""}`}
@@ -427,7 +428,7 @@ export function DetailPanel({
     return typeof raw === "object" ? (raw as Record<string, unknown>) : {};
   })();
 
-  const quote = executor.trading_pair?.split("-")[1] || "USDT";
+  const quote = executor.type === "onchain" || executor.type === "onchain_executor" ? "USDT" : executor.trading_pair?.split("-")[1] || "USDT";
   const fmtPnl = rateFormatPnl ? (v: number) => rateFormatPnl(v, quote) : formatPnl;
   const fmtVal = rateFormatValue ? (v: number) => rateFormatValue(v, quote) : formatUsd;
   const fmtDet = rateFormatDetailed ? (v: number) => rateFormatDetailed(v, quote) : formatUsd;
@@ -476,6 +477,7 @@ export function DetailPanel({
         </div>
 
         <div className="p-5 space-y-5">
+          {(executor.type === "onchain" || executor.type === "onchain_executor") && <OnchainEvidence executor={executor} />}
           {/* Status & Meta */}
           <div className="flex items-center gap-3 flex-wrap text-sm">
             <div className="flex items-center gap-1.5">
