@@ -169,19 +169,31 @@ def _pnl_figure(events: list[dict]) -> go.Figure | None:
     return fig
 
 
+# A quote that was cancelled on refresh never traded. Counting every close
+# type as a trade said 70 on a run with five fills and no completed pair: 71
+# of those were EARLY_STOP, which is the controller replacing its own unfilled
+# orders. These are the closes that end a position and realize its P&L.
+ROUND_TRIP_CLOSES = frozenset(
+    {"TAKE_PROFIT", "STOP_LOSS", "TRAILING_STOP", "TIME_LIMIT", "COMPLETED"}
+)
+
+
 async def _holdings(
     client, connector_name: str, pairs: list[str]
-) -> tuple[list[dict], int | None]:
-    """What the fly's bots hold now, and how many positions they have closed.
+) -> tuple[list[dict], int | None, int]:
+    """What the fly's bots hold now, how many positions they closed, and how
+    many they are still holding.
 
-    The trade count is the sum of each controller's close-type counts — round
-    trips actually completed, not orders placed. ``None`` when no bot reported,
-    so the report can say "unknown" rather than "zero".
+    The trade count is round trips actually completed — closes that ended a
+    position and realized its P&L — not quotes placed, and not the quotes the
+    controller cancelled in order to replace them. ``None`` when no bot
+    reported, so the report can say "unknown" rather than "zero".
     """
     market = LiveMarket(client, connector_name, "5m", 72)
     bots = await market.bots()
     rows: list[dict] = []
     trades: int | None = None
+    held = 0
     for pair in pairs:
         names = pair_names(pair)
         running, bot = LiveMarket.find_bot(bots, names.bot_name)
@@ -192,7 +204,16 @@ async def _holdings(
         inner = perf.get("performance", perf) if isinstance(perf, dict) else {}
         closes = inner.get("close_type_counts") or {}
         if isinstance(closes, dict):
-            trades = (trades or 0) + sum(int(v or 0) for v in closes.values())
+            trades = (trades or 0) + sum(
+                int(count or 0)
+                for name, count in closes.items()
+                if str(name).split(".")[-1] in ROUND_TRIP_CLOSES
+            )
+            held = held + sum(
+                int(count or 0)
+                for name, count in closes.items()
+                if str(name).split(".")[-1] == "POSITION_HOLD"
+            )
         positions = inner.get("positions_summary") or []
         amount = sum(
             float(p.get("amount", 0) or 0) for p in positions if isinstance(p, dict)
@@ -208,7 +229,7 @@ async def _holdings(
                 "Volume": _fmt(inner.get("volume_traded")),
             }
         )
-    return rows, trades
+    return rows, trades, held
 
 
 async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
@@ -252,8 +273,10 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     stale = observed is not latest
 
     client = await get_client(context._chat_id, context=context)
-    holdings, trades = (
-        await _holdings(client, config.connector_name, pairs) if client else ([], None)
+    holdings, trades, held = (
+        await _holdings(client, config.connector_name, pairs)
+        if client
+        else ([], None, 0)
     )
     book_net = sum(
         float(info.get("net", 0) or 0)
@@ -447,14 +470,19 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
             (f"Halted: {halted}. " if halted else "")
             + f"Session high {_fmt(guard.get('session_high_net'), 4, plus=True)}, "
             f"{guard.get('ticks_since_high', 0)} observation(s) since, "
-            f"{guard.get('applies_today', 0)} config change(s) applied today."
+            f"{guard.get('applies_today', 0)} config change(s) applied today. "
+            + (
+                f"{held} position(s) opened and still held."
+                if held
+                else "No position is open."
+            )
             if guard.get("session_high_net") is not None
             else "No P&L has been reported yet, so the breakers have nothing to judge."
         ),
     )
     builder.kpi("Ticks", f"{state.get('tick', 0):,}")
     builder.kpi("Net P&L", _fmt(book_net, 4, plus=True))
-    builder.kpi("Trades", f"{trades:,}" if trades is not None else "—")
+    builder.kpi("Round trips", f"{trades:,}" if trades is not None else "—")
     builder.kpi("Volume", _fmt(book_volume))
     pnl = _pnl_figure(events)
     if pnl is not None:
