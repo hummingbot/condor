@@ -503,6 +503,50 @@ Copied in spirit from stonkfly's `docs/model.md`, because the same limits hold:
 * No profitable learning is demonstrated by anything in this design. The guard
   and the controller's stop-loss are what bound the loss, not the fly.
 
+### What the replay controls established, 2026-09-13
+
+`fly_replay` walks a pinned candle series with the same brain, decoder and
+geometry, changing one setting per variant. On 327 ticks of XYZ:DRAM-USD at
+5 m, with the position cap taken from the controller rather than chosen:
+
+| against `live` | mean per-tick | final gap | t |
+|---|---|---|---|
+| shuffled reinforcement | +0.00013 | +0.04 | **+0.24** |
+| frozen plasticity | +0.00165 | +0.54 | +1.06 |
+| valence disconnected | +0.00307 | +1.00 | +1.20 |
+
+**The fly with real P&L reinforcement is not distinguishable from the fly whose
+reinforcement sign is random.** That is the control this design has always said
+it lacked, and it now exists and does not separate them. Nor does freezing the
+memory rule entirely. One market, one window, and a fill model that assumes a
+touched price was ours — so this is not proof of a null, but it is the first
+evidence on the question and it points at one.
+
+Two measurement lessons are worth more than the numbers:
+
+* An earlier statistic ran on the equity curves rather than their increments.
+  A curve is cumulative, so it returned |t| of 27 to 63 for variants a few
+  percent apart — a measure of when two runs diverged, not of whether they earn
+  differently.
+* The replay's open-position cap was a number chosen in the harness. It bound
+  before the strategy did, and manufactured |t| of 1.5 to 2.0 across four runs
+  that collapsed to 0.1–1.0 once the cap came from `pmm_mister`'s own limit.
+  Every "suggestive" result before that fix should be read as withdrawn.
+
+### What the levers were worth
+
+* **Quote levels off the bar range, not the touch** (kept). Level 1 sat at half
+  the observed spread — 2 bp where a typical bar ranged 9.9 — so every
+  multiplier the fly could express stayed inside what a normal bar covers, and
+  five variants returned identical fills. At half the range, `widen` fills 18
+  where `live` fills 38.
+* **An exit that scales with the market** (kept) — it was the fee floor whether
+  a market moved 2 bp a bar or 20.
+* **The fly moving that exit** (reverted). Halved the round trips, 35 against
+  68, and earned nothing for them in either window.
+* **A gated trend taking a side off the book** (kept, unproven). Fired on 13 of
+  327 ticks and finished +0.22 ahead of the two-sided control at t = +0.67.
+
 ## 16. Decisions
 
 Settled 2026-09-12: 1 vendor, 2 deterministic apply, 3 descending neurons,
