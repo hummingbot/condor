@@ -254,7 +254,7 @@ source:
 
 * `equity_t = realized_pnl + unrealized_pnl − fees` for **this bot's**
   `pmm_mister` controller, read from `manage_bots(action="status")`
-  performance (the same fields `mm_dashboard` reads), so nothing else on the
+  performance (`realized_pnl_quote` + `unrealized_pnl_quote`), so nothing else on the
   account can reward or punish the fly.
 * `delta = equity_t − anchor` where `anchor` is the previous observation's
   equity. `delta ≥ +deadband` → `reward` (PAM11 ×15), `≤ −deadband` →
@@ -362,13 +362,11 @@ agents/market_making_fly/
     fly_status.py         # one-shot: latest posture, channels, z-scores, spikes, memory stats, P&L, vetoes, halt reason
     fly_report.py         # one-shot: the run dashboard (fly, book, neurons, decisions, sensory frame)
     hip3_market_scanner.py  # copied from Market Making Expert
-    mm_dashboard.py         # copied
   skills/
     fly_mm_deploy/SKILL.md      # deploy playbook (adapted from pmm_mister_deploy: scanner → base config → deploy → start fly_brain)
     fly_decoder/SKILL.md        # how to read fly_status and the decoder
     pmm_config_playbook/        # copied
     capital_allocation/         # copied
-    mm_bot_report/              # copied
   strategies/fly_hip3_operator/strategy.md   # thin loop: keep bot + fly alive, surface halts, rotate when flat
 
 agents/market_making_fly/tests/     # conftest puts the agent dir on sys.path
@@ -408,7 +406,7 @@ Two modes, like Market Making Expert:
 * **Delegated / loop**: `fly_mm_deploy` skill end-to-end: scanner → TOP PICK →
   base config from `pmm_config_playbook` balanced profile adapted with HIP-3
   bounds → deploy with `max_global_drawdown_quote` → start `fly_brain`
-  (shadow first unless told live) → verify with `mm_bot_report`. The loop
+  (shadow first unless told live) → verify with `fly_report`. The loop
   strategy ticks every 5 min: confirms bot and fly instance alive, surfaces
   halts/vetoes, rotates when flat and the market is closed.
 

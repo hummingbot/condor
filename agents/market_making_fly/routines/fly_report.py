@@ -24,7 +24,7 @@ import time
 
 import numpy as np
 import plotly.graph_objects as go
-from flybrain.fly3d import ACCENT, BODY, GROUND, LIMB, desk_and_chart_figure
+from flybrain.fly3d import ACCENT, BODY, GROUND, LIMB, fly_figure
 from flybrain.market import LiveMarket
 from flybrain.naming import pair_names
 from flybrain.run_state import RunDir
@@ -240,13 +240,18 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         "the monitor and the panel beside it show the fly's own input frame",
     )
     sensory = _read_frame(run_dir.frame_path)
+    # Two halves of the grid, not one figure split internally: below the
+    # layout's 800px breakpoint these stack on their own.
     builder.plotly(
-        desk_and_chart_figure(
-            sensory,
+        fly_figure(
             title=f"FLY.EXE — {alive}",
             subtitle=f"{', '.join(pairs) or 'no market'}",
-        )
+            chart=sensory,
+        ),
+        width=7,
     )
+    if sensory is not None:
+        builder.plotly(_frame_figure(sensory), width=5)
     if sensory is not None:
         builder.markdown(
             f"**What the fly sees** — the 320×180 frame fed to the retina on tick "

@@ -409,3 +409,30 @@ def test_hydrate_is_a_no_op_for_a_pre_existing_inlined_report(reports_dir):
     """The 100 reports already on disk need no migration to keep working."""
     legacy = "<html><head><script>window.Plotly={};</script></head><body></body></html>"
     assert rendering.hydrate(legacy) == legacy
+
+
+def test_plotly_width_spans_the_grid_and_defaults_to_the_full_row():
+    """A narrow figure has to leave the plain `.section` markup behind:
+    `.report-grid > .section` forces `grid-column: 1 / -1`, which would beat
+    `.report-component`'s span and silently keep the figure full width."""
+    import plotly.graph_objects as go
+
+    from condor.reports import ReportBuilder
+
+    def html_for(**kwargs):
+        builder = ReportBuilder("t")
+        builder.plotly(go.Figure(go.Scatter(x=[1, 2], y=[1, 2])), **kwargs)
+        return builder._render_sections()
+
+    full = html_for()
+    assert 'class="section plotly-chart report-panel"' in full
+    assert "--component-span" not in full
+
+    half = html_for(width=6)
+    assert "--component-span:6" in half
+    assert 'class="section plotly-chart' not in half  # or the grid rule wins
+    assert "report-component" in half
+
+    # out-of-range widths are clamped rather than emitted as broken CSS
+    assert "--component-span" not in html_for(width=99)  # clamps to the full row
+    assert "--component-span:1" in html_for(width=0)

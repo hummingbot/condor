@@ -118,7 +118,7 @@ non-neutral postures.
 
 ```
 manage_routines(action="run", name="fly_status", config={"run_name": "fly-2026-09-12"})
-manage_routines(action="run", name="mm_bot_report", config={})
+manage_routines(action="run", name="fly_report", config={"run_name": "fly-2026-09-12"})
 ```
 
 Report: pairs, spreads, bots running, fly tick count, first postures, any vetoes or

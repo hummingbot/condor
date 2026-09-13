@@ -118,8 +118,14 @@ class ReportBuilder:
         )
         return self
 
-    def plotly(self, fig: Any, optimize: bool = True) -> ReportBuilder:
+    def plotly(self, fig: Any, optimize: bool = True, width: int = 12) -> ReportBuilder:
         """Attach a Plotly figure.
+
+        ``width`` is the figure's span of the report's 12-column grid, the same
+        knob every data-bound component already takes. The default spans the
+        row, exactly as before. A narrower one lets two figures sit side by
+        side and, below the layout's 800px breakpoint, stack on their own —
+        which a single figure split internally cannot do.
 
         Large figures are re-encoded for display (see
         :mod:`condor.reports.figure_opt`): evenly spaced x arrays collapse to
@@ -139,7 +145,13 @@ class ReportBuilder:
             )
         else:
             content = fig.to_html(full_html=False, include_plotlyjs=False)
-        self._sections.append({"type": "plotly", "content": content})
+        self._sections.append(
+            {
+                "type": "plotly",
+                "content": content,
+                "width": max(1, min(12, int(width))),
+            }
+        )
         return self
 
     def table(
@@ -573,9 +585,21 @@ class ReportBuilder:
                 )
                 index += 1
             elif section["type"] == "plotly":
-                parts.append(
-                    f'<div class="section plotly-chart report-panel">{section["content"]}</div>'
-                )
+                # A full-width figure keeps the plain section markup it has
+                # always had. A narrower one becomes a grid item instead, so it
+                # spans its columns and collapses to full width on a narrow
+                # screen; `.report-grid > .section` would otherwise force it
+                # back to the whole row.
+                span = section.get("width", 12)
+                if span < 12:
+                    parts.append(
+                        f'<div class="plotly-chart report-panel report-component" '
+                        f'style="--component-span:{span}">{section["content"]}</div>'
+                    )
+                else:
+                    parts.append(
+                        f'<div class="section plotly-chart report-panel">{section["content"]}</div>'
+                    )
                 index += 1
             elif section["type"] == "table":
                 parts.append(self._render_table(section["columns"], section["rows"]))

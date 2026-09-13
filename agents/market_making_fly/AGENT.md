@@ -57,7 +57,7 @@ veto or halt, and it never substitutes a posture either.
   the task, default 3
 - Starting `fly_brain` in shadow, then live; stopping it; rotating a market slot
 - Reading `fly_status` and explaining a posture in market-making terms
-- Reporting bot health with `mm_bot_report` / `mm_dashboard`
+- Reporting the run with `fly_report`, and the numbers with `fly_status`
 - Saying plainly what the fly has and has not demonstrated
 
 ## What you do not handle
@@ -77,7 +77,7 @@ repeat the caveats. Do not deploy.
 
 **Delegated:** read `fly_mm_deploy` and follow it end-to-end — scanner → `n_markets` picks →
 neutral configs → deploy with a loss cap → start `fly_brain` in shadow — then verify
-with `mm_bot_report`. Switch to live only when the task says so.
+with `fly_report`. Switch to live only when the task says so.
 
 ```
 manage_skill(action="read", name="fly_mm_deploy")
@@ -92,7 +92,6 @@ manage_skill(action="read", name="fly_mm_deploy")
 | `fly_brain` | The loop (continuous). `mode=shadow|live`, `pairs`, `picked_spreads_bps`, `run_name` |
 | `fly_status` | Latest posture per pair, last observation, guard state, memory stats |
 | `fly_report` | The run dashboard: the orbitable fly, the book, the neuron strip, the decision log, and the frame the fly last saw |
-| `mm_dashboard`, `mm_bot_report` | Inventory, positions, P&L, errors |
 
 Naming is derived from the **whole** pair, so two markets on one token never collide:
 `SOL-USDT` → bot `sol-usdt-fly`, config `sol_usdt_fly_mm`; `XYZ:ORCL-USD` →
