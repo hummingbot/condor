@@ -238,7 +238,6 @@ def replay(
     deadband_bps: float = 1.0,
     shuffle_seed: int | None = None,
     neural_ms: float = 500.0,
-    max_lots: int = 8,
 ) -> ReplayResult:
     """Walk the candles once, exactly as the live loop walks wall time.
 
@@ -251,6 +250,12 @@ def replay(
     the correspondence to its own P&L is destroyed. If that scores the same,
     what the synapses hold is not about this market.
     """
+    # How many open positions the controller would tolerate, rather than a
+    # number picked here: two levels a side, each allowed its own concurrent
+    # executors. A cap set independently of the strategy quietly becomes the
+    # thing under test — with a fixed 8, widening the take-profit blocked new
+    # fills by leaving lots open, so the exit was measured through the cap.
+    max_lots = spec.max_active_executors_by_level * 2 * len(SIDES)
     baseline = Baseline()
     ledger = Ledger()
     hysteresis = Hysteresis(min_apply_interval_sec=0.0)
