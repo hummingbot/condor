@@ -33,6 +33,7 @@ import asyncio
 import json
 import logging
 import multiprocessing
+import time
 from concurrent.futures import ProcessPoolExecutor
 
 import plotly.graph_objects as go
@@ -92,6 +93,13 @@ class Config(BaseModel):
     baseline_window: int = Field(default=60)
     baseline_warmup: int = Field(default=10)
     seed: int = Field(default=7301, description="Seed for the shuffled control")
+    refresh_candles: bool = Field(
+        default=False,
+        description="Fetch a new window and pin it. Off by default: the venue "
+        "only serves the latest N candles, so two runs an hour apart replay "
+        "different markets and are not comparable — the sign of a control's "
+        "difference flipped between two such windows on 2026-09-13",
+    )
     concurrency: int = Field(
         default=4,
         ge=1,
@@ -142,8 +150,20 @@ def _curve_figure(results: list) -> go.Figure:
     return fig
 
 
-async def _candles(client, config: Config) -> list[dict]:
-    """The series every variant replays. One fetch, so they cannot differ."""
+async def _candles(client, config: Config, pinned: Path) -> list[dict]:
+    """The series every variant replays — and every *later* run replays too.
+
+    The venue serves only the latest N candles, so fetching each time means two
+    runs an hour apart are scored on different markets. That is not a detail:
+    between two such windows the sign of the fly's difference from its frozen
+    control reversed. So the first fetch is pinned to disk and reused until
+    someone asks for a new one, which is what makes a lever's before and after
+    a comparison rather than two anecdotes.
+    """
+    if pinned.exists() and not config.refresh_candles:
+        saved = json.loads(pinned.read_text())
+        if saved.get("interval") == config.interval and saved.get("candles"):
+            return saved["candles"]
     for attempt in (1, 2):  # a cold feed answers on the second ask
         try:
             raw = await client.market_data.get_candles(
@@ -154,6 +174,17 @@ async def _candles(client, config: Config) -> list[dict]:
             )
             rows = raw if isinstance(raw, list) else raw.get("data", raw.get("candles"))
             if rows:
+                pinned.parent.mkdir(parents=True, exist_ok=True)
+                pinned.write_text(
+                    json.dumps(
+                        {
+                            "pair": config.trading_pair,
+                            "interval": config.interval,
+                            "fetched_at": time.time(),
+                            "candles": list(rows),
+                        }
+                    )
+                )
                 return list(rows)
         except Exception:
             if attempt == 2:
@@ -187,7 +218,11 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     client = await get_client(context._chat_id, context=context)
     if not client:
         return "No server available"
-    candles = await _candles(client, config)
+    slug = pair_names(config.trading_pair).slug
+    home = agent_home(AGENT_SLUG) / "replay"
+    home.mkdir(parents=True, exist_ok=True)
+    pinned = home / f"{slug}-{config.interval}-candles.json"
+    candles = await _candles(client, config, pinned)
     market_type = venue.market_type_for(config.connector_name)
     fee = config.maker_fee_bps or await venue.maker_fee_bps(
         config.connector_name, market_type, config.trading_pair
@@ -203,12 +238,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         maker_fee_bps=fee,
     )
     spec.check_order_size()
-    record = (
-        agent_home(AGENT_SLUG)
-        / "replay"
-        / f"{pair_names(config.trading_pair).slug}.json"
-    )
-    record.parent.mkdir(parents=True, exist_ok=True)
+    record = home / f"{slug}.json"
 
     loop = asyncio.get_running_loop()
     gate = asyncio.Semaphore(config.concurrency)
@@ -280,7 +310,9 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     builder.manual_order()
     builder.section(
         "WHAT WAS REPLAYED",
-        f"{len(candles):,} {config.interval} candles of {config.trading_pair}, "
+        f"{len(candles):,} {config.interval} candles of {config.trading_pair}"
+        + (" (freshly fetched)" if config.refresh_candles else " (the pinned window)")
+        + ", "
         f"{results[0].ticks if results else 0} ticks after the "
         f"{config.n_candles}-candle window. Every variant saw the same series and "
         f"the same geometry — {market_range:.2f} bp median bar range, {fee:.2f} bp "
