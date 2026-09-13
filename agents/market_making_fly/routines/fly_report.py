@@ -49,12 +49,18 @@ CATEGORY = "Bot Analysis"
 # which exists to stop a full-width chart being squashed and would otherwise
 # stop the brain matching the card stack beside it.
 FLY, FRAME = 6, 6
-CARDS, BRAIN = 5, 7
+# Six and six, not five and seven: the cards wrap by their own 230px minimum,
+# so a five-column stack needs a ~1150px container before it fits two per row
+# and stops towering over the brain. Six needs ~970, which covers every screen
+# that is meaningfully wider than the 800px breakpoint.
+CARDS, BRAIN = 6, 6
 PANEL_CHROME = 34  # the panel's own padding and border, measured
 # Row one is sized so the frame fills its half: 16:9 at six columns is ~335px.
 ROW_ONE = 430
-# Row two matches the card stack, which is what it is — three rows of 98px
-# plus two 16px gaps. Nothing about a KPI card's height is ours to set.
+# Row two matches the card stack, which is what it is: six cards at two per
+# row is three rows of roughly 98px plus two 16px gaps. A card's exact height
+# drifts a few pixels with the container, so this lands within ~5px rather
+# than exactly — nothing about a KPI card's height is ours to set.
 ROW_TWO = 3 * 98 + 2 * 16
 AGENT_SLUG = "market_making_fly"
 
@@ -251,13 +257,26 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     builder.manual_order()
 
     # ── FLY.EXE ──────────────────────────────────────────────────────────────
+    sensory = _read_frame(run_dir.frame_path)
+    # The prose belongs under the heading, not in a box below the figures it
+    # describes. `section` escapes its description, so this is plain text —
+    # no markdown syntax, which would show as literal asterisks.
     builder.section(
         "FLY.EXE",
         f"{alive} · run {config.run_name} · tick {state.get('tick', 0)} · "
-        f"{len(pairs)} market{'s' if len(pairs) != 1 else ''} · drag to orbit · "
-        "the monitor and the panel beside it show the fly's own input frame",
+        f"{len(pairs)} market{'s' if len(pairs) != 1 else ''} · drag to orbit."
+        + (
+            f" What the fly sees: the 320×180 frame fed to the retina on tick "
+            f"{observed.get('tick')} — {settings.get('n_candles', '?')} × "
+            f"{settings.get('candle_interval', '?')} candles, volume and the live "
+            "bid/ask — shown on its monitor and again at full size beside it. This "
+            "is the picture the posture below was decoded from. No quotes, "
+            "inventory or P&L are drawn, because those reach the fly only as "
+            "dopamine."
+            if sensory is not None
+            else " No input frame has been recorded for this run yet."
+        ),
     )
-    sensory = _read_frame(run_dir.frame_path)
     # Two halves of the grid, not one figure split internally: below the
     # layout's 800px breakpoint these stack on their own.
     builder.plotly(
@@ -273,29 +292,42 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         builder.plotly(
             _frame_figure(sensory, height=ROW_ONE - PANEL_CHROME), width=FRAME
         )
-    if sensory is not None:
-        builder.markdown(
-            f"**What the fly sees** — the 320×180 frame fed to the retina on tick "
-            f"{observed.get('tick')}: {settings.get('n_candles', '?')} × "
-            f"{settings.get('candle_interval', '?')} candles, volume and the live "
-            "bid/ask, shown on its monitor and again at full size beside it. This is "
-            "the picture the posture below was decoded from. No quotes, inventory or "
-            "P&L are drawn, because those reach the fly only as dopamine."
-        )
 
     # ── NEURONS & NEURAL ORDER ───────────────────────────────────────────────
     # Six cards, not fifteen. The rest of the numbers are narrative, and the
     # picture says more about where the activity sat than a card ever could.
     drawn, mapped, neurons_total = coverage()
     active = neural.get("active_neurons")
+    posture_line = (
+        f"{str(last_posture.get('regime', 'no posture yet')).upper()} on "
+        f"{observed.get('pair', '—')} — {execution.get('reason', 'nothing recorded')}. "
+        f"Decoded from trend z {_fmt(last_posture.get('trend_z'), 2, plus=True)} and "
+        f"arousal z {_fmt(last_posture.get('arousal_z'), 2, plus=True)}, gated on "
+        f"{neural.get('gate_spikes', '—')} DNpe017 spike(s)."
+        + ("" if last_posture.get("warm", True) else " Baseline still forming.")
+    )
+    observation_line = (
+        f" The observation ran "
+        f"{_fmt(float(neural['brain_ms']) / 1000, 1) if neural.get('brain_ms') else '—'} s "
+        f"of neural time and produced {neural.get('total_spikes', 0):,} spikes, "
+        f"{neural.get('kc_spikes', 0):,} of them in Kenyon cells. Stimulus "
+        f"{observed.get('stimulus', 'none')} — {neural.get('reward_spikes', 0)} PAM11 "
+        f"and {neural.get('aversive_spikes', 0)} PPL101 spikes — left "
+        f"{(memory.get('changed_edges') or 0):,} of "
+        f"{(memory.get('plastic_edges') or 0):,} plastic edges away from baseline, "
+        f"mean efficacy {_fmt(memory.get('mean_efficacy'), 5)}."
+    )
     builder.section(
         "NEURONS & NEURAL ORDER",
         f"{neurons_total:,} neurons · {mapped:,} mapped somata · {drawn:,} drawn"
         + (
-            f" · observation {observed.get('tick')}; the newest tick ran no brain"
+            f" · observation {observed.get('tick')}, the newest tick ran no brain"
             if stale
             else ""
-        ),
+        )
+        + ". "
+        + posture_line
+        + observation_line,
     )
     # Cards on the left, the brain on the right, the same way the fly and its
     # frame sit above — five columns and seven of the runtime's twelve, both
@@ -335,23 +367,6 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         width=BRAIN,
     )
     builder.plotly(readout_figure(neural, last_posture, height=260))
-    builder.markdown(
-        f"**{str(last_posture.get('regime', 'no posture yet')).upper()}** on "
-        f"`{observed.get('pair', '—')}` — {execution.get('reason', 'nothing recorded')}. "
-        f"Decoded from trend z {_fmt(last_posture.get('trend_z'), 2, plus=True)} and "
-        f"arousal z {_fmt(last_posture.get('arousal_z'), 2, plus=True)}, gated on "
-        f"{neural.get('gate_spikes', '—')} DNpe017 spike(s)."
-        + ("" if last_posture.get("warm", True) else " _Baseline still forming._")
-        + f"\n\nThe observation ran {_fmt(float(neural['brain_ms']) / 1000, 1) if neural.get('brain_ms') else '—'} s "
-        f"of neural time and produced {neural.get('total_spikes', 0):,} spikes, "
-        f"{neural.get('kc_spikes', 0):,} of them in Kenyon cells. Stimulus "
-        f"`{observed.get('stimulus', 'none')}` — {neural.get('reward_spikes', 0)} PAM11 "
-        f"and {neural.get('aversive_spikes', 0)} PPL101 spikes — left "
-        f"{(memory.get('changed_edges') or 0):,} of {(memory.get('plastic_edges') or 0):,} "
-        f"plastic edges away from baseline, mean efficacy "
-        f"{_fmt(memory.get('mean_efficacy'), 5)}."
-    )
-
     # ── DECISIONS & POSITIONS ────────────────────────────────────────────────
     # One panel: what the fly called, and what those calls left it holding.
     builder.section(
