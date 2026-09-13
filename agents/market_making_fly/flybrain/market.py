@@ -217,11 +217,13 @@ class LiveMarket:
         running, _ = self.find_bot(await self.bots(), names.bot_name)
         if running is None:
             raise RuntimeError(f"bot {names.bot_name} is not running")
+        # The live update endpoint requires ``id`` equal to the config name.
+        payload = {"id": names.config_name, **config}
         await self.client.controllers.create_or_update_controller_config(
-            names.config_name, config
+            names.config_name, payload
         )
         await self.client.controllers.update_bot_controller_config(
-            running, names.config_name, config
+            running, names.config_name, payload
         )
 
     async def stop_bot(self, pair: str) -> bool:

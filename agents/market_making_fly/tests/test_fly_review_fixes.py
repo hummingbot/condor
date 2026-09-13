@@ -16,6 +16,7 @@ class _Controllers:
         self.fail_live = fail_live
 
     async def create_or_update_controller_config(self, name, config):
+        assert config["id"] == name
         self.calls.append(("saved", name))
         if self.fail_saved:
             raise RuntimeError("saved failed")
