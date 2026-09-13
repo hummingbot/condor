@@ -68,6 +68,25 @@ def test_provenance_refuses_changed_protocol(tmp_path):
     assert run.check_provenance(prov) == sig
 
 
+def test_sizing_settings_are_recorded_but_not_signed(tmp_path):
+    run = RunDir(tmp_path / "run")
+    prov = {"settings": {"neural_ms": 500, "total_amount_quote": 200, "leverage": 3}}
+    sig = run.check_provenance(prov)
+    resized = {
+        "settings": {
+            "neural_ms": 500,
+            "total_amount_quote": 500,
+            "leverage": 5,
+            "portfolio_allocation": 1.0,
+        }
+    }
+    assert run.check_provenance(resized) == sig
+    with pytest.raises(RuntimeError):
+        run.check_provenance(
+            {"settings": {"neural_ms": 700, "total_amount_quote": 200}}
+        )
+
+
 def test_source_hashes_cover_the_package():
     hashes = source_hashes()
     assert "decoder.py" in hashes and "neural/kernel.cpp" in hashes

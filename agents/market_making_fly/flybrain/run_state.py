@@ -36,10 +36,24 @@ def source_hashes() -> dict[str, str]:
 # signature a resume is checked against: a bug fix in the loop must not orphan
 # a brain lineage. Settings, decoder, guard, dataset and circuit are.
 UNSIGNED_KEYS = ("source_sha256",)
+# Sizing and cadence are the operator's per-deployment choices, not the
+# protocol the brain lineage was formed under; they are recorded, not signed.
+UNSIGNED_SETTINGS = (
+    "total_amount_quote",
+    "leverage",
+    "portfolio_allocation",
+    "interval_sec",
+    "connector_name",
+)
 
 
 def signature(provenance: dict) -> str:
     signed = {k: v for k, v in provenance.items() if k not in UNSIGNED_KEYS}
+    settings = signed.get("settings")
+    if isinstance(settings, dict):
+        signed["settings"] = {
+            k: v for k, v in settings.items() if k not in UNSIGNED_SETTINGS
+        }
     return hashlib.sha256(
         json.dumps(signed, sort_keys=True, default=str).encode()
     ).hexdigest()
