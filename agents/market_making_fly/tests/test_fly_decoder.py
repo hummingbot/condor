@@ -112,7 +112,7 @@ def test_baseline_window_and_roundtrip():
 
 
 def test_posture_roundtrip():
-    p = Posture("quiet", 0.8, 1.0, -1.0, -0.2, -1.3, True, True)
+    p = Posture("quiet", 0.8, 1.0, -1.0, -0.2, -1.3, 0.0, True, True)
     assert Posture.from_dict(p.to_dict()) == p
 
 
@@ -132,14 +132,50 @@ def test_settings_validation():
 
 def test_hysteresis():
     h = Hysteresis(min_apply_interval_sec=300)
-    base = Posture("ranging", 1.0, 1.0, 0.0, 0, 0, False, True)
+    base = Posture("ranging", 1.0, 1.0, 0.0, 0, 0, 0.0, False, True)
     assert should_apply(None, base, None, 1000, h)[0]
-    same = Posture("ranging", 1.05, 1.0, 0.2, 0, 0, False, True)
+    same = Posture("ranging", 1.05, 1.0, 0.2, 0, 0, 0.0, False, True)
     assert not should_apply(base, same, 0, 1000, h)[0]
-    regime = Posture("volatile", 1.0, 1.0, 0.0, 0, 1.2, False, True)
+    regime = Posture("volatile", 1.0, 1.0, 0.0, 0, 1.2, 0.0, False, True)
     assert should_apply(base, regime, 0, 1000, h)[0]
     assert not should_apply(base, regime, 900, 1000, h)[0]  # cooldown
-    wider = Posture("ranging", 1.2, 1.0, 0.0, 0, 0, False, True)
+    wider = Posture("ranging", 1.2, 1.0, 0.0, 0, 0, 0.0, False, True)
     assert should_apply(base, wider, 0, 1000, h)[0]
-    lean = Posture("ranging", 1.0, 1.0, 0.6, 0, 0, True, True)
+    lean = Posture("ranging", 1.0, 1.0, 0.6, 0, 0, 0.0, True, True)
     assert should_apply(base, lean, 0, 1000, h)[0]
+
+
+def test_valence_moves_the_size_the_fly_commits():
+    """MBON07 minus MBON11 is what the KC→MBON memory rule writes to, so it is
+    the only path a P&L pulse has to a decision. Without it the dopamine loop
+    moved thousands of synapses and changed nothing the fly did."""
+    b = Baseline()
+    for _ in range(S.warmup):
+        b.push(Channels(0.0, 8.0, 0, 0.0, 400), S.window)
+    good = decode(Channels(0.0, 8.0, 0, 6.0, 400), b, S)
+    assert good.valence_z > 1 and good.size_mult > 1
+    b2 = Baseline()
+    for _ in range(S.warmup):
+        b2.push(Channels(0.0, 8.0, 0, 0.0, 400), S.window)
+    bad = decode(Channels(0.0, 8.0, 0, -6.0, 400), b2, S)
+    assert bad.valence_z < -1 and bad.size_mult < 1
+    # and it moves size only — the spread is the arousal channel's
+    assert good.spread_mult == pytest.approx(bad.spread_mult)
+
+
+def test_a_scene_that_never_reached_the_mushroom_body_is_not_acted_on():
+    """Kenyon drive is the confidence test: with no sparse code of the chart,
+    every other channel is reading the network's own noise."""
+    b = Baseline()
+    for _ in range(S.warmup):
+        b.push(Channels(0.0, 8.0, 0, 0.0, 400), S.window)
+    seen = decode(Channels(0.0, 8.0, 1, 0.0, 400), b, S)
+    assert seen.confident
+
+    dark = Baseline()
+    for _ in range(S.warmup):
+        dark.push(Channels(0.0, 8.0, 0, 0.0, 400), S.window)
+    blind = decode(Channels(0.0, 8.0, 1, 0.0, 0), dark, S)
+    assert not blind.confident
+    ok, why = should_apply(seen, blind, None, 0.0, Hysteresis())
+    assert ok is False and "kenyon" in why.lower()

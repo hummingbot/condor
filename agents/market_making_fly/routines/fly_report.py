@@ -335,7 +335,8 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     active = neural.get("active_neurons")
     posture_line = (
         f"Decoded from trend z {_fmt(last_posture.get('trend_z'), 2, plus=True)} and "
-        f"arousal z {_fmt(last_posture.get('arousal_z'), 2, plus=True)}, gated on "
+        f"arousal z {_fmt(last_posture.get('arousal_z'), 2, plus=True)}, learned "
+        f"valence z {_fmt(last_posture.get('valence_z'), 2, plus=True)}, gated on "
         f"{neural.get('gate_spikes', '—')} DNpe017 spike(s)."
         + ("" if last_posture.get("warm", True) else " Baseline still forming.")
     )

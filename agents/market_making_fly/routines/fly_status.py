@@ -87,6 +87,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
             lines.append(
                 f"{pair}: {posture['regime']} spread_x={posture['spread_mult']:.2f} "
                 f"size_x={posture.get('size_mult', 1.0):.2f} "
+                f"valence_z={posture.get('valence_z', 0.0):+.2f} "
                 f"lean_bp={posture['shift_bps']:+.2f} trend_z={posture['trend_z']:+.2f} "
                 f"arousal_z={posture['arousal_z']:+.2f} baseline_n={len((baselines.get(pair) or {}).get('trend', []))}"
             )

@@ -23,7 +23,8 @@ user wants to *look* at the run, `fly_status` when you need to quote figures.
 | `trend_hz` | DNp20 right mean rate − left mean rate | lean direction; stonkfly's BUY/SELL cells |
 | `arousal_hz` | mean rate of the 1,314 descending neurons (minus the readouts) | spread width **and** how much of the book is quoted |
 | `gate_spikes` | DNpe017 | ≥ 1 required for a trending call and for any lean |
-| `kc_spikes` | Kenyon cells | did the chart reach the mushroom body at all (0 = the fly saw nothing useful) |
+| `valence_hz` | mean MBON07 rate − mean MBON11 rate | approach minus avoidance — **the memory rule's own output**, and the only channel a P&L pulse can reach. Drives how much of the book is quoted |
+| `kc_spikes` | Kenyon cells | the confidence test: no sparse code of the chart means every other channel is reading noise, so the posture is marked unconfident and the loop holds |
 | `reward_spikes` / `aversive_spikes` | PAM11 / PPL101 | did the pulse arrive |
 
 ## Posture
@@ -35,6 +36,8 @@ user wants to *look* at the run, `fly_status` when you need to quote figures.
 * `spread ×` = clip(1 − 0.5·arousal_z, 0.6, 2.5) — an aroused fly quotes **tighter**.
   `size ×` = clip(1 + 0.5·arousal_z, 0.6, 2.5) — and quotes **more** of the book,
   clamped so an order never falls under the venue minimum nor the allocation over 1.
+  `size ×` also carries `+0.5·valence_z`, so what the fly has learned about scenes
+  like this one moves the capital it commits.
   The sign on each is a choice, not a finding: arousal is a population rate against
   its own average and nothing ties it to volatility. `lean` = clip(trend_z, ±3 bp), 0
   without a gate spike, and capped at half the first spread level when mapped.
@@ -60,13 +63,16 @@ update failed · `HALT` loop stopped · `TICK_ERROR` data fetch failed, loop con
 
 * That the fly detected a regime: it emitted a z-score we labelled.
 * That a P&L pulse taught it anything: pulses are value feedback, not credit assignment,
-  and edges change from endogenous dopamine activity too.
+  and edges change from endogenous dopamine activity too. The valence channel means the
+  memory rule can now *reach* a decision — it does not mean what it reaches is right.
 * That a run with positive P&L shows the fly works: a rising market makes any long
   inventory look skilled. No held-out replay or shuffled-reinforcement control exists.
 
 ## Health checks
 
-* `kc_spikes` stays 0 → the chart is not activating the mushroom body; report it.
+* `kc_spikes` stays 0 → the chart is not activating the mushroom body. The loop now
+  holds instead of applying (`HOLD` with "scene not seen"); a run that does this
+  every tick is quoting a stale config, so report it.
 * `baseline_n` not growing for a pair → that pair's book is closed or its feed fails.
 * `halted` set → read the reason; financial halts need a new `run_name`.
 * `compute_seconds` above ~40 % of the interval → lower `neural_ms`.

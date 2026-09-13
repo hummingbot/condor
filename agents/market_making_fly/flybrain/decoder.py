@@ -9,6 +9,15 @@ neurons":
 * ``arousal_hz`` — mean rate of the descending-neuron population. Higher →
                    tighter spreads and a larger share of the book quoted.
 * ``gate``       — DNpe017 spikes ≥ 1, required for a trending call.
+* ``valence_hz`` — mean MBON07 rate minus mean MBON11 rate: approach minus
+                   avoidance. These are the cells the KC→MBON memory rule
+                   writes to, so this is the only channel a P&L pulse can
+                   reach. Higher → more of the book quoted. Without it the
+                   dopamine loop changes synapses that change nothing.
+* ``kc_spikes``  — Kenyon cell drive. Not a posture: a confidence test. A scene
+                   that barely reaches the mushroom body leaves the other
+                   channels reading noise, so the posture is marked unconfident
+                   and the loop holds rather than applying it.
 
 Channels are z-scored against a rolling per-pair baseline. Stonkfly's own run
 proposed BUY six times out of six — a persistent turning bias of the circuit
@@ -62,6 +71,13 @@ class DecoderSettings:
     size_gain: float = 0.5
     size_min: float = 0.6
     size_max: float = 2.5
+    # What the fly has learned about scenes like this one, on the same scale as
+    # arousal and added to it, so the size the fly commits carries both "the
+    # market is active" and "this looked good last time".
+    valence_gain: float = 0.5
+    # A scene this far below the mushroom body's own recent drive is one the
+    # fly effectively did not see; its z-scores are noise.
+    z_kc_quiet: float = -1.5
     shift_gain_bps: float = 1.0
     max_shift_bps: float = 3.0
     center_bias: bool = True
@@ -83,7 +99,9 @@ class DecoderSettings:
                 raise ValueError(f"{name} must be finite and positive")
         # The two arousal gains carry a direction, so they may be negative —
         # but not zero, which would mean the channel is read and discarded.
-        for name in ("spread_gain", "size_gain"):
+        if self.z_kc_quiet >= 0:
+            raise ValueError("z_kc_quiet must be negative")
+        for name in ("spread_gain", "size_gain", "valence_gain"):
             value = getattr(self, name)
             if not math.isfinite(value) or value == 0:
                 raise ValueError(f"{name} must be finite and non-zero")
@@ -94,29 +112,44 @@ class Channels:
     trend_hz: float
     arousal_hz: float
     gate_spikes: int
+    valence_hz: float = 0.0
+    kc_spikes: int = 0
 
     def __post_init__(self):
-        if not math.isfinite(self.trend_hz) or not math.isfinite(self.arousal_hz):
-            raise ValueError("Nonfinite channel")
-        if self.arousal_hz < 0 or self.gate_spikes < 0:
+        for name in ("trend_hz", "arousal_hz", "valence_hz"):
+            if not math.isfinite(getattr(self, name)):
+                raise ValueError(f"Nonfinite channel {name}")
+        if self.arousal_hz < 0 or self.gate_spikes < 0 or self.kc_spikes < 0:
             raise ValueError("Negative rate or spike count")
 
 
 @dataclass
 class Baseline:
-    """Rolling per-pair history of the two channels; persisted in state.json."""
+    """Rolling per-pair history of each channel; persisted in state.json."""
 
     trend: list[float] = field(default_factory=list)
     arousal: list[float] = field(default_factory=list)
+    valence: list[float] = field(default_factory=list)
+    kc: list[float] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict | None) -> "Baseline":
         if not data:
             return cls()
-        return cls(trend=list(data["trend"]), arousal=list(data["arousal"]))
+        return cls(
+            trend=list(data["trend"]),
+            arousal=list(data["arousal"]),
+            valence=list(data["valence"]),
+            kc=list(data["kc"]),
+        )
 
     def to_dict(self) -> dict:
-        return {"trend": list(self.trend), "arousal": list(self.arousal)}
+        return {
+            "trend": list(self.trend),
+            "arousal": list(self.arousal),
+            "valence": list(self.valence),
+            "kc": list(self.kc),
+        }
 
     @property
     def count(self) -> int:
@@ -125,8 +158,10 @@ class Baseline:
     def push(self, channels: Channels, window: int) -> None:
         self.trend.append(channels.trend_hz)
         self.arousal.append(channels.arousal_hz)
-        del self.trend[:-window]
-        del self.arousal[:-window]
+        self.valence.append(channels.valence_hz)
+        self.kc.append(float(channels.kc_spikes))
+        for history in (self.trend, self.arousal, self.valence, self.kc):
+            del history[:-window]
 
 
 def _z(value: float, history: list[float], center: bool) -> float:
@@ -147,8 +182,10 @@ class Posture:
     shift_bps: float
     trend_z: float
     arousal_z: float
+    valence_z: float
     gate: bool
     warm: bool  # False while the baseline is still forming
+    confident: bool = True  # False when the scene never reached the mushroom body
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -165,6 +202,7 @@ NEUTRAL = Posture(
     shift_bps=0.0,
     trend_z=0.0,
     arousal_z=0.0,
+    valence_z=0.0,
     gate=False,
     warm=False,
 )
@@ -197,10 +235,19 @@ def decode(channels: Channels, baseline: Baseline, s: DecoderSettings) -> Postur
     else:
         trend_z = channels.trend_hz / RAW_TREND_UNIT_HZ
     arousal_z = _z(channels.arousal_hz, baseline.arousal, center=True)
+    valence_z = _z(channels.valence_hz, baseline.valence, center=True)
+    kc_z = _z(float(channels.kc_spikes), baseline.kc, center=True)
     gate = channels.gate_spikes >= 1
+    # No Kenyon drive at all, or far below what this pair usually produces: the
+    # chart did not reach the mushroom body, so every z above is measuring the
+    # network's own noise rather than the picture.
+    confident = channels.kc_spikes > 0 and kc_z > s.z_kc_quiet
     regime = classify(trend_z, arousal_z, gate, s)
     spread_mult = min(s.spread_max, max(s.spread_min, 1 + s.spread_gain * arousal_z))
-    size_mult = min(s.size_max, max(s.size_min, 1 + s.size_gain * arousal_z))
+    size_mult = min(
+        s.size_max,
+        max(s.size_min, 1 + s.size_gain * arousal_z + s.valence_gain * valence_z),
+    )
     shift = max(-s.max_shift_bps, min(s.max_shift_bps, s.shift_gain_bps * trend_z))
     if not gate:
         shift = 0.0  # no descending gate spike, no directional lean
@@ -211,8 +258,10 @@ def decode(channels: Channels, baseline: Baseline, s: DecoderSettings) -> Postur
         shift_bps=round(shift, 3),
         trend_z=round(trend_z, 4),
         arousal_z=round(arousal_z, 4),
+        valence_z=round(valence_z, 4),
         gate=gate,
         warm=True,
+        confident=confident,
     )
 
 
@@ -231,6 +280,11 @@ def should_apply(
     h: Hysteresis,
 ) -> tuple[bool, str]:
     """Rate-limit configuration changes to material posture moves."""
+    if not new.confident:
+        # Holding is the conservative act: the last applied config stays, and
+        # the reason is recorded rather than a neutral posture being written
+        # as though the fly had decided on one.
+        return False, "kenyon drive below baseline — scene not seen"
     if previous is None:
         return True, "first posture"
     if last_apply_ts is not None and now - last_apply_ts < h.min_apply_interval_sec:

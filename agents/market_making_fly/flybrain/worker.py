@@ -48,6 +48,15 @@ class FlyBrain:
         self.gate = np.flatnonzero(types.eq("DNpe017"))
         if not len(self.left) or not len(self.right) or not len(self.gate):
             raise RuntimeError("Missing annotated DNp20 / DNpe017 readout cells")
+        # The memory rule's own output. KC→MBON07/11 are the synapses dopamine
+        # moves, so their firing is the only place a P&L pulse can reach a
+        # decision. Read here rather than through the vendored circuit map,
+        # which bundles both into one `mb` array, and for the same reason the
+        # other readouts are read here: this is what the decoder consumes.
+        self.mbon_approach = np.flatnonzero(types.eq("MBON07"))
+        self.mbon_avoid = np.flatnonzero(types.eq("MBON11"))
+        if not len(self.mbon_approach) or not len(self.mbon_avoid):
+            raise RuntimeError("Missing annotated MBON07 / MBON11 memory outputs")
         superclass = np.asarray(self.brain.superclass).astype(str)
         readouts = np.concatenate([self.left, self.right, self.gate])
         descending = np.flatnonzero(superclass == DESCENDING_SUPERCLASS)
@@ -67,6 +76,8 @@ class FlyBrain:
             "left": [str(self.brain.ids[i]) for i in self.left],
             "right": [str(self.brain.ids[i]) for i in self.right],
             "gate": [str(self.brain.ids[i]) for i in self.gate],
+            "mbon_approach": [str(self.brain.ids[i]) for i in self.mbon_approach],
+            "mbon_avoid": [str(self.brain.ids[i]) for i in self.mbon_avoid],
             "descending_count": int(len(self.descending)),
         }
 
@@ -105,10 +116,17 @@ class FlyBrain:
         seconds = neural_ms / 1000
         left = float(np.mean(counts[self.left]) / seconds)
         right = float(np.mean(counts[self.right]) / seconds)
+        approach = float(np.mean(counts[self.mbon_approach]) / seconds)
+        avoid = float(np.mean(counts[self.mbon_avoid]) / seconds)
         return {
             "trend_hz": right - left,
             "left_hz": left,
             "right_hz": right,
+            # What the memory rule has made of this scene: MBON07 approach
+            # minus MBON11 avoidance. Positive is the learned "go".
+            "valence_hz": approach - avoid,
+            "mbon_approach_hz": approach,
+            "mbon_avoid_hz": avoid,
             "arousal_hz": float(np.mean(counts[self.descending]) / seconds),
             "gate_spikes": int(counts[self.gate].sum()),
             # Over the whole network, not extrapolated from the drawn sample:
@@ -148,6 +166,7 @@ class FlyBrain:
             "readout": {
                 "trend": "DNp20 mean right minus left rate",
                 "arousal": f"mean rate of superclass={DESCENDING_SUPERCLASS!r} minus readouts",
+                "valence": "mean MBON07 rate minus mean MBON11 rate",
                 "gate": "DNpe017 spike count >= 1",
                 "cells": self.cell_ids,
                 "validated": False,

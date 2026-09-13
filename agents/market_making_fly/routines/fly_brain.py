@@ -468,7 +468,11 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                 )
                 posture = decode(
                     Channels(
-                        neural["trend_hz"], neural["arousal_hz"], neural["gate_spikes"]
+                        neural["trend_hz"],
+                        neural["arousal_hz"],
+                        neural["gate_spikes"],
+                        neural["valence_hz"],
+                        neural["kc_spikes"],
                     ),
                     baselines[pair],
                     decoder_settings,
@@ -572,6 +576,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                 b.kpi("Regime", posture.regime)
                 b.kpi("Spread ×", f"{posture.spread_mult:.2f}")
                 b.kpi("Size ×", f"{posture.size_mult:.2f}")
+                b.kpi("Valence z", f"{posture.valence_z:+.2f}")
                 b.kpi("Lean", f"{posture.shift_bps:+.2f} bp")
                 b.kpi("Trend z", f"{posture.trend_z:+.2f}")
                 b.kpi("Arousal z", f"{posture.arousal_z:+.2f}")
