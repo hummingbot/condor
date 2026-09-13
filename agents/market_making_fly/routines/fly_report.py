@@ -390,9 +390,10 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     # One card, not two: both multipliers are read off the same channel, and
     # the stack's height is matched to the brain beside it at six cards.
     builder.kpi(
-        "Spread / size ×",
+        "Spread / size / TP ×",
         f"{_fmt(last_posture.get('spread_mult'))} / "
-        f"{_fmt(last_posture.get('size_mult'))}",
+        f"{_fmt(last_posture.get('size_mult'))} / "
+        f"{_fmt(last_posture.get('tp_mult'))}",
         width=CARDS,
     )
     builder.kpi(

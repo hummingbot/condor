@@ -165,7 +165,7 @@ def test_a_config_sitting_exactly_on_the_floor_is_not_vetoed():
         portfolio_allocation=0.3,
         maker_fee_bps=1.3,
     )
-    leaned = Posture("trending_up", 1.14, 1.0, 1.27, 2.0, 0.3, 0.0, True, True)
+    leaned = Posture("trending_up", 1.14, 1.0, 1.0, 1.27, 2.0, 0.3, 0.0, True, True)
     config = build_config(spec, leaned)
     assert min(float(x) for x in config["buy_spreads"].split(",")) == pytest.approx(
         spec.min_spread_bps * 1e-4

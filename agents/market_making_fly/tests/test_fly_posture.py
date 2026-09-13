@@ -54,14 +54,14 @@ def test_take_profit_floor_beats_fees_and_spread():
 
 def test_volatile_widens_quiet_tightens_with_floor():
     wide = build_config(
-        SPEC, Posture("volatile", 2.0, 1.0, 0.0, 0, 1.5, 0.0, False, True)
+        SPEC, Posture("volatile", 2.0, 1.0, 1.0, 0.0, 0, 1.5, 0.0, False, True)
     )
     assert _spreads(wide["buy_spreads"])[0] == pytest.approx(10 * BPS)
     assert (wide["executor_refresh_time"], wide["buy_cooldown_time"]) == TIMING[
         "volatile"
     ]
     tight = build_config(
-        SPEC, Posture("quiet", 0.6, 1.0, 0.0, 0, -1.5, 0.0, False, True)
+        SPEC, Posture("quiet", 0.6, 1.0, 1.0, 0.0, 0, -1.5, 0.0, False, True)
     )
     # 5 bp × 0.6 = 3 bp, well inside a typical bar and clear of the 1.3 bp fee
     assert _spreads(tight["buy_spreads"])[0] == pytest.approx(3 * BPS)
@@ -72,14 +72,14 @@ def test_volatile_widens_quiet_tightens_with_floor():
 
 def test_lean_is_asymmetric_and_capped():
     up = build_config(
-        SPEC, Posture("trending_up", 1.0, 1.0, 3.0, 2.0, 0, 0.0, True, True)
+        SPEC, Posture("trending_up", 1.0, 1.0, 1.0, 3.0, 2.0, 0, 0.0, True, True)
     )
     buy, sell = _spreads(up["buy_spreads"]), _spreads(up["sell_spreads"])
     # lean capped at half of level 1 (5 bp → 2.5 bp), clear of the fee floor
     assert buy[0] == pytest.approx(2.5 * BPS) and sell[0] == pytest.approx(7.5 * BPS)
     assert buy[1] == pytest.approx(5 * BPS) and sell[1] == pytest.approx(10 * BPS)
     down = build_config(
-        SPEC, Posture("trending_down", 1.0, 1.0, -3.0, -2.0, 0, 0.0, True, True)
+        SPEC, Posture("trending_down", 1.0, 1.0, 1.0, -3.0, -2.0, 0, 0.0, True, True)
     )
     assert _spreads(down["sell_spreads"])[0] == pytest.approx(2.5 * BPS)
     assert _spreads(down["buy_spreads"])[0] == pytest.approx(7.5 * BPS)
@@ -99,13 +99,15 @@ def test_the_spread_floor_is_the_market_own_fee():
     assert dear.min_spread_bps == pytest.approx(7.5)  # binance spot
     # a lean that would quote inside the fee is pushed back out to it
     leaned = build_config(
-        dear, Posture("trending_up", 1.0, 1.0, 3.0, 2.0, 0, 0.0, True, True)
+        dear, Posture("trending_up", 1.0, 1.0, 1.0, 3.0, 2.0, 0, 0.0, True, True)
     )
     assert min(_spreads(leaned["buy_spreads"])) == pytest.approx(7.5 * BPS)
 
 
 def test_pause_sets_kill_switch():
-    cfg = build_config(SPEC, Posture("pause", 2.5, 1.0, 0.0, 0, 3.0, 0.0, False, True))
+    cfg = build_config(
+        SPEC, Posture("pause", 2.5, 1.0, 1.0, 0.0, 0, 3.0, 0.0, False, True)
+    )
     assert cfg["manual_kill_switch"] is True
 
 
@@ -114,7 +116,7 @@ def test_every_spread_respects_min():
         for mult in (0.6, 1.0, 2.5):
             for shift in (-3.0, 0.0, 3.0):
                 cfg = build_config(
-                    SPEC, Posture(regime, mult, 1.0, shift, 0, 0, 0.0, True, True)
+                    SPEC, Posture(regime, mult, 1.0, 1.0, shift, 0, 0, 0.0, True, True)
                 )
                 for key in ("buy_spreads", "sell_spreads"):
                     assert min(_spreads(cfg[key])) >= SPEC.min_spread_bps * BPS - 1e-12
@@ -171,7 +173,9 @@ def test_the_fee_floor_follows_the_venue():
 
 def test_config_diff():
     a = build_config(SPEC, NEUTRAL)
-    b = build_config(SPEC, Posture("volatile", 2.0, 1.0, 0.0, 0, 1.5, 0.0, False, True))
+    b = build_config(
+        SPEC, Posture("volatile", 2.0, 1.0, 1.0, 0.0, 0, 1.5, 0.0, False, True)
+    )
     diff = config_diff(a, b)
     assert "buy_spreads" in diff and "trading_pair" not in diff
     assert config_diff(None, a) == a
@@ -224,17 +228,21 @@ def test_size_follows_arousal_and_stays_inside_both_limits():
     spec = MarketSpec(
         **{**SPEC.__dict__, "total_amount_quote": 200, "portfolio_allocation": 0.3}
     )
-    hot = build_config(spec, Posture("ranging", 1.0, 2.5, 0.0, 0, 0, 0.0, False, True))
-    calm = build_config(spec, Posture("ranging", 1.0, 0.6, 0.0, 0, 0, 0.0, False, True))
+    hot = build_config(
+        spec, Posture("ranging", 1.0, 2.5, 1.0, 0.0, 0, 0, 0.0, False, True)
+    )
+    calm = build_config(
+        spec, Posture("ranging", 1.0, 0.6, 1.0, 0.0, 0, 0, 0.0, False, True)
+    )
     assert hot["portfolio_allocation"] > spec.portfolio_allocation
     assert calm["portfolio_allocation"] < spec.portfolio_allocation
     assert calm["portfolio_allocation"] == pytest.approx(0.24)
     assert calm["portfolio_allocation"] == pytest.approx(spec.min_portfolio_allocation)
     # and a big book scaled up still cannot quote more than all of itself
     big = MarketSpec(**{**SPEC.__dict__, "portfolio_allocation": 0.5})
-    assert build_config(big, Posture("ranging", 1.0, 2.5, 0.0, 0, 0, 0.0, False, True))[
-        "portfolio_allocation"
-    ] == pytest.approx(1.0)
+    assert build_config(
+        big, Posture("ranging", 1.0, 2.5, 1.0, 0.0, 0, 0, 0.0, False, True)
+    )["portfolio_allocation"] == pytest.approx(1.0)
 
 
 def test_the_config_matches_the_experts_balanced_profile():
@@ -254,3 +262,31 @@ def test_the_config_matches_the_experts_balanced_profile():
     assert cfg["global_sl_activation_from"] == "target_base"
     assert cfg["global_pnl_reference"] == "position"
     assert cfg["tick_mode"] is False
+
+
+def test_the_exit_scales_with_the_market_and_never_goes_under_the_fee():
+    """The take-profit was one number whatever the market and whatever the
+    posture, so five replay variants closed the same eleven round trips. It is
+    now three quarters of a typical bar, moved by arousal, with the fee floor
+    and the fly's own first level underneath it."""
+    from flybrain.posture import take_profit_base_bps, take_profit_floor_bps
+
+    # a market that moves: the range sets the exit, not the fee
+    assert take_profit_base_bps(1.3, 20.0) == pytest.approx(15.0)
+    # a market that barely moves: the fee floor holds it up
+    assert take_profit_base_bps(1.3, 2.0) == pytest.approx(take_profit_floor_bps(1.3))
+
+    wide = build_config(
+        SPEC, Posture("volatile", 1.0, 1.0, 2.5, 0.0, 0, 1.5, 0.0, False, True)
+    )
+    flat = build_config(SPEC, NEUTRAL)
+    assert float(wide["take_profit"]) > float(flat["take_profit"])
+    # SPEC's 10 bp range puts the base at 7.5 bp; 2.5x is 18.75
+    assert float(wide["take_profit"]) == pytest.approx(18.75 * BPS)
+
+    # and a fly that wants a tight exit still cannot quote one inside the fee
+    tight = MarketSpec(**{**SPEC.__dict__, "range_bps": 2.0})
+    cfg = build_config(
+        tight, Posture("quiet", 0.6, 1.0, 0.6, 0.0, 0, -1.5, 0.0, False, True)
+    )
+    assert float(cfg["take_profit"]) >= take_profit_floor(tight)

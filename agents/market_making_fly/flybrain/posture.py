@@ -173,6 +173,20 @@ def take_profit_floor_bps(maker_fee_bps: float) -> float:
     return max(4.0, 2.2 * 2 * maker_fee_bps)
 
 
+# The exit was one number for every market and every posture, so a replay of
+# five variants closed the same eleven round trips apiece however they quoted.
+# Three quarters of a typical bar is a target the market reaches often without
+# giving the whole excursion away, and it scales with the market rather than
+# with the fee alone — the fee only ever sets the floor.
+TP_RANGE_FRACTION = 0.75
+
+
+def take_profit_base_bps(maker_fee_bps: float, range_bps: float) -> float:
+    """The exit before the fly moves it: a fraction of the range, never under
+    what a round trip costs."""
+    return max(take_profit_floor_bps(maker_fee_bps), TP_RANGE_FRACTION * range_bps)
+
+
 # The outer level must stay outside the inner one, whatever the arithmetic
 # says: a ladder whose second rung is inside its first fills in the wrong
 # order and means nothing.
@@ -232,7 +246,16 @@ def build_config(spec: MarketSpec, posture: Posture) -> dict:
     shift = max(-levels[0] / 2, min(levels[0] / 2, posture.shift_bps))
     buy = [max(spec.min_spread_bps, lvl - shift) for lvl in levels]
     sell = [max(spec.min_spread_bps, lvl + shift) for lvl in levels]
-    take_profit = max(take_profit_floor(spec), min(buy[0], sell[0]) * BPS)
+    # The fly asks for more of the range when it is aroused, but never less
+    # than a round trip costs, and never less than its own first level — a
+    # take-profit inside the spread it quotes would close for nothing.
+    take_profit = max(
+        take_profit_floor(spec),
+        min(buy[0], sell[0]) * BPS,
+        take_profit_base_bps(spec.maker_fee_bps, spec.range_bps)
+        * posture.tp_mult
+        * BPS,
+    )
     refresh, cooldown = TIMING[posture.regime]
     config = {
         "controller_type": "generic",

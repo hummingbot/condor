@@ -37,7 +37,9 @@ user wants to *look* at the run, `fly_status` when you need to quote figures.
   `size ×` = clip(1 + 0.5·arousal_z, 0.6, 2.5) — and quotes **more** of the book,
   clamped so an order never falls under the venue minimum nor the allocation over 1.
   `size ×` also carries `+0.5·valence_z`, so what the fly has learned about scenes
-  like this one moves the capital it commits.
+  like this one moves the capital it commits. `tp ×` = clip(1 + 0.5·arousal_z, 0.6,
+  2.5) on a base of 0.75 × the market's median candle range — an active market both
+  fills sooner and travels further, so the fly holds for more of it.
   The sign on each is a choice, not a finding: arousal is a population rate against
   its own average and nothing ties it to volatility. `lean` = clip(trend_z, ±3 bp), 0
   without a gate spike, and capped at half the first spread level when mapped.

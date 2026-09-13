@@ -15,6 +15,9 @@ as there are variants, changing one setting each time:
 * ``shuffled`` — reinforcement of the same frequency and magnitude, with the
                  sign randomised. The control the caveats have always demanded.
 * ``widen``    — the old arousal direction, for the A/B that motivated the flip.
+* ``flat-tp``  — the exit fixed where the range puts it, with the fly unable to
+                 move it. Says whether deciding how long to hold is worth
+                 anything, separately from deciding where to quote.
 
 Each variant gets its own brain process: a network that has already learned
 from one variant is not a control for the next.
@@ -65,6 +68,7 @@ VARIANTS: dict[str, dict] = {
     "no-valence": {"valence_gain": OFF},
     "shuffled": {"shuffle": True},
     "widen": {"spread_gain": 0.5},
+    "flat-tp": {"tp_gain": OFF},
 }
 
 
@@ -78,7 +82,7 @@ class Config(BaseModel):
         default=1000, ge=200, le=5000, description="Candles to fetch"
     )
     variants: str = Field(
-        default="live,no-memory,no-valence,shuffled,widen",
+        default="live,no-memory,no-valence,shuffled,widen,flat-tp",
         description=f"Comma-separated, from: {', '.join(VARIANTS)}",
     )
     total_amount_quote: float = Field(default=200.0)
@@ -340,6 +344,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                 "Unconfident": f"{s['unconfident']:,}",
                 "Spread ×": f"{s['mean_spread_mult']:.2f}",
                 "Size ×": f"{s['mean_size_mult']:.2f}",
+                "TP ×": f"{s['mean_tp_mult']:.2f}",
             }
             for s in summaries
         ],
@@ -354,6 +359,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
             "Unconfident",
             "Spread ×",
             "Size ×",
+            "TP ×",
         ],
     )
     builder.plotly(_curve_figure(results))
@@ -418,7 +424,8 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         lines.append(
             f"{s['variant']}: net {s['net']:+.4f}, {s['fills']} fills, "
             f"{s['round_trips']} round trips, {s['applies']} applies, "
-            f"spread ×{s['mean_spread_mult']:.2f}, size ×{s['mean_size_mult']:.2f}"
+            f"spread ×{s['mean_spread_mult']:.2f}, size ×{s['mean_size_mult']:.2f}, "
+            f"tp ×{s['mean_tp_mult']:.2f}"
         )
     if len(results) > 1:
         for other in results[1:]:

@@ -185,6 +185,7 @@ class ReplayResult:
             regimes[p.regime] = regimes.get(p.regime, 0) + 1
         spreads = [p.spread_mult for p in self.postures] or [0.0]
         sizes = [p.size_mult for p in self.postures] or [0.0]
+        tps = [p.tp_mult for p in self.postures] or [0.0]
         return {
             "variant": self.variant,
             "ticks": self.ticks,
@@ -199,6 +200,7 @@ class ReplayResult:
             "unconfident": self.unconfident,
             "mean_spread_mult": round(sum(spreads) / len(spreads), 3),
             "mean_size_mult": round(sum(sizes) / len(sizes), 3),
+            "mean_tp_mult": round(sum(tps) / len(tps), 3),
             "regimes": regimes,
         }
 
