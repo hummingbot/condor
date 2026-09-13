@@ -98,3 +98,67 @@ def test_candle_payload_shapes():
 def test_required_collateral():
     spec = MarketSpec("hyperliquid_perpetual", "XYZ:A-USD", 500, 8.0, leverage=2)
     assert required_collateral([spec, spec]) == pytest.approx(2 * 500 * 0.5 / 2)
+
+
+class _MarketData:
+    """Records what the generic order-book endpoint was asked for."""
+
+    def __init__(self, book=None):
+        self.calls = []
+        self.book = (
+            book if book is not None else {"bids": [[99.0, 5]], "asks": [[101.0, 5]]}
+        )
+
+    async def get_order_book(self, connector, pair, depth=1):
+        self.calls.append((connector, pair, depth))
+        return self.book
+
+
+class _Client:
+    def __init__(self, book=None):
+        self.market_data = _MarketData(book)
+
+
+def _live(connector, book=None):
+    from flybrain.market import LiveMarket
+
+    return LiveMarket(_Client(book), connector, "5m", 72)
+
+
+def test_a_plain_pair_reads_the_generic_order_book():
+    m = _live("binance_perpetual")
+    book = asyncio.run(m.book("SOL-USDT"))
+    assert (book.bid, book.ask) == (99.0, 101.0) and book.open
+    assert m.client.market_data.calls == [("binance_perpetual", "SOL-USDT", 1)]
+    assert asyncio.run(m.fresh_mid("SOL-USDT")) == 100.0
+
+
+def test_an_empty_generic_book_is_closed_not_an_error():
+    m = _live("binance", {"bids": [], "asks": []})
+    assert not asyncio.run(m.book("SOL-USDT")).open
+
+
+@pytest.mark.parametrize(
+    "book",
+    [
+        {"bids": [[float("nan"), 1]], "asks": [[101.0, 1]]},
+        {"bids": [[0.0, 1]], "asks": [[101.0, 1]]},
+        {"bids": [[101.0, 1]], "asks": [[99.0, 1]]},  # crossed
+    ],
+)
+def test_a_nonsense_generic_book_raises(book):
+    with pytest.raises(RuntimeError):
+        asyncio.run(_live("binance", book).book("SOL-USDT"))
+
+
+def test_a_hip3_pair_does_not_use_the_generic_endpoint():
+    """hummingbot-api's order-book endpoint 500s on HIP-3 pairs, so those must
+    go to Hyperliquid's own. Proven by the generic one never being called."""
+    import aiohttp
+
+    m = _live("hyperliquid_perpetual")
+    try:
+        asyncio.run(m.book("XYZ:ORCL-USD"))
+    except (aiohttp.ClientError, RuntimeError, OSError):
+        pass  # offline in CI; the point is which path was taken
+    assert m.client.market_data.calls == []

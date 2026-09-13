@@ -1,7 +1,7 @@
 """Turn a posture into a full ``pmm_mister`` config.
 
-The base is the HIP-3 operator's bounded defaults; the posture multiplies the
-spreads and leans them. Every money-relevant floor lives here, in code:
+The base is a bounded default set; the posture multiplies the spreads and leans
+them. Every money-relevant floor lives here, in code:
 
 * no spread level below ``min_spread_bps``;
 * ``take_profit`` never below ``2.2 ×`` the round-trip maker fee, and never
@@ -9,8 +9,12 @@ spreads and leans them. Every money-relevant floor lives here, in code:
   mandatory);
 * the reference-price lean is capped at half the first-level spread.
 
-Inventory bands, allocation, leverage cap and the global stop loss are fixed by
-the HIP-3 playbook and are not the fly's to move.
+Inventory bands, allocation, leverage cap and the global stop loss are the
+operator's, not the fly's to move.
+
+The spec works on any CLOB market, spot or perp. What the venue decides —
+whether leverage applies at all, and what a round trip costs — comes from
+``venue.py``; what the fly decides is only ever the posture.
 """
 
 from __future__ import annotations
@@ -18,7 +22,9 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+from flybrain import venue
 from flybrain.decoder import REGIMES, Posture
+from flybrain.naming import pair_names
 
 # executor_refresh_time, buy/sell cooldown — Market Making Expert's table.
 TIMING: dict[str, tuple[int, int]] = {
@@ -39,11 +45,16 @@ class MarketSpec:
     """What the operator settles once per deployment; the fly never changes it."""
 
     connector_name: str
-    trading_pair: str  # UPPERCASE issuer prefix, e.g. XYZ:DRAM-USD
+    trading_pair: str  # BASE-QUOTE, or ISSUER:TOKEN-QUOTE on HIP-3
     total_amount_quote: float
-    picked_spread_bps: float  # the scanner's spread for this market
-    leverage: int = 3
-    maker_fee_bps: float = 1.3  # HIP-3 all-in maker fee per side incl. builder fee
+    picked_spread_bps: float  # the observed spread for this market
+    # Blank means "derive from the connector name"; see venue.resolve.
+    market_type: str = ""
+    # 1 on spot, where there is nothing to lever.
+    leverage: int = 1
+    # 0 means "use the venue default"; pass the exchange's real figure when
+    # known, since the take-profit floor is derived from it.
+    maker_fee_bps: float = 0.0
     min_spread_bps: float = 3.0
     portfolio_allocation: float = 0.2
     target_base_pct: float = 0.4
@@ -58,12 +69,15 @@ class MarketSpec:
     min_order_notional: float = 10.0
 
     def __post_init__(self):
-        if self.trading_pair != self.trading_pair.upper():
-            raise ValueError(
-                f"HIP-3 trading_pair must be uppercase, got {self.trading_pair!r}"
+        pair_names(self.trading_pair)  # refuses anything unparseable
+        resolved = venue.resolve(self.connector_name, self.market_type)
+        object.__setattr__(self, "market_type", resolved)
+        if not self.maker_fee_bps:
+            object.__setattr__(
+                self,
+                "maker_fee_bps",
+                venue.default_maker_fee_bps(self.connector_name, resolved),
             )
-        if not self.trading_pair.endswith("-USD") or ":" not in self.trading_pair:
-            raise ValueError("HIP-3 pair must look like ISSUER:TOKEN-USD")
         for name in (
             "total_amount_quote",
             "picked_spread_bps",
@@ -73,7 +87,13 @@ class MarketSpec:
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be finite and positive")
-        if not 1 <= self.leverage <= self.leverage_cap:
+        if self.is_spot:
+            if self.leverage != 1:
+                raise ValueError(
+                    f"{self.connector_name} is a spot market: leverage must be 1, "
+                    f"got {self.leverage}"
+                )
+        elif not 1 <= self.leverage <= self.leverage_cap:
             raise ValueError(f"leverage must be within 1..{self.leverage_cap}")
         if not 0 < self.min_base_pct < self.target_base_pct < self.max_base_pct < 1:
             raise ValueError("0 < min_base < target_base < max_base < 1 required")
@@ -81,6 +101,10 @@ class MarketSpec:
             raise ValueError("portfolio_allocation must be in (0, 1]")
         if self.min_order_notional < 0:
             raise ValueError("min_order_notional must be >= 0")
+
+    @property
+    def is_spot(self) -> bool:
+        return self.market_type == venue.SPOT
 
     @property
     def order_notional(self) -> float:
@@ -123,7 +147,7 @@ def build_config(spec: MarketSpec, posture: Posture) -> dict:
     sell = [max(spec.min_spread_bps, lvl + shift) for lvl in levels]
     take_profit = max(take_profit_floor(spec), min(buy[0], sell[0]) * BPS)
     refresh, cooldown = TIMING[posture.regime]
-    return {
+    config = {
         "controller_type": "generic",
         "controller_name": "pmm_mister",
         "connector_name": spec.connector_name,
@@ -131,7 +155,6 @@ def build_config(spec: MarketSpec, posture: Posture) -> dict:
         "total_amount_quote": spec.total_amount_quote,
         "portfolio_allocation": spec.portfolio_allocation,
         "leverage": spec.leverage,
-        "position_mode": "ONEWAY",
         "target_base_pct": spec.target_base_pct,
         "min_base_pct": spec.min_base_pct,
         "max_base_pct": spec.max_base_pct,
@@ -150,6 +173,10 @@ def build_config(spec: MarketSpec, posture: Posture) -> dict:
         "global_stop_loss": spec.global_stop_loss,
         "manual_kill_switch": posture.regime == "pause",
     }
+    if not spec.is_spot:
+        # Only a perpetual has one; pmm_mister skips the check on spot.
+        config["position_mode"] = "ONEWAY"
+    return config
 
 
 def config_diff(old: dict | None, new: dict) -> dict:

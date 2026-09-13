@@ -1,9 +1,11 @@
 """What the fly loop reads from the world, and the one thing it writes.
 
 ``LiveMarket`` talks to Hummingbot (candles, bot performance, portfolio, config
-updates, stop) and to Hyperliquid's public ``l2Book`` for the live book — the
-hummingbot-api order-book endpoint 500s on HIP-3 pairs. ``FixtureMarket`` is a
-deterministic offline stand-in for plumbing tests; it never applies anything.
+updates, stop) and reads the top of book from hummingbot-api, which serves any
+CLOB connector it supports. HIP-3 pairs are the one exception: that endpoint
+500s on them, so those fall back to Hyperliquid's public ``l2Book``.
+``FixtureMarket`` is a deterministic offline stand-in for plumbing tests; it
+never applies anything.
 """
 
 from __future__ import annotations
@@ -22,7 +24,6 @@ HL_INFO_URL = "https://api.hyperliquid.xyz/info"
 # The deploy tool appends -YYYYMMDD-HHMMSS, and a redeploy that hands the
 # running instance name back in stacks another one.
 _SUFFIXED = re.compile(r"(?:-\d{8}-\d{6})+")
-QUOTE_TOKENS = ("USD", "USDC")
 
 
 @dataclass(frozen=True)
@@ -91,8 +92,31 @@ class LiveMarket:
         self.candle_interval = candle_interval
         self.n_candles = n_candles
 
-    async def observe(self, pair: str) -> Observation:
+    async def book(self, pair: str) -> Book:
+        """Top of book, from whichever source serves this market.
+
+        hummingbot-api covers every CLOB connector it supports. HIP-3 pairs are
+        the exception: its order-book endpoint 500s on them, so those go
+        straight to Hyperliquid's public one.
+        """
         names = pair_names(pair)
+        if names.hl_coin and "hyperliquid" in self.connector_name.lower():
+            async with aiohttp.ClientSession() as session:
+                return await fetch_l2_book(session, names.hl_coin)
+        raw = await self.client.market_data.get_order_book(
+            self.connector_name, pair, depth=1
+        )
+        if not isinstance(raw, dict):
+            raise RuntimeError(f"{pair}: unexpected order book payload")
+        bids, asks = raw.get("bids") or [], raw.get("asks") or []
+        if not bids or not asks:
+            return Book(None, None)  # closed / empty book, a real state
+        bid, ask = float(bids[0][0]), float(asks[0][0])
+        if not (math.isfinite(bid) and math.isfinite(ask)) or bid <= 0 or ask < bid:
+            raise RuntimeError(f"{pair}: invalid top of book bid={bid!r} ask={ask!r}")
+        return Book(bid, ask)
+
+    async def observe(self, pair: str) -> Observation:
         candles = normalize_candle_payload(
             await self.client.market_data.get_candles(
                 self.connector_name,
@@ -101,8 +125,7 @@ class LiveMarket:
                 max_records=self.n_candles,
             )
         )
-        async with aiohttp.ClientSession() as session:
-            book = await fetch_l2_book(session, names.coin)
+        book = await self.book(pair)
         if not book.open:
             # The chart still exists; the loop decides what a closed book means.
             last = float(candles[-1]["close"])
@@ -110,8 +133,7 @@ class LiveMarket:
         return Observation(pair, candles, book.bid, book.ask, True)
 
     async def fresh_mid(self, pair: str) -> float:
-        async with aiohttp.ClientSession() as session:
-            book = await fetch_l2_book(session, pair_names(pair).coin)
+        book = await self.book(pair)
         if not book.open:
             raise RuntimeError(f"{pair}: book closed at apply time")
         return (book.bid + book.ask) / 2
@@ -209,7 +231,14 @@ class LiveMarket:
             raise RuntimeError("Nonfinite bot performance")
         return net, volume, per_pair, carry
 
-    async def available_usd(self) -> float:
+    async def available_quote(self, quote_tokens: set[str]) -> float:
+        """Available balance in the quote assets these books trade against.
+
+        A perp draws margin from its collateral asset; a spot book spends the
+        quote outright. Either way the figure that matters is what is free in
+        the asset the pair is denominated in, so the caller names it rather
+        than this assuming a venue's collateral token.
+        """
         state = await self.client.portfolio.get_portfolio_state()
         if not isinstance(state, dict):
             raise RuntimeError("Portfolio state unavailable")
@@ -223,7 +252,7 @@ class LiveMarket:
                     continue
                 seen = True
                 for token in tokens:
-                    if isinstance(token, dict) and token.get("token") in QUOTE_TOKENS:
+                    if isinstance(token, dict) and token.get("token") in quote_tokens:
                         units = float(token.get("units", 0) or 0)
                         total += float(token.get("available_units", units) or 0)
         if not seen:
@@ -327,7 +356,7 @@ class FixtureMarket:
         carry = {p: {"net": share_net, "volume": share_volume} for p in pairs}
         return net, volume, per_pair, carry
 
-    async def available_usd(self) -> float:
+    async def available_quote(self, quote_tokens: set[str]) -> float:
         return 1e9
 
     async def apply(self, pair: str, config: dict) -> None:
@@ -362,8 +391,17 @@ def pnl_is_known(per_pair: dict) -> bool:
 
 
 def required_collateral(specs: list[MarketSpec]) -> float:
-    """Margin the three books could need at their inventory cap."""
+    """Quote the books could need at their inventory cap.
+
+    On a perp that is margin, so leverage divides it. On spot leverage is 1 by
+    construction, and the same expression is the quote actually spent.
+    """
     return sum(s.total_amount_quote * s.max_base_pct / s.leverage for s in specs)
+
+
+def quote_tokens(specs: list[MarketSpec]) -> set[str]:
+    """The quote assets these books are denominated in."""
+    return {pair_names(s.trading_pair).quote for s in specs}
 
 
 def now() -> float:

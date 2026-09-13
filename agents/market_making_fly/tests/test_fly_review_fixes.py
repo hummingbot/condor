@@ -68,17 +68,26 @@ def test_price_move_rejects_nonfinite(bad):
 
 
 def test_find_bot_accepts_deploy_suffix_and_refuses_ambiguity():
-    bots = {"orcl-fly-20260913-055821": {}, "dram-fly": {}, "orcl-flyer": {}}
-    assert LiveMarket.find_bot(bots, "orcl-fly")[0] == "orcl-fly-20260913-055821"
-    assert LiveMarket.find_bot(bots, "dram-fly")[0] == "dram-fly"
-    assert LiveMarket.find_bot(bots, "spcx-fly") == (None, None)
+    bots = {
+        "xyz-orcl-usd-fly-20260913-055821": {},
+        "xyz-dram-usd-fly": {},
+        "xyz-orcl-usd-flyer": {},
+    }
+    assert (
+        LiveMarket.find_bot(bots, "xyz-orcl-usd-fly")[0]
+        == "xyz-orcl-usd-fly-20260913-055821"
+    )
+    assert LiveMarket.find_bot(bots, "xyz-dram-usd-fly")[0] == "xyz-dram-usd-fly"
+    assert LiveMarket.find_bot(bots, "xyz-spcx-usd-fly") == (None, None)
     with pytest.raises(RuntimeError):
-        LiveMarket.find_bot({**bots, "orcl-fly": {}}, "orcl-fly")
+        LiveMarket.find_bot({**bots, "xyz-orcl-usd-fly": {}}, "xyz-orcl-usd-fly")
 
 
 def test_equity_carries_a_vanished_bot():
     running = {
-        "orcl-fly-20260913-055821": {"performance": {"orcl_fly_mm": _perf(-1.5, 400)}}
+        "xyz-orcl-usd-fly-20260913-055821": {
+            "performance": {"xyz_orcl_usd_fly_mm": _perf(-1.5, 400)}
+        }
     }
     net, volume, per_pair, carry = asyncio.run(
         _market(running).equity(["XYZ:ORCL-USD"])
@@ -102,7 +111,7 @@ def test_equity_carries_a_vanished_bot():
 
 
 def test_equity_marks_a_running_bot_without_a_report():
-    unreported = {"orcl-fly-20260913-055821": {"performance": {}}}
+    unreported = {"xyz-orcl-usd-fly-20260913-055821": {"performance": {}}}
     net, volume, per_pair, carry = asyncio.run(
         _market(unreported).equity(
             ["XYZ:ORCL-USD"], {"XYZ:ORCL-USD": {"net": 2.0, "volume": 50}}
@@ -121,25 +130,25 @@ def test_equity_marks_a_running_bot_without_a_report():
 
 
 def test_apply_saves_before_touching_the_live_bot():
-    bots = {"orcl-fly-20260913-055821": {}}
+    bots = {"xyz-orcl-usd-fly-20260913-055821": {}}
     m = _market(bots)
     asyncio.run(m.apply("XYZ:ORCL-USD", {"x": 1}))
     assert m.client.controllers.calls == [
-        ("saved", "orcl_fly_mm"),
-        ("live", "orcl-fly-20260913-055821", "orcl_fly_mm"),
+        ("saved", "xyz_orcl_usd_fly_mm"),
+        ("live", "xyz-orcl-usd-fly-20260913-055821", "xyz_orcl_usd_fly_mm"),
     ]
     failing = _market(bots, fail_saved=True)
     with pytest.raises(RuntimeError):
         asyncio.run(failing.apply("XYZ:ORCL-USD", {"x": 1}))
-    assert failing.client.controllers.calls == [("saved", "orcl_fly_mm")]
+    assert failing.client.controllers.calls == [("saved", "xyz_orcl_usd_fly_mm")]
     with pytest.raises(RuntimeError):
         asyncio.run(_market({}).apply("XYZ:ORCL-USD", {"x": 1}))
 
 
 def test_stop_bot_uses_the_running_name():
-    m = _market({"orcl-fly-20260913-055821": {}})
+    m = _market({"xyz-orcl-usd-fly-20260913-055821": {}})
     assert asyncio.run(m.stop_bot("XYZ:ORCL-USD")) is True
-    assert m.client.bot_orchestration.stopped == ["orcl-fly-20260913-055821"]
+    assert m.client.bot_orchestration.stopped == ["xyz-orcl-usd-fly-20260913-055821"]
     assert asyncio.run(_market({}).stop_bot("XYZ:ORCL-USD")) is False
 
 
@@ -193,7 +202,9 @@ def test_a_redeployed_book_is_not_a_five_dollar_loss():
     from flybrain.market import book_restarted
 
     traded = {
-        "orcl-fly-20260913-055821": {"performance": {"orcl_fly_mm": _perf(5.0, 7000.0)}}
+        "xyz-orcl-usd-fly-20260913-055821": {
+            "performance": {"xyz_orcl_usd_fly_mm": _perf(5.0, 7000.0)}
+        }
     }
     net, _, per_pair, carry = asyncio.run(_market(traded).equity(["XYZ:ORCL-USD"]))
     assert net == 5.0 and not book_restarted(per_pair)
@@ -204,7 +215,9 @@ def test_a_redeployed_book_is_not_a_five_dollar_loss():
 
     # the operator redeploys; the new instance reports from zero
     fresh = {
-        "orcl-fly-20260913-071220": {"performance": {"orcl_fly_mm": _perf(0.0, 0.0)}}
+        "xyz-orcl-usd-fly-20260913-071220": {
+            "performance": {"xyz_orcl_usd_fly_mm": _perf(0.0, 0.0)}
+        }
     }
     net2, _, per_pair2, _ = asyncio.run(_market(fresh).equity(["XYZ:ORCL-USD"], carry))
     assert book_restarted(per_pair2) == ["XYZ:ORCL-USD"]
@@ -224,12 +237,14 @@ def test_a_redeployed_book_is_not_a_five_dollar_loss():
 
 def test_growing_volume_is_not_a_restart():
     traded = {
-        "orcl-fly-20260913-055821": {"performance": {"orcl_fly_mm": _perf(5.0, 7000.0)}}
+        "xyz-orcl-usd-fly-20260913-055821": {
+            "performance": {"xyz_orcl_usd_fly_mm": _perf(5.0, 7000.0)}
+        }
     }
     _, _, _, carry = asyncio.run(_market(traded).equity(["XYZ:ORCL-USD"]))
     more = {
-        "orcl-fly-20260913-055821": {
-            "performance": {"orcl_fly_mm": _perf(-2.0, 9000.0)}
+        "xyz-orcl-usd-fly-20260913-055821": {
+            "performance": {"xyz_orcl_usd_fly_mm": _perf(-2.0, 9000.0)}
         }
     }
     _, _, per_pair, _ = asyncio.run(_market(more).equity(["XYZ:ORCL-USD"], carry))

@@ -1,8 +1,8 @@
 ---
 name: fly_mm_deploy
-description: End-to-end deployment of the fly market maker on up to three HIP-3 pairs —
-  scan, deploy neutral pmm_mister bots with the fly's naming, start fly_brain in shadow,
-  verify, and (only when told) switch to live.
+description: End-to-end deployment of the fly market maker on up to three markets on
+  any CLOB venue, spot or perp — pick the markets, deploy neutral pmm_mister bots with
+  the fly's naming, start fly_brain in shadow, verify, and (only when told) go live.
 when_to_use: When asked to set up, deploy, launch, or restart the fly market maker, or
   to rotate one of its market slots. Follow it as a delegate task with no mid-flow
   confirmation.
@@ -12,19 +12,37 @@ source: agent:market_making_fly
 
 # Fly MM Deploy
 
-You are deploying **Market Making Fly**: one shared fly brain, up to three HIP-3
-markets, `pmm_mister` controllers. The fly decides posture; you set up the plumbing.
+You are deploying **Market Making Fly**: one shared fly brain, up to three markets
+on any CLOB venue, `pmm_mister` controllers. The fly decides posture; you set up
+the plumbing.
+
+## Step 0 — Settle the venue
+
+- `connector_name`: any CLOB connector hummingbot-api serves. A `_perpetual`
+  suffix means perp, anything else is spot.
+- **Spot**: `leverage` must be 1, and the fee floor is far wider — check
+  `maker_fee_bps` before anything else.
+- **`maker_fee_bps`**: pass the exchange's real per-side maker fee when you know
+  it. Leaving it at 0 uses a conservative default, which quotes wider than
+  necessary rather than tighter than is profitable.
 
 ## Step 1 — Pick the markets
+
+On **Hyperliquid HIP-3**, rank them:
 
 ```
 manage_routines(action="run", name="hip3_market_scanner",
   config={"issuer": "xyz", "min_spread_bps": 3, "max_daily_drift_pct": 3, "top_n": 5})
 ```
 
-Take the top **`n_markets`** survivors (1–3; from `[CURRENT CONFIG]` or the task,
-default 3) that have an open live book — one brain quotes them all in round-robin. Record for each: `pair` (uppercase, e.g. `XYZ:DRAM-USD`) and its **spread in
-bp** — this is `picked_spreads_bps`. If fewer than one survivor, stop and report.
+On **any other venue**, either take the pairs the operator named, or rank
+candidates with the global `market_scanner` routine and read the spread from
+`get_prices` plus the order book.
+
+Take the top **`n_markets`** (1-3; from `[CURRENT CONFIG]` or the task, default 3)
+that have an open live book — one brain quotes them all in round-robin. Record for
+each: `pair` (uppercase `BASE-QUOTE`, or `ISSUER:TOKEN-QUOTE` on HIP-3) and its
+**spread in bp** — this is `picked_spreads_bps`. If none survive, stop and report.
 
 ## Step 2 — Collateral
 
@@ -34,8 +52,10 @@ bp** — this is `picked_spreads_bps`. If fewer than one survivor, stop and repo
 
 ## Step 3 — Neutral configs (the fly's starting point)
 
-For each pair derive `token` (e.g. `DRAM`), `bot_name = {token.lower()}-fly`,
-`config_name = {token.lower()}_fly_mm`. The neutral config is exactly what
+For each pair derive the slug from the **whole** pair — `SOL-USDT` → `sol-usdt`,
+`XYZ:ORCL-USD` → `xyz-orcl-usd` — then `bot_name = {slug}-fly` and
+`config_name = {slug}_fly_mm` (underscores). Never name a bot after the base token
+alone: `BTC-USDT` and `BTC-USDC` would collide. The neutral config is exactly what
 `fly_brain` would apply for the `ranging` regime; build it with:
 
 ```python
@@ -43,15 +63,15 @@ run_code(code="""
 import sys; sys.path.insert(0, "agents/market_making_fly")
 from flybrain.posture import MarketSpec, build_config
 from flybrain.decoder import NEUTRAL
-spec = MarketSpec(connector_name="hyperliquid_perpetual", trading_pair="XYZ:DRAM-USD",
+spec = MarketSpec(connector_name="binance_perpetual", trading_pair="SOL-USDT",
                   total_amount_quote=500, picked_spread_bps=8.0, leverage=3,
-                  portfolio_allocation=0.2)
+                  portfolio_allocation=0.2)   # spot: leverage=1, and check maker_fee_bps
 print(build_config(spec, NEUTRAL))
 """)
 ```
 
 `build_config` refuses a spec whose orders would fall under the exchange minimum
-(10 USD on HIP-3): each order is `total_amount_quote × portfolio_allocation / 4`.
+(10 USD on HIP-3, 5-10 USD on most spot venues): each order is `total_amount_quote × portfolio_allocation / 4`.
 200 quote on one market needs `portfolio_allocation` ≥ 0.2; 100 quote needs ≥ 0.4.
 Whatever value you use here, pass the **same** `portfolio_allocation` to `fly_brain`
 in Step 5 — it rebuilds every config from it.

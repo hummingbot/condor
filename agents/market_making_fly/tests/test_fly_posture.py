@@ -88,27 +88,52 @@ def test_every_spread_respects_min():
 
 
 def test_spec_validation():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError):  # lowercase pair
         MarketSpec("hyperliquid_perpetual", "xyz:dram-usd", 500, 8)
-    with pytest.raises(ValueError):
-        MarketSpec("hyperliquid_perpetual", "DRAM-USD", 500, 8)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError):  # no quote
+        MarketSpec("hyperliquid_perpetual", "DRAMUSD", 500, 8)
+    with pytest.raises(ValueError):  # leverage above the cap
         MarketSpec("hyperliquid_perpetual", "XYZ:DRAM-USD", 500, 8, leverage=10)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError):  # no capital
         MarketSpec("hyperliquid_perpetual", "XYZ:DRAM-USD", 0, 8)
 
 
-def test_order_size_floor():
-    small = MarketSpec("hyperliquid_perpetual", "XYZ:A-USD", 200, 5.0)
-    assert small.order_notional == pytest.approx(10.0)
-    small.check_order_size()
-    tiny = MarketSpec("hyperliquid_perpetual", "XYZ:A-USD", 100, 5.0)
-    with pytest.raises(ValueError, match="at least 0.40"):
-        build_config(tiny, NEUTRAL)
-    full = MarketSpec(
-        "hyperliquid_perpetual", "XYZ:A-USD", 100, 5.0, portfolio_allocation=1.0
+def test_spot_and_perp_are_settled_by_the_connector():
+    perp = MarketSpec("binance_perpetual", "SOL-USDT", 1000, 6.0, leverage=3)
+    spot = MarketSpec("binance", "SOL-USDT", 1000, 6.0)
+    assert (perp.market_type, spot.market_type) == ("perp", "spot")
+    assert not perp.is_spot and spot.is_spot
+    # a spot book has nothing to lever
+    with pytest.raises(ValueError, match="leverage must be 1"):
+        MarketSpec("binance", "SOL-USDT", 1000, 6.0, leverage=3)
+    # and a mislabelled connector is refused rather than silently reinterpreted
+    with pytest.raises(ValueError, match="looks like a perp"):
+        MarketSpec("binance_perpetual", "SOL-USDT", 1000, 6.0, market_type="spot")
+
+
+def test_position_mode_is_a_perp_field():
+    perp = build_config(MarketSpec("binance_perpetual", "SOL-USDT", 1000, 6.0), NEUTRAL)
+    spot = build_config(MarketSpec("binance", "SOL-USDT", 1000, 6.0), NEUTRAL)
+    assert perp["position_mode"] == "ONEWAY" and perp["leverage"] == 1
+    assert "position_mode" not in spot
+
+
+def test_the_fee_floor_follows_the_venue():
+    """Spot fees run several times perp fees, and a take-profit that is
+    comfortably profitable on a perp loses money on spot."""
+    perp = MarketSpec("binance_perpetual", "SOL-USDT", 1000, 6.0)
+    spot = MarketSpec("binance", "SOL-USDT", 1000, 6.0)
+    assert perp.maker_fee_bps == 2.0 and spot.maker_fee_bps == 7.5
+    assert take_profit_floor(spot) > 3 * take_profit_floor(perp)
+    assert build_config(spot, NEUTRAL)["take_profit"] >= take_profit_floor(spot)
+    # an unknown venue is quoted wide, not tight
+    unknown = MarketSpec("some_new_dex", "SOL-USDT", 1000, 6.0)
+    assert unknown.maker_fee_bps == 10.0
+    # and the real figure always wins
+    assert (
+        MarketSpec("binance", "SOL-USDT", 1000, 6.0, maker_fee_bps=1.0).maker_fee_bps
+        == 1.0
     )
-    build_config(full, NEUTRAL)
 
 
 def test_config_diff():

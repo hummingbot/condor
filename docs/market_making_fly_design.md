@@ -27,9 +27,13 @@ substitute**, and Hummingbot's controller executes. The Condor LLM agent is the
 *operator* — it picks the market, deploys the bot, starts and stops the fly,
 reports, and explains — it never overrides the fly's posture with its own view.
 
-The trading universe is **Hyperliquid HIP-3 perps (xyz issuer)** on
-`hyperliquid_perpetual`, reusing Market Making Expert's HIP-3 scanner and its
-HIP-3 operating rules.
+The trading universe is **any CLOB market hummingbot-api serves, spot or perp**.
+Hyperliquid HIP-3 was the first venue and keeps two special cases: its order
+book comes from Hyperliquid's own endpoint (hummingbot-api's 500s on HIP-3
+pairs), and its scanner ranks the xyz issuer's markets. Everything venue-
+dependent — spot versus perp, whether leverage applies, and what a round trip
+costs — lives in `flybrain/venue.py`; the decoder, the chart and the dopamine
+feedback are venue-agnostic, because a candle chart is a candle chart.
 
 FLM (the "Fly Language Model") was the first candidate and is **not** used:
 it is a frozen 1.2 B-parameter chat model whose next-token scores get a small
@@ -276,7 +280,35 @@ the first external pulse — endogenous dopamine activity drives the rule too. W
 report `changed_edges`, `mean_efficacy`, `reward_spikes`, `aversive_spikes`
 every tick and make no claim beyond them.
 
-## 10. Trading universe — HIP-3
+## 10. Trading universe — any CLOB market
+
+**Venue-independent by default (2026-09-13).** `flybrain/venue.py` holds the
+three things that differ between venues, all of which bear on money:
+
+* **spot or perp**, decided by the connector name (`_perpetual` means perp).
+  Leverage applies only to a perp; on spot it must be 1 and `position_mode` is
+  not sent. A connector declared as the type it is not is refused rather than
+  silently reinterpreted.
+* **the maker fee**, from which the take-profit floor follows. Spot fees run
+  three to five times perp fees on the same exchange, so the floor moves with
+  it: Binance perp 2 bp a side gives an 8.8 bp floor, Binance spot 7.5 bp gives
+  33 bp. An unknown venue defaults deliberately wide (10 bp spot, 2.5 bp perp),
+  because a floor set too low loses money silently while one set too high only
+  costs fills. `maker_fee_bps` overrides it per deployment.
+* **the top of book**, which comes from hummingbot-api for every connector it
+  serves. HIP-3 pairs are the one exception: that endpoint 500s on them, so
+  they fall back to Hyperliquid's public `l2Book`.
+
+Pair grammar is `BASE-QUOTE` or, on HIP-3, `ISSUER:TOKEN-QUOTE`. Names derive
+from the **whole** pair (`SOL-USDT` → `sol-usdt-fly`, `XYZ:ORCL-USD` →
+`xyz-orcl-usd-fly`), because naming a bot after its base token alone makes
+`BTC-USDT` and `BTC-USDC` the same bot — the fly would read one book's P&L
+while updating the other's config.
+
+The decoder, the chart and the dopamine feedback are unchanged and venue-
+agnostic: a candle chart is a candle chart.
+
+### Hyperliquid HIP-3, the first venue
 
 * Connector `hyperliquid_perpetual`, issuer `xyz`, pairs `XYZ:TOKEN-USD`
   (uppercase; lowercase → KeyError → zero orders).

@@ -1,6 +1,7 @@
 """The fly loop: chart → connectome → posture → pmm_mister config, with P&L dopamine.
 
-One shared brain is shown up to three HIP-3 markets in round-robin. Each tick:
+One shared brain is shown up to three markets in round-robin — any CLOB spot or
+perp market hummingbot-api serves. Each tick:
 
 1. fetch candles + live book for this tick's pair;
 2. read the combined net P&L of the fly's bots, turn its change since the last
@@ -72,6 +73,7 @@ from flybrain.market import (
     LiveMarket,
     book_restarted,
     pnl_is_known,
+    quote_tokens,
     required_collateral,
 )
 from flybrain.naming import pair_names, parse_pairs
@@ -98,20 +100,32 @@ class Config(BaseModel):
     """Fly-connectome market maker: one brain, up to three HIP-3 markets, P&L dopamine."""
 
     pairs: str = Field(
-        default="XYZ:DRAM-USD,XYZ:SPCX-USD,XYZ:SMSN-USD",
-        description="1 to 3 uppercase HIP-3 pairs, comma-separated — this list IS the market count (bot {token}-fly, config {token}_fly_mm)",
+        default="XYZ:ORCL-USD",
+        description="1 to 3 uppercase pairs, comma-separated — BASE-QUOTE on any CLOB venue, or ISSUER:TOKEN-QUOTE on HIP-3. This list IS the market count; each pair names its own bot ({slug}-fly) and config ({slug}_fly_mm)",
     )
     picked_spreads_bps: str = Field(
         default="8,8,8",
         description="Scanner spread per pair in bp, same order as pairs",
     )
     connector_name: str = Field(
-        default="hyperliquid_perpetual", description="Connector"
+        default="hyperliquid_perpetual",
+        description="Any CLOB connector hummingbot-api serves, spot or perp (a _perpetual suffix means perp)",
+    )
+    market_type: str = Field(
+        default="",
+        description="spot | perp; blank derives it from the connector name",
+    )
+    maker_fee_bps: float = Field(
+        default=0.0,
+        description="Maker fee per side in bp; 0 uses a conservative venue default. The take-profit floor is derived from it, so pass the exchange's real figure when you know it",
     )
     total_amount_quote: float = Field(
         default=500.0, description="Capital per pair (quote)"
     )
-    leverage: int = Field(default=3, description="Leverage per pair (cap 5)")
+    leverage: int = Field(
+        default=1,
+        description="Leverage per pair (perp only, cap 5); must be 1 on spot",
+    )
     portfolio_allocation: float = Field(
         default=0.2,
         description="Fraction of total_amount_quote quoted per cycle; each order is total × allocation / 4 and must clear the exchange minimum (10 USD on HIP-3) — one market at 200 quote needs 0.2+",
@@ -180,7 +194,9 @@ def _specs(config: Config, pairs: list[str]) -> list[MarketSpec]:
             trading_pair=pair,
             total_amount_quote=config.total_amount_quote,
             picked_spread_bps=spread,
+            market_type=config.market_type,
             leverage=config.leverage,
+            maker_fee_bps=config.maker_fee_bps,
             portfolio_allocation=config.portfolio_allocation,
         )
         for pair, spread in zip(pairs, spreads)
@@ -496,7 +512,8 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                         check_apply_window(guard_state, now, guard_settings)
                         check_config(proposed, spec)
                         check_collateral(
-                            await market.available_usd(), required_collateral(specs)
+                            await market.available_quote(quote_tokens(specs)),
+                            required_collateral(specs),
                         )
                         check_price_move(
                             obs.mid, await market.fresh_mid(pair), guard_settings
