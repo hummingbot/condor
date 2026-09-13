@@ -618,9 +618,14 @@ class ReportBuilder:
                 # back to the whole row.
                 span = section.get("width", 12)
                 if span < 12:
+                    # `min-height: 400px` keeps a full-width chart from being
+                    # squashed, but a narrow panel was placed deliberately
+                    # beside something else and has to be free to match it.
+                    # Inline, so it overrides the stylesheet for this panel only.
                     parts.append(
                         f'<div class="plotly-chart report-panel report-component" '
-                        f'style="--component-span:{span}">{section["content"]}</div>'
+                        f'style="--component-span:{span};min-height:0">'
+                        f'{section["content"]}</div>'
                     )
                 else:
                     parts.append(

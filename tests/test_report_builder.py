@@ -430,6 +430,9 @@ def test_plotly_width_spans_the_grid_and_defaults_to_the_full_row():
 
     half = html_for(width=6)
     assert "--component-span:6" in half
+    # the stylesheet's 400px floor would stop a narrow panel matching whatever
+    # it sits beside, so it is released inline for that panel only
+    assert "min-height:0" in half and "min-height:0" not in full
     assert 'class="section plotly-chart' not in half  # or the grid rule wins
     assert "report-component" in half
 

@@ -40,10 +40,22 @@ logger = logging.getLogger(__name__)
 
 CATEGORY = "Bot Analysis"
 
-# Columns of the report's 12-wide grid. The cards take the narrower half so
-# they wrap to two per row beside the brain, and both collapse to full width
-# under the runtime's 800px breakpoint.
+# Columns of the report's 12-wide grid, and the panel heights that make each
+# row's two halves finish level on a wide screen. Everything collapses to full
+# width under the runtime's 800px breakpoint, where heights stop mattering.
+#
+# A panel is its figure plus 34px of padding and border, measured rather than
+# guessed. Narrow panels are also released from the stylesheet's 400px floor,
+# which exists to stop a full-width chart being squashed and would otherwise
+# stop the brain matching the card stack beside it.
+FLY, FRAME = 6, 6
 CARDS, BRAIN = 5, 7
+PANEL_CHROME = 34  # the panel's own padding and border, measured
+# Row one is sized so the frame fills its half: 16:9 at six columns is ~335px.
+ROW_ONE = 430
+# Row two matches the card stack, which is what it is — three rows of 98px
+# plus two 16px gaps. Nothing about a KPI card's height is ours to set.
+ROW_TWO = 3 * 98 + 2 * 16
 AGENT_SLUG = "market_making_fly"
 
 # How an execution status reads in the decision log.
@@ -97,11 +109,11 @@ def _read_frame(path: Path) -> np.ndarray | None:
     return np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8)
 
 
-def _frame_figure(frame: np.ndarray) -> go.Figure:
+def _frame_figure(frame: np.ndarray, height: int = 340) -> go.Figure:
     """That frame, full size, as the report's sensory panel."""
     fig = go.Figure(go.Image(z=frame))
     fig.update_layout(
-        height=340,
+        height=height,
         margin=dict(l=0, r=0, t=6, b=6),
         paper_bgcolor=GROUND,
         plot_bgcolor=GROUND,
@@ -253,11 +265,14 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
             title=f"FLY.EXE — {alive}",
             subtitle=f"{', '.join(pairs) or 'no market'}",
             chart=sensory,
+            height=ROW_ONE - PANEL_CHROME,
         ),
-        width=7,
+        width=FLY,
     )
     if sensory is not None:
-        builder.plotly(_frame_figure(sensory), width=5)
+        builder.plotly(
+            _frame_figure(sensory, height=ROW_ONE - PANEL_CHROME), width=FRAME
+        )
     if sensory is not None:
         builder.markdown(
             f"**What the fly sees** — the 320×180 frame fed to the retina on tick "
@@ -312,7 +327,12 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         width=CARDS,
     )
     builder.plotly(
-        brain_figure(run_dir.load_activity(), title="NEURAL ACTIVITY"), width=BRAIN
+        brain_figure(
+            run_dir.load_activity(),
+            title="NEURAL ACTIVITY",
+            height=ROW_TWO - PANEL_CHROME,
+        ),
+        width=BRAIN,
     )
     builder.plotly(readout_figure(neural, last_posture, height=260))
     builder.markdown(
