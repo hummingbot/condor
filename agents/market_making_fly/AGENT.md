@@ -87,7 +87,7 @@ manage_skill(action="read", name="fly_mm_deploy")
 | Routine | Use |
 |---|---|
 | `fly_setup` | `action=prepare` downloads and compiles the connectome into this agent's home (once per install); `verify`; `bench` |
-| `hip3_market_scanner` | Rank xyz HIP-3 markets; take the top picks and their spreads |
+| `mm_market_scanner` | Rank any venue's markets for market making: spread against that venue's round-trip fee, book depth, drift. Works on HIP-3 too |
 | `fly_chart` | Render the exact frame for a pair (what the fly sees) |
 | `fly_brain` | The loop (continuous). `mode=shadow|live`, `pairs`, `picked_spreads_bps`, `run_name` |
 | `fly_status` | Latest posture per pair, last observation, guard state, memory stats |

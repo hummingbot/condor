@@ -312,8 +312,9 @@ agnostic: a candle chart is a candle chart.
 
 * Connector `hyperliquid_perpetual`, issuer `xyz`, pairs `XYZ:TOKEN-USD`
   (uppercase; lowercase → KeyError → zero orders).
-* Market selection is the existing `hip3_market_scanner` routine (copied into
-  the agent): volume, spread-vs-fee, daily drift, `l2Book` depth filter,
+* Market selection is the `mm_market_scanner` routine, which ranks any venue's
+  markets on the same criteria (superseding the HIP-3-only scanner this agent
+  used to carry): volume, spread-vs-fee, daily drift, `l2Book` depth filter,
   `TOP PICK`. Selection is the operator's job (deterministic routine + LLM
   reading it), not the fly's — the fly never chooses which market it is shown,
   as in stonkfly's fixed round-robin.
@@ -361,7 +362,7 @@ agents/market_making_fly/
     fly_brain.py          # CONTINUOUS: the loop in §3; modes shadow|live, learning|frozen, fixture|market
     fly_status.py         # one-shot: latest posture, channels, z-scores, spikes, memory stats, P&L, vetoes, halt reason
     fly_report.py         # one-shot: the run dashboard (fly, book, neurons, decisions, sensory frame)
-    hip3_market_scanner.py  # copied from Market Making Expert
+    mm_market_scanner.py    # ranks any venue: spread vs its round-trip fee, depth, drift
   skills/
     fly_mm_deploy/SKILL.md      # deploy playbook (adapted from pmm_mister_deploy: scanner → base config → deploy → start fly_brain)
     fly_decoder/SKILL.md        # how to read fly_status and the decoder

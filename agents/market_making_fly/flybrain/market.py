@@ -49,6 +49,68 @@ class Book:
         return self.bid is not None and self.ask is not None
 
 
+def level(entry) -> tuple[float, float]:
+    """One book level as ``(price, size)``. Venues disagree on the shape:
+    Hyperliquid sends ``{"px", "sz"}``, hummingbot-api sends ``[price, qty]``,
+    and some connectors send ``{"price", "quantity"}``."""
+    if isinstance(entry, dict):
+        price = entry.get("px", entry.get("price", entry.get("Price")))
+        size = entry.get(
+            "sz", entry.get("quantity", entry.get("size", entry.get("amount")))
+        )
+        return float(price), float(size)
+    return float(entry[0]), float(entry[1])
+
+
+def depth_within(
+    bids: list[tuple[float, float]],
+    asks: list[tuple[float, float]],
+    within_bps: float,
+) -> tuple[float, float, float]:
+    """``(bid_notional, ask_notional, spread_bps)`` inside ``within_bps`` of mid.
+
+    What a market maker actually needs to know about a book: how wide the touch
+    is, and how much is resting close enough to trade against. Levels further
+    out than the band are not liquidity this strategy will ever see.
+    """
+    if not bids or not asks:
+        return 0.0, 0.0, 0.0
+    best_bid, best_ask = bids[0][0], asks[0][0]
+    mid = (best_bid + best_ask) / 2
+    if mid <= 0 or not math.isfinite(mid):
+        return 0.0, 0.0, 0.0
+    spread_bps = (best_ask - best_bid) / mid * 1e4
+
+    def side(levels, is_bid):
+        total = 0.0
+        for price, size in levels:
+            offset = (mid - price) / mid * 1e4 if is_bid else (price - mid) / mid * 1e4
+            if offset > within_bps:
+                break  # the ladder is sorted; nothing beyond is closer
+            total += price * size
+        return total
+
+    return side(bids, True), side(asks, False), spread_bps
+
+
+async def fetch_l2_levels(
+    session: aiohttp.ClientSession, coin: str
+) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
+    """Full bid/ask ladders from Hyperliquid's public book."""
+    async with session.post(
+        HL_INFO_URL,
+        json={"type": "l2Book", "coin": coin},
+        timeout=aiohttp.ClientTimeout(total=10),
+    ) as resp:
+        if resp.status != 200:
+            raise RuntimeError(f"l2Book {coin}: HTTP {resp.status}")
+        book = await resp.json()
+    levels = book.get("levels") if isinstance(book, dict) else None
+    if not levels or len(levels) != 2:
+        raise RuntimeError(f"l2Book {coin}: unexpected payload {str(book)[:120]}")
+    return [level(e) for e in levels[0]], [level(e) for e in levels[1]]
+
+
 async def fetch_l2_book(session: aiohttp.ClientSession, coin: str) -> Book:
     async with session.post(
         HL_INFO_URL,
@@ -92,26 +154,36 @@ class LiveMarket:
         self.candle_interval = candle_interval
         self.n_candles = n_candles
 
-    async def book(self, pair: str) -> Book:
-        """Top of book, from whichever source serves this market.
+    async def levels(
+        self, pair: str, depth: int = 50
+    ) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
+        """Bid/ask ladders, from whichever source serves this market.
 
         hummingbot-api covers every CLOB connector it supports. HIP-3 pairs are
         the exception: its order-book endpoint 500s on them, so those go
-        straight to Hyperliquid's public one.
+        straight to Hyperliquid's public one. That rule lives here alone, so
+        anything reading a book — the loop, the scanner — inherits it.
         """
         names = pair_names(pair)
         if names.hl_coin and "hyperliquid" in self.connector_name.lower():
             async with aiohttp.ClientSession() as session:
-                return await fetch_l2_book(session, names.hl_coin)
+                return await fetch_l2_levels(session, names.hl_coin)
         raw = await self.client.market_data.get_order_book(
-            self.connector_name, pair, depth=1
+            self.connector_name, pair, depth=depth
         )
         if not isinstance(raw, dict):
             raise RuntimeError(f"{pair}: unexpected order book payload")
-        bids, asks = raw.get("bids") or [], raw.get("asks") or []
+        return (
+            [level(e) for e in (raw.get("bids") or [])],
+            [level(e) for e in (raw.get("asks") or [])],
+        )
+
+    async def book(self, pair: str) -> Book:
+        """Top of book. Source selection lives in :meth:`levels`."""
+        bids, asks = await self.levels(pair, depth=1)
         if not bids or not asks:
             return Book(None, None)  # closed / empty book, a real state
-        bid, ask = float(bids[0][0]), float(asks[0][0])
+        bid, ask = bids[0][0], asks[0][0]
         if not (math.isfinite(bid) and math.isfinite(ask)) or bid <= 0 or ask < bid:
             raise RuntimeError(f"{pair}: invalid top of book bid={bid!r} ask={ask!r}")
         return Book(bid, ask)

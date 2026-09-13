@@ -162,3 +162,52 @@ def test_a_hip3_pair_does_not_use_the_generic_endpoint():
     except (aiohttp.ClientError, RuntimeError, OSError):
         pass  # offline in CI; the point is which path was taken
     assert m.client.market_data.calls == []
+
+
+def test_a_book_level_is_read_whatever_shape_the_venue_sends():
+    from flybrain.market import level
+
+    assert level({"px": "100.5", "sz": "2"}) == (100.5, 2.0)  # Hyperliquid
+    assert level([100.5, 2]) == (100.5, 2.0)  # hummingbot-api
+    assert level({"price": 100.5, "quantity": 2}) == (100.5, 2.0)
+    assert level({"price": 100.5, "amount": 2}) == (100.5, 2.0)
+
+
+def test_depth_only_counts_what_is_close_enough_to_trade_against():
+    """Liquidity resting far from mid is not liquidity this strategy sees."""
+    from flybrain.market import depth_within
+
+    bids = [(99.9, 10), (99.0, 100), (90.0, 1000)]  # ~10bp, ~100bp, ~1000bp out
+    asks = [(100.1, 10), (101.0, 100), (110.0, 1000)]
+    bid_usd, ask_usd, spread = depth_within(bids, asks, within_bps=20)
+    assert spread == pytest.approx(20.0, abs=0.1)
+    assert bid_usd == pytest.approx(99.9 * 10)  # the 99.0 level is ~100bp out
+    assert ask_usd == pytest.approx(100.1 * 10)
+    # a wider band reaches further down the ladder
+    wide_bid, wide_ask, _ = depth_within(bids, asks, within_bps=150)
+    assert wide_bid > bid_usd and wide_ask > ask_usd
+    # an empty side is no depth and no spread, not a crash
+    assert depth_within([], asks, 20) == (0.0, 0.0, 0.0)
+
+
+def test_the_scanner_requires_the_spread_to_clear_the_venues_own_fee():
+    """The HIP-3 scanner hardcoded 3bp, unrelated to what a round trip costs.
+    A spot book's fee is several times a perp's, so the floor has to move."""
+    import importlib.util
+    from pathlib import Path
+
+    from flybrain import venue
+
+    path = Path(__file__).resolve().parents[1] / "routines" / "mm_market_scanner.py"
+    spec = importlib.util.spec_from_file_location("mm_market_scanner", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    def floor_for(connector):
+        cfg = mod.Config(connector_name=connector)
+        fee = venue.default_maker_fee_bps(connector, venue.market_type_for(connector))
+        return 2 * fee * cfg.min_spread_over_fee
+
+    assert floor_for("hyperliquid_perpetual") == pytest.approx(3.9)
+    assert floor_for("binance") == pytest.approx(22.5)  # spot costs far more
+    assert floor_for("binance") > 5 * floor_for("hyperliquid_perpetual") / 2

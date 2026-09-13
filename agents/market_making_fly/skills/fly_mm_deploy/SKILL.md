@@ -28,21 +28,28 @@ the plumbing.
 
 ## Step 1 — Pick the markets
 
-On **Hyperliquid HIP-3**, rank them:
-
 ```
-manage_routines(action="run", name="hip3_market_scanner",
-  config={"issuer": "xyz", "min_spread_bps": 3, "max_daily_drift_pct": 3, "top_n": 5})
+manage_routines(action="run", name="mm_market_scanner", config={
+  "connector_name": "<connector>", "issuer": "xyz",   # issuer only on HIP-3
+  "quote": "USDT",                                     # optional, e.g. spot venues
+  "prescreen": 30, "top_n": 5})
 ```
 
-On **any other venue**, either take the pairs the operator named, or rank
-candidates with the global `market_scanner` routine and read the spread from
-`get_prices` plus the order book.
+It ranks by volume, by how far the spread clears **that venue's** round-trip
+maker fee, and by book depth, then reports why every rejected market failed.
+Take the top **`n_markets`** (1-3; from `[CURRENT CONFIG]` or the task, default
+3) with an open book — one brain quotes them all in round-robin. Record each
+`pair` and its **spread in bp**; that is `picked_spreads_bps`.
 
-Take the top **`n_markets`** (1-3; from `[CURRENT CONFIG]` or the task, default 3)
-that have an open live book — one brain quotes them all in round-robin. Record for
-each: `pair` (uppercase `BASE-QUOTE`, or `ISSUER:TOKEN-QUOTE` on HIP-3) and its
-**spread in bp** — this is `picked_spreads_bps`. If none survive, stop and report.
+**If nothing survives, raise `prescreen` before anything else.** Reading a book
+costs a call, so only the busiest markets are read — and the widest markets are
+rarely the busiest. On HIP-3 the eight heaviest markets all quote under 1.4 bp,
+nowhere near the 3.9 bp needed to clear a 2.6 bp round trip; the first market
+that cleared it sat thirtieth by volume. A `TOP PICK: none` line means the scan
+did not look far enough, or this venue is genuinely too tight to quote.
+
+If it still finds nothing, stop and report that rather than lowering the
+spread floor: quoting inside the fee loses money on every fill.
 
 ## Step 2 — Collateral
 
