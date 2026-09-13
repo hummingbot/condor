@@ -370,7 +370,11 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                 equity, volume, per_pair, pnl_carry = await market.equity(
                     pairs, pnl_carry
                 )
-                if anchor is None:
+                running_bots = [p for p, i in per_pair.items() if i.get("running")]
+                pnl_known = bool(running_bots) and all(
+                    per_pair[p].get("reported") for p in running_bots
+                )
+                if anchor is None or not pnl_known:
                     kind, delta = "none", 0.0
                 else:
                     kind, delta = reinforcement(equity, anchor, deadband)
@@ -382,10 +386,14 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                         "volume": volume,
                         "pnl_delta": delta,
                         "stimulus": kind,
+                        "pnl_known": pnl_known,
                         "bots": per_pair,
                     }
                 )
-                check_pnl(equity, volume, guard_state, guard_settings, max_loss)
+                if pnl_known:
+                    # Breakers judge reported P&L only; an unreported book is
+                    # neither a loss nor a high.
+                    check_pnl(equity, volume, guard_state, guard_settings, max_loss)
 
                 if not obs.open:
                     # Nothing new for the fly to see; keep the anchor so the next
@@ -433,7 +441,8 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                 # Checkpoint and anchor are committed before any apply.
                 ck = run_dir.checkpoint_path(tick)
                 sha = await loop.run_in_executor(pool, worker._checkpoint, str(ck))
-                anchor = equity
+                if pnl_known:
+                    anchor = equity
                 tick += 1
                 persist({"checkpoint": {"file": ck.name, "sha256": sha}})
 

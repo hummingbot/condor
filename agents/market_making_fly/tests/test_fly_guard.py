@@ -123,6 +123,16 @@ def test_no_new_high_breaker():
         check_pnl(0.9, 1000.0, st, small, 100.0)
 
 
+def test_first_reported_figure_is_the_high_not_a_drawdown():
+    st = GuardState()
+    small = GuardSettings(loss_no_new_high_ticks=2)
+    check_pnl(-0.5, 1000.0, st, small, 100.0)  # first report, negative
+    assert st.session_high_net == -0.5 and st.ticks_since_high == 0
+    check_pnl(-0.6, 1000.0, st, small, 100.0)
+    with pytest.raises(Halt):
+        check_pnl(-0.6, 1000.0, st, small, 100.0)
+
+
 def test_new_high_resets_counter():
     st = GuardState()
     small = GuardSettings(loss_no_new_high_ticks=3)

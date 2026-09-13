@@ -56,7 +56,9 @@ class GuardState:
     applies_today: int = 0
     last_apply: dict[str, float] = field(default_factory=dict)  # per pair
     consecutive_failures: int = 0
-    session_high_net: float = 0.0
+    # None until the first tick with reported P&L: an unreported book has no
+    # high to fall from, and a first negative figure is not a drawdown.
+    session_high_net: float | None = None
     ticks_since_high: int = 0
     closed_ticks: dict[str, int] = field(default_factory=dict)
     halted: str | None = None
@@ -180,7 +182,9 @@ def check_pnl(
     unrealized P&L — realized alone can look fine while the open position bleeds."""
     if not math.isfinite(total_net) or not math.isfinite(volume):
         raise Veto("P&L figures are not finite")
-    if total_net > state.session_high_net:
+    # Call only on ticks whose P&L is reported: breakers count reported ticks,
+    # never silence, and the first report sets the high.
+    if state.session_high_net is None or total_net > state.session_high_net:
         state.session_high_net = total_net
         state.ticks_since_high = 0
     else:
