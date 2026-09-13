@@ -24,6 +24,10 @@ from pathlib import Path
 _AGENT_DIR = str(Path(__file__).resolve().parents[1])
 if _AGENT_DIR not in sys.path:
     sys.path.insert(0, _AGENT_DIR)
+# Condor re-executes this file when it changes but keeps imported modules
+# cached; drop flybrain's so the reload actually picks up the package.
+for _name in [m for m in sys.modules if m == "flybrain" or m.startswith("flybrain.")]:
+    del sys.modules[_name]
 
 import asyncio
 import logging
@@ -459,6 +463,17 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                 else:
                     try:
                         check_not_halted(guard_state)
+                        unreported = [
+                            p
+                            for p, info in per_pair.items()
+                            if info.get("running") and not info.get("reported")
+                        ]
+                        if unreported:
+                            raise Veto(
+                                "no performance report for "
+                                + ", ".join(unreported)
+                                + "; the guard cannot see P&L"
+                            )
                         check_apply_window(guard_state, now, guard_settings)
                         check_config(proposed, spec)
                         check_collateral(

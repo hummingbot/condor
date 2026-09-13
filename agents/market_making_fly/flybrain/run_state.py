@@ -126,7 +126,12 @@ class RunDir:
         sig = signature(provenance)
         if self.provenance_path.exists():
             recorded = json.loads(self.provenance_path.read_text())
-            if recorded.get("signature") != sig:
+            # Re-sign what was recorded under the current rule, so a change to
+            # which keys are signed does not itself refuse every existing run.
+            recorded_sig = signature(
+                {k: v for k, v in recorded.items() if k != "signature"}
+            )
+            if recorded_sig != sig:
                 raise RuntimeError(
                     "Run protocol changed (settings, decoder, dataset or source); "
                     "use a new run_name or review the migration explicitly"

@@ -8,6 +8,10 @@ from pathlib import Path
 _AGENT_DIR = str(Path(__file__).resolve().parents[1])
 if _AGENT_DIR not in sys.path:
     sys.path.insert(0, _AGENT_DIR)
+# Condor re-executes this file when it changes but keeps imported modules
+# cached; drop flybrain's so the reload actually picks up the package.
+for _name in [m for m in sys.modules if m == "flybrain" or m.startswith("flybrain.")]:
+    del sys.modules[_name]
 
 import logging
 

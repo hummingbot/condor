@@ -170,15 +170,30 @@ class LiveMarket:
                 continue
             perf = (bot.get("performance") or {}).get(names.config_name)
             if not isinstance(perf, dict):
-                raise RuntimeError(
-                    f"bot {names.bot_name} is running without controller {names.config_name}"
-                )
+                # The bot is up but the API has no performance report for its
+                # controller (no MQTT report yet, or reporting broken). Keep the
+                # last known figures; the loop decides what that permits.
+                previous = carry.get(pair)
+                if previous:
+                    net += previous["net"]
+                    volume += previous["volume"]
+                per_pair[pair] = {
+                    "running": True,
+                    "reported": False,
+                    **(previous or {}),
+                }
+                continue
             inner = perf.get("performance", perf)
             pair_net = controller_net(inner)
             pair_volume = float(inner.get("volume_traded", 0) or 0)
             net += pair_net
             volume += pair_volume
-            per_pair[pair] = {"running": True, "net": pair_net, "volume": pair_volume}
+            per_pair[pair] = {
+                "running": True,
+                "reported": True,
+                "net": pair_net,
+                "volume": pair_volume,
+            }
             carry[pair] = {"net": pair_net, "volume": pair_volume}
         if not math.isfinite(net) or not math.isfinite(volume):
             raise RuntimeError("Nonfinite bot performance")
