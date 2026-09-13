@@ -168,11 +168,19 @@ def _pnl_figure(events: list[dict]) -> go.Figure | None:
     return fig
 
 
-async def _holdings(client, connector_name: str, pairs: list[str]) -> list[dict]:
-    """What each of the fly's bots is holding right now, from the live bot."""
+async def _holdings(
+    client, connector_name: str, pairs: list[str]
+) -> tuple[list[dict], int | None]:
+    """What the fly's bots hold now, and how many positions they have closed.
+
+    The trade count is the sum of each controller's close-type counts — round
+    trips actually completed, not orders placed. ``None`` when no bot reported,
+    so the report can say "unknown" rather than "zero".
+    """
     market = LiveMarket(client, connector_name, "5m", 72)
     bots = await market.bots()
-    rows = []
+    rows: list[dict] = []
+    trades: int | None = None
     for pair in pairs:
         names = pair_names(pair)
         running, bot = LiveMarket.find_bot(bots, names.bot_name)
@@ -181,6 +189,9 @@ async def _holdings(client, connector_name: str, pairs: list[str]) -> list[dict]
             continue
         perf = (bot.get("performance") or {}).get(names.config_name) or {}
         inner = perf.get("performance", perf) if isinstance(perf, dict) else {}
+        closes = inner.get("close_type_counts") or {}
+        if isinstance(closes, dict):
+            trades = (trades or 0) + sum(int(v or 0) for v in closes.values())
         positions = inner.get("positions_summary") or []
         amount = sum(
             float(p.get("amount", 0) or 0) for p in positions if isinstance(p, dict)
@@ -196,7 +207,7 @@ async def _holdings(client, connector_name: str, pairs: list[str]) -> list[dict]
                 "Volume": _fmt(inner.get("volume_traded")),
             }
         )
-    return rows
+    return rows, trades
 
 
 async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
@@ -240,7 +251,9 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     stale = observed is not latest
 
     client = await get_client(context._chat_id, context=context)
-    holdings = await _holdings(client, config.connector_name, pairs) if client else []
+    holdings, trades = (
+        await _holdings(client, config.connector_name, pairs) if client else ([], None)
+    )
     book_net = sum(
         float(info.get("net", 0) or 0)
         for info in (latest.get("bots") or {}).values()
@@ -262,19 +275,17 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     # describes. `section` escapes its description, so this is plain text —
     # no markdown syntax, which would show as literal asterisks.
     builder.section(
-        "FLY.EXE",
-        f"{alive} · run {config.run_name} · tick {state.get('tick', 0)} · "
-        f"{len(pairs)} market{'s' if len(pairs) != 1 else ''} · drag to orbit."
-        + (
-            f" What the fly sees: the 320×180 frame fed to the retina on tick "
-            f"{observed.get('tick')} — {settings.get('n_candles', '?')} × "
+        "WHAT THE FLY SEES",
+        (
+            f"The 320×180 frame fed to the retina on tick {observed.get('tick')} — "
+            f"{settings.get('n_candles', '?')} × "
             f"{settings.get('candle_interval', '?')} candles, volume and the live "
             "bid/ask — shown on its monitor and again at full size beside it. This "
             "is the picture the posture below was decoded from. No quotes, "
             "inventory or P&L are drawn, because those reach the fly only as "
-            "dopamine."
+            "dopamine. Drag the scene to orbit it."
             if sensory is not None
-            else " No input frame has been recorded for this run yet."
+            else "No input frame has been recorded for this run yet."
         ),
     )
     # Two halves of the grid, not one figure split internally: below the
@@ -299,8 +310,6 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     drawn, mapped, neurons_total = coverage()
     active = neural.get("active_neurons")
     posture_line = (
-        f"{str(last_posture.get('regime', 'no posture yet')).upper()} on "
-        f"{observed.get('pair', '—')} — {execution.get('reason', 'nothing recorded')}. "
         f"Decoded from trend z {_fmt(last_posture.get('trend_z'), 2, plus=True)} and "
         f"arousal z {_fmt(last_posture.get('arousal_z'), 2, plus=True)}, gated on "
         f"{neural.get('gate_spikes', '—')} DNpe017 spike(s)."
@@ -317,18 +326,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         f"{(memory.get('plastic_edges') or 0):,} plastic edges away from baseline, "
         f"mean efficacy {_fmt(memory.get('mean_efficacy'), 5)}."
     )
-    builder.section(
-        "NEURONS & NEURAL ORDER",
-        f"{neurons_total:,} neurons · {mapped:,} mapped somata · {drawn:,} drawn"
-        + (
-            f" · observation {observed.get('tick')}, the newest tick ran no brain"
-            if stale
-            else ""
-        )
-        + ". "
-        + posture_line
-        + observation_line,
-    )
+    builder.section("THE FLY BRAIN", posture_line + observation_line)
     # Cards on the left, the brain on the right, the same way the fly and its
     # frame sit above — five columns and seven of the runtime's twelve, both
     # collapsing to full width below its 800px breakpoint.
@@ -409,10 +407,6 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     pnl = _pnl_figure(events)
     if pnl is not None:
         builder.plotly(pnl)
-    builder.kpi("Net P&L", _fmt(book_net, 4, plus=True))
-    builder.kpi("Volume", _fmt(book_volume))
-    builder.kpi("Markets", str(len(pairs)))
-    builder.kpi("Mode", str(latest.get("mode", "—")).upper())
     if holdings:
         builder.table(
             holdings,
@@ -425,12 +419,21 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         )
 
     # ── PERFORMANCE & LIMITS ─────────────────────────────────────────────────
-    builder.section("PERFORMANCE & LIMITS", "What the guard is watching")
-    builder.kpi("Halted", halted or "no")
-    builder.kpi("Session high", _fmt(guard.get("session_high_net"), 4, plus=True))
-    builder.kpi("Ticks since high", str(guard.get("ticks_since_high", "—")))
-    builder.kpi("Applies today", str(guard.get("applies_today", 0)))
-    builder.kpi("Anchor", _fmt(state.get("anchor"), 4, plus=True))
+    builder.section(
+        "PERFORMANCE",
+        (
+            (f"Halted: {halted}. " if halted else "")
+            + f"Session high {_fmt(guard.get('session_high_net'), 4, plus=True)}, "
+            f"{guard.get('ticks_since_high', 0)} observation(s) since, "
+            f"{guard.get('applies_today', 0)} config change(s) applied today."
+            if guard.get("session_high_net") is not None
+            else "No P&L has been reported yet, so the breakers have nothing to judge."
+        ),
+    )
+    builder.kpi("Ticks", f"{state.get('tick', 0):,}")
+    builder.kpi("Net P&L", _fmt(book_net, 4, plus=True))
+    builder.kpi("Trades", f"{trades:,}" if trades is not None else "—")
+    builder.kpi("Volume", _fmt(book_volume))
     builder.markdown(
         "_Regime, spread multiplier and lean are an engineered readout of spike counts, "
         "not a discovered market-making circuit. Dopamine pulses report the change in "
