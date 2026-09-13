@@ -436,3 +436,24 @@ def test_plotly_width_spans_the_grid_and_defaults_to_the_full_row():
     # out-of-range widths are clamped rather than emitted as broken CSS
     assert "--component-span" not in html_for(width=99)  # clamps to the full row
     assert "--component-span:1" in html_for(width=0)
+
+
+def test_kpi_width_wraps_the_bar_so_the_grid_rule_cannot_override_it():
+    """`.report-grid > .kpi-bar` forces `grid-column: 1 / -1`, so a narrow run
+    has to be wrapped rather than given the span itself — and the inner bar
+    still needs its own card grid."""
+    from condor.reports import ReportBuilder
+
+    def html_for(**kwargs):
+        builder = ReportBuilder("t")
+        builder.kpi("A", "1", **kwargs)
+        builder.kpi("B", "2", **kwargs)
+        return builder._render_sections()
+
+    full = html_for()
+    assert '<div class="kpi-bar">' in full
+    assert "--component-span" not in full
+
+    half = html_for(width=5)
+    assert '--component-span:5"><div class="kpi-bar">' in half
+    assert half.count('class="kpi-bar"') == 1  # one bar, wrapped once

@@ -57,6 +57,12 @@ class FlyBrain:
                 f"No {DESCENDING_SUPERCLASS!r} superclass in graph.npz; "
                 f"available: {sorted(set(superclass.tolist()))}"
             )
+        # The report draws the connectome's somata; carrying their spike counts
+        # back is what lets it colour the animal by what actually fired, rather
+        # than by cell class alone. A few thousand ints per observation.
+        from flybrain.cloud import load as load_cloud
+
+        self.cloud_index = load_cloud()["index"].astype(np.int64)
         self.cell_ids = {
             "left": [str(self.brain.ids[i]) for i in self.left],
             "right": [str(self.brain.ids[i]) for i in self.right],
@@ -105,6 +111,11 @@ class FlyBrain:
             "right_hz": right,
             "arousal_hz": float(np.mean(counts[self.descending]) / seconds),
             "gate_spikes": int(counts[self.gate].sum()),
+            # Over the whole network, not extrapolated from the drawn sample:
+            # the report's cloud is stratified, so a fraction of it would not be
+            # a fraction of the animal.
+            "active_neurons": int((counts > 0).sum()),
+            "mean_rate_hz": float(counts.mean() / seconds),
             "kc_spikes": int(counts[b.circuit["kc"]].sum()),
             "reward_spikes": int(counts[b.circuit["reward"]].sum()),
             "aversive_spikes": int(counts[b.circuit["aversive"]].sum()),
@@ -117,6 +128,7 @@ class FlyBrain:
             "input_sha256": hashlib.sha256(frame.tobytes()).hexdigest(),
             "memory": b.memory(),
             "cell_ids": self.cell_ids,
+            "activity": counts[self.cloud_index].astype(int).tolist(),
         }
 
     def save(self, path: Path) -> None:

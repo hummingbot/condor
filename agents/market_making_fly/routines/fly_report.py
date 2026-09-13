@@ -24,6 +24,7 @@ import time
 
 import numpy as np
 import plotly.graph_objects as go
+from flybrain.brainviz import brain_figure, coverage, readout_figure
 from flybrain.fly3d import ACCENT, BODY, GROUND, LIMB, fly_figure
 from flybrain.market import LiveMarket
 from flybrain.naming import pair_names
@@ -38,6 +39,11 @@ from condor.reports import ReportBuilder
 logger = logging.getLogger(__name__)
 
 CATEGORY = "Bot Analysis"
+
+# Columns of the report's 12-wide grid. The cards take the narrower half so
+# they wrap to two per row beside the brain, and both collapse to full width
+# under the runtime's 800px breakpoint.
+CARDS, BRAIN = 5, 7
 AGENT_SLUG = "market_making_fly"
 
 # How an execution status reads in the decision log.
@@ -263,59 +269,67 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         )
 
     # ── NEURONS & NEURAL ORDER ───────────────────────────────────────────────
-    # One panel: the connectome's numbers and the posture they were decoded
-    # into belong together — the second is only readable against the first.
+    # Six cards, not fifteen. The rest of the numbers are narrative, and the
+    # picture says more about where the activity sat than a card ever could.
+    drawn, mapped, neurons_total = coverage()
+    active = neural.get("active_neurons")
     builder.section(
         "NEURONS & NEURAL ORDER",
-        "The connectome's own numbers from the last observation, and the posture "
-        "decoded from them"
+        f"{neurons_total:,} neurons · {mapped:,} mapped somata · {drawn:,} drawn"
         + (
-            f" (tick {observed.get('tick')}; the newest tick ran no brain)"
+            f" · observation {observed.get('tick')}; the newest tick ran no brain"
             if stale
             else ""
         ),
     )
-    builder.kpi("Neurons", f"{neurons:,}" if neurons else "—")
+    # Cards on the left, the brain on the right, the same way the fly and its
+    # frame sit above — five columns and seven of the runtime's twelve, both
+    # collapsing to full width below its 800px breakpoint.
     builder.kpi(
-        "Latest spikes",
-        f"{neural.get('total_spikes'):,}" if neural.get("total_spikes") else "—",
-    )
-    builder.kpi(
-        "Memory changed",
+        "Active neurons",
         (
-            f"{memory.get('changed_edges'):,}"
-            if memory.get("changed_edges") is not None
+            f"{active:,}  ·  {100 * active / neurons_total:.1f}%"
+            if active is not None
             else "—"
         ),
+        width=CARDS,
     )
     builder.kpi(
-        "Brain time",
-        f"{float(neural['brain_ms']) / 1000:,.1f} s" if neural.get("brain_ms") else "—",
+        "Mean firing rate",
+        f"{neural['mean_rate_hz']:.1f} Hz" if neural.get("mean_rate_hz") else "—",
+        width=CARDS,
+    )
+    builder.kpi("Regime", str(last_posture.get("regime", "—")).upper(), width=CARDS)
+    builder.kpi("Spread ×", _fmt(last_posture.get("spread_mult")), width=CARDS)
+    builder.kpi(
+        "Lean",
+        f"{_fmt(last_posture.get('shift_bps'), 2, plus=True)} bp",
+        width=CARDS,
     )
     builder.kpi(
-        "Kenyon cells",
-        f"{neural.get('kc_spikes'):,}" if neural.get("kc_spikes") is not None else "—",
+        "Result",
+        RESULT_WORDS.get(execution.get("status"), execution.get("status", "—")),
+        width=CARDS,
     )
-    builder.kpi("Gate (DNpe017)", str(neural.get("gate_spikes", "—")))
-    builder.kpi("Reward (PAM11)", str(neural.get("reward_spikes", "—")))
-    builder.kpi("Aversive (PPL101)", str(neural.get("aversive_spikes", "—")))
-    builder.kpi("Mean efficacy", _fmt(memory.get("mean_efficacy"), 5))
-    if last_posture:
-        builder.kpi("Regime", str(last_posture.get("regime", "—")).upper())
-        builder.kpi("Spread ×", _fmt(last_posture.get("spread_mult")))
-        builder.kpi("Lean", f"{_fmt(last_posture.get('shift_bps'), 2, plus=True)} bp")
-        builder.kpi("Trend z", _fmt(last_posture.get("trend_z"), 2, plus=True))
-        builder.kpi("Arousal z", _fmt(last_posture.get("arousal_z"), 2, plus=True))
-        builder.kpi(
-            "Result",
-            RESULT_WORDS.get(execution.get("status"), execution.get("status", "—")),
-        )
+    builder.plotly(
+        brain_figure(run_dir.load_activity(), title="NEURAL ACTIVITY"), width=BRAIN
+    )
+    builder.plotly(readout_figure(neural, last_posture, height=260))
     builder.markdown(
         f"**{str(last_posture.get('regime', 'no posture yet')).upper()}** on "
         f"`{observed.get('pair', '—')}` — {execution.get('reason', 'nothing recorded')}. "
-        f"Stimulus `{observed.get('stimulus', 'none')}`, P&L delta "
-        f"{_fmt(latest.get('pnl_delta'), 4, plus=True)}."
+        f"Decoded from trend z {_fmt(last_posture.get('trend_z'), 2, plus=True)} and "
+        f"arousal z {_fmt(last_posture.get('arousal_z'), 2, plus=True)}, gated on "
+        f"{neural.get('gate_spikes', '—')} DNpe017 spike(s)."
         + ("" if last_posture.get("warm", True) else " _Baseline still forming._")
+        + f"\n\nThe observation ran {_fmt(float(neural['brain_ms']) / 1000, 1) if neural.get('brain_ms') else '—'} s "
+        f"of neural time and produced {neural.get('total_spikes', 0):,} spikes, "
+        f"{neural.get('kc_spikes', 0):,} of them in Kenyon cells. Stimulus "
+        f"`{observed.get('stimulus', 'none')}` — {neural.get('reward_spikes', 0)} PAM11 "
+        f"and {neural.get('aversive_spikes', 0)} PPL101 spikes — left "
+        f"{(memory.get('changed_edges') or 0):,} of {(memory.get('plastic_edges') or 0):,} "
+        f"plastic edges away from baseline, mean efficacy "
+        f"{_fmt(memory.get('mean_efficacy'), 5)}."
     )
 
     # ── DECISIONS & POSITIONS ────────────────────────────────────────────────

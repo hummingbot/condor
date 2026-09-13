@@ -88,8 +88,22 @@ class ReportBuilder:
         return self
 
     def kpi(
-        self, label: str, value: str, delta: str | None = None, trend: str = "neutral"
+        self,
+        label: str,
+        value: str,
+        delta: str | None = None,
+        trend: str = "neutral",
+        width: int = 12,
     ) -> ReportBuilder:
+        """Add a KPI card.
+
+        ``width`` is the span of the report's 12-column grid taken by the whole
+        run of consecutive cards, the first card's value winning. The default
+        spans the row as before; a narrower one lets the cards sit beside a
+        figure and, below the layout's 800px breakpoint, stack under it. The
+        cards keep their own auto-fitting grid inside that span, so a narrow
+        run simply wraps to fewer per row.
+        """
         self._sections.append(
             {
                 "type": "kpi",
@@ -97,6 +111,7 @@ class ReportBuilder:
                 "value": value,
                 "delta": delta,
                 "trend": trend,
+                "width": max(1, min(12, int(width))),
             }
         )
         return self
@@ -577,7 +592,18 @@ class ReportBuilder:
                         f'<div class="value">{html.escape(str(kpi["value"]))}</div>'
                         f"{delta_html}</div>"
                     )
-                parts.append(f'<div class="kpi-bar">{"".join(cards)}</div>')
+                # A full-width run keeps the markup it has always had. A
+                # narrower one is wrapped in a grid item rather than given the
+                # span itself: `.report-grid > .kpi-bar` would beat it, and the
+                # inner bar still needs its own card grid.
+                span = kpis[0].get("width", 12)
+                bar = f'<div class="kpi-bar">{"".join(cards)}</div>'
+                parts.append(
+                    bar
+                    if span >= 12
+                    else f'<div class="report-component" '
+                    f'style="--component-span:{span}">{bar}</div>'
+                )
             elif section["type"] == "markdown":
                 parts.append(
                     '<div class="section section-md">'

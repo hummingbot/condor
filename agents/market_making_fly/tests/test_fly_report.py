@@ -100,3 +100,58 @@ def test_every_execution_status_has_a_word():
         "TICK_ERROR",
     ):
         assert report.RESULT_WORDS[status]
+
+
+def test_the_cloud_is_real_anatomy_and_always_holds_the_identified_circuit():
+    """The graph carries no coordinates; these come from the release's soma
+    positions. The cells the decoder and the memory rule read are kept whole,
+    because a proportional sample would drop populations of four and six."""
+    from flybrain.cloud import GROUPS, load
+
+    cloud = load()
+    index, xyz, group = cloud["index"], cloud["xyz"], cloud["group"]
+    assert len(index) == len(xyz) == len(group)
+    assert np.isfinite(xyz).all()  # every drawn point has a real position
+    assert len(np.unique(index)) == len(index)
+    assert index.max() < cloud["neurons_total"]
+    assert cloud["mapped_total"] < cloud["neurons_total"]  # not every cell is mapped
+    # the tiny identified populations survive sampling
+    for name, expected in (("dopamine", 17), ("memory output", 6), ("readout", 4)):
+        assert int((group == GROUPS.index(name)).sum()) == expected
+    # and the silhouette is not swamped by one group
+    assert int((group == GROUPS.index("visual")).sum()) > 1000
+
+
+def test_orient_centres_and_normalizes_without_distorting():
+    from flybrain.cloud import orient
+
+    raw = np.array([[0, 0, 0], [100, 200, 300], [-100, -200, -300]], dtype=np.float32)
+    out = orient(raw)
+    assert np.abs(out).max() == pytest.approx(1.0)
+    assert np.allclose(out.mean(axis=0), 0, atol=1e-6)
+    # one scale for all axes: a per-axis scale would stretch the animal
+    spans = (raw.max(axis=0) - raw.min(axis=0))[[0, 2, 1]]
+    got = out.max(axis=0) - out.min(axis=0)
+    assert np.allclose(got / got[0], spans / spans[0], atol=1e-5)
+
+
+def test_silent_neurons_are_drawn_apart_from_firing_ones():
+    """Nineteen cells in twenty are silent; running them through the same
+    colour scale turns the anatomy into a haze that buries the live ones."""
+    from flybrain.brainviz import brain_figure
+    from flybrain.cloud import load
+
+    n = len(load()["index"])
+    activity = [0] * n
+    activity[0] = 40
+    activity[1] = 5
+    fig = brain_figure(activity)
+    assert len(fig.data) == 2
+    quiet, live = fig.data
+    assert len(quiet.x) == n - 2 and len(live.x) == 2
+    assert quiet.marker.size < live.marker.size.min()  # silent recede
+    assert live.marker.color.max() == pytest.approx(1.0)  # hottest is the top colour
+
+    # with no snapshot at all it falls back to colouring by cell class
+    classed = brain_figure(None)
+    assert len(classed.data) > 2 and classed.layout.showlegend

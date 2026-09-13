@@ -80,6 +80,7 @@ class RunDir:
         self.events_path = self.root / "events.jsonl"
         self.latest_path = self.root / "latest.json"
         self.frame_path = self.root / "latest-input.png"
+        self.activity_path = self.root / "latest-activity.json"
         self.provenance_path = self.root / "provenance.json"
         self.lock_path = self.root / "worker.lock"
         self.stop_path = self.root / "STOP"
@@ -121,6 +122,20 @@ class RunDir:
 
     def write_latest(self, row: dict) -> None:
         atomic_write_json(self.latest_path, row, indent=2, default=str)
+
+    def save_activity(self, counts: list[int]) -> None:
+        """Spike counts at the cloud's neurons, for the report to colour by.
+
+        Overwritten each observation rather than appended: it is a few thousand
+        numbers, which would bury `events.jsonl` within an hour, and only the
+        latest is ever drawn.
+        """
+        atomic_write_json(self.activity_path, counts)
+
+    def load_activity(self) -> list[int] | None:
+        if not self.activity_path.exists():
+            return None
+        return json.loads(self.activity_path.read_text())
 
     def save_frame(self, frame: np.ndarray) -> None:
         Image.fromarray(frame).save(self.frame_path)
