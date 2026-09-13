@@ -160,7 +160,7 @@ def test_a_config_sitting_exactly_on_the_floor_is_not_vetoed():
         connector_name="hyperliquid_perpetual",
         trading_pair="XYZ:DRAM-USD",
         total_amount_quote=200,
-        picked_spread_bps=0.35,
+        range_bps=4.0,
         leverage=1,
         portfolio_allocation=0.3,
         maker_fee_bps=1.3,

@@ -82,8 +82,8 @@ class Config(BaseModel):
     )
     total_amount_quote: float = Field(default=200.0)
     portfolio_allocation: float = Field(default=0.3)
-    picked_spread_bps: float = Field(
-        default=0.0, description="0 measures it from the candles"
+    range_bps: float = Field(
+        default=0.0, description="0 measures the median candle range from the data"
     )
     maker_fee_bps: float = Field(default=0.0, description="0 fetches the venue's")
     leverage: int = Field(default=1)
@@ -161,10 +161,9 @@ async def _candles(client, config: Config) -> list[dict]:
     raise RuntimeError(f"No candles for {config.trading_pair}")
 
 
-def _spread_from_candles(candles: list[dict]) -> float:
-    """A stand-in for the scanner's measured touch, in bp: the median bar's
-    range is the only width a candle series knows about. Replay cannot see a
-    book, and saying so is better than defaulting to a number."""
+def _range_from_candles(candles: list[dict]) -> float:
+    """The median bar's range in bp — the quantity the quote levels are built
+    from, and the same median the scanner ranks reach by."""
     import statistics
 
     ranges = [
@@ -172,7 +171,9 @@ def _spread_from_candles(candles: list[dict]) -> float:
         for c in candles
         if float(c.get("close") or 0) > 0
     ]
-    return round(statistics.median(ranges) / 4, 2) if ranges else 2.0
+    if not ranges:
+        raise ValueError("No usable candles to measure a range from")
+    return round(statistics.median(ranges), 2)
 
 
 async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
@@ -191,12 +192,12 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     fee = config.maker_fee_bps or await venue.maker_fee_bps(
         config.connector_name, market_type, config.trading_pair
     )
-    spread = config.picked_spread_bps or _spread_from_candles(candles)
+    market_range = config.range_bps or _range_from_candles(candles)
     spec = MarketSpec(
         connector_name=config.connector_name,
         trading_pair=config.trading_pair,
         total_amount_quote=config.total_amount_quote,
-        picked_spread_bps=spread,
+        range_bps=market_range,
         leverage=config.leverage,
         portfolio_allocation=config.portfolio_allocation,
         maker_fee_bps=fee,
@@ -265,7 +266,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                 "pair": config.trading_pair,
                 "interval": config.interval,
                 "candles": len(candles),
-                "spread_bps": spread,
+                "range_bps": market_range,
                 "fee_bps": fee,
                 "summaries": summaries,
                 "curves": {r.variant: r.equity_curve for r in results},
@@ -282,7 +283,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         f"{len(candles):,} {config.interval} candles of {config.trading_pair}, "
         f"{results[0].ticks if results else 0} ticks after the "
         f"{config.n_candles}-candle window. Every variant saw the same series and "
-        f"the same book geometry — {spread:.2f} bp measured spread, {fee:.2f} bp "
+        f"the same geometry — {market_range:.2f} bp median bar range, {fee:.2f} bp "
         "maker fee — and each ran on its own freshly seeded brain. Fills assume "
         "a quote the price touched was ours, so every P&L here is an upper "
         "bound; the bias is identical across variants, which is what makes the "
@@ -379,7 +380,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     lines = [
         f"pair: {config.trading_pair} ({config.interval})",
         f"candles: {len(candles)}, ticks: {results[0].ticks if results else 0}",
-        f"spread: {spread:.2f} bp, fee: {fee:.2f} bp",
+        f"median range: {market_range:.2f} bp, fee: {fee:.2f} bp",
     ]
     for s in summaries:
         lines.append(

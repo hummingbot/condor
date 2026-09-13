@@ -41,7 +41,8 @@ user wants to *look* at the run, `fly_status` when you need to quote figures.
   The sign on each is a choice, not a finding: arousal is a population rate against
   its own average and nothing ties it to volatility. `lean` = clip(trend_z, ±3 bp), 0
   without a gate spike, and capped at half the first spread level when mapped.
-* Mapping: level 1 = max(2, S/2) bp, level 2 = S+1 bp (S = scanner spread), times
+* Mapping: level 1 = max(2, R/2) bp, level 2 = level 1 + R/4 (R = the market's
+  median candle range), times
   `spread ×`, buy −lean / sell +lean, floor 3 bp; TP = max(4 bp, 2.2 × round-trip fee,
   first level); timing per regime; `pause` sets `manual_kill_switch`.
 

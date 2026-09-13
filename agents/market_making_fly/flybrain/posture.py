@@ -52,7 +52,7 @@ class MarketSpec:
     connector_name: str
     trading_pair: str  # BASE-QUOTE, or ISSUER:TOKEN-QUOTE on HIP-3
     total_amount_quote: float
-    picked_spread_bps: float  # the observed spread for this market
+    range_bps: float  # median candle range for this market, at the fly's interval
     # Blank means "derive from the connector name"; see venue.resolve.
     market_type: str = ""
     # 1 on spot, where there is nothing to lever.
@@ -93,7 +93,7 @@ class MarketSpec:
                 "maker_fee_bps",
                 venue.default_maker_fee_bps(self.connector_name, resolved),
             )
-        for name in ("total_amount_quote", "picked_spread_bps", "maker_fee_bps"):
+        for name in ("total_amount_quote", "range_bps", "maker_fee_bps"):
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be finite and positive")
@@ -173,18 +173,31 @@ def take_profit_floor_bps(maker_fee_bps: float) -> float:
     return max(4.0, 2.2 * 2 * maker_fee_bps)
 
 
-# The outer level must stay outside the inner one. The playbook's S+1 assumed
-# a market quoting several bp; on a tight book — XYZ:DRAM-USD quotes 0.35 —
-# S+1 lands inside max(2, S/2) and the ladder inverts, so the "outer" level
-# fills first and the inventory ladder means nothing.
+# The outer level must stay outside the inner one, whatever the arithmetic
+# says: a ladder whose second rung is inside its first fills in the wrong
+# order and means nothing.
 LEVEL_STEP_BPS = 1.0
 
+# Quotes are placed against how far the market actually travels, not against
+# how wide its touch is. The playbook derived level 1 from the observed spread
+# — half of 1.75 bp on DRAM, so 2 bp — while a typical 5-minute bar there
+# ranges 9.9 bp and therefore reaches about 5 bp either side of mid. Every
+# level the fly could express, tight or wide, sat inside what a normal bar
+# covers, so the same candles touched the same orders whatever it decided:
+# five replay variants returned 23 fills and 15 round trips apiece.
+#
+# Half the range puts level 1 where a typical bar just reaches it, so the
+# spread multiplier straddles the fill boundary instead of living inside it:
+# 0.6x fills most bars, 2.5x fills few.
+LEVEL_ONE_RANGE_FRACTION = 0.5
+LEVEL_STEP_RANGE_FRACTION = 0.25
 
-def base_levels_from_spread(picked_spread_bps: float) -> tuple[float, float]:
-    """HIP-3 playbook: level 1 ``max(2, S/2)`` bp, level 2 ``S+1`` bp, with the
-    second never inside the first."""
-    first = max(2.0, picked_spread_bps / 2)
-    return first, max(picked_spread_bps + 1, first + LEVEL_STEP_BPS)
+
+def base_levels_from_range(range_bps: float) -> tuple[float, float]:
+    """Level 1 at half a typical bar's range, level 2 a quarter-bar beyond."""
+    first = max(2.0, LEVEL_ONE_RANGE_FRACTION * range_bps)
+    step = max(LEVEL_STEP_BPS, LEVEL_STEP_RANGE_FRACTION * range_bps)
+    return first, first + step
 
 
 def take_profit_floor(spec: MarketSpec) -> float:
@@ -192,7 +205,7 @@ def take_profit_floor(spec: MarketSpec) -> float:
 
 
 def base_levels_bps(spec: MarketSpec) -> tuple[float, float]:
-    return base_levels_from_spread(spec.picked_spread_bps)
+    return base_levels_from_range(spec.range_bps)
 
 
 def _fmt(values: list[float]) -> str:

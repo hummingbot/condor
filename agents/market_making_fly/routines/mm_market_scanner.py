@@ -52,7 +52,7 @@ import statistics
 from flybrain import venue
 from flybrain.market import LiveMarket, depth_within
 from flybrain.naming import pair_names
-from flybrain.posture import base_levels_from_spread, take_profit_floor_bps
+from flybrain.posture import base_levels_from_range, take_profit_floor_bps
 from pydantic import BaseModel, Field
 from telegram.ext import ContextTypes
 
@@ -126,15 +126,14 @@ class Config(BaseModel):
     top_n: int = Field(default=5, ge=1, le=25, description="Markets to report")
 
 
-def cycle_bps(spread_bps: float, fee_bps: float) -> float:
+def cycle_bps(range_bps: float, fee_bps: float) -> float:
     """The round trip the fly must travel on this market, in bp.
 
-    From mid down to where it would rest level 1 — ``max(2, S/2)``, never
-    inside the fee — and back out through the take-profit floor. This is the
-    distance a market has to move for one completed pair, and the thing a
-    candle's range is compared against.
+    From mid down to where it would rest level 1 — half a typical bar's range,
+    never inside the fee — and back out through the take-profit floor. This is
+    the distance a market has to move for one completed pair.
     """
-    entry = max(base_levels_from_spread(spread_bps)[0], fee_bps)
+    entry = max(base_levels_from_range(range_bps)[0], fee_bps)
     return entry + take_profit_floor_bps(fee_bps)
 
 
@@ -283,9 +282,9 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         # never inside the fee, and close at the take-profit floor. The round
         # trip it must travel is the sum — down to the quote, then back up
         # through the exit.
-        entry_bps = max(base_levels_from_spread(spread)[0], fee_bps)
+        entry_bps = max(base_levels_from_range(range_bps or 0.0)[0], fee_bps)
         exit_bps = take_profit_floor_bps(fee_bps)
-        cycle = cycle_bps(spread, fee_bps)
+        cycle = cycle_bps(range_bps or 0.0, fee_bps)
         range_bps = m.get("range_bps")
         # How far a typical candle travels against that cycle. Above 1 the
         # median candle completes one; below it, the market does not come to
@@ -455,7 +454,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         best = survivors[0]
         lines.append(
             f"TOP PICK: {best['pair']} at reach {best['reach']:.2f}×, "
-            f"picked_spread_bps={best['spread_bps']:.2f}"
+            f"picked_ranges_bps={best['range_bps']:.2f}"
         )
     else:
         lines.append(

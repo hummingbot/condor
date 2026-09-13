@@ -103,9 +103,11 @@ class Config(BaseModel):
         default="XYZ:ORCL-USD",
         description="1 to 3 uppercase pairs, comma-separated — BASE-QUOTE on any CLOB venue, or ISSUER:TOKEN-QUOTE on HIP-3. This list IS the market count; each pair names its own bot ({slug}-fly) and config ({slug}_fly_mm)",
     )
-    picked_spreads_bps: str = Field(
-        default="8,8,8",
-        description="Scanner spread per pair in bp, same order as pairs",
+    picked_ranges_bps: str = Field(
+        default="10,10,10",
+        description="Scanner median candle range per pair in bp, same order as "
+        "pairs. Quote levels are placed against how far the market travels, not "
+        "against how wide its touch is",
     )
     connector_name: str = Field(
         default="hyperliquid_perpetual",
@@ -190,10 +192,10 @@ async def _specs(config: Config, pairs: list[str]) -> list[MarketSpec]:
     The take-profit floor is derived from it, so it is read per pair unless the
     caller passed a figure of their own.
     """
-    spreads = [float(x) for x in config.picked_spreads_bps.split(",") if x.strip()]
-    if len(spreads) != len(pairs):
+    ranges = [float(x) for x in config.picked_ranges_bps.split(",") if x.strip()]
+    if len(ranges) != len(pairs):
         raise ValueError(
-            f"picked_spreads_bps has {len(spreads)} entries for {len(pairs)} pairs"
+            f"picked_ranges_bps has {len(ranges)} entries for {len(pairs)} pairs"
         )
     market_type = venue.resolve(config.connector_name, config.market_type)
     return [
@@ -201,7 +203,7 @@ async def _specs(config: Config, pairs: list[str]) -> list[MarketSpec]:
             connector_name=config.connector_name,
             trading_pair=pair,
             total_amount_quote=config.total_amount_quote,
-            picked_spread_bps=spread,
+            range_bps=market_range,
             market_type=config.market_type,
             leverage=config.leverage,
             maker_fee_bps=(
@@ -210,7 +212,7 @@ async def _specs(config: Config, pairs: list[str]) -> list[MarketSpec]:
             ),
             portfolio_allocation=config.portfolio_allocation,
         )
-        for pair, spread in zip(pairs, spreads)
+        for pair, market_range in zip(pairs, ranges)
     ]
 
 
@@ -313,7 +315,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                 if k
                 not in (
                     "pairs",
-                    "picked_spreads_bps",
+                    "picked_ranges_bps",
                     "mode",
                     "fast",
                     "steps",

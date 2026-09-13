@@ -35,21 +35,25 @@ manage_routines(action="run", name="mm_market_scanner", config={
   "prescreen": 30, "top_n": 5})
 ```
 
-It ranks by volume, by how far the spread clears **that venue's** round-trip
-maker fee, and by book depth, then reports why every rejected market failed.
+It ranks by volume, by whether a typical candle travels the round trip the fly
+must make — down to its quote, back out through the take-profit — and by book
+depth, then reports why every rejected market failed.
 Take the top **`n_markets`** (1-3; from `[CURRENT CONFIG]` or the task, default
 3) with an open book — one brain quotes them all in round-robin. Record each
-`pair` and its **spread in bp**; that is `picked_spreads_bps`.
+`pair` and its **median candle range in bp**; that is `picked_ranges_bps`. The
+quote levels are built from how far the market travels, not from how wide its
+touch is: level 1 sits at half a typical bar, where the spread multiplier can
+actually change whether a bar reaches it.
 
 **If nothing survives, raise `prescreen` before anything else.** Reading a book
-costs a call, so only the busiest markets are read — and the widest markets are
-rarely the busiest. On HIP-3 the eight heaviest markets all quote under 1.4 bp,
-nowhere near the 3.9 bp needed to clear a 2.6 bp round trip; the first market
-that cleared it sat thirtieth by volume. A `TOP PICK: none` line means the scan
-did not look far enough, or this venue is genuinely too tight to quote.
+costs a call, so only the busiest markets are read — and the busiest markets are
+not the most reachable. On Hyperliquid the heaviest HIP-3 markets barely move
+2 bp in five minutes against a 7.7 bp cycle; the first market that cleared it
+sat fourth by volume. A `TOP PICK: none` line means the scan did not look far
+enough, or this venue genuinely does not come to a resting quote.
 
 If it still finds nothing, stop and report that rather than lowering the
-spread floor: quoting inside the fee loses money on every fill.
+floor: quoting inside the fee loses money on every fill.
 
 ## Step 2 — Collateral
 
@@ -71,7 +75,7 @@ import sys; sys.path.insert(0, "agents/market_making_fly")
 from flybrain.posture import MarketSpec, build_config
 from flybrain.decoder import NEUTRAL
 spec = MarketSpec(connector_name="binance_perpetual", trading_pair="SOL-USDT",
-                  total_amount_quote=500, picked_spread_bps=8.0, leverage=3,
+                  total_amount_quote=500, range_bps=10.0, leverage=3,
                   portfolio_allocation=0.2)   # spot: leverage=1, and check maker_fee_bps
 print(build_config(spec, NEUTRAL))
 """)
@@ -106,13 +110,13 @@ controller.
 
 ## Step 5 — Start the fly in shadow
 
-`pairs` and `picked_spreads_bps` list exactly the `n_markets` picks, same order.
-With `n_markets: 1` that is a single pair and a single spread.
+`pairs` and `picked_ranges_bps` list exactly the `n_markets` picks, same order.
+With `n_markets: 1` that is a single pair and a single range.
 
 ```
 manage_routines(action="start", name="fly_brain", config={
   "pairs": "XYZ:DRAM-USD,XYZ:SPCX-USD,XYZ:SMSN-USD",   # n_markets entries
-  "picked_spreads_bps": "8,6,10",                       # one per pair
+  "picked_ranges_bps": "10,8,14",                      # one per pair
   "total_amount_quote": 500, "leverage": 3, "portfolio_allocation": 0.2,
   "mode": "shadow", "run_name": "fly-2026-09-12"})
 ```
@@ -128,7 +132,7 @@ manage_routines(action="run", name="fly_status", config={"run_name": "fly-2026-0
 manage_routines(action="run", name="fly_report", config={"run_name": "fly-2026-09-12"})
 ```
 
-Report: pairs, spreads, bots running, fly tick count, first postures, any vetoes or
+Report: pairs, ranges, bots running, fly tick count, first postures, any vetoes or
 halts, and the caveat that the fly's learning is not validated.
 
 ## Step 7 — Live (only when the task says so)
@@ -143,7 +147,7 @@ period first.
 When a slot's market is closed, dominated, or the operator asks: stop that bot
 (`manage_bots(action="stop_bot", bot_name=...)`), re-run the scanner, deploy the new
 pick with Steps 3–4, stop `fly_brain` and start it again with the updated `pairs` and
-`picked_spreads_bps` and the same `run_name`. The brain keeps its memory; only the
+`picked_ranges_bps` and the same `run_name`. The brain keeps its memory; only the
 swapped pair's baseline starts over.
 
 ## Halts

@@ -16,7 +16,7 @@ SPEC = MarketSpec(
     connector_name="hyperliquid_perpetual",
     trading_pair="XYZ:DRAM-USD",
     total_amount_quote=500,
-    picked_spread_bps=8.0,
+    range_bps=10.0,
     # What a HIP-3 market in growth mode costs all-in: 0.3 bp to the venue plus
     # 1.0 bp of builder fee. The loop fetches this per market; a core
     # Hyperliquid perp is 2.5 bp, which is why it is not assumed here.
@@ -28,12 +28,12 @@ def _spreads(value):
     return [float(x) for x in value.split(",")]
 
 
-def test_neutral_config_matches_hip3_base():
+def test_neutral_config_sits_at_half_a_bar_and_a_quarter_beyond():
     cfg = build_config(SPEC, NEUTRAL)
     l1, l2 = base_levels_bps(SPEC)
-    assert (l1, l2) == (4.0, 9.0)
-    assert _spreads(cfg["buy_spreads"]) == pytest.approx([4 * BPS, 9 * BPS])
-    assert _spreads(cfg["sell_spreads"]) == pytest.approx([4 * BPS, 9 * BPS])
+    assert (l1, l2) == (5.0, 7.5)  # a 10 bp bar: half of it, then a quarter more
+    assert _spreads(cfg["buy_spreads"]) == pytest.approx([5 * BPS, 7.5 * BPS])
+    assert _spreads(cfg["sell_spreads"]) == pytest.approx([5 * BPS, 7.5 * BPS])
     assert (
         cfg["controller_name"] == "pmm_mister" and cfg["controller_type"] == "generic"
     )
@@ -56,15 +56,15 @@ def test_volatile_widens_quiet_tightens_with_floor():
     wide = build_config(
         SPEC, Posture("volatile", 2.0, 1.0, 0.0, 0, 1.5, 0.0, False, True)
     )
-    assert _spreads(wide["buy_spreads"])[0] == pytest.approx(8 * BPS)
+    assert _spreads(wide["buy_spreads"])[0] == pytest.approx(10 * BPS)
     assert (wide["executor_refresh_time"], wide["buy_cooldown_time"]) == TIMING[
         "volatile"
     ]
     tight = build_config(
         SPEC, Posture("quiet", 0.6, 1.0, 0.0, 0, -1.5, 0.0, False, True)
     )
-    # 4 bp × 0.6 = 2.4 bp, which clears this market's 1.3 bp fee floor
-    assert _spreads(tight["buy_spreads"])[0] == pytest.approx(2.4 * BPS)
+    # 5 bp × 0.6 = 3 bp, well inside a typical bar and clear of the 1.3 bp fee
+    assert _spreads(tight["buy_spreads"])[0] == pytest.approx(3 * BPS)
     assert (tight["executor_refresh_time"], tight["buy_cooldown_time"]) == TIMING[
         "quiet"
     ]
@@ -75,14 +75,14 @@ def test_lean_is_asymmetric_and_capped():
         SPEC, Posture("trending_up", 1.0, 1.0, 3.0, 2.0, 0, 0.0, True, True)
     )
     buy, sell = _spreads(up["buy_spreads"]), _spreads(up["sell_spreads"])
-    # lean capped at half of level 1 (4 bp → 2 bp), and 2 bp still clears the fee
-    assert buy[0] == pytest.approx(2 * BPS) and sell[0] == pytest.approx(6 * BPS)
-    assert buy[1] == pytest.approx(7 * BPS) and sell[1] == pytest.approx(11 * BPS)
+    # lean capped at half of level 1 (5 bp → 2.5 bp), clear of the fee floor
+    assert buy[0] == pytest.approx(2.5 * BPS) and sell[0] == pytest.approx(7.5 * BPS)
+    assert buy[1] == pytest.approx(5 * BPS) and sell[1] == pytest.approx(10 * BPS)
     down = build_config(
         SPEC, Posture("trending_down", 1.0, 1.0, -3.0, -2.0, 0, 0.0, True, True)
     )
-    assert _spreads(down["sell_spreads"])[0] == pytest.approx(2 * BPS)
-    assert _spreads(down["buy_spreads"])[0] == pytest.approx(6 * BPS)
+    assert _spreads(down["sell_spreads"])[0] == pytest.approx(2.5 * BPS)
+    assert _spreads(down["buy_spreads"])[0] == pytest.approx(7.5 * BPS)
 
 
 def test_the_spread_floor_is_the_market_own_fee():
@@ -94,7 +94,7 @@ def test_the_spread_floor_is_the_market_own_fee():
         connector_name="binance",
         trading_pair="SOL-USDT",
         total_amount_quote=500,
-        picked_spread_bps=8.0,
+        range_bps=10.0,
     )
     assert dear.min_spread_bps == pytest.approx(7.5)  # binance spot
     # a lean that would quote inside the fee is pushed back out to it
@@ -193,19 +193,24 @@ def test_an_order_sized_to_the_bare_minimum_is_refused():
     assert roomy.order_notional == pytest.approx(15.0)
 
 
-def test_the_outer_level_never_lands_inside_the_inner_one():
-    """XYZ:DRAM-USD quotes 0.35 bp, where the playbook's S+1 (1.35) falls
-    inside max(2, S/2) (2.0) and the ladder inverts."""
-    from flybrain.posture import base_levels_from_spread
+def test_quotes_are_placed_against_how_far_the_market_travels():
+    """Level 1 sat at half the *touch* — 2 bp on a market whose typical bar
+    ranges 9.9 — so every multiplier the fly could express stayed inside what a
+    normal bar covers, and five replay variants returned the same 23 fills.
+    Half the range puts it where a typical bar just reaches."""
+    from flybrain.posture import base_levels_from_range
 
-    for spread in (0.1, 0.35, 1.75, 2.0, 8.0, 20.0):
-        first, second = base_levels_from_spread(spread)
-        assert second > first, f"levels inverted at S={spread}"
-    assert base_levels_from_spread(0.35) == (2.0, 3.0)
-    assert base_levels_from_spread(8.0) == (4.0, 9.0)  # wide markets unchanged
-    tight = build_config(
-        MarketSpec(**{**SPEC.__dict__, "picked_spread_bps": 0.35}), NEUTRAL
-    )
+    assert base_levels_from_range(9.9) == (pytest.approx(4.95), pytest.approx(7.425))
+    # the multiplier now straddles a typical bar's reach instead of living
+    # inside it: tight fills most bars, wide fills few
+    first, _ = base_levels_from_range(9.9)
+    assert first * 0.6 < 9.9 / 2 < first * 2.5
+    # a dead market still gets a floor rather than a quote on top of mid
+    assert base_levels_from_range(0.4)[0] == 2.0
+    for market_range in (0.1, 0.4, 4.0, 9.9, 40.0):
+        first, second = base_levels_from_range(market_range)
+        assert second > first, f"levels inverted at range={market_range}"
+    tight = build_config(MarketSpec(**{**SPEC.__dict__, "range_bps": 0.4}), NEUTRAL)
     buys = _spreads(tight["buy_spreads"])
     assert buys == sorted(buys) and len(set(buys)) == 2
 
