@@ -246,15 +246,14 @@ def build_config(spec: MarketSpec, posture: Posture) -> dict:
     shift = max(-levels[0] / 2, min(levels[0] / 2, posture.shift_bps))
     buy = [max(spec.min_spread_bps, lvl - shift) for lvl in levels]
     sell = [max(spec.min_spread_bps, lvl + shift) for lvl in levels]
-    # The fly asks for more of the range when it is aroused, but never less
-    # than a round trip costs, and never less than its own first level — a
-    # take-profit inside the spread it quotes would close for nothing.
+    # The exit scales with the market, never below what a round trip costs and
+    # never below the fly's own first level — a take-profit inside the spread
+    # it quotes would close for nothing. The fly does not move it: letting
+    # arousal widen it halved the round trips and earned nothing for them.
     take_profit = max(
         take_profit_floor(spec),
         min(buy[0], sell[0]) * BPS,
-        take_profit_base_bps(spec.maker_fee_bps, spec.range_bps)
-        * posture.tp_mult
-        * BPS,
+        take_profit_base_bps(spec.maker_fee_bps, spec.range_bps) * BPS,
     )
     refresh, cooldown = TIMING[posture.regime]
     config = {

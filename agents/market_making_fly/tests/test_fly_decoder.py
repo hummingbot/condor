@@ -112,7 +112,7 @@ def test_baseline_window_and_roundtrip():
 
 
 def test_posture_roundtrip():
-    p = Posture("quiet", 0.8, 1.0, 1.0, -1.0, -0.2, -1.3, 0.0, True, True)
+    p = Posture("quiet", 0.8, 1.0, -1.0, -0.2, -1.3, 0.0, True, True)
     assert Posture.from_dict(p.to_dict()) == p
 
 
@@ -132,16 +132,16 @@ def test_settings_validation():
 
 def test_hysteresis():
     h = Hysteresis(min_apply_interval_sec=300)
-    base = Posture("ranging", 1.0, 1.0, 1.0, 0.0, 0, 0, 0.0, False, True)
+    base = Posture("ranging", 1.0, 1.0, 0.0, 0, 0, 0.0, False, True)
     assert should_apply(None, base, None, 1000, h)[0]
-    same = Posture("ranging", 1.05, 1.0, 1.0, 0.2, 0, 0, 0.0, False, True)
+    same = Posture("ranging", 1.05, 1.0, 0.2, 0, 0, 0.0, False, True)
     assert not should_apply(base, same, 0, 1000, h)[0]
-    regime = Posture("volatile", 1.0, 1.0, 1.0, 0.0, 0, 1.2, 0.0, False, True)
+    regime = Posture("volatile", 1.0, 1.0, 0.0, 0, 1.2, 0.0, False, True)
     assert should_apply(base, regime, 0, 1000, h)[0]
     assert not should_apply(base, regime, 900, 1000, h)[0]  # cooldown
-    wider = Posture("ranging", 1.2, 1.0, 1.0, 0.0, 0, 0, 0.0, False, True)
+    wider = Posture("ranging", 1.2, 1.0, 0.0, 0, 0, 0.0, False, True)
     assert should_apply(base, wider, 0, 1000, h)[0]
-    lean = Posture("ranging", 1.0, 1.0, 1.0, 0.6, 0, 0, 0.0, True, True)
+    lean = Posture("ranging", 1.0, 1.0, 0.6, 0, 0, 0.0, True, True)
     assert should_apply(base, lean, 0, 1000, h)[0]
 
 

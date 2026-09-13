@@ -7,8 +7,9 @@ neurons":
 * ``trend_hz``   — mean DNp20 right rate minus mean left rate (stonkfly's
                    BUY/SELL cells). Sign → which way the reference price leans.
 * ``arousal_hz`` — mean rate of the descending-neuron population. Higher →
-                   tighter spreads, a larger share of the book quoted, and a
-                   wider take-profit to hold for.
+                   tighter spreads and a larger share of the book quoted. It
+                   moved the take-profit too until a replay showed that cost
+                   half the round trips and earned nothing for them.
 * ``gate``       — DNpe017 spikes ≥ 1, required for a trending call, and for
                    taking a side off the book.
 * ``valence_hz`` — mean MBON07 rate minus mean MBON11 rate: approach minus
@@ -77,12 +78,6 @@ class DecoderSettings:
     # arousal and added to it, so the size the fly commits carries both "the
     # market is active" and "this looked good last time".
     valence_gain: float = 0.5
-    # How long to hold for. An active market both fills a quote sooner and
-    # travels further afterwards, so the same arousal that tightens the entry
-    # widens the exit: the fly asks for more of a range it can see moving.
-    tp_gain: float = 0.5
-    tp_min: float = 0.6
-    tp_max: float = 2.5
     # A scene this far below the mushroom body's own recent drive is one the
     # fly effectively did not see; its z-scores are noise.
     z_kc_quiet: float = -1.5
@@ -103,7 +98,6 @@ class DecoderSettings:
         for lo, hi, what in (
             (self.spread_min, self.spread_max, "spread"),
             (self.size_min, self.size_max, "size"),
-            (self.tp_min, self.tp_max, "tp"),
         ):
             if not 0 < lo <= 1 <= hi:
                 raise ValueError(f"{what}_min <= 1 <= {what}_max required")
@@ -117,7 +111,7 @@ class DecoderSettings:
             raise ValueError("z_kc_quiet must be negative")
         if self.z_side < self.z_regime:
             raise ValueError("z_side must be at least z_regime")
-        for name in ("spread_gain", "size_gain", "valence_gain", "tp_gain"):
+        for name in ("spread_gain", "size_gain", "valence_gain"):
             value = getattr(self, name)
             if not math.isfinite(value) or value == 0:
                 raise ValueError(f"{name} must be finite and non-zero")
@@ -195,7 +189,6 @@ class Posture:
     regime: str
     spread_mult: float
     size_mult: float
-    tp_mult: float
     shift_bps: float
     trend_z: float
     arousal_z: float
@@ -217,7 +210,6 @@ NEUTRAL = Posture(
     regime="ranging",
     spread_mult=1.0,
     size_mult=1.0,
-    tp_mult=1.0,
     shift_bps=0.0,
     trend_z=0.0,
     arousal_z=0.0,
@@ -267,7 +259,6 @@ def decode(channels: Channels, baseline: Baseline, s: DecoderSettings) -> Postur
         s.size_max,
         max(s.size_min, 1 + s.size_gain * arousal_z + s.valence_gain * valence_z),
     )
-    tp_mult = min(s.tp_max, max(s.tp_min, 1 + s.tp_gain * arousal_z))
     shift = max(-s.max_shift_bps, min(s.max_shift_bps, s.shift_gain_bps * trend_z))
     if not gate:
         shift = 0.0  # no descending gate spike, no directional lean
@@ -281,7 +272,6 @@ def decode(channels: Channels, baseline: Baseline, s: DecoderSettings) -> Postur
         regime=regime,
         spread_mult=round(spread_mult, 4),
         size_mult=round(size_mult, 4),
-        tp_mult=round(tp_mult, 4),
         shift_bps=round(shift, 3),
         trend_z=round(trend_z, 4),
         arousal_z=round(arousal_z, 4),
