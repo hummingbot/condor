@@ -82,13 +82,17 @@ def _clock(wall_time) -> str:
     return time.strftime("%H:%M:%S", time.localtime(float(wall_time)))
 
 
-def _frame_figure(path: Path) -> go.Figure | None:
-    """The last chart the fly was shown, as the report's sensory panel."""
+def _read_frame(path: Path) -> np.ndarray | None:
+    """The exact pixels the retina last received, as saved by the loop."""
     if not path.exists():
         return None
     from PIL import Image
 
-    frame = np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8)
+    return np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8)
+
+
+def _frame_figure(frame: np.ndarray) -> go.Figure:
+    """That frame, full size, as the report's sensory panel."""
     fig = go.Figure(go.Image(z=frame))
     fig.update_layout(
         height=340,
@@ -193,6 +197,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         else {}
     )
 
+    settings = provenance.get("settings") or {}
     guard = state.get("guard", {})
     postures = state.get("postures", {})
     pairs = list(postures)
@@ -233,12 +238,25 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         f"{alive} · run {config.run_name} · tick {state.get('tick', 0)} · "
         f"{len(pairs)} market{'s' if len(pairs) != 1 else ''} · drag to orbit",
     )
+    sensory = _read_frame(run_dir.frame_path)
     builder.plotly(
         fly_figure(
             title=f"FLY.EXE — {alive}",
             subtitle=f"{', '.join(pairs) or 'no market'}",
+            chart=sensory,
         )
     )
+    # The same frame, full size, beside the fly that was looking at it.
+    if sensory is not None:
+        builder.section(
+            "WHAT THE FLY SEES",
+            f"The 320×180 frame fed to the retina on tick {observed.get('tick')} — "
+            f"{settings.get('n_candles', '?')} × {settings.get('candle_interval', '?')} "
+            "candles, volume and the live bid/ask. This is the picture the posture "
+            "above was decoded from; no quotes, inventory or P&L are drawn, because "
+            "those reach the fly only as dopamine.",
+        )
+        builder.plotly(_frame_figure(sensory))
 
     # ── THE BAG ──────────────────────────────────────────────────────────────
     builder.section("THE BAG", "What the fly's own bots are holding right now")
@@ -353,16 +371,6 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     pnl = _pnl_figure(events)
     if pnl is not None:
         builder.plotly(pnl)
-
-    # ── WHAT THE FLY SEES ────────────────────────────────────────────────────
-    frame = _frame_figure(run_dir.frame_path)
-    if frame is not None:
-        builder.section(
-            "WHAT THE FLY SEES",
-            "The last 320×180 frame fed to the retina — candles, volume, bid/ask. "
-            "No quotes, inventory or P&L are drawn; those reach the fly only as dopamine.",
-        )
-        builder.plotly(frame)
 
     # ── PERFORMANCE & LIMITS ─────────────────────────────────────────────────
     builder.section("PERFORMANCE & LIMITS", "What the guard is watching")

@@ -19,11 +19,23 @@ def _module(name):
 def test_every_mesh_face_indexes_a_real_vertex():
     """A Mesh3d with an out-of-range face renders nothing and says nothing."""
     x, y, z, i, j, k = fly3d._ellipsoid((0, 0, 0), (1, 0.5, 0.5), n_u=12, n_v=7)
-    assert len(x) == len(y) == len(z) == 12 * 7
-    assert len(i) == len(j) == len(k) == 12 * (7 - 1) * 2
+    assert len(x) == len(y) == len(z) == 12 * 5 + 2  # 5 rings plus two poles
+    assert len(i) == len(j) == len(k)
     for faces in (i, j, k):
         assert faces.min() >= 0 and faces.max() < len(x)
     assert np.isfinite(np.concatenate([x, y, z])).all()
+
+
+def test_no_face_collapses_to_a_sliver():
+    """Coincident pole vertices make zero-area triangles, which WebGL draws as
+    a white sawtooth across the body even though a static export hides them."""
+    x, y, z, i, j, k = fly3d._ellipsoid((0, 0, 0), (1, 0.5, 0.5), n_u=12, n_v=7)
+    p = np.stack([x, y, z], axis=1)
+    a, b, c = p[i], p[j], p[k]
+    area = 0.5 * np.linalg.norm(np.cross(b - a, c - a), axis=1)
+    assert area.min() > 1e-9, "degenerate face in the mesh"
+    # and each vertex is actually used, so nothing is left stranded
+    assert set(np.concatenate([i, j, k]).tolist()) == set(range(len(x)))
 
 
 def test_the_wings_actually_move():
