@@ -19,6 +19,8 @@ dependencies = [
     # It pins numba==0.61.2, which caps numpy at <2.3 — that is also the numpy
     # the API container runs (2.2.6), so the two environments stay aligned.
     "pandas-ta>=0.4.71b",
+    # Fly connectome (condor/fly): MaleCNS feather files
+    "pyarrow",
     "geckoterminal-py",
     "mcp",
     "fastapi",
