@@ -21,7 +21,7 @@ user wants to *look* at the run, `fly_status` when you need to quote figures.
 | Field | Cells | Meaning |
 |---|---|---|
 | `trend_hz` | DNp20 right mean rate − left mean rate | lean direction; stonkfly's BUY/SELL cells |
-| `arousal_hz` | mean rate of the 1,314 descending neurons (minus the readouts) | spread width |
+| `arousal_hz` | mean rate of the 1,314 descending neurons (minus the readouts) | spread width **and** how much of the book is quoted |
 | `gate_spikes` | DNpe017 | ≥ 1 required for a trending call and for any lean |
 | `kc_spikes` | Kenyon cells | did the chart reach the mushroom body at all (0 = the fly saw nothing useful) |
 | `reward_spikes` / `aversive_spikes` | PAM11 / PPL101 | did the pulse arrive |
@@ -32,8 +32,12 @@ user wants to *look* at the run, `fly_status` when you need to quote figures.
   window 60 observations. `warm=False` for the first 10 — neutral posture.
 * Regime precedence: `pause` (arousal_z ≥ 2.5) > `volatile` (≥ 1) > `trending_up/down`
   (gate and |trend_z| ≥ 1) > `quiet` (arousal_z ≤ −1) > `ranging`.
-* `spread ×` = clip(1 + 0.5·arousal_z, 0.6, 2.5). `lean` = clip(trend_z, ±3 bp), 0 without
-  a gate spike, and capped at half the first spread level when mapped.
+* `spread ×` = clip(1 − 0.5·arousal_z, 0.6, 2.5) — an aroused fly quotes **tighter**.
+  `size ×` = clip(1 + 0.5·arousal_z, 0.6, 2.5) — and quotes **more** of the book,
+  clamped so an order never falls under the venue minimum nor the allocation over 1.
+  The sign on each is a choice, not a finding: arousal is a population rate against
+  its own average and nothing ties it to volatility. `lean` = clip(trend_z, ±3 bp), 0
+  without a gate spike, and capped at half the first spread level when mapped.
 * Mapping: level 1 = max(2, S/2) bp, level 2 = S+1 bp (S = scanner spread), times
   `spread ×`, buy −lean / sell +lean, floor 3 bp; TP = max(4 bp, 2.2 × round-trip fee,
   first level); timing per regime; `pause` sets `manual_kill_switch`.
@@ -47,7 +51,8 @@ update failed · `HALT` loop stopped · `TICK_ERROR` data fetch failed, loop con
 
 ## What you may say
 
-* "The fly's arousal channel is 1.8 σ above its baseline on DRAM, so it widened to 1.9×."
+* "The fly's arousal channel is 1.8 σ above its baseline on DRAM, so it tightened to
+  0.6× and quoted 1.9× the usual share of the book."
 * "No gate spike this observation, so no lean regardless of trend."
 * "Changed edges rose from 0 to 312 after the first aversive pulse."
 

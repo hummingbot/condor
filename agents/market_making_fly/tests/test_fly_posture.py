@@ -38,7 +38,7 @@ def test_neutral_config_matches_hip3_base():
         cfg["controller_name"] == "pmm_mister" and cfg["controller_type"] == "generic"
     )
     assert cfg["trading_pair"] == "XYZ:DRAM-USD"
-    assert cfg["global_sl_enabled"] is True and cfg["global_stop_loss"] == 0.02
+    assert cfg["global_sl_enabled"] is True and cfg["global_stop_loss"] == 0.05
     assert cfg["manual_kill_switch"] is False
     assert (cfg["executor_refresh_time"], cfg["buy_cooldown_time"]) == TIMING["ranging"]
     assert cfg["open_order_type"] == 3 and cfg["take_profit_order_type"] == 3
@@ -53,12 +53,12 @@ def test_take_profit_floor_beats_fees_and_spread():
 
 
 def test_volatile_widens_quiet_tightens_with_floor():
-    wide = build_config(SPEC, Posture("volatile", 2.0, 0.0, 0, 1.5, False, True))
+    wide = build_config(SPEC, Posture("volatile", 2.0, 1.0, 0.0, 0, 1.5, False, True))
     assert _spreads(wide["buy_spreads"])[0] == pytest.approx(8 * BPS)
     assert (wide["executor_refresh_time"], wide["buy_cooldown_time"]) == TIMING[
         "volatile"
     ]
-    tight = build_config(SPEC, Posture("quiet", 0.6, 0.0, 0, -1.5, False, True))
+    tight = build_config(SPEC, Posture("quiet", 0.6, 1.0, 0.0, 0, -1.5, False, True))
     # 4 bp × 0.6 = 2.4 bp, which clears this market's 1.3 bp fee floor
     assert _spreads(tight["buy_spreads"])[0] == pytest.approx(2.4 * BPS)
     assert (tight["executor_refresh_time"], tight["buy_cooldown_time"]) == TIMING[
@@ -67,12 +67,14 @@ def test_volatile_widens_quiet_tightens_with_floor():
 
 
 def test_lean_is_asymmetric_and_capped():
-    up = build_config(SPEC, Posture("trending_up", 1.0, 3.0, 2.0, 0, True, True))
+    up = build_config(SPEC, Posture("trending_up", 1.0, 1.0, 3.0, 2.0, 0, True, True))
     buy, sell = _spreads(up["buy_spreads"]), _spreads(up["sell_spreads"])
     # lean capped at half of level 1 (4 bp → 2 bp), and 2 bp still clears the fee
     assert buy[0] == pytest.approx(2 * BPS) and sell[0] == pytest.approx(6 * BPS)
     assert buy[1] == pytest.approx(7 * BPS) and sell[1] == pytest.approx(11 * BPS)
-    down = build_config(SPEC, Posture("trending_down", 1.0, -3.0, -2.0, 0, True, True))
+    down = build_config(
+        SPEC, Posture("trending_down", 1.0, 1.0, -3.0, -2.0, 0, True, True)
+    )
     assert _spreads(down["sell_spreads"])[0] == pytest.approx(2 * BPS)
     assert _spreads(down["buy_spreads"])[0] == pytest.approx(6 * BPS)
 
@@ -90,12 +92,14 @@ def test_the_spread_floor_is_the_market_own_fee():
     )
     assert dear.min_spread_bps == pytest.approx(7.5)  # binance spot
     # a lean that would quote inside the fee is pushed back out to it
-    leaned = build_config(dear, Posture("trending_up", 1.0, 3.0, 2.0, 0, True, True))
+    leaned = build_config(
+        dear, Posture("trending_up", 1.0, 1.0, 3.0, 2.0, 0, True, True)
+    )
     assert min(_spreads(leaned["buy_spreads"])) == pytest.approx(7.5 * BPS)
 
 
 def test_pause_sets_kill_switch():
-    cfg = build_config(SPEC, Posture("pause", 2.5, 0.0, 0, 3.0, False, True))
+    cfg = build_config(SPEC, Posture("pause", 2.5, 1.0, 0.0, 0, 3.0, False, True))
     assert cfg["manual_kill_switch"] is True
 
 
@@ -103,7 +107,9 @@ def test_every_spread_respects_min():
     for regime in TIMING:
         for mult in (0.6, 1.0, 2.5):
             for shift in (-3.0, 0.0, 3.0):
-                cfg = build_config(SPEC, Posture(regime, mult, shift, 0, 0, True, True))
+                cfg = build_config(
+                    SPEC, Posture(regime, mult, 1.0, shift, 0, 0, True, True)
+                )
                 for key in ("buy_spreads", "sell_spreads"):
                     assert min(_spreads(cfg[key])) >= SPEC.min_spread_bps * BPS - 1e-12
 
@@ -159,7 +165,7 @@ def test_the_fee_floor_follows_the_venue():
 
 def test_config_diff():
     a = build_config(SPEC, NEUTRAL)
-    b = build_config(SPEC, Posture("volatile", 2.0, 0.0, 0, 1.5, False, True))
+    b = build_config(SPEC, Posture("volatile", 2.0, 1.0, 0.0, 0, 1.5, False, True))
     diff = config_diff(a, b)
     assert "buy_spreads" in diff and "trading_pair" not in diff
     assert config_diff(None, a) == a
@@ -196,3 +202,44 @@ def test_the_outer_level_never_lands_inside_the_inner_one():
     )
     buys = _spreads(tight["buy_spreads"])
     assert buys == sorted(buys) and len(set(buys)) == 2
+
+
+def test_size_follows_arousal_and_stays_inside_both_limits():
+    """The fly quotes more of the book when aroused, but never so little that
+    an order falls under the venue minimum, nor more than the whole book."""
+    # 200 quote at 0.3 is a 15 order; scaled down by 0.6 it would be 9, under
+    # the 12 the venue needs once the base amount is rounded, so the floor
+    # binds before the multiplier does.
+    spec = MarketSpec(
+        **{**SPEC.__dict__, "total_amount_quote": 200, "portfolio_allocation": 0.3}
+    )
+    hot = build_config(spec, Posture("ranging", 1.0, 2.5, 0.0, 0, 0, False, True))
+    calm = build_config(spec, Posture("ranging", 1.0, 0.6, 0.0, 0, 0, False, True))
+    assert hot["portfolio_allocation"] > spec.portfolio_allocation
+    assert calm["portfolio_allocation"] < spec.portfolio_allocation
+    assert calm["portfolio_allocation"] == pytest.approx(0.24)
+    assert calm["portfolio_allocation"] == pytest.approx(spec.min_portfolio_allocation)
+    # and a big book scaled up still cannot quote more than all of itself
+    big = MarketSpec(**{**SPEC.__dict__, "portfolio_allocation": 0.5})
+    assert build_config(big, Posture("ranging", 1.0, 2.5, 0.0, 0, 0, False, True))[
+        "portfolio_allocation"
+    ] == pytest.approx(1.0)
+
+
+def test_the_config_matches_the_experts_balanced_profile():
+    """Everything that is not spread, floor or feedback is the expert's vetted
+    profile, and is stated rather than left to the controller's defaults."""
+    cfg = build_config(SPEC, NEUTRAL)
+    assert cfg["target_base_pct"] == 0.5
+    assert cfg["min_base_pct"] == 0.35 and cfg["max_base_pct"] == 0.65
+    assert cfg["max_active_executors_by_level"] == 3
+    assert cfg["min_skew"] == 1.5
+    assert cfg["buy_position_effectivization_time"] == 120
+    assert cfg["sell_position_effectivization_time"] == 120
+    assert cfg["price_distance_tolerance"] == 0.0005
+    assert cfg["refresh_tolerance"] == 0.0005
+    assert cfg["tolerance_scaling"] == 1.2
+    assert cfg["global_tp_enabled"] is False and cfg["global_sl_enabled"] is True
+    assert cfg["global_sl_activation_from"] == "target_base"
+    assert cfg["global_pnl_reference"] == "position"
+    assert cfg["tick_mode"] is False

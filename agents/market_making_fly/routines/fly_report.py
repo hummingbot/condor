@@ -346,7 +346,14 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         width=CARDS,
     )
     builder.kpi("Regime", str(last_posture.get("regime", "—")).upper(), width=CARDS)
-    builder.kpi("Spread ×", _fmt(last_posture.get("spread_mult")), width=CARDS)
+    # One card, not two: both multipliers are read off the same channel, and
+    # the stack's height is matched to the brain beside it at six cards.
+    builder.kpi(
+        "Spread / size ×",
+        f"{_fmt(last_posture.get('spread_mult'))} / "
+        f"{_fmt(last_posture.get('size_mult'))}",
+        width=CARDS,
+    )
     builder.kpi(
         "Lean",
         f"{_fmt(last_posture.get('shift_bps'), 2, plus=True)} bp",

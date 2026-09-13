@@ -81,15 +81,26 @@ def test_no_gate_no_lean():
     assert p.shift_bps == 0 and p.regime == "ranging"
 
 
-def test_arousal_widens_and_pauses():
+def test_arousal_tightens_sizes_up_and_pauses():
+    """An aroused fly leans in: tighter quotes and more of the book. The sign
+    is a choice, not a finding — arousal is a population rate against its own
+    average and nothing ties it to volatility."""
     b = Baseline()
     _warm(b)
-    wide = decode(Channels(0.0, 11.5, 0), b, S)
-    assert wide.spread_mult > 1
+    hot = decode(Channels(0.0, 11.5, 0), b, S)
+    assert hot.arousal_z > 1
+    assert hot.spread_mult < 1 and hot.size_mult > 1
     b2 = Baseline()
     _warm(b2)
-    pause = decode(Channels(0.0, 100.0, 0), b2, S)
-    assert pause.regime == "pause" and pause.spread_mult == S.spread_max
+    calm = decode(Channels(0.0, 8.0, 0), b2, S)
+    assert calm.arousal_z < 0
+    assert calm.spread_mult > 1 and calm.size_mult < 1
+    # the breaker still fires on the same channel, and both knobs stay clipped
+    b3 = Baseline()
+    _warm(b3)
+    pause = decode(Channels(0.0, 100.0, 0), b3, S)
+    assert pause.regime == "pause"
+    assert pause.spread_mult == S.spread_min and pause.size_mult == S.size_max
 
 
 def test_baseline_window_and_roundtrip():
@@ -101,7 +112,7 @@ def test_baseline_window_and_roundtrip():
 
 
 def test_posture_roundtrip():
-    p = Posture("quiet", 0.8, -1.0, -0.2, -1.3, True, True)
+    p = Posture("quiet", 0.8, 1.0, -1.0, -0.2, -1.3, True, True)
     assert Posture.from_dict(p.to_dict()) == p
 
 
@@ -121,14 +132,14 @@ def test_settings_validation():
 
 def test_hysteresis():
     h = Hysteresis(min_apply_interval_sec=300)
-    base = Posture("ranging", 1.0, 0.0, 0, 0, False, True)
+    base = Posture("ranging", 1.0, 1.0, 0.0, 0, 0, False, True)
     assert should_apply(None, base, None, 1000, h)[0]
-    same = Posture("ranging", 1.05, 0.2, 0, 0, False, True)
+    same = Posture("ranging", 1.05, 1.0, 0.2, 0, 0, False, True)
     assert not should_apply(base, same, 0, 1000, h)[0]
-    regime = Posture("volatile", 1.0, 0.0, 0, 1.2, False, True)
+    regime = Posture("volatile", 1.0, 1.0, 0.0, 0, 1.2, False, True)
     assert should_apply(base, regime, 0, 1000, h)[0]
     assert not should_apply(base, regime, 900, 1000, h)[0]  # cooldown
-    wider = Posture("ranging", 1.2, 0.0, 0, 0, False, True)
+    wider = Posture("ranging", 1.2, 1.0, 0.0, 0, 0, False, True)
     assert should_apply(base, wider, 0, 1000, h)[0]
-    lean = Posture("ranging", 1.0, 0.6, 0, 0, True, True)
+    lean = Posture("ranging", 1.0, 1.0, 0.6, 0, 0, True, True)
     assert should_apply(base, lean, 0, 1000, h)[0]

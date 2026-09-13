@@ -7,7 +7,7 @@ neurons":
 * ``trend_hz``   — mean DNp20 right rate minus mean left rate (stonkfly's
                    BUY/SELL cells). Sign → which way the reference price leans.
 * ``arousal_hz`` — mean rate of the descending-neuron population. Higher →
-                   wider spreads.
+                   tighter spreads and a larger share of the book quoted.
 * ``gate``       — DNpe017 spikes ≥ 1, required for a trending call.
 
 Channels are z-scored against a rolling per-pair baseline. Stonkfly's own run
@@ -47,9 +47,21 @@ class DecoderSettings:
     warmup: int = 10
     z_regime: float = 1.0
     z_pause: float = 2.5
-    spread_gain: float = 0.5
+    # Negative: an aroused fly quotes *tighter*, not wider. Arousal is the
+    # descending population's rate against its own recent average — nothing
+    # ties it to volatility, so neither sign is derived from anything. This one
+    # says an active market is one to lean into; +0.5 says it is one to back
+    # away from, which is the textbook answer. Both are testable against each
+    # other on the same market and neither has been.
+    spread_gain: float = -0.5
     spread_min: float = 0.6
     spread_max: float = 2.5
+    # And it quotes more of the book while it is active. Bounded the same way,
+    # then clamped in build_config so an order never falls under the venue
+    # minimum or the allocation over 1.
+    size_gain: float = 0.5
+    size_min: float = 0.6
+    size_max: float = 2.5
     shift_gain_bps: float = 1.0
     max_shift_bps: float = 3.0
     center_bias: bool = True
@@ -59,12 +71,22 @@ class DecoderSettings:
             raise ValueError("window >= 2 and 1 <= warmup <= window required")
         if not 0 < self.z_regime < self.z_pause:
             raise ValueError("0 < z_regime < z_pause required")
-        if not 0 < self.spread_min <= 1 <= self.spread_max:
-            raise ValueError("spread_min <= 1 <= spread_max required")
-        for name in ("spread_gain", "shift_gain_bps", "max_shift_bps"):
+        for lo, hi, what in (
+            (self.spread_min, self.spread_max, "spread"),
+            (self.size_min, self.size_max, "size"),
+        ):
+            if not 0 < lo <= 1 <= hi:
+                raise ValueError(f"{what}_min <= 1 <= {what}_max required")
+        for name in ("shift_gain_bps", "max_shift_bps"):
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be finite and positive")
+        # The two arousal gains carry a direction, so they may be negative —
+        # but not zero, which would mean the channel is read and discarded.
+        for name in ("spread_gain", "size_gain"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value == 0:
+                raise ValueError(f"{name} must be finite and non-zero")
 
 
 @dataclass(frozen=True)
@@ -121,6 +143,7 @@ def _z(value: float, history: list[float], center: bool) -> float:
 class Posture:
     regime: str
     spread_mult: float
+    size_mult: float
     shift_bps: float
     trend_z: float
     arousal_z: float
@@ -138,6 +161,7 @@ class Posture:
 NEUTRAL = Posture(
     regime="ranging",
     spread_mult=1.0,
+    size_mult=1.0,
     shift_bps=0.0,
     trend_z=0.0,
     arousal_z=0.0,
@@ -176,12 +200,14 @@ def decode(channels: Channels, baseline: Baseline, s: DecoderSettings) -> Postur
     gate = channels.gate_spikes >= 1
     regime = classify(trend_z, arousal_z, gate, s)
     spread_mult = min(s.spread_max, max(s.spread_min, 1 + s.spread_gain * arousal_z))
+    size_mult = min(s.size_max, max(s.size_min, 1 + s.size_gain * arousal_z))
     shift = max(-s.max_shift_bps, min(s.max_shift_bps, s.shift_gain_bps * trend_z))
     if not gate:
         shift = 0.0  # no descending gate spike, no directional lean
     return Posture(
         regime=regime,
         spread_mult=round(spread_mult, 4),
+        size_mult=round(size_mult, 4),
         shift_bps=round(shift, 3),
         trend_z=round(trend_z, 4),
         arousal_z=round(arousal_z, 4),

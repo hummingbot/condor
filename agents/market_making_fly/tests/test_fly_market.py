@@ -97,7 +97,7 @@ def test_candle_payload_shapes():
 
 def test_required_collateral():
     spec = MarketSpec("hyperliquid_perpetual", "XYZ:A-USD", 500, 8.0, leverage=2)
-    assert required_collateral([spec, spec]) == pytest.approx(2 * 500 * 0.5 / 2)
+    assert required_collateral([spec, spec]) == pytest.approx(2 * 500 * 0.65 / 2)
 
 
 class _MarketData:

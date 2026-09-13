@@ -60,12 +60,23 @@ class MarketSpec:
     # 0 means "use the venue default"; pass the exchange's real figure when
     # known, since the take-profit floor is derived from it.
     maker_fee_bps: float = 0.0
-    portfolio_allocation: float = 0.2
-    target_base_pct: float = 0.4
-    min_base_pct: float = 0.3
-    max_base_pct: float = 0.5
-    max_active_executors_by_level: int = 2
-    global_stop_loss: float = 0.02
+    # Everything below is Market Making Expert's balanced profile, which is the
+    # vetted steady state for this controller. The fly's own contribution is
+    # the spread geometry, the fee-derived floor and the dopamine loop; there
+    # was no reason for the rest of the config to differ from what the expert
+    # deploys, and several of these were quietly the controller's defaults
+    # rather than a choice.
+    portfolio_allocation: float = 0.15
+    target_base_pct: float = 0.5
+    min_base_pct: float = 0.35
+    max_base_pct: float = 0.65
+    max_active_executors_by_level: int = 3
+    min_skew: float = 1.5
+    effectivization_time: int = 120
+    price_distance_tolerance: float = 0.0005
+    refresh_tolerance: float = 0.0005
+    tolerance_scaling: float = 1.2
+    global_stop_loss: float = 0.05
     leverage_cap: int = 5
     # Exchange minimum per order. pmm_mister sizes one cycle as
     # total_amount_quote × portfolio_allocation, split across both sides and
@@ -104,6 +115,11 @@ class MarketSpec:
     @property
     def is_spot(self) -> bool:
         return self.market_type == venue.SPOT
+
+    @property
+    def min_portfolio_allocation(self) -> float:
+        """The smallest allocation whose orders still clear the venue minimum."""
+        return self.min_order_notional * ORDER_SIZE_MARGIN * 4 / self.total_amount_quote
 
     @property
     def min_spread_bps(self) -> float:
@@ -187,6 +203,17 @@ def build_config(spec: MarketSpec, posture: Posture) -> dict:
     if posture.regime not in TIMING:
         raise ValueError(f"Unknown regime {posture.regime!r}")
     spec.check_order_size()
+    # Arousal moves how much of the book is quoted as well as how tight: an
+    # active market gets leaned into on both. Clamped so a scaled-down cycle
+    # never sizes an order under the venue minimum, nor a scaled-up one over
+    # the whole book.
+    allocation = min(
+        1.0,
+        max(
+            spec.min_portfolio_allocation,
+            spec.portfolio_allocation * posture.size_mult,
+        ),
+    )
     l1, l2 = base_levels_bps(spec)
     levels = [l1 * posture.spread_mult, l2 * posture.spread_mult]
     shift = max(-levels[0] / 2, min(levels[0] / 2, posture.shift_bps))
@@ -200,7 +227,7 @@ def build_config(spec: MarketSpec, posture: Posture) -> dict:
         "connector_name": spec.connector_name,
         "trading_pair": spec.trading_pair,
         "total_amount_quote": spec.total_amount_quote,
-        "portfolio_allocation": spec.portfolio_allocation,
+        "portfolio_allocation": round(allocation, 6),
         "leverage": spec.leverage,
         "target_base_pct": spec.target_base_pct,
         "min_base_pct": spec.min_base_pct,
@@ -216,8 +243,22 @@ def build_config(spec: MarketSpec, posture: Posture) -> dict:
         "take_profit_order_type": 3,
         "open_order_type": 3,
         "max_active_executors_by_level": spec.max_active_executors_by_level,
+        # Stated rather than left to the controller's defaults, so a change in
+        # hummingbot cannot move the fly's risk without anyone deciding to.
+        "buy_position_effectivization_time": spec.effectivization_time,
+        "sell_position_effectivization_time": spec.effectivization_time,
+        "price_distance_tolerance": spec.price_distance_tolerance,
+        "refresh_tolerance": spec.refresh_tolerance,
+        "tolerance_scaling": spec.tolerance_scaling,
+        # The expert's third domain, which the fly had no answer to at all:
+        # quote the accumulating side wider until the inventory comes back.
+        "min_skew": spec.min_skew,
+        "tick_mode": False,
+        "global_tp_enabled": False,
         "global_sl_enabled": True,
         "global_stop_loss": spec.global_stop_loss,
+        "global_sl_activation_from": "target_base",
+        "global_pnl_reference": "position",
         "manual_kill_switch": posture.regime == "pause",
     }
     if not spec.is_spot:
