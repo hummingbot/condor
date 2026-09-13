@@ -72,7 +72,7 @@ Run `fly_status` (and `fly_chart` for the picture), answer in key: value lines, 
 the numbers (trend_z, arousal_z, gate, regime, spread ×, lean, changed edges), and
 repeat the caveats. Do not deploy.
 
-**Delegated:** read `fly_mm_deploy` and follow it end-to-end — scanner → three picks →
+**Delegated:** read `fly_mm_deploy` and follow it end-to-end — scanner → `n_markets` picks →
 neutral configs → deploy with a loss cap → start `fly_brain` in shadow — then verify
 with `mm_bot_report`. Switch to live only when the task says so.
 
