@@ -38,6 +38,10 @@ TIMING: dict[str, tuple[int, int]] = {
 assert set(TIMING) == set(REGIMES)
 
 BPS = 1e-4
+# How far above an exchange minimum an order must be sized to survive the
+# venue's own rounding. 20 % covers a step rounded down on a three-decimal
+# market near $150 and leaves room for the lean.
+ORDER_SIZE_MARGIN = 1.2
 
 
 @dataclass(frozen=True)
@@ -113,12 +117,25 @@ class MarketSpec:
         return self.total_amount_quote * self.portfolio_allocation / 4
 
     def check_order_size(self) -> None:
-        if self.order_notional < self.min_order_notional:
-            needed = self.min_order_notional * 4 / self.total_amount_quote
+        """Refuse a size the exchange will reject once it has been rounded.
+
+        An order sized to exactly the minimum does not survive the round trip
+        through the exchange's own precision: the controller converts the quote
+        size to a base amount, rounds it down to the market's step, and the
+        resulting notional lands *under* the minimum. XYZ:ORCL-USD quotes to
+        three decimals near 148, so $10.00 became $9.94 and Hyperliquid
+        rejected every order with "lower than minimum notional size". The
+        margin is what a rounded-down step can cost plus the widest lean.
+        """
+        floor = self.min_order_notional * ORDER_SIZE_MARGIN
+        if self.order_notional < floor:
+            needed = floor * 4 / self.total_amount_quote
             raise ValueError(
                 f"{self.trading_pair}: an order would be {self.order_notional:.2f} quote, "
-                f"below the {self.min_order_notional:.0f} minimum; raise portfolio_allocation "
-                f"to at least {min(1.0, needed):.2f} or total_amount_quote"
+                f"under the {floor:.2f} needed to clear a "
+                f"{self.min_order_notional:.0f} minimum after rounding; raise "
+                f"portfolio_allocation to at least {min(1.0, needed):.2f} or "
+                "total_amount_quote"
             )
 
 

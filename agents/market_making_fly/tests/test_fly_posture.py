@@ -146,3 +146,19 @@ def test_config_diff():
     diff = config_diff(a, b)
     assert "buy_spreads" in diff and "trading_pair" not in diff
     assert config_diff(None, a) == a
+
+
+def test_an_order_sized_to_the_bare_minimum_is_refused():
+    """The live failure of 2026-09-13: 200 quote at 0.2 allocation sizes each
+    order to exactly the 10 USD minimum, the controller rounds the base amount
+    down to the market's step, and Hyperliquid rejected all of them at 9.94."""
+    bare = MarketSpec(
+        **{**SPEC.__dict__, "total_amount_quote": 200, "portfolio_allocation": 0.2}
+    )
+    assert bare.order_notional == pytest.approx(10.0)
+    with pytest.raises(ValueError, match="after rounding"):
+        bare.check_order_size()
+    # and the message names an allocation that actually clears it
+    roomy = MarketSpec(**{**bare.__dict__, "portfolio_allocation": 0.3})
+    roomy.check_order_size()
+    assert roomy.order_notional == pytest.approx(15.0)
