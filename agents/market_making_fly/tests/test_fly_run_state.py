@@ -61,6 +61,11 @@ def test_provenance_refuses_changed_protocol(tmp_path):
         run.check_provenance({**prov, "decoder": {"window": 30}})
     # source hashes are recorded but a code change does not refuse the resume
     assert run.check_provenance({**prov, "source_sha256": {"a.py": "2"}}) == sig
+    # a run recorded under an older signing rule is re-signed, not refused
+    stale = json.loads(run.provenance_path.read_text())
+    stale["signature"] = "0" * 64
+    run.provenance_path.write_text(json.dumps(stale))
+    assert run.check_provenance(prov) == sig
 
 
 def test_source_hashes_cover_the_package():

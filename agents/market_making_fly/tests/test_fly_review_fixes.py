@@ -83,7 +83,7 @@ def test_equity_carries_a_vanished_bot():
     net, volume, per_pair, carry = asyncio.run(
         _market(running).equity(["XYZ:ORCL-USD"])
     )
-    assert (net, volume) == (-1.5, 400) and per_pair["XYZ:ORCL-USD"]["running"]
+    assert (net, volume) == (-1.5, 400) and per_pair["XYZ:ORCL-USD"]["reported"]
     # bot disappears from the status response: its last figures stay in the book
     net2, volume2, per_pair2, carry2 = asyncio.run(
         _market({}).equity(["XYZ:ORCL-USD"], carry)
@@ -99,6 +99,25 @@ def test_equity_carries_a_vanished_bot():
     # a bot that never reported contributes nothing
     net3, _, per_pair3, _ = asyncio.run(_market({}).equity(["XYZ:DRAM-USD"]))
     assert net3 == 0 and per_pair3["XYZ:DRAM-USD"] == {"running": False}
+
+
+def test_equity_marks_a_running_bot_without_a_report():
+    unreported = {"orcl-fly-20260913-055821": {"performance": {}}}
+    net, volume, per_pair, carry = asyncio.run(
+        _market(unreported).equity(
+            ["XYZ:ORCL-USD"], {"XYZ:ORCL-USD": {"net": 2.0, "volume": 50}}
+        )
+    )
+    assert (net, volume) == (2.0, 50)
+    assert per_pair["XYZ:ORCL-USD"] == {
+        "running": True,
+        "reported": False,
+        "net": 2.0,
+        "volume": 50,
+    }
+    assert carry == {"XYZ:ORCL-USD": {"net": 2.0, "volume": 50}}
+    _, _, fresh, _ = asyncio.run(_market(unreported).equity(["XYZ:ORCL-USD"]))
+    assert fresh["XYZ:ORCL-USD"] == {"running": True, "reported": False}
 
 
 def test_apply_saves_before_touching_the_live_bot():
