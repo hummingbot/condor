@@ -39,13 +39,13 @@ import plotly.graph_objects as go
 from flybrain import venue, worker
 from flybrain.decoder import DecoderSettings
 from flybrain.fly3d import ACCENT, BODY, GROUND, LIMB
+from flybrain.naming import pair_names
 from flybrain.posture import MarketSpec
 from flybrain.replay import paired_stats, replay
 from pydantic import BaseModel, Field
 from telegram.ext import ContextTypes
 
 from condor.memory.paths import agent_home
-from condor.paths import safe_id
 from condor.reports import ReportBuilder
 
 logger = logging.getLogger(__name__)
@@ -202,6 +202,12 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         maker_fee_bps=fee,
     )
     spec.check_order_size()
+    record = (
+        agent_home(AGENT_SLUG)
+        / "replay"
+        / f"{pair_names(config.trading_pair).slug}.json"
+    )
+    record.parent.mkdir(parents=True, exist_ok=True)
 
     loop = asyncio.get_running_loop()
     gate = asyncio.Semaphore(config.concurrency)
@@ -253,8 +259,6 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     summaries = [r.summary() for r in results]
     # The brains are the expensive part and the arithmetic over their output is
     # not; keeping the curves means a better statistic never costs another run.
-    record = agent_home(AGENT_SLUG) / "replay" / f"{safe_id(config.trading_pair)}.json"
-    record.parent.mkdir(parents=True, exist_ok=True)
     record.write_text(
         json.dumps(
             {

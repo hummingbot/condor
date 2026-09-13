@@ -36,8 +36,15 @@ from dataclasses import dataclass, field
 
 import numpy as np
 from flybrain.chart import market_frame
-from flybrain.decoder import Baseline, Channels, DecoderSettings, decode, should_apply
-from flybrain.decoder import Hysteresis, Posture
+from flybrain.decoder import (
+    Baseline,
+    Channels,
+    DecoderSettings,
+    Hysteresis,
+    Posture,
+    decode,
+    should_apply,
+)
 from flybrain.posture import BPS, MarketSpec, build_config, take_profit_floor
 from flybrain.reinforcement import reinforcement
 
