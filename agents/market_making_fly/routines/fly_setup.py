@@ -35,9 +35,14 @@ class Config(BaseModel):
     """Prepare (download + compile), verify, or bench the fly connectome."""
 
     action: str = Field(default="verify", description="prepare | verify | bench")
-    observations: int = Field(default=3, description="bench: observations to time")
+    observations: int = Field(
+        default=3, ge=1, le=20, description="bench: observations to time (1–20)"
+    )
     neural_ms: float = Field(
-        default=500.0, description="bench: neural ms per observation"
+        default=500.0,
+        ge=200.0,
+        le=5000.0,
+        description="bench: neural ms per observation (200–5000)",
     )
 
 

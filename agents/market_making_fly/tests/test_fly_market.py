@@ -29,7 +29,7 @@ def test_fixture_equity_stays_inside_the_breaker():
     m = FixtureMarket(PAIRS, 72)
     for tick in range(60):
         m.tick = tick
-        net, volume, per_pair = asyncio.run(m.equity(PAIRS))
+        net, volume, per_pair, _ = asyncio.run(m.equity(PAIRS))
         assert abs(net / volume) * 1e4 < 5
         assert per_pair["XYZ:A-USD"]["running"] is False
 

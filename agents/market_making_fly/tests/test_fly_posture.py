@@ -98,6 +98,19 @@ def test_spec_validation():
         MarketSpec("hyperliquid_perpetual", "XYZ:DRAM-USD", 0, 8)
 
 
+def test_order_size_floor():
+    small = MarketSpec("hyperliquid_perpetual", "XYZ:A-USD", 200, 5.0)
+    assert small.order_notional == pytest.approx(10.0)
+    small.check_order_size()
+    tiny = MarketSpec("hyperliquid_perpetual", "XYZ:A-USD", 100, 5.0)
+    with pytest.raises(ValueError, match="at least 0.40"):
+        build_config(tiny, NEUTRAL)
+    full = MarketSpec(
+        "hyperliquid_perpetual", "XYZ:A-USD", 100, 5.0, portfolio_allocation=1.0
+    )
+    build_config(full, NEUTRAL)
+
+
 def test_config_diff():
     a = build_config(SPEC, NEUTRAL)
     b = build_config(SPEC, Posture("volatile", 2.0, 0.0, 0, 1.5, False, True))

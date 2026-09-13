@@ -59,6 +59,8 @@ def test_provenance_refuses_changed_protocol(tmp_path):
     assert run.check_provenance(dict(prov)) == sig
     with pytest.raises(RuntimeError):
         run.check_provenance({**prov, "decoder": {"window": 30}})
+    # source hashes are recorded but a code change does not refuse the resume
+    assert run.check_provenance({**prov, "source_sha256": {"a.py": "2"}}) == sig
 
 
 def test_source_hashes_cover_the_package():

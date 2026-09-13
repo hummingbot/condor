@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 from telegram.ext import ContextTypes
 
 from condor.memory.paths import agent_home
+from condor.paths import safe_id
 from condor.reports import ReportBuilder
 
 logger = logging.getLogger(__name__)
@@ -41,7 +42,7 @@ def _fmt(value, digits=3) -> str:
 
 
 async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
-    root = agent_home(AGENT_SLUG) / "fly" / config.run_name
+    root = agent_home(AGENT_SLUG) / "fly" / safe_id(config.run_name)
     if not root.exists():
         raise FileNotFoundError(
             f"No fly run at {root}; start fly_brain with run_name={config.run_name!r}"

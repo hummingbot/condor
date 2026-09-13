@@ -145,8 +145,9 @@ def check_apply_window(state: GuardState, now: float, s: GuardSettings) -> None:
 
 
 def check_price_move(observed_mid: float, fresh_mid: float, s: GuardSettings) -> None:
-    if observed_mid <= 0 or fresh_mid <= 0:
-        raise Veto("non-positive mid")
+    for name, value in (("observed", observed_mid), ("fresh", fresh_mid)):
+        if not math.isfinite(value) or value <= 0:
+            raise Veto(f"{name} mid is not a positive finite price: {value!r}")
     if abs(fresh_mid - observed_mid) / observed_mid > s.apply_price_tolerance:
         raise Veto("price moved beyond neural observation tolerance")
 

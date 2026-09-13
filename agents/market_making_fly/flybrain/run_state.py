@@ -32,9 +32,16 @@ def source_hashes() -> dict[str, str]:
     }
 
 
+# Recorded in provenance.json for the audit trail, but not part of the
+# signature a resume is checked against: a bug fix in the loop must not orphan
+# a brain lineage. Settings, decoder, guard, dataset and circuit are.
+UNSIGNED_KEYS = ("source_sha256",)
+
+
 def signature(provenance: dict) -> str:
+    signed = {k: v for k, v in provenance.items() if k not in UNSIGNED_KEYS}
     return hashlib.sha256(
-        json.dumps(provenance, sort_keys=True, default=str).encode()
+        json.dumps(signed, sort_keys=True, default=str).encode()
     ).hexdigest()
 
 

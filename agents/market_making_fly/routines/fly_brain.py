@@ -71,6 +71,7 @@ from pydantic import BaseModel, Field
 from telegram.ext import ContextTypes
 
 from condor.memory.paths import agent_home
+from condor.paths import safe_id
 from condor.reports import LiveReport
 
 logger = logging.getLogger(__name__)
@@ -100,6 +101,10 @@ class Config(BaseModel):
         default=500.0, description="Capital per pair (quote)"
     )
     leverage: int = Field(default=3, description="Leverage per pair (cap 5)")
+    portfolio_allocation: float = Field(
+        default=0.2,
+        description="Fraction of total_amount_quote quoted per cycle; each order is total × allocation / 4 and must clear the exchange minimum (10 USD on HIP-3) — one market at 200 quote needs 0.2+",
+    )
     mode: str = Field(
         default="shadow", description="shadow (record only) or live (apply configs)"
     )
@@ -108,7 +113,7 @@ class Config(BaseModel):
     )
     run_name: str = Field(
         default="fly",
-        description="Run directory under the agent home; new name = new brain lineage",
+        description="Run directory under the agent home (letters, digits, dot, dash, underscore); new name = new brain lineage",
     )
     resume_reviewed: bool = Field(
         default=False, description="Clear a transient halt after review"
@@ -165,6 +170,7 @@ def _specs(config: Config, pairs: list[str]) -> list[MarketSpec]:
             total_amount_quote=config.total_amount_quote,
             picked_spread_bps=spread,
             leverage=config.leverage,
+            portfolio_allocation=config.portfolio_allocation,
         )
         for pair, spread in zip(pairs, spreads)
     ]
@@ -194,6 +200,8 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         raise ValueError("interval_sec must be >= 10")
     pairs = parse_pairs(config.pairs)
     specs = _specs(config, pairs)
+    for spec in specs:
+        spec.check_order_size()  # fail at start, not on the first apply
     by_pair = {s.trading_pair: s for s in specs}
     decoder_settings = DecoderSettings(
         window=config.baseline_window,
@@ -214,7 +222,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
             f"Connectome not prepared at {DATA}; run the fly_setup routine with "
             'action="prepare" first (downloads ~1.1 GB, needs a C++ compiler)'
         )
-    run_dir = RunDir(agent_home(AGENT_SLUG) / "fly" / config.run_name)
+    run_dir = RunDir(agent_home(AGENT_SLUG) / "fly" / safe_id(config.run_name))
     run_dir.lock()
     pool = ProcessPoolExecutor(
         max_workers=1,
@@ -251,6 +259,10 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         }
         anchor = state.get("anchor")
         tick = int(state.get("tick", 0))
+        pnl_carry: dict = state.get("pnl_carry", {})
+        # Shadow keeps its own per-pair apply clock so the trial shows the same
+        # cooldown live would, without touching the live guard's accounting.
+        shadow_last: dict = state.get("shadow_last", {})
 
         from flybrain.data import verify
 
@@ -315,9 +327,21 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                         p: (q.to_dict() if q else None) for p, q in postures.items()
                     },
                     "applied": applied,
+                    "pnl_carry": pnl_carry,
+                    "shadow_last": shadow_last,
                     **(extra or {}),
                 }
             )
+
+        async def pace() -> None:
+            """Wait out the rest of the interval; every tick path ends here."""
+            if config.fast:
+                return
+            until = started + config.interval_sec
+            while time.monotonic() < until:
+                if run_dir.stop_requested():
+                    break
+                await asyncio.sleep(min(1.0, until - time.monotonic()))
 
         # ---- the loop -------------------------------------------------------
         while not config.steps or count < config.steps:
@@ -339,7 +363,9 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
             }
             try:
                 obs = await market.observe(pair)
-                equity, volume, per_pair = await market.equity(pairs)
+                equity, volume, per_pair, pnl_carry = await market.equity(
+                    pairs, pnl_carry
+                )
                 if anchor is None:
                     kind, delta = "none", 0.0
                 else:
@@ -378,6 +404,10 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                     run_dir.append_event(row)
                     run_dir.write_latest(row)
                     count += 1
+                    if config.steps and count >= config.steps:
+                        stop_reason = f"{count} steps done"
+                        break
+                    await pace()
                     continue
                 check_market_open(pair, True, guard_state, guard_settings)
 
@@ -407,18 +437,20 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                 row.update({"neural": neural_row, "posture": posture.to_dict()})
 
                 now = time.time()
+                last_apply_ts = (
+                    guard_state.last_apply.get(pair)
+                    if config.mode == "live"
+                    else shadow_last.get(pair)
+                )
                 ok, why = should_apply(
-                    postures[pair],
-                    posture,
-                    guard_state.last_apply.get(pair),
-                    now,
-                    hysteresis,
+                    postures[pair], posture, last_apply_ts, now, hysteresis
                 )
                 diff = config_diff(applied[pair], proposed)
                 if not ok:
                     row["execution"] = {"status": "HOLD", "reason": why}
                 elif config.mode == "shadow":
                     postures[pair] = posture
+                    shadow_last[pair] = now
                     row["execution"] = {
                         "status": "SHADOW",
                         "reason": why,
@@ -621,12 +653,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
             if config.steps and count >= config.steps:
                 stop_reason = f"{count} steps done"
                 break
-            if not config.fast:
-                until = started + config.interval_sec
-                while time.monotonic() < until:
-                    if run_dir.stop_requested():
-                        break
-                    await asyncio.sleep(min(1.0, until - time.monotonic()))
+            await pace()
     except asyncio.CancelledError:
         stop_reason = "cancelled"
         raise

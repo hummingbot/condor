@@ -52,6 +52,10 @@ class MarketSpec:
     max_active_executors_by_level: int = 2
     global_stop_loss: float = 0.02
     leverage_cap: int = 5
+    # Exchange minimum per order. pmm_mister sizes one cycle as
+    # total_amount_quote × portfolio_allocation, split across both sides and
+    # every level, so a small book needs a larger allocation to clear it.
+    min_order_notional: float = 10.0
 
     def __post_init__(self):
         if self.trading_pair != self.trading_pair.upper():
@@ -75,6 +79,23 @@ class MarketSpec:
             raise ValueError("0 < min_base < target_base < max_base < 1 required")
         if not 0 < self.portfolio_allocation <= 1:
             raise ValueError("portfolio_allocation must be in (0, 1]")
+        if self.min_order_notional < 0:
+            raise ValueError("min_order_notional must be >= 0")
+
+    @property
+    def order_notional(self) -> float:
+        """Quote size of one order at neutral posture: one cycle's allocation
+        over two sides and two levels."""
+        return self.total_amount_quote * self.portfolio_allocation / 4
+
+    def check_order_size(self) -> None:
+        if self.order_notional < self.min_order_notional:
+            needed = self.min_order_notional * 4 / self.total_amount_quote
+            raise ValueError(
+                f"{self.trading_pair}: an order would be {self.order_notional:.2f} quote, "
+                f"below the {self.min_order_notional:.0f} minimum; raise portfolio_allocation "
+                f"to at least {min(1.0, needed):.2f} or total_amount_quote"
+            )
 
 
 def take_profit_floor(spec: MarketSpec) -> float:
@@ -94,6 +115,7 @@ def _fmt(values: list[float]) -> str:
 def build_config(spec: MarketSpec, posture: Posture) -> dict:
     if posture.regime not in TIMING:
         raise ValueError(f"Unknown regime {posture.regime!r}")
+    spec.check_order_size()
     l1, l2 = base_levels_bps(spec)
     levels = [l1 * posture.spread_mult, l2 * posture.spread_mult]
     shift = max(-levels[0] / 2, min(levels[0] / 2, posture.shift_bps))

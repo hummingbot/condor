@@ -9,6 +9,7 @@ deterministic offline stand-in for plumbing tests; it never applies anything.
 from __future__ import annotations
 
 import math
+import re
 import time
 from dataclasses import dataclass
 
@@ -18,6 +19,7 @@ from flybrain.posture import MarketSpec
 from flybrain.reinforcement import controller_net
 
 HL_INFO_URL = "https://api.hyperliquid.xyz/info"
+_SUFFIXED = re.compile(r"-\d{8}-\d{6}")
 QUOTE_TOKENS = ("USD", "USDC")
 
 
@@ -59,7 +61,12 @@ async def fetch_l2_book(session: aiohttp.ClientSession, coin: str) -> Book:
     bids, asks = levels
     if not bids or not asks:
         return Book(None, None)  # closed / empty book, a real state not an error
-    return Book(float(bids[0]["px"]), float(asks[0]["px"]))
+    bid, ask = float(bids[0]["px"]), float(asks[0]["px"])
+    if not (math.isfinite(bid) and math.isfinite(ask)) or bid <= 0 or ask < bid:
+        raise RuntimeError(
+            f"l2Book {coin}: invalid top of book bid={bid!r} ask={ask!r}"
+        )
+    return Book(bid, ask)
 
 
 def normalize_candle_payload(result) -> list[dict]:
@@ -113,20 +120,53 @@ class LiveMarket:
         data = raw.get("data", raw)
         return data if isinstance(data, dict) else {}
 
-    async def equity(self, pairs: list[str]) -> tuple[float, float, dict]:
+    @staticmethod
+    def find_bot(bots: dict, bot_name: str) -> tuple[str | None, dict | None]:
+        """The deploy tool suffixes instance names with ``-YYYYMMDD-HHMMSS``,
+        so ``orcl-fly`` runs as ``orcl-fly-20260913-055821``. Match the exact
+        name or that suffix form; refuse an ambiguous match."""
+        matches = [
+            name
+            for name in bots
+            if name == bot_name
+            or _SUFFIXED.fullmatch(name[len(bot_name) :])
+            and name.startswith(bot_name)
+        ]
+        if len(matches) > 1:
+            raise RuntimeError(f"several bots match {bot_name!r}: {sorted(matches)}")
+        if not matches:
+            return None, None
+        bot = bots[matches[0]]
+        return matches[0], (bot if isinstance(bot, dict) else None)
+
+    async def equity(
+        self, pairs: list[str], carry: dict[str, dict] | None = None
+    ) -> tuple[float, float, dict, dict]:
         """Combined ``realized + unrealized`` and volume across the fly's bots.
 
-        A bot that is not running contributes nothing — there is no P&L to
-        report. Returns ``(net, volume, per_pair)``."""
+        ``carry`` holds the last figures each bot reported. A bot that has never
+        reported contributes nothing (a shadow run with no bot). A bot that
+        reported before and is now missing from the active list — stopped,
+        archived, or dropped from one status response — keeps contributing its
+        last known figures, frozen, so its result does not vanish from the
+        combined book and produce a fake equity jump. Returns
+        ``(net, volume, per_pair, carry)``; persist ``carry`` between ticks."""
         bots = await self.bots()
+        carry = {k: dict(v) for k, v in (carry or {}).items()}
         net = 0.0
         volume = 0.0
         per_pair: dict[str, dict] = {}
         for pair in pairs:
             names = pair_names(pair)
-            bot = bots.get(names.bot_name)
-            if not isinstance(bot, dict):
-                per_pair[pair] = {"running": False}
+            _, bot = self.find_bot(bots, names.bot_name)
+            if bot is None:
+                previous = carry.get(pair)
+                if previous:
+                    net += previous["net"]
+                    volume += previous["volume"]
+                    per_pair[pair] = {"running": False, "carried": True, **previous}
+                else:
+                    per_pair[pair] = {"running": False}
                 continue
             perf = (bot.get("performance") or {}).get(names.config_name)
             if not isinstance(perf, dict):
@@ -139,9 +179,10 @@ class LiveMarket:
             net += pair_net
             volume += pair_volume
             per_pair[pair] = {"running": True, "net": pair_net, "volume": pair_volume}
+            carry[pair] = {"net": pair_net, "volume": pair_volume}
         if not math.isfinite(net) or not math.isfinite(volume):
             raise RuntimeError("Nonfinite bot performance")
-        return net, volume, per_pair
+        return net, volume, per_pair, carry
 
     async def available_usd(self) -> float:
         state = await self.client.portfolio.get_portfolio_state()
@@ -165,23 +206,30 @@ class LiveMarket:
         return total
 
     async def apply(self, pair: str, config: dict) -> None:
-        """Update the live bot's controller and the saved config, both layers."""
+        """Update the saved config, then the live bot's controller.
+
+        Durable layer first: if saving fails nothing has changed on the bot and
+        the tick is a clean error. If the live update then fails, the saved
+        config is ahead of the bot, the tick is an error, ``applied`` keeps the
+        old posture, and the next material posture retries both — the bot is
+        never left running a config the run state does not know about."""
         names = pair_names(pair)
-        bots = await self.bots()
-        if names.bot_name not in bots:
+        running, _ = self.find_bot(await self.bots(), names.bot_name)
+        if running is None:
             raise RuntimeError(f"bot {names.bot_name} is not running")
-        await self.client.controllers.update_bot_controller_config(
-            names.bot_name, names.config_name, config
-        )
         await self.client.controllers.create_or_update_controller_config(
             names.config_name, config
+        )
+        await self.client.controllers.update_bot_controller_config(
+            running, names.config_name, config
         )
 
     async def stop_bot(self, pair: str) -> bool:
         names = pair_names(pair)
-        if names.bot_name not in await self.bots():
+        running, _ = self.find_bot(await self.bots(), names.bot_name)
+        if running is None:
             return False
-        await self.client.bot_orchestration.stop_and_archive_bot(names.bot_name)
+        await self.client.bot_orchestration.stop_and_archive_bot(running)
         return True
 
 
@@ -222,12 +270,14 @@ class FixtureMarket:
         index = self.pairs.index(pair)
         return self._price(index, self.tick + self.n_candles)
 
-    async def equity(self, pairs: list[str]) -> tuple[float, float, dict]:
+    async def equity(
+        self, pairs: list[str], carry: dict[str, dict] | None = None
+    ) -> tuple[float, float, dict, dict]:
         # Swings so both pulses fire, drifts up so new highs recur, and stays
         # within ±2 bp of volume so the loss-rate breaker is not exercised here.
         net = 2.0 * math.sin(self.tick * 1.3) + 0.05 * self.tick
         volume = 10_000.0 * (self.tick + 1)
-        return net, volume, {p: {"running": False, "fixture": True} for p in pairs}
+        return net, volume, {p: {"running": False, "fixture": True} for p in pairs}, {}
 
     async def available_usd(self) -> float:
         return 1e9

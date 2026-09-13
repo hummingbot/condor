@@ -44,10 +44,17 @@ import sys; sys.path.insert(0, "agents/market_making_fly")
 from flybrain.posture import MarketSpec, build_config
 from flybrain.decoder import NEUTRAL
 spec = MarketSpec(connector_name="hyperliquid_perpetual", trading_pair="XYZ:DRAM-USD",
-                  total_amount_quote=500, picked_spread_bps=8.0, leverage=3)
+                  total_amount_quote=500, picked_spread_bps=8.0, leverage=3,
+                  portfolio_allocation=0.2)
 print(build_config(spec, NEUTRAL))
 """)
 ```
+
+`build_config` refuses a spec whose orders would fall under the exchange minimum
+(10 USD on HIP-3): each order is `total_amount_quote × portfolio_allocation / 4`.
+200 quote on one market needs `portfolio_allocation` ≥ 0.2; 100 quote needs ≥ 0.4.
+Whatever value you use here, pass the **same** `portfolio_allocation` to `fly_brain`
+in Step 5 — it rebuilds every config from it.
 
 Then save it:
 
@@ -79,7 +86,7 @@ With `n_markets: 1` that is a single pair and a single spread.
 manage_routines(action="start", name="fly_brain", config={
   "pairs": "XYZ:DRAM-USD,XYZ:SPCX-USD,XYZ:SMSN-USD",   # n_markets entries
   "picked_spreads_bps": "8,6,10",                       # one per pair
-  "total_amount_quote": 500, "leverage": 3,
+  "total_amount_quote": 500, "leverage": 3, "portfolio_allocation": 0.2,
   "mode": "shadow", "run_name": "fly-2026-09-12"})
 ```
 
