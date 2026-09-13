@@ -55,6 +55,7 @@ FLY, FRAME = 6, 6
 # that is meaningfully wider than the 800px breakpoint.
 CARDS, BRAIN = 6, 6
 PANEL_CHROME = 34  # the panel's own padding and border, measured
+FULL_ROW = 400  # the stylesheet's floor for a full-width chart panel
 # Row one is sized so the frame fills its half: 16:9 at six columns is ~335px.
 ROW_ONE = 430
 # Row two matches the card stack, which is what it is: six cards at two per
@@ -152,7 +153,7 @@ def _pnl_figure(events: list[dict]) -> go.Figure | None:
         )
     )
     fig.update_layout(
-        height=260,
+        height=FULL_ROW - PANEL_CHROME,
         margin=dict(l=48, r=16, t=10, b=36),
         paper_bgcolor=GROUND,
         plot_bgcolor=GROUND,
@@ -404,9 +405,6 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
             "Reason",
         ],
     )
-    pnl = _pnl_figure(events)
-    if pnl is not None:
-        builder.plotly(pnl)
     if holdings:
         builder.table(
             holdings,
@@ -418,7 +416,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
             "running in shadow with nothing deployed._"
         )
 
-    # ── PERFORMANCE & LIMITS ─────────────────────────────────────────────────
+    # ── PERFORMANCE ──────────────────────────────────────────────────────────
     builder.section(
         "PERFORMANCE",
         (
@@ -434,14 +432,9 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     builder.kpi("Net P&L", _fmt(book_net, 4, plus=True))
     builder.kpi("Trades", f"{trades:,}" if trades is not None else "—")
     builder.kpi("Volume", _fmt(book_volume))
-    builder.markdown(
-        "_Regime, spread multiplier and lean are an engineered readout of spike counts, "
-        "not a discovered market-making circuit. Dopamine pulses report the change in "
-        "P&L between two observations, not credit for the last posture, and synapses "
-        "also change from endogenous activity. No profitable learning has been "
-        "demonstrated: the guard and the controller's stop loss bound the loss, not the "
-        "fly._"
-    )
+    pnl = _pnl_figure(events)
+    if pnl is not None:
+        builder.plotly(pnl)
     await builder.save()
 
     lines = [
