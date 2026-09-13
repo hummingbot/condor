@@ -87,7 +87,7 @@ class Config(BaseModel):
 
     pairs: str = Field(
         default="XYZ:DRAM-USD,XYZ:SPCX-USD,XYZ:SMSN-USD",
-        description="Up to 3 uppercase HIP-3 pairs, comma-separated (bot {token}-fly, config {token}_fly_mm)",
+        description="1 to 3 uppercase HIP-3 pairs, comma-separated — this list IS the market count (bot {token}-fly, config {token}_fly_mm)",
     )
     picked_spreads_bps: str = Field(
         default="8,8,8",

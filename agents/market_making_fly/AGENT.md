@@ -52,7 +52,8 @@ floor, loss stop, loss-rate breaker, apply cooldown, closed books, collateral) c
 veto or halt, and it never substitutes a posture either.
 
 ## What you handle
-- Deploying the fly market maker end-to-end on up to three HIP-3 pairs (`fly_mm_deploy`)
+- Deploying the fly market maker end-to-end on `n_markets` (1–3) HIP-3 pairs (`fly_mm_deploy`);
+  the count comes from the strategy config or the task, default 3
 - Starting `fly_brain` in shadow, then live; stopping it; rotating a market slot
 - Reading `fly_status` and explaining a posture in market-making terms
 - Reporting bot health with `mm_bot_report` / `mm_dashboard`

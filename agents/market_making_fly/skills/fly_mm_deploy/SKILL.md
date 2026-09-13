@@ -22,8 +22,8 @@ manage_routines(action="run", name="hip3_market_scanner",
   config={"issuer": "xyz", "min_spread_bps": 3, "max_daily_drift_pct": 3, "top_n": 5})
 ```
 
-Take up to **three** survivors from the top of the ranking that have an open live
-book. Record for each: `pair` (uppercase, e.g. `XYZ:DRAM-USD`) and its **spread in
+Take the top **`n_markets`** survivors (1–3; from `[CURRENT CONFIG]` or the task,
+default 3) that have an open live book — one brain quotes them all in round-robin. Record for each: `pair` (uppercase, e.g. `XYZ:DRAM-USD`) and its **spread in
 bp** — this is `picked_spreads_bps`. If fewer than one survivor, stop and report.
 
 ## Step 2 — Collateral
@@ -72,10 +72,13 @@ controller.
 
 ## Step 5 — Start the fly in shadow
 
+`pairs` and `picked_spreads_bps` list exactly the `n_markets` picks, same order.
+With `n_markets: 1` that is a single pair and a single spread.
+
 ```
 manage_routines(action="start", name="fly_brain", config={
-  "pairs": "XYZ:DRAM-USD,XYZ:SPCX-USD,XYZ:SMSN-USD",
-  "picked_spreads_bps": "8,6,10",
+  "pairs": "XYZ:DRAM-USD,XYZ:SPCX-USD,XYZ:SMSN-USD",   # n_markets entries
+  "picked_spreads_bps": "8,6,10",                       # one per pair
   "total_amount_quote": 500, "leverage": 3,
   "mode": "shadow", "run_name": "fly-2026-09-12"})
 ```
