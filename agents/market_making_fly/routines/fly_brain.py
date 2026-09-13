@@ -658,9 +658,11 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                 # already fallen from.
                 b.kpi(
                     "Session high",
-                    "—"
-                    if guard_state.session_high_net is None
-                    else f"{guard_state.session_high_net:+.4f}",
+                    (
+                        "—"
+                        if guard_state.session_high_net is None
+                        else f"{guard_state.session_high_net:+.4f}"
+                    ),
                 )
                 b.kpi("Ticks since high", str(guard_state.ticks_since_high))
                 b.kpi("Loss stop", f"-{max_loss:.2f}")

@@ -59,8 +59,8 @@ def test_volatile_widens_quiet_tightens_with_floor():
         "volatile"
     ]
     tight = build_config(SPEC, Posture("quiet", 0.6, 0.0, 0, -1.5, False, True))
-    # 4 bp × 0.6 = 2.4 bp, floored to the 3 bp minimum
-    assert _spreads(tight["buy_spreads"])[0] == pytest.approx(3 * BPS)
+    # 4 bp × 0.6 = 2.4 bp, which clears this market's 1.3 bp fee floor
+    assert _spreads(tight["buy_spreads"])[0] == pytest.approx(2.4 * BPS)
     assert (tight["executor_refresh_time"], tight["buy_cooldown_time"]) == TIMING[
         "quiet"
     ]
@@ -69,12 +69,29 @@ def test_volatile_widens_quiet_tightens_with_floor():
 def test_lean_is_asymmetric_and_capped():
     up = build_config(SPEC, Posture("trending_up", 1.0, 3.0, 2.0, 0, True, True))
     buy, sell = _spreads(up["buy_spreads"]), _spreads(up["sell_spreads"])
-    # lean capped at half of level 1 (4 bp → 2 bp); buy 2 bp floored to 3 bp
-    assert buy[0] == pytest.approx(3 * BPS) and sell[0] == pytest.approx(6 * BPS)
+    # lean capped at half of level 1 (4 bp → 2 bp), and 2 bp still clears the fee
+    assert buy[0] == pytest.approx(2 * BPS) and sell[0] == pytest.approx(6 * BPS)
     assert buy[1] == pytest.approx(7 * BPS) and sell[1] == pytest.approx(11 * BPS)
     down = build_config(SPEC, Posture("trending_down", 1.0, -3.0, -2.0, 0, True, True))
-    assert _spreads(down["sell_spreads"])[0] == pytest.approx(3 * BPS)
+    assert _spreads(down["sell_spreads"])[0] == pytest.approx(2 * BPS)
     assert _spreads(down["buy_spreads"])[0] == pytest.approx(6 * BPS)
+
+
+def test_the_spread_floor_is_the_market_own_fee():
+    """A quote at the floor breaks even: buy at −f and sell at +f capture 2f,
+    exactly the round trip. A fixed 3 bp was too wide for a HIP-3 perp and far
+    too tight for a spot book."""
+    assert SPEC.min_spread_bps == pytest.approx(SPEC.maker_fee_bps)
+    dear = MarketSpec(
+        connector_name="binance",
+        trading_pair="SOL-USDT",
+        total_amount_quote=500,
+        picked_spread_bps=8.0,
+    )
+    assert dear.min_spread_bps == pytest.approx(7.5)  # binance spot
+    # a lean that would quote inside the fee is pushed back out to it
+    leaned = build_config(dear, Posture("trending_up", 1.0, 3.0, 2.0, 0, True, True))
+    assert min(_spreads(leaned["buy_spreads"])) == pytest.approx(7.5 * BPS)
 
 
 def test_pause_sets_kill_switch():

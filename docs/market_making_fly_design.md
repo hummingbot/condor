@@ -204,7 +204,8 @@ shifts it:
 * Base spreads from the scanner's picked spread `S` bp: level 1
   `max(2, S/2)`, level 2 `S+1` (HIP-3 playbook). Then
   `buy = base · spread_mult − shift`, `sell = base · spread_mult + shift`,
-  each floored at `min_spread_bps = 3`.
+  each floored at the market's own maker fee, so a two-sided round trip at
+  the floor breaks even (1.3 bp on a HIP-3 perp, 7.5 on a spot book).
 * `take_profit = max(0.0004, level-1 buy spread)` — and never below
   `2.2 × round-trip maker fee` (HIP-3 all-in ~1.3 bp/side → 2.6 bp; floor 5.7 bp
   wins). Market Making Expert's rule "TP must exceed round-trip fees" becomes a
@@ -237,7 +238,7 @@ passes `resume_reviewed=true`". None of them chooses a different posture.
 |---|---|
 | Market closed (live book missing a side) — HIP-3 equities close off-hours | veto (HOLD); after `closed_ticks_to_stop` consecutive closed ticks, STOP bot, leave fly observing |
 | Available USD on the unified Hyperliquid account < required margin | veto |
-| Any spread `< min_spread_bps`, TP below fee floor, leverage above cap | veto (should be unreachable after `posture.py` floors; this is the belt to those braces) |
+| Any spread inside the market's maker fee, TP below fee floor, leverage above cap | veto (should be unreachable after `posture.py` floors; this is the belt to those braces) |
 | Apply cooldown (`min_apply_interval_sec`) or daily apply cap (`max_applies_per_day = 48`) | veto |
 | Mid moved more than `apply_price_tolerance = 0.5 %` between observation and apply | veto (stonkfly's fresh-book check) |
 | `total_net ≤ −max_loss_quote` (default 4 % of `total_amount_quote`) | **halt**: STOP bot, position closed by the controller's `global_stop_loss` / market-close, fly halted |
@@ -462,7 +463,7 @@ Unit (no data, run in CI):
   warm-up emits ranging; centring removes a constant bias; hysteresis blocks
   small changes and passes regime changes.
 * `posture.py`: fee floor beats spread; shift never pushes a side below
-  `min_spread_bps`; pause sets the kill switch; timing table per regime; pair
+  the fee floor; pause sets the kill switch; timing table per regime; pair
   is uppercase.
 * `guard.py`: every row of the table in §8, halt vs veto, `resume_reviewed`
   semantics, financial halt not clearable.

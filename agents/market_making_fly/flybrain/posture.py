@@ -3,7 +3,8 @@
 The base is a bounded default set; the posture multiplies the spreads and leans
 them. Every money-relevant floor lives here, in code:
 
-* no spread level below ``min_spread_bps``;
+* no spread level closer to mid than the market's own maker fee, so a
+  two-sided round trip at the floor at least pays for itself;
 * ``take_profit`` never below ``2.2 ×`` the round-trip maker fee, and never
   below 4 bp (Market Making Expert's "TP must exceed round-trip fees" made
   mandatory);
@@ -59,7 +60,6 @@ class MarketSpec:
     # 0 means "use the venue default"; pass the exchange's real figure when
     # known, since the take-profit floor is derived from it.
     maker_fee_bps: float = 0.0
-    min_spread_bps: float = 3.0
     portfolio_allocation: float = 0.2
     target_base_pct: float = 0.4
     min_base_pct: float = 0.3
@@ -82,12 +82,7 @@ class MarketSpec:
                 "maker_fee_bps",
                 venue.default_maker_fee_bps(self.connector_name, resolved),
             )
-        for name in (
-            "total_amount_quote",
-            "picked_spread_bps",
-            "maker_fee_bps",
-            "min_spread_bps",
-        ):
+        for name in ("total_amount_quote", "picked_spread_bps", "maker_fee_bps"):
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be finite and positive")
@@ -109,6 +104,20 @@ class MarketSpec:
     @property
     def is_spot(self) -> bool:
         return self.market_type == venue.SPOT
+
+    @property
+    def min_spread_bps(self) -> float:
+        """The closest to mid a quote may sit: one maker fee.
+
+        A buy at −f and a sell at +f capture exactly 2f, which is the round
+        trip — break-even. Anything tighter loses money on every completed
+        pair whatever the fly decodes, so it is the one width that is not the
+        strategy's to choose. It was a fixed 3 bp, which is both too wide for
+        a HIP-3 market at 1.3 bp and too tight for a spot book at 7.5, and it
+        was a parameter nobody could set correctly without already knowing the
+        fee the spec now carries.
+        """
+        return self.maker_fee_bps
 
     @property
     def order_notional(self) -> float:
