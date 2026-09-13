@@ -190,24 +190,28 @@ def test_depth_only_counts_what_is_close_enough_to_trade_against():
     assert depth_within([], asks, 20) == (0.0, 0.0, 0.0)
 
 
-def test_the_scanner_requires_the_spread_to_clear_the_venues_own_fee():
-    """The HIP-3 scanner hardcoded 3bp, unrelated to what a round trip costs.
-    A spot book's fee is several times a perp's, so the floor has to move."""
+def test_the_scanner_measures_the_trip_the_fly_would_actually_make():
+    """Both older scanners asked whether the touch already clears a round trip,
+    which is the test for joining the touch. The fly rests a quote away from
+    mid, so what matters is the distance it must travel: down to level 1, never
+    inside the fee, then out through the take-profit floor."""
     import importlib.util
     from pathlib import Path
-
-    from flybrain import venue
 
     path = Path(__file__).resolve().parents[1] / "routines" / "mm_market_scanner.py"
     spec = importlib.util.spec_from_file_location("mm_market_scanner", path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
 
-    def floor_for(connector):
-        cfg = mod.Config(connector_name=connector)
-        fee = venue.default_maker_fee_bps(connector, venue.market_type_for(connector))
-        return 2 * fee * cfg.min_spread_over_fee
-
-    assert floor_for("binance") == pytest.approx(22.5)  # spot costs far more
-    assert floor_for("binance_perpetual") == pytest.approx(6.0)
-    assert floor_for("binance") > 3 * floor_for("binance_perpetual")
+    # XYZ:ORCL-USD as it was on 2026-09-13: 2 bp touch, 1.3 bp all-in fee.
+    # Level 1 is max(2, 2/2) = 2 bp, the take-profit floor 2.2 × 2.6 = 5.72.
+    assert mod.cycle_bps(2.0, 1.3) == pytest.approx(2.0 + 5.72)
+    # A dearer market has to travel further for the same quote, because the
+    # exit is fee-derived: binance spot at 7.5 bp needs 33 bp of take-profit.
+    assert mod.cycle_bps(2.0, 7.5) == pytest.approx(7.5 + 33.0)
+    # and the fee is a floor on the entry too — a market quoting inside it
+    # cannot be quoted inside it
+    assert mod.cycle_bps(0.2, 7.5) == pytest.approx(7.5 + 33.0)
+    # A market whose median candle travels less than the cycle never completes
+    # one, however wide its touch looks.
+    assert 4.0 / mod.cycle_bps(2.0, 1.3) < 1.0

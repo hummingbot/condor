@@ -148,14 +148,26 @@ class MarketSpec:
             )
 
 
+# The two geometry rules, as plain functions of what they actually depend on:
+# a market's fee and its observed spread. The scanner needs them before a spec
+# exists — it is deciding whether a market is worth quoting at all — and two
+# copies of a money rule is one too many.
+def take_profit_floor_bps(maker_fee_bps: float) -> float:
+    """Where a position must close to have been worth opening, in bp."""
+    return max(4.0, 2.2 * 2 * maker_fee_bps)
+
+
+def base_levels_from_spread(picked_spread_bps: float) -> tuple[float, float]:
+    """HIP-3 playbook: level 1 ``max(2, S/2)`` bp, level 2 ``S+1`` bp."""
+    return max(2.0, picked_spread_bps / 2), picked_spread_bps + 1
+
+
 def take_profit_floor(spec: MarketSpec) -> float:
-    return round(max(4 * BPS, 2.2 * 2 * spec.maker_fee_bps * BPS), 8)
+    return round(take_profit_floor_bps(spec.maker_fee_bps) * BPS, 8)
 
 
 def base_levels_bps(spec: MarketSpec) -> tuple[float, float]:
-    """HIP-3 playbook: level 1 ``max(2, S/2)`` bp, level 2 ``S+1`` bp."""
-    s = spec.picked_spread_bps
-    return max(2.0, s / 2), s + 1
+    return base_levels_from_spread(spec.picked_spread_bps)
 
 
 def _fmt(values: list[float]) -> str:
