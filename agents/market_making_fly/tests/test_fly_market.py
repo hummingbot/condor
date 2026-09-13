@@ -8,6 +8,7 @@ from flybrain.market import (
     Book,
     FixtureMarket,
     normalize_candle_payload,
+    pnl_is_known,
     required_collateral,
 )
 from flybrain.posture import MarketSpec
@@ -29,9 +30,46 @@ def test_fixture_equity_stays_inside_the_breaker():
     m = FixtureMarket(PAIRS, 72)
     for tick in range(60):
         m.tick = tick
-        net, volume, per_pair, _ = asyncio.run(m.equity(PAIRS))
+        net, volume, per_pair, carry = asyncio.run(m.equity(PAIRS))
         assert abs(net / volume) * 1e4 < 5
-        assert per_pair["XYZ:A-USD"]["running"] is False
+        assert sum(i["net"] for i in per_pair.values()) == pytest.approx(net)
+        assert sum(i["volume"] for i in per_pair.values()) == pytest.approx(volume)
+        assert set(carry) == set(PAIRS)
+
+
+def test_fixture_reports_so_an_offline_run_exercises_the_pulses():
+    """A fixture book that did not report would pin the stimulus to ``none``
+    and never advance the anchor, which is the whole point of the offline run."""
+    m = FixtureMarket(PAIRS, 72)
+    _, _, per_pair, _ = asyncio.run(m.equity(PAIRS))
+    assert all(i["running"] and i["reported"] for i in per_pair.values())
+    assert pnl_is_known(per_pair)
+    # and the swing really does cross the deadband both ways
+    nets = []
+    for tick in range(12):
+        m.tick = tick
+        net, _, _, _ = asyncio.run(m.equity(PAIRS))
+        nets.append(net)
+    deltas = [b - a for a, b in zip(nets, nets[1:])]
+    assert max(deltas) > 0.02 and min(deltas) < -0.02
+
+
+@pytest.mark.parametrize(
+    "per_pair,expected",
+    [
+        ({}, False),  # no book at all is silence, not a result
+        ({"a": {"running": False}}, False),
+        ({"a": {"running": True}}, False),  # running but no report yet
+        ({"a": {"running": True, "reported": True}}, True),
+        (
+            {"a": {"running": True, "reported": True}, "b": {"running": True}},
+            False,  # one silent book makes the combined figure unusable
+        ),
+        ({"a": {"running": True, "reported": True}, "b": {"running": False}}, True),
+    ],
+)
+def test_pnl_is_known(per_pair, expected):
+    assert pnl_is_known(per_pair) is expected
 
 
 def test_fixture_never_applies():

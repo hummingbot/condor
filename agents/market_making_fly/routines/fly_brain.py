@@ -66,7 +66,12 @@ from flybrain.guard import (
     record_apply,
     resume,
 )
-from flybrain.market import FixtureMarket, LiveMarket, required_collateral
+from flybrain.market import (
+    FixtureMarket,
+    LiveMarket,
+    pnl_is_known,
+    required_collateral,
+)
 from flybrain.naming import pair_names, parse_pairs
 from flybrain.posture import MarketSpec, build_config, config_diff
 from flybrain.reinforcement import reinforcement
@@ -370,10 +375,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                 equity, volume, per_pair, pnl_carry = await market.equity(
                     pairs, pnl_carry
                 )
-                running_bots = [p for p, i in per_pair.items() if i.get("running")]
-                pnl_known = bool(running_bots) and all(
-                    per_pair[p].get("reported") for p in running_bots
-                )
+                pnl_known = pnl_is_known(per_pair)
                 if anchor is None or not pnl_known:
                     kind, delta = "none", 0.0
                 else:

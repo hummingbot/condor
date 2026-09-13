@@ -290,11 +290,32 @@ class FixtureMarket:
     async def equity(
         self, pairs: list[str], carry: dict[str, dict] | None = None
     ) -> tuple[float, float, dict, dict]:
-        # Swings so both pulses fire, drifts up so new highs recur, and stays
-        # within ±2 bp of volume so the loss-rate breaker is not exercised here.
+        """A fixture stands in for a full book that reports.
+
+        Every pair is marked running and reported on purpose: an offline run
+        exists to exercise the reward/aversive path end to end, and a book that
+        never reports would pin the stimulus to ``none`` (see ``pnl_is_known``).
+        Nothing is applied from here either way — ``apply`` refuses.
+
+        The aggregate swings so both pulses fire, drifts up so new highs recur,
+        and stays within ±2 bp of volume so the loss-rate breaker is not
+        exercised here; each pair carries an equal share of it.
+        """
         net = 2.0 * math.sin(self.tick * 1.3) + 0.05 * self.tick
         volume = 10_000.0 * (self.tick + 1)
-        return net, volume, {p: {"running": False, "fixture": True} for p in pairs}, {}
+        share_net, share_volume = net / len(pairs), volume / len(pairs)
+        per_pair = {
+            p: {
+                "running": True,
+                "reported": True,
+                "fixture": True,
+                "net": share_net,
+                "volume": share_volume,
+            }
+            for p in pairs
+        }
+        carry = {p: {"net": share_net, "volume": share_volume} for p in pairs}
+        return net, volume, per_pair, carry
 
     async def available_usd(self) -> float:
         return 1e9
@@ -304,6 +325,19 @@ class FixtureMarket:
 
     async def stop_bot(self, pair: str) -> bool:
         return False
+
+
+def pnl_is_known(per_pair: dict) -> bool:
+    """True when every running book reported its P&L this tick.
+
+    The reinforcement pulse, the equity anchor and the financial breakers all
+    hang off this: an unreported book is silence, not a result. No running book
+    at all is also silence — a shadow run with no bot deployed has nothing to
+    learn from. A market that stands in for a full book (the fixture) must
+    therefore report, or it exercises none of that path.
+    """
+    running = [info for info in per_pair.values() if info.get("running")]
+    return bool(running) and all(info.get("reported") for info in running)
 
 
 def required_collateral(specs: list[MarketSpec]) -> float:
