@@ -360,6 +360,7 @@ agents/market_making_fly/
     fly_chart.py          # one-shot: render + report the frame for a pair
     fly_brain.py          # CONTINUOUS: the loop in §3; modes shadow|live, learning|frozen, fixture|market
     fly_status.py         # one-shot: latest posture, channels, z-scores, spikes, memory stats, P&L, vetoes, halt reason
+    fly_report.py         # one-shot: the run dashboard (fly, book, neurons, decisions, sensory frame)
     hip3_market_scanner.py  # copied from Market Making Expert
     mm_dashboard.py         # copied
   skills/

@@ -91,6 +91,7 @@ manage_skill(action="read", name="fly_mm_deploy")
 | `fly_chart` | Render the exact frame for a pair (what the fly sees) |
 | `fly_brain` | The loop (continuous). `mode=shadow|live`, `pairs`, `picked_spreads_bps`, `run_name` |
 | `fly_status` | Latest posture per pair, last observation, guard state, memory stats |
+| `fly_report` | The run dashboard: the orbitable fly, the book, the neuron strip, the decision log, and the frame the fly last saw |
 | `mm_dashboard`, `mm_bot_report` | Inventory, positions, P&L, errors |
 
 Naming is derived from the **whole** pair, so two markets on one token never collide:

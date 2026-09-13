@@ -11,7 +11,10 @@ references_routine: fly_status
 
 # Reading the fly
 
-Run `manage_routines(action="run", name="fly_status", config={"run_name": "<run>"})`.
+Run `manage_routines(action="run", name="fly_status", config={"run_name": "<run>"})`
+for the numbers as text, or `fly_report` for the dashboard — the same data plus the
+fly itself, the decision log and the last frame it saw. Use `fly_report` when the
+user wants to *look* at the run, `fly_status` when you need to quote figures.
 
 ## Channels (per observation, 500 ms of neural time)
 
