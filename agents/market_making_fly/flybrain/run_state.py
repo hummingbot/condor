@@ -35,16 +35,29 @@ def source_hashes() -> dict[str, str]:
 # Recorded in provenance.json for the audit trail, but not part of the
 # signature a resume is checked against: a bug fix in the loop must not orphan
 # a brain lineage. Settings, decoder, guard, dataset and circuit are.
-UNSIGNED_KEYS = ("source_sha256",)
-# Sizing and cadence are the operator's per-deployment choices, not the
-# protocol the brain lineage was formed under; they are recorded, not signed.
-UNSIGNED_SETTINGS = (
-    "total_amount_quote",
-    "leverage",
-    "portfolio_allocation",
-    "interval_sec",
-    "connector_name",
-)
+# The shape of what ``state.json`` holds, and how the code reads it back.
+# BUMP THIS whenever a persisted field is added, removed or reinterpreted:
+# resuming an old run on code that reads its state differently is how a fixed
+# bug comes back. ``session_high_net`` going from ``0.0`` to ``None`` did
+# exactly that — a resumed run read its first reported figure as a drawdown
+# from zero and halted.
+STATE_VERSION = 1
+
+# Recorded in provenance.json for the audit trail, but not signed: a bug fix
+# in the loop must not orphan a brain lineage. What the code *means* by the
+# persisted state is pinned by STATE_VERSION instead.
+# ``state_version`` is compared directly in check_provenance, so it is kept
+# out of the signature — inside it, re-signing would overwrite it and the
+# comparison would never fire.
+UNSIGNED_KEYS = ("source_sha256", "state_version")
+
+# Cadence is the operator's to change mid-lineage: it moves no money and
+# reinterprets no accounting. Everything else about the deployment is signed.
+# Sizing, leverage, allocation and venue all denominate the anchor, the session
+# high and the carried P&L that a resume restores, so changing one while
+# restoring the other half of the books is how a run halts on a mix of two
+# deployments' numbers. Changing them needs a new run_name.
+UNSIGNED_SETTINGS = ("interval_sec",)
 
 
 def signature(provenance: dict) -> str:
@@ -140,6 +153,16 @@ class RunDir:
         sig = signature(provenance)
         if self.provenance_path.exists():
             recorded = json.loads(self.provenance_path.read_text())
+            # Compared directly, never through the signature: re-signing the
+            # recorded provenance below rewrites whatever the current rule
+            # controls, which would make this check silently inert.
+            recorded_version = recorded.get("state_version")
+            if recorded_version != STATE_VERSION:
+                raise RuntimeError(
+                    f"Run state is version {recorded_version}, this code reads "
+                    f"version {STATE_VERSION}; its persisted state would be "
+                    "reinterpreted. Use a new run_name."
+                )
             # Re-sign what was recorded under the current rule, so a change to
             # which keys are signed does not itself refuse every existing run.
             recorded_sig = signature(
@@ -153,7 +176,7 @@ class RunDir:
             return sig
         atomic_write_json(
             self.provenance_path,
-            {"signature": sig, **provenance},
+            {"signature": sig, "state_version": STATE_VERSION, **provenance},
             indent=2,
             default=str,
         )

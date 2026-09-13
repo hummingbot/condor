@@ -19,7 +19,9 @@ from flybrain.posture import MarketSpec
 from flybrain.reinforcement import controller_net
 
 HL_INFO_URL = "https://api.hyperliquid.xyz/info"
-_SUFFIXED = re.compile(r"-\d{8}-\d{6}")
+# The deploy tool appends -YYYYMMDD-HHMMSS, and a redeploy that hands the
+# running instance name back in stacks another one.
+_SUFFIXED = re.compile(r"(?:-\d{8}-\d{6})+")
 QUOTE_TOKENS = ("USD", "USDC")
 
 
@@ -123,14 +125,17 @@ class LiveMarket:
     @staticmethod
     def find_bot(bots: dict, bot_name: str) -> tuple[str | None, dict | None]:
         """The deploy tool suffixes instance names with ``-YYYYMMDD-HHMMSS``,
-        so ``orcl-fly`` runs as ``orcl-fly-20260913-055821``. Match the exact
-        name or that suffix form; refuse an ambiguous match."""
+        so ``orcl-fly`` runs as ``orcl-fly-20260913-055821``, and a redeploy
+        that hands the instance name back stacks another suffix. Match the
+        exact name or any number of those suffixes, and refuse an ambiguous
+        match: stopping the wrong bot is worse than stopping none."""
         matches = [
             name
             for name in bots
             if name == bot_name
-            or _SUFFIXED.fullmatch(name[len(bot_name) :])
-            and name.startswith(bot_name)
+            or (
+                name.startswith(bot_name) and _SUFFIXED.fullmatch(name[len(bot_name) :])
+            )
         ]
         if len(matches) > 1:
             raise RuntimeError(f"several bots match {bot_name!r}: {sorted(matches)}")
@@ -188,12 +193,17 @@ class LiveMarket:
             pair_volume = float(inner.get("volume_traded", 0) or 0)
             net += pair_net
             volume += pair_volume
+            previous = carry.get(pair)
             per_pair[pair] = {
                 "running": True,
                 "reported": True,
                 "net": pair_net,
                 "volume": pair_volume,
             }
+            if previous and pair_volume < previous["volume"]:
+                # Volume only accumulates within a controller instance, so this
+                # is a fresh one: a redeploy, not a collapse in P&L.
+                per_pair[pair]["restarted"] = True
             carry[pair] = {"net": pair_net, "volume": pair_volume}
         if not math.isfinite(net) or not math.isfinite(volume):
             raise RuntimeError("Nonfinite bot performance")
@@ -325,6 +335,17 @@ class FixtureMarket:
 
     async def stop_bot(self, pair: str) -> bool:
         return False
+
+
+def book_restarted(per_pair: dict) -> list[str]:
+    """Books whose reported volume went backwards since the last tick.
+
+    Volume only accumulates within one controller instance, so a drop means a
+    fresh instance reporting from zero — a redeploy. Its P&L is not a loss of
+    the difference, and the previous deployment's high-water mark is not a
+    height it has fallen from.
+    """
+    return sorted(p for p, info in per_pair.items() if info.get("restarted"))
 
 
 def pnl_is_known(per_pair: dict) -> bool:

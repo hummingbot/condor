@@ -63,12 +63,14 @@ from flybrain.guard import (
     check_pnl,
     check_price_move,
     default_max_loss,
+    rebase,
     record_apply,
     resume,
 )
 from flybrain.market import (
     FixtureMarket,
     LiveMarket,
+    book_restarted,
     pnl_is_known,
     required_collateral,
 )
@@ -362,7 +364,6 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                 stop_reason = f"halted: {guard_state.halted}"
                 break
             pair = pairs[tick % len(pairs)]
-            names = pair_names(pair)
             spec = by_pair[pair]
             row: dict = {
                 "tick": tick,
@@ -376,7 +377,13 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                     pairs, pnl_carry
                 )
                 pnl_known = pnl_is_known(per_pair)
-                if anchor is None or not pnl_known:
+                restarted = book_restarted(per_pair)
+                if restarted:
+                    # A redeployed controller reports from zero: that is not a
+                    # loss to punish, and its predecessor's high is not a height
+                    # to measure it against.
+                    rebase(guard_state)
+                if anchor is None or not pnl_known or restarted:
                     kind, delta = "none", 0.0
                 else:
                     kind, delta = reinforcement(equity, anchor, deadband)
@@ -389,6 +396,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                         "pnl_delta": delta,
                         "stimulus": kind,
                         "pnl_known": pnl_known,
+                        "restarted": restarted,
                         "bots": per_pair,
                     }
                 )

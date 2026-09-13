@@ -171,6 +171,16 @@ def record_apply(
         raise Halt(state.halted, False)
 
 
+def rebase(state: GuardState) -> None:
+    """Forget the session's high-water marks after a book restarted.
+
+    A redeployed controller reports from zero. Measured against the previous
+    deployment's high, it would be halted for a drawdown that never happened.
+    """
+    state.session_high_net = None
+    state.ticks_since_high = 0
+
+
 def check_pnl(
     total_net: float,
     volume: float,

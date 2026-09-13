@@ -68,23 +68,54 @@ def test_provenance_refuses_changed_protocol(tmp_path):
     assert run.check_provenance(prov) == sig
 
 
-def test_sizing_settings_are_recorded_but_not_signed(tmp_path):
+def test_cadence_may_change_but_the_books_own_terms_may_not(tmp_path):
+    """A resume restores the anchor, the session high and the carried P&L.
+    Anything that denominates those must be signed, or a run judges one
+    deployment's numbers by another's thresholds."""
     run = RunDir(tmp_path / "run")
-    prov = {"settings": {"neural_ms": 500, "total_amount_quote": 200, "leverage": 3}}
-    sig = run.check_provenance(prov)
-    resized = {
+    base = {
         "settings": {
             "neural_ms": 500,
-            "total_amount_quote": 500,
-            "leverage": 5,
-            "portfolio_allocation": 1.0,
+            "interval_sec": 60,
+            "total_amount_quote": 200,
+            "leverage": 3,
+            "portfolio_allocation": 0.2,
+            "connector_name": "hyperliquid_perpetual",
         }
     }
-    assert run.check_provenance(resized) == sig
-    with pytest.raises(RuntimeError):
-        run.check_provenance(
-            {"settings": {"neural_ms": 700, "total_amount_quote": 200}}
-        )
+    sig = run.check_provenance(base)
+    # cadence moves no money and reinterprets no accounting
+    slower = {"settings": {**base["settings"], "interval_sec": 300}}
+    assert run.check_provenance(slower) == sig
+    for changed in (
+        {"total_amount_quote": 1000},
+        {"leverage": 5},
+        {"portfolio_allocation": 1.0},
+        {"connector_name": "binance_perpetual"},
+        {"neural_ms": 700},
+    ):
+        with pytest.raises(RuntimeError):
+            run.check_provenance({"settings": {**base["settings"], **changed}})
+
+
+def test_state_version_is_signed(tmp_path):
+    """A persisted-state change must orphan the run rather than let old state
+    be reinterpreted: session_high_net 0.0 -> None already proved why."""
+    import flybrain.run_state as run_state
+
+    run = RunDir(tmp_path / "run")
+    prov = {"settings": {"neural_ms": 500}}
+    sig = run.check_provenance(prov)
+    recorded = json.loads(run.provenance_path.read_text())
+    assert recorded["state_version"] == run_state.STATE_VERSION
+    original = run_state.STATE_VERSION
+    try:
+        run_state.STATE_VERSION = original + 1
+        with pytest.raises(RuntimeError):
+            run.check_provenance(prov)
+    finally:
+        run_state.STATE_VERSION = original
+    assert run.check_provenance(prov) == sig
 
 
 def test_source_hashes_cover_the_package():

@@ -6,7 +6,7 @@ import math
 
 import pytest
 from flybrain.guard import GuardSettings, Veto, check_price_move
-from flybrain.market import Book, LiveMarket
+from flybrain.market import Book, LiveMarket, book_restarted, pnl_is_known
 
 
 class _Controllers:
@@ -182,3 +182,56 @@ def test_status_rejects_escaping_run_name():
     for bad in ("../../etc", "/tmp/x", "a/b"):
         with pytest.raises(UnsafeIdError):
             asyncio.run(mod.run(mod.Config(run_name=bad), Ctx()))
+
+
+def test_a_redeployed_book_is_not_a_five_dollar_loss():
+    """A fresh controller instance reports from zero. Without the restart
+    check that reads as the whole previous deployment's P&L evaporating: a
+    large false aversive pulse, and a stale high the new book is measured
+    against."""
+    from flybrain.guard import GuardSettings, GuardState, Halt, check_pnl, rebase
+    from flybrain.market import book_restarted
+
+    traded = {
+        "orcl-fly-20260913-055821": {"performance": {"orcl_fly_mm": _perf(5.0, 7000.0)}}
+    }
+    net, _, per_pair, carry = asyncio.run(_market(traded).equity(["XYZ:ORCL-USD"]))
+    assert net == 5.0 and not book_restarted(per_pair)
+
+    guard, settings = GuardState(), GuardSettings(loss_no_new_high_ticks=3)
+    check_pnl(net, 7000.0, guard, settings, 100.0)
+    assert guard.session_high_net == 5.0
+
+    # the operator redeploys; the new instance reports from zero
+    fresh = {
+        "orcl-fly-20260913-071220": {"performance": {"orcl_fly_mm": _perf(0.0, 0.0)}}
+    }
+    net2, _, per_pair2, _ = asyncio.run(_market(fresh).equity(["XYZ:ORCL-USD"], carry))
+    assert book_restarted(per_pair2) == ["XYZ:ORCL-USD"]
+
+    # rebased, the fresh book sets its own high instead of counting down to a halt
+    rebase(guard)
+    for _ in range(5):
+        check_pnl(net2, 0.0, guard, settings, 100.0)
+    assert guard.session_high_net == 0.0
+
+    # without the rebase it would have halted against the old deployment's high
+    stale = GuardState(session_high_net=5.0)
+    with pytest.raises(Halt):
+        for _ in range(4):
+            check_pnl(0.0, 0.0, stale, settings, 100.0)
+
+
+def test_growing_volume_is_not_a_restart():
+    traded = {
+        "orcl-fly-20260913-055821": {"performance": {"orcl_fly_mm": _perf(5.0, 7000.0)}}
+    }
+    _, _, _, carry = asyncio.run(_market(traded).equity(["XYZ:ORCL-USD"]))
+    more = {
+        "orcl-fly-20260913-055821": {
+            "performance": {"orcl_fly_mm": _perf(-2.0, 9000.0)}
+        }
+    }
+    _, _, per_pair, _ = asyncio.run(_market(more).equity(["XYZ:ORCL-USD"], carry))
+    # P&L fell hard, but volume grew: a real loss, and it must still pulse
+    assert not book_restarted(per_pair) and pnl_is_known(per_pair)
