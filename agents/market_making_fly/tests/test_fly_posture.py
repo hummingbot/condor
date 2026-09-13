@@ -179,3 +179,20 @@ def test_an_order_sized_to_the_bare_minimum_is_refused():
     roomy = MarketSpec(**{**bare.__dict__, "portfolio_allocation": 0.3})
     roomy.check_order_size()
     assert roomy.order_notional == pytest.approx(15.0)
+
+
+def test_the_outer_level_never_lands_inside_the_inner_one():
+    """XYZ:DRAM-USD quotes 0.35 bp, where the playbook's S+1 (1.35) falls
+    inside max(2, S/2) (2.0) and the ladder inverts."""
+    from flybrain.posture import base_levels_from_spread
+
+    for spread in (0.1, 0.35, 1.75, 2.0, 8.0, 20.0):
+        first, second = base_levels_from_spread(spread)
+        assert second > first, f"levels inverted at S={spread}"
+    assert base_levels_from_spread(0.35) == (2.0, 3.0)
+    assert base_levels_from_spread(8.0) == (4.0, 9.0)  # wide markets unchanged
+    tight = build_config(
+        MarketSpec(**{**SPEC.__dict__, "picked_spread_bps": 0.35}), NEUTRAL
+    )
+    buys = _spreads(tight["buy_spreads"])
+    assert buys == sorted(buys) and len(set(buys)) == 2

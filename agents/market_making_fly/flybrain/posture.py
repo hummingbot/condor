@@ -157,9 +157,18 @@ def take_profit_floor_bps(maker_fee_bps: float) -> float:
     return max(4.0, 2.2 * 2 * maker_fee_bps)
 
 
+# The outer level must stay outside the inner one. The playbook's S+1 assumed
+# a market quoting several bp; on a tight book — XYZ:DRAM-USD quotes 0.35 —
+# S+1 lands inside max(2, S/2) and the ladder inverts, so the "outer" level
+# fills first and the inventory ladder means nothing.
+LEVEL_STEP_BPS = 1.0
+
+
 def base_levels_from_spread(picked_spread_bps: float) -> tuple[float, float]:
-    """HIP-3 playbook: level 1 ``max(2, S/2)`` bp, level 2 ``S+1`` bp."""
-    return max(2.0, picked_spread_bps / 2), picked_spread_bps + 1
+    """HIP-3 playbook: level 1 ``max(2, S/2)`` bp, level 2 ``S+1`` bp, with the
+    second never inside the first."""
+    first = max(2.0, picked_spread_bps / 2)
+    return first, max(picked_spread_bps + 1, first + LEVEL_STEP_BPS)
 
 
 def take_profit_floor(spec: MarketSpec) -> float:
