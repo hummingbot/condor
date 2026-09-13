@@ -82,6 +82,7 @@ manage_skill(action="read", name="fly_mm_deploy")
 ## Routines
 | Routine | Use |
 |---|---|
+| `fly_setup` | `action=prepare` downloads and compiles the connectome into this agent's home (once per install); `verify`; `bench` |
 | `hip3_market_scanner` | Rank xyz HIP-3 markets; take the top picks and their spreads |
 | `fly_chart` | Render the exact frame for a pair (what the fly sees) |
 | `fly_brain` | The loop (continuous). `mode=shadow|live`, `pairs`, `picked_spreads_bps`, `run_name` |

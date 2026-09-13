@@ -40,8 +40,9 @@ For each pair derive `token` (e.g. `DRAM`), `bot_name = {token.lower()}-fly`,
 
 ```python
 run_code(code="""
-from condor.fly.posture import MarketSpec, build_config
-from condor.fly.decoder import NEUTRAL
+import sys; sys.path.insert(0, "agents/market_making_fly")
+from flybrain.posture import MarketSpec, build_config
+from flybrain.decoder import NEUTRAL
 spec = MarketSpec(connector_name="hyperliquid_perpetual", trading_pair="XYZ:DRAM-USD",
                   total_amount_quote=500, picked_spread_bps=8.0, leverage=3)
 print(build_config(spec, NEUTRAL))

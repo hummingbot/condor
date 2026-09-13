@@ -5,13 +5,13 @@ import json
 import os
 from pathlib import Path
 
-# Condor: the connectome data lives under this install's runtime root
-# (``<repo>/.condor/fly/data``), overridable with ``CONDOR_FLY_DATA``. This is
-# the only edit to the vendored stonkfly code.
-from condor.paths import runtime_root
+# Condor: the connectome data lives in this agent's writable home
+# (``.condor/agents/market_making_fly/data``), overridable with ``CONDOR_FLY_DATA``.
+# This is the only edit to the vendored stonkfly code.
+from condor.memory.paths import agent_home
 
 DATA = Path(
-    os.environ.get("CONDOR_FLY_DATA") or (runtime_root() / "fly" / "data")
+    os.environ.get("CONDOR_FLY_DATA") or (agent_home("market_making_fly") / "data")
 ).resolve()
 GRAPH = DATA / "graph.npz"
 OUT = DATA / "cache"

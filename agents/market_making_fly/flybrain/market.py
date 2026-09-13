@@ -13,10 +13,9 @@ import time
 from dataclasses import dataclass
 
 import aiohttp
-
-from condor.fly.naming import pair_names
-from condor.fly.posture import MarketSpec
-from condor.fly.reinforcement import controller_net
+from flybrain.naming import pair_names
+from flybrain.posture import MarketSpec
+from flybrain.reinforcement import controller_net
 
 HL_INFO_URL = "https://api.hyperliquid.xyz/info"
 QUOTE_TOKENS = ("USD", "USDC")

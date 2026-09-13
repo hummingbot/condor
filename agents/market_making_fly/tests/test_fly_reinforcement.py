@@ -3,8 +3,7 @@
 from decimal import Decimal
 
 import pytest
-
-from condor.fly.reinforcement import controller_net, reinforcement
+from flybrain.reinforcement import controller_net, reinforcement
 
 
 @pytest.mark.parametrize(

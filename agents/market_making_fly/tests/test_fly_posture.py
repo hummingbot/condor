@@ -1,9 +1,8 @@
 """Posture → pmm_mister config: floors, lean cap, timing table, pause switch."""
 
 import pytest
-
-from condor.fly.decoder import NEUTRAL, Posture
-from condor.fly.posture import (
+from flybrain.decoder import NEUTRAL, Posture
+from flybrain.posture import (
     BPS,
     TIMING,
     MarketSpec,

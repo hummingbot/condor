@@ -1,8 +1,7 @@
 """Spike channels → posture: the regime table, warm-up, centring, hysteresis."""
 
 import pytest
-
-from condor.fly.decoder import (
+from flybrain.decoder import (
     NEUTRAL,
     Baseline,
     Channels,

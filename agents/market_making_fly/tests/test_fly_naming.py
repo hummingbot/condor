@@ -1,8 +1,7 @@
 """Derived names for a HIP-3 pair, and the pairs list rules."""
 
 import pytest
-
-from condor.fly.naming import pair_names, parse_pairs
+from flybrain.naming import pair_names, parse_pairs
 
 
 def test_pair_names():

@@ -1,6 +1,6 @@
 # Market Making Fly — implementation design
 
-Status: **draft for review, nothing implemented yet.**
+Status: **implemented (see §18); this document is the reference.**
 Date: 2026-09-12
 
 ## 1. Summary
@@ -41,14 +41,14 @@ puts the actual connectome in the decision path, which is what you asked for.
 
 | Stonkfly piece | MM Fly | Notes |
 |---|---|---|
-| `neural/` package: graph import, C++ LIF kernel, `MemoryBrain`, `VisualMemoryBrain`, `circuit` (PAM11/PPL101/KC/MBON), `rule` (anti-Hebbian memory), checksum locks | **Vendored unchanged** into `condor/fly/neural/` | MIT. Only the data-directory constant changes. Keeping it byte-identical keeps its lock/provenance chain valid. |
-| `data.py` prepare / verify (1.1 GB MaleCNS download, checksum, compile `graph.npz`) | Vendored, exposed as `condor fly prepare` / `condor fly verify` | Data lives under Condor's local, git-ignored root. |
-| `display.market_frame` (320×180 line chart) | **Replaced** by `condor/fly/chart.py`: OHLCV candlesticks + volume | Same canvas size and light palette so the retinal projection is unchanged. |
-| `Decoder` (DNp20 R−L → BUY/SELL/HOLD) | **Replaced** by `condor/fly/decoder.py`: DNp20 R−L → trend/skew, a population-rate channel → arousal/spread, gate on DNpe017 | Still a fixed, engineered readout of spike counts. |
+| `neural/` package: graph import, C++ LIF kernel, `MemoryBrain`, `VisualMemoryBrain`, `circuit` (PAM11/PPL101/KC/MBON), `rule` (anti-Hebbian memory), checksum locks | **Vendored unchanged** into `agents/market_making_fly/flybrain/neural/` | MIT. Only the data-directory constant changes. Keeping it byte-identical keeps its lock/provenance chain valid. |
+| `data.py` prepare / verify (1.1 GB MaleCNS download, checksum, compile `graph.npz`) | Vendored, exposed as the `fly_setup` routine (`action=prepare|verify|bench`) and `python agents/market_making_fly/flybrain/__main__.py …` | Data lives in the agent's own git-ignored home. |
+| `display.market_frame` (320×180 line chart) | **Replaced** by `agents/market_making_fly/flybrain/chart.py`: OHLCV candlesticks + volume | Same canvas size and light palette so the retinal projection is unchanged. |
+| `Decoder` (DNp20 R−L → BUY/SELL/HOLD) | **Replaced** by `agents/market_making_fly/flybrain/decoder.py`: DNp20 R−L → trend/skew, a population-rate channel → arousal/spread, gate on DNpe017 | Still a fixed, engineered readout of spike counts. |
 | `reinforcement.py` (equity delta vs anchor, deadband) | Same rule, equity = controller `realized + unrealized − fees` | Filtered by the bot/controller, so other bots on the account do not leak in. |
-| `risk.Guard` / `Veto` | `condor/fly/guard.py`: fee floor, loss stop, loss-rate breaker, apply cooldown, market-open, collateral, price-move tolerance | Veto keeps the previous config. It never invents a different posture. |
+| `risk.Guard` / `Veto` | `agents/market_making_fly/flybrain/guard.py`: fee floor, loss stop, loss-rate breaker, apply cooldown, market-open, collateral, price-move tolerance | Veto keeps the previous config. It never invents a different posture. |
 | `broker.py`, `actions.py`, `ledger.py` (Coinbase FOK orders, SQLite intents) | **Dropped** | Execution is Hummingbot `pmm_mister`; the fly never places orders itself. |
-| `cli.py` run loop, 2-slot checkpoints, `events.jsonl`, `latest.json`, `latest-input.png`, provenance hash | Re-implemented as the `fly_brain` continuous routine + `condor/fly/run_state.py` | Same durability pattern. |
+| `cli.py` run loop, 2-slot checkpoints, `events.jsonl`, `latest.json`, `latest-input.png`, provenance hash | Re-implemented as the `fly_brain` continuous routine + `agents/market_making_fly/flybrain/run_state.py` | Same durability pattern. |
 
 ## 3. Pipeline
 
@@ -77,7 +77,7 @@ accounting anchor are committed **before** anything is applied to the bot.
 
 ## 4. What the fly sees — chart specification
 
-`condor/fly/chart.py: market_frame(pair, candles, bid, ask) -> np.uint8[180,320,3]`
+`agents/market_making_fly/flybrain/chart.py: market_frame(pair, candles, bid, ask) -> np.uint8[180,320,3]`
 
 * Canvas 320×180, light background `(235,240,249)`, dark header bar with the
   pair name — identical to stonkfly. Stonkfly found the dark chart produced no
@@ -111,7 +111,7 @@ operator playbook).
 
 ## 5. The neural substrate
 
-* `condor/fly/neural/` = stonkfly's `neural/` package plus `data.py`, vendored
+* `agents/market_making_fly/flybrain/neural/` = stonkfly's `neural/` package plus `data.py`, vendored
   with a `THIRD_PARTY.md` notice (MIT). Files: `brain.py`, `state.py`,
   `circuit.py`, `rule.py`, `visual.py`, `sensory.py`, `transmitters.py`,
   `connectome.py`, `prepare.py`, `kernel.cpp`, and the four `*.lock.json`
@@ -121,12 +121,11 @@ operator playbook).
   per observation in 10 ms bins, 200 ms / 20 mV dopamine pulse, KC rest −60 mV
   with adaptation, R8 → aMe12 sign correction, memory rule gain 0.001, 1 s
   eligibility traces, 1,800 s memory decay, efficacy bounds 0.1–2×.
-* **Data**: `condor fly prepare` downloads ~1.1 GB (annotations + edges
+* **Data**: `fly_setup` (`action=prepare`) downloads ~1.1 GB (annotations + edges
   feather), verifies SHA-256 against the locks, compiles `graph.npz`
   (166,700 × 25,582,938) and builds the C++ kernel with `c++ -O3`. Location:
-  `<local root>/fly/data/` (git-ignored, beside `.condor/agents/`), overridable
-  with `CONDOR_FLY_DATA`. `condor fly verify` re-checks; `condor doctor` gets a
-  `fly-data` row.
+  `.condor/agents/market_making_fly/data/` (the agent's writable home, git-ignored),
+  overridable with `CONDOR_FLY_DATA`. `fly_setup` `action=verify` re-checks.
 * **Process model**: the simulation is CPU-bound C++ called through ctypes and
   must not run on Condor's event loop. The `fly_brain` routine owns a
   `ProcessPoolExecutor(max_workers=1, spawn)` whose initializer loads
@@ -136,14 +135,14 @@ operator playbook).
   instance; a per-run lock file prevents two instances on one run directory
   (stonkfly's `worker.lock`).
 * **Compute budget**: stonkfly does not publish a per-observation timing.
-  `condor fly bench` will run three observations on a synthetic frame and print
+  `fly_setup` `action=bench` will run three observations on a synthetic frame and print
   `compute_seconds`; if it exceeds ~40 % of `interval_sec`, lower `neural_ms`
   (it is a config field). Memory: the graph is ~300 MB resident, checkpoints
   ~100 MB each × 2 slots.
 
 ## 6. Decoder — spikes → quoting posture
 
-`condor/fly/decoder.py`. Engineered and fixed, like stonkfly's — it reads only
+`agents/market_making_fly/flybrain/decoder.py`. Engineered and fixed, like stonkfly's — it reads only
 spike counts, and the cell IDs it reads are written to the audit log.
 
 Raw channels per observation (`seconds = neural_ms / 1000`):
@@ -194,7 +193,7 @@ fitted basis. They are config fields.
 
 ## 7. Posture → `pmm_mister` config
 
-`condor/fly/posture.py: build_config(base, posture, fees) -> dict`. The base
+`agents/market_making_fly/flybrain/posture.py: build_config(base, posture, fees) -> dict`. The base
 config is the HIP-3 operator's bounded defaults, the posture multiplies and
 shifts it:
 
@@ -226,7 +225,7 @@ config, both layers, per the deploy playbook.
 
 ## 8. Guard — vetoes only
 
-`condor/fly/guard.py`. Every rule is deterministic; a veto means "keep the
+`agents/market_making_fly/flybrain/guard.py`. Every rule is deterministic; a veto means "keep the
 previous config", a halt means "stop the bot and stop the fly until a human
 passes `resume_reviewed=true`". None of them chooses a different posture.
 
@@ -246,7 +245,7 @@ passes `resume_reviewed=true`". None of them chooses a different posture.
 
 ## 9. Reinforcement — P&L → dopamine
 
-`condor/fly/reinforcement.py`, stonkfly's function with a different equity
+`agents/market_making_fly/flybrain/reinforcement.py`, stonkfly's function with a different equity
 source:
 
 * `equity_t = realized_pnl + unrealized_pnl − fees` for **this bot's**
@@ -309,7 +308,8 @@ every tick and make no claim beyond them.
 ## 11. Condor integration — files
 
 ```
-condor/fly/
+agents/market_making_fly/
+  flybrain/                 # everything below lives inside the agent; nothing in condor/ changes
   __init__.py
   neural/                 # vendored stonkfly.neural + THIRD_PARTY.md (MIT)
   data.py                 # vendored prepare/verify, Condor data dir
@@ -320,7 +320,7 @@ condor/fly/
   reinforcement.py        # equity delta → reward|aversive|none
   worker.py               # ProcessPoolExecutor target: load brain, observe, checkpoint, restore
   run_state.py            # run dir: state.json, events.jsonl, latest.json, PNG, 2-slot checkpoints, provenance, lock, STOP
-  cli.py                  # condor fly prepare | verify | bench
+  __main__.py             # prepare | verify | bench, runnable by path
 
 agents/market_making_fly/
   AGENT.md                # operator brain (LLM)
@@ -338,7 +338,7 @@ agents/market_making_fly/
     mm_bot_report/              # copied
   strategies/fly_hip3_operator/strategy.md   # thin loop: keep bot + fly alive, surface halts, rotate when flat
 
-tests/
+agents/market_making_fly/tests/     # conftest puts the agent dir on sys.path
   test_fly_chart.py test_fly_decoder.py test_fly_posture.py
   test_fly_guard.py test_fly_reinforcement.py
   test_fly_full_graph.py   # opt-in, CONDOR_FLY_FULL_TEST=1, needs prepared data
@@ -394,7 +394,7 @@ Expert.
 
 ## 12. Deploy lifecycle
 
-1. `condor fly prepare` once per machine (1.1 GB, several minutes, needs `c++`).
+1. `fly_setup` with `action=prepare` once per install (1.1 GB, several minutes, needs `c++`).
 2. Operator agent runs the scanner, deploys `pmm_mister` on the TOP PICK with
    the neutral (ranging) posture config.
 3. `manage_routines(action="start", name="fly_brain", agent="market_making_fly",
@@ -475,10 +475,10 @@ Copied in spirit from stonkfly's `docs/model.md`, because the same limits hold:
 Settled 2026-09-12: 1 vendor, 2 deterministic apply, 3 descending neurons,
 4 baseline-centred, 5 72 × 5 m, 6 net P&L incl. unrealized, 7 **three markets
 in parallel on one shared brain** (see §10), 8 shadow default, 9
-`.condor/fly/data`, 10 no target-base nudge. The original options are kept
+`.condor/agents/market_making_fly/data`, 10 no target-base nudge. The original options are kept
 below for the record.
 
-1. **Vendor stonkfly's neural package into `condor/fly/neural/` (recommended)**
+1. **Vendor stonkfly's neural package into `agents/market_making_fly/flybrain/neural/` (recommended)**
    vs `pip install git+…stonkfly`. Installing pulls `coinbase-agentkit` and
    `coinbase-advanced-py` into Condor for no use; vendoring adds ~1,400 lines +
    the kernel + `pyarrow` as a new dependency.
@@ -510,7 +510,7 @@ below for the record.
 
 | Phase | Deliverable | Verifies |
 |---|---|---|
-| 1 | `condor/fly/neural` vendored, `data.py`, `condor fly prepare/verify/bench`, `pyarrow` dep, doctor row | `prepare` completes on this Mac, `verify` passes, `bench` prints compute time |
+| 1 | `agents/market_making_fly/flybrain/neural` vendored, `data.py`, `fly_setup` routine, `pyarrow` dep | `prepare` completes on this Mac, `verify` passes, `bench` prints compute time |
 | 2 | `chart.py` + tests, `fly_chart` routine | rendered DRAM chart in a report |
 | 3 | `decoder.py`, `posture.py`, `guard.py`, `reinforcement.py` + tests | unit suite green |
 | 4 | `worker.py`, `run_state.py`, `fly_brain` routine, fixture mode | `fixture + fast + steps=6` run end-to-end with checkpoint resume |
@@ -526,19 +526,20 @@ Phases 1–5 are implemented; phase 6 (live at small size) is the operator's cal
 
 | Piece | Where | State |
 |---|---|---|
-| Vendored neural package, data prepare/verify, kernel | `condor/fly/neural/`, `condor/fly/data.py`, `python -m condor.fly prepare\|verify\|bench` | done; dataset prepared at `.condor/fly/data` (1.6 GB), verified, kernel built |
-| Chart, decoder, posture, guard, reinforcement, naming, market, run state, worker | `condor/fly/*.py` | done, 77 unit tests green (`uv run pytest tests/test_fly_*.py`) |
+| Vendored neural package, data prepare/verify, kernel | `agents/market_making_fly/flybrain/neural/`, `flybrain/data.py`, `fly_setup` routine | done; dataset prepared at `.condor/agents/market_making_fly/data` (1.6 GB), verified, kernel built |
+| Chart, decoder, posture, guard, reinforcement, naming, market, run state, worker | `agents/market_making_fly/flybrain/*.py` | done, 77 unit tests green (`uv run pytest agents/market_making_fly/tests`) |
 | Loop routine | `agents/market_making_fly/routines/fly_brain.py` | done; 14-observation fixture run end to end (checkpoints, events, live report, halt path) |
 | `fly_chart`, `fly_status`, copied scanner/dashboard | `agents/market_making_fly/routines/` | done, load through routine discovery |
 | Agent brain, deploy playbook, decoder skill, operator strategy | `agents/market_making_fly/{AGENT.md,skills,strategies}` | done |
-| Opt-in full-graph test | `tests/test_fly_full_graph.py` (`CONDOR_FLY_FULL_TEST=1`) | done |
-| Doctor row | — | not done; use `python -m condor.fly verify` |
+| Opt-in full-graph test | `agents/market_making_fly/tests/test_fly_full_graph.py` (`CONDOR_FLY_FULL_TEST=1`) | done |
+| Doctor row | — | not done; use `fly_setup` `action=verify` |
 
 Deviations from the text above: the descending-neuron superclass label in
-`graph.npz` is `descending_neuron` (1,314 cells); the CLI is
-`python -m condor.fly …` rather than a `condor fly` subcommand (there is no
-`condor` console script in this repo); checkpoints are ~7 MB compressed, not
-100 MB.
+`graph.npz` is `descending_neuron` (1,314 cells); the whole implementation is
+contained in `agents/market_making_fly/` (package `flybrain`, put on `sys.path`
+by the routines) so no core Condor module changes — the only repo-level edit is
+the `pyarrow` dependency; setup is the `fly_setup` routine rather than a CLI;
+checkpoints are ~7 MB compressed, not 100 MB.
 
 ### First measurements
 

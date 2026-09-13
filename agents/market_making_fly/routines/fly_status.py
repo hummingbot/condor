@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+_AGENT_DIR = str(Path(__file__).resolve().parents[1])
+if _AGENT_DIR not in sys.path:
+    sys.path.insert(0, _AGENT_DIR)
+
 import json
 import logging
 
+from flybrain.run_state import RunDir
 from pydantic import BaseModel, Field
 from telegram.ext import ContextTypes
 
-from condor.fly.run_state import RunDir
 from condor.memory.paths import agent_home
 from condor.reports import ReportBuilder
 

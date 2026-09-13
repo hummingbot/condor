@@ -18,7 +18,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-from condor.fly.decoder import REGIMES, Posture
+from flybrain.decoder import REGIMES, Posture
 
 # executor_refresh_time, buy/sell cooldown — Market Making Expert's table.
 TIMING: dict[str, tuple[int, int]] = {

@@ -12,7 +12,7 @@ import math
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 
-from condor.fly.posture import MarketSpec, take_profit_floor
+from flybrain.posture import MarketSpec, take_profit_floor
 
 BPS = 1e-4
 

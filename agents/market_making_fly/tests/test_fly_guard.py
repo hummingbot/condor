@@ -1,9 +1,8 @@
 """Every guard rule: veto vs halt, and a financial halt that review cannot clear."""
 
 import pytest
-
-from condor.fly.decoder import NEUTRAL
-from condor.fly.guard import (
+from flybrain.decoder import NEUTRAL
+from flybrain.guard import (
     GuardSettings,
     GuardState,
     Halt,
@@ -19,7 +18,7 @@ from condor.fly.guard import (
     record_apply,
     resume,
 )
-from condor.fly.posture import MarketSpec, build_config
+from flybrain.posture import MarketSpec, build_config
 
 SPEC = MarketSpec("hyperliquid_perpetual", "XYZ:DRAM-USD", 500, 8.0)
 S = GuardSettings()

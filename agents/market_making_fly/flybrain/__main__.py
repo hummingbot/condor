@@ -1,4 +1,4 @@
-"""``uv run python -m condor.fly prepare | verify | bench``.
+"""``uv run python agents/market_making_fly/flybrain/__main__.py prepare | verify | bench``.
 
 ``prepare`` downloads the MaleCNS v1.0 release files (~1.1 GB), verifies their
 checksums, compiles the retained graph and builds the C++ kernel. ``verify``
@@ -13,10 +13,15 @@ import argparse
 import json
 import sys
 import time
+from pathlib import Path
+
+_AGENT_DIR = str(Path(__file__).resolve().parents[1])
+if _AGENT_DIR not in sys.path:
+    sys.path.insert(0, _AGENT_DIR)
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="python -m condor.fly", description=__doc__)
+    parser = argparse.ArgumentParser(prog="python -m flybrain", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("prepare", help="download, verify and compile the connectome")
     sub.add_parser("verify", help="re-check the prepared connectome arrays")
@@ -25,26 +30,25 @@ def main(argv: list[str] | None = None) -> int:
     bench.add_argument("--neural-ms", type=float, default=500.0)
     args = parser.parse_args(argv)
 
-    from condor.fly.neural.common import DATA
+    from flybrain.neural.common import DATA
 
     if args.command == "prepare":
-        from condor.fly.data import prepare
+        from flybrain.data import prepare
 
         print(f"Data directory: {DATA}", flush=True)
         prepare()
-        from condor.fly.neural.brain import build
+        from flybrain.neural.brain import build
 
         print(json.dumps({"kernel": build()["model"], "data": str(DATA)}))
         return 0
     if args.command == "verify":
-        from condor.fly.data import verify
+        from flybrain.data import verify
 
         print(json.dumps({**verify(), "data": str(DATA)}))
         return 0
     if args.command == "bench":
         import numpy as np
-
-        from condor.fly.worker import FlyBrain
+        from flybrain.worker import FlyBrain
 
         started = time.perf_counter()
         brain = FlyBrain(learning=True)

@@ -4,8 +4,7 @@ import hashlib
 
 import numpy as np
 import pytest
-
-from condor.fly import chart
+from flybrain import chart
 
 
 def _candles(n=72, start=100.0, step=0.5, up=True):

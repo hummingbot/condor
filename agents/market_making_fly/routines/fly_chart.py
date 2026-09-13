@@ -2,16 +2,23 @@
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+_AGENT_DIR = str(Path(__file__).resolve().parents[1])
+if _AGENT_DIR not in sys.path:
+    sys.path.insert(0, _AGENT_DIR)
+
 import logging
 
 import aiohttp
 import plotly.graph_objects as go
+from flybrain.chart import market_frame, normalize_candles, price_scale
+from flybrain.market import fetch_l2_book, normalize_candle_payload
+from flybrain.naming import pair_names
 from pydantic import BaseModel, Field
 from telegram.ext import ContextTypes
 
-from condor.fly.chart import market_frame, normalize_candles, price_scale
-from condor.fly.market import fetch_l2_book, normalize_candle_payload
-from condor.fly.naming import pair_names
 from condor.reports import ReportBuilder
 from config_manager import get_client
 

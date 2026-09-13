@@ -1,21 +1,13 @@
 """Opt-in full-connectome checks — stonkfly's integration test transposed.
 
-Needs the prepared dataset (``python -m condor.fly prepare``) and about a
+Needs the prepared dataset (``python -m flybrain prepare``) and about a
 minute: ``CONDOR_FLY_FULL_TEST=1 uv run pytest tests/test_fly_full_graph.py``.
 """
 
 import os
-from pathlib import Path
 
 import numpy as np
 import pytest
-
-# The suite isolates CONDOR_RUNTIME_ROOT into a temp dir; the prepared
-# connectome lives in the real one unless CONDOR_FLY_DATA says otherwise.
-os.environ.setdefault(
-    "CONDOR_FLY_DATA",
-    str(Path(__file__).resolve().parent.parent / ".condor" / "fly" / "data"),
-)
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("CONDOR_FLY_FULL_TEST") != "1",
@@ -24,10 +16,10 @@ pytestmark = pytest.mark.skipif(
 
 
 def test_chart_reaches_kenyon_cells_and_pulses_hit_dopamine_cells(tmp_path):
-    from condor.fly.chart import market_frame
-    from condor.fly.data import verify
-    from condor.fly.market import FixtureMarket
-    from condor.fly.worker import FlyBrain
+    from flybrain.chart import market_frame
+    from flybrain.data import verify
+    from flybrain.market import FixtureMarket
+    from flybrain.worker import FlyBrain
 
     assert verify()["neurons"] == 166700
     brain = FlyBrain(learning=True)

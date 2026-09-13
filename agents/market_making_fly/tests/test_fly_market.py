@@ -3,15 +3,14 @@
 import asyncio
 
 import pytest
-
-from condor.fly.chart import market_frame
-from condor.fly.market import (
+from flybrain.chart import market_frame
+from flybrain.market import (
     Book,
     FixtureMarket,
     normalize_candle_payload,
     required_collateral,
 )
-from condor.fly.posture import MarketSpec
+from flybrain.posture import MarketSpec
 
 PAIRS = ["XYZ:A-USD", "XYZ:B-USD", "XYZ:C-USD"]
 

@@ -18,6 +18,13 @@ The guard can veto or halt; nothing in this file chooses a posture.
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+_AGENT_DIR = str(Path(__file__).resolve().parents[1])
+if _AGENT_DIR not in sys.path:
+    sys.path.insert(0, _AGENT_DIR)
+
 import asyncio
 import logging
 import multiprocessing
@@ -28,12 +35,9 @@ from pathlib import Path
 
 import numpy as np
 import plotly.graph_objects as go
-from pydantic import BaseModel, Field
-from telegram.ext import ContextTypes
-
-from condor.fly import worker
-from condor.fly.chart import market_frame
-from condor.fly.decoder import (
+from flybrain import worker
+from flybrain.chart import market_frame
+from flybrain.decoder import (
     Baseline,
     Channels,
     DecoderSettings,
@@ -42,7 +46,7 @@ from condor.fly.decoder import (
     decode,
     should_apply,
 )
-from condor.fly.guard import (
+from flybrain.guard import (
     GuardSettings,
     GuardState,
     Halt,
@@ -58,11 +62,14 @@ from condor.fly.guard import (
     record_apply,
     resume,
 )
-from condor.fly.market import FixtureMarket, LiveMarket, required_collateral
-from condor.fly.naming import pair_names, parse_pairs
-from condor.fly.posture import MarketSpec, build_config, config_diff
-from condor.fly.reinforcement import reinforcement
-from condor.fly.run_state import RunDir, source_hashes
+from flybrain.market import FixtureMarket, LiveMarket, required_collateral
+from flybrain.naming import pair_names, parse_pairs
+from flybrain.posture import MarketSpec, build_config, config_diff
+from flybrain.reinforcement import reinforcement
+from flybrain.run_state import RunDir, source_hashes
+from pydantic import BaseModel, Field
+from telegram.ext import ContextTypes
+
 from condor.memory.paths import agent_home
 from condor.reports import LiveReport
 
@@ -200,6 +207,13 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         config.reward_deadband_bps * BPS * sum(s.total_amount_quote for s in specs)
     )
 
+    from flybrain.neural.common import DATA, GRAPH
+
+    if not GRAPH.exists():
+        raise RuntimeError(
+            f"Connectome not prepared at {DATA}; run the fly_setup routine with "
+            'action="prepare" first (downloads ~1.1 GB, needs a C++ compiler)'
+        )
     run_dir = RunDir(agent_home(AGENT_SLUG) / "fly" / config.run_name)
     run_dir.lock()
     pool = ProcessPoolExecutor(
@@ -238,7 +252,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         anchor = state.get("anchor")
         tick = int(state.get("tick", 0))
 
-        from condor.fly.data import verify
+        from flybrain.data import verify
 
         dataset = await loop.run_in_executor(None, verify)
         brain_prov = await loop.run_in_executor(pool, worker._provenance)

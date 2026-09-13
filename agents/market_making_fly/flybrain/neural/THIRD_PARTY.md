@@ -1,6 +1,6 @@
 # Third-party notice
 
-`condor/fly/neural/` and `condor/fly/data.py` are vendored from
+`agents/market_making_fly/flybrain/neural/` and `agents/market_making_fly/flybrain/data.py` are vendored from
 https://github.com/nftechie/stonkfly (MIT License, Copyright (c) 2026 nftechie
 and DOOMFLY contributors). Only `neural/common.py` is modified: the data
 directory resolves to Condor's runtime root instead of `./data`.

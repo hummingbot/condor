@@ -4,8 +4,7 @@ import json
 
 import numpy as np
 import pytest
-
-from condor.fly.run_state import RunDir, signature, source_hashes
+from flybrain.run_state import RunDir, signature, source_hashes
 
 
 def test_lock_is_exclusive(tmp_path):

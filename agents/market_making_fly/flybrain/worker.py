@@ -28,8 +28,8 @@ class FlyBrain:
         pulse_ms: float = 200.0,
         pulse_current: float = 20.0,
     ):
-        from condor.fly.neural.common import annotations
-        from condor.fly.neural.visual import VisualMemoryBrain
+        from flybrain.neural.common import annotations
+        from flybrain.neural.visual import VisualMemoryBrain
 
         if neural_bin_ms <= 0 or neural_bin_ms > 10:
             raise ValueError("neural_bin_ms must be in (0, 10]")
