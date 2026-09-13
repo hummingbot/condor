@@ -25,9 +25,9 @@ _AGENT_DIR = str(Path(__file__).resolve().parents[1])
 if _AGENT_DIR not in sys.path:
     sys.path.insert(0, _AGENT_DIR)
 # Condor re-executes this file when it changes but keeps imported modules
-# cached; drop flybrain's so the reload actually picks up the package.
-for _name in [m for m in sys.modules if m == "flybrain" or m.startswith("flybrain.")]:
-    del sys.modules[_name]
+# cached: after editing anything under flybrain/, restart Condor. Purging the
+# cache here is not an option — each routine would re-import its own copy and
+# the spawned brain worker could no longer pickle flybrain.worker._init.
 
 import asyncio
 import logging

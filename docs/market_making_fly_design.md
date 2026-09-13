@@ -539,7 +539,9 @@ Deviations from the text above: the descending-neuron superclass label in
 contained in `agents/market_making_fly/` (package `flybrain`, put on `sys.path`
 by the routines) so no core Condor module changes — the only repo-level edit is
 the `pyarrow` dependency; setup is the `fly_setup` routine rather than a CLI;
-checkpoints are ~7 MB compressed, not 100 MB.
+checkpoints are ~7 MB compressed, not 100 MB. Condor re-executes a routine
+file when it changes but keeps imported modules cached, so after editing
+anything under `flybrain/` restart Condor before starting `fly_brain`.
 
 ### First measurements
 
