@@ -208,6 +208,6 @@ def test_the_scanner_requires_the_spread_to_clear_the_venues_own_fee():
         fee = venue.default_maker_fee_bps(connector, venue.market_type_for(connector))
         return 2 * fee * cfg.min_spread_over_fee
 
-    assert floor_for("hyperliquid_perpetual") == pytest.approx(3.9)
     assert floor_for("binance") == pytest.approx(22.5)  # spot costs far more
-    assert floor_for("binance") > 5 * floor_for("hyperliquid_perpetual") / 2
+    assert floor_for("binance_perpetual") == pytest.approx(6.0)
+    assert floor_for("binance") > 3 * floor_for("binance_perpetual")

@@ -128,18 +128,32 @@ async def _measure(market: LiveMarket, pair: str, config: Config, sem) -> dict:
         except Exception as failure:  # external feed, one market
             row["error"] = repr(failure)[:80]
             return row
-        try:
-            raw = await market.client.market_data.get_candles(
-                config.connector_name, pair, interval="1h", max_records=25
-            )
-            rows = raw if isinstance(raw, list) else raw.get("data", raw.get("candles"))
-            closes = [float(c["close"]) for c in (rows or []) if c.get("close")]
-            row["drift_pct"] = (
-                abs(closes[-1] / closes[0] - 1) * 100 if len(closes) >= 2 else None
-            )
-        except Exception as failure:
-            row["drift_pct"] = None
-            row["drift_error"] = repr(failure)[:60]
+        # The first ask for a market hummingbot-api has not seen subscribes a
+        # candle feed and returns 504 if it is not ready within 30 s. That is a
+        # cold feed, not a missing market: the same call answers on the second
+        # attempt. Asking twice is the difference between a scan that ranks the
+        # venue and one that rejects all of it for "no candles".
+        for attempt in (1, 2):
+            try:
+                raw = await market.client.market_data.get_candles(
+                    config.connector_name, pair, interval="1h", max_records=25
+                )
+                rows = (
+                    raw
+                    if isinstance(raw, list)
+                    else raw.get("data", raw.get("candles"))
+                )
+                closes = [float(c["close"]) for c in (rows or []) if c.get("close")]
+                row["drift_pct"] = (
+                    abs(closes[-1] / closes[0] - 1) * 100 if len(closes) >= 2 else None
+                )
+                break
+            except Exception as failure:  # external feed, one market
+                row["drift_pct"] = None
+                row["drift_error"] = (
+                    str(getattr(failure, "message", "") or failure)[:70]
+                    or repr(failure)[:70]
+                )
     return row
 
 
@@ -151,11 +165,6 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         return "No server available"
 
     market_type = venue.market_type_for(config.connector_name)
-    fee_bps = config.maker_fee_bps or venue.default_maker_fee_bps(
-        config.connector_name, market_type
-    )
-    round_trip_bps = 2 * fee_bps
-    min_spread_bps = round_trip_bps * config.min_spread_over_fee
 
     # ── 1. Enumerate and screen on volume, which is one call ──────────────────
     if config.pairs.strip():
@@ -206,9 +215,21 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     )
     by_pair = {m["pair"]: m for m in measured}
 
+    # One connector can serve two fee families — a Hyperliquid core perp costs
+    # twice what one of its HIP-3 markets does — so each market is ranked
+    # against its own round trip, not the venue's average.
+    fees = {
+        pair: config.maker_fee_bps
+        or await venue.maker_fee_bps(config.connector_name, market_type, pair)
+        for pair, _ in screened
+    }
+
     rows = []
     for pair, volume in screened:
         m = by_pair[pair]
+        fee_bps = fees[pair]
+        round_trip_bps = 2 * fee_bps
+        min_spread_bps = round_trip_bps * config.min_spread_over_fee
         drift = m.get("drift_pct")
         depth = min(m.get("bid_depth_usd", 0.0), m.get("ask_depth_usd", 0.0))
         spread = m.get("spread_bps", 0.0)
@@ -222,13 +243,15 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         if depth < config.min_book_depth_usd:
             reasons.append(f"depth ${depth:,.0f}")
         if drift is None:
-            reasons.append("no candles")
+            reasons.append(f"drift unreadable: {m.get('drift_error', 'no candles')}")
         elif drift > config.max_daily_drift_pct:
             reasons.append(f"drift {drift:.1f}%")
         rows.append(
             {
                 "pair": pair,
                 "volume": volume,
+                "fee_bps": fee_bps,
+                "floor_bps": min_spread_bps,
                 "spread_bps": spread,
                 "spread_over_fee": spread / round_trip_bps if round_trip_bps else 0.0,
                 "depth_usd": depth,
@@ -253,17 +276,32 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     builder.source("routine", "mm_market_scanner")
     builder.tags(["market-making", "scanner", config.connector_name])
     builder.manual_order()
+    cheapest, dearest = min(fees.values()), max(fees.values())
+    fee_text = (
+        f"{cheapest:.2f} bp"
+        if cheapest == dearest
+        else f"{cheapest:.2f}–{dearest:.2f} bp"
+    )
     builder.section(
         "WHAT A ROUND TRIP COSTS HERE",
-        f"{market_type} venue · maker {fee_bps:.2f} bp a side · round trip "
-        f"{round_trip_bps:.2f} bp · a market must quote at least "
-        f"{min_spread_bps:.2f} bp to clear it by {config.min_spread_over_fee}×",
+        f"{market_type} venue · maker {fee_text} a side · each market must quote "
+        f"{config.min_spread_over_fee}× its own round trip to clear it"
+        + (
+            ""
+            if cheapest == dearest
+            else ". This venue charges different markets differently, so the floor "
+            "below is per market rather than venue-wide"
+        ),
     )
     builder.kpi("Venue", config.connector_name)
     builder.kpi("Type", market_type)
-    builder.kpi("Maker fee", f"{fee_bps:.2f} bp")
-    builder.kpi("Round trip", f"{round_trip_bps:.2f} bp")
-    builder.kpi("Spread floor", f"{min_spread_bps:.2f} bp")
+    builder.kpi("Maker fee", fee_text)
+    builder.kpi("Round trip", f"{2 * cheapest:.2f}–{2 * dearest:.2f} bp")
+    builder.kpi(
+        "Spread floor",
+        f"{2 * cheapest * config.min_spread_over_fee:.2f}–"
+        f"{2 * dearest * config.min_spread_over_fee:.2f} bp",
+    )
     builder.kpi("Listed", f"{listed:,}")
     builder.kpi("Book-checked", str(len(screened)))
     builder.kpi("Survivors", str(len([r for r in rows if r["survives"]])))
@@ -277,6 +315,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                 "Pair": r["pair"],
                 "24h volume": f"${r['volume']:,.0f}",
                 "Spread": f"{r['spread_bps']:.2f} bp",
+                "Maker fee": f"{r['fee_bps']:.2f} bp",
                 "× round trip": f"{r['spread_over_fee']:.2f}×",
                 "Depth/side": f"${r['depth_usd']:,.0f}",
                 "Drift": (
@@ -291,6 +330,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
             "Pair",
             "24h volume",
             "Spread",
+            "Maker fee",
             "× round trip",
             "Depth/side",
             "Drift",
@@ -328,14 +368,14 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
 
     lines = [
         f"venue: {config.connector_name} ({market_type})",
-        f"maker_fee_bps: {fee_bps:.2f} (round trip {round_trip_bps:.2f})",
-        f"spread_floor_bps: {min_spread_bps:.2f}",
+        f"maker_fee_bps: {fee_text} a side",
         f"listed: {listed}, book_checked: {len(screened)}, survivors: {len(survivors)}",
     ]
     for n, r in enumerate(survivors, 1):
         lines.append(
-            f"{n}. {r['pair']}: spread {r['spread_bps']:.2f} bp "
-            f"({r['spread_over_fee']:.2f}× round trip), depth ${r['depth_usd']:,.0f}/side, "
+            f"{n}. {r['pair']}: spread {r['spread_bps']:.2f} bp vs a "
+            f"{r['floor_bps']:.2f} bp floor ({r['spread_over_fee']:.2f}× round trip), "
+            f"fee {r['fee_bps']:.2f} bp, depth ${r['depth_usd']:,.0f}/side, "
             f"vol ${r['volume']:,.0f}, drift "
             + (f"{r['drift_pct']:.2f}%" if r["drift_pct"] is not None else "—")
         )

@@ -40,7 +40,7 @@ from pathlib import Path
 
 import numpy as np
 import plotly.graph_objects as go
-from flybrain import worker
+from flybrain import venue, worker
 from flybrain.chart import market_frame
 from flybrain.decoder import (
     Baseline,
@@ -182,12 +182,20 @@ class Config(BaseModel):
     )
 
 
-def _specs(config: Config, pairs: list[str]) -> list[MarketSpec]:
+async def _specs(config: Config, pairs: list[str]) -> list[MarketSpec]:
+    """One spec per pair, each carrying the fee its own market charges.
+
+    The fee is not a property of the connector: one Hyperliquid account pays
+    2.5 bp a side on a core perp and 1.3 bp on a HIP-3 market in growth mode.
+    The take-profit floor is derived from it, so it is read per pair unless the
+    caller passed a figure of their own.
+    """
     spreads = [float(x) for x in config.picked_spreads_bps.split(",") if x.strip()]
     if len(spreads) != len(pairs):
         raise ValueError(
             f"picked_spreads_bps has {len(spreads)} entries for {len(pairs)} pairs"
         )
+    market_type = venue.resolve(config.connector_name, config.market_type)
     return [
         MarketSpec(
             connector_name=config.connector_name,
@@ -196,7 +204,10 @@ def _specs(config: Config, pairs: list[str]) -> list[MarketSpec]:
             picked_spread_bps=spread,
             market_type=config.market_type,
             leverage=config.leverage,
-            maker_fee_bps=config.maker_fee_bps,
+            maker_fee_bps=(
+                config.maker_fee_bps
+                or await venue.maker_fee_bps(config.connector_name, market_type, pair)
+            ),
             portfolio_allocation=config.portfolio_allocation,
         )
         for pair, spread in zip(pairs, spreads)
@@ -226,7 +237,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     if config.interval_sec < 10:
         raise ValueError("interval_sec must be >= 10")
     pairs = parse_pairs(config.pairs)
-    specs = _specs(config, pairs)
+    specs = await _specs(config, pairs)
     for spec in specs:
         spec.check_order_size()  # fail at start, not on the first apply
     by_pair = {s.trading_pair: s for s in specs}
@@ -642,7 +653,15 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                 b.section("05 / GUARD", "Halts, breakers, apply budget")
                 b.kpi("Halted", guard_state.halted or "no")
                 b.kpi("Applies today", str(guard_state.applies_today))
-                b.kpi("Session high", f"{guard_state.session_high_net:+.4f}")
+                # None until a bot has reported P&L: the first report sets the
+                # high, and a zero here would read as a real high the run had
+                # already fallen from.
+                b.kpi(
+                    "Session high",
+                    "—"
+                    if guard_state.session_high_net is None
+                    else f"{guard_state.session_high_net:+.4f}",
+                )
                 b.kpi("Ticks since high", str(guard_state.ticks_since_high))
                 b.kpi("Loss stop", f"-{max_loss:.2f}")
                 b.markdown(

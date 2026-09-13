@@ -1,5 +1,7 @@
 """Spot or perp, and what a round trip costs there."""
 
+import asyncio
+
 import pytest
 from flybrain import venue
 
@@ -41,3 +43,52 @@ def test_resolve_refuses_a_contradiction():
         venue.resolve("binance", "margin")
     with pytest.raises(ValueError):
         venue.market_type_for("")
+
+
+def _seed_hyperliquid_fees():
+    """The two Hyperliquid payloads the fee comes from, as the venue returns
+    them. Seeding the cache keeps the arithmetic under test and the network
+    out of it."""
+    venue._hl_cache.clear()
+    venue._hl_cache[
+        repr(
+            sorted({"type": "userFees", "user": venue._SCHEDULE_PROBE_ADDRESS}.items())
+        )
+    ] = {"feeSchedule": {"add": "0.00015", "cross": "0.00045", "spotAdd": "0.0004"}}
+    venue._hl_cache[repr(sorted({"type": "meta", "dex": "xyz"}.items()))] = {
+        "universe": [
+            {"name": "xyz:ORCL", "deployerFeeScale": "1.0", "growthMode": "enabled"},
+            {"name": "xyz:NOGROWTH", "deployerFeeScale": "1.0"},
+            {"name": "xyz:HALFSCALE", "deployerFeeScale": "0.5"},
+        ]
+    }
+
+
+def test_one_hyperliquid_connector_charges_two_different_fees():
+    """A core perp and a HIP-3 market differ by about 2x, and the floor built
+    on the wrong one either loses money or never fills. Measured against the
+    run of 2026-09-13: 173 maker fills on XYZ:ORCL-USD paid 1.29 bp all-in."""
+    _seed_hyperliquid_fees()
+    core = asyncio.run(venue.hyperliquid_maker_fee_bps("BTC-USD", "perp"))
+    hip3 = asyncio.run(venue.hyperliquid_maker_fee_bps("XYZ:ORCL-USD", "perp"))
+    assert core == pytest.approx(1.5 + venue.HUMMINGBOT_BUILDER_FEE_BPS)
+    # scale 1.0 doubles the venue rate, growth mode takes a tenth of that
+    assert hip3 == pytest.approx(1.5 * 2 * 0.1 + venue.HUMMINGBOT_BUILDER_FEE_BPS)
+    assert abs(hip3 - 1.29) < 0.02, "computed fee has drifted from what was paid"
+
+
+def test_the_deployers_own_setting_moves_the_fee_both_ways():
+    """Hyperliquid's rule is not a discount: without growth mode a HIP-3
+    market costs more than the core venue, not less."""
+    _seed_hyperliquid_fees()
+    dear = asyncio.run(venue.hyperliquid_maker_fee_bps("XYZ:NOGROWTH-USD", "perp"))
+    half = asyncio.run(venue.hyperliquid_maker_fee_bps("XYZ:HALFSCALE-USD", "perp"))
+    assert dear == pytest.approx(1.5 * 2 + venue.HUMMINGBOT_BUILDER_FEE_BPS)
+    assert half == pytest.approx(1.5 * 1.5 + venue.HUMMINGBOT_BUILDER_FEE_BPS)
+    assert dear > asyncio.run(venue.hyperliquid_maker_fee_bps("BTC-USD", "perp"))
+
+
+def test_an_unlisted_hip3_market_is_refused_not_guessed():
+    _seed_hyperliquid_fees()
+    with pytest.raises(ValueError, match="not listed"):
+        asyncio.run(venue.hyperliquid_maker_fee_bps("XYZ:NOTREAL-USD", "perp"))

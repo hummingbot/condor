@@ -17,6 +17,10 @@ SPEC = MarketSpec(
     trading_pair="XYZ:DRAM-USD",
     total_amount_quote=500,
     picked_spread_bps=8.0,
+    # What a HIP-3 market in growth mode costs all-in: 0.3 bp to the venue plus
+    # 1.0 bp of builder fee. The loop fetches this per market; a core
+    # Hyperliquid perp is 2.5 bp, which is why it is not assumed here.
+    maker_fee_bps=1.3,
 )
 
 

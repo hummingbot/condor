@@ -311,7 +311,7 @@ class LiveMarket:
         the asset the pair is denominated in, so the caller names it rather
         than this assuming a venue's collateral token.
         """
-        state = await self.client.portfolio.get_portfolio_state()
+        state = await self.client.portfolio.get_state()
         if not isinstance(state, dict):
             raise RuntimeError("Portfolio state unavailable")
         total = 0.0
