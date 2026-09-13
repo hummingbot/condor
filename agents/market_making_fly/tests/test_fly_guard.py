@@ -146,3 +146,28 @@ def test_default_max_loss_and_roundtrip():
     assert default_max_loss([SPEC], GuardSettings(max_loss_quote=7.0)) == 7.0
     st = GuardState(applies_today=3, closed_ticks={"X:Y-USD": 1}, halted="x")
     assert GuardState.from_dict(st.to_dict()) == st
+
+
+def test_a_config_sitting_exactly_on_the_floor_is_not_vetoed():
+    """Live on 2026-09-13, tick 18: a trending posture leaned the buy side down
+    to the fee floor, the config serialized it as 0.00013, and the guard vetoed
+    it because 0.00013 < 1.3 * 1e-4 by one ulp. The guard was refusing the
+    posture builder's own arithmetic, and a real apply was lost."""
+    from flybrain.decoder import Posture
+    from flybrain.posture import MarketSpec, build_config
+
+    spec = MarketSpec(
+        connector_name="hyperliquid_perpetual",
+        trading_pair="XYZ:DRAM-USD",
+        total_amount_quote=200,
+        picked_spread_bps=0.35,
+        leverage=1,
+        portfolio_allocation=0.3,
+        maker_fee_bps=1.3,
+    )
+    leaned = Posture("trending_up", 1.14, 1.0, 1.27, 2.0, 0.3, True, True)
+    config = build_config(spec, leaned)
+    assert min(float(x) for x in config["buy_spreads"].split(",")) == pytest.approx(
+        spec.min_spread_bps * 1e-4
+    )
+    check_config(config, spec)  # must not raise

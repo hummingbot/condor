@@ -164,6 +164,15 @@ def coverage() -> tuple[int, int, int]:
     return len(cloud["index"]), cloud["mapped_total"], cloud["neurons_total"]
 
 
+READOUT_TOP, READOUT_BOTTOM = 36, 64
+
+
+def _note_y(height: int) -> float:
+    """Paper-coordinate y that puts a note clear of the tick labels at any
+    height. 56 px: the axis numbers sit about 20 below the axis."""
+    return -56 / max(1, height - READOUT_TOP - READOUT_BOTTOM)
+
+
 def readout_figure(neural: dict, posture: dict | None = None, height: int = 460):
     """The three channels the posture is decoded from, as they were measured.
 
@@ -199,7 +208,7 @@ def readout_figure(neural: dict, posture: dict | None = None, height: int = 460)
     trend = right - left
     fig.update_layout(
         height=height,
-        margin=dict(l=96, r=20, t=36, b=64),
+        margin=dict(l=96, r=20, t=READOUT_TOP, b=READOUT_BOTTOM),
         paper_bgcolor=GROUND,
         plot_bgcolor=GROUND,
         font=dict(color="#c8d4e8", family="monospace", size=11),
@@ -218,7 +227,7 @@ def readout_figure(neural: dict, posture: dict | None = None, height: int = 460)
         annotations=[
             dict(
                 x=0,
-                y=-0.30,
+                y=_note_y(height),
                 xref="paper",
                 yref="paper",
                 showarrow=False,
@@ -239,7 +248,7 @@ def readout_figure(neural: dict, posture: dict | None = None, height: int = 460)
             ),
             dict(
                 x=1,
-                y=-0.30,
+                y=_note_y(height),
                 xref="paper",
                 yref="paper",
                 showarrow=False,

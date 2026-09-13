@@ -316,10 +316,21 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         f"{neural.get('gate_spikes', '—')} DNpe017 spike(s)."
         + ("" if last_posture.get("warm", True) else " Baseline still forming.")
     )
+    # A run recorded before the loop knew its own observation length has only
+    # the brain's lifetime; printing "— ms" for the missing half reads worse
+    # than not claiming it.
+    ran = (
+        f" The observation ran {_fmt(neural['observation_ms'], 0)} ms of neural time"
+        if neural.get("observation_ms")
+        else " The observation"
+    )
+    if neural.get("brain_ms"):
+        ran += (
+            f" ({_fmt(float(neural['brain_ms']) / 1000, 1)} s on this brain since it "
+            "was seeded)"
+        )
     observation_line = (
-        f" The observation ran "
-        f"{_fmt(float(neural['brain_ms']) / 1000, 1) if neural.get('brain_ms') else '—'} s "
-        f"of neural time and produced {neural.get('total_spikes', 0):,} spikes, "
+        f"{ran} produced {neural.get('total_spikes', 0):,} spikes, "
         f"{neural.get('kc_spikes', 0):,} of them in Kenyon cells. Stimulus "
         f"{observed.get('stimulus', 'none')} — {neural.get('reward_spikes', 0)} PAM11 "
         f"and {neural.get('aversive_spikes', 0)} PPL101 spikes — left "
@@ -327,7 +338,13 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         f"{(memory.get('plastic_edges') or 0):,} plastic edges away from baseline, "
         f"mean efficacy {_fmt(memory.get('mean_efficacy'), 5)}."
     )
-    builder.section("THE FLY BRAIN", posture_line + observation_line)
+    builder.section(
+        "THE FLY BRAIN",
+        posture_line
+        + observation_line
+        + " In the scene, brighter and larger is more spikes in the window and the "
+        "dim haze is every cell that stayed silent; hover one for its group.",
+    )
     # Cards on the left, the brain on the right, the same way the fly and its
     # frame sit above — five columns and seven of the runtime's twelve, both
     # collapsing to full width below its 800px breakpoint.
@@ -372,7 +389,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         ),
         width=BRAIN,
     )
-    builder.plotly(readout_figure(neural, last_posture, height=260))
+    builder.plotly(readout_figure(neural, last_posture, height=FULL_ROW - PANEL_CHROME))
     # ── DECISIONS & POSITIONS ────────────────────────────────────────────────
     # One panel: what the fly called, and what those calls left it holding.
     builder.section(

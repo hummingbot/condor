@@ -122,13 +122,22 @@ def _spreads(value: str) -> list[float]:
     return [float(x) for x in str(value).split(",") if x.strip()]
 
 
+# A config that sits exactly on a floor reaches this check as a serialized
+# decimal, and the float it parses back to can be one ulp under the float the
+# floor computes to: 1.3 bp writes as 0.00013, which is less than 1.3 * 1e-4.
+# Vetoing that is the guard refusing the posture builder's own arithmetic — it
+# cost a real apply on 2026-09-13, tick 18. The tolerance is relative and far
+# below any width that could matter.
+FLOOR_TOLERANCE = 1e-9
+
+
 def check_config(config: dict, spec: MarketSpec) -> None:
     """Belt to ``posture.build_config``'s braces: refuse anything below the floors."""
     for key in ("buy_spreads", "sell_spreads"):
         for level in _spreads(config[key]):
-            if level < spec.min_spread_bps * BPS:
+            if level < spec.min_spread_bps * BPS * (1 - FLOOR_TOLERANCE):
                 raise Veto(f"{key} level {level} below {spec.min_spread_bps} bp")
-    if float(config["take_profit"]) < take_profit_floor(spec):
+    if float(config["take_profit"]) < take_profit_floor(spec) * (1 - FLOOR_TOLERANCE):
         raise Veto("take_profit below fee floor")
     if int(config["leverage"]) > spec.leverage_cap:
         raise Veto(f"leverage {config['leverage']} above cap {spec.leverage_cap}")

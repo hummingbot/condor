@@ -122,6 +122,10 @@ class FlyBrain:
             "total_spikes": int(counts.sum()),
             "stimulus": reinforcement,
             "stimulus_ms": delivered * b.dt,
+            # This observation's neural time, and the brain's total since it
+            # was seeded. Reporting the second as the first says a 500 ms
+            # observation ran for ten seconds once twenty of them have gone by.
+            "observation_ms": float(neural_ms),
             "brain_ms": b.sim_ms,
             "compute_seconds": wall,
             "spike_sha256": hashlib.sha256(counts.tobytes()).hexdigest(),
