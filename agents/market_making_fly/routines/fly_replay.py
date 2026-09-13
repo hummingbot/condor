@@ -1,0 +1,394 @@
+"""Run the fly over recorded candles, several ways, and compare them.
+
+The agent's central claim — that P&L feedback shapes what the fly does — has
+never had a control, because every live run is one sample of a market that
+never repeats. This runs the same candles through the same brain as many times
+as there are variants, changing one setting each time:
+
+* ``live``     — the fly as deployed.
+* ``no-memory``— the memory rule frozen. If this scores the same, the plastic
+                 synapses are decoration.
+* ``no-valence``— the memory rule still runs, but its output is disconnected
+                 from the posture (``valence_gain`` ~ 0). Separates "the rule
+                 does nothing" from "the rule does something the decoder does
+                 not read".
+* ``shuffled`` — reinforcement of the same frequency and magnitude, with the
+                 sign randomised. The control the caveats have always demanded.
+* ``widen``    — the old arousal direction, for the A/B that motivated the flip.
+
+Each variant gets its own brain process: a network that has already learned
+from one variant is not a control for the next.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+_AGENT_DIR = str(Path(__file__).resolve().parents[1])
+if _AGENT_DIR not in sys.path:
+    sys.path.insert(0, _AGENT_DIR)
+
+import asyncio
+import json
+import logging
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor
+
+import plotly.graph_objects as go
+from flybrain import venue, worker
+from flybrain.decoder import DecoderSettings
+from flybrain.fly3d import ACCENT, BODY, GROUND, LIMB
+from flybrain.posture import MarketSpec
+from flybrain.replay import paired_stats, replay
+from pydantic import BaseModel, Field
+from telegram.ext import ContextTypes
+
+from condor.memory.paths import agent_home
+from condor.paths import safe_id
+from condor.reports import ReportBuilder
+
+logger = logging.getLogger(__name__)
+
+CATEGORY = "Bot Analysis"
+AGENT_SLUG = "market_making_fly"
+
+# A gain cannot be zero — the decoder refuses a channel it would read and
+# discard — so "disconnected" is the smallest gain that rounds out of every
+# posture the size multiplier can express.
+OFF = 1e-9
+
+VARIANTS: dict[str, dict] = {
+    "live": {},
+    "no-memory": {"learning": False},
+    "no-valence": {"valence_gain": OFF},
+    "shuffled": {"shuffle": True},
+    "widen": {"spread_gain": 0.5},
+}
+
+
+class Config(BaseModel):
+    """Replay the fly over historical candles and compare its variants."""
+
+    trading_pair: str = Field(default="XYZ:DRAM-USD", description="Market to replay")
+    connector_name: str = Field(default="hyperliquid_perpetual")
+    interval: str = Field(default="5m", description="Candle interval, as the fly sees")
+    max_records: int = Field(
+        default=1000, ge=200, le=5000, description="Candles to fetch"
+    )
+    variants: str = Field(
+        default="live,no-memory,no-valence,shuffled,widen",
+        description=f"Comma-separated, from: {', '.join(VARIANTS)}",
+    )
+    total_amount_quote: float = Field(default=200.0)
+    portfolio_allocation: float = Field(default=0.3)
+    picked_spread_bps: float = Field(
+        default=0.0, description="0 measures it from the candles"
+    )
+    maker_fee_bps: float = Field(default=0.0, description="0 fetches the venue's")
+    leverage: int = Field(default=1)
+    n_candles: int = Field(default=72, description="Window the retina sees")
+    neural_ms: float = Field(default=500.0)
+    baseline_window: int = Field(default=60)
+    baseline_warmup: int = Field(default=10)
+    seed: int = Field(default=7301, description="Seed for the shuffled control")
+    concurrency: int = Field(
+        default=4,
+        ge=1,
+        le=8,
+        description="Variants to replay at once. Each holds its own brain (~250 MB) "
+        "and saturates one core; they are independent, so this is wall time "
+        "divided rather than work shared",
+    )
+
+
+def _settings(config: Config, overrides: dict) -> DecoderSettings:
+    fields = {
+        "window": config.baseline_window,
+        "warmup": config.baseline_warmup,
+    }
+    fields.update(
+        {k: v for k, v in overrides.items() if k not in ("learning", "shuffle")}
+    )
+    return DecoderSettings(**fields)
+
+
+def _curve_figure(results: list) -> go.Figure:
+    fig = go.Figure()
+    palette = [ACCENT, "#7fb2ff", "#f2a35c", "#c58cff", "#6fd3c0"]
+    for n, result in enumerate(results):
+        fig.add_trace(
+            go.Scatter(
+                x=list(range(len(result.equity_curve))),
+                y=result.equity_curve,
+                mode="lines",
+                name=result.variant,
+                line=dict(color=palette[n % len(palette)], width=2),
+            )
+        )
+    fig.update_layout(
+        height=366,
+        margin=dict(l=56, r=16, t=10, b=40),
+        paper_bgcolor=GROUND,
+        plot_bgcolor=GROUND,
+        font=dict(color=BODY, family="monospace", size=11),
+        xaxis=dict(title="tick", gridcolor="#18202e", zerolinecolor="#18202e"),
+        yaxis=dict(
+            title="net P&L (quote)", gridcolor="#18202e", zerolinecolor="#243044"
+        ),
+        legend=dict(orientation="h", yanchor="top", y=-0.18, xanchor="center", x=0.5),
+    )
+    fig.add_hline(y=0, line=dict(color=LIMB, width=1, dash="dot"))
+    return fig
+
+
+async def _candles(client, config: Config) -> list[dict]:
+    """The series every variant replays. One fetch, so they cannot differ."""
+    for attempt in (1, 2):  # a cold feed answers on the second ask
+        try:
+            raw = await client.market_data.get_candles(
+                config.connector_name,
+                config.trading_pair,
+                interval=config.interval,
+                max_records=config.max_records,
+            )
+            rows = raw if isinstance(raw, list) else raw.get("data", raw.get("candles"))
+            if rows:
+                return list(rows)
+        except Exception:
+            if attempt == 2:
+                raise
+    raise RuntimeError(f"No candles for {config.trading_pair}")
+
+
+def _spread_from_candles(candles: list[dict]) -> float:
+    """A stand-in for the scanner's measured touch, in bp: the median bar's
+    range is the only width a candle series knows about. Replay cannot see a
+    book, and saying so is better than defaulting to a number."""
+    import statistics
+
+    ranges = [
+        (float(c["high"]) - float(c["low"])) / float(c["close"]) * 1e4
+        for c in candles
+        if float(c.get("close") or 0) > 0
+    ]
+    return round(statistics.median(ranges) / 4, 2) if ranges else 2.0
+
+
+async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
+    from config_manager import get_client
+
+    names = [v.strip() for v in config.variants.split(",") if v.strip()]
+    unknown = [v for v in names if v not in VARIANTS]
+    if unknown:
+        raise ValueError(f"Unknown variant(s) {unknown}; choose from {list(VARIANTS)}")
+
+    client = await get_client(context._chat_id, context=context)
+    if not client:
+        return "No server available"
+    candles = await _candles(client, config)
+    market_type = venue.market_type_for(config.connector_name)
+    fee = config.maker_fee_bps or await venue.maker_fee_bps(
+        config.connector_name, market_type, config.trading_pair
+    )
+    spread = config.picked_spread_bps or _spread_from_candles(candles)
+    spec = MarketSpec(
+        connector_name=config.connector_name,
+        trading_pair=config.trading_pair,
+        total_amount_quote=config.total_amount_quote,
+        picked_spread_bps=spread,
+        leverage=config.leverage,
+        portfolio_allocation=config.portfolio_allocation,
+        maker_fee_bps=fee,
+    )
+    spec.check_order_size()
+
+    loop = asyncio.get_running_loop()
+    gate = asyncio.Semaphore(config.concurrency)
+
+    async def one(name: str):
+        overrides = VARIANTS[name]
+        async with gate:
+            # A fresh process per variant: the brain is stateful, and one that
+            # has already learned is not a control for the next.
+            pool = ProcessPoolExecutor(
+                max_workers=1,
+                mp_context=multiprocessing.get_context("spawn"),
+                initializer=worker._init,
+                initargs=(overrides.get("learning", True), 10.0, 200.0, 20.0),
+            )
+            try:
+
+                def observe(frame, stimulus, neural_ms, _pool=pool):
+                    return _pool.submit(
+                        worker._observe, frame, stimulus, neural_ms
+                    ).result()
+
+                result = await loop.run_in_executor(
+                    None,
+                    lambda o=overrides, ob=observe: replay(
+                        variant=name,
+                        pair=config.trading_pair,
+                        candles=candles,
+                        spec=spec,
+                        settings=_settings(config, o),
+                        observe=ob,
+                        window=config.n_candles,
+                        shuffle_seed=config.seed if o.get("shuffle") else None,
+                        neural_ms=config.neural_ms,
+                    ),
+                )
+            finally:
+                pool.shutdown(wait=True)
+        await context.bot.send_message(
+            chat_id=context._chat_id,
+            text=f"🪰 replay {name}: net {result.equity_curve[-1]:+.4f} "
+            f"over {result.ticks} ticks, {result.ledger.fills} fills",
+        )
+        return result
+
+    # Order is the caller's, not the order they finished in: the first variant
+    # is the baseline every control is compared against.
+    results = list(await asyncio.gather(*(one(name) for name in names)))
+    summaries = [r.summary() for r in results]
+    # The brains are the expensive part and the arithmetic over their output is
+    # not; keeping the curves means a better statistic never costs another run.
+    record = agent_home(AGENT_SLUG) / "replay" / f"{safe_id(config.trading_pair)}.json"
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text(
+        json.dumps(
+            {
+                "pair": config.trading_pair,
+                "interval": config.interval,
+                "candles": len(candles),
+                "spread_bps": spread,
+                "fee_bps": fee,
+                "summaries": summaries,
+                "curves": {r.variant: r.equity_curve for r in results},
+            },
+            indent=1,
+        )
+    )
+    builder = ReportBuilder(f"Fly replay — {config.trading_pair}")
+    builder.source("routine", "fly_replay")
+    builder.tags(["fly", "replay", "control", config.trading_pair])
+    builder.manual_order()
+    builder.section(
+        "WHAT WAS REPLAYED",
+        f"{len(candles):,} {config.interval} candles of {config.trading_pair}, "
+        f"{results[0].ticks if results else 0} ticks after the "
+        f"{config.n_candles}-candle window. Every variant saw the same series and "
+        f"the same book geometry — {spread:.2f} bp measured spread, {fee:.2f} bp "
+        "maker fee — and each ran on its own freshly seeded brain. Fills assume "
+        "a quote the price touched was ours, so every P&L here is an upper "
+        "bound; the bias is identical across variants, which is what makes the "
+        "comparison worth reading and the absolute number not.",
+    )
+    builder.kpi("Market", config.trading_pair)
+    builder.kpi("Candles", f"{len(candles):,}")
+    builder.kpi("Ticks", f"{results[0].ticks if results else 0:,}")
+    builder.kpi("Maker fee", f"{fee:.2f} bp")
+
+    builder.section("VARIANTS", "One row per run, over identical candles")
+    builder.table(
+        [
+            {
+                "Variant": s["variant"],
+                "Net P&L": f"{s['net']:+.4f}",
+                "Realized": f"{s['realized']:+.4f}",
+                "Fees": f"{s['fees']:.4f}",
+                "Fills": f"{s['fills']:,}",
+                "Round trips": f"{s['round_trips']:,}",
+                "Applies": f"{s['applies']:,}",
+                "Unconfident": f"{s['unconfident']:,}",
+                "Spread ×": f"{s['mean_spread_mult']:.2f}",
+                "Size ×": f"{s['mean_size_mult']:.2f}",
+            }
+            for s in summaries
+        ],
+        [
+            "Variant",
+            "Net P&L",
+            "Realized",
+            "Fees",
+            "Fills",
+            "Round trips",
+            "Applies",
+            "Unconfident",
+            "Spread ×",
+            "Size ×",
+        ],
+    )
+    builder.plotly(_curve_figure(results))
+
+    if len(results) > 1:
+        base = results[0]
+        rows = []
+        for other in results[1:]:
+            stats = paired_stats(base.equity_curve, other.equity_curve)
+            rows.append(
+                {
+                    "Against": f"{base.variant} − {other.variant}",
+                    "Mean per-tick earnings difference": f"{stats['mean_diff']:+.5f}",
+                    "SD": f"{stats['sd']:.5f}",
+                    "Final gap": f"{stats['final_gap']:+.4f}",
+                    "t": f"{stats['t']:+.2f}",
+                    "Reads as": (
+                        "distinguishable"
+                        if abs(stats["t"]) >= 2
+                        else "not distinguishable"
+                    ),
+                }
+            )
+        builder.section(
+            "AGAINST THE CONTROLS",
+            "How differently the deployed fly earns per tick, against each "
+            "control. On increments, not on the equity curves themselves: a "
+            "curve is cumulative, so once two runs separate every later tick "
+            "inherits the gap and a t on levels measures when they diverged "
+            "rather than whether they earn differently. One replay of one "
+            "market is still a weak instrument — |t| under 2 is not evidence of "
+            "a difference, and it is not evidence of sameness either.",
+        )
+        builder.table(
+            rows,
+            [
+                "Against",
+                "Mean per-tick earnings difference",
+                "SD",
+                "Final gap",
+                "t",
+                "Reads as",
+            ],
+        )
+
+    builder.markdown(
+        "_A variant that scores better here has not been shown to make money: "
+        "the fill model is optimistic, one market is one sample, and the "
+        "take-profit that never fills is marked to the close rather than to "
+        "what it would cost to get out. What replay can establish is the "
+        "negative — that a variant is **not** distinguishable from its control, "
+        "which is the claim this agent has never been able to test._"
+    )
+    await builder.save()
+
+    lines = [
+        f"pair: {config.trading_pair} ({config.interval})",
+        f"candles: {len(candles)}, ticks: {results[0].ticks if results else 0}",
+        f"spread: {spread:.2f} bp, fee: {fee:.2f} bp",
+    ]
+    for s in summaries:
+        lines.append(
+            f"{s['variant']}: net {s['net']:+.4f}, {s['fills']} fills, "
+            f"{s['round_trips']} round trips, {s['applies']} applies, "
+            f"spread ×{s['mean_spread_mult']:.2f}, size ×{s['mean_size_mult']:.2f}"
+        )
+    if len(results) > 1:
+        for other in results[1:]:
+            stats = paired_stats(results[0].equity_curve, other.equity_curve)
+            lines.append(
+                f"{results[0].variant} vs {other.variant}: mean per-tick earnings "
+                f"{stats['mean_diff']:+.5f}, final gap {stats['final_gap']:+.4f}, "
+                f"t {stats['t']:+.2f}"
+            )
+    return "\n".join(lines)
