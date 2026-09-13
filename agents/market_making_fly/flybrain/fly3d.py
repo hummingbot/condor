@@ -558,3 +558,53 @@ def fly_figure(
         legend=dict(orientation="h", yanchor="top", y=-0.15, xanchor="center", x=0.5),
     )
     return fig
+
+
+def desk_and_chart_figure(
+    chart: np.ndarray | None,
+    title: str = "",
+    subtitle: str = "",
+    height: int = 460,
+    scene_share: float = 0.62,
+):
+    """The fly at its desk and the frame it was reading, side by side.
+
+    One figure rather than two blocks: a report component spans the runtime's
+    12-column grid, but that width is only exposed on data-bound components,
+    not on a plain Plotly block — and this agent does not reach into core
+    Condor to change that. Splitting inside the figure gets the same reading
+    (posture beside the picture it came from) without touching the runtime.
+
+    On a narrow screen the whole figure scales rather than stacking, so the
+    split favours the scene, which survives shrinking better than a chart does.
+    """
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+
+    if chart is None:
+        return fly_figure(title=title, subtitle=subtitle, height=height)
+
+    fig = make_subplots(
+        rows=1,
+        cols=2,
+        specs=[[{"type": "scene"}, {"type": "xy"}]],
+        column_widths=[scene_share, 1 - scene_share],
+        horizontal_spacing=0.015,
+    )
+    scene = fly_figure(title=title, subtitle=subtitle, height=height, chart=chart)
+    for trace in scene.data:
+        fig.add_trace(trace, row=1, col=1)
+    # Added last, so the wing indices the frames retarget are unchanged.
+    fig.add_trace(go.Image(z=chart, hoverinfo="skip"), row=1, col=2)
+    fig.frames = scene.frames
+
+    fig.update_layout(scene.layout)
+    fig.update_layout(
+        height=height,
+        margin=dict(l=0, r=0, t=40 if title else 8, b=8),
+        xaxis=dict(visible=False),
+        yaxis=dict(visible=False, scaleanchor="x"),
+    )
+    # The 3D panel keeps the left of the figure; the frame sits at its right.
+    fig.update_layout(scene=dict(domain=dict(x=[0.0, scene_share], y=[0, 1])))
+    return fig

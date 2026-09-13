@@ -24,7 +24,7 @@ import time
 
 import numpy as np
 import plotly.graph_objects as go
-from flybrain.fly3d import ACCENT, BODY, EYE, GROUND, LIMB, fly_figure
+from flybrain.fly3d import ACCENT, BODY, GROUND, LIMB, desk_and_chart_figure
 from flybrain.market import LiveMarket
 from flybrain.naming import pair_names
 from flybrain.run_state import RunDir
@@ -236,49 +236,34 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     builder.section(
         "FLY.EXE",
         f"{alive} · run {config.run_name} · tick {state.get('tick', 0)} · "
-        f"{len(pairs)} market{'s' if len(pairs) != 1 else ''} · drag to orbit",
+        f"{len(pairs)} market{'s' if len(pairs) != 1 else ''} · drag to orbit · "
+        "the monitor and the panel beside it show the fly's own input frame",
     )
     sensory = _read_frame(run_dir.frame_path)
     builder.plotly(
-        fly_figure(
+        desk_and_chart_figure(
+            sensory,
             title=f"FLY.EXE — {alive}",
             subtitle=f"{', '.join(pairs) or 'no market'}",
-            chart=sensory,
         )
     )
-    # The same frame, full size, beside the fly that was looking at it.
     if sensory is not None:
-        builder.section(
-            "WHAT THE FLY SEES",
-            f"The 320×180 frame fed to the retina on tick {observed.get('tick')} — "
-            f"{settings.get('n_candles', '?')} × {settings.get('candle_interval', '?')} "
-            "candles, volume and the live bid/ask. This is the picture the posture "
-            "above was decoded from; no quotes, inventory or P&L are drawn, because "
-            "those reach the fly only as dopamine.",
-        )
-        builder.plotly(_frame_figure(sensory))
-
-    # ── THE BAG ──────────────────────────────────────────────────────────────
-    builder.section("THE BAG", "What the fly's own bots are holding right now")
-    builder.kpi("Net P&L", _fmt(book_net, 4, plus=True))
-    builder.kpi("Volume", _fmt(book_volume))
-    builder.kpi("Markets", str(len(pairs)))
-    builder.kpi("Mode", str(latest.get("mode", "—")).upper())
-    if holdings:
-        builder.table(
-            holdings,
-            ["Market", "Bot", "Side", "Position", "Realized", "Unrealized", "Volume"],
-        )
-    else:
         builder.markdown(
-            "_No live bot data — either no server is bound to this chat, or the fly is "
-            "running in shadow with nothing deployed._"
+            f"**What the fly sees** — the 320×180 frame fed to the retina on tick "
+            f"{observed.get('tick')}: {settings.get('n_candles', '?')} × "
+            f"{settings.get('candle_interval', '?')} candles, volume and the live "
+            "bid/ask, shown on its monitor and again at full size beside it. This is "
+            "the picture the posture below was decoded from. No quotes, inventory or "
+            "P&L are drawn, because those reach the fly only as dopamine."
         )
 
-    # ── NEURONS ──────────────────────────────────────────────────────────────
+    # ── NEURONS & NEURAL ORDER ───────────────────────────────────────────────
+    # One panel: the connectome's numbers and the posture they were decoded
+    # into belong together — the second is only readable against the first.
     builder.section(
-        "NEURONS",
-        "The connectome's own numbers, from the last observation"
+        "NEURONS & NEURAL ORDER",
+        "The connectome's own numbers from the last observation, and the posture "
+        "decoded from them"
         + (
             f" (tick {observed.get('tick')}; the newest tick ran no brain)"
             if stale
@@ -310,9 +295,6 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     builder.kpi("Reward (PAM11)", str(neural.get("reward_spikes", "—")))
     builder.kpi("Aversive (PPL101)", str(neural.get("aversive_spikes", "—")))
     builder.kpi("Mean efficacy", _fmt(memory.get("mean_efficacy"), 5))
-
-    # ── NEURAL ORDER ─────────────────────────────────────────────────────────
-    builder.section("NEURAL ORDER", "The posture decoded from the last observation")
     if last_posture:
         builder.kpi("Regime", str(last_posture.get("regime", "—")).upper())
         builder.kpi("Spread ×", _fmt(last_posture.get("spread_mult")))
@@ -331,9 +313,12 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         + ("" if last_posture.get("warm", True) else " _Baseline still forming._")
     )
 
-    # ── DECISIONS ────────────────────────────────────────────────────────────
+    # ── DECISIONS & POSITIONS ────────────────────────────────────────────────
+    # One panel: what the fly called, and what those calls left it holding.
     builder.section(
-        "DECISIONS", f"Last {min(config.recent, len(events))} observations, newest last"
+        "DECISIONS & POSITIONS",
+        f"Last {min(config.recent, len(events))} observations, newest last — and "
+        "what the fly's own bots are holding right now",
     )
     builder.table(
         [
@@ -367,10 +352,23 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
             "Reason",
         ],
     )
-
     pnl = _pnl_figure(events)
     if pnl is not None:
         builder.plotly(pnl)
+    builder.kpi("Net P&L", _fmt(book_net, 4, plus=True))
+    builder.kpi("Volume", _fmt(book_volume))
+    builder.kpi("Markets", str(len(pairs)))
+    builder.kpi("Mode", str(latest.get("mode", "—")).upper())
+    if holdings:
+        builder.table(
+            holdings,
+            ["Market", "Bot", "Side", "Position", "Realized", "Unrealized", "Volume"],
+        )
+    else:
+        builder.markdown(
+            "_No live bot data — either no server is bound to this chat, or the fly is "
+            "running in shadow with nothing deployed._"
+        )
 
     # ── PERFORMANCE & LIMITS ─────────────────────────────────────────────────
     builder.section("PERFORMANCE & LIMITS", "What the guard is watching")
