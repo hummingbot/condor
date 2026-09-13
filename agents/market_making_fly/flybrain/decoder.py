@@ -9,7 +9,8 @@ neurons":
 * ``arousal_hz`` — mean rate of the descending-neuron population. Higher →
                    tighter spreads, a larger share of the book quoted, and a
                    wider take-profit to hold for.
-* ``gate``       — DNpe017 spikes ≥ 1, required for a trending call.
+* ``gate``       — DNpe017 spikes ≥ 1, required for a trending call, and for
+                   taking a side off the book.
 * ``valence_hz`` — mean MBON07 rate minus mean MBON11 rate: approach minus
                    avoidance. These are the cells the KC→MBON memory rule
                    writes to, so this is the only channel a P&L pulse can
@@ -85,6 +86,11 @@ class DecoderSettings:
     # A scene this far below the mushroom body's own recent drive is one the
     # fly effectively did not see; its z-scores are noise.
     z_kc_quiet: float = -1.5
+    # Past this, a gated trend stops nudging the reference price and takes a
+    # side away. Leaning moved the quote 2.5 bp on a market whose bars run 8;
+    # the failure it was meant to prevent — filling one side over and over
+    # into a move — needs the other side gone, not discounted.
+    z_side: float = 1.5
     shift_gain_bps: float = 1.0
     max_shift_bps: float = 3.0
     center_bias: bool = True
@@ -109,6 +115,8 @@ class DecoderSettings:
         # but not zero, which would mean the channel is read and discarded.
         if self.z_kc_quiet >= 0:
             raise ValueError("z_kc_quiet must be negative")
+        if self.z_side < self.z_regime:
+            raise ValueError("z_side must be at least z_regime")
         for name in ("spread_gain", "size_gain", "valence_gain", "tp_gain"):
             value = getattr(self, name)
             if not math.isfinite(value) or value == 0:
@@ -194,6 +202,7 @@ class Posture:
     valence_z: float
     gate: bool
     warm: bool  # False while the baseline is still forming
+    side: str = "both"  # "buy" or "sell" when a gated trend takes one away
     confident: bool = True  # False when the scene never reached the mushroom body
 
     def to_dict(self) -> dict:
@@ -262,6 +271,12 @@ def decode(channels: Channels, baseline: Baseline, s: DecoderSettings) -> Postur
     shift = max(-s.max_shift_bps, min(s.max_shift_bps, s.shift_gain_bps * trend_z))
     if not gate:
         shift = 0.0  # no descending gate spike, no directional lean
+    # A trend strong enough to act on takes the other side off the book rather
+    # than pricing it a little worse. Quoting with the trend is the same
+    # direction the lean already expressed, carried to its conclusion.
+    side = "both"
+    if gate and abs(trend_z) >= s.z_side:
+        side = "buy" if trend_z > 0 else "sell"
     return Posture(
         regime=regime,
         spread_mult=round(spread_mult, 4),
@@ -274,6 +289,7 @@ def decode(channels: Channels, baseline: Baseline, s: DecoderSettings) -> Postur
         gate=gate,
         warm=True,
         confident=confident,
+        side=side,
     )
 
 

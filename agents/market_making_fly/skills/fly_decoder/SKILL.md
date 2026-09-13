@@ -33,6 +33,10 @@ user wants to *look* at the run, `fly_status` when you need to quote figures.
   window 60 observations. `warm=False` for the first 10 — neutral posture.
 * Regime precedence: `pause` (arousal_z ≥ 2.5) > `volatile` (≥ 1) > `trending_up/down`
   (gate and |trend_z| ≥ 1) > `quiet` (arousal_z ≤ −1) > `ranging`.
+* **Side**: a gated trend past |trend_z| ≥ 1.5 takes the other side off the book —
+  `buy` on a positive trend, `sell` on a negative one — by quoting it at zero size,
+  which pmm_mister skips. The surviving side's orders double, because the controller
+  normalizes amounts across both.
 * `spread ×` = clip(1 − 0.5·arousal_z, 0.6, 2.5) — an aroused fly quotes **tighter**.
   `size ×` = clip(1 + 0.5·arousal_z, 0.6, 2.5) — and quotes **more** of the book,
   clamped so an order never falls under the venue minimum nor the allocation over 1.

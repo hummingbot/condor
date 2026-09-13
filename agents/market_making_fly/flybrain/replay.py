@@ -95,6 +95,11 @@ def _levels(config: dict, key: str) -> list[float]:
     return [float(x) for x in config[key].split(",")]
 
 
+def _amounts(config: dict, side: str) -> list[float]:
+    """The per-level amount fractions for one side; all zero when suppressed."""
+    return [float(x) for x in config[f"{side}_amounts_pct"].split(",") if float(x)]
+
+
 def quote_prices(config: dict, mid: float) -> dict[str, list[float]]:
     """Where this config rests its orders around ``mid``."""
     return {
@@ -145,9 +150,12 @@ def step(
     notional = float(config["total_amount_quote"]) * float(
         config["portfolio_allocation"]
     )
-    per_order = notional / 4
+    # pmm_mister normalizes amounts across both sides, so a side quoted at zero
+    # size does not shrink the book — it doubles the other side's orders.
+    active = [s for s in SIDES if any(_amounts(config, s))]
+    per_order = notional / max(1, sum(len(_amounts(config, s)) for s in active))
     prices = quote_prices(config, mid)
-    for side in SIDES:
+    for side in active:
         for price in prices[side]:
             if len(ledger.open_lots) >= max_lots:
                 break
@@ -201,6 +209,7 @@ class ReplayResult:
             "mean_spread_mult": round(sum(spreads) / len(spreads), 3),
             "mean_size_mult": round(sum(sizes) / len(sizes), 3),
             "mean_tp_mult": round(sum(tps) / len(tps), 3),
+            "one_sided": sum(1 for p in self.postures if p.side != "both"),
             "regimes": regimes,
         }
 

@@ -270,8 +270,13 @@ def build_config(spec: MarketSpec, posture: Posture) -> dict:
         "max_base_pct": spec.max_base_pct,
         "buy_spreads": _fmt([b * BPS for b in buy]),
         "sell_spreads": _fmt([s * BPS for s in sell]),
-        "buy_amounts_pct": "1,1",
-        "sell_amounts_pct": "1,1",
+        # A suppressed side is quoted at zero size, which pmm_mister skips by
+        # name ("The amount of the level is 0. Skipping."). It also normalizes
+        # amounts across both sides, so the surviving side's orders double —
+        # the same capital through half as many quotes, which is what taking a
+        # side off the book should mean.
+        "buy_amounts_pct": "0,0" if posture.side == "sell" else "1,1",
+        "sell_amounts_pct": "0,0" if posture.side == "buy" else "1,1",
         "executor_refresh_time": refresh,
         "buy_cooldown_time": cooldown,
         "sell_cooldown_time": cooldown,

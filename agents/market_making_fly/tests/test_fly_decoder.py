@@ -179,3 +179,31 @@ def test_a_scene_that_never_reached_the_mushroom_body_is_not_acted_on():
     assert not blind.confident
     ok, why = should_apply(seen, blind, None, 0.0, Hysteresis())
     assert ok is False and "kenyon" in why.lower()
+
+
+def _varied(gate: int) -> Baseline:
+    """A baseline with real spread in it. A flat history has zero variance, so
+    the decoder scores *any* departure from it at the same 2.2 sigma however
+    small — which made the first version of this test assert that 2.0 Hz was a
+    mild move and 40 a strong one when the decoder could not tell them apart."""
+    b = Baseline()
+    for value in (-4.0, -2.0, 0.0, 2.0, 4.0):
+        b.push(Channels(value, 8.0, gate, 0.0, 400), S.window)
+    return b
+
+
+def test_a_side_is_only_taken_away_on_a_gated_trend():
+    # a strong trend with no gate spike is still both sides: the gate is what
+    # separates a reading from a decision
+    ungated = decode(Channels(20.0, 8.0, 0, 0.0, 400), _varied(0), S)
+    assert ungated.trend_z > S.z_side and ungated.side == "both"
+
+    up = decode(Channels(20.0, 8.0, 1, 0.0, 400), _varied(1), S)
+    assert up.trend_z > S.z_side and up.side == "buy"
+
+    down = decode(Channels(-20.0, 8.0, 1, 0.0, 400), _varied(1), S)
+    assert down.trend_z < -S.z_side and down.side == "sell"
+
+    # and a trend too weak to act on leaves both sides up
+    mild = decode(Channels(2.0, 8.0, 1, 0.0, 400), _varied(1), S)
+    assert abs(mild.trend_z) < S.z_side and mild.side == "both"

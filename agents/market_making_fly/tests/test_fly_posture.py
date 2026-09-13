@@ -290,3 +290,21 @@ def test_the_exit_scales_with_the_market_and_never_goes_under_the_fee():
         tight, Posture("quiet", 0.6, 1.0, 0.6, 0.0, 0, -1.5, 0.0, False, True)
     )
     assert float(cfg["take_profit"]) >= take_profit_floor(tight)
+
+
+def test_a_gated_trend_takes_a_side_off_the_book():
+    """Leaning moved the quote 2.5 bp on a market whose bars run 8, which is
+    why the fly filled five buys and no sells into a fall and held them. A
+    trend worth acting on removes the other side instead of discounting it."""
+    up = build_config(
+        SPEC,
+        Posture("trending_up", 1.0, 1.0, 1.0, 2.0, 2.0, 0, 0.0, True, True, "buy"),
+    )
+    assert up["sell_amounts_pct"] == "0,0" and up["buy_amounts_pct"] == "1,1"
+    down = build_config(
+        SPEC,
+        Posture("trending_down", 1.0, 1.0, 1.0, -2.0, -2.0, 0, 0.0, True, True, "sell"),
+    )
+    assert down["buy_amounts_pct"] == "0,0" and down["sell_amounts_pct"] == "1,1"
+    # both sides is still the default, and the guard sees a valid config either way
+    assert build_config(SPEC, NEUTRAL)["buy_amounts_pct"] == "1,1"
