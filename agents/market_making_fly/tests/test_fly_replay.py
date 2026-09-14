@@ -109,3 +109,31 @@ def test_the_disconnected_gain_is_a_gain_the_decoder_accepts():
         DecoderSettings(valence_gain=0.0)
     settings = DecoderSettings(valence_gain=mod.OFF)
     assert round(1 + settings.valence_gain * 3.0, 4) == 1.0
+
+
+def test_windows_are_contiguous_and_share_no_candle():
+    from flybrain.replay import windows
+
+    series = [{"close": i} for i in range(1000)]
+    cut = windows(series, 4, 72)
+    assert [len(w) for w in cut] == [250] * 4
+    assert [w[0]["close"] for w in cut] == [0, 250, 500, 750]
+    # a split too thin to score is refused rather than silently returning stubs
+    with pytest.raises(ValueError, match="not enough"):
+        windows(series, 8, 120)
+
+
+def test_a_result_carried_by_one_window_is_not_a_result():
+    """The whole point of several windows: a control beaten in one slice and
+    lost in the rest should not read as an edge because the totals add up."""
+    from flybrain.replay import pooled_stats
+
+    flat = [0.0] * 60
+    jump = [0.0] * 30 + [9.0] * 30  # one window, one big move, then nothing
+    carried = pooled_stats([(jump, flat), (flat, jump), (flat, jump), (flat, jump)])
+    assert carried["led"] == 1 and carried["windows"] == 4
+
+    # and a steady per-tick edge in every window shows in both
+    steady = [i * 0.05 for i in range(60)]
+    real = pooled_stats([(steady, flat)] * 4)
+    assert real["led"] == 4 and real["mean_diff"] > 0

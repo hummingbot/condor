@@ -44,7 +44,7 @@ from flybrain.decoder import DecoderSettings
 from flybrain.fly3d import ACCENT, BODY, GROUND, LIMB
 from flybrain.naming import pair_names
 from flybrain.posture import MarketSpec
-from flybrain.replay import paired_stats, replay
+from flybrain.replay import paired_stats, pooled_stats, replay, windows
 from pydantic import BaseModel, Field
 from telegram.ext import ContextTypes
 
@@ -96,6 +96,15 @@ class Config(BaseModel):
     baseline_window: int = Field(default=60)
     baseline_warmup: int = Field(default=10)
     seed: int = Field(default=7301, description="Seed for the shuffled control")
+    windows: int = Field(
+        default=1,
+        ge=1,
+        le=8,
+        description="Replay every variant on this many contiguous slices of the "
+        "series, and judge a control by how many of them it lost. One window is "
+        "one sample: the sign of a result flipped between two windows on "
+        "2026-09-13, so a single one settles nothing either way",
+    )
     refresh_candles: bool = Field(
         default=False,
         description="Fetch a new window and pin it. Off by default: the venue "
@@ -246,7 +255,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     loop = asyncio.get_running_loop()
     gate = asyncio.Semaphore(config.concurrency)
 
-    async def one(name: str):
+    async def one(name: str, series: list[dict], label: str):
         overrides = VARIANTS[name]
         async with gate:
             # A fresh process per variant: the brain is stateful, and one that
@@ -269,7 +278,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                     lambda o=overrides, ob=observe: replay(
                         variant=name,
                         pair=config.trading_pair,
-                        candles=candles,
+                        candles=series,
                         spec=spec,
                         settings=_settings(config, o),
                         observe=ob,
@@ -282,14 +291,21 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                 pool.shutdown(wait=True)
         await context.bot.send_message(
             chat_id=context._chat_id,
-            text=f"🪰 replay {name}: net {result.equity_curve[-1]:+.4f} "
+            text=f"🪰 replay {name}{label}: net {result.equity_curve[-1]:+.4f} "
             f"over {result.ticks} ticks, {result.ledger.fills} fills",
         )
         return result
 
+    slices = windows(candles, config.windows, config.n_candles)
     # Order is the caller's, not the order they finished in: the first variant
     # is the baseline every control is compared against.
-    results = list(await asyncio.gather(*(one(name) for name in names)))
+    per_window: list[list] = []
+    for index, series in enumerate(slices, 1):
+        label = f" w{index}" if len(slices) > 1 else ""
+        per_window.append(
+            list(await asyncio.gather(*(one(name, series, label) for name in names)))
+        )
+    results = per_window[0]
     summaries = [r.summary() for r in results]
     # The brains are the expensive part and the arithmetic over their output is
     # not; keeping the curves means a better statistic never costs another run.
@@ -363,6 +379,46 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     )
     builder.plotly(_curve_figure(results))
 
+    if len(results) > 1 and len(per_window) > 1:
+        # The verdict that matters when there is more than one window: the
+        # increments pooled across all of them, and how many windows the fly
+        # actually lost. A control it beats in two of four is noise whatever
+        # the total says.
+        builder.section(
+            "ACROSS WINDOWS",
+            f"{len(per_window)} contiguous slices of the same series, each "
+            "replayed by every variant on its own freshly seeded brain. "
+            "'Windows lost' counts the slices where the control finished ahead "
+            "of the deployed fly — a real difference should show in the pooled "
+            "increments *and* in most windows, and one that shows in only the "
+            "total was carried by one slice.",
+        )
+        pooled_rows = []
+        for position, name in enumerate(names[1:], start=1):
+            curves = [
+                (window[0].equity_curve, window[position].equity_curve)
+                for window in per_window
+            ]
+            stats = pooled_stats(curves)
+            pooled_rows.append(
+                {
+                    "Against": f"{names[0]} − {name}",
+                    "Pooled per-tick": f"{stats['mean_diff']:+.5f}",
+                    "Pooled t": f"{stats['t']:+.2f}",
+                    "Windows won": f"{stats['led']}/{stats['windows']}",
+                    "Reads as": (
+                        "distinguishable"
+                        if abs(stats["t"]) >= 2
+                        and stats["led"] in (0, stats["windows"])
+                        else "not distinguishable"
+                    ),
+                }
+            )
+        builder.table(
+            pooled_rows,
+            ["Against", "Pooled per-tick", "Pooled t", "Windows won", "Reads as"],
+        )
+
     if len(results) > 1:
         base = results[0]
         rows = []
@@ -383,7 +439,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                 }
             )
         builder.section(
-            "AGAINST THE CONTROLS",
+            "AGAINST THE CONTROLS" + (" (first window)" if len(per_window) > 1 else ""),
             "How differently the deployed fly earns per tick, against each "
             "control. On increments, not on the equity curves themselves: a "
             "curve is cumulative, so once two runs separate every later tick "
@@ -416,7 +472,8 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
 
     lines = [
         f"pair: {config.trading_pair} ({config.interval})",
-        f"candles: {len(candles)}, ticks: {results[0].ticks if results else 0}",
+        f"candles: {len(candles)} in {len(per_window)} window(s), "
+        f"ticks each: {results[0].ticks if results else 0}",
         f"median range: {market_range:.2f} bp, fee: {fee:.2f} bp",
     ]
     for s in summaries:
@@ -427,11 +484,25 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
             f"{s['one_sided']} one-sided"
         )
     if len(results) > 1:
-        for other in results[1:]:
-            stats = paired_stats(results[0].equity_curve, other.equity_curve)
-            lines.append(
-                f"{results[0].variant} vs {other.variant}: mean per-tick earnings "
-                f"{stats['mean_diff']:+.5f}, final gap {stats['final_gap']:+.4f}, "
-                f"t {stats['t']:+.2f}"
-            )
+        for position, name in enumerate(names[1:], start=1):
+            if len(per_window) > 1:
+                stats = pooled_stats(
+                    [
+                        (window[0].equity_curve, window[position].equity_curve)
+                        for window in per_window
+                    ]
+                )
+                lines.append(
+                    f"{names[0]} vs {name}: pooled per-tick {stats['mean_diff']:+.5f}, "
+                    f"t {stats['t']:+.2f}, won {stats['led']}/{stats['windows']} windows"
+                )
+            else:
+                stats = paired_stats(
+                    results[0].equity_curve, results[position].equity_curve
+                )
+                lines.append(
+                    f"{names[0]} vs {name}: mean per-tick earnings "
+                    f"{stats['mean_diff']:+.5f}, final gap {stats['final_gap']:+.4f}, "
+                    f"t {stats['t']:+.2f}"
+                )
     return "\n".join(lines)

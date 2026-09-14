@@ -52,6 +52,11 @@ from flybrain.reinforcement import reinforcement
 # unrealized P&L; a closed one has both fees taken out of it.
 SIDES = ("buy", "sell")
 
+# Below this a window is arithmetically valid and statistically worthless: it
+# would fit the retina's candle window and leave a handful of ticks to score,
+# which is not a sample of anything. Refusing is better than reporting it.
+MIN_TICKS_PER_WINDOW = 30
+
 
 @dataclass
 class Lot:
@@ -319,6 +324,60 @@ def replay(
         equity_curve=curve,
         postures=postures,
     )
+
+
+def windows(candles: list[dict], count: int, span: int) -> list[list[dict]]:
+    """Split a series into ``count`` contiguous slices of equal length.
+
+    One window is one sample of one market, and a sample of one is how the sign
+    of a result flips between two runs ninety minutes apart. Contiguous rather
+    than overlapping, so the slices share no candle and each is an independent
+    draw of the same market.
+    """
+    if count < 1:
+        raise ValueError("count must be at least 1")
+    usable = len(candles) // count
+    if usable - span - 1 < MIN_TICKS_PER_WINDOW:
+        raise ValueError(
+            f"{len(candles)} candles split {count} ways leaves {usable} each, "
+            f"which is {max(0, usable - span - 1)} ticks after a {span}-candle "
+            f"window — not enough to score. A window needs at least "
+            f"{MIN_TICKS_PER_WINDOW}: fetch more candles or ask for fewer windows"
+        )
+    return [candles[i * usable : (i + 1) * usable] for i in range(count)]
+
+
+def pooled_stats(pairs: list[tuple[list[float], list[float]]]) -> dict:
+    """One verdict over several windows: the increments pooled, and how many
+    windows the first run actually led in.
+
+    The pooled t answers "does it earn differently"; the count answers "or did
+    one window carry it". A result that is real should do both, and a result
+    that leads in two windows of four is noise however large its total.
+    """
+    gains: list[float] = []
+    led = 0
+    for a, b in pairs:
+        n = min(len(a), len(b))
+        if n < 4:
+            continue
+        gains.extend((a[i] - a[i - 1]) - (b[i] - b[i - 1]) for i in range(1, n))
+        if a[n - 1] > b[n - 1]:
+            led += 1
+    if len(gains) < 4:
+        return {"n": 0, "windows": len(pairs), "led": led, "mean_diff": 0.0, "t": 0.0}
+    mean = sum(gains) / len(gains)
+    var = sum((g - mean) ** 2 for g in gains) / (len(gains) - 1)
+    sd = math.sqrt(var)
+    scale = max(abs(mean), max((abs(g) for g in gains), default=0.0))
+    return {
+        "n": len(gains),
+        "windows": len(pairs),
+        "led": led,
+        "mean_diff": mean,
+        "sd": sd,
+        "t": 0.0 if sd <= scale * 1e-9 else mean / (sd / math.sqrt(len(gains))),
+    }
 
 
 def paired_stats(a: list[float], b: list[float]) -> dict:
