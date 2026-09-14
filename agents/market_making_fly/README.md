@@ -385,8 +385,6 @@ agents/market_making_fly/
   skills/
     fly_mm_deploy/SKILL.md      # deploy playbook (adapted from pmm_mister_deploy: scanner → base config → deploy → start fly_brain)
     fly_decoder/SKILL.md        # how to read fly_status and the decoder
-    pmm_config_playbook/        # copied
-    capital_allocation/         # copied
   strategies/mm_operator/strategy.md   # thin loop: keep bot + fly alive, surface halts, rotate when flat
 
 agents/market_making_fly/tests/     # conftest puts the agent dir on sys.path
@@ -424,8 +422,9 @@ Two modes, like Market Making Expert:
   "is it learning anything" → runs `fly_status` (and `fly_chart`), answers in
   key: value lines, quotes the numbers, repeats the caveats in §15.
 * **Delegated / loop**: `fly_mm_deploy` skill end-to-end: scanner → TOP PICK →
-  base config from `pmm_config_playbook` balanced profile adapted with HIP-3
-  bounds → deploy with `max_global_drawdown_quote` → start `fly_brain`
+  base config built by `posture.build_config`, which *is* Market Making
+  Expert's balanced profile everywhere the fly does not decide (see §15) →
+  deploy with `max_global_drawdown_quote` → start `fly_brain`
   (shadow first unless told live) → verify with `fly_report`. The loop
   strategy ticks every 5 min: confirms bot and fly instance alive, surfaces
   halts/vetoes, rotates when flat and the market is closed.
