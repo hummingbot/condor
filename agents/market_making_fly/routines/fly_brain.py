@@ -489,7 +489,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                 tick += 1
                 persist({"checkpoint": {"file": ck.name, "sha256": sha}})
 
-                run_dir.save_activity(neural["activity"])
+                run_dir.save_activity(neural["activity"], tick - 1, pair)
                 neural_row = {
                     k: v for k, v in neural.items() if k not in ("cell_ids", "activity")
                 }

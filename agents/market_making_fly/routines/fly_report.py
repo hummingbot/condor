@@ -32,6 +32,7 @@ from flybrain.run_state import RunDir
 from pydantic import BaseModel, Field
 from telegram.ext import ContextTypes
 
+from condor.fetchers.bot_performance import count_trade_closes
 from condor.memory.paths import agent_home
 from condor.paths import safe_id
 from condor.reports import ReportBuilder
@@ -169,15 +170,6 @@ def _pnl_figure(events: list[dict]) -> go.Figure | None:
     return fig
 
 
-# A quote that was cancelled on refresh never traded. Counting every close
-# type as a trade said 70 on a run with five fills and no completed pair: 71
-# of those were EARLY_STOP, which is the controller replacing its own unfilled
-# orders. These are the closes that end a position and realize its P&L.
-ROUND_TRIP_CLOSES = frozenset(
-    {"TAKE_PROFIT", "STOP_LOSS", "TRAILING_STOP", "TIME_LIMIT", "COMPLETED"}
-)
-
-
 async def _holdings(
     client, connector_name: str, pairs: list[str]
 ) -> tuple[list[dict], int | None, int]:
@@ -204,11 +196,11 @@ async def _holdings(
         inner = perf.get("performance", perf) if isinstance(perf, dict) else {}
         closes = inner.get("close_type_counts") or {}
         if isinstance(closes, dict):
-            trades = (trades or 0) + sum(
-                int(count or 0)
-                for name, count in closes.items()
-                if str(name).split(".")[-1] in ROUND_TRIP_CLOSES
-            )
+            # Condor's own definition of a trade, not a second copy of it: the
+            # live snapshot and the cumulative history already count round
+            # trips this way, and a report that disagreed with them would be a
+            # third answer to the same question.
+            trades = (trades or 0) + count_trade_closes(inner)
             held = held + sum(
                 int(count or 0)
                 for name, count in closes.items()
@@ -407,7 +399,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     )
     builder.plotly(
         brain_figure(
-            run_dir.load_activity(),
+            run_dir.load_activity(observed.get("tick"), observed.get("pair", "")),
             title="NEURAL ACTIVITY",
             height=ROW_TWO - PANEL_CHROME,
         ),

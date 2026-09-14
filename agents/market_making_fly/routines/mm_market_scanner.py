@@ -91,11 +91,18 @@ class Config(BaseModel):
         default="",
         description="Only pairs with this issuer prefix, e.g. xyz for HIP-3 (blank = any)",
     )
+    # Every threshold below is bounded. A negative fee or a negative multiple
+    # does not loosen a filter, it inverts it: the floor goes below zero and
+    # every market that is not crossed "clears the fee", which is the one
+    # mistake this routine exists to prevent.
     maker_fee_bps: float = Field(
-        default=0.0, description="Maker fee per side in bp; 0 uses the venue default"
+        default=0.0,
+        ge=0.0,
+        description="Maker fee per side in bp; 0 uses the venue default",
     )
     min_range_over_cycle: float = Field(
         default=1.0,
+        gt=0.0,
         description="Require a typical candle's range to be this multiple of the "
         "round trip the fly would have to travel (quote distance + take-profit). "
         "1.0 means a median candle completes one cycle",
@@ -104,16 +111,19 @@ class Config(BaseModel):
         default="5m",
         description="Candle the range is measured on; use the fly's own interval",
     )
-    min_volume_usd: float = Field(default=250_000.0, description="Minimum 24h volume")
+    min_volume_usd: float = Field(
+        default=250_000.0, ge=0.0, description="Minimum 24h volume"
+    )
     max_daily_drift_pct: float = Field(
-        default=3.0, description="Maximum 24h price drift %"
+        default=3.0, ge=0.0, description="Maximum 24h price drift %"
     )
     min_book_depth_usd: float = Field(
         default=10_000.0,
+        ge=0.0,
         description="Minimum resting notional per side, within the band",
     )
     depth_within_bps: float = Field(
-        default=10.0, description="Band around mid for depth"
+        default=10.0, gt=0.0, description="Band around mid for depth"
     )
     prescreen: int = Field(
         default=30,

@@ -123,19 +123,39 @@ class RunDir:
     def write_latest(self, row: dict) -> None:
         atomic_write_json(self.latest_path, row, indent=2, default=str)
 
-    def save_activity(self, counts: list[int]) -> None:
+    def save_activity(self, counts: list[int], tick: int, pair: str) -> None:
         """Spike counts at the cloud's neurons, for the report to colour by.
 
         Overwritten each observation rather than appended: it is a few thousand
         numbers, which would bury `events.jsonl` within an hour, and only the
         latest is ever drawn.
-        """
-        atomic_write_json(self.activity_path, counts)
 
-    def load_activity(self) -> list[int] | None:
+        Stamped with the observation it came from. The file is written when the
+        brain runs, but the tick can still fail afterwards in the guard or the
+        apply — and the report then falls back to the last observation that
+        completed, which is a *different* one. Unstamped, a round-robin run
+        would draw one market's neurons beside another market's posture.
+        """
+        atomic_write_json(
+            self.activity_path, {"tick": tick, "pair": pair, "counts": counts}
+        )
+
+    def load_activity(
+        self, tick: int | None = None, pair: str = ""
+    ) -> list[int] | None:
+        """The spike counts, but only if they belong to the observation asked
+        for. A mismatch returns None, which draws the anatomy instead of
+        somebody else's activity."""
         if not self.activity_path.exists():
             return None
-        return json.loads(self.activity_path.read_text())
+        saved = json.loads(self.activity_path.read_text())
+        if not isinstance(saved, dict):
+            return None  # a snapshot from before they were stamped
+        if tick is not None and (
+            saved.get("tick") != tick or saved.get("pair") != pair
+        ):
+            return None
+        return saved.get("counts")
 
     def save_frame(self, frame: np.ndarray) -> None:
         Image.fromarray(frame).save(self.frame_path)

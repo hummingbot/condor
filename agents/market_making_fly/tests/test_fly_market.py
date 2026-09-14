@@ -7,6 +7,7 @@ from flybrain.chart import market_frame
 from flybrain.market import (
     Book,
     FixtureMarket,
+    depth_within,
     normalize_candle_payload,
     pnl_is_known,
     required_collateral,
@@ -215,3 +216,48 @@ def test_the_scanner_measures_the_trip_the_fly_would_actually_make():
     # A market whose median candle travels less than the cycle never completes
     # one, however wide its touch looks.
     assert 4.0 / mod.cycle_bps(2.0, 1.3) < 1.0
+
+
+def test_depth_survives_a_ladder_that_arrives_out_of_order():
+    """The walk stops at the first level outside the band, so one out-of-order
+    rung would hide every closer level behind it — understating depth and
+    rejecting a market that was eligible."""
+    tidy_bids = [(100.0, 5.0), (99.9, 5.0), (99.0, 5.0)]
+    tidy_asks = [(100.1, 5.0), (100.2, 5.0), (101.0, 5.0)]
+    expected = depth_within(tidy_bids, tidy_asks, within_bps=30)
+
+    shuffled_bids = [(99.0, 5.0), (100.0, 5.0), (99.9, 5.0)]
+    shuffled_asks = [(101.0, 5.0), (100.1, 5.0), (100.2, 5.0)]
+    assert depth_within(shuffled_bids, shuffled_asks, within_bps=30) == expected
+    # and the touch itself is the best price, not whatever arrived first
+    assert depth_within(shuffled_bids, shuffled_asks, 30)[2] == pytest.approx(
+        (100.1 - 100.0) / 100.05 * 1e4
+    )
+
+
+def test_the_scanner_refuses_a_threshold_that_would_invert_a_filter():
+    """A negative fee or multiple does not loosen the spread floor, it puts it
+    below zero — after which every market that is not crossed 'clears the
+    fee', which is the one mistake this routine exists to prevent."""
+    import importlib.util
+    from pathlib import Path
+
+    import pydantic
+
+    path = Path(__file__).resolve().parents[1] / "routines" / "mm_market_scanner.py"
+    spec = importlib.util.spec_from_file_location("mm_market_scanner", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    for field, bad in (
+        ("maker_fee_bps", -1.3),
+        ("min_range_over_cycle", -1.0),
+        ("min_range_over_cycle", 0.0),
+        ("min_volume_usd", -1.0),
+        ("max_daily_drift_pct", -3.0),
+        ("min_book_depth_usd", -10_000.0),
+        ("depth_within_bps", 0.0),
+    ):
+        with pytest.raises(pydantic.ValidationError):
+            mod.Config(**{field: bad})
+    mod.Config()  # the defaults are all inside their own bounds

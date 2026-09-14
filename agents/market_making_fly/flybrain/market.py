@@ -75,6 +75,13 @@ def depth_within(
     """
     if not bids or not asks:
         return 0.0, 0.0, 0.0
+    # Sorted here rather than assumed. The touch is the best price and the walk
+    # stops at the first level outside the band, so one out-of-order rung from
+    # a connector would hide every closer level behind it — understating depth
+    # and rejecting a market that was eligible. Sorting a book this size costs
+    # nothing next to the call that fetched it.
+    bids = sorted(bids, key=lambda level: -level[0])
+    asks = sorted(asks, key=lambda level: level[0])
     best_bid, best_ask = bids[0][0], asks[0][0]
     mid = (best_bid + best_ask) / 2
     if mid <= 0 or not math.isfinite(mid):
@@ -86,7 +93,7 @@ def depth_within(
         for price, size in levels:
             offset = (mid - price) / mid * 1e4 if is_bid else (price - mid) / mid * 1e4
             if offset > within_bps:
-                break  # the ladder is sorted; nothing beyond is closer
+                break  # now genuinely sorted; nothing beyond is closer
             total += price * size
         return total
 
