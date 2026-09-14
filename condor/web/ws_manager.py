@@ -366,12 +366,17 @@ class WebSocketManager(CandleStreamsMixin, HummingbotStreamsMixin):
             )
             self._sds_subscriptions[channel] = cache_key
 
-            # Broadcast the primed data
+            # Broadcast the primed data. The SDS entry holds the *raw* payload,
+            # so bots goes through the same enrichment as every later frame
+            # (`_on_data_update`): broadcasting it as-is sent `{status, data}`,
+            # which the dashboard wrote over its cached fleet — every revisit of
+            # /bots flashed "No bots running" until the next real frame.
             result = sds.get(server_name, data_type, **params)
             if result is not None:
-                prev = self._last_data.get(channel)
-                if result != prev:
-                    await self.broadcast(channel, result)
+                if sdt_name == "BOTS_STATUS":
+                    await self._broadcast_bots_update(channel, server_name, result)
+                else:
+                    await self._broadcast_update(channel, result)
 
             # Portfolio history rides on the portfolio subscription: one SDS
             # key per range, primed now and polled until the last client leaves.

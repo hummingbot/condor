@@ -169,3 +169,64 @@ def test_a_failed_enrichment_still_renders_the_page(sds, monkeypatch):
     assert frame["controllers"][0]["config"] == {}
     assert frame["controllers"][0]["deployed_at"] is None
     assert frame["total_volume"] == 1234.5
+
+
+class _FakeWS:
+    def __init__(self):
+        self.sent: list[str] = []
+
+    async def send_text(self, text):
+        self.sent.append(text)
+
+
+def test_the_subscribe_prime_is_the_enriched_page_not_the_raw_status(sds, monkeypatch):
+    """The frame a fresh ``bots:<server>`` subscriber gets first is a page.
+
+    The prime broadcast the raw SDS payload (``{status, data}``). The dashboard
+    replaces its ``["bots", server]`` cache with every frame, so a revisit of
+    /bots swapped the cached fleet for an object with no controllers and drew
+    "No bots running" until the next poll's enriched frame arrived.
+    """
+    import json
+
+    from condor.web.ws_manager import WebSocketManager, _Connection
+
+    service, _client = sds
+    monkeypatch.setattr(service, "subscribe", _async_return("key"), raising=True)
+
+    from config_manager import UserRole
+
+    class _CM:
+        def get_user_role(self, *_a, **_k):
+            return UserRole.USER
+
+        def has_server_access(self, *_a, **_k):
+            return True
+
+    monkeypatch.setattr("config_manager.get_config_manager", lambda: _CM())
+
+    async def _drive():
+        manager = WebSocketManager()
+        ws = _FakeWS()
+        conn = _Connection(ws, user_id=USER.id)
+        conn.channels.add(f"bots:{SERVER}")
+        manager._connections.append(conn)
+        await manager._subscribe_sds(f"bots:{SERVER}")
+        return ws, manager
+
+    ws, manager = asyncio.run(_drive())
+
+    assert ws.sent, "a subscriber must get the primed fleet immediately"
+    frame = json.loads(ws.sent[-1])["data"]
+    assert "status" not in frame
+    assert frame["controllers"][0]["controller_id"] == "pmm_binance_BTC-USDT_1"
+    assert frame["controllers"][0]["config"] == CONFIG
+    # And a later subscriber replayed from `_last_data` gets the page too.
+    assert "controllers" in manager._last_data[f"bots:{SERVER}"]
+
+
+def _async_return(value):
+    async def _fn(*_a, **_k):
+        return value
+
+    return _fn
