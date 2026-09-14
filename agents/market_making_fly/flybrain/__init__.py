@@ -2,5 +2,5 @@
 
 The neural substrate (``flybrain.neural``) is vendored from stonkfly; the
 chart, decoder, posture mapping, guard, reinforcement and worker are Condor's.
-See ``docs/market_making_fly_design.md``.
+See ``agents/market_making_fly/README.md``.
 """

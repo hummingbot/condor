@@ -678,7 +678,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                     "_The regime, spread multiplier and lean are decoded from spike counts "
                     "of identified cells; the mapping is engineered and unvalidated. Dopamine "
                     "pulses report P&L change, not credit for the last posture. See "
-                    "docs/market_making_fly_design.md §15._"
+                    "agents/market_making_fly/README.md §15._"
                 )
                 await report.update()
 

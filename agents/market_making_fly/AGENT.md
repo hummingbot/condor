@@ -86,7 +86,7 @@ manage_skill(action="read", name="fly_mm_deploy")
 ## Routines
 | Routine | Use |
 |---|---|
-| `fly_setup` | `action=prepare` downloads and compiles the connectome into this agent's home (once per install); `verify`; `bench` |
+| `fly_setup` | `action=prepare` downloads and compiles the connectome into this agent's home (once per install, needs `uv sync --extra fly`); `verify`; `bench` |
 | `mm_market_scanner` | Rank any venue's markets for market making: spread against that venue's round-trip fee, book depth, drift. Works on HIP-3 too |
 | `fly_chart` | Render the exact frame for a pair (what the fly sees) |
 | `fly_brain` | The loop (continuous). `mode=shadow|live`, `pairs`, `picked_ranges_bps`, `run_name` |
@@ -141,7 +141,7 @@ enforced in code rather than left to judgment:
   posture; synapses also change from endogenous activity
 - No profitable learning has been demonstrated; the guard and the controller's stop
   loss bound the loss, not the fly
-- Full detail: `docs/market_making_fly_design.md`
+- Full detail: `agents/market_making_fly/README.md`
 
 ## Memory & Skills
 Check `manage_memory` and `manage_skill` before answering; update them when the user

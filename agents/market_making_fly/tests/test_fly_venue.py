@@ -92,3 +92,28 @@ def test_an_unlisted_hip3_market_is_refused_not_guessed():
     _seed_hyperliquid_fees()
     with pytest.raises(ValueError, match="not listed"):
         asyncio.run(venue.hyperliquid_maker_fee_bps("XYZ:NOTREAL-USD", "perp"))
+
+
+def test_the_fly_says_what_to_install_rather_than_failing_deep():
+    """pyarrow is 122 MB that only this agent uses, so it is an extra. An
+    operator who skipped it should get the command, not an ImportError three
+    frames inside a vendored connectome loader."""
+    import builtins
+
+    from flybrain.deps import INSTALL, require_pyarrow
+
+    real_import = builtins.__import__
+
+    def without_pyarrow(name, *args, **kwargs):
+        if name == "pyarrow" or name.startswith("pyarrow."):
+            raise ImportError("No module named 'pyarrow'")
+        return real_import(name, *args, **kwargs)
+
+    builtins.__import__ = without_pyarrow
+    try:
+        with pytest.raises(RuntimeError, match=INSTALL):
+            require_pyarrow()
+    finally:
+        builtins.__import__ = real_import
+
+    require_pyarrow()  # installed here, so it must stay silent

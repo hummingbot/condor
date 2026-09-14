@@ -19,8 +19,6 @@ dependencies = [
     # It pins numba==0.61.2, which caps numpy at <2.3 — that is also the numpy
     # the API container runs (2.2.6), so the two environments stay aligned.
     "pandas-ta>=0.4.71b",
-    # Fly connectome (condor/fly): MaleCNS feather files
-    "pyarrow",
     "geckoterminal-py",
     "mcp",
     "fastapi",
@@ -40,6 +38,15 @@ dependencies = [
     # python-jose[cryptography].
     "pywebpush>=2.5.0",
 ]
+
+[project.optional-dependencies]
+# Market Making Fly reads the MaleCNS release from Arrow feather files. pyarrow
+# is 122 MB installed and nothing else in Condor touches it, so it is an extra
+# rather than a core dependency: `uv sync --extra fly`. Every import of it in
+# the agent is inside a function, and the two entry points that reach one check
+# first and say this — so a Condor without the extra runs normally and the fly
+# refuses to start with an instruction rather than an ImportError.
+fly = ["pyarrow"]
 
 [dependency-groups]
 # PEP 735 group: this is what ``uv sync --dev`` installs. Declared as an

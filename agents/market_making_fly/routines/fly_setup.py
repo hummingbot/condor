@@ -82,8 +82,13 @@ def _bench(observations: int, neural_ms: float) -> dict:
 
 
 async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
+    from flybrain.deps import require_pyarrow
     from flybrain.neural.common import DATA
 
+    # Every path from here reads a feather file. Check once, at the front, so
+    # the answer is a command to run rather than an ImportError from inside the
+    # vendored loader after a 1.1 GB download.
+    require_pyarrow()
     if config.action not in ("prepare", "verify", "bench"):
         raise ValueError("action must be prepare, verify or bench")
     loop = asyncio.get_running_loop()

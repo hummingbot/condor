@@ -1,7 +1,25 @@
-# Market Making Fly — implementation design
+# Market Making Fly
 
-Status: **implemented (see §18); this document is the reference.**
-Date: 2026-09-12
+A Condor agent whose market-making discretion — regime, spread width, how much
+to commit, which way to lean — is decoded from a simulation of the MaleCNS v1.0
+fly connectome watching a chart, with the bots' P&L fed back as dopamine.
+
+Status: **implemented**. This file is the agent's reference: the design, the
+decisions behind it, and §15 for what has and has not been demonstrated.
+Written 2026-09-12, evidence added 2026-09-13.
+
+## 0. Install
+
+```
+uv sync --extra fly                       # pyarrow, for the MaleCNS feather files
+manage_routines(action="run", name="fly_setup", config={"action": "prepare"})
+```
+
+`pyarrow` is 122 MB and nothing else in Condor reads Arrow, so it is an extra
+rather than a core dependency — a Condor installed without it is a normal
+Condor with this one agent unavailable, and the two entry points that need it
+say so with the command rather than an ImportError. `prepare` downloads ~1.1 GB
+of connectome and compiles the kernel; it is a once-per-install step.
 
 ## 1. Summary
 
@@ -369,14 +387,14 @@ agents/market_making_fly/
     fly_decoder/SKILL.md        # how to read fly_status and the decoder
     pmm_config_playbook/        # copied
     capital_allocation/         # copied
-  strategies/fly_hip3_operator/strategy.md   # thin loop: keep bot + fly alive, surface halts, rotate when flat
+  strategies/mm_operator/strategy.md   # thin loop: keep bot + fly alive, surface halts, rotate when flat
 
 agents/market_making_fly/tests/     # conftest puts the agent dir on sys.path
   test_fly_chart.py test_fly_decoder.py test_fly_posture.py
   test_fly_guard.py test_fly_reinforcement.py
   test_fly_full_graph.py   # opt-in, CONDOR_FLY_FULL_TEST=1, needs prepared data
 
-docs/market_making_fly_design.md   # this file, kept as the reference
+README.md                                  # this file: design, decisions, and what is claimed
 ```
 
 Run state per fly instance:
@@ -558,7 +576,7 @@ below for the record.
 1. **Vendor stonkfly's neural package into `agents/market_making_fly/flybrain/neural/` (recommended)**
    vs `pip install git+…stonkfly`. Installing pulls `coinbase-agentkit` and
    `coinbase-advanced-py` into Condor for no use; vendoring adds ~1,400 lines +
-   the kernel + `pyarrow` as a new dependency.
+   the kernel + `pyarrow` as a new optional dependency (extra `fly`).
 2. **Deterministic apply (recommended)** — the `fly_brain` routine applies the
    config itself and the LLM only operates — vs the LLM loop reading the
    posture and applying it each tick. The second puts an LLM back between the

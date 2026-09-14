@@ -16,6 +16,7 @@ seeded draw, so the same install always draws the same brain.
 from __future__ import annotations
 
 import numpy as np
+from flybrain.deps import require_pyarrow
 from flybrain.neural.common import DATA, GRAPH
 
 CLOUD = DATA / "soma_cloud.npz"
@@ -84,6 +85,7 @@ def _group_of(ids: np.ndarray, superclass: np.ndarray) -> np.ndarray:
 
 def build(max_points: int = DEFAULT_POINTS) -> dict:
     """Subsample the somata and cache the result. Idempotent."""
+    require_pyarrow()
     with np.load(GRAPH) as graph:
         ids = graph["ids"]
         superclass = graph["superclass"].astype(str)

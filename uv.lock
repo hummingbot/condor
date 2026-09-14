@@ -614,7 +614,6 @@ dependencies = [
     { name = "pandas", version = "3.0.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14'" },
     { name = "pandas-ta" },
     { name = "plotly" },
-    { name = "pyarrow" },
     { name = "pydantic-ai" },
     { name = "python-dotenv" },
     { name = "python-jose", extra = ["cryptography"] },
@@ -625,6 +624,11 @@ dependencies = [
     { name = "uvicorn", extra = ["standard"] },
     { name = "watchfiles" },
     { name = "yfinance" },
+]
+
+[package.optional-dependencies]
+fly = [
+    { name = "pyarrow" },
 ]
 
 [package.dev-dependencies]
@@ -652,7 +656,7 @@ requires-dist = [
     { name = "pandas" },
     { name = "pandas-ta", specifier = ">=0.4.71b0" },
     { name = "plotly" },
-    { name = "pyarrow" },
+    { name = "pyarrow", marker = "extra == 'fly'" },
     { name = "pydantic-ai", extras = ["mcp"] },
     { name = "python-dotenv" },
     { name = "python-jose", extras = ["cryptography"] },
@@ -664,6 +668,7 @@ requires-dist = [
     { name = "watchfiles" },
     { name = "yfinance", specifier = ">=1.7.0" },
 ]
+provides-extras = ["fly"]
 
 [package.metadata.requires-dev]
 dev = [
