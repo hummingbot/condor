@@ -523,21 +523,35 @@ Copied in spirit from stonkfly's `docs/model.md`, because the same limits hold:
 ### What the replay controls established, 2026-09-13
 
 `fly_replay` walks a pinned candle series with the same brain, decoder and
-geometry, changing one setting per variant. On 327 ticks of XYZ:DRAM-USD at
-5 m, with the position cap taken from the controller rather than chosen:
+geometry, changing one setting per variant. Two markets, four contiguous
+windows each, 327 ticks per window, every variant on its own freshly seeded
+brain:
 
-| against `live` | mean per-tick | final gap | t |
-|---|---|---|---|
-| shuffled reinforcement | +0.00013 | +0.04 | **+0.24** |
-| frozen plasticity | +0.00165 | +0.54 | +1.06 |
-| valence disconnected | +0.00307 | +1.00 | +1.20 |
+| market | against `live` | pooled per-tick | pooled t | windows won |
+|---|---|---|---|---|
+| XYZ:DRAM-USD (1.3 bp fee, 13.7 bp bars) | shuffled reinforcement | +0.00035 | +0.17 | **2 / 4** |
+| | frozen plasticity | +0.00136 | +0.65 | 3 / 4 |
+| ZEC-USD (2.5 bp fee, 41.3 bp bars) | shuffled reinforcement | −0.00501 | −0.80 | **2 / 4** |
+| | frozen plasticity | −0.00813 | −1.11 | 1 / 4 |
 
-**The fly with real P&L reinforcement is not distinguishable from the fly whose
-reinforcement sign is random.** That is the control this design has always said
-it lacked, and it now exists and does not separate them. Nor does freezing the
-memory rule entirely. One market, one window, and a fill model that assumes a
-touched price was ours — so this is not proof of a null, but it is the first
-evidence on the question and it points at one.
+**The fly with real P&L reinforcement beats the fly whose reinforcement sign is
+random in exactly half the windows, on both markets.** That is a coin flip. It
+is the control this design has always said it lacked, it exists now, and it
+does not separate them — on two fee families, in a regime where the strategy
+made money (DRAM, all variants +1.7 to +1.8) and one where it lost (ZEC, all
+variants −12.5 to −14.6). Freezing the memory rule outright does not separate
+them either, and on ZEC the frozen fly was ahead.
+
+The fill model still assumes a touched price was ours, and eight windows of two
+markets is not the last word. But the earlier single-window figures this
+replaces (t = +0.24 against shuffled) were one slice of one market, and the
+multi-window result is the one to quote: a reader can judge "2 of 4 windows"
+without trusting the statistic at all.
+
+What this does *not* say is that the market maker does not work. On DRAM's
+volatile stretch every variant earned, which is the geometry earning — quote
+levels placed against how far the market travels. The connectome's contribution
+to that is what is unmeasurable.
 
 Two measurement lessons are worth more than the numbers:
 
