@@ -896,7 +896,34 @@ async def get_telemetry_settings(user: WebUser = Depends(get_current_user)):
         "pending_events": emitter.buffered(),
         "privacy_doc": "PRIVACY.md",
         "can_change": cm.is_admin(user.id),
+        "notice_shown": consent.notice_shown(),
         "disclosure": DISCLOSURE,
+    }
+
+
+@router.post("/telemetry/notice")
+async def mark_telemetry_notice_shown(user: WebUser = Depends(get_current_user)):
+    """Record that the dashboard showed the admin the telemetry notice.
+
+    Posted by the notice strip when it renders. It is the dashboard's delivery
+    receipt — the equivalent of the Telegram message having been sent — and it
+    is what moves an unanswered install from the ping floor to ``usage``, so it
+    counts only for the admin, who is the one being told. It changes nothing
+    for an install that has already answered or whose level the environment
+    pins; ``consent.mark_notice_shown`` enforces both.
+    """
+    from condor.telemetry import consent
+
+    if not get_config_manager().is_admin(user.id):
+        raise HTTPException(
+            status_code=403,
+            detail="Telemetry is an install-wide setting; only the admin is notified",
+        )
+    consent.mark_notice_shown()
+    return {
+        "level": consent.level(),
+        "consent": consent.state(),
+        "notice_shown": consent.notice_shown(),
     }
 
 
@@ -907,8 +934,8 @@ async def set_telemetry_settings(
 ):
     """Change the install's telemetry level. Admin only, and reversible.
 
-    ``ping`` is the floor for an install that has never answered — silence is
-    not refusal — but ``off`` is a real answer here, because an admin who wants
+    An unanswered install is at ``ping`` until it has been shown the notice and
+    at ``usage`` after — silence is not refusal — but ``off`` is a real answer here, because an admin who wants
     this install to report nothing must have a way to say so in the product
     rather than only by editing ``.env``. It is recorded as a refusal in
     ``config.yml``, so it survives upgrades; ``ping``/``usage`` re-enable.

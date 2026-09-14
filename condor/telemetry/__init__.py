@@ -11,9 +11,10 @@ The four facts that define it:
   ``ping``: the four adoption events (``install``, ``heartbeat``,
   ``version_change``, ``shutdown``) and the anonymous envelope, from the first
   boot, with no answer required.
-- **Usage is opt-in, once, by the admin.** One inline-keyboard prompt on boot
-  offers full usage or install-count-only. The answer is durable and
-  reversible.
+- **Usage is opt-out, after a notice.** The admin is told once — a Telegram
+  message on boot, or a strip on the dashboard — that usage summaries are on
+  and where to turn them off. Only a delivered notice turns them on; the answer
+  ("Got it", "Turn off", or a level in Settings) is durable and reversible.
 - **Allowlisted.** :mod:`condor.telemetry.schema` declares every event and every
   property. Anything undeclared is dropped by construction, which is what makes
   the "never collected" list in ``PRIVACY.md`` a property of the code.

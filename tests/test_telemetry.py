@@ -331,9 +331,9 @@ class _FakeTap:
 
 
 def test_a_stale_no_thanks_tap_is_recorded_as_the_refusal_it_is(install, monkeypatch):
-    """The prompt no longer offers "off", so such a tap can only come from a
-    message an older build sent — where the button read "No thanks". Rounding
-    it up to the floor would be the same defect as ignoring a stored one."""
+    """An "off" tap is the notice's "Turn off", or "No thanks" on a message an
+    older build sent. Rounding it up to the floor would be the same defect as
+    ignoring a stored refusal."""
     from condor.telemetry import prompt
     from config_manager import get_config_manager
 
@@ -623,27 +623,143 @@ def test_an_install_silenced_by_the_environment_is_never_counted(install, monkey
 
 
 def test_telegram_and_the_dashboard_disclose_exactly_the_same_thing():
-    """Two prompts mean two chances to disagree about what is collected. The
-    dashboard card renders `DISCLOSURE`; the Telegram message is built from it."""
+    """Two notices mean two chances to disagree about what is collected. The
+    dashboard strip renders `DISCLOSURE`; the Telegram message is built from it."""
     from condor.telemetry.prompt import _TEXT, DISCLOSURE
 
     assert DISCLOSURE["headline"] in _TEXT
-    assert DISCLOSURE["always_on"] in _TEXT
-    assert DISCLOSURE["optional"] in _TEXT
+    assert DISCLOSURE["summary"] in _TEXT
+    assert DISCLOSURE["opt_out"] in _TEXT
     assert DISCLOSURE["doc"] in _TEXT
     for never in DISCLOSURE["never"]:
         assert never in _TEXT
 
 
-def test_the_prompt_offers_no_way_to_switch_counting_off():
-    """`off` is the operator's env kill switch, never a button — on either
-    surface. A stray option here would quietly make the floor optional."""
-    from condor.telemetry.prompt import DISCLOSURE, OPTIONS
+def test_settings_offers_only_grantable_levels_and_the_notice_a_real_off():
+    """`off` is never a *level* an admin grants — a stray one would be rounded
+    up to the floor. Turning off is a recorded refusal, and the notice offers
+    it as a button of its own."""
+    from condor.telemetry.prompt import DISCLOSURE, OPTIONS, keyboard
 
     levels = {option["level"] for option in OPTIONS}
     assert levels == set(consent.ANSWER_LEVELS)
     assert consent.OFF not in levels
     assert [o["level"] for o in DISCLOSURE["options"]] == [o["level"] for o in OPTIONS]
+
+    buttons = [b for row in keyboard().inline_keyboard for b in row]
+    assert [b.callback_data for b in buttons] == ["telemetry:usage", "telemetry:off"]
+    assert [b.text for b in buttons] == [
+        DISCLOSURE["acknowledge"],
+        DISCLOSURE["turn_off"],
+    ]
+
+
+# ── Usage is on once the notice has been shown ───────────────────────────
+
+
+def test_usage_starts_only_once_the_notice_is_shown(install):
+    """The opt-out is honest only because nothing beyond a count is recorded
+    before the admin could have read that usage summaries are on."""
+    from config_manager import get_config_manager
+
+    get_config_manager()
+    emitter.emit("command", name="portfolio", surface="telegram")
+    assert consent.level() == consent.PING
+    assert emitter.buffered() == 0
+
+    assert consent.mark_notice_shown() is True
+    assert consent.state() == consent.UNKNOWN  # told, not answered
+    assert consent.level() == consent.USAGE
+    assert consent.install_id()
+    emitter.emit("command", name="portfolio", surface="telegram")
+    assert emitter.buffered() == 1
+
+    assert consent.mark_notice_shown() is False  # once
+    assert consent.should_prompt("9.9.9") is False  # nothing left to tell
+
+
+@pytest.mark.parametrize("answer", ["ping", "off"])
+def test_the_notice_cannot_overrule_an_answer_already_given(install, answer):
+    """An install that chose install-count-only, or refused, keeps that answer:
+    the notice is for installs that never said anything."""
+    from config_manager import get_config_manager
+
+    get_config_manager()
+    if answer == "off":
+        consent.deny()
+    else:
+        consent.grant(answer)
+    before = consent.level()
+
+    assert consent.mark_notice_shown() is False
+    assert consent.level() == before
+    assert not consent.notice_shown()
+
+
+def test_the_notice_cannot_overrule_the_environment(install, monkeypatch):
+    from config_manager import get_config_manager
+
+    get_config_manager()
+    monkeypatch.setattr("utils.config.CONDOR_TELEMETRY", "ping", raising=False)
+    consent.refresh()
+
+    assert consent.mark_notice_shown() is False
+    assert consent.level() == consent.PING
+
+
+class _FakeBot:
+    def __init__(self, fail=False):
+        self.fail = fail
+        self.sent = []
+
+    async def send_message(self, **kwargs):
+        if self.fail:
+            raise RuntimeError("telegram is down")
+        self.sent.append(kwargs)
+
+
+def test_a_delivered_telegram_notice_turns_usage_on(install, monkeypatch):
+    from condor.telemetry import prompt
+    from config_manager import get_config_manager
+
+    get_config_manager()
+    monkeypatch.setattr("utils.config.ADMIN_USER_ID", "7", raising=False)
+    bot = _FakeBot()
+
+    assert asyncio.run(prompt.maybe_prompt_admin(bot)) is True
+    assert bot.sent and bot.sent[0]["text"] == prompt._TEXT
+    assert consent.notice_shown()
+    assert consent.level() == consent.USAGE
+
+
+def test_a_notice_that_failed_to_send_leaves_the_install_at_the_floor(
+    install, monkeypatch
+):
+    """An attempt is not a delivery. Nobody was told, so nothing turns on."""
+    from condor.telemetry import prompt
+    from config_manager import get_config_manager
+
+    get_config_manager()
+    monkeypatch.setattr("utils.config.ADMIN_USER_ID", "7", raising=False)
+
+    assert asyncio.run(prompt.maybe_prompt_admin(_FakeBot(fail=True))) is False
+    assert not consent.notice_shown()
+    assert consent.level() == consent.PING
+
+
+def test_got_it_on_the_notice_records_usage(install, monkeypatch):
+    from condor.telemetry import prompt
+    from config_manager import get_config_manager
+
+    monkeypatch.setattr(type(get_config_manager()), "is_admin", lambda self, uid: True)
+    consent.mark_notice_shown()
+
+    tap = _FakeTap("telemetry:usage")
+    asyncio.run(prompt.callback_handler(tap, None))
+
+    assert consent.state() == consent.GRANTED
+    assert consent.level() == consent.USAGE
+    assert "Settings" in tap.callback_query.text
 
 
 # ── Out of process ───────────────────────────────────────────────────────

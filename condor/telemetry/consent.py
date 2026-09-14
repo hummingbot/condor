@@ -5,19 +5,27 @@ admin owns the install. The states are ``unknown`` (the default on a fresh
 clone), ``granted`` and ``denied``, stored in ``config.yml`` under ``telemetry``
 alongside the install's identity.
 
-Three rules matter more than the rest:
+Four rules matter more than the rest:
 
-**The floor is ``ping`` — for an install that has not answered.** Every install
-that has said nothing is counted: it emits the four adoption events
-(``install``, ``heartbeat``, ``version_change``, ``shutdown``) and nothing else.
-The prompt decides one thing only — whether the ``usage`` events are added on
-top. There is no "off" answer on the form, so silence is never read as refusal.
+**The floor is ``ping`` — until the admin has been told.** An install that has
+said nothing emits the four adoption events (``install``, ``heartbeat``,
+``version_change``, ``shutdown``) and nothing else. That is all an install
+sends before anyone could have read what it sends.
+
+**Usage is the default once the notice has been shown.** The admin is shown one
+notice — the Telegram message next to the boot notification, or the dashboard
+strip — saying usage summaries are on and where to turn them off. Its delivery
+is recorded as ``noticed_at``, and from that moment an unanswered install
+resolves to ``usage``. It is an opt-out, and the notice is what makes it one: no
+usage event is ever recorded for an install that was never told. "Got it" just
+records ``granted`` at ``usage`` so the notice stops showing.
 
 **A refusal is honoured, and survives an upgrade.** ``denied`` is not silence:
-it is a recorded "no", written by :func:`deny` (the dashboard's off switch, and
-older builds' "No thanks" button). It resolves to level ``off``, so an install
-that refused under any build stays silent across upgrades and is never re-asked.
-Re-enabling is an explicit act — :func:`set_level` with ``ping`` or ``usage``.
+it is a recorded "no", written by :func:`deny` (the notice's "Turn off", the
+dashboard's off switch, older builds' "No thanks"). It resolves to level
+``off``, so an install that refused under any build stays silent across upgrades
+and is never re-asked — and the notice cannot flip it, nor an install that chose
+``ping``. Re-enabling is an explicit act — :func:`set_level`.
 
 **The environment wins.** ``CONDOR_TELEMETRY`` in ``utils/config.py`` overrides
 the stored answer in both directions: it can silence an install that granted
@@ -45,10 +53,9 @@ UNKNOWN = "unknown"
 GRANTED = "granted"
 DENIED = "denied"
 
-# Answer -> level, the two buttons of the admin prompt. "off" is deliberately
-# not one of them: install counting is the floor for an install that has *not*
-# answered, so an ignored prompt must not be readable as a refusal. Refusing is
-# a separate, explicit act — `deny()`.
+# Answer -> level for the grantable answers: the notice's "Got it" and the two
+# levels in Settings. "off" is deliberately not one of them — refusing is a
+# separate, recorded act, `deny()`, so a stray answer can never be read as one.
 ANSWER_LEVELS = {"usage": USAGE, "ping": PING}
 
 _cached_level: str | None = None
@@ -125,12 +132,13 @@ def _compute_level() -> str:
         stored = _section().get("level")
         return stored if stored in (PING, USAGE) else USAGE
     if stored_state == DENIED:
-        # A recorded "no" outranks the floor. Installs that refused under an
-        # older build carry this state forward, and an upgrade must not read
-        # their refusal as an unanswered prompt.
+        # A recorded "no" outranks everything stored. Installs that refused
+        # under an older build carry this state forward, and an upgrade must not
+        # read their refusal as an unanswered notice.
         return OFF
-    # Unanswered installs are still counted: ping is the floor.
-    return PING
+    # Unanswered: usage once the admin has been told it is on, and until then
+    # only the ping floor — nothing beyond a count before anyone could know.
+    return USAGE if notice_shown() else PING
 
 
 def refresh() -> str:
@@ -286,7 +294,7 @@ def mark_feature_seen(feature: str) -> bool:
     """True the first time this install ever uses ``feature``, False after.
 
     Backs the ``feature_first_use`` activation funnel. Only called at level
-    ``usage``, so an install that has not opted in never accumulates the list.
+    ``usage``, so an install below it never accumulates the list.
     """
     section = _section()
     seen = list(section.get("features_seen") or [])
@@ -297,17 +305,43 @@ def mark_feature_seen(feature: str) -> bool:
     return True
 
 
-# ── Prompt bookkeeping ───────────────────────────────────────────────────
+# ── Notice bookkeeping ───────────────────────────────────────────────────
+
+
+def notice_shown() -> bool:
+    """Has the admin been shown the notice that usage summaries are on?"""
+    return bool(_section().get("noticed_at"))
+
+
+def mark_notice_shown() -> bool:
+    """Record that the notice reached the admin. True if this turned usage on.
+
+    Called only once the notice has actually been delivered — after the
+    Telegram message was sent, or when the dashboard strip rendered for the
+    admin — never before, because this is the moment an unanswered install
+    starts sending usage events. It changes nothing for an install that has
+    already answered (a ``ping`` or a refusal stays exactly that) or whose level
+    the environment pins.
+    """
+    if env_overridden() or state() != UNKNOWN or notice_shown():
+        return False
+    _update(noticed_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+    ensure_identity()
+    return True
 
 
 def should_prompt(version: str = "") -> bool:
-    """Has this install never been asked (or not since this version)?"""
-    if env_overridden() or state() != UNKNOWN:
+    """Is there a notice left to send (and not already tried on this version)?"""
+    if env_overridden() or state() != UNKNOWN or notice_shown():
         return False
     asked = _section().get("prompted_version")
     return asked != (version or "unknown")
 
 
 def mark_prompted(version: str = "") -> None:
-    """Written *before* the prompt is sent, so a crash loop cannot re-ask forever."""
+    """Written *before* the notice is sent, so a crash loop cannot re-send forever.
+
+    Deliberately not :func:`mark_notice_shown`: an attempt is not a delivery,
+    and a send that fails must leave the install at the ping floor.
+    """
     _update(prompted_version=version or "unknown")

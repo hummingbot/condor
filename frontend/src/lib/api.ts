@@ -1597,14 +1597,14 @@ export interface VoiceSettingsResponse {
 
 // ── Telemetry (FEAT-023) ──
 
-/** The two answers on the consent form. There is no "off" button on it. */
+/** The two grantable levels offered in Settings → Privacy. */
 export type TelemetryLevel = "ping" | "usage";
 
 /**
- * What the level can actually be. `off` is not an answer to the prompt — it is
- * a refusal, made explicitly (Settings → Privacy) or pinned by the operator's
- * `CONDOR_TELEMETRY` — which is why it is a separate type from the two options
- * the disclosure offers.
+ * What the level can actually be. `off` is not a level an admin grants — it is
+ * a refusal, recorded explicitly ("Turn off", Settings → Privacy) or pinned by
+ * the operator's `CONDOR_TELEMETRY` — which is why it is a separate type from
+ * the two options the disclosure offers.
  */
 export type TelemetryEffectiveLevel = TelemetryLevel | "off";
 
@@ -1614,22 +1614,24 @@ export interface TelemetryOption {
 }
 
 /**
- * What the install is told before it answers, served by the backend so this
- * copy and the Telegram prompt's cannot drift (`condor/telemetry/prompt.py`).
+ * What the install is told, served by the backend so this copy and the
+ * Telegram notice's cannot drift (`condor/telemetry/prompt.py`).
  */
 export interface TelemetryDisclosure {
   headline: string;
-  always_on: string;
-  optional: string;
+  summary: string;
+  opt_out: string;
   never: string[];
   doc: string;
+  acknowledge: string;
+  turn_off: string;
   options: TelemetryOption[];
 }
 
 export type TelemetryConsentState = "unknown" | "granted" | "denied";
 
 export interface TelemetrySettingsResponse {
-  /** `unknown` until someone answers — that is what the consent card asks.
+  /** `unknown` until someone answers — the notice strip shows until then.
    * `denied` is a recorded refusal: the level is `off` and stays off. */
   consent: TelemetryConsentState;
   level: TelemetryEffectiveLevel;
@@ -1640,6 +1642,9 @@ export interface TelemetrySettingsResponse {
   privacy_doc: string;
   /** Consent is install-wide, so only the admin may answer. */
   can_change: boolean;
+  /** The admin has been shown the notice. An unanswered install sends usage
+   * summaries only once this is true; before, only the install count. */
+  notice_shown: boolean;
   disclosure: TelemetryDisclosure;
 }
 
@@ -3725,6 +3730,14 @@ export const api = {
 
   getTelemetrySettings: () =>
     apiFetch<TelemetrySettingsResponse>("/api/v1/settings/telemetry"),
+
+  /** The notice strip's delivery receipt. Admin only (403 otherwise). */
+  markTelemetryNoticeShown: () =>
+    apiFetch<{
+      level: TelemetryEffectiveLevel;
+      consent: TelemetryConsentState;
+      notice_shown: boolean;
+    }>("/api/v1/settings/telemetry/notice", { method: "POST" }),
 
   /** Admin only (403 otherwise), and 409 when `CONDOR_TELEMETRY` is pinned.
    * `off` records a refusal and purges whatever was collected. */
