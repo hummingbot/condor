@@ -158,6 +158,56 @@ async def test_failed_fetch_is_not_cached():
 
 
 @pytest.mark.asyncio
+async def test_failed_refresh_answers_with_the_last_known_configs(monkeypatch):
+    """A refresh that raises past the TTL keeps the last good configs.
+
+    An empty map would strip every controller of its class, and the dashboard
+    groups the Type bubbles by it.
+    """
+    client = _Client()
+    now = [1000.0]
+
+    class _Clock:
+        @staticmethod
+        def monotonic():
+            return now[0]
+
+    monkeypatch.setattr(bots_mod, "time", _Clock)
+
+    await fetch_bots_enrichment(client, _bots("alpha"))
+    now[0] += bots_mod._CTRL_CONFIGS_TTL + 1
+    client.fail_next = True
+    stale = await fetch_bots_enrichment(client, _bots("alpha"))
+
+    assert stale.ctrl_configs["ctrl_alpha"]["controller_name"] == "name_alpha"
+    # Still not remembered as fresh: the next refresh asks upstream again.
+    await fetch_bots_enrichment(client, _bots("alpha"))
+    assert client.config_calls == ["alpha", "alpha", "alpha"]
+
+
+@pytest.mark.asyncio
+async def test_timed_out_refresh_answers_with_the_last_known_configs(monkeypatch):
+    """The whole config fan-out timing out degrades to the last good configs."""
+    client = _Client()
+    await fetch_bots_enrichment(client, _bots("alpha"))
+
+    now = [1000.0 + bots_mod._CTRL_CONFIGS_TTL * 10]
+
+    class _Clock:
+        @staticmethod
+        def monotonic():
+            return now[0]
+
+    monkeypatch.setattr(bots_mod, "time", _Clock)
+    monkeypatch.setattr(bots_mod, "ENRICHMENT_TIMEOUT", 0.01)
+    client.gate = asyncio.Event()  # never set: upstream hangs
+
+    stale = await fetch_bots_enrichment(client, _bots("alpha"))
+
+    assert stale.ctrl_configs["ctrl_alpha"]["controller_name"] == "name_alpha"
+
+
+@pytest.mark.asyncio
 async def test_invalidation_shows_the_edited_config():
     """After a config edit invalidates the bot, the next page shows the edit."""
     client = _Client()

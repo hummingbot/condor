@@ -100,7 +100,7 @@ GOLDEN_REST = {
             },
         },
         {
-            "controller_name": "quiet_ctrl",
+            "controller_name": "",
             "controller_type": "",
             "controller_id": "quiet_ctrl",
             "bot_name": "epsilon",
@@ -148,7 +148,8 @@ GOLDEN_REST = {
 GOLDEN_WS = {
     "controllers": [
         {
-            "controller_name": "pmm_binance_BTC-USDT_1",
+            # No config, no class: never the id standing in for one.
+            "controller_name": "",
             "controller_id": "pmm_binance_BTC-USDT_1",
             "bot_name": "epsilon",
             "status": "running",
@@ -165,7 +166,7 @@ GOLDEN_WS = {
             "config": {},
         },
         {
-            "controller_name": "quiet_ctrl",
+            "controller_name": "",
             "controller_id": "quiet_ctrl",
             "bot_name": "epsilon",
             "status": "stopped",

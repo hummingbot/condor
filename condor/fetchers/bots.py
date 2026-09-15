@@ -86,8 +86,8 @@ def build_bots_page(
     controller_id and connector/trading_pair as the REST body.
 
     The kwargs still default to empty maps, but that is degradation, not a
-    supported mode: with no configs a controller reports ``config={}``, no
-    deploy age, its raw performance key as its id, and a connector/pair guessed
+    supported mode: with no configs a controller reports ``config={}``, an
+    empty ``controller_name`` (its class is unknown), no deploy age, its raw performance key as its id, and a connector/pair guessed
     by splitting that key on underscores.
 
     Args:
@@ -186,13 +186,15 @@ def build_bots_page(
                 total_pnl += global_pnl
                 total_volume += volume
 
-                config_cname = ctrl_config.get("controller_name", "")
-                display_name = config_cname or ctrl_name
                 display_id = config_id or ctrl_name
 
                 controllers.append(
                     {
-                        "controller_name": display_name,
+                        # The class, and only the config knows it. Never the id
+                        # in its place: the dashboard groups and filters by this
+                        # field, so a degraded frame would turn every controller
+                        # into a "type" of its own until the next good one.
+                        "controller_name": ctrl_config.get("controller_name", ""),
                         "controller_id": display_id,
                         "bot_name": bot_name,
                         "status": ctrl_status,
@@ -386,6 +388,37 @@ def _prune_ctrl_configs(server: str, live: set[str]) -> None:
         _ctrl_configs_cache.pop(key, None)
 
 
+def _index_ctrl_configs(configs_map: dict[str, dict], configs: list[dict]) -> None:
+    for cfg in configs:
+        cid = cfg.get("id") or cfg.get("controller_id", "")
+        if cid:
+            configs_map[cid] = cfg
+        cname = cfg.get("controller_name", "")
+        if cname and cname != cid:
+            configs_map[cname] = cfg
+
+
+def _last_known_ctrl_configs(client, bot_names: list[str]) -> dict[str, dict]:
+    """The configs we last fetched for these bots, however old.
+
+    What a failed or timed-out refresh answers with instead of nothing. A
+    config is near-static, so the last good copy is almost always still right,
+    while an empty map strips every controller of its class, pair and deploy
+    config for as long as the SDS caches the degraded enrichment. Expired
+    entries are only ever overwritten or pruned, never dropped on expiry, so
+    they are still here; an invalidated bot has none and stays degraded.
+    """
+    configs_map: dict[str, dict] = {}
+    server = _server_key(client)
+    if not server:
+        return configs_map
+    for bn in bot_names:
+        entry = _ctrl_configs_cache.get((server, bn))
+        if entry is not None:
+            _index_ctrl_configs(configs_map, entry[1])
+    return configs_map
+
+
 async def _fetch_ctrl_configs(client, bot_names: list[str]) -> dict[str, dict]:
     """Controller configs for the given bots, keyed by config id and by name."""
     configs_map: dict[str, dict] = {}
@@ -394,15 +427,11 @@ async def _fetch_ctrl_configs(client, bot_names: list[str]) -> dict[str, dict]:
 
     async def _get_one(bn: str):
         try:
-            for cfg in await _get_bot_configs(client, bn):
-                cid = cfg.get("id") or cfg.get("controller_id", "")
-                if cid:
-                    configs_map[cid] = cfg
-                cname = cfg.get("controller_name", "")
-                if cname and cname != cid:
-                    configs_map[cname] = cfg
+            configs = await _get_bot_configs(client, bn)
         except Exception:
-            pass
+            configs = []
+            configs_map.update(_last_known_ctrl_configs(client, [bn]))
+        _index_ctrl_configs(configs_map, configs)
 
     await asyncio.gather(*[_get_one(bn) for bn in bot_names])
     _prune_ctrl_configs(_server_key(client), set(bot_names))
@@ -491,11 +520,13 @@ async def fetch_bots_enrichment(
 
     ctrl_configs, bot_runs, latest_perf = await asyncio.gather(
         _with_enrichment_timeout(
-            _fetch_ctrl_configs(client, bot_names), "controller configs", {}
+            _fetch_ctrl_configs(client, bot_names), "controller configs", None
         ),
         _with_enrichment_timeout(
             _fetch_deployed_runs(client, bot_names), "bot runs", {}
         ),
         _with_enrichment_timeout(_fetch_latest_perf(client), "latest performance", {}),
     )
+    if ctrl_configs is None:
+        ctrl_configs = _last_known_ctrl_configs(client, bot_names)
     return BotsEnrichment(ctrl_configs, bot_runs, latest_perf)

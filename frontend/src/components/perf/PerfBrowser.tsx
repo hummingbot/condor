@@ -2159,7 +2159,7 @@ export function PerfBrowser({
     ].filter(Boolean);
 
     const subject = activeCtrl
-      ? `controller "${activeCtrl.controller_name}" (${activeCtrl.trading_pair}) of bot ${activeCtrl.bot_name}`
+      ? `controller "${activeCtrl.controller_name || activeCtrl.controller_id}" (${activeCtrl.trading_pair}) of bot ${activeCtrl.bot_name}`
       : activeExec
         ? `executor ${activeExec.id} (${activeExec.type}, ${activeExec.trading_pair})`
         : activeRun
@@ -2559,8 +2559,10 @@ export function PerfBrowser({
             {activeCtrl ? (
               <>
                 <div className="truncate">
-                  <h2 className="text-sm font-semibold truncate">{activeCtrl.controller_name}</h2>
-                  {activeCtrl.controller_id && activeCtrl.controller_id !== activeCtrl.controller_name && (
+                  <h2 className="text-sm font-semibold truncate">
+                    {activeCtrl.controller_name || activeCtrl.controller_id}
+                  </h2>
+                  {activeCtrl.controller_name && activeCtrl.controller_id && activeCtrl.controller_id !== activeCtrl.controller_name && (
                     <span className="text-[10px] text-[var(--color-text-muted)] font-mono block truncate">
                       {activeCtrl.controller_id}
                     </span>
