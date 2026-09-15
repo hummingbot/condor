@@ -18,49 +18,12 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ExecutorInfo } from "@/lib/api";
+// The library itself is substituted at the resolver, for every test file at
+// once (CORR-368) — `chartDouble` is only how this file reads back what the
+// component drew. `lineSeriesAdded` counts the overlay churn under test: the
+// candlestick series is created once at init and is not a line series.
+import { chartDouble } from "@/test/lightweight-charts-double";
 import { ExecutorChart } from "./ExecutorChart";
-
-const chartState = vi.hoisted(() => ({
-  addSeries: 0,
-  removeSeries: 0,
-}));
-
-vi.mock("lightweight-charts", () => {
-  /** Unknown members answer with a no-op spy; only the counters carry meaning. */
-  const stub = (own: Record<string, unknown>) =>
-    new Proxy(own, {
-      get(target, prop) {
-        if (typeof prop !== "string" || prop === "then") return undefined;
-        if (!(prop in target)) target[prop] = vi.fn();
-        return target[prop];
-      },
-    });
-
-  const LineSeries = { kind: "line" };
-  const series = stub({ priceToCoordinate: vi.fn(() => 0), setData: vi.fn() });
-  const timeScale = stub({ scrollPosition: vi.fn(() => 0) });
-  const chart = stub({
-    addSeries: vi.fn((kind: unknown) => {
-      // The candlestick series is created once at init; only the overlay line
-      // series are the churn under test.
-      if (kind === LineSeries) chartState.addSeries += 1;
-      return series;
-    }),
-    removeSeries: vi.fn(() => {
-      chartState.removeSeries += 1;
-    }),
-    timeScale: vi.fn(() => timeScale),
-  });
-
-  return {
-    createChart: vi.fn(() => chart),
-    CandlestickSeries: { kind: "candlestick" },
-    LineSeries,
-    ColorType: { Solid: "solid" },
-    CrosshairMode: { Normal: 0 },
-    LineStyle: { Solid: 0, Dotted: 1, Dashed: 2 },
-  };
-});
 
 vi.mock("@/hooks/useRates", () => ({
   useRates: () => ({
@@ -133,8 +96,7 @@ describe("ExecutorChart overlay series", () => {
   beforeEach(() => {
     globalThis.IS_REACT_ACT_ENVIRONMENT = true;
     queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    chartState.addSeries = 0;
-    chartState.removeSeries = 0;
+    chartDouble.reset();
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -149,7 +111,7 @@ describe("ExecutorChart overlay series", () => {
     const executor = closedExecutor();
     await render([executor]);
 
-    const drawn = chartState.addSeries;
+    const drawn = chartDouble.lineSeriesAdded;
     expect(drawn).toBeGreaterThan(0);
 
     // What the detail panel does on every mousemove of a divider drag, and what
@@ -158,29 +120,29 @@ describe("ExecutorChart overlay series", () => {
     await render([{ ...executor }]);
     await render([{ ...executor }]);
 
-    expect(chartState.addSeries).toBe(drawn);
-    expect(chartState.removeSeries).toBe(0);
+    expect(chartDouble.lineSeriesAdded).toBe(drawn);
+    expect(chartDouble.seriesRemoved).toBe(0);
   });
 
   it("redraws when the segment the executor draws actually moves", async () => {
     const executor = closedExecutor();
     await render([executor]);
 
-    const drawn = chartState.addSeries;
+    const drawn = chartDouble.lineSeriesAdded;
     await render([{ ...executor, custom_info: { close_price: 191 } }]);
 
-    expect(chartState.addSeries).toBe(drawn * 2);
-    expect(chartState.removeSeries).toBe(drawn);
+    expect(chartDouble.lineSeriesAdded).toBe(drawn * 2);
+    expect(chartDouble.seriesRemoved).toBe(drawn);
   });
 
   it("redraws when an executor joins the group", async () => {
     const executor = closedExecutor();
     await render([executor]);
 
-    const drawn = chartState.addSeries;
+    const drawn = chartDouble.lineSeriesAdded;
     await render([executor, closedExecutor({ id: "exec-2", entry_price: 170 })]);
 
-    expect(chartState.addSeries).toBeGreaterThan(drawn);
-    expect(chartState.removeSeries).toBe(drawn);
+    expect(chartDouble.lineSeriesAdded).toBeGreaterThan(drawn);
+    expect(chartDouble.seriesRemoved).toBe(drawn);
   });
 });

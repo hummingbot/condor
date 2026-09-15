@@ -7,7 +7,7 @@ export const TELEMETRY_KEY = ["telemetry-settings"] as const;
 
 /**
  * The install's telemetry state, shared by the two places that render it: the
- * consent banner in the shell and the card in Settings → Privacy. One query key,
+ * notice strip in the shell and the card in Settings → Privacy. One query key,
  * so opening Settings right after answering the banner costs no second request
  * and cannot show a staler answer than the one just given.
  */
@@ -39,9 +39,26 @@ export function useSetTelemetryLevel() {
 }
 
 /**
- * Should we ask? Only an install that has never answered, only the admin who is
- * allowed to answer, and never when the environment has pinned the level — in
- * that case there is no answer left to give.
+ * Record that the notice strip was shown to the admin. The backend turns usage
+ * summaries on at that moment for an unanswered install, so the new level is
+ * written through for the settings card to show without a refetch.
+ */
+export function useMarkTelemetryNoticeShown() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.markTelemetryNoticeShown,
+    onSuccess: (res) => {
+      qc.setQueryData(TELEMETRY_KEY, (old: TelemetrySettingsResponse | undefined) =>
+        old ? { ...old, ...res } : old,
+      );
+    },
+  });
+}
+
+/**
+ * Should the notice show? Only for an install that has never answered, only to
+ * the admin who is allowed to answer, and never when the environment has pinned
+ * the level — in that case there is nothing left to tell.
  */
 export function shouldAskConsent(data: TelemetrySettingsResponse | undefined): boolean {
   return !!data && data.consent === "unknown" && data.can_change && !data.env_overridden;

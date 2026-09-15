@@ -48,7 +48,6 @@ DANGEROUS_TOOLS = {
     "execute_swap",  # every call signs; quote/status/search are separate tools
     "manage_clmm",  # every action that moves liquidity
     "manage_amm",  # every action that moves liquidity
-    "manage_gateway_config",  # no resource of it is gated today; see below
     "control_agent",  # only `start`, which launches an unattended trading loop
     # The executor family is gated by NAME (FEAT-062), the same way the swap family
     # is: a create and a stop each have their own tool, so there is no `action` to
@@ -125,24 +124,20 @@ DANGEROUS_AMM_ACTIONS = {"add_liquidity", "remove_liquidity", "create_pool"}
 # so the gate has to know both or `start_agent` walks straight past it.
 DANGEROUS_CONTROL_ACTIONS = {"start", "start_agent"}
 
-# Resource types within manage_gateway_config that require confirmation. This tool
-# is gated on `resource_type`, not `action`, because what it edits matters and how
-# it edits does not. The set is empty and the gate stays: `wallets` used to be in it
-# because `add` took a PRIVATE KEY, but that path no longer exists over MCP (wallets
-# are read-only there, added and removed in the dashboard), so nothing this tool can
-# reach is worth a human. Everything it still touches — tokens, pools, connectors,
-# networks — is Gateway's own symbol/address mapping. Deleting a token there moves no
-# funds and changes nothing on-chain, so gating it would put a human in front of a
-# config edit while the trades that edit enables stay where they are. An unreadable
-# `resource_type` still fails closed.
-DANGEROUS_CONFIG_RESOURCES: set[str] = set()
+# There is no gate on `manage_gateway_config`. Its `networks` and `connectors`
+# are read-only over MCP: a network config carries `nodeURL`, the RPC every
+# transaction is broadcast through, and a connector config the slippage every
+# swap inherits, so those writes belong to the server owner in Condor and the
+# tool takes no `update` action or payload at all. What is left to write is the
+# `tokens` and `pools` symbol → address mapping, which moves no funds and needs
+# no human. The same goes for `chains` and `wallets`, both read-only since FEAT-065.
 
 
 # ── What changed the world (FEAT-097) ──
 #
 # The sets above answer "should a human approve this". The log asks a different
 # question — "did this change anything" — and the two deliberately differ:
-# `manage_gateway_config` is gated on an intentionally empty resource set, and
+# `manage_gateway_config`'s token and pool edits are never gated, and
 # the brakes (`stop`, `pause`, `resume`, `shutdown`) are ungated on purpose. A
 # log built on the confirmation predicate would therefore be silent about every
 # config edit and every brake, which is the exact silence the log exists to end.
@@ -195,9 +190,78 @@ READ_ONLY_CONTROL_ACTIONS = {"list", "list_agents", "get_state"}
 #: no trace at all. Recording them is the log's question, not the gate's.
 MUTATING_CONTROLLER_ACTIONS = {"upsert", "delete"}
 READ_ONLY_CONTROLLER_ACTIONS = {"list", "describe"}
-#: `manage_gateway_config` is recorded on its *action*, not its resource type:
-#: what it edits is what the gate weighs, and whether it edited at all is what
-#: the log weighs.
+#: The snippet runner. Deliberately *not* in ``DANGEROUS_TOOLS`` and not to be
+#: added: since ARCH-308 a tick reads a market it can compute on only through
+#: ``client.market_data.*`` inside a snippet, so a name gate here would put a
+#: confirmation in front of every tick's candle read (SEC-616). What it does get
+#: is a log row, and a refusal in the one mode that promises nothing mutates.
+CODE_RUN_TOOL = "run_code"
+#: ``run_code``'s three actions split by what they touch: ``run`` executes a
+#: snippet holding the unrestricted API client, and the other two only read runs
+#: already stored.
+MUTATING_CODE_RUN_ACTIONS = {"run"}
+READ_ONLY_CODE_RUN_ACTIONS = {"history", "get"}
+#: The routine library. The *other* door onto arbitrary Python, and for the same
+#: reason as ``run_code``: a routine is a Python file with an ``async run()``,
+#: ``create_routine`` writes one and ``run`` executes it holding the same
+#: unrestricted API client. Deliberately not in ``DANGEROUS_TOOLS`` either —
+#: running a routine is ordinary tick work and a name gate would prompt a human
+#: for every one of them (SEC-626).
+ROUTINE_TOOL = "manage_routines"
+#: ``manage_routines``' twelve actions split by what they touch. The writes are
+#: the two halves of the same capability: ``create_routine`` / ``edit_routine``
+#: put Python on disk, ``run`` / ``run_async`` / ``start`` execute it, and
+#: ``delete_routine`` takes it away again.
+#:
+#: ``stop`` is here rather than with the reads, which is the one place this set
+#: parts company with the module's rule that a brake is never stood in front of.
+#: A brake is a session stopping *its own* activity, and a dry run has none: it
+#: cannot reach ``start`` or ``run_async``, so the only instance it could stop
+#: belongs to a live seat, and killing that is a mutation of the shared runtime
+#: rather than this session braking.
+MUTATING_ROUTINE_ACTIONS = {
+    "run",
+    "run_async",
+    "start",
+    "stop",
+    "create_routine",
+    "edit_routine",
+    "delete_routine",
+}
+#: The routine library's reads: what exists, what it takes, what it says, and
+#: what a run already produced. None of them execute anything.
+READ_ONLY_ROUTINE_ACTIONS = {
+    "list",
+    "describe",
+    "read_routine",
+    "get_instance",
+    "list_instances",
+}
+#: The candle reader, and the answer to what refusing the two tools above costs
+#: a rehearsal (CORR-625). Both of those are refused in dry-run for holding the
+#: unrestricted API client, and since ARCH-308 they were between them the only
+#: structured market read a tick had — so a dry run could not rehearse a
+#: candle-driven decision at all, which is the whole point of one.
+#:
+#: This tool is the read-only path back. It takes parameters rather than code,
+#: so unlike a snippet there is nothing in it to write with, and it is listed
+#: here rather than left unnamed for one reason: an *unclassified* action on it
+#: is refused in dry-run. A future action that does more than read cannot become
+#: callable in a rehearsal by being added to the tool and forgotten here.
+MARKET_DATA_TOOL = "get_market_data"
+#: Empty on purpose, and the assertion this whole entry exists to make: the tool
+#: has no write half. It is kept as a name rather than inlined as ``set()`` so
+#: that the day one is added, there is somewhere obvious to put it.
+MUTATING_MARKET_DATA_ACTIONS: set[str] = set()
+#: Reading candles, reading a candle range, and asking which connectors serve
+#: OHLCV at all. Pinned against the tool's registered ``Literal`` by a test, the
+#: same way the routine and snippet sets are.
+READ_ONLY_MARKET_DATA_ACTIONS = {"candles", "historical_candles", "connectors"}
+#: How much of a snippet's first line the log row carries. A summary is one line
+#: on a page, and the whole source is in the code-run store anyway.
+MAX_SNIPPET_HEAD_CHARS = 80
+#: `manage_gateway_config` is recorded on its *action*: whether it edited a token
+#: or a pool at all is what the log weighs.
 READ_ONLY_CONFIG_ACTIONS = {"list", "get"}
 
 
@@ -327,24 +391,6 @@ def _executor_amount(tool_name: str, input_data: dict[str, Any]) -> str:
     return f" of {amount}" if amount is not None else ""
 
 
-def _has_dangerous_resource(
-    tool_call: dict[str, Any], dangerous_resources: set[str]
-) -> bool:
-    """Whether a resource-gated tool call selects one of its dangerous resources.
-
-    The resource-typed twin of :func:`_has_dangerous_action`, and it fails closed the
-    same way (SEC-093): unreadable arguments, or a missing/non-string ``resource_type``,
-    count as dangerous.
-    """
-    input_data = tool_call_input(tool_call)
-    if input_data is None:
-        return True
-    resource = input_data.get("resource_type")
-    if not isinstance(resource, str) or not resource:
-        return True
-    return resource in dangerous_resources
-
-
 def is_dangerous_tool_call(tool_call: dict[str, Any]) -> bool:
     """Check if a tool call requires user confirmation."""
     tool_name = tool_call_name(tool_call)
@@ -357,9 +403,6 @@ def is_dangerous_tool_call(tool_call: dict[str, Any]) -> bool:
 
         if tool_name == "manage_amm":
             return _has_dangerous_action(tool_call, DANGEROUS_AMM_ACTIONS)
-
-        if tool_name == "manage_gateway_config":
-            return _has_dangerous_resource(tool_call, DANGEROUS_CONFIG_RESOURCES)
 
         if tool_name == "control_agent":
             return _has_dangerous_action(tool_call, DANGEROUS_CONTROL_ACTIONS)
@@ -431,15 +474,8 @@ def is_mutating_tool_call(tool_call: dict[str, Any]) -> bool:
         )
 
     if tool_name == "manage_gateway_config":
-        # Recorded unless it is one of the two reads. The resource type is read
-        # only to stay a superset of the gate, which fails closed on a missing
-        # one: a call neither of us can parse is recorded rather than dropped.
-        input_data = tool_call_input(tool_call)
-        if input_data is None:
-            return True
-        resource = input_data.get("resource_type")
-        if not isinstance(resource, str) or not resource:
-            return True
+        # Recorded unless it is one of the two reads: a token or pool edit is a
+        # write to Gateway's config even though nothing gates it.
         return _is_mutating_action(tool_call, set(), READ_ONLY_CONFIG_ACTIONS)
 
     # Gated by name, and every one of them writes: an order, a signature, an
@@ -452,6 +488,98 @@ def is_mutating_tool_call(tool_call: dict[str, Any]) -> bool:
     }
 
 
+def is_code_execution_call(tool_call: dict[str, Any]) -> bool:
+    """Does this call *execute* a snippet? (SEC-616)
+
+    ``run_code(action="run")`` hands arbitrary Python the unrestricted API
+    client, so it can do anything any other tool can do and several things none
+    of them can. ``history`` and ``get`` only read runs already stored.
+
+    True on an action this module cannot read, which is both the fail-open rule
+    its siblings follow *and* the tool's own default: ``action`` omitted means
+    ``run``. The log uses this as an extra row; the unattended gate uses it to
+    refuse in dry-run, where failing this way is failing closed.
+    """
+    if tool_call_name(tool_call) != CODE_RUN_TOOL:
+        return False
+    return _is_mutating_action(
+        tool_call, MUTATING_CODE_RUN_ACTIONS, READ_ONLY_CODE_RUN_ACTIONS
+    )
+
+
+def is_mutating_routine_call(tool_call: dict[str, Any]) -> bool:
+    """Does this call *write or execute* a routine? (SEC-626)
+
+    The sibling of :func:`is_code_execution_call` over the other door onto
+    arbitrary Python. A routine is a Python file, ``create_routine`` writes one
+    and ``run`` executes it holding the same unrestricted API client, so the two
+    tools have the same reach and get the same answer.
+
+    Fails closed the same way, and for the same two reasons: an action this
+    module has not heard of is a new one, and a newly added write must not
+    default to allowed.
+    """
+    if tool_call_name(tool_call) != ROUTINE_TOOL:
+        return False
+    return _is_mutating_action(
+        tool_call, MUTATING_ROUTINE_ACTIONS, READ_ONLY_ROUTINE_ACTIONS
+    )
+
+
+def dry_run_refusal(tool_call: dict[str, Any]) -> str | None:
+    """Why a dry run must not auto-approve this call, or ``None`` to let it by.
+
+    Dry-run's promise is that nothing mutates, and the *gate* refuses every
+    named write there already. This is the rest of that promise: the tools the
+    gate deliberately does not name, because naming them would put a
+    confirmation in front of ordinary tick work, yet which can each mutate
+    anything at all once they run.
+
+    Kept as one function returning one reason rather than a branch per tool in
+    the caller, because it is a policy and not a special case: SEC-616 refused
+    ``run_code`` here and SEC-626 found the identical hole one door over in
+    ``manage_routines``. A third such tool is a line in this function, and the
+    unattended gate does not have to learn about it.
+
+    The refusal is per *action*, not per tool, so what a dry run needs in order
+    to rehearse at all — listing routines, reading their source and their config
+    schema, reading back a past run or a past snippet, reading candles — stays
+    free. Widening that read-only half is how a dry run gets a new capability
+    without getting the ability to write, and ``get_market_data`` below is that
+    widening rather than an exception to it (CORR-625): it appears here not to
+    be allowed — an unnamed tool is already allowed — but so that an action
+    added to it later has to be classified before a rehearsal can call it.
+    """
+    if is_code_execution_call(tool_call):
+        return (
+            "this session runs in dry-run mode, where nothing mutates, and a "
+            "snippet holds the unrestricted API client — read the market with "
+            "get_market_data and the other read-only tools instead"
+        )
+
+    if is_mutating_routine_call(tool_call):
+        return (
+            "this session runs in dry-run mode, where nothing mutates, and a "
+            "routine is Python holding the same unrestricted API client as a "
+            "snippet — 'list', 'describe' and 'read_routine' still work"
+        )
+
+    if tool_call_name(tool_call) == MARKET_DATA_TOOL and _is_mutating_action(
+        tool_call, MUTATING_MARKET_DATA_ACTIONS, READ_ONLY_MARKET_DATA_ACTIONS
+    ):
+        # Every action this module knows on this tool reads, so reaching here at
+        # all means an action it does *not* know — a new one, or an unreadable
+        # argument. Fails closed like its siblings: the cost is a rehearsal that
+        # says so, against a write that a rehearsal promised could not happen.
+        return (
+            "this session runs in dry-run mode, and get_market_data was asked "
+            "for something this build does not know is a read — use "
+            "'candles', 'historical_candles' or 'connectors'"
+        )
+
+    return None
+
+
 def is_recordable_tool_call(tool_call: dict[str, Any]) -> bool:
     """Should the action log keep a row for this call? (FEAT-102)
 
@@ -461,11 +589,16 @@ def is_recordable_tool_call(tool_call: dict[str, Any]) -> bool:
     functions answering nearly the same question will drift, and this shape
     makes the gate's set structurally a subset that cannot fall behind.
 
-    Its one extra today is ``manage_controllers``. The gate excludes that tool
-    entirely and should keep excluding it — widening the gate would put a new
-    confirmation prompt in front of a running fleet — but a bot's controllers
+    Its extras are ``manage_controllers``, ``run_code`` and ``manage_routines``.
+    The gate excludes all three tools entirely and should keep excluding them —
+    widening the gate would put a new confirmation prompt in front of a running
+    fleet, and in front of every tick's market read — but a bot's controllers
     are *written* by exactly these calls, so a log that drops them cannot say
-    how a fleet was built or which of its config writes were rejected.
+    how a fleet was built or which of its config writes were rejected, and a
+    snippet can change anything at all, so a log that drops it is silent about
+    the one tool that can (SEC-616). A routine is the same Python behind a
+    different door, so it is recorded on the same argument (SEC-626): "wrote a
+    routine and ran it" is precisely the sequence a reader needs to see.
 
     Fails open the same way its siblings do: an action this module has not heard
     of is recorded rather than dropped.
@@ -478,7 +611,7 @@ def is_recordable_tool_call(tool_call: dict[str, Any]) -> bool:
             tool_call, MUTATING_CONTROLLER_ACTIONS, READ_ONLY_CONTROLLER_ACTIONS
         )
 
-    return False
+    return is_code_execution_call(tool_call) or is_mutating_routine_call(tool_call)
 
 
 def format_tool_summary(tool_call: dict[str, Any]) -> str:
@@ -580,8 +713,8 @@ def format_tool_summary(tool_call: dict[str, Any]) -> str:
         return f"Swap {side} {amount} {pair}"
 
     if tool_name == "manage_gateway_config":
-        # The wallet import/remove summaries lived here until the tool stopped
-        # accepting a private key at all (FEAT-065); wallets are read-only now.
+        # Never gated, so this line is written for the log. Wallets went read-only
+        # in FEAT-065, and networks and connectors went the same way after SEC-566.
         resource = input_data.get("resource_type", "?")
         action = input_data.get("action", "?")
         return f"Gateway config: {action} {resource}"
@@ -630,6 +763,42 @@ def format_tool_summary(tool_call: dict[str, Any]) -> str:
             or "?"
         )
         return f"Controller {target}: {action} '{name}'"
+
+    if tool_name == CODE_RUN_TOOL:
+        # Never gated either, so this line is written for the log (SEC-616). The
+        # label is what the caller said the snippet was for and the first line is
+        # what it actually starts doing — enough to tell a candle read from a
+        # `client.gateway.start(...)` without carrying a whole script into the
+        # log; the full source is in the code-run store (`condor/code_runs.py`).
+        action = input_data.get("action") or "run"
+        if action not in MUTATING_CODE_RUN_ACTIONS:
+            return f"Code run: {action}"
+        label = str(input_data.get("label") or "").strip()
+        code = str(input_data.get("code") or "")
+        head = next((line.strip() for line in code.splitlines() if line.strip()), "")
+        if len(head) > MAX_SNIPPET_HEAD_CHARS:
+            head = head[:MAX_SNIPPET_HEAD_CHARS] + "…"
+        what = f"Run snippet '{label}'" if label else "Run snippet"
+        return f"{what}: {head}" if head else f"{what} (no code)"
+
+    if tool_name == ROUTINE_TOOL:
+        # Never gated either, so this line too is written for the log (SEC-626).
+        # It has to name the routine: a tick that writes one and runs it makes
+        # two calls that "manage_routines" twice over describes as nothing, and
+        # which library it landed in is half of what a routine *is* — an
+        # agent-local script and a shared one under the same name are different
+        # code. For `stop` and `get_instance` the name is an instance id, which
+        # is the right thing to print for those anyway.
+        action = input_data.get("action", "?")
+        name = str(input_data.get("name") or "").strip() or "?"
+        agent = input_data.get("agent")
+        if input_data.get("shared"):
+            where = " (shared)"
+        elif isinstance(agent, str) and agent:
+            where = f" ({agent})"
+        else:
+            where = ""
+        return f"Routine {action} '{name}'{where}"
 
     # Generic fallback
     return tool_name

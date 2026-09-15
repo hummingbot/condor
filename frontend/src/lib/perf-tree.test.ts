@@ -512,7 +512,7 @@ describe("buildTree, grouping by bot", () => {
 
   // Keyboard navigation walks what is drawn, so a shut bucket must hide its
   // executors — that is the collapse the 42 flat rows never had. Two shut
-  // levels now, not one: the "Unattached" row hides every dead controller id,
+  // levels now, not one: the "Unattached" row hides every such id,
   // and each of those still hides its own executors until opened in turn.
   it("walks the unattached row and its buckets before their executors, hiding what is shut", () => {
     const tree = buildTree(
@@ -945,7 +945,7 @@ describe("buildTree, the owner rows (FEAT-107)", () => {
       leafFromController(
         controller({ controller_id: "old", deployed_at: new Date(NOW - 9 * HOUR).toISOString() }),
       ),
-      // Inside the ledger's reach with no deed behind it: not Condor's.
+      // Inside the ledger's reach with no deed the join can reach: no answer.
       leafFromController(
         controller({
           bot_name: "stranger",

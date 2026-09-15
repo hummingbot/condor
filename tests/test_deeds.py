@@ -6,8 +6,11 @@ Three claims, and they are the whole feature:
   does, in the run's own directory — so ``read_actions``, ``read_owned`` and
   ``build_deployments`` work on a conversation with no changes;
 * a run that mutated nothing writes nothing and creates no directory;
-* a mutating route that records no deed **fails this module**, which is the
-  answer to "somebody adds a sixth door and nobody wires it".
+* a route or a Telegram handler that creates a record and writes no deed
+  **fails this module**, which is the answer to "somebody adds a door and
+  nobody wires it" — and, until CORR-622, the answer nobody had: the
+  enumeration listed the two route modules and the busiest door on the
+  product was never in its blast radius.
 
 The first test is the feature's own precondition, pinned: FEAT-102's fix is what
 makes a deed name a bot at all, and an opaque summary would make every row here
@@ -18,6 +21,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import json
 from pathlib import Path
 
 import pytest
@@ -32,6 +36,7 @@ from condor.agents import deeds
 from condor.agents.actions import read_actions
 from condor.agents.ownership import read_owned
 from condor.agents.strategy import StrategyStore
+from condor.fsutil import atomic_write_json
 
 USER = 4242
 
@@ -104,16 +109,23 @@ def test_an_unbound_chat_belongs_to_condor_and_a_bound_one_to_its_specialist():
 
 def test_each_door_gets_its_own_pseudo_strategy():
     assert deeds.run_key_for(deeds.for_ui(USER)) == "condor.ui"
+    assert deeds.run_key_for(deeds.for_telegram(USER)) == "condor.telegram"
     assert (
         deeds.run_key_for(deeds.for_delegation(USER, "t1", "brigado"))
         == "brigado.delegation"
     )
 
 
+def test_neither_button_door_can_carry_an_attribution_tag():
+    """A tag names a run a model could have been told about; nobody tells a button."""
+    assert deeds.attribution_tag(deeds.for_ui(USER)) == ""
+    assert deeds.attribution_tag(deeds.for_telegram(USER)) == ""
+
+
 def test_a_strategy_may_not_be_named_after_a_pseudo_one():
     """Or ``brigado.chat`` would mean two runs and join as one."""
     store = StrategyStore()
-    for name in ("chat", "Chat", "UI", "delegation"):
+    for name in ("chat", "Chat", "UI", "delegation", "telegram", "Telegram"):
         with pytest.raises(ValueError, match="reserved"):
             store.create(agent_slug="brigado", name=name)
 
@@ -152,6 +164,35 @@ def test_a_dashboard_deed_lands_under_the_person_who_pressed_the_button():
     assert not (paths.ui_dir(9999)).exists(), "another user's directory is untouched"
 
 
+def test_a_telegram_deed_lands_under_the_person_who_pressed_the_button():
+    """Its own directory, not the dashboard's: two rooms, two answers.
+
+    Nothing under ``handlers/`` recorded anything at all until CORR-622, which
+    is why every Telegram deploy on every install read "Outside Condor".
+    """
+    owner = deeds.for_telegram(USER)
+    deeds.record_direct(
+        owner,
+        verb="create_grid_executor",
+        summary="Create grid executor on SOL-USDC",
+    )
+    assert deeds.deed_dir(owner) == paths.telegram_dir(USER)
+    (row,) = read_actions(paths.telegram_dir(USER))
+    assert row.verb == "create_grid_executor"
+    assert not paths.ui_dir(USER).exists(), "the dashboard's record is its own"
+
+
+def test_a_telegram_deploy_owns_its_bot_too():
+    """``owner_of`` has to answer for the busiest door, or the cut accuses it."""
+    deeds.record_direct(
+        deeds.for_telegram(USER),
+        verb="manage_bots:deploy",
+        summary="Deploy bot 'tg-deployed' with controllers ['c1']",
+        subject="tg-deployed",
+    )
+    assert [b.base for b in read_owned(paths.telegram_dir(USER))] == ["tg-deployed"]
+
+
 def test_a_deed_with_nowhere_to_go_is_dropped_rather_than_guessed():
     """No user, no conversation, or an id that is not a path segment."""
     assert deeds.deed_dir(deeds.for_conversation(None, "c")) is None
@@ -159,6 +200,7 @@ def test_a_deed_with_nowhere_to_go_is_dropped_rather_than_guessed():
     assert deeds.deed_dir(deeds.for_delegation(USER, "")) is None
     assert deeds.deed_dir(deeds.for_conversation(USER, "../escape")) is None
     assert deeds.deed_dir(deeds.for_ui(None)) is None
+    assert deeds.deed_dir(deeds.for_telegram(None)) is None
 
     # And recording against one is a no-op, not an exception.
     deeds.record_deeds(deeds.for_conversation(None, "c"), _deploy_calls())
@@ -274,7 +316,52 @@ def test_rows_from_two_doors_are_the_same_shape():
     assert a.tick == b.tick == 0, "outside a loop there is no tick, and 0 says so"
 
 
-# ── The sixth door, answered by a test rather than by architecture ──
+# ── What the log covers ──
+
+
+def test_the_cut_is_stamped_the_first_time_this_build_looks_and_then_holds():
+    """``since`` is a fact about the build, so it is written down once."""
+    assert deeds.coverage_since(now=1_000.0) == 1_000.0
+    assert deeds.coverage_since(now=9_999.0) == 1_000.0
+
+
+def test_a_build_that_gains_a_door_restamps_the_cut():
+    """The lie CORR-622 closed, in one test.
+
+    An install whose chat has been recording since ``1_000`` and whose Telegram
+    door was wired at ``5_000`` covered nothing in between. Reading the cut off
+    the oldest row said ``1_000`` — and so called every Telegram deploy of that
+    era "Outside Condor" on a product that is a Telegram bot.
+    """
+    atomic_write_json(
+        paths.deed_coverage_path(),
+        {"doors": ["conversation", "delegation", "ui"], "since": 1_000.0},
+    )
+
+    assert deeds.coverage_since(now=5_000.0) == 5_000.0
+
+
+def test_every_door_in_this_build_is_named_in_the_stamp():
+    """The stamp is only a coverage claim if it lists what it covers."""
+    deeds.coverage_since(now=1_000.0)
+
+    record = json.loads(paths.deed_coverage_path().read_text())
+    assert record["doors"] == sorted(deeds.DOORS)
+    assert "telegram" in record["doors"]
+
+
+def test_a_cut_that_cannot_be_written_down_dates_nothing(monkeypatch):
+    """A cut nobody remembers would move on every call, and judge by accident."""
+
+    def _no(*args, **kwargs):
+        raise OSError("read-only")
+
+    monkeypatch.setattr(deeds, "atomic_write_json", _no)
+
+    assert deeds.coverage_since(now=1_000.0) == 0.0
+
+
+# ── The next door, answered by a test rather than by architecture ──
 
 #: The route modules whose mutations reach the world. A new one belongs here.
 _ROUTE_MODULES = ("condor.web.routes.bots", "condor.web.routes.executors")
@@ -323,11 +410,11 @@ def test_every_mutating_route_records_a_deed():
     )
 
 
-def test_every_route_deed_uses_a_verb_the_log_already_speaks():
-    """A verb nobody else emits joins with nothing (FEAT-100's ``CREATE_VERBS``)."""
+def _known_verbs() -> set[str]:
+    """The vocabulary the log already speaks. A verb outside it joins with nothing."""
     from condor.runtime.danger import CREATE_EXECUTOR_TOOLS
 
-    known = {
+    return {
         *(f"manage_bots:{a}" for a in ("deploy", "stop_bot", "update_config")),
         "manage_bots:stop_controllers",
         "manage_bots:start_controllers",
@@ -337,6 +424,11 @@ def test_every_route_deed_uses_a_verb_the_log_already_speaks():
         "clear_position_held",
         *CREATE_EXECUTOR_TOOLS,
     }
+
+
+def test_every_route_deed_uses_a_verb_the_log_already_speaks():
+    """A verb nobody else emits joins with nothing (FEAT-100's ``CREATE_VERBS``)."""
+    known = _known_verbs()
     for _module, name, source in _mutating_route_sources():
         for node in ast.walk(ast.parse(inspect.cleandoc(source))):
             if not (
@@ -355,6 +447,89 @@ def test_the_ui_helper_is_the_only_deeds_entry_point_the_routes_use():
         assert "record_direct(" not in source
 
 
+#: The upstream calls that put a **record** into the world from a handler: an
+#: executor, or a bot. A stop mutates something too, but it creates nothing for
+#: ``/bots`` to attribute, and it is the creating call whose silence made a
+#: Telegram deploy read as "Outside Condor".
+_RECORD_CREATING_CALLS = frozenset({"create_executor", "deploy_v2_controllers"})
+
+_HANDLERS_ROOT = Path(__file__).resolve().parents[1] / "handlers"
+
+
+def _calls_in(node: ast.AST) -> set[str]:
+    """Every name this function calls, attribute calls by their last segment."""
+    names: set[str] = set()
+    for child in ast.walk(node):
+        if not isinstance(child, ast.Call):
+            continue
+        func = child.func
+        names.add(
+            func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+        )
+    return names
+
+
+def _record_creating_handlers() -> list[tuple[str, ast.AST]]:
+    """``(where, function node)`` for every handler that creates a record."""
+    found: list[tuple[str, ast.AST]] = []
+    for path in sorted(_HANDLERS_ROOT.rglob("*.py")):
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if _calls_in(node) & _RECORD_CREATING_CALLS:
+                rel = path.relative_to(_HANDLERS_ROOT.parent)
+                found.append((f"{rel}::{node.name}", node))
+    return found
+
+
+def test_there_are_record_creating_handlers_to_check():
+    """A guard on the guard: an enumeration that finds nothing proves nothing."""
+    assert len(_record_creating_handlers()) >= 4
+
+
+def test_every_record_creating_telegram_handler_writes_a_deed():
+    """Deploy an executor or a bot from Telegram and record it, or fail here.
+
+    The guard that existed listed two *route* modules, so ``handlers/`` — the
+    door this product is named after — was never in its blast radius. Every
+    executor and every bot deployed from Telegram was then a record with no
+    deed, and ``/bots`` called it "Outside Condor" (CORR-622).
+    """
+    missing = [
+        where
+        for where, node in _record_creating_handlers()
+        if "record_telegram_deed" not in _calls_in(node)
+    ]
+    assert not missing, (
+        "these handlers put a record into the world and record nothing: "
+        + ", ".join(missing)
+        + " — call record_telegram_deed() after the upstream call returns."
+    )
+
+
+def test_every_telegram_deed_uses_a_verb_the_log_already_speaks():
+    """One vocabulary for both doors, or a row joins with nothing."""
+    known = _known_verbs()
+    for where, node in _record_creating_handlers():
+        for child in ast.walk(node):
+            if not (
+                isinstance(child, ast.keyword)
+                and child.arg == "verb"
+                and isinstance(child.value, ast.Constant)
+            ):
+                continue
+            assert child.value.value in known, f"{where} invents {child.value.value!r}"
+
+
+def test_the_telegram_helper_is_the_only_deeds_entry_point_the_handlers_use():
+    """One helper, so the enumeration above cannot be sidestepped by accident."""
+    for path in _HANDLERS_ROOT.rglob("*.py"):
+        if path.name == "_deeds.py":
+            continue
+        assert "record_direct(" not in path.read_text(), path
+
+
 # ── The readers, unchanged ──
 
 
@@ -366,7 +541,7 @@ def test_the_existing_readers_work_on_a_conversation_with_no_changes():
     """
     from types import SimpleNamespace
 
-    from condor.web.routes.agents import build_deployments
+    from condor.agents.attribution import build_deployments
 
     owner = deeds.for_conversation(USER, "conv1")
     deeds.record_deeds(owner, _deploy_calls("pmm-king-btcbrl"))

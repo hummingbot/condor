@@ -16,6 +16,7 @@ longer than a conversation turn.
 
 import asyncio
 import logging
+import re
 import shutil
 import time
 from pathlib import Path
@@ -36,6 +37,61 @@ _NO_SERVER = (
     "registered. Ask the user to select a server (/servers in Telegram, or the "
     "server selector in the dashboard) and try again."
 )
+
+# A routine name is a bare Python module stem and nothing else. Anchored with
+# ``\Z`` rather than ``$`` because ``$`` also matches before a trailing newline,
+# which would admit "foo\n". The class carries no ".", no "/" or "\", no NUL and
+# no ":", and cannot start with one either, so ``routines_dir / f"{name}.py"`` is
+# provably a direct child of ``routines_dir``: there is no spelling of ``name``
+# — traversal, absolute, encoded, or Windows-style — that leaves the directory.
+_ROUTINE_NAME = re.compile(r"[a-z][a-z0-9_]*\Z")
+
+
+def _bad_name(name: str | None) -> dict | None:
+    """The invalid-name error, or ``None`` when ``name`` may be joined onto a dir.
+
+    One spelling of the rule for all four CRUD actions (SEC-577): ``create_routine``
+    checked it and read/edit/delete did not, so a ``name`` of "../../_shared/routines/x"
+    reached ``unlink()`` outside the caller's writable library. Deliberately *not*
+    hoisted into the ``manage_routines`` dispatcher — ``name`` carries an
+    instance_id for ``stop``/``get_instance``, which is not a routine name.
+    """
+    if not name or not _ROUTINE_NAME.match(name):
+        return {
+            "error": "name must be lowercase alphanumeric with underscores (e.g. 'my_scanner')"
+        }
+    return None
+
+
+def _confined(path: Path, base: Path | None = None) -> bool:
+    """Is ``path`` really inside a directory routine source may be read from?
+
+    Defense in depth on the read path only (CORR-585's ``routine_source_roots``):
+    ``_bad_name`` already makes traversal via ``name`` unreachable, but
+    ``read_routine`` returns *file contents*, and its last fallback joins onto a
+    cwd-relative ``Path("routines")`` that need not be this install's library at
+    all. Everything is compared **resolved** and with ``is_relative_to``, so
+    neither a symlink pointing out of a library nor a prefix sibling such as
+    ``routines_backup/`` is mistaken for it — which a string prefix would be.
+
+    ``base`` is the directory this very call derived from an anchored resolver
+    (``_get_agent_routines_dir``, ``_shared_roots``, ``_stock_twin``); it is
+    trusted as a root of its own because ``routine_source_roots`` enumerates
+    *existing* dirs, so a library that is legitimate but not yet enumerated must
+    not read as an escape. It is never caller-controlled, and admitting it still
+    rejects a symlinked file inside it.
+
+    Not used on the write paths: there the name rule is already total, and an
+    allowlist built by enumeration would refuse a first ``create_routine`` into
+    an agent home that has yet to be written.
+    """
+    from condor.routine_store import routine_source_roots
+
+    roots = list(routine_source_roots())
+    if base is not None:
+        roots.append(base.resolve())
+    resolved = path.resolve()
+    return any(resolved.is_relative_to(root) for root in roots)
 
 
 def _shared_roots() -> tuple[Path, ...]:
@@ -68,7 +124,7 @@ def _get_agent_routines_dir(target: str | None, shared: bool = False) -> Path | 
     *owning agent's* dir (the strategy half is discarded — there is no
     per-strategy routines dir). Without a ``target``, the current assistant's own
     dir — the general library (root ``routines/``) for the chat, or the launched
-    Agent's (``.condor/agents/<slug>/routines``, ``settings.agent_slug``).
+    Agent's (``.condor/agents/<slug>/routines``, ``settings.specialist_slug``).
 
     ``shared=True`` targets the published library every assistant reads
     (:func:`condor.memory.paths.shared_routines_root`), and is honored **only**
@@ -123,21 +179,23 @@ def _own_plus_shared(slug: str | None) -> dict:
     One call for both seats (FEAT-038): a domain expert/trading agent gets
     ``agents/<slug>/routines`` over ``agents/_shared/routines``, the chat gets
     the general library — which ``discover_routines`` already merges the shared
-    root into. The chat re-scans on every call because it is the library's
-    author and its edits must be visible immediately; an agent rides the mtime
-    cache.
+    root into. Both seats ride the mtime cache: discovery re-imports an edited
+    file, loads a new one and drops a deleted one on every call (PERF-572), so
+    the chat's own edits to its library are visible immediately without paying
+    a full re-import of every routine per tool call.
     """
     from routines.base import assistant_routines
 
-    return assistant_routines(slug, force_reload=not slug)
+    return assistant_routines(slug)
 
 
 def _resolve_routine(name: str):
     """Look up a routine in the current assistant's scope.
 
-    A domain expert/trading agent (``settings.agent_slug`` set) resolves its own
-    routines plus the shared library, its own shadowing a shared name. The chat
-    ``condor`` resolves the general library (root ``routines/`` + shared).
+    A domain expert/trading agent (``settings.specialist_slug`` set) resolves
+    its own routines plus the shared library, its own shadowing a shared name.
+    The chat ``condor`` resolves the general library (root ``routines/`` +
+    shared).
     """
     return _own_plus_shared(settings.specialist_slug).get(name)
 
@@ -166,7 +224,7 @@ def list_routines(target: str | None = None) -> dict:
         return {"routines": result}
 
     # Chat condor: the general library (root routines/).
-    for name, routine in sorted(discover_routines(force_reload=True).items()):
+    for name, routine in sorted(discover_routines().items()):
         result.append(
             {
                 "name": name,
@@ -661,12 +719,8 @@ def create_routine(
     ``shared=True`` publishes it to every assistant — chat only, see
     :func:`_get_agent_routines_dir`.
     """
-    import re
-
-    if not name or not re.match(r"^[a-z][a-z0-9_]*$", name):
-        return {
-            "error": "name must be lowercase alphanumeric with underscores (e.g. 'my_scanner')"
-        }
+    if bad := _bad_name(name):
+        return bad
     if not code:
         return {"error": "code is required"}
 
@@ -692,14 +746,16 @@ def create_routine(
     routines_dir.mkdir(parents=True, exist_ok=True)
     file_path.write_text(code)
 
-    from routines.base import discover_routines_from_path
+    from routines.base import discover_routines_from_path, load_error
 
     loaded = discover_routines_from_path(routines_dir)
     if name not in loaded:
+        # The reason discovery recorded, not a guess: a routine refused for a
+        # credential-shaped Config default (SEC-627) is not a syntax error, and
+        # telling the author so is the only feedback that door gives.
+        reason = load_error(file_path) or "check for syntax errors"
         file_path.unlink()
-        return {
-            "error": "Routine file was created but failed to load. Check for syntax errors."
-        }
+        return {"error": f"Routine file was created but failed to load: {reason}"}
 
     routine = loaded[name]
     result = {
@@ -715,15 +771,18 @@ def create_routine(
 
 def read_routine(name: str, target: str | None, shared: bool = False) -> dict:
     """Read the source code of a routine."""
+    if bad := _bad_name(name):
+        return bad
+
     routines_dir = _get_agent_routines_dir(target, shared)
     if routines_dir:
         file_path = routines_dir / f"{name}.py"
-        if file_path.exists():
+        if file_path.exists() and _confined(file_path, routines_dir):
             return {"name": name, "code": file_path.read_text(), "scope": "agent"}
         # ...and the shipped one under it, which an agent can read and edit (the
         # edit forks it down) but never delete.
         twin = _stock_twin(routines_dir, name)
-        if twin is not None:
+        if twin is not None and _confined(twin, twin.parent):
             return {"name": name, "code": twin.read_text(), "scope": "agent"}
 
     # An assistant can read the source of anything it can run, so the shared
@@ -731,11 +790,11 @@ def read_routine(name: str, target: str | None, shared: bool = False) -> dict:
     # `scope` says (writes go through _get_agent_routines_dir and never land here).
     for shared_path in _shared_roots():
         candidate = shared_path / f"{name}.py"
-        if candidate.exists():
+        if candidate.exists() and _confined(candidate, shared_path):
             return {"name": name, "code": candidate.read_text(), "scope": "shared"}
 
     global_path = Path("routines") / f"{name}.py"
-    if global_path.exists():
+    if global_path.exists() and _confined(global_path):
         return {"name": name, "code": global_path.read_text(), "scope": "global"}
 
     return {"error": f"Routine '{name}' not found"}
@@ -745,6 +804,9 @@ def edit_routine(
     name: str, code: str, target: str | None, shared: bool = False
 ) -> dict:
     """Update the source code of a routine in the caller's writable library."""
+    if bad := _bad_name(name):
+        return bad
+
     routines_dir = _get_agent_routines_dir(target, shared)
     if not routines_dir:
         return {
@@ -772,13 +834,15 @@ def edit_routine(
     old_code = file_path.read_text()
     file_path.write_text(code)
 
-    from routines.base import discover_routines_from_path
+    from routines.base import discover_routines_from_path, load_error
 
     loaded = discover_routines_from_path(routines_dir)
     if name not in loaded:
+        reason = load_error(file_path) or "check for syntax errors"
         file_path.write_text(old_code)
         return {
-            "error": "Updated code failed to load (syntax error?). Reverted to previous version."
+            "error": f"Updated code failed to load: {reason}. "
+            "Reverted to previous version."
         }
 
     routine = loaded[name]
@@ -791,6 +855,9 @@ def edit_routine(
 
 def delete_routine(name: str, target: str | None, shared: bool = False) -> dict:
     """Delete a routine from the caller's writable library."""
+    if bad := _bad_name(name):
+        return bad
+
     routines_dir = _get_agent_routines_dir(target, shared)
     if not routines_dir:
         return {

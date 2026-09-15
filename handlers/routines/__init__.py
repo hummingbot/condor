@@ -902,7 +902,10 @@ async def _edit_or_send(
 async def _show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show main routines menu."""
     chat_id = update.effective_chat.id
-    routines = discover_routines(force_reload=True)
+    # Plain discovery: it is mtime-keyed, so new/edited/deleted routine files are
+    # still picked up on every render (PERF-620). ``force_reload=True`` is kept for
+    # the explicit Reload button, whose job is to retry cached load *failures*.
+    routines = discover_routines()
     all_instances = _get_instances(context)
 
     # Count running instances per routine

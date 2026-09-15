@@ -17,6 +17,7 @@ import { PlaybookView } from "@/components/agent/workspace/PlaybookView";
 import { SectionRail } from "@/components/agent/workspace/SectionRail";
 import { SECTION_META } from "@/components/agent/workspace/sectionMeta";
 import {
+  serializeSections,
   useSections,
   type SectionId,
 } from "@/components/agent/workspace/sections";
@@ -147,11 +148,26 @@ export function AgentRunScreen({
   // the keys, which is the only reason three regions polling at 5s is one poll
   // — and the reason the page can hold its own `["agent", slug]` for the header
   // without buying a second one.
+  //
+  // Gated the same way `AgentStrategies` and `AgentKnowledge` gate this key
+  // (PERF-305/PERF-343): `GET /agents/{slug}` prices every strategy's sessions
+  // through the Hummingbot API, and react-query takes the *shortest* interval
+  // among a key's observers — so a flat 5s here silently overrode their gate on
+  // the screen a reader leaves open longest. Nothing live on this screen comes
+  // off this key: the countdown and the cadence are the separately polled
+  // `["strategy", slug, sslug]`, and the rail is `["agent-runs", ...]`.
   const { data: agent, isLoading } = useQuery({
     queryKey: ["agent", slug],
     queryFn: () => api.getAgent(slug),
     enabled: !!slug,
-    refetchInterval: 5000,
+    // The page resolves this key before it renders the screen, so the
+    // screen's observer mounts a tick later onto data react-query would
+    // otherwise call stale and re-fetch — one open, two requests. A cadence's
+    // worth of freshness makes the second mount reuse the first read; the
+    // interval below refetches on its own timer regardless.
+    staleTime: 5000,
+    refetchInterval: (q) =>
+      q.state.data?.strategies.some((s) => s.status === "running") ? 5000 : false,
   });
 
   // The rail's window, not a filter (FEAT-111). An install that has been
@@ -261,11 +277,7 @@ export function AgentRunScreen({
     if (!id) return;
     pendingScroll.current = null;
     if (!open.includes(id)) return;
-    bodyRef.current
-      ?.querySelector(`[data-section-body="${id}"]`)
-      // Guarded: jsdom has no layout, so it implements no `scrollIntoView`,
-      // and a rail click in a test must not throw for want of a viewport.
-      ?.scrollIntoView?.({ block: "start", behavior: "smooth" });
+    scrollToSection(bodyRef.current, id);
   }, [open]);
 
   // The same action as the band's own header, reached from the index: one rule
@@ -277,6 +289,33 @@ export function AgentRunScreen({
       pendingScroll.current = id;
     },
     [toggle],
+  );
+
+  /**
+   * A run named from inside a band — the Playbook's session and dry-run counts.
+   *
+   * The selection a rail row makes, plus two things a door from further down
+   * the page owes the reader. It opens Runs *beside* the band it was clicked
+   * from, because `?open=` is a set and the old link replaced it, closing the
+   * Playbook under the reader's cursor. And it brings Runs on screen, because
+   * the band draws above the Playbook: opened from there, it grows the page
+   * out of sight and the click looks like it did nothing.
+   *
+   * Scrolls now when Runs is already open — `open` will not change, so the
+   * effect above would never spend the request.
+   */
+  const showRun = useCallback(
+    (run: string) => {
+      const runsOpen = open.includes("runs");
+      setParams({
+        strategy: sslug,
+        run,
+        open: serializeSections([...open, "runs"]),
+      });
+      if (runsOpen) scrollToSection(bodyRef.current, "runs");
+      else pendingScroll.current = "runs";
+    },
+    [open, setParams, sslug],
   );
 
   // The page has already guarded this by the time it mounts the screen — the
@@ -483,6 +522,7 @@ export function AgentRunScreen({
                       sslug={sslug}
                       strategy={strategy}
                       onDeleted={() => setParams({ strategy: null })}
+                      onOpenRun={showRun}
                     />
                   ) : (
                     <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">
@@ -528,6 +568,15 @@ export function AgentRunScreen({
         )}
     </div>
   );
+}
+
+/** Bring one band's top to the top of the screen's own scroller. */
+function scrollToSection(body: HTMLElement | null, id: SectionId): void {
+  body
+    ?.querySelector(`[data-section-body="${id}"]`)
+    // Guarded: jsdom has no layout, so it implements no `scrollIntoView`,
+    // and a rail click in a test must not throw for want of a viewport.
+    ?.scrollIntoView?.({ block: "start", behavior: "smooth" });
 }
 
 /**

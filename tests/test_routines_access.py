@@ -1,10 +1,10 @@
 """Tests for SEC-045: routine run/schedule endpoints must enforce server access.
 
-The four execution endpoints (``/routines/servers/{server}/{routine}/run``,
-``.../schedule``, ``/routines/run``, ``/routines/schedule``) accept an
-arbitrary ``server_name``. Without a ``has_server_access`` gate, any approved
-user could run/schedule routines against servers owned by other users, using
-those servers' stored API credentials (cross-server IDOR).
+The execution endpoints (``/routines/run``, ``/routines/start``,
+``/routines/schedule``) take an arbitrary ``server_name`` in the request body.
+Without a ``has_server_access`` gate, any approved user could run/schedule
+routines against servers owned by other users, using those servers' stored API
+credentials (cross-server IDOR).
 """
 
 import pytest
@@ -127,26 +127,6 @@ def client_and_cm(monkeypatch):
 # ── Denied: no access to the target server ──
 
 
-def test_run_denied_on_foreign_server(client_and_store):
-    client, store = client_and_store
-    resp = client.post(
-        f"/routines/servers/{FOREIGN_SERVER}/some_routine/run",
-        json={"config": {}},
-    )
-    assert resp.status_code == 403
-    assert store.execute_calls == []
-
-
-def test_schedule_denied_on_foreign_server(client_and_store):
-    client, store = client_and_store
-    resp = client.post(
-        f"/routines/servers/{FOREIGN_SERVER}/some_routine/schedule",
-        json={"config": {}, "interval_sec": 60},
-    )
-    assert resp.status_code == 403
-    assert store.schedule_calls == []
-
-
 def test_run_v2_denied_on_foreign_server(client_and_store):
     client, store = client_and_store
     resp = client.post(
@@ -172,28 +152,6 @@ def test_schedule_v2_denied_on_foreign_server(client_and_store):
 
 
 # ── Allowed: user has access to the target server ──
-
-
-def test_run_allowed_on_owned_server(client_and_store):
-    client, store = client_and_store
-    resp = client.post(
-        f"/routines/servers/{OWNED_SERVER}/some_routine/run",
-        json={"config": {}},
-    )
-    assert resp.status_code == 200
-    assert resp.json() == {"instance_id": "inst-run"}
-    assert store.execute_calls == [("some_routine", OWNED_SERVER, USER.id)]
-
-
-def test_schedule_allowed_on_owned_server(client_and_store):
-    client, store = client_and_store
-    resp = client.post(
-        f"/routines/servers/{OWNED_SERVER}/some_routine/schedule",
-        json={"config": {}, "interval_sec": 60},
-    )
-    assert resp.status_code == 200
-    assert resp.json() == {"instance_id": "inst-sched"}
-    assert store.schedule_calls == [("some_routine", OWNED_SERVER, USER.id)]
 
 
 def test_run_v2_allowed_on_owned_server(client_and_store):

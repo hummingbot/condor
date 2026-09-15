@@ -461,7 +461,7 @@ def register_handlers(application: Application) -> None:
         CallbackQueryHandler(admin_callback_handler, pattern="^admin:")
     )
 
-    # Telemetry consent prompt (FEAT-023): three buttons, admin only
+    # Telemetry notice (FEAT-023): Got it / Turn off, admin only
     from condor.telemetry import prompt as telemetry_prompt
 
     application.add_handler(
@@ -1020,9 +1020,15 @@ def main() -> None:
     # In local mode there is no token and nothing polls; the placeholder exists
     # only so the Application (and with it job_queue, CallbackContext and the
     # handler registry) can be built at all. Nothing ever calls Telegram with it.
+    # PTB's 5s defaults kill startup on a slow link: initialize() calls getMe,
+    # and one connect that takes >5s raises TimedOut and exits the process.
     application = (
         Application.builder()
         .token(TELEGRAM_TOKEN or "0:local")
+        .connect_timeout(20)
+        .read_timeout(20)
+        .get_updates_connect_timeout(20)
+        .get_updates_read_timeout(30)
         .persistence(persistence)
         .concurrent_updates(True)
         .build()
@@ -1214,13 +1220,13 @@ async def _run_dual(application: Application) -> None:
         except Exception as e:
             logger.warning(f"Failed to send startup notification to admin: {e}")
 
-        # Ask, once, whether this install wants to be counted (FEAT-023). Sent
-        # next to the boot notification because that is the one moment the admin
-        # is already looking. Until it is answered, nothing is collected. The
-        # prompt is a Telegram message with inline buttons, so local mode is
-        # skipped here and asked in the dashboard instead (the consent card in
-        # Settings → Privacy). Either way the install is already counted:
-        # `telemetry.init()` does that at the ping floor, without an answer.
+        # Tell the admin, once, that usage summaries are on and how to turn
+        # them off (FEAT-023). Sent next to the boot notification because that
+        # is the one moment the admin is already looking. Until the notice is
+        # delivered, only the install count is sent. It is a Telegram message
+        # with inline buttons, so local mode is skipped here and told in the
+        # dashboard instead (the notice strip). Either way the install is
+        # already counted: `telemetry.init()` does that at the ping floor.
         if not LOCAL_MODE:
             from condor.telemetry.prompt import maybe_prompt_admin
 

@@ -76,6 +76,20 @@ const OWNERS = [
     agentIds: [] as string[],
     live: null,
   },
+  // The chat door, as `_pseudo_owners` builds it: an empty namespace, and
+  // `PSEUDO_STRATEGY_NAMES`' word in `strategyName`. A term is named off this
+  // rather than off a vocabulary of its own (READ-364).
+  {
+    runKey: "brigado.chat",
+    agentSlug: "brigado",
+    agentName: "Brigado",
+    strategySlug: "chat",
+    strategyName: "Chat",
+    namespace: "",
+    declaredBots: [] as string[],
+    agentIds: [] as string[],
+    live: null,
+  },
 ];
 
 function fleet(controllers: ControllerInfo[], over: Partial<FleetData> = {}) {
@@ -184,7 +198,7 @@ describe("the two numbers", () => {
     expect(container.querySelector("[data-money-net]")?.textContent).toContain("91");
     const term = container.querySelector("[data-money-term='agent:brigado.chat']");
     expect(term).not.toBeNull();
-    expect(term?.textContent).toContain("Deployed from chat");
+    expect(term?.textContent).toContain("Brigado / Chat");
     expect(term?.querySelector("a")?.getAttribute("href")).toBe(
       "/bots?scope=agent%3Abrigado.chat",
     );

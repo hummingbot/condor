@@ -1,4 +1,9 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  type QueryClient,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import {
   Clock,
   MessageSquareText,
@@ -14,6 +19,25 @@ import { useState } from "react";
 
 import { useEscapeKey } from "@/hooks/useEscapeKey";
 import { api } from "@/lib/api";
+
+/**
+ * What a start/stop/pause/resume just made stale.
+ *
+ * Two keys, not one. The strategy's own record is the obvious half; the agent
+ * detail is the half that used to be missed, and it is load-bearing because
+ * `strategies[].status` is what the workspace reads for the "Live" badge and
+ * the delete guard — and what re-arms the gated `["agent", slug]` poll
+ * (PERF-343). Invalidating only the strategy left an idle agent's gate closed
+ * over a loop that had just started, with nothing left to reopen it.
+ */
+function invalidateLifecycle(
+  queryClient: QueryClient,
+  slug: string,
+  sslug: string,
+) {
+  queryClient.invalidateQueries({ queryKey: ["strategy", slug, sslug] });
+  queryClient.invalidateQueries({ queryKey: ["agent", slug] });
+}
 
 // ── Start Session Dialog ──
 
@@ -80,7 +104,7 @@ export function StartSessionDialog({
       return api.startStrategy(slug, sslug, config, context);
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["strategy", slug, sslug] });
+      invalidateLifecycle(queryClient, slug, sslug);
       onClose();
     },
   });
@@ -328,17 +352,17 @@ export function AgentControls({ slug, sslug, status, defaultContext, agentConfig
   const stopMut = useMutation({
     mutationFn: () => api.stopStrategy(slug, sslug),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["strategy", slug, sslug] });
+      invalidateLifecycle(queryClient, slug, sslug);
       setConfirmStop(false);
     },
   });
   const pauseMut = useMutation({
     mutationFn: () => api.pauseStrategy(slug, sslug),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["strategy", slug, sslug] }),
+    onSuccess: () => invalidateLifecycle(queryClient, slug, sslug),
   });
   const resumeMut = useMutation({
     mutationFn: () => api.resumeStrategy(slug, sslug),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["strategy", slug, sslug] }),
+    onSuccess: () => invalidateLifecycle(queryClient, slug, sslug),
   });
 
   const loading = stopMut.isPending || pauseMut.isPending || resumeMut.isPending;

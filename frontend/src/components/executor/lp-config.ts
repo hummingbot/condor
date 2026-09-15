@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useReducer } from "react";
 
 import type { ChartPriceMapping, ExecutorValidation, PickSlot } from "./types";
+import { loadPersistedDefaults, savePersistedDefaults } from "./persisted-defaults";
 import { api, type DexPoolInfo } from "@/lib/api";
 import { getThemeColors } from "@/lib/theme-colors";
 import { LP_DEFAULTS_KEY } from "@/lib/sessionState";
@@ -95,26 +96,11 @@ const PERSISTED_FIELDS: (keyof LPState)[] = [
 ];
 
 function loadSavedDefaults(): LPState {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return DEFAULTS;
-    const saved = JSON.parse(raw);
-    const merged = { ...DEFAULTS };
-    for (const key of PERSISTED_FIELDS) {
-      if (key in saved && saved[key] !== undefined) {
-        (merged as Record<string, unknown>)[key] = saved[key];
-      }
-    }
-    return merged;
-  } catch {
-    return DEFAULTS;
-  }
+  return loadPersistedDefaults(STORAGE_KEY, DEFAULTS, PERSISTED_FIELDS);
 }
 
 function saveDefaults(state: LPState) {
-  const toSave: Record<string, unknown> = {};
-  for (const key of PERSISTED_FIELDS) toSave[key] = state[key];
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
+  savePersistedDefaults(STORAGE_KEY, state, PERSISTED_FIELDS);
 }
 
 /**

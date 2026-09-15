@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import { AlertTriangle, Bot, Brain, Loader2, MessageSquare, X } from "lucide-react";
 
-import type { ChatSlot } from "@/hooks/useChatSocket";
+import type { ChatSlot, PermissionRequest } from "@/hooks/useChatSocket";
 import { CHAT_SLUG, type AgentSummary, type ChatAgentOption } from "@/lib/api";
 import { speakerNames } from "@/lib/agentColor";
+import { ApprovalPrompt } from "./ApprovalPrompt";
 import { ChatInput } from "./ChatInput";
 import { ChatMessageView } from "./ChatMessage";
+import { ConversationUsage } from "./ConversationUsage";
 import { Starters, type Starter } from "./Starters";
 
 /** How close to the end still counts as "following the answer", in pixels. */
@@ -61,11 +63,7 @@ export function ChatThread({
    * identical to a dropped one is the bug this replaces.
    */
   isQueued?: boolean;
-  permissionRequest: {
-    request_id: string;
-    summary: string;
-    origin?: string;
-  } | null;
+  permissionRequest: PermissionRequest | null;
   onResolvePermission: (requestId: string, approved: boolean) => void;
   switchError?: string | null;
   onDismissSwitchError?: () => void;
@@ -211,38 +209,6 @@ export function ChatThread({
 
   return (
     <>
-      {/* Permission request banner */}
-      {permissionRequest && (
-        <div className="border-b border-amber-500/30 bg-amber-500/10 px-4 py-3">
-          <div className="flex items-start gap-2">
-            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-[var(--color-yellow)]" />
-            <div className="flex-1 text-sm">
-              <p className="font-medium text-[var(--color-yellow)]">
-                Confirm action
-                {permissionRequest.origin ? ` — ${permissionRequest.origin}` : ""}
-              </p>
-              <p className="mt-0.5 text-[var(--color-text-muted)]">
-                {permissionRequest.summary}
-              </p>
-              <div className="mt-2 flex gap-2">
-                <button
-                  onClick={() => onResolvePermission(permissionRequest.request_id, true)}
-                  className="rounded bg-[var(--color-green)] px-3 py-1 text-xs font-medium text-white hover:opacity-90"
-                >
-                  Approve
-                </button>
-                <button
-                  onClick={() => onResolvePermission(permissionRequest.request_id, false)}
-                  className="rounded bg-[var(--color-red)] px-3 py-1 text-xs font-medium text-white hover:opacity-90"
-                >
-                  Reject
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* Switch failure — the header still shows whoever is actually answering */}
       {switchError && (
         <div className="flex items-start gap-2 border-b border-red-500/30 bg-red-500/10 px-4 py-2 text-xs text-red-400">
@@ -253,6 +219,8 @@ export function ChatThread({
           </button>
         </div>
       )}
+
+      <ConversationUsage usage={slot?.usage} />
 
       {/* Messages area */}
       <div ref={scrollAreaRef} className="flex-1 overflow-y-auto px-4 py-4">
@@ -337,29 +305,49 @@ export function ChatThread({
         </div>
       </div>
 
-      {/* Input */}
+      {/* Input — the same `px-4` as the transcript's scroll area, so the box
+          lines up with the turns above it at every width instead of running
+          to the pane's edges on a narrow one. */}
       {slot && (
-        <div className={columnClassName}>
-          <ChatInput
-            onSend={onSend}
-            // Deliberately not `disabled={isStreaming}`. The composer stays
-            // live while the agent answers: sending mid-answer is how the user
-            // redirects it, and a dead input was the reason the correction had
-            // nowhere to go (FEAT-030).
-            isStreaming={isStreaming}
-            onAbort={onAbort}
-            autoFocus={autoFocus}
-            // The composer names whoever is bound: a chat with Backpack MM is
-            // not a chat with Condor, and the placeholder was the last place
-            // the UI still said otherwise (FEAT-025).
-            placeholder={`Ask ${(slot.info.agent_slug && slot.info.label) || "Condor"}...`}
-            leading={composerLeading}
-            // Half-written words survive leaving the page, per conversation.
-            // Keyed on the conversation rather than the slot: a session that is
-            // reaped and respawned is the same chat to the person writing in
-            // it, and the slot id it comes back under is not the one they left.
-            draftKey={slot.info.conversation_id || slot.info.slot_id}
-          />
+        <div className="px-4 pb-4 pt-1">
+          <div className={columnClassName}>
+            {/* On the composer, not above the transcript: the paused call sits
+                where the user is already looking and cannot scroll away. */}
+            {permissionRequest && (
+              <ApprovalPrompt
+                // One mount per request, so each counts down from its own clock.
+                key={permissionRequest.request_id}
+                request={permissionRequest}
+                onResolve={onResolvePermission}
+              />
+            )}
+            <ChatInput
+              onSend={onSend}
+              // Deliberately not `disabled={isStreaming}`. The composer stays
+              // live while the agent answers: sending mid-answer is how the user
+              // redirects it, and a dead input was the reason the correction had
+              // nowhere to go (FEAT-030).
+              isStreaming={isStreaming}
+              onAbort={onAbort}
+              autoFocus={autoFocus}
+              // The composer names whoever is bound: a chat with Backpack MM is
+              // not a chat with Condor, and the placeholder was the last place
+              // the UI still said otherwise (FEAT-025).
+              // While a call is paused the box says what it is waiting on:
+              // a reply sent now steers the agent and denies that call.
+              placeholder={
+                permissionRequest
+                  ? "Allow or deny the call above first — a message here cancels it"
+                  : `Ask ${(slot.info.agent_slug && slot.info.label) || "Condor"}...`
+              }
+              leading={composerLeading}
+              // Half-written words survive leaving the page, per conversation.
+              // Keyed on the conversation rather than the slot: a session that is
+              // reaped and respawned is the same chat to the person writing in
+              // it, and the slot id it comes back under is not the one they left.
+              draftKey={slot.info.conversation_id || slot.info.slot_id}
+            />
+          </div>
         </div>
       )}
     </>

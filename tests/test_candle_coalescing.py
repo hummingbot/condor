@@ -147,7 +147,7 @@ def test_failing_fetch_reaches_every_waiter_and_is_not_cached(monkeypatch):
 
         # Nothing cached, nothing left in flight: the next request retries.
         cached = dict(market._candle_cache)
-        inflight = dict(market._candle_inflight)
+        inflight = len(market._candle_inflight)
 
         healthy = _CountingClient()
         _install(monkeypatch, healthy)
@@ -159,7 +159,7 @@ def test_failing_fetch_reaches_every_waiter_and_is_not_cached(monkeypatch):
     assert len(errors) == 3
     assert all(isinstance(e, Exception) for e in errors)
     assert cached == {}
-    assert inflight == {}
+    assert inflight == 0
     # The retry actually hit upstream and succeeded.
     assert ok_calls == 1
     assert len(retried) == 1

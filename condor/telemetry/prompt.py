@@ -1,16 +1,18 @@
-"""The one-tap consent prompt, and the callback that answers it.
+"""The telemetry notice, and the callback that answers it.
 
-Opt-in only works if asking is cheap, so this is a single message with two
-buttons next to the "Condor is online" notification the admin already gets. It
-is sent at most once per version, the intent is written to disk *before* the
-message goes out (a crash loop must not re-ask forever), and until it is
-answered the install stays at the ``ping`` floor — counted, nothing more.
+A notice, not a question: one message next to the "Condor is online"
+notification the admin already gets, saying that anonymous usage summaries are
+on, what they contain, and how to turn them off. It has a "Got it" button and a
+"Turn off" button. It is sent at most once per version until it is delivered,
+the attempt is written to disk *before* the message goes out (a crash loop must
+not re-send forever), and only a *delivered* notice moves an unanswered install
+from the ``ping`` floor to ``usage`` — see :mod:`condor.telemetry.consent`.
 
-Telegram is not the only surface that asks. A local-mode install has no bot to
-message, so the dashboard asks instead — ``GET /api/v1/settings/telemetry``
-serves :data:`DISCLOSURE` to the consent card. Both surfaces render the same
-copy from the same constant: a privacy claim written down twice is a privacy
-claim that will eventually disagree with itself.
+Telegram is not the only surface that tells. A local-mode install has no bot to
+message, so the dashboard shows the same notice — ``GET
+/api/v1/settings/telemetry`` serves :data:`DISCLOSURE` to the notice strip. Both
+surfaces render the same copy from the same constant: a privacy claim written
+down twice is a privacy claim that will eventually disagree with itself.
 """
 
 from __future__ import annotations
@@ -21,25 +23,25 @@ log = logging.getLogger(__name__)
 
 CALLBACK_PREFIX = "telemetry"
 
-# The two answers, in the order both surfaces offer them. `off` is deliberately
-# absent — install counting is the floor (see ``consent.ANSWER_LEVELS``).
+# The two levels an admin can choose in Settings → Privacy, in the order it
+# offers them. The notice itself offers "Got it" (usage) and "Turn off" (a
+# recorded refusal, `consent.deny`); `off` is not a level here for that reason.
 OPTIONS = (
-    {"level": "usage", "label": "Yes, share usage summaries"},
+    {"level": "usage", "label": "Usage summaries and install count (default)"},
     {"level": "ping", "label": "Only count my install"},
 )
 
-# Everything an install is told before it answers.
+# Everything an install is told.
 DISCLOSURE = {
-    "headline": "Help improve Condor?",
-    "always_on": (
-        "Condor counts installs so the project knows it is used: a random id, "
-        "the version, and an uptime ping — nothing about you or your trading. "
-        "That is always on."
+    "headline": "Condor shares anonymous usage stats",
+    "summary": (
+        "To learn what gets used and what breaks, Condor sends a random install "
+        "id, its version, which commands and screens are used, errors, and "
+        "which models agents run. Nothing about you or your trading."
     ),
-    "optional": (
-        "It can also send an anonymous, allowlisted usage summary: which "
-        "commands and screens get used, what breaks, and which models agents "
-        "run. That part is up to you."
+    "opt_out": (
+        "You can turn this off at any time in Settings \u2192 Privacy, or with "
+        "CONDOR_TELEMETRY=off."
     ),
     # A list in the browser, one sentence in Telegram. The last entry is phrased
     # to close the sentence :func:`_never_line` builds.
@@ -56,8 +58,10 @@ DISCLOSURE = {
     ],
     "doc": (
         "Full details in PRIVACY.md at the root of the repo, which also says "
-        "how to change this answer at any time."
+        "how to change this at any time."
     ),
+    "acknowledge": "Got it",
+    "turn_off": "Turn off",
     "options": [dict(option) for option in OPTIONS],
 }
 
@@ -71,9 +75,9 @@ def _never_line() -> str:
 _TEXT = "\n\n".join(
     (
         DISCLOSURE["headline"],
-        DISCLOSURE["always_on"],
-        DISCLOSURE["optional"],
+        DISCLOSURE["summary"],
         _never_line(),
+        DISCLOSURE["opt_out"],
         DISCLOSURE["doc"],
     )
 )
@@ -82,21 +86,26 @@ _TEXT = "\n\n".join(
 def keyboard():
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
+    from condor.telemetry import consent
+
     return InlineKeyboardMarkup(
         [
             [
                 InlineKeyboardButton(
-                    option["label"],
-                    callback_data=f"{CALLBACK_PREFIX}:{option['level']}",
-                )
+                    DISCLOSURE["acknowledge"],
+                    callback_data=f"{CALLBACK_PREFIX}:{consent.USAGE}",
+                ),
+                InlineKeyboardButton(
+                    DISCLOSURE["turn_off"],
+                    callback_data=f"{CALLBACK_PREFIX}:{consent.OFF}",
+                ),
             ]
-            for option in OPTIONS
         ]
     )
 
 
 async def maybe_prompt_admin(bot) -> bool:
-    """Ask the admin once, if there is anything to ask. Never raises."""
+    """Tell the admin once, if there is anything to tell. Never raises."""
     try:
         from utils.config import ADMIN_USER_ID
 
@@ -110,20 +119,24 @@ async def maybe_prompt_admin(bot) -> bool:
             return False
 
         # Written first: if sending or the process dies right after, the admin
-        # gets asked again on the next version, not on the next boot loop.
+        # is told again on the next version, not on the next boot loop.
         consent.mark_prompted(version)
         await bot.send_message(
             chat_id=int(ADMIN_USER_ID), text=_TEXT, reply_markup=keyboard()
         )
+        # Only a delivered notice turns usage on. A send that raised above
+        # leaves the install at the ping floor.
+        consent.mark_notice_shown()
         return True
     except Exception:  # noqa: BLE001
-        log.debug("Could not send the telemetry consent prompt", exc_info=True)
+        log.debug("Could not send the telemetry notice", exc_info=True)
         return False
 
 
 async def callback_handler(update, context) -> None:
-    """Handle ``telemetry:usage|ping|off``. Admin only — it is an install-wide
-    setting, and the admin owns the install."""
+    """Handle ``telemetry:usage|off`` from the notice, and ``ping`` from a
+    prompt an older build sent. Admin only — it is an install-wide setting, and
+    the admin owns the install."""
     query = update.callback_query
     try:
         await query.answer()
@@ -145,11 +158,10 @@ async def callback_handler(update, context) -> None:
         answer = (
             (query.data or "").split(":", 1)[1] if ":" in (query.data or "") else ""
         )
-        # An "off" tap can only come from a prompt sent by an older version,
-        # where the button read "No thanks". That is a refusal, so it is
-        # recorded as one — the same answer the dashboard's off switch gives —
-        # rather than being rounded up to the floor. Anything else
-        # unrecognized still lands on ping via grant().
+        # "Turn off" on the notice — or "No thanks" on a prompt an older build
+        # sent. Either is a refusal, so it is recorded as one — the same answer
+        # the dashboard's off switch gives — rather than being rounded up to the
+        # floor. Anything else unrecognized still lands on ping via grant().
         if answer == consent.OFF:
             consent.deny()
             await query.edit_message_text(
@@ -173,10 +185,9 @@ async def callback_handler(update, context) -> None:
             )
         else:
             await query.edit_message_text(
-                "Thanks. Condor will send anonymous usage and reliability "
-                "events. No keys, addresses, pairs, amounts or prompts ever "
-                "leave this machine. PRIVACY.md says how to change or withdraw "
-                "this."
+                "Thanks. Condor sends anonymous usage and reliability events. "
+                "No keys, addresses, pairs, amounts or prompts ever leave this "
+                "machine. Settings \u2192 Privacy turns it off at any time."
             )
     except Exception:  # noqa: BLE001
         log.exception("Telemetry consent callback failed")

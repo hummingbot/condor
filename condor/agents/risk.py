@@ -20,6 +20,7 @@ from condor.runtime.danger import (
     DANGEROUS_CLMM_ACTIONS,
     LEVERAGE_TOOL,
     LEVERAGED_EXECUTOR_TOOLS,
+    dry_run_refusal,
     is_dangerous_tool_call,
     tool_call_input,
     tool_call_name,
@@ -854,6 +855,25 @@ def auto_approve_with_risk_check(
                     "an agent never places an order directly — use a "
                     "create_*_executor tool instead",
                 )
+
+        # Neither `run_code` nor `manage_routines` is in `DANGEROUS_TOOLS`, and
+        # neither must be — a snippet is how a tick reads a market (ARCH-308)
+        # and a routine is ordinary tick work, so gating either by name would
+        # put a confirmation in front of every candle read. But both run
+        # arbitrary Python holding the unrestricted API client, which makes them
+        # the ways to mutate the world for real from inside a dry run: every
+        # *named* write above is refused there, `await client.gateway.start(...)`
+        # inside a snippet was not (SEC-616), and neither was writing that same
+        # line into a routine and running it (SEC-626).
+        #
+        # Which calls those are is `danger.py`'s policy and not this gate's, so
+        # a third such tool never has to reach this file. Reads on both tools —
+        # past runs, the routine list, a routine's source — change nothing and
+        # stay free.
+        if execution_mode == "dry_run":
+            refusal = dry_run_refusal(tool_call)
+            if refusal:
+                return deny(tool_call_name(tool_call), refusal, level=logging.INFO)
 
         # Auto-approve everything else
         for opt in options:

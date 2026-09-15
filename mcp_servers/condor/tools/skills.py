@@ -1,9 +1,9 @@
 """Skill tool — thin MCP wrapper over condor.memory.SkillStore.
 
 Skills are general to the assistant (playbooks shared by everyone using it), not
-per-user. The library is selected by ``settings.agent_slug`` (empty -> chat
-condor) and is editable at runtime: read/search/list plus create/edit/delete.
-Mirrors ``tools/memory.py``.
+per-user. The library is selected by ``settings.specialist_slug`` (empty ->
+chat condor) and is editable at runtime: read/search/list plus
+create/edit/delete. Mirrors ``tools/memory.py``.
 """
 
 from condor.memory import SkillStore
@@ -15,12 +15,12 @@ def _resolve_agent_slug(target: str | None) -> tuple[str | None, bool]:
 
     Mirrors routines' ``_get_agent_routines_dir``. ``target`` lets the chat
     condor author/inspect a *specific* agent's local skills (the chat MCP has no
-    ``agent_slug`` of its own). A skill library is keyed by the **agent** alone,
-    so a bare agent slug is the canonical form; a composite strategy key
+    ``specialist_slug`` of its own). A skill library is keyed by the **agent**
+    alone, so a bare agent slug is the canonical form; a composite strategy key
     ``"agent_slug.strategy_slug"`` is still accepted and resolves to its *owning
     agent* (the strategy half is discarded — there is no per-strategy library).
     Without a ``target`` the current assistant is used — the launched agent
-    (``settings.agent_slug``) or the chat condor (``None``).
+    (``settings.specialist_slug``) or the chat condor (``None``).
 
     Returns ``(agent_slug, ok)``; ``ok`` is False only when a ``target`` was
     given but matched no agent or strategy, so the caller errors instead of

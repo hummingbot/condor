@@ -1,17 +1,21 @@
 # Privacy
 
 Condor is self-hosted. It runs on your machine, holds your exchange API keys,
-and places your orders. So what leaves that machine by default is the absolute
-minimum — an anonymous "this install exists" — and everything beyond that is
-opt-in. This document is the complete statement of both.
+and places your orders. So what leaves that machine is anonymous, allowlisted,
+and announced before it starts — and anything that is content is opt-in. This
+document is the complete statement of both.
 
-**Short version:** a fresh install counts itself and nothing more. With no
-consent recorded it runs at level `ping`: a random install id, the version, and
-a periodic heartbeat — nothing about you, your users, or your trading. None of
-the usage events are sent until an admin taps "yes" on a prompt. Batches go to
-the project's collector at `https://telemetry.hummingbot.org/v1/events`, which
-is fixed in the source and cannot be pointed elsewhere. An admin can turn it
-off entirely — in Settings → Privacy, or with `CONDOR_TELEMETRY=off` in the
+**Short version:** a fresh install counts itself: a random install id, the
+version, and a periodic heartbeat — nothing about you, your users, or your
+trading. Anonymous **usage summaries** (which features are used, what breaks,
+which models agents run) are **on by default, but only after the admin has been
+told**: Condor shows one notice — a Telegram message on boot, or a strip on the
+dashboard — saying so, with a "Got it" button and a way to turn it off. Until
+that notice has been delivered, nothing beyond the install count is recorded.
+Batches go to the project's collector at
+`https://telemetry.hummingbot.org/v1/events`, which is fixed in the source and
+cannot be pointed elsewhere. An admin can turn it off entirely — from the
+notice, in Settings → Privacy, or with `CONDOR_TELEMETRY=off` in the
 environment — and a refusal, once recorded, is honoured across upgrades.
 
 There is one other way anything can leave, and it is completely separate: you
@@ -32,17 +36,18 @@ meant to be read, not trusted.
 
 ## What is collected
 
-There are three levels. The consent prompt chooses between `ping` and `usage`
-— it has no "off" button, so ignoring it is never read as a refusal. `off` is a
-deliberate act: the admin turns reporting off in Settings → Privacy, or the
-operator sets `CONDOR_TELEMETRY=off`. You can change the answer later, in
-either direction.
+There are three levels. An install that has not answered is at `ping` until the
+admin has been shown the notice, and at `usage` from then on. `off` is a
+deliberate act: the admin presses "Turn off" on the notice or picks it in
+Settings → Privacy, or the operator sets `CONDOR_TELEMETRY=off`. Ignoring the
+notice is not a refusal — but it has been read, so it is not a secret either.
+You can change the answer later, in either direction.
 
 | Level | What it sends |
 |---|---|
-| `ping` | Only that this install exists: `install`, `heartbeat`, `version_change`, `shutdown`. **This is the default, and the floor** — the prompt has no "off" option. |
-| `usage` | The above plus the feature, reliability and agent events below. Opt-in only. |
-| `off` | Nothing, ever. The emitter is a no-op — no install id is created, nothing is buffered, nothing is written, nothing is sent. Reached by an admin turning reporting off in Settings → Privacy, or by `CONDOR_TELEMETRY=off` in the environment. |
+| `ping` | Only that this install exists: `install`, `heartbeat`, `version_change`, `shutdown`. What an install sends **before the notice has reached the admin**, and what "Only count my install" in Settings keeps it at. |
+| `usage` | The above plus the feature, reliability and agent events below. **The default once the notice has been shown**; opt out at any time. |
+| `off` | Nothing, ever. The emitter is a no-op — no install id is created, nothing is buffered, nothing is written, nothing is sent. Reached by "Turn off" on the notice, by an admin turning reporting off in Settings → Privacy, or by `CONDOR_TELEMETRY=off` in the environment. |
 
 Every batch carries one context block describing the *deployment*, not you:
 
@@ -120,8 +125,9 @@ per-install, the same person on two installs produces two unrelated hashes.
 
 ## Where it goes
 
-At the default `ping` level, only the four adoption events and the envelope
-above. Everything else needs an explicit opt-in.
+Before the notice has been shown, and at `ping`, only the four adoption events
+and the envelope above. The usage events follow once the admin has been told,
+unless they turned it off.
 
 Batches are POSTed to `https://telemetry.hummingbot.org/v1/events`.
 That address is compiled into
@@ -144,37 +150,40 @@ cat .condor/telemetry/outbox.jsonl | jq .
 
 ## How to change it — or turn it off entirely
 
-Install counting (`ping`) is the floor for an install that has *not* answered:
-it is not an option on the consent prompt, because an ignored prompt must not be
-read as a refusal and the project needs an honest count of installs to know what
-to support. A refusal, though, is a different thing from silence — an admin who
-says no is obeyed, and that answer is written to `config.yml`, so it keeps
-holding after an upgrade. To check what your install is doing:
+The notice is the moment usage summaries begin for an install that has not
+answered, and it is recorded as `noticed_at` in `config.yml` only once it has
+actually been delivered — a Telegram message that failed to send, or a dashboard
+nobody opened, turns nothing on. A refusal is a different thing from silence —
+an admin who says no is obeyed, and that answer is written to `config.yml`, so
+it keeps holding after an upgrade; the notice never overrides it, nor an install
+that chose "Only count my install". To check what your install is doing:
 
 ```bash
-# The authoritative answer. Prints "ping" on a default install, and
-# "off" when CONDOR_TELEMETRY=off is set or the admin turned reporting off.
+# The authoritative answer. Prints "ping" before the notice has been shown,
+# "usage" after it, and "off" when CONDOR_TELEMETRY=off is set or the admin
+# turned reporting off.
 uv run python -c "from condor.telemetry import consent; print(consent.level())"
 ```
 
 Three ways to control it, in order of precedence:
 
 1. **Environment** — `CONDOR_TELEMETRY=off` in your `.env`. The one full kill
-   switch: it overrides everything, suppresses the prompt, and is the right
+   switch: it overrides everything, suppresses the notice, and is the right
    answer for an install that must send nothing at all.
 2. **The dashboard** — Settings → Privacy, which every seat can read and only
    the admin can change
-   (`GET`/`PUT /api/v1/settings/telemetry?level=ping|usage|off`). This is also
-   where an install that runs without Telegram is asked in the first place,
-   since it has no bot to be asked through. Choosing `off` here records a
-   refusal, which is the durable form of the kill switch: it is stored rather
-   than read from the environment of one process.
+   (`GET`/`PUT /api/v1/settings/telemetry?level=ping|usage|off`). An install
+   that runs without Telegram is shown the notice as a strip across the top of
+   the dashboard instead, since it has no bot to be told through. Choosing
+   `off` here — or "Turn off" on the notice — records a refusal, which is the
+   durable form of the kill switch: it is stored rather than read from the
+   environment of one process.
 3. **`config.yml`** — edit the `telemetry` section directly:
 
    ```yaml
    telemetry:
      consent: granted   # or `denied`, which forces level `off`
-     level: ping
+     level: ping        # or `usage`
    ```
 
 Downgrading from `usage` to `ping`, and turning reporting off, are both a
@@ -345,7 +354,8 @@ Always, which nobody but that user can do for them.
 ## Changes to this document
 
 Adding anything to the collected list requires a change to `schema.py`, a change
-to this file, and re-asking for consent. In particular, adding trading pairs
+to this file, and a new notice to every install that has not turned reporting
+off. In particular, adding trading pairs
 would make positions inferable from timing and must not be done quietly.
 
 The same applies to sharing, in its own terms. Sending anything a user has not

@@ -19,11 +19,42 @@ precisely so that the tables stay reachable without waking a server. Hence the
 
 from __future__ import annotations
 
+import argparse
 from collections.abc import Callable, Iterable, Mapping
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:  # pragma: no cover - annotation only, never imported at runtime
     from mcp.server.fastmcp import FastMCP
+
+
+def parse_profile_flags(default_profile: str) -> tuple[str, tuple[str, ...]]:
+    """``(--profile, --mute-tools)`` off argv, read at import.
+
+    Both flags have to be resolved *here* rather than once a server is already
+    starting its stdio loop: which tools exist is decided when the module
+    registers them, which is import time, and the mute subtracts from the
+    profile inside ``register_tools``, which runs at import too. Hence
+    ``parse_known_args`` — every other flag a spawner passes (``--url``,
+    ``--server-name``, ``--chat-id``, …) stays inert here, and a run under
+    pytest, whose argv is the test runner's, resolves the defaults.
+
+    ``default_profile`` is the caller's, not this module's: each server owns its
+    own ``DEFAULT_TOOL_PROFILE`` and its own rings. An empty or absent
+    ``--mute-tools`` is the norm — the spawner only puts it on the line when the
+    operator has actually switched something off — and blanks in it are not
+    names, so ``"a, b,,c"`` is ``("a", "b", "c")``.
+
+    The single declaration of the wire format both servers and
+    ``condor.runtime.toolsets`` have to agree on: renaming a flag or widening
+    the separator contract is one edit here, not a two-file change a reviewer
+    can half-land.
+    """
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--profile", default=default_profile)
+    parser.add_argument("--mute-tools", default="")
+    args, _ = parser.parse_known_args()
+    muted = tuple(n.strip() for n in (args.mute_tools or "").split(",") if n.strip())
+    return args.profile, muted
 
 
 def make_resolver(namespace: dict[str, Any]) -> Callable[[str], Any]:

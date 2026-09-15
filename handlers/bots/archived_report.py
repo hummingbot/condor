@@ -13,16 +13,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-logger = logging.getLogger(__name__)
+from condor.paths import reports_dir
 
-# Reports directory in project root
-REPORTS_DIR = Path("reports")
+logger = logging.getLogger(__name__)
 
 
 def ensure_reports_dir() -> Path:
-    """Create reports directory if it doesn't exist."""
-    REPORTS_DIR.mkdir(exist_ok=True)
-    return REPORTS_DIR
+    """Create the report output directory if it doesn't exist."""
+    directory = reports_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
 
 
 def _extract_bot_name(db_path: str) -> str:
@@ -218,7 +218,7 @@ async def save_full_report(
         )
 
         # Save JSON
-        json_path = REPORTS_DIR / f"{filename}.json"
+        json_path = reports_dir() / f"{filename}.json"
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump(report_data, f, indent=2, default=_serialize_datetime)
         logger.info(f"Saved JSON report to {json_path}")
@@ -238,7 +238,7 @@ async def save_full_report(
                 )
 
                 if chart_bytes:
-                    png_path = REPORTS_DIR / f"{filename}.png"
+                    png_path = reports_dir() / f"{filename}.png"
                     with open(png_path, "wb") as f:
                         f.write(chart_bytes.read())
                     logger.info(f"Saved chart to {png_path}")
@@ -262,10 +262,10 @@ def list_reports() -> List[Dict[str, Any]]:
     """
     reports = []
     try:
-        if not REPORTS_DIR.exists():
+        if not reports_dir().exists():
             return []
 
-        for json_file in REPORTS_DIR.glob("*.json"):
+        for json_file in reports_dir().glob("*.json"):
             try:
                 with open(json_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
@@ -314,7 +314,7 @@ def load_report(filename: str) -> Optional[Dict[str, Any]]:
         if not filename.endswith(".json"):
             filename = f"{filename}.json"
 
-        report_path = REPORTS_DIR / filename
+        report_path = reports_dir() / filename
 
         if not report_path.exists():
             return None
@@ -341,7 +341,7 @@ def delete_report(filename: str) -> bool:
         if not filename.endswith(".json"):
             filename = f"{filename}.json"
 
-        json_path = REPORTS_DIR / filename
+        json_path = reports_dir() / filename
         png_path = json_path.with_suffix(".png")
 
         deleted = False

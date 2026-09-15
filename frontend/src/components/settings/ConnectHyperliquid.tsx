@@ -1,7 +1,9 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { AlertCircle, ArrowLeft, Check, Loader2, Sparkles, Wallet } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { api } from "@/lib/api";
+import { invalidateCredentialQueries } from "@/lib/queryClient";
 import { type DiscoveredWallet, connectWallet, discoverWallets } from "@/lib/wallet/evm";
 import {
   AGENT_VALIDITY_DAYS,
@@ -60,6 +62,7 @@ export function ConnectHyperliquid({
   onBack: () => void;
   onDone: () => void;
 }) {
+  const qc = useQueryClient();
   const [wallets, setWallets] = useState<DiscoveredWallet[]>([]);
   const [scanning, setScanning] = useState(true);
   const [accountName, setAccountName] = useState(() => defaultAgentName());
@@ -143,6 +146,12 @@ export function ConnectHyperliquid({
         const reason = (failed[0].result as PromiseRejectedResult).reason as { message?: string };
         throw new Error(reason?.message || "Failed to save Hyperliquid credentials.");
       }
+
+      // At least one connector saved — refresh the credential-derived caches now,
+      // at the write, rather than waiting on the "done" screen's referral prompt
+      // (which the user may dismiss by navigating away instead of clicking through).
+      invalidateCredentialQueries(qc, server);
+
       if (failed.length > 0) {
         const reason = (failed[0].result as PromiseRejectedResult).reason as { message?: string };
         setPartial(

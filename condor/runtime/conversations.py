@@ -47,6 +47,7 @@ from condor.acp.client import (
     fold_tool_call_event,
     normalize_tool_title,
 )
+from condor.acp.usage import TokenUsage
 from condor.fsutil import atomic_write_bytes
 from condor.runtime.events import EventType
 from condor.runtime.registry_file import read_status, write_status
@@ -336,6 +337,15 @@ class ConversationMeta(BaseModel):
         default=False, description="Did the pass actually learn something?"
     )
 
+    # ── Token usage (FEAT-120) ──
+    # The running total, in ``TokenUsage.to_dict()``'s shape. A plain dict and
+    # not a nested model because ``write_status`` merges top-level keys. Empty
+    # on every conversation older than this, which reads as "not measured".
+    usage: dict = Field(
+        default_factory=dict,
+        description="Running TokenUsage total; {} = unknown (before FEAT-120).",
+    )
+
 
 class TurnEntry(BaseModel):
     """One line of the transcript.
@@ -416,6 +426,14 @@ class TurnEntry(BaseModel):
             "{type: 'tool', id} naming an entry of tool_calls. Derived — the "
             "reasoning is the same text as thought, and the tool detail is not "
             "repeated here. Empty = order not recorded (pre-ARCH-330 turns)."
+        ),
+    )
+    usage: dict = Field(
+        default_factory=dict,
+        description=(
+            "What this turn cost, in TokenUsage.to_dict()'s shape, on the last "
+            "entry the turn wrote. Includes anything spent since the previous "
+            "turn outside one (/compact). Empty = not measured (pre-FEAT-120)."
         ),
     )
 
@@ -702,6 +720,12 @@ def append_turn(user_id: int, conv_id: str, entry: TurnEntry) -> None:
         fields["title"] = _truncate(entry.text, TITLE_MAX_CHARS)
     if entry.role == "assistant" and entry.text:
         fields["last_snippet"] = _truncate(entry.text, SNIPPET_MAX_CHARS)
+    if entry.usage:
+        # Beside ``turn_count`` and on exactly its terms: one read-modify-write
+        # per turn, merged under ``write_status``'s lock.
+        fields["usage"] = (
+            TokenUsage.from_dict(meta.usage) + TokenUsage.from_dict(entry.usage)
+        ).to_dict()
     write_status(conv_dir, META_FILENAME, **fields)
 
 
@@ -994,6 +1018,9 @@ class Recorder:
         # what was in them.
         self._events: list[dict] = []
         self._error = ""
+        # What this turn cost, handed in by the funnel (FEAT-120) — once at
+        # DONE and once more in its ``finally``, which after a DONE adds zero.
+        self._usage = TokenUsage()
         # Stays empty unless a DONE arrives: an abandoned generator never
         # reports an ending, and "unknown" is the honest record of that.
         self._stop = ""
@@ -1080,6 +1107,11 @@ class Recorder:
             self._error = str(event.field("message", "") or "")
         elif event.type == EventType.DONE:
             self._stop = event.stop_reason
+
+    def note_usage(self, usage: TokenUsage) -> None:
+        """Add to what this turn is charged. Never writes."""
+        if self.enabled:
+            self._usage = self._usage + usage
 
     def _note_thought(self, text: str) -> None:
         """Extend the run's trailing reasoning step, or open a new one.
@@ -1170,13 +1202,11 @@ class Recorder:
                     attachments=self._attachments,
                 )
             )
-            append_turn(self.user_id, self.conv_id, opening)
+            entries = [opening]
             text = "".join(self._text)
             tools = self._recorded_calls()
             if text or tools or self._thought:
-                append_turn(
-                    self.user_id,
-                    self.conv_id,
+                entries.append(
                     TurnEntry(
                         role="assistant",
                         text=text,
@@ -1185,14 +1215,17 @@ class Recorder:
                         events=self._recorded_events(tools),
                         stop_reason=self._stop,
                         **self._attribution(),
-                    ),
+                    )
                 )
             elif self._error:
-                append_turn(
-                    self.user_id,
-                    self.conv_id,
-                    TurnEntry(role="system", text=self._error, kind="error"),
-                )
+                entries.append(TurnEntry(role="system", text=self._error, kind="error"))
+            # On the *last* entry written — the answer, else the error, else the
+            # opening line — so a turn that failed or never answered still adds
+            # what it spent to the conversation's total.
+            if not self._usage.is_zero():
+                entries[-1].usage = self._usage.to_dict()
+            for entry in entries:
+                append_turn(self.user_id, self.conv_id, entry)
         except Exception:  # noqa: BLE001 - recording must not break a prompt
             log.warning("Could not record turn for %s", self.conv_id, exc_info=True)
 

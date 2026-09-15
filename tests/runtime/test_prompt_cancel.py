@@ -500,3 +500,58 @@ def test_prompt_overall_timeout_aborts_the_turn_at_the_agent(monkeypatch):
     assert client._peer._pending == {}
     assert session.is_busy is False
     assert session._lock.locked() is False
+
+
+def test_an_abandoned_turn_stops_buffering_into_the_event_queue():
+    """PERF-332: what nobody can receive is dropped, not parked in RAM.
+
+    The turn above is abandoned mid-answer and the agent keeps generating. Its
+    remaining chunks and tool outputs are *provably* undeliverable — the next
+    prompt drains the queue before it reads anything — so the queue used to
+    grow with the length of the abandoned turn and hold it until the idle sweep
+    detached the session an hour later. One big tool result parked megabytes.
+    """
+    client = _client(answers_cancel=True)
+
+    async def scenario():
+        events: list = []
+        agen = client.prompt_stream("read me the whole log")
+        pending = asyncio.ensure_future(agen.__anext__())
+        await asyncio.sleep(0.05)
+        client._on_session_update("sess-1", _chunk("half an answer"))
+        events.append(await asyncio.wait_for(pending, timeout=5))
+
+        await agen.aclose()  # the socket dropped: nobody is reading any more
+        await asyncio.sleep(0.05)
+
+        # The agent runs on for another hundred chunks and dumps a fat tool
+        # result nobody asked for.
+        for i in range(100):
+            client._on_session_update("sess-1", _chunk(f"tail {i} "))
+        client._on_session_update(
+            "sess-1",
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "1",
+                "status": "completed",
+                "output": "x" * 100_000,
+            },
+        )
+        abandoned = client._event_queue.qsize()
+
+        # ...and the next turn still reads its own words off an empty queue.
+        after: list = []
+        task = asyncio.create_task(_drive(client.prompt_stream("still there?"), after))
+        await asyncio.sleep(0.05)
+        client._on_session_update("sess-1", _chunk("yes"))
+        await _finish(client)
+        await asyncio.wait_for(task, timeout=5)
+        return events, abandoned, after
+
+    events, abandoned, after = asyncio.run(scenario())
+
+    assert _said(events) == "half an answer"
+    # Flat, not 101 events deep: the queue never grew with the abandoned turn.
+    assert abandoned == 0
+    assert _said(after) == "yes"
+    assert after[-1].stop_reason == "end_turn"

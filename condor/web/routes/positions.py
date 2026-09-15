@@ -6,6 +6,7 @@ import logging
 from fastapi import APIRouter, Depends
 
 from condor.fetchers.market_data import fetch_current_price
+from condor.server_data_service import ServerDataType, get_server_data_service
 from condor.web.auth import require_server_access
 from condor.web.models import WebUser
 from config_manager import get_config_manager
@@ -59,8 +60,6 @@ async def get_consolidated_positions(
     user: WebUser = Depends(require_server_access),
 ):
     cm = get_config_manager()
-
-    from condor.server_data_service import ServerDataType, get_server_data_service
 
     # Fetch executor positions and bot data in parallel
     async def fetch_executor_positions():

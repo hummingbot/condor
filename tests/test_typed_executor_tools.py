@@ -397,3 +397,120 @@ def test_a_read_tool_is_never_gated():
             )
         )
         assert result["outcome"]["outcome"] == "selected", f"{name} was gated"
+
+
+# ---------------------------------------------------------------------------
+# A nested block merges too — it is not replaced wholesale (CORR-560)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def shipped_preferences(tmp_path, monkeypatch):
+    """The preferences a fresh install actually gets, on a throwaway path.
+
+    Not a stub: the shipped template is the thing under test here, since it writes
+    an ACTIVE grid ``triple_barrier_config`` on first run.
+    """
+    from mcp_servers.hummingbot_api.executor_preferences import (
+        ExecutorPreferencesManager,
+    )
+
+    manager = ExecutorPreferencesManager(tmp_path / "executor_preferences.md")
+    monkeypatch.setattr(executor_create, "executor_preferences", manager)
+    return manager
+
+
+def test_the_shipped_grid_barrier_survives_a_create_that_names_no_barrier(
+    shipped_preferences,
+):
+    """The grid tool always sends the block (the backend schema requires it).
+
+    An empty one used to replace the saved block, deploying a grid with no
+    take-profit and taker exits — a different strategy from the one on file.
+    """
+    client = _RecordingClient()
+
+    asyncio.run(
+        executor_create.create_grid_executor(
+            client,
+            connector_name="binance_perpetual",
+            trading_pair="SOL-USDT",
+            side=1,
+            start_price=140,
+            end_price=150,
+            limit_price=138,
+            total_amount_quote=500,
+        )
+    )
+
+    barrier = client.calls[0]["config"]["triple_barrier_config"]
+    assert barrier["take_profit"] == 0.0002
+    assert barrier["open_order_type"] == 3
+    assert barrier["take_profit_order_type"] == 3
+
+
+def test_an_explicit_barrier_wins_key_by_key_and_the_rest_fills_in(
+    shipped_preferences,
+):
+    client = _RecordingClient()
+
+    asyncio.run(
+        executor_create.create_grid_executor(
+            client,
+            connector_name="binance_perpetual",
+            trading_pair="SOL-USDT",
+            side=1,
+            start_price=140,
+            end_price=150,
+            limit_price=138,
+            total_amount_quote=500,
+            take_profit=0.002,
+        )
+    )
+
+    barrier = client.calls[0]["config"]["triple_barrier_config"]
+    assert barrier["take_profit"] == 0.002, "the explicit argument must win"
+    assert barrier["open_order_type"] == 3, "the saved sibling must still fill in"
+
+
+def test_a_saved_stop_loss_survives_a_create_that_passes_only_a_take_profit(
+    monkeypatch,
+):
+    """The funded-position case: a partial barrier must not drop the other legs."""
+    client = _RecordingClient()
+    monkeypatch.setattr(
+        executor_create.executor_preferences,
+        "get_defaults",
+        lambda executor_type: {
+            "triple_barrier_config": {"stop_loss": 0.01, "open_order_type": 3}
+        },
+    )
+
+    asyncio.run(
+        executor_create.create_position_executor(
+            client,
+            connector_name="binance_perpetual",
+            trading_pair="BTC-USDT",
+            side=1,
+            amount=0.01,
+            take_profit=0.02,
+        )
+    )
+
+    barrier = client.calls[0]["config"]["triple_barrier_config"]
+    assert barrier["stop_loss"] == 0.01, "the saved stop-loss must not be dropped"
+    assert barrier["take_profit"] == 0.02
+    assert barrier["open_order_type"] == 3
+
+
+def test_saving_a_partial_barrier_updates_the_stored_block_rather_than_truncating_it(
+    shipped_preferences,
+):
+    """``save_as_default`` writes through the same merge, so a save cannot truncate."""
+    shipped_preferences.update_defaults(
+        "grid_executor", {"triple_barrier_config": {"take_profit": 0.005}}
+    )
+
+    stored = shipped_preferences.get_defaults("grid_executor")["triple_barrier_config"]
+    assert stored["take_profit"] == 0.005
+    assert stored["open_order_type"] == 3, "the untouched key must survive the save"

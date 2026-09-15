@@ -374,7 +374,10 @@ function BubbleHero({
   onAsk: (text: string, files?: File[]) => void;
 }) {
   return (
-    <div className="flex flex-1 flex-col items-center justify-center px-3 text-center">
+    // Hung from the top, not centred: centring re-balanced the whole hero on
+    // every line the composer grew, so the icon and the title climbed the panel
+    // as the user typed.
+    <div className="flex flex-1 flex-col items-center px-3 pt-6 text-center">
       <MessageSquare className="mb-3 h-8 w-8 text-[var(--color-text-muted)] opacity-30" />
       <p className="text-sm font-medium text-[var(--color-text)]">
         Ask {name} about this page

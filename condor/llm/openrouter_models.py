@@ -98,6 +98,20 @@ async def fetch_models(force_refresh: bool = False) -> list[OpenRouterModel]:
     return models
 
 
+def cached_context_length(model_id: str) -> int | None:
+    """The context window of ``model_id`` if the catalog is already cached.
+
+    Never fetches: it runs at the end of every chat turn (FEAT-120), which must
+    not grow a network call. A stale cache still answers, since a model's
+    context window does not move by the hour. ``None`` when the catalog was
+    never fetched in this process or does not list the model.
+    """
+    if _cache is None:
+        return None
+    model = find_model_by_slug(_cache[1], model_id)
+    return model.context_length if model and model.context_length > 0 else None
+
+
 def format_button_label(model: OpenRouterModel) -> str:
     """Short label for inline keyboard buttons. Telegram max ~30 chars looks good."""
     label = model.name or model.slug

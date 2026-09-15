@@ -8,16 +8,19 @@ per-endpoint: it walks the real FastAPI app and asserts that every server-scoped
 route carries one of the ``require_server_access*`` dependencies, with a small
 explicit allowlist for the routes that deliberately answer differently.
 
-Three shapes exist, and they are not interchangeable:
+Two shapes exist, and they are not interchangeable:
 
 * ``/servers/{name}/...``   → ``require_server_access``
-* ``/servers/{server_name}/...`` → ``require_server_access_by_server_name``
 * ``?server=...``          → ``require_server_access_query``
 
-and a fourth that no path/query dependency can cover — the server name arriving
+and a third that no path/query dependency can cover — the server name arriving
 in the request **body** — which uses the shared ``check_server_access`` helper
 the dependencies are built on. Those sites are pinned by source inspection
 below, because there is no signature for FastAPI to reflect on.
+
+The sweep below also recognises a ``{server_name}`` path parameter, a shape no
+route uses today (READ-595 deleted the last two): a route reintroducing it is
+reported as unguarded rather than quietly skipped.
 """
 
 from __future__ import annotations
@@ -36,14 +39,12 @@ from condor.web.auth import (
     check_server_access,
     get_current_user,
     require_server_access,
-    require_server_access_by_server_name,
     require_server_access_query,
 )
 from condor.web.models import WebUser
 
 GUARDS = {
     require_server_access,
-    require_server_access_by_server_name,
     require_server_access_query,
 }
 
@@ -167,11 +168,6 @@ def test_each_shape_uses_the_dependency_that_matches_it(app):
             query_params = {p.name for p in sub.query_params}
             if sub.call is require_server_access and "name" not in path_params:
                 wrong.append(f"{route.path}: require_server_access has no {{name}}")
-            if (
-                sub.call is require_server_access_by_server_name
-                and "server_name" not in path_params
-            ):
-                wrong.append(f"{route.path}: no {{server_name}} path param")
             if sub.call is require_server_access_query and "server" not in query_params:
                 wrong.append(f"{route.path}: no ?server= query param")
     assert not wrong, wrong
@@ -263,13 +259,6 @@ def test_path_guard_returns_the_user_on_an_owned_server(deny):
     assert asyncio.run(require_server_access(OWNED, user=USER)) is USER
 
 
-def test_server_name_alias_guard_refuses_a_foreign_server(deny):
-    with pytest.raises(HTTPException) as exc:
-        asyncio.run(require_server_access_by_server_name(FOREIGN, user=USER))
-    assert exc.value.status_code == 403
-    assert asyncio.run(require_server_access_by_server_name(OWNED, user=USER)) is USER
-
-
 def test_query_guard_refuses_a_foreign_server(deny):
     with pytest.raises(HTTPException) as exc:
         asyncio.run(require_server_access_query(FOREIGN, user=USER))
@@ -306,8 +295,6 @@ def client(app, deny):
         ("GET", f"/api/v1/settings/gateway/status?server={FOREIGN}"),
         ("GET", f"/api/v1/settings/credentials?server={FOREIGN}"),
         ("GET", f"/api/v1/routines/options/controller_configs?server={FOREIGN}"),
-        # {server_name} path param
-        ("POST", f"/api/v1/routines/servers/{FOREIGN}/some_routine/run"),
     ],
 )
 def test_a_foreign_server_is_refused_over_http(client, method, url):

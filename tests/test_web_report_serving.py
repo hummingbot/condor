@@ -85,8 +85,7 @@ def reports_dir(tmp_path, monkeypatch):
         ),
         encoding="utf-8",
     )
-    monkeypatch.setattr(reports, "CHARTS_DIR", directory)
-    monkeypatch.setattr(reports, "INDEX_FILE", index)
+    monkeypatch.setenv("CONDOR_REPORTS_DIR", str(directory))
     # Ownership (SEC-196) is orthogonal here: USER owns every seeded entry and
     # is not an admin, so these tests keep exercising serving/containment.
     monkeypatch.setattr(reports_routes, "get_config_manager", lambda: _NoAdmins())

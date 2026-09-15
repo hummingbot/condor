@@ -22,7 +22,7 @@ from enum import Enum
 from functools import partial
 from typing import Any, Callable, Dict, FrozenSet, List, Optional, Tuple
 
-from condor.asyncutil import TaskSet
+from condor.asyncutil import SingleFlight, TaskSet
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +43,10 @@ class ServerDataType(Enum):
     TRADING_RULES = "trading_rules"
     CONNECTORS = "connectors"
     BOTS_STATUS = "bots_status"
+    #: The controller configs, deploy timestamps and DB performance the
+    #: bots page is enriched with — fetched as one unit so the REST route
+    #: and every WS bots frame render from the same answer.
+    BOTS_ENRICHMENT = "bots_enrichment"
     EXECUTORS = "executors"
     BOT_RUNS = "bot_runs"
     CANDLE_CONNECTORS = "candle_connectors"
@@ -110,6 +114,11 @@ _DEFAULTS: Dict[ServerDataType, DataTypeDefaults] = {
     ServerDataType.TRADING_RULES: DataTypeDefaults(interval=300, ttl=600),
     ServerDataType.CONNECTORS: DataTypeDefaults(interval=300, ttl=600),
     ServerDataType.BOTS_STATUS: DataTypeDefaults(interval=5, ttl=30),
+    # Enrichment moves far slower than status: a controller config, a deploy
+    # timestamp and a DB performance snapshot do not change between two 5s
+    # frames, and the fetch costs one call per bot. A minute of staleness
+    # buys eleven of every twelve frames a free, warm read.
+    ServerDataType.BOTS_ENRICHMENT: DataTypeDefaults(interval=30, ttl=60),
     ServerDataType.EXECUTORS: DataTypeDefaults(interval=2, ttl=30),
     ServerDataType.BOT_RUNS: DataTypeDefaults(interval=30, ttl=120),
     ServerDataType.CANDLE_CONNECTORS: DataTypeDefaults(interval=300, ttl=600),
@@ -131,6 +140,21 @@ _DEFAULTS: Dict[ServerDataType, DataTypeDefaults] = {
     # all currency conversion, so reads never hit the network.
     ServerDataType.TICKER_POOL: DataTypeDefaults(interval=60, ttl=300),
 }
+
+
+#: Everything computed from an account's credential list. Adding or removing a
+#: key changes all of it at once: CONNECTORS *is* the credentialed list, VENUES
+#: derives its `credentialed` trait from that same list (fetch_venues calls
+#: fetch_available_cex_connectors, condor/fetchers/connectors.py:173), and
+#: PORTFOLIO is the balances of those accounts. VENUES is the one nothing
+#: re-polls — it is not in auto_subscribe_servers' core_types — so forgetting it
+#: here strands the trade panel behind a stale view-only overlay for a full
+#: 600s TTL, in every browser (issue #238).
+CREDENTIAL_DERIVED: Tuple[ServerDataType, ...] = (
+    ServerDataType.CONNECTORS,
+    ServerDataType.VENUES,
+    ServerDataType.PORTFOLIO,
+)
 
 
 # ============================================
@@ -300,8 +324,9 @@ class ServerDataService:
         self._rate_limiters: Dict[str, RateLimiter] = {}
         self._fetch_registry: Dict[ServerDataType, FetchSpec] = {}
         self._poll_task: Optional[asyncio.Task] = None
-        # In-flight fetches per key (single-flight coalescing)
-        self._inflight: Dict[CacheKey, asyncio.Task] = {}
+        # In-flight fetches per key (single-flight coalescing). Per-instance, so
+        # a second ServerDataService in a test never shares one.
+        self._inflight = SingleFlight()
         self._running = False
         self._last_cleanup = time.time()
         # Sync listeners (e.g. WebSocketManager broadcasts)
@@ -411,7 +436,14 @@ class ServerDataService:
     # ------ Read API ------
 
     def get(self, server: str, data_type: ServerDataType, **params) -> Optional[Any]:
-        """Read from cache only (hot path). Returns None if not cached or expired."""
+        """Read from cache only (hot path). Returns None if not cached or expired.
+
+        ``None`` means "nothing usable in cache", never "the server is fine": a
+        failing fetch leaves the previous value in place (see
+        :meth:`get_or_fetch`) and the entry only disappears once it expires and
+        :meth:`_cleanup_stale` is allowed to evict it. Use :meth:`get_entry` for
+        the error/age metadata behind a ``None``.
+        """
         key = CacheKey.make(server, data_type, **params)
         entry = self._cache.get(key)
         if entry is None:
@@ -426,7 +458,24 @@ class ServerDataService:
     async def get_or_fetch(
         self, server: str, data_type: ServerDataType, **params
     ) -> Optional[Any]:
-        """Return cached data if fresh, otherwise fetch. For REST/one-shot reads."""
+        """Return cached data if fresh, otherwise fetch. For REST/one-shot reads.
+
+        Three outcomes, indistinguishable from the return value alone:
+
+        1. a cache hit within the key's TTL;
+        2. a successful fetch, just written to the cache;
+        3. a *failed* fetch, which returns the previous value at whatever age it
+           has — or ``None`` if there never was one.
+
+        The third case is silent and unbounded: nothing here caps how old the
+        returned value may be, and a key with a live subscriber is never evicted
+        by :meth:`_cleanup_stale`, so with the API server down this keeps handing
+        out the last good snapshot for as long as the subscriber stays attached.
+
+        The value carries no age of its own. When freshness is load-bearing,
+        read :meth:`get_entry` alongside it for ``fetched_at``,
+        ``consecutive_errors`` and ``last_error_at``.
+        """
         key = CacheKey.make(server, data_type, **params)
 
         # Check cache
@@ -440,7 +489,13 @@ class ServerDataService:
     def get_entry(
         self, server: str, data_type: ServerDataType, **params
     ) -> Optional[CacheEntry]:
-        """Get the full cache entry (for age/metadata checks)."""
+        """Get the full cache entry (for age/metadata checks).
+
+        This is the sanctioned way to age-check a :meth:`get_or_fetch` result:
+        that call can return a value of any age when the fetch failed, and only
+        the entry's ``fetched_at`` / ``consecutive_errors`` / ``last_error_at``
+        say so.
+        """
         key = CacheKey.make(server, data_type, **params)
         return self._cache.get(key)
 
@@ -681,7 +736,26 @@ class ServerDataService:
                     self._cleanup_stale()
                     self._last_cleanup = now
             except asyncio.CancelledError:
-                break
+                # Two very different events arrive here as the same exception:
+                # *this* task being cancelled (stop(), shutdown), and something
+                # this tick awaited being cancelled — a shared single-flight
+                # fetch killed by one of its own dependencies. Only the first
+                # ends the loop, and it is re-raised rather than swallowed so
+                # the task genuinely finishes cancelled.
+                #
+                # The second must not end it. ``break`` here left ``_running``
+                # True, and start() returns early on that, so one stray
+                # cancellation silently retired the poller for the lifetime of
+                # the process and every surface served the last cached value
+                # until Condor was restarted.
+                task = asyncio.current_task()
+                if not self._running or (task is not None and task.cancelling()):
+                    raise
+                logger.error(
+                    "SDS poll loop absorbed a cancellation it did not request; "
+                    "continuing to poll"
+                )
+                continue
             except Exception as e:
                 logger.error("SDS poll loop error: %s", e, exc_info=True)
                 await asyncio.sleep(5)
@@ -725,6 +799,22 @@ class ServerDataService:
                 return
             try:
                 await self._fetch_and_cache(key)
+            except asyncio.CancelledError:
+                # ``except Exception`` never caught this: CancelledError is a
+                # BaseException. Ours — the poll task was cancelled and gather
+                # cancelled this child with it — must propagate so stop() really
+                # stops. A cancellation that came out of the shared fetch is not
+                # ours, and must not travel up through gather into _poll_loop,
+                # where it is indistinguishable from a shutdown.
+                task = asyncio.current_task()
+                if task is not None and task.cancelling():
+                    raise
+                logger.warning(
+                    "SDS: fetch for %s:%s was cancelled by something it awaited; "
+                    "skipping it this tick",
+                    key.server,
+                    key.data_type.value,
+                )
             except Exception:
                 pass  # Error already recorded in _fetch_and_cache
 
@@ -737,12 +827,7 @@ class ServerDataService:
         starting a duplicate backend request. The in-flight entry is cleared
         when the fetch settles, so a failure never poisons subsequent fetches.
         """
-        task = self._inflight.get(key)
-        if task is None:
-            task = asyncio.ensure_future(self._do_fetch_and_cache(key))
-            self._inflight[key] = task
-            task.add_done_callback(lambda _t, k=key: self._inflight.pop(k, None))
-        return await task
+        return await self._inflight.run(key, lambda: self._do_fetch_and_cache(key))
 
     async def _do_fetch_and_cache(self, key: CacheKey) -> Optional[Any]:
         """Fetch data and update cache. Returns the fetched value."""
@@ -821,7 +906,13 @@ class ServerDataService:
                     self._callback_tasks.track(task, sub.subscriber_id)
 
     def _cleanup_stale(self) -> None:
-        """Remove cache entries with no subscribers and expired TTL."""
+        """Remove cache entries with no subscribers and expired TTL.
+
+        A key with at least one live subscriber is exempt: it is kept no matter
+        how old it is. That is what makes :meth:`get_or_fetch`'s stale-on-error
+        window unbounded for the subscribed keys (portfolio, bot status,
+        executors) while a subscriber is attached.
+        """
         now = time.time()
         stale = []
         for key, entry in self._cache.items():
@@ -887,6 +978,7 @@ def register_default_fetches() -> None:
         fetch_active_orders,
         fetch_available_cex_connectors,
         fetch_bot_runs,
+        fetch_bots_enrichment,
         fetch_bots_status,
         fetch_candle_connectors,
         fetch_connectors,
@@ -924,6 +1016,7 @@ def register_default_fetches() -> None:
     sds.register_fetch(ServerDataType.ALL_CONNECTORS, fetch_connectors)
     sds.register_fetch(ServerDataType.VENUES, partial(fetch_venues, strict=True))
     sds.register_fetch(ServerDataType.BOTS_STATUS, fetch_bots_status)
+    sds.register_fetch(ServerDataType.BOTS_ENRICHMENT, fetch_bots_enrichment)
     sds.register_fetch(ServerDataType.EXECUTORS, fetch_executors)
     sds.register_fetch(ServerDataType.BOT_RUNS, fetch_bot_runs)
     sds.register_fetch(ServerDataType.CANDLE_CONNECTORS, fetch_candle_connectors)

@@ -42,13 +42,11 @@ import {
   CartesianGrid,
   ComposedChart,
   Line,
-  Rectangle,
   ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
-  type BarShapeProps,
 } from "recharts";
 
 import { formatAxisCurrency, formatAxisTime, formatCurrencyVolume, formatCurrencyPnl, pnlColor } from "@/lib/formatters";
@@ -63,22 +61,17 @@ import {
   PNL_SERIES_LABELS,
   PNL_SERIES_PANE,
   RANGE_PRESETS,
-  chartBucketMs,
-  formatBucketLabel,
   hiddenSeriesSnapshot,
   paneSeries,
-  positionAreaExtent,
-  positionAxisDomain,
   resolveTimeRange,
   setSeriesHidden,
   sliceToRange,
   subscribeToHiddenSeries,
-  volumeBarWidth,
-  zeroGradientOffset,
   type PnlChartPoint,
   type PnlSeriesKey,
   type TimeRange,
 } from "@/lib/pnl-chart";
+import { useActivityPane } from "@/lib/pnl-chart-pane";
 import { getThemeColors } from "@/lib/theme-colors";
 import { PnlEvolutionTooltip } from "./PnlChartTooltips";
 import { PnlRangeStrip } from "./PnlRangeStrip";
@@ -506,67 +499,18 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
     [drawnPnl, drawnActivity],
   );
 
-  // The position axis is pinned across zero rather than left to recharts, so
-  // the signed area always has its baseline on screen (READ-246). Memoised
-  // because recharts keeps the domain in its own store and a fresh array on
-  // every render would churn it.
-  const positionDomain = useMemo(() => positionAxisDomain(visible), [visible]);
-  // Measured against the area's own extent, not the padded domain: the fill's
-  // gradient is in objectBoundingBox units. See zeroGradientOffset.
-  const positionZeroOffset = useMemo(() => zeroGradientOffset(positionAreaExtent(visible)), [visible]);
-
-  // ── Volume bars (READ-245) ──
+  // ── Volume bars and the position axis (READ-245, READ-246) ──
   //
-  // The bars are sized by us, not by recharts. On a numeric X axis recharts
-  // takes a bar's width from the *smallest* gap between two adjacent points and
-  // clamps any explicit `barSize` back under it — and this series always has
-  // one gap far smaller than the rest, because the fold ends it with a live
-  // "now" point a fraction of a bucket after the last snapshot. Left alone,
-  // every bar in the pane would be drawn at that fraction, thinning to a
-  // hairline and thickening again with each snapshot that lands. See
-  // `volumeBarWidth` and `chartBucketMs`.
-  //
-  // The measurement comes from the pane's own ResponsiveContainer, which is
-  // already observing its size, rather than from a second observer of ours. It
-  // is 0 until the first callback — and stays 0 where there is no layout at all
-  // — which `volumeBarWidth` answers with `undefined`, i.e. "leave it to
-  // recharts".
-  const [activityWidth, setActivityWidth] = useState(0);
-  const onActivityResize = useCallback((width: number) => setActivityWidth(width), []);
-  const bucketMs = useMemo(() => chartBucketMs(visible), [visible]);
-  // The bucket has to be named in the tooltip: "Volume" used to be a running
-  // total, which needs no qualifier, and is now one bucket's worth, which means
-  // nothing until you know how long a bucket is.
-  const bucketLabel = useMemo(() => formatBucketLabel(bucketMs), [bucketMs]);
-  const barWidth = volumeBarWidth(
-    // The plot area, not the card: both gutters and the right margin are
-    // outside the time domain the bars are placed in.
-    activityWidth - 2 * AXIS_WIDTH - PANE_MARGIN_RIGHT,
-    spanMs,
-    bucketMs,
-  );
-  // Centred on its instant rather than starting there (recharts' own
-  // convention on a numeric axis), so a bar sits under the synced cursor and
-  // the tooltip that reports it, in both panes.
-  const volumeBar = useCallback(
-    (props: BarShapeProps) => {
-      const width = barWidth ?? props.width;
-      const x = props.x + props.width / 2 - width / 2;
-      return (
-        <Rectangle
-          x={x}
-          y={props.y}
-          width={width}
-          height={props.height}
-          radius={props.radius}
-          fill={props.fill}
-          fillOpacity={props.fillOpacity}
-          stroke="none"
-        />
-      );
-    },
-    [barWidth],
-  );
+  // The pane's whole geometry — the measured width the bars are sized from,
+  // the bucket, the re-centring bar shape, the zero-pinned position axis —
+  // comes from one hook, shared with OwnerPnlChart's activity pane (ARCH-341).
+  const {
+    onActivityResize,
+    bucketLabel,
+    volumeBar,
+    positionDomain,
+    positionZeroOffset,
+  } = useActivityPane(visible, spanMs);
 
   // What the bars on screen add up to — the flow the activity pane draws, as
   // opposed to `latest.volume`, the lifetime counter they were differenced from

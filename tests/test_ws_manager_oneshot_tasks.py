@@ -13,8 +13,14 @@ import inspect
 import json
 import logging
 
+import pytest
+
 from condor.server_data_service import CacheKey, ServerDataType
 from condor.web.ws_manager import WebSocketManager, _Connection
+
+# These connections are stand-ins with no config entry; `broadcast` re-reads
+# server access per frame since SEC-592 and would revoke them mid-test.
+pytestmark = pytest.mark.usefixtures("ws_access_granted")
 
 WS_LOGGER = "condor.web.ws_manager"
 

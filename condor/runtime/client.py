@@ -171,6 +171,20 @@ def _model_of(agent_key: str) -> str:
     return agent_key.split(":", 1)[1] if ":" in agent_key else agent_key
 
 
+def _attach_usage(done: RuntimeEvent, session, recorder) -> None:
+    """Charge this turn what the client spent since the last one (FEAT-120).
+
+    Taken here, the fifth concern this funnel owns on the same argument as the
+    other four: every chat turn on every surface ends here, so the clients only
+    count and never have to know what a turn is — and none of the half-dozen
+    places that synthesize a ``PromptDone`` has to learn about usage. Riding the
+    DONE event rather than a new one keeps the wire shape: consumers gain a key.
+    """
+    turn_usage = session.take_usage()
+    done.data["usage"] = turn_usage.to_dict()
+    recorder.note_usage(turn_usage)
+
+
 async def prompt(
     key: SessionKey,
     req: PromptRequest,
@@ -341,6 +355,7 @@ async def prompt(
                 tool_kinds[kind] = tool_kinds.get(kind, 0) + 1
             elif runtime_event.type is EventType.DONE:
                 outcome = "done"
+                _attach_usage(runtime_event, session, recorder)
             recorder.observe(runtime_event)
             yield runtime_event
     except Exception as exc:  # noqa: BLE001 - surfaced to the caller as an event
@@ -349,8 +364,13 @@ async def prompt(
         failure = RuntimeEvent.error(str(exc), session_key=raw_key)
         recorder.observe(failure)
         yield failure
-        yield RuntimeEvent.done("error", session_key=raw_key)
+        done = RuntimeEvent.done("error", session_key=raw_key)
+        _attach_usage(done, session, recorder)
+        yield done
     finally:
+        # A turn that never reached DONE — the abandoned generator below — is
+        # counted here or not at all. After a DONE this takes nothing.
+        recorder.note_usage(session.take_usage())
         # Not on DONE: the dashboard abandons this generator constantly (page
         # reload, abort_prompt cancelling the task, WS disconnect), and an
         # abandoned async generator only ever gets GeneratorExit. Losing the

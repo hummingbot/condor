@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 from condor import dex_candles
 from condor.web.auth import require_owner, require_server_access
 from condor.web.models import WebUser
+from condor.web.routes._errors import upstream_error
 from config_manager import get_config_manager
 
 logger = logging.getLogger(__name__)
@@ -507,8 +508,8 @@ async def add_dex_token(
                     else None
                 )
     except Exception as e:
-        logger.warning("add token %s on %s failed: %s", address, gateway_network, e)
-        raise HTTPException(status_code=502, detail=f"Gateway refused: {e}") from e
+        logger.exception("add token %s on %s failed", address, gateway_network)
+        raise upstream_error("Gateway refused", e) from e
 
     # `ensure_tokens_listed` folds its own upstream errors into this verdict so
     # the automatic path stays quiet; a clicked button must not.

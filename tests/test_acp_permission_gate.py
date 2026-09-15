@@ -146,6 +146,7 @@ def test_read_only_acp_call_still_takes_the_fast_path():
 def test_session_update_records_the_arguments():
     """Transcripts recorded ``"input": null`` for all 123 ACP tool calls."""
     client = ACPClient(command="true")
+    client._current_req_id = 1  # a turn is being streamed (PERF-332)
     client._on_session_update(
         "s",
         {
@@ -387,7 +388,6 @@ FUND_MOVING_TOOLS = {
     "manage_amm",
     "manage_bots",
     "manage_clmm",
-    "manage_gateway_config",  # the wallets resource takes a private key
 }
 
 #: Tools that read, or that only write config the trading loop must be told to
@@ -395,10 +395,18 @@ FUND_MOVING_TOOLS = {
 #: ``test_every_action_gated_tool_is_classified`` below.
 NON_FUND_MOVING_TOOLS = {
     "manage_controllers",  # writes controller templates, never a running bot
-    "manage_gateway_container",  # starts and stops Gateway; signs nothing
+    # Writes only the token/pool symbol → address mapping. Networks and connectors
+    # (the RPC and the slippage) are read-only over MCP and set in Condor.
+    "manage_gateway_config",
     "executor_defaults",  # edits a local preferences file; creates nothing
     "explore_dex_pools",
     "explore_geckoterminal",
+    # Reads candles and nothing else, which is the whole reason it exists: a dry
+    # run may call neither a snippet nor a routine, so this is the market read
+    # left to a rehearsal (CORR-625). Its mutating half in danger.py is empty,
+    # and an action added to it without landing in the read-only set there is
+    # refused in dry-run rather than waved through.
+    "get_market_data",
 }
 
 #: Verbs that mean "this call changes something out in the world".
@@ -472,10 +480,10 @@ def test_every_mutating_action_of_a_fund_moving_tool_is_dangerous():
                 "add it to the matching DANGEROUS_* set in condor/runtime/danger.py"
             )
     # 3 AMM + 3 CLMM + 5 bot today: a floor, so a signature refactor that silently
-    # stops yielding actions fails instead of passing vacuously. Neither the swap
-    # nor the executor family is counted: they have no `action` since FEAT-064 and
-    # FEAT-062 and are gated by name instead (see test_swap_signing_action_is_dangerous
-    # and tests/test_dangerous_gate_names_resolve.py).
+    # stops yielding actions fails instead of passing vacuously.
+    # Neither the swap nor the executor family is counted: they have no `action` since
+    # FEAT-064 and FEAT-062 and are gated by name instead (see
+    # test_swap_signing_action_is_dangerous and tests/test_dangerous_gate_names_resolve.py).
     assert checked >= 11, f"only {checked} mutating actions found — enumeration broke"
 
 
@@ -524,6 +532,31 @@ def test_control_agent_with_unreadable_arguments_fails_closed():
     for raw in (None, "not json", ["start"], {}, {"action": 7}):
         call = normalize_tool_call(_acp_request(CONTROL, raw))
         assert is_dangerous_tool_call(call), f"{raw!r} slipped past the gate"
+
+
+# ---------------------------------------------------------------------------
+# manage_gateway_config never asks: the RPC and slippage are set in Condor
+# ---------------------------------------------------------------------------
+
+CONFIG = "mcp__mcp-hummingbot__manage_gateway_config"
+
+
+def test_reading_gateway_config_or_editing_a_token_never_asks():
+    """What the tool can still do is read, or edit a symbol → address mapping.
+
+    Repointing the RPC or a connector's slippage used to reach this gate
+    (SEC-566). That write is no longer an action of the tool at all.
+    """
+    for args in (
+        {"resource_type": "networks", "action": "get", "network_id": "solana-mainnet"},
+        {"resource_type": "connectors", "action": "list"},
+        {"resource_type": "tokens", "action": "add", "token_symbol": "WIF"},
+        {"resource_type": "pools", "action": "delete"},
+    ):
+        channel = _CapturingChannel(answer=True)
+        result = _drive_acp(_acp_request(CONFIG, args), channel)
+        assert not channel.delivered, f"manage_gateway_config({args}) raised a prompt"
+        assert result["outcome"]["outcome"] == "selected"
 
 
 # ---------------------------------------------------------------------------

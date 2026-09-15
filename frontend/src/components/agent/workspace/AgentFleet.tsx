@@ -5,7 +5,7 @@ import { Link, useSearchParams } from "react-router-dom";
 import { PerfBrowser } from "@/components/perf/PerfBrowser";
 import { useFleetData } from "@/hooks/useFleetData";
 import { useServer } from "@/hooks/useServer";
-import { attributionOf, runKeyLabel } from "@/lib/agent-attribution";
+import { attributionOf, ownerRowLabel } from "@/lib/agent-attribution";
 import type { AgentRunRow } from "@/lib/api";
 import { parsePopulation } from "@/lib/perf-tree";
 
@@ -132,7 +132,7 @@ export function AgentFleet({
       <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-[11px] text-[var(--color-text-muted)]">
         <span className="tabular-nums">
           Showing {counts.mine.toLocaleString()} of {counts.total.toLocaleString()}{" "}
-          {counts.total === 1 ? "controller" : "controllers"} — {runKeyLabel(runKey)}
+          {counts.total === 1 ? "controller" : "controllers"} — {ownerRowLabel(fleet.owners, runKey)}
           &apos;s
         </span>
         <Link
@@ -148,7 +148,7 @@ export function AgentFleet({
         {elsewhere && (
           <span className="inline-flex items-center gap-1 text-[var(--color-yellow)]">
             <Server className="h-3 w-3" />
-            {runKeyLabel(runKey)}&apos;s bots run on{" "}
+            {ownerRowLabel(fleet.owners, runKey)}&apos;s bots run on{" "}
             <code className="font-mono">{serverName}</code>
             <button
               type="button"

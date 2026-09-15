@@ -103,10 +103,10 @@ class RunHistoryEntry:
     #: Total points across every controller.
     points: int = 0
     #: The upstream sampling interval the rows were actually **fetched** at —
-    #: provenance, not shape. It is ``pick_interval`` of the run's span (the
-    #: per-controller walk deliberately goes coarse for a long run; see the
-    #: note in :mod:`condor.fetchers.run_history`), or ``5m`` when the run
-    #: declared no controller ids and the walk had no id to bind.
+    #: provenance, not shape. It is ``pick_sampling_interval`` of the run's
+    #: span (the per-controller walk deliberately goes coarse for a long run;
+    #: see the note in :mod:`condor.fetchers.run_history`), or ``5m`` when the
+    #: run declared no controller ids and the walk had no id to bind.
     #:
     #: It is *not* the spacing of the points below it: those are thinned to
     #: ``HISTORY_POINT_BUDGET`` by time bucket, which lands on no rung of the

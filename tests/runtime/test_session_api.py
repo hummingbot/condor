@@ -213,7 +213,14 @@ def test_ws_contract_unchanged():
     done = _to_ws_message(
         RuntimeEvent.from_acp(PromptDone(stop_reason="end_turn")), "s"
     )
-    assert done == {"event": "prompt_done", "slot_id": "s", "stop_reason": "end_turn"}
+    # ``usage`` is an added key (FEAT-120): what the funnel charged the turn,
+    # null on a DONE it did not charge — this one never went through it.
+    assert done == {
+        "event": "prompt_done",
+        "slot_id": "s",
+        "stop_reason": "end_turn",
+        "usage": None,
+    }
 
     err = _to_ws_message(RuntimeEvent.error("nope"), "slot1")
     assert err == {"event": "error", "slot_id": "slot1", "message": "nope"}

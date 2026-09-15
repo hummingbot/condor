@@ -16,6 +16,11 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 
 import type { PickSlot } from "@/components/executor/types";
+// The library itself is substituted at the resolver, for every test file at
+// once (CORR-368); this file only declares the invertible price scale the drag
+// is measured on and reads back the primitives, options and crosshair handler
+// the component installed.
+import { chartDouble } from "@/test/lightweight-charts-double";
 import { TradeChart } from "./TradeChart";
 
 /** A flat, invertible scale: price 700 sits at row 300, price 800 at row 200. */
@@ -29,60 +34,6 @@ function yAtPrice(price: number): number {
 const START_PRICE = 700; // row 300
 const END_PRICE = 800; // row 200
 const LIMIT_PRICE = 600; // row 400
-
-const chartState = vi.hoisted(() => ({
-  series: null as unknown,
-  options: {} as Record<string, unknown>,
-  primitives: [] as unknown[],
-  crosshairCb: null as ((param: unknown) => void) | null,
-}));
-
-vi.mock("lightweight-charts", () => {
-  const stub = (own: Record<string, unknown>) =>
-    new Proxy(own, {
-      get(target, prop) {
-        if (typeof prop !== "string" || prop === "then") return undefined;
-        if (!(prop in target)) target[prop] = vi.fn();
-        return target[prop];
-      },
-    });
-
-  const series = stub({
-    coordinateToPrice: vi.fn((y: number) => 1000 - y),
-    priceToCoordinate: vi.fn((price: number) => 1000 - price),
-    createPriceLine: vi.fn(() => ({})),
-    attachPrimitive: vi.fn((p: unknown) => {
-      chartState.primitives.push(p);
-      (p as { attached?: (a: unknown) => void }).attached?.({ series });
-    }),
-    detachPrimitive: vi.fn((p: unknown) => {
-      chartState.primitives = chartState.primitives.filter((x) => x !== p);
-      (p as { detached?: () => void }).detached?.();
-    }),
-  });
-  chartState.series = series;
-
-  const timeScale = stub({});
-  const chart = stub({
-    addSeries: vi.fn(() => series),
-    timeScale: vi.fn(() => timeScale),
-    subscribeCrosshairMove: vi.fn((cb: (param: unknown) => void) => {
-      chartState.crosshairCb = cb;
-    }),
-    applyOptions: vi.fn((opts: Record<string, unknown>) => {
-      Object.assign(chartState.options, opts);
-    }),
-  });
-
-  return {
-    createChart: vi.fn(() => chart),
-    CandlestickSeries: {},
-    LineSeries: {},
-    ColorType: { Solid: "solid" },
-    CrosshairMode: { Normal: 0 },
-    LineStyle: { Solid: 0, Dotted: 1, Dashed: 2 },
-  };
-});
 
 vi.mock("@/hooks/useCandleStore", () => ({
   useCandleStore: () => ({
@@ -175,7 +126,7 @@ async function drag(fromY: number, ...throughY: number[]) {
 /** Park the crosshair on a pixel row, which is what the click branches read. */
 async function hoverAt(y: number) {
   await act(async () => {
-    chartState.crosshairCb?.({
+    chartDouble.crosshairCb?.({
       point: { x: 300, y },
       seriesData: new Map(),
       time: 1_700_000_000,
@@ -197,9 +148,7 @@ beforeEach(() => {
     unobserve() {}
     disconnect() {}
   } as unknown as typeof ResizeObserver;
-  chartState.options = {};
-  chartState.primitives = [];
-  chartState.crosshairCb = null;
+  chartDouble.reset({ toPrice: priceAtY, toCoordinate: yAtPrice });
   onPriceSet = vi.fn<(field: PickSlot, price: number) => void>();
   container = document.createElement("div");
   document.body.appendChild(container);
@@ -305,10 +254,10 @@ describe("TradeChart price-line drag", () => {
       fire("pointerdown", yAtPrice(START_PRICE));
       fire("pointermove", 340);
     });
-    expect(chartState.options).toMatchObject({ handleScroll: false, handleScale: false });
+    expect(chartDouble.options).toMatchObject({ handleScroll: false, handleScale: false });
 
     await act(async () => { fire("pointerup", 340); });
-    expect(chartState.options).toMatchObject({ handleScroll: true, handleScale: true });
+    expect(chartDouble.options).toMatchObject({ handleScroll: true, handleScale: true });
   });
 
   it("takes the crosshair down for the length of the drag", async () => {
@@ -319,10 +268,10 @@ describe("TradeChart price-line drag", () => {
 
     await act(async () => { fire("pointerdown", yAtPrice(START_PRICE)); });
     // A press that has not travelled is still a candidate click, and keeps it.
-    expect(chartState.options.crosshair).toBeUndefined();
+    expect(chartDouble.options.crosshair).toBeUndefined();
 
     await act(async () => { fire("pointermove", 340); });
-    expect(chartState.options).toMatchObject({
+    expect(chartDouble.options).toMatchObject({
       crosshair: {
         horzLine: { visible: false, labelVisible: false },
         vertLine: { visible: false, labelVisible: false },
@@ -330,7 +279,7 @@ describe("TradeChart price-line drag", () => {
     });
 
     await act(async () => { fire("pointerup", 340); });
-    expect(chartState.options).toMatchObject({
+    expect(chartDouble.options).toMatchObject({
       crosshair: {
         horzLine: { visible: true, labelVisible: true },
         vertLine: { visible: true, labelVisible: true },
@@ -346,7 +295,7 @@ describe("TradeChart price-line drag", () => {
       fire("pointercancel", 340);
     });
 
-    expect(chartState.options).toMatchObject({
+    expect(chartDouble.options).toMatchObject({
       crosshair: { horzLine: { visible: true }, vertLine: { visible: true } },
     });
   });
@@ -357,10 +306,10 @@ describe("TradeChart price-line drag", () => {
       fire("pointerdown", yAtPrice(START_PRICE));
       fire("pointermove", 340);
     });
-    expect(chartState.options).toMatchObject({ handleScroll: false });
+    expect(chartDouble.options).toMatchObject({ handleScroll: false });
 
     await act(async () => { root.unmount(); });
-    expect(chartState.options).toMatchObject({ handleScroll: true, handleScale: true });
+    expect(chartDouble.options).toMatchObject({ handleScroll: true, handleScale: true });
 
     // The afterEach unmount must stay harmless.
     root = createRoot(container);
@@ -389,7 +338,7 @@ describe("TradeChart price-line drag", () => {
     expect(onPriceSet).toHaveBeenCalledTimes(1);
     expect(onPriceSet).toHaveBeenCalledWith("end", START_PRICE);
     // And the press handed panning straight back.
-    expect(chartState.options).toMatchObject({ handleScroll: true, handleScale: true });
+    expect(chartDouble.options).toMatchObject({ handleScroll: true, handleScale: true });
   });
 
   it("writes nothing for a wiggle that stays inside the click slop", async () => {
@@ -437,7 +386,7 @@ describe("TradeChart price-line drag", () => {
 describe("TradeChart drag hover cursor", () => {
   it("asks for a resize cursor over a draggable line and nothing elsewhere", async () => {
     await render();
-    const primitive = chartState.primitives[0] as {
+    const primitive = chartDouble.primitives[0] as {
       hitTest?: (x: number, y: number) => { cursorStyle?: string; externalId: string } | null;
     };
     expect(primitive).toBeTruthy();
@@ -459,16 +408,17 @@ describe("TradeChart drag hover cursor", () => {
  */
 describe("TradeChart price-line styling", () => {
   function priceLineOpts(): Record<string, unknown>[] {
-    const series = chartState.series as { createPriceLine: Mock };
+    const series = chartDouble.series as { createPriceLine: Mock };
     return series.createPriceLine.mock.calls.map(([opts]) => opts as Record<string, unknown>);
   }
 
   it("draws both range bounds solid and the limit dotted", async () => {
-    (chartState.series as { createPriceLine: Mock }).createPriceLine.mockClear();
+    // No `mockClear()` first: `chartDouble.reset()` gave this test its own
+    // chart, so every recorded price line is one this render drew.
     await render({ lineLabels: { start: "Lower", end: "Upper", limit: "Lower limit" } });
 
     const byTitle = new Map(priceLineOpts().map((opts) => [opts.title, opts]));
-    // The mocked module numbers the styles Solid: 0, Dotted: 1, Dashed: 2.
+    // The double numbers the styles Solid: 0, Dotted: 1, Dashed: 2.
     expect(byTitle.get("Lower")?.lineStyle).toBe(0);
     expect(byTitle.get("Upper")?.lineStyle).toBe(0);
     expect(byTitle.get("Lower limit")?.lineStyle).toBe(1);

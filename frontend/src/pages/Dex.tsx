@@ -140,25 +140,28 @@ export function Dex() {
     source.kind !== "favorites" &&
     (source.kind === "gateway" || !isSearch || isAddress);
 
+  // Everything that picks *which* listing is showing; the page within it is
+  // appended below.
+  const listingKey = [
+    "dex-pools",
+    server,
+    source.kind,
+    source.kind === "gecko"
+      ? source.view
+      : source.kind === "gateway"
+        ? source.connector
+        : "favorites",
+    isGateway ? "" : network,
+    effectiveQuery,
+    isGateway ? "" : dexes.join(","),
+  ];
+
   const {
     data: pagedPools,
     isFetching,
     dataUpdatedAt: poolsUpdatedAt,
   } = useQuery({
-    queryKey: [
-      "dex-pools",
-      server,
-      source.kind,
-      source.kind === "gecko"
-        ? source.view
-        : source.kind === "gateway"
-          ? source.connector
-          : "favorites",
-      isGateway ? "" : network,
-      effectiveQuery,
-      isGateway ? "" : dexes.join(","),
-      page,
-    ],
+    queryKey: [...listingKey, page],
     queryFn: () =>
       api.getDexPools(
         server!,
@@ -185,7 +188,14 @@ export function Dex() {
       ),
     enabled,
     staleTime: POOL_STALE_MS,
-    placeholderData: (prev) => prev,
+    // The previous page stays up while the next one loads — but only a page of
+    // this same listing. Carried across tabs, or into a query that will never
+    // run (a ticker typed into Search), it sat under a pager whose Next still
+    // worked while the rows never changed.
+    placeholderData: (prev, prevQuery) =>
+      enabled && listingKey.every((part, i) => prevQuery?.queryKey[i] === part)
+        ? prev
+        : undefined,
   });
 
   // The pasted address may be a *pool*, not a token. Both are 44 base58

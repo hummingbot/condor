@@ -6,7 +6,7 @@ import yaml from "js-yaml";
 import { CodeEditor } from "@/components/editor/CodeEditor";
 import { useEscapeKey } from "@/hooks/useEscapeKey";
 import { api, type ControllerConfigSummary } from "@/lib/api";
-import { configToYaml } from "@/lib/configYaml";
+import { configToYaml, parseYamlMapping, validateYamlMapping } from "@/lib/configYaml";
 
 // ── Delete Confirm Dialog ──
 
@@ -155,18 +155,10 @@ export function UploadDialog({
   const validateContent = useCallback(
     (val: string, m: UploadMode) => {
       if (m === "config") {
-        try {
-          const parsed = yaml.load(val);
-          if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-            return "YAML must be a mapping";
-          }
-          if (!(parsed as Record<string, unknown>).id) {
-            return "Config must have an 'id' field";
-          }
-          return null;
-        } catch (e) {
-          return e instanceof Error ? e.message : "Invalid YAML";
-        }
+        const result = parseYamlMapping(val);
+        if (!result.ok) return result.error;
+        if (!result.value.id) return "Config must have an 'id' field";
+        return null;
       }
       // Controller: just needs non-empty Python
       if (!val.trim()) return "Paste or drop a Python file";
@@ -418,16 +410,7 @@ export function CloneConfigDialog({
 
   const handleYamlChange = useCallback((val: string) => {
     setYamlContent(val);
-    try {
-      const parsed = yaml.load(val);
-      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-        setYamlError("YAML must be a mapping");
-      } else {
-        setYamlError(null);
-      }
-    } catch (e) {
-      setYamlError(e instanceof Error ? e.message : "Invalid YAML");
-    }
+    setYamlError(validateYamlMapping(val));
   }, []);
 
   const createMutation = useMutation({

@@ -52,7 +52,9 @@ Work the other way round:
    the broken level, whatever the trade is actually predicting. Use candles if you need
    the pair's typical swing:
    `run_code`: `await client.market_data.get_candles_last_days(connector, pair, days=7,
-   interval="1h")`.
+   interval="1h")`. In a dry run `run_code` is refused — use
+   `get_market_data(action="candles", connector_name=connector, trading_pair=pair,
+   interval="1h", max_records=168)`, which returns the same rows.
 2. **That distance is the stop**, expressed as a fraction of entry.
 3. **Size so that distance costs an acceptable amount.** The stop sets the risk per unit;
    the amount sets how many units. Adjust the amount, never the stop.

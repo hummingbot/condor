@@ -14,6 +14,7 @@ from typing import Any, Dict, Optional
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
+from handlers._deeds import record_telegram_deed
 from handlers.bots._shared import (
     fetch_candles,
     fetch_current_price,
@@ -968,6 +969,11 @@ async def handle_deploy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     try:
         client, _ = await get_executors_client(chat_id, context.user_data)
         result = await create_executor(client, executor_config)
+        record_telegram_deed(
+            update,
+            verb="create_grid_executor",
+            summary=f"Create grid executor on {config.get('trading_pair') or '?'}",
+        )
 
         # Invalidate cache
         invalidate_cache(context.user_data, "all")

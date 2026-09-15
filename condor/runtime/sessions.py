@@ -12,6 +12,7 @@ through ``condor.runtime.client`` instead.
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from copy import copy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -20,6 +21,7 @@ from telegram import Bot
 from condor.acp import ACPClient, PermissionCallback, PromptDone
 from condor.acp.client import ToolCallEvent, ToolCallUpdate, fold_tool_call_event
 from condor.acp.pydantic_ai_client import PydanticAIClient
+from condor.acp.usage import TokenUsage
 from condor.agents import deeds
 from condor.agents.agent import identity_header as agent_identity_header
 from condor.runtime import binding, conversations
@@ -161,6 +163,10 @@ class AgentSession:
     user_data: dict | None = None
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _abort_event: asyncio.Event = field(default_factory=asyncio.Event)
+    # How much of ``client.usage`` has already been handed to a turn
+    # (FEAT-120). Per session, and a session owns exactly one client for its
+    # life, so this baseline never straddles two counters.
+    _usage_recorded: TokenUsage = field(default_factory=TokenUsage)
 
     def info(self) -> SessionInfo:
         """Serializable view of this session."""
@@ -180,6 +186,26 @@ class AgentSession:
             label=self.label,
             conversation_id=self.conversation_id,
         )
+
+    def take_usage(self) -> TokenUsage:
+        """What the client has spent since the last take. Advances the baseline.
+
+        Idempotent per turn: a second call with nothing new in between returns
+        zero counters (``context_*`` still carry the latest reading). Anything
+        the client spent outside a recorded turn — ``/compact``, the eager
+        context prompt, a cancelled turn's late response — is in the next take,
+        so it is charged one turn late but never lost.
+
+        A client that never learned to count (a test double, a future backend)
+        records nothing rather than failing the turn.
+        """
+        current = getattr(self.client, "usage", None)
+        if not isinstance(current, TokenUsage):
+            return TokenUsage()
+        now = copy(current)
+        delta = now - self._usage_recorded
+        self._usage_recorded = now
+        return delta
 
     async def prompt_stream(
         self,
@@ -458,6 +484,7 @@ def bound_agent_context(
     ``control_agent`` was authorized to stop the whole time. ``agent_key``
     falls back to the binding's own; the caller passes the resolved key, since
     a model picked in the UI overrides what the Agent front matter configured.
+    The slug narrows the line to what this Agent's seat actually mounts.
     """
     sections = [
         binding.agent_identity_context(
@@ -465,7 +492,7 @@ def bound_agent_context(
         ),
         platform_formatting(platform),
     ]
-    preload = chat_tool_preload(agent_key or bound.agent_key)
+    preload = chat_tool_preload(agent_key or bound.agent_key, bound.agent_slug)
     if preload:
         sections.append(preload)
     return "\n\n".join(sections)
@@ -730,8 +757,10 @@ async def _spawn_session(
         agent_key,
         mcp_servers=mcp_servers,
         permission_callback=permission_callback,
-        # A bound Agent's allowlist is enforced here exactly as it is on
-        # delegate and loop, so an Agent has the same reach in every mode.
+        # The client-side filter, which only pydantic-ai applies. On every
+        # backend the allowlist is also enforced one level down: the MCP
+        # subprocesses never mount what it leaves out (toolsets.seat_mutes), so
+        # an Agent has the same reach in every mode and on every model.
         allowed_tools=bound.tools or None,
         extra_env=extra_env,
         system_prompt=(
@@ -744,7 +773,6 @@ async def _spawn_session(
         default_base_url=(
             agent_prefs.get("base_url") or os.environ.get("LMSTUDIO_BASE_URL") or None
         ),
-        tool_filter_mode=agent_prefs.get("tool_filter_mode"),
         strict_custom_endpoint=True,
     )
 
@@ -776,15 +804,17 @@ async def _spawn_session(
         # *and* reach, subjected on the run's own principal — the same id the
         # MCP toolset is built for, so the label and the credentials downstream
         # can never disagree about who this session belongs to.
-        from config_manager import get_config_manager, get_effective_server
+        from config_manager import (
+            get_config_manager,
+            get_effective_server,
+            may_use_stored_server,
+        )
 
         cm = get_config_manager()
         subject_id, _ = spec.effective_ids()
 
         def usable(name: str | None) -> bool:
-            return bool(name and cm.get_server(name)) and cm.has_server_access(
-                subject_id, name
-            )
+            return may_use_stored_server(cm, subject_id, name)
 
         resolved_server = spec.server_name
         if not usable(resolved_server):

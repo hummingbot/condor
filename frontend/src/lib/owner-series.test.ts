@@ -18,10 +18,14 @@ import { describe, expect, it } from "vitest";
 import type { ControllerInfo, ControllerPerformanceSnapshot } from "@/lib/api";
 import {
   FOCUS_RADIUS_PX,
+  alignedZeroDomains,
   mergeOwnerRows,
   nearestSeries,
+  niceTicks,
   ownerDataKey,
+  ownerPositionKey,
   ownerSeries,
+  ownerVolumeKey,
   parseBaseline,
   parseBasis,
   rebaseRows,
@@ -152,6 +156,94 @@ describe("the flow and the stock", () => {
     const lifetime = rows[rows.length - 1].volume;
     expect(totalDelta).toBeLessThan(lifetime);
     expect(lifetime).toBeGreaterThan(0);
+  });
+
+  // What the hover claims about a bar: "this line traded N of the M in this
+  // bucket". It is only a fact if the owners' shares are the bar — the same
+  // fold, the same bucket, the same clamp — rather than an apportionment.
+  it("splits each bar between the owners it belongs to, exactly", () => {
+    const series = ownerSeries(SNAPSHOTS, OWNERS, []);
+    const { rows, keys } = mergeOwnerRows([series.total], series.owners);
+
+    for (const row of rows) {
+      const shares = keys.reduce((sum, key) => {
+        const value = row[ownerVolumeKey(key)];
+        return sum + (typeof value === "number" ? value : 0);
+      }, 0);
+      expect(shares).toBeCloseTo(row.volumeDelta, 9);
+    }
+    // And it is a real split rather than a column of zeroes: alpha's second
+    // reading is the only trading in its bucket.
+    const traded = rows.find((row) => row.volumeDelta > 0)!;
+    expect(traded[ownerVolumeKey("alpha")]).toBeCloseTo(traded.volumeDelta, 9);
+  });
+
+  it("gives the share and the book the same gap rule as the line", () => {
+    const series = ownerSeries(SNAPSHOTS, OWNERS, []);
+    const { rows } = mergeOwnerRows([series.total], series.owners);
+    const first = rows[0];
+
+    expect(typeof first[ownerVolumeKey("alpha")]).toBe("number");
+    expect(typeof first[ownerPositionKey("alpha")]).toBe("number");
+    // Beta has not started: no line, and nothing to attribute to it either.
+    expect(first[ownerVolumeKey("beta")]).toBeUndefined();
+    expect(first[ownerPositionKey("beta")]).toBeUndefined();
+  });
+});
+
+// ── The two axes (FEAT-119) ──
+//
+// The Total is twelve controllers tall, so it gets an axis of its own — and
+// the moment it has one, the dashed line at zero means two different heights
+// unless the two domains are chosen together. These are the arithmetic behind
+// "one zero line, true of both".
+
+describe("alignedZeroDomains", () => {
+  /** Where zero falls in a domain, as a fraction of its height. */
+  const zeroAt = ([min, max]: [number, number]) => -min / (max - min);
+
+  it("puts zero at the same height on both axes", () => {
+    const domains = alignedZeroDomains([-25, 9, -3], [-210, 105])!;
+    expect(zeroAt(domains.owner)).toBeCloseTo(zeroAt(domains.total), 9);
+  });
+
+  it("leaves room for every value it was given", () => {
+    const domains = alignedZeroDomains([-25, 9], [-210, 105])!;
+    expect(domains.owner[0]).toBeLessThanOrEqual(-25);
+    expect(domains.owner[1]).toBeGreaterThanOrEqual(9);
+    expect(domains.total[0]).toBeLessThanOrEqual(-210);
+    expect(domains.total[1]).toBeGreaterThanOrEqual(105);
+  });
+
+  it("spends no pane on a side neither series is on", () => {
+    // A fleet that has only ever been down: zero is the top of both axes, not
+    // the middle of them.
+    const domains = alignedZeroDomains([-25, -3], [-210, -40])!;
+    expect(domains.owner[1]).toBe(0);
+    expect(domains.total[1]).toBe(0);
+  });
+
+  it("has no answer where there is nothing to scale", () => {
+    expect(alignedZeroDomains([], [1, 2])).toBeNull();
+    expect(alignedZeroDomains([1, 2], [Number.NaN])).toBeNull();
+    // Flat at zero: no height to divide, and recharts' own domain is as good.
+    expect(alignedZeroDomains([0, 0], [0, 0])).toBeNull();
+  });
+});
+
+describe("niceTicks", () => {
+  it("always includes zero, so the dashed line is labelled", () => {
+    expect(niceTicks([-26, 9.4])).toContain(0);
+    expect(niceTicks([-218.4, 109.2])).toContain(0);
+    expect(niceTicks([-0.026, 0.0094])).toContain(0);
+  });
+
+  it("steps in round numbers rather than in fifths of an odd domain", () => {
+    expect(niceTicks([-26, 9.4])).toEqual([-25, -20, -15, -10, -5, 0, 5]);
+  });
+
+  it("has no ticks for a domain with no height", () => {
+    expect(niceTicks([0, 0])).toEqual([]);
   });
 });
 
@@ -293,6 +385,27 @@ describe("nearestSeries", () => {
     const gappy = new Map([["alpha", Number.NaN], ["beta", 20]]);
     expect(nearestSeries(gappy, 480, scale)).toBe("beta");
     expect(nearestSeries(gappy, 440, scale)).toBeNull();
+  });
+
+  it("compares in pixels across two axes, not in values", () => {
+    // The Total on its own axis: a tenth of the pixels per dollar. A single
+    // scale would place its -200 off the pane; per series, it is drawn at 400
+    // and the cursor there is on it and not on alpha.
+    const totalScale = (value: number) => 500 - value / 10;
+    const scales = new Map([
+      ["total", totalScale],
+      ["alpha", scale],
+      ["beta", scale],
+    ]);
+    const twoAxes = new Map([
+      ["total", 1000],
+      ["alpha", 60],
+      ["beta", 20],
+    ]);
+    expect(nearestSeries(twoAxes, 400, scales)).toBe("total");
+    expect(nearestSeries(twoAxes, 440, scales)).toBe("alpha");
+    // A series the map has no scale for is not on screen to be pointed at.
+    expect(nearestSeries(twoAxes, 400, new Map([["alpha", scale]]))).toBeNull();
   });
 
   it("breaks a tie toward the first entry, which is the legend's order", () => {

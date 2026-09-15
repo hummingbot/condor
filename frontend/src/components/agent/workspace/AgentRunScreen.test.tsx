@@ -71,8 +71,17 @@ vi.mock("@/components/agent/workspace/MoneyView", () => ({
 vi.mock("@/components/agent/workspace/AgentFleet", () => ({
   AgentFleet: stub("fleet"),
 }));
+// The Playbook's stub keeps one control: a count that names a run, which is the
+// one move the band asks of the screen around it.
 vi.mock("@/components/agent/workspace/PlaybookView", () => ({
-  PlaybookView: stub("playbook"),
+  PlaybookView: ({ onOpenRun }: { onOpenRun: (run: string) => void }) => {
+    mounted.push("playbook");
+    return (
+      <div data-body="playbook">
+        <button type="button" data-open-run onClick={() => onOpenRun("s:3")} />
+      </div>
+    );
+  },
 }));
 vi.mock("@/components/agent/lab/RunRail", () => ({ RunRail: stub("rail") }));
 vi.mock("@/components/agent/lab/RunOverview", () => ({
@@ -445,5 +454,50 @@ describe("the index down the side (FEAT-120)", () => {
     await render("/");
     expect(container.querySelector("[data-section-rail]")).toBeNull();
     expect(container.textContent).toContain("no strategies yet");
+  });
+});
+
+describe("a count in the Playbook that names a run", () => {
+  // jsdom has no layout and no `scrollIntoView`, so one is lent for these tests
+  // alone: the scroll is the half of this move a reader would miss without it.
+  let scrolled: Element[];
+  beforeEach(() => {
+    scrolled = [];
+    Element.prototype.scrollIntoView = function (this: Element) {
+      scrolled.push(this);
+    };
+  });
+  afterEach(() => {
+    Reflect.deleteProperty(Element.prototype, "scrollIntoView");
+  });
+
+  const count = () =>
+    container.querySelector<HTMLButtonElement>("[data-open-run]")!;
+  const scrolledTo = () =>
+    scrolled.map((el) => el.getAttribute("data-section-body"));
+
+  it("opens Runs beside the Playbook, on that run of this strategy", async () => {
+    await render("/?open=playbook");
+    await click(count());
+
+    const params = new URLSearchParams(search());
+    // Beside, not instead: the link this replaced wrote `?open=runs` and shut
+    // the Playbook under the reader's cursor.
+    expect(params.get("open")).toBe("runs.playbook");
+    expect(params.get("run")).toBe("s:3");
+    expect(params.get("strategy")).toBe("brl_mm");
+    expect(bodies()).toEqual(["answers", "rail", "playbook"]);
+  });
+
+  it("brings Runs on screen, whether or not it was already open", async () => {
+    await render("/?open=playbook");
+    await click(count());
+    expect(scrolledTo()).toEqual(["runs"]);
+
+    // Runs is open now, so `open` does not move on the second click — the case
+    // a scroll keyed on `open` alone would silently skip.
+    scrolled = [];
+    await click(count());
+    expect(scrolledTo()).toEqual(["runs"]);
   });
 });

@@ -10,6 +10,43 @@ const ALWAYS_HIDDEN_KEYS = ["id"] as const;
 // read-only / partial-update controller browser opts into hiding them.
 export const CONTROLLER_HIDDEN_KEYS = ["controller_name", "controller_type"] as const;
 
+/** The one message every editor shows for YAML that parses but isn't a mapping. */
+export const YAML_NOT_A_MAPPING = "YAML must be a mapping (key: value)";
+
+export type YamlMappingResult =
+  | { ok: true; value: Record<string, unknown> }
+  | { ok: false; error: string };
+
+/**
+ * Parse YAML that is required to be a mapping (the shape every config editor
+ * round-trips). Never throws: a parse failure comes back as `ok: false` with the
+ * first line of the js-yaml message, which is the human-readable part — the rest
+ * is the source snippet the editor already shows.
+ */
+export function parseYamlMapping(text: string): YamlMappingResult {
+  let parsed: unknown;
+  try {
+    parsed = yaml.load(text);
+  } catch (e) {
+    const message = e instanceof Error ? e.message : "";
+    return { ok: false, error: message.split("\n")[0] || "Invalid YAML" };
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return { ok: false, error: YAML_NOT_A_MAPPING };
+  }
+  return { ok: true, value: parsed as Record<string, unknown> };
+}
+
+/**
+ * Validate-only view of `parseYamlMapping`: `null` when `text` is a YAML
+ * mapping, otherwise the message to show the user. This is what the editors
+ * call on every keystroke.
+ */
+export function validateYamlMapping(text: string): string | null {
+  const result = parseYamlMapping(text);
+  return result.ok ? null : result.error;
+}
+
 export interface ConfigToYamlOptions {
   /** Extra keys to strip in addition to `id` (e.g. CONTROLLER_HIDDEN_KEYS). */
   hiddenKeys?: readonly string[];

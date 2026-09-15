@@ -7,8 +7,10 @@ import {
   type AppNotification,
   type ConversationTurn,
   type NotificationsResponse,
+  type TokenUsage,
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+import { addUsage } from "@/lib/usage";
 import { namesATool, toolCallState } from "@/lib/formatters";
 import { collectViewFacts, renderViewBlock } from "@/lib/viewFacts";
 import { WS_AUTH_SUBPROTOCOL } from "@/lib/websocket";
@@ -216,6 +218,21 @@ export interface PermissionRequest {
   summary: string;
   /** Which agent, on which server, raised it. Empty when unattributable. */
   origin?: string;
+  /** The bare tool name, previewed like the command it is. */
+  tool?: string;
+  /** Its arguments; null when the backend could not read them. */
+  input?: Record<string, unknown> | null;
+  /**
+   * When the runtime denies it unanswered, in *this* browser's epoch seconds —
+   * derived from the server's relative `expires_in` on arrival, so a skewed
+   * local clock cannot make the countdown lie. Absent from an older backend.
+   */
+  deadline?: number;
+}
+
+/** A relative `expires_in` from the wire, as a local deadline. */
+export function deadlineFrom(expiresIn: unknown): number | undefined {
+  return typeof expiresIn === "number" ? Date.now() / 1000 + expiresIn : undefined;
 }
 
 /**
@@ -237,6 +254,12 @@ export interface ChatSlot {
    * lands, which is what makes a new chat feel warm instead of loading.
    */
   pending?: boolean;
+  /**
+   * What this conversation has cost so far (FEAT-120): seeded from the stored
+   * total on hydrate and advanced by each `prompt_done`. Absent until the
+   * backend has measured something.
+   */
+  usage?: TokenUsage;
 }
 
 let msgIdCounter = 0;
@@ -341,6 +364,26 @@ function settleToolCalls(msgs: ChatMessage[]): ChatMessage[] {
 /** Now, in the epoch seconds the transcript is recorded in. */
 function nowTs(): number {
   return Date.now() / 1000;
+}
+
+/**
+ * One system entry, ready to append — a reload, a routine's note, an error, a
+ * handover divider.
+ *
+ * Every one of them is the same shape, so the shape lives here alone: callers
+ * say the words and the kind, and the id and the timestamp are minted at the
+ * moment the note is made. Anything `ChatMessage` later grows for system
+ * entries is added once, here, instead of being hunted through the file.
+ */
+function systemNote(text: string, kind?: string): ChatMessage {
+  return {
+    id: nextMsgId(),
+    role: "system",
+    text,
+    kind,
+    toolCalls: [],
+    ts: nowTs(),
+  };
 }
 
 let clientRefCounter = 0;
@@ -704,17 +747,7 @@ export function useChatSocket() {
    */
   const appendSystemNote = useCallback(
     (slotId: string, text: string, kind?: string) => {
-      updateSlotMessages(slotId, (msgs) => [
-        ...msgs,
-        {
-          id: nextMsgId(),
-          role: "system" as const,
-          text,
-          kind,
-          toolCalls: [],
-          ts: nowTs(),
-        },
-      ]);
+      updateSlotMessages(slotId, (msgs) => [...msgs, systemNote(text, kind)]);
     },
     [updateSlotMessages],
   );
@@ -1000,17 +1033,11 @@ export function useChatSocket() {
           );
           ids = stored.map((a) => a.id);
         } catch (e) {
-          updateSlotMessages(slotId, (msgs) => [
-            ...msgs,
-            {
-              id: nextMsgId(),
-              role: "system" as const,
-              kind: "error",
-              text: e instanceof Error ? e.message : "Could not attach that image",
-              toolCalls: [],
-              ts: nowTs(),
-            },
-          ]);
+          appendSystemNote(
+            slotId,
+            e instanceof Error ? e.message : "Could not attach that image",
+            "error",
+          );
           return;
         }
       }
@@ -1022,8 +1049,49 @@ export function useChatSocket() {
         ...(ids.length ? { attachments: ids } : {}),
       });
     },
-    [send, updateSlotMessages],
+    [appendSystemNote, send],
   );
+
+  /**
+   * Re-read the approvals this user has not answered yet (FEAT-010).
+   *
+   * `permission_request` is a fire-and-forget push: a reload mid-approval
+   * killed the socket it was addressed to, and nothing re-sent it, so the
+   * agent sat waiting behind a page that showed no prompt until its TTL denied
+   * the call two minutes later. The registry outlives the connection, so every
+   * socket open asks it what is still pending.
+   *
+   * Merged, never assigned: an approval this session already has on screen is
+   * left exactly as it is, and one answered between the read going out and
+   * coming back is simply absent from the reply. A failed read is silent —
+   * the socket is up and the live path still works.
+   */
+  const replayPendingConfirmations = useCallback(async () => {
+    try {
+      const pending = await api.getPendingConfirmations();
+      if (pending.length === 0) return;
+      setPermissionRequests((prev) => {
+        const next = { ...prev };
+        let added = false;
+        for (const p of pending) {
+          const slot = p.slot_id || UNATTRIBUTED;
+          if (next[slot]) continue;
+          next[slot] = {
+            request_id: p.id,
+            summary: p.summary,
+            origin: p.origin || "",
+            tool: p.tool,
+            input: p.input,
+            deadline: deadlineFrom(p.expires_in),
+          };
+          added = true;
+        }
+        return added ? next : prev;
+      });
+    } catch {
+      /* the live path is unaffected; the next connect asks again */
+    }
+  }, []);
 
   // Drop the current socket without letting its asynchronous `onclose` speak
   // for a connection we already decided to abandon.
@@ -1075,6 +1143,9 @@ export function useChatSocket() {
       const queued = unsent.current;
       unsent.current = [];
       for (const msg of queued) ws.send(JSON.stringify(msg));
+      // The roster that follows says which conversations are alive; it says
+      // nothing about which of them is holding a tool call waiting on a click.
+      void replayPendingConfirmations();
     };
     ws.onclose = () => {
       // A socket we replaced or closed on purpose still fires `onclose`, long
@@ -1096,7 +1167,7 @@ export function useChatSocket() {
         /* ignore */
       }
     };
-  }, [token, closeSocket]);
+  }, [token, closeSocket, replayPendingConfirmations]);
 
   const disconnect = useCallback(() => {
     shouldConnect.current = false;
@@ -1144,6 +1215,16 @@ export function useChatSocket() {
         : null;
       try {
         const detail = await api.getConversation(conversationId);
+        // The stored total, not a sum of what this tab happened to see: a
+        // resync re-seeds, so a turn answered from Telegram or another tab
+        // converges here. Before the empty-transcript return below, which is
+        // about messages only.
+        const usage = addUsage(undefined, detail.meta?.usage);
+        if (usage && usage.total_tokens > 0) {
+          setSlots((prev) =>
+            prev.map((s) => (s.info.slot_id === slotId ? { ...s, usage } : s)),
+          );
+        }
         const restored = turnsToMessages(detail.turns, conversationId);
         // An empty transcript never wipes the screen: on a resync that would
         // trade a missed note for a lost conversation.
@@ -1621,6 +1702,9 @@ export function useChatSocket() {
               request_id: data.request_id as string,
               summary: data.summary as string,
               origin: (data.origin as string) || "",
+              tool: typeof data.tool === "string" ? data.tool : undefined,
+              input: (data.input as Record<string, unknown> | null | undefined) ?? null,
+              deadline: deadlineFrom(data.expires_in),
             },
           }));
           break;
@@ -1632,6 +1716,15 @@ export function useChatSocket() {
           // answer that trailed off — the alternative the old dead composer
           // avoided by never letting this happen at all.
           if (!slotId) break;
+          // Steering denies whatever the turn was waiting on
+          // (`condor.runtime.client.prompt`), so an approval still on screen
+          // would offer an Allow that can no longer do anything.
+          setPermissionRequests((prev) => {
+            if (!(slotId in prev)) return prev;
+            const next = { ...prev };
+            delete next[slotId];
+            return next;
+          });
           flushChunks(slotId);
           updateSlotMessages(slotId, (prev) => {
             const msgs = settleToolCalls(prev);
@@ -1721,6 +1814,19 @@ export function useChatSocket() {
             // mid-answer, and its composer stays locked until its own turn is
             // done.
             stopStreaming(slotId);
+            // What the turn cost, onto the total (FEAT-120). A frame without
+            // it — an older backend, a DONE the funnel did not charge — leaves
+            // the total where it was.
+            const turnUsage = data.usage as Partial<TokenUsage> | null | undefined;
+            if (turnUsage) {
+              setSlots((prev) =>
+                prev.map((s) =>
+                  s.info.slot_id === slotId
+                    ? { ...s, usage: addUsage(s.usage, turnUsage) }
+                    : s,
+                ),
+              );
+            }
           }
           break;
 
@@ -1748,21 +1854,10 @@ export function useChatSocket() {
             setSlots((prev) =>
               prev.map((s) => {
                 if (s.info.slot_id !== errSlotId) return s;
-                const id = nextMsgId();
                 return {
                   ...s,
                   pending: false,
-                  messages: [
-                    ...s.messages,
-                    {
-                      id,
-                      role: "system" as const,
-                      kind: "error",
-                      text: errMsg,
-                      toolCalls: [],
-                      ts: nowTs(),
-                    },
-                  ],
+                  messages: [...s.messages, systemNote(errMsg, "error")],
                 };
               }),
             );
@@ -1891,6 +1986,37 @@ export function useChatSocket() {
   );
 
   /**
+   * Repoint one slot, and mark the scrollback if the move is worth marking.
+   *
+   * A brain switch and a server switch are the same edit — merge the session's
+   * new fields into the slot's `info`, then append a divider — and differ only
+   * in which fields move and in when the move earns a divider at all. Both
+   * answers are read off the *previous* info (a server switch is suppressed by
+   * comparing the old server name against the new one), so the caller hands in
+   * a function of it rather than a finished pair.
+   */
+  const applySwitch = useCallback(
+    (
+      slotId: string,
+      compute: (prev: SlotInfo) => { info: SlotInfo; divider?: string },
+    ) => {
+      setSlots((prev) =>
+        prev.map((s) => {
+          if (s.info.slot_id !== slotId) return s;
+          const { info, divider } = compute(s.info);
+          if (!divider) return { ...s, info };
+          return {
+            ...s,
+            info,
+            messages: [...s.messages, systemNote(divider, "switch")],
+          };
+        }),
+      );
+    },
+    [],
+  );
+
+  /**
    * Rebind the chat to a different brain, mid-conversation.
    *
    * The subprocess is replaced — ACP has no identity hot-swap — but the
@@ -1908,42 +2034,27 @@ export function useChatSocket() {
       // The outgoing brain's last words belong above the divider that retires
       // it, not in a new bubble underneath it.
       flushChunks();
-      setSlots((prev) =>
-        prev.map((s) => {
-          if (s.info.slot_id !== slotId) return s;
-          const info: SlotInfo = {
-            ...s.info,
-            agent_key: session.agent_key,
-            // A brain switch can move the server too: binding to an Agent that
-            // pins one overrides the chat's ambient choice, and unbinding
-            // hands it back. Both are read off the respawned session.
-            server_name: session.server_name || undefined,
-            server_pinned: session.server_pinned,
-            agent_slug: session.agent_slug,
-            label: session.label,
-          };
-          // Only a change of *who* divides the scrollback; a model swap under
-          // the same identity is not a handover the reader needs marked.
-          if (selection.agentSlug === undefined) return { ...s, info };
-          return {
-            ...s,
-            info,
-            messages: [
-              ...s.messages,
-              {
-                id: nextMsgId(),
-                role: "system" as const,
-                text: `Switched to ${session.label}`,
-                kind: "switch",
-                toolCalls: [],
-                ts: nowTs(),
-              },
-            ],
-          };
-        }),
-      );
+      applySwitch(slotId, (prev) => ({
+        info: {
+          ...prev,
+          agent_key: session.agent_key,
+          // A brain switch can move the server too: binding to an Agent that
+          // pins one overrides the chat's ambient choice, and unbinding
+          // hands it back. Both are read off the respawned session.
+          server_name: session.server_name || undefined,
+          server_pinned: session.server_pinned,
+          agent_slug: session.agent_slug,
+          label: session.label,
+        },
+        // Only a change of *who* divides the scrollback; a model swap under
+        // the same identity is not a handover the reader needs marked.
+        divider:
+          selection.agentSlug === undefined
+            ? undefined
+            : `Switched to ${session.label}`,
+      }));
     },
-    [flushChunks, user],
+    [applySwitch, flushChunks, user],
   );
 
   /**
@@ -1963,36 +2074,21 @@ export function useChatSocket() {
       // Same ordering rule as the brain switch: buffered text first, divider
       // after it.
       flushChunks();
-      setSlots((prev) =>
-        prev.map((s) => {
-          if (s.info.slot_id !== slotId) return s;
-          const info: SlotInfo = {
-            ...s.info,
-            server_name: session.server_name || undefined,
-            server_pinned: session.server_pinned,
-          };
-          // Only an actual move divides the scrollback. A pinned Agent ignores
-          // the request, and a divider claiming otherwise would be a lie.
-          if (session.server_name === s.info.server_name) return { ...s, info };
-          return {
-            ...s,
-            info,
-            messages: [
-              ...s.messages,
-              {
-                id: nextMsgId(),
-                role: "system" as const,
-                text: `Now using server ${session.server_name}`,
-                kind: "switch",
-                toolCalls: [],
-                ts: nowTs(),
-              },
-            ],
-          };
-        }),
-      );
+      applySwitch(slotId, (prev) => ({
+        info: {
+          ...prev,
+          server_name: session.server_name || undefined,
+          server_pinned: session.server_pinned,
+        },
+        // Only an actual move divides the scrollback. A pinned Agent ignores
+        // the request, and a divider claiming otherwise would be a lie.
+        divider:
+          session.server_name === prev.server_name
+            ? undefined
+            : `Now using server ${session.server_name}`,
+      }));
     },
-    [flushChunks, user],
+    [applySwitch, flushChunks, user],
   );
 
   const destroySession = useCallback(

@@ -1,7 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, Loader2, Plus, Server, Trash2, X } from "lucide-react";
+import { Check, Loader2, Plus, Server } from "lucide-react";
 import { useState } from "react";
 
+import { InlineConfirm } from "@/components/ui/InlineConfirm";
 import { api } from "@/lib/api";
 import type { CustomProvider } from "@/lib/api";
 
@@ -139,32 +140,16 @@ function ProviderRow({
         </div>
       </div>
 
-      {confirming ? (
-        <div className="flex shrink-0 items-center gap-1">
-          <button
-            onClick={onConfirmDelete}
-            disabled={deleting}
-            className="rounded px-2 py-1 text-xs font-medium text-[var(--color-red)] hover:bg-[var(--color-red)]/10 disabled:opacity-50"
-          >
-            {deleting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Forget"}
-          </button>
-          <button
-            onClick={onCancelDelete}
-            className="rounded p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
-            aria-label="Cancel"
-          >
-            <X className="h-3.5 w-3.5" />
-          </button>
-        </div>
-      ) : (
-        <button
-          onClick={onRequestDelete}
-          className="shrink-0 rounded p-1.5 text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-red)]/10 hover:text-[var(--color-red)]"
-          aria-label={`Forget ${provider.name}`}
-        >
-          <Trash2 className="h-3.5 w-3.5" />
-        </button>
-      )}
+      <InlineConfirm
+        confirming={confirming}
+        onRequest={onRequestDelete}
+        onConfirm={onConfirmDelete}
+        onCancel={onCancelDelete}
+        pending={deleting}
+        triggerLabel={`Forget ${provider.name}`}
+        confirmLabel={`Confirm forget ${provider.name}`}
+        cancelLabel="Cancel forget"
+      />
     </div>
   );
 }

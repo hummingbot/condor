@@ -157,6 +157,21 @@ class _CandleBuffer:
             )
         return new_max
 
+    def grow_to(self, duration_seconds: int) -> int:
+        """Resize for ``duration_seconds`` but never below the current size.
+
+        Candle buffers are shared per channel, so a second subscriber asking for
+        a shorter window must not evict history the first subscriber's snapshot
+        still carries. The frontend manages its own display window; the backend
+        only guarantees *enough* history is buffered. Returns the max size,
+        unchanged when the request would shrink the buffer.
+        """
+        interval_sec = _INTERVAL_SECONDS.get(self.interval, 60)
+        needed = max(math.ceil(duration_seconds / interval_sec), 200)
+        if needed <= self._max_size:
+            return self._max_size
+        return self.set_duration(duration_seconds)
+
     def upsert(self, candle: dict) -> None:
         self._data[candle["timestamp"]] = candle
         self._evict()
@@ -261,10 +276,12 @@ class CandleStreamsMixin:
             buf = _CandleBuffer(interval, dur)
             self._candle_buffers[channel] = buf
         else:
-            # Expand buffer if this client needs more
+            # Expand buffer if this client needs more — never shrink it, or a
+            # second tab (or a reconnect, which re-subscribes with the 3-day
+            # default) would evict history the first tab is still drawing.
             if dur > 0:
                 old_max = buf.max_size
-                buf.set_duration(dur)
+                buf.grow_to(dur)
                 if buf.max_size > old_max and buf.needs_backfill:
                     self._oneshot_tasks.track(
                         asyncio.create_task(
@@ -294,11 +311,8 @@ class CandleStreamsMixin:
             return
         old_max = buf.max_size
         # Only expand — skip if requested duration would shrink the buffer
-        interval_sec = _INTERVAL_SECONDS.get(buf.interval, 60)
-        needed = max(math.ceil(duration / interval_sec), 200)
-        if needed <= old_max:
+        if buf.grow_to(duration) <= old_max:
             return
-        buf.set_duration(duration)
         if buf.needs_backfill:
             await self._backfill_candles(channel)
         # Broadcast updated snapshot to ALL subscribers on this channel

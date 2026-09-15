@@ -29,6 +29,10 @@ Do this before anything else. A grid in a trend is a slow loss with extra steps.
 df = await client.market_data.get_candles_last_days("binance", "SOL-USDT", days=3, interval="1h")
 ```
 
+In a **dry run** `run_code` is refused. Read the same series with the tool instead —
+`get_market_data(action="candles", connector_name="binance", trading_pair="SOL-USDT",
+interval="1h", max_records=72)` — and judge the regime off the rows.
+
 Read the series, don't just take the min and max:
 
 - **Ranging** — price crosses its own mid repeatedly, highs and lows cluster in a band,

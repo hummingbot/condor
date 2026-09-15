@@ -1,6 +1,10 @@
 import { AlertTriangle, Power, Repeat, Zap } from "lucide-react";
 
 import { ModeBadge } from "@/components/agent/ModeBadge";
+import {
+  dueInSec,
+  tickCountdownLabel,
+} from "@/components/agent/workspace/fleet";
 import { useSeconds } from "@/hooks/useSeconds";
 import { countdown } from "@/lib/agent-attribution";
 import type { RunningInstance } from "@/lib/api";
@@ -91,7 +95,9 @@ export function LoopPulse({
   // after a first tick: `0 + frequency` is 1970, and a bar filled from 1970 is
   // a bar pinned at 100% that means nothing.
   const elapsed = running && lastTickAt > 0 ? now / 1000 - lastTickAt : null;
-  const dueIn = elapsed === null ? null : frequency - elapsed;
+  // The countdown itself is the shared rule, which is also what keeps a loop
+  // with no cadence from reading as permanently overdue here.
+  const dueIn = dueInSec(running ? instance : null, now / 1000);
   const progress =
     elapsed === null ? 0 : Math.max(0, Math.min(1, elapsed / Math.max(1, frequency)));
   const overdue = dueIn !== null && dueIn <= 0;
@@ -196,11 +202,7 @@ export function LoopPulse({
               />
             </div>
             <span className="shrink-0 font-mono text-[11px] tabular-nums text-[var(--color-text-muted)]">
-              {dueIn === null
-                ? "—"
-                : overdue
-                  ? `overdue ${countdown(-dueIn)}`
-                  : `next in ${countdown(dueIn)}`}
+              {dueIn === null ? "—" : tickCountdownLabel(dueIn)}
             </span>
           </div>
         )}
