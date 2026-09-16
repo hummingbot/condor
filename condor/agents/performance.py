@@ -15,7 +15,7 @@ from functools import partial
 from typing import Any
 
 from condor.fetchers._pagination import walk_pages
-from condor.fetchers.executors import EXECUTORS_PAGE_SIZE
+from condor.fetchers.executors import EXECUTORS_PAGE_SIZE, extract_executors_list
 
 log = logging.getLogger(__name__)
 
@@ -74,16 +74,6 @@ class AgentPerformance:
 
     def to_dict(self) -> dict[str, Any]:
         return {**asdict(self), "bot_name": self.bot_name}
-
-
-def _extract_executors_list(result: Any) -> list[dict]:
-    if isinstance(result, list):
-        return result
-    if isinstance(result, dict):
-        for key in ("executors", "data", "results", "items"):
-            if key in result and isinstance(result[key], list):
-                return result[key]
-    return []
 
 
 def _executor_row(ex: dict) -> dict[str, Any]:
@@ -385,7 +375,7 @@ async def fetch_agent_performance_batch(
         try:
             async for page in walk_pages(
                 partial(client.executors.search_executors, controller_ids=[aid]),
-                _extract_executors_list,
+                extract_executors_list,
                 page_size=PAGE_SIZE,
                 max_items=MAX_ROWS,
             ):
