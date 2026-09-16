@@ -148,6 +148,30 @@ def _dex_call_label(tool_name: str, input_data: dict[str, Any]) -> str:
     return input_data.get("action", "") or tool_name
 
 
+def _finite_number(value: Any, name: str, *, positive: bool = False) -> float:
+    """``value`` as a finite float, or ``ValueError`` naming ``name``.
+
+    The one parser behind every figure the gate values (leverage, executor
+    amounts, ``manage_amm`` fields, reference prices), so a malformed input is
+    refused the same way and with the same reason whichever field carried it.
+    ``bool`` is refused rather than read as 1 or 0. ``positive`` rejects zero
+    too; otherwise only negatives are refused. Empty-value policy and string
+    trimming belong to the caller.
+    """
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be a number, got {value!r}")
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a number, got {value!r}") from exc
+    if not math.isfinite(number) or (number <= 0 if positive else number < 0):
+        raise ValueError(
+            f"{name} must be a {'positive' if positive else 'non-negative'} "
+            f"finite number, got {value!r}"
+        )
+    return number
+
+
 def _requested_leverage(input_data: dict[str, Any]) -> float | None:
     """The leverage a call asks for, or ``None`` when it names none.
 
@@ -159,17 +183,9 @@ def _requested_leverage(input_data: dict[str, Any]) -> float | None:
     value = input_data.get("leverage")
     if value is None or value == "":
         return None
-    if isinstance(value, bool):
-        raise ValueError(f"got {value!r}")
     if isinstance(value, str):
         value = value.strip().removesuffix("x").removesuffix("X")
-    try:
-        leverage = float(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"got {value!r}") from exc
-    if not math.isfinite(leverage) or leverage <= 0:
-        raise ValueError(f"got {value!r}")
-    return leverage
+    return _finite_number(value, "leverage", positive=True)
 
 
 #: Signing actions that return capital instead of committing it. Allowed even
@@ -900,13 +916,7 @@ def _quote_amount(value: Any, name: str) -> float:
         return 0.0
     if isinstance(value, str):
         value = value.strip().removeprefix("$")
-    try:
-        amount = float(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{name} must be a number, got {value!r}") from exc
-    if not math.isfinite(amount) or amount < 0:
-        raise ValueError(f"{name} must be a non-negative finite number")
-    return amount
+    return _finite_number(value, name)
 
 
 def _is_quote_denominated(value: Any) -> bool:
@@ -974,12 +984,7 @@ async def _planned_amount_quote(
                 input_data.get("connector_name", ""),
                 input_data.get("trading_pair", ""),
             )
-            if price is None:
-                raise ValueError("reference price is unavailable")
-            price = float(price)
-            if not math.isfinite(price) or price <= 0:
-                raise ValueError("reference price must be a positive finite number")
-            amount = quote + base * price
+            amount = quote + base * _positive_price(price)
         else:
             amount = quote
     else:
@@ -1001,26 +1006,14 @@ def _amm_field(value: Any, name: str, default: float | None = None) -> float:
         if default is None:
             raise ValueError(f"{name} is required to price this call")
         return default
-    try:
-        amount = float(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{name} must be a number, got {value!r}") from exc
-    if not math.isfinite(amount) or amount < 0:
-        raise ValueError(f"{name} must be a non-negative finite number")
-    return amount
+    return _finite_number(value, name)
 
 
 def _positive_price(value: Any) -> float:
     """A reference price, or ``ValueError`` if it cannot bound anything."""
     if value is None or value == "":
         raise ValueError("reference price is unavailable")
-    try:
-        price = float(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"reference price must be a number, got {value!r}") from exc
-    if not math.isfinite(price) or price <= 0:
-        raise ValueError("reference price must be a positive finite number")
-    return price
+    return _finite_number(value, "reference price", positive=True)
 
 
 async def _amm_base_price(input_data: dict[str, Any], client: Any) -> float:

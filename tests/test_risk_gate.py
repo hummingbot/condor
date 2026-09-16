@@ -15,7 +15,11 @@ from condor.agents.risk import (
     RiskEngine,
     RiskLimits,
     RiskState,
+    _amm_field,
     _planned_amount_quote,
+    _positive_price,
+    _quote_amount,
+    _requested_leverage,
     auto_approve_with_risk_check,
 )
 
@@ -975,3 +979,92 @@ def test_the_candle_reader_needs_no_confirmation_in_any_mode(mode):
     )
     assert is_dangerous_tool_call(call) is False
     assert asyncio.run(callback(call, _OPTIONS))["outcome"]["outcome"] == "selected"
+
+
+# ---------------------------------------------------------------------------
+# ARCH-677: one finite-number parser behind every priced field
+# ---------------------------------------------------------------------------
+
+_PARSERS = {
+    "quote_amount": lambda v: _quote_amount(v, "amount"),
+    "amm_field": lambda v: _amm_field(v, "amount"),
+    "positive_price": _positive_price,
+    "requested_leverage": lambda v: _requested_leverage({"leverage": v}),
+}
+
+
+@pytest.mark.parametrize("parser", sorted(_PARSERS))
+@pytest.mark.parametrize("value", ["nan", "inf", "-1", "abc", True])
+def test_every_parser_refuses_the_same_malformed_input(parser, value):
+    """A bool, non-number, non-finite or negative figure is refused by every
+    door, not valued as 1 by three of them and refused by the fourth."""
+    with pytest.raises(ValueError):
+        _PARSERS[parser](value)
+
+
+@pytest.mark.parametrize("parser", sorted(_PARSERS))
+def test_every_parser_words_a_malformed_input_the_same_way(parser):
+    with pytest.raises(ValueError, match=r"must be a number, got 'abc'"):
+        _PARSERS[parser]("abc")
+
+
+def test_quote_amount_empty_is_zero_and_dollar_is_stripped():
+    assert _quote_amount(None, "amount") == 0.0
+    assert _quote_amount("", "amount") == 0.0
+    assert _quote_amount("$100", "amount") == 100.0
+    assert _quote_amount("0", "amount") == 0.0
+
+
+def test_amm_field_empty_requires_a_value_unless_defaulted():
+    with pytest.raises(ValueError, match="is required to price this call"):
+        _amm_field("", "amount")
+    assert _amm_field("", "amount", default=0.0) == 0.0
+    assert _amm_field("2.5", "amount") == 2.5
+
+
+def test_requested_leverage_strips_x_and_empty_is_none():
+    assert _requested_leverage({"leverage": "5x"}) == 5.0
+    assert _requested_leverage({}) is None
+    assert _requested_leverage({"leverage": ""}) is None
+    with pytest.raises(ValueError, match="positive finite number"):
+        _requested_leverage({"leverage": 0})
+
+
+def test_positive_price_missing_is_unavailable_and_zero_is_refused():
+    with pytest.raises(ValueError, match="reference price is unavailable"):
+        _positive_price(None)
+    with pytest.raises(ValueError, match="positive finite number"):
+        _positive_price("0")
+    assert _positive_price("1.5") == 1.5
+
+
+def test_risk_module_parses_input_numbers_in_one_place():
+    """Only _finite_number checks isfinite on a parsed input; the fetched price
+    in _planned_amount_quote goes through _positive_price."""
+    import inspect
+
+    import condor.agents.risk as risk
+
+    for fn in (
+        risk._requested_leverage,
+        risk._quote_amount,
+        risk._amm_field,
+        risk._positive_price,
+    ):
+        assert "isfinite" not in inspect.getsource(fn)
+    planned = inspect.getsource(risk._planned_amount_quote)
+    assert "_positive_price(price)" in planned
+    assert planned.count("isfinite") == 1  # the planned-total check only
+
+
+def test_planned_amount_quote_refuses_an_unpriceable_fetched_price(monkeypatch):
+    import condor.fetchers.market_data as md
+
+    async def _no_price(*_a, **_k):
+        return None
+
+    monkeypatch.setattr(md, "fetch_current_price", _no_price)
+    with pytest.raises(ValueError, match="reference price is unavailable"):
+        asyncio.run(
+            _planned_amount_quote("create_position_executor", {"amount": "1"}, object())
+        )
