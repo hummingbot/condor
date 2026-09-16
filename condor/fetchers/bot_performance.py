@@ -474,6 +474,35 @@ def clear_archived_cache() -> None:
     _archived_cache.clear()
 
 
+async def fetch_bot_universe(client: Any) -> tuple[dict[str, dict], list[str]]:
+    """Every bot a PnL attribution can draw on: ``(live aggregates, archived names)``.
+
+    The one prelude of every session-PnL pipeline — the strategy rollup
+    (``attribution.apply_bot_mode_pnl``), the agent's own view
+    (``performance.fetch_agent_performance_batch``) and the PnL series — so the
+    surfaces that must agree on what a session earned start from the same universe
+    under the same failure policy:
+
+    - a live-snapshot failure is logged and degrades to ``{}``. Archived-only bases
+      still resolve through the archived names, and a base only the snapshot knew
+      surfaces as unresolved ("unknown, not zero") rather than a silent $0;
+    - the archived listing is best-effort (:func:`fetch_archived_paths` never
+      raises).
+
+    Owns only this stage: the history fetch (:func:`fetch_base_histories`) stays
+    with each caller, whose guards differ. Adoption (``TickEngine``) deliberately
+    calls :func:`fetch_all_bot_performance` directly, because it must defer on a
+    failed snapshot instead of seeing an empty server.
+    """
+    try:
+        all_perf = await fetch_all_bot_performance(client)
+    except Exception as e:
+        logger.warning("bot performance snapshot failed: %s", e)
+        all_perf = {}
+    archived = await fetch_archived_instances(client)
+    return all_perf, archived
+
+
 def _iso_to_epoch(ts: Any) -> float | None:
     from datetime import datetime
 

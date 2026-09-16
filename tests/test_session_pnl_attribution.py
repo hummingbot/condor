@@ -845,3 +845,112 @@ def test_no_fees_anywhere_still_reads_as_unknown_on_both_surfaces(tmp_path):
     assert s1.fees == detail.fees == 0.0
     assert s1.fees_known is detail.fees_known is False
     assert s1.volume == detail.volume == 5000.0
+
+
+class _SnapshotDownClient(_FakeClient):
+    """The whole-server snapshot errors while the archived listing still works."""
+
+    def __init__(self, history: dict[str, list[dict]], archived: list[str]):
+        super().__init__(snapshots=[], history=history)
+        self.snapshot_calls = 0
+        paths = [f"bots/archived/{n}/data/{n}.sqlite" for n in archived]
+
+        async def _list_databases():
+            return paths
+
+        from types import SimpleNamespace
+
+        self.archived_bots = SimpleNamespace(list_databases=_list_databases)
+
+    async def get_latest_controller_performance(self):
+        self.snapshot_calls += 1
+        raise RuntimeError("controller-performance/latest timed out")
+
+
+def test_rollup_still_attributes_archived_pnl_when_the_live_snapshot_fails():
+    """A snapshot outage must not zero the rollup while the session detail survives.
+
+    Both surfaces start from ``fetch_bot_universe``, whose policy is one: a
+    failed snapshot degrades to an empty live set, and a stopped bot's realized
+    PnL still resolves through the archived listing — on the strategy rollup
+    (``apply_bot_mode_pnl``) exactly as on the agent's own view.
+    """
+    import tempfile
+    from types import SimpleNamespace
+
+    from condor.agents.performance import fetch_agent_performance
+    from condor.fetchers.bot_performance import (
+        clear_archived_cache,
+        clear_history_cache,
+        clear_snapshot_cache,
+    )
+
+    def _clear():
+        clear_snapshot_cache()
+        clear_archived_cache()
+        clear_history_cache()
+
+    _clear()
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            sd1 = _write_session(tmp_path, 1)
+            _write_ledger(sd1, {"ns-bot": _epoch(T2)})
+
+            inst = "ns-bot-20260701-000000"
+            history = {
+                inst: [
+                    _hist_row(T0, 0.0, cum_volume=0.0, cum_fees=0.0),
+                    _hist_row(T2, 40.0, cum_volume=4000.0, cum_fees=4.0),
+                    _hist_row(T3, 100.0, cum_volume=9000.0, cum_fees=9.0),
+                ]
+            }
+
+            rollup_client = _SnapshotDownClient(history, archived=[inst])
+            s1 = _session(1)
+            asyncio.run(apply_bot_mode_pnl([s1], tmp_path, None, rollup_client))
+            assert rollup_client.snapshot_calls == 1
+
+            async def _no_executors(**_kw):
+                return []
+
+            agent_client = _SnapshotDownClient(history, archived=[inst])
+            agent_client.executors = SimpleNamespace(search_executors=_no_executors)
+            owned = session_ownership(tmp_path, None, 1)
+            since = min(b.since for b in owned)
+            detail = asyncio.run(
+                fetch_agent_performance(
+                    agent_client, "a_1", bot_names=[b.base for b in owned], since=since
+                )
+            )
+
+            # The stopped bot's post-takeover slice, not a silent $0.
+            assert s1.realized_pnl == detail.realized_pnl == 60.0
+            assert s1.volume == detail.volume == 5000.0
+            assert s1.fees == detail.fees == 5.0
+    finally:
+        _clear()
+
+
+def test_bot_universe_degrades_a_failed_snapshot_to_an_empty_live_set():
+    """The shared prelude never raises on a snapshot outage and keeps the archive."""
+    from condor.fetchers.bot_performance import (
+        clear_archived_cache,
+        clear_snapshot_cache,
+        fetch_bot_universe,
+    )
+
+    clear_snapshot_cache()
+    clear_archived_cache()
+    try:
+        client = _SnapshotDownClient({}, archived=["b-2", "a-1"])
+        assert asyncio.run(fetch_bot_universe(client)) == ({}, ["a-1", "b-2"])
+
+        healthy = _FakeClient(
+            snapshots=[_snap("live-bot", T3, realized=5.0)], history={}
+        )
+        live, archived = asyncio.run(fetch_bot_universe(healthy))
+        assert set(live) == {"live-bot"} and archived == []
+    finally:
+        clear_snapshot_cache()
+        clear_archived_cache()

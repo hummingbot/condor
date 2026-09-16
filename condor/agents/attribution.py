@@ -235,9 +235,8 @@ async def apply_bot_mode_pnl(
     """
     from condor.fetchers.bot_performance import (
         bot_executor_rows,
-        fetch_all_bot_performance,
-        fetch_archived_instances,
         fetch_base_histories,
+        fetch_bot_universe,
         resolve_bots,
         slice_history,
     )
@@ -249,11 +248,12 @@ async def apply_bot_mode_pnl(
     if not bases:
         return  # direct-executor strategy — nothing to attribute
 
-    try:
-        all_perf = await fetch_all_bot_performance(client)
-    except Exception as e:
-        log.warning("bot perf fetch for %s failed: %s", strategy_dir.name, e)
-        return
+    # Archived instances carry the realized PnL of every bot a session stopped —
+    # the normal end state of a finished session, and invisible in the live
+    # snapshot. Same universe and failure policy the live agent's own view uses,
+    # so the dashboard and the tick loop cannot disagree about what a session
+    # earned — not even when the live snapshot is down.
+    all_perf, archived = await fetch_bot_universe(client)
 
     now = time.time()
     # The oldest takeover across every base sets how far back the histories must
@@ -263,11 +263,6 @@ async def apply_bot_mode_pnl(
         (since for lst in owners.values() for since, _, _ in lst if since > 0),
         default=0.0,
     )
-    # Archived instances carry the realized PnL of every bot a session stopped —
-    # the normal end state of a finished session, and invisible in the live
-    # snapshot. Same universe the live agent's own view uses, so the dashboard and
-    # the tick loop cannot disagree about what a session earned.
-    archived = await fetch_archived_instances(client)
     histories_by_base = await fetch_base_histories(
         client, all_perf, bases, earliest, now, extra_names=archived
     )

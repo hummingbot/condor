@@ -240,9 +240,8 @@ async def fetch_agent_pnl_series(
     import time as _time
 
     from condor.fetchers.bot_performance import (
-        fetch_all_bot_performance,
-        fetch_archived_instances,
         fetch_base_histories,
+        fetch_bot_universe,
         slice_history_series,
     )
 
@@ -251,12 +250,7 @@ async def fetch_agent_pnl_series(
         return []
 
     end = until if until > 0 else _time.time()
-    try:
-        all_bot_perf = await fetch_all_bot_performance(client)
-    except Exception as e:
-        log.warning("pnl series: bot snapshot failed: %s", e)
-        all_bot_perf = {}
-    archived = await fetch_archived_instances(client)
+    all_bot_perf, archived = await fetch_bot_universe(client)
     try:
         histories = await fetch_base_histories(
             client, all_bot_perf, bases, since, end, extra_names=archived
@@ -419,22 +413,16 @@ async def fetch_agent_performance_batch(
         import time
 
         from condor.fetchers.bot_performance import (
-            fetch_all_bot_performance,
-            fetch_archived_instances,
             fetch_base_histories,
+            fetch_bot_universe,
             partition_instances,
             resolve_bots,
             slice_history,
         )
 
-        try:
-            all_bot_perf = await fetch_all_bot_performance(client)
-        except Exception as e:
-            log.warning("fetch_all_bot_performance failed: %s", e)
-            all_bot_perf = {}
         # Stopped instances still hold the realized PnL they earned, and a session
         # that stopped its bot before the rollup ran would otherwise report $0.
-        archived = await fetch_archived_instances(client)
+        all_bot_perf, archived = await fetch_bot_universe(client)
         now = time.time()
         for aid, bases in wanted.items():
             # Resolved per agent over ALL its bases at once, so an owned parent
