@@ -203,12 +203,18 @@ def test_the_pydantic_ai_prompt_is_a_list_with_the_image_first():
     import contextlib
 
     from pydantic_ai.messages import BinaryContent
+    from pydantic_ai.usage import RunUsage
 
     from condor.acp import pydantic_ai_client as pac
 
     seen: list = []
 
     class _Run:
+        # A finished run with nothing to say: enough of AgentRun for the turn to
+        # end cleanly, so the test can require end_turn rather than pass through
+        # the error branch.
+        result = None
+
         def __aiter__(self):
             async def _empty():
                 return
@@ -216,28 +222,38 @@ def test_the_pydantic_ai_prompt_is_a_list_with_the_image_first():
 
             return _empty()
 
+        def usage(self):
+            return RunUsage()
+
+        def new_messages(self):
+            return []
+
     class _Agent:
         @contextlib.asynccontextmanager
         async def iter(self, prompt, **kwargs):
             seen.append(prompt)
             yield _Run()
 
-    client = pac.PydanticAIClient.__new__(pac.PydanticAIClient)
+    from condor.acp.client import PromptDone
+
+    client = pac.PydanticAIClient(model="openai:gpt-4o")
     client._agent = _Agent()
-    client._request_semaphore = None
-    client._abort_requested = False
-    client._message_history = []
-    client._permission_gate = type("G", (), {"reset": lambda self: None})()
+
+    stop_reasons: list[str] = []
 
     async def scenario():
-        async for _ in client.prompt_stream(
+        async for event in client.prompt_stream(
             "read this", images=[PromptImage(data=PNG, mime="image/png")]
         ):
-            pass
-        async for _ in client.prompt_stream("and this?"):
-            pass
+            if isinstance(event, PromptDone):
+                stop_reasons.append(event.stop_reason)
+        async for event in client.prompt_stream("and this?"):
+            if isinstance(event, PromptDone):
+                stop_reasons.append(event.stop_reason)
 
     asyncio.run(scenario())
+
+    assert stop_reasons == ["end_turn", "end_turn"]
 
     assert seen[0] == [BinaryContent(data=PNG, media_type="image/png"), "read this"]
     assert seen[1] == "and this?", "a text-only turn stays a bare string"
