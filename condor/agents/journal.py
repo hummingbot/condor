@@ -137,8 +137,12 @@ LEARNING_CATEGORIES = {
 }
 DEFAULT_LEARNING_CATEGORY = "market"
 
-SNAPSHOT_TEMPLATE = """\
-# Snapshot #{tick} — {timestamp}
+# One body for both snapshot writers (tick snapshots and dry-run experiments);
+# only the header differs. The title line inside ``{header}`` is parsed by
+# sessions_index, and the dashboard reads sections by their ``##`` headings
+# (frontend/src/lib/parse-agent.ts), so neither may change shape.
+_SNAPSHOT_BODY = """\
+{header}
 
 <details><summary>System Prompt ({prompt_len} chars)</summary>
 
@@ -162,6 +166,88 @@ SNAPSHOT_TEMPLATE = """\
 ## Stats
 Duration: {duration:.1f}s
 """
+
+# Cap on a tool call's output in a snapshot.
+SNAPSHOT_TOOL_OUTPUT_CHARS = 2000
+
+
+def render_risk_lines(risk_state: dict[str, Any], bullet: str = "- ") -> list[str]:
+    """The risk block, one line per limit, shared by the tick prompt and snapshots.
+
+    Every value keeps a ``.get`` default: a failed dry run records
+    ``risk_state={}`` and must still render.
+    """
+    rs = risk_state
+    max_dd = rs.get("max_drawdown_pct", -1)
+    dd_display = (
+        f"{rs.get('drawdown_pct', 0):.1f}% / {max_dd:.1f}% limit"
+        if max_dd >= 0
+        else "disabled"
+    )
+    lines = [
+        f"Position Size: ${rs.get('total_exposure', 0):.2f} / ${rs.get('max_position_size', 500):.2f} limit",
+        f"Open Executors: {rs.get('executor_count', 0)} / {rs.get('max_open_executors', 5)} limit",
+        f"Drawdown: {dd_display}",
+    ]
+    # Only when one is set: a leverage limit is off by default ([[SEC-558]]),
+    # and a line reading "disabled" invites the agent to go looking for the
+    # ceiling. When it IS set, it has to be here — a limit the agent is not
+    # told about is a limit it will trip, and every create it makes on a perp
+    # has to declare a leverage at or under it.
+    max_leverage = rs.get("max_leverage", -1)
+    if max_leverage >= 0:
+        lines.append(
+            f"Max Leverage: {max_leverage:g}x "
+            "(declare `leverage` on every create; omitting it is refused)"
+        )
+    lines.append(
+        f"Status: {'BLOCKED - ' + rs.get('block_reason', '') if rs.get('is_blocked') else 'ACTIVE'}"
+    )
+    return [bullet + line for line in lines]
+
+
+def render_tool_calls(tool_calls: list[dict[str, Any]]) -> str:
+    """Markdown for a tick's folded tool calls, as every snapshot records them."""
+    parts: list[str] = []
+    for i, tc in enumerate(tool_calls, 1):
+        tc_name = tc.get("name", tc.get("title", "unknown"))
+        tc_status = tc.get("status", "")
+        parts.append(f"### {i}. {tc_name} ({tc_status})")
+        if tc.get("input"):
+            input_str = (
+                json.dumps(tc["input"], indent=2)
+                if isinstance(tc["input"], dict)
+                else str(tc["input"])
+            )
+            parts.append(f"**Input:**\n```json\n{input_str}\n```")
+        if tc.get("output"):
+            output_str = str(tc["output"])[:SNAPSHOT_TOOL_OUTPUT_CHARS]
+            parts.append(f"**Output:**\n```\n{output_str}\n```")
+        parts.append("")
+    return "\n".join(parts)
+
+
+def render_snapshot(
+    header: str,
+    system_prompt: str,
+    response_text: str,
+    tool_calls: list[dict[str, Any]],
+    executors_data: str,
+    risk_state: dict[str, Any],
+    duration: float,
+) -> str:
+    """The full text of a snapshot file: ``header`` then the shared body."""
+    return _SNAPSHOT_BODY.format(
+        header=header,
+        prompt_len=len(system_prompt),
+        system_prompt=system_prompt,
+        executors_data=executors_data or "No executors.",
+        risk_state="\n".join(render_risk_lines(risk_state)),
+        response_text=response_text or "No response.",
+        tool_count=len(tool_calls),
+        tool_calls=render_tool_calls(tool_calls) or "No tool calls.",
+        duration=duration,
+    )
 
 
 # Session directory names, current first. A strategy that ran before the rename
@@ -255,35 +341,6 @@ def count_journal_ticks(journal_path: Path) -> int:
     return highest_tick_number(journal_path.read_text(errors="replace"))
 
 
-EXPERIMENT_TEMPLATE = """\
-# Experiment #{num} — {timestamp}
-Mode: {execution_mode}
-Model: {agent_key}
-
-<details><summary>System Prompt ({prompt_len} chars)</summary>
-
-{system_prompt}
-
-</details>
-
-## Executor State
-{executors_data}
-
-## Risk State
-{risk_state}
-
-## Agent Response
-{response_text}
-
-## Tool Calls ({tool_count})
-
-{tool_calls}
-
-## Stats
-Duration: {duration:.1f}s
-"""
-
-
 def save_experiment_snapshot(
     agent_dir: Path,
     experiment_num: int,
@@ -301,52 +358,18 @@ def save_experiment_snapshot(
     experiments_dir = agent_dir / "dry_runs"
     experiments_dir.mkdir(parents=True, exist_ok=True)
 
-    # Format risk state
-    max_dd = risk_state.get("max_drawdown_pct", -1)
-    dd_display = (
-        f"{risk_state.get('drawdown_pct', 0):.1f}% / {max_dd:.1f}% limit"
-        if max_dd >= 0
-        else "disabled"
+    header = (
+        f"# Experiment #{experiment_num} — {timestamp}\n"
+        f"Mode: {execution_mode}\n"
+        f"Model: {agent_key or 'unknown'}"
     )
-    risk_lines = [
-        f"- Position Size: ${risk_state.get('total_exposure', 0):.2f} / ${risk_state.get('max_position_size', 500):.2f} limit",
-        f"- Open Executors: {risk_state.get('executor_count', 0)} / {risk_state.get('max_open_executors', 5)} limit",
-        f"- Drawdown: {dd_display}",
-        f"- Status: {'BLOCKED - ' + risk_state.get('block_reason', '') if risk_state.get('is_blocked') else 'ACTIVE'}",
-    ]
-
-    # Format tool calls
-    import json
-
-    tool_parts = []
-    for i, tc in enumerate(tool_calls, 1):
-        tc_name = tc.get("name", tc.get("title", "unknown"))
-        tc_status = tc.get("status", "")
-        tool_parts.append(f"### {i}. {tc_name} ({tc_status})")
-        if tc.get("input"):
-            input_str = (
-                json.dumps(tc["input"], indent=2)
-                if isinstance(tc["input"], dict)
-                else str(tc["input"])
-            )
-            tool_parts.append(f"**Input:**\n```json\n{input_str}\n```")
-        if tc.get("output"):
-            output_str = str(tc["output"])[:2000]
-            tool_parts.append(f"**Output:**\n```\n{output_str}\n```")
-        tool_parts.append("")
-
-    content = EXPERIMENT_TEMPLATE.format(
-        num=experiment_num,
-        timestamp=timestamp,
-        execution_mode=execution_mode,
-        agent_key=agent_key or "unknown",
-        prompt_len=len(system_prompt),
+    content = render_snapshot(
+        header,
         system_prompt=system_prompt,
-        executors_data=executors_data or "No executors.",
-        risk_state="\n".join(risk_lines),
-        response_text=response_text or "No response.",
-        tool_count=len(tool_calls),
-        tool_calls="\n".join(tool_parts) or "No tool calls.",
+        response_text=response_text,
+        tool_calls=tool_calls,
+        executors_data=executors_data,
+        risk_state=risk_state,
         duration=duration,
     )
 
@@ -672,48 +695,13 @@ class JournalManager:
         """Write a full snapshot capturing everything."""
         self._snapshots_dir.mkdir(parents=True, exist_ok=True)
 
-        # Format risk state
-        max_dd = risk_state.get("max_drawdown_pct", -1)
-        dd_display = (
-            f"{risk_state.get('drawdown_pct', 0):.1f}% / {max_dd:.1f}% limit"
-            if max_dd >= 0
-            else "disabled"
-        )
-        risk_lines = [
-            f"- Position Size: ${risk_state.get('total_exposure', 0):.2f} / ${risk_state.get('max_position_size', 500):.2f} limit",
-            f"- Open Executors: {risk_state.get('executor_count', 0)} / {risk_state.get('max_open_executors', 5)} limit",
-            f"- Drawdown: {dd_display}",
-            f"- Status: {'BLOCKED - ' + risk_state.get('block_reason', '') if risk_state.get('is_blocked') else 'ACTIVE'}",
-        ]
-
-        # Format tool calls
-        tool_parts = []
-        for i, tc in enumerate(tool_calls, 1):
-            tc_name = tc.get("name", tc.get("title", "unknown"))
-            tc_status = tc.get("status", "")
-            tool_parts.append(f"### {i}. {tc_name} ({tc_status})")
-            if tc.get("input"):
-                input_str = (
-                    json.dumps(tc["input"], indent=2)
-                    if isinstance(tc["input"], dict)
-                    else str(tc["input"])
-                )
-                tool_parts.append(f"**Input:**\n```json\n{input_str}\n```")
-            if tc.get("output"):
-                output_str = str(tc["output"])[:2000]
-                tool_parts.append(f"**Output:**\n```\n{output_str}\n```")
-            tool_parts.append("")
-
-        content = SNAPSHOT_TEMPLATE.format(
-            tick=tick,
-            timestamp=timestamp,
-            prompt_len=len(system_prompt),
+        content = render_snapshot(
+            f"# Snapshot #{tick} — {timestamp}",
             system_prompt=system_prompt,
-            executors_data=executors_data or "No executors.",
-            risk_state="\n".join(risk_lines),
-            response_text=response_text or "No response.",
-            tool_count=len(tool_calls),
-            tool_calls="\n".join(tool_parts) or "No tool calls.",
+            response_text=response_text,
+            tool_calls=tool_calls,
+            executors_data=executors_data,
+            risk_state=risk_state,
             duration=duration,
         )
 

@@ -99,3 +99,101 @@ def test_a_state_snapshot_needs_no_tick(engine):
     assert _write(entry_type="state", text="SOL 142.10, 1 grid open") == {
         "written": True
     }
+
+
+# ── Both snapshot writers share one renderer (ARCH-655) ──
+
+_TOOL_CALLS = [
+    {"name": "create_executor", "status": "completed", "input": {"amount": 10}},
+    {"title": "get_prices", "input": "SOL-USDC", "output": "x" * 3000},
+]
+
+
+def _body(text: str) -> str:
+    return text[text.index("## Executor State") :]
+
+
+def _risk_section(text: str) -> str:
+    return text[text.index("## Risk State") : text.index("## Agent Response")]
+
+
+def _full_snapshot(tmp_path, risk_state: dict) -> str:
+    from condor.agents.journal import JournalManager
+
+    journal = JournalManager("agt.grid", session_dir=tmp_path / "full")
+    return journal.save_full_snapshot(
+        tick=7,
+        timestamp="2026-09-17 10:00",
+        system_prompt="SP",
+        response_text="done",
+        tool_calls=_TOOL_CALLS,
+        executors_data="1 executor",
+        risk_state=risk_state,
+        duration=3.25,
+    ).read_text()
+
+
+def _experiment_snapshot(tmp_path, risk_state: dict) -> str:
+    from condor.agents.journal import save_experiment_snapshot
+
+    return save_experiment_snapshot(
+        tmp_path / "exp",
+        experiment_num=7,
+        execution_mode="dry_run",
+        timestamp="2026-09-17 10:00",
+        system_prompt="SP",
+        response_text="done",
+        tool_calls=_TOOL_CALLS,
+        executors_data="1 executor",
+        risk_state=risk_state,
+        duration=3.25,
+        agent_key="claude-code",
+    ).read_text()
+
+
+def test_both_snapshot_writers_render_the_same_body(tmp_path):
+    risk_state = {"max_drawdown_pct": 10, "drawdown_pct": 2.5, "max_leverage": 3}
+    full = _full_snapshot(tmp_path, risk_state)
+    experiment = _experiment_snapshot(tmp_path, risk_state)
+
+    assert _body(full) == _body(experiment)
+    assert full.startswith("# Snapshot #7 — 2026-09-17 10:00\n\n<details>")
+    assert experiment.startswith(
+        "# Experiment #7 — 2026-09-17 10:00\nMode: dry_run\nModel: claude-code\n\n"
+    )
+    # The output cap still applies, once.
+    assert "x" * 2000 + "\n```" in full and "x" * 2001 not in full
+
+
+def test_snapshot_risk_block_carries_the_leverage_line_the_prompt_shows(tmp_path):
+    from condor.agents.journal import render_risk_lines
+
+    risk_state = {"max_leverage": 5}
+    prompt_lines = render_risk_lines(risk_state, bullet="")
+    leverage = next(line for line in prompt_lines if line.startswith("Max Leverage"))
+    assert leverage.startswith("Max Leverage: 5x")
+
+    assert f"- {leverage}\n" in _risk_section(_full_snapshot(tmp_path, risk_state))
+    assert f"- {leverage}\n" in _risk_section(
+        _experiment_snapshot(tmp_path, risk_state)
+    )
+
+
+def test_an_empty_risk_state_still_renders_default_limits(tmp_path):
+    # engine records a failed dry run with risk_state={}
+    for text in (_full_snapshot(tmp_path, {}), _experiment_snapshot(tmp_path, {})):
+        section = _risk_section(text)
+        assert "- Position Size: $0.00 / $500.00 limit" in section
+        assert "- Open Executors: 0 / 5 limit" in section
+        assert "- Drawdown: disabled" in section
+        assert "- Status: ACTIVE" in section
+        assert "Max Leverage" not in section
+
+
+def test_the_tick_prompt_risk_block_comes_from_the_shared_renderer():
+    import inspect
+
+    from condor.agents import journal, prompts
+
+    assert prompts.render_risk_lines is journal.render_risk_lines
+    assert "Position Size:" not in inspect.getsource(prompts)

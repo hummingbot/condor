@@ -179,7 +179,7 @@ _snapshot_info_cache: dict[Path, tuple[float, int, dict[str, Any]]] = {}
 def _parse_snapshot_file(f: Path, tick: int) -> dict[str, Any]:
     """Summary fields of one snapshot: tick, timestamp, file.
 
-    The timestamp is the tail of the title line, which ``SNAPSHOT_TEMPLATE``
+    The timestamp is the tail of the title line, which ``save_full_snapshot``
     puts on line 1 — so the fast path reads only that line instead of pulling a
     multi-hundred-KB dump into memory. A file whose first line is not the title
     (legacy ``run_N.md`` layouts) falls back to scanning the rest, keeping the

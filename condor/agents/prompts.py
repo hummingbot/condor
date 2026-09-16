@@ -16,6 +16,7 @@ from condor.memory import paths as _paths
 from condor.runtime.state import MAX_STATE_VALUE_CHARS
 
 from .agent import Agent
+from .journal import render_risk_lines
 from .strategy import Strategy
 
 log = logging.getLogger(__name__)
@@ -588,33 +589,7 @@ def build_tick_prompt(
         sections.append(_build_controller_mode_section(bot_name, ledger))
 
     # Risk state
-    rs = risk_state
-    max_dd = rs.get("max_drawdown_pct", -1)
-    dd_display = (
-        f"{rs.get('drawdown_pct', 0):.1f}% / {max_dd:.1f}% limit"
-        if max_dd >= 0
-        else "disabled"
-    )
-    risk_lines = [
-        "[RISK STATE]",
-        f"Position Size: ${rs.get('total_exposure', 0):.2f} / ${rs.get('max_position_size', 500):.2f} limit",
-        f"Open Executors: {rs.get('executor_count', 0)} / {rs.get('max_open_executors', 5)} limit",
-        f"Drawdown: {dd_display}",
-    ]
-    # Only when one is set: a leverage limit is off by default ([[SEC-558]]),
-    # and a line reading "disabled" invites the agent to go looking for the
-    # ceiling. When it IS set, it has to be here — a limit the agent is not
-    # told about is a limit it will trip, and every create it makes on a perp
-    # has to declare a leverage at or under it.
-    max_leverage = rs.get("max_leverage", -1)
-    if max_leverage >= 0:
-        risk_lines.append(
-            f"Max Leverage: {max_leverage:g}x "
-            "(declare `leverage` on every create; omitting it is refused)"
-        )
-    risk_lines.append(
-        f"Status: {'BLOCKED - ' + rs.get('block_reason', '') if rs.get('is_blocked') else 'ACTIVE'}"
-    )
+    risk_lines = ["[RISK STATE]", *render_risk_lines(risk_state, bullet="")]
     sections.append("\n".join(risk_lines))
 
     # What the gate refused last tick, and why. The permission response the model
