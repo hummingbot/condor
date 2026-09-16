@@ -371,17 +371,22 @@ export function DockExecution({
             <span className="text-[var(--color-yellow)]"> · {paused} paused</span>
           )}
         </span>
-        <span className="shrink-0 tabular-nums">
-          {liveExecutors} executor{liveExecutors === 1 ? "" : "s"}
-        </span>
+        {/* Only when there are some: a PMM fleet runs no executors at all, and
+            a standing "0 executors" beside the controller count reads as a
+            fault rather than as the shape of the strategy. */}
+        {liveExecutors > 0 && (
+          <span className="shrink-0 tabular-nums">
+            {liveExecutors} executor{liveExecutors === 1 ? "" : "s"}
+          </span>
+        )}
       </div>
 
       {/* A table, not a list of cards. Every controller answers the same eight
           questions, and eight answers per row only stay comparable when they
-          are in eight columns. The agent and bot rows above them span the whole
-          table instead: they are headings with a fold attached, not eight more
-          numbers, and giving them the controller's columns would have put an
-          agent's total under a heading that says "Controller". It fits whatever
+          are in eight columns. A bot row spans the whole table: it is a heading
+          with a fold attached. An agent row puts its name across the first four
+          columns and its totals under Vol, Real., Unreal. and Net, so every sum
+          is labelled by the heading above it. The table fits whatever
           width the panel was dragged to and only scrolls sideways below
           `TABLE_MIN_PX`, where the controller name would otherwise be squeezed
           out of legibility. */}
@@ -407,13 +412,17 @@ export function DockExecution({
                   key={col.key}
                   scope="col"
                   title={col.hint}
+                  // An `aria-label` rather than an `sr-only` child: visually
+                  // hidden text is still selected text, so copying the table
+                  // pasted "Pause or start the controller" as a heading.
+                  aria-label={col.label ? undefined : col.hint}
                   className={`px-1.5 pb-1 font-medium ${
                     col.num ? "text-right" : "text-left"
                   } ${col.key === "controller" ? "pl-3" : ""} ${
                     col.key === "act" ? "pr-3" : ""
                   }`}
                 >
-                  {col.label || <span className="sr-only">{col.hint}</span>}
+                  {col.label}
                 </th>
               ))}
             </tr>
@@ -431,27 +440,25 @@ export function DockExecution({
                     symbol={currencySymbol}
                     onOpen={(scope) => navigate(`/bots?scope=${scope}`)}
                   />
+                ) : row.kind === "agent" ? (
+                  <AgentRow
+                    row={row}
+                    live={row.agent ? live.get(row.agent.slug) ?? null : null}
+                    nowSec={nowSec}
+                    symbol={currencySymbol}
+                    open={open.has(row.id)}
+                    onToggle={() => toggle(row.id)}
+                    onOpenAgent={onOpenAgent}
+                  />
                 ) : (
                   <tr>
                     <td colSpan={COLUMNS.length} className="p-0">
-                      {row.kind === "agent" ? (
-                        <AgentRow
-                          row={row}
-                          live={row.agent ? live.get(row.agent.slug) ?? null : null}
-                          nowSec={nowSec}
-                          symbol={currencySymbol}
-                          open={open.has(row.id)}
-                          onToggle={() => toggle(row.id)}
-                          onOpenAgent={onOpenAgent}
-                        />
-                      ) : (
-                        <BotRow
-                          row={row}
-                          open={open.has(row.id)}
-                          onToggle={() => toggle(row.id)}
-                          onOpen={() => navigate(`/bots?scope=bot:${row.label}`)}
-                        />
-                      )}
+                      <BotRow
+                        row={row}
+                        open={open.has(row.id)}
+                        onToggle={() => toggle(row.id)}
+                        onOpen={() => navigate(`/bots?scope=bot:${row.label}`)}
+                      />
                     </td>
                   </tr>
                 )}
@@ -569,79 +576,99 @@ function AgentRow({
     else navigate(`/agents/${encodeURIComponent(slug)}`);
   };
 
-  return (
-    <div data-agent-row={row.id} className="px-3 pt-1.5">
-      <div className="flex items-baseline gap-1.5">
-        <Twisty open={open} onToggle={row.hasChildren ? onToggle : null} label={row.label} />
-        <button
-          type="button"
-          data-agent-open={slug ?? ""}
-          onClick={openIt}
-          title={
-            slug
-              ? `Open ${row.label} — everything it is running on this server`
-              : `${row.label} — records this fleet map does not credit to an agent`
-          }
-          className="flex min-w-0 flex-1 items-baseline gap-1.5 text-left transition-colors hover:text-[var(--color-text)]"
-        >
-          {/* Live, paused, or not looping at all — and never absent: an agent
-              that has stopped is still an agent whose records are on screen. */}
-          <span
-            data-agent-live={running ? "" : undefined}
-            className={`h-1.5 w-1.5 shrink-0 self-center rounded-full ${
-              running
-                ? "bg-emerald-400"
-                : live?.live
-                  ? "bg-amber-400"
-                  : "bg-[var(--color-text-muted)]/40"
-            }`}
-          />
-          <span className="min-w-0 truncate text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
-            {row.label}
-          </span>
-        </button>
-        <span
-          className="shrink-0 font-mono tabular-nums"
-          style={{ color: pnlColor(row.totals.net) }}
-        >
-          {formatCurrencyPnl(row.totals.net, symbol)}
-        </span>
-        <span className="shrink-0 font-mono tabular-nums text-[var(--color-text-muted)]">
-          {formatCompactVolume(row.totals.volume, symbol)}
-        </span>
-      </div>
+  /**
+   * The agent's totals, each under the heading that names it.
+   *
+   * They used to float at the end of the name line as two bare figures — a
+   * signed one and a compact one — and nothing on screen said the first was
+   * net PnL and the second volume. In the controllers' own columns the heading
+   * says it, and the sum sits directly above the rows it adds up.
+   */
+  const total = (value: number, what: string, pnl: boolean) => (
+    <td
+      title={`${row.label} — ${what}, summed over its controllers on this server`}
+      className={`whitespace-nowrap px-1.5 pt-1.5 text-right align-top font-mono font-semibold tabular-nums ${
+        pnl ? "" : "text-[var(--color-text-muted)]"
+      }`}
+      style={pnl ? { color: pnlColor(value) } : undefined}
+    >
+      {pnl ? formatCurrencyPnl(value, symbol) : formatCompactVolume(value, symbol)}
+    </td>
+  );
 
-      {live && (
-        <div className="flex items-baseline gap-1.5 pl-[18px] text-[10px] text-[var(--color-text-muted)]">
-          {due !== null && (
+  return (
+    <tr data-agent-row={row.id}>
+      {/* Controller, pair, exec and up: the name and its liveness line take
+          the columns an owner has no single value for. */}
+      <td colSpan={4} className="overflow-hidden pl-3 pr-1.5 pt-1.5 align-top">
+        <div className="flex items-baseline gap-1.5">
+          <Twisty open={open} onToggle={row.hasChildren ? onToggle : null} label={row.label} />
+          <button
+            type="button"
+            data-agent-open={slug ?? ""}
+            onClick={openIt}
+            title={
+              slug
+                ? `Open ${row.label} — everything it is running on this server`
+                : `${row.label} — records this fleet map does not credit to an agent`
+            }
+            className="flex min-w-0 flex-1 items-baseline gap-1.5 text-left transition-colors hover:text-[var(--color-text)]"
+          >
+            {/* Live, paused, or not looping at all — and never absent: an agent
+                that has stopped is still an agent whose records are on screen. */}
             <span
-              data-agent-due
-              className={`shrink-0 font-mono ${due <= 0 ? "text-amber-400" : ""}`}
-            >
-              {tickCountdownLabel(due)}
-            </span>
-          )}
-          {live.lastDid ? (
-            <Link
-              to={decisionHref(live)}
-              data-agent-decision
-              title="Read the whole tick this came from"
-              className={`min-w-0 truncate transition-colors hover:underline ${
-                live.lastDid.ok ? "" : "text-[var(--color-red)]"
+              data-agent-live={running ? "" : undefined}
+              className={`h-1.5 w-1.5 shrink-0 self-center rounded-full ${
+                running
+                  ? "bg-emerald-400"
+                  : live?.live
+                    ? "bg-amber-400"
+                    : "bg-[var(--color-text-muted)]/40"
               }`}
-            >
-              {live.lastDid.summary}
-            </Link>
-          ) : (
-            live.lastSaid && (
-              <span data-agent-decision className="min-w-0 truncate">
-                {live.lastSaid}
-              </span>
-            )
-          )}
+            />
+            <span className="min-w-0 truncate text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
+              {row.label}
+            </span>
+          </button>
         </div>
-      )}
-    </div>
+
+        {live && (
+          <div className="flex items-baseline gap-1.5 pl-[18px] text-[10px] text-[var(--color-text-muted)]">
+            {due !== null && (
+              <span
+                data-agent-due
+                className={`shrink-0 font-mono ${due <= 0 ? "text-amber-400" : ""}`}
+              >
+                {tickCountdownLabel(due)}
+              </span>
+            )}
+            {live.lastDid ? (
+              <Link
+                to={decisionHref(live)}
+                data-agent-decision
+                title="Read the whole tick this came from"
+                className={`min-w-0 truncate transition-colors hover:underline ${
+                  live.lastDid.ok ? "" : "text-[var(--color-red)]"
+                }`}
+              >
+                {live.lastDid.summary}
+              </Link>
+            ) : (
+              live.lastSaid && (
+                <span data-agent-decision className="min-w-0 truncate">
+                  {live.lastSaid}
+                </span>
+              )
+            )}
+          </div>
+        )}
+      </td>
+      {total(row.totals.volume, "volume traded", false)}
+      {total(row.totals.realized, "realized PnL", true)}
+      {total(row.totals.unrealized, "unrealized PnL", true)}
+      {total(row.totals.net, "net PnL", true)}
+      <td />
+    </tr>
   );
 }
 
