@@ -1169,6 +1169,45 @@ def _instance_from_engine(engine, perf_by_id: dict) -> RunningInstance:
     )
 
 
+def _strategy_live_state(
+    strategy_dir: Path,
+    run_key: str,
+    engines: list,
+    perf_by_id: dict | None = None,
+) -> tuple[str, str, int, list[RunningInstance]]:
+    """A strategy's headline ``(status, agent_id, tick_count, instances)``.
+
+    The one place the rule lives: the first registered engine (running or
+    paused) wins; with no engine, the latest session on disk; with neither,
+    ``("idle", "", 0)``. Callers pass the engines in so their
+    ``_get_engines_for`` seam stays theirs.
+
+    ``instances`` is only built when ``perf_by_id`` is given: each one costs a
+    journal summary read and an ``actions.jsonl`` tail per engine, which a
+    status-only caller (the brain panel) must not pay — it gets ``[]``.
+    """
+    instances: list[RunningInstance] = []
+    if perf_by_id is not None:
+        instances = [_instance_from_engine(e, perf_by_id) for e in engines]
+
+    if engines:
+        if instances:
+            head = instances[0]
+            return head.status, head.agent_id, head.tick_count, instances
+        info = engines[0].get_info()
+        return info["status"], info["agent_id"], info["tick_count"], instances
+
+    disk_info = infer_latest_session_status(strategy_dir, run_key)
+    if disk_info:
+        return (
+            disk_info["status"],
+            disk_info["agent_id"],
+            disk_info["tick_count"],
+            instances,
+        )
+    return "idle", "", 0, instances
+
+
 async def _build_strategy_summary(strategy, user: WebUser) -> StrategySummary:
     """Roll up disk + engine + performance state for one strategy.
 
@@ -1192,24 +1231,9 @@ async def _build_strategy_summary(strategy, user: WebUser) -> StrategySummary:
     perf_by_id = {p.agent_id: p for p in sessions_perf}
 
     engines = _get_engines_for(strategy.agent_slug, strategy.slug)
-    status = "idle"
-    agent_id = ""
-    tick_count = 0
-    instances: list[RunningInstance] = []
-    for engine in engines:
-        inst = _instance_from_engine(engine, perf_by_id)
-        instances.append(inst)
-        if not agent_id:
-            status = inst.status
-            agent_id = inst.agent_id
-            tick_count = inst.tick_count
-
-    if not engines:
-        disk_info = infer_latest_session_status(strategy_dir, run_key)
-        if disk_info:
-            status = disk_info["status"]
-            agent_id = disk_info["agent_id"]
-            tick_count = disk_info["tick_count"]
+    status, agent_id, tick_count, instances = _strategy_live_state(
+        strategy_dir, run_key, engines, perf_by_id
+    )
 
     latest_session_pnl = 0.0
     if sessions_perf:
@@ -1686,16 +1710,10 @@ def _strategy_cards(slug: str) -> list[StrategyCard]:
     """
     cards: list[StrategyCard] = []
     for strategy in _strategy_store().list(slug):
-        status = "idle"
         engines = _get_engines_for(slug, strategy.slug)
-        if engines:
-            status = engines[0].get_info().get("status", "running")
-        else:
-            disk_info = infer_latest_session_status(
-                strategy.home, _runkey(slug, strategy.slug)
-            )
-            if disk_info:
-                status = disk_info["status"]
+        status, *_ = _strategy_live_state(
+            strategy.home, _runkey(slug, strategy.slug), engines
+        )
         cards.append(
             StrategyCard(
                 slug=strategy.slug,
@@ -2547,21 +2565,10 @@ async def get_strategy(
     perf_by_id = {p.agent_id: p for p in sessions_perf}
 
     engines = _get_engines_for(slug, sslug)
-    status = "idle"
-    agent_id = ""
-    instances = []
-    for engine in engines:
-        inst = _instance_from_engine(engine, perf_by_id)
-        instances.append(inst)
-        if not agent_id:
-            status = inst.status
-            agent_id = inst.agent_id
-
-    if not engines:
-        disk_info = infer_latest_session_status(strategy_dir, run_key)
-        if disk_info:
-            status = disk_info["status"]
-            agent_id = disk_info["agent_id"]
+    # StrategyDetail carries no tick_count; the instances do.
+    status, agent_id, _ticks, instances = _strategy_live_state(
+        strategy_dir, run_key, engines, perf_by_id
+    )
 
     return StrategyDetail(
         slug=sslug,
