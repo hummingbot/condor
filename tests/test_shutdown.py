@@ -8,6 +8,7 @@ verify/alert on residual), and the engine wrapper's idempotency guard.
 import asyncio
 import inspect
 from contextlib import contextmanager
+from functools import partial
 from types import SimpleNamespace
 
 import pytest
@@ -397,6 +398,9 @@ def test_run_shutdown_idempotent(monkeypatch):
         agent_id="acme.scalper_1",
         _notify=_notify,
     )
+    # The shared teardown every exit path ends in (ARCH-646).
+    stub._reap_client = partial(TickEngine._reap_client, stub)
+    stub._finish = partial(TickEngine._finish, stub)
 
     async def _drive():
         await TickEngine._run_shutdown(stub, "first")

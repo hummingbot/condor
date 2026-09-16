@@ -139,8 +139,7 @@ class TickEngine:
     _last_refusals: list[dict[str, Any]] = field(
         default_factory=list, init=False, repr=False
     )
-    # Why the loop ended, for the strategy_run telemetry event: "user" unless
-    # something in the loop set it first.
+    # Why the run ended ("user" until _finish() records the real reason).
     _last_stop_reason: str = field(default="user", init=False, repr=False)
     # Session canvas + live report (FEAT-036). Both None for experiments, which
     # keep no journal and therefore no narrative to render.
@@ -153,6 +152,9 @@ class TickEngine:
     _active_client: "ACPClient | PydanticAIClient | None" = field(
         default=None, init=False, repr=False
     )
+    # Set by _finish(): the run's teardown has happened, so any later exit path
+    # (a stop() after the loop self-completed) is a no-op.
+    _finished: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self):
         # The journal/sessions/learnings hang off the *strategy* dir (one level
@@ -266,7 +268,7 @@ class TickEngine:
         )
 
     async def stop(self) -> None:
-        """Stop gracefully."""
+        """Stop gracefully (positions are kept)."""
         self._running = False
         if self._task and not self._task.done():
             self._task.cancel()
@@ -274,35 +276,66 @@ class TickEngine:
                 await self._task
             except asyncio.CancelledError:
                 pass
-        # Backstop: if the tick was cancelled mid-await, its own finally may not
-        # have reaped the ACP subprocess. stop() is idempotent, so a double call
-        # after a clean tick is a harmless no-op.
+        await self._finish(LoopState.STOPPED, "user")
+
+    async def _reap_client(self, *, during: str = "") -> None:
+        """Stop the live per-tick ACP client, if any.
+
+        Backstop for a tick cancelled mid-await, whose own finally may not have
+        reaped the subprocess. client.stop() is idempotent, so reaping after a
+        clean tick (which already cleared ``_active_client``) is a no-op.
+        """
         client = self._active_client
-        if client is not None:
-            try:
-                await client.stop()
-            except Exception:
-                log.exception(
-                    "TickEngine %s: error reaping active client", self.agent_id
-                )
-            self._active_client = None
-        # Close the ownership window before the journal: from here on this session
-        # operates nothing, so a bot left running must stop accruing to it. The
-        # next session adopts the bot on its first tick and picks the timeline up
-        # from there; the gap in between belongs to no session, which is the truth.
-        if self.ledger is not None:
-            self.ledger.release()
-        # Shape of the session for telemetry (FEAT-023): mode, cadence and tick
-        # count. Never the playbook, the journal, the pairs or the positions.
-        telemetry_taps.strategy_run(
-            self.config,
-            ticks=getattr(self.journal, "tick_count", 0) or 0,
-            stopped_by=self._last_stop_reason,
-        )
-        if self.journal:
-            self.journal.close()
-        _supervisor().unregister(self.agent_id, LoopState.STOPPED)
-        log.info("TickEngine %s stopped", self.agent_id)
+        if client is None:
+            return
+        try:
+            await client.stop()
+        except Exception:
+            log.exception(
+                "TickEngine %s: error reaping active client%s",
+                self.agent_id,
+                f" during {during}" if during else "",
+            )
+        self._active_client = None
+
+    async def _finish(self, final_state: str, reason: str) -> None:
+        """End this run: the ONE teardown every exit path goes through.
+
+        ``final_state`` is the LoopState recorded on disk; ``reason`` is the
+        ``stopped_by`` of the strategy_run telemetry event ("user", "shutdown",
+        "error", "complete", "max_ticks"). Runs at most once per engine, so a
+        stop() after the loop already ended itself changes nothing.
+
+        ``getattr`` on ``_finished``/``config``: tests drive the lifecycle
+        methods with SimpleNamespace stand-ins that carry neither.
+        """
+        if getattr(self, "_finished", False):
+            return
+        self._finished = True
+        self._last_stop_reason = reason
+        self._running = False
+        try:
+            await self._reap_client()
+        finally:
+            # Close the ownership window before the journal: from here on this
+            # session operates nothing, so a bot left running must stop accruing
+            # to it. The next session adopts the bot on its first tick and picks
+            # the timeline up from there; the gap in between belongs to no
+            # session, which is the truth.
+            if self.ledger is not None:
+                self.ledger.release()
+            # Shape of the session for telemetry (FEAT-023): mode, cadence and
+            # tick count. Never the playbook, the journal, the pairs or the
+            # positions.
+            telemetry_taps.strategy_run(
+                getattr(self, "config", None),
+                ticks=getattr(self.journal, "tick_count", 0) or 0,
+                stopped_by=reason,
+            )
+            if self.journal:
+                self.journal.close()
+            _supervisor().unregister(self.agent_id, final_state)
+            log.info("TickEngine %s ended: %s (%s)", self.agent_id, final_state, reason)
 
     async def _run_shutdown(self, reason: str) -> None:
         """Emergency winddown of this session's positions/executors, then self-stop.
@@ -320,7 +353,6 @@ class TickEngine:
         if self._shutting_down:
             return
         self._shutting_down = True
-        self._last_stop_reason = "shutdown"
         # Halt the loop so no next/concurrent tick fights the winddown.
         self._running = False
         self._paused = True
@@ -336,17 +368,8 @@ class TickEngine:
                 await self._task
             except asyncio.CancelledError:
                 pass
-        # Reap any live per-tick client (mirrors stop()'s backstop).
-        client = self._active_client
-        if client is not None:
-            try:
-                await client.stop()
-            except Exception:
-                log.exception(
-                    "TickEngine %s: error reaping active client during shutdown",
-                    self.agent_id,
-                )
-            self._active_client = None
+        # The client must be dead BEFORE the winddown runs, not after it.
+        await self._reap_client(during="shutdown")
 
         from .shutdown import run_shutdown
 
@@ -359,15 +382,10 @@ class TickEngine:
                 f"verify positions manually! ({reason})"
             )
         finally:
-            # Mirrors stop(): the session operates nothing past this point, so its
-            # ownership window closes here too. run_shutdown() may have wound the
-            # bot down, but it also may have failed — either way the window ends.
-            if self.ledger is not None:
-                self.ledger.release()
-            if self.journal:
-                self.journal.close()
-            _supervisor().unregister(self.agent_id, LoopState.STOPPED)
+            # run_shutdown() may have wound the bot down or failed; either way
+            # the run ends here.
             log.info("TickEngine %s shut down (%s)", self.agent_id, reason)
+            await self._finish(LoopState.STOPPED, "shutdown")
 
     def pause(self) -> None:
         self._paused = True
@@ -449,9 +467,7 @@ class TickEngine:
                         await self._notify(
                             f"Agent {self.agent_id}: {label} failed: {tick_error}"
                         )
-                        self._last_stop_reason = "error"
-                        self._running = False
-                        _supervisor().unregister(self.agent_id, LoopState.ERROR)
+                        await self._finish(LoopState.ERROR, "error")
                         return
                     log.info(
                         "TickEngine %s: %s complete, self-stopping",
@@ -459,9 +475,7 @@ class TickEngine:
                         label,
                     )
                     await self._notify(f"Agent {self.agent_id}: {label} complete.")
-                    self._last_stop_reason = "complete"
-                    self._running = False
-                    _supervisor().unregister(self.agent_id, LoopState.COMPLETED)
+                    await self._finish(LoopState.COMPLETED, "complete")
                     return
 
                 # max_ticks limit (loop mode only)
@@ -475,10 +489,7 @@ class TickEngine:
                     await self._notify(
                         f"Agent {self.agent_id}: completed {max_ticks} ticks (max_ticks limit)."
                     )
-                    self._last_stop_reason = "max_ticks"
-                    self._running = False
-                    self.journal.close()
-                    _supervisor().unregister(self.agent_id, LoopState.COMPLETED)
+                    await self._finish(LoopState.COMPLETED, "max_ticks")
                     return
 
             try:
