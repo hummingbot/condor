@@ -79,6 +79,10 @@ class RiskState:
     book_trusted: bool = True
     drift_quote: float | None = None  # None = nothing priced, never 0.0
     drift_reason: str = ""
+    # The limits these metrics are judged against, carried so ``to_dict`` can
+    # show them to the agent. A bare ``RiskState()`` reports ``RiskLimits``'
+    # own defaults; ``RiskEngine.get_state`` passes the engine's limits.
+    limits: RiskLimits = field(default_factory=RiskLimits)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -93,26 +97,12 @@ class RiskState:
             "drift_quote": self.drift_quote,
             "drift_reason": self.drift_reason,
             # Include limits for prompt display
-            "max_position_size": (
-                self._limits.max_position_size_quote
-                if hasattr(self, "_limits")
-                else 500
-            ),
-            "max_open_executors": (
-                self._limits.max_open_executors if hasattr(self, "_limits") else 5
-            ),
-            "max_drawdown_pct": (
-                self._limits.max_drawdown_pct if hasattr(self, "_limits") else -1
-            ),
-            "shutdown_drawdown_pct": (
-                self._limits.shutdown_drawdown_pct if hasattr(self, "_limits") else -1
-            ),
-            "max_drift_quote": (
-                self._limits.max_drift_quote if hasattr(self, "_limits") else -1
-            ),
-            "max_leverage": (
-                self._limits.max_leverage if hasattr(self, "_limits") else -1
-            ),
+            "max_position_size": self.limits.max_position_size_quote,
+            "max_open_executors": self.limits.max_open_executors,
+            "max_drawdown_pct": self.limits.max_drawdown_pct,
+            "shutdown_drawdown_pct": self.limits.shutdown_drawdown_pct,
+            "max_drift_quote": self.limits.max_drift_quote,
+            "max_leverage": self.limits.max_leverage,
         }
 
 
@@ -226,8 +216,7 @@ class RiskEngine:
 
     def get_state(self, tracker: Any) -> RiskState:
         """Compute current risk metrics from tracker data."""
-        state = RiskState()
-        state._limits = self.limits
+        state = RiskState(limits=self.limits)
 
         try:
             state.total_exposure = tracker.get_total_exposure()

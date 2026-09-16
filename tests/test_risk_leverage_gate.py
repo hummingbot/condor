@@ -358,13 +358,11 @@ def _tick_prompt(risk_state: dict) -> str:
 
 def test_the_risk_state_block_shows_the_leverage_limit_when_set():
     # Built the way the engine builds it, from RiskState.to_dict
-    state = RiskState()
-    state._limits = RiskLimits(max_leverage=5.0)
+    state = RiskState(limits=RiskLimits(max_leverage=5.0))
     prompt = _tick_prompt(state.to_dict())
     assert "Max Leverage: 5x" in prompt
 
 
 def test_the_risk_state_block_stays_quiet_when_the_limit_is_off():
-    state = RiskState()
-    state._limits = RiskLimits()
+    state = RiskState(limits=RiskLimits())
     assert "Max Leverage" not in _tick_prompt(state.to_dict())
