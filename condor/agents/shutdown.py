@@ -21,7 +21,6 @@ import logging
 from typing import Any
 
 from condor.fetchers.tracked_positions import fetch_tracked_positions
-from condor.frontmatter import parse_frontmatter
 from condor.runtime.timeouts import resolve_tick_timeout
 
 from .strategy import STRATEGIES_DIRNAME, Strategy
@@ -85,23 +84,18 @@ def load_shutdown_policy(strategy: Strategy) -> tuple[ShutdownPolicy, str]:
     strategy happened to resolve from. If nothing is on disk, returns the
     built-in default policy with an empty body.
     """
-    from condor.memory.paths import agent_home_layers, defaults_layers
+    from condor.memory.paths import read_layered_file
 
-    homes = agent_home_layers(strategy.agent_slug)
-    candidates = [
-        *(h / STRATEGIES_DIRNAME / strategy.slug / "shutdown.md" for h in homes),
-        *(h / "shutdown.md" for h in homes),
-        *(d / "shutdown.md" for d in defaults_layers()),
-    ]
-    for path in candidates:
-        if not path.exists():
-            continue
-        try:
-            meta, body = parse_frontmatter(path.read_text())
-            return ShutdownPolicy.from_dict(meta), body.strip()
-        except Exception:
-            log.exception("Failed to parse shutdown.md at %s", path)
-    return ShutdownPolicy(), ""
+    # No skip_empty_body: a frontmatter-only shutdown.md *is* a policy.
+    found = read_layered_file(
+        "shutdown.md",
+        strategy.agent_slug,
+        within=(STRATEGIES_DIRNAME, strategy.slug),
+    )
+    if found is None:
+        return ShutdownPolicy(), ""
+    meta, body = found
+    return ShutdownPolicy.from_dict(meta), body
 
 
 # ---------------------------------------------------------------------------

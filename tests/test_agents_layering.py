@@ -334,6 +334,164 @@ def test_the_shutdown_policy_walks_strategy_then_agent_then_defaults(stock):
     assert load_shutdown_policy(strategy)[1] == "S"
 
 
+@pytest.fixture
+def forget_shadow_warnings():
+    """The shadow warning is once per process; each test starts from none."""
+    from condor.memory import paths
+
+    paths._SHADOWED_RULEBOOKS_WARNED.clear()
+    yield
+    paths._SHADOWED_RULEBOOKS_WARNED.clear()
+
+
+def _shadow_warnings(caplog) -> list[str]:
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelname == "WARNING" and "shadows" in r.getMessage()
+    ]
+
+
+def test_the_three_policy_loaders_share_one_resolver():
+    """ARCH-656: no loader builds its own candidate walk or parses frontmatter."""
+    import inspect
+
+    from condor.agents import prompts, reflection, shutdown
+
+    for fn in (
+        reflection.load_policy,
+        prompts.load_core_rules,
+        shutdown.load_shutdown_policy,
+    ):
+        src = inspect.getsource(fn)
+        assert "read_layered_file" in src
+        for hand_rolled in (
+            "agent_home_layers",
+            "defaults_layers",
+            "parse_frontmatter",
+        ):
+            assert hand_rolled not in src, (fn.__name__, hand_rolled)
+
+    from condor.memory import paths
+
+    # Tests and callers clear the set by its old name: it must be the same object.
+    assert prompts._SHADOWED_RULEBOOKS_WARNED is paths._SHADOWED_RULEBOOKS_WARNED
+
+
+def test_a_differing_local_reflect_policy_is_warned_about_once(
+    forget_shadow_warnings, caplog
+):
+    from condor.agents.reflection import load_policy
+    from condor.memory.paths import defaults_layers
+
+    local_defaults, stock_defaults = defaults_layers()
+    _write(stock_defaults / "reflect.md", "shipped reflection")
+    _write(local_defaults / "reflect.md", "our reflection")
+
+    with caplog.at_level("WARNING"):
+        for _ in range(3):
+            assert load_policy("scout") == "our reflection"
+
+    warnings = _shadow_warnings(caplog)
+    assert len(warnings) == 1
+    assert str(local_defaults / "reflect.md") in warnings[0]
+    assert str(stock_defaults / "reflect.md") in warnings[0]
+
+
+def test_an_identical_local_reflect_policy_says_nothing(forget_shadow_warnings, caplog):
+    from condor.agents.reflection import load_policy
+    from condor.memory.paths import defaults_layers
+
+    local_defaults, stock_defaults = defaults_layers()
+    _write(stock_defaults / "reflect.md", "same reflection")
+    _write(local_defaults / "reflect.md", "same reflection")
+
+    with caplog.at_level("WARNING"):
+        assert load_policy("scout") == "same reflection"
+
+    assert not _shadow_warnings(caplog)
+
+
+def test_a_differing_local_strategy_shutdown_policy_is_warned_about_once(
+    stock, forget_shadow_warnings, caplog
+):
+    from condor.agents.shutdown import load_shutdown_policy
+    from condor.agents.strategy import STRATEGIES_DIRNAME
+
+    strategy = StrategyStore().create(
+        agent_slug="scout", name="Grid", instructions="tick"
+    )
+    shipped = stock / STRATEGIES_DIRNAME / strategy.slug / "shutdown.md"
+    _write(shipped, "---\non_kill_switch: hold\n---\n\nshipped")
+    _write(strategy.home / "shutdown.md", "---\non_kill_switch: hold\n---\n\nours")
+
+    with caplog.at_level("WARNING"):
+        for _ in range(3):
+            assert load_shutdown_policy(strategy)[1] == "ours"
+
+    warnings = _shadow_warnings(caplog)
+    assert len(warnings) == 1
+    assert str(strategy.home / "shutdown.md") in warnings[0]
+    assert str(shipped) in warnings[0]
+
+
+def test_an_identical_local_strategy_shutdown_policy_says_nothing(
+    stock, forget_shadow_warnings, caplog
+):
+    from condor.agents.shutdown import load_shutdown_policy
+    from condor.agents.strategy import STRATEGIES_DIRNAME
+
+    strategy = StrategyStore().create(
+        agent_slug="scout", name="Grid", instructions="tick"
+    )
+    text = "---\non_kill_switch: hold\n---\n\nsame"
+    _write(stock / STRATEGIES_DIRNAME / strategy.slug / "shutdown.md", text)
+    _write(strategy.home / "shutdown.md", text)
+
+    with caplog.at_level("WARNING"):
+        assert load_shutdown_policy(strategy)[1] == "same"
+
+    assert not _shadow_warnings(caplog)
+
+
+def test_a_frontmatter_only_strategy_shutdown_policy_still_wins(stock):
+    """An empty body is a legitimate shutdown.md: its policy must not fall through."""
+    from condor.agents.shutdown import (
+        DEFAULT_POLICY,
+        VALID_POLICIES,
+        load_shutdown_policy,
+    )
+    from condor.memory.paths import defaults_layers
+
+    other = next(p for p in sorted(VALID_POLICIES) if p != DEFAULT_POLICY)
+    _write(
+        defaults_layers()[1] / "shutdown.md",
+        f"---\non_kill_switch: {DEFAULT_POLICY}\n---\n\nD",
+    )
+    _write(stock / "shutdown.md", f"---\non_kill_switch: {DEFAULT_POLICY}\n---\n\nA")
+    strategy = StrategyStore().create(
+        agent_slug="scout", name="Grid", instructions="tick"
+    )
+    _write(strategy.home / "shutdown.md", f"---\non_kill_switch: {other}\n---\n")
+
+    policy, body = load_shutdown_policy(strategy)
+    assert policy.on_kill_switch == other
+    assert body == ""
+
+
+def test_a_directory_named_like_the_policy_is_skipped_not_crashed_on(stock):
+    from condor.agents.shutdown import load_shutdown_policy
+    from condor.memory.paths import defaults_layers
+
+    _write(defaults_layers()[1] / "shutdown.md", "---\non_kill_switch: hold\n---\n\nD")
+    strategy = StrategyStore().create(
+        agent_slug="scout", name="Grid", instructions="tick"
+    )
+    (strategy.home / "shutdown.md").mkdir(parents=True)
+
+    assert load_shutdown_policy(strategy)[1] == "D"
+
+
 # ── 8. Routines layer by name, the way they always have ──
 
 

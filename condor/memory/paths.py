@@ -42,16 +42,21 @@ A caller that picks the wrong one is wrong in a visible direction: writing
 through a plural is a type error, reading through a singular silently loses the
 stock library.
 
-Pure filesystem logic with **no** MCP/Telegram deps and no ``yaml``, so it runs
-from the main process (prompt injection) and from the MCP subprocess (the
-tools) alike.
+Pure filesystem logic with **no** MCP/Telegram deps and no module-level
+``yaml`` (:func:`read_layered_file` imports the frontmatter parser lazily), so
+it runs from the main process (prompt injection) and from the MCP subprocess
+(the tools) alike.
 """
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Sequence
 from pathlib import Path
 
 from condor.paths import local_agents_root, stock_agents_root
+
+log = logging.getLogger(__name__)
 
 # The default agent: the one answering when no specialist is bound. It is a
 # normal agent directory like any other — what makes it default is that a falsy
@@ -133,6 +138,89 @@ def defaults_layers() -> tuple[Path, Path]:
         local_agents_root() / DEFAULTS_DIRNAME,
         stock_agents_root() / DEFAULTS_DIRNAME,
     )
+
+
+# Pairs already warned about, so a shadow costs one line and not one per tick.
+_SHADOWED_RULEBOOKS_WARNED: set[tuple[str, str]] = set()
+
+
+def _warn_once_if_shadowed(local: Path, stock: Path) -> None:
+    """Say it out loud when a local policy file silently overrides a shipped one.
+
+    A policy file (``core_rules.md``, ``reflect.md``, ``shutdown.md``) is a
+    *single file*, so a local copy forks the whole contract — the failure mode
+    :func:`resolve_agent_file` avoids one level down by resolving per item. An
+    operator who then edits the tracked file gets no error, no warning and no
+    effect (ARCH-612). One warning per pair turns that silent no-op into a line
+    in the log.
+    """
+    key = (str(local), str(stock))
+    if key in _SHADOWED_RULEBOOKS_WARNED:
+        return
+    try:
+        if not stock.is_file():
+            return  # nothing shipped to shadow: a purely local file is fine
+        if stock.read_text(encoding="utf-8") == local.read_text(encoding="utf-8"):
+            return  # a copy, not a fork
+    except OSError:
+        return
+    _SHADOWED_RULEBOOKS_WARNED.add(key)
+    log.warning(
+        "%s shadows %s and the two differ: edits to the shipped file have no "
+        "effect. Delete the local copy to fall back to it.",
+        local,
+        stock,
+    )
+
+
+def read_layered_file(
+    filename: str,
+    agent_slug: str | None = None,
+    *,
+    within: Sequence[str] = (),
+    skip_empty_body: bool = False,
+) -> tuple[dict, str] | None:
+    """The first readable layered ``filename`` as ``(frontmatter, stripped body)``.
+
+    The one resolver for an agent's single-file policies (``reflect.md``,
+    ``core_rules.md``, ``shutdown.md``). Levels, most specific first:
+    ``<home>/<*within>/<filename>`` when ``within`` is given (a strategy passes
+    ``("strategies", <slug>)``), then ``<home>/<filename>``, then
+    ``_defaults/<filename>`` — each consulted in both roots, local before stock.
+    When a local file wins over a shipped sibling that differs, the shadow is
+    warned about once (:func:`_warn_once_if_shadowed`).
+
+    ``skip_empty_body`` lets a prose-only policy fall through a file with no
+    body; a policy whose frontmatter *is* the policy (``shutdown.md``) leaves it
+    off so a frontmatter-only file still wins its level. An unreadable or
+    unparsable file is logged and skipped — a broken policy is never a crash.
+    Returns ``None`` when nothing on disk qualifies.
+    """
+    from condor.frontmatter import parse_frontmatter
+
+    local_home, stock_home = agent_home_layers(agent_slug)
+    levels: list[tuple[Path, Path]] = []
+    if within:
+        levels.append((local_home.joinpath(*within), stock_home.joinpath(*within)))
+    levels.append((local_home, stock_home))
+    levels.append(defaults_layers())
+
+    for local_dir, stock_dir in levels:
+        local, stock = local_dir / filename, stock_dir / filename
+        for path in (local, stock):
+            try:
+                if not path.is_file():
+                    continue
+                meta, body = parse_frontmatter(path.read_text(encoding="utf-8"))
+                body = body.strip()
+                if skip_empty_body and not body:
+                    continue
+                if path == local:
+                    _warn_once_if_shadowed(local, stock)
+                return meta or {}, body
+            except Exception:  # noqa: BLE001 - an unreadable policy is not a crash
+                log.warning("Could not read %s", path, exc_info=True)
+    return None
 
 
 def shared_skills_root() -> Path:

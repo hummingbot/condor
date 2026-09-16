@@ -10,10 +10,9 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Collection
-from pathlib import Path
 from typing import Any
 
-from condor.frontmatter import parse_frontmatter
+from condor.memory import paths as _paths
 from condor.runtime.state import MAX_STATE_VALUE_CHARS
 
 from .agent import Agent
@@ -386,43 +385,16 @@ CORE_RULES_FILENAME = "core_rules.md"
 # the same block whether it is ticking or answering a chat.
 CORE_RULES_HEADER = "[CORE RULES — apply to every session]"
 
-# Pairs already warned about, so a shadow costs one line and not one per tick.
-_SHADOWED_RULEBOOKS_WARNED: set[tuple[str, str]] = set()
-
-
-def _warn_once_if_shadowed(local: Path, stock: Path) -> None:
-    """Say it out loud when a local rulebook silently overrides a shipped one.
-
-    The rulebook is a *single file*, so a local copy forks the whole
-    behavioural contract — the failure mode :func:`resolve_agent_file` avoids
-    one level down by resolving per item. An operator who then edits the
-    tracked file gets no error, no warning and no effect (ARCH-612). One
-    warning per pair turns that silent no-op into a line in the log.
-    """
-    key = (str(local), str(stock))
-    if key in _SHADOWED_RULEBOOKS_WARNED:
-        return
-    try:
-        if not stock.is_file():
-            return  # nothing shipped to shadow: a purely local rulebook is fine
-        if stock.read_text(encoding="utf-8") == local.read_text(encoding="utf-8"):
-            return  # a copy, not a fork
-    except OSError:
-        return
-    _SHADOWED_RULEBOOKS_WARNED.add(key)
-    log.warning(
-        "%s shadows %s and the two differ: edits to the shipped file have no "
-        "effect. Delete the local copy to fall back to it.",
-        local,
-        stock,
-    )
+# The shadow warning lives with the shared resolver; re-bound here (the same
+# set object) because callers and tests clear it by this name.
+_SHADOWED_RULEBOOKS_WARNED = _paths._SHADOWED_RULEBOOKS_WARNED
 
 
 def load_core_rules(agent_slug: str | None = None) -> str:
     """The shared behavioural rules for this agent: its own, else the default.
 
-    Resolved exactly like :func:`condor.agents.reflection.load_policy` —
-    ``<slug>/core_rules.md`` then ``_defaults/core_rules.md``, each consulted in
+    Resolved by :func:`condor.memory.paths.read_layered_file`, the resolver
+    ``reflect.md`` and ``shutdown.md`` share — ``<slug>/core_rules.md`` then ``_defaults/core_rules.md``, each consulted in
     both roots (local before stock), so an install that dropped its own house
     rules in shadows the shipped ones without losing them. A falsy slug reads
     only the default, which is what the chat seat wants.
@@ -431,30 +403,13 @@ def load_core_rules(agent_slug: str | None = None) -> str:
     the next tick. Returns ``""`` when nothing is on disk or the file is
     unreadable — a missing rulebook must never be what breaks a tick. When a
     local layer wins over a shipped file that differs,
-    :func:`_warn_once_if_shadowed` says so rather than letting the fork be
+    :func:`condor.memory.paths._warn_once_if_shadowed` says so rather than letting the fork be
     silent.
     """
-    from condor.memory.paths import agent_home_layers, defaults_layers
-
-    layers = (agent_home_layers(agent_slug), defaults_layers())
-    for local_home, stock_home in layers:
-        local, stock = (
-            local_home / CORE_RULES_FILENAME,
-            stock_home / CORE_RULES_FILENAME,
-        )
-        for path in (local, stock):
-            try:
-                if not path.is_file():
-                    continue
-                _, body = parse_frontmatter(path.read_text(encoding="utf-8"))
-                body = body.strip()
-                if body:
-                    if path == local:
-                        _warn_once_if_shadowed(local, stock)
-                    return body
-            except Exception:  # noqa: BLE001 - an unreadable rulebook is not a crash
-                log.warning("Could not read %s", path, exc_info=True)
-    return ""
+    found = _paths.read_layered_file(
+        CORE_RULES_FILENAME, agent_slug, skip_empty_body=True
+    )
+    return found[1] if found else ""
 
 
 def core_rules_section(agent_slug: str | None = None) -> str:
