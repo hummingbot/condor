@@ -2034,7 +2034,7 @@ async def sweep_fees(executor_id: str) -> str:
 
     WHAT IT DOES. Two swaps from the vault's Swig wallet, both through Gateway:
     the swept amount to SOL through `jupiter/router` (skipped when the fee
-    asset is SOL), then that SOL into the vault token on `meteora-dbc/router`
+    asset is SOL), then that SOL into the vault token on `meteora/launch`
     (pair `<MINT>-SOL`, side BUY, amount in SOL). The tokens land in the Swig
     wallet in the same transaction.
 

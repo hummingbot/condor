@@ -290,9 +290,9 @@ def test_vault_status_reads_the_pool_the_balance_and_the_ledger():
     assert "exec-1" in text and "sig-2" in text
 
     pool_call, balance_call = client.gateway.calls
-    assert pool_call[0] == "/gateway/router/pool-info"
+    assert pool_call[0] == "/gateway/launch/pool-info"
     assert pool_call[1] == {
-        "connector": "meteora-dbc",
+        "connector": "meteora",
         "network": "solana-mainnet-beta",
         "pool_address": vault["pool"],
     }

@@ -56,11 +56,14 @@ NETWORK = "solana-mainnet-beta"
 #: Gateway's DBC connector, in the "name/type" form the unified swap route
 #: takes. ``execute_swap`` on it from the Swig funds-owner address makes Gateway
 #: wrap the swap in a Swig ``sign`` and sign with the stored delegate.
-DBC_CONNECTOR = "meteora-dbc/router"
-#: The bare connector name, for Gateway's router pool-info read (hummingbot-api
-#: proxies it as GET /gateway/router/pool-info; decimal fields come back as
+DBC_CONNECTOR = "meteora/launch"
+#: The bare connector name, for Gateway's launch pool-info read (hummingbot-api
+#: proxies it as GET /gateway/launch/pool-info; decimal fields come back as
 #: strings — price, migrationProgress, quoteReserve, migrationQuoteThreshold).
-DBC_CONNECTOR_NAME = "meteora-dbc"
+# The Dynamic Bonding Curve is the `meteora` connector's `launch` trading type,
+# not a connector of its own (Gateway, 2026-09-16). After migration the same
+# connector trades the token on its `amm` surface.
+DBC_CONNECTOR_NAME = "meteora"
 #: Where a non-SOL fee asset is converted to SOL: an aggregator, so a fee asset
 #: Gateway has no pool entry for (a fresh mint, a tokenised equity) still routes.
 #: A vault whose strategy already quotes SOL never reaches this leg.
@@ -85,7 +88,7 @@ SWEEP_LEDGER_FILE = "vault_sweeps.jsonl"
 
 #: How the DBC buy is expressed on Gateway's unified swap route, as agreed with
 #: the connector: base = the vault mint, quote = SOL, side BUY, and ``amount``
-#: is the SOL spent (exact-in). This is the M1 ``meteora-dbc`` contract, not the
+#: is the SOL spent (exact-in). This is the M1 ``meteora`` launch-curve contract, not the
 #: aggregator convention where a BUY's amount is the base received.
 DBC_BUY_SIDE = "BUY"
 
@@ -480,7 +483,7 @@ async def vault_status(client: Any, vault: dict[str, Any] | None) -> dict[str, A
 
     pool, pool_error = await _read(
         client.gateway._get(
-            "/gateway/router/pool-info",
+            "/gateway/launch/pool-info",
             params={
                 "connector": DBC_CONNECTOR_NAME,
                 "network": NETWORK,
