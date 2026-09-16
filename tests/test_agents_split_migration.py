@@ -24,6 +24,7 @@ from condor.migrations import (
     MARKER_FILENAME,
     MARKER_V2_FILENAME,
     MARKER_V3_FILENAME,
+    MARKER_V4_FILENAME,
     ensure_migrated,
 )
 
@@ -123,6 +124,71 @@ def test_an_excluded_agent_moves_whole_and_is_still_listed(repo):
     # Moved, not lost: the registry is the union of the two roots.
     assert set(iter_agent_slugs()) == {"brigado", "scout"}
     assert _dirty(repo) == ""
+
+
+def test_an_excluded_agent_with_a_store_still_leaves_the_library(repo):
+    """Step 1 moves the store first, so step 2 finds a local home already there.
+
+    It used to take that as "never overwrite" and skip the agent, leaving its
+    definition in ``agents/`` where the layering calls it shipped — and every
+    strategy under it undeletable.
+    """
+    from condor.layering import resolves_to_stock
+
+    agents = repo / "agents"
+    _write(agents / "brigado" / "AGENT.md", "---\nname: Brigado\n---\n\nBRL.\n")
+    _write(agents / "brigado" / "store" / "user_7" / "audit.log", "ran")
+    _write(agents / "brigado" / "strategies" / "fleet" / "strategy.md", "---\n---\n")
+    _write(repo / ".git" / "info" / "exclude", "agents/brigado/\n")
+
+    report = ensure_migrated()
+
+    local = paths.local_agents_root() / "brigado"
+    assert report.agent_dirs == 1
+    assert not (agents / "brigado").exists()
+    assert (local / "AGENT.md").exists()
+    assert (local / "store" / "user_7" / "audit.log").read_text() == "ran"
+    assert not resolves_to_stock("brigado", "strategies", "fleet", "strategy.md")
+
+
+def test_v4_merges_a_leftover_the_local_copy_winning(repo):
+    """A box whose v2 already skipped the agent: v4 finishes the job.
+
+    Where both sides hold a file and disagree, the local one is what the product
+    has been reading, so it stays; the leftover is set aside, not deleted.
+    """
+    agents = repo / "agents"
+    local = paths.local_agents_root() / "brigado"
+    runtime = paths.runtime_root()
+    for marker in (MARKER_FILENAME, MARKER_V2_FILENAME, MARKER_V3_FILENAME):
+        _write(runtime / marker, "done\n")
+    _write(repo / ".git" / "info" / "exclude", "agents/brigado/\n")
+    _write(agents / "brigado" / "AGENT.md", "old")
+    _write(agents / "brigado" / "skills" / "lp" / "SKILL.md", "same")
+    _write(agents / "brigado" / "routines" / "r.py", "only in the leftover")
+    _write(agents / "brigado" / "routines" / "__pycache__" / "r.pyc", "bytecode")
+    _write(agents / "brigado" / "strategies" / "fleet" / "strategy.md", "fleet")
+    _write(local / "AGENT.md", "edited")
+    _write(local / "skills" / "lp" / "SKILL.md", "same")
+    _write(local / "store" / "user_7" / "audit.log", "ran")
+    _write(local / "routines" / "__pycache__" / "r.pyc", "newer bytecode")
+
+    report = ensure_migrated()
+
+    assert not (agents / "brigado").exists()
+    assert (local / "AGENT.md").read_text() == "edited"
+    assert (local / "skills" / "lp" / "SKILL.md").read_text() == "same"
+    assert (local / "routines" / "r.py").read_text() == "only in the leftover"
+    assert (local / "strategies" / "fleet" / "strategy.md").exists()
+    # Regenerated output is dropped, never set aside as a "disagreement".
+    assert (
+        local / "routines" / "__pycache__" / "r.pyc"
+    ).read_text() == "newer bytecode"
+    backup = runtime / "migration-backups" / "agents" / "brigado" / "AGENT.md"
+    assert backup.read_text() == "old"
+    assert report.agent_backups == 1 and report.agent_dirs == 1
+    assert (runtime / MARKER_V4_FILENAME).is_file()
+    assert ensure_migrated().total == 0
 
 
 def test_a_tracked_agent_is_left_where_it_is(repo):
